@@ -54,6 +54,7 @@ Default = all detected vendors. User can opt out of individual ones.
 
 **(b) Apply settings edits:** for each entry in `settings_files[]`:
 - Read the file (create with `{}` if missing for JSON, empty for TOML).
+- **Confirmation-gated edits:** for any `edit` with `requires_confirmation: true`, surface its `tradeoff_note` to the user verbatim and ask for explicit confirmation BEFORE applying. Skip the edit on decline and record it in the final report as "declined by user — trade-off not accepted". Applies regardless of whether the user pre-approved the vendor in Step 2.
 - Apply each `edit` (nested keys like `env.DISABLE_TELEMETRY` or `analytics.enabled` — dotted path, not literal key).
 - On a Self-Modification / hook denial from the Edit tool, **do not retry**. Print the exact diff and instruct the user to run `! $EDITOR <path>` to paste manually. This applies to any settings file, not just `~/.claude/settings.json`.
 
