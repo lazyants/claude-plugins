@@ -1,0 +1,113 @@
+{
+  "name": "windows-privacy",
+  "display": "Windows system privacy",
+  "detect_cmd": "reg",
+  "detect_paths": [],
+  "platforms": ["win32"],
+  "doc_urls": [
+    "https://learn.microsoft.com/en-us/windows/privacy/configure-windows-diagnostic-data-in-your-organization",
+    "https://learn.microsoft.com/en-us/windows/client-management/mdm/policy-csp-windowsai",
+    "https://learn.microsoft.com/en-us/windows/client-management/mdm/policy-csp-system"
+  ],
+  "settings_files": [],
+  "shell_env_vars": [],
+  "shell_commands": [
+    {
+      "command": "reg add \"HKCU\\Software\\Policies\\Microsoft\\Windows\\WindowsAI\" /v DisableAIDataAnalysis /t REG_DWORD /d 1 /f",
+      "disables": "Recall — disable AI data analysis (screenshots every few seconds on Win11 24H2+)",
+      "requires_admin": false,
+      "scope": "per_user",
+      "ui_path": "Settings → Privacy & security → Recall & snapshots",
+      "documented": true
+    },
+    {
+      "command": "reg add \"HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows\\WindowsAI\" /v AllowRecallEnablement /t REG_DWORD /d 0 /f",
+      "disables": "Recall — feature-gate off at machine level (deletes snapshots on reboot)",
+      "requires_admin": true,
+      "scope": "system_wide",
+      "ui_path": "Group Policy → Computer Configuration → Administrative Templates → Windows Components → Windows AI",
+      "documented": true
+    },
+    {
+      "command": "reg add \"HKCU\\Software\\Policies\\Microsoft\\Windows\\WindowsCopilot\" /v TurnOffWindowsCopilot /t REG_DWORD /d 1 /f",
+      "disables": "Legacy Windows Copilot (pre-chat-app experience). Note path is WindowsCopilot, not WindowsAI.",
+      "requires_admin": false,
+      "scope": "per_user",
+      "ui_path": "Settings → Personalization → Taskbar → Copilot",
+      "documented": true
+    },
+    {
+      "command": "reg add \"HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows\\DataCollection\" /v AllowTelemetry /t REG_DWORD /d 0 /f",
+      "disables": "Windows diagnostic data (Enterprise/Education/Server: sets to Security; Home: value 0 unsupported, effective floor is Required [1])",
+      "requires_admin": true,
+      "scope": "system_wide",
+      "ui_path": "Settings → Privacy & security → Diagnostics & feedback → Diagnostic data",
+      "documented": true
+    },
+    {
+      "command": "reg add \"HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows\\System\" /v PublishUserActivities /t REG_DWORD /d 0 /f",
+      "disables": "Activity History — local collection",
+      "requires_admin": true,
+      "scope": "system_wide",
+      "ui_path": "Settings → Privacy & security → Activity history",
+      "documented": true
+    },
+    {
+      "command": "reg add \"HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows\\System\" /v UploadUserActivities /t REG_DWORD /d 0 /f",
+      "disables": "Activity History — cloud upload",
+      "requires_admin": true,
+      "scope": "system_wide",
+      "ui_path": "Settings → Privacy & security → Activity history",
+      "documented": true
+    },
+    {
+      "command": "reg add \"HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\AdvertisingInfo\" /v Enabled /t REG_DWORD /d 0 /f",
+      "disables": "Microsoft Advertising ID (per-user)",
+      "requires_admin": false,
+      "scope": "per_user",
+      "ui_path": "Settings → Privacy & security → General → Advertising ID",
+      "documented": true
+    },
+    {
+      "command": "reg add \"HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows\\Windows Search\" /v AllowCortana /t REG_DWORD /d 0 /f",
+      "disables": "Cortana",
+      "requires_admin": true,
+      "scope": "system_wide",
+      "ui_path": "Settings → Privacy & security → Search permissions",
+      "documented": true
+    },
+    {
+      "command": "reg add \"HKCU\\Software\\Policies\\Microsoft\\Windows\\CloudContent\" /v DisableTailoredExperiences /t REG_DWORD /d 1 /f",
+      "disables": "Tailored experiences — 'Let Windows improve Start and search results'",
+      "requires_admin": false,
+      "scope": "per_user",
+      "ui_path": "Settings → Privacy & security → Diagnostics & feedback → Tailored experiences",
+      "documented": true
+    },
+    {
+      "command": "reg add \"HKCU\\Software\\Microsoft\\InputPersonalization\" /v RestrictImplicitTextCollection /t REG_DWORD /d 1 /f",
+      "disables": "Inking & Typing personalization (stops local keystroke model training)",
+      "requires_admin": false,
+      "scope": "per_user",
+      "ui_path": "Settings → Privacy & security → Inking & typing personalization",
+      "documented": true
+    }
+  ],
+  "persistent_files": [],
+  "diff_patterns": {
+    "env_regex": "(WINDOWS_|MICROSOFT_|TELEMETRY|DISABLE|RECALL|COPILOT|TRACK)",
+    "settings_regex": "^(Allow|Disable|TurnOff|Publish|Upload|Enabled|Restrict)"
+  },
+  "notes": [
+    "Recall has dual-key control: HKCU DisableAIDataAnalysis (user) + HKLM AllowRecallEnablement (machine, admin, deletes snapshots on reboot).",
+    "New Copilot chat app (post-2024 rebuild) is not covered by TurnOffWindowsCopilot — Microsoft's documented path is uninstall only.",
+    "Edge telemetry is out of scope — configure via Edge's own policy keys."
+  ],
+  "caveats": [
+    {
+      "var": "home_edition_telemetry_floor",
+      "framing": "On Windows Home, AllowTelemetry=0 is silently bumped to 1 (Required). Effective floor is Required. Confirm the target machine is Pro / Enterprise / Education before expecting Security-level off.",
+      "auto_apply": false
+    }
+  ]
+}

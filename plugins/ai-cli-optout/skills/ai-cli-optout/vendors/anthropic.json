@@ -1,0 +1,58 @@
+{
+  "name": "anthropic",
+  "display": "Anthropic Claude Code",
+  "detect_cmd": "claude",
+  "detect_paths": ["~/.claude"],
+  "doc_urls": [
+    "https://code.claude.com/docs/en/env-vars.md",
+    "https://code.claude.com/docs/en/data-usage.md",
+    "https://code.claude.com/docs/en/monitoring-usage.md",
+    "https://code.claude.com/docs/en/settings.md"
+  ],
+  "settings_files": [
+    {
+      "path": "~/.claude/settings.json",
+      "format": "json",
+      "edits": [
+        { "key": "env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "value": "1", "disables": "Kill switch: Statsig + Sentry + surveys + /feedback" },
+        { "key": "env.DISABLE_TELEMETRY", "value": "1", "disables": "Statsig operational metrics" },
+        { "key": "env.DISABLE_ERROR_REPORTING", "value": "1", "disables": "Sentry crash/error reports" },
+        { "key": "env.CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY", "value": "1", "disables": "In-session numeric rating prompt" },
+        { "key": "env.DISABLE_FEEDBACK_COMMAND", "value": "1", "disables": "/feedback command" },
+        { "key": "skipWebFetchPreflight", "value": true, "disables": "Hostname preflight to api.anthropic.com" }
+      ],
+      "_hook_note": "Usually blocked by Self-Modification hook — expect to fall back to manual paste."
+    },
+    {
+      "path": "~/.claude-bm/settings.json",
+      "format": "json",
+      "edits": [
+        { "key": "env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "value": "1", "disables": "Kill switch" },
+        { "key": "env.DISABLE_TELEMETRY", "value": "1", "disables": "Statsig operational metrics" },
+        { "key": "env.DISABLE_ERROR_REPORTING", "value": "1", "disables": "Sentry crash/error reports" },
+        { "key": "env.CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY", "value": "1", "disables": "In-session rating prompt" },
+        { "key": "env.DISABLE_FEEDBACK_COMMAND", "value": "1", "disables": "/feedback command" },
+        { "key": "skipWebFetchPreflight", "value": true, "disables": "Hostname preflight to api.anthropic.com" }
+      ],
+      "_hook_note": "Partial block — agent edits allowed for env block and new top-level keys. DO NOT anchor edits near skipDangerousModePermissionPrompt / skipAutoPermissionPrompt."
+    }
+  ],
+  "shell_env_vars": [],
+  "persistent_files": [
+    { "path": "~/.claude/projects", "note": "Plaintext session transcripts, 30-day default retention. Tune with top-level cleanupPeriodDays in settings.json." }
+  ],
+  "diff_patterns": {
+    "env_regex": "(NONESSENTIAL|TELEMETRY|FEEDBACK|ERROR_REPORT|OPT_?OUT|SURVEY|PRIVACY|ANALYTICS|TRAFFIC|DO_NOT_TRACK)",
+    "settings_regex": "`skip[A-Z][A-Za-z]+`"
+  },
+  "provider_switches": [
+    { "var": "CLAUDE_CODE_USE_BEDROCK", "value": "1", "note": "Routes to AWS Bedrock; telemetry off by default there" },
+    { "var": "CLAUDE_CODE_USE_VERTEX", "value": "1", "note": "Routes to Google Vertex AI; telemetry off by default there" },
+    { "var": "CLAUDE_CODE_USE_FOUNDRY", "value": "1", "note": "Routes to Azure AI Foundry; telemetry off by default there" }
+  ],
+  "notes": [
+    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC is the kill switch but does NOT cover skipWebFetchPreflight.",
+    "Prompts/outputs still go to Anthropic's API unless a provider switch is used (changes billing/compute, not just telemetry)."
+  ],
+  "caveats": []
+}

@@ -1,0 +1,38 @@
+{
+  "name": "copilot",
+  "display": "GitHub CLI + Copilot CLI",
+  "detect_cmd": "gh",
+  "detect_paths": ["~/.config/github-copilot", "~/.config/gh"],
+  "doc_urls": [
+    "https://docs.github.com/en/copilot/responsible-use/copilot-cli",
+    "https://cli.github.com/manual/gh_config"
+  ],
+  "settings_files": [],
+  "shell_env_vars": [
+    { "name": "GH_TELEMETRY", "value": "false", "disables": "Base gh CLI telemetry (does NOT control Copilot CLI)" }
+  ],
+  "gh_config_commands": [
+    { "cmd": "gh config set telemetry disabled", "disables": "Persist base gh telemetry=disabled in ~/.config/gh/config.yml" }
+  ],
+  "persistent_files": [
+    { "path": "~/.config/github-copilot/apps.json", "note": "Contains plaintext OAuth tokens (ghu_*). Verify permissions are 0600 — not world-readable." },
+    { "path": "~/.config/github-copilot/versions.json", "note": "Extension version metadata." },
+    { "path": "~/.config/github-copilot/intellij/mcp.json", "note": "IDE-specific MCP config." }
+  ],
+  "diff_patterns": {
+    "env_regex": "(COPILOT_|GH_|TELEMETRY|DISABLE|OPT_?OUT|OFFLINE|TRACK)",
+    "settings_regex": "^(telemetry|copilot)\\."
+  },
+  "notes": [
+    "Copilot CLI has NO documented standalone telemetry toggle. Copilot telemetry is separate from base gh telemetry.",
+    "Base gh is controlled by GH_TELEMETRY=false OR 'gh config set telemetry disabled' (both are real; env wins if both set)."
+  ],
+  "caveats": [
+    {
+      "var": "COPILOT_OFFLINE",
+      "value": "true",
+      "framing": "Offline mode for BYOK/local-provider use — NOT a telemetry toggle. Disables web_fetch, /delegate, Code Search and other online-dependent features as a side effect. Only surface to the user if they explicitly asked for the nuclear option.",
+      "auto_apply": false
+    }
+  ]
+}

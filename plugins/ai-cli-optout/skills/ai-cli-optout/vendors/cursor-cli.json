@@ -1,0 +1,38 @@
+{
+  "name": "cursor-cli",
+  "display": "Cursor CLI (cursor-agent)",
+  "detect_cmd": "cursor-agent",
+  "detect_paths": [
+    "~/.local/bin/cursor-agent"
+  ],
+  "doc_urls": [
+    "https://cursor.com/data-use",
+    "https://docs.cursor.com/cli/overview"
+  ],
+  "settings_files": [],
+  "shell_env_vars": [],
+  "manual_only": true,
+  "manual_instructions": [
+    "Cursor CLI (`cursor-agent`) is a different binary from the editor launcher `cursor`. Both authenticate against the same Cursor account, so account-level Privacy Mode covers BOTH — set once in the editor (Cmd+Shift+J → Privacy → Privacy Mode) or at https://cursor.com/settings → Privacy. No CLI-specific toggle exists; even with your own API key, requests still route through Cursor's backend.",
+    "Business-plan accounts have Privacy Mode forced on (zero retention) — no action needed there.",
+    "`~/.cursor/cli-config.json` holds preferences only (vim mode, default model, shell-permissions allow/deny). No telemetry key — do not invent one."
+  ],
+  "process_check": {
+    "cmd": "pgrep -x cursor-agent",
+    "if_running": "cursor-agent is running. No settings edits apply (manual_only), but quit any interactive session before changing Cursor account Privacy Mode so the CLI re-reads the setting on next login."
+  },
+  "persistent_files": [
+    { "path": "~/.cursor/cli-config.json", "note": "CLI preferences + shell-permissions allow/deny (not telemetry; review manually)." },
+    { "path": "~/.cursor/ai-tracking", "note": "Shared with editor — AI telemetry queue." },
+    { "path": "~/.cursor/plans", "note": "Local agent plan artifacts." }
+  ],
+  "diff_patterns": {
+    "env_regex": "(CURSOR_|TELEMETRY|DISABLE|OPT_?OUT|TRACK|PRIVACY|ANALYTICS)",
+    "settings_regex": "(privacy|telemetry|cursor\\.)"
+  },
+  "notes": [
+    "Installed via `brew install --cask cursor-cli` (ships `cursor-agent`) or `curl https://cursor.com/install -fsS | bash`.",
+    "Bundled `merkle-tree-napi.darwin-arm64.node` is unsigned — first run trips macOS Gatekeeper. Known release-hygiene issue, not malware. Fix: System Settings → Privacy & Security → Allow Anyway, or scoped `xattr -rd com.apple.quarantine /opt/homebrew/Caskroom/cursor-cli/`."
+  ],
+  "caveats": []
+}

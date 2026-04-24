@@ -1,0 +1,51 @@
+{
+  "name": "antigravity",
+  "display": "Google Antigravity IDE",
+  "detect_cmd": "antigravity",
+  "detect_paths": [
+    "~/.antigravity",
+    "~/Library/Application Support/Antigravity",
+    "/Applications/Antigravity.app"
+  ],
+  "platforms": ["darwin"],
+  "doc_urls": [
+    "https://antigravity.google/terms",
+    "https://discuss.ai.google.dev/t/antigravity-privacy/138277",
+    "https://discuss.ai.google.dev/t/antigravity-data-training-opt-out/125236"
+  ],
+  "settings_files": [
+    {
+      "path": "~/Library/Application Support/Antigravity/User/settings.json",
+      "format": "json",
+      "edits": [
+        { "key": "telemetry.telemetryLevel", "value": "off", "disables": "VS Code-layer telemetry (Application Insights). Does NOT confirm-stop Google's Interactions/training pipeline." },
+        { "key": "telemetry.enableCrashReporter", "value": false, "disables": "Crash dumps to Google (VS Code deprecated key, still honored in the fork)" }
+      ]
+    }
+  ],
+  "shell_env_vars": [],
+  "persistent_files": [
+    { "path": "~/Library/Application Support/Antigravity/Crashpad", "note": "Crash dumps queued for upload." },
+    { "path": "~/Library/Application Support/Antigravity/logs", "note": "Session logs (timestamped)." },
+    { "path": "~/Library/Application Support/Antigravity/machineid", "note": "Persistent installation ID." },
+    { "path": "~/Library/Application Support/Antigravity/CachedData", "note": "Extension + interaction cache." }
+  ],
+  "diff_patterns": {
+    "env_regex": "(ANTIGRAVITY_|GOOGLE_|TELEMETRY|DISABLE|OPT_?OUT|TRACK|CRASH)",
+    "settings_regex": "^telemetry\\."
+  },
+  "process_check": {
+    "cmd": "pgrep -i Antigravity",
+    "if_running": "Quit Antigravity (including helper processes) before editing settings.json — Electron rewrites on shutdown and will clobber manual edits."
+  },
+  "notes": [
+    "Google-branded VS Code fork (v1.107.0). No env var or CLI flag documented — see caveat for the training-pipeline opt-out."
+  ],
+  "caveats": [
+    {
+      "var": "ai_training_opt_out",
+      "framing": "AI training opt-out is EMAIL-ONLY — no settings key or env var. Send a request to antigravity-support@google.com to delete your Interactions data. Google otherwise uses Interactions for ML training unless accessed via Workspace/GCP.",
+      "auto_apply": false
+    }
+  ]
+}

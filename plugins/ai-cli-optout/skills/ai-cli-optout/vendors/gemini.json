@@ -1,0 +1,38 @@
+{
+  "name": "gemini",
+  "display": "Google Gemini CLI",
+  "detect_cmd": "gemini",
+  "detect_paths": ["~/.gemini"],
+  "doc_urls": [
+    "https://google-gemini.github.io/gemini-cli/docs/cli/telemetry.html"
+  ],
+  "settings_files": [
+    {
+      "path": "~/.gemini/settings.json",
+      "format": "json",
+      "edits": [
+        { "key": "telemetry.enabled", "value": false, "disables": "Usage/performance telemetry" },
+        { "key": "telemetry.logPrompts", "value": false, "disables": "Sending prompt content as part of telemetry" }
+      ]
+    }
+  ],
+  "shell_env_vars": [
+    { "name": "GEMINI_TELEMETRY_ENABLED", "value": "false", "disables": "Telemetry via env var (overrides settings.json if set)" },
+    { "name": "GEMINI_TELEMETRY_LOG_PROMPTS", "value": "false", "disables": "Prompt logging via env var" }
+  ],
+  "persistent_files": [
+    { "path": "~/.gemini/settings.json", "note": "Retains otlpEndpoint / target config from prior telemetry setup; review after disabling." }
+  ],
+  "cli_flags": [
+    { "flag": "--no-telemetry", "note": "Per-invocation override; documented but not auto-applied by this skill." }
+  ],
+  "diff_patterns": {
+    "env_regex": "(GEMINI_|TELEMETRY|DISABLE|OPT_?OUT|TRACK|ANALYTICS|LOG_PROMPTS)",
+    "settings_regex": "^telemetry\\."
+  },
+  "notes": [
+    "With personal Google accounts, Gemini may also collect prompts/code for model improvement unless telemetry.logPrompts is explicitly false.",
+    "The env var wins over settings.json if both set."
+  ],
+  "caveats": []
+}

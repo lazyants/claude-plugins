@@ -1,0 +1,75 @@
+{
+  "name": "macos-privacy",
+  "display": "macOS system privacy",
+  "detect_cmd": "sw_vers",
+  "detect_paths": [
+    "/Library/Application Support/CrashReporter/DiagnosticMessagesHistory.plist"
+  ],
+  "platforms": ["darwin"],
+  "doc_urls": [
+    "https://support.apple.com/guide/mac-help/apple-intelligence-and-privacy-mchlfc0d4779/mac",
+    "https://support.apple.com/guide/deployment/depba790e53/web"
+  ],
+  "settings_files": [],
+  "shell_env_vars": [],
+  "shell_commands": [
+    {
+      "command": "defaults write com.apple.AdLib allowApplePersonalizedAdvertising -bool false",
+      "disables": "Apple personalized advertising",
+      "requires_sudo": false,
+      "scope": "per_user",
+      "ui_path": "System Settings → Privacy & Security → Apple Advertising → Personalized Ads",
+      "documented": true
+    },
+    {
+      "command": "sudo defaults write /Library/Application\\ Support/CrashReporter/DiagnosticMessagesHistory AutoSubmit -bool false",
+      "disables": "Share Mac Analytics (diagnostics + usage data sent to Apple)",
+      "requires_sudo": true,
+      "scope": "system_wide",
+      "ui_path": "System Settings → Privacy & Security → Analytics & Improvements → Share Mac Analytics",
+      "documented": true
+    },
+    {
+      "command": "sudo defaults write /Library/Application\\ Support/CrashReporter/DiagnosticMessagesHistory ThirdPartyDataSubmit -bool false",
+      "disables": "Share with App Developers (crashes shared with third-party developers)",
+      "requires_sudo": true,
+      "scope": "system_wide",
+      "ui_path": "System Settings → Privacy & Security → Analytics & Improvements → Share with App Developers",
+      "documented": true
+    }
+  ],
+  "manual_only_items": [
+    {
+      "name": "Apple Intelligence features",
+      "ui_path": "System Settings → Apple Intelligence & Siri → toggle Apple Intelligence OFF (or granular per-feature toggles: Writing Tools, Genmoji, Image Playground, Mail/Notes/Safari summaries)",
+      "reason": "com.apple.applicationaccess allow* keys are MDM-only — plain `defaults write` no-ops on unmanaged Macs. Automated path requires a signed .mobileconfig restrictions profile installed via `sudo profiles install -path <profile>`; this skill does NOT ship or install such a profile."
+    },
+    {
+      "name": "Improve Siri & Dictation",
+      "ui_path": "System Settings → Privacy & Security → Analytics & Improvements → Improve Siri & Dictation",
+      "reason": "UI-only (audio opt-in). No documented defaults key."
+    },
+    {
+      "name": "Help Apple Improve Search (Spotlight)",
+      "ui_path": "System Settings → Spotlight → Search Privacy",
+      "reason": "UI-only. No defaults key."
+    },
+    {
+      "name": "Share iCloud Analytics",
+      "ui_path": "System Settings → Privacy & Security → Analytics & Improvements → Share iCloud Analytics",
+      "reason": "UI-only. No defaults key."
+    }
+  ],
+  "persistent_files": [
+    { "path": "/Library/Application Support/CrashReporter/DiagnosticMessagesHistory.plist", "note": "System-wide analytics plist (reported, never deleted). Writable by sudo only; not SIP-protected." },
+    { "path": "~/Library/Preferences/com.apple.appleintelligencereporting.plist", "note": "Apple Intelligence reporting state (macOS 26+). Read-only from here." }
+  ],
+  "diff_patterns": {
+    "env_regex": "(APPLE_|MACOS_|TELEMETRY|DISABLE|ANALYTICS|PRIVACY)",
+    "settings_regex": "^(allow|autoSubmit|thirdParty|personalized)"
+  },
+  "notes": [
+    "macOS 26.4+ ships com.apple.appleintelligencereporting — observable, not currently writable by user."
+  ],
+  "caveats": []
+}

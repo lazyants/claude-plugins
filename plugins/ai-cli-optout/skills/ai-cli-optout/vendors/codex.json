@@ -1,0 +1,37 @@
+{
+  "name": "codex",
+  "display": "OpenAI Codex CLI",
+  "detect_cmd": "codex",
+  "detect_paths": ["~/.codex"],
+  "doc_urls": [
+    "https://developers.openai.com/codex/config-reference"
+  ],
+  "settings_files": [
+    {
+      "path": "~/.codex/config.toml",
+      "format": "toml",
+      "edits": [
+        { "key": "analytics.enabled", "value": false, "disables": "Codex usage analytics sent to OpenAI" },
+        { "key": "feedback.enabled", "value": false, "disables": "Codex /feedback uploads" }
+      ]
+    }
+  ],
+  "shell_env_vars": [],
+  "persistent_files": [
+    { "path": "~/.codex/logs_2.sqlite", "note": "Local activity DB — can exceed 500MB. Opt-out stops new sends but existing rows stay." },
+    { "path": "~/.codex/history.jsonl", "note": "Raw conversation log; plaintext prompts and responses." },
+    { "path": "~/.codex/installation_id", "note": "Persistent UUID used to correlate sessions. Delete to rotate identity (not covered by opt-out)." },
+    { "path": "~/.codex/sessions", "note": "Per-session transcripts." },
+    { "path": "~/.codex/.codex-global-state.json", "note": "Global state including personality tracking." }
+  ],
+  "diff_patterns": {
+    "env_regex": "(ANALYTICS|TELEMETRY|DISABLE|OPT_?OUT|TRACK|FEEDBACK|REPORT)",
+    "settings_regex": "^(analytics|telemetry|feedback|reporting)\\."
+  },
+  "notes": [
+    "No env-var wrapper — must edit config.toml directly.",
+    "Profile-scoped override exists: profiles.<name>.analytics.enabled = false. If config.toml has a [profiles.*] section, apply there too.",
+    "Opt-out stops new sends; existing sqlite/jsonl logs persist and should be reviewed separately."
+  ],
+  "caveats": []
+}

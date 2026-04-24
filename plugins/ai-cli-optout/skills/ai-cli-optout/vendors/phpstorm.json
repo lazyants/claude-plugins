@@ -1,0 +1,42 @@
+{
+  "name": "phpstorm",
+  "display": "JetBrains PhpStorm",
+  "detect_cmd": "phpstorm",
+  "detect_paths": [
+    "/Applications/PhpStorm.app",
+    "~/Library/Application Support/JetBrains"
+  ],
+  "platforms": ["darwin"],
+  "doc_urls": [
+    "https://www.jetbrains.com/help/phpstorm/settings-usage-statistics.html",
+    "https://www.jetbrains.com/help/ai-assistant/installation-guide-ai-assistant.html",
+    "https://www.jetbrains.com/legal/docs/privacy/privacy.html"
+  ],
+  "settings_files": [],
+  "shell_env_vars": [],
+  "manual_only": true,
+  "manual_instructions": [
+    "PhpStorm → Settings (⌘,) → Tools → Usage Statistics → uncheck 'Send usage statistics' → Apply → restart PhpStorm.",
+    "Also Settings → Appearance & Behavior → System Settings → Data Sharing → disable any per-category consents.",
+    "If the AI Assistant plugin is installed (check ~/Library/Application Support/JetBrains/PhpStorm*/plugins/ai-assistant*): Settings → Tools → AI Assistant → Data Sharing → set 'Detailed data collection' to 'Disable'. Restart required.",
+    "Versioned paths use a year-based suffix (PhpStorm2025.3, PhpStorm2026.1, ...). Glob ~/Library/Application Support/JetBrains/PhpStorm* rather than hardcoding a version."
+  ],
+  "process_check": {
+    "cmd": "pgrep -i phpstorm",
+    "if_running": "Quit PhpStorm before touching config files — settings are rewritten on shutdown."
+  },
+  "persistent_files": [
+    { "path": "~/Library/Caches/JetBrains/PhpStorm*/event-log-data/logs/FUS", "note": "Feature Usage Statistics queue (telemetry waiting to be uploaded)." },
+    { "path": "~/Library/Caches/JetBrains/PhpStorm*/log", "note": "IDE logs — may include paths, plugin errors." },
+    { "path": "~/Library/Application Support/JetBrains/consentOptions/accepted", "note": "Undocumented consent record, resets across versions." }
+  ],
+  "diff_patterns": {
+    "env_regex": "(JETBRAINS_|IDEA_|TELEMETRY|DISABLE|OPT_?OUT|TRACK|FUS)",
+    "settings_regex": "^(ai|data|usage|telemetry)"
+  },
+  "notes": [
+    "AI Assistant is a non-bundled plugin, disabled by default — only surface its opt-out if the plugin directory exists.",
+    "Release-channel toggles (Settings → Appearance & Behavior → System Settings → Updates) can independently send telemetry pings — out of scope here."
+  ],
+  "caveats": []
+}

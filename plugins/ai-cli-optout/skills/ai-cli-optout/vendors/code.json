@@ -1,0 +1,50 @@
+{
+  "name": "code",
+  "display": "Visual Studio Code",
+  "detect_cmd": "code",
+  "detect_paths": [
+    "~/.vscode",
+    "~/Library/Application Support/Code",
+    "/Applications/Visual Studio Code.app"
+  ],
+  "platforms": ["darwin"],
+  "doc_urls": [
+    "https://github.com/microsoft/vscode-docs/blob/main/docs/configure/telemetry.md",
+    "https://code.visualstudio.com/docs/configure/telemetry"
+  ],
+  "settings_files": [
+    {
+      "path": "~/Library/Application Support/Code/User/settings.json",
+      "format": "json",
+      "edits": [
+        { "key": "telemetry.telemetryLevel", "value": "off", "disables": "All VS Code telemetry tiers (crash, error, usage). Supersedes deprecated telemetry.enableTelemetry / telemetry.enableCrashReporter — never write both." }
+      ]
+    }
+  ],
+  "shell_env_vars": [],
+  "persistent_files": [
+    { "path": "~/Library/Application Support/Code/User/globalStorage", "note": "Per-extension state; may include telemetry queues for third-party extensions." },
+    { "path": "~/Library/Application Support/Code/logs", "note": "Rotating IDE logs." }
+  ],
+  "cli_flags": [
+    { "flag": "--disable-telemetry", "note": "Diagnostic / per-invocation flag (e.g. `code tunnel --disable-telemetry`); not a persistent opt-out." }
+  ],
+  "diff_patterns": {
+    "env_regex": "(VSCODE_|TELEMETRY|DISABLE|OPT_?OUT|TRACK|CRASH)",
+    "settings_regex": "^telemetry\\."
+  },
+  "process_check": {
+    "cmd": "pgrep -i 'Visual Studio Code'",
+    "if_running": "Quit VS Code before editing settings.json — graceful-shutdown rewrite can clobber manual edits."
+  },
+  "notes": [
+    "telemetry.telemetryLevel is the one canonical key — never double-write the deprecated enableTelemetry / enableCrashReporter alongside it."
+  ],
+  "caveats": [
+    {
+      "var": "copilot_extension",
+      "framing": "If github.copilot / github.copilot-chat extensions are installed (check ~/.vscode/extensions/), they DO NOT inherit telemetry.telemetryLevel per Microsoft docs. Check each extension's own telemetry docs separately. Skill never auto-writes Copilot-specific keys.",
+      "auto_apply": false
+    }
+  ]
+}

@@ -1,0 +1,40 @@
+{
+  "name": "cursor",
+  "display": "Cursor editor",
+  "detect_cmd": "cursor",
+  "detect_paths": [
+    "~/.cursor",
+    "~/Library/Application Support/Cursor"
+  ],
+  "doc_urls": [
+    "https://cursor.com/data-use"
+  ],
+  "settings_files": [],
+  "shell_env_vars": [],
+  "manual_only": true,
+  "manual_instructions": [
+    "Open the Cursor Settings panel with Cmd+Shift+J (NOT Cmd+, — that opens VS Code-style settings, where 'Privacy Mode' does NOT appear). Scroll to the 'Privacy' section. Set the 'Privacy Mode' dropdown to 'Privacy Mode' (no training; code may be stored for Background Agent) or 'Privacy Mode with Storage' if you want zero retention. Default = code used for training. This is the vendor-blessed AI-telemetry control.",
+    "Browser fallback: sign in at https://cursor.com/settings → Privacy tab → set the same dropdown. Business-plan accounts have Privacy Mode forced on.",
+    "Trap: searching 'privacy' in Cmd+, surfaces exactly 3 options — 'Cursor > General: Email Privacy Enabled' (just masks your email in the UI), 'Redhat > Telemetry: Enabled' (only present if the Red Hat extension is installed), and 'Crash Reporting: Enabled' (editor crash reports only). NONE of these is the AI-telemetry toggle. Close Cmd+, and open Cmd+Shift+J instead.",
+    "Separately, in VS Code-style settings (Cmd+, → Open Settings (JSON)), set \"telemetry.telemetryLevel\": \"off\" and the Crash Reporting dropdown to 'off' — these cover editor/crash-reporting telemetry. Does NOT control Cursor's AI telemetry; Privacy Mode in Cmd+Shift+J is the real switch."
+  ],
+  "process_check": {
+    "cmd": "pgrep -x Cursor",
+    "if_running": "Tell the user to quit Cursor before any JSON edit — its graceful shutdown rewrites settings.json and will clobber manual edits."
+  },
+  "persistent_files": [
+    { "path": "~/.cursor/ai-tracking", "note": "Electron-side AI telemetry queue." },
+    { "path": "~/.cursor/browser-logs", "note": "Browser session logs." },
+    { "path": "~/Library/Application Support/Cursor/logs", "note": "App logs (path contains space — quote in scripts)." }
+  ],
+  "diff_patterns": {
+    "env_regex": "(CURSOR_|TELEMETRY|DISABLE|OPT_?OUT|TRACK|PRIVACY)",
+    "settings_regex": "(privacy|telemetry|cursor\\.)"
+  },
+  "notes": [
+    "CLI launcher is stateless for analytics — main telemetry lives in the Electron app.",
+    "Cursor's AI-telemetry JSON key is not publicly documented; auto-write is unsafe.",
+    "Business-plan accounts have Privacy Mode forced on (zero retention) — no action needed there."
+  ],
+  "caveats": []
+}
