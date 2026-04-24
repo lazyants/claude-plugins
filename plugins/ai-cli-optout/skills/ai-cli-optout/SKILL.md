@@ -104,6 +104,8 @@ Both require `jq` and fail fast with a clear install hint if missing. `curl -fsS
 3. Run `bash scripts/check_new_optouts.sh <name>` to smoke-test baseline extraction.
 4. Update the vendors table above.
 
+**Read [`../../CONTRIBUTING.md`](../../CONTRIBUTING.md) before committing.** It documents the `detect_paths` sibling-config trap (the most common cause of false-positive vendor detection) and the `requires_confirmation` gate schema for risky edits.
+
 No code changes required — the skill is data-driven.
 
 ## Provider switches (Anthropic only, not auto-applied)
