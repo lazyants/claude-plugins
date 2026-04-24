@@ -24,6 +24,27 @@ The `detect_paths[]` array is an OR fallback for when `detect_cmd` is missing fr
 
 `tests/vendor-schema.test.sh` ships a `FORBIDDEN_DETECT_PATHS` array that blocks 16 known shared / ancestor paths: `~`, `~/Library`, `~/Library/Application Support`, `~/Library/Caches`, `~/Library/Preferences`, `~/.config`, `~/.cache`, `~/.local`, `~/.local/share`, JetBrains config roots, `/Applications`, `/Library`, `/opt`, `/usr/local`, `/etc`, `/var`, `/tmp`. If you hit a new sibling-config trap that isn't covered, add the ancestor to the array and note it in `KNOWN_ISSUES.md`.
 
+### Vendor doc research: seed `doc_urls[]` with every relevant page
+
+`scripts/check_new_optouts.sh` only diffs the URLs listed in a vendor's `doc_urls[]`. Miss a page at authoring time and the script can never surface flags added there.
+
+Vendor telemetry docs are often split across multiple URLs: a high-level "what we collect" page and a separate "how to opt out" page. Real example (2026-04-24, Vercel CLI):
+
+- `https://vercel.com/docs/cli/telemetry` — describes only the `vercel telemetry disable` subcommand.
+- `https://vercel.com/docs/cli/about-telemetry` — also documents `VERCEL_TELEMETRY_DISABLED=1` as an env-var opt-out.
+
+Authoring `vendors/vercel.json` from only the first page omitted the env var. An adversarial codex review caught it, but the habit of fetching both pages from the start avoids the round-trip.
+
+**Checklist when adding a new vendor:**
+
+1. Fetch the main telemetry doc page.
+2. Grep the page for links to sibling pages (`/telemetry-details`, `/about-*`, `/opt-out`, `/privacy`).
+3. Fetch every telemetry-relevant linked doc.
+4. Cross-check against the vendor's GitHub repo README + recent release notes for silent telemetry toggles.
+5. Add **every** relevant URL to `doc_urls[]` — not just the most comprehensive one. This is what `check_new_optouts.sh` reads.
+6. Record every documented opt-out mechanism (env var, subcommand, config file, UI toggle) in the vendor JSON — don't pick one and drop the others.
+7. Undocumented-but-widely-honored conventions (`DO_NOT_TRACK=1`, `NO_ANALYTICS=1`) ship **only** with primary-source citation of the vendor honoring it. Otherwise drop — no guessing.
+
 ### Confirmation gate — when to use it
 
 If an edit you're adding could break user-visible Claude Code features (not just send telemetry), mark it with `"requires_confirmation": true` AND a non-empty `"tradeoff_note"`:
