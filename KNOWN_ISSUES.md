@@ -11,7 +11,7 @@ Tracked caveats and planned coverage for `ai-cli-optout`. Resolved blockers are 
 `DISABLE_TELEMETRY=1` and `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` flip the same GrowthBook kill-switch that controls feature entitlements — so any Claude Code capability delivered behind a remote feature flag silently disappears once either var is set.
 
 - **Confirmed:** Opus 4.6 1M-context default model on Max / Team / Enterprise plans. Upstream: <https://github.com/anthropics/claude-code/issues/34178>.
-- **Reported, not yet reproduced in isolation:** `/remote-control` slash command disappears from the command palette after the skill applies these vars (user-observed 2026-04-24). To reproduce, run `env -u CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC -u DISABLE_TELEMETRY claude` and check whether the command returns.
+- **Confirmed (2026-04-24):** `/remote-control` slash command. Responds with `Unknown command: /remote-control` while either var is set; returns after both are removed from `~/.claude/settings.json` `env` block and Claude Code is restarted. Shell-level `env -u` is insufficient — `settings.json` values override. Remove the JSON keys, then restart.
 
 GrowthBook-gated features may fail similarly in the future. The skill now surfaces this trade-off before applying either var (see the `TRADE-OFF` line in `vendors/anthropic.json` `notes[]`). Users who need a disappearing feature should narrow the opt-out: drop these two vars and keep `DISABLE_ERROR_REPORTING`, `DISABLE_FEEDBACK_COMMAND`, `CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY` — not known / documented to touch GrowthBook.
 
