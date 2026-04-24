@@ -15,6 +15,8 @@ Tracked caveats and planned coverage for `ai-cli-optout`. Resolved blockers are 
 
   **Isolated attribution (2026-04-24):** `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` is **sufficient on its own** to break `/remote-control` — verified by running `claude` with only that var and `EXPERIMENTAL_AGENT_TEAMS` set in the env block (no `DISABLE_TELEMETRY`). Whether `DISABLE_TELEMETRY=1` *alone* also breaks `/remote-control` is not tested — a future test can isolate that dimension.
 
+  **Mitigation in skill (v1.0.3+):** both `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` edits in `vendors/anthropic.json` now carry `requires_confirmation: true` with a `tradeoff_note` citing `/remote-control` and Opus 1M. `SKILL.md` step 3(b) surfaces the note and asks the user for explicit confirmation before applying. Users who decline get the narrower opt-out automatically; users who accept have been shown the cost. A schema invariant in `tests/vendor-schema.test.sh` blocks any future `requires_confirmation: true` edit from shipping without a populated `tradeoff_note`.
+
 GrowthBook-gated features may fail similarly in the future. The skill now surfaces this trade-off before applying either var (see the `TRADE-OFF` line in `vendors/anthropic.json` `notes[]`). Users who need a disappearing feature should narrow the opt-out: drop these two vars and keep `DISABLE_ERROR_REPORTING`, `DISABLE_FEEDBACK_COMMAND`, `CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY` — not known / documented to touch GrowthBook.
 
 ### C3 — Windows Home: `AllowTelemetry=0` unsupported

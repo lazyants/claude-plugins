@@ -14,7 +14,7 @@
       "path": "~/.claude/settings.json",
       "format": "json",
       "edits": [
-        { "key": "env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "value": "1", "disables": "Kill switch: Statsig + Sentry + surveys + /feedback" },
+        { "key": "env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "value": "1", "disables": "Kill switch: Statsig + Sentry + surveys + /feedback", "requires_confirmation": true, "tradeoff_note": "CONFIRMED to break the /remote-control slash command and the Opus 4.6 1M-context default model on Max/Team/Enterprise plans — this var shares a GrowthBook kill-switch with feature entitlements, not just telemetry. See KNOWN_ISSUES.md §C2 and upstream anthropics/claude-code#34178. Users who need either feature should decline this edit." },
         { "key": "env.DISABLE_TELEMETRY", "value": "1", "disables": "Statsig operational metrics" },
         { "key": "env.DISABLE_ERROR_REPORTING", "value": "1", "disables": "Sentry crash/error reports" },
         { "key": "env.CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY", "value": "1", "disables": "In-session numeric rating prompt" },
@@ -27,7 +27,7 @@
       "path": "~/.claude-bm/settings.json",
       "format": "json",
       "edits": [
-        { "key": "env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "value": "1", "disables": "Kill switch" },
+        { "key": "env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "value": "1", "disables": "Kill switch", "requires_confirmation": true, "tradeoff_note": "CONFIRMED to break the /remote-control slash command and the Opus 4.6 1M-context default model on Max/Team/Enterprise plans — this var shares a GrowthBook kill-switch with feature entitlements, not just telemetry. See KNOWN_ISSUES.md §C2 and upstream anthropics/claude-code#34178. Users who need either feature should decline this edit." },
         { "key": "env.DISABLE_TELEMETRY", "value": "1", "disables": "Statsig operational metrics" },
         { "key": "env.DISABLE_ERROR_REPORTING", "value": "1", "disables": "Sentry crash/error reports" },
         { "key": "env.CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY", "value": "1", "disables": "In-session rating prompt" },

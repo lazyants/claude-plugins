@@ -76,6 +76,15 @@ for config in "$VENDORS_DIR"/*.json; do
     '.settings_files[]?.edits[]?.key | select(test($re) | not)' "$config")"
   assert "all edits[].key are dotted paths" test -z "$bad_keys"
 
+  # Confirmation gate: requires_confirmation=true MUST carry a non-empty
+  # tradeoff_note so the user sees what they are trading off. Otherwise the
+  # gate is silent-consent theater.
+  bad_gates="$(jq -r '.settings_files[]?.edits[]?
+    | select(.requires_confirmation == true)
+    | select((.tradeoff_note // "") | length == 0)
+    | .key' "$config")"
+  assert "requires_confirmation edits carry non-empty tradeoff_note" test -z "$bad_gates"
+
   # manual_only invariants
   if [ "$(jq -r '.manual_only // false' "$config")" = "true" ]; then
     assert "manual_only → non-empty manual_instructions" \
