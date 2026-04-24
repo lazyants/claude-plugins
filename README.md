@@ -4,11 +4,9 @@ Public plugins for [Claude Code](https://claude.com/claude-code), maintained und
 
 ## Plugins
 
-### `ai-cli-optout` — v0.1.0
+### `ai-cli-optout` — v1.0.3
 
-Opts out of telemetry, error reporting, analytics, feedback surveys, and related data collection across every locally installed AI CLI and AI-enabled IDE, plus macOS / Windows OS-level privacy surfaces. One skill, eleven vendors, data-driven.
-
-**Status:** private scaffold. Not installable from the public marketplace until pre-publish blockers in [`KNOWN_ISSUES.md`](./KNOWN_ISSUES.md) are closed.
+Opts out of telemetry, error reporting, analytics, feedback surveys, and related data collection across every locally installed AI CLI and AI-enabled IDE, plus macOS / Windows OS-level privacy surfaces. One skill, eleven vendors, data-driven. 182 test assertions guard vendor-schema invariants and script behavior.
 
 #### Vendors covered (baseline 2026-04-24)
 

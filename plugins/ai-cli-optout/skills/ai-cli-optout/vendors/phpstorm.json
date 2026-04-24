@@ -4,7 +4,7 @@
   "detect_cmd": "phpstorm",
   "detect_paths": [
     "/Applications/PhpStorm.app",
-    "~/Library/Application Support/JetBrains"
+    "~/Applications/PhpStorm.app"
   ],
   "platforms": ["darwin"],
   "doc_urls": [
