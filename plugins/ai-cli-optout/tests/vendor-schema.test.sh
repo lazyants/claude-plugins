@@ -101,6 +101,12 @@ for config in "$VENDORS_DIR"/*.json; do
     assert "shell_commands → platforms non-empty" \
       test "$(jq -r '(.platforms // []) | length' "$config")" -gt 0
   fi
+
+  # cli_commands shape — each entry must carry .cmd and .disables so the skill
+  # can render "what/why" before asking the user to run it.
+  bad_cli="$(jq -r '.cli_commands[]?
+    | select((.cmd // "") == "" or (.disables // "") == "")' "$config")"
+  assert "cli_commands entries carry .cmd and .disables" test -z "$bad_cli"
 done
 
 if [ "$TESTS_FAILED" -eq 0 ]; then

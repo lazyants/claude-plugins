@@ -1,7 +1,7 @@
 {
   "name": "ai-cli-optout",
   "description": "Opt out of telemetry across every locally installed AI CLI and AI-enabled IDE.",
-  "version": "1.0.3",
+  "version": "1.1.0",
   "author": { "name": "Lazy Ants" },
   "skills": "./skills/"
 }

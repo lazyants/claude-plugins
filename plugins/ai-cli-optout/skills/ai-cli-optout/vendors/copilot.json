@@ -11,7 +11,7 @@
   "shell_env_vars": [
     { "name": "GH_TELEMETRY", "value": "false", "disables": "Base gh CLI telemetry (does NOT control Copilot CLI)" }
   ],
-  "gh_config_commands": [
+  "cli_commands": [
     { "cmd": "gh config set telemetry disabled", "disables": "Persist base gh telemetry=disabled in ~/.config/gh/config.yml" }
   ],
   "persistent_files": [

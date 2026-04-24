@@ -3,14 +3,14 @@
   "owner": { "name": "Lazy Ants" },
   "metadata": {
     "description": "Lazy Ants Claude Code plugins",
-    "version": "1.0.3"
+    "version": "1.1.0"
   },
   "plugins": [
     {
       "name": "ai-cli-optout",
       "source": "./plugins/ai-cli-optout",
       "description": "Opt out of telemetry across every locally installed AI CLI and AI-enabled IDE, plus macOS/Windows OS-level privacy surfaces.",
-      "version": "1.0.3",
+      "version": "1.1.0",
       "author": { "name": "Lazy Ants" },
       "category": "privacy",
       "keywords": [
@@ -25,7 +25,8 @@
         "cursor",
         "antigravity",
         "vscode",
-        "phpstorm"
+        "phpstorm",
+        "vercel"
       ]
     }
   ]

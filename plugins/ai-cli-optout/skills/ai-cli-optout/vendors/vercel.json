@@ -1,0 +1,37 @@
+{
+  "name": "vercel",
+  "display": "Vercel CLI",
+  "detect_cmd": "vercel",
+  "detect_paths": ["/opt/homebrew/bin/vercel"],
+  "doc_urls": [
+    "https://vercel.com/docs/cli/about-telemetry",
+    "https://vercel.com/docs/cli/telemetry",
+    "https://vercel.com/docs/project-configuration/global-configuration"
+  ],
+  "settings_files": [],
+  "shell_env_vars": [
+    { "name": "VERCEL_TELEMETRY_DISABLED", "value": "1", "disables": "Vercel CLI telemetry for this process only — per-run override. Does NOT change the persisted `collectMetrics` setting; `vercel telemetry status` still reports the config value." }
+  ],
+  "cli_commands": [
+    { "cmd": "vercel telemetry disable", "disables": "Persist Vercel CLI telemetry opt-out (writes collectMetrics=false to com.vercel.cli/config.json — cross-platform; covers all future runs without needing the env var)" }
+  ],
+  "persistent_files": [
+    { "path": "~/Library/Application Support/com.vercel.cli/config.json", "note": "macOS: CLI global config. Holds collectMetrics setting after opt-out." },
+    { "path": "~/Library/Application Support/com.vercel.cli/auth.json", "note": "macOS: OAuth token. Verify permissions are 0600 — leaking this grants account access." },
+    { "path": "~/.local/share/com.vercel.cli/config.json", "note": "Linux XDG_DATA_HOME path for the same config file." },
+    { "path": "~/.local/share/com.vercel.cli/auth.json", "note": "Linux XDG_DATA_HOME path for the auth token. Same 0600 guidance as macOS." },
+    { "path": "%APPDATA%\\Roaming\\xdg.data\\com.vercel.cli\\config.json", "note": "Windows path per Vercel's global-configuration docs (XDG-style under %APPDATA%\\Roaming). Unverified locally — reported for completeness." },
+    { "path": "%APPDATA%\\Roaming\\xdg.data\\com.vercel.cli\\auth.json", "note": "Windows auth token location. Same 0600 guidance applies once the file exists." }
+  ],
+  "diff_patterns": {
+    "env_regex": "(VERCEL_|TELEMETRY|DISABLE|OPT_?OUT|TRACK|METRICS)",
+    "settings_regex": "^(collectMetrics|telemetry)"
+  },
+  "notes": [
+    "Two documented opt-outs — both from `https://vercel.com/docs/cli/about-telemetry`. The subcommand `vercel telemetry disable` persists across runs; `VERCEL_TELEMETRY_DISABLED=1` is per-run only (quoting the docs: 'This will only apply for runs where the environment variable is set and will not change your configured telemetry status.'). Apply the subcommand for durable opt-out and surface the env var as a shell-rc belt-and-suspenders entry.",
+    "`VERCEL_TELEMETRY_DEBUG=1` is debug-only (redirects events to stderr) and is NOT a supported opt-out — do not suggest it.",
+    "Pre-login behavior of `vercel telemetry disable` was not verified locally during authoring — on a fresh machine with no `auth.json`, the command may fail or may succeed by creating only `config.json`. If users report failure, consider adding a `vercel login` prerequisite check.",
+    "Related Vercel-owned tools with separate telemetry streams (NOT covered by this vendor): Next.js (`NEXT_TELEMETRY_DISABLED=1` + `next telemetry disable`), Turborepo (`TURBO_TELEMETRY_DISABLED=1` + `turbo telemetry disable`). Add as discrete vendor files only if users ask."
+  ],
+  "caveats": []
+}
