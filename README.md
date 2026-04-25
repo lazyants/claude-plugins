@@ -6,13 +6,13 @@ Public plugins for [Claude Code](https://claude.com/claude-code), maintained und
 
 ### `ai-cli-optout` — v1.1.0
 
-Opts out of telemetry, error reporting, analytics, feedback surveys, and related data collection across every locally installed AI CLI and AI-enabled IDE, plus Vercel CLI (adjacent developer tooling) and macOS / Windows OS-level privacy surfaces. One skill, twelve vendors, data-driven. 369 test assertions guard vendor-schema invariants and script behavior.
+Opts out of telemetry, error reporting, analytics, feedback surveys, and related data collection across every locally installed AI CLI and AI-enabled IDE, plus Vercel CLI (adjacent developer tooling) and macOS / Windows OS-level privacy surfaces. One skill, thirteen vendors, data-driven. 369 test assertions guard vendor-schema invariants and script behavior.
 
 #### Vendors covered (baseline 2026-04-24)
 
 | Vendor | Platform | Kind |
 |---|---|---|
-| Anthropic Claude Code | any | settings.json + env |
+| Anthropic Claude Code | any | settings.json + env *(2 edits confirmation-gated — see warnings)* |
 | OpenAI Codex CLI | any | `~/.codex/config.toml` |
 | Google Gemini CLI | any | settings.json + env |
 | GitHub Copilot CLI + `gh` | any | `gh config set` + env |
@@ -22,6 +22,7 @@ Opts out of telemetry, error reporting, analytics, feedback surveys, and related
 | VS Code | darwin | settings.json (Copilot extension does not inherit) |
 | PhpStorm | darwin | manual only — Settings → Tools → Usage Statistics |
 | Vercel CLI | any | `vercel telemetry disable` (persistent) + `VERCEL_TELEMETRY_DISABLED=1` (per-run) |
+| Vercel Claude Code plugin | any | env — `VERCEL_PLUGIN_TELEMETRY=off` (interim, not yet first-class) |
 | macOS system privacy | darwin | `defaults write` (AdLib, CrashReporter) |
 | Windows system privacy | win32 | `reg add` (Recall, Copilot, Telemetry, AdvertisingInfo) |
 
