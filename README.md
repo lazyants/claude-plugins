@@ -4,11 +4,32 @@ Public plugins for [Claude Code](https://claude.com/claude-code), maintained und
 
 ## Plugins
 
-### `ai-cli-optout` — v1.1.0
+| Plugin | Version | What it does |
+|---|---|---|
+| [`ai-cli-optout`](#ai-cli-optout--v110) | 1.1.0 | Opt out of telemetry across every locally installed AI CLI / AI-enabled IDE, plus Vercel CLI and macOS / Windows OS-level privacy surfaces. |
+| [`obsidian-project-vault`](#obsidian-project-vault--v100) | 1.0.0 | Set up, migrate, audit, and operate an Obsidian vault as an LLM Wiki — a persistent, compounding knowledge base maintained by Claude Code. |
+
+## Install / update / uninstall
+
+```
+claude plugin marketplace add lazyants/claude-plugins
+claude plugin install <plugin-name>@lazyants
+```
+
+Restart Claude Code once after install for new skill triggers to register. The `@lazyants` marketplace suffix is required on every plugin command — bare `claude plugin update <name>` will not find the plugin.
+
+```
+claude plugin update <plugin-name>@lazyants
+claude plugin uninstall <plugin-name>@lazyants
+```
+
+## `ai-cli-optout` — v1.1.0
 
 Opts out of telemetry, error reporting, analytics, feedback surveys, and related data collection across every locally installed AI CLI and AI-enabled IDE, plus Vercel CLI (adjacent developer tooling) and macOS / Windows OS-level privacy surfaces. One skill, thirteen vendors, data-driven. 369 test assertions guard vendor-schema invariants and script behavior.
 
-#### Vendors covered (baseline 2026-04-24)
+Trigger phrases: "disable telemetry", "opt out of telemetry", "privacy mode", etc. — full list in `plugins/ai-cli-optout/skills/ai-cli-optout/SKILL.md`.
+
+### Vendors covered (baseline 2026-04-24)
 
 | Vendor | Platform | Kind |
 |---|---|---|
@@ -26,25 +47,7 @@ Opts out of telemetry, error reporting, analytics, feedback surveys, and related
 | macOS system privacy | darwin | `defaults write` (AdLib, CrashReporter) |
 | Windows system privacy | win32 | `reg add` (Recall, Copilot, Telemetry, AdvertisingInfo) |
 
-#### Install
-
-```
-claude plugin marketplace add lazyants/claude-plugins
-claude plugin install ai-cli-optout@lazyants
-```
-
-Restart Claude Code once for the new skill triggers to register. Then ask Claude to "disable telemetry", "opt out of telemetry", "privacy mode", etc. — the full trigger list is in `plugins/ai-cli-optout/skills/ai-cli-optout/SKILL.md`.
-
-#### Update / uninstall
-
-```
-claude plugin update ai-cli-optout@lazyants
-claude plugin uninstall ai-cli-optout@lazyants
-```
-
-The `@lazyants` marketplace suffix is required — `claude plugin update ai-cli-optout` alone will not find the plugin.
-
-#### Warnings before you run it
+### Warnings before you run it
 
 - **Anthropic Claude Code users:** setting `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` or `DISABLE_TELEMETRY=1` does more than stop telemetry — both flags also disable the `/remote-control` command and, on Max / Team / Enterprise plans, silently switch Opus 4.6 off the 1M-context default model. See [anthropics/claude-code#34178](https://github.com/anthropics/claude-code/issues/34178) and `KNOWN_ISSUES.md` §C2. The skill gates both edits behind `requires_confirmation: true` so you see the trade-off and can decline. A safe narrow opt-out that leaves these features intact (`DISABLE_ERROR_REPORTING=1`, `DISABLE_FEEDBACK_COMMAND=1`, `CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY=1`, `skipWebFetchPreflight: true`) is documented in `KNOWN_ISSUES.md` §C2.
 - **Cursor:** quit the app before the skill edits any JSON — Cursor's Electron process rewrites settings on graceful quit and will overwrite your changes.
@@ -52,7 +55,7 @@ The `@lazyants` marketplace suffix is required — `claude plugin update ai-cli-
 - **Vercel CLI:** the subcommand `vercel telemetry disable` is persistent; `VERCEL_TELEMETRY_DISABLED=1` is per-run only and does **not** change the persisted status reported by `vercel telemetry status`. The skill applies both so you're covered either way.
 - **Vercel Claude Code plugin (separate from the Vercel CLI):** if installed, it sends every bash command string to `telemetry.vercel.com` by default. Interim opt-out: `VERCEL_PLUGIN_TELEMETRY=off`. Not yet a first-class vendor in this skill — tracked in `KNOWN_ISSUES.md`.
 
-#### What this does **not** cover
+### What this does **not** cover
 
 - Prompts and outputs still go to each vendor's API. To avoid that path you must switch providers (e.g. route Claude Code to AWS Bedrock / Google Vertex / Azure Foundry).
 - Existing local state (Codex sqlite, conversation logs, OAuth tokens) is **reported**, never deleted.
@@ -60,34 +63,18 @@ The `@lazyants` marketplace suffix is required — `claude plugin update ai-cli-
 
 See [`DISCLAIMER.md`](./DISCLAIMER.md) for the full no-warranty statement.
 
-### `obsidian-project-vault` — v1.0.0
+## `obsidian-project-vault` — v1.0.0
 
 Set up, migrate, audit, and operate an Obsidian vault as an **LLM Wiki** — a persistent, compounding knowledge base maintained by Claude Code instead of a one-shot RAG retrieval surface. Three-layer architecture (raw sources / wiki / schema), four setup modes (create, migrate, audit, ingest), and a query-and-file-back loop so every answer the LLM derives is folded back into the vault.
 
-#### What it covers
+Trigger phrases: "set up obsidian", "migrate vault", "audit vault", "wiki-lint", "ingest sources", etc. — full list in `plugins/obsidian-project-vault/skills/obsidian-project-vault/SKILL.md`.
+
+### What it covers
 
 - **Setup modes** — create a fresh `vault/` subfolder, migrate an existing standalone vault into a project repo (with diff-before-delete safety), or audit a vault's structural health.
 - **Wiki pattern** — three layers (raw sources, wiki, schema), Report template with frontmatter, INDEX.md navigation, CLAUDE.md workflow integration.
 - **Ongoing operations** — ingest new sources, query the vault and file findings back, lint vault health, prune stale entries.
 - **Git + `.obsidian/`** — `.gitignore` patterns, vault MCP config, sane defaults for human-side workflow (Web Clipper, Dataview, graph view).
-
-#### Install
-
-```
-claude plugin marketplace add lazyants/claude-plugins
-claude plugin install obsidian-project-vault@lazyants
-```
-
-Restart Claude Code once for the new skill triggers to register. Then ask Claude to "set up obsidian", "migrate vault", "audit vault", "wiki-lint", "ingest sources", etc. — full trigger list in `plugins/obsidian-project-vault/skills/obsidian-project-vault/SKILL.md`.
-
-#### Update / uninstall
-
-```
-claude plugin update obsidian-project-vault@lazyants
-claude plugin uninstall obsidian-project-vault@lazyants
-```
-
-The `@lazyants` marketplace suffix is required.
 
 ## License & disclaimer
 
