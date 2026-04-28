@@ -3,7 +3,7 @@
   "owner": { "name": "Lazy Ants" },
   "metadata": {
     "description": "Lazy Ants Claude Code plugins",
-    "version": "1.1.0"
+    "version": "1.2.0"
   },
   "plugins": [
     {
@@ -27,6 +27,24 @@
         "vscode",
         "phpstorm",
         "vercel"
+      ]
+    },
+    {
+      "name": "obsidian-project-vault",
+      "source": "./plugins/obsidian-project-vault",
+      "description": "Set up, migrate, audit, and operate an Obsidian vault as an LLM Wiki — a persistent, compounding knowledge base maintained by Claude Code.",
+      "version": "1.0.0",
+      "author": { "name": "Lazy Ants" },
+      "category": "documentation",
+      "keywords": [
+        "obsidian",
+        "vault",
+        "llm-wiki",
+        "knowledge-base",
+        "documentation",
+        "markdown",
+        "rag",
+        "notes"
       ]
     }
   ]

@@ -1,0 +1,7 @@
+{
+  "name": "obsidian-project-vault",
+  "description": "Set up, migrate, audit, and operate an Obsidian vault as an LLM Wiki — a persistent, compounding knowledge base maintained by Claude Code.",
+  "version": "1.0.0",
+  "author": { "name": "Lazy Ants" },
+  "skills": "./skills/"
+}

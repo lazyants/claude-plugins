@@ -2,6 +2,14 @@
 
 All notable changes to `lazyants/claude-plugins` are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is per-plugin, not repo-wide.
 
+## [obsidian-project-vault 1.0.0] — 2026-04-28
+
+Initial release. Promotes the in-house `obsidian-project-vault` skill (previously a personal-scope skill at `~/.claude/skills/`) into a marketplace plugin so it can be installed and updated via `claude plugin install obsidian-project-vault@lazyants`.
+
+### Added
+- `plugins/obsidian-project-vault/skills/obsidian-project-vault/SKILL.md` — LLM Wiki pattern, three-layer architecture (raw sources / wiki / schema), four setup modes (create, migrate, audit, ingest), Report template + frontmatter, INDEX.md navigation, CLAUDE.md workflow integration, query-and-file-back loop, vault-lint operation.
+- `plugins/obsidian-project-vault/skills/obsidian-project-vault/references/obsidian-tips.md` — human-side Obsidian workflow notes (Web Clipper, Dataview queries, graph view).
+
 ## [ai-cli-optout 1.1.0] — 2026-04-24
 
 Adds Vercel CLI and generalizes the CLI-command opt-out schema so adjacent developer CLIs can slot in without bespoke fields.

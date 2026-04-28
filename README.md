@@ -60,6 +60,35 @@ The `@lazyants` marketplace suffix is required — `claude plugin update ai-cli-
 
 See [`DISCLAIMER.md`](./DISCLAIMER.md) for the full no-warranty statement.
 
+### `obsidian-project-vault` — v1.0.0
+
+Set up, migrate, audit, and operate an Obsidian vault as an **LLM Wiki** — a persistent, compounding knowledge base maintained by Claude Code instead of a one-shot RAG retrieval surface. Three-layer architecture (raw sources / wiki / schema), four setup modes (create, migrate, audit, ingest), and a query-and-file-back loop so every answer the LLM derives is folded back into the vault.
+
+#### What it covers
+
+- **Setup modes** — create a fresh `vault/` subfolder, migrate an existing standalone vault into a project repo (with diff-before-delete safety), or audit a vault's structural health.
+- **Wiki pattern** — three layers (raw sources, wiki, schema), Report template with frontmatter, INDEX.md navigation, CLAUDE.md workflow integration.
+- **Ongoing operations** — ingest new sources, query the vault and file findings back, lint vault health, prune stale entries.
+- **Git + `.obsidian/`** — `.gitignore` patterns, vault MCP config, sane defaults for human-side workflow (Web Clipper, Dataview, graph view).
+
+#### Install
+
+```
+claude plugin marketplace add lazyants/claude-plugins
+claude plugin install obsidian-project-vault@lazyants
+```
+
+Restart Claude Code once for the new skill triggers to register. Then ask Claude to "set up obsidian", "migrate vault", "audit vault", "wiki-lint", "ingest sources", etc. — full trigger list in `plugins/obsidian-project-vault/skills/obsidian-project-vault/SKILL.md`.
+
+#### Update / uninstall
+
+```
+claude plugin update obsidian-project-vault@lazyants
+claude plugin uninstall obsidian-project-vault@lazyants
+```
+
+The `@lazyants` marketplace suffix is required.
+
 ## License & disclaimer
 
 MIT — see [`LICENSE`](./LICENSE). No warranty, no vendor affiliation — see [`DISCLAIMER.md`](./DISCLAIMER.md).
