@@ -1,0 +1,24 @@
+# db-guardrails — layer 3 for Laravel
+# ------------------------------------
+# Copy to `.env.testing`. With this file present, any artisan command run with
+# `--env=testing` routes to an in-memory SQLite database and can never touch
+# the real one. Run migration tests through Pest/PHPUnit, which load this.
+#
+# APP_KEY below is a throwaway test key — fine to commit. Regenerate if you
+# prefer: `php artisan key:generate --env=testing --show`.
+
+APP_ENV=testing
+APP_KEY=base64:dGVzdGluZ2tleXRoYXRpczMyYnl0ZXNsb25nISEhISE=
+
+DB_CONNECTION=sqlite
+DB_DATABASE=:memory:
+DB_HOST=
+DB_PORT=
+DB_USERNAME=
+DB_PASSWORD=
+
+CACHE_STORE=array
+QUEUE_CONNECTION=sync
+SESSION_DRIVER=array
+MAIL_MAILER=array
+BROADCAST_CONNECTION=null

@@ -1,0 +1,16 @@
+{
+  "description": "db-guardrails — PreToolUse:Bash hook that blocks destructive database commands before Claude Code runs them.",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/block-destructive-db.sh\""
+          }
+        ]
+      }
+    ]
+  }
+}

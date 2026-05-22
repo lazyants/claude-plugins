@@ -3,7 +3,7 @@
   "owner": { "name": "Lazy Ants" },
   "metadata": {
     "description": "Lazy Ants Claude Code plugins",
-    "version": "1.2.0"
+    "version": "1.3.0"
   },
   "plugins": [
     {
@@ -27,6 +27,25 @@
         "vscode",
         "phpstorm",
         "vercel"
+      ]
+    },
+    {
+      "name": "db-guardrails",
+      "source": "./plugins/db-guardrails",
+      "description": "Stop AI coding agents from accidentally emptying your database. An always-on hook blocks destructive DB commands across 15+ frameworks, plus a stack-aware installer for database-level privilege separation and framework boot guards.",
+      "version": "1.0.0",
+      "author": { "name": "Lazy Ants" },
+      "category": "safety",
+      "keywords": [
+        "database",
+        "safety",
+        "guardrail",
+        "hook",
+        "destructive",
+        "drop-table",
+        "truncate",
+        "migrations",
+        "claude-code"
       ]
     },
     {

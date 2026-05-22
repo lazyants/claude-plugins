@@ -1,0 +1,19 @@
+{
+  "name": "db-guardrails",
+  "description": "Stop AI coding agents from accidentally emptying your database. Ships an always-on hook that blocks destructive DB commands (DROP, TRUNCATE, DELETE-without-WHERE, migrate:fresh, db:drop, prisma migrate reset, FLUSHALL, docker compose down -v and more) across 15+ frameworks, plus a stack-aware installer for database-level privilege separation and framework boot guards.",
+  "version": "1.0.0",
+  "author": { "name": "Lazy Ants" },
+  "homepage": "https://github.com/lazyants/claude-plugins",
+  "keywords": [
+    "database",
+    "safety",
+    "guardrail",
+    "hook",
+    "destructive",
+    "drop-table",
+    "truncate",
+    "migrations",
+    "claude-code"
+  ],
+  "skills": "./skills/"
+}

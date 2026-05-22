@@ -2,6 +2,17 @@
 
 All notable changes to `lazyants/claude-plugins` are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is per-plugin, not repo-wide.
 
+## [db-guardrails 1.0.0] — 2026-05-22
+
+Initial release. New plugin — protects databases from accidental destructive commands run by AI coding agents. Generalised from a four-layer guardrail stack built in-house after an agent twice wiped a development database via a misrouted `artisan migrate`.
+
+### Added
+- `plugins/db-guardrails/hooks/block-destructive-db.sh` + `hooks/hooks.json` — always-on `PreToolUse:Bash` hook (layer 4). Framework-agnostic: blocks raw SQL (`DROP`, `TRUNCATE`, `DELETE` without `WHERE`), Laravel, Rails, Django, Prisma, TypeORM, Sequelize, Knex, Drizzle, Doctrine/Symfony, EF Core, Alembic, Flyway, Liquibase, MongoDB, Redis, plus `docker compose down -v` and `rm -rf` of DB data directories. Out-of-band bypass via `ALLOW_DESTRUCTIVE_DB_HOOK=true`; no inline self-bypass. Written for bash 3.2+; `jq`/`python3` payload parsing with a fail-open-with-warning fallback.
+- `plugins/db-guardrails/skills/db-guardrails/SKILL.md` — `/db-guardrails` installer skill. Detects database engine + framework, scaffolds layers 1–3.
+- `assets/` — layer 1 privilege separation for MySQL/MariaDB (`mariadb`/`mysql` client auto-detected) and PostgreSQL; layer 2/3 drop-in guard files for Laravel, Django, Rails and Symfony.
+- `references/framework-guards.md` — per-framework boot-guard placement notes, plus the Node-ORM connection-string-split config pattern and the MongoDB scoped-role recipe.
+- `tests/block-destructive-db.test.sh` — 28 assertions covering blocked commands, legitimate look-alikes (`truncate -s 0`, `php artisan migrate`, `DELETE ... WHERE`, `rm -rf node_modules`), and the bypass env var.
+
 ## [obsidian-project-vault 1.0.0] — 2026-04-28
 
 Initial release. Promotes the in-house `obsidian-project-vault` skill (previously a personal-scope skill at `~/.claude/skills/`) into a marketplace plugin so it can be installed and updated via `claude plugin install obsidian-project-vault@lazyants`.
