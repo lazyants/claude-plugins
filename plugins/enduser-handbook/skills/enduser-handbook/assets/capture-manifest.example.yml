@@ -1,0 +1,95 @@
+# Engine-agnostic capture manifest — shape reference.
+#
+# This YAML documents the DISCIPLINE the base skill enforces, regardless of
+# `capture.engine`. The live manifest file in a real project lives at the path
+# you set in `capture.manifest_path` (e.g. a TypeScript file for Playwright,
+# a JS file for Cypress, a Python list for Puppeteer-via-pyppeteer, or a YAML
+# file like this one for `engine: manual`). Whatever the format, the shape
+# below is the contract.
+#
+# One entry == one chapter in the handbook. Authoring rule (see
+# references/manifest-discipline.md): never invent entries; every slug must
+# correspond to a route discovered from `stack.backend.route_globs` /
+# `stack.frontend.page_globs` and a real user-facing feature.
+
+- # ------------------------------------------------------------------
+  # REQUIRED — engine-agnostic
+  # ------------------------------------------------------------------
+
+  slug: feature-slug                  # English kebab-case. Becomes
+                                      # <publish.chapters_dir>/<slug>.md and
+                                      # the screenshot subdirectory name.
+                                      # English-only even when the handbook
+                                      # is non-English (filesystem hygiene).
+
+  title: "Feature title"              # The H1 of the produced chapter, written
+                                      # in the handbook's target language
+                                      # (driven by `language.code` /
+                                      # `language.register`). Quote UI labels
+                                      # verbatim from the running app.
+
+  route: /path/to/feature             # The user-facing route the capture
+                                      # navigates to. Must exist in the
+                                      # running UI (see references/running-ui-source.md).
+
+  role: role_name                     # MUST be one of the values declared in
+                                      # `capture.auth_role_enum` in the
+                                      # project profile. The base skill does
+                                      # not hardcode a role vocabulary — your
+                                      # profile defines it (e.g. some projects
+                                      # use [admin, internal, external], others
+                                      # [owner, editor, viewer], others
+                                      # [staff, customer], etc.).
+                                      # If `capture.role_flags[role]` is set
+                                      # in the profile, the capture session
+                                      # must also satisfy those flags before
+                                      # navigating (a granted flag only means
+                                      # the control renders — see
+                                      # references/capture-safety.md).
+
+  glossary_terms:                     # Terms introduced or referenced by this
+    - Term1                           # chapter. The base skill cross-checks
+    - Term2                           # each entry against
+                                      # `publish.glossary_dir` and either
+                                      # links existing entries or creates
+                                      # stubs (see references/glossary-discipline.md).
+
+  steps:                              # Ordered list. Each step produces one
+                                      # screenshot embedded in the chapter in
+                                      # the order given.
+
+    - id: 01-list                     # Two-digit prefix + English kebab-case
+                                      # slug. The prefix is the on-disk sort
+                                      # key; do not skip numbers.
+      label: "Step caption"           # Caption rendered under the screenshot
+                                      # in the handbook's target language.
+      screenshot: 01-list.png         # Filename written under
+                                      # `capture.output_dir/<slug>/`.
+
+    - id: 02-action
+      label: "Perform an action"
+      action: "click the primary button in the header"
+                                      # Free-text English directive describing
+                                      # the user action the engine must
+                                      # perform before the screenshot. The
+                                      # base skill includes this string
+                                      # verbatim in the capture-step prompt;
+                                      # Claude translates it into the
+                                      # appropriate engine API call given
+                                      # `capture.engine` and `capture.command`.
+                                      # Keep it concrete (name the control as
+                                      # it appears in the running UI).
+      screenshot: 02-action.png
+
+  # ------------------------------------------------------------------
+  # OPTIONAL — engine-specific (omit unless your engine supports it)
+  # ------------------------------------------------------------------
+
+  # Playwright projects fill this in (pre-goto response wait); other engines
+  # use their equivalent (Cypress: cy.intercept; Puppeteer: page.waitForResponse)
+  # or omit. When set, this is the network signal the capture engine waits on
+  # before asserting the page is mounted; the base skill consumes it via the
+  # `capture.page_identity_signal` directive (see references/page-identity.md).
+  # If omitted, the engine falls back to the profile-level
+  # `capture.page_identity_signal` description alone.
+  waitForApi: ""
