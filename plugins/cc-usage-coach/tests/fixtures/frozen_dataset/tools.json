@@ -1,0 +1,31 @@
+{
+  "tool_use_freq": {
+    "Bash": 500,
+    "Read": 300,
+    "Edit": 120,
+    "Agent": 40,
+    "Write": 30
+  },
+  "tool_result_bytes": {
+    "Read": {
+      "chars": 1200000,
+      "est_tokens": 300000,
+      "count": 300
+    },
+    "Bash": {
+      "chars": 800000,
+      "est_tokens": 200000,
+      "count": 500
+    },
+    "Edit": {
+      "chars": 240000,
+      "est_tokens": 60000,
+      "count": 120
+    },
+    "Agent": {
+      "chars": 400000,
+      "est_tokens": 100000,
+      "count": 40
+    }
+  }
+}

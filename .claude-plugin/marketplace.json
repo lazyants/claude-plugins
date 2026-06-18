@@ -3,7 +3,7 @@
   "owner": { "name": "Lazy Ants" },
   "metadata": {
     "description": "Lazy Ants Claude Code plugins",
-    "version": "1.3.0"
+    "version": "1.4.0"
   },
   "plugins": [
     {
@@ -64,6 +64,22 @@
         "markdown",
         "rag",
         "notes"
+      ]
+    },
+    {
+      "name": "cc-usage-coach",
+      "source": "./plugins/cc-usage-coach",
+      "description": "Personalized, behavior-aware analysis of where your Claude Code (Max/Pro) usage-limit tokens go, with ranked, low-effort ways to use fewer — computed entirely from your local session logs. Python measures; Claude concludes.",
+      "version": "1.0.0",
+      "author": { "name": "Lazy Ants" },
+      "category": "productivity",
+      "keywords": [
+        "usage",
+        "tokens",
+        "cost",
+        "cache",
+        "limits",
+        "claude-code"
       ]
     }
   ]

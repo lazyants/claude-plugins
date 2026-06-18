@@ -1,0 +1,855 @@
+{
+  "baselines": {
+    "cr_per_turn": {
+      "n": 34,
+      "p50": 18954.545454545456,
+      "p90": 52333.333333333336
+    },
+    "peak_ctx": {
+      "n": 34,
+      "p50": 100000.0,
+      "p90": 140999.99999999997
+    },
+    "read_chars_per_call": {
+      "n": 1,
+      "p50": 20000.0,
+      "p90": 20000.0
+    },
+    "recache_excess_proxy": {
+      "n": 34,
+      "p50": 113500.0,
+      "p90": 261999.99999999994
+    },
+    "turns": {
+      "n": 34,
+      "p50": 12.0,
+      "p90": 14.0
+    }
+  },
+  "behavior_color": {
+    "hour_histogram_utc": [
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      513,
+      18,
+      3,
+      0,
+      1,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0
+    ],
+    "no_tool_cr_share": 0.0,
+    "no_tool_turn_share": 0.0,
+    "note": "color, not a lever",
+    "weekday_split": [
+      30,
+      420,
+      25,
+      12,
+      8,
+      10,
+      30
+    ]
+  },
+  "candidate_sessions": {
+    "items": [
+      {
+        "anomaly_factors": {
+          "cr_per_turn": 0.765,
+          "n_turns": 1.0,
+          "peak_ctx": 1.0,
+          "recache_excess_proxy": 1.0
+        },
+        "anomaly_rank": 1,
+        "base": "a-big",
+        "build_floor": 400000,
+        "cost_pct": 16.485,
+        "cost_rank": 1,
+        "cr": 4000000,
+        "cr_peak_mult": 10.0,
+        "n_comp": 0,
+        "n_epochs": 1,
+        "n_models": 1,
+        "n_turns": 120,
+        "p": "project-a",
+        "peak_ctx": 400000,
+        "read_evidence": {
+          "n_read": 0,
+          "read_chars": 0,
+          "repeat_reads": []
+        },
+        "recache_excess_note": "ROUGH directional proxy, not a bound (can over/understate)",
+        "recache_excess_proxy": 3600000,
+        "selection_buckets": [
+          "anomaly",
+          "cost",
+          "signal:n_turns",
+          "signal:peak_ctx",
+          "signal:recache_excess_proxy"
+        ],
+        "source_ref": "a-big",
+        "why": [
+          "recache_excess_proxy",
+          "peak_ctx"
+        ]
+      },
+      {
+        "anomaly_factors": {
+          "cr_per_turn": 0.882,
+          "n_turns": 0.971,
+          "peak_ctx": 0.941,
+          "recache_excess_proxy": 0.971
+        },
+        "anomaly_rank": 4,
+        "base": "c-canary",
+        "build_floor": 200000,
+        "cost_pct": 12.343,
+        "cost_rank": 2,
+        "cr": 3000000,
+        "cr_peak_mult": 15.0,
+        "n_comp": 0,
+        "n_epochs": 1,
+        "n_models": 1,
+        "n_turns": 60,
+        "p": "project-c",
+        "peak_ctx": 200000,
+        "read_evidence": {
+          "n_read": 0,
+          "read_chars": 0,
+          "repeat_reads": []
+        },
+        "recache_excess_note": "ROUGH directional proxy, not a bound (can over/understate)",
+        "recache_excess_proxy": 2800000,
+        "selection_buckets": [
+          "anomaly",
+          "cost",
+          "signal:n_turns",
+          "signal:peak_ctx",
+          "signal:recache_excess_proxy"
+        ],
+        "source_ref": "c-canary",
+        "why": [
+          "recache_excess_proxy",
+          "peak_ctx"
+        ]
+      },
+      {
+        "anomaly_factors": {
+          "cr_per_turn": 0.971,
+          "n_turns": 0.941,
+          "peak_ctx": 0.971,
+          "recache_excess_proxy": 0.941
+        },
+        "anomaly_rank": 3,
+        "base": "a-marathon",
+        "build_floor": 900000,
+        "cost_pct": 9.927,
+        "cost_rank": 3,
+        "cr": 2400000,
+        "cr_peak_mult": 8.0,
+        "n_comp": 1,
+        "n_epochs": 2,
+        "n_models": 2,
+        "n_turns": 25,
+        "p": "project-a",
+        "peak_ctx": 300000,
+        "read_evidence": {
+          "n_read": 0,
+          "read_chars": 0,
+          "repeat_reads": []
+        },
+        "recache_excess_note": "ROUGH directional proxy, not a bound (can over/understate)",
+        "recache_excess_proxy": 1500000,
+        "selection_buckets": [
+          "anomaly",
+          "cost",
+          "signal:cr_per_turn",
+          "signal:n_turns",
+          "signal:peak_ctx",
+          "signal:recache_excess_proxy"
+        ],
+        "source_ref": "a-marathon",
+        "why": [
+          "cr_per_turn",
+          "recache_excess_proxy",
+          "peak_ctx",
+          "compaction"
+        ]
+      },
+      {
+        "anomaly_factors": {
+          "cr_per_turn": 0.824,
+          "n_turns": 0.324,
+          "peak_ctx": 0.882,
+          "recache_excess_proxy": 0.912
+        },
+        "anomaly_rank": 13,
+        "base": "wf-001",
+        "build_floor": 120000,
+        "cost_pct": 1.681,
+        "cost_rank": 4,
+        "cr": 400000,
+        "cr_peak_mult": 3.33,
+        "n_comp": 0,
+        "n_epochs": 1,
+        "n_models": 1,
+        "n_turns": 10,
+        "p": "wf_001",
+        "peak_ctx": 120000,
+        "read_evidence": {
+          "n_read": 0,
+          "read_chars": 0,
+          "repeat_reads": []
+        },
+        "recache_excess_note": "ROUGH directional proxy, not a bound (can over/understate)",
+        "recache_excess_proxy": 280000,
+        "selection_buckets": [
+          "cost"
+        ],
+        "source_ref": "wf-001",
+        "why": [
+          "recache_excess_proxy"
+        ]
+      },
+      {
+        "anomaly_factors": {
+          "cr_per_turn": 0.794,
+          "n_turns": 0.147,
+          "peak_ctx": 0.912,
+          "recache_excess_proxy": 0.853
+        },
+        "anomaly_rank": 6,
+        "base": "b-repeat",
+        "build_floor": 150000,
+        "cost_pct": 1.279,
+        "cost_rank": 5,
+        "cr": 300000,
+        "cr_peak_mult": 2.0,
+        "n_comp": 0,
+        "n_epochs": 1,
+        "n_models": 1,
+        "n_turns": 8,
+        "p": "project-b",
+        "peak_ctx": 150000,
+        "read_evidence": {
+          "n_read": 9,
+          "read_chars": 180000,
+          "repeat_reads": [
+            [
+              "worker.py#a1b2c3",
+              3
+            ],
+            [
+              "config.json#d4e5f6",
+              2
+            ]
+          ]
+        },
+        "recache_excess_note": "ROUGH directional proxy, not a bound (can over/understate)",
+        "recache_excess_proxy": 150000,
+        "selection_buckets": [
+          "anomaly",
+          "cost"
+        ],
+        "source_ref": "b-repeat",
+        "why": [
+          "peak_ctx",
+          "repeat_read"
+        ]
+      },
+      {
+        "anomaly_factors": {
+          "cr_per_turn": 0.882,
+          "n_turns": 0.118,
+          "peak_ctx": 0.088,
+          "recache_excess_proxy": 0.882
+        },
+        "anomaly_rank": 14,
+        "base": "sub-larger",
+        "build_floor": 80000,
+        "cost_pct": 1.251,
+        "cost_rank": 6,
+        "cr": 300000,
+        "cr_peak_mult": 3.75,
+        "n_comp": 0,
+        "n_epochs": 1,
+        "n_models": 1,
+        "n_turns": 6,
+        "p": "subagents",
+        "peak_ctx": 80000,
+        "read_evidence": {
+          "n_read": 0,
+          "read_chars": 0,
+          "repeat_reads": []
+        },
+        "recache_excess_note": "ROUGH directional proxy, not a bound (can over/understate)",
+        "recache_excess_proxy": 220000,
+        "selection_buckets": [
+          "cost"
+        ],
+        "source_ref": "sub-larger",
+        "why": []
+      },
+      {
+        "anomaly_factors": {
+          "cr_per_turn": 0.206,
+          "n_turns": 0.912,
+          "peak_ctx": 0.853,
+          "recache_excess_proxy": 0.824
+        },
+        "anomaly_rank": 12,
+        "base": "fill-24",
+        "build_floor": 100000,
+        "cost_pct": 0.954,
+        "cost_rank": 7,
+        "cr": 224000,
+        "cr_peak_mult": 2.24,
+        "n_comp": 0,
+        "n_epochs": 1,
+        "n_models": 1,
+        "n_turns": 14,
+        "p": "project-a",
+        "peak_ctx": 100000,
+        "read_evidence": {
+          "n_read": 0,
+          "read_chars": 0,
+          "repeat_reads": []
+        },
+        "recache_excess_note": "ROUGH directional proxy, not a bound (can over/understate)",
+        "recache_excess_proxy": 124000,
+        "selection_buckets": [
+          "cost"
+        ],
+        "source_ref": "fill-24",
+        "why": []
+      },
+      {
+        "anomaly_factors": {
+          "cr_per_turn": 0.324,
+          "n_turns": 0.765,
+          "peak_ctx": 0.853,
+          "recache_excess_proxy": 0.794
+        },
+        "anomaly_rank": 34,
+        "base": "fill-23",
+        "build_floor": 100000,
+        "cost_pct": 0.95,
+        "cost_rank": 8,
+        "cr": 223000,
+        "cr_peak_mult": 2.23,
+        "n_comp": 0,
+        "n_epochs": 1,
+        "n_models": 1,
+        "n_turns": 13,
+        "p": "project-c",
+        "peak_ctx": 100000,
+        "read_evidence": {
+          "n_read": 0,
+          "read_chars": 0,
+          "repeat_reads": []
+        },
+        "recache_excess_note": "ROUGH directional proxy, not a bound (can over/understate)",
+        "recache_excess_proxy": 123000,
+        "selection_buckets": [
+          "cost"
+        ],
+        "source_ref": "fill-23",
+        "why": []
+      },
+      {
+        "anomaly_factors": {
+          "cr_per_turn": 0.471,
+          "n_turns": 0.618,
+          "peak_ctx": 0.853,
+          "recache_excess_proxy": 0.765
+        },
+        "anomaly_rank": 33,
+        "base": "fill-22",
+        "build_floor": 100000,
+        "cost_pct": 0.946,
+        "cost_rank": 9,
+        "cr": 222000,
+        "cr_peak_mult": 2.22,
+        "n_comp": 0,
+        "n_epochs": 1,
+        "n_models": 1,
+        "n_turns": 12,
+        "p": "project-b",
+        "peak_ctx": 100000,
+        "read_evidence": {
+          "n_read": 0,
+          "read_chars": 0,
+          "repeat_reads": []
+        },
+        "recache_excess_note": "ROUGH directional proxy, not a bound (can over/understate)",
+        "recache_excess_proxy": 122000,
+        "selection_buckets": [
+          "cost"
+        ],
+        "source_ref": "fill-22",
+        "why": []
+      },
+      {
+        "anomaly_factors": {
+          "cr_per_turn": 0.618,
+          "n_turns": 0.471,
+          "peak_ctx": 0.853,
+          "recache_excess_proxy": 0.735
+        },
+        "anomaly_rank": 32,
+        "base": "fill-21",
+        "build_floor": 100000,
+        "cost_pct": 0.942,
+        "cost_rank": 10,
+        "cr": 221000,
+        "cr_peak_mult": 2.21,
+        "n_comp": 0,
+        "n_epochs": 1,
+        "n_models": 1,
+        "n_turns": 11,
+        "p": "project-a",
+        "peak_ctx": 100000,
+        "read_evidence": {
+          "n_read": 0,
+          "read_chars": 0,
+          "repeat_reads": []
+        },
+        "recache_excess_note": "ROUGH directional proxy, not a bound (can over/understate)",
+        "recache_excess_proxy": 121000,
+        "selection_buckets": [
+          "cost"
+        ],
+        "source_ref": "fill-21",
+        "why": []
+      },
+      {
+        "anomaly_factors": {
+          "cr_per_turn": 0.088,
+          "n_turns": 0.912,
+          "peak_ctx": 0.853,
+          "recache_excess_proxy": 0.529
+        },
+        "anomaly_rank": 10,
+        "base": "fill-14",
+        "build_floor": 100000,
+        "cost_pct": 0.914,
+        "cost_rank": 17,
+        "cr": 214000,
+        "cr_peak_mult": 2.14,
+        "n_comp": 0,
+        "n_epochs": 1,
+        "n_models": 1,
+        "n_turns": 14,
+        "p": "project-c",
+        "peak_ctx": 100000,
+        "read_evidence": {
+          "n_read": 0,
+          "read_chars": 0,
+          "repeat_reads": []
+        },
+        "recache_excess_note": "ROUGH directional proxy, not a bound (can over/understate)",
+        "recache_excess_proxy": 114000,
+        "selection_buckets": [
+          "anomaly"
+        ],
+        "source_ref": "fill-14",
+        "why": []
+      },
+      {
+        "anomaly_factors": {
+          "cr_per_turn": 0.059,
+          "n_turns": 0.912,
+          "peak_ctx": 0.853,
+          "recache_excess_proxy": 0.382
+        },
+        "anomaly_rank": 9,
+        "base": "fill-09",
+        "build_floor": 100000,
+        "cost_pct": 0.893,
+        "cost_rank": 22,
+        "cr": 209000,
+        "cr_peak_mult": 2.09,
+        "n_comp": 0,
+        "n_epochs": 1,
+        "n_models": 1,
+        "n_turns": 14,
+        "p": "project-a",
+        "peak_ctx": 100000,
+        "read_evidence": {
+          "n_read": 0,
+          "read_chars": 0,
+          "repeat_reads": []
+        },
+        "recache_excess_note": "ROUGH directional proxy, not a bound (can over/understate)",
+        "recache_excess_proxy": 109000,
+        "selection_buckets": [
+          "anomaly"
+        ],
+        "source_ref": "fill-09",
+        "why": []
+      },
+      {
+        "anomaly_factors": {
+          "cr_per_turn": 0.029,
+          "n_turns": 0.912,
+          "peak_ctx": 0.853,
+          "recache_excess_proxy": 0.235
+        },
+        "anomaly_rank": 8,
+        "base": "fill-04",
+        "build_floor": 100000,
+        "cost_pct": 0.873,
+        "cost_rank": 27,
+        "cr": 204000,
+        "cr_peak_mult": 2.04,
+        "n_comp": 0,
+        "n_epochs": 1,
+        "n_models": 1,
+        "n_turns": 14,
+        "p": "project-b",
+        "peak_ctx": 100000,
+        "read_evidence": {
+          "n_read": 0,
+          "read_chars": 0,
+          "repeat_reads": []
+        },
+        "recache_excess_note": "ROUGH directional proxy, not a bound (can over/understate)",
+        "recache_excess_proxy": 104000,
+        "selection_buckets": [
+          "anomaly"
+        ],
+        "source_ref": "fill-04",
+        "why": []
+      },
+      {
+        "anomaly_factors": {
+          "cr_per_turn": 0.912,
+          "n_turns": 0.088,
+          "peak_ctx": 0.118,
+          "recache_excess_proxy": 0.088
+        },
+        "anomaly_rank": 7,
+        "base": "b-zero",
+        "build_floor": 90000,
+        "cost_pct": 0.69,
+        "cost_rank": 32,
+        "cr": 160000,
+        "cr_peak_mult": 1.78,
+        "n_comp": 0,
+        "n_epochs": 1,
+        "n_models": 1,
+        "n_turns": 3,
+        "p": "project-b",
+        "peak_ctx": 90000,
+        "read_evidence": {
+          "n_read": 0,
+          "read_chars": 0,
+          "repeat_reads": []
+        },
+        "recache_excess_note": "ROUGH directional proxy, not a bound (can over/understate)",
+        "recache_excess_proxy": 70000,
+        "selection_buckets": [
+          "anomaly"
+        ],
+        "source_ref": "b-zero",
+        "why": [
+          "cr_per_turn"
+        ]
+      },
+      {
+        "anomaly_factors": {
+          "cr_per_turn": 1.0,
+          "n_turns": 0.029,
+          "peak_ctx": 0.059,
+          "recache_excess_proxy": 0.029
+        },
+        "anomaly_rank": 2,
+        "base": "c-onesh",
+        "build_floor": 70000,
+        "cost_pct": 0.516,
+        "cost_rank": 33,
+        "cr": 120000,
+        "cr_peak_mult": 1.71,
+        "n_comp": 0,
+        "n_epochs": 1,
+        "n_models": 1,
+        "n_turns": 1,
+        "p": "project-c",
+        "peak_ctx": 70000,
+        "read_evidence": {
+          "n_read": 0,
+          "read_chars": 0,
+          "repeat_reads": []
+        },
+        "recache_excess_note": "ROUGH directional proxy, not a bound (can over/understate)",
+        "recache_excess_proxy": 50000,
+        "selection_buckets": [
+          "anomaly",
+          "signal:cr_per_turn"
+        ],
+        "source_ref": "c-onesh",
+        "why": [
+          "cr_per_turn"
+        ]
+      },
+      {
+        "anomaly_factors": {
+          "cr_per_turn": 0.941,
+          "n_turns": 0.059,
+          "peak_ctx": 0.029,
+          "recache_excess_proxy": 0.059
+        },
+        "anomaly_rank": 5,
+        "base": "sub-trivial",
+        "build_floor": 60000,
+        "cost_pct": 0.512,
+        "cost_rank": 34,
+        "cr": 120000,
+        "cr_peak_mult": 2.0,
+        "n_comp": 0,
+        "n_epochs": 1,
+        "n_models": 1,
+        "n_turns": 2,
+        "p": "subagents",
+        "peak_ctx": 60000,
+        "read_evidence": {
+          "n_read": 0,
+          "read_chars": 0,
+          "repeat_reads": []
+        },
+        "recache_excess_note": "ROUGH directional proxy, not a bound (can over/understate)",
+        "recache_excess_proxy": 60000,
+        "selection_buckets": [
+          "anomaly",
+          "signal:cr_per_turn"
+        ],
+        "source_ref": "sub-trivial",
+        "why": [
+          "cr_per_turn"
+        ]
+      }
+    ],
+    "omitted_candidate_counts": {
+      "post_cap": 0,
+      "post_dedup": 16,
+      "pre_dedup": 32
+    }
+  },
+  "corpus": {
+    "creation": 24200000,
+    "date_range": [
+      "2026-06-02",
+      "2026-06-09"
+    ],
+    "input": 161500,
+    "insufficient_data": false,
+    "n_projects": 5,
+    "n_sessions": 34,
+    "n_turns": 535,
+    "output": 267500,
+    "prefix_share": 0.0731,
+    "quota": 24629000,
+    "read": 26750000,
+    "recache_share": 0.4764
+  },
+  "currency_notes": {
+    "5m_write_means_overage": false,
+    "haiku_4_5_reads_uncertain": true,
+    "output_limit_weight": "undocumented",
+    "read_exclusion_exceptions": [
+      "claude-haiku-3.5"
+    ],
+    "reads_excluded_from_limits": true
+  },
+  "fan_out": {
+    "n": 4,
+    "side_cr_share": 0.1331,
+    "spinup_first_cr_median": 54500,
+    "subagent_share": 0.0176,
+    "trivial_subagent_rate": 0.5,
+    "workflow_share": 0.0168
+  },
+  "model_task_fit_signals": {
+    "m": {
+      "median_out": 500,
+      "n": 330,
+      "tool_turn_share": 1.0
+    },
+    "opus": {
+      "median_out": 500,
+      "n": 193,
+      "tool_turn_share": 1.0
+    },
+    "sonnet": {
+      "median_out": 500,
+      "n": 12,
+      "tool_turn_share": 1.0
+    }
+  },
+  "pareto": {
+    "projects_to_81pct": 2,
+    "projects_to_90pct": 3,
+    "session_quota_shares": {
+      "top10pct": 38.8,
+      "top1pct": 16.5,
+      "top5pct": 28.8
+    },
+    "top_projects": [
+      {
+        "cum_pct": 66.67,
+        "p": "project-a",
+        "pct": 66.67,
+        "quota": 16419800
+      },
+      {
+        "cum_pct": 87.43,
+        "p": "project-c",
+        "pct": 20.76,
+        "quota": 5113600
+      },
+      {
+        "cum_pct": 96.63,
+        "p": "project-b",
+        "pct": 9.2,
+        "quota": 2264800
+      },
+      {
+        "cum_pct": 98.35,
+        "p": "subagents",
+        "pct": 1.72,
+        "quota": 424800
+      },
+      {
+        "cum_pct": 100.0,
+        "p": "wf_001",
+        "pct": 1.65,
+        "quota": 406000
+      }
+    ]
+  },
+  "schema_version": 2,
+  "session_length": {
+    "by_dir_class": {
+      "real": 31,
+      "subagents": 2,
+      "workflow": 1
+    },
+    "real_dur_min": {
+      "max": 60.0,
+      "note": "wall-clock overstates active work; sessions resume across days",
+      "p50": 60.0,
+      "p90": 60.0
+    },
+    "real_turns": {
+      "histogram": {
+        "1": 1,
+        "1000+": 0,
+        "101-300": 1,
+        "11-20": 20,
+        "2-5": 1,
+        "21-50": 1,
+        "301-1000": 0,
+        "51-100": 1,
+        "6-10": 6
+      },
+      "max": 120,
+      "mean": 16.7,
+      "p50": 12.0,
+      "p90": 14.0,
+      "p99": 102.0
+    },
+    "real_with_side_turns": 1
+  },
+  "split": {
+    "creation_pct": 98.26,
+    "input_pct": 0.66,
+    "output_pct": 1.09
+  },
+  "tool_injection": {
+    "by_tool": [
+      {
+        "chars_per_call": 4000,
+        "est_tokens": 300000,
+        "pct": 45.5,
+        "tool": "Read"
+      },
+      {
+        "chars_per_call": 1600,
+        "est_tokens": 200000,
+        "pct": 30.3,
+        "tool": "Bash"
+      },
+      {
+        "chars_per_call": 2000,
+        "est_tokens": 60000,
+        "pct": 9.1,
+        "tool": "Edit"
+      },
+      {
+        "chars_per_call": 10000,
+        "est_tokens": 100000,
+        "pct": 15.2,
+        "tool": "Agent"
+      }
+    ],
+    "injection_to_creation_mult": 36.7,
+    "note": "injection_to_creation_mult is an aggregate ratio, not a per-chunk re-cache count"
+  },
+  "version_signals_by_model": [
+    {
+      "confidence": "ok",
+      "cr_per_turn": 20448.7,
+      "model": "m",
+      "n": 312,
+      "n_turns": 312,
+      "ratio_vs_trailing_median": null,
+      "reuse_ratio": 2.4,
+      "v": "1"
+    },
+    {
+      "confidence": "ok",
+      "cr_per_turn": 83681.0,
+      "model": "opus",
+      "n": 163,
+      "n_turns": 163,
+      "ratio_vs_trailing_median": null,
+      "reuse_ratio": 0.6,
+      "v": "2.1.150"
+    },
+    {
+      "confidence": "ok",
+      "cr_per_turn": 80000.0,
+      "model": "opus",
+      "n": 30,
+      "n_turns": 30,
+      "ratio_vs_trailing_median": 0.956,
+      "reuse_ratio": 0.6,
+      "v": "2.1.158"
+    },
+    {
+      "confidence": "low",
+      "cr_per_turn": 80000.0,
+      "model": "sonnet",
+      "n": 12,
+      "n_turns": 12,
+      "ratio_vs_trailing_median": null,
+      "reuse_ratio": 0.6,
+      "v": "2.1.158"
+    }
+  ]
+}
