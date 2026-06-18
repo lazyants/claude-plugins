@@ -1,0 +1,108 @@
+# .claude/handbook/profile.yml
+profile_version: 1                  # base skill refuses unknown versions
+
+language:
+  code: de                          # ISO-639-1
+  register: formal_Sie              # formal_Sie | formal_vous | informal_du | informal_tu | formal_you | informal_you | …
+  date_format: "DD.MM.YYYY"
+  decimal_separator: ","
+  currency_symbol: "€"
+
+audience:
+  persona: Marktpartner             # short label
+  description: "energy-market business users (utilities, suppliers)"
+
+stack:
+  backend:
+    type: laravel                   # laravel | django | rails | nextjs | fastapi | spring | none
+    route_globs:
+      - "routes/web/*.php"
+      - "routes/admin/*.php"
+    api_url_prefix: "/api/v1"
+  frontend:
+    type: vue                       # vue | react | svelte | angular | none
+    page_globs:
+      - "resources/assets/js/pages/**/*.vue"
+  surface: web_ui                   # web_ui | mobile_app | cli | api
+
+capture:
+  engine: playwright                # playwright | cypress | puppeteer | manual
+  manifest_path: "tests/handbook/manifest.ts"
+  capture_specs_dir: "tests/handbook"
+
+  auth_role_enum: [admin, internal, external]
+  role_flags:                       # optional per-role permission gates beyond plain role assignment
+    admin:
+      - AuthAdminUser
+    # internal: []
+    # external: []
+
+  command: |                        # exact, copy-pasteable; engine-specific
+    docker compose run --rm \
+      --add-host=app.test:host-gateway \
+      app npx playwright test tests/handbook --reporter=line
+  locale: de
+  output_dir: "vault/handbook/assets"
+
+  # Free-text English description of the engine-specific signal. The base SKILL.md
+  # consumes it by embedding the literal string verbatim into the capture-step instruction —
+  # i.e. Claude is told "After navigation, apply: {{capture.page_identity_signal}}." It is NOT
+  # paraphrased, summarized, or reinterpreted before insertion, so write it as a concrete,
+  # actionable engine directive — not a vague description. Claude then translates that directive
+  # into the appropriate engine API call given `capture.engine` and `capture.command`. Keep this string concrete and engine-aware
+  # (e.g. for Playwright: "wait for response matching stack.backend.api_url_prefix, then assert
+  # the primary heading is visible"). The principle lives in references/page-identity.md and
+  # applies even if this field is empty.
+  page_identity_signal: "wait for response matching stack.backend.api_url_prefix, then assert the primary page heading is visible"
+
+  # Project-specific examples of irreversible / live-system actions the skill MUST NOT fire.
+  # The principle (never trigger mutating actions in live captures) is in references/capture-safety.md
+  # and applies even with an empty list; this list customizes the examples for project teams.
+  live_action_examples:
+    - "DocuSign e-signature send"
+    - "Mengensicherung 'übergeben' (Apigee)"
+    - "Bonität credit query 'suchen'"
+    - "Brand7/ELE export replay"
+    - "any 'unwiderruflich löschen' action"
+
+  # Project-specific PII categories that must not appear in screenshots without explicit sign-off.
+  pii_categories:
+    - "real credit reports"
+    - "e-signature envelopes with customer data"
+    - "customer-identifying overlay contents"
+
+publish:
+  target: obsidian_vault            # obsidian_vault | confluence | gitbook | docusaurus | static_md  (only obsidian_vault ships in v1)
+  chapters_dir: "vault/handbook"
+  index_file: "vault/handbook/INDEX.md"
+  glossary_dir: "vault/knowledge/glossary"
+  glossary_seed: "vault/knowledge/INDEX.md"
+  frontmatter_required: true
+  section_labels:                   # localized literal strings the chapter template will substitute
+    prerequisites: "Voraussetzungen"
+    related: "Verwandte Themen"
+  wikilinks: true                   # obsidian-style [[…]]; false = markdown links
+
+diataxis:
+  quadrants_in_use: [tutorials, howtos]   # subset of [tutorials, howtos, reference, explanation]
+
+style_guide:
+  # Recommended: point to an external file with the full project style guide.
+  # The skill verifies this file exists at first read; if `source` is set but the file is missing,
+  # the skill halts with a "style_guide.source path not found" error rather than silently using `inline`.
+  source: ".claude/handbook/style-guide.md"
+
+  # `inline` is a minimal-fallback ONLY (use when the project has no formal style guide).
+  # A real project tone-of-voice covers ~10 dimensions (address form, sentence style, UI labels,
+  # headings, screenshots/alt-text, Diátaxis, terminology, numbers, do/don't); `inline` cannot
+  # replace that. Leave `source` set to a real file for any non-trivial project.
+  inline:
+    sentence_style: "imperative second-person; one action per step"
+    address_form_examples: []
+    ui_label_rule: "quote UI labels verbatim, in the language they appear in the running app"
+    do_donts: []
+
+glossary:
+  canonical_term_language: de
+  english_code_required: true
+  synonym_field_name: "Synonyme"    # localize: "Synonyms" for English, "Synonyme" for German, etc.

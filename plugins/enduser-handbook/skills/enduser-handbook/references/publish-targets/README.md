@@ -1,0 +1,37 @@
+# Publish-target adapters
+
+This directory holds one Markdown file per supported publish target. The base `SKILL.md` selects an adapter at the publish step by reading `references/publish-targets/<publish.target>.md`, where `<publish.target>` is the value of `publish.target` in the consuming project's `.claude/handbook/profile.yml`.
+
+## Selection mechanism
+
+At the publish step, the base skill does this (in prose, not code):
+
+1. Read `publish.target` from the loaded profile.
+2. Try to open `references/publish-targets/<publish.target>.md` (e.g. `obsidian-vault.md` when `publish.target: obsidian_vault`).
+3. If the file does not exist, halt with: `"No publish-target adapter for <value>. Available: <list of files in this directory minus README.md>."` No partial output, no file writes.
+4. Otherwise follow the adapter's instructions to write the chapter, wire it into the index/parent, and add glossary entries.
+
+The base skill never branches on target name in its own prose. All target-specific knowledge lives in the adapter file. This is the only extension point.
+
+## What ships in v1
+
+Only `obsidian-vault.md` ships. The plan names four other candidates — `confluence`, `gitbook`, `docusaurus`, `static_md` — none of which are implemented. Setting `publish.target` to any of those triggers the halt above.
+
+## Adding a new target X
+
+Create `<X>.md` in this directory (filename must match the `publish.target` value, kebab-cased; e.g. `publish.target: confluence` -> `confluence.md`). Model it on `obsidian-vault.md` and document, in second-person voice, every binding the base skill needs to write a chapter through this target. Concretely, your adapter MUST cover:
+
+- **Chapter file creation.** Where the chapter file lands relative to `publish.chapters_dir`, what extension it uses, what filename convention (slug from the manifest, kebab-case, etc.), and how to handle name collisions.
+- **Index / parent wiring.** How to register the new chapter in `publish.index_file` (or the target's equivalent parent structure — a Confluence parent page id, a Docusaurus `sidebars.js` entry, a GitBook `SUMMARY.md` line). Specify exactly which file you edit and where in it.
+- **Frontmatter / metadata.** Whether the target needs frontmatter at all. If `publish.frontmatter_required: true`, document the exact required keys (e.g. `title`, `language`, `audience`, tags) and how their values are derived from the profile and the manifest entry. If the target uses a different metadata mechanism (Confluence labels, Docusaurus `id`/`sidebar_position`), document that instead.
+- **Glossary entries.** How to write glossary entries to `publish.glossary_dir`: one file per term vs. a single combined file, naming convention, cross-link format, and how to seed from `publish.glossary_seed`.
+- **Asset layout.** Where screenshots and other assets from `capture.output_dir` are referenced from inside the chapter file. If the target requires assets to live in a target-specific location (e.g. uploaded to a Confluence attachment endpoint), document the move/copy step.
+- **Link format.** Whether links between chapters use `publish.wikilinks: true` (Obsidian-style `[[Target]]`) or plain Markdown `[text](path)`. If the target supports both, say which to prefer and why. If the target ignores `publish.wikilinks`, say so explicitly.
+- **Section labels.** How `publish.section_labels.prerequisites` and `publish.section_labels.related` are substituted into the chapter — usually verbatim under H2 headings, but the target may impose a different heading level or a structured field.
+- **Halt conditions.** Any precondition the adapter must check before writing (e.g. the index file exists, the chapters_dir is writable, the target's required tooling is reachable). List the exact halt messages.
+
+Keep the adapter file to roughly the same shape and length as `obsidian-vault.md`. Reference profile keys exactly as written in the profile schema (e.g. `publish.chapters_dir`, not "the chapters directory"). Do not duplicate generic discipline (anti-fabrication, completeness, glossary policy) — that lives in the sibling `references/` files and applies regardless of target.
+
+## Naming
+
+The filename is the contract. `publish.target: obsidian_vault` reads `obsidian-vault.md` (underscores in the profile value become hyphens in the filename, lowercase throughout). Keep names short, descriptive, and free of vendor versioning — `confluence.md`, not `confluence-cloud-2026.md`. If a target genuinely needs two variants (e.g. Confluence Cloud vs. Server with different APIs), use `confluence-cloud.md` and `confluence-server.md` and let the consumer pick via `publish.target`.

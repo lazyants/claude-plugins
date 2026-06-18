@@ -65,6 +65,22 @@
         "rag",
         "notes"
       ]
+    },
+    {
+      "name": "enduser-handbook",
+      "source": "./plugins/enduser-handbook",
+      "description": "Generate and maintain a Diátaxis-structured end-user handbook for any project from a per-project profile, with live screenshot capture and ongoing completeness audits; ships an Obsidian-vault publish adapter.",
+      "version": "1.0.0",
+      "author": { "name": "Lazy Ants" },
+      "category": "documentation",
+      "keywords": [
+        "handbook",
+        "documentation",
+        "enduser",
+        "diataxis",
+        "screenshots",
+        "obsidian"
+      ]
     }
   ]
 }

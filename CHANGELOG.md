@@ -2,6 +2,14 @@
 
 All notable changes to `lazyants/claude-plugins` are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is per-plugin, not repo-wide.
 
+## [enduser-handbook 1.0.0] — 2026-06-18
+
+Initial release. New plugin for generating end-user handbooks across projects (German/„Sie", English, any register; Laravel/Vue, Django/React, etc.) from a per-project `.claude/handbook/profile.yml`.
+
+### Added
+- Methodology lifted from VPP-handbook (Diátaxis, anti-fabrication, capture safety, glossary discipline, completeness gate); project-specific bits (language, stack, capture command, publish target) are profile-driven.
+- v1 ships the `obsidian_vault` publish-target adapter; Confluence/GitBook/Docusaurus targets are an additive future change.
+
 ## [db-guardrails 1.0.0] — 2026-05-22
 
 Initial release. New plugin — protects databases from accidental destructive commands run by AI coding agents. Generalised from a four-layer guardrail stack built in-house after an agent twice wiped a development database via a misrouted `artisan migrate`.
