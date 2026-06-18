@@ -48,8 +48,13 @@ and let it drive them.
 3. **`scripts/arc.py <source_ref>`** — inspects a single session's prompt arc by
    its opaque `source_ref` (from `source_index.json`). Local-only.
 
-The Claude runtime then reads `signal_pack.json` and writes your report. No raw
-log bytes go into the model beyond the aggregated signals.
+The Claude runtime reads `signal_pack.json` to write your report. For the top
+candidate sessions it also runs `arc.py` (step 4 of the skill), whose output is a
+compact digest of that session's **prompt text** — so selected raw prompt excerpts
+from your local logs do enter the model context during report generation. The
+shareable `signal_pack.json` itself stays aggregate-only; the arc excerpts are
+local-only (never written to the pack or uploaded) but they are sent to your own
+Claude runtime.
 
 ### Environment variables
 
@@ -76,6 +81,11 @@ logs only, performs **no** network calls, and nothing leaves your machine.
   and your prompt text. They are written with `0600` permissions where
   applicable and **must never be uploaded or shared.** If you share output with
   anyone, share the signal pack — never these.
+- **Generating the report sends some prompt text to your own Claude runtime.** When
+  the skill inspects a candidate session (step 4) it feeds `arc.py`'s prompt-arc
+  digest into the model context, so the report is written with some of your raw
+  prompt excerpts in context — not aggregated signals alone. This never leaves your
+  machine and is never added to the shareable pack, but it is more than the aggregate.
 
 The opaque `source_ref` (session) and project ID are the only handles that cross
 between the shareable pack and the local-only indexes, so you — and your own
