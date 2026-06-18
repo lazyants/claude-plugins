@@ -45,7 +45,7 @@ def sess(s, d="real", n_turns=10, n_side=0, dur_min=60.0):
 def test_fixture_has_13_keys_incl_session_length():
     sessions, turns, tools = _load()
     pack = S.build_pack(sessions, iter(turns), tools)
-    assert pack["schema_version"] == 2
+    assert pack["schema_version"] == 3
     assert "session_length" in pack
     assert len(pack) == 13
 
@@ -195,3 +195,31 @@ def test_main_refuses_symlinked_source_index(tmp_path, monkeypatch, capsys):
     assert "could not" in err                                # generic message...
     assert "/Users/" not in err and str(out) not in err      # ...with NO absolute path leaked
     assert target.read_text() == "{}"                        # symlink target was NOT written through
+
+
+# --- 5. project anonymization: shareable pack has opaque project IDs; real names only in the
+#     LOCAL-ONLY project_index.json (PR #1 review) ----------------------------------------------
+def test_main_writes_project_index_local_only(tmp_path, monkeypatch):
+    import re
+    out = tmp_path / "out"
+    _seed_dataset(str(out))
+    monkeypatch.setenv("CC_COACH_OUT", str(out))
+    assert S.main() == 0
+    pidx = out / "project_index.json"
+    assert pidx.exists()
+    assert (os.stat(pidx).st_mode & 0o777) == 0o600          # LOCAL-ONLY, 0600 like source_index
+    proj_map = json.loads(pidx.read_text())
+    assert proj_map, "fixture has real projects -> the id->name map must be non-empty"
+    # each key is an opaque id that resolves (via _proj_id) to its real-name value
+    for pid, name in proj_map.items():
+        assert re.match(r"^proj_[0-9a-f]{10}$", pid) and S._proj_id(name) == pid
+    # the shareable pack on disk carries ONLY opaque/sentinel project labels, and no real name
+    pack = json.loads((out / "signal_pack.json").read_text())
+    labels = ([tp["p"] for tp in pack["pareto"]["top_projects"]] +
+              [it["p"] for it in pack["candidate_sessions"]["items"]])
+    for lab in labels:
+        assert re.match(r"^proj_[0-9a-f]{10}$", lab)        # EVERY project label is opaque
+    # exclude CC structural dir-class labels (they appear as by_dir_class keys, not project names)
+    blob = json.dumps(pack)
+    for name in set(proj_map.values()) - {"real", "subagents", "workflow"}:
+        assert name not in blob, f"real project name leaked into shareable pack: {name!r}"

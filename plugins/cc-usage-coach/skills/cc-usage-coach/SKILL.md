@@ -31,19 +31,27 @@ matter (e.g. `python3 "<skill-dir>/scripts/extract.py"`).
    dirs to scan as well, e.g. `CC_COACH_CONFIG_DIRS=dir-a,dir-b` (use the user's
    real dir names; the placeholders here are generic on purpose).
 
-2. **Build signals.** Run `scripts/signals.py`. It writes two files:
-   - `signal_pack.json` — compact, path-free, **shareable**.
+2. **Build signals.** Run `scripts/signals.py`. It writes three files:
+   - `signal_pack.json` — compact, path-free AND project-name-free, **shareable**.
+     Project labels in it are OPAQUE IDs (e.g. `proj_a1b2c3d4e5`), not real names.
    - `source_index.json` — `{source_ref -> absolute path}`, **LOCAL-ONLY**
      (`0600`, gitignored). Used only to locate sessions on disk.
+   - `project_index.json` — `{opaque project id -> real project name}`,
+     **LOCAL-ONLY** (`0600`, gitignored). Used only to show real project names
+     in YOUR report.
 
    Both extract and signals write under the plugin's own directory by default.
    When you invoke the scripts from outside the plugin dir, or the plugin dir is
    read-only, set `CC_COACH_OUT` to a writable output dir and the scripts will
    put `dataset/`, `signal_pack.json`, and `source_index.json` there instead.
 
-3. **Read ONLY the pack.** Read `signal_pack.json` and nothing else from the
-   dataset. Never read `dataset/sessions.jsonl` or the per-turn files into
-   context — the pack is the deliberate, path-free summary.
+3. **Read the pack (resolve names locally).** Read `signal_pack.json`; never read
+   `dataset/sessions.jsonl` or the per-turn files into context — the pack is the
+   deliberate, path-free summary. The pack's project labels
+   (`pareto.top_projects[].p`, `candidate_sessions[].p`) are OPAQUE IDs; to name a
+   project in YOUR report, look its ID up in the LOCAL-ONLY `project_index.json`
+   (`{id -> real name}`). Show the user the real name; NEVER put a real project
+   name in anything meant to be shared.
 
 4. **Inspect the top candidates.** Pick the top 3–5 entries in
    `candidate_sessions.items` (by `cost_pct` / `anomaly_rank` / `why`). For each,
@@ -183,11 +191,14 @@ Also:
   state which tier matters for them. Limit savings ≠ dollar savings.
 - If `corpus.insufficient_data` is true (or `n` is small on the baselines),
   **hedge hard**: present findings as tentative, do not rank aggressive levers.
-- **Never quote a local filesystem path.** `source_index.json`,
-  `dataset/sessions.jsonl`, and the arc digest carry real usernames/project
-  names — they are LOCAL-ONLY: do not archive, upload, paste, or quote them.
-  Refer to sessions by `source_ref` / `base` only. Only the path-free
-  `signal_pack.json` is safe to share.
+- **Never quote a local filesystem path or a real project name in a shareable
+  output.** `source_index.json`, `project_index.json`, `dataset/sessions.jsonl`,
+  and the arc digest carry real usernames / paths / project names — they are
+  LOCAL-ONLY: do not archive, upload, paste, or quote them. In the pack, sessions
+  are opaque `source_ref` and projects are opaque IDs; resolve them to real names
+  (via `source_index.json` / `project_index.json`) ONLY in the user's local
+  report. Only the path-free, project-name-free `signal_pack.json` is safe to
+  share.
 
 ## Self-check before delivering
 

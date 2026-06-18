@@ -12,7 +12,7 @@ Design rules (see SKILL_PLAN.md): no hardcoded magnitude thresholds (only per-us
 p50/p90 + mechanism-level constants below); no advice strings; reads are free for limits.
 Run: python3 tools/signals.py
 """
-import bisect, datetime, json, os, sys, statistics
+import bisect, datetime, hashlib, json, os, sys, statistics
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import lib_sessions as L   # shared out_dir() resolver (Change 4b)
 
@@ -335,7 +335,7 @@ def build_pack(sessions, turns_iter, tools):
     session_length = session_length_block(sessions)
 
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "corpus": corpus, "split": split, "pareto": pareto, "baselines": baselines,
         "session_length": session_length,
         "candidate_sessions": cand, "fan_out": fan_out,
@@ -370,6 +370,25 @@ def version_signals_by_model(vm):
                         "ratio_vs_trailing_median": trailing_median_ratio(ordered, i),
                         "n": n, "confidence": "low" if n < MIN_SLICE else "ok"})
     return out
+
+
+def _read_token(leaf_hash):
+    """Opaque file token for the SHAREABLE pack's repeat_reads. The dataset entry is
+    `leaf#<one-way-hash>`; keep ONLY the trailing hash (`-> file_<hash>`) and drop the real
+    filename — a filename can embed a project / client / sensitive name (verified on real data:
+    project names appeared inside re-read filenames), so it must not reach the shared pack. The
+    repeat COUNT (the actual churn signal) is preserved; the real filename stays in the LOCAL-ONLY
+    dataset. PR-review follow-up to project anonymization.
+
+    Hardened (no pass-through): only the trailing segment after the last `#` is kept, and only when
+    it is a non-empty hex hash. Any other shape — no `#` (`orphan`), a non-hex tail, or a non-string
+    entry — is hashed whole rather than emitted verbatim, so a malformed/corrupt dataset entry can
+    never leak a filename. Mirrors `_proj_id`'s hash-everything rule."""
+    s = str(leaf_hash)
+    _, sep, tail = s.rpartition("#")
+    if sep and tail and all(c in "0123456789abcdef" for c in tail):
+        return "file_" + tail
+    return "file_" + hashlib.sha1(s.encode("utf-8", errors="replace")).hexdigest()[:6]
 
 
 def select_candidates(sessions, total_quota, baselines):
@@ -433,7 +452,9 @@ def select_candidates(sessions, total_quota, baselines):
             "anomaly_rank": anom_rank[s["s"]], "anomaly_factors": e["factors"],
             "selection_buckets": sorted(set(buckets[s["s"]])), "why": e["why"],
             "read_evidence": {"n_read": s.get("n_read", 0), "read_chars": s.get("read_chars", 0),
-                              "repeat_reads": s.get("repeat_reads", [])},
+                              # opaque file token only — the real filename (which can embed a
+                              # project/client name) stays in the LOCAL-ONLY dataset, not the pack.
+                              "repeat_reads": [[_read_token(rr[0]), rr[1]] for rr in s.get("repeat_reads", [])]},
         })
     return {
         "items": out,
@@ -442,40 +463,85 @@ def select_candidates(sessions, total_quota, baselines):
     }
 
 
+# -- project anonymization: the shareable pack carries OPAQUE project IDs; the id->name map is
+#    LOCAL-ONLY (project_index.json), resolved by the report (mirrors source_ref/source_index).
+def _proj_id(name):
+    """Opaque, stable, name-free ID for a project label in the SHAREABLE pack (one-way sha1). EVERY
+    label is hashed — nothing passes through unmasked — so a real project that happens to be named
+    like a fallback ("unknown"/"?") cannot leak, and a non-string is coerced (never crashes). The
+    report resolves IDs back to names via the LOCAL-ONLY project_index.json. codex review."""
+    return "proj_" + hashlib.sha1(str(name).encode("utf-8")).hexdigest()[:10]
+
+
+def anonymize_projects(pack):
+    """Return (anonymized_pack, {opaque_id: real_name}). Every project label in the shareable pack
+    (`pareto.top_projects[].p` and `candidate_sessions.items[].p` — the only fields that carry one)
+    becomes an opaque _proj_id; the id->name map is LOCAL-ONLY (project_index.json). A shared pack
+    thus discloses no project/client/repo name; the user's report resolves names from the map,
+    exactly as source_ref resolves via source_index. Pure + deterministic, so it preserves the
+    build_pack(reversed)==build_pack invariant."""
+    mapping = {}
+
+    def oid(name):
+        pid = _proj_id(name)            # every label is hashed -> always recorded for resolution
+        mapping[pid] = name
+        return pid
+
+    anon = dict(pack)
+    pareto = dict(pack["pareto"])
+    pareto["top_projects"] = [{**tp, "p": oid(tp["p"])} for tp in pack["pareto"]["top_projects"]]
+    anon["pareto"] = pareto
+    cs = dict(pack["candidate_sessions"])
+    cs["items"] = [{**it, "p": oid(it["p"])} for it in pack["candidate_sessions"]["items"]]
+    anon["candidate_sessions"] = cs
+    return anon, mapping
+
+
+def _write_local_json(path, obj):
+    """Write a LOCAL-ONLY JSON file at 0600 with no umask window, refusing a planted symlink
+    (O_NOFOLLOW). Returns True on success; on failure prints a PATH-FREE error to stderr and
+    returns False — NEVER prints `path` (an absolute path on stderr is the leak we guard against)."""
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(path, flags, 0o600)
+    except OSError:
+        print("error: could not write local index", file=sys.stderr)
+        return False
+    try:
+        os.fchmod(fd, 0o600)            # enforce 0600 even if it pre-existed looser — FATAL if it fails
+    except OSError:
+        os.close(fd)                    # fd still raw (not fdopen'd) -> close it, don't half-write
+        print("error: could not secure local index", file=sys.stderr)
+        return False
+    with os.fdopen(fd, "w") as fh:      # fdopen now owns fd and closes it on exit
+        json.dump(obj, fh, sort_keys=True)
+    return True
+
+
 def main():
     out = L.out_dir()
     dataset = os.path.join(out, "dataset")
     sessions = load_sessions(dataset)
     tools = json.load(open(os.path.join(dataset, "tools.json")))
     pack = build_pack(sessions, stream_turns(dataset), tools)
+    pack, proj_index = anonymize_projects(pack)   # shareable pack carries OPAQUE project IDs only
     pack_path = os.path.join(out, "signal_pack.json")
     with open(pack_path, "w") as fh:
         json.dump(pack, fh, indent=2)
-    # LOCAL-ONLY source index: source_ref -> ABSOLUTE PATH. Never share. Created 0600 from
-    # the start (no umask window) + O_NOFOLLOW so a planted symlink at the path is refused.
+    # LOCAL-ONLY indexes (0600, gitignored, never shared): source_ref -> ABSOLUTE PATH, and
+    # opaque project id -> REAL project name (so the report can show real names).
     index = {s["s"]: s["source_path"] for s in sessions if s.get("source_path")}
-    idx_path = os.path.join(out, "source_index.json")
-    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
-    try:
-        fd = os.open(idx_path, flags, 0o600)
-    except OSError:
-        # NEVER print idx_path — an absolute path on stderr is the leak we're guarding against.
-        print("error: could not write source index", file=sys.stderr)
+    if not _write_local_json(os.path.join(out, "source_index.json"), index):
         return 1
-    try:
-        os.fchmod(fd, 0o600)   # enforce 0600 even if the file pre-existed looser — FATAL if it fails
-    except OSError:
-        os.close(fd)           # fd is still raw (not yet fdopen'd) -> close it, don't leak/half-write
-        print("error: could not secure source index", file=sys.stderr)
+    if not _write_local_json(os.path.join(out, "project_index.json"), proj_index):
         return 1
-    with os.fdopen(fd, "w") as fh:   # fdopen now owns fd and closes it on exit
-        json.dump(index, fh)
     c = pack["corpus"]
     # Print NO absolute path to stdout — this stream enters the skill LLM's context.
     print(f"signal_pack.json written ({os.path.getsize(pack_path)//1024} KB)")
     print(f"  sessions={c['n_sessions']:,} quota={c['quota']:,} recache_share={c['recache_share']} "
           f"candidates={len(pack['candidate_sessions']['items'])}")
-    print(f"source_index.json written -> {len(index)} refs (LOCAL, 0600)")
+    print(f"source_index.json + project_index.json written "
+          f"({len(index)} refs, {len(proj_index)} projects; LOCAL, 0600)")
     return 0
 
 

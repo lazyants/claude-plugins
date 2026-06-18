@@ -15,7 +15,7 @@ project labels project-a/b/c + a subagents + a workflow id. No real names ship h
 Run:    python3 -m pytest tests/test_golden.py -q
 Re-pin: python3 tests/test_golden.py --update   # regenerate fixtures + golden_pack.json
 """
-import os, sys, json
+import os, sys, json, re
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "skills", "cc-usage-coach", "scripts"))
@@ -30,6 +30,8 @@ REQUIRED_KEYS = (
     "behavior_color", "model_task_fit_signals", "currency_notes",
 )
 PATH_NEEDLES = ("/Users/", "/home/", "-Users-", "-home-", ".jsonl", "source_path")
+# synthetic project labels that MUST be anonymized out of the shareable (shipped) pack
+PROJECT_NEEDLES = ("project-a", "project-b", "project-c")
 
 
 # --------------------------------------------------------------------------- #
@@ -203,13 +205,20 @@ def canon(obj):
     return json.dumps(obj, sort_keys=True, separators=(",", ":"))
 
 
+def shipped_pack(sessions, turns, tools):
+    """The artifact actually written to signal_pack.json: build_pack then project anonymization.
+    The golden + safety/determinism proofs run on THIS (what ships), not the raw real-name pack."""
+    return S.anonymize_projects(S.build_pack(sessions, iter(turns), tools))[0]
+
+
 # --------------------------------------------------------------------------- #
 # Tests
 # --------------------------------------------------------------------------- #
 def test_golden_pack_exact_match():
-    """build_pack over the frozen fixture equals the committed golden_pack.json exactly."""
+    """The shipped pack (build_pack + project anonymization) over the frozen fixture equals the
+    committed golden_pack.json exactly."""
     sessions, turns, tools = load_fixture()
-    pack = S.build_pack(sessions, iter(turns), tools)
+    pack = shipped_pack(sessions, turns, tools)
     with open(GOLDEN_PATH) as fh:
         golden = json.load(fh)
     assert canon(pack) == canon(golden), (
@@ -220,8 +229,8 @@ def test_golden_pack_exact_match():
 
 def test_all_required_keys_present():
     sessions, turns, tools = load_fixture()
-    pack = S.build_pack(sessions, iter(turns), tools)
-    assert pack["schema_version"] == 2
+    pack = shipped_pack(sessions, turns, tools)
+    assert pack["schema_version"] == 3
     for k in REQUIRED_KEYS:
         assert k in pack, f"missing top-level key: {k}"
     assert len(REQUIRED_KEYS) == 13
@@ -243,17 +252,106 @@ def test_recache_share_in_unit_interval():
 
 def test_no_path_leakage_in_pack():
     sessions, turns, tools = load_fixture()
-    pack = S.build_pack(sessions, iter(turns), tools)
+    pack = shipped_pack(sessions, turns, tools)
     blob = json.dumps(pack)
-    for needle in PATH_NEEDLES:
-        assert needle not in blob, f"path/source leak: {needle!r} present in shareable pack"
+    for needle in PATH_NEEDLES + PROJECT_NEEDLES:
+        assert needle not in blob, f"path/source/project leak: {needle!r} present in shareable pack"
+
+
+def test_project_labels_opaque_and_mapped():
+    """Shipped pack carries only opaque project IDs (or sentinels); the LOCAL-ONLY map resolves
+    each back to a real name; and no real project name leaks into the shareable pack."""
+    sessions, turns, tools = load_fixture()
+    raw = S.build_pack(sessions, iter(turns), tools)
+    shipped, proj_map = S.anonymize_projects(raw)
+    opaque = re.compile(r"^proj_[0-9a-f]{10}$")
+    labels = ([tp["p"] for tp in shipped["pareto"]["top_projects"]] +
+              [it["p"] for it in shipped["candidate_sessions"]["items"]])
+    assert labels, "fixture must produce project labels to anonymize"
+    for lab in labels:
+        assert opaque.match(lab), f"non-opaque project label: {lab!r}"   # EVERY label is hashed
+    # the map is the inverse of _proj_id and resolves every opaque id to a real name
+    for pid, name in proj_map.items():
+        assert opaque.match(pid) and S._proj_id(name) == pid
+    # every real label in the raw pack is recoverable via the local map, and none leaks into shipped
+    raw_names = {tp["p"] for tp in raw["pareto"]["top_projects"]}
+    assert raw_names, "fixture should have real project names in top_projects"
+    assert raw_names <= set(proj_map.values()), "every real project label must be in the local map"
+    # dir-class labels (real/subagents/workflow) legitimately appear as session_length.by_dir_class
+    # KEYS — CC structural vocabulary, not user project names — so exclude them from the leak check.
+    blob = json.dumps(shipped)
+    for name in raw_names - {"real", "subagents", "workflow"}:
+        assert name not in blob, f"real project name leaked into shareable pack: {name!r}"
+
+
+def test_every_label_hashed_no_passthrough():
+    """A real project literally named like a former fallback ("unknown"/"?") must be HASHED, not
+    passed through unmasked; a non-string label is coerced, never crashes. (codex review.)"""
+    pack = {"pareto": {"top_projects": [{"p": "unknown", "quota": 1}]},
+            "candidate_sessions": {"items": [{"p": "?"}]}}
+    anon, mapping = S.anonymize_projects(pack)
+    opaque = re.compile(r"^proj_[0-9a-f]{10}$")
+    assert opaque.match(anon["pareto"]["top_projects"][0]["p"])
+    assert opaque.match(anon["candidate_sessions"]["items"][0]["p"])
+    assert set(mapping.values()) == {"unknown", "?"}      # both recorded for LOCAL-ONLY resolution
+    assert opaque.match(S._proj_id(None))                 # non-string coerced -> no crash
+
+
+def test_repeat_reads_filenames_opaque_in_shipped_pack():
+    """repeat_reads in the shareable pack carries OPAQUE file tokens (`file_<hash>`), never real
+    filenames — a filename can embed a project/client/sensitive name (found on real data: project
+    names appeared inside re-read filenames). The repeat count is preserved. (codex/PR review.)"""
+    sessions, turns, tools = load_fixture()
+    shipped = shipped_pack(sessions, turns, tools)
+    tok = re.compile(r"^file_[0-9a-f]+$")
+    seen = False
+    for it in shipped["candidate_sessions"]["items"]:
+        for entry in it["read_evidence"]["repeat_reads"]:
+            seen = True
+            assert tok.match(entry[0]), f"non-opaque repeat_read token: {entry[0]!r}"
+            assert isinstance(entry[1], int)
+    assert seen, "fixture must have a candidate with repeat_reads to exercise this"
+    blob = json.dumps(shipped)                       # synthetic fixture filenames must be gone
+    assert "worker.py" not in blob and "config.json" not in blob
+
+
+def test_read_token_no_filename_passthrough():
+    """_read_token keeps only a valid trailing hex hash; any other shape (no `#`, non-hex tail,
+    non-string, empty) is hashed whole, never emitted verbatim — so a malformed/corrupt dataset
+    entry can never leak a filename into the shareable pack. (codex review of the PR delta.)"""
+    tok = re.compile(r"^file_[0-9a-f]+$")
+    # well-formed `leaf#hash`: keep the hash, drop the leaf
+    assert S._read_token("worker.py#a1b2c3") == "file_a1b2c3"
+    # filename containing '#' but still ending in `#<hex>`: still only the trailing hash survives
+    assert S._read_token("my#project.py#d4e5f6") == "file_d4e5f6"
+    # the trailing hex is trusted ONLY after a real `#`: a bare hex string (no `#`) is hashed whole,
+    # never echoed -> differs from the same hex used as a `#`-delimited tail. (codex review.)
+    assert S._read_token("a1b2c3") != S._read_token("x#a1b2c3")
+    assert S._read_token("123") != "file_123"
+    # malformed shapes must NOT pass the original through; they get hashed and match the token shape
+    for bad in ("orphan_a1b2c3", "client-project.py", "report#NOTHEX", "secret.py#", "",
+                "a#b#client", "a1b2c3", "DEADBEEF"):
+        out = S._read_token(bad)
+        assert tok.match(out), f"non-opaque token for {bad!r}: {out!r}"
+        for needle in ("client", "project", "secret", "orphan"):
+            assert needle not in out
+    # non-string entries are coerced + hashed, never emitted as `file_None` / `file_123` / `file_['x']`
+    for bad in (None, 123, ["client.py"]):
+        out = S._read_token(bad)
+        assert tok.match(out), f"non-opaque token for {bad!r}: {out!r}"
+        assert "None" not in out and "client" not in out
+    # a lone surrogate (real filesystems surrogate-escape undecodable filename bytes) must hash, not
+    # raise UnicodeEncodeError, on either the tail or the whole-string fallback. (codex review.)
+    assert tok.match(S._read_token("\ud800"))
+    assert tok.match(S._read_token("\ud800#zz"))
 
 
 def test_order_independent():
-    """build_pack with reversed sessions AND reversed turns yields an identical pack."""
+    """The shipped pack with reversed sessions AND reversed turns is identical (anonymization is a
+    pure function of the pack, so it preserves build_pack's order-independence)."""
     sessions, turns, tools = load_fixture()
-    a = S.build_pack(sessions, iter(turns), tools)
-    b = S.build_pack(list(reversed(sessions)), iter(list(reversed(turns))), tools)
+    a = shipped_pack(sessions, turns, tools)
+    b = shipped_pack(list(reversed(sessions)), list(reversed(turns)), tools)
     assert canon(a) == canon(b), "pack changed under input reorder (selection/aggregation unstable)"
 
 
@@ -270,7 +368,7 @@ def test_insufficient_data_false_for_populated_corpus():
 if __name__ == "__main__" and "--update" in sys.argv:
     _sessions, _turns, _tools = build_corpus()
     write_fixture(_sessions, _turns, _tools)
-    _pack = S.build_pack(_sessions, iter(_turns), _tools)
+    _pack = shipped_pack(_sessions, _turns, _tools)   # golden = the SHIPPED (anonymized) artifact
     with open(GOLDEN_PATH, "w") as _fh:
         json.dump(_pack, _fh, indent=2, sort_keys=True)
         _fh.write("\n")

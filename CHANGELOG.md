@@ -9,10 +9,10 @@ Initial release. New plugin — personalized, behavior-aware analysis of where y
 ### Added
 - `plugins/cc-usage-coach/skills/cc-usage-coach/SKILL.md` — the skill that drives the scripts and writes the personalized report from the signal pack.
 - `scripts/extract.py` — scans local Claude Code session logs into a local `dataset/`.
-- `scripts/signals.py` — emits `signal_pack.json` (path-free, safe to share) plus a local-only `source_index.json` mapping opaque `source_ref`s back to real files.
+- `scripts/signals.py` — emits `signal_pack.json` (path-free AND project-name-free — project labels are opaque IDs — safe to share) plus two local-only maps: `source_index.json` (opaque `source_ref` → real file) and `project_index.json` (opaque project ID → real project name).
 - `scripts/arc.py <source_ref>` — inspects a single session's prompt arc (local-only).
-- Local-first by construction: no network calls; `source_index.json`, `dataset/`, and the `arc.py` digest are local-only (real paths + prompt text, `0600` where applicable, never uploaded). Honors `CLAUDE_CONFIG_DIR`; extra scan roots via `CC_COACH_CONFIG_DIRS`; output location via `CC_COACH_OUT` (else next to the scripts if writable, else `${XDG_CACHE_HOME:-~/.cache}/cc-usage-coach/`).
-- `tests/` — pytest suite over synthetic fixtures (no real logs, no network) covering the extractor, the signal-pack shape and its path-free guarantee, the per-session arc, and fixture safety. Run with `bash tests/run-all.sh`.
+- Local-first by construction: no network calls; `source_index.json`, `project_index.json`, `dataset/`, and the `arc.py` digest are local-only (real paths, project names + prompt text, `0600` where applicable, never uploaded). Honors `CLAUDE_CONFIG_DIR`; extra scan roots via `CC_COACH_CONFIG_DIRS`; output location via `CC_COACH_OUT` (else next to the scripts if writable, else `${XDG_CACHE_HOME:-~/.cache}/cc-usage-coach/`).
+- `tests/` — pytest suite over synthetic fixtures (no real logs, no network) covering the extractor, the signal-pack shape and its path-free + project-name-free guarantee, the per-session arc, and fixture safety. Run with `bash tests/run-all.sh`.
 
 ## [db-guardrails 1.0.0] — 2026-05-22
 

@@ -16,7 +16,8 @@ guessing.
 
 - **A signal pack** — `signal_pack.json`, a compact aggregate of your session
   behavior (token shapes, cache patterns, tool mix, session lengths). It is
-  **path-free** and safe to share.
+  **path-free and project-name-free** (project folders appear as opaque IDs),
+  so it is safe to share.
 - **A personalized report** — the Claude runtime reads the signal pack and
   writes a plain-language breakdown of where your limit tokens go, with ranked,
   low-effort changes that would use fewer.
@@ -39,10 +40,11 @@ and let it drive them.
 
 1. **`scripts/extract.py`** — scans your local Claude Code session logs and
    builds a local dataset under `dataset/`.
-2. **`scripts/signals.py`** — reads the dataset and emits two files:
-   `signal_pack.json` (the path-free aggregate, safe to share) and
-   `source_index.json` (a **local-only** map from opaque session references back
-   to real files).
+2. **`scripts/signals.py`** — reads the dataset and emits three files:
+   `signal_pack.json` (the path-free, project-name-free aggregate, safe to
+   share) and two **local-only** maps: `source_index.json` (opaque session
+   reference → real file) and `project_index.json` (opaque project ID → real
+   project name).
 3. **`scripts/arc.py <source_ref>`** — inspects a single session's prompt arc by
    its opaque `source_ref` (from `source_index.json`). Local-only.
 
@@ -65,18 +67,20 @@ that directory is writable, else `${XDG_CACHE_HOME:-~/.cache}/cc-usage-coach/`.
 cc-usage-coach is **local-first** by construction. It reads your local session
 logs only, performs **no** network calls, and nothing leaves your machine.
 
-- **`signal_pack.json` is path-free and safe to share.** It contains aggregated
-  signals only — no filesystem paths, no prompt text. Sessions are referred to
-  only by an opaque `source_ref`.
-- **`source_index.json`, the `dataset/`, and the `arc.py` digest are
-  local-only.** They contain real filesystem paths and your prompt text. They
-  are written with `0600` permissions where applicable and **must never be
-  uploaded or shared.** If you share output with anyone, share the signal pack —
-  never these.
+- **`signal_pack.json` is path-free, project-name-free, and safe to share.** It
+  contains aggregated signals only — no filesystem paths, no prompt text, no
+  project/client/repo names. Sessions appear only as an opaque `source_ref` and
+  projects only as an opaque project ID.
+- **`source_index.json`, `project_index.json`, the `dataset/`, and the `arc.py`
+  digest are local-only.** They contain real filesystem paths, project names,
+  and your prompt text. They are written with `0600` permissions where
+  applicable and **must never be uploaded or shared.** If you share output with
+  anyone, share the signal pack — never these.
 
-The opaque `source_ref` is the only handle that crosses between the shareable
-pack and the local-only index, so you can correlate a finding back to a session
-on your own machine without exposing which session it is.
+The opaque `source_ref` (session) and project ID are the only handles that cross
+between the shareable pack and the local-only indexes, so you — and your own
+Claude runtime, reading the local maps — can correlate a finding back to a real
+session or project on your machine without the shared pack exposing either.
 
 ## Layout
 
@@ -86,7 +90,7 @@ cc-usage-coach/
 │   ├── SKILL.md       # the skill that drives the scripts and writes the report
 │   └── scripts/
 │       ├── extract.py # scan local session logs → local dataset/
-│       ├── signals.py # dataset → signal_pack.json + source_index.json
+│       ├── signals.py # dataset → signal_pack.json (+ local-only source/project indexes)
 │       └── arc.py     # inspect one session's prompt arc (local-only)
 └── tests/
     └── run-all.sh     # runs the pytest suite

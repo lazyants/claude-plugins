@@ -86,7 +86,7 @@
         "n_epochs": 1,
         "n_models": 1,
         "n_turns": 120,
-        "p": "project-a",
+        "p": "proj_526ebec5ae",
         "peak_ctx": 400000,
         "read_evidence": {
           "n_read": 0,
@@ -126,7 +126,7 @@
         "n_epochs": 1,
         "n_models": 1,
         "n_turns": 60,
-        "p": "project-c",
+        "p": "proj_42dd348bad",
         "peak_ctx": 200000,
         "read_evidence": {
           "n_read": 0,
@@ -166,7 +166,7 @@
         "n_epochs": 2,
         "n_models": 2,
         "n_turns": 25,
-        "p": "project-a",
+        "p": "proj_526ebec5ae",
         "peak_ctx": 300000,
         "read_evidence": {
           "n_read": 0,
@@ -209,7 +209,7 @@
         "n_epochs": 1,
         "n_models": 1,
         "n_turns": 10,
-        "p": "wf_001",
+        "p": "proj_290f0fadd0",
         "peak_ctx": 120000,
         "read_evidence": {
           "n_read": 0,
@@ -244,18 +244,18 @@
         "n_epochs": 1,
         "n_models": 1,
         "n_turns": 8,
-        "p": "project-b",
+        "p": "proj_9572d3c175",
         "peak_ctx": 150000,
         "read_evidence": {
           "n_read": 9,
           "read_chars": 180000,
           "repeat_reads": [
             [
-              "worker.py#a1b2c3",
+              "file_a1b2c3",
               3
             ],
             [
-              "config.json#d4e5f6",
+              "file_d4e5f6",
               2
             ]
           ]
@@ -290,7 +290,7 @@
         "n_epochs": 1,
         "n_models": 1,
         "n_turns": 6,
-        "p": "subagents",
+        "p": "proj_b2c9fd9e39",
         "peak_ctx": 80000,
         "read_evidence": {
           "n_read": 0,
@@ -323,7 +323,7 @@
         "n_epochs": 1,
         "n_models": 1,
         "n_turns": 14,
-        "p": "project-a",
+        "p": "proj_526ebec5ae",
         "peak_ctx": 100000,
         "read_evidence": {
           "n_read": 0,
@@ -356,7 +356,7 @@
         "n_epochs": 1,
         "n_models": 1,
         "n_turns": 13,
-        "p": "project-c",
+        "p": "proj_42dd348bad",
         "peak_ctx": 100000,
         "read_evidence": {
           "n_read": 0,
@@ -389,7 +389,7 @@
         "n_epochs": 1,
         "n_models": 1,
         "n_turns": 12,
-        "p": "project-b",
+        "p": "proj_9572d3c175",
         "peak_ctx": 100000,
         "read_evidence": {
           "n_read": 0,
@@ -422,7 +422,7 @@
         "n_epochs": 1,
         "n_models": 1,
         "n_turns": 11,
-        "p": "project-a",
+        "p": "proj_526ebec5ae",
         "peak_ctx": 100000,
         "read_evidence": {
           "n_read": 0,
@@ -455,7 +455,7 @@
         "n_epochs": 1,
         "n_models": 1,
         "n_turns": 14,
-        "p": "project-c",
+        "p": "proj_42dd348bad",
         "peak_ctx": 100000,
         "read_evidence": {
           "n_read": 0,
@@ -488,7 +488,7 @@
         "n_epochs": 1,
         "n_models": 1,
         "n_turns": 14,
-        "p": "project-a",
+        "p": "proj_526ebec5ae",
         "peak_ctx": 100000,
         "read_evidence": {
           "n_read": 0,
@@ -521,7 +521,7 @@
         "n_epochs": 1,
         "n_models": 1,
         "n_turns": 14,
-        "p": "project-b",
+        "p": "proj_9572d3c175",
         "peak_ctx": 100000,
         "read_evidence": {
           "n_read": 0,
@@ -554,7 +554,7 @@
         "n_epochs": 1,
         "n_models": 1,
         "n_turns": 3,
-        "p": "project-b",
+        "p": "proj_9572d3c175",
         "peak_ctx": 90000,
         "read_evidence": {
           "n_read": 0,
@@ -589,7 +589,7 @@
         "n_epochs": 1,
         "n_models": 1,
         "n_turns": 1,
-        "p": "project-c",
+        "p": "proj_42dd348bad",
         "peak_ctx": 70000,
         "read_evidence": {
           "n_read": 0,
@@ -625,7 +625,7 @@
         "n_epochs": 1,
         "n_models": 1,
         "n_turns": 2,
-        "p": "subagents",
+        "p": "proj_b2c9fd9e39",
         "peak_ctx": 60000,
         "read_evidence": {
           "n_read": 0,
@@ -712,37 +712,37 @@
     "top_projects": [
       {
         "cum_pct": 66.67,
-        "p": "project-a",
+        "p": "proj_526ebec5ae",
         "pct": 66.67,
         "quota": 16419800
       },
       {
         "cum_pct": 87.43,
-        "p": "project-c",
+        "p": "proj_42dd348bad",
         "pct": 20.76,
         "quota": 5113600
       },
       {
         "cum_pct": 96.63,
-        "p": "project-b",
+        "p": "proj_9572d3c175",
         "pct": 9.2,
         "quota": 2264800
       },
       {
         "cum_pct": 98.35,
-        "p": "subagents",
+        "p": "proj_b2c9fd9e39",
         "pct": 1.72,
         "quota": 424800
       },
       {
         "cum_pct": 100.0,
-        "p": "wf_001",
+        "p": "proj_290f0fadd0",
         "pct": 1.65,
         "quota": 406000
       }
     ]
   },
-  "schema_version": 2,
+  "schema_version": 3,
   "session_length": {
     "by_dir_class": {
       "real": 31,
