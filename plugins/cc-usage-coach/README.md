@@ -48,13 +48,14 @@ and let it drive them.
 3. **`scripts/arc.py <source_ref>`** — inspects a single session's prompt arc by
    its opaque `source_ref` (from `source_index.json`). Local-only.
 
-The Claude runtime reads `signal_pack.json` to write your report. For the top
+The Claude Code model reads `signal_pack.json` to write your report. For the top
 candidate sessions it also runs `arc.py` (step 4 of the skill), whose output is a
 compact digest of that session's **prompt text** — so selected raw prompt excerpts
-from your local logs do enter the model context during report generation. The
-shareable `signal_pack.json` itself stays aggregate-only; the arc excerpts are
-local-only (never written to the pack or uploaded) but they are sent to your own
-Claude runtime.
+from your local logs enter the model context during report generation. As with any
+Claude Code prompt, that context goes to the model: on Max/Pro that is Anthropic's
+API. The shareable `signal_pack.json` stays aggregate-only, and the scripts make no
+network calls of their own, but the report step does transmit the pack plus those
+arc excerpts to your model.
 
 ### Environment variables
 
@@ -69,8 +70,12 @@ that directory is writable, else `${XDG_CACHE_HOME:-~/.cache}/cc-usage-coach/`.
 
 ## Privacy
 
-cc-usage-coach is **local-first** by construction. It reads your local session
-logs only, performs **no** network calls, and nothing leaves your machine.
+cc-usage-coach's **scripts** are local-first by construction: they read your local
+session logs, perform **no** network calls of their own, and write only to your
+machine. The **report**, however, is written by the Claude Code model — the skill
+sends it the signal pack and (for inspected sessions) raw prompt excerpts as prompt
+context, so on Max/Pro that data reaches Anthropic's API exactly like any other
+Claude Code conversation. The plugin adds no exfiltration beyond that.
 
 - **`signal_pack.json` is path-free, project-name-free, and safe to share.** It
   contains aggregated signals only — no filesystem paths, no prompt text, no
@@ -81,11 +86,14 @@ logs only, performs **no** network calls, and nothing leaves your machine.
   and your prompt text. They are written with `0600` permissions where
   applicable and **must never be uploaded or shared.** If you share output with
   anyone, share the signal pack — never these.
-- **Generating the report sends some prompt text to your own Claude runtime.** When
-  the skill inspects a candidate session (step 4) it feeds `arc.py`'s prompt-arc
-  digest into the model context, so the report is written with some of your raw
-  prompt excerpts in context — not aggregated signals alone. This never leaves your
-  machine and is never added to the shareable pack, but it is more than the aggregate.
+- **Generating the report sends the pack — and some raw prompt text — to your Claude
+  model.** When the skill inspects a candidate session (step 4) it feeds `arc.py`'s
+  prompt-arc digest into the model context, so the report is written with some of
+  your raw prompt excerpts, not aggregated signals alone. On Max/Pro that model is
+  Anthropic's API, so those excerpts leave your machine as ordinary prompt context
+  (the scripts add no separate upload, and the excerpts are never written to the
+  shareable pack). The privacy boundary is the scripts and `signal_pack.json` — not
+  the model step.
 
 The opaque `source_ref` (session) and project ID are the only handles that cross
 between the shareable pack and the local-only indexes, so you — and your own

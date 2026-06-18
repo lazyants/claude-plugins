@@ -116,7 +116,7 @@ Trigger phrases: "where do my tokens go", "why am I hitting the usage limit", "u
 
 ### Privacy
 
-Local-first by construction: reads local logs only, makes no network calls, nothing leaves your machine. `signal_pack.json` is path-free and safe to share; `source_index.json`, the `dataset/`, and the `arc.py` digest are local-only — they hold real paths and prompt text, are written `0600` where applicable, and must never be uploaded. Sessions are referred to only by an opaque `source_ref`. Note the report step runs `arc.py` on selected sessions, so some of your raw prompt text enters the local model context while the report is written — it stays on your machine and is never added to the shareable pack.
+The **scripts** are local-first: they read local logs only and make no network calls of their own. `signal_pack.json` is path-free and safe to share; `source_index.json`, `project_index.json`, the `dataset/`, and the `arc.py` digest are local-only — they hold real paths, project names, and prompt text, are written `0600` where applicable, and must never be uploaded. Sessions are referred to only by an opaque `source_ref`. The **report**, though, is written by the Claude Code model: the skill sends it the signal pack and (for sessions inspected via `arc.py` in step 4) raw prompt excerpts as prompt context — so on Max/Pro that data goes to Anthropic's API like any Claude Code conversation. Those excerpts are never added to the shareable pack, but the report step is not "nothing leaves your machine."
 
 ### Environment variables
 

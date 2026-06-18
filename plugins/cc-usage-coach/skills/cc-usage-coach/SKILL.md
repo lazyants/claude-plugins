@@ -43,7 +43,8 @@ matter (e.g. `python3 "<skill-dir>/scripts/extract.py"`).
    Both extract and signals write under the plugin's own directory by default.
    When you invoke the scripts from outside the plugin dir, or the plugin dir is
    read-only, set `CC_COACH_OUT` to a writable output dir and the scripts will
-   put `dataset/`, `signal_pack.json`, and `source_index.json` there instead.
+   put `dataset/`, `signal_pack.json`, `source_index.json`, and
+   `project_index.json` there instead.
 
 3. **Read the pack (resolve names locally).** Read `signal_pack.json`; never read
    `dataset/sessions.jsonl` or the per-turn files into context — the pack is the

@@ -391,7 +391,7 @@ def session_id(path):
 
 
 def out_dir():
-    """Resolve the dir that holds dataset/ + signal_pack.json + source_index.json.
+    """Resolve the dir that holds dataset/ + signal_pack.json + source_index.json + project_index.json.
 
     Precedence (so every script in the SAME copy agrees — base is relative to THIS
     file's location, and the skill bundles all scripts together):
