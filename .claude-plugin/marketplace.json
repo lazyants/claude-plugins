@@ -1,6 +1,8 @@
 {
   "name": "lazyants",
-  "owner": { "name": "Lazy Ants" },
+  "owner": {
+    "name": "Lazy Ants"
+  },
   "metadata": {
     "description": "Lazy Ants Claude Code plugins",
     "version": "1.4.0"
@@ -11,7 +13,9 @@
       "source": "./plugins/ai-cli-optout",
       "description": "Opt out of telemetry across every locally installed AI CLI and AI-enabled IDE, plus macOS/Windows OS-level privacy surfaces.",
       "version": "1.1.0",
-      "author": { "name": "Lazy Ants" },
+      "author": {
+        "name": "Lazy Ants"
+      },
       "category": "privacy",
       "keywords": [
         "telemetry",
@@ -34,7 +38,9 @@
       "source": "./plugins/db-guardrails",
       "description": "Stop AI coding agents from accidentally emptying your database. An always-on hook blocks destructive DB commands across 15+ frameworks, plus a stack-aware installer for database-level privilege separation and framework boot guards.",
       "version": "1.0.0",
-      "author": { "name": "Lazy Ants" },
+      "author": {
+        "name": "Lazy Ants"
+      },
       "category": "safety",
       "keywords": [
         "database",
@@ -51,9 +57,11 @@
     {
       "name": "obsidian-project-vault",
       "source": "./plugins/obsidian-project-vault",
-      "description": "Set up, migrate, audit, and operate an Obsidian vault as an LLM Wiki — a persistent, compounding knowledge base maintained by Claude Code.",
+      "description": "Set up, migrate, audit, and operate an Obsidian vault as an LLM Wiki \u2014 a persistent, compounding knowledge base maintained by Claude Code.",
       "version": "1.0.0",
-      "author": { "name": "Lazy Ants" },
+      "author": {
+        "name": "Lazy Ants"
+      },
       "category": "documentation",
       "keywords": [
         "obsidian",
@@ -67,11 +75,31 @@
       ]
     },
     {
+      "name": "enduser-handbook",
+      "source": "./plugins/enduser-handbook",
+      "description": "Generate and maintain a Di\u00e1taxis-structured end-user handbook for any project from a per-project profile, with live screenshot capture and ongoing completeness audits; ships an Obsidian-vault publish adapter.",
+      "version": "1.0.0",
+      "author": {
+        "name": "Lazy Ants"
+      },
+      "category": "documentation",
+      "keywords": [
+        "handbook",
+        "documentation",
+        "enduser",
+        "diataxis",
+        "screenshots",
+        "obsidian"
+      ]
+    },
+    {
       "name": "cc-usage-coach",
       "source": "./plugins/cc-usage-coach",
-      "description": "Personalized, behavior-aware analysis of where your Claude Code (Max/Pro) usage-limit tokens go, with ranked, low-effort ways to use fewer — computed entirely from your local session logs. Python measures; Claude concludes.",
+      "description": "Personalized, behavior-aware analysis of where your Claude Code (Max/Pro) usage-limit tokens go, with ranked, low-effort ways to use fewer \u2014 computed entirely from your local session logs. Python measures; Claude concludes.",
       "version": "1.0.0",
-      "author": { "name": "Lazy Ants" },
+      "author": {
+        "name": "Lazy Ants"
+      },
       "category": "productivity",
       "keywords": [
         "usage",

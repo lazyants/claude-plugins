@@ -10,6 +10,7 @@ Public plugins for [Claude Code](https://claude.com/claude-code), maintained und
 | [`db-guardrails`](#db-guardrails--v100) | 1.0.0 | Stop AI coding agents from accidentally emptying your database — an always-on hook that blocks destructive DB commands across 15+ frameworks, plus a stack-aware installer for deeper safety layers. |
 | [`obsidian-project-vault`](#obsidian-project-vault--v100) | 1.0.0 | Set up, migrate, audit, and operate an Obsidian vault as an LLM Wiki — a persistent, compounding knowledge base maintained by Claude Code. |
 | [`cc-usage-coach`](#cc-usage-coach--v100) | 1.0.0 | Personalized, behavior-aware analysis of where your Claude Code (Max/Pro) usage-limit tokens go, with ranked, low-effort ways to use fewer — computed entirely from your local session logs. Python measures; Claude concludes. |
+| [`enduser-handbook`](#enduser-handbook--v100) | 1.0.0 | Author, capture, and publish a Diátaxis-structured end-user handbook for any project — methodology shipped as a reusable skill, project-specific bindings supplied via `.claude/handbook/profile.yml`. |
 
 ## Install / update / uninstall
 
@@ -115,13 +116,34 @@ Trigger phrases: "where do my tokens go", "why am I hitting the usage limit", "u
 
 ### Privacy
 
-Local-first by construction: reads local logs only, makes no network calls, nothing leaves your machine. `signal_pack.json` is path-free and safe to share; `source_index.json`, the `dataset/`, and the `arc.py` digest are local-only — they hold real paths and prompt text, are written `0600` where applicable, and must never be uploaded. Sessions are referred to only by an opaque `source_ref`.
+Local-first by construction: reads local logs only, makes no network calls, nothing leaves your machine. `signal_pack.json` is path-free and safe to share; `source_index.json`, the `dataset/`, and the `arc.py` digest are local-only — they hold real paths and prompt text, are written `0600` where applicable, and must never be uploaded. Sessions are referred to only by an opaque `source_ref`. Note the report step runs `arc.py` on selected sessions, so some of your raw prompt text enters the local model context while the report is written — it stays on your machine and is never added to the shareable pack.
 
 ### Environment variables
 
 - `CLAUDE_CONFIG_DIR` — honored; points the scan at a non-default config directory.
 - `CC_COACH_CONFIG_DIRS` — comma-separated extra config dirs to scan (default scans only the standard `.claude`).
 - `CC_COACH_OUT` — output location. Precedence: `$CC_COACH_OUT` if set, else next to the scripts if writable, else `${XDG_CACHE_HOME:-~/.cache}/cc-usage-coach/`.
+
+## `enduser-handbook` — v1.0.0
+
+Author, capture, and publish a Diátaxis-structured end-user handbook (tutorials, how-tos, reference, explanation) for any project. The methodology — pre-read mandate, anti-fabrication rules, capture safety, page identity, manifest discipline, glossary and tone consistency, completeness gate, "running UI is the primary source" — ships as a reusable skill. Project-specific bindings (language, register, stack globs, capture engine, publish target, glossary) live in `.claude/handbook/profile.yml` so the same skill produces a German shopkeeper-register handbook for one project and an English developer-register handbook for the next without forking the workflow.
+
+Sibling to [`obsidian-project-vault`](#obsidian-project-vault--v100): where `obsidian-project-vault` builds the *internal* LLM Wiki that the team and Claude Code use, `enduser-handbook` builds the *external* end-user manual that ships to customers. They compose — `enduser-handbook`'s default publish-target adapter is `obsidian-vault`, so the handbook can be written straight into a vault scaffolded by `obsidian-project-vault` (separate folder, separate INDEX wiring, separate frontmatter shape). One vault, two audiences.
+
+Trigger phrases: "write the end-user handbook", "update the user manual", "add a handbook chapter for <feature>", "re-capture handbook screenshots", etc. — full list in `plugins/enduser-handbook/skills/enduser-handbook/SKILL.md`.
+
+### What it covers
+
+- **Profile-driven** — language, register, stack/route globs, capture engine, publish target, glossary discipline all declared in `.claude/handbook/profile.yml`. The skill halts loudly if the profile is missing or unknown rather than guessing.
+- **Running UI is the source** — code only tells the skill *which* features and routes exist; every described feature must be captured live, never fabricated from the codebase.
+- **Diátaxis structure** — tutorials, how-tos, reference, and explanation each have their own discipline; chapters are gated on completeness before publish.
+- **Publish-target adapters** — currently `obsidian-vault` (paths, INDEX wiring, link syntax, frontmatter shape governed by the adapter, not improvised).
+- **Month-over-month consistency** — mandatory pre-read of style guide + every reference file every session, so tone and terminology stay stable as the handbook grows.
+
+### What it is **not**
+
+- Developer / API / architecture docs — those belong in `CLAUDE.md`, `AGENTS.md`, or the project's internal knowledge area (e.g. an `obsidian-project-vault` wiki).
+- A one-shot generator — it is a long-lived authoring loop maintained over the project's lifetime.
 
 ## License & disclaimer
 

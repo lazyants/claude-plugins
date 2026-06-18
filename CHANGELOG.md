@@ -14,6 +14,14 @@ Initial release. New plugin — personalized, behavior-aware analysis of where y
 - Local-first by construction: no network calls; `source_index.json`, `project_index.json`, `dataset/`, and the `arc.py` digest are local-only (real paths, project names + prompt text, `0600` where applicable, never uploaded). Honors `CLAUDE_CONFIG_DIR`; extra scan roots via `CC_COACH_CONFIG_DIRS`; output location via `CC_COACH_OUT` (else next to the scripts if writable, else `${XDG_CACHE_HOME:-~/.cache}/cc-usage-coach/`).
 - `tests/` — pytest suite over synthetic fixtures (no real logs, no network) covering the extractor, the signal-pack shape and its path-free + project-name-free guarantee, the per-session arc, and fixture safety. Run with `bash tests/run-all.sh`.
 
+## [enduser-handbook 1.0.0] — 2026-06-18
+
+Initial release. New plugin for generating end-user handbooks across projects (German/„Sie", English, any register; Laravel/Vue, Django/React, etc.) from a per-project `.claude/handbook/profile.yml`.
+
+### Added
+- Methodology lifted from VPP-handbook (Diátaxis, anti-fabrication, capture safety, glossary discipline, completeness gate); project-specific bits (language, stack, capture command, publish target) are profile-driven.
+- v1 ships the `obsidian_vault` publish-target adapter; Confluence/GitBook/Docusaurus targets are an additive future change.
+
 ## [db-guardrails 1.0.0] — 2026-05-22
 
 Initial release. New plugin — protects databases from accidental destructive commands run by AI coding agents. Generalised from a four-layer guardrail stack built in-house after an agent twice wiped a development database via a misrouted `artisan migrate`.
