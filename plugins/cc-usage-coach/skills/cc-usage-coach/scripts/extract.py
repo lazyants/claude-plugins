@@ -37,6 +37,20 @@ def auf(entry):
     return uf
 
 
+def _self_identity_tokens():
+    """Lower-cased local-user identity tokens (login name + home-dir leaf). The tool only ever reads
+    the CURRENT user's own session logs, so a path leaf equal to one of these IS this user's
+    username — drop it. This is the backstop that closes a relocated home under a non-standard parent
+    (e.g. /Volumes/Data/<user>, D:\\Profiles\\<user>), which a pure path-SHAPE rule cannot see; here
+    we legitimately DO know $HOME (mirrors arc.py's literal-home redaction). PR #1 review."""
+    home = os.path.expanduser("~")
+    toks = {ntpath.basename(home.rstrip("/\\")), os.environ.get("USER", ""), os.environ.get("LOGNAME", "")}
+    return {t.lower() for t in toks if t}
+
+
+_SELF = _self_identity_tokens()
+
+
 def _home_root(d):
     """True if dir `d` is a multi-user home root (its immediate child is therefore a username): its
     own trailing component is 'Users' (macOS/Windows) or 'home' (Linux). Splitting on BOTH
@@ -54,19 +68,19 @@ def _safe_leaf(p):
     Windows '\\' and drive letters — so a path recorded on another OS is split correctly: a username
     PARENT (.../Users/<user>, .../home/<user>, incl. UNC and mount forms) is dropped and only the
     bare filename/project leaf is kept. Also dropped: the home-root dir itself ('users'/'home'/
-    'root'), a ':'-bearing leaf (un-split drive / alternate-data-stream), and a mangled CC dir
-    ('-Users-…').
-    LIMITATION (inherent, documented): a *relocated* bare home root under a non-standard parent
-    (e.g. 'D:\\Profiles\\<user>', '/Volumes/Data/<user>') is indistinguishable by path SHAPE from a
-    project dir without knowing $HOME, so a cwd set to exactly such a home root could still expose
-    its leaf. Standard layouts — the overwhelmingly common case — are fully covered.
-    codex/security review: posixpath alone leaked 'C:/Users/<user>', 'C:\\Users\\<user>' and UNC."""
+    'root'), a ':'-bearing leaf (un-split drive / alternate-data-stream), a mangled CC dir
+    ('-Users-…'), and any leaf equal to the LOCAL user's login/home name (`_SELF`) — the backstop
+    that closes a *relocated* bare home under a non-standard parent ('/Volumes/Data/<user>',
+    'D:\\Profiles\\<user>'), which path SHAPE alone cannot detect.
+    codex/security/PR-review: posixpath alone leaked 'C:/Users/<user>', 'C:\\Users\\<user>' and UNC;
+    a non-standard relocated home leaked the bare username until the `_SELF` check was added."""
     p = str(p).rstrip("/\\")
     if _home_root(ntpath.dirname(p)):                    # parent is a home root -> leaf is a username
         return None
     base = ntpath.basename(p)
     if (not base or ":" in base
             or base.lower() in ("users", "home", "root")        # the home-root dir itself
+            or base.lower() in _SELF                            # the local user's own login/home name
             or base.lower().startswith(("-users-", "-home-"))):  # mangled full cwd
         return None
     return base

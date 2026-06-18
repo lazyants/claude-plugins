@@ -75,8 +75,9 @@ def test_is_writable_dir_false_for_readonly(tmp_path):
 
 
 # --- proj_of: the shareable pack's project label must be PATH-FREE (codex r2 HIGH) ---
-def test_proj_of_is_path_free():
+def test_proj_of_is_path_free(monkeypatch):
     import extract as E
+    monkeypatch.setattr(E, "_SELF", set())   # isolate the path-SHAPE logic from the test-runner's identity
     # normal project cwd -> its leaf basename (a clean project name)
     assert E.proj_of({"cwd": "/Users/alice/myrepo"}, "/x/p/s.jsonl") == "myrepo"
     assert E.proj_of({"cwd": "/home/bob/work/proj"}, "/x/p/s.jsonl") == "proj"
@@ -96,8 +97,9 @@ def test_proj_of_is_path_free():
 
 
 # --- _safe_leaf: every leaf into the shareable pack (repeat_reads + proj_of) must be PATH-FREE ---
-def test_safe_leaf_is_path_free():
+def test_safe_leaf_is_path_free(monkeypatch):
     import extract as E
+    monkeypatch.setattr(E, "_SELF", set())   # isolate the path-SHAPE logic from the test-runner's identity
     # a normal file -> its basename (a clean leaf is a legit re-read signal)
     assert E._safe_leaf("/Users/alice/proj/file.py") == "file.py"
     # Read of a home dir -> basename would be the USERNAME -> dropped
@@ -123,3 +125,17 @@ def test_safe_leaf_is_path_free():
     assert E._safe_leaf("/weird/with:colon") is None
     # the renamed helper replaced the old name (no divergent second copy can drift)
     assert not hasattr(E, "_safe_read_leaf")
+
+
+# --- local-identity backstop: a relocated home under a NON-standard parent (path shape can't see
+#     it) must still drop the username, because the tool knows the local $HOME/$USER (PR #1 review) ---
+def test_safe_leaf_drops_local_identity(monkeypatch):
+    import extract as E
+    monkeypatch.setattr(E, "_SELF", {"alice"})   # pretend the local user is "alice"
+    # bare relocated home roots whose parent leaf is NOT Users/home -> shape misses, identity catches
+    assert E._safe_leaf("/Volumes/Data/alice") is None
+    assert E._safe_leaf("/export/home2/alice") is None
+    assert E.proj_of({"cwd": "D:\\Profiles\\alice"}, "/x/p/s.jsonl") == "unknown"
+    # but a real project UNDER the relocated home keeps its leaf (only the username is dropped)
+    assert E._safe_leaf("/Volumes/Data/alice/realproj") == "realproj"
+    assert E.proj_of({"cwd": "/Volumes/Data/alice/realproj"}, "/x/p/s.jsonl") == "realproj"
