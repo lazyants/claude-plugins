@@ -75,8 +75,7 @@
           "peak_ctx": 1.0,
           "recache_excess_proxy": 1.0
         },
-        "anomaly_rank": 1,
-        "base": "a-big",
+        "anomaly_rank": 2,
         "build_floor": 400000,
         "cost_pct": 16.485,
         "cost_rank": 1,
@@ -102,7 +101,7 @@
           "signal:peak_ctx",
           "signal:recache_excess_proxy"
         ],
-        "source_ref": "a-big",
+        "source_ref": "sess_7e1db5521c",
         "why": [
           "recache_excess_proxy",
           "peak_ctx"
@@ -115,8 +114,7 @@
           "peak_ctx": 0.941,
           "recache_excess_proxy": 0.971
         },
-        "anomaly_rank": 4,
-        "base": "c-canary",
+        "anomaly_rank": 3,
         "build_floor": 200000,
         "cost_pct": 12.343,
         "cost_rank": 2,
@@ -142,7 +140,7 @@
           "signal:peak_ctx",
           "signal:recache_excess_proxy"
         ],
-        "source_ref": "c-canary",
+        "source_ref": "sess_9bc4f454bc",
         "why": [
           "recache_excess_proxy",
           "peak_ctx"
@@ -155,8 +153,7 @@
           "peak_ctx": 0.971,
           "recache_excess_proxy": 0.941
         },
-        "anomaly_rank": 3,
-        "base": "a-marathon",
+        "anomaly_rank": 4,
         "build_floor": 900000,
         "cost_pct": 9.927,
         "cost_rank": 3,
@@ -183,7 +180,7 @@
           "signal:peak_ctx",
           "signal:recache_excess_proxy"
         ],
-        "source_ref": "a-marathon",
+        "source_ref": "sess_7a9a52c624",
         "why": [
           "cr_per_turn",
           "recache_excess_proxy",
@@ -199,7 +196,6 @@
           "recache_excess_proxy": 0.912
         },
         "anomaly_rank": 13,
-        "base": "wf-001",
         "build_floor": 120000,
         "cost_pct": 1.681,
         "cost_rank": 4,
@@ -221,7 +217,7 @@
         "selection_buckets": [
           "cost"
         ],
-        "source_ref": "wf-001",
+        "source_ref": "sess_c67df5bf86",
         "why": [
           "recache_excess_proxy"
         ]
@@ -233,8 +229,7 @@
           "peak_ctx": 0.912,
           "recache_excess_proxy": 0.853
         },
-        "anomaly_rank": 6,
-        "base": "b-repeat",
+        "anomaly_rank": 7,
         "build_floor": 150000,
         "cost_pct": 1.279,
         "cost_rank": 5,
@@ -266,7 +261,7 @@
           "anomaly",
           "cost"
         ],
-        "source_ref": "b-repeat",
+        "source_ref": "sess_bb7d32d045",
         "why": [
           "peak_ctx",
           "repeat_read"
@@ -280,7 +275,6 @@
           "recache_excess_proxy": 0.882
         },
         "anomaly_rank": 14,
-        "base": "sub-larger",
         "build_floor": 80000,
         "cost_pct": 1.251,
         "cost_rank": 6,
@@ -302,7 +296,7 @@
         "selection_buckets": [
           "cost"
         ],
-        "source_ref": "sub-larger",
+        "source_ref": "sess_8d8b8cd93b",
         "why": []
       },
       {
@@ -312,8 +306,7 @@
           "peak_ctx": 0.853,
           "recache_excess_proxy": 0.824
         },
-        "anomaly_rank": 12,
-        "base": "fill-24",
+        "anomaly_rank": 8,
         "build_floor": 100000,
         "cost_pct": 0.954,
         "cost_rank": 7,
@@ -333,9 +326,10 @@
         "recache_excess_note": "ROUGH directional proxy, not a bound (can over/understate)",
         "recache_excess_proxy": 124000,
         "selection_buckets": [
+          "anomaly",
           "cost"
         ],
-        "source_ref": "fill-24",
+        "source_ref": "sess_6931665438",
         "why": []
       },
       {
@@ -346,7 +340,6 @@
           "recache_excess_proxy": 0.794
         },
         "anomaly_rank": 34,
-        "base": "fill-23",
         "build_floor": 100000,
         "cost_pct": 0.95,
         "cost_rank": 8,
@@ -368,7 +361,7 @@
         "selection_buckets": [
           "cost"
         ],
-        "source_ref": "fill-23",
+        "source_ref": "sess_e9e9306a86",
         "why": []
       },
       {
@@ -378,8 +371,7 @@
           "peak_ctx": 0.853,
           "recache_excess_proxy": 0.765
         },
-        "anomaly_rank": 33,
-        "base": "fill-22",
+        "anomaly_rank": 29,
         "build_floor": 100000,
         "cost_pct": 0.946,
         "cost_rank": 9,
@@ -401,7 +393,7 @@
         "selection_buckets": [
           "cost"
         ],
-        "source_ref": "fill-22",
+        "source_ref": "sess_bd358a0f1a",
         "why": []
       },
       {
@@ -411,8 +403,7 @@
           "peak_ctx": 0.853,
           "recache_excess_proxy": 0.735
         },
-        "anomaly_rank": 32,
-        "base": "fill-21",
+        "anomaly_rank": 24,
         "build_floor": 100000,
         "cost_pct": 0.942,
         "cost_rank": 10,
@@ -434,61 +425,27 @@
         "selection_buckets": [
           "cost"
         ],
-        "source_ref": "fill-21",
+        "source_ref": "sess_88a48c60fb",
         "why": []
       },
       {
         "anomaly_factors": {
-          "cr_per_turn": 0.088,
+          "cr_per_turn": 0.147,
           "n_turns": 0.912,
           "peak_ctx": 0.853,
-          "recache_excess_proxy": 0.529
-        },
-        "anomaly_rank": 10,
-        "base": "fill-14",
-        "build_floor": 100000,
-        "cost_pct": 0.914,
-        "cost_rank": 17,
-        "cr": 214000,
-        "cr_peak_mult": 2.14,
-        "n_comp": 0,
-        "n_epochs": 1,
-        "n_models": 1,
-        "n_turns": 14,
-        "p": "proj_42dd348bad",
-        "peak_ctx": 100000,
-        "read_evidence": {
-          "n_read": 0,
-          "read_chars": 0,
-          "repeat_reads": []
-        },
-        "recache_excess_note": "ROUGH directional proxy, not a bound (can over/understate)",
-        "recache_excess_proxy": 114000,
-        "selection_buckets": [
-          "anomaly"
-        ],
-        "source_ref": "fill-14",
-        "why": []
-      },
-      {
-        "anomaly_factors": {
-          "cr_per_turn": 0.059,
-          "n_turns": 0.912,
-          "peak_ctx": 0.853,
-          "recache_excess_proxy": 0.382
+          "recache_excess_proxy": 0.676
         },
         "anomaly_rank": 9,
-        "base": "fill-09",
         "build_floor": 100000,
-        "cost_pct": 0.893,
-        "cost_rank": 22,
-        "cr": 209000,
-        "cr_peak_mult": 2.09,
+        "cost_pct": 0.934,
+        "cost_rank": 12,
+        "cr": 219000,
+        "cr_peak_mult": 2.19,
         "n_comp": 0,
         "n_epochs": 1,
         "n_models": 1,
         "n_turns": 14,
-        "p": "proj_526ebec5ae",
+        "p": "proj_9572d3c175",
         "peak_ctx": 100000,
         "read_evidence": {
           "n_read": 0,
@@ -496,11 +453,11 @@
           "repeat_reads": []
         },
         "recache_excess_note": "ROUGH directional proxy, not a bound (can over/understate)",
-        "recache_excess_proxy": 109000,
+        "recache_excess_proxy": 119000,
         "selection_buckets": [
           "anomaly"
         ],
-        "source_ref": "fill-09",
+        "source_ref": "sess_d4e7ac701d",
         "why": []
       },
       {
@@ -510,8 +467,7 @@
           "peak_ctx": 0.853,
           "recache_excess_proxy": 0.235
         },
-        "anomaly_rank": 8,
-        "base": "fill-04",
+        "anomaly_rank": 10,
         "build_floor": 100000,
         "cost_pct": 0.873,
         "cost_rank": 27,
@@ -533,7 +489,7 @@
         "selection_buckets": [
           "anomaly"
         ],
-        "source_ref": "fill-04",
+        "source_ref": "sess_8d54024acb",
         "why": []
       },
       {
@@ -543,8 +499,7 @@
           "peak_ctx": 0.118,
           "recache_excess_proxy": 0.088
         },
-        "anomaly_rank": 7,
-        "base": "b-zero",
+        "anomaly_rank": 6,
         "build_floor": 90000,
         "cost_pct": 0.69,
         "cost_rank": 32,
@@ -566,7 +521,7 @@
         "selection_buckets": [
           "anomaly"
         ],
-        "source_ref": "b-zero",
+        "source_ref": "sess_620e1b440e",
         "why": [
           "cr_per_turn"
         ]
@@ -578,8 +533,7 @@
           "peak_ctx": 0.059,
           "recache_excess_proxy": 0.029
         },
-        "anomaly_rank": 2,
-        "base": "c-onesh",
+        "anomaly_rank": 1,
         "build_floor": 70000,
         "cost_pct": 0.516,
         "cost_rank": 33,
@@ -602,7 +556,7 @@
           "anomaly",
           "signal:cr_per_turn"
         ],
-        "source_ref": "c-onesh",
+        "source_ref": "sess_885beed4c7",
         "why": [
           "cr_per_turn"
         ]
@@ -615,7 +569,6 @@
           "recache_excess_proxy": 0.059
         },
         "anomaly_rank": 5,
-        "base": "sub-trivial",
         "build_floor": 60000,
         "cost_pct": 0.512,
         "cost_rank": 34,
@@ -638,7 +591,7 @@
           "anomaly",
           "signal:cr_per_turn"
         ],
-        "source_ref": "sub-trivial",
+        "source_ref": "sess_5e5ba22b85",
         "why": [
           "cr_per_turn"
         ]
@@ -646,7 +599,7 @@
     ],
     "omitted_candidate_counts": {
       "post_cap": 0,
-      "post_dedup": 16,
+      "post_dedup": 15,
       "pre_dedup": 32
     }
   },

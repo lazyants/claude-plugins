@@ -12,7 +12,7 @@ Outputs (under ../dataset/):
 
 Run: python3 tools/extract.py
 """
-import json, os, sys, hashlib, ntpath
+import hashlib, json, os, sys, ntpath
 from collections import defaultdict
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import lib_sessions as L
@@ -136,7 +136,7 @@ def segmented_build_floor(floor_seq):
     return sum(peak.values()), len({k[0] for k in peak}), len(peak)
 
 
-def main():
+def _run():
     OUT_DIR = os.path.join(L.out_dir(), "dataset")
     os.makedirs(OUT_DIR, exist_ok=True)
     files = L.discover_files()
@@ -148,14 +148,17 @@ def main():
     tool_use_freq = defaultdict(int)            # tool name -> # of tool_use blocks
     tool_result = defaultdict(lambda: [0, 0])   # tool name -> [result_chars, result_count]
 
-    fturns = open(os.path.join(OUT_DIR, "turns.jsonl"), "w")
-    fsess = open(os.path.join(OUT_DIR, "sessions.jsonl"), "w")
+    # Every dataset file is LOCAL-ONLY (real paths/project names/timestamps) -> 0600 from creation
+    # via the hardened helper, not just sessions.jsonl + not via a post-hoc chmod (umask race).
+    fturns = L.open_local_write(os.path.join(OUT_DIR, "turns.jsonl"))
+    fsess = L.open_local_write(os.path.join(OUT_DIR, "sessions.jsonl"))
 
     for fi, path in enumerate(files):
         base = os.path.basename(path)[:-6] if path.endswith(".jsonl") else os.path.basename(path)
-        # basename (session uuid / agent id) collides across project dirs -> append a realpath
-        # hash for a unique join key (codex review LOW). Keep `base` for human readability.
-        sid = f"{base}-{hashlib.sha1(path.encode()).hexdigest()[:6]}"
+        # sid is an OPAQUE one-way hash of the realpath (PR audit F1): the raw filename can embed a
+        # project/client name or a username, so it must NOT become the pack's source_ref. `base`
+        # (the real stem) is kept LOCAL-ONLY in sessions.jsonl for the local report's readability.
+        sid = L.session_id(path)
         dc = dir_class(path)
         entries = [o for o in L.iter_entries(path) if isinstance(o, dict)]   # skip non-dict JSON lines
         if not entries:
@@ -320,21 +323,16 @@ def main():
             print(f"... {fi+1}/{len(files)} files", file=sys.stderr)
 
     fturns.close(); fsess.close()
-    # sessions.jsonl carries full realpaths (source_path) -> local-only, 0600 (SKILL_PLAN R3-2)
-    try:
-        os.chmod(os.path.join(OUT_DIR, "sessions.jsonl"), 0o600)
-    except OSError:
-        pass
 
     tools_out = {
         "tool_use_freq": dict(sorted(tool_use_freq.items(), key=lambda x: -x[1])),
         "tool_result_bytes": {k: {"chars": v[0], "est_tokens": v[0] // 4, "count": v[1]}
                               for k, v in sorted(tool_result.items(), key=lambda x: -x[1][0])},
     }
-    with open(os.path.join(OUT_DIR, "tools.json"), "w") as fh:
+    with L.open_local_write(os.path.join(OUT_DIR, "tools.json")) as fh:
         json.dump(tools_out, fh, indent=2)
     tot["quota"] = tot["in"] + tot["cr"] + tot["out"]
-    with open(os.path.join(OUT_DIR, "meta.json"), "w") as fh:
+    with L.open_local_write(os.path.join(OUT_DIR, "meta.json")) as fh:
         json.dump({"files": len(files), "totals": tot,
                    "schema": "turns:{s,p,d,v,m,t,ts,in,cr,rd,out,c5,c1,wt,nt}; "
                              "sessions:{s,base,source_path,p,n_proj,d,models,vers,n_models,n_versions,"
@@ -349,5 +347,18 @@ def main():
     print("dataset written (set CC_COACH_OUT to relocate)")   # no absolute path to stdout
 
 
+def main():
+    """Top-level guard (mirror arc.py): swallow any unexpected exception into a generic, PATH-FREE
+    message + rc 1, so a partial/interrupted run never prints a traceback whose frames echo this
+    script's realpath (a username/path leak into the skill LLM context)."""
+    try:
+        return _run()
+    except SystemExit:
+        raise
+    except BaseException:
+        print("extract.py: could not build the dataset", file=sys.stderr)
+        return 1
+
+
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

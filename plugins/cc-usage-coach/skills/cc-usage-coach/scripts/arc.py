@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""arc.py — compact, PATH-FREE, LOCAL-ONLY single-session digest (cc-usage-coach step 4).
-Prints to stdout the human-prompt ARC + structural markers of ONE session, with all
-filesystem paths redacted. Output contains the user's prompt text => LOCAL-ONLY, never
+"""arc.py — compact, LOCAL-ONLY single-session digest (cc-usage-coach step 4).
+Prints to stdout the human-prompt ARC + structural markers of ONE session, with common
+filesystem-path forms redacted best-effort (NOT a guarantee). Output contains the user's
+prompt text and is LOCAL-ONLY, never
 written to a shareable file. The realpath is looked up from source_index.json by the
 opaque source_ref and NEVER printed."""
 import sys, os, re, json

@@ -173,7 +173,9 @@ def test_main_writes_source_index_0600(tmp_path, monkeypatch):
     assert (os.stat(idx).st_mode & 0o777) == 0o600          # created/forced 0600, no umask window
     # assert REAL content was written — an empty / early-return file must NOT pass (codex r3 check 5)
     seeded = S.load_sessions(os.path.join(str(out), "dataset"))
-    expected = {s["s"]: s["source_path"] for s in seeded if s.get("source_path")}
+    # source_index is keyed by the OPAQUE _source_ref (derived from source_path), matching the pack's
+    # source_ref so arc.py resolves — NOT by the dataset's raw `s`.
+    expected = {S._source_ref(s): s["source_path"] for s in seeded if s.get("source_path")}
     assert expected, "fixture must seed at least one source_path for this to assert real content"
     assert json.loads(idx.read_text()) == expected
     assert (out / "signal_pack.json").exists()
@@ -223,3 +225,20 @@ def test_main_writes_project_index_local_only(tmp_path, monkeypatch):
     blob = json.dumps(pack)
     for name in set(proj_map.values()) - {"real", "subagents", "workflow"}:
         assert name not in blob, f"real project name leaked into shareable pack: {name!r}"
+
+
+# --- 6. source_ref is derived from the realpath, never trusted from a (possibly stale) dataset ---
+def test_source_ref_opaque_even_for_stale_filename_s():
+    """signals derives the pack's source_ref from the authoritative source_path, NOT the dataset's
+    stored `s` — so a stale/pre-fix sessions.jsonl whose `s` still carries a filename cannot leak it
+    into the shareable pack. Re-derives the SAME id extract assigns, so source_index resolves. (F1.)"""
+    import re
+    stale = {"s": "CLIENTACME-debugging-abc123",
+             "source_path": "/Users/x/p/CLIENTACME-debugging.jsonl"}
+    ref = S._source_ref(stale)
+    assert re.match(r"^sess_[0-9a-f]{10}$", ref)
+    assert "CLIENTACME" not in ref and "debugging" not in ref
+    assert ref == S.L.session_id("/Users/x/p/CLIENTACME-debugging.jsonl")
+    # with no source_path, it still yields an opaque token (hashes the stale s, never echoes it)
+    ref2 = S._source_ref({"s": "CLIENTACME-debugging-abc123"})
+    assert re.match(r"^sess_[0-9a-f]{10}$", ref2) and "CLIENTACME" not in ref2

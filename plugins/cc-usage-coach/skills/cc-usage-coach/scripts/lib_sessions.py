@@ -7,7 +7,7 @@ dict/number inputs (no filesystem), so it is unit-tested without real logs.
 Parsing/IO helpers are separated at the bottom.
 """
 from __future__ import annotations
-import json, os, glob, math, tempfile
+import hashlib, json, os, glob, math, tempfile
 
 # ---------------------------------------------------------------------------
 # Constants (PLAN §2). Billing weights are relative to base input price.
@@ -363,6 +363,31 @@ def _is_writable_dir(d) -> bool:
     except OSError:
         pass
     return True
+
+
+def open_local_write(path):
+    """Open a LOCAL-ONLY artifact for writing at mode 0600 FROM CREATION — no umask race, no
+    symlink follow — and return a text-mode handle. The dataset (turns/sessions/tools/meta)
+    carries real paths, project names, timestamps and prompt-derived metadata, so EVERY file
+    under out_dir() must be 0600, not just sessions.jsonl. Mirrors signals._write_local_json's
+    hardening: O_NOFOLLOW refuses a pre-planted symlink at `path` (fail-closed), and fchmod
+    re-tightens a file that pre-existed at a looser mode (O_CREAT without O_EXCL won't)."""
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(path, flags, 0o600)
+    try:
+        os.fchmod(fd, 0o600)
+    except OSError:
+        os.close(fd)
+        raise
+    return os.fdopen(fd, "w")
+
+
+def session_id(path):
+    """Opaque, stable handle for a session log: `sess_` + 10 hex of sha1(realpath). This is the
+    SHAREABLE pack's source_ref AND the LOCAL-ONLY source_index key — the raw filename can embed a
+    project/client name or a username, so it must never appear in signal_pack.json. errors=replace
+    keeps a surrogate-escaped (undecodable) filename from raising. Mirrors signals._proj_id."""
+    return "sess_" + hashlib.sha1(str(path).encode("utf-8", errors="replace")).hexdigest()[:10]
 
 
 def out_dir():

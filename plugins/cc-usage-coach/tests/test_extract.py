@@ -7,7 +7,7 @@ The 0600 mode of source_index.json is set in signals.main() and is covered by th
 signals/integration tests (it needs a real dataset), so it is intentionally not
 asserted here — this file focuses on out_dir + _is_writable_dir.
 """
-import os, sys
+import os, sys, re
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "skills", "cc-usage-coach", "scripts"))
@@ -139,3 +139,20 @@ def test_safe_leaf_drops_local_identity(monkeypatch):
     # but a real project UNDER the relocated home keeps its leaf (only the username is dropped)
     assert E._safe_leaf("/Volumes/Data/alice/realproj") == "realproj"
     assert E.proj_of({"cwd": "/Volumes/Data/alice/realproj"}, "/x/p/s.jsonl") == "realproj"
+
+
+# --- _session_id: the SHAREABLE pack's source_ref must be OPAQUE — no filename leak (PR audit F1) ---
+def test_session_id_opaque_no_filename_leak():
+    # a session file named after a client/project, or carrying a username, must NOT survive into
+    # the shareable source_ref — only an opaque sess_<hash>. (Default CC logs are UUIDs, but the
+    # contract is unconditional and the code must enforce it.)
+    for p in ("/Users/x/projects/p/CLIENTACME-debugging-session.jsonl",
+              "/Users/bob/.claude/projects/-Users-bob-secret/bob_the_user.jsonl",
+              "C:\\Users\\bob\\proj\\acmecorp-merger.jsonl"):
+        sid = L.session_id(p)
+        assert re.match(r"^sess_[0-9a-f]{10}$", sid), sid
+        for needle in ("CLIENTACME", "debugging", "bob", "secret", "acmecorp", "merger", "Users"):
+            assert needle not in sid
+    # stable + path-specific (different realpaths -> different ids)
+    assert L.session_id("/a/x.jsonl") == L.session_id("/a/x.jsonl")
+    assert L.session_id("/a/x.jsonl") != L.session_id("/b/x.jsonl")

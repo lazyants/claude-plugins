@@ -195,15 +195,27 @@ def trailing_median_ratio(model_versions, idx):
 
 # --------------------------------------------------------------------------- IO + assembly
 def load_sessions(dataset):
+    out = []
     with open(os.path.join(dataset, "sessions.jsonl")) as fh:
-        return [json.loads(line) for line in fh if line.strip()]
+        for line in fh:
+            if not line.strip():
+                continue
+            try:
+                out.append(json.loads(line))
+            except ValueError:        # skip a truncated/corrupt line (e.g. interrupted extract.py)
+                continue
+    return out
 
 
 def stream_turns(dataset):
     with open(os.path.join(dataset, "turns.jsonl")) as fh:
         for line in fh:
-            if line.strip():
+            if not line.strip():
+                continue
+            try:
                 yield json.loads(line)
+            except ValueError:        # skip a truncated/corrupt line
+                continue
 
 
 def build_pack(sessions, turns_iter, tools):
@@ -391,6 +403,15 @@ def _read_token(leaf_hash):
     return "file_" + hashlib.sha1(s.encode("utf-8", errors="replace")).hexdigest()[:6]
 
 
+def _source_ref(s):
+    """Opaque, shareable session handle for the pack AND the source_index KEY. Derived from the
+    authoritative realpath (`source_path`), NOT the dataset's stored `s`: signals does not trust the
+    dataset, so a stale/pre-fix sessions.jsonl whose `s` still carries a filename cannot leak it into
+    the shareable pack. Re-derives the SAME opaque id extract assigned, so source_index resolves and
+    arc.py can look the path back up. (PR audit F1.)"""
+    return L.session_id(s.get("source_path") or s.get("s"))
+
+
 def select_candidates(sessions, total_quota, baselines):
     """Deterministic multi-bucket candidate selection. Emits ranks/factors, NO verdict."""
     # precompute per-session metric values + within-user percentile ranks
@@ -441,7 +462,7 @@ def select_candidates(sessions, total_quota, baselines):
     for e in ordered:
         s = e["s"]
         out.append({
-            "source_ref": s["s"], "base": s["base"], "p": s["p"],
+            "source_ref": _source_ref(s), "p": s["p"],
             "n_turns": s["n_turns"], "peak_ctx": s["peak_ctx"], "cr": s["cr"],
             "build_floor": s.get("build_floor", 0), "n_epochs": s.get("n_epochs", 1),
             "n_comp": s.get("n_comp", 0), "n_models": s.get("n_models", 1),
@@ -518,7 +539,7 @@ def _write_local_json(path, obj):
     return True
 
 
-def main():
+def _run():
     out = L.out_dir()
     dataset = os.path.join(out, "dataset")
     sessions = load_sessions(dataset)
@@ -530,7 +551,7 @@ def main():
         json.dump(pack, fh, indent=2)
     # LOCAL-ONLY indexes (0600, gitignored, never shared): source_ref -> ABSOLUTE PATH, and
     # opaque project id -> REAL project name (so the report can show real names).
-    index = {s["s"]: s["source_path"] for s in sessions if s.get("source_path")}
+    index = {_source_ref(s): s["source_path"] for s in sessions if s.get("source_path")}
     if not _write_local_json(os.path.join(out, "source_index.json"), index):
         return 1
     if not _write_local_json(os.path.join(out, "project_index.json"), proj_index):
@@ -543,6 +564,20 @@ def main():
     print(f"source_index.json + project_index.json written "
           f"({len(index)} refs, {len(proj_index)} projects; LOCAL, 0600)")
     return 0
+
+
+def main():
+    """Top-level guard (mirror arc.py): swallow any unexpected exception into a generic, PATH-FREE
+    message + rc 1, so a partial/interrupted dataset (missing tools.json, truncated jsonl) never
+    prints a traceback whose frames echo this script's realpath into the skill LLM context."""
+    try:
+        return _run()
+    except SystemExit:
+        raise
+    except BaseException:
+        print("signals.py: could not build the pack (dataset may be incomplete — re-run extract.py)",
+              file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":

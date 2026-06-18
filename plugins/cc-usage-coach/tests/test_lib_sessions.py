@@ -6,7 +6,8 @@ resolution (_resolve_config_dirs) and realpath-deduped session-log discovery
 (discover_files). Synthetic paths only — no real usernames/projects. PLAN §1.
 Run: python3 -m pytest tests/test_lib_sessions.py -q
 """
-import os, sys
+import os, sys, stat
+import pytest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "skills", "cc-usage-coach", "scripts"))
@@ -111,3 +112,45 @@ def test_discover_files_recurses_nested_projects(tmp_path):
         fh.write("{}\n")
     files = L.discover_files(config_dirs=[".claude"], home=home)
     assert files == [os.path.realpath(p)]
+
+
+# --- open_local_write: every LOCAL-ONLY dataset file is 0600 FROM CREATION ----
+def _mode(p):
+    return stat.S_IMODE(os.stat(p).st_mode)
+
+
+def test_open_local_write_creates_0600(tmp_path):
+    # The dataset carries real paths/project names -> must NOT be world-readable.
+    p = str(tmp_path / "turns.jsonl")
+    with L.open_local_write(p) as fh:
+        fh.write("x\n")
+    assert _mode(p) == 0o600
+    with open(p) as fh:
+        assert fh.read() == "x\n"
+
+
+def test_open_local_write_retightens_preexisting_loose_file(tmp_path):
+    # A prior unhardened run could have left a 0644 file; the helper re-tightens it
+    # (O_CREAT without O_EXCL keeps the old mode, so the fchmod is load-bearing).
+    p = str(tmp_path / "tools.json")
+    with open(p, "w") as fh:
+        fh.write("old")
+    os.chmod(p, 0o644)
+    with L.open_local_write(p) as fh:
+        fh.write("new")
+    assert _mode(p) == 0o600
+    with open(p) as fh:
+        assert fh.read() == "new"      # truncated + rewritten
+
+
+@pytest.mark.skipif(not getattr(os, "O_NOFOLLOW", 0), reason="O_NOFOLLOW unavailable")
+def test_open_local_write_refuses_symlink(tmp_path):
+    # O_NOFOLLOW: a pre-planted symlink at the path is refused (fail-closed), so the
+    # write never follows through to another file.
+    target = tmp_path / "target"
+    target.write_text("secret")
+    link = str(tmp_path / "meta.json")
+    os.symlink(str(target), link)
+    with pytest.raises(OSError):
+        L.open_local_write(link)
+    assert target.read_text() == "secret"

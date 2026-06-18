@@ -15,7 +15,7 @@ project labels project-a/b/c + a subagents + a workflow id. No real names ship h
 Run:    python3 -m pytest tests/test_golden.py -q
 Re-pin: python3 tests/test_golden.py --update   # regenerate fixtures + golden_pack.json
 """
-import os, sys, json, re
+import os, sys, json, re, hashlib
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "skills", "cc-usage-coach", "scripts"))
@@ -50,6 +50,12 @@ PROJECT_NEEDLES = ("project-a", "project-b", "project-c")
 #   * >=30 sessions so insufficient_data is False and baselines populate
 # Only synthetic identities are ever written. NEUTRAL — ships publicly.
 # --------------------------------------------------------------------------- #
+def _sid(name):
+    """Opaque session id, mirroring extract._session_id's shape (sess_<hex>). The fixture's
+    readable session name lives in `base` (LOCAL-ONLY); the pack's source_ref is this hash."""
+    return "sess_" + hashlib.sha1(str(name).encode()).hexdigest()[:10]
+
+
 def _session(s, p, d="real", n_turns=10, cr=200_000, peak_ctx=100_000, build_floor=None,
              n_comp=0, n_models=1, n_side=0, n_read=0, read_chars=0, repeat_reads=None,
              n_repeat_read_paths=0, first_cr=50_000, date="2026-06-01", n_epochs=1,
@@ -59,7 +65,7 @@ def _session(s, p, d="real", n_turns=10, cr=200_000, peak_ctx=100_000, build_flo
     start = date + "T08:00:00.000Z" if date else None
     end = date + "T09:00:00.000Z" if date else None
     return {
-        "s": s, "base": s, "source_path": source_path or f"/Users/x/project-a/{s}.jsonl",
+        "s": _sid(s), "base": s, "source_path": source_path or f"/Users/x/project-a/{s}.jsonl",
         "p": p, "n_proj": 1, "d": d, "models": models or (["m"] * n_models), "vers": vers or ["1"],
         "n_models": n_models, "n_versions": len(vers) if vers else 1, "n_turns": n_turns, "n_side": n_side,
         "in": inp, "cr": cr, "rd": rd, "out": out, "quota": quota,
@@ -75,7 +81,7 @@ def _session(s, p, d="real", n_turns=10, cr=200_000, peak_ctx=100_000, build_flo
 
 def _turn(s, p, m="m", t="main", cr=20_000, inp=100, out=500, rd=50_000, nt=1,
           v="1", ts="2026-06-01T08:00:00.000Z"):
-    return {"s": s, "p": p, "d": "real", "v": v, "m": m, "t": t, "ts": ts,
+    return {"s": _sid(s), "p": p, "d": "real", "v": v, "m": m, "t": t, "ts": ts,
             "in": inp, "cr": cr, "rd": rd, "out": out, "c5": 0, "c1": cr, "wt": "1h", "nt": nt}
 
 
@@ -344,6 +350,26 @@ def test_read_token_no_filename_passthrough():
     # raise UnicodeEncodeError, on either the tail or the whole-string fallback. (codex review.)
     assert tok.match(S._read_token("\ud800"))
     assert tok.match(S._read_token("\ud800#zz"))
+
+
+def test_source_ref_opaque_and_base_dropped():
+    """Every candidate session in the shipped pack carries an OPAQUE sess_<hash> source_ref, and the
+    raw filename stem `base` (which can embed a project/client name or a username) is dropped — the
+    real basename stays LOCAL-ONLY in the dataset. No fixture session's base leaks into the shareable
+    pack. (PR audit F1/F5/F6.)"""
+    sessions, turns, tools = load_fixture()
+    shipped = shipped_pack(sessions, turns, tools)
+    opaque = re.compile(r"^sess_[0-9a-f]{10}$")
+    items = shipped["candidate_sessions"]["items"]
+    assert items, "fixture must produce candidate sessions"
+    for it in items:
+        assert opaque.match(it["source_ref"]), f"non-opaque source_ref: {it['source_ref']!r}"
+        assert "base" not in it, "raw filename stem `base` must not ship in the shareable pack"
+    blob = json.dumps(shipped)
+    for s in sessions:
+        b = s.get("base")
+        if b:
+            assert b not in blob, f"session base leaked into shareable pack: {b!r}"
 
 
 def test_order_independent():

@@ -56,7 +56,7 @@ matter (e.g. `python3 "<skill-dir>/scripts/extract.py"`).
 4. **Inspect the top candidates.** Pick the top 3–5 entries in
    `candidate_sessions.items` (by `cost_pct` / `anomaly_rank` / `why`). For each,
    run `python3 "<skill-dir>/scripts/arc.py" <source_ref>` to get a compact,
-   path-free **arc digest** of that session — the sequence of user prompts and
+   LOCAL-ONLY **arc digest** of that session — the sequence of user prompts and
    the edit/agent activity over time. **Judge from the arc, not the opener.** A
    long session whose prompts trace one coherent task — even across compactions,
    or an autonomous loop that keeps working the same goal — is *warranted*; call
