@@ -1,0 +1,12 @@
+# Runtime artifacts — NEVER commit. The skill writes these into its own dir when
+# CC_COACH_OUT is unset and the dir is writable; they carry local paths / prompt text.
+__pycache__/
+*.pyc
+dataset/
+signal_pack.json
+source_index.json
+project_index.json
+results.json
+
+# Local screencast recordings (capture real paths + prompt text)
+*.cast
