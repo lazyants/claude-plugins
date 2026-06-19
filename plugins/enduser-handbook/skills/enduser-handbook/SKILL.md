@@ -95,7 +95,7 @@ You drive the capture using `capture.engine` and run `capture.command` exactly a
 
 After navigation to each page, you apply: **{{capture.page_identity_signal}}**. This sentence is the profile's engine-aware recipe; you translate it into the appropriate engine API call given `capture.engine` and `capture.command`. The principle (assert page identity before screenshot, not just URL) lives in [references/page-identity.md](references/page-identity.md) and applies even if the field is empty.
 
-You write captured assets to `capture.output_dir`. The capture uses `capture.locale` to drive UI language in the running app. Live / irreversible / PII constraints from R5 and R6 bind every step — see [references/capture-safety.md](references/capture-safety.md).
+You write captured assets to `capture.output_dir`. The capture pins the sandbox locale to `capture.locale` (a full POSIX locale such as `de_DE.UTF-8`), which drives both process locale and UI language in the running app; the bare content-language code lives in `language.code`. Live / irreversible / PII constraints from R5 and R6 bind every step — see [references/capture-safety.md](references/capture-safety.md).
 
 ### W3 — Author the chapter
 

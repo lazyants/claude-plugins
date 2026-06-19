@@ -44,7 +44,7 @@ capture:
       -e LANG=de_DE.UTF-8 -e LC_ALL=de_DE.UTF-8 \
       --add-host=app.test:host-gateway \
       app npx playwright test tests/handbook --reporter=line
-  locale: de
+  locale: de_DE.UTF-8               # full POSIX locale fed verbatim to LANG/LC_ALL (see command above); content language is language.code
   output_dir: "vault/handbook/assets"
 
   # Free-text English description of the engine-specific signal. The base SKILL.md

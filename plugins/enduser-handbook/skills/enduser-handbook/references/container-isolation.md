@@ -63,10 +63,14 @@ When you read `capture.command` from the profile, you check that the project
 has wired it so the sandbox satisfies these guarantees. If a guarantee is not
 met, you halt and tell the user to fix the command before running captures.
 
-1. **Locale equals `capture.locale`.** The sandbox sets `LANG` and `LC_ALL`
-   (or the equivalent for the runtime) to `capture.locale`. The app under
-   test renders in that language. You do not accept "it usually picks the
-   right one" — pin it.
+1. **Locale equals `capture.locale`.** `capture.locale` is a full POSIX
+   locale (e.g. `de_DE.UTF-8`), not a bare ISO language code — a bare code
+   cannot pin date/number/sort formatting, which is the whole point of this
+   guarantee. The sandbox sets `LANG` and `LC_ALL` (or the runtime's
+   equivalent) to `capture.locale` *verbatim*, and the app under test renders
+   in that locale's language. The content language alone lives in
+   `language.code`; `capture.locale` is the process locale. You do not accept
+   "it usually picks the right one" — pin it.
 2. **All capture output lands under `capture.output_dir`.** The command
    mounts `capture.output_dir` writable into the sandbox and the spec writes
    only there. No writes to other host paths. The path in `capture.output_dir`
@@ -94,11 +98,11 @@ project-specific and stay in `capture.command` / `.claude/handbook/capture-recip
 the *shape* is general:
 
 - **Pin the locale to `capture.locale`**, e.g. `-e LANG=de_DE.UTF-8 -e LC_ALL=de_DE.UTF-8`.
-  Guarantee 1 requires the sandbox locale to equal `capture.locale`. An unpinned container
-  inherits the image default (often `C`/POSIX), which changes date and number formats, sort
-  order, and which translation file the app serves — so two machines produce visibly
-  different chapters. Set both `LANG` and `LC_ALL` to the full locale that matches
-  `capture.locale`.
+  Guarantee 1 requires the sandbox locale to equal `capture.locale`, which is itself a full
+  POSIX locale (e.g. `de_DE.UTF-8`) — so set both `LANG` and `LC_ALL` to that value verbatim.
+  An unpinned container inherits the image default (often `C`/POSIX), which changes date and
+  number formats, sort order, and which translation file the app serves — so two machines
+  produce visibly different chapters.
 - **Run as the host user**, e.g. `--user "$(id -u):$(id -g)"`. A container running as root
   writes root-owned PNGs into `capture.output_dir` that the developer then cannot edit or
   clean without sudo. Map the host UID/GID so captured artifacts stay owned by the user.
