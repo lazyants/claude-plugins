@@ -1,7 +1,7 @@
 {
   "name": "enduser-handbook",
   "description": "Author, capture, and publish a Diátaxis-structured end-user handbook for any project — methodology shipped as a reusable skill, project-specific bindings supplied via .claude/handbook/profile.yml.",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "author": { "name": "Lazy Ants" },
   "skills": "./skills/"
 }

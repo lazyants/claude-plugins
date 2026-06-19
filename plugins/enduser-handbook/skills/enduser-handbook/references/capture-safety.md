@@ -79,6 +79,15 @@ project's capture specs, not here.
   *container* also captures the page showing through its transparent area — and a leak-assert
   scoped to that container's own subtree is blind to the sibling content bleeding through
   behind it. Screenshot the opaque inner dialog box, and run the assert over that same node.
+- **When the PII has no detectable pattern, assert mask COVERAGE, not just absence.** The
+  fail-closed leak-assert above can only catch PII it can *match* — an e-mail regex, a known
+  internal domain. Free-form identifiers — personal names, customer/account ids, opaque record
+  hashes — have no such pattern, so the leak-assert is blind to them: if the mask silently
+  misses a target (a column header renamed, a selector drifted), nothing fails and the real
+  value ships in the screenshot. For that class the *mask itself* must be fail-closed — have it
+  report how many targets it matched and assert that count equals the number you intended to
+  mask, so a missed target throws instead of leaking. Use both together: pattern-matchable PII
+  is caught by the leak-assert, unmatchable PII by the coverage assert.
 
 Automated asserts cover the DOM subtree; your eye covers the frame. **Always eyeball masked
 and confirmation-dialog shots before publishing** — that is how the bleed-through case above

@@ -2,6 +2,13 @@
 
 All notable changes to `lazyants/claude-plugins` are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is per-plugin, not repo-wide.
 
+## [enduser-handbook 1.0.2] — 2026-06-19
+
+Documentation-only release. Extends the PII-masking guidance to cover identifiers that have no detectable pattern; no behavioral or schema change to the plugin.
+
+### Changed
+- `references/capture-safety.md` — added a fourth masking rule for **non-pattern-matchable PII** (personal names, customer/account ids, opaque record hashes). The fail-closed leak-assert can only catch PII it can *match* (an e-mail regex, a known domain), so it is blind to free-form identifiers — a silently-missed mask (renamed column header, drifted selector) ships the real value. For that class the *mask itself* must be fail-closed: have it report how many targets it matched and assert that count equals the intended number, so a missed target throws instead of leaking. Pattern-matchable PII stays caught by the leak-assert; unmatchable PII is caught by the coverage assert.
+
 ## [enduser-handbook 1.0.1] — 2026-06-19
 
 Documentation-only release. Hardens the screenshot-capture guidance in the skill; no behavioral or schema change to the plugin.
