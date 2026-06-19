@@ -71,8 +71,13 @@ project's capture specs, not here.
   run. A PNG edited by hand silently reverts the next time someone re-captures.
 - **Add a fail-closed leak-assert.** After masking, programmatically assert that no real
   identifier survived in the captured content and FAIL the run if one did (strip your own
-  placeholder first so it is not re-flagged). This is the PII regression test: a later UI
-  change that surfaces a new address breaks the run instead of shipping a leak.
+  placeholder first so it is not re-flagged). Build the string you scan from **individual
+  text nodes plus form-control values, joined by a separator that cannot occur mid-token**
+  (a newline) — not one concatenated `textContent`. A joined `textContent` fuses adjacent
+  cells, so unrelated neighbours match a pattern that neither contains alone (an order
+  number butting against the next cell reads as an IBAN) — a false leak that wastes a run
+  and, worse, can hide a real one. This is the PII regression test: a later UI change that
+  surfaces a new address breaks the run instead of shipping a leak.
 - **Scope the mask AND the assert to what the SCREENSHOT frames — not to the element you
   think you are shooting.** A full-viewport overlay (a modal or backdrop rendered fixed over
   the page) has a bounding box that spans the whole viewport, so an element-screenshot of the
@@ -122,10 +127,42 @@ thing you must not do.
 Apply the same pattern to multi-step send flows: capture the final-review screen with
 the "Send" button visible and labeled; do not capture the "Sent" confirmation.
 
+**Dismiss via the safe control, and pin the selector to it.** Capturing the dialog means
+you then have to close it, and the close click is itself a hazard: the dialog has a
+destructive button that fires the action and a safe one that backs out. Click the safe one —
+and select it by the *negative* (the non-destructive / non-primary button) or by its cancel
+label, never as "the primary button" or "the first button in the dialog", which can resolve
+to the destructive control depending on the app's button order. Assert the dialog's own
+identifying text before you click, so you are dismissing the dialog you think you are.
+
 For success-toast screenshots (a different case — a reversible mutating action whose
 outcome the reader needs to see), only fire the action when the side-effect is safely
 reversible *and* the data state is staging/seed, never production. If in doubt,
 screenshot the dialog at open and disclose the outcome in prose.
+
+## Auto-save-on-input fields are observe-only
+
+Some fields persist on every keystroke — a notes/comment box that saves on each input
+event, an inline-edit cell that commits on blur, a toggle that writes immediately. These
+are **mutating actions with no Save button**, so "capture the open form, just don't submit"
+does not protect you: typing a single character *is* the write, and it corrupts the
+synthetic record mid-run, so later steps capture the mutated state. Treat them as
+observe-only — seed the field with representative content beforehand and capture it as-is;
+never type into, clear, or toggle them during capture. When you classify a function's
+side-effect (Rule 3), check specifically for persists-on-input behaviour, not only
+persists-on-submit.
+
+## Synthetic seed data must be hermetic
+
+When you seed synthetic data to make an overlay non-empty, the seed runs against the real
+local app, and creating a record can fire the same side-effects the UI would. Model
+observers, lifecycle hooks, and event listeners on the seeded models may send e-mail, queue
+a job, broadcast, or call an external API on create/update — even though you never touched
+the UI. A "local-only" seed can still hit a live integration this way. Before running a seed
+during capture, confirm it is guarded to the local environment **and** that no hook on the
+seeded models performs an external send — or neutralise the outbound layer (fake the
+HTTP/queue/mail transport) for the seed run. The seed must only insert rows; it must not
+send.
 
 ## Quick self-check before each click
 

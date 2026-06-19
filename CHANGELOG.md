@@ -2,6 +2,17 @@
 
 All notable changes to `lazyants/claude-plugins` are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is per-plugin, not repo-wide.
 
+## [enduser-handbook 1.0.3] — 2026-06-19
+
+Documentation-only release. Adds three concrete capture-safety hazards surfaced while authoring the `/admin/contracts` chapters; no behavioral or schema change to the plugin.
+
+### Changed
+- `references/capture-safety.md` — four additions:
+  - **Leak-assert must read per-text-node, not a concatenated `textContent`.** Joining a subtree into one string fuses adjacent cells, so unrelated neighbours match a pattern neither contains alone (an order number butting against the next cell reads as an IBAN) — a false leak that wastes a run and can hide a real one. Build the scanned string from individual text nodes + form-control values joined by a newline.
+  - **Dismiss confirm dialogs via the safe control, pinned by selector.** The close click is itself a hazard: select the non-destructive / non-primary (or cancel-labelled) button, never "the primary button" or "the first button", which can resolve to the destructive control depending on button order. Assert the dialog's identifying text before clicking.
+  - **Auto-save-on-input fields are observe-only.** A field that persists on every keystroke (notes box, inline-edit, immediate toggle) is a mutating action with no Save button — typing one character *is* the write and corrupts the synthetic record mid-run. Seed it and capture as-is; never type. Classify side-effects as persists-on-input, not only persists-on-submit.
+  - **Synthetic seed data must be hermetic.** Creating a record via factories can fire model observers / lifecycle hooks that send e-mail, queue jobs, broadcast, or call an external API — so a "local-only" seed can still hit a live integration. Guard the seed to local AND confirm no hook on the seeded models performs an external send (or fake the outbound layer for the seed run).
+
 ## [enduser-handbook 1.0.2] — 2026-06-19
 
 Documentation-only release. Extends the PII-masking guidance to cover identifiers that have no detectable pattern; no behavioral or schema change to the plugin.
