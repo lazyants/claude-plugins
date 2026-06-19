@@ -85,6 +85,31 @@ met, you halt and tell the user to fix the command before running captures.
    itself). If you see drift, the sandbox is leaky — fix the command before
    shipping more captures.
 
+## Common command patterns (engine-agnostic)
+
+Whatever runtime the project standardizes on, a `capture.command` that drives a
+**containerized live dev stack** almost always needs these patterns to satisfy the
+guarantees above. The literal values (image tag, network name, host alias) are
+project-specific and stay in `capture.command` / `.claude/handbook/capture-recipe.md` — only
+the *shape* is general:
+
+- **Run as the host user**, e.g. `--user "$(id -u):$(id -g)"`. A container running as root
+  writes root-owned PNGs into `capture.output_dir` that the developer then cannot edit or
+  clean without sudo. Map the host UID/GID so captured artifacts stay owned by the user.
+- **Point `HOME` at a throwaway dir**, e.g. `-e HOME=/tmp`. With the repo bind-mounted and
+  `HOME` left at its default, the engine dumps `.cache` / `.npm` / `.config` **into the
+  bind-mounted repo**, which then get committed as junk. `HOME=/tmp` keeps that churn out of
+  the tree (belt-and-suspenders: gitignore those paths too).
+- **Reach the running app, don't recreate it.** When the app is already up (the dev stack the
+  developer is using), join its existing network and resolve its host with
+  `--add-host` / `host-gateway` rather than `compose up`-ing the app service — bringing the
+  service up again can recreate containers and disrupt the developer's running stack. Use
+  `compose run --rm` (one-off) or `docker run` against the existing network, never `up`.
+- **Pin the engine image in lockstep with the test dependency.** The capture image tag (the
+  Playwright/Cypress browser image) must match the engine version pinned in the project's
+  package manifest; bump them together, or the browser and the test runner drift and captures
+  stop being reproducible (guarantee 5).
+
 ## When the project has no sandbox yet
 
 If `capture.command` is empty or the project clearly runs captures on the

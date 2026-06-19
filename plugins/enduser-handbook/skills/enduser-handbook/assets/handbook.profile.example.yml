@@ -37,8 +37,10 @@ capture:
     # internal: []
     # external: []
 
-  command: |                        # exact, copy-pasteable; engine-specific
+  command: |                        # exact, copy-pasteable; engine-specific. See container-isolation.md "Common command patterns".
     docker compose run --rm \
+      --user "$(id -u):$(id -g)" \
+      -e HOME=/tmp \
       --add-host=app.test:host-gateway \
       app npx playwright test tests/handbook --reporter=line
   locale: de
