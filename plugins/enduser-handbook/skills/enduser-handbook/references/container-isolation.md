@@ -63,10 +63,14 @@ When you read `capture.command` from the profile, you check that the project
 has wired it so the sandbox satisfies these guarantees. If a guarantee is not
 met, you halt and tell the user to fix the command before running captures.
 
-1. **Locale equals `capture.locale`.** The sandbox sets `LANG` and `LC_ALL`
-   (or the equivalent for the runtime) to `capture.locale`. The app under
-   test renders in that language. You do not accept "it usually picks the
-   right one" — pin it.
+1. **Locale equals `capture.locale`.** `capture.locale` is a full POSIX
+   locale (e.g. `de_DE.UTF-8`), not a bare ISO language code — a bare code
+   cannot pin date/number/sort formatting, which is the whole point of this
+   guarantee. The sandbox sets `LANG` and `LC_ALL` (or the runtime's
+   equivalent) to `capture.locale` *verbatim*, and the app under test renders
+   in that locale's language. The content language alone lives in
+   `language.code`; `capture.locale` is the process locale. You do not accept
+   "it usually picks the right one" — pin it.
 2. **All capture output lands under `capture.output_dir`.** The command
    mounts `capture.output_dir` writable into the sandbox and the spec writes
    only there. No writes to other host paths. The path in `capture.output_dir`
@@ -84,6 +88,37 @@ met, you halt and tell the user to fix the command before running captures.
    byte-for-byte equivalent screenshots (modulo timestamps in the data
    itself). If you see drift, the sandbox is leaky — fix the command before
    shipping more captures.
+
+## Common command patterns (engine-agnostic)
+
+Whatever runtime the project standardizes on, a `capture.command` that drives a
+**containerized live dev stack** almost always needs these patterns to satisfy the
+guarantees above. The literal values (image tag, network name, host alias) are
+project-specific and stay in `capture.command` / `.claude/handbook/capture-recipe.md` — only
+the *shape* is general:
+
+- **Pin the locale to `capture.locale`**, e.g. `-e LANG=de_DE.UTF-8 -e LC_ALL=de_DE.UTF-8`.
+  Guarantee 1 requires the sandbox locale to equal `capture.locale`, which is itself a full
+  POSIX locale (e.g. `de_DE.UTF-8`) — so set both `LANG` and `LC_ALL` to that value verbatim.
+  An unpinned container inherits the image default (often `C`/POSIX), which changes date and
+  number formats, sort order, and which translation file the app serves — so two machines
+  produce visibly different chapters.
+- **Run as the host user**, e.g. `--user "$(id -u):$(id -g)"`. A container running as root
+  writes root-owned PNGs into `capture.output_dir` that the developer then cannot edit or
+  clean without sudo. Map the host UID/GID so captured artifacts stay owned by the user.
+- **Point `HOME` at a throwaway dir**, e.g. `-e HOME=/tmp`. With the repo bind-mounted and
+  `HOME` left at its default, the engine dumps `.cache` / `.npm` / `.config` **into the
+  bind-mounted repo**, which then get committed as junk. `HOME=/tmp` keeps that churn out of
+  the tree (belt-and-suspenders: gitignore those paths too).
+- **Reach the running app, don't recreate it.** When the app is already up (the dev stack the
+  developer is using), join its existing network and resolve its host with
+  `--add-host` / `host-gateway` rather than `compose up`-ing the app service — bringing the
+  service up again can recreate containers and disrupt the developer's running stack. Use
+  `compose run --rm` (one-off) or `docker run` against the existing network, never `up`.
+- **Pin the engine image in lockstep with the test dependency.** The capture image tag (the
+  Playwright/Cypress browser image) must match the engine version pinned in the project's
+  package manifest; bump them together, or the browser and the test runner drift and captures
+  stop being reproducible (guarantee 5).
 
 ## When the project has no sandbox yet
 

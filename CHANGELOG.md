@@ -2,6 +2,15 @@
 
 All notable changes to `lazyants/claude-plugins` are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is per-plugin, not repo-wide.
 
+## [enduser-handbook 1.0.1] — 2026-06-19
+
+Documentation-only release. Hardens the screenshot-capture guidance in the skill; no behavioral or schema change to the plugin.
+
+### Changed
+- `references/capture-safety.md` — the PII-masking guidance now mandates *reproducible* masking: mask in-step (including control/header values), assert no leak with a fail-closed check, and scope both the mask and the leak-assert to the screenshot frame rather than a DOM subtree (a transparent backdrop can bleed un-masked content from the page behind a modal). Always keep an eyeball-confirmation shot.
+- `references/container-isolation.md` — added an engine-agnostic "Common command patterns" section (pin the locale, run as the host user, keep engine caches out of the bind-mounted repo, join the existing network instead of recreating services, pin the engine image in lockstep with the test dependency). Concrete per-project commands still live in the project's `capture.command` / `.claude/handbook/capture-recipe.md`.
+- Clarified that `capture.locale` is a **full POSIX locale** (e.g. `de_DE.UTF-8`) fed verbatim to `LANG`/`LC_ALL`, distinct from the content-language code in `language.code` — a bare ISO code can't pin date/number/sort formatting. Reconciled across `SKILL.md`, `container-isolation.md` guarantee 1, and the example profile (`capture.locale: de_DE.UTF-8`), so the shipped example now literally satisfies the guarantee.
+
 ## [cc-usage-coach 1.0.0] — 2026-06-18
 
 Initial release. New plugin — personalized, behavior-aware analysis of where your Claude Code (Max/Pro) usage-limit tokens go, with ranked, low-effort ways to use fewer, computed entirely from your local session logs. Python measures; Claude concludes.

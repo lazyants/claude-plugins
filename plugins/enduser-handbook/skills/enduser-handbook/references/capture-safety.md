@@ -46,16 +46,43 @@ Three options when a PII category would appear in your shot, in order of prefere
 
 1. **Skip the shot.** Document the function in prose with a one-sentence disclosure that
    explains why no screenshot is included.
-2. **Mask the PII.** Replace identifying values with placeholders before saving the PNG —
-   names, addresses, account numbers, document contents, scanned identity material. The
-   mask must be visually obvious so a reader does not mistake masked content for real
-   data.
+2. **Mask the PII.** Replace identifying values with placeholders — names, addresses,
+   account numbers, document contents, scanned identity material. Prefer masking
+   **reproducibly in the capture step** (mutate the rendered values just before the shot),
+   not by hand-editing the saved PNG, so the mask is reproduced on every re-capture. The
+   mask must be visually obvious so a reader does not mistake masked content for real data.
+   See **Mask reproducibly, then prove the mask held** below.
 3. **Ask the user to sign off.** Only when masking is impractical and the screenshot is
    essential. The sign-off is per-shot, in writing, and recorded in the chapter's
    commit/PR notes. Do not assume a previous sign-off carries forward to a new shot.
 
 If `capture.pii_categories` is empty you still apply the principle for any obviously
 sensitive content (real names, real financial data, real medical or legal documents).
+
+### Mask reproducibly, then prove the mask held
+
+When you choose option 2, three rules make masking trustworthy. They are engine-agnostic —
+the exact API (mutating the rendered page, taking the element shot, asserting) lives in the
+project's capture specs, not here.
+
+- **Mask inside the capture step, not by hand.** Mutate the rendered content — text nodes
+  AND form-control values (text inputs, textareas, the selected option of a dropdown), not
+  only visible text — immediately before the screenshot, so the mask is reproduced on every
+  run. A PNG edited by hand silently reverts the next time someone re-captures.
+- **Add a fail-closed leak-assert.** After masking, programmatically assert that no real
+  identifier survived in the captured content and FAIL the run if one did (strip your own
+  placeholder first so it is not re-flagged). This is the PII regression test: a later UI
+  change that surfaces a new address breaks the run instead of shipping a leak.
+- **Scope the mask AND the assert to what the SCREENSHOT frames — not to the element you
+  think you are shooting.** A full-viewport overlay (a modal or backdrop rendered fixed over
+  the page) has a bounding box that spans the whole viewport, so an element-screenshot of the
+  *container* also captures the page showing through its transparent area — and a leak-assert
+  scoped to that container's own subtree is blind to the sibling content bleeding through
+  behind it. Screenshot the opaque inner dialog box, and run the assert over that same node.
+
+Automated asserts cover the DOM subtree; your eye covers the frame. **Always eyeball masked
+and confirmation-dialog shots before publishing** — that is how the bleed-through case above
+gets caught when the subtree-scoped assert passes but the frame still leaks.
 
 ## Disclosure in prose
 
