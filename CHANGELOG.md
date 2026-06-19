@@ -2,6 +2,14 @@
 
 All notable changes to `lazyants/claude-plugins` are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is per-plugin, not repo-wide.
 
+## [enduser-handbook 1.0.4] — 2026-06-19
+
+Documentation-only release. Genericizes the shipped example profile so the public asset no longer carries project-identifying domain strings; no behavioral or schema change to the plugin.
+
+### Changed
+- `assets/handbook.profile.example.yml` — replaced project-specific persona, audience, and live-action examples (energy-market "Marktpartner", Apigee, Brand7/ELE, DocuSign, …) with neutral, illustrative placeholders. The example still exercises every field; it just no longer fingerprints a specific project.
+- `README.md` — added a "Tips for best results" section to the `enduser-handbook` entry: plan the chapter first then fan out at high effort with multi-agent orchestration (`ultracode`), author one page at a time, review from multiple agent perspectives, and rerun the skill as a completeness pass to confirm every feature is described.
+
 ## [enduser-handbook 1.0.3] — 2026-06-19
 
 Documentation-only release. Adds three concrete capture-safety hazards surfaced while authoring the `/admin/contracts` chapters; no behavioral or schema change to the plugin.
