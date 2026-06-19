@@ -9,8 +9,8 @@ language:
   currency_symbol: "€"
 
 audience:
-  persona: Marktpartner             # short label
-  description: "energy-market business users (utilities, suppliers)"
+  persona: Sachbearbeiter           # short label
+  description: "back-office business users who operate the platform day-to-day"
 
 stack:
   backend:
@@ -62,11 +62,11 @@ capture:
   # The principle (never trigger mutating actions in live captures) is in references/capture-safety.md
   # and applies even with an empty list; this list customizes the examples for project teams.
   live_action_examples:
-    - "DocuSign e-signature send"
-    - "Mengensicherung 'übergeben' (Apigee)"
-    - "Bonität credit query 'suchen'"
-    - "Brand7/ELE export replay"
-    - "any 'unwiderruflich löschen' action"
+    - "e-signature 'send' (external provider)"
+    - "quantity-commit 'submit' to an upstream API"
+    - "credit-check 'search' (external bureau)"
+    - "legacy-system export replay"
+    - "any 'delete permanently' / irreversible action"
 
   # Project-specific PII categories that must not appear in screenshots without explicit sign-off.
   pii_categories:
