@@ -93,6 +93,12 @@ guarantees above. The literal values (image tag, network name, host alias) are
 project-specific and stay in `capture.command` / `.claude/handbook/capture-recipe.md` — only
 the *shape* is general:
 
+- **Pin the locale to `capture.locale`**, e.g. `-e LANG=de_DE.UTF-8 -e LC_ALL=de_DE.UTF-8`.
+  Guarantee 1 requires the sandbox locale to equal `capture.locale`. An unpinned container
+  inherits the image default (often `C`/POSIX), which changes date and number formats, sort
+  order, and which translation file the app serves — so two machines produce visibly
+  different chapters. Set both `LANG` and `LC_ALL` to the full locale that matches
+  `capture.locale`.
 - **Run as the host user**, e.g. `--user "$(id -u):$(id -g)"`. A container running as root
   writes root-owned PNGs into `capture.output_dir` that the developer then cannot edit or
   clean without sudo. Map the host UID/GID so captured artifacts stay owned by the user.

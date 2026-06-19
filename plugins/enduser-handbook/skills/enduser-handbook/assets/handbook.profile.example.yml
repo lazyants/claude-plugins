@@ -41,6 +41,7 @@ capture:
     docker compose run --rm \
       --user "$(id -u):$(id -g)" \
       -e HOME=/tmp \
+      -e LANG=de_DE.UTF-8 -e LC_ALL=de_DE.UTF-8 \
       --add-host=app.test:host-gateway \
       app npx playwright test tests/handbook --reporter=line
   locale: de
