@@ -66,7 +66,8 @@ the exact API (mutating the rendered page, taking the element shot, asserting) l
 project's capture specs, not here.
 
 - **Mask inside the capture step, not by hand.** Mutate the rendered content — text nodes
-  AND form-control values (text inputs, textareas, the selected option of a dropdown), not
+  AND form-control values (text inputs, textareas, **all options** of a dropdown — not just the
+  selected one, since a multi-select renders unselected options too) AND `placeholder` text, not
   only visible text — immediately before the screenshot, so the mask is reproduced on every
   run. A PNG edited by hand silently reverts the next time someone re-captures.
 - **Add a fail-closed leak-assert.** After masking, programmatically assert that no real
@@ -134,6 +135,17 @@ and select it by the *negative* (the non-destructive / non-primary button) or by
 label, never as "the primary button" or "the first button in the dialog", which can resolve
 to the destructive control depending on the app's button order. Assert the dialog's own
 identifying text before you click, so you are dismissing the dialog you think you are.
+
+Prefer the keyboard **Escape** key — it is the version-agnostic safe cancel. Pressing
+Escape backs out of the dialog without resolving any button selector, so it cannot
+accidentally hit the destructive control. A framework's cancel handle (e.g. a bootbox
+`data-bb-handler="cancel"` attribute) is version-specific and may not exist in the installed
+version, so do not pin to a guessed cancel selector; press Escape first and fall back to the
+negative/cancel-label button only if Escape does not dismiss. The importable helper contract
+for this is in `capture-spec-helpers.md`. That contract is the normative, engine-agnostic
+rule; `../assets/capture-helpers.playwright.ts` is a
+**non-normative reference implementation** for the Playwright reference case — fork it for
+other engines.
 
 For success-toast screenshots (a different case — a reversible mutating action whose
 outcome the reader needs to see), only fire the action when the side-effect is safely
