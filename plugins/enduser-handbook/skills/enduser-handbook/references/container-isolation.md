@@ -120,6 +120,42 @@ the *shape* is general:
   package manifest; bump them together, or the browser and the test runner drift and captures
   stop being reproducible (guarantee 5).
 
+## Capturing from a git worktree
+
+When you run captures from a **git worktree** (a checkout linked to a main
+clone, common when a team isolates a feature branch), the worktree's
+`node_modules` is usually a **symlink** back to the main checkout's real
+`node_modules`. That symlink **dangles inside the docker bind-mount**: the
+container mounts the worktree path, follows the symlink, and lands on a target
+that does not exist inside the sandbox's filesystem. The capture engine then
+fails to resolve its own dependencies even though `node_modules` "is there" on
+the host.
+
+The pattern (engine-agnostic — adapt to whatever runtime `capture.command`
+uses):
+
+- **Overlay the real modules with a second, read-only mount** using **resolved
+  absolute paths**, so the container sees real files where the dangling symlink
+  was:
+  `-v <abs-main-checkout>/node_modules:<container-app-dir>/node_modules:ro`.
+  Resolve both sides to absolute paths first (a worktree-relative or `~`-relative
+  path will not mount correctly); mark it `:ro` because capture never writes to
+  `node_modules`.
+- **Stage with explicit paths, never `git add -A`.** A `node_modules/` gitignore
+  rule matches the **directory pattern**, not a **symlink** that happens to be
+  named `node_modules` — so the symlink is *not* ignored and a blanket
+  `git add -A` will commit it. Stage only the artifacts you mean to ship with
+  `git add <paths>`, listing the chapter, manifest, and screenshot paths
+  explicitly.
+- **Serialize capture across parallel worktrees.** Worktrees share the
+  developer's single running dev stack and its port; two captures running at once
+  contend for the same app instance and produce non-deterministic shots (guarantee
+  5). Run one worktree's capture at a time.
+
+The engine-agnostic rules here are normative; any `*.playwright.*` asset shipped
+under `../assets/` is a **non-normative reference implementation** for the
+Playwright reference case — fork it for other engines.
+
 ## When the project has no sandbox yet
 
 If `capture.command` is empty or the project clearly runs captures on the

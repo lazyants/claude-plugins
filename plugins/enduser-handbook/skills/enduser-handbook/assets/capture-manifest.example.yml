@@ -53,6 +53,10 @@
                                       # `publish.glossary_dir` and either
                                       # links existing entries or creates
                                       # stubs (see references/glossary-discipline.md).
+                                      # This list and the chapter frontmatter's
+                                      # `glossary_terms` are TWO separate lists
+                                      # that must be kept in sync (the completeness
+                                      # gate cross-checks them).
 
   steps:                              # Ordered list. Each step produces one
                                       # screenshot embedded in the chapter in
@@ -90,6 +94,8 @@
   # or omit. When set, this is the network signal the capture engine waits on
   # before asserting the page is mounted; the base skill consumes it via the
   # `capture.page_identity_signal` directive (see references/page-identity.md).
-  # If omitted, the engine falls back to the profile-level
-  # `capture.page_identity_signal` description alone.
+  # OMIT for a server-rendered page with no post-mount XHR — assert page identity
+  # on a heading/DOM element instead (see references/page-identity.md). If omitted,
+  # the engine falls back to the profile-level `capture.page_identity_signal`
+  # description alone.
   waitForApi: ""

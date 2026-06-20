@@ -52,11 +52,12 @@ capture:
   # i.e. Claude is told "After navigation, apply: {{capture.page_identity_signal}}." It is NOT
   # paraphrased, summarized, or reinterpreted before insertion, so write it as a concrete,
   # actionable engine directive — not a vague description. Claude then translates that directive
-  # into the appropriate engine API call given `capture.engine` and `capture.command`. Keep this string concrete and engine-aware
-  # (e.g. for Playwright: "wait for response matching stack.backend.api_url_prefix, then assert
-  # the primary heading is visible"). The principle lives in references/page-identity.md and
-  # applies even if this field is empty.
-  page_identity_signal: "wait for response matching stack.backend.api_url_prefix, then assert the primary page heading is visible"
+  # into the appropriate engine API call given `capture.engine` and `capture.command`. Keep this string concrete and engine-aware.
+  # For a CLIENT-RENDERED page (Playwright): "wait for response matching stack.backend.api_url_prefix,
+  # then assert the primary heading is visible". For a SERVER-RENDERED page (no post-mount XHR), drop
+  # the response wait and assert on the heading/DOM directly: "assert the primary page heading is
+  # visible". The principle lives in references/page-identity.md and applies even if this field is empty.
+  page_identity_signal: "wait for response matching stack.backend.api_url_prefix, then assert the primary page heading is visible"   # client-rendered example; for server-rendered pages assert the heading/DOM directly (no XHR wait)
 
   # Project-specific examples of irreversible / live-system actions the skill MUST NOT fire.
   # The principle (never trigger mutating actions in live captures) is in references/capture-safety.md

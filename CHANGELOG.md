@@ -2,6 +2,31 @@
 
 All notable changes to `lazyants/claude-plugins` are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is per-plugin, not repo-wide.
 
+## [enduser-handbook 1.0.5] — 2026-06-20
+
+Tooling + revalidation release. The methodology already mandated a live-UI surface enumerator and the capture-safety/page-identity machinery, but shipped neither as runnable code — every chapter re-implemented them by hand and they drifted. This release ships them as non-normative Playwright **reference implementations** (the contract stays engine-agnostic — fork for other engines, exactly like `regression-checks.sh`), adds a first-class **revalidation/audit mode**, and fixes wording/consistency drifts surfaced across several authoring sessions. No change to the existing authoring rules.
+
+### Added
+- `assets/lib/control-inventory.mjs` (+ `control-inventory.d.mts`) — browser-agnostic, Node-testable extraction/normalization: `extractRecord` (always returns a record, never drops a control), `normalizeControls` (no filtering by text presence), `classifyByShape` (destructive-control hint).
+- `assets/surface-audit.playwright.ts` — live-DOM surface enumerator (uses `page.$$`, not `$$eval`, so extraction is unit-testable) that dumps every control's verbatim text/title/aria-label/href/role — icon-only controls included — plus a coverage-matrix skeleton.
+- `assets/capture-helpers.playwright.ts` — context-level `installCaptureGuard` (service-worker block, ordered fail-closed request classifier covering writes/SSE/beacons, WebSocket blocking via `routeWebSocket`, single `classifyRequest` read escape), plus `assertIdentity`, `captureRegion`/`captureViewport`, `openModalDialog`/`dismissModal` (Escape-first), and `maskAndAssert` (newline-joined leak-assert + mask-coverage assert).
+- `assets/capture.example.spec.ts` — skeleton chapter spec wiring the canonical guarded-capture flow.
+- `references/capture-spec-helpers.md` — engine-agnostic contract for the helper module + spec skeleton.
+- `references/revalidation.md` — audit/revalidation mode for already-merged chapters.
+- `plugins/enduser-handbook/tests/control-inventory.test.mjs` (`node --test`, zero deps) + `tests/reference-assets.test.sh` (structural gate) — regression-catchers for the shipped reference assets (icon-only/destructive controls survive; guard ordering and invariants hold; cross-file wording contracts).
+
+### Changed
+- `references/completeness-gate.md` — added a "Surface enumeration (mechanical first pass)" recipe pointing at the reference enumerator; cross-check that the manifest's `glossary_terms` and the chapter frontmatter's `glossary_terms` stay in sync.
+- `references/manifest-discipline.md` — added "Shared-edit hotspots" (the manifest/glossary/chapter-index are append-hotspots; resolve additively and re-run type/lint; split the manifest into per-chapter modules); renamed the per-chapter field `glossaryTerms` → `glossary_terms` to match the assets.
+- `references/container-isolation.md` — added "Capturing from a git worktree": overlay the dangling symlinked `node_modules` with a second read-only mount, stage with explicit `git add` (not `-A`), serialize parallel-worktree captures.
+- `references/page-identity.md` — server-rendered pages (no post-mount XHR) are now a first-class identity case (assert heading/DOM directly); added screenshot guidance (reset session-persisted filters before overview shots; capture the viewport for long unpaginated lists).
+- `references/anti-fabrication.md` — added a concrete "do not 'correct' the UI's grammar/punctuation" anti-example (hyphenation/spacing/casing).
+- `references/capture-safety.md` — Escape is the version-agnostic safe dialog dismiss (don't pin to a framework-specific cancel handle); pointer to the new helper contract.
+- `references/running-ui-source.md` — points the "enumerate the running UI" mandate at the reference enumerator.
+- `SKILL.md` — added W6 revalidation/audit mode; server-rendered page-identity wording; pointers to the new enumeration + helper assets.
+- `assets/handbook.profile.example.yml`, `assets/capture-manifest.example.yml` — `page_identity_signal` / `waitForApi` now cover the server-rendered (no-XHR) case.
+- `assets/regression-checks.sh` — clarified that `golden` must be the SAME chapter's prior version, not a sibling exemplar.
+
 ## [enduser-handbook 1.0.4] — 2026-06-19
 
 Documentation-only release. Genericizes the shipped example profile so the public asset no longer carries project-identifying domain strings; no behavioral or schema change to the plugin.

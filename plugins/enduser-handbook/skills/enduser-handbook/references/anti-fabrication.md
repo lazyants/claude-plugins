@@ -41,6 +41,8 @@ Copy UI labels exactly. That means:
 - **Whatever language they appear in** — labels are quoted in the language of the running UI, regardless of the language the surrounding prose is in. A handbook written in `language.code: de` quotes English labels in English when that is what the app actually displays; a handbook in `en` quotes German labels in German. The surrounding sentence is in the chapter language; the label inside the quote marks is in the UI's language.
 - **Quote marks per project style** — the *outer* quote style (curly vs straight, single vs double, low-9 vs guillemets, locale-specific pairs) follows the chapter's locale conventions from the style guide; the *inner* string is the literal UI text.
 
+**Do not "correct" the UI's grammar/punctuation.** The most insidious label violations are the ones you commit unconsciously, because your instinct is to write the language *correctly*. You might write „API-Einstellungen" — the grammatically-correct German with the Bindestrich — when the live tooltip actually reads „API Einstellungen" (no hyphen, a space). The urge to produce correct German silently overrides verbatim quoting, and hyphenation, spacing, and casing are exactly where "quote verbatim" gets violated without you noticing. The screenshot and the quoted string must match the **running UI**, not your sense of correct grammar. If the app is "wrong", you quote it wrong (and flag it to the team per `running-ui-source.md`) — you do not silently fix it in the handbook.
+
 When the label changes in the app, the chapter is wrong until the screenshot AND the quoted string are both refreshed. There is no "the label is basically the same" — it either matches or the step is stale.
 
 ## "If you cannot capture it, say so"

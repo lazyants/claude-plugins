@@ -29,7 +29,10 @@ For every screenshot the chapter will embed, the capture spec must, immediately 
 1. Confirm the page is the one you navigated to — the route, URL, or screen identifier matches
    what the manifest entry declares.
 2. Confirm the page has finished rendering — the primary heading, main container, or
-   distinguishing element the chapter is about is actually present and visible.
+   distinguishing element the chapter is about is actually present and visible. **This DOM
+   assertion is the primary identity check, and it is sufficient on its own.** Asserting the
+   primary heading/element directly works for every page, server-rendered or client-rendered;
+   you do not need to observe network traffic to know a page rendered.
 3. Confirm the loading state is gone — no spinner, skeleton, or "please wait" overlay covering
    the area the screenshot will capture.
 4. Confirm the specific element the step narrates is visible — if the step says "click the
@@ -38,6 +41,21 @@ For every screenshot the chapter will embed, the capture spec must, immediately 
 
 If any of these fail, the run must **fail loudly** — never fall back to capturing whatever is on
 screen. A wrong screenshot is worse than no screenshot, because the chapter will ship it.
+
+### Server-rendered pages and the XHR wait
+
+For a **server-rendered page with no post-mount XHR** — the markup arrives complete in the
+initial document and nothing fetches more on mount — the heading/DOM assertion in step 2 is
+the whole identity check. Assert the primary heading/container directly and shoot. Do **not**
+reach for a network/response wait: there is no post-mount request to wait for, so a
+"wait for the API response" step would hang or time out on a page that is already fully rendered.
+
+Waiting on a specific XHR/response is **one option, applicable only to client-rendered pages
+that fetch their payload after mount** — it is not the default. For those pages, the response
+wait is a useful way to know the post-mount data has landed before you assert step 2. But the
+DOM assertion is still what proves identity; the XHR wait is at most a sequencing aid that
+precedes it. Choose the response wait when the page is client-rendered and the chapter's
+content depends on a post-mount fetch; otherwise assert the heading/DOM and move on.
 
 If a manifest step cannot pass its identity assertion, drop it from the chapter. Do not narrate
 a step you could not capture.
@@ -80,3 +98,21 @@ For each capture step, the spec should:
 
 Never collapse "navigate → assert → shoot" into "navigate → shoot". The middle step is the whole
 point.
+
+## Screenshot guidance
+
+Identity asserts that you are on the right page; these two rules keep the shot itself
+representative of what a reader will see.
+
+- **Reset session-persisted filters before an "overview" shot.** Many list/table screens
+  persist the user's last filter, search, or sort in the session (server-side, a cookie, or
+  local storage), so the page reopens already filtered. An "overview" screenshot taken in that
+  state is poisoned by a stale filter and shows a narrowed list, not the overview. Before an
+  overview capture, clear persisted filters — e.g. navigate with a `?clear-filter`-style
+  param the app honours, or otherwise reset to the unfiltered default — so the shot shows the
+  full surface the chapter claims to.
+- **For long unpaginated lists, capture the viewport, not the full element.** A full-element
+  screenshot of a list that renders all rows (no pagination) produces an unusably tall image —
+  a 100-row table becomes a strip nobody can read. Capture the **viewport** (the visible
+  window) for these, so the shot is a normal screen the reader recognizes. Reserve
+  full-element capture for short, bounded elements.

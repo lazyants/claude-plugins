@@ -78,7 +78,7 @@
       "name": "enduser-handbook",
       "source": "./plugins/enduser-handbook",
       "description": "Generate and maintain a Di\u00e1taxis-structured end-user handbook for any project from a per-project profile, with live screenshot capture and ongoing completeness audits; ships an Obsidian-vault publish adapter.",
-      "version": "1.0.4",
+      "version": "1.0.5",
       "author": {
         "name": "Lazy Ants"
       },

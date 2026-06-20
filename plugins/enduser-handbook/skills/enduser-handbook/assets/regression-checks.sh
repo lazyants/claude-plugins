@@ -1,6 +1,11 @@
 #!/bin/sh
 # regression-checks.sh — measurable regression diff between a golden and a candidate chapter.
 #
+# GOLDEN SEMANTICS: <golden.md> must be the SAME chapter's prior version, not a different
+# (sibling/exemplar) chapter. Signals 1 (Sie-count ±10%) and 3 (H2-count exact) are bound to a
+# chapter's own length and structure, so comparing two different chapters fails them spuriously.
+# Use this chapter-over-chapter (before/after an edit), never cross-chapter.
+#
 # Usage: ./regression-checks.sh <golden.md> <candidate.md>
 #   EXPECTED_H1_WORD   word the candidate's H1 must contain (e.g. a project verb like
 #                      "verwalten"). Unset by default — signal 7 is skipped unless you set it.

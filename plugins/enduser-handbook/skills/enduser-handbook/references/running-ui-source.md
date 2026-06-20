@@ -19,6 +19,13 @@ This applies to whatever surface the project ships, as set by `stack.surface` in
 Everything else in the project that *describes* the UI is secondary evidence. You consult it
 to know what to look for; you do not trust it to tell you what's there.
 
+To enumerate the control surface from the running UI mechanically — rather than reading it
+off the source — use a tool that walks the **live DOM** and captures each control's
+text/title/aria-label/href/role (see the surface-enumeration pass in `completeness-gate.md`).
+That enumeration guidance is the normative, engine-agnostic rule;
+`../assets/surface-audit.playwright.ts` is a **non-normative reference implementation** for
+the Playwright reference case — fork it for other engines.
+
 ## Why secondary sources lie
 
 You will be tempted to skip a capture because "the code clearly shows the button is there" or

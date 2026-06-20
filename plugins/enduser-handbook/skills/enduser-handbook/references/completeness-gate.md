@@ -98,6 +98,60 @@ A short script that enumerates triggers from the source globs and prints the
 matrix template is reasonable project tooling — it does not replace the
 classify/status pass, which is a reading task.
 
+## Surface enumeration (mechanical first pass)
+
+Before the reading pass, do a mechanical first pass that enumerates the
+interactive surface so the matrix starts from observed controls, not from
+memory. Enumerate the **live DOM** — the controls actually rendered in the
+running UI — **not** the framework route/page source (a Blade/Vue/React page
+file can declare controls behind unmet `v-if`/role gates that never render, and
+miss ones injected at runtime). For each control capture, verbatim:
+
+- the **text** (the displayed label),
+- the **title** attribute,
+- the **aria-label**,
+- the **href**,
+- the **role**.
+
+**Include icon-only controls** — controls with no visible text. And **never
+filter the enumeration by text presence.** A `text || href`-style filter
+silently drops icon-only destructive controls (a delete/trash/tag glyph with an
+`aria-label` but no text node) — and an icon-only destructive control is exactly
+the row that gets missed, which is the failure this gate exists to catch (a
+short control count produces a fabricated coverage matrix). Keep every record;
+let the classify pass decide, not the enumerator.
+
+This guidance is the normative, engine-agnostic rule;
+`../assets/surface-audit.playwright.ts` is a **non-normative reference implementation**
+for the Playwright reference case — fork it for other engines.
+
+**PII boundary of the mechanical pass.** The enumeration captures control
+**identity** verbatim — `aria-label`, `title`, `name`, `href` (including
+`mailto:` addresses), and a genuine control's visible **text label** — because
+those *are* the label the matrix needs. A reference implementation can and should
+suppress text that is **not** a control label: a value-bearing control's user
+data (a `<textarea>`/`<select>`/contenteditable's content, an input's prefilled
+value) **and** the aggregate text of a non-control element matched only by a
+broad identity attribute (a `<div data-testid="customer-details">…</div>` data
+region or a row container) — that aggregate text is page data, not a label, so it
+is dropped. But it **cannot** strip PII that lives inside an **identity label it
+must keep**: a genuine control's own visible label (a clickable customer name, an
+`aria-label="Delete order for jane@example.com"`), and — because an icon-only
+control (`<span aria-label="Delete">`) is indistinguishable from a labelled data
+region (`<div aria-label="Jane jane@example.com">`) — the `aria-label`/`title` of
+**every** matched element is retained, so those can carry region PII too. No
+pattern mask can detect a bare name. So treat this pass as a **first pass, not a
+PII guarantee**: run it
+**only against seeded / non-PII data** (`capture-safety.md` seed hermeticity),
+and **scrub any residual PII from the matrix labels in the human classify pass
+before committing**. The enumerator is non-authoritative; the classify pass is
+what ships.
+
+While you are here, cross-check the two glossary lists for sync: the capture
+manifest's `glossary_terms` list (see `manifest-discipline.md`) and the chapter
+frontmatter's `glossary_terms` list are two separate lists that MUST match. A
+term in one but not the other is a drift defect — resolve it before publish.
+
 ## Block-vs-allow rules for publish
 
 The audit **blocks** publish when any of the following hold:

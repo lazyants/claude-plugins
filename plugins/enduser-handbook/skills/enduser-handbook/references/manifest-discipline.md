@@ -15,8 +15,12 @@ to produce, with — per chapter — the fields a human can audit in under a min
 - `route` — the in-app path the capture script will visit.
 - `role` — one value from `capture.auth_role_enum`; which logged-in user the
   capture runs as.
-- `glossaryTerms` — terms this chapter introduces or relies on; cross-checked
-  against the glossary discipline.
+- `glossary_terms` — terms this chapter introduces or relies on; cross-checked
+  against the glossary discipline. This list and the chapter frontmatter's
+  `glossary_terms` are **two separate lists that MUST be kept in sync** — the
+  completeness gate checks them against each other (see
+  `completeness-gate.md`). Renaming a term in one without the other is exactly
+  the kind of drift the manifest review exists to catch.
 - `steps[]` — ordered list of `{ id, label, action?, screenshot }` covering the
   flow the chapter teaches.
 
@@ -97,6 +101,33 @@ of throwing away wrong capture code dwarfs the cost of one extra review round.
 - Not auto-generated. A script that scrapes routes and emits a manifest skips
   the entire point of human review. The manifest is something you draft by
   reading the running UI and then ask a human to bless.
+
+## Shared-edit hotspots
+
+Three artifacts are **append-hotspots** — every chapter effort grows them, so
+parallel efforts on different chapters collide on the same lines:
+
+- the capture manifest (every chapter appends its entry),
+- the glossary index (every chapter appends its terms),
+- the chapter index (every chapter appends its link).
+
+When two efforts touch the same hotspot, resolve the conflict **additively** —
+keep both contributions — and then **re-run the project's type/lint check**
+before moving on. A blind "keep both" in a merge tool can fuse two manifest
+objects into one malformed entry (a dropped comma, two values under one key, a
+duplicated `slug`); the type/lint pass is what catches that the resolved file is
+still valid, not just textually merged.
+
+The durable fix is to **stop sharing the list at all**: split the manifest into
+**per-chapter modules** — e.g. `manifest/<slug>.ts` (or `<slug>.yml`)
+re-exported from a thin index — so each chapter effort edits only its own file
+and the index changes by one import line, not a contested array body. The same
+shape applies to the glossary and chapter indexes. Recommend this split to the
+project the first time two chapter efforts collide on a shared list.
+
+The engine-agnostic rules here are normative; any `*.playwright.*` asset shipped
+under `../assets/` is a **non-normative reference implementation** for the
+Playwright reference case — fork it for other engines.
 
 ## When the manifest changes
 

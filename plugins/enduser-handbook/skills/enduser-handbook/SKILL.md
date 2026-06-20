@@ -77,7 +77,7 @@ You do not publish screenshots containing personally identifiable information. C
 
 ### W1 — Discover the feature surface
 
-You list the routes/pages declared in `stack.backend.route_globs` and `stack.frontend.page_globs` to identify the page, its route, the required role from `capture.auth_role_enum`, and the post-mount data signal the page waits on (the engine-specific recipe lives in `capture.page_identity_signal`). Read the globs through the framework idioms named in `stack.backend.type` and `stack.frontend.type` — e.g. a Laravel route file groups differently than a Next.js `app/` tree, a Vue single-file component exposes its route differently than a React page. The page's data-readiness signal is typically an XHR to `stack.backend.api_url_prefix`; reference that prefix when you set the per-chapter wait condition.
+You list the routes/pages declared in `stack.backend.route_globs` and `stack.frontend.page_globs` to identify the page, its route, the required role from `capture.auth_role_enum`, and the post-mount data signal the page waits on (the engine-specific recipe lives in `capture.page_identity_signal`). Read the globs through the framework idioms named in `stack.backend.type` and `stack.frontend.type` — e.g. a Laravel route file groups differently than a Next.js `app/` tree, a Vue single-file component exposes its route differently than a React page. For client-rendered pages the data-readiness signal is typically an XHR to `stack.backend.api_url_prefix`; reference that prefix when you set the per-chapter wait condition. Server-rendered pages have no post-mount XHR — assert page identity on a heading/DOM element instead (see [references/page-identity.md](references/page-identity.md)).
 
 For each role in `capture.auth_role_enum`, you check `capture.role_flags[role]`. A granted flag only means the *control renders* — not that the role actually has the data. Three independent capture-feasibility gates apply per function:
 
@@ -85,7 +85,7 @@ For each role in `capture.auth_role_enum`, you check `capture.role_flags[role]`.
 - **Seed/staging data state** — does data exist to make the overlay non-empty/triggerable?
 - **Side-effect** — read-only / mutating / live-external / irreversible (per R3 + R5)?
 
-Then you enumerate the interactive surface within the page — root and component subtree — and build the coverage matrix (R4). A function you cannot fully capture is not dropped; it is disclosed in prose, and the blocking flag/state is recorded.
+Then you enumerate the interactive surface within the page — root and component subtree — and build the coverage matrix (R4). You enumerate from the running DOM rather than the source, capturing each control's verbatim text, title, aria-label, href, and role — icon-only controls included. [assets/surface-audit.playwright.ts](assets/surface-audit.playwright.ts) is a non-normative reference implementation of this enumeration for the Playwright reference case; the methodology is normative and engine-agnostic, so fork the asset for other engines. A function you cannot fully capture is not dropped; it is disclosed in prose, and the blocking flag/state is recorded.
 
 You record the chapter entry in the capture manifest per [references/manifest-discipline.md](references/manifest-discipline.md). The manifest must have a step for every capturable end-user-facing overlay — not just top-level page states.
 
@@ -95,7 +95,7 @@ You drive the capture using `capture.engine` and run `capture.command` exactly a
 
 After navigation to each page, you apply: **{{capture.page_identity_signal}}**. This sentence is the profile's engine-aware recipe; you translate it into the appropriate engine API call given `capture.engine` and `capture.command`. The principle (assert page identity before screenshot, not just URL) lives in [references/page-identity.md](references/page-identity.md) and applies even if the field is empty.
 
-You write captured assets to `capture.output_dir`. The capture pins the sandbox locale to `capture.locale` (a full POSIX locale such as `de_DE.UTF-8`), which drives both process locale and UI language in the running app; the bare content-language code lives in `language.code`. Live / irreversible / PII constraints from R5 and R6 bind every step — see [references/capture-safety.md](references/capture-safety.md).
+You write captured assets to `capture.output_dir`. The capture pins the sandbox locale to `capture.locale` (a full POSIX locale such as `de_DE.UTF-8`), which drives both process locale and UI language in the running app; the bare content-language code lives in `language.code`. Live / irreversible / PII constraints from R5 and R6 bind every step — see [references/capture-safety.md](references/capture-safety.md). The reusable capture-spec helper contract — fail-closed request guard, page-identity assertion, reproducible mask + leak-assert, safe dialog dismiss — lives in [references/capture-spec-helpers.md](references/capture-spec-helpers.md).
 
 ### W3 — Author the chapter
 
@@ -122,6 +122,10 @@ You read [references/publish-targets/<publish.target>.md](references/publish-tar
 - Any project-knowledge notes (e.g. updating a `CLAUDE.md` note, a session log).
 
 Assets remain at `capture.output_dir`. You never improvise the publish wiring from memory — every adapter-specific detail comes from the adapter file.
+
+### W6 — Revalidation / audit mode (existing chapters)
+
+When you re-validate an already-merged chapter rather than authoring a new one, you re-derive the feature surface from the running UI (as in W1) and diff it against the existing chapter and its manifest entry, then classify each delta as no-op, accepted-diff, or material. Revalidation skips only the initial accepted-manifest review for no-op or accepted-diff unchanged scope. Any material delta — to route, role, steps, glossary terms, side-effect class, or a changed/added/removed control or newly discovered interactive trigger — emits a delta manifest and halts for user acceptance per [references/manifest-discipline.md](references/manifest-discipline.md). See [references/revalidation.md](references/revalidation.md).
 
 ## Consistency over time
 
