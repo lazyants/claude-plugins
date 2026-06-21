@@ -185,6 +185,11 @@ Before you click any button during capture, run the checklist:
 3. Would the click hit an external system, a real customer, or mutate non-reversible
    state?
 4. Would the resulting screenshot expose anything from `capture.pii_categories`?
+5. Does the target return an error / 500 because a required file, record, or
+   integration is absent in the seeded env?
+6. Does the control render or send a LIVE document to an external system?
 
 If any answer is yes, stop at the current state, capture it, and disclose the action in
 prose. Resume navigation by closing the dialog or backing out — not by clicking through.
+For the disclosure sentence, fill in one of the "Disclosure prose templates" in
+`completeness-gate.md`.

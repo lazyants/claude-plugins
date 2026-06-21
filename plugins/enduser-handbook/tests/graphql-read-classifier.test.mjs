@@ -66,6 +66,22 @@ test('fails closed on non-POST methods', () => {
   assert.equal(classifyGraphqlRead({ method: 'GET', url: 'https://app.test/graphql', postData: JSON.stringify({ query: '{ me }' }) }), undefined);
 });
 
+test('returns undefined (does not throw) on beacon/SSE-shaped requests — predicate totality', () => {
+  // The capture guard now consults classifyRequest for ping/beacon and eventsource requests too
+  // (decideRoute hoists it above those branches), so it MUST be total: return undefined for any
+  // request it does not recognize and never throw. These shapes are not POST /graphql with an inline
+  // read body, so they must fall through cleanly to undefined.
+  const beacon = { method: 'POST', url: 'https://an.test/collect', postData: 'metric=1', resourceType: 'ping' };
+  const beaconGet = { method: 'GET', url: 'https://an.test/collect', postData: null, resourceType: 'ping' };
+  const sse = { method: 'GET', url: 'https://app.test/stream', postData: null, resourceType: 'eventsource' };
+  assert.doesNotThrow(() => classifyGraphqlRead(beacon));
+  assert.doesNotThrow(() => classifyGraphqlRead(beaconGet));
+  assert.doesNotThrow(() => classifyGraphqlRead(sse));
+  assert.equal(classifyGraphqlRead(beacon), undefined);
+  assert.equal(classifyGraphqlRead(beaconGet), undefined);
+  assert.equal(classifyGraphqlRead(sse), undefined);
+});
+
 test('fails closed when the URL is not a /graphql endpoint', () => {
   assert.equal(classifyGraphqlRead({ method: 'POST', url: 'https://app.test/api', postData: JSON.stringify({ query: '{ me }' }) }), undefined);
 });

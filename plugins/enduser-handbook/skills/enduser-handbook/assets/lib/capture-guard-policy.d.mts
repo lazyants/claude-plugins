@@ -23,7 +23,13 @@ export interface GuardDecision {
 /** Options for decideRoute. Only classifyRequest can admit an otherwise-blocked read. */
 export interface GuardPolicyOptions {
   denyPatterns?: Array<string | RegExp>;
-  classifyRequest?: (req: GuardRequest) => 'read' | undefined;
+  /**
+   * The single read/benign escape. 'read' ADMITS (allows) an otherwise-blocked read; 'benign' BLOCKS
+   * the request but excludes it from the dangerous ledger; anything else (incl. undefined) fails
+   * closed. Now consulted for ping/beacon and eventsource requests too, so it MUST be total — return
+   * `undefined` for any request it does not recognize and never throw.
+   */
+  classifyRequest?: (req: GuardRequest) => 'read' | 'benign' | undefined;
   allowBeacons?: boolean;
 }
 
@@ -44,7 +50,7 @@ export function matchesDeny(
 ): boolean;
 
 /**
- * Ordered classifier: deny < eventsource < beacon < classify-read < get-head < fail-closed.
- * Returns allow/block + a reason. Fails closed on anything not proven a read.
+ * Ordered classifier: deny < classify-benign < eventsource < beacon < classify-read < get-head <
+ * fail-closed. Returns allow/block + a reason. Fails closed on anything not proven a read.
  */
 export function decideRoute(req: GuardRequest, opts?: GuardPolicyOptions): GuardDecision;

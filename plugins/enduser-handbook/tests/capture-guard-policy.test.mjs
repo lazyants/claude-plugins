@@ -110,6 +110,47 @@ test('classify-read admits a GraphQL query; only exact "read" admits', () => {
   assert.equal(decideRoute(req({ method: 'POST', url: 'https://app.test/x', postData: 'x' }), { classifyRequest: () => true }).action, 'block');
 });
 
+test('classify-benign blocks (never allows) and wins over eventsource/beacon/fail-closed', () => {
+  // 'benign' means "known-harmless telemetry": block it (it never fires) but it is NOT counted
+  // dangerous. It must win over eventsource, beacon, and the fail-closed default — but never allow.
+  const benign = { classifyRequest: () => 'benign' };
+  // A fail-closed POST is now silenced as benign instead.
+  const post = decideRoute(req({ method: 'POST', url: 'https://an.test/_boost/logs' }), benign);
+  assert.equal(post.action, 'block');
+  assert.equal(post.reason, 'classify-benign');
+  // A ping/beacon: benign wins over the beacon branch (the predicate is now reached for beacons).
+  const beacon = decideRoute(req({ resourceType: 'ping', url: 'https://an.test/collect' }), benign);
+  assert.equal(beacon.action, 'block');
+  assert.equal(beacon.reason, 'classify-benign');
+  // An eventsource/SSE: benign wins over the eventsource branch.
+  const sse = decideRoute(req({ resourceType: 'eventsource', url: 'https://an.test/stream' }), benign);
+  assert.equal(sse.action, 'block');
+  assert.equal(sse.reason, 'classify-benign');
+});
+
+test('deny still wins over a benign verdict', () => {
+  // deny patterns + the built-in dangerous-verb block run BEFORE the hoisted classifier, so a
+  // 'benign' verdict cannot reopen a denied/destructive request.
+  assert.equal(
+    decideRoute(req({ method: 'POST', url: 'https://an.test/collect' }), {
+      denyPatterns: ['/collect'],
+      classifyRequest: () => 'benign',
+    }).reason,
+    'deny-pattern',
+  );
+  assert.equal(
+    decideRoute(req({ method: 'GET', url: 'https://app.test/items/5/delete' }), {
+      classifyRequest: () => 'benign',
+    }).reason,
+    'deny-dangerous-verb',
+  );
+});
+
+test('a stray-truthy classifyRequest still fails closed (only exact "read"/"benign" act)', () => {
+  // Neither 'read' nor 'benign' — a stray truthy must not admit nor silence; the POST fails closed.
+  assert.equal(decideRoute(req({ method: 'POST', url: 'https://app.test/x', postData: 'x' }), { classifyRequest: () => true }).reason, 'fail-closed');
+});
+
 test('plain GET/HEAD are allowed (after the deny step has cleared dangerous-verb GETs)', () => {
   assert.equal(decideRoute(req({ method: 'GET', url: 'https://cdn.test/font.woff2' })).action, 'allow');
   assert.equal(decideRoute(req({ method: 'HEAD', url: 'https://app.test/health' })).action, 'allow');

@@ -76,6 +76,40 @@ prose the end-user actually reads.
 A trigger that is neither documented nor disclosed is a **defect**. "Out of
 scope" only counts when it is written for the reader. Silence is not scope.
 
+## Disclosure prose templates
+
+When a row is disclosed rather than documented, do not invent the sentence from
+scratch each time — fill in one of these. Each is one sentence; replace every
+`{…}` with the project's real label and render it in the profile's
+`language.register`.
+
+- **Live-external send:** "The page also offers a **{action}** control; it is
+  not shown here because it dispatches a live request to **{external system}**,
+  which we do not trigger in the handbook."
+- **Permission-gated:** "A **{action}** control appears for **{role/permission}**;
+  the **{role}** used for this chapter does not have it."
+- **Read-only indicator:** "**{element}** is a read-only **{status/indicator}**
+  and is described in the symbol legend."
+- **Error-state on a missing prerequisite:** "The **{feature}** requires
+  **{prerequisite}** that is absent in the handbook environment, so it returns
+  an error state and is described rather than shown."
+
+## Disclose TRIGGER LIST
+
+Disclose-don't-capture is a mechanical call, not a judgement: disclose (do not
+capture) when **any** of the following holds.
+
+1. The target errors / 500s because a required file, record, or integration is
+   absent in the seeded environment.
+2. The control renders or sends a LIVE document or request to an external
+   system.
+3. Capturing it needs real (un-maskable) PII.
+4. The action is irreversible / destructive past a read-only open state.
+5. The control is gated to a role this chapter does not use.
+
+If none of these holds, the row is capturable — document it. If one does, write
+a disclosure sentence from the templates above.
+
 ## The audit walk-through
 
 Run this before every publish, not only on first authoring:
@@ -121,14 +155,29 @@ the row that gets missed, which is the failure this gate exists to catch (a
 short control count produces a fabricated coverage matrix). Keep every record;
 let the classify pass decide, not the enumerator.
 
+**Framework-styled controls are enumerated, but not "genuine".** The audit now
+also matches `.btn` / `[data-bs-toggle]` / `[data-toggle]` controls so a glyph
+styled as a Bootstrap button (`<span class="btn glyphicon-trash">`) is no longer
+invisible. But a control matched **only** by one of these class/attribute hooks
+is enumerated, not a "genuine control" — so its visible **text** is SUPPRESSED
+(a `<span class="btn">Jane Doe</span>` clickable name must not leak its label).
+Read its label from `aria-label`, `title`, or the human scrub, exactly as you
+would for an icon-only control. A real button (`<button class="btn">` /
+`<a class="btn" href>`) is genuine on its own tag/href and keeps its label as
+before.
+
 This guidance is the normative, engine-agnostic rule;
 `../assets/surface-audit.playwright.ts` is a **non-normative reference implementation**
 for the Playwright reference case — fork it for other engines.
 
 **PII boundary of the mechanical pass.** The enumeration captures control
 **identity** verbatim — `aria-label`, `title`, `name`, `href` (including
-`mailto:` addresses), and a genuine control's visible **text label** — because
-those *are* the label the matrix needs. A reference implementation can and should
+`mailto:` addresses), `className` (`class`), and a genuine control's visible
+**text label** — because those *are* the label the matrix needs. `className` is
+developer-authored (utility / framework / icon classes) and is captured for the
+destructive-control classification; treat it as a verbatim field under this same
+boundary, and scrub it in the human pass if an app encodes record/user slugs
+into class names (`class="customer-row-jane-doe"`). A reference implementation can and should
 suppress text that is **not** a control label: a value-bearing control's user
 data (a `<textarea>`/`<select>`/contenteditable's content, an input's prefilled
 value) **and** the aggregate text of a non-control element matched only by a

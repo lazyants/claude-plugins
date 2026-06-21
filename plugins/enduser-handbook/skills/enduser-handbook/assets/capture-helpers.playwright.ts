@@ -29,11 +29,20 @@ export interface CaptureGuardOptions {
   /** URL substrings/regexes that must ALWAYS be blocked + recorded, regardless of method. */
   denyPatterns: Array<string | RegExp>;
   /**
-   * The single read escape hatch. Return the exact string 'read' to admit an otherwise-blocked
-   * request (e.g. a GraphQL query — inspect postData for `query` vs `mutation`). Any other return
-   * value (including undefined) is treated as non-read and falls through to fail-closed.
+   * The single read/benign escape hatch — two non-undefined verdicts, no built-in defaults (the
+   * author supplies the predicate):
+   *   - return `'read'` to ADMIT an otherwise-blocked request (e.g. a GraphQL query — inspect
+   *     postData for `query` vs `mutation`);
+   *   - return `'benign'` to BLOCK a known-harmless dev-telemetry request (a console-log POST, a
+   *     Sentry beacon) WITHOUT counting it dangerous — it never fires, but `assertNoDangerousHits()`
+   *     will not false-trip on it (it lands in the separate `blockedBenign` ledger);
+   *   - anything else (including `undefined`) is non-read/non-benign and falls through to fail-closed.
+   *
+   * Totality contract: the predicate is now consulted for ping/beacon and eventsource requests too
+   * (the v1.0.5 beacon branch returned before it could run), so it MUST return `undefined` for any
+   * request it does not recognize and MUST NOT throw.
    */
-  classifyRequest?: (req: ClassifiedRequest) => 'read' | undefined;
+  classifyRequest?: (req: ClassifiedRequest) => 'read' | 'benign' | undefined;
   /** Exceptional opt-in for analytics beacons. denyPatterns still win over it. */
   allowBeacons?: boolean;
 }
@@ -45,9 +54,16 @@ export interface CaptureGuard {
    * timer each time one arrives), giving a delayed beacon/fetch/WebSocket fired after the last
    * interaction time to reach the handler — capped at `maxMs` so it cannot hang. This is best-effort,
    * NOT a guarantee that every late request has settled; a request that fires after the drain window
-   * is not detected. Call it in a `finally`, before closing the context.
+   * is not detected. Call it in a `finally`, before closing the context. It gates on the
+   * `dangerousHits` ledger ONLY — requests classified `'benign'` are excluded by construction.
    */
   assertNoDangerousHits(quietMs?: number, maxMs?: number): Promise<void>;
+  /**
+   * Read-only snapshot of the requests blocked as `'benign'` (the classify-benign verdict) during
+   * capture — for observability/debugging. These are NOT counted dangerous and never block
+   * `assertNoDangerousHits()`. Returns a copy.
+   */
+  blockedBenign(): string[];
 }
 
 /**
@@ -69,11 +85,21 @@ export async function installCaptureGuard(
   { denyPatterns, classifyRequest, allowBeacons = false }: CaptureGuardOptions,
 ): Promise<CaptureGuard> {
   const dangerousHits: string[] = [];
-  // Bumped on every recorded hit (HTTP or WebSocket) so the drain loop below can detect "a new hit
-  // arrived during the quiet window" and reset its timer.
+  // Requests blocked as known-harmless dev telemetry (the classify-benign verdict). Kept in a
+  // SEPARATE ledger so they are aborted (they never fire) but do NOT count toward
+  // assertNoDangerousHits, and do NOT bump lastHitAt — a chatty telemetry page must not stretch the
+  // drain window.
+  const blockedBenign: string[] = [];
+  // Bumped on every recorded DANGEROUS hit (HTTP or WebSocket) so the drain loop below can detect "a
+  // new hit arrived during the quiet window" and reset its timer. Benign blocks do not bump it.
   let lastHitAt = 0;
 
   const record = (route: Route, req: Request, reason: string): Promise<void> => {
+    if (reason === 'classify-benign') {
+      // Block it (it never fires) but do not count it dangerous and do not stretch the drain window.
+      blockedBenign.push(`${reason}: ${req.method()} ${req.url()}`);
+      return route.abort();
+    }
     dangerousHits.push(`${reason}: ${req.method()} ${req.url()}`);
     lastHitAt = Date.now();
     return route.abort();
@@ -132,6 +158,7 @@ export async function installCaptureGuard(
         );
       }
     },
+    blockedBenign: () => [...blockedBenign],
   };
 }
 
@@ -212,9 +239,73 @@ export async function assertIdentity(
   }
 }
 
-/** Element-scoped screenshot. Use for a single component/region. */
-export async function captureRegion(locator: Locator, path: string): Promise<void> {
+/**
+ * Element-scoped screenshot. Use for a single component/region.
+ *
+ * With `{ maxHeight }`, guards against a RUNAWAY-height element (a layout bug ballooning a modal to
+ * tens of thousands of px) by temporarily clamping the element's rendered height before the shot:
+ * when the element is taller than `maxHeight`, its OWN `scrollTop` is reset to 0 and a temporary
+ * inline `max-height`/`overflow: hidden` is applied, the shot is taken at `scale: 'css'` (DPR-neutral,
+ * so a smoke-check on image height ≈ `maxHeight` holds in CSS pixels), then the prior inline `style`
+ * attribute + `scrollTop` are RESTORED EXACTLY (the whole attribute is rewritten — preserving
+ * `!important` priorities and `overflow-x/y` shorthands — or removed if there was none) in a `finally`.
+ * This is a CSS height clamp, NOT a
+ * viewport clip — it is viewport-independent (a `page.screenshot({ clip })` path breaks when
+ * `maxHeight` exceeds the viewport height or the element is not top-aligned). The `scrollTop = 0`
+ * reset is load-bearing: `locator.screenshot()` of an already-scrolled container captures its CURRENT
+ * offset, not the top.
+ *
+ * CAVEATS: (a) the clamp shows ONLY the top `maxHeight` of the element — content below is hidden, so a
+ * legitimately long region must be paginated (capture in sections) or its truncation disclosed; this
+ * is a runaway-height guard, not a tall-capture solution. (b) Only the clamped element's OWN scroll is
+ * reset; a deeply-nested INNER scroll container can still render at its own offset (out of scope here).
+ * When `maxHeight` is omitted or the element is shorter, the plain element screenshot is used.
+ */
+export async function captureRegion(
+  locator: Locator,
+  path: string,
+  opts: { maxHeight?: number } = {},
+): Promise<void> {
   await locator.waitFor({ state: 'visible' });
+
+  const { maxHeight } = opts;
+  if (maxHeight !== undefined) {
+    const height = await locator.evaluate((el) => el.getBoundingClientRect().height);
+    if (height > maxHeight) {
+      // Save the FULL inline `style` attribute + scrollTop, then clamp from the top, shoot, and ALWAYS
+      // restore. Saving the whole attribute (not individual `el.style.*` shorthands) makes the restore
+      // EXACT: reassigning `el.style.maxHeight`/`el.style.overflow` would drop an `!important` priority
+      // and clobber a pre-existing `overflow-x`-only inline style (the shorthand reads ''), corrupting a
+      // later capture of the same element. `setProperty` MERGES the clamp into any existing inline style.
+      const saved = await locator.evaluate(
+        (el, h) => {
+          const target = el as HTMLElement;
+          const prior = { styleAttr: target.getAttribute('style'), scrollTop: target.scrollTop };
+          target.scrollTop = 0;
+          target.style.setProperty('max-height', `${h}px`);
+          target.style.setProperty('overflow', 'hidden');
+          return prior;
+        },
+        maxHeight,
+      );
+      try {
+        // scale: 'css' keeps the produced image at 1:1 CSS pixels (DPR-neutral smoke-check).
+        await locator.screenshot({ path, scale: 'css' });
+      } finally {
+        await locator.evaluate(
+          (el, prior) => {
+            const target = el as HTMLElement;
+            // Exact restore: rewrite the whole inline style attribute, or remove it if there was none.
+            if (prior.styleAttr === null) target.removeAttribute('style');
+            else target.setAttribute('style', prior.styleAttr);
+            target.scrollTop = prior.scrollTop;
+          },
+          saved,
+        );
+      }
+      return;
+    }
+  }
   await locator.screenshot({ path });
 }
 

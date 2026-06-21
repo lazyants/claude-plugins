@@ -43,6 +43,13 @@ export interface ControlRecord {
   role: string | null;
   /** data-testid attribute, or null. */
   testId: string | null;
+  /**
+   * class attribute, VERBATIM (never suppressed) — or null. Primarily the destructive heuristic's
+   * signal for icon-only controls (glyphicon-trash / fa-trash / mdi-delete) and the only identity
+   * such a control has beyond aria-label. A verbatim field under the documented PII boundary
+   * (seeded data + human scrub), since a minority of apps encode record/user slugs into class names.
+   */
+  className: string | null;
 }
 
 /** A ControlRecord after normalization, carrying its enumeration index and the heuristic shape hint. */

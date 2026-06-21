@@ -24,6 +24,7 @@ const ATTR_TESTID = 'data-testid';
 const ATTR_TYPE = 'type';
 const ATTR_VALUE = 'value';
 const ATTR_NAME = 'name';
+const ATTR_CLASS = 'class';
 // A native <input type="submit|button|reset|image"> carries its visible LABEL in the `value`
 // attribute, not textContent — reading it keeps "<input type=submit value=Delete>" from becoming a
 // label-less, mis-counted control. BUT a text-entry input's `value` attribute can be PREFILLED USER
@@ -63,6 +64,15 @@ export const INTERACTIVE_SELECTOR = [
   '[role=status]',
   'a[download]',
   'a[href^="mailto:"]',
+  // Framework button/toggle classes (Bootstrap et al.): a glyph/icon control styled as a button
+  // ('<span class="btn glyphicon-trash">', '<div data-bs-toggle="dropdown">') is invisible to a
+  // tag/role/href-only enumeration. These are ENUMERATED as controls so they are counted, but they
+  // are NOT "genuine controls" (isGenuineControl keys off tag/role/href/editable, never class) — a
+  // non-genuine '<span class="btn">' therefore keeps its text SUPPRESSED, preserving the PII-leak
+  // whitelist (a '<span class="btn">Jane Doe</span>' must not leak its label).
+  '.btn',
+  '[data-bs-toggle]',
+  '[data-toggle]',
 ].join(', ');
 
 // Value-bearing controls hold USER DATA, not a static label, in textContent (or value): a <textarea>
@@ -174,7 +184,8 @@ function tokenize(value) {
  *                      arg?: string) => Promise<any> }} handle
  * @returns {Promise<{ tag: string|null, text: string, value: string|null, hasDestructiveText: boolean,
  *                      name: string|null, title: string|null, ariaLabel: string|null,
- *                      href: string|null, role: string|null, testId: string|null }>}
+ *                      href: string|null, role: string|null, testId: string|null,
+ *                      className: string|null }>}
  */
 export async function extractRecord(handle) {
   // tagName + textContent come from the element itself, not from an attribute. We read them in one
@@ -205,6 +216,13 @@ export async function extractRecord(handle) {
   const type = (await handle.getAttribute(ATTR_TYPE)) ?? '';
   const role = await handle.getAttribute(ATTR_ROLE);
   const href = await handle.getAttribute(ATTR_HREF);
+  // `class` is developer-authored (utility/framework/icon classes) — read VERBATIM and never
+  // suppressed. It is primarily the destructive heuristic's signal (glyphicon-trash / fa-trash /
+  // mdi-delete) for an icon-only control that carries no other label, and the only identity such a
+  // control has beyond aria-label. A minority of apps encode record/user slugs into class names, so
+  // className is a verbatim console/matrix field under the SAME documented PII boundary as the
+  // identity labels (seeded data + human scrub) — see completeness-gate.md; it is NOT redacted.
+  const className = await handle.getAttribute(ATTR_CLASS);
   const valueBearing = isValueBearing(tag, type, editable);
 
   // Log raw textContent ONLY for a genuine LEAF control — genuine (its text could be its actionable
@@ -255,6 +273,7 @@ export async function extractRecord(handle) {
     href,
     role,
     testId: await handle.getAttribute(ATTR_TESTID),
+    className,
   };
 }
 
@@ -269,7 +288,8 @@ export async function extractRecord(handle) {
  * 'unclassified' result means "the heuristic saw nothing" — it does NOT mean "safe".
  *
  * @param {{ text: string, value?: string|null, hasDestructiveText?: boolean, title: string|null,
- *           ariaLabel: string|null, href: string|null, role: string|null, testId: string|null }} record
+ *           ariaLabel: string|null, href: string|null, role: string|null, testId: string|null,
+ *           className?: string|null }} record
  * @returns {'candidate-destructive' | 'unclassified'}
  */
 export function classifyByShape(record) {
@@ -278,9 +298,11 @@ export function classifyByShape(record) {
   if (record.hasDestructiveText) return 'candidate-destructive';
   // Scan the human-meaningful fields. text + value are included so a literal "Delete" button label —
   // whether it lives in textContent or in a native input's `value` attribute — is flagged even when
-  // it carries no href/testId. Each value is tokenized so camelCase/snake_case/kebab/URL-segment
-  // joins (deleteUser, remove_item, /items/5/delete) match the bare verb.
-  const fields = [record.text, record.value, record.title, record.ariaLabel, record.href, record.testId];
+  // it carries no href/testId. className is included so an icon class (glyphicon-trash / fa-trash /
+  // bi-trash / mdi-delete) on a label-less control still flags. Each value is tokenized so
+  // camelCase/snake_case/kebab/URL-segment joins (deleteUser, remove_item, /items/5/delete,
+  // glyphicon-trash) match the bare verb; matching is token-exact so "removed-item"/"undelete" do not.
+  const fields = [record.text, record.value, record.title, record.ariaLabel, record.href, record.testId, record.className];
   for (const value of fields) {
     if (containsDestructiveToken(value)) return 'candidate-destructive';
   }
