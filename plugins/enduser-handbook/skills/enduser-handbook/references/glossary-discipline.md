@@ -88,7 +88,7 @@ In each chapter, you link the canonical term on its first occurrence to its glos
 Subsequent uses in the same chapter are plain text.
 
 - The link target is the entry inside `publish.glossary_dir`. The link syntax depends on the
-  publish target — the adapter at `references/publish-targets/<publish.target>.md` controls the
+  publish target — the resolved publish-target adapter file (see SKILL.md Step 0b) controls the
   exact form. You produce the link; the adapter dictates whether it is a wikilink, a relative
   markdown link, an anchor, or something else.
 - First occurrence is per chapter, not per handbook. A reader who lands on chapter seven via search

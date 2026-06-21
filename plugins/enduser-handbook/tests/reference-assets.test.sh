@@ -405,6 +405,12 @@ has "static-md: network halt message"      'writes local files only'      "$SMD"
 has  "skill: filename normalization rule" 'underscores with hyphens'                 "$SKILL"
 has  "skill: dynamic halt list"           'files in this directory minus README.md'  "$SKILL"
 hasnt "skill: stale hardcoded halt gone"  'Available: obsidian-vault.'               "$SKILL"
+# Step 0b AND W5 (SKILL) plus the publish-targets README must use the resolved (hyphenated) adapter
+# name — none may reintroduce the raw un-normalized '<publish.target>.md' form, which would send
+# static_md to a non-existent static_md.md.
+PTREADME="$REFS/publish-targets/README.md"
+hasnt "skill: no raw un-normalized adapter path"     '<publish.target>.md' "$SKILL"
+hasnt "publish-targets README: no raw adapter path"  '<publish.target>.md' "$PTREADME"
 
 # Profile honesty: the example must not over-promise a single-adapter ship.
 hasnt "profile: no over-promise" 'only obsidian_vault ships' "$PROF"

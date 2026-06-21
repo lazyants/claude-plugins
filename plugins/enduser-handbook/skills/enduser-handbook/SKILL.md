@@ -113,7 +113,7 @@ If `glossary.english_code_required` is true, every entry carries an English code
 
 ### W5 — Publish
 
-You read [references/publish-targets/<publish.target>.md](references/publish-targets/) and you follow its wiring exactly. The adapter tells you:
+You read the publish-target adapter file resolved in Step 0b — `references/publish-targets/<resolved-name>.md`, where `<resolved-name>` is the `publish.target` value lowercased with underscores replaced by hyphens (`static_md` → `static-md.md`) — and you follow its wiring exactly. The adapter tells you:
 
 - Where chapter files land — you write the chapter to `publish.chapters_dir/<slug>.md`.
 - Where INDEX / dashboard / log files live and how to wire them.
