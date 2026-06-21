@@ -1,21 +1,21 @@
 # Publish-target adapters
 
-This directory holds one Markdown file per supported publish target. The base `SKILL.md` selects an adapter at the publish step by reading `references/publish-targets/<publish.target>.md`, where `<publish.target>` is the value of `publish.target` in the consuming project's `.claude/handbook/profile.yml`.
+This directory holds one Markdown file per supported publish target. The base `SKILL.md` selects an adapter at the publish step by reading `references/publish-targets/<resolved-name>.md`, where `<resolved-name>` is the `publish.target` value in the consuming project's `.claude/handbook/profile.yml`, lowercased with underscores replaced by hyphens (see "Naming").
 
 ## Selection mechanism
 
 At the publish step, the base skill does this (in prose, not code):
 
 1. Read `publish.target` from the loaded profile.
-2. Try to open `references/publish-targets/<publish.target>.md` (e.g. `obsidian-vault.md` when `publish.target: obsidian_vault`).
+2. Try to open `references/publish-targets/<resolved-name>.md`, where `<resolved-name>` is the `publish.target` value lowercased with underscores replaced by hyphens (e.g. `obsidian-vault.md` when `publish.target: obsidian_vault`, `static-md.md` when `publish.target: static_md`). See "Naming" below.
 3. If the file does not exist, halt with: `"No publish-target adapter for <value>. Available: <list of files in this directory minus README.md>."` No partial output, no file writes.
 4. Otherwise follow the adapter's instructions to write the chapter, wire it into the index/parent, and add glossary entries.
 
 The base skill never branches on target name in its own prose. All target-specific knowledge lives in the adapter file. This is the only extension point.
 
-## What ships in v1
+## What ships
 
-Only `obsidian-vault.md` ships. The plan names four other candidates — `confluence`, `gitbook`, `docusaurus`, `static_md` — none of which are implemented. Setting `publish.target` to any of those triggers the halt above.
+Two adapters ship: `obsidian-vault.md` and `static-md.md`. The latter is the universal plain-Markdown fallback — it publishes to a GitHub wiki, an MkDocs tree, a GitBook (via `SUMMARY.md`), or a plain repo. Three candidates remain unimplemented — `confluence`, `gitbook`, `docusaurus`; setting `publish.target` to any of those triggers the halt above.
 
 ## Adding a new target X
 

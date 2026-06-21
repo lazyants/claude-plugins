@@ -360,6 +360,81 @@ else
   echo "  note  no local esbuild (and never network-fetching npx -y) — skipping the .ts syntax check"
 fi
 
+echo "== publish-target adapters =="
+SMD="$REFS/publish-targets/static-md.md"
+PROF="$ASSETS/handbook.profile.example.yml"
+
+if [ -f "$SMD" ]; then ok "static-md adapter exists"; else bad "static-md adapter missing"; fi
+
+# Exact-key bindings — each profile key the adapter must resolve, named verbatim.
+has "static-md: binds publish.chapters_dir"               'publish.chapters_dir'               "$SMD"
+has "static-md: binds publish.index_file"                 'publish.index_file'                 "$SMD"
+has "static-md: binds publish.glossary_dir"               'publish.glossary_dir'               "$SMD"
+has "static-md: binds publish.frontmatter_required"       'publish.frontmatter_required'       "$SMD"
+has "static-md: binds publish.section_labels.prerequisites" 'publish.section_labels.prerequisites' "$SMD"
+has "static-md: binds publish.section_labels.related"     'publish.section_labels.related'     "$SMD"
+has "static-md: binds publish.wikilinks"                  'publish.wikilinks'                  "$SMD"
+has "static-md: binds capture.output_dir"                 'capture.output_dir'                 "$SMD"
+
+has_ci "static-md: adapter documents halt conditions" 'halt' "$SMD"
+
+# Relative-link mandate: pins the general formula AND both worked path examples.
+has "static-md: cross-subtree relative example" '](../'    "$SMD"
+has "static-md: teaches the relative rule"       'relative' "$SMD"
+has "static-md: pins the relative-path formula"  'relative(dirname(chapter_file), target_file)' "$SMD"
+has "static-md: documents vault-root index example" 'vault-root' "$SMD"
+has "static-md: documents repo-root index example"  'repo-root'  "$SMD"
+has "static-md: vault-root index path (one ../)"   '](../SUMMARY.md)'    "$SMD"
+has "static-md: repo-root index path (two ../)"    '](../../SUMMARY.md)' "$SMD"
+
+# No Obsidian leakage: never the literal wikilink symbol, never a Dataview fence.
+hasnt "static-md: no wikilink symbol" '[[' "$SMD"
+NEEDLE='```dataview'
+hasnt "static-md: no dataview block" "$NEEDLE" "$SMD"
+
+# Requires wikilinks: false for the static target.
+has "static-md: requires wikilinks false" 'wikilinks: false' "$SMD"
+
+# Each halt condition carries its exact quoted message (adapter contract, publish-targets/README.md:31).
+has "static-md: index_file halt message"   'writable table of contents'   "$SMD"
+has "static-md: chapters_dir halt message" 'cannot write chapters'        "$SMD"
+has "static-md: wikilinks halt message"    'do not render on a static site' "$SMD"
+has "static-md: network halt message"      'writes local files only'      "$SMD"
+# Asset contract: screenshots remain at capture.output_dir (no fictional copy into chapters tree),
+# and capture.output_dir must resolve under chapters_dir so the static site can serve the images.
+has "static-md: assets remain at capture.output_dir"  'remain there'                    "$SMD"
+has "static-md: assets must resolve under the docs tree" 'MUST resolve under chapters_dir' "$SMD"
+has "static-md: capture.output_dir-under-tree halt"   'resolve under `publish.chapters_dir` so the rendered' "$SMD"
+
+# Glossary relative-link must NOT double-prefix `../` onto <glossary-rel> — <glossary-rel> already
+# equals relative(dirname(chapter), glossary_dir), so `../<glossary-rel>` over-climbs by one segment.
+hasnt "static-md: no double-prefixed glossary link" '](../<glossary-rel>'        "$SMD"
+has   "static-md: corrected glossary link template" '](<glossary-rel>/index.md'  "$SMD"
+# glossary_terms is an authoring/manifest field, never emitted into the minimal published frontmatter.
+has "static-md: glossary_terms authoring-only" 'authoring-time only' "$SMD"
+# Index wiring is two required writes PLUS a conditional glossary_seed reconciliation (not "exactly two").
+has "static-md: two-writes-plus-conditional framing" 'required writes**, plus one conditional' "$SMD"
+# index_file halt covers an existing-but-read-only file, not just an unwritable parent dir.
+has "static-md: index_file writable-if-exists halt" 'the file itself if it already exists' "$SMD"
+# A halt covers an unwritable glossary target (the adapter writes glossary_dir/index.md in index wiring).
+has "static-md: glossary-writable halt" 'cannot write the glossary' "$SMD"
+# wikilinks halt fires on unset too, not only explicit true (unset would default to Obsidian wikilinks-on).
+has "static-md: wikilinks halt covers unset" 'or leaves it unset' "$SMD"
+
+# SKILL filename-normalization rule + dynamic halt list (written by a sibling teammate; assert anyway).
+has  "skill: filename normalization rule" 'underscores with hyphens'                 "$SKILL"
+has  "skill: dynamic halt list"           'files in this directory minus README.md'  "$SKILL"
+hasnt "skill: stale hardcoded halt gone"  'Available: obsidian-vault.'               "$SKILL"
+# Step 0b AND W5 (SKILL) plus the publish-targets README must use the resolved (hyphenated) adapter
+# name — none may reintroduce the raw un-normalized '<publish.target>.md' form, which would send
+# static_md to a non-existent static_md.md.
+PTREADME="$REFS/publish-targets/README.md"
+hasnt "skill: no raw un-normalized adapter path"     '<publish.target>.md' "$SKILL"
+hasnt "publish-targets README: no raw adapter path"  '<publish.target>.md' "$PTREADME"
+
+# Profile honesty: the example must not over-promise a single-adapter ship.
+hasnt "profile: no over-promise" 'only obsidian_vault ships' "$PROF"
+
 TOTAL=$((PASS + FAIL))
 echo "----"
 echo "TOTAL: $PASS/$TOTAL passed, $FAIL failed"

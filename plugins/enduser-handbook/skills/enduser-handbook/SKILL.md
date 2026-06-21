@@ -33,7 +33,7 @@ If `style_guide.source` is set, you verify the file exists at that path (resolve
 
 ## Step 0b — Resolve the publish-target adapter
 
-You read `references/publish-targets/<publish.target>.md`. If the file does not exist you halt with: `No publish-target adapter for <publish.target>. Available: obsidian-vault.`
+You read the publish-target adapter file, resolving its filename from `publish.target` by lowercasing and replacing **underscores with hyphens** (e.g. `obsidian_vault` → `obsidian-vault.md`, `static_md` → `static-md.md`): `references/publish-targets/<resolved-name>.md`. If the file does not exist you halt with: `No publish-target adapter for <publish.target>. Available: <the .md files in this directory minus README.md>.`
 
 The resolved adapter governs every choice in W5 (paths, INDEX wiring, link syntax, frontmatter shape). Do not improvise publish wiring from memory.
 
@@ -107,13 +107,13 @@ Tone steady over months requires the per-session exemplar re-read per [reference
 
 ### W4 — Glossary
 
-For every domain term used, you ensure a canonical entry exists at `publish.glossary_dir`; you add it if missing. The canonical term language is `glossary.canonical_term_language`. The synonym field in each entry uses the localized field name `glossary.synonym_field_name`. New glossary entries are seeded from `publish.glossary_seed` (the project's glossary index/dashboard). You link terms from the chapter using the link syntax the publish-target adapter prescribes. See [references/glossary-discipline.md](references/glossary-discipline.md).
+For every domain term used, you ensure a canonical entry exists at `publish.glossary_dir`; you add it if missing. The canonical term language is `glossary.canonical_term_language`. The synonym field in each entry uses the localized field name `glossary.synonym_field_name`. When `publish.glossary_seed` is set and readable, new glossary entries are seeded from it (the project's glossary index/dashboard). You link terms from the chapter using the link syntax the publish-target adapter prescribes. See [references/glossary-discipline.md](references/glossary-discipline.md).
 
 If `glossary.english_code_required` is true, every entry carries an English code identifier alongside the localized canonical term — useful for cross-language search and for matching code identifiers.
 
 ### W5 — Publish
 
-You read [references/publish-targets/<publish.target>.md](references/publish-targets/) and you follow its wiring exactly. The adapter tells you:
+You read the publish-target adapter file resolved in Step 0b — `references/publish-targets/<resolved-name>.md`, where `<resolved-name>` is the `publish.target` value lowercased with underscores replaced by hyphens (`static_md` → `static-md.md`) — and you follow its wiring exactly. The adapter tells you:
 
 - Where chapter files land — you write the chapter to `publish.chapters_dir/<slug>.md`.
 - Where INDEX / dashboard / log files live and how to wire them.
@@ -129,4 +129,4 @@ When you re-validate an already-merged chapter rather than authoring a new one, 
 
 ## Consistency over time
 
-The handbook lives for years. Before each session you re-read the style guide, re-read the glossary index at `publish.glossary_seed`, and open the latest exemplar chapter per [references/tone-consistency.md](references/tone-consistency.md). After writing you run the coverage audit per [references/completeness-gate.md](references/completeness-gate.md) — silent omissions are defects, not stylistic choices.
+The handbook lives for years. Before each session you re-read the style guide, re-read the glossary index at `publish.glossary_seed` when it is set and readable, and open the latest exemplar chapter per [references/tone-consistency.md](references/tone-consistency.md). After writing you run the coverage audit per [references/completeness-gate.md](references/completeness-gate.md) — silent omissions are defects, not stylistic choices.

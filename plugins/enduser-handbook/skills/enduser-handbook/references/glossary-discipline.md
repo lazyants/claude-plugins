@@ -88,7 +88,7 @@ In each chapter, you link the canonical term on its first occurrence to its glos
 Subsequent uses in the same chapter are plain text.
 
 - The link target is the entry inside `publish.glossary_dir`. The link syntax depends on the
-  publish target — the adapter at `references/publish-targets/<publish.target>.md` controls the
+  publish target — the resolved publish-target adapter file (see SKILL.md Step 0b) controls the
   exact form. You produce the link; the adapter dictates whether it is a wikilink, a relative
   markdown link, an anchor, or something else.
 - First occurrence is per chapter, not per handbook. A reader who lands on chapter seven via search
@@ -100,13 +100,13 @@ Subsequent uses in the same chapter are plain text.
 
 ## Seeding from the existing index
 
-Before you author the first chapter — and again whenever you start work in a fresh area of the
-product — you scan `publish.glossary_seed` for terms that already exist. This file is the
-project's pre-existing list of domain terms; it tells you what canonical forms have already been
+When `publish.glossary_seed` is set and readable, before you author the first chapter — and again whenever you
+start work in a fresh area of the product — you scan it for terms that already exist. This file is
+the project's pre-existing list of domain terms; it tells you what canonical forms have already been
 agreed.
 
-- You read `publish.glossary_seed` in full. You note which terms are already entries under
-  `publish.glossary_dir` and which are still seeds awaiting a real entry.
+- When it is set and readable, you read `publish.glossary_seed` in full. You note which terms are already entries
+  under `publish.glossary_dir` and which are still seeds awaiting a real entry.
 - You reuse existing canonical forms verbatim. You do not invent a new spelling when one already
   exists in the seed.
 - When you create a real entry for a seeded term, you update the seed file's marker (whatever

@@ -1,10 +1,10 @@
 # Additional publish-target adapters for enduser-handbook
 
-**Status:** deferred · **Section:** enduser-handbook · **Surfaced:** 2026-06-18 (PR #2)
+**Status:** partially done (static_md shipped v1.1.0; Confluence/GitBook/Docusaurus deferred) · **Section:** enduser-handbook · **Surfaced:** 2026-06-18 (PR #2)
 
 ## Problem
 
-v1 ships only the `obsidian-vault` publish-target adapter. The profile schema already enumerates `confluence`, `gitbook`, `docusaurus`, `static_md` as `publish.target` values, and the base skill halts cleanly when an unimplemented target is selected. No adapter exists for them yet.
+The plugin now ships the `obsidian-vault` and `static-md` publish-target adapters. The profile schema also enumerates `confluence`, `gitbook`, `docusaurus` as `publish.target` values, and the base skill halts cleanly when an unimplemented target is selected. No adapter exists for those three yet.
 
 ## Work (per target, when a real project needs it)
 
