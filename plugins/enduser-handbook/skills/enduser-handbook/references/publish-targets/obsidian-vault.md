@@ -1,8 +1,8 @@
 # Publish target: Obsidian vault
 
-You read this file when `publish.target: obsidian_vault`. It is the only target-specific
-adapter that ships in v1. Every path here resolves through profile keys — never hardcode a
-project layout. Obsidian-specific names (Dataview, wikilinks, INDEX.md, `.md` frontmatter)
+You read this file when `publish.target: obsidian_vault`. It is the Obsidian-specific
+publish-target adapter (the `static_md` adapter publishes to a plain-Markdown docs tree
+instead). Every path here resolves through profile keys — never hardcode a project layout. Obsidian-specific names (Dataview, wikilinks, INDEX.md, `.md` frontmatter)
 are deliberate: that is this adapter's job.
 
 ## What "Obsidian vault" implies
