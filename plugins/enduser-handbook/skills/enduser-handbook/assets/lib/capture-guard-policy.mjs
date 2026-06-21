@@ -7,7 +7,7 @@
 // capture-helpers.playwright.ts so it is unit-testable without a browser and so the branch ORDER is
 // asserted on real code, not just on comment line numbers. decideRoute({method,url,postData,
 // resourceType}, opts) returns { action: 'allow' | 'block', reason }. The Playwright route handler
-// just maps allow→continue, block→abort+record. The six `// [guard:*]` sentinels live HERE, in
+// just maps allow→continue, block→abort+record. The seven `// [guard:*]` sentinels live HERE, in
 // order, so reordering the actual decisions is what the order test catches.
 //
 // This is DEFENSE-IN-DEPTH, not permission to click ambiguous controls — the human capture-safety
@@ -162,13 +162,25 @@ export function matchesDeny(req, patterns) {
 /**
  * @typedef {{ method: string, url: string, postData: string|null, resourceType: string }} GuardRequest
  * @typedef {{ action: 'allow'|'block', reason: string }} GuardDecision
- * @typedef {{ denyPatterns?: Array<string|RegExp>, classifyRequest?: (req: GuardRequest) => ('read'|undefined), allowBeacons?: boolean }} GuardPolicyOptions
+ * @typedef {{ denyPatterns?: Array<string|RegExp>, classifyRequest?: (req: GuardRequest) => ('read'|'benign'|undefined), allowBeacons?: boolean }} GuardPolicyOptions
+ *
+ * `classifyRequest` totality contract: the predicate is consulted ONCE per request (hoisted below
+ * the deny step) and is now also reached for ping/beacon and eventsource requests — v1.0.5 returned
+ * from the beacon branch BEFORE classify-read, so the predicate never saw a beacon. Because it is now
+ * total over every classified request it MUST return `undefined` for any request it does not
+ * recognize and MUST NOT throw; a throw escapes decideRoute (no fail-closed wrapper). 'read' ADMITS
+ * (allow), 'benign' BLOCKS but is not counted dangerous, anything else (incl. a stray truthy) falls
+ * through to the fail-closed default.
  */
 
 /**
- * The ordered classifier. Returns allow/block + a reason. The branch order is the contract:
- * deny < eventsource < beacon < classify-read < get-head < fail-closed. The built-in dangerous-verb
- * check is part of the deny step so the six sentinels keep their order and counts.
+ * The ordered classifier. Returns allow/block + a reason. The branch order is the contract (SEVEN
+ * sentinels): deny < classify-benign < eventsource < beacon < classify-read < get-head <
+ * fail-closed. The built-in dangerous-verb check is part of the deny step so the sentinels keep their
+ * order and counts. `classifyRequest` is hoisted to a single call after the deny step (see the
+ * typedef's totality contract): deny + the built-in dangerous-verb block always win over it; then a
+ * 'benign' verdict silences eventsource/beacon/fail-closed without flagging; a 'read' verdict admits
+ * an SSE or a generic POST; everything else fails closed.
  *
  * @param {GuardRequest} req
  * @param {GuardPolicyOptions} [opts]
@@ -189,10 +201,21 @@ export function decideRoute(req, opts = {}) {
     return { action: 'block', reason: 'deny-dangerous-verb' };
   }
 
+  // Hoist the classifier to a single call AFTER the deny step (deny must keep winning). The verdict
+  // is read by classify-benign, eventsource, and classify-read below. Per the totality contract it
+  // returns 'read' | 'benign' | undefined and never throws.
+  const verdict = classifyRequest?.(req);
+
+  // [guard:classify-benign]
+  // Known-harmless dev telemetry (e.g. a console-log POST or a Sentry beacon): block it (it never
+  // fires) but flag it benign so the guard does not count it dangerous. Wins over eventsource/beacon/
+  // fail-closed, but NOT over deny above.
+  if (verdict === 'benign') return { action: 'block', reason: 'classify-benign' };
+
   // [guard:eventsource]
   // SSE is a long-lived GET the generic allow would wrongly admit to a live external endpoint.
   if (resourceType === 'eventsource') {
-    if (classifyRequest?.(req) === 'read') return { action: 'allow', reason: 'eventsource-read' };
+    if (verdict === 'read') return { action: 'allow', reason: 'eventsource-read' };
     return { action: 'block', reason: 'eventsource' };
   }
 
@@ -205,7 +228,7 @@ export function decideRoute(req, opts = {}) {
 
   // [guard:classify-read]
   // The single read escape hatch (e.g. a GraphQL query). ONLY the exact string 'read' admits.
-  if (classifyRequest?.(req) === 'read') {
+  if (verdict === 'read') {
     return { action: 'allow', reason: 'classify-read' };
   }
 

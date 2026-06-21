@@ -2,6 +2,22 @@
 
 All notable changes to `lazyants/claude-plugins` are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is per-plugin, not repo-wide.
 
+## [enduser-handbook 1.0.6] — 2026-06-20
+
+Residual-hardening release for the v1.0.5 capture tooling, closing four gaps surfaced while authoring chapters. No change to the existing authoring rules; the engine-agnostic stance and the v1.0.5 PII-leak whitelist are preserved (the only new verbatim field, `className`, is brought under the documented seeded-data + human-scrub boundary).
+
+### Added
+- `references/completeness-gate.md` — a concrete **disclose TRIGGER LIST** (errors/500 on an absent prerequisite, live external send, un-maskable PII, irreversible action, role-gated control) + copy-paste **"Disclosure prose templates"**, replacing the previous principle-only guidance.
+- `assets/capture-helpers.playwright.ts` — `captureRegion` gains an opt-in `{ maxHeight }` cap that clamps a runaway-height region (temporary CSS `max-height`/`overflow` + `scrollTop` reset, shot at `scale: 'css'`, restored after); a separate `blockedBenign` ledger + `blockedBenign()` accessor.
+
+### Changed
+- `assets/lib/control-inventory.mjs` — `INTERACTIVE_SELECTOR` now also matches framework button/toggle controls (`.btn`, `[data-bs-toggle]`, `[data-toggle]`) so glyph/icon controls (`<span class="btn glyphicon-trash">`) are no longer missed; these are ENUMERATED but not "genuine" (their text stays suppressed, preserving the PII whitelist). `extractRecord` now captures `class` verbatim (`className`) and `classifyByShape` scans it for destructive icon classes (`glyphicon-trash`/`fa-trash`/`bi-trash`/`mdi-delete`).
+- `assets/lib/capture-guard-policy.mjs` — `classifyRequest` gains a `'benign'` verdict (`'read' | 'benign' | undefined`) and a new `[guard:classify-benign]` branch between `deny` and `eventsource`: known-harmless dev telemetry (laravel-boost `/_boost/`, Sentry) is BLOCKED (it never fires) but routed to the non-dangerous ledger so `assertNoDangerousHits()` no longer false-trips on console-logging pages. The predicate is now total (consulted for beacons/SSE too, so it must return `undefined` for unrecognized requests and never throw).
+- `assets/surface-audit.playwright.ts` — `className` added to the coverage-matrix label fallback (a class-only glyph control shows its class instead of `(unlabelled control)`).
+- `references/capture-safety.md`, `references/capture-spec-helpers.md`, `references/page-identity.md` — documented the disclose triggers, the `'benign'` verdict (`'read'` admits, `'benign'` blocks-but-not-counted), the `className` verbatim field under the PII boundary, and the `captureRegion` `maxHeight` cap.
+- `assets/capture.example.spec.ts` — example `classifyRequest` returning `'benign'` for `/_boost/` + Sentry shapes; `captureRegion(..., { maxHeight })` usage.
+- `plugins/enduser-handbook/tests/` — new `className`/glyph cases (control-inventory), `'benign'`-verdict cases (capture-guard-policy), a predicate-totality case (graphql-read-classifier); `reference-assets.test.sh` extended (SEVEN-sentinel order incl. `classify-benign`, plus new selector / `className` / `blockedBenign` / `maxHeight` / disclose assertions).
+
 ## [enduser-handbook 1.0.5] — 2026-06-20
 
 Tooling + revalidation release. The methodology already mandated a live-UI surface enumerator and the capture-safety/page-identity machinery, but shipped neither as runnable code — every chapter re-implemented them by hand and they drifted. This release ships them as non-normative Playwright **reference implementations** (the contract stays engine-agnostic — fork for other engines, exactly like `regression-checks.sh`), adds a first-class **revalidation/audit mode**, and fixes wording/consistency drifts surfaced across several authoring sessions. No change to the existing authoring rules.

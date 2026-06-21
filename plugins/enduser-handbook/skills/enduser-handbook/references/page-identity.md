@@ -116,3 +116,7 @@ representative of what a reader will see.
   a 100-row table becomes a strip nobody can read. Capture the **viewport** (the visible
   window) for these, so the shot is a normal screen the reader recognizes. Reserve
   full-element capture for short, bounded elements.
+- **For a region whose height can balloon (a tall modal or list), cap it.** Pass
+  `captureRegion`'s `{ maxHeight }` to clamp the rendered height; content below the clamp is
+  hidden, so paginate the capture in sections or disclose the remainder in prose. See
+  `capture-spec-helpers.md`.

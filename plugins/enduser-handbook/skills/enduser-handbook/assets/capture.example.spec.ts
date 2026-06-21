@@ -46,13 +46,23 @@ test('capture: items chapter', async ({ browser }) => {
   //    project's capture.live_action_examples; classifyRequest admits read-only POSTs (GraphQL
   //    queries) for POST-read apps. This is defense-in-depth — the human classify pass still
   //    governs every click below.
+  // Benign dev-telemetry recognizer — the AUTHOR's responsibility (there is NO built-in default).
+  // Returning 'benign' BLOCKS the request (it never fires) but keeps it OUT of the dangerous ledger,
+  // so assertNoDangerousHits() does not false-trip on a console-logging page (e.g. laravel-boost's
+  // POST /_boost/browser-logs or a Sentry beacon). Match ONLY shapes you have verified are harmless
+  // telemetry — over-broad matching would silence a real write. Tune these patterns to your stack.
+  const isBenignTelemetry = (url: string): boolean => url.includes('/_boost/') || /sentry/i.test(url);
+
   const guard = await installCaptureGuard(context, {
     denyPatterns: ['/delete', '/send', '/approve', '/finalize'],
-    // The SAFE GraphQL pattern — the guard's single allow escape-hatch. Admit ONLY a single, inline,
-    // unambiguous READ document; fail closed on anything else. The full ordered rules (POST /graphql
-    // inline body → no mutation/subscription → single top-level op → leading `query`/`{` token) live
-    // in lib/graphql-read-classifier.mjs, where they are unit-tested without a browser.
-    classifyRequest: (req) => classifyGraphqlRead(req),
+    // The single read/benign escape-hatch. 'benign' silences known-harmless telemetry (above);
+    // otherwise defer to the SAFE GraphQL classifier — admit ONLY a single, inline, unambiguous READ
+    // document ('read'), fail closed on anything else (undefined). The full ordered GraphQL rules
+    // (POST /graphql inline body → no mutation/subscription → single top-level op → leading
+    // `query`/`{` token) live in lib/graphql-read-classifier.mjs, unit-tested without a browser.
+    // classifyRequest must be TOTAL: return undefined for anything it does not recognize, never throw
+    // (it is now consulted for beacon/SSE requests too).
+    classifyRequest: (req) => (isBenignTelemetry(req.url) ? 'benign' : classifyGraphqlRead(req)),
   });
 
   // 3. Only now create the page.
@@ -80,7 +90,10 @@ test('capture: items chapter', async ({ browser }) => {
       patterns: [/[\w.+-]+@[\w-]+\.[\w.-]+/], // e-mail leak pattern; add project-specific patterns
       expectedCount: 2,
     });
-    await captureRegion(dialog, `${OUTPUT_DIR}/details-dialog.png`);
+    // A modal can balloon to a runaway height on a layout bug; cap the shot so a stray 80,000px
+    // dialog does not produce an unusable image. The cap hides content below maxHeight — paginate or
+    // disclose a legitimately long region (see captureRegion's JSDoc).
+    await captureRegion(dialog, `${OUTPUT_DIR}/details-dialog.png`, { maxHeight: 4000 });
     await dismissModal(page, { dialog, expectedText: 'Details', cancelLabel: 'Cancel' });
   } finally {
     // 6. In a finally so a delayed beacon/fetch fired during teardown is still drained and asserted

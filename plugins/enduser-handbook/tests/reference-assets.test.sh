@@ -3,8 +3,9 @@
 #
 # These are HARD gates on the SHAPED invariants that prose review keeps missing:
 #   - the surface-enumeration reference impl is unit-testable (no $$eval) and not text-gated;
-#   - the capture guard is installed at context level, fails closed, has ONE read escape hatch,
-#     and orders its branches deny < eventsource < beacon < classify-read < get-head < fail-closed;
+#   - the capture guard is installed at context level, fails closed, has ONE read escape ('read')
+#     + one benign-telemetry escape ('benign'), and orders its branches
+#     deny < classify-benign < eventsource < beacon < classify-read < get-head < fail-closed;
 #   - the example spec installs the guard before the first page and blocks service workers;
 #   - the revalidation carve-out is the PRECISE one (not the broad "skips the HALT");
 #   - the normative-vs-reference one-liner appears in every decision-5 touch point + asset header;
@@ -90,6 +91,17 @@ if grep -qF "'textarea'" "$CI" && grep -qF "'[contenteditable]'" "$CI"; then
 else
   bad "control-inventory: selector missing auto-save/inline-edit fields (textarea / contenteditable)"
 fi
+# v1.0.6: framework glyph/icon controls are ENUMERATED (not genuine) so a <span class="btn
+# glyphicon-trash"> add/delete control is not missed. All THREE matchers required.
+if grep -qF "'.btn'" "$CI" && grep -qF "'[data-bs-toggle]'" "$CI" && grep -qF "'[data-toggle]'" "$CI"; then
+  ok "control-inventory: selector covers framework button/toggle controls (.btn / data-bs-toggle / data-toggle)"
+else
+  bad "control-inventory: selector missing .btn / [data-bs-toggle] / [data-toggle]"
+fi
+# v1.0.6: class captured verbatim (className) + fed to the destructive heuristic. The ONLY new verbatim
+# field; covered by the documented PII boundary (asserted in the disclose-docs block below).
+has "control-inventory: captures class verbatim (ATTR_CLASS)"  'ATTR_CLASS' "$CI"
+has "control-inventory: classifyByShape scans record.className" 'record.className' "$CI"
 # value extraction must be TYPE-AWARE: keep value only for button-like inputs; a text-entry input's
 # prefilled value is PII and must NOT enter the console-logged inventory.
 has "control-inventory: type-aware value extraction (button-like only)" 'BUTTON_LIKE_INPUT_TYPES' "$ASSETS/lib/control-inventory.mjs"
@@ -162,28 +174,39 @@ for f in "$CH" "$POLICY"; do
   hasnt "guard: no appOrigin ($base)"       'appOrigin'       "$f"
 done
 
-# The six guard sentinels now live in the PURE policy module (decideRoute), so reordering the actual
+# The SEVEN guard sentinels now live in the PURE policy module (decideRoute), so reordering the actual
 # decisions — not just the comments — is what fails. Each EXACTLY once, line numbers STRICTLY
-# ASCENDING in the fixed order.
+# ASCENDING in the fixed order. Matching is per-sentinel exact (e.g. '// [guard:deny]'), so the header
+# prose "seven // [guard:*] sentinels" is not miscounted.
 echo "== capture-guard-policy.mjs guard sentinel order =="
 sentinel_ok=1
-for s in '// [guard:deny]' '// [guard:eventsource]' '// [guard:beacon]' '// [guard:classify-read]' '// [guard:get-head]' '// [guard:fail-closed]'; do
+for s in '// [guard:deny]' '// [guard:classify-benign]' '// [guard:eventsource]' '// [guard:beacon]' '// [guard:classify-read]' '// [guard:get-head]' '// [guard:fail-closed]'; do
   c="$(count_fixed "$s" "$POLICY")"
   if [ "$c" -ne 1 ]; then bad "guard sentinel appears exactly once: $s (found $c)"; sentinel_ok=0; else ok "guard sentinel present exactly once: $s"; fi
 done
 if [ "$sentinel_ok" -eq 1 ]; then
   L_DENY="$(line_of '// [guard:deny]' "$POLICY")"
+  L_BENIGN="$(line_of '// [guard:classify-benign]' "$POLICY")"
   L_ES="$(line_of '// [guard:eventsource]' "$POLICY")"
   L_BEACON="$(line_of '// [guard:beacon]' "$POLICY")"
   L_READ="$(line_of '// [guard:classify-read]' "$POLICY")"
   L_GET="$(line_of '// [guard:get-head]' "$POLICY")"
   L_FC="$(line_of '// [guard:fail-closed]' "$POLICY")"
-  if [ "$L_DENY" -lt "$L_ES" ] && [ "$L_ES" -lt "$L_BEACON" ] && [ "$L_BEACON" -lt "$L_READ" ] && [ "$L_READ" -lt "$L_GET" ] && [ "$L_GET" -lt "$L_FC" ]; then
-    ok "guard sentinels strictly ascending: deny<eventsource<beacon<classify-read<get-head<fail-closed"
+  if [ "$L_DENY" -lt "$L_BENIGN" ] && [ "$L_BENIGN" -lt "$L_ES" ] && [ "$L_ES" -lt "$L_BEACON" ] && [ "$L_BEACON" -lt "$L_READ" ] && [ "$L_READ" -lt "$L_GET" ] && [ "$L_GET" -lt "$L_FC" ]; then
+    ok "guard sentinels strictly ascending: deny<classify-benign<eventsource<beacon<classify-read<get-head<fail-closed"
   else
-    bad "guard sentinel order wrong: deny=$L_DENY es=$L_ES beacon=$L_BEACON read=$L_READ get=$L_GET fail=$L_FC"
+    bad "guard sentinel order wrong: deny=$L_DENY benign=$L_BENIGN es=$L_ES beacon=$L_BEACON read=$L_READ get=$L_GET fail=$L_FC"
   fi
 fi
+# v1.0.6: the benign-telemetry verdict. classifyRequest gains a 'benign' return that BLOCKS the request
+# (it never fires) but routes it to a SEPARATE non-dangerous ledger, so assertNoDangerousHits does not
+# false-trip on dev telemetry (laravel-boost /_boost/, Sentry). No new allowlist; the order test above
+# already proves classify-benign sits AFTER deny (deny still wins).
+for f in "$CH" "$POLICY" "$ASSETS/lib/capture-guard-policy.d.mts"; do
+  has "guard: classifyRequest admits a 'benign' verdict ($(basename "$f"))" "'benign'" "$f"
+done
+has "capture-helpers: separate blockedBenign ledger"                      'blockedBenign' "$CH"
+has "capture-helpers: assertNoDangerousHits still gates on dangerousHits" 'dangerousHits.length' "$CH"
 # The built-in dangerous-verb block must live in the deny step (finding 4).
 has "capture-guard-policy: built-in dangerous-verb block (deny-dangerous-verb)" 'deny-dangerous-verb' "$POLICY"
 # Percent-decode the path/query before scanning so encoded dangerous verbs cannot slip through.
@@ -220,6 +243,12 @@ has   "capture-helpers: spinner check counts visible indicators (not .first())" 
 # The pure identity matcher must FAIL CLOSED on a blank route/API target (an empty target otherwise
 # matches every URL via the '/' prefix).
 has   "identity-match: fails closed on a blank target" 'blank target' "$ASSETS/lib/identity-match.mjs"
+# v1.0.6: captureRegion gains an opt-in { maxHeight } that clamps a runaway-height region via a
+# temporary CSS max-height/overflow + scrollTop reset, shot at scale:'css', restored after (NOT a
+# viewport clip — the clip path is viewport-relative and breaks when maxHeight > viewport height).
+has "capture-helpers: captureRegion has a maxHeight cap option"          'maxHeight' "$CH"
+has "capture-helpers: captureRegion resets scrollTop for the top slice"  'scrollTop' "$CH"
+has "capture-helpers: captureRegion shoots at scale css (DPR-neutral)"   "scale: 'css'" "$CH"
 
 echo "== capture.example.spec.ts =="
 SPEC="$ASSETS/capture.example.spec.ts"
@@ -258,6 +287,14 @@ for f in "$REVAL" "$SKILL"; do
   has    "wording: $base — 'delta manifest'"                                  'delta manifest' "$f"
   has_ci "wording: $base — 'halt' (case-insensitive)"                         'halt' "$f"
 done
+
+echo "== v1.0.6 disclose docs + className PII boundary =="
+has "completeness-gate: disclosure prose templates"              'Disclosure prose templates' "$REFS/completeness-gate.md"
+has "completeness-gate: disclose trigger list"                   'TRIGGER LIST' "$REFS/completeness-gate.md"
+has "completeness-gate: className in the PII-boundary field list" 'className' "$REFS/completeness-gate.md"
+has "capture-spec-helpers: lists className in verbatim fields"    'className' "$REFS/capture-spec-helpers.md"
+has "surface-audit: className in the matrix-label fallback"       'className' "$SA"
+has "control-inventory.d.mts: declares className"                 'className' "$ASSETS/lib/control-inventory.d.mts"
 
 echo "== normative-vs-reference one-liner in every decision-5 touch point + asset header =="
 NORMATIVE='non-normative reference implementation'

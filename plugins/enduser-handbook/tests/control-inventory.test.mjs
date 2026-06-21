@@ -275,9 +275,54 @@ test('extractRecord suppresses text for an <a> WITHOUT href (not a navigable con
 
 test('INTERACTIVE_SELECTOR (enumeration selector) is exported and broad', () => {
   assert.equal(typeof INTERACTIVE_SELECTOR, 'string');
-  for (const part of ['button', 'input:not([type=hidden])', '[aria-label]', '[data-testid]', '.badge']) {
+  for (const part of ['button', 'input:not([type=hidden])', '[aria-label]', '[data-testid]', '.badge', '.btn', '[data-bs-toggle]', '[data-toggle]']) {
     assert.ok(INTERACTIVE_SELECTOR.includes(part), `INTERACTIVE_SELECTOR must include ${part}`);
   }
+});
+
+test('a non-genuine <span class="btn glyphicon-trash"> is enumerated but its text is SUPPRESSED; className flags destructive', async () => {
+  // The headline (a): a glyph control styled as a button. The SPAN is matched by the broadened .btn
+  // matcher but is NOT a genuine control (isGenuineControl never keys off class), so its text stays
+  // suppressed — preserving the PII whitelist (a '<span class="btn">Jane Doe</span>' must not leak).
+  // className is captured verbatim and carries the destructive signal via its glyphicon-trash token.
+  const record = await extractRecord(
+    stub({ 'aria-label': 'Delete', class: 'btn glyphicon-trash' }, { tag: 'SPAN', text: '' }),
+  );
+  assert.equal(record.text, '', 'a non-genuine .btn span must not log its text');
+  assert.equal(record.className, 'btn glyphicon-trash', 'class is captured verbatim');
+  assert.equal(record.ariaLabel, 'Delete');
+  assert.equal(classifyByShape(record), 'candidate-destructive', 'the glyphicon-trash class token flags destructive');
+});
+
+test('a text-labelled <span class="btn">Actions</span> is SUPPRESSED (a SPAN is not genuine) but className is kept', async () => {
+  // The documented trade: a text-labelled .btn span loses its visible label in the matrix (SPAN is
+  // not a genuine control), recovered from className / aria-label / the human scrub. This is the
+  // deliberate preservation of the v1.0.5 whitelist, NOT a regression — do not make .btn genuine.
+  const record = await extractRecord(stub({ class: 'btn' }, { tag: 'SPAN', text: 'Actions' }));
+  assert.equal(record.text, '', 'a non-genuine .btn span suppresses its text');
+  assert.equal(record.className, 'btn', 'class is captured verbatim even when text is suppressed');
+});
+
+test('a genuine <button class="btn btn-danger">Delete</button> KEEPS its label and is flagged destructive', async () => {
+  // A real Bootstrap button is already genuine via its BUTTON tag (not via class), so it keeps its
+  // label and is classified — the broadened matcher does not change genuine controls.
+  const record = await extractRecord(stub({ class: 'btn btn-danger' }, { tag: 'BUTTON', text: 'Delete' }));
+  assert.equal(record.text, 'Delete', 'a genuine leaf button keeps its label');
+  assert.equal(record.className, 'btn btn-danger');
+  assert.equal(classifyByShape(record), 'candidate-destructive');
+});
+
+test('className is null when the control has no class attribute', async () => {
+  const record = await extractRecord(stub({}, { tag: 'BUTTON', text: 'Save' }));
+  assert.equal(record.className, null, 'a missing class attribute is null, not undefined/empty');
+});
+
+test('a class containing "removed-item" does NOT flag destructive (token-exact: removed != remove)', async () => {
+  // Token-exact matching: tokenize('removed-item') → ['removed','item']; neither is a destructive
+  // verb, so an otherwise-clean control with only that class must stay unclassified (no false trip).
+  const record = await extractRecord(stub({ class: 'removed-item' }, { tag: 'BUTTON', text: 'Restore' }));
+  assert.equal(record.className, 'removed-item');
+  assert.equal(classifyByShape(record), 'unclassified', 'removed != remove — token-exact, no false positive');
 });
 
 test('a "delete"-containing textarea is NOT flagged destructive (user content, not an action)', async () => {

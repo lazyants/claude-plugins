@@ -31,13 +31,29 @@ other engines. The reference doc is normative; the `*.playwright.*` asset is one
   assertion **drains a short quiet period** before checking, so a delayed beacon/fetch fired after
   the last interaction is still caught.
 
+  **`classifyRequest` is one predicate with two non-`undefined` verdicts — `'read'` and `'benign'`
+  do opposite things.** `'read'` **ADMITS** (allows) the read escape: the otherwise-blocked GraphQL
+  query is let through. `'benign'` **BLOCKS** the request — it never fires — but EXCLUDES it from
+  the dangerous-hits assertion, so known-harmless dev telemetry (a laravel-boost `/_boost/` log
+  POST, a Sentry beacon) does not false-trip `assertNoDangerousHits()` on any page that
+  console-logs. Everything else (any other return, including a stray truthy) **fails closed**
+  (blocked + recorded as dangerous). Note the asymmetry: `'read'` allows, `'benign'` blocks — they
+  are not "both block". `classifyRequest` must be **total**: return `undefined` for anything it does
+  not recognize and never throw (the guard now consults it for beacon/SSE requests too). There is
+  still **NO write allowlist** — `'benign'` silences a block, it does not permit a write.
+
 - **Identity assertion** — before every shot, prove the page is the one the manifest declares: the
   route matches, the loading state is gone, and either the awaited response arrived
   (client-rendered) **or** the primary heading/DOM is visible (server-rendered — a first-class
   case, not a fallback). Fail loudly; never shoot whatever is on screen.
 
 - **Region / viewport capture** — element-scoped for a single component; viewport for long
-  unpaginated lists that overflow the element frame.
+  unpaginated lists that overflow the element frame. An opt-in `{ maxHeight }` clamps a
+  runaway-height region: when set and the element's rendered height exceeds it, the helper
+  captures only the top `maxHeight` (via a temporary CSS height clamp, restored after) — content
+  below the clamp is hidden, so **paginate** the capture in sections or **disclose** the truncation
+  in prose. It is a guard against a layout-bug height balloon (a modal ballooned to ~82,000px), not
+  a tall-capture solution; default behavior is unchanged when `maxHeight` is omitted.
 
 - **Modal open / dismiss** — assert the dialog's identifying text first, then dismiss via **Escape
   first**, falling back to a named negative/cancel control. **Never** the primary/first button,
@@ -74,8 +90,11 @@ spec at `../assets/capture.example.spec.ts` shows this end to end.
 
 The mechanical first pass for the coverage matrix (see `completeness-gate.md`) enumerates the
 **live DOM**, capturing every interactive trigger verbatim — text, title, aria-label, href, role,
-test id — including **icon-only** controls, and **never filtering by text presence**. The reference
-impl at `../assets/surface-audit.playwright.ts` factors per-control extraction into a
-browser-agnostic module (`../assets/lib/control-inventory.mjs`) so the "icon-only control dropped"
-regression is unit-testable. Enumeration is a hint; the human classify/status pass in
+test id, `className` — including **icon-only** controls, and **never filtering by text presence**.
+`className` is captured for the destructive-control classification (icon classes such as
+`glyphicon-trash`/`fa-trash`) and is covered by the **PII boundary of the mechanical pass** in
+`completeness-gate.md` — scrub it in the human pass if an app encodes record/user slugs into class
+names. The reference impl at `../assets/surface-audit.playwright.ts` factors per-control extraction
+into a browser-agnostic module (`../assets/lib/control-inventory.mjs`) so the "icon-only control
+dropped" regression is unit-testable. Enumeration is a hint; the human classify/status pass in
 `completeness-gate.md` is authoritative.

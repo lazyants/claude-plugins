@@ -9,14 +9,24 @@
 // badges — and NEVER filters by text presence. The output is a JSON inventory plus a markdown
 // coverage-matrix skeleton (one row per control) for the human classify/status pass.
 //
+// BROADENED MATCHERS: INTERACTIVE_SELECTOR (imported from lib/control-inventory.mjs — no selector
+// literal lives here) also enumerates framework button/toggle classes (.btn / [data-bs-toggle] /
+// [data-toggle]) so a glyph control styled as a button ('<span class="btn glyphicon-trash">') is
+// counted instead of silently missed. These are ENUMERATED-NOT-GENUINE: a non-genuine '<span
+// class="btn">' is counted but its text stays SUPPRESSED (isGenuineControl never keys off class), so
+// a '<span class="btn">Jane Doe</span>' does not leak its label — its identity comes from aria-label,
+// className, or the human scrub, exactly like an icon-only control. The control's class is captured
+// verbatim (className) as the destructive-heuristic signal and a last-resort matrix label.
+//
 // PII BOUNDARY (read before running): this is a mechanical, non-authoritative pass. extractRecord
 // SUPPRESSES the user-data fields (a value-bearing control's textContent/value), but a control's
-// IDENTITY fields — aria-label, title, name, href (e.g. a mailto address) — are logged VERBATIM
-// because they ARE the label the coverage matrix needs. Those can embed PII, including names that no
-// pattern mask can catch. So run this audit ONLY against seeded / non-PII data (capture-safety.md seed
-// hermeticity), and the human classify pass MUST scrub any residual PII from the coverage-matrix
-// labels before committing. The enumerator is a first pass, NOT a PII guarantee — see
-// references/capture-safety.md and references/completeness-gate.md.
+// IDENTITY fields — aria-label, title, name, href (e.g. a mailto address), className — are logged
+// VERBATIM because they ARE the label the coverage matrix needs. Those can embed PII, including names
+// that no pattern mask can catch (a minority of apps encode record/user slugs into class names). So
+// run this audit ONLY against seeded / non-PII data (capture-safety.md seed hermeticity), and the
+// human classify pass MUST scrub any residual PII from the coverage-matrix labels before committing.
+// The enumerator is a first pass, NOT a PII guarantee — see references/capture-safety.md and
+// references/completeness-gate.md.
 //
 // CRITICAL: extraction is done with page.$$(selector) + extractRecord(handle), NOT with the
 // eval-over-all variant (page.$$ + eval). That variant's callback is browser-serialized and cannot
@@ -90,7 +100,11 @@ export async function auditSurface({ page, route, heading, waitForApi, rowSelect
   console.log('| Trigger (verbatim UI label) | Side-effect class | Status |');
   console.log('|---|---|---|');
   for (const c of inventory) {
-    const label = c.text || c.ariaLabel || c.title || c.testId || c.name || c.href || '(unlabelled control)';
+    // className is the LAST fallback (after the identity fields) so a class-only glyph control — a
+    // '<span class="btn glyphicon-trash">' enumerated via the broadened matchers but carrying no
+    // text/aria-label/title/testid/name/href — surfaces its class string in the matrix instead of
+    // collapsing to '(unlabelled control)'. It is captured verbatim (under the PII boundary above).
+    const label = c.text || c.ariaLabel || c.title || c.testId || c.name || c.href || c.className || '(unlabelled control)';
     console.log(`| ${label} | TODO | TODO |`);
   }
 
