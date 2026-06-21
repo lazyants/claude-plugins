@@ -32,22 +32,31 @@ names come from the profile.
 
 ```
 {{publish.chapters_dir}}/
-  <chapter-slug>.md                    # one chapter per feature; slug is English kebab-case
-  assets/<chapter-slug>/NN-*.png       # screenshots captured for this chapter
+  <chapter-slug>.md                              # one chapter per feature; slug is English kebab-case
+{{capture.output_dir}}/<chapter-slug>/NN-*.png   # screenshots, retained here (NOT copied); MUST resolve under chapters_dir — see Assets
 {{publish.glossary_dir}}/
-  index.md                             # canonical glossary page (see glossary-discipline.md)
-{{publish.index_file}}                 # the flat table of contents (e.g. SUMMARY.md / README.md)
+  index.md                                       # canonical glossary page (see glossary-discipline.md)
+{{publish.index_file}}                           # the flat table of contents (e.g. SUMMARY.md / README.md)
 ```
 
 Chapter slugs are **always English kebab-case** even when the prose is in another language.
 The H1 and body render in `language.code`; only the filename and the URL-ish slug stay
 English. This keeps the file tree greppable and the link targets stable across translations.
 
-Screenshots are captured into `{{capture.output_dir}}/<chapter-slug>/` and published beside
-the chapter under `{{publish.chapters_dir}}/assets/<chapter-slug>/`. They are embedded by
-**relative path** from the chapter: `![alt](assets/<chapter-slug>/01-overview.png)`. Never
-absolute paths, never docs-root-rooted paths — a relative embed keeps the chapter portable if
-the docs tree is moved or renamed.
+## Assets
+
+Screenshots are captured into `{{capture.output_dir}}/<chapter-slug>/` and **remain there** — the
+base skill does not copy assets into the chapters tree (`capture.output_dir` is the single retained
+location; see `SKILL.md` W5, "Assets remain at `capture.output_dir`"). Embed each by a **relative
+path from the chapter to that retained location**: `![alt](<rel>/<chapter-slug>/01-overview.png)`,
+where `<rel>` is `relative(dirname(chapter_file), capture.output_dir)`. For the example layout
+(`capture.output_dir: vault/handbook/assets`, chapter in `vault/handbook/`) that resolves to
+`![alt](assets/<chapter-slug>/01-overview.png)`. Never absolute, never docs-root-rooted paths.
+
+A static renderer serves only files **inside** the published docs tree, so `capture.output_dir`
+MUST resolve under `publish.chapters_dir` (point it at e.g. `<chapters_dir>/assets`) — otherwise the
+embed resolves to a file outside the served tree and the image 404s while the rest of the page
+renders. This is a halt condition (below), and the link-integrity gate re-checks it per embed.
 
 ## Frontmatter
 
@@ -156,12 +165,17 @@ produce a partial tree:
    ensure its parent directory exists before publishing."
 2. **`publish.chapters_dir` is writable.** You cannot place chapters otherwise. Halt with:
    "static_md cannot write chapters — `publish.chapters_dir` is unset or not writable."
-3. **`publish.wikilinks: false`.** This target cannot render Obsidian wikilinks. If a
+3. **`capture.output_dir` resolves under `publish.chapters_dir`.** A static renderer serves only
+   files inside the published docs tree, so the retained screenshots must live within it. Halt with:
+   "static_md requires `capture.output_dir` to resolve under `publish.chapters_dir` so the rendered
+   site can serve screenshots — point it inside the docs tree (e.g. `<chapters_dir>/assets`) and
+   re-run."
+4. **`publish.wikilinks: false`.** This target cannot render Obsidian wikilinks. If a
    `static_md` profile sets `wikilinks: true`, halt with: "static_md requires `wikilinks: false`
    — Obsidian wikilinks do not render on a static site; set `publish.wikilinks: false` in the
    profile and re-run." Never silently emit plain links over a `wikilinks: true` profile — the
    profile and the output must agree.
-4. **No network.** This adapter is file-only. If publishing would require an HTTP call, an API
+5. **No network.** This adapter is file-only. If publishing would require an HTTP call, an API
    token, or auth (a hosted Confluence/GitBook API), that is a different target. Halt with:
    "static_md writes local files only — a hosted Confluence/GitBook API target needs a different
    `publish.target` adapter."
@@ -170,9 +184,10 @@ produce a partial tree:
 
 Before declaring the chapter published, you verify in this order and halt on the first failure:
 
-1. Every `![](…)` resolves to a PNG that actually exists under
-   `{{capture.output_dir}}/<chapter-slug>/` — no orphan embeds, no captures the run did not
-   produce.
+1. Every `![](…)` embed, resolved relative to the chapter, points at a PNG that actually exists
+   under `{{capture.output_dir}}/<chapter-slug>/` (the retained location), AND that location
+   resolves under `{{publish.chapters_dir}}` so the static site can serve it — no orphan embeds, no
+   captures the run did not produce, no embed pointing outside the published tree.
 2. Every relative Markdown link resolves to a real file (and, for glossary links, a real heading
    anchor). Compute each from `relative(dirname(chapter_file), target_file)` and confirm the
    target exists. Broken relative links 404 on a static site and are silent in raw views.

@@ -400,6 +400,11 @@ has "static-md: index_file halt message"   'writable table of contents'   "$SMD"
 has "static-md: chapters_dir halt message" 'cannot write chapters'        "$SMD"
 has "static-md: wikilinks halt message"    'do not render on a static site' "$SMD"
 has "static-md: network halt message"      'writes local files only'      "$SMD"
+# Asset contract: screenshots remain at capture.output_dir (no fictional copy into chapters tree),
+# and capture.output_dir must resolve under chapters_dir so the static site can serve the images.
+has "static-md: assets remain at capture.output_dir"  'remain there'                    "$SMD"
+has "static-md: assets must resolve under the docs tree" 'MUST resolve under chapters_dir' "$SMD"
+has "static-md: capture.output_dir-under-tree halt"   'resolve under `publish.chapters_dir` so the rendered' "$SMD"
 
 # SKILL filename-normalization rule + dynamic halt list (written by a sibling teammate; assert anyway).
 has  "skill: filename normalization rule" 'underscores with hyphens'                 "$SKILL"
