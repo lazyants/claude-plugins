@@ -13,11 +13,12 @@ The reference enumeration/capture assets are pure Playwright TypeScript (`assets
 - `references/running-ui-source.md:27`
 - `references/container-isolation.md:157`
 - `references/manifest-discipline.md:130`
-- `references/capture-spec-helpers.md:11`
+- `references/capture-spec-helpers.md:11` (line-wrapped 11–12)
+- `references/capture-safety.md:147` (line-wrapped 147–148)
 
-The *methodology* is genuinely engine-agnostic and normative; the *asset* is not. A Cypress or Puppeteer team does not "fork" a Playwright spec — they reimplement it against a different driver API (different selector engine, different network-interception hooks, different lifecycle). "Fork it" undersells that as a copy-and-tweak. The portable part is `assets/lib/*.mjs` (engine-neutral helpers — the classifier, the inventory, the matchers), which a non-Playwright spec can import directly; the Playwright `.ts` driver glue is what gets rewritten.
+Seven sites total. Two of them wrap "fork it for / other engines" across a line break, so grep for `other engines` (not the whole phrase on one line) when re-sweeping. The *methodology* is genuinely engine-agnostic and normative; the *asset* is not. A Cypress or Puppeteer team does not "fork" a Playwright spec — they reimplement it against a different driver API (different selector engine, different network-interception hooks, different lifecycle). "Fork it" undersells that as a copy-and-tweak. The portable part is `assets/lib/*.mjs` (engine-neutral helpers — the classifier, the inventory, the matchers), which a non-Playwright spec can import directly; the Playwright `.ts` driver glue is what gets rewritten.
 
-**Work:** reword the "fork it for other engines" phrasing (sweep all 6 sites — keep them consistent) to something like "the methodology is normative and engine-agnostic; reimplement the Playwright `.ts` driver glue for another engine, reusing the engine-neutral `lib/*.mjs` helpers as-is." Pairs with [the capture-engines reference-doc item](enduser-handbook-capture-engines.md).
+**Work:** reword the "fork it for other engines" phrasing (sweep all 7 sites — keep them consistent) to something like "the methodology is normative and engine-agnostic; reimplement the Playwright `.ts` driver glue for another engine, reusing the engine-neutral `lib/*.mjs` helpers as-is." Pairs with [the capture-engines reference-doc item](enduser-handbook-capture-engines.md).
 
 ## Trim 2 — shipped read-hatch is GraphQL-only; REST/Django POST-reads fail closed
 
