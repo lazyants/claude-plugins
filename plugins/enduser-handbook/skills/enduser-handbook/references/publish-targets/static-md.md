@@ -18,9 +18,9 @@ of the Obsidian-specific features:
   render as a raw code block. You never emit a Dataview block on this target.
 - **Standard Markdown links only — not Obsidian wikilinks.** A static renderer does not
   resolve double-bracket wikilink syntax; it prints it literally. This adapter therefore
-  **requires** `publish.wikilinks: false` and halts if a `static_md` profile sets it true (see
-  "Halt conditions"). The index is a flat table of contents, not an Obsidian `INDEX.md` with
-  status rows.
+  **requires** `publish.wikilinks: false` and halts unless the profile sets it explicitly false
+  (see "Halt conditions"). The index is a flat table of contents, not an Obsidian `INDEX.md`
+  with status rows.
 
 You do not own the docs tree. The user may already have an MkDocs nav, a GitBook
 `SUMMARY.md`, or a hand-curated wiki sidebar. Add to it; never restructure it.
@@ -75,7 +75,9 @@ language: {{language.code}}
 
 Keep it minimal on purpose: MkDocs, GitBook, and Docusaurus each reject or warn on unknown
 frontmatter keys, so do **not** carry the Obsidian-flavoured `type`/`section`/`status`/`tags`
-block here. `language` stays in when the profile sets it. When
+block here — nor the authoring-only `glossary_terms` list (a manifest/authoring field, see
+"Glossary backlink discipline"), which is never emitted into the published frontmatter.
+`language` stays in when the profile sets it. When
 `publish.frontmatter_required: false`, omit the block entirely — a plain wiki or
 `SUMMARY.md`-only tree often has no frontmatter convention, and an injected block would render
 as visible text at the top of the page.
@@ -93,7 +95,8 @@ from memory. Two mechanics matter at publish time for this target:
   Obsidian-default template's placeholders are overridden for a static target. Use standard
   Markdown links, not Obsidian wikilinks. Each line is one of three forms:
   - `- [Title](slug.md)` — a sibling chapter;
-  - `- [Term](../<glossary-rel>/index.md#term)` — a glossary entry;
+  - `- [Term](<glossary-rel>/index.md#term)` — a glossary entry (see "Glossary backlink
+    discipline" below for `<glossary-rel>`);
   - `- [<index label>](<relative-index-path>)` — the index, e.g. `- [All chapters](../SUMMARY.md)`.
   At least one line resolves to the index (see the gate below) so the chapter is reachable.
 
@@ -130,7 +133,8 @@ literal across to a profile with a different layout; re-derive it from the formu
 ## Index wiring (do this on every chapter create/update)
 
 Static-target index wiring is deliberately simpler than the Obsidian path — there is **no**
-Dataview dashboard, **no** `log.md`, and **no** `CLAUDE.md` vault-map line. Exactly two writes:
+Dataview dashboard, **no** `log.md`, and **no** `CLAUDE.md` vault-map line. There are **two
+required writes**, plus one conditional `publish.glossary_seed` reconciliation:
 
 1. **`{{publish.index_file}}`** — the flat table of contents (`SUMMARY.md`, `README.md`, an
    MkDocs `nav:` list, etc.). Add **one** TOC line linking to the new chapter, computed
@@ -138,44 +142,57 @@ Dataview dashboard, **no** `log.md`, and **no** `CLAUDE.md` vault-map line. Exac
    existing file uses a different order — match what is there. Do not rewrite unrelated rows.
 2. **Glossary entry** — for each new domain term, add or link its entry under
    `{{publish.glossary_dir}}/index.md` (the page is owned by `references/glossary-discipline.md`;
-   this adapter only encodes the relative link syntax). When `publish.glossary_seed` is set and
-   readable, reconcile its row as that file's convention requires; when it is unset, proceed
-   without it — a static docs tree often has no seed index.
+   this adapter only encodes the relative link syntax).
+3. **`{{publish.glossary_seed}}` reconciliation (conditional)** — only when `publish.glossary_seed`
+   is set and readable, reconcile its row as that file's convention requires; when it is unset,
+   proceed without it — a static docs tree often has no seed index.
 
 ## Glossary backlink discipline
 
 Every domain term's **first occurrence** in a chapter links to its glossary entry with a
-relative Markdown link: `[TermHeading](../<glossary-rel>/index.md#termheading)`, where
+relative Markdown link: `[TermHeading](<glossary-rel>/index.md#termheading)`, where
 `<glossary-rel>` is `relative(dirname(chapter_file), publish.glossary_dir)` (for the example
-layout above, `[TermHeading](../knowledge/glossary/index.md#termheading)`). The anchor is
-lowercased and hyphenated. The glossary entry heading is the term in
-`glossary.canonical_term_language`; the English code identifier is a field inside the entry,
-not the heading. The term set comes from the manifest and per-chapter frontmatter field
-`glossary_terms` (populated during authoring from `publish.glossary_seed` when set) — never a
-camelCase variant.
+layout above, `<glossary-rel>` resolves to `../knowledge/glossary`, so the link is
+`[TermHeading](../knowledge/glossary/index.md#termheading)`). The anchor is lowercased and
+hyphenated. The glossary entry heading is the term in `glossary.canonical_term_language`; the
+English code identifier is a field inside the entry, not the heading. The term set comes from
+the manifest `glossary_terms` list — the authoring source of truth, kept in sync with the
+chapter's authoring frontmatter per `manifest-discipline.md` and populated from
+`publish.glossary_seed` when set. That field is authoring-time only; the minimal published
+frontmatter (see "Frontmatter") does not carry it. Use the canonical term, never a camelCase
+variant.
 
 ## Halt conditions
 
 Before you write a single chapter file, verify and **halt** on the first failure — do not
 produce a partial tree:
 
-1. **`publish.index_file` is set and its parent directory is writable.** A static handbook with
-   no reachable index is an island of orphan pages; refuse to publish without one. Halt with:
-   "static_md requires `publish.index_file` to point at a writable table of contents — set it and
-   ensure its parent directory exists before publishing."
+1. **`publish.index_file` is set and writable** — the file itself if it already exists (index
+   wiring appends a TOC line to it), or its parent directory if the file is absent and must be
+   created. A static handbook with no reachable, writable index is an island of orphan pages;
+   refuse to publish without one. Halt with: "static_md requires `publish.index_file` to point at
+   a writable table of contents — set it and ensure the file (or its parent directory, if the file
+   does not yet exist) is writable before publishing."
 2. **`publish.chapters_dir` is writable.** You cannot place chapters otherwise. Halt with:
    "static_md cannot write chapters — `publish.chapters_dir` is unset or not writable."
-3. **`capture.output_dir` resolves under `publish.chapters_dir`.** A static renderer serves only
+3. **The glossary target is writable.** Index wiring adds or links a glossary entry under
+   `publish.glossary_dir/index.md` (and, when `publish.glossary_seed` is set, reconciles its row),
+   so that file must be writable if it exists or creatable if absent, and the seed must be writable
+   when reconciliation applies. An unwritable target leaves a missing or broken glossary backlink
+   silently. Halt with: "static_md cannot write the glossary — `publish.glossary_dir`/index.md (or
+   `publish.glossary_seed`, when set) is not writable or creatable."
+4. **`capture.output_dir` resolves under `publish.chapters_dir`.** A static renderer serves only
    files inside the published docs tree, so the retained screenshots must live within it. Halt with:
    "static_md requires `capture.output_dir` to resolve under `publish.chapters_dir` so the rendered
    site can serve screenshots — point it inside the docs tree (e.g. `<chapters_dir>/assets`) and
    re-run."
-4. **`publish.wikilinks: false`.** This target cannot render Obsidian wikilinks. If a
-   `static_md` profile sets `wikilinks: true`, halt with: "static_md requires `wikilinks: false`
-   — Obsidian wikilinks do not render on a static site; set `publish.wikilinks: false` in the
-   profile and re-run." Never silently emit plain links over a `wikilinks: true` profile — the
-   profile and the output must agree.
-5. **No network.** This adapter is file-only. If publishing would require an HTTP call, an API
+5. **`publish.wikilinks` is explicitly `false`.** This target cannot render Obsidian wikilinks, and
+   an unset value would fall back to Obsidian's wikilinks-on default and silently break every
+   relative link. If a `static_md` profile sets `wikilinks: true` **or leaves it unset**, halt with:
+   "static_md requires `wikilinks: false` — Obsidian wikilinks do not render on a static site; set
+   `publish.wikilinks: false` in the profile and re-run." Never silently emit plain links over a
+   `wikilinks: true` (or unset) profile — the profile and the output must agree.
+6. **No network.** This adapter is file-only. If publishing would require an HTTP call, an API
    token, or auth (a hosted Confluence/GitBook API), that is a different target. Halt with:
    "static_md writes local files only — a hosted Confluence/GitBook API target needs a different
    `publish.target` adapter."

@@ -406,6 +406,21 @@ has "static-md: assets remain at capture.output_dir"  'remain there'            
 has "static-md: assets must resolve under the docs tree" 'MUST resolve under chapters_dir' "$SMD"
 has "static-md: capture.output_dir-under-tree halt"   'resolve under `publish.chapters_dir` so the rendered' "$SMD"
 
+# Glossary relative-link must NOT double-prefix `../` onto <glossary-rel> — <glossary-rel> already
+# equals relative(dirname(chapter), glossary_dir), so `../<glossary-rel>` over-climbs by one segment.
+hasnt "static-md: no double-prefixed glossary link" '](../<glossary-rel>'        "$SMD"
+has   "static-md: corrected glossary link template" '](<glossary-rel>/index.md'  "$SMD"
+# glossary_terms is an authoring/manifest field, never emitted into the minimal published frontmatter.
+has "static-md: glossary_terms authoring-only" 'authoring-time only' "$SMD"
+# Index wiring is two required writes PLUS a conditional glossary_seed reconciliation (not "exactly two").
+has "static-md: two-writes-plus-conditional framing" 'required writes**, plus one conditional' "$SMD"
+# index_file halt covers an existing-but-read-only file, not just an unwritable parent dir.
+has "static-md: index_file writable-if-exists halt" 'the file itself if it already exists' "$SMD"
+# A halt covers an unwritable glossary target (the adapter writes glossary_dir/index.md in index wiring).
+has "static-md: glossary-writable halt" 'cannot write the glossary' "$SMD"
+# wikilinks halt fires on unset too, not only explicit true (unset would default to Obsidian wikilinks-on).
+has "static-md: wikilinks halt covers unset" 'or leaves it unset' "$SMD"
+
 # SKILL filename-normalization rule + dynamic halt list (written by a sibling teammate; assert anyway).
 has  "skill: filename normalization rule" 'underscores with hyphens'                 "$SKILL"
 has  "skill: dynamic halt list"           'files in this directory minus README.md'  "$SKILL"
