@@ -360,6 +360,55 @@ else
   echo "  note  no local esbuild (and never network-fetching npx -y) — skipping the .ts syntax check"
 fi
 
+echo "== publish-target adapters =="
+SMD="$REFS/publish-targets/static-md.md"
+PROF="$ASSETS/handbook.profile.example.yml"
+
+if [ -f "$SMD" ]; then ok "static-md adapter exists"; else bad "static-md adapter missing"; fi
+
+# Exact-key bindings — each profile key the adapter must resolve, named verbatim.
+has "static-md: binds publish.chapters_dir"               'publish.chapters_dir'               "$SMD"
+has "static-md: binds publish.index_file"                 'publish.index_file'                 "$SMD"
+has "static-md: binds publish.glossary_dir"               'publish.glossary_dir'               "$SMD"
+has "static-md: binds publish.frontmatter_required"       'publish.frontmatter_required'       "$SMD"
+has "static-md: binds publish.section_labels.prerequisites" 'publish.section_labels.prerequisites' "$SMD"
+has "static-md: binds publish.section_labels.related"     'publish.section_labels.related'     "$SMD"
+has "static-md: binds publish.wikilinks"                  'publish.wikilinks'                  "$SMD"
+has "static-md: binds capture.output_dir"                 'capture.output_dir'                 "$SMD"
+
+has_ci "static-md: adapter documents halt conditions" 'halt' "$SMD"
+
+# Relative-link mandate: pins the general formula AND both worked path examples.
+has "static-md: cross-subtree relative example" '](../'    "$SMD"
+has "static-md: teaches the relative rule"       'relative' "$SMD"
+has "static-md: pins the relative-path formula"  'relative(dirname(chapter_file), target_file)' "$SMD"
+has "static-md: documents vault-root index example" 'vault-root' "$SMD"
+has "static-md: documents repo-root index example"  'repo-root'  "$SMD"
+has "static-md: vault-root index path (one ../)"   '](../SUMMARY.md)'    "$SMD"
+has "static-md: repo-root index path (two ../)"    '](../../SUMMARY.md)' "$SMD"
+
+# No Obsidian leakage: never the literal wikilink symbol, never a Dataview fence.
+hasnt "static-md: no wikilink symbol" '[[' "$SMD"
+NEEDLE='```dataview'
+hasnt "static-md: no dataview block" "$NEEDLE" "$SMD"
+
+# Requires wikilinks: false for the static target.
+has "static-md: requires wikilinks false" 'wikilinks: false' "$SMD"
+
+# Each halt condition carries its exact quoted message (adapter contract, publish-targets/README.md:31).
+has "static-md: index_file halt message"   'writable table of contents'   "$SMD"
+has "static-md: chapters_dir halt message" 'cannot write chapters'        "$SMD"
+has "static-md: wikilinks halt message"    'do not render on a static site' "$SMD"
+has "static-md: network halt message"      'writes local files only'      "$SMD"
+
+# SKILL filename-normalization rule + dynamic halt list (written by a sibling teammate; assert anyway).
+has  "skill: filename normalization rule" 'underscores with hyphens'                 "$SKILL"
+has  "skill: dynamic halt list"           'files in this directory minus README.md'  "$SKILL"
+hasnt "skill: stale hardcoded halt gone"  'Available: obsidian-vault.'               "$SKILL"
+
+# Profile honesty: the example must not over-promise a single-adapter ship.
+hasnt "profile: no over-promise" 'only obsidian_vault ships' "$PROF"
+
 TOTAL=$((PASS + FAIL))
 echo "----"
 echo "TOTAL: $PASS/$TOTAL passed, $FAIL failed"

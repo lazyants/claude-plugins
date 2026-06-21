@@ -13,9 +13,9 @@ At the publish step, the base skill does this (in prose, not code):
 
 The base skill never branches on target name in its own prose. All target-specific knowledge lives in the adapter file. This is the only extension point.
 
-## What ships in v1
+## What ships
 
-Only `obsidian-vault.md` ships. The plan names four other candidates — `confluence`, `gitbook`, `docusaurus`, `static_md` — none of which are implemented. Setting `publish.target` to any of those triggers the halt above.
+Two adapters ship: `obsidian-vault.md` and `static-md.md`. The latter is the universal plain-Markdown fallback — it publishes to a GitHub wiki, an MkDocs tree, a GitBook (via `SUMMARY.md`), or a plain repo. Three candidates remain unimplemented — `confluence`, `gitbook`, `docusaurus`; setting `publish.target` to any of those triggers the halt above.
 
 ## Adding a new target X
 

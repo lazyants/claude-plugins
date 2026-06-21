@@ -76,7 +76,7 @@ capture:
     - "customer-identifying overlay contents"
 
 publish:
-  target: obsidian_vault            # obsidian_vault | confluence | gitbook | docusaurus | static_md  (only obsidian_vault ships in v1)
+  target: obsidian_vault            # obsidian_vault, static_md ship in v1.1 · confluence | gitbook | docusaurus are future
   chapters_dir: "vault/handbook"
   index_file: "vault/handbook/INDEX.md"
   glossary_dir: "vault/knowledge/glossary"

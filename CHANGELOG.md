@@ -2,6 +2,24 @@
 
 All notable changes to `lazyants/claude-plugins` are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is per-plugin, not repo-wide.
 
+## [enduser-handbook 1.1.0] — 2026-06-21
+
+First additive publish-target adapter since 1.0.0, fulfilling the 1.0.0 promise of additional publish targets. No change to the existing authoring rules; the only base-skill edits are correctness fixes the new adapter exposed.
+
+### Added
+- `references/publish-targets/static-md.md` — a normative publish adapter for a plain-Markdown docs tree (GitHub wiki, MkDocs, GitBook, plain repo): flat-index TOC wiring, relative Markdown links computed from the chapter file, and a hard requirement of `publish.wikilinks: false` (halts if true). Universal plain-Markdown fallback alongside the existing `obsidian-vault` adapter.
+- `tests/reference-assets.test.sh` — a new `== publish-target adapters ==` block: exact-key binding assertions for `static-md.md`, the relative-link mandate, the no-Obsidian-leakage guards, the Step 0b filename-normalization rule, and the dynamic halt-list phrasing.
+
+### Changed
+- `SKILL.md` Step 0b — explicit adapter-filename normalization (lowercase, replace `_` with `-`; `obsidian_vault` → `obsidian-vault.md`, `static_md` → `static-md.md`), fixing a latent ambiguity that also affected `obsidian_vault`; the "Available:" halt list is now derived dynamically from the files in `references/publish-targets/` minus `README.md` instead of hardcoding the adapter set.
+- `SKILL.md` W4 + Consistency and `references/glossary-discipline.md` — `publish.glossary_seed` reads are now conditional ("when `publish.glossary_seed` is set/readable"), since a static docs tree may ship no seed index. The `obsidian-vault` adapter keeps requiring the seed as a target-level requirement.
+- `references/publish-targets/README.md` — "what ships" now lists both `obsidian-vault` and `static-md`; `confluence`/`gitbook`/`docusaurus` remain future targets.
+- `assets/handbook.profile.example.yml` — target-enum comment honesty trim (`obsidian_vault`, `static_md` ship; `confluence`/`gitbook`/`docusaurus` are future).
+- `marketplace.json` — description now mentions both publish adapters; added `markdown` and `docs` keywords.
+
+### Tests
+- `tests/reference-assets.test.sh` — new `== publish-target adapters ==` gate covering the `static-md.md` bindings, relative-link mandate, no-`[[`/no-dataview leakage, `wikilinks: false` requirement, Step 0b filename-normalization phrase, and the dynamic halt-list phrasing (stale `Available: obsidian-vault.` literal gone; `files in this directory minus README.md` present).
+
 ## [enduser-handbook 1.0.6] — 2026-06-20
 
 Residual-hardening release for the v1.0.5 capture tooling, closing four gaps surfaced while authoring chapters. No change to the existing authoring rules; the engine-agnostic stance and the v1.0.5 PII-leak whitelist are preserved (the only new verbatim field, `className`, is brought under the documented seeded-data + human-scrub boundary).
