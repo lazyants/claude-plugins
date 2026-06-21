@@ -20,7 +20,7 @@ export interface GuardDecision {
   reason: string;
 }
 
-/** Options for decideRoute. Only classifyRequest can admit an otherwise-blocked read. */
+/** Options for decideRoute. classifyRequest's 'read' admits an otherwise-blocked read; 'benign' blocks-uncounted. */
 export interface GuardPolicyOptions {
   denyPatterns?: Array<string | RegExp>;
   /**

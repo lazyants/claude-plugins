@@ -13,16 +13,16 @@
 
 import type { Browser, BrowserContext, Locator, Page, Route, Request } from '@playwright/test';
 // The ordered classifier lives in a pure, browser-agnostic module so its branch ORDER (deny <
-// eventsource < beacon < classify-read < get-head < fail-closed) is unit-testable, not just
-// grep-able. The six `// [guard:*]` sentinels live in decideRoute. This handler only maps the
-// decision onto abort/continue + recording.
+// classify-benign < eventsource < beacon < classify-read < get-head < fail-closed) is unit-testable,
+// not just grep-able. The seven `// [guard:*]` sentinels live in decideRoute. This handler only maps
+// the decision onto abort/continue + recording.
 import { decideRoute, tokenize } from './lib/capture-guard-policy.mjs';
 import type { GuardRequest } from './lib/capture-guard-policy.mjs';
 // Pure, unit-tested URL-identity matcher (pathname-boundary, not substring) so route/API matching
 // cannot be fooled by '/api/users-old' or a '?next=/settings/users' redirect.
 import { urlMatchesTarget } from './lib/identity-match.mjs';
 
-/** A request as seen by classifyRequest. Only the exact string 'read' admits; anything else falls through. */
+/** A request as seen by classifyRequest. 'read' admits; 'benign' blocks-uncounted; anything else falls through. */
 export type ClassifiedRequest = GuardRequest;
 
 export interface CaptureGuardOptions {
