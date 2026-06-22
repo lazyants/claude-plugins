@@ -85,6 +85,18 @@ project's capture specs, not here.
   *container* also captures the page showing through its transparent area — and a leak-assert
   scoped to that container's own subtree is blind to the sibling content bleeding through
   behind it. Screenshot the opaque inner dialog box, and run the assert over that same node.
+  The rule is **bidirectional** — scope must *equal* the captured frame, never
+  narrower. The inverse case: a deliberate **full-viewport or full-page**
+  screenshot (`captureViewport` / `page.screenshot`) frames the whole viewport,
+  **including app chrome** — a header showing the logged-in user's name, an
+  account sidebar. Scoping the mask and assert to an inner dialog or region here
+  leaves that framed chrome scanned by nothing and the name ships.
+  `maskAndAssert` runs over whatever locator you hand it, so for a **full-viewport
+  or full-page** shot you must scope it (and the leak-scan) to the **document
+  root** (`:root`/`body`), not a `getByRole('dialog')` node — otherwise a
+  non-modal capture gets no automated scan at all. A `captureRegion` shot is
+  element-scoped, so hand `maskAndAssert` that **same region locator** — the
+  scan still equals the frame.
 - **When the PII has no detectable pattern, assert mask COVERAGE, not just absence.** The
   fail-closed leak-assert above can only catch PII it can *match* — an e-mail regex, a known
   internal domain. Free-form identifiers — personal names, customer/account ids, opaque record

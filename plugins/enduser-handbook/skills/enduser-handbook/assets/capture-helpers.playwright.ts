@@ -480,9 +480,12 @@ export interface MaskOptions {
  *
  * SCAN CARVE-OUT (what the automated leak-scan does NOT cover): the scan reads rendered DOM TEXT
  * NODES + form-control values + input/textarea placeholder. It does NOT read CSS pseudo-element
- * content (::before/::after `content`), which IS painted into the screenshot, nor any non-rendered
- * attribute. Those surfaces rely on the human eyeball-the-frame step (capture-safety.md) as the
- * backstop — the scan is defense-in-depth, not a complete proof.
+ * content (::before/::after `content`), which IS painted into the screenshot; nor the `alt` text a
+ * broken/failed <img> paints into the frame (browser replacement-rendering — painted, but not a DOM
+ * text node, so the same carve-out as pseudo-content; a loaded image paints no alt); nor genuinely
+ * non-rendered attributes (title/aria-label, never painted). Those surfaces rely on the human
+ * eyeball-the-frame step (capture-safety.md) as the backstop — the scan is defense-in-depth, not a
+ * complete proof.
  */
 export async function maskAndAssert(
   page: Page,
