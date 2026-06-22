@@ -42,6 +42,19 @@ For every screenshot the chapter will embed, the capture spec must, immediately 
 If any of these fail, the run must **fail loudly** — never fall back to capturing whatever is on
 screen. A wrong screenshot is worse than no screenshot, because the chapter will ship it.
 
+**Assert visibility on a content-bearing element, never a bare layout wrapper.** `visible` is a
+*layout* predicate: a container whose only content is floated out of normal flow (an uncleared
+float, no clearfix or `overflow`), an empty auto-sized grid track or flex line, or a
+`display: contents` node (which generates no box of its own) ends up with a **zero-height box —
+or no box at all**, and a visibility assertion (`toBeVisible()` / `waitFor({ state: 'visible' })`)
+requires a non-empty bounding box — width **and** height > 0. So it reports such a wrapper
+*hidden* even though its content paints — a loud false-negative that fails the run on a page that
+rendered correctly, and may tempt you to wrongly drop a real, capturable step. Target the heading,
+a text-bearing element, or a leaf with intrinsic size; if you must anchor on a collapse-prone
+container, assert a **child that has height**. `toBeAttached()` / `state: 'attached'` only
+*supplements* this — attachment does not prove the page rendered, which is the whole point of the
+check, so it is never a standalone replacement for a visibility assertion.
+
 ### Server-rendered pages and the XHR wait
 
 For a **server-rendered page with no post-mount XHR** — the markup arrives complete in the
@@ -111,6 +124,16 @@ representative of what a reader will see.
   overview capture, clear persisted filters — e.g. navigate with a `?clear-filter`-style
   param the app honours, or otherwise reset to the unfiltered default — so the shot shows the
   full surface the chapter claims to.
+- **When a shot deliberately stages a data-state, assert fail-closed that the precondition
+  held.** Some shots need the backing data shaped first — emptying a list to document the
+  empty state, clearing a logo so the upload field renders instead of the image, seeding a
+  fixture, assuming a reduced role. Page identity proves you are on the right *route*, but the
+  route and heading are identical for the staged and the un-staged page, so a forgotten or
+  **reverted** precondition (you restored the logo before re-capturing) passes identity and
+  silently ships the wrong-but-real state. Pair every staged precondition with an explicit
+  assertion that it holds — assert the staged-state marker is **present** and/or the wrong-state
+  marker is **absent** — before the shot, so a missed precondition fails the run instead of
+  shipping the wrong screen.
 - **For long unpaginated lists, capture the viewport, not the full element.** A full-element
   screenshot of a list that renders all rows (no pagination) produces an unusably tall image —
   a 100-row table becomes a strip nobody can read. Capture the **viewport** (the visible
@@ -120,3 +143,18 @@ representative of what a reader will see.
   `captureRegion`'s `{ maxHeight }` to clamp the rendered height; content below the clamp is
   hidden, so paginate the capture in sections or disclose the remainder in prose. See
   `capture-spec-helpers.md`.
+- **Let transitions settle before shooting.** A shot fired immediately after a modal-open or
+  row-expand assertion can catch a **mid-animation frame** — a half-faded dialog, a sliding
+  panel, a mask overlay not yet settled over its target — producing a blurred, half-rendered
+  image that also differs frame-to-frame across machines (breaking capture reproducibility).
+  Disable animations for the capture (Playwright's `animations: 'disabled'` screenshot option on
+  the reference engine, the equivalent for your engine, or a reduced-motion /
+  `* { transition: none }` override), or wait for the transition to finish; do **not** rely on a
+  fixed sleep.
+- **Scroll lazy / below-the-fold content into view before a full-element capture.** A
+  full-element shot of a list or region that lazy-loads images, virtualizes rows
+  (`IntersectionObserver`), or renders skeletons until scrolled will ship **blank or
+  placeholder rows** in the parts never scrolled into view — the container's visibility
+  assertion still passes, but the captured image below the fold is empty. Scroll the region to
+  force-load its content (or assert the narrated rows are actually painted) before the full
+  capture.
