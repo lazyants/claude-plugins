@@ -59,7 +59,9 @@ other engines. The reference doc is normative; the `*.playwright.*` asset is one
   first**, falling back to a named negative/cancel control. **Never** the primary/first button,
   which can be the destructive one.
 
-- **Mask-and-assert** — scope the shot *and* the leak scan to the **opaque inner dialog**. **Mask
+- **Mask-and-assert** — scope the shot *and* the leak scan to **exactly what the
+  screenshot frames** — the **opaque inner dialog** for a modal/element shot, the **document
+  root** for a full-viewport shot, never a node narrower than the frame. **Mask
   first, then scan** — overwrite text nodes, form-control values **and `placeholder` text** (for a
   `<select>`, the rendered *label* of **every option** — all options, not just the selected ones: a
   `<select multiple>`/`[size>1]` renders its unselected options too, so an unselected option label
@@ -71,12 +73,14 @@ other engines. The reference doc is normative; the `*.playwright.*` asset is one
   scan string by **joining per-node values with a newline** (not one concatenated `textContent`,
   which fuses neighbouring cells into false tokens), then fail if any leak pattern matches **or** if
   the matched-mask count differs from the expected count (fail-closed coverage for unmatchable PII).
-  Both passes recurse into **open** shadow roots. Three things the automated scan does **not** cover
+  Both passes recurse into **open** shadow roots. Four things the automated scan does **not** cover
   — like closed shadow roots, they fall to the human eyeball-the-frame step as the backstop: **closed**
   shadow roots (inaccessible to script — mask inside the component or open the root for capture); **CSS
   pseudo-element content** (`::before`/`::after` `content:`, painted into the shot but not a DOM text
-  node); and **non-rendered attributes** (`title`/`aria-label`/`alt`, which are not painted into a
-  static screenshot).
+  node); **a broken or failed `<img>`'s `alt` text** (the browser paints it into the frame as
+  replacement-rendering, but it is **not** a DOM text node — so the text/value/placeholder corpus
+  misses it exactly as it misses pseudo-content; a successfully loaded image paints no `alt`); and
+  **genuinely non-rendered attributes** (`title`/`aria-label`, never painted into a static screenshot).
 
 ## The spec skeleton
 

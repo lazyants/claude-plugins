@@ -10,7 +10,7 @@ Public plugins for [Claude Code](https://claude.com/claude-code), maintained und
 | [`db-guardrails`](#db-guardrails--v100) | 1.0.0 | Stop AI coding agents from accidentally emptying your database — an always-on hook that blocks destructive DB commands across 15+ frameworks, plus a stack-aware installer for deeper safety layers. |
 | [`obsidian-project-vault`](#obsidian-project-vault--v100) | 1.0.0 | Set up, migrate, audit, and operate an Obsidian vault as an LLM Wiki — a persistent, compounding knowledge base maintained by Claude Code. |
 | [`cc-usage-coach`](#cc-usage-coach--v100) | 1.0.0 | Personalized, behavior-aware analysis of where your Claude Code (Max/Pro) usage-limit tokens go, with ranked, low-effort ways to use fewer — computed entirely from your local session logs. Python measures; Claude concludes. |
-| [`enduser-handbook`](#enduser-handbook--v110) | 1.1.0 | Author, capture, and publish a Diátaxis-structured end-user handbook for any project — methodology shipped as a reusable skill, project-specific bindings supplied via `.claude/handbook/profile.yml`. |
+| [`enduser-handbook`](#enduser-handbook--v111) | 1.1.1 | Author, capture, and publish a Diátaxis-structured end-user handbook for any project — methodology shipped as a reusable skill, project-specific bindings supplied via `.claude/handbook/profile.yml`. |
 
 ## Install / update / uninstall
 
@@ -124,7 +124,7 @@ The **scripts** are local-first: they read local logs only and make no network c
 - `CC_COACH_CONFIG_DIRS` — comma-separated extra config dirs to scan (default scans only the standard `.claude`).
 - `CC_COACH_OUT` — output location. Precedence: `$CC_COACH_OUT` if set, else next to the scripts if writable, else `${XDG_CACHE_HOME:-~/.cache}/cc-usage-coach/`.
 
-## `enduser-handbook` — v1.1.0
+## `enduser-handbook` — v1.1.1
 
 Author, capture, and publish a Diátaxis-structured end-user handbook (tutorials, how-tos, reference, explanation) for any project. The methodology — pre-read mandate, anti-fabrication rules, capture safety, page identity, manifest discipline, glossary and tone consistency, completeness gate, "running UI is the primary source" — ships as a reusable skill. Project-specific bindings (language, register, stack globs, capture engine, publish target, glossary) live in `.claude/handbook/profile.yml` so the same skill produces a German shopkeeper-register handbook for one project and an English developer-register handbook for the next without forking the workflow.
 
@@ -142,6 +142,7 @@ Trigger phrases: "write the end-user handbook", "update the user manual", "add a
 - **Reference capture tooling (v1.0.5)** — ships non-normative Playwright reference implementations for the parts that carry the most risk: a live-DOM surface enumerator (every control's verbatim text/title/aria-label/href/role, icon-only controls included) and a context-level capture guard (fail-closed request classifier, service-worker block, WebSocket/beacon/SSE handling, safe Escape-first dialog dismiss, reproducible PII mask + leak-assert). The methodology stays engine-agnostic — fork the assets for other engines.
 - **Revalidation / audit mode (v1.0.5)** — a first-class path for re-validating an already-merged chapter: re-derive the surface from the running UI, diff against the existing chapter and manifest, and classify each delta (no-op / accepted-diff / material) — material deltas still emit a delta manifest and halt for review.
 - **Surface / guard / capture hardening (v1.0.6)** — the surface enumerator now also catches framework glyph/icon controls (`.btn`, `[data-bs-toggle]`, `[data-toggle]`) and records each control's `class` to drive destructive-action hints; the capture guard adds a `'benign'` verdict so blocked dev-telemetry (e.g. laravel-boost, Sentry) no longer false-trips the safety assertion; `captureRegion` gains a `maxHeight` cap for runaway-height modals; and the completeness gate ships a concrete disclose trigger-list + prose templates.
+- **Capture-safety correctness (v1.1.1)** — a broken `<img>`'s `alt` text *is* painted into the screenshot (browser replacement-rendering), so it is reclassified from a "non-rendered attribute" to a painted-but-unscannable surface the eyeball backstop must catch — only `title`/`aria-label` are genuinely non-rendered; and the mask/leak-scan scope rule is made explicitly bidirectional — scope must equal the captured frame, so a full-viewport shot scopes the scan to the document root (an element- or region-scoped shot to its own node) and framed app chrome (e.g. a header user name) is never left unscanned.
 
 ### What it is **not**
 
