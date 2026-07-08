@@ -1,0 +1,167 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "final-audit-summary.schema.json",
+  "title": "Final Audit Summary",
+  "description": "Structured stdout of final_audit.py, run at W7 over every converged segment: 2 hard checks (coverage, stale-review) rolled into hard_failures, 4 WARN checks rolled into warnings, a whole-project completeness gate (completeness_counts/project_complete), and a frontback coverage report. The arithmetic rollup invariant hard_failures == coverage_failures + stale_review_failures is enforced procedurally by final_audit.py itself. The project_complete invariant is enforced by this schema: project_complete is true if and only if every one of completeness_counts' five values (not_started, recoverable, stale, blocked_needs_regeneration, human_escalation) is 0 -- i.e. project_complete is true only when EVERY manifest.json segment classifies reusable, zero in every other category.",
+  "type": "object",
+  "properties": {
+    "coverage_failures": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Count of converged segments that fail the coverage hard check."
+    },
+    "stale_review_failures": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Count of converged segments that fail the stale-review hard check."
+    },
+    "hard_failures": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Rollup invariant (procedurally enforced, not schema-expressible): hard_failures == coverage_failures + stale_review_failures."
+    },
+    "warnings": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Count of WARN-level (non-blocking) check failures across the 4 WARN checks."
+    },
+    "project_complete": {
+      "type": "boolean",
+      "description": "Rollup invariant: project_complete == true if and only if every one of completeness_counts' five values equals 0."
+    },
+    "completeness_counts": {
+      "type": "object",
+      "description": "Whole-project completeness gate: classification counts from a full select_segments.py run over the entire manifest.json with no --only-segs restriction.",
+      "properties": {
+        "not_started": { "type": "integer", "minimum": 0 },
+        "recoverable": { "type": "integer", "minimum": 0 },
+        "stale": { "type": "integer", "minimum": 0 },
+        "blocked_needs_regeneration": { "type": "integer", "minimum": 0 },
+        "human_escalation": { "type": "integer", "minimum": 0 }
+      },
+      "required": [
+        "not_started",
+        "recoverable",
+        "stale",
+        "blocked_needs_regeneration",
+        "human_escalation"
+      ],
+      "additionalProperties": false
+    },
+    "frontback_coverage": {
+      "type": "array",
+      "description": "UNCONDITIONALLY present as an array -- one entry per manifest frontback[] item. An empty array is used for a plain_text source with no frontmatter; this field is never omitted.",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" },
+          "decision": {
+            "type": "string",
+            "enum": ["translate", "regenerate", "omit"]
+          },
+          "status": {
+            "type": ["string", "null"],
+            "description": "The matching segment's classification for a translate decision; null for regenerate/omit decisions."
+          }
+        },
+        "required": ["id", "decision", "status"],
+        "additionalProperties": false,
+        "allOf": [
+          {
+            "if": {
+              "properties": { "decision": { "const": "translate" } },
+              "required": ["decision"]
+            },
+            "then": {
+              "properties": { "status": { "type": "string" } }
+            }
+          },
+          {
+            "if": {
+              "properties": { "decision": { "enum": ["regenerate", "omit"] } },
+              "required": ["decision"]
+            },
+            "then": {
+              "properties": { "status": { "const": null } }
+            }
+          }
+        ]
+      }
+    },
+    "generated_at": {
+      "type": "string",
+      "description": "Timestamp at which final_audit.py produced this summary."
+    }
+  },
+  "required": [
+    "coverage_failures",
+    "stale_review_failures",
+    "hard_failures",
+    "warnings",
+    "project_complete",
+    "completeness_counts",
+    "frontback_coverage",
+    "generated_at"
+  ],
+  "additionalProperties": false,
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "completeness_counts": {
+            "properties": {
+              "not_started": { "const": 0 },
+              "recoverable": { "const": 0 },
+              "stale": { "const": 0 },
+              "blocked_needs_regeneration": { "const": 0 },
+              "human_escalation": { "const": 0 }
+            },
+            "required": [
+              "not_started",
+              "recoverable",
+              "stale",
+              "blocked_needs_regeneration",
+              "human_escalation"
+            ]
+          }
+        },
+        "required": ["completeness_counts"]
+      },
+      "then": {
+        "properties": {
+          "project_complete": { "const": true }
+        },
+        "required": ["project_complete"]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "project_complete": { "const": true }
+        },
+        "required": ["project_complete"]
+      },
+      "then": {
+        "properties": {
+          "completeness_counts": {
+            "properties": {
+              "not_started": { "const": 0 },
+              "recoverable": { "const": 0 },
+              "stale": { "const": 0 },
+              "blocked_needs_regeneration": { "const": 0 },
+              "human_escalation": { "const": 0 }
+            },
+            "required": [
+              "not_started",
+              "recoverable",
+              "stale",
+              "blocked_needs_regeneration",
+              "human_escalation"
+            ]
+          }
+        },
+        "required": ["completeness_counts"]
+      }
+    }
+  ]
+}

@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "ledger.schema.json",
+  "title": "Ledger",
+  "description": "The SEPARATE materialized multi-record shape written by ledger_merge.py to ledger.json -- a per-segment status/reason/rounds map assembled from every runs/ledger.d/*.json fragment. Each value under `segments` composes against the SAME status-free base as ledger-fragment.schema.json (never against ledger-fragment.schema.json itself), so the wider status enum here -- which includes `stale` -- never conflicts with the fragment schema's narrower enum. `stale` is a status ledger_merge.py COMPUTES when building this map (a cache-key mismatch against a converged fragment); it is never found in any actual on-disk fragment.",
+  "type": "object",
+  "properties": {
+    "segments": {
+      "type": "object",
+      "additionalProperties": {
+        "allOf": [
+          { "$ref": "ledger-record-base.schema.json" }
+        ],
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": ["pending", "in_progress", "converged", "non_converged", "blocked", "stale"]
+          }
+        },
+        "required": ["status"],
+        "unevaluatedProperties": false
+      }
+    }
+  },
+  "required": ["segments"],
+  "additionalProperties": false
+}

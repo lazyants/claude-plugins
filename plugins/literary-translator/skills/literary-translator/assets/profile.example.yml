@@ -1,0 +1,187 @@
+# .claude/literary-translator/profile.yml
+profile_version: 1                      # skill refuses unknown versions
+
+project:
+  title: "YOUR BOOK TITLE HERE"           # e.g. a real project's title: "Les Historiettes de Tallemant des Réaux, tome 3"
+  durable_root: "/ABS/PATH/TO/YOUR_PROJECT"   # NOT scratchpad -- e.g. a real project: "/Users/you/dev/your-book-project"
+                                          # profile_validate.py FATALLY REJECTS this literal placeholder string --
+                                          # Step 0 cannot pass until this is replaced with a real path.
+  durable_root_adopt_existing: false     # Optional, defaults false/absent. Step 0a's ownership-marker check
+                                          # halts with an ADOPTION PROMPT, not a fatal error, when durable_root
+                                          # already contains a generic managed-directory name (segments/, scripts/,
+                                          # out/, etc.) with no plugin marker inside it -- a plausible, normal book
+                                          # project's own unrelated folder, not necessarily a conflict. Set this to
+                                          # true, explicitly, ONLY after confirming the existing directory is safe
+                                          # for this plugin to also write into.
+  pipeline_version: v1                   # bump on ANY schema/prompt/role change -> invalidates ledger cache
+  max_segment_words: 15000               # FATAL preflight: extraction halts, naming the offending
+                                          # segment(s), if any segment's word_count exceeds this -- v1 has NO
+                                          # sub-chunking. v1's actual scope is works whose NATURAL segment/chapter
+                                          # boundaries already fit under this cap -- a novel with
+                                          # genuinely long natural chapters that exceed it is OUT OF SCOPE for v1,
+                                          # not a "pre-split it yourself" quick fix; see the `custom` adapter for
+                                          # the principled escape hatch (a co-designed extractor performing an
+                                          # author-approved chapter split before this plugin ever sees the text).
+                                          # Default is generous relative to a typical novella-scale chapter --
+                                          # raise or lower per project, but never silently overflow.
+
+source:
+  format: gutenberg_epub                 # gutenberg_epub | plain_text | custom
+  path: "/ABS/PATH/TO/YOUR_SOURCE.epub"  # profile_validate.py FATALLY REJECTS this literal placeholder too --
+                                          # e.g. a real project: "/Users/you/Downloads/YourBook.epub". REQUIRED and
+                                          # existence-checked for EVERY format, including `custom` -- for a `custom`
+                                          # source consuming more than one file, this is the PRIMARY/representative
+                                          # input (Step 0's own sanity anchor); the co-designed extractor's own
+                                          # `manifest.json` `source_inputs[]` is the authoritative FULL file list,
+                                          # which may include more than this one path -- see custom.md.
+  gutenberg_id: null                     # optional, gutenberg_epub only -- set the real Gutenberg ebook ID if known
+  language:
+    code: fr                             # ISO-639-1, source language
+    particle_config: "fr.json"           # BARE FILENAME ONLY, resolved as ${durable_root}/languages/<value> --
+                                          # e.g. this resolves to ${durable_root}/languages/fr.json, copied there
+                                          # by Step 0a (NOT assets/languages/, which is inside the plugin install
+                                          # dir and may not be reachable at runtime). Never include a "languages/"
+                                          # prefix here -- the resolution base already supplies that segment.
+                                          # A project-local override (e.g. after a failed smoke test) lives in
+                                          # this same ${durable_root}/languages/ directory, under a
+                                          # DIFFERENT filename Step 0a never copies over (e.g. "fr.local.json").
+                                          # This value must be a simple alphanumeric/dot/underscore/hyphen filename
+                                          # ending in .json -- no path separators, no "..", no absolute path;
+                                          # profile_validate.py fatally rejects any value that violates this,
+                                          # naming the field.
+                                          # `has_elision` (article-fusion handling, e.g. French `d'X`/`l'X`) is NOT
+                                          # a profile field -- it lives in the resolved particle_config file itself
+                                          # (${durable_root}/languages/<value>), which is the sole source of truth
+                                          # for this and every other language-specific behavior. To change whether
+                                          # a language elides, edit that file directly (or fork a `.local.json`
+                                          # override).
+    smoke_test:
+      # Any NEW language preset -- even the proven, unmodified `fr.json` -- requires its own smoke test the FIRST
+      # time it's used against a NEW source. `fr.json` is proven against Historiettes' own 17th-c. orthography and
+      # vocabulary specifically, not against French prose in general -- reusing it for a different book still
+      # requires a fresh smoke-test pass. The gate is keyed to a TRIPLE: this exact particle_config's content, this
+      # exact project's own extracted-source-text sample, and the generating script's own identity, so a stale
+      # report from an older script version or a different book's sample is never silently trusted. Only an EXACT
+      # repeat run against the identical sample, config, and currently-installed script version (e.g. a
+      # resumed/re-run session on the same project, no plugin update in between) can reuse a prior report.
+      report_path: null
+        # Path to a written smoke-test report proving the triple above matches. All hashing/comparison is
+        # procedural, evaluated at W3 (after extraction produces manifest.json) -- Step 0 only validates this
+        # field's SHAPE (a string or null). `null` means: derive `${project.durable_root}/runs/language-smoke-report.json`
+        # fresh, every run -- nothing to persist. A project may instead set an explicit string here for a
+        # non-default location; when set, it MUST be a bare path starting with "runs/" and containing no ".."
+        # segment -- profile_validate.py fatally rejects any value that violates this.
+  adapter_config:
+    # Only the sub-block matching `source.format` is meaningful; the others are ignored -- safe to leave them
+    # populated (as this example does, for illustration) or blanked to null. Whichever format is NOT active, its
+    # own sub-block is validated for basic shape only, never its specialized rules -- those only become
+    # load-bearing once that format is genuinely selected.
+    gutenberg_epub:
+      spine_overrides: {}       # optional: {"<file>": "body|footnote-defs|front-back"} per-file classification override
+      frontback_overrides: {}  # optional: {"<FRONTBACK id>": "translate|regenerate|omit"} per-element decision override
+    plain_text:
+      segmentation:
+        method: blank_line_run  # blank_line_run | heading_regex
+        blank_line_threshold: 2 # blank_line_run only -- REQUIRED, a positive integer, when this method is active
+        heading_regex: null     # heading_regex only -- REQUIRED, a compilable regex, when this method is active
+      verse_detection: CHOOSE_none_confirmed_or_regex
+        # Ships as an intentionally INVALID placeholder -- Step 0 fatally rejects it until you consciously replace
+        # it with `none_confirmed` (this source has no verse) or `regex` (verse_regex below detects it). This
+        # enum is enforced ONLY while `source.format: plain_text` is the active format -- while a different format
+        # is active (as in this example), it sits inertly and does not block Step 0. Once you set `plain_text` as
+        # your real format, replace this value consciously before proceeding.
+      verse_regex: null
+        # Only meaningful, and then REQUIRED, when verse_detection: regex; ignored (must stay null) for
+        # none_confirmed.
+      footnotes: CHOOSE_none_confirmed_or_markdown_ref_or_custom_regex
+        # Ships as an intentionally INVALID placeholder, identical discipline to verse_detection above. Replace
+        # with `none_confirmed` (no footnotes), `markdown_ref` (standard `[^N]` + trailing endnote list), or
+        # `custom_regex` (footnote_anchor_regex/footnote_def_regex below define your own convention) -- whichever
+        # this source's own text genuinely calls for.
+      footnote_anchor_regex: null   # required (and only meaningful) when footnotes: custom_regex
+      footnote_def_regex: null      # required (and only meaningful) when footnotes: custom_regex
+    custom:
+      extractor_path: null
+        # Only meaningful when `source.format: custom`. Path (relative to durable_root) to the hand-crafted Python
+        # extractor this project co-designs with the skill (Step 0c, custom.md). `null` means co-design
+        # hasn't happened yet -- Step 0c halts and starts that conversation; a non-null value must resolve to an
+        # existing file under `${durable_root}/scripts/custom_extractors/<value>` (a bare relative filename, no
+        # ".." segment, no absolute path -- e.g. `extractor_path: "my_book_extractor.py"`). The co-designed script
+        # must produce a `manifest.json` matching every other adapter's exact output shape and pass the same
+        # round-trip self-checks.
+
+target:
+  language:
+    code: ru                             # ISO-639-1, target language
+    register_notes: "ты/вы politeness distinction — see style_bible.md section B"
+    # target languages without an analogous register axis (e.g. English) leave this
+    # informational; style_bible.md section B says "if not applicable, delete this section"
+
+verse_policy:
+  mode: full_rhymed_plus_literal
+    # full_rhymed_plus_literal | full_rhymed_only | rhythmic_approximation |
+    # mixed_by_length | literal_only | skip   -- see references/verse-policy.md
+  threshold_lines: null
+    # REQUIRED (fatal at Step 0 if null/absent) only when mode: mixed_by_length;
+    # ignored (must stay null) for every other mode -- nested under verse_policy so
+    # the mode<->threshold coupling is structurally visible, not two independent
+    # top-level keys a profile author could set inconsistently.
+
+engine:
+  # translator and reviewer are HARDCODED to codex:codex-rescue in every shipped
+  # template (translate_TASK.template.md, review_TASK.template.md,
+  # mass-translate-wf.template.js) -- this is NOT a configurable swap point in v1.
+  # The whole schema-validated, codex-only-translates/codex-only-reviews design is
+  # load-bearing on that specific agent's behavior; letting a profile silently
+  # point elsewhere would reintroduce exactly the failure mode this methodology
+  # was built to eliminate.
+  effort: high
+    # Applies to every ACCURACY-BEARING agent() call -- translate, review, fix, and glossary-pass batches. Does
+    # NOT apply to purely mechanical, no-judgment calls: the translator-readiness poll and the ledger-bookkeeping
+    # call are both effort:'low' by design.
+  max_fix_rounds: 4                       # cap before escalating to non_converged / blocked
+  batch_agent_cap: 1000
+    # A worst-case agent-call-count ESTIMATE for this batch is computed before dispatch begins -- if the
+    # estimate for the given SEGS array would exceed this cap, the run refuses to start, logging the estimate
+    # and the offending segment count. Splitting a batch that's too large into smaller ones is the operator's
+    # call, not automated in v1.
+
+footnotes:
+  apparatus_policy: translate_all
+    # translate_all | preserve_source | omit_apparatus | body_refs_only
+    # -- see references/source-format-adapters/ (each adapter defines its own
+    # behavior for all four values) and references/engine-loop.md.
+    # This project's choice: translate 100% of the 19th-c. critical apparatus too
+    # (translate_all).
+
+glossary:
+  research_mode: CHOOSE_live_or_offline  # Ships as an intentionally INVALID placeholder.
+                                          # REQUIRED, no default -- live | offline. The explicit, human-set
+                                          # precondition for whether THIS run's glossary-pass codex agent actually
+                                          # has working web/research access -- the orchestrating Claude session is
+                                          # the only party that actually knows this about its own environment, so
+                                          # it's a declared precondition, never something a script silently probes
+                                          # and gets wrong. Under `offline`, basis:"established" is FATALLY
+                                          # forbidden for every canon entry this run produces -- candidates that
+                                          # would otherwise warrant it get basis:"transliterated" or are routed to
+                                          # review_queue instead, tagged with a SOURCE_UNAVAILABLE: note. Replace
+                                          # with `live` or `offline`, consciously, matching THIS run's own actual
+                                          # environment.
+
+validation:
+  untranslated_sentinel: "нет перевода"
+    # validate_draft.py reads THIS field rather than a hardcoded literal -- a target-language-
+    # appropriate marker a translator agent uses/leaves behind for "not yet translated," which the false-green
+    # gate scans for verbatim.
+
+output:
+  v1_scope: segment_drafts_and_audit
+    # v1 delivers converged per-segment drafts + ledger + each draft's own validate_draft.py per-segment audit
+    # trail + a whole-book final_audit.py summary/WARN report -- NOT a single assembled book file. Book assembly
+    # (EPUB/bilingual/etc.) is explicitly out of scope for v1 (see non-goals). destination below is where the
+    # audit/handoff package (not a book) is written.
+  destination: "/ABS/PATH/TO/YOUR_PROJECT/out/"   # matches durable_root's placeholder above + /out/ (the default,
+                                          # resolving inside durable_root); e.g. a real project:
+                                          # "/Users/you/dev/your-book-project/out/"
+  # future (v2+, once a real assembly script exists and is proven): format: epub | bilingual_epub |
+  # plain_text_master; destination: <book path>

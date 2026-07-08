@@ -1,0 +1,544 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://claude-marketplace.local/literary-translator/schemas/profile.schema.json",
+  "title": "literary-translator profile.yml",
+  "description": "Structural contract for .claude/literary-translator/profile.yml. Shape/type/enum/conditional validation only -- filesystem existence, path-traversal safety, and placeholder-substring rejection are procedural checks done by profile_validate.py, not this schema.",
+  "type": "object",
+  "properties": {
+    "profile_version": {
+      "const": 1
+    },
+    "project": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["title", "durable_root", "pipeline_version", "max_segment_words"],
+      "properties": {
+        "title": {
+          "type": "string",
+          "minLength": 1
+        },
+        "durable_root": {
+          "type": "string",
+          "minLength": 1
+        },
+        "durable_root_adopt_existing": {
+          "type": "boolean"
+        },
+        "pipeline_version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "max_segment_words": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["format", "path", "language", "adapter_config"],
+      "properties": {
+        "format": {
+          "type": "string",
+          "enum": ["gutenberg_epub", "plain_text", "custom"]
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "gutenberg_id": {
+          "type": ["integer", "null"],
+          "minimum": 1
+        },
+        "language": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["code", "particle_config", "smoke_test"],
+          "properties": {
+            "code": {
+              "type": "string",
+              "pattern": "^[a-z]{2}$"
+            },
+            "particle_config": {
+              "type": "string",
+              "minLength": 6,
+              "pattern": "^[A-Za-z0-9_.-]+\\.json$"
+            },
+            "smoke_test": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["report_path"],
+              "properties": {
+                "report_path": {
+                  "type": ["string", "null"]
+                }
+              }
+            }
+          }
+        },
+        "adapter_config": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["gutenberg_epub", "plain_text", "custom"],
+          "properties": {
+            "gutenberg_epub": {
+              "type": ["object", "null"],
+              "additionalProperties": false,
+              "properties": {
+                "spine_overrides": {
+                  "type": "object",
+                  "additionalProperties": {
+                    "type": "string",
+                    "enum": ["body", "footnote-defs", "front-back"]
+                  }
+                },
+                "frontback_overrides": {
+                  "type": "object",
+                  "additionalProperties": {
+                    "type": "string",
+                    "enum": ["translate", "regenerate", "omit"]
+                  }
+                }
+              }
+            },
+            "plain_text": {
+              "type": ["object", "null"],
+              "additionalProperties": false,
+              "required": [
+                "segmentation",
+                "verse_detection",
+                "verse_regex",
+                "footnotes",
+                "footnote_anchor_regex",
+                "footnote_def_regex"
+              ],
+              "properties": {
+                "segmentation": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["method", "blank_line_threshold", "heading_regex"],
+                  "properties": {
+                    "method": {
+                      "type": "string",
+                      "enum": ["blank_line_run", "heading_regex"]
+                    },
+                    "blank_line_threshold": {
+                      "type": ["integer", "null"],
+                      "minimum": 1
+                    },
+                    "heading_regex": {
+                      "type": ["string", "null"],
+                      "minLength": 1
+                    }
+                  }
+                },
+                "verse_detection": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "verse_regex": {
+                  "type": ["string", "null"],
+                  "minLength": 1
+                },
+                "footnotes": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "footnote_anchor_regex": {
+                  "type": ["string", "null"],
+                  "minLength": 1
+                },
+                "footnote_def_regex": {
+                  "type": ["string", "null"],
+                  "minLength": 1
+                }
+              }
+            },
+            "custom": {
+              "type": ["object", "null"],
+              "additionalProperties": false,
+              "required": ["extractor_path"],
+              "properties": {
+                "extractor_path": {
+                  "type": ["string", "null"]
+                }
+              }
+            }
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "format": { "const": "gutenberg_epub" }
+            },
+            "required": ["format"]
+          },
+          "then": {
+            "properties": {
+              "adapter_config": {
+                "properties": {
+                  "gutenberg_epub": { "type": "object" }
+                },
+                "required": ["gutenberg_epub"]
+              }
+            },
+            "required": ["adapter_config"]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "format": { "not": { "const": "gutenberg_epub" } }
+            },
+            "required": ["format"]
+          },
+          "then": {
+            "properties": {
+              "gutenberg_id": { "type": "null" }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "format": { "const": "plain_text" }
+            },
+            "required": ["format"]
+          },
+          "then": {
+            "properties": {
+              "adapter_config": {
+                "properties": {
+                  "plain_text": {
+                    "type": "object",
+                    "allOf": [
+                      {
+                        "if": {
+                          "properties": {
+                            "segmentation": {
+                              "properties": {
+                                "method": { "const": "blank_line_run" }
+                              },
+                              "required": ["method"]
+                            }
+                          },
+                          "required": ["segmentation"]
+                        },
+                        "then": {
+                          "properties": {
+                            "segmentation": {
+                              "properties": {
+                                "blank_line_threshold": {
+                                  "type": "integer",
+                                  "minimum": 1
+                                }
+                              },
+                              "required": ["blank_line_threshold"]
+                            }
+                          },
+                          "required": ["segmentation"]
+                        }
+                      },
+                      {
+                        "if": {
+                          "properties": {
+                            "segmentation": {
+                              "properties": {
+                                "method": { "const": "heading_regex" }
+                              },
+                              "required": ["method"]
+                            }
+                          },
+                          "required": ["segmentation"]
+                        },
+                        "then": {
+                          "properties": {
+                            "segmentation": {
+                              "properties": {
+                                "heading_regex": {
+                                  "type": "string",
+                                  "minLength": 1
+                                }
+                              },
+                              "required": ["heading_regex"]
+                            }
+                          },
+                          "required": ["segmentation"]
+                        }
+                      },
+                      {
+                        "properties": {
+                          "verse_detection": {
+                            "enum": ["none_confirmed", "regex"]
+                          },
+                          "footnotes": {
+                            "enum": ["none_confirmed", "markdown_ref", "custom_regex"]
+                          }
+                        }
+                      },
+                      {
+                        "if": {
+                          "properties": {
+                            "verse_detection": { "const": "regex" }
+                          },
+                          "required": ["verse_detection"]
+                        },
+                        "then": {
+                          "properties": {
+                            "verse_regex": {
+                              "type": "string",
+                              "minLength": 1
+                            }
+                          },
+                          "required": ["verse_regex"]
+                        }
+                      },
+                      {
+                        "if": {
+                          "properties": {
+                            "verse_detection": { "const": "none_confirmed" }
+                          },
+                          "required": ["verse_detection"]
+                        },
+                        "then": {
+                          "properties": {
+                            "verse_regex": {
+                              "type": "null"
+                            }
+                          }
+                        }
+                      },
+                      {
+                        "if": {
+                          "properties": {
+                            "footnotes": { "const": "custom_regex" }
+                          },
+                          "required": ["footnotes"]
+                        },
+                        "then": {
+                          "properties": {
+                            "footnote_anchor_regex": {
+                              "type": "string",
+                              "minLength": 1
+                            },
+                            "footnote_def_regex": {
+                              "type": "string",
+                              "minLength": 1
+                            }
+                          },
+                          "required": ["footnote_anchor_regex", "footnote_def_regex"]
+                        }
+                      },
+                      {
+                        "if": {
+                          "properties": {
+                            "footnotes": { "not": { "const": "custom_regex" } }
+                          },
+                          "required": ["footnotes"]
+                        },
+                        "then": {
+                          "properties": {
+                            "footnote_anchor_regex": {
+                              "type": "null"
+                            },
+                            "footnote_def_regex": {
+                              "type": "null"
+                            }
+                          }
+                        }
+                      }
+                    ]
+                  }
+                },
+                "required": ["plain_text"]
+              }
+            },
+            "required": ["adapter_config"]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "format": { "const": "custom" }
+            },
+            "required": ["format"]
+          },
+          "then": {
+            "properties": {
+              "adapter_config": {
+                "properties": {
+                  "custom": { "type": "object" }
+                },
+                "required": ["custom"]
+              }
+            },
+            "required": ["adapter_config"]
+          }
+        }
+      ]
+    },
+    "target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["language"],
+      "properties": {
+        "language": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["code", "register_notes"],
+          "properties": {
+            "code": {
+              "type": "string",
+              "pattern": "^[a-z]{2}$"
+            },
+            "register_notes": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    },
+    "verse_policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode", "threshold_lines"],
+      "properties": {
+        "mode": {
+          "type": "string",
+          "enum": [
+            "full_rhymed_plus_literal",
+            "full_rhymed_only",
+            "rhythmic_approximation",
+            "mixed_by_length",
+            "literal_only",
+            "skip"
+          ]
+        },
+        "threshold_lines": {
+          "type": ["integer", "null"],
+          "minimum": 1
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "mode": { "const": "mixed_by_length" }
+            },
+            "required": ["mode"]
+          },
+          "then": {
+            "properties": {
+              "threshold_lines": {
+                "type": "integer",
+                "minimum": 1
+              }
+            },
+            "required": ["threshold_lines"]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "mode": { "not": { "const": "mixed_by_length" } }
+            },
+            "required": ["mode"]
+          },
+          "then": {
+            "properties": {
+              "threshold_lines": {
+                "type": "null"
+              }
+            },
+            "required": ["threshold_lines"]
+          }
+        }
+      ]
+    },
+    "engine": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["effort", "max_fix_rounds", "batch_agent_cap"],
+      "properties": {
+        "effort": {
+          "const": "high"
+        },
+        "max_fix_rounds": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "batch_agent_cap": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "footnotes": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["apparatus_policy"],
+      "properties": {
+        "apparatus_policy": {
+          "type": "string",
+          "enum": ["translate_all", "preserve_source", "omit_apparatus", "body_refs_only"]
+        }
+      }
+    },
+    "glossary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["research_mode"],
+      "properties": {
+        "research_mode": {
+          "type": "string",
+          "enum": ["live", "offline"]
+        }
+      }
+    },
+    "validation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["untranslated_sentinel"],
+      "properties": {
+        "untranslated_sentinel": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "output": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["v1_scope", "destination"],
+      "properties": {
+        "v1_scope": {
+          "type": "string",
+          "enum": ["segment_drafts_and_audit"]
+        },
+        "destination": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    }
+  },
+  "patternProperties": {
+    "^x_": {}
+  },
+  "additionalProperties": false,
+  "required": [
+    "profile_version",
+    "project",
+    "source",
+    "target",
+    "verse_policy",
+    "engine",
+    "footnotes",
+    "glossary",
+    "validation",
+    "output"
+  ]
+}

@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "canon-entry.schema.json",
+  "title": "Canon Entry",
+  "description": "One resolved, ACCEPTED canon entry -- a proper-name/realia decision that has already cleared the glossary-pass merge step and lives in canon.json's entries{} map. Renamed from the historiettes-t3 reference project's canon.schema.json. If basis == \"established\", source is required and must be a non-empty URI (the glossary-pass agent's cited reference for the established rendering).",
+  "type": "object",
+  "properties": {
+    "source_form": { "type": "string" },
+    "is_proper_name": { "type": "boolean" },
+    "canonical_target_form": { "type": "string" },
+    "basis": {
+      "type": "string",
+      "enum": ["established", "transliterated", "title", "not_a_name"]
+    },
+    "source": { "type": "string" },
+    "confidence": {
+      "type": "string",
+      "enum": ["high", "medium", "low"]
+    },
+    "note": { "type": "string" }
+  },
+  "required": [
+    "source_form",
+    "is_proper_name",
+    "canonical_target_form",
+    "basis",
+    "confidence"
+  ],
+  "additionalProperties": false,
+  "if": {
+    "required": ["basis"],
+    "properties": {
+      "basis": { "const": "established" }
+    }
+  },
+  "then": {
+    "required": ["source"],
+    "properties": {
+      "source": {
+        "type": "string",
+        "format": "uri",
+        "minLength": 1
+      }
+    }
+  }
+}

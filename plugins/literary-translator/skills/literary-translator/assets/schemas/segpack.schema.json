@@ -1,0 +1,165 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "segpack.schema.json",
+  "title": "Segpack",
+  "description": "Per-segment assembly script segpack.py's own output shape (segments/segpack_{seg}.json): blocks in reading order, referenced footnotes, verses parented to this segment, proper-noun candidates, and the canon_names/new_names split. segpack.py runs a hand-rolled, dependency-free structural self-check against THIS schema (no jsonschema library, matching the real source project's own scripts) -- a missing/invalid segpack is a FATAL W3a preflight error. Consumed by translatePrompt/reviewPrompt as the single source of truth for what a segment contains.",
+  "type": "object",
+  "properties": {
+    "seg": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Segment identifier. Matches the corresponding manifest.json segments[]/frontback[] entry id this segpack was assembled from."
+    },
+    "title": {
+      "type": "string",
+      "description": "Human-readable segment title (e.g. chapter heading), copied from manifest.json."
+    },
+    "kind": {
+      "type": "string",
+      "enum": ["body", "frontback"],
+      "description": "Copied straight from the matching segments[]/frontback[] entry in manifest.json -- NEVER re-derived by segpack.py or any consumer. \"frontback\" corresponds to a translate-decision FRONTBACK:{id} unit; \"body\" to an ordinary body segment."
+    },
+    "word_count": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Total word count of this segment's source content, as recorded by extract.py.template's no_segment_exceeds_max_words check."
+    },
+    "blocks": {
+      "type": "array",
+      "description": "This segment's blocks in reading order (order_index-sorted), the unit input_sha1 hashes over (concatenated source_html/plain_text of every block, in order_index order).",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Block identifier, unique within manifest.json's block-ID model."
+          },
+          "order_index": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Reading-order rank within this segment, per extract.py.template's order_index re-ranking pass."
+          },
+          "source_html": {
+            "type": "string",
+            "description": "Block content as source HTML (gutenberg_epub-style adapters)."
+          },
+          "plain_text": {
+            "type": "string",
+            "description": "Block content as plain text (plain_text-style adapters, or a custom adapter emitting plain text)."
+          },
+          "body_ref_markers": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "OPTIONAL. Present only under footnotes.apparatus_policy: body_refs_only -- the literal anchor marker string(s) (e.g. \"[N]\") extract.py.template baked into this block's plain text verbatim, recorded here so validate_draft.py's sentinel-lite check can confirm every marker still appears, same multiset count, in the translated draft."
+          }
+        },
+        "required": ["id", "order_index"],
+        "anyOf": [
+          { "required": ["source_html"] },
+          { "required": ["plain_text"] }
+        ],
+        "additionalProperties": false
+      }
+    },
+    "footnotes": {
+      "type": "array",
+      "description": "Footnote definitions referenced by this segment's blocks, present only when footnotes.apparatus_policy resolves to translate_all or preserve_source (empty array under body_refs_only/omit_apparatus, per extract.py.template's three-way footnote-grouping distinction). This is the array note_map_hash hashes over (n + source_text per entry).",
+      "items": {
+        "type": "object",
+        "properties": {
+          "n": {
+            "type": "integer",
+            "description": "Footnote number, matches the FN:{N} block table / ⟦FNREF_N⟧ body sentinel."
+          },
+          "source_text": {
+            "type": "string",
+            "description": "Footnote definition text in the source language. Generalized field name for the real reference's fr_text."
+          }
+        },
+        "required": ["n", "source_text"],
+        "additionalProperties": false
+      }
+    },
+    "verses": {
+      "type": "array",
+      "description": "Verse-placeholder map for this segment's own standalone verse blocks -- the array verse_map_hash hashes over (vid + placeholder + parent_block per entry). The actual verse source text lives in the blocks[] entry identified by parent_block; this array is purely the lookup map enforcing the per-block verse-placeholder bijection (never flat set membership) required under every verse_policy.mode, including skip.",
+      "items": {
+        "type": "object",
+        "properties": {
+          "vid": {
+            "type": "string",
+            "description": "Verse identifier, unique within this segment."
+          },
+          "placeholder": {
+            "type": "string",
+            "description": "The sentinel placeholder (e.g. a ⟦VERSE_...⟧ token) standing in for this verse's translated content."
+          },
+          "parent_block": {
+            "type": "string",
+            "description": "The id of the blocks[] entry this verse is parented to -- the standalone verse block whose translation must equal this verse's own placeholder, a per-block bijection, not flat set membership."
+          }
+        },
+        "required": ["vid", "placeholder", "parent_block"],
+        "additionalProperties": false
+      }
+    },
+    "names": {
+      "type": "array",
+      "description": "Proper-noun candidate forms bootstrap_names.py/segpack.py found within this segment's own content. Consumed by final_audit.py's glossary-diff WARN check (cross-segment name-form drift + canon.json self-consistency).",
+      "items": { "type": "string" }
+    },
+    "canon_names": {
+      "type": "array",
+      "description": "Name forms appearing in this segment that are ALREADY canonized in canon.json's entries{} at segpack-generation time -- locked forms the translator MUST use verbatim. Together with new_names, this is the list used_terms_hash's per-segment computation references to look up canon.json entries currently keyed by these names.",
+      "items": { "type": "string" }
+    },
+    "new_names": {
+      "type": "array",
+      "description": "Name forms appearing in this segment that are NOT yet canonized in canon.json at segpack-generation time -- the translator resolves these by context and flags them NEW: in the draft's own notes[]. Invalidation-load-bearing: used_terms_hash's per-segment computation includes new_names (not just canon_names) so that canonizing one of these elsewhere later correctly flips this segment stale the moment its bytes first enter canon.json.",
+      "items": { "type": "string" }
+    },
+    "generation_hashes": {
+      "type": "object",
+      "description": "Copied DIRECTLY from manifest.json's (source_extraction_hash, source_input_hash) and canon.json's (particle_config_hash, derivation_bundle_hash) current recorded values at segpack-generation time -- NEVER independently recomputed by this schema, segpack.py, or any consumer. Transitively proves the whole upstream extraction/derivation chain was current when this segpack was built; the derivation-state gate (select_segments.py) compares these recorded values against CURRENT values to distinguish an ordinary stale reclassification from blocked_needs_regeneration.",
+      "properties": {
+        "source_extraction_hash": {
+          "type": "string",
+          "description": "Copied verbatim from manifest.json's generation_hashes.source_extraction_hash."
+        },
+        "source_input_hash": {
+          "type": "string",
+          "description": "Copied verbatim from manifest.json's generation_hashes.source_input_hash."
+        },
+        "particle_config_hash": {
+          "type": "string",
+          "description": "Copied verbatim from canon.json's generation_hashes.particle_config_hash."
+        },
+        "derivation_bundle_hash": {
+          "type": "string",
+          "description": "Copied verbatim from canon.json's generation_hashes.derivation_bundle_hash."
+        }
+      },
+      "required": [
+        "source_extraction_hash",
+        "source_input_hash",
+        "particle_config_hash",
+        "derivation_bundle_hash"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "seg",
+    "title",
+    "kind",
+    "word_count",
+    "blocks",
+    "footnotes",
+    "verses",
+    "names",
+    "canon_names",
+    "new_names",
+    "generation_hashes"
+  ],
+  "additionalProperties": false
+}

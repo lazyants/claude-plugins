@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "review.schema.json",
+  "title": "Segment Review Verdict",
+  "description": "Structured return of the review agent for one segment draft. Matches the proven reference engine's review schema 1:1 -- clean/coverage_ok/findings, additionalProperties:false -- with one deliberate plugin addition: draft_sha1. There is no verse_status field anywhere in this schema; verse-specific issues surface as ordinary findings[] entries (loc: \"VERSE:{vid}\"), and verse COVERAGE is exclusively the deterministic validator's job, never review judgment.",
+  "type": "object",
+  "properties": {
+    "clean": {
+      "type": "boolean",
+      "description": "True iff the reviewer found no findings requiring a fix round."
+    },
+    "coverage_ok": {
+      "type": "boolean",
+      "description": "True iff the reviewer confirms the draft covers the full source segment (no dropped blocks/footnotes/verses from a review-judgment standpoint)."
+    },
+    "findings": {
+      "type": "array",
+      "description": "Issues the reviewer wants fixed. Empty when clean is true.",
+      "items": {
+        "type": "object",
+        "properties": {
+          "loc": {
+            "type": "string",
+            "description": "Location the finding applies to (e.g. a block/footnote id, or \"VERSE:{vid}\" for verse-specific issues)."
+          },
+          "severity": {
+            "type": "string"
+          },
+          "issue": {
+            "type": "string"
+          },
+          "suggest": {
+            "type": "string"
+          }
+        },
+        "required": ["loc", "severity", "issue", "suggest"],
+        "additionalProperties": false
+      }
+    },
+    "draft_sha1": {
+      "type": "string",
+      "description": "Deliberate plugin addition -- the real reference schema lacks this field. The reviewer's own sha1 of the draft it is about to review, computed by shelling out to draft_sha1.py BEFORE reading the draft (hash-first-then-read). This is a staleness-detection mechanism: at convergence, ledger_update.py re-reads this value, computes a fresh sha1 of the current on-disk draft, and compares -- a mismatch (the draft changed since this review was written) refuses to record convergence at all. Hash-first-then-read narrows but does not fully close the TOCTOU window."
+    }
+  },
+  "required": ["clean", "coverage_ok", "findings", "draft_sha1"],
+  "additionalProperties": false
+}

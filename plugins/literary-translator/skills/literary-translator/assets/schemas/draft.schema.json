@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "draft.schema.json",
+  "title": "Segment Draft",
+  "description": "Structural self-check shape for segments/{seg}.draft.json (draft_path(seg) -- no target-language suffix, unlike the real reference project's own .ru.draft.json). This is a MODE-NEUTRAL structural superset ONLY: it validates LOCAL container shape -- that blocks/footnotes/verses are dicts with the right value types, that names/notes are arrays of the right item type -- and nothing deeper. It deliberately does NOT encode which of a verse entry's own fields (e.g. a rendered rendering, a literal gloss) are required, forbidden, or conditional; that varies by verse_policy.mode (see references/verse-policy.md, the six-mode table) and is validate_draft.py's SOLE authority. There is no if/then anywhere in this schema keyed on verse_policy.mode, by design. Likewise, per-block/per-footnote/per-verse key-set completeness and the per-block verse-placeholder bijection invariant are coverage checks, not local shape checks, and are validate_draft.py's job alone -- a draft can be fully draft.schema.json-valid while still failing validate_draft.py outright (a missing verse key, a duplicated placeholder) or being semantically wrong for the active mode (e.g. a missing literal gloss under full_rhymed_plus_literal). validate_draft.py and segpack.py both use a hand-rolled, dependency-free structural check against this schema's shape (matching the real source project, which imports only json/os/re/sys) rather than the jsonschema library -- this file is still authoritative documentation of that shape, not merely descriptive.",
+  "type": "object",
+  "properties": {
+    "seg": {
+      "type": "string",
+      "description": "Segment id this draft translates -- matches the corresponding segpack's own seg id."
+    },
+    "blocks": {
+      "type": "object",
+      "description": "Translated body-block text keyed by block id (mirrors segpack.blocks[]'s ids). Local container shape only: a dict whose values are strings. Whether every segpack block id is present (coverage) is validate_draft.py's job, not this schema's.",
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
+    "footnotes": {
+      "type": "object",
+      "description": "Translated footnote text keyed by footnote id (mirrors segpack.footnotes[]'s ids). Local container shape only: a dict whose values are strings. Coverage against the resolved apparatus_policy (which footnotes must appear at all) is validate_draft.py's job, not this schema's.",
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
+    "verses": {
+      "type": "object",
+      "description": "Per-verse translated content keyed by verse id (mirrors segpack.verses[]'s ids). MODE-NEUTRAL: a dict whose values are objects -- this schema constrains the value no further than 'is an object', since which of its own fields exist (and whether any are required, e.g. rendered/literal_gloss) varies by verse_policy.mode and is validate_draft.py's SOLE authority (see references/verse-policy.md). A value MAY be an empty object under skip mode. Per-verse key-set/bijection coverage (every segpack verse id present exactly once, every ⟦VERSE_...⟧ placeholder resolved) is IDENTICAL across every mode including skip, but is a coverage check, not a local shape check, and is validate_draft.py's job, not this schema's.",
+      "additionalProperties": {
+        "type": "object"
+      }
+    },
+    "names": {
+      "type": "array",
+      "description": "Proper-noun/name entries this segment's translation resolved or touched -- read by final_audit.py's WARN-only cross-segment glossary-diff check against canon.json. Local container shape only: an array of objects; which fields each entry carries (e.g. source/target forms, basis, confidence) is not enforced here.",
+      "items": {
+        "type": "object"
+      }
+    },
+    "notes": {
+      "type": "array",
+      "description": "Free-form translator notes for this segment (e.g. NEW: flags for a not-yet-canonized new_names[] candidate resolved by context, translation-choice rationale). Local container shape only: an array of strings.",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "required": ["seg", "blocks", "footnotes", "verses", "names", "notes"],
+  "additionalProperties": false
+}

@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "ledger-write-confirmation.schema.json",
+  "title": "Ledger Write Confirmation",
+  "description": "Structured stdout of ledger_update.py: SUCCESS reports the fragment just written; FAILURE reports why nothing was written. The two branches are not the same shape -- a failure never claims a fragment_path/fragment_sha1 that doesn't exist.",
+  "oneOf": [
+    {
+      "title": "SUCCESS",
+      "type": "object",
+      "properties": {
+        "success": { "const": true },
+        "status": { "type": "string" },
+        "fragment_path": { "type": "string" },
+        "fragment_sha1": { "type": "string" }
+      },
+      "required": ["success", "status", "fragment_path", "fragment_sha1"],
+      "additionalProperties": false
+    },
+    {
+      "title": "FAILURE",
+      "type": "object",
+      "properties": {
+        "success": { "const": false },
+        "error": { "type": "string" },
+        "exit_code": { "type": "integer" },
+        "stderr": { "type": "string" }
+      },
+      "required": ["success", "error"],
+      "additionalProperties": false
+    }
+  ]
+}

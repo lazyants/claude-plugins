@@ -1,0 +1,100 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "canon-adjudications.schema.json",
+  "title": "Canon Adjudications",
+  "description": "The persisted artifact canon_adjudication_audit.py reads (default path {durable_root}/canon_adjudications.json) and cross-checks against canon.json's freshly recomputed required-item worklist -- NEVER writes verdicts or risk-acceptances itself (--init only ever writes the empty template below). Authored by a human reviewer or a schema-validated codex workflow. 'adjudications' covers categories 1-3 (duplicate_source_form/existing_merge/candidate_missed_merge_pair), keyed by '{kind}::' + sha256(canonical_json(identity)); each record needs a valid verdict_class plus non-empty reviewed_by/reason. 'degenerate_cap_overrides' covers category 3's above-cap risk-acceptance, keyed by the single project-global scope token '__canon__'; each record must carry the FRESH cap-identity (entity_count/pair_count/cap/entity_set_fingerprint) canon_adjudication_audit.py's --check prints, or it is reported stale. 'review_queue_risk_overrides' covers category 4 (review_queue_unresolved items that are risk-accepted rather than drained), keyed the same way as their matching required item. | VALIDATION LAYERS: this schema is the full AUTHORING contract -- validate the whole file against it at authoring time (a human reviewer or schema-validated codex workflow). The runtime reader (canon_adjudication_audit.py) enforces the load-bearing fields of CURRENTLY-REQUIRED items plus structural readability; it intentionally does NOT re-validate the content of ORPHAN records (adjudication/override keys that match no currently-required item) -- orphans are reported for pruning but are non-blocking, because an orphan cannot hide a current risk (required items are recomputed fresh from canon.json). Full-file schema conformance beyond the load-bearing current-item fields is the authoring layer's responsibility, deliberately not duplicated in the stdlib-only reader.",
+  "type": "object",
+  "properties": {
+    "schema_version": { "const": 1 },
+    "_contract": {
+      "description": "Free-text pointer to canon_adjudication_audit.py's own module docstring for the full contract -- documentation only, not load-bearing; not read or validated by the reader, so left unconstrained to match the reader."
+    },
+    "adjudications": {
+      "type": "object",
+      "description": "Keyed by required-item key ('duplicate_source_form::<hash>' / 'existing_merge::<hash>' / 'candidate_missed_merge_pair::<hash>'). Each record's own 'kind'/identity fields are for human readability and orphan-detection only -- the KEY is authoritative for matching against the currently-required item.",
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "description": "Advisory human-readability label (normally duplicate_source_form / existing_merge / candidate_missed_merge_pair). canon_adjudication_audit.py does NOT read or validate this field -- the record KEY is authoritative for matching against the currently-required item. Left unconstrained so this schema and the reader agree: a mistyped advisory label must never block the gate."
+          },
+          "verdict_class": {
+            "type": "string",
+            "enum": ["confirmed_ok", "adverse"]
+          },
+          "reviewed_by": {
+            "type": "string",
+            "pattern": "\\S",
+            "description": "Non-empty and not whitespace-only: human name or codex-workflow id. A missing/empty/blank value never satisfies the gate."
+          },
+          "reason": {
+            "type": "string",
+            "pattern": "\\S"
+          },
+          "timestamp": { "description": "Advisory; not read or validated by canon_adjudication_audit.py, so left unconstrained to match the reader." }
+        },
+        "required": ["verdict_class", "reviewed_by", "reason"],
+        "additionalProperties": true
+      }
+    },
+    "degenerate_cap_overrides": {
+      "type": "object",
+      "description": "At most one meaningful key, '__canon__' -- canon is project-global, so there is exactly one cap scope.",
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "risk_accepted_by": {
+            "type": "string",
+            "pattern": "\\S"
+          },
+          "reason": {
+            "type": "string",
+            "pattern": "\\S"
+          },
+          "timestamp": { "description": "Advisory; not read or validated by canon_adjudication_audit.py, so left unconstrained to match the reader." },
+          "entity_count": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Must match the fresh cap-identity canon_adjudication_audit.py's --check prints, or this override is reported stale."
+          },
+          "pair_count": { "type": "integer", "minimum": 0 },
+          "cap": { "type": "integer", "minimum": 0 },
+          "entity_set_fingerprint": {
+            "type": "string",
+            "description": "sha256(canonical_json(sorted distinct normalized canonical_target_form over proper-name entries)). Any change to the entity set (add/remove/rename) changes this and stales the override."
+          }
+        },
+        "required": [
+          "risk_accepted_by",
+          "reason",
+          "entity_count",
+          "pair_count",
+          "cap",
+          "entity_set_fingerprint"
+        ],
+        "additionalProperties": true
+      }
+    },
+    "review_queue_risk_overrides": {
+      "type": "object",
+      "description": "Keyed by 'review_queue_unresolved::<hash>', the same key construction as the matching review_queue_unresolved required item (hash of the whole queued item's own canonical JSON -- any content change re-blocks under a new key).",
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "risk_accepted_by": {
+            "type": "string",
+            "pattern": "\\S"
+          },
+          "reason": {
+            "type": "string",
+            "pattern": "\\S"
+          },
+          "timestamp": { "description": "Advisory; not read or validated by canon_adjudication_audit.py, so left unconstrained to match the reader." }
+        },
+        "required": ["risk_accepted_by", "reason"],
+        "additionalProperties": true
+      }
+    }
+  },
+  "additionalProperties": true
+}

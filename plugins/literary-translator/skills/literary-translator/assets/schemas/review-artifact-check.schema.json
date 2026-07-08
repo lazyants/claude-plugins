@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "review-artifact-check.schema.json",
+  "title": "Review Artifact Check",
+  "description": "Structured stdout of review_artifact_check.py: compares canonical review_path(seg) against the expected review object written to --expected-file using sorted-key JSON. MATCH means the on-disk review artifact matches that expected object; MISMATCH means the artifact differs and the review must be retried or blocked.",
+  "oneOf": [
+    {
+      "title": "MATCH",
+      "type": "object",
+      "properties": {
+        "match": { "const": true }
+      },
+      "required": ["match"],
+      "additionalProperties": false
+    },
+    {
+      "title": "MISMATCH",
+      "type": "object",
+      "properties": {
+        "match": { "const": false },
+        "mismatch_detail": { "type": "string" }
+      },
+      "required": ["match", "mismatch_detail"],
+      "additionalProperties": false
+    }
+  ]
+}

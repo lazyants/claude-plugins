@@ -1,0 +1,1145 @@
+# EXTRACTOR_CONTRACT_VERSION: 1
+#
+# This marker MUST stay the file's first non-blank line (mirrors the
+# `<!-- PROMPT_CONTRACT_VERSION: N -->` convention `translate_TASK.md` /
+# `review_TASK.md` / `glossary_TASK.md` use, generalized to a Python `#`
+# comment since this file must stay valid Python). On a resumed project,
+# `scripts/profile_validate.py` compares this value against its own hardcoded
+# `CURRENT_EXTRACTOR_CONTRACT_VERSION` constant and FATALLY halts on: a
+# missing marker, a malformed (non-integer) value, a duplicated marker, or a
+# non-leading marker. Bump both this line and that constant together whenever
+# this file's I/O contract (manifest.json shape, block-ID model, sentinel
+# conventions) changes in a way old projects must consciously re-adopt --
+# NEVER auto-overwrite a project's already-hand-adapted `extract.py`.
+"""Deterministic extractor -- gutenberg_epub adapter (config-driven).
+
+Generalized from the proven, production-run extractor built for Historiettes
+de Tallemant, tome 3 (fr->ru). Keeps that script's core mechanics -- the
+block-ID/order_index coverage model, spine + front/back classification,
+footnote grouping, verse detection, and the blocking round-trip self-check
+suite -- but drives every per-project decision off `profile.yml` instead of
+hardcoded constants, and self-anchors under `${durable_root}` instead of an
+absolute path baked in at authoring time.
+
+This file IS the `gutenberg_epub` adapter's extractor (see
+`references/source-format-adapters/gutenberg-epub.md`). It refuses to run
+against a profile whose `source.format` is anything else -- `plain_text`
+sources use a separate, lighter adapter (segmentation-heuristic based, no
+EPUB spine/OPF concept at all); `custom` sources use a hand-co-designed
+extractor under `scripts/custom_extractors/`. A v1.1 dispatcher that shares
+this file across formats is plausible future work, not this build's scope.
+
+Shipped location: Step 0a copies this template, ONCE, to
+`${durable_root}/extract.py` (a one-time seed, never re-copied over a
+project's own hand-adapted copy) -- a SIBLING of `scripts/`, `segments/`,
+`manifest.json`, etc., NOT a member of `scripts/` itself. That is why this
+file self-anchors via `Path(__file__).resolve().parent` (one level up from
+where a generic `${durable_root}/scripts/<name>.py` script would use
+`.parents[1]`) -- getting this wrong silently resolves `durable_root` one
+directory too high and corrupts every path derived from it.
+
+Block-ID model
+---------------
+  HEAD:{seg}            chapter/novella heading (source h2)
+  PARA:{seg}:{ord}      prose paragraph
+  QUOTE:{seg}:{ord}     block quotation (blockquote-equivalent, wrapper kept)
+  VERSE:{seg}:{ord}     standalone poem node (top-level poetry node in a segment)
+  FN:{N}                footnote definition N (only when footnotes.apparatus_policy
+                        is translate_all/preserve_source -- see build_footnote_table)
+  FRONTBACK:{id}        front/back element, decision translate|regenerate|omit
+
+Sentinels
+---------
+  U+27E6 FNREF_N U+27E7          marks the exact in-sentence position of footnote
+                                 anchor N (translate_all/preserve_source only).
+  U+27E6 VERSE_Vddd_hash U+27E7  marks an embedded poem (inside a quote/footnote/
+                                 frontback block); the poem is translated via the
+                                 verse sub-pipeline and substituted back at assembly.
+  [N]                            literal footnote marker baked into plain text
+                                 verbatim when footnotes.apparatus_policy is
+                                 body_refs_only -- no apparatus exists to point at,
+                                 the reader just sees "there was a note here".
+
+Standalone body poems are their own VERSE block. Poems nested in a quote,
+footnote, or frontback block are replaced in place by a VERSE placeholder and
+recorded in the verse store with mount="embedded" plus the parent block that
+carries the placeholder.
+"""
+import copy
+import hashlib
+import json
+import os
+import posixpath
+import re
+import subprocess
+import sys
+import urllib.parse
+import warnings
+import zipfile
+from pathlib import Path
+
+def _missing_dep(pip_name: str, hint: str = "") -> None:
+    suffix = f" ({hint})" if hint else ""
+    print(
+        f"ERROR: this plugin requires the '{pip_name}' Python package{suffix}.\n"
+        f"Install with: pip install {pip_name}\n"
+        f"(or: pip install -r requirements.txt from the literary-translator plugin directory)",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
+
+try:
+    import yaml
+except ImportError:
+    _missing_dep("PyYAML")
+
+try:
+    import jsonschema
+except ImportError:
+    _missing_dep("jsonschema")
+
+try:
+    from bs4 import BeautifulSoup, FeatureNotFound, XMLParsedAsHTMLWarning
+    from bs4.element import NavigableString, Tag
+except ImportError:
+    _missing_dep("beautifulsoup4")
+
+try:
+    import lxml  # noqa: F401  -- bs4's "lxml"/"xml" parser backends need this installed.
+except ImportError:
+    _missing_dep("lxml", "bs4's XML/HTML parser backend")
+
+# bs4 can import fine while its "lxml"/"xml" parser BACKEND is separately
+# missing (FeatureNotFound) -- must be caught here, at preflight, with a
+# backend-named actionable message, not mid-extraction as a bare traceback.
+for _backend in ("lxml", "xml"):
+    try:
+        BeautifulSoup("<a>x</a>", _backend)
+    except FeatureNotFound:
+        _missing_dep("lxml", f"bs4's {_backend!r} parser backend is unavailable")
+
+warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
+
+# ---------------------------------------------------------------------------
+# Self-anchoring (load-bearing -- see module docstring for why `.parent`, not
+# `.parents[1]`, is correct for THIS specific file).
+# ---------------------------------------------------------------------------
+DURABLE_ROOT = Path(__file__).resolve().parent
+MANIFEST_PATH = DURABLE_ROOT / "manifest.json"
+SCHEMAS_DIR = DURABLE_ROOT / "schemas"
+SCRIPTS_DIR = DURABLE_ROOT / "scripts"
+ROOT_MARKER_PATH = DURABLE_ROOT / ".literary-translator-root.json"
+
+FN_ANCHOR_RE = re.compile(r"^FNanchor_(\d+)$")
+FN_DEF_RE = re.compile(r"^Footnote_(\d+)$")
+FNREF_RE = re.compile(r"⟦FNREF_(\d+)⟧")
+VERSEREF_RE = re.compile(r"⟦VERSE_(V\d+)_[0-9a-f]{8}⟧")
+BODY_REF_MARKER_RE = re.compile(r"\[(\d+)\]")
+_WS = re.compile(r"[ \t\r\n ]+")
+
+# Block-level tags get a whitespace boundary in plain text; inline tags (a, b,
+# i, span, sup, ...) are concatenated with NO injected separator, so a word
+# split by inline markup (<b>C</b>ertes) or an anchor sentinel stays glued to
+# its neighbours. NEVER replace block_text() with bs4's own get_text(" ") --
+# that inserts a separator at every tag boundary, inline or not, and corrupts
+# drop-cap-split words and sentinel-adjacent punctuation alike.
+BLOCK_TAGS = {
+    "p", "div", "br", "h1", "h2", "h3", "h4", "h5", "h6",
+    "blockquote", "li", "ul", "ol", "table", "tr", "td", "hr",
+}
+
+VALID_APPARATUS_POLICIES = ("translate_all", "preserve_source", "omit_apparatus", "body_refs_only")
+
+
+def die(msg):
+    print(f"FATAL: {msg}", file=sys.stderr)
+    sys.exit(1)
+
+
+def sha1(s: str) -> str:
+    return hashlib.sha1(s.encode("utf-8")).hexdigest()
+
+
+def normalize_text(s: str) -> str:
+    return _WS.sub(" ", s).strip()
+
+
+def has_class(tag, name):
+    return isinstance(tag, Tag) and name in (tag.get("class") or [])
+
+
+def block_text(node) -> str:
+    """get_text() that inserts a separator only at block boundaries, never inline."""
+    parts = []
+
+    def rec(n):
+        if isinstance(n, NavigableString):
+            parts.append(str(n))
+            return
+        if not isinstance(n, Tag):
+            return
+        block = n.name in BLOCK_TAGS
+        if block:
+            parts.append("\n")
+        for c in n.children:
+            rec(c)
+        if block:
+            parts.append("\n")
+
+    rec(node)
+    return "".join(parts)
+
+
+def short_name(href) -> str:
+    href = str(href)
+    return href.split("@")[-1] if "@" in href else href
+
+
+# ---------------------------------------------------------------------------
+# profile.yml discovery + loading (self-anchored: no --profile / --durable-root flag)
+# ---------------------------------------------------------------------------
+def _resolve_owner_profile_path() -> Path:
+    if not ROOT_MARKER_PATH.is_file():
+        die(
+            f"{ROOT_MARKER_PATH} not found -- Step 0a (durable-root scaffolding) must "
+            f"run before extract.py. Re-invoke the literary-translator skill's Step 0/0a."
+        )
+    try:
+        marker = json.loads(ROOT_MARKER_PATH.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as e:
+        die(f"cannot parse {ROOT_MARKER_PATH}: {e}")
+    owner = marker.get("owner_profile_path")
+    if not owner:
+        die(f"{ROOT_MARKER_PATH} has no 'owner_profile_path' field")
+    p = Path(owner)
+    if not p.is_absolute():
+        p = (DURABLE_ROOT / owner).resolve()
+    if not p.is_file():
+        die(f"profile.yml referenced by {ROOT_MARKER_PATH} ('owner_profile_path': {owner!r}) not found at {p}")
+    return p
+
+
+def load_profile() -> dict:
+    profile_path = _resolve_owner_profile_path()
+    try:
+        with open(profile_path, encoding="utf-8") as f:
+            profile = yaml.safe_load(f)
+    except yaml.YAMLError as e:
+        die(f"cannot parse {profile_path} as YAML: {e}")
+    if not isinstance(profile, dict):
+        die(f"{profile_path} did not parse to a YAML mapping")
+    fmt = (profile.get("source") or {}).get("format")
+    if fmt != "gutenberg_epub":
+        die(
+            f"{profile_path}: source.format is {fmt!r}, but this extract.py is the "
+            f"gutenberg_epub adapter's extractor. See references/source-format-adapters/ "
+            f"for the correct adapter for this format."
+        )
+    return profile
+
+
+# ---------------------------------------------------------------------------
+# EPUB (zip) access
+# ---------------------------------------------------------------------------
+def open_source_zip(source_path: Path) -> zipfile.ZipFile:
+    if not source_path.is_file():
+        die(f"source.path does not exist: {source_path}")
+    try:
+        return zipfile.ZipFile(source_path)
+    except zipfile.BadZipFile as e:
+        die(f"source.path ({source_path}) is not a valid EPUB/zip archive: {e}")
+
+
+def _zip_join(opf_dir: str, href: str) -> str:
+    href = urllib.parse.unquote(str(href).split("#")[0])
+    if opf_dir:
+        return posixpath.normpath(posixpath.join(opf_dir, href))
+    return posixpath.normpath(href)
+
+
+def read_zip_member(zf: zipfile.ZipFile, opf_dir: str, href: str) -> str:
+    full = _zip_join(opf_dir, href)
+    try:
+        return zf.read(full).decode("utf-8")
+    except KeyError:
+        die(f"EPUB manifest references {href!r} (resolved to {full!r}) but it is not present in the archive")
+
+
+def read_html_item(zf: zipfile.ZipFile, opf_dir: str, href: str) -> BeautifulSoup:
+    return BeautifulSoup(read_zip_member(zf, opf_dir, href), "lxml")
+
+
+def load_opf(zf: zipfile.ZipFile):
+    try:
+        container_xml = zf.read("META-INF/container.xml").decode("utf-8")
+    except KeyError:
+        die("EPUB archive has no META-INF/container.xml")
+    csoup = BeautifulSoup(container_xml, "xml")
+    rootfile = csoup.find("rootfile")
+    if rootfile is None or not rootfile.get("full-path"):
+        die("META-INF/container.xml has no <rootfile full-path=...> element")
+    opf_path = rootfile["full-path"]
+    opf_dir = posixpath.dirname(opf_path)
+    try:
+        opf_text = zf.read(opf_path).decode("utf-8")
+    except KeyError:
+        die(f"container.xml points at {opf_path!r} but it is not present in the archive")
+    return BeautifulSoup(opf_text, "xml"), opf_dir
+
+
+def load_spine(opf_soup: BeautifulSoup) -> list:
+    manifest_items = {it.get("id"): it.get("href") for it in opf_soup.find_all("item")}
+    mediatype = {it.get("id"): it.get("media-type") for it in opf_soup.find_all("item")}
+    spine = []
+    for pos, ir in enumerate(opf_soup.find_all("itemref")):
+        idref = ir.get("idref")
+        href = manifest_items.get(idref)
+        spine.append({
+            "pos": pos,
+            "idref": idref,
+            "href": href,
+            "file": short_name(href) if href else None,
+            "media_type": mediatype.get(idref),
+        })
+    return spine
+
+
+# ---------------------------------------------------------------------------
+# ADAPT-POINT: classify_spine_item
+# ---------------------------------------------------------------------------
+def classify_spine_item(item, zf, opf_dir, spine_overrides):
+    """Classify one spine item as body | footnote-defs | front-back.
+
+    Per-project override FIRST (adapter_config.gutenberg_epub.spine_overrides,
+    keyed by this item's own "file" short-name), THEN a content-based
+    heuristic fallback: a spine item with any FNanchor_N id is "body"; one
+    with no anchors but at least one Footnote_N id is "footnote-defs";
+    anything else (including non-xhtml manifest entries, which never carry
+    the manuscript's own footnote markup) is "front-back". Extend this
+    function's fallback branch, or add spine_overrides entries in profile.yml,
+    to fit a source whose own footnote-anchor/definition ID convention
+    differs from Gutenberg's ebookmaker output.
+    """
+    override = (spine_overrides or {}).get(item["file"])
+    if override:
+        return override
+    if item.get("media_type") != "application/xhtml+xml" or not item.get("href"):
+        return "front-back"
+    soup = read_html_item(zf, opf_dir, item["href"])
+    body = soup.body or soup
+    n_anchor = len(body.find_all("a", id=FN_ANCHOR_RE))
+    n_def = len(body.find_all(id=FN_DEF_RE))
+    if n_anchor > 0:
+        return "body"
+    if n_def > 0:
+        return "footnote-defs"
+    return "front-back"
+
+
+# ---------------------------------------------------------------------------
+# Serialization helpers (operate on clones; master tree already carries any
+# already-assigned placeholders from the earlier verse-detection pass)
+# ---------------------------------------------------------------------------
+PAGENO_CLASS = "x-ebookmaker-pageno"
+
+
+def _prep_clone(tag: Tag, apparatus_policy: str, strip_labels=False) -> Tag:
+    clone = copy.copy(tag)
+    for a in clone.find_all("a", class_=PAGENO_CLASS):
+        a.decompose()
+    if strip_labels:
+        for lab in clone.find_all("span", class_="label"):
+            lab.decompose()
+    for a in list(clone.find_all("a", id=FN_ANCHOR_RE)):
+        n = int(FN_ANCHOR_RE.match(a.get("id")).group(1))
+        if apparatus_policy in ("translate_all", "preserve_source"):
+            a.replace_with(NavigableString(f"⟦FNREF_{n}⟧"))
+        elif apparatus_policy == "body_refs_only":
+            a.replace_with(NavigableString(f"[{n}]"))
+        elif apparatus_policy == "omit_apparatus":
+            a.decompose()
+        else:
+            raise ValueError(f"unknown footnotes.apparatus_policy: {apparatus_policy!r}")
+    return clone
+
+
+def serialize_prose(tag: Tag, apparatus_policy: str, strip_labels=False):
+    clone = _prep_clone(tag, apparatus_policy, strip_labels=strip_labels)
+    html = str(clone)
+    text = normalize_text(block_text(clone))
+    fnrefs = [int(m) for m in FNREF_RE.findall(text)]
+    return html, text, fnrefs
+
+
+def verse_plain(container: Tag) -> str:
+    # join a line's inline pieces with NO separator (<b>C</b>ertes -> "Certes");
+    # source whitespace between words is preserved in its own text nodes.
+    stanzas = container.select(".stanza")
+    if stanzas:
+        parts = []
+        for st in stanzas:
+            parts.extend(normalize_text(ln.get_text()) for ln in st.select(".line"))
+            parts.append("")  # blank line between stanzas
+        return "\n".join(parts).strip()
+    lines = [normalize_text(ln.get_text()) for ln in container.select(".line")]
+    return "\n".join(lines).strip() or normalize_text(container.get_text("\n"))
+
+
+def verse_payload(container: Tag, apparatus_policy: str):
+    clone = _prep_clone(container, apparatus_policy)
+    html = str(clone)
+    plain = verse_plain(clone)
+    n_line = len(container.select(".line"))
+    n_stanza = len(container.select(".stanza"))
+    fnrefs = [int(m) for m in FNREF_RE.findall(plain)]
+    return html, plain, n_line, n_stanza, fnrefs
+
+
+# ---------------------------------------------------------------------------
+# ADAPT-POINT: classify_frontback_block
+# ---------------------------------------------------------------------------
+_TOC_KEYWORDS = ("table of contents", "table des mati", "inhaltsverzeichnis", "indice")
+
+
+def classify_frontback_block(tag: Tag):
+    """Default decision for one front/back-matter block, BEFORE per-project
+    overrides are applied (adapter_config.gutenberg_epub.frontback_overrides,
+    keyed by this element's own generated FRONTBACK:{id}, applied by the
+    caller once that id exists). Extend the keyword lists / add new branches
+    here for a project's own front-matter conventions (translator forewords,
+    dedication pages, a different transcriber-note phrasing, etc.) -- the
+    override map is the one-off escape hatch, this function is the default
+    heuristic every element falls through to first.
+    """
+    cls = tag.get("class") or []
+    txt = normalize_text(tag.get_text(" "))
+    low = txt.strip().lower().rstrip(":")
+    if tag.name == "div" and ("pgheader" in cls or "pgmonospaced" in cls):
+        return "omit", "Project Gutenberg boilerplate header/footer"
+    if tag.name == "div" and "box" in cls and low.startswith("note sur la transcription"):
+        return "omit", "transcriber note"
+    if tag.name == "hr":
+        return "regenerate", "rule (structural)"
+    if any(kw in low for kw in _TOC_KEYWORDS):
+        return "regenerate", "table of contents rebuilt from segments at assembly"
+    if low == "notes":
+        return "regenerate", "notes-section divider rebuilt at assembly"
+    if tag.find("img"):
+        return "regenerate", "decorative image kept as-is at assembly"
+    if not txt:
+        return "regenerate", "empty structural block"
+    return "translate", "title-page / front-matter text"
+
+
+# ---------------------------------------------------------------------------
+# Build
+# ---------------------------------------------------------------------------
+def build(profile: dict):
+    source_cfg = profile["source"]
+    project_cfg = profile["project"]
+    footnotes_cfg = profile["footnotes"]
+    adapter_cfg = (source_cfg.get("adapter_config") or {}).get("gutenberg_epub") or {}
+    spine_overrides = adapter_cfg.get("spine_overrides") or {}
+    frontback_overrides = adapter_cfg.get("frontback_overrides") or {}
+    apparatus_policy = footnotes_cfg["apparatus_policy"]
+    if apparatus_policy not in VALID_APPARATUS_POLICIES:
+        die(f"footnotes.apparatus_policy: unknown value {apparatus_policy!r}")
+    max_segment_words = project_cfg["max_segment_words"]
+
+    source_path = Path(source_cfg["path"]).expanduser()
+    zf = open_source_zip(source_path)
+    try:
+        opf_soup, opf_dir = load_opf(zf)
+        spine = load_spine(opf_soup)
+        for it in spine:
+            it["klass"] = classify_spine_item(it, zf, opf_dir, spine_overrides)
+
+        body_items = [it for it in spine if it["klass"] == "body"]
+        notes_items = [it for it in spine if it["klass"] == "footnote-defs"]
+        fb_items = [it for it in spine if it["klass"] == "front-back"]
+
+        body_soups = [(read_html_item(zf, opf_dir, it["href"]), it["file"]) for it in body_items]
+        notes_soups = [(read_html_item(zf, opf_dir, it["href"]), it["file"]) for it in notes_items]
+        fb_soups = [(read_html_item(zf, opf_dir, it["href"]), it["file"]) for it in fb_items]
+    finally:
+        zf.close()
+
+    blocks = {}
+    segments = []
+    frontback = []
+    verse_store = []
+    anchor_index = {}
+    order = [0]
+
+    def next_order():
+        order[0] += 1
+        return order[0]
+
+    def add_block(bid, rec):
+        if bid in blocks:
+            raise ValueError(f"DUPLICATE block id: {bid}")
+        blocks[bid] = rec
+        return bid
+
+    def record_anchors(fnrefs, block_id, seg_id, file_label):
+        if apparatus_policy not in ("translate_all", "preserve_source"):
+            return  # no FNREF sentinel exists under body_refs_only/omit_apparatus
+        for n in fnrefs:
+            anchor_index[n] = {"anchor_block": block_id, "anchor_seg": seg_id, "anchor_file": file_label}
+
+    # -----------------------------------------------------------------
+    # ADAPT-POINT: verse-detection loop.
+    #
+    # Registers verse nodes by the UNION of two methods:
+    #   (a) explicit ".poetry-container" wrapper (the proven, primary method) --
+    #       each container becomes its own verse entry; a standalone body-level
+    #       container survives as its own VERSE block, an embedded one (inside a
+    #       quote/footnote/frontback element, or nested deeper in the body) is
+    #       replaced in place by its placeholder sentinel.
+    #   (b) a bare ".stanza"/".line" fallback for sources that mark up verse
+    #       WITHOUT a wrapping ".poetry-container" -- every orphan .stanza/.line
+    #       node not already covered by (a) is grouped by its own immediate
+    #       parent element (in document order of first appearance) and treated
+    #       exactly like a poetry-container from that point on. This is a
+    #       heuristic, not a proof: a source that packs multiple distinct poems
+    #       under one shared parent with no wrapper element of their own will
+    #       have them merged into a single verse entry. Spot-check verse.store
+    #       against the source for a project relying on the fallback; add a
+    #       project-specific wrapper-normalization pass upstream (or refine the
+    #       grouping predicate here) if it merges poems that should stay separate.
+    # -----------------------------------------------------------------
+    vid_by_tagid = {}
+    verse_by_vid = {}
+    scopes = (
+        [(s, f, "body") for s, f in body_soups]
+        + [(s, f, "footnote") for s, f in notes_soups]
+        + [(s, f, "frontback") for s, f in fb_soups]
+    )
+    vcount = 0
+    total_stanza = total_line = 0
+
+    def _register_verse_node(container, label, ctx, force_embedded=False):
+        nonlocal vcount
+        vcount += 1
+        vid = f"V{vcount:03d}"
+        html, plain, n_line, n_stanza, fnrefs = verse_payload(container, apparatus_policy)
+        placeholder = f"⟦VERSE_{vid}_{sha1(plain)[:8]}⟧"
+        standalone = (
+            not force_embedded
+            and ctx == "body"
+            and container.parent is not None
+            and container.parent.name == "body"
+        )
+        entry = {
+            "vid": vid, "placeholder": placeholder, "context": ctx,
+            "mount": "block" if standalone else "embedded",
+            "parent_block": None, "source_file": label,
+            "n_line": n_line, "n_stanza": n_stanza,
+            "source_html": html, "plain_text": plain, "sha1": sha1(plain),
+            "fnrefs": fnrefs,
+        }
+        verse_store.append(entry)
+        verse_by_vid[vid] = entry
+        if standalone:
+            vid_by_tagid[id(container)] = vid
+        else:
+            container.replace_with(NavigableString(placeholder))
+        return standalone
+
+    for soup, label, ctx in scopes:
+        total_stanza += len(soup.select(".stanza"))
+        total_line += len(soup.select(".line"))
+        for pc in soup.select(".poetry-container"):
+            _register_verse_node(pc, label, ctx)
+
+    # fallback (b): bare .stanza/.line not covered by any (surviving or
+    # already-replaced) .poetry-container -- group by immediate parent.
+    # Always registered as "embedded" (never "block"/standalone), even when
+    # the grouping parent happens to sit directly under <body>: without an
+    # explicit ".poetry-container" class, add_content_block()'s own
+    # class-based dispatch has no way to recognize a surviving node as verse,
+    # so it must always be replaced in-place by its placeholder sentinel and
+    # picked up like any other embedded verse reference via link_embedded().
+    for soup, label, ctx in scopes:
+        seen_parent_ids = set()
+        orphan_parents = []
+        for node in soup.select(".stanza, .line"):
+            if node.find_parent(class_="poetry-container"):
+                continue
+            parent = node.parent
+            if parent is None or id(parent) in seen_parent_ids:
+                continue
+            seen_parent_ids.add(id(parent))
+            orphan_parents.append(parent)
+        for parent in orphan_parents:
+            _register_verse_node(parent, label, ctx, force_embedded=True)
+
+    # anything still uncovered after both passes is a genuine self-check
+    # failure (e.g. a .line/.stanza node with no addressable parent element).
+    uncovered = []
+    for soup, label, ctx in scopes:
+        for ln in soup.select(".line, .stanza"):
+            if not ln.find_parent(class_="poetry-container"):
+                uncovered.append((label, normalize_text(ln.get_text())[:40]))
+
+    def link_embedded(block_id, text):
+        for vid in VERSEREF_RE.findall(text):
+            if vid in verse_by_vid:
+                verse_by_vid[vid]["parent_block"] = block_id
+
+    # ---- body segmentation ----
+    seg_counter = [0]
+    para_ord = [0]
+    cur_seg = [None]
+    seen_first_h2 = [False]
+    body_toplevel_total = 0
+    body_toplevel_classified = 0
+    unclassified = []
+
+    def start_segment(h2tag, file_label):
+        seg_counter[0] += 1
+        seg_id = f"seg{seg_counter[0]:02d}"
+        html, plain, fnrefs = serialize_prose(h2tag, apparatus_policy)
+        head_id = f"HEAD:{seg_id}"
+        add_block(head_id, {
+            "id": head_id, "type": "HEAD", "seg": seg_id, "order_index": next_order(),
+            "source_file": file_label, "source_html": html, "plain_text": plain,
+            "sha1": sha1(plain), "fnrefs": fnrefs,
+        })
+        record_anchors(fnrefs, head_id, seg_id, file_label)
+        link_embedded(head_id, plain)
+        seg = {
+            "seg": seg_id, "title_id": head_id, "title_text": plain, "kind": "body",
+            "block_ids": [head_id], "source_files": [file_label],
+            "n_para": 0, "n_verse": 0, "n_quote": 0, "word_count": len(plain.split()),
+        }
+        segments.append(seg)
+        para_ord[0] = 0
+        cur_seg[0] = seg
+        return seg
+
+    def add_content_block(tag, file_label):
+        seg = cur_seg[0]
+        if has_class(tag, "poetry-container"):
+            para_ord[0] += 1
+            bid = f"VERSE:{seg['seg']}:{para_ord[0]:04d}"
+            html, plain, n_line, n_stanza, fnrefs = verse_payload(tag, apparatus_policy)
+            vid = vid_by_tagid.get(id(tag))
+            add_block(bid, {
+                "id": bid, "type": "VERSE", "seg": seg["seg"], "order_index": next_order(),
+                "source_file": file_label, "source_html": html, "plain_text": plain,
+                "sha1": sha1(plain), "fnrefs": fnrefs,
+            })
+            if vid:
+                verse_by_vid[vid]["parent_block"] = bid
+            seg["block_ids"].append(bid)
+            seg["n_verse"] += 1
+            record_anchors(fnrefs, bid, seg["seg"], file_label)
+            return
+        if has_class(tag, "blockquote"):
+            btype, key = "QUOTE", "n_quote"
+        else:
+            btype, key = "PARA", "n_para"
+        para_ord[0] += 1
+        bid = f"{btype}:{seg['seg']}:{para_ord[0]:04d}"
+        html, plain, fnrefs = serialize_prose(tag, apparatus_policy)
+        add_block(bid, {
+            "id": bid, "type": btype, "seg": seg["seg"], "order_index": next_order(),
+            "source_file": file_label, "source_html": html, "plain_text": plain,
+            "sha1": sha1(plain), "fnrefs": fnrefs,
+        })
+        seg["block_ids"].append(bid)
+        seg[key] += 1
+        seg["word_count"] += len(plain.split())
+        record_anchors(fnrefs, bid, seg["seg"], file_label)
+        link_embedded(bid, plain)
+
+    for soup, file_label in body_soups:
+        body_el = soup.body or soup
+        for child in body_el.children:
+            if not isinstance(child, Tag):
+                continue
+            body_toplevel_total += 1
+            if child.name == "h2":
+                seen_first_h2[0] = True
+                start_segment(child, file_label)
+                body_toplevel_classified += 1
+                continue
+            if not seen_first_h2[0]:
+                decision, reason = classify_frontback_block(child)
+                fb_id = f"FRONTBACK:fm{len(frontback) + 1:02d}"
+                decision, reason = _apply_frontback_override(fb_id, decision, reason, frontback_overrides)
+                html, plain, fnrefs = serialize_prose(child, apparatus_policy)
+                add_block(fb_id, {
+                    "id": fb_id, "type": "FRONTBACK", "seg": fb_id if decision == "translate" else None,
+                    "order_index": next_order(), "source_file": file_label, "source_html": html,
+                    "plain_text": plain, "sha1": sha1(plain), "fnrefs": fnrefs, "decision": decision,
+                    "reason": reason, "origin": "front-matter",
+                })
+                frontback.append({
+                    "id": fb_id, "decision": decision, "reason": reason,
+                    "file": file_label, "text_head": plain[:80],
+                })
+                body_toplevel_classified += 1
+                continue
+            if child.name == "p" and not normalize_text(child.get_text(" ")):
+                body_toplevel_classified += 1  # empty spacer paragraph, structural skip
+                continue
+            seg = cur_seg[0]
+            if seg is None:
+                unclassified.append((file_label, normalize_text(child.get_text(" "))[:40]))
+                body_toplevel_classified += 1
+                continue
+            if file_label not in seg["source_files"]:
+                seg["source_files"].append(file_label)
+            add_content_block(child, file_label)
+            body_toplevel_classified += 1
+
+    # ---- footnote definitions ----
+    fn_groups, orphan_fn = build_footnote_table(notes_soups, apparatus_policy)
+    def_index = {}
+    for g in fn_groups:
+        n = g["n"]
+        fn_id = f"FN:{n}"
+        html_parts, text_parts, fnrefs = [], [], []
+        for nd in g["nodes"]:
+            if isinstance(nd, Tag):
+                h, t, fr = serialize_prose(nd, apparatus_policy, strip_labels=True)
+                html_parts.append(h)
+                text_parts.append(t)
+                fnrefs += fr
+            else:
+                s = str(nd).strip()
+                if s:
+                    html_parts.append(s)
+                    text_parts.append(s)
+        def_text = normalize_text(" ".join(text_parts))
+        add_block(fn_id, {
+            "id": fn_id, "type": "FN", "seg": None, "order_index": next_order(),
+            "source_file": g["file"], "source_html": "\n".join(html_parts),
+            "plain_text": def_text, "sha1": sha1(def_text), "fnrefs": fnrefs,
+        })
+        def_index[n] = {"def_block": fn_id, "def_file": g["file"]}
+        link_embedded(fn_id, def_text)
+
+    # ---- front/back non-body files (cover wrapper, NOTES divider, TOC, etc.) ----
+    for soup, file_label in fb_soups:
+        body_el = soup.body or soup
+        for child in body_el.children:
+            if not isinstance(child, Tag):
+                continue
+            decision, reason = classify_frontback_block(child)
+            if reason == "empty structural block":
+                inner = child.find(["h1", "h2"])
+                if inner:
+                    decision, reason = classify_frontback_block(inner)
+            slug = re.sub(r"[^A-Za-z0-9]+", "", posixpath.splitext(file_label)[0])[:16] or "fb"
+            fb_id = f"FRONTBACK:{slug}_{len(frontback) + 1:02d}"
+            decision, reason = _apply_frontback_override(fb_id, decision, reason, frontback_overrides)
+            html, plain, fnrefs = serialize_prose(child, apparatus_policy)
+            add_block(fb_id, {
+                "id": fb_id, "type": "FRONTBACK", "seg": fb_id if decision == "translate" else None,
+                "order_index": next_order(), "source_file": file_label, "source_html": html,
+                "plain_text": plain, "sha1": sha1(plain), "fnrefs": fnrefs, "decision": decision,
+                "reason": reason, "origin": "back-matter",
+            })
+            frontback.append({
+                "id": fb_id, "decision": decision, "reason": reason,
+                "file": file_label, "text_head": plain[:80],
+            })
+
+    # ---- promote every translate-decision FRONTBACK element into segments[] ----
+    # (see manifest.schema.json's top-level description -- this is the ONE
+    # cross-array invariant the schema itself cannot express: every
+    # frontback[] entry with decision:"translate" MUST have a matching
+    # segments[] entry of its own; regenerate/omit-decision entries MUST NOT.)
+    for fb in frontback:
+        if fb["decision"] != "translate":
+            continue
+        blk = blocks[fb["id"]]
+        segments.append({
+            "seg": fb["id"], "kind": "frontback",
+            "title_text": fb["text_head"], "block_ids": [fb["id"]],
+            "source_files": [fb["file"]], "word_count": len(blk["plain_text"].split()),
+        })
+
+    # ---- reassign order_index to true spine/reading order ----
+    # Blocks were emitted stream-by-stream (body, then footnotes, then
+    # front/back), so the raw counter above is not global source order.
+    # Re-rank by (spine position of the source file, emission order within
+    # that file/stream).
+    pos_of = {it["file"]: it["pos"] for it in spine}
+    for rank, b in enumerate(
+        sorted(blocks.values(), key=lambda b: (pos_of.get(b["source_file"], 10 ** 6), b["order_index"])),
+        start=1,
+    ):
+        b["order_index"] = rank
+
+    # ---- footnotes join table ----
+    footnotes = []
+    if apparatus_policy in ("translate_all", "preserve_source"):
+        for n in sorted(set(anchor_index) | set(def_index)):
+            a = anchor_index.get(n, {})
+            d = def_index.get(n, {})
+            footnotes.append({
+                "n": n, "anchor_id": f"FNanchor_{n}", "def_id": f"Footnote_{n}",
+                "anchor_block": a.get("anchor_block"), "anchor_seg": a.get("anchor_seg"),
+                "anchor_file": a.get("anchor_file"),
+                "def_block": d.get("def_block"), "def_file": d.get("def_file"),
+            })
+
+    def ctx_count(key):
+        return sum(1 for v in verse_store if v["context"] == key)
+
+    manifest = {
+        "blocks": blocks,
+        "spine": [
+            {k: it[k] for k in ("pos", "idref", "file", "media_type", "klass") if it.get(k) is not None}
+            for it in spine
+        ],
+        "segments": segments,
+        "footnotes": footnotes,
+        "frontback": frontback,
+        "verse": {
+            "store": verse_store,
+            "n_nodes": len(verse_store),
+            "n_block": sum(1 for v in verse_store if v["mount"] == "block"),
+            "n_embedded": sum(1 for v in verse_store if v["mount"] == "embedded"),
+            "by_context": {c: ctx_count(c) for c in ("body", "footnote", "frontback")},
+            "total_stanza": total_stanza, "total_line": total_line,
+        },
+        "source_inputs": [str(source_path)],
+    }
+
+    report = {
+        "n_spine": len(spine), "n_body_files": len(body_items),
+        "n_notes_files": len(notes_items), "n_frontback_files": len(fb_items),
+        "n_segments": len(segments),
+        "n_blocks": len(blocks),
+        "n_para": sum(1 for b in blocks.values() if b["type"] == "PARA"),
+        "n_quote": sum(1 for b in blocks.values() if b["type"] == "QUOTE"),
+        "n_verse_blocks": sum(1 for b in blocks.values() if b["type"] == "VERSE"),
+        "n_fn": sum(1 for b in blocks.values() if b["type"] == "FN"),
+        "n_frontback": len(frontback),
+        "total_words_body": sum(s["word_count"] for s in segments if s["kind"] == "body"),
+        "body_toplevel_total": body_toplevel_total,
+        "body_toplevel_classified": body_toplevel_classified,
+        "unclassified": unclassified,
+        "orphan_fn": orphan_fn,
+        "uncovered_verse_lines": uncovered,
+        "apparatus_policy": apparatus_policy,
+    }
+    return manifest, report, max_segment_words
+
+
+def _apply_frontback_override(fb_id, decision, reason, frontback_overrides):
+    override = (frontback_overrides or {}).get(fb_id)
+    if override and override != decision:
+        return override, f"override (adapter_config.gutenberg_epub.frontback_overrides): was {reason!r}"
+    return decision, reason
+
+
+# ---------------------------------------------------------------------------
+# ADAPT-POINT: footnote-grouping loop
+# ---------------------------------------------------------------------------
+def build_footnote_table(notes_soups, apparatus_policy):
+    """Group raw footnote-definition markup into one record per footnote number.
+
+    A single footnote's definition can spill across the notes-file boundary
+    (its anchor <p> ends file N, its continuation opens file N+1) -- process
+    every notes file as ONE concatenated stream so the "current footnote"
+    state stays active across that boundary; grouping per-file independently
+    would silently truncate a spilled definition.
+
+    Branches on footnotes.apparatus_policy (matches _prep_clone's anchor
+    handling one-for-one):
+      - translate_all / preserve_source: build the full FN:{N} table below
+        (these two policies differ only at the LATER translation stage, not
+        at extraction).
+      - body_refs_only / omit_apparatus: notes-file content is never turned
+        into blocks at all -- nothing to translate/preserve, so this returns
+        an empty table unconditionally. (body_refs_only's literal `[N]`
+        marker was already baked into the BODY block's own plain_text by
+        _prep_clone; segpack.py derives body_ref_markers[] by re-scanning
+        that text, never from this table.)
+    """
+    if apparatus_policy not in ("translate_all", "preserve_source"):
+        return [], []
+    fn_groups = []
+    orphan_fn = []
+    cur = None
+    for soup, file_label in notes_soups:
+        for foot in soup.find_all("div", class_="footnote"):
+            for node in foot.children:
+                if isinstance(node, Tag):
+                    a = node.find(id=FN_DEF_RE)
+                    if a is not None:
+                        n = int(FN_DEF_RE.match(a.get("id")).group(1))
+                        cur = {"n": n, "file": file_label, "files": [file_label], "nodes": [node]}
+                        fn_groups.append(cur)
+                        continue
+                    if cur is not None:
+                        cur["nodes"].append(node)
+                        if file_label not in cur["files"]:
+                            cur["files"].append(file_label)
+                    elif normalize_text(node.get_text(" ")):
+                        orphan_fn.append((file_label, normalize_text(node.get_text(" "))[:40]))
+                elif isinstance(node, NavigableString) and node.strip():
+                    if cur is not None:
+                        cur["nodes"].append(str(node))
+                        if file_label not in cur["files"]:
+                            cur["files"].append(file_label)
+                    else:
+                        orphan_fn.append((file_label, node.strip()[:40]))
+    return fn_groups, orphan_fn
+
+
+# ---------------------------------------------------------------------------
+# Round-trip self-checks (blocking, printed as a human-readable report;
+# NEVER persisted into manifest.json -- manifest.schema.json's
+# additionalProperties:false forbids any field beyond its declared shape).
+# ---------------------------------------------------------------------------
+def run_self_checks(manifest, report, max_segment_words):
+    results = []
+
+    def chk(name, ok, detail=""):
+        results.append({"name": name, "ok": bool(ok), "detail": detail})
+
+    blocks = manifest["blocks"]
+    segments = manifest["segments"]
+    footnotes = manifest["footnotes"]
+    verse_store = manifest["verse"]["store"]
+    frontback = manifest["frontback"]
+    apparatus_policy = report["apparatus_policy"]
+
+    # block-ID uniqueness
+    chk("block_ids_unique", len(blocks) == len({b["id"] for b in blocks.values()}), f"n_blocks={len(blocks)}")
+
+    # body coverage without holes
+    chk(
+        "body_coverage_no_holes",
+        report["body_toplevel_total"] == report["body_toplevel_classified"] and not report["unclassified"],
+        f"total={report['body_toplevel_total']} classified={report['body_toplevel_classified']} "
+        f"unclassified={report['unclassified'][:5]}",
+    )
+
+    # spine order preserved
+    spine = manifest["spine"]
+    order_ok = spine == sorted(spine, key=lambda x: x["pos"])
+    chk("spine_order_preserved", order_ok, f"n_spine={len(spine)} order_ok={order_ok}")
+
+    # every body segment carries at least one content block (heading-only
+    # segments are a real extraction bug for a project whose h2 always
+    # introduces prose -- surface it loudly rather than silently shipping
+    # an empty segment downstream)
+    body_segments = [s for s in segments if s["kind"] == "body"]
+    empty = [s["seg"] for s in body_segments if not (s["n_para"] + s["n_verse"] + s["n_quote"])]
+    chk("segmentation_nonempty", not empty, f"n_body_segments={len(body_segments)} empty={empty}")
+
+    # no body segment built entirely from notes-classified files (a
+    # mis-classified spine item leaking footnote-definition text into the
+    # body stream as if it were a real chapter)
+    notes_files = {s["file"] for s in spine if s["klass"] == "footnote-defs"}
+    pseudo = [s["seg"] for s in body_segments if notes_files and set(s["source_files"]) <= notes_files]
+    chk("no_pseudo_segments_from_notes", not pseudo, f"pseudo={pseudo}")
+
+    if apparatus_policy in ("translate_all", "preserve_source"):
+        anchors = {f["n"] for f in footnotes if f["anchor_block"]}
+        defs = {f["n"] for f in footnotes if f["def_block"]}
+        chk(
+            "fn_bijection", anchors == defs,
+            f"anchors={len(anchors)} defs={len(defs)} "
+            f"dangling_anchor={sorted(anchors - defs)[:8]} dangling_def={sorted(defs - anchors)[:8]}",
+        )
+        orphan_fn = report["orphan_fn"]
+        chk("no_orphan_footnote_continuation", not orphan_fn, f"orphan_fn={orphan_fn[:5]}")
+
+        ref_count, ref_block = {}, {}
+        for b in blocks.values():
+            for m in FNREF_RE.findall(b["plain_text"]):
+                n = int(m)
+                ref_count[n] = ref_count.get(n, 0) + 1
+                ref_block.setdefault(n, set()).add(b["id"])
+        dup = {n: c for n, c in ref_count.items() if c != 1}
+        multi = {n: sorted(bs) for n, bs in ref_block.items() if len(bs) != 1}
+        chk(
+            "fnref_sentinel_unique",
+            not dup and not multi and set(ref_count) == {f["n"] for f in footnotes},
+            f"n_refs={len(ref_count)} dup={dict(list(dup.items())[:5])} multi={dict(list(multi.items())[:5])}",
+        )
+    elif apparatus_policy == "body_refs_only":
+        markers = []
+        for b in blocks.values():
+            markers.extend(BODY_REF_MARKER_RE.findall(b["plain_text"]))
+        dup = {n: markers.count(n) for n in set(markers) if markers.count(n) != 1}
+        chk("body_ref_markers_well_formed_and_unique", not dup, f"n_markers={len(markers)} duplicated={dup}")
+    else:
+        chk("footnote_checks_not_applicable", True, f"apparatus_policy={apparatus_policy} (omit_apparatus)")
+
+    # front-back inventory: every element has a valid decision + non-empty reason,
+    # AND the schema-unenforceable translate<->segments[] cross-reference holds.
+    missing = [x["id"] for x in frontback if x["decision"] not in ("translate", "regenerate", "omit") or not x["reason"]]
+    seg_ids = {s["seg"] for s in segments if s["kind"] == "frontback"}
+    fb_translate_ids = {x["id"] for x in frontback if x["decision"] == "translate"}
+    fb_other_ids = {x["id"] for x in frontback if x["decision"] != "translate"}
+    missing_from_segments = sorted(fb_translate_ids - seg_ids)
+    leaked_into_segments = sorted(fb_other_ids & seg_ids)
+    chk(
+        "frontback_inventory",
+        not missing and not missing_from_segments and not leaked_into_segments,
+        f"n_fb={len(frontback)} missing_fields={missing} "
+        f"missing_from_segments={missing_from_segments} leaked_into_segments={leaked_into_segments}",
+    )
+
+    # verse store: placeholders unique, every entry mounted
+    v = manifest["verse"]
+    placeholders = [e["placeholder"] for e in verse_store]
+    unmounted = [e["vid"] for e in verse_store if not e["parent_block"]]
+    chk(
+        "verse_placeholders_unique_and_mounted",
+        len(placeholders) == len(set(placeholders)) and not unmounted,
+        f"n={len(placeholders)} unique={len(set(placeholders))} unmounted={unmounted[:5]}",
+    )
+
+    # verse structure: no uncovered lines (the fallback pass in build() should
+    # have grouped every bare .stanza/.line into its own verse entry already --
+    # anything left here means the fallback's own grouping heuristic missed it)
+    uncovered = report["uncovered_verse_lines"]
+    chk("verse_no_uncovered", not uncovered, f"uncovered={uncovered[:5]}")
+    chk(
+        "verse_counts_reconcile",
+        v["n_block"] + v["n_embedded"] == v["n_nodes"] and v["n_block"] == report["n_verse_blocks"],
+        f"block={v['n_block']} embedded={v['n_embedded']} nodes={v['n_nodes']} "
+        f"verse_blocks={report['n_verse_blocks']} by_context={v['by_context']}",
+    )
+
+    # BLOCKING: no segment may exceed max_segment_words (v1 has no sub-chunking)
+    offenders = [(s["seg"], s["word_count"]) for s in segments if s["word_count"] > max_segment_words]
+    chk(
+        "no_segment_exceeds_max_words",
+        not offenders,
+        f"max_segment_words={max_segment_words} offenders={offenders}",
+    )
+
+    return {"all_pass": all(r["ok"] for r in results), "results": results}
+
+
+# ---------------------------------------------------------------------------
+# Two-phase write: DRAFT (missing generation_hashes; carries TEMPORARY
+# format/adapter_config fields cache_key.py needs to read) -> cache_key.py
+# --field ... -> FINAL atomic, schema-exact write.
+# ---------------------------------------------------------------------------
+def two_phase_write(manifest: dict, profile: dict) -> dict:
+    cache_key_script = SCRIPTS_DIR / "cache_key.py"
+    if not cache_key_script.is_file():
+        die(
+            f"{cache_key_script} not found -- Step 0a must copy scripts/ into "
+            f"${{durable_root}}/scripts/ before extract.py runs."
+        )
+
+    resolved_adapter_config = (profile["source"].get("adapter_config") or {}).get("gutenberg_epub")
+
+    # ---- DRAFT write: manifest fields + the two TEMPORARY fields
+    # cache_key.py's global hash computations need (format/adapter_config).
+    # Deliberately NOT schema-valid yet -- generation_hashes is absent and
+    # format/adapter_config are NOT part of manifest.schema.json's shape.
+    # Nothing else reads manifest.json between this write and the final one,
+    # so this intermediate write does not need atomic tmp-write-then-replace.
+    draft = dict(manifest)
+    draft["format"] = profile["source"]["format"]
+    draft["adapter_config"] = resolved_adapter_config
+    with open(MANIFEST_PATH, "w", encoding="utf-8") as f:
+        json.dump(draft, f, ensure_ascii=False, indent=1)
+
+    def read_field(name):
+        try:
+            proc = subprocess.run(
+                [sys.executable, str(cache_key_script), "--field", name],
+                cwd=str(DURABLE_ROOT), capture_output=True, text=True, check=True,
+            )
+        except subprocess.CalledProcessError as e:
+            die(f"cache_key.py --field {name} failed (exit {e.returncode}): {e.stderr.strip()}")
+        value = proc.stdout.strip()
+        if not value:
+            die(f"cache_key.py --field {name} produced empty output")
+        return value
+
+    source_extraction_hash = read_field("source_extraction_hash")
+    source_input_hash = read_field("source_input_hash")
+
+    # ---- FINAL write: the clean, schema-exact manifest (no format/adapter_config,
+    # generation_hashes now present), atomic tmp-write-then-os.replace().
+    final_manifest = dict(manifest)
+    final_manifest["generation_hashes"] = {
+        "source_extraction_hash": source_extraction_hash,
+        "source_input_hash": source_input_hash,
+    }
+    tmp_path = MANIFEST_PATH.with_name(f"manifest.json.tmp.{os.getpid()}")
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        json.dump(final_manifest, f, ensure_ascii=False, indent=1)
+    os.replace(str(tmp_path), str(MANIFEST_PATH))
+    return final_manifest
+
+
+def validate_against_schema(final_manifest: dict) -> list:
+    schema_path = SCHEMAS_DIR / "manifest.schema.json"
+    if not schema_path.is_file():
+        die(f"{schema_path} not found -- Step 0a must copy schemas/ before extract.py runs.")
+    with open(schema_path, encoding="utf-8") as f:
+        schema = json.load(f)
+    validator = jsonschema.Draft202012Validator(schema, format_checker=jsonschema.FormatChecker())
+    errors = sorted(validator.iter_errors(final_manifest), key=lambda e: list(e.absolute_path))
+    return [f"{'/'.join(str(p) for p in e.absolute_path) or '<root>'}: {e.message}" for e in errors]
+
+
+# ---------------------------------------------------------------------------
+def main():
+    profile = load_profile()
+    manifest, report, max_segment_words = build(profile)
+    checks = run_self_checks(manifest, report, max_segment_words)
+    final_manifest = two_phase_write(manifest, profile)
+    schema_errors = validate_against_schema(final_manifest)
+
+    print("=" * 70)
+    print("MANIFEST  ->", MANIFEST_PATH)
+    print("=" * 70)
+    print(
+        f"spine: {report['n_spine']}  body={report['n_body_files']} "
+        f"notes={report['n_notes_files']} front/back={report['n_frontback_files']}"
+    )
+    print(f"segments: {report['n_segments']}")
+    print(
+        f"blocks: {report['n_blocks']}  PARA={report['n_para']} QUOTE={report['n_quote']} "
+        f"VERSE={report['n_verse_blocks']} FN={report['n_fn']} FRONTBACK={report['n_frontback']}"
+    )
+    print(f"footnotes: {len(final_manifest['footnotes'])}  (apparatus_policy={report['apparatus_policy']})")
+    v = final_manifest["verse"]
+    print(
+        f"verse: {v['n_nodes']} nodes (block={v['n_block']} embedded={v['n_embedded']}) "
+        f"by_context={v['by_context']}  stanza={v['total_stanza']} line={v['total_line']}"
+    )
+    print(f"body words (approx): {report['total_words_body']:,}")
+    print("-" * 70)
+    print("front/back inventory:")
+    for x in final_manifest["frontback"]:
+        print(f"  [{x['decision']:10s}] {x['id']:26s} {x['reason']}")
+    print("-" * 70)
+    print("SELF-CHECKS:")
+    for r in checks["results"]:
+        print(f"  {'PASS' if r['ok'] else 'FAIL'}  {r['name']:36s} {r['detail']}")
+    print("-" * 70)
+    print("SCHEMA VALIDATION (manifest.schema.json):")
+    if schema_errors:
+        for e in schema_errors:
+            print(f"  FAIL  {e}")
+    else:
+        print("  PASS  manifest.json matches manifest.schema.json")
+    print("-" * 70)
+    ok = checks["all_pass"] and not schema_errors
+    print("ALL PASS" if ok else "*** SOME CHECKS FAILED ***")
+    sys.exit(0 if ok else 1)
+
+
+if __name__ == "__main__":
+    main()
