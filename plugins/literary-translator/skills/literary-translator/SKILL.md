@@ -30,9 +30,11 @@ Three scope statements, read BEFORE any setup work:
    French text specifically, not French in general.** Any other language, AND
    any other French source, is an unverified starter preset gated by a
    mandatory smoke test (Step 0/W3, `references/language-pair-parameterization.md`).
-2. **v1 delivers converged, audited per-segment drafts — NOT an assembled book
-   file.** Assembling drafts into one distributable book is a future phase
-   (see `references/assembly-and-output.md`).
+2. **v1 defaults to converged, audited per-segment drafts — NOT an assembled
+   book file** (`output.v1_scope: segment_drafts_and_audit`, still the
+   default). Selecting `output.v1_scope: assembled_book` instead assembles a
+   single rendered output — an Obsidian wiki this increment; EPUB and a
+   custom renderer are later phases (see `references/assembly-and-output.md`).
 3. **v1 is scoped to texts whose natural segments/chapters already fit under a
    configurable per-segment word cap (`max_segment_words`).** A novel with
    genuinely long natural chapters is OUT OF SCOPE for v1 — stated here, before
@@ -282,6 +284,52 @@ schema can't express:
   arbitrary. Then check it resolves to an existing file — FATAL, naming the
   unresolvable path, if not.
 
+## Step 0d — Resolve output-target adapter
+
+Runs only when `output.v1_scope: assembled_book`. Under the default
+`output.v1_scope: segment_drafts_and_audit`, Step 0d is a deliberate no-op —
+zero resolution work, zero HALT risk — matching the proportionality
+guardrail that a plain translate+gloss job never pays for assembly
+machinery it will never read (`references/assembly-and-output.md`).
+
+When `assembled_book` is selected, resolve the already-schema-validated
+`output.target` (`obsidian` | `epub` | `custom`) via `output_resolve.py`'s
+resolution logic, plus read `output.name_display`, `output.index`, and the
+one `output.adapter_config.<target>` sub-block matching the resolved
+target — the others sit inert. This step depends ONLY on the
+already-validated `profile.output` block (no manifest, no ledger, no draft
+required yet) — the same "resolve early, from validated shape alone"
+posture Step 0b/0c already apply to `verse_policy.mode`/`source.format`, so
+a blocking co-design need surfaces at setup time, never mid-project.
+
+- `target: obsidian` resolves to the built-in `render_obsidian` adapter
+  (shipped this increment). `target: epub` resolves to the built-in name
+  `render_epub`, a later-phase adapter not yet shipped — resolving the name
+  now is exhaustive enum coverage, not a claim the renderer exists.
+- `target: custom` specifically: the schema validates shape only — the
+  `adapter_config.custom.renderer_path` key is required whenever
+  `target: custom`, value must be `string | null`. Step 0d owns the two
+  procedural checks a schema can't express, the same split Step 0c already
+  applies to `source.adapter_config.custom.extractor_path`:
+  - `null` — valid, the expected starting state — HALT and co-design a
+    hand-crafted Python renderer with the user (informed by
+    `render_obsidian.py` as a starting pattern), against the fixed
+    `render(nodestream, canon, profile, out_dir) -> dict` entry-point every
+    built-in adapter implements
+    (`references/output-target-adapters/README.md`).
+  - Non-null — FATAL rejection (before any existence check) of any value
+    containing `..`, starting with `/`, or not matching the schema's
+    `^[A-Za-z0-9._/-]+$` pattern. Resolution is against a fixed subtree,
+    `${durable_root}/scripts/custom_renderers/<value>`, never an arbitrary
+    filesystem location. Only then does Step 0d check the resolved path
+    actually exists — FATAL, naming the unresolvable path, if not.
+
+Unlike a Step-0c custom-source HALT, which blocks the whole project before
+extraction can even begin, a Step-0d custom-target HALT blocks only
+assembly (W9) — a project can still scaffold, translate, and converge every
+segment with the co-design conversation still outstanding, and only hits
+this HALT once `output.v1_scope: assembled_book` is actually chosen.
+
 ## Pre-read mandate
 
 Read every file under `references/` (once per session) before any
@@ -316,7 +364,7 @@ here, follow the linked doc:
 
   `references/workflow-schema-validation.md`
 
-## Workflow W1–W8
+## Workflow W1–W9
 
 **W1 Scaffold** — not a copy action itself (Step 0/0a already did all
 copying). W1 is the human-facing label for "fill in every placeholder across
@@ -547,9 +595,36 @@ still incomplete" are two different numbers, never conflated (a batch can
 succeed while the project is still incomplete). Hand off the audit package:
 converged per-segment drafts, ledger, each draft's own audit trail,
 `final_audit.py`'s summary+WARN list — as `output.v1_scope:
-segment_drafts_and_audit`. Assembling drafts into one distributable book
-file is explicitly a future phase, not v1 (see
+segment_drafts_and_audit`. When `output.v1_scope: assembled_book` instead,
+this same completeness gate feeds **W9 Assemble** next: assembling the
+drafts into one rendered output is a separate, additional step, never a
+silent substitute for the segment-drafts handoff (see
 `references/assembly-and-output.md`).
+
+**W9 Assemble** (only when `output.v1_scope: assembled_book`) — assembly
+runs as a plain DETERMINISTIC script step (`assemble.py` then
+`diff_rendered_output.py`), never an agent workflow: it has no
+agent-workflow template of its own, and none is planned. Assembly has no
+review/fix loop and no ledger prompts to schema-validate, so it does not
+mirror `mass-translate-wf.template.js`'s agent machinery. Gated on W7's
+`final-audit-summary.project_complete: true` — the whole-project
+completeness gate, not merely "this batch converged" — assembling a book
+from a project that is not yet fully converged is refused, never silently
+attempted over a partial set.
+
+Run `scripts/assemble.py`, which reconstructs the whole-book reading order
+from `manifest.json` + every converged segment's draft + `ledger.json`'s
+convergence gate into the shared NodeStream artifact, then invokes the
+Step-0d-resolved output-target adapter (`render_obsidian` in this
+increment) to render the book under `${durable_root}/out/` (see
+`references/assembly-and-output.md` for the reconstruction algorithm and
+the NodeStream/anchor-map artifacts). Then run
+`scripts/diff_rendered_output.py` as the acceptance gate: it re-renders and
+diffs against the last accepted baseline — exit `0` on an exact match, `1`
+on a mismatch or guard refusal, `2` when no baseline exists yet
+(`--accept-baseline` freezes the current render as the new baseline). The
+render+diff comparison IS the acceptance gate — there is no separate
+item-count check alongside it.
 
 ## Reference docs
 
@@ -562,5 +637,8 @@ file is explicitly a future phase, not v1 (see
 - `references/source-format-adapters/` — `gutenberg-epub.md`, `plain-text.md`, `custom.md`, Step 0c
 - `references/workflow-schema-validation.md` — R7
 - `references/orchestration-and-batching.md` — W5 dispatch mechanics
-- `references/assembly-and-output.md` — v1/future scope for output
+- `references/assembly-and-output.md` — output scope, Step 0d, W9, the
+  assembler/NodeStream architecture
+- `references/output-target-adapters/` — `obsidian.md`, Step 0d's
+  per-target rules
 - `references/gotchas.md` — known pitfalls

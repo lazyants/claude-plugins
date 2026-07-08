@@ -176,36 +176,55 @@ validation:
 
 output:
   v1_scope: segment_drafts_and_audit
-    # v1 delivers converged per-segment drafts + ledger + each draft's own validate_draft.py per-segment audit
-    # trail + a whole-book final_audit.py summary/WARN report -- NOT a single assembled book file. Book assembly
-    # (EPUB/bilingual/etc.) is explicitly out of scope for v1 (see non-goals). destination below is where the
-    # audit/handoff package (not a book) is written. `assembled_book` is a later-increment value (see
-    # references/assembly-and-output.md) -- declared here for shape only, not yet load-bearing.
+    # segment_drafts_and_audit | assembled_book -- the default, segment_drafts_and_audit, delivers converged
+    # per-segment drafts + ledger + each draft's own validate_draft.py per-segment audit trail + a whole-book
+    # final_audit.py summary/WARN report -- NOT a single assembled book file. destination below is where the
+    # audit/handoff package (not a book) is written. Setting this to `assembled_book` is LOAD-BEARING: it turns
+    # on Step 0d + W9 Assemble, which reconstruct the converged drafts into one rendered book via the
+    # `target` adapter below (see references/assembly-and-output.md) -- gated on W7's project_complete: true.
   destination: "/ABS/PATH/TO/YOUR_PROJECT/out/"   # matches durable_root's placeholder above + /out/ (the default,
                                           # resolving inside durable_root); e.g. a real project:
                                           # "/Users/you/dev/your-book-project/out/"
   target: obsidian
-    # obsidian | epub | custom -- which output-target adapter (later increment) would render the assembled
-    # book; obsidian is PRIMARY. Inert in v1 (no assembler exists yet) -- declared now so profiles need not be
-    # migrated when assembly ships.
+    # obsidian | epub | custom -- which output-target adapter renders the assembled book; only ever consulted
+    # when v1_scope: assembled_book. `obsidian` is the one target this increment actually ships and renders,
+    # via scripts/render_obsidian.py -- a vault of narrative pages plus one cross-linked entity note per
+    # canon.json entry. `epub` resolves (Step 0d validates the enum) but has no renderer behind it yet (see
+    # references/assembly-and-output.md's "Why build_epub.py hasn't been generalized"). `custom` also resolves
+    # but always requires this project to co-design its own renderer first (adapter_config.custom.renderer_path).
   name_display:
     parenthetical_originals: never
       # never | first_occurrence -- whether a name's original-script form is shown parenthetically alongside
-      # its target-language rendering the first time it occurs. Inert until the assembler exists.
+      # its target-language rendering the first time it occurs. Only consulted by the obsidian adapter at
+      # render time, i.e. only under v1_scope: assembled_book; inert under the default segment_drafts_and_audit.
   index:
     enabled: false
-      # Optional occurrence index (later increment) -- OFF by default; a plain translate+gloss job never pays
-      # for it. Obsidian gets an index for free via native backlinks once assembly ships; this knob only
-      # matters for non-obsidian targets.
+      # A separate, generated occurrence-index PAGE -- a still-later-phase feature, not yet built for any
+      # target -- OFF by default; a plain translate+gloss job never pays for it. The obsidian target already
+      # gets an occurrence index for free via its native backlinks panel regardless of this setting (see
+      # references/output-target-adapters/obsidian.md), so this knob stays irrelevant there too until that
+      # later phase ships.
     person_grouping: false
       # Opt-in lightweight name-grouping for the index. REQUIRES index.enabled: true (schema-enforced) --
       # setting this true while enabled is false/absent is a validation error.
   adapter_config:
-    # Per-target settings for the (future) assembler -- only the sub-block matching `target` above is
-    # meaningful; the others sit inert. Shape is intentionally loose in v1 (each key is just object-or-null);
-    # per-target field-level validation arrives with the assembler itself.
-    obsidian: {}
+    # Per-target settings for the assembler -- only the sub-block matching `target` above is meaningful;
+    # the others sit inert. Field-level shape validation is real for obsidian/custom (see below); epub
+    # stays intentionally loose (any object) until its own Phase ships.
+    obsidian:
+      folders: {}
+        # Optional category -> folder catalog for entity-note placement (e.g. {"person": "people",
+        # "place": "places", "work": "works"}) -- OPEN, per-project vocabulary declared here, NOT a
+        # hardcoded schema enum (see references/output-target-adapters/obsidian.md for preset examples
+        # to copy from). A category absent from this map (or left {} entirely, as here) routes to an
+        # "other" folder -- never a hard failure.
     epub: null
-    custom: null
-  # future (v2+, once a real assembly script exists and is proven): format: epub | bilingual_epub |
-  # plain_text_master; destination: <book path>
+    custom:
+      renderer_path: null
+        # Bare relative filename (no path separators beyond what's needed, no ".." segment, no leading
+        # "/"), resolved as ${durable_root}/scripts/custom_renderers/<value>. Only meaningful when
+        # target: custom. null means the custom renderer hasn't been co-designed yet --
+        # output_resolve.py halts for that conversation rather than silently guessing.
+  # future (v2+): bilingual-output layout logic (bilingual_epub | plain_text_master) is a plausible later
+  # addition, but only once the `epub` target itself exists and renders (see
+  # references/assembly-and-output.md's "Also out of scope for this increment").

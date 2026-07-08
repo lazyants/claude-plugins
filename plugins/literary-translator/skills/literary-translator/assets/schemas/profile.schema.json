@@ -555,13 +555,29 @@
           "additionalProperties": false,
           "properties": {
             "obsidian": {
-              "type": ["object", "null"]
+              "type": ["object", "null"],
+              "additionalProperties": false,
+              "properties": {
+                "folders": {
+                  "type": "object",
+                  "additionalProperties": { "type": "string" },
+                  "description": "Optional category -> folder catalog (e.g. {\"person\": \"people\", \"place\": \"places\"}) for the obsidian adapter's vault/<folder>/ note placement -- OPEN, per-project vocabulary (no enum): a category absent from this map routes to an 'other' folder, never a hard failure. See references/output-target-adapters/obsidian.md for documented preset examples."
+                }
+              }
             },
             "epub": {
               "type": ["object", "null"]
             },
             "custom": {
-              "type": ["object", "null"]
+              "type": ["object", "null"],
+              "additionalProperties": false,
+              "properties": {
+                "renderer_path": {
+                  "type": ["string", "null"],
+                  "pattern": "^[A-Za-z0-9._/-]+$",
+                  "description": "Bare relative path (no '..' segments, no leading '/') to the co-designed custom output renderer, resolved as {durable_root}/scripts/custom_renderers/<value> by output_resolve.py. null means co-design hasn't happened yet -- output_resolve.py halts for co-design rather than silently swallowing the gap."
+                }
+              }
             }
           }
         }
