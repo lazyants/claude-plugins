@@ -72,11 +72,13 @@ def _write_valid_profile(tmp_path: Path) -> tuple[Path, Path]:
     recipe as tests/profile_example_validation.test.py's clean case:
     assets/profile.example.yml with every placeholder replaced by a real
     value) plus its prerequisite filesystem fixtures -- an existing
-    source file, and a durable_root whose parent exists/is writable and
-    does not resolve under a tmp/temp/scratchpad path component (pytest's
-    own tmp_path is safe here -- verified it resolves under a `.../T/
-    pytest-of-<user>/...` path, never a literal `tmp`/`temp`/`scratchpad`
-    path segment). Returns (profile_path, durable_root)."""
+    source file, and a durable_root whose parent exists and is writable.
+    pytest's own tmp_path resolves under a literal `tmp` path component
+    on Linux (e.g. CI runners honoring `TMPDIR=/tmp`), so any caller
+    expecting Step 0's exit-0 pass must set
+    `LT_PROFILE_VALIDATE_ALLOW_TMP_ROOT=1` (see profile_validate.py's
+    `check_durable_root`) -- callers that only assert a halt don't need
+    it. Returns (profile_path, durable_root)."""
     durable_root = tmp_path / "durable"
     durable_root.mkdir()
     source_file = tmp_path / "source.epub"
@@ -174,7 +176,8 @@ def _seed_other_task_files(durable_root: Path, current_version: int, skip: str) 
 # innocent before any halt is asserted below.
 # ---------------------------------------------------------------------------
 
-def test_well_formed_markers_pass_clean(pv, tmp_path, capsys):
+def test_well_formed_markers_pass_clean(pv, tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv(pv.ALLOW_TMP_ROOT_ENV_VAR, "1")
     profile_path, durable_root = _write_valid_profile(tmp_path)
     for filename in TASK_FILENAMES:
         (durable_root / filename).write_text(
@@ -187,10 +190,11 @@ def test_well_formed_markers_pass_clean(pv, tmp_path, capsys):
     assert exit_code == 0, f"expected a clean exit, got {exit_code!r}; stderr:\n{err}"
 
 
-def test_no_task_files_is_not_a_resumed_project_violation(pv, tmp_path, capsys):
+def test_no_task_files_is_not_a_resumed_project_violation(pv, tmp_path, monkeypatch, capsys):
     """A genuinely fresh project (no *_TASK.md files exist yet at all) must
     not be mistaken for the 'missing marker' violation -- check_contract_marker
     only fires once the file exists (`if not path.is_file(): return []`)."""
+    monkeypatch.setenv(pv.ALLOW_TMP_ROOT_ENV_VAR, "1")
     profile_path, _durable_root = _write_valid_profile(tmp_path)
 
     exit_code, _out, err = _run_main(pv, profile_path, capsys)
@@ -280,7 +284,8 @@ def test_non_leading_marker_halts(pv, tmp_path, capsys, filename):
 # false positives.
 # ---------------------------------------------------------------------------
 
-def test_duplicated_marker_with_identical_values_is_not_fatal(pv, tmp_path, capsys):
+def test_duplicated_marker_with_identical_values_is_not_fatal(pv, tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv(pv.ALLOW_TMP_ROOT_ENV_VAR, "1")
     profile_path, durable_root = _write_valid_profile(tmp_path)
     current = pv.CURRENT_PROMPT_CONTRACT_VERSION
     filename = "translate_TASK.md"
@@ -299,7 +304,8 @@ def test_duplicated_marker_with_identical_values_is_not_fatal(pv, tmp_path, caps
     )
 
 
-def test_marker_after_leading_blank_lines_is_still_leading(pv, tmp_path, capsys):
+def test_marker_after_leading_blank_lines_is_still_leading(pv, tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv(pv.ALLOW_TMP_ROOT_ENV_VAR, "1")
     profile_path, durable_root = _write_valid_profile(tmp_path)
     current = pv.CURRENT_PROMPT_CONTRACT_VERSION
     filename = "review_TASK.md"

@@ -285,7 +285,13 @@ def test_verbatim_shipped_example_scan_placeholders_names_every_placeholder(pv):
 # blank_line_threshold: 2) -> clean pass.
 # ---------------------------------------------------------------------------
 
-def test_fully_filled_fixture_structurally_identical_passes_cleanly(pv, tmp_path, capsys):
+def test_fully_filled_fixture_structurally_identical_passes_cleanly(pv, tmp_path, monkeypatch, capsys):
+    # pytest's own tmp_path resolves under a literal `tmp` path component
+    # on Linux (e.g. CI runners honoring `TMPDIR=/tmp`), which
+    # check_durable_root would otherwise reject -- this fixture's
+    # durable_root is genuinely under tmp_path, so accept it explicitly
+    # (see profile_validate.py's `check_durable_root`).
+    monkeypatch.setenv(pv.ALLOW_TMP_ROOT_ENV_VAR, "1")
     durable_root = tmp_path / "book-project"
     source_path = tmp_path / "source.epub"
     source_path.write_bytes(b"fake epub bytes for the fixture")

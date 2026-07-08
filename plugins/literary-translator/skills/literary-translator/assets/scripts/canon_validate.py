@@ -25,11 +25,12 @@ MERGE mode (--batch PATH given)
 
     Pass 1 (per-batch-item). Every item is independently re-validated
     against canon-batch.schema.json's own discriminated-union item shape
-    -- via jsonschema.Draft202012Validator(..., format_checker=
-    jsonschema.FormatChecker()) set EXPLICITLY, since jsonschema.validate()'s
-    convenience wrapper does not enable format assertions by default --
-    never the bare canon-entry.schema.json shape, since a batch item also
-    carries the 'disposition' field that shape does not have.
+    -- via jsonschema.Draft202012Validator(..., format_checker=<a
+    FormatChecker with a stdlib urllib.parse-based "uri" checker registered
+    on it>) set EXPLICITLY, since jsonschema.validate()'s convenience
+    wrapper does not enable format assertions by default -- never the bare
+    canon-entry.schema.json shape, since a batch item also carries the
+    'disposition' field that shape does not have.
 
     Offline research-mode backstop. If --research-mode offline and ANY
     item in the batch claims basis:"established" (accepted or queued --
@@ -114,6 +115,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from urllib.parse import urlparse
 
 try:
     import jsonschema
@@ -211,15 +213,15 @@ def _build_schema_registry() -> "Registry":
 
 
 def _draft202012_validator(schema: dict, registry: "Registry") -> "jsonschema.Draft202012Validator":
-    """Constructs a jsonschema.Draft202012Validator with
-    format_checker=jsonschema.FormatChecker() set EXPLICITLY. This is
-    REQUIRED, not optional -- jsonschema.validate()'s convenience wrapper
-    does not enable format assertions by default, and canon-entry.schema.json's
-    established->URI conditional depends entirely on the 'uri' format
-    assertion actually running.
+    """Constructs a jsonschema.Draft202012Validator with format_checker=
+    _uri_format_checker() set EXPLICITLY. This is REQUIRED, not optional --
+    jsonschema.validate()'s convenience wrapper does not enable format
+    assertions by default, and canon-entry.schema.json's established->URI
+    conditional depends entirely on the 'uri' format assertion actually
+    running.
     """
     return jsonschema.Draft202012Validator(
-        schema, registry=registry, format_checker=jsonschema.FormatChecker()
+        schema, registry=registry, format_checker=_uri_format_checker()
     )
 
 
@@ -271,22 +273,43 @@ def _indexed_item_label(kind: str, index: int, item) -> str:
     return f"{kind}[{index}]" + (f" ({source_form!r})" if source_form else "")
 
 
-def _rfc3987_backend_effective() -> bool:
-    """Self-test, same spirit as extract.py.template's bs4/lxml backend
-    preflight (references/gotchas.md, section 12): jsonschema's 'uri'
-    format checker silently no-ops (accepts anything) when the optional
-    'rfc3987' package is missing, rather than raising ImportError -- an
-    import-only check of jsonschema/referencing would pass while the
-    format assertion this whole script depends on for basis:"established"
-    enforcement never actually fires. Returns True iff a deliberately
-    malformed URI is actually rejected.
+def _is_uri(value: str) -> bool:
+    """A value is a valid URI iff urllib.parse.urlparse() yields BOTH a
+    non-empty scheme AND a non-empty netloc -- i.e. a real absolute URL
+    like "https://host/path", not a bare path or a scheme-less string.
+    """
+    parsed = urlparse(value)
+    return bool(parsed.scheme) and bool(parsed.netloc)
+
+
+def _check_uri_format(value) -> bool:
+    """The 'uri' format checker registered on _uri_format_checker()'s
+    FormatChecker. jsonschema's format_checker protocol requires a checker
+    to either return a bool or raise one of its declared `raises` types --
+    never silently no-op -- so a malformed value raises ValueError rather
+    than returning False, matching how fc.checks(..., raises=(ValueError,))
+    is registered below.
+    """
+    if not isinstance(value, str):
+        return True  # format checks only apply to strings; type is schema's job
+    if not _is_uri(value):
+        raise ValueError(f"{value!r} is not a valid URI (need scheme + netloc)")
+    return True
+
+
+def _uri_format_checker() -> "jsonschema.FormatChecker":
+    """Builds a jsonschema.FormatChecker with a stdlib urllib.parse-based
+    'uri' checker registered on it, so canon-entry.schema.json's
+    basis:"established" -> source:{format:"uri"} conditional is enforced
+    deterministically regardless of whether the optional (GPLv3+) 'rfc3987'
+    package is installed -- this plugin is intentionally stdlib-first and
+    never adds rfc3987 to requirements.txt. Registering a custom 'uri'
+    checker overrides jsonschema's own (rfc3987-backed, otherwise-no-op)
+    default for that format name.
     """
     fc = jsonschema.FormatChecker()
-    try:
-        fc.check("not a valid uri :: ///", "uri")
-    except Exception:
-        return True
-    return False
+    fc.checks("uri", raises=(ValueError,))(_check_uri_format)
+    return fc
 
 
 # ---------------------------------------------------------------------------
@@ -669,15 +692,6 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
 
     canon_path = Path(args.canon_path) if args.canon_path else DEFAULT_CANON_PATH
-
-    if not _rfc3987_backend_effective():
-        sys.stderr.write(
-            "canon_validate.py: warning: the 'rfc3987' package is not "
-            "installed, so jsonschema's 'uri' format assertion is a silent "
-            "no-op -- canon-entry.schema.json's basis:\"established\" -> "
-            "source:{format:\"uri\"} constraint will NOT actually be "
-            "enforced. Install with: pip install rfc3987\n"
-        )
 
     try:
         registry = _build_schema_registry()

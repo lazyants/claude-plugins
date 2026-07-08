@@ -168,6 +168,11 @@ PLACEHOLDER_SUBSTRINGS = (
 CHOOSE_PREFIX = "CHOOSE_"
 
 TMP_OR_SCRATCHPAD_MARKERS = frozenset({"tmp", "temp", "scratchpad"})
+# Narrow, default-off override for check_durable_root()'s tmp/scratchpad
+# rejection -- see that function's docstring. Set to "1" to accept a
+# durable_root that resolves under a tmp/temp/scratchpad path component;
+# any other value (including unset) leaves the rejection in force.
+ALLOW_TMP_ROOT_ENV_VAR = "LT_PROFILE_VALIDATE_ALLOW_TMP_ROOT"
 
 PROMPT_CONTRACT_MARKER_RE = re.compile(r"^\s*<!--\s*PROMPT_CONTRACT_VERSION:\s*(.+?)\s*-->\s*$")
 EXTRACTOR_CONTRACT_MARKER_RE = re.compile(r"^\s*#\s*EXTRACTOR_CONTRACT_VERSION:\s*(.+?)\s*$")
@@ -348,12 +353,20 @@ def _resolves_under_tmp_or_scratchpad(path: Path) -> bool:
 def check_durable_root(profile: dict):
     """`project.durable_root`'s PARENT must exist and be writable, and must
     NOT resolve under a tmp/scratchpad directory. durable_root itself is NOT
-    required to exist yet -- Step 0a creates it."""
+    required to exist yet -- Step 0a creates it.
+
+    The tmp/scratchpad rejection alone (never the parent-exists/writable
+    checks) is skipped when the `LT_PROFILE_VALIDATE_ALLOW_TMP_ROOT`
+    environment variable is exactly "1" -- a narrow, default-off override
+    for ephemeral/CI/test environments that intentionally place
+    durable_root under a tmp dir (e.g. pytest's tmp_path, which resolves
+    under /tmp on Linux CI runners)."""
     errors = []
     raw = profile["project"]["durable_root"]
     durable_root = Path(raw).expanduser()
 
-    if _resolves_under_tmp_or_scratchpad(durable_root):
+    allow_tmp_root = os.environ.get(ALLOW_TMP_ROOT_ENV_VAR) == "1"
+    if not allow_tmp_root and _resolves_under_tmp_or_scratchpad(durable_root):
         errors.append(
             f"project.durable_root: must not resolve under a tmp/temp/"
             f"scratchpad directory (resolves to {durable_root.resolve()})"

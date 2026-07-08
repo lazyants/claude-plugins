@@ -561,6 +561,37 @@ def test_all_three_placeholders_together_report_three_distinct_errors():
 
 
 # ---------------------------------------------------------------------------
+# check_durable_root: tmp/scratchpad rejection, and the
+# LT_PROFILE_VALIDATE_ALLOW_TMP_ROOT override that lets an ephemeral/CI/
+# test environment opt a durable_root genuinely under /tmp back in, without
+# weakening the default (no env var -> still rejected). durable_root's
+# parent is "/tmp" itself here -- always present and writable on macOS and
+# Linux -- so both cases below isolate the tmp/scratchpad check alone, with
+# no parent-exists/writable noise mixed in.
+# ---------------------------------------------------------------------------
+
+
+def test_durable_root_under_tmp_is_rejected_by_default(monkeypatch):
+    monkeypatch.delenv(pv.ALLOW_TMP_ROOT_ENV_VAR, raising=False)
+    profile = make_base_profile()
+    profile["project"]["durable_root"] = "/tmp/lt-profile-validate-test-durable-root"
+
+    errors = pv.check_durable_root(profile)
+
+    assert len(errors) == 1, errors
+    assert "project.durable_root" in errors[0]
+    assert "must not resolve under a tmp/temp/scratchpad directory" in errors[0]
+
+
+def test_durable_root_under_tmp_is_accepted_with_override(monkeypatch):
+    monkeypatch.setenv(pv.ALLOW_TMP_ROOT_ENV_VAR, "1")
+    profile = make_base_profile()
+    profile["project"]["durable_root"] = "/tmp/lt-profile-validate-test-durable-root"
+
+    assert pv.check_durable_root(profile) == []
+
+
+# ---------------------------------------------------------------------------
 # heading_regex compilability (procedural)
 # ---------------------------------------------------------------------------
 

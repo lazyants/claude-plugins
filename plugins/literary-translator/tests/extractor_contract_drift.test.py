@@ -103,11 +103,12 @@ def _write_valid_profile(tmp_path: Path) -> tuple[Path, Path]:
     """Builds a fully schema-valid, placeholder-free profile.yml (same
     recipe as tests/prompt_contract_drift.test.py's own fixture) plus its
     prerequisite filesystem fixtures -- an existing source file, and a
-    durable_root whose parent exists/is writable and does not resolve
-    under a tmp/temp/scratchpad path component (pytest's own tmp_path is
-    safe here -- verified it resolves under a `.../T/pytest-of-<user>/...`
-    path, never a literal `tmp`/`temp`/`scratchpad` path segment). Returns
-    (profile_path, durable_root)."""
+    durable_root whose parent exists and is writable. pytest's own
+    tmp_path resolves under a literal `tmp` path component on Linux (e.g.
+    CI runners honoring `TMPDIR=/tmp`), so any caller expecting Step 0's
+    exit-0 pass must set `LT_PROFILE_VALIDATE_ALLOW_TMP_ROOT=1` (see
+    profile_validate.py's `check_durable_root`) -- callers that only
+    assert a halt don't need it. Returns (profile_path, durable_root)."""
     durable_root = tmp_path / "durable"
     durable_root.mkdir()
     source_file = tmp_path / "source.epub"
@@ -188,7 +189,8 @@ def _run_main(pv_module, profile_path: Path, capsys):
 # asserted below.
 # ---------------------------------------------------------------------------
 
-def test_well_formed_marker_passes_clean(pv, tmp_path, capsys):
+def test_well_formed_marker_passes_clean(pv, tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv(pv.ALLOW_TMP_ROOT_ENV_VAR, "1")
     profile_path, durable_root = _write_valid_profile(tmp_path)
     (durable_root / EXTRACT_PY_FILENAME).write_text(
         _well_formed_marker(pv.CURRENT_EXTRACTOR_CONTRACT_VERSION)
@@ -201,11 +203,12 @@ def test_well_formed_marker_passes_clean(pv, tmp_path, capsys):
     assert exit_code == 0, f"expected a clean exit, got {exit_code!r}; stderr:\n{err}"
 
 
-def test_well_formed_marker_passes_clean_alongside_resumed_task_files(pv, tmp_path, capsys):
+def test_well_formed_marker_passes_clean_alongside_resumed_task_files(pv, tmp_path, monkeypatch, capsys):
     """A well-formed extract.py marker must not be disturbed by the sibling
     PROMPT_CONTRACT_VERSION check also running against well-formed
     *_TASK.md files in the same durable_root -- the two marker checks are
     independent, not mutually interfering."""
+    monkeypatch.setenv(pv.ALLOW_TMP_ROOT_ENV_VAR, "1")
     profile_path, durable_root = _write_valid_profile(tmp_path)
     (durable_root / EXTRACT_PY_FILENAME).write_text(
         _well_formed_marker(pv.CURRENT_EXTRACTOR_CONTRACT_VERSION)
@@ -224,10 +227,11 @@ def test_well_formed_marker_passes_clean_alongside_resumed_task_files(pv, tmp_pa
     assert exit_code == 0, f"expected a clean exit, got {exit_code!r}; stderr:\n{err}"
 
 
-def test_no_extract_py_is_not_a_resumed_project_violation(pv, tmp_path, capsys):
+def test_no_extract_py_is_not_a_resumed_project_violation(pv, tmp_path, monkeypatch, capsys):
     """A genuinely fresh project (no extract.py yet at all) must not be
     mistaken for the 'missing marker' violation -- check_contract_marker
     only fires once the file exists (`if not path.is_file(): return []`)."""
+    monkeypatch.setenv(pv.ALLOW_TMP_ROOT_ENV_VAR, "1")
     profile_path, _durable_root = _write_valid_profile(tmp_path)
 
     exit_code, _out, err = _run_main(pv, profile_path, capsys)
@@ -310,7 +314,8 @@ def test_non_leading_marker_halts(pv, tmp_path, capsys):
 # false positives.
 # ---------------------------------------------------------------------------
 
-def test_duplicated_marker_with_identical_values_is_not_fatal(pv, tmp_path, capsys):
+def test_duplicated_marker_with_identical_values_is_not_fatal(pv, tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv(pv.ALLOW_TMP_ROOT_ENV_VAR, "1")
     profile_path, durable_root = _write_valid_profile(tmp_path)
     current = pv.CURRENT_EXTRACTOR_CONTRACT_VERSION
     (durable_root / EXTRACT_PY_FILENAME).write_text(
@@ -328,7 +333,8 @@ def test_duplicated_marker_with_identical_values_is_not_fatal(pv, tmp_path, caps
     )
 
 
-def test_marker_after_leading_blank_lines_is_still_leading(pv, tmp_path, capsys):
+def test_marker_after_leading_blank_lines_is_still_leading(pv, tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv(pv.ALLOW_TMP_ROOT_ENV_VAR, "1")
     profile_path, durable_root = _write_valid_profile(tmp_path)
     current = pv.CURRENT_EXTRACTOR_CONTRACT_VERSION
     (durable_root / EXTRACT_PY_FILENAME).write_text(
@@ -373,11 +379,12 @@ def test_html_comment_syntax_marker_is_not_recognized(pv, tmp_path, capsys):
     assert "no leading EXTRACTOR_CONTRACT_VERSION marker found" in err, err
 
 
-def test_marker_without_inner_whitespace_is_still_recognized(pv, tmp_path, capsys):
+def test_marker_without_inner_whitespace_is_still_recognized(pv, tmp_path, monkeypatch, capsys):
     """Ordinary, unremarkable Python comment style -- no space after '#' or
     around the colon -- must still be recognized as a well-formed marker
     (unlike the HTML-comment form above, this is genuinely valid Python and
     the marker's own regex is deliberately whitespace-tolerant)."""
+    monkeypatch.setenv(pv.ALLOW_TMP_ROOT_ENV_VAR, "1")
     profile_path, durable_root = _write_valid_profile(tmp_path)
     current = pv.CURRENT_EXTRACTOR_CONTRACT_VERSION
     (durable_root / EXTRACT_PY_FILENAME).write_text(

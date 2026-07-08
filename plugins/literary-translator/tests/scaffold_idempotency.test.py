@@ -53,6 +53,7 @@ re-invoke across a project's whole lifetime:
 """
 import hashlib
 import importlib.util
+import os
 import shutil
 import subprocess
 import sys
@@ -82,6 +83,13 @@ CHOOSE_SENTINELS = (
     "CHOOSE_none_confirmed_or_markdown_ref_or_custom_regex",
     "CHOOSE_live_or_offline",
 )
+# Must match profile_validate.py's own ALLOW_TMP_ROOT_ENV_VAR constant --
+# this file drives profile_validate.py as a subprocess (see module
+# docstring, Part A), so it can't import that constant, only mirror the
+# literal name. pytest's own tmp_path resolves under a literal `tmp` path
+# component on Linux (e.g. CI runners honoring `TMPDIR=/tmp`), which
+# check_durable_root would otherwise reject.
+ALLOW_TMP_ROOT_ENV_VAR = "LT_PROFILE_VALIDATE_ALLOW_TMP_ROOT"
 
 
 def _load_module(name, path):
@@ -144,12 +152,16 @@ def make_real_values_profile(tmp_path):
     return profile_path, durable_root, source_path
 
 
-def run_profile_validate(profile_path):
+def run_profile_validate(profile_path, extra_env=None):
+    env = os.environ.copy()
+    if extra_env:
+        env.update(extra_env)
     return subprocess.run(
         [sys.executable, str(PROFILE_VALIDATE_SCRIPT), "--profile", str(profile_path)],
         capture_output=True,
         text=True,
         timeout=30,
+        env=env,
     )
 
 
@@ -167,7 +179,7 @@ def test_step0_real_profile_stays_byte_identical_across_repeated_invocations(tmp
     # "Repeated" -- not just a single second invocation -- matching the
     # same rigor Step 0a's template-copy half of this suite applies below.
     for i in range(3):
-        result = run_profile_validate(profile_path)
+        result = run_profile_validate(profile_path, extra_env={ALLOW_TMP_ROOT_ENV_VAR: "1"})
         assert result.returncode == 0, (
             f"invocation #{i + 1} did not exit clean; this fixture is meant "
             f"to be a fully valid, real profile so a non-zero exit means "
