@@ -516,13 +516,82 @@
       "properties": {
         "v1_scope": {
           "type": "string",
-          "enum": ["segment_drafts_and_audit"]
+          "enum": ["segment_drafts_and_audit", "assembled_book"]
         },
         "destination": {
           "type": "string",
           "minLength": 1
+        },
+        "target": {
+          "type": "string",
+          "enum": ["obsidian", "epub", "custom"]
+        },
+        "name_display": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "parenthetical_originals": {
+              "type": "string",
+              "enum": ["never", "first_occurrence"]
+            }
+          }
+        },
+        "index": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": false
+            },
+            "person_grouping": {
+              "type": "boolean",
+              "default": false
+            }
+          }
+        },
+        "adapter_config": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "obsidian": {
+              "type": ["object", "null"]
+            },
+            "epub": {
+              "type": ["object", "null"]
+            },
+            "custom": {
+              "type": ["object", "null"]
+            }
+          }
         }
-      }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "index": {
+                "properties": {
+                  "person_grouping": { "const": true }
+                },
+                "required": ["person_grouping"]
+              }
+            },
+            "required": ["index"]
+          },
+          "then": {
+            "properties": {
+              "index": {
+                "properties": {
+                  "enabled": { "const": true }
+                },
+                "required": ["enabled"]
+              }
+            },
+            "required": ["index"]
+          }
+        }
+      ]
     }
   },
   "patternProperties": {

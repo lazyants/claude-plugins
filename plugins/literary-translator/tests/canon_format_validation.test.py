@@ -165,6 +165,7 @@ def canon_entry(
     source=None,
     is_proper_name=True,
     note=None,
+    category=None,
 ):
     """A canon-entry.schema.json-shaped ACCEPTED entry (entries{} value)."""
     entry = {
@@ -178,6 +179,8 @@ def canon_entry(
         entry["source"] = source
     if note is not None:
         entry["note"] = note
+    if category is not None:
+        entry["category"] = category
     return entry
 
 
@@ -431,6 +434,71 @@ def test_merge_accepts_accepted_item_transliterated_without_source(tmp_path):
     # canon-entry.schema.json shape, which is additionalProperties:false.
     assert "disposition" not in on_disk["entries"]["Guerin"]
     assert on_disk["entries"]["Guerin"]["basis"] == "transliterated"
+
+
+def test_merge_accepts_and_persists_category_field(tmp_path):
+    # Regression lock (THOROUGH build, per-work category taxonomy): 'category'
+    # is an OPTIONAL, open-vocabulary string wired through THREE surfaces --
+    # canon-entry.schema.json, canon-batch.schema.json's ACCEPTED branch (an
+    # additionalProperties:false object that would otherwise REJECT it at
+    # intake), and canon_validate.py's own CANON_ENTRY_FIELDS allow-list
+    # (which otherwise STRIPS any key not listed there when merging an
+    # accepted item into entries{}). A lone edit to any one of the three
+    # silently breaks this round-trip -- this test proves all three agree.
+    root = make_durable_root(tmp_path)
+    batch_path = write_batch(
+        root,
+        [
+            accepted_batch_item(
+                "Yerushalayim",
+                canonical_target_form="Jerusalem",
+                basis="transliterated",
+                confidence="high",
+                category="place",
+            )
+        ],
+    )
+
+    proc = run_canon_validate(root, "live", batch_path=batch_path)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    payload = parse_stdout(proc)
+    assert payload["success"] is True
+    assert payload["merged_accepted"] == 1
+
+    on_disk = json.loads((root / "canon.json").read_text(encoding="utf-8"))
+    assert on_disk["entries"]["Yerushalayim"]["category"] == "place"
+    # 'disposition' must still be stripped alongside everything else that is
+    # NOT a canon-entry field -- category surviving must not mean the
+    # allow-list stopped filtering altogether.
+    assert "disposition" not in on_disk["entries"]["Yerushalayim"]
+
+
+def test_validate_only_accepts_entry_with_category_field(tmp_path):
+    # Companion VALIDATE-ONLY case: an existing entries{} value already
+    # carrying 'category' (e.g. from a prior merge, or hand-edited) must
+    # pass canon-entry.schema.json cleanly -- it's optional, not merely
+    # merge-time-tolerated.
+    root = make_durable_root(tmp_path)
+    write_canon(
+        root,
+        canon_file_doc(
+            entries={
+                "Yerushalayim": canon_entry(
+                    "Yerushalayim",
+                    canonical_target_form="Jerusalem",
+                    basis="transliterated",
+                    confidence="high",
+                    category="place",
+                )
+            }
+        ),
+    )
+
+    proc = run_canon_validate(root, "live")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    payload = parse_stdout(proc)
+    assert payload["success"] is True
+    assert payload["entries_count"] == 1
 
 
 def test_merge_rejects_review_queue_item_missing_note(tmp_path):

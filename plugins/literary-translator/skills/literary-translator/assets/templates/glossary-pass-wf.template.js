@@ -83,6 +83,7 @@ const CANON_BATCH_ACCEPTED_SHAPE = {
     source: { type: "string", description: "Reference URL. Required, and must be a non-empty URI, when basis is established." },
     confidence: { type: "string", enum: ["high", "medium", "low"] },
     note: { type: "string" },
+    category: { type: "string", description: "Optional, OPEN-vocabulary per-project entity category (e.g. person, place, work, group) -- see canon-entry.schema.json's own 'category' field. Absent/blank is valid; consumers treat it as 'other'." },
   },
   if: {
     properties: { basis: { const: "established" } },

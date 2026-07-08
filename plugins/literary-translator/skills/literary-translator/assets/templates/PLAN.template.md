@@ -70,6 +70,18 @@ environment, not a preference; any project-specific reason to deviate from the s
 `max_fix_rounds` / `batch_agent_cap` defaults.
 <!-- LT_REQUIRED_FILL_END -->
 
+### Intake & proportionality agreement (SKILL.md's "Intake & proportionality" step)
+
+<!-- LT_REQUIRED_FILL_BEGIN: intake-proportionality-agreement -->
+LT_PLACEHOLDER_UNFILLED -- record the outcome of SKILL.md's "Intake & proportionality" step, agreed with
+the user before scaffolding: this project's rough size (word count, segment/chapter count, verse/front-back
+presence); which tier was chosen -- fast (lean defaults) or thorough (opt-in fuller apparatus) -- and
+exactly which knobs express that choice (`glossary.research_mode`, `footnotes.apparatus_policy`,
+`verse_policy.mode`, `engine.max_fix_rounds`, `output.target`, `output.index.enabled`); and the worth-it
+rationale for that choice -- why the chosen tier's cost (or lack of it) is justified for this project's
+actual goal, not assumed by default.
+<!-- LT_REQUIRED_FILL_END -->
+
 ## 3. Extraction notes specific to this source
 
 <!-- LT_REQUIRED_FILL_BEGIN: extraction-notes -->

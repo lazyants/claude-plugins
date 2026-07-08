@@ -85,6 +85,16 @@ direct address"). If the source language has no honorific/title system worth a f
 explicitly here rather than leaving this unfilled.
 <!-- LT_REQUIRED_FILL_END -->
 
+- **Original-script parenthetical** -- whether this project renders the source-form / original-script name
+  in parentheses on first mention, and if so, in which form.
+
+<!-- LT_REQUIRED_FILL_BEGIN: name-display-parentheses -->
+LT_PLACEHOLDER_UNFILLED -- on first mention, render the source-form / original-script name in parentheses?
+YES/NO. If YES: which form -- original script, transliteration, or both? If transliteration (alone or
+alongside the original script), which transliteration system (cite it by name -- a standard national /
+academic romanization scheme, not an ad hoc one)?
+<!-- LT_REQUIRED_FILL_END -->
+
 - Nicknames / speaking names -- translate the sense where the source clearly intends one; keep the
   original in a translator's note when it matters and the sense doesn't carry over cleanly.
 

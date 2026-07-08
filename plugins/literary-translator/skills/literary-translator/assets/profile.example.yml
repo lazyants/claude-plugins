@@ -179,9 +179,33 @@ output:
     # v1 delivers converged per-segment drafts + ledger + each draft's own validate_draft.py per-segment audit
     # trail + a whole-book final_audit.py summary/WARN report -- NOT a single assembled book file. Book assembly
     # (EPUB/bilingual/etc.) is explicitly out of scope for v1 (see non-goals). destination below is where the
-    # audit/handoff package (not a book) is written.
+    # audit/handoff package (not a book) is written. `assembled_book` is a later-increment value (see
+    # references/assembly-and-output.md) -- declared here for shape only, not yet load-bearing.
   destination: "/ABS/PATH/TO/YOUR_PROJECT/out/"   # matches durable_root's placeholder above + /out/ (the default,
                                           # resolving inside durable_root); e.g. a real project:
                                           # "/Users/you/dev/your-book-project/out/"
+  target: obsidian
+    # obsidian | epub | custom -- which output-target adapter (later increment) would render the assembled
+    # book; obsidian is PRIMARY. Inert in v1 (no assembler exists yet) -- declared now so profiles need not be
+    # migrated when assembly ships.
+  name_display:
+    parenthetical_originals: never
+      # never | first_occurrence -- whether a name's original-script form is shown parenthetically alongside
+      # its target-language rendering the first time it occurs. Inert until the assembler exists.
+  index:
+    enabled: false
+      # Optional occurrence index (later increment) -- OFF by default; a plain translate+gloss job never pays
+      # for it. Obsidian gets an index for free via native backlinks once assembly ships; this knob only
+      # matters for non-obsidian targets.
+    person_grouping: false
+      # Opt-in lightweight name-grouping for the index. REQUIRES index.enabled: true (schema-enforced) --
+      # setting this true while enabled is false/absent is a validation error.
+  adapter_config:
+    # Per-target settings for the (future) assembler -- only the sub-block matching `target` above is
+    # meaningful; the others sit inert. Shape is intentionally loose in v1 (each key is just object-or-null);
+    # per-target field-level validation arrives with the assembler itself.
+    obsidian: {}
+    epub: null
+    custom: null
   # future (v2+, once a real assembly script exists and is proven): format: epub | bilingual_epub |
   # plain_text_master; destination: <book path>

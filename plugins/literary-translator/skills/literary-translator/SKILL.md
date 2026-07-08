@@ -39,6 +39,54 @@ Three scope statements, read BEFORE any setup work:
    setup, so effort spent on a profile, style bible, and canon scaffolding
    isn't wasted on a fatal extraction halt at chapter 1.
 
+## Intake & proportionality (do this first)
+
+Before Step 0, before scaffolding a single file: size the job and agree its
+output shape with the user out loud. Skipping this is how a plain
+translate+gloss job ends up quietly provisioning apparatus it will never use.
+
+1. **State the job's rough size.** Word count (main text, plus the footnote
+   apparatus separately if the source has one), segment/chapter count, and
+   whether verse or front/back matter is present — the same reconnaissance
+   `PLAN.md` section 1 (Source) eventually records; do it now, before any
+   scope commitment.
+2. **Confirm output shape through existing knobs, never a new mode.** This
+   plugin has no separate "fast mode"/"thorough mode" switch — proportionality
+   is expressed entirely through profile knobs that already exist:
+   `glossary.research_mode` (`live` vs `offline`), `footnotes.apparatus_policy`,
+   `verse_policy.mode` (the six-value enum in
+   `references/verse-policy.md`), and `engine.max_fix_rounds`. Two further
+   knobs decide how much *output* apparatus gets provisioned:
+   `output.target` (defaults `obsidian`) and `output.index.enabled` (defaults
+   `false`). Walk the user through what each knob currently resolves to for
+   this project before scaffolding proceeds.
+3. **Default fast, offer thorough explicitly, through those same knobs.** The
+   default posture for a new project is the lean end of every one of those
+   knobs — offline research where live isn't required, the lightest
+   apparatus policy the source actually needs, index off. Present the
+   exhaustive alternative (live research, a fuller apparatus, index on) as an
+   explicit opt-in the user chooses through the same knobs, never as a
+   separate code path.
+4. **Agree pipeline role assignment.** Ask who translates, who reviews, who
+   fixes, and who orchestrates. The reviewer must be independent of the
+   translator — ideally a different engine/family
+   (`references/operating-constellation.md`). Offer the valid combinations:
+   (1) Claude translates → Codex reviews → Claude fixes — this plugin's
+   default, cross-engine and the strongest combination at catching errors;
+   (2) Claude translates → a separate fresh Claude agent reviews → Claude
+   fixes; (3) Codex translates → a separate agent reviews → Claude only
+   applies fixes, orchestrates, and verifies. Degrade gracefully to a single
+   engine if the user has only Claude or only Codex. This is NOT a new
+   profile knob — a mechanical engine-per-role knob is deferred; record the
+   agreed constellation in `PLAN.md`, not `profile.yml`.
+5. **State why the lean default is worth it.** A plain translate+gloss job
+   that turns on every knob pays for machinery — live-research round-trips, a
+   heavier apparatus, an occurrence index — it will never read. Naming that
+   trade-off up front is cheaper than discovering it mid-project. Defer
+   side-quests: a knob not required for THIS project's stated goal stays at
+   its lean default, full stop — raise it later, from `PLAN.md` section 5, if
+   the project's own scope genuinely grows to need it.
+
 ## Step 0 — Read + validate `profile.yml`
 
 Implemented by `scripts/profile_validate.py`, invoked as:
@@ -344,7 +392,9 @@ is an OPT-IN gate a project enables, not yet wired as a mandatory W-step;
 the script defaults to hard-blocking (exit 1) so a project that wires it in
 gets the full gate. The accuracy calls it audits are authored by a human
 reviewer or a schema-validated codex workflow — the script never decides
-identity itself.
+identity itself. Enable ONLY when a per-person index, per-person bios, or
+enforced cross-document consistency is in scope; on a plain translate+gloss
+job leave it off — the lightweight `review_queue` is the correct tool.
 
 **W3a Segpack generation** (runs right after W3, since `segpack.py`'s canon
 injection needs the just-frozen `canon.json`). Run `scripts/segpack.py` for
