@@ -51,6 +51,7 @@ own path -- it never assumes cwd and never takes a --durable-root flag.
 import argparse
 import hashlib
 import json
+import re
 import sys
 from pathlib import Path
 from typing import NoReturn
@@ -125,6 +126,31 @@ def fail(message: str) -> NoReturn:
     traceback for an expected/actionable condition."""
     print(f"ERROR: {message}", file=sys.stderr)
     sys.exit(1)
+
+
+# Canonical segment-id safety contract. A seg id is either an ordinary body
+# id (e.g. "seg01", "seg05_blocked_regen", "segAnchor") or a translate-decision
+# FRONTBACK:{id} unit (e.g. "FRONTBACK:fm01"). It is spliced into filesystem
+# paths and workflow shell commands, so it MUST be a path- and shell-safe
+# allowlist. Keep this identical across every consuming script.
+# NOTE: re.fullmatch (NOT re.match + "$") -- in Python "$" also matches just
+# before a trailing newline, so re.match(r"...$", "seg01\n") would WRONGLY pass.
+_SEG_ID_RE = re.compile(r"(?:FRONTBACK:)?[A-Za-z0-9_]+")
+
+
+def validate_seg(seg):
+    """Return an error string if `seg` is not a path/shell-safe segment id,
+    else None. Allows ONLY [A-Za-z0-9_] with an optional literal 'FRONTBACK:'
+    prefix -- rejecting empties, path separators, '..', absolute paths, and
+    every shell metacharacter."""
+    if not isinstance(seg, str) or not seg:
+        return "segment id must be a non-empty string."
+    if not _SEG_ID_RE.fullmatch(seg):
+        return (
+            "segment id must match (FRONTBACK:)?[A-Za-z0-9_]+ (no path "
+            f"separators, '..', or shell metacharacters); got {seg!r}."
+        )
+    return None
 
 
 def require_yaml() -> None:
@@ -598,6 +624,11 @@ def main() -> int:
 
     if args.seg is None and args.field is None:
         parser.error("either --seg or --field (or both) is required")
+
+    if args.seg is not None:
+        seg_error = validate_seg(args.seg)
+        if seg_error is not None:
+            fail(seg_error)
 
     durable_root = DURABLE_ROOT
 

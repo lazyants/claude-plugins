@@ -93,7 +93,8 @@
         "properties": {
           "seg": {
             "type": "string",
-            "description": "This segment's own id -- an ordinary body segment id (e.g. \"seg02\") or, for a translate-decision frontback unit, the matching FRONTBACK:{id} string."
+            "pattern": "^(?:FRONTBACK:)?[A-Za-z0-9_]+$",
+            "description": "This segment's own id -- an ordinary body segment id (e.g. \"seg02\") or, for a translate-decision frontback unit, the matching FRONTBACK:{id} string. Enforced at runtime by the consuming scripts (validate_seg); this pattern documents the path/shell-safety contract."
           },
           "kind": {
             "type": "string",
@@ -165,7 +166,7 @@
         "properties": {
           "id": {
             "type": "string",
-            "pattern": "^FRONTBACK:.+$"
+            "pattern": "^FRONTBACK:[A-Za-z0-9_]+$"
           },
           "decision": {
             "type": "string",

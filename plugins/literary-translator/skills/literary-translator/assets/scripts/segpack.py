@@ -74,6 +74,31 @@ except ImportError as exc:
         "Re-run Step 0a, or verify the plugin install is not corrupted."
     )
 
+# Canonical segment-id safety contract. A seg id is either an ordinary body
+# id (e.g. "seg01", "seg05_blocked_regen", "segAnchor") or a translate-decision
+# FRONTBACK:{id} unit (e.g. "FRONTBACK:fm01"). It is spliced into filesystem
+# paths and workflow shell commands, so it MUST be a path- and shell-safe
+# allowlist. Keep this identical across every consuming script.
+# NOTE: re.fullmatch (NOT re.match + "$") -- in Python "$" also matches just
+# before a trailing newline, so re.match(r"...$", "seg01\n") would WRONGLY pass.
+_SEG_ID_RE = re.compile(r"(?:FRONTBACK:)?[A-Za-z0-9_]+")
+
+
+def validate_seg(seg):
+    """Return an error string if `seg` is not a path/shell-safe segment id,
+    else None. Allows ONLY [A-Za-z0-9_] with an optional literal 'FRONTBACK:'
+    prefix -- rejecting empties, path separators, '..', absolute paths, and
+    every shell metacharacter."""
+    if not isinstance(seg, str) or not seg:
+        return "segment id must be a non-empty string."
+    if not _SEG_ID_RE.fullmatch(seg):
+        return (
+            "segment id must match (FRONTBACK:)?[A-Za-z0-9_]+ (no path "
+            f"separators, '..', or shell metacharacters); got {seg!r}."
+        )
+    return None
+
+
 APPARATUS_POLICIES = ("translate_all", "preserve_source", "omit_apparatus", "body_refs_only")
 FOOTNOTE_CARRYING_POLICIES = ("translate_all", "preserve_source")
 
@@ -330,6 +355,10 @@ def validate_segpack(pack, seg_id=None):
 
     if not isinstance(pack["seg"], str) or not pack["seg"]:
         errors.append(f"segpack {label}: 'seg' must be a non-empty string")
+    else:
+        seg_error = validate_seg(pack["seg"])
+        if seg_error is not None:
+            errors.append(f"segpack {label}: 'seg' is not a safe segment id: {seg_error}")
     if not isinstance(pack["title"], str):
         errors.append(f"segpack {label}: 'title' must be a string")
     if pack["kind"] not in ("body", "frontback"):
@@ -455,6 +484,11 @@ def parse_args(argv=None):
 def main(argv=None):
     args = parse_args(argv)
 
+    if args.seg is not None:
+        seg_error = validate_seg(args.seg)
+        if seg_error is not None:
+            sys.exit(f"FATAL: {seg_error}")
+
     manifest_path = DURABLE_ROOT / "manifest.json"
     canon_path = DURABLE_ROOT / "canon.json"
     languages_dir = DURABLE_ROOT / "languages"
@@ -486,6 +520,15 @@ def main(argv=None):
     failures = {}
     written = []
     for seg_id in seg_ids:
+        # Validate the id BEFORE build_pack / the out_path write, so the
+        # path-safety guarantee is local here (not merely inherited from
+        # validate_segpack seeing pack["seg"] == seg_id downstream). In
+        # --all mode seg_id comes straight from manifest.json segments[],
+        # which an untrusted custom extractor controls.
+        seg_error = validate_seg(seg_id)
+        if seg_error:
+            failures[seg_id] = [seg_error]
+            continue
         try:
             pack = build_pack(seg_id, manifest, canon, lang_config, args.apparatus_policy)
         except SegpackError as exc:

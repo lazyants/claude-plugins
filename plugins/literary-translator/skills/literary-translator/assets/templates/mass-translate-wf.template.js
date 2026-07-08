@@ -226,6 +226,29 @@ const VERSE_POLICY_INSTRUCTION_BLOCK = "{{VERSE_POLICY_INSTRUCTION_BLOCK}}";
 const SEGS = Array.isArray(args) ? args : JSON.parse(args);
 
 // ---------------------------------------------------------------------------
+// Defense-in-depth segment id guard. Every id in SEGS is spliced, unquoted,
+// into shell command strings below (translatePrompt/reviewPrompt/fixPrompt/
+// waitPrompt/recordLedgerPrompt/mergeLedgerPrompt), including a bash for-loop
+// in waitPrompt -- an unsafe id ('../', '/', shell metacharacters) would
+// otherwise escape the durable root or inject arbitrary shell commands.
+// select_segments.py already validates every id it emits against this same
+// allowlist BEFORE it ever reaches this script's args, so this check should
+// never fire in production; it exists solely so a poisoned/hand-edited SEGS
+// input fails loudly here rather than silently reaching a shell command.
+// Kept identical to select_segments.py's and review_artifact_check.py's own
+// validate_seg() allowlist. In JS, "$" (no /m flag) matches only
+// end-of-input (NOT before a trailing newline), so /^...$/ is safe here --
+// do NOT add the /m flag.
+// ---------------------------------------------------------------------------
+const SEG_ID_RE = /^(?:FRONTBACK:)?[A-Za-z0-9_]+$/;
+for (let i = 0; i < SEGS.length; i++) {
+  const s = SEGS[i];
+  if (typeof s !== "string" || !SEG_ID_RE.test(s)) {
+    throw new Error(`Unsafe segment id ${JSON.stringify(s)}: must match (FRONTBACK:)?[A-Za-z0-9_]+`);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Small helper: does fragmentPath end with exactly "{seg}.json"? A plain
 // substring check (indexOf) would wrongly match seg1 against a fragment
 // path for seg10 -- this checks the true path suffix instead.

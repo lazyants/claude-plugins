@@ -122,6 +122,7 @@ alone.
 import argparse
 import hashlib
 import json
+import re
 import subprocess
 import sys
 from collections import Counter
@@ -238,6 +239,41 @@ def read_json(path: Path, what: str):
 
 
 # ---------------------------------------------------------------------------
+# Segment id validation -- the SOURCE guard. Every seg id this script ever
+# handles (manifest.json's segments[], and --only-segs) ends up spliced,
+# unquoted, into the generated mass-translate-wf.js's shell command strings
+# (see mass-translate-wf.template.js's translatePrompt/reviewPrompt/etc.), so
+# a poisoned manifest or a hand-typed --only-segs value must be rejected
+# HERE, before any path is built or any id is emitted into SEGS -- never
+# left for the workflow's own defense-in-depth JS guard to catch first.
+# Canonical allowlist, kept identical to review_artifact_check.py's own
+# validate_seg() per this project's "no shared lib between self-contained
+# scripts" convention.
+# ---------------------------------------------------------------------------
+
+# A seg id is either an ordinary body id (e.g. "seg01", "seg05_blocked_regen")
+# or a translate-decision FRONTBACK:{id} unit (e.g. "FRONTBACK:fm01"). Using
+# re.fullmatch (NOT re.match + "$") -- in Python "$" also matches just before
+# a trailing newline, so re.match(r"...$", "seg01\n") would WRONGLY pass.
+_SEG_ID_RE = re.compile(r"(?:FRONTBACK:)?[A-Za-z0-9_]+")
+
+
+def validate_seg(seg):
+    """Return an error string if `seg` is not a path/shell-safe segment id,
+    else None. Allows ONLY [A-Za-z0-9_] with an optional literal
+    'FRONTBACK:' prefix -- rejecting empties, path separators, '..',
+    absolute paths, and every shell metacharacter."""
+    if not isinstance(seg, str) or not seg:
+        return "segment id must be a non-empty string."
+    if not _SEG_ID_RE.fullmatch(seg):
+        return (
+            "segment id must match (FRONTBACK:)?[A-Za-z0-9_]+ (no path "
+            f"separators, '..', or shell metacharacters); got {seg!r}."
+        )
+    return None
+
+
+# ---------------------------------------------------------------------------
 # Step 1: run ledger_merge.py (bare -- no completeness flag; this is only
 # ever meant to freshly materialize runs/ledger.json, not to gate on which
 # segments happen to already have a fragment).
@@ -303,7 +339,11 @@ def load_candidate_segments() -> list:
         # is not a valid entry under that schema and must be rejected
         # fatally, never silently coerced into a candidate id.
         if isinstance(item, dict) and isinstance(item.get("seg"), str):
-            candidates.append(item["seg"])
+            seg = item["seg"]
+            problem = validate_seg(seg)
+            if problem is not None:
+                fatal(f"manifest.json: unsafe segment id: {problem}")
+            candidates.append(seg)
         else:
             fatal(f"manifest.json: malformed segments[] entry: {item!r}")
     if not candidates:
@@ -538,6 +578,10 @@ def run(args) -> dict:
     only_segs = None
     if args.only_segs is not None:
         only_segs = parse_only_segs(args.only_segs)
+        for seg in only_segs:
+            problem = validate_seg(seg)
+            if problem is not None:
+                fatal(f"--only-segs: unsafe segment id: {problem}")
         unknown = [seg for seg in only_segs if seg not in candidate_set]
         if unknown:
             fatal(

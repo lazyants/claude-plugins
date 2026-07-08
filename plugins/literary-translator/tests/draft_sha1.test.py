@@ -262,7 +262,7 @@ def test_self_anchoring_independent_of_cwd(tmp_path):
 
 def test_missing_draft_file_errors_nonzero_and_names_path(tmp_path):
     root = make_durable_root(tmp_path)
-    seg = "seg-does-not-exist"
+    seg = "seg_does_not_exist"
 
     result = run_draft_sha1(root, seg)
 
@@ -299,7 +299,7 @@ def test_unreadable_draft_file_errors_nonzero(tmp_path):
     is false for a directory, so this exercises the same not-found branch,
     never an unhandled OSError surfacing as an ugly traceback."""
     root = make_durable_root(tmp_path)
-    seg = "seg-is-a-dir"
+    seg = "seg_is_a_dir"
     (root / "segments" / f"{seg}.draft.json").mkdir()
 
     result = run_draft_sha1(root, seg)

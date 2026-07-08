@@ -27,6 +27,7 @@ ready yet, or the segpack/draft itself is missing/invalid/schema-malformed
 Usage: python3 draft_ready.py SEG
 """
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -35,6 +36,30 @@ from pathlib import Path
 # --durable-root flag.
 DURABLE_ROOT = Path(__file__).resolve().parents[1]
 SEGMENTS_DIR = DURABLE_ROOT / "segments"
+
+# Canonical segment-id safety contract. A seg id is either an ordinary body
+# id (e.g. "seg01", "seg05_blocked_regen", "segAnchor") or a translate-decision
+# FRONTBACK:{id} unit (e.g. "FRONTBACK:fm01"). It is spliced into filesystem
+# paths and workflow shell commands, so it MUST be a path- and shell-safe
+# allowlist. Keep this identical across every consuming script.
+# NOTE: re.fullmatch (NOT re.match + "$") -- in Python "$" also matches just
+# before a trailing newline, so re.match(r"...$", "seg01\n") would WRONGLY pass.
+_SEG_ID_RE = re.compile(r"(?:FRONTBACK:)?[A-Za-z0-9_]+")
+
+
+def validate_seg(seg):
+    """Return an error string if `seg` is not a path/shell-safe segment id,
+    else None. Allows ONLY [A-Za-z0-9_] with an optional literal 'FRONTBACK:'
+    prefix -- rejecting empties, path separators, '..', absolute paths, and
+    every shell metacharacter."""
+    if not isinstance(seg, str) or not seg:
+        return "segment id must be a non-empty string."
+    if not _SEG_ID_RE.fullmatch(seg):
+        return (
+            "segment id must match (FRONTBACK:)?[A-Za-z0-9_]+ (no path "
+            f"separators, '..', or shell metacharacters); got {seg!r}."
+        )
+    return None
 
 
 def draft_path(seg: str) -> Path:
@@ -140,6 +165,10 @@ def main() -> None:
         print("usage: python3 draft_ready.py SEG", file=sys.stderr)
         sys.exit(2)
     seg = sys.argv[1]
+    _seg_err = validate_seg(seg)
+    if _seg_err:
+        print(f"Error: {_seg_err}", file=sys.stderr)
+        sys.exit(2)
 
     dp = draft_path(seg)
     if not dp.exists() or dp.stat().st_size == 0:

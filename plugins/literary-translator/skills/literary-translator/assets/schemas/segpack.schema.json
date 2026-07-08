@@ -8,7 +8,8 @@
     "seg": {
       "type": "string",
       "minLength": 1,
-      "description": "Segment identifier. Matches the corresponding manifest.json segments[]/frontback[] entry id this segpack was assembled from."
+      "pattern": "^(?:FRONTBACK:)?[A-Za-z0-9_]+$",
+      "description": "Segment identifier. Matches the corresponding manifest.json segments[]/frontback[] entry id this segpack was assembled from. Enforced at runtime by the consuming scripts (validate_seg); this pattern documents the path/shell-safety contract."
     },
     "title": {
       "type": "string",

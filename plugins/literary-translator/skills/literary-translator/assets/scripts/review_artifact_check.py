@@ -72,12 +72,13 @@ audit-trail question (review_path(seg)'s draft_sha1 vs. the CURRENT
 draft's hash is ledger_update.py's own, separate, binding check -- this
 script never reads or recomputes a draft hash at all).
 
-Dependency-free: stdlib `json` only. No requirements.txt entry, no
+Dependency-free: stdlib `json` and `re` only. No requirements.txt entry, no
 dependency preflight needed.
 """
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -92,11 +93,19 @@ SEGMENTS_DIR = DURABLE_ROOT / "segments"
 # findings[] array or issue string doesn't blow up the printed line.
 _TRUNCATE_LEN = 120
 
+# The canonical allowlist (kept identical to select_segments.py's own
+# validate_seg() per this project's "no shared lib between self-contained
+# scripts" convention): [A-Za-z0-9_], with an optional literal 'FRONTBACK:'
+# prefix. Using re.fullmatch (NOT re.match + "$") -- in Python "$" also
+# matches just before a trailing newline, so re.match(r"...$", "seg01\n")
+# would WRONGLY pass.
+_SEG_ID_RE = re.compile(r"(?:FRONTBACK:)?[A-Za-z0-9_]+")
+
 
 def validate_seg(seg):
-    """Reject any seg value that could make review_path(seg) escape
-    SEGMENTS_DIR. Must be called on the raw seg string BEFORE
-    review_path(seg) is ever built.
+    """Reject any seg value that is not on the path/shell-safe allowlist.
+    Must be called on the raw seg string BEFORE review_path(seg) is ever
+    built.
 
     review_path(seg) builds SEGMENTS_DIR / f"{seg}.review.json" using
     pathlib's `/` operator, which silently DISCARDS the SEGMENTS_DIR
@@ -104,22 +113,33 @@ def validate_seg(seg):
     pathlib behavior, e.g. Path('/a') / '/b' == Path('/b') -- letting the
     script read/compare a review JSON file completely outside segments/
     when seg contains a path separator, '..', or is itself an absolute
-    path. The canonical review_path(seg) = segments/{seg}.review.json
-    (references/ledger-and-resumability.md's canonical path invariants)
-    implies seg is always a plain segment id, never a path.
+    path. seg also flows into shell command strings built by the
+    mass-translate workflow (mass-translate-wf.template.js), so a bare
+    path-escape denylist is not enough either -- a shell metacharacter
+    (e.g. "seg;rm") passed every one of the checks below unscathed. The
+    single source of truth is therefore the allowlist regex _SEG_ID_RE;
+    the specific checks below exist only to give the classic path-escape
+    cases their own precise, historical wording -- every input _SEG_ID_RE
+    would reject for any OTHER reason (shell metacharacters, whitespace, a
+    stray '.', etc.) falls through to the generic allowlist message.
 
     Returns None when seg is a safe bare segment id, or a human-readable
     problem description otherwise.
     """
     if not seg:
         return "segment id must not be empty."
+    if _SEG_ID_RE.fullmatch(seg):
+        return None
     if Path(seg).is_absolute():
         return f"segment id must not be an absolute path (got {seg!r})."
     if "/" in seg or "\\" in seg:
         return f"segment id must not contain a path separator (got {seg!r})."
     if ".." in Path(seg).parts:
         return f"segment id must not contain a '..' path component (got {seg!r})."
-    return None
+    return (
+        "segment id must match (FRONTBACK:)?[A-Za-z0-9_]+ (no path "
+        f"separators, '..', or shell metacharacters); got {seg!r}."
+    )
 
 
 def review_path(seg):
