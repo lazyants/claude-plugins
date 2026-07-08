@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "canon-batch.schema.json",
+  "title": "Canon Batch (glossary-pass return contract)",
+  "description": "The real return contract of a codex glossary-pass batch call (agent(glossaryPrompt(batch), {agentType:'codex:codex-rescue', effort:'high', schema: CANON_BATCH_SCHEMA})). A discriminated union over each item's own 'disposition' field: 'accepted' items are ready to merge into canon.json's entries{} map (the full canon-entry.schema.json shape); 'review_queue' items are not yet resolved and only need a note explaining why. The merge step routes on 'disposition' directly, never infers routing from basis/confidence after the fact. The established->URI constraint on the ACCEPTED branch is inlined here (rather than $ref'd to canon-entry.schema.json) so this file validates standalone under a hand-rolled or relative-$ref-less resolver; keep the two constraints in sync if canon-entry.schema.json's own conditional ever changes.",
+  "type": "array",
+  "items": {
+    "oneOf": [
+      {
+        "title": "ACCEPTED",
+        "description": "A resolved canon entry, ready to merge into canon.json's entries{} map -- the full canon-entry.schema.json shape.",
+        "type": "object",
+        "properties": {
+          "source_form": { "type": "string" },
+          "is_proper_name": { "type": "boolean" },
+          "disposition": { "const": "accepted" },
+          "canonical_target_form": { "type": "string" },
+          "basis": {
+            "type": "string",
+            "enum": ["established", "transliterated", "title", "not_a_name"]
+          },
+          "source": { "type": "string" },
+          "confidence": {
+            "type": "string",
+            "enum": ["high", "medium", "low"]
+          },
+          "note": { "type": "string" }
+        },
+        "required": ["source_form", "is_proper_name", "disposition", "canonical_target_form", "basis", "confidence"],
+        "additionalProperties": false,
+        "if": {
+          "properties": { "basis": { "const": "established" } },
+          "required": ["basis"]
+        },
+        "then": {
+          "properties": {
+            "source": { "type": "string", "format": "uri", "minLength": 1 }
+          },
+          "required": ["source"]
+        }
+      },
+      {
+        "title": "QUEUED",
+        "description": "A not-yet-resolved candidate routed to canon.json's review_queue[] -- canonical_target_form/basis/source/confidence are all optional/absent, but note is mandatory and must explain why it's queued (e.g. a SOURCE_UNAVAILABLE: prefix or a dispute reason).",
+        "type": "object",
+        "properties": {
+          "source_form": { "type": "string" },
+          "is_proper_name": { "type": "boolean" },
+          "disposition": { "const": "review_queue" },
+          "canonical_target_form": { "type": "string" },
+          "basis": {
+            "type": "string",
+            "enum": ["established", "transliterated", "title", "not_a_name"]
+          },
+          "source": { "type": "string" },
+          "confidence": {
+            "type": "string",
+            "enum": ["high", "medium", "low"]
+          },
+          "note": { "type": "string" }
+        },
+        "required": ["source_form", "is_proper_name", "disposition", "note"],
+        "additionalProperties": false
+      }
+    ]
+  }
+}

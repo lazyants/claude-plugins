@@ -1,0 +1,99 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "ledger-record-base.schema.json",
+  "title": "Ledger Record Base",
+  "description": "Fields common to every ledger record, whether a per-segment fragment (ledger-fragment.schema.json) or a materialized entry inside ledger.json (ledger.schema.json). Deliberately declares NO `status` property -- each composing schema layers its own `status` enum on top so the wider ledger.schema.json enum (which adds `stale`) never conflicts with the narrower fragment enum (which never writes `stale` to disk).",
+  "type": "object",
+  "properties": {
+    "timestamp": {
+      "type": "string",
+      "description": "ISO-8601 timestamp, always regenerated on every write -- the ONLY unconditional requirement."
+    },
+    "reason": {
+      "type": "string"
+    },
+    "rounds": {
+      "type": "integer",
+      "description": "Bare integer -- never a {translate,review,fix} object. Every branch of reviewFixLoop() returns a bare int."
+    },
+    "cache_key": {
+      "type": "object",
+      "description": "The composite 15-field cache key.",
+      "properties": {
+        "input_sha1": { "type": "string" },
+        "style_contract_hash": { "type": "string" },
+        "used_terms_hash": { "type": "string" },
+        "pipeline_version": { "type": "string" },
+        "schema_hash": { "type": "string" },
+        "prompt_hash": { "type": "string" },
+        "agent_config_hash": { "type": "string" },
+        "profile_semantics_hash": { "type": "string" },
+        "particle_config_hash": { "type": "string" },
+        "source_extraction_hash": { "type": "string" },
+        "source_input_hash": { "type": "string" },
+        "derivation_bundle_hash": { "type": "string" },
+        "verse_map_hash": { "type": "string" },
+        "note_map_hash": { "type": "string" },
+        "plugin_bundle_hash": { "type": "string" }
+      },
+      "required": [
+        "input_sha1",
+        "style_contract_hash",
+        "used_terms_hash",
+        "pipeline_version",
+        "schema_hash",
+        "prompt_hash",
+        "agent_config_hash",
+        "profile_semantics_hash",
+        "particle_config_hash",
+        "source_extraction_hash",
+        "source_input_hash",
+        "derivation_bundle_hash",
+        "verse_map_hash",
+        "note_map_hash",
+        "plugin_bundle_hash"
+      ],
+      "additionalProperties": false
+    },
+    "n_blocks": {
+      "type": "integer",
+      "description": "Populated by ledger_update.py itself by reading segpack_{seg}.json's blocks[] length -- never supplied by the calling agent's payload."
+    },
+    "n_footnotes": {
+      "type": "integer",
+      "description": "Populated by ledger_update.py itself by reading segpack_{seg}.json's footnotes[] length -- never supplied by the calling agent's payload."
+    },
+    "n_verses": {
+      "type": "integer",
+      "description": "Populated by ledger_update.py itself by reading segpack_{seg}.json's verses[] length -- never supplied by the calling agent's payload."
+    },
+    "reviewed_draft_sha1": {
+      "type": "string",
+      "description": "sha1 of segments/{seg}.draft.json's content, populated by ledger_update.py itself at the moment of convergence -- never supplied by the calling agent."
+    },
+    "note": {
+      "type": "string"
+    }
+  },
+  "required": ["timestamp"],
+  "allOf": [
+    {
+      "if": {
+        "required": ["status"],
+        "properties": { "status": { "const": "converged" } }
+      },
+      "then": {
+        "required": ["rounds", "cache_key", "n_blocks", "n_footnotes", "n_verses", "reviewed_draft_sha1"]
+      }
+    },
+    {
+      "if": {
+        "required": ["status"],
+        "properties": { "status": { "enum": ["non_converged", "blocked"] } }
+      },
+      "then": {
+        "required": ["reason"]
+      }
+    }
+  ]
+}

@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "ledger-merge-confirmation.schema.json",
+  "title": "Ledger Merge Confirmation",
+  "description": "Structured stdout of ledger_merge.py: SUCCESS reports the materialized ledger.json and its completeness/staleness classification; FAILURE reports why the merge could not complete. The two branches are not the same shape -- a failure never claims a ledger_path/n_segments/stale_segments that doesn't exist.",
+  "oneOf": [
+    {
+      "title": "SUCCESS",
+      "type": "object",
+      "properties": {
+        "success": { "const": true },
+        "ledger_path": { "type": "string" },
+        "n_segments": { "type": "integer" },
+        "missing_segments": {
+          "type": "array",
+          "maxItems": 0
+        },
+        "stale_segments": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      },
+      "required": ["success", "ledger_path", "n_segments", "missing_segments", "stale_segments"],
+      "additionalProperties": false
+    },
+    {
+      "title": "FAILURE",
+      "type": "object",
+      "properties": {
+        "success": { "const": false },
+        "error": { "type": "string" },
+        "missing_segments": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "exit_code": { "type": "integer" },
+        "stderr": { "type": "string" }
+      },
+      "required": ["success", "error"],
+      "additionalProperties": false
+    }
+  ]
+}

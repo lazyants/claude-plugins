@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "ledger-fragment.schema.json",
+  "title": "Ledger Fragment",
+  "description": "Shape of one on-disk fragment written by ledger_update.py to runs/ledger.d/{seg}.json. Composes ledger-record-base.schema.json via allOf and layers its own narrower `status` enum -- NO `stale`, ever, since these are the only statuses ledger_update.py itself writes to a fragment (`stale` is a status ledger_merge.py computes only in the materialized ledger.json, never found on disk here). Uses `unevaluatedProperties: false` rather than `additionalProperties: false`, since the latter cannot see properties satisfied by a sibling allOf branch (the base schema's properties) and would incorrectly reject them; unevaluatedProperties is allOf/$ref-aware.",
+  "allOf": [
+    { "$ref": "ledger-record-base.schema.json" }
+  ],
+  "type": "object",
+  "properties": {
+    "status": {
+      "type": "string",
+      "enum": ["pending", "in_progress", "converged", "non_converged", "blocked"]
+    }
+  },
+  "required": ["status"],
+  "unevaluatedProperties": false
+}

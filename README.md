@@ -11,6 +11,7 @@ Public plugins for [Claude Code](https://claude.com/claude-code), maintained und
 | [`obsidian-project-vault`](#obsidian-project-vault--v100) | 1.0.0 | Set up, migrate, audit, and operate an Obsidian vault as an LLM Wiki — a persistent, compounding knowledge base maintained by Claude Code. |
 | [`cc-usage-coach`](#cc-usage-coach--v100) | 1.0.0 | Personalized, behavior-aware analysis of where your Claude Code (Max/Pro) usage-limit tokens go, with ranked, low-effort ways to use fewer — computed entirely from your local session logs. Python measures; Claude concludes. |
 | [`enduser-handbook`](#enduser-handbook--v111) | 1.1.1 | Author, capture, and publish a Diátaxis-structured end-user handbook for any project — methodology shipped as a reusable skill, project-specific bindings supplied via `.claude/handbook/profile.yml`. |
+| [`literary-translator`](#literary-translator--v100) | 1.0.0 | High-fidelity literary book translation over a Gutenberg-style EPUB or plain-text source — a codex-translate → deterministic false-green gate → codex-review → Claude-fix loop run to convergence, with a frozen name/realia canon, a configurable verse policy, and ledger-based resumability. |
 
 ## Install / update / uninstall
 
@@ -156,6 +157,26 @@ Trigger phrases: "write the end-user handbook", "update the user manual", "add a
 - **One page at a time.** Author and capture a single chapter per pass and keep its scope tight. A focused page is far easier to get right — and to verify — than a sprawling one; resist bundling unrelated features into one chapter.
 - **Review from more than one perspective.** Have several agents read the drafted chapter, each from a different angle (a first-time user, a power user, a skeptic hunting for fabricated or undocumented behavior). More viewpoints beat one — no single pass catches everything.
 - **Rerun and validate coverage.** When a chapter (or the whole handbook) is done, run the skill again as a completeness pass: walk the actual feature surface and confirm every feature is described. The first pass always misses some.
+
+## `literary-translator` — v1.0.0
+
+High-fidelity literary **book translation** over a Gutenberg-style EPUB or plain-text source (or, in expert mode, a hand-co-designed custom extractor for any other source shape): a `codex-translate → deterministic false-green gate → codex-review → Claude-fix` loop, run to convergence per segment, with a frozen name/realia **canon**, a configurable **verse policy**, and **ledger-based resumability**. The loop runs per segment / per novella, never per book. v1 delivers converged per-segment drafts plus a full audit trail — not an assembled book (see non-goals).
+
+Trigger phrases: "translate this book", "set up a literary translation pipeline", "new book translation project", "translate this EPUB/story collection from X to Y", "Gutenberg EPUB translation", "resume book translation" — full list in `plugins/literary-translator/skills/literary-translator/SKILL.md`.
+
+### What it covers
+
+- **Engine loop** — per segment: codex translates, a deterministic false-green gate (`validate_draft.py`) rejects placeholder / empty / policy-violating drafts, codex reviews, Claude applies fixes, looped until converged. The scripts surface candidates and enforce schemas; the accuracy / identity calls are codex's, never a script's.
+- **Frozen name/realia canon** — a 1:1 `source_form → canonical_target_form` dictionary (`canon.json`) with a validation gate (`canon_validate.py`) and an opt-in human-adjudication gate (`canon_adjudication_audit.py`) that turns duplicate / merge / missed-pair / unresolved-queue review requirements into a persisted, machine-checkable record.
+- **Verse policy** — configurable handling of verse vs prose (`rendered` / `literal_gloss` fields, per-mode validation).
+- **Ledger-based resumability** — a `ledger.json` with a composite cache key so an interrupted run resumes safely and re-applies any style-bible / canon edit rather than shipping stale drafts.
+- **Source adapters** — `gutenberg_epub`, `plain_text`, and an expert-mode `custom` extractor. Scripts are self-anchored and stdlib-first; each emits one JSON line to stdout, human detail to stderr, exit 0 / 1 / 2.
+
+### Status & scope
+
+- Source-language extraction is proven against **Historiettes' 17th-century French specifically**, not French in general; every other language config — and every other French source — ships as an unverified **starter preset gated by a mandatory smoke test** (see `plugins/literary-translator/skills/literary-translator/references/language-pair-parameterization.md`).
+- One of the two shipped source adapters and the expert-mode custom extractor remain **experimental / unstable** until each is pilot-proven end-to-end on a real project (see `references/source-format-adapters/`).
+- Scoped to texts whose natural segments / chapters fit under a configurable per-segment word cap; a novel with genuinely long natural chapters is out of scope for v1.
 
 ## License & disclaimer
 

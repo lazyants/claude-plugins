@@ -1,0 +1,43 @@
+{
+  "PARTICLES": [
+    "von",
+    "zu"
+  ],
+  "STOPWORDS": [
+    "Der",
+    "Die",
+    "Das",
+    "Ein",
+    "Eine",
+    "Ich",
+    "Du",
+    "Er",
+    "Sie",
+    "Es",
+    "Wir",
+    "Ihr",
+    "Und",
+    "Oder",
+    "Aber",
+    "Nicht",
+    "Auch",
+    "Doch",
+    "Also",
+    "So",
+    "Wie",
+    "Was",
+    "Wer",
+    "Wo",
+    "Warum",
+    "Wenn",
+    "Dass",
+    "Denn",
+    "Sehr",
+    "Schon",
+    "Noch",
+    "Nur",
+    "Dann"
+  ],
+  "has_elision": false,
+  "ELISION_RE": null
+}

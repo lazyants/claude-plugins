@@ -1,0 +1,277 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "manifest.schema.json",
+  "title": "Extraction Manifest",
+  "description": "The extraction manifest every source-format adapter (gutenberg_epub, plain_text, custom) must produce -- the EXACT same shape regardless of adapter, validated immediately after extraction by extract.py.template using the real jsonschema.Draft202012Validator (never the hand-rolled checker validate_draft.py/segpack.py use elsewhere). Encodes the block-ID/order_index model (blocks{}, keyed by block id, each block carrying its own order_index -- the single global reading-order axis spine[]/segments[]/footnotes[]/verse.store all reference by id rather than duplicating), the reading-order spine (spine[]), the translatable-unit inventory (segments[], EXPLICITLY inclusive of translate-decision FRONTBACK:{id} units and not just body content -- a translate-decision frontback unit gets its own segments[] entry with kind:\"frontback\" and is segpacked/dispatched/reviewed/ledgered through the exact same generic pipeline as a body segment), the footnote anchor/definition table (footnotes[]), the verse-placeholder inventory (verse.store), the full front/back-matter disposition inventory (frontback[]), and the extraction provenance hashes (generation_hashes.source_extraction_hash/.source_input_hash) alongside the raw source-file list they are derived from (source_inputs[]). CROSS-REFERENCE INVARIANT THIS SCHEMA CANNOT EXPRESS (checked PROCEDURALLY instead, never schema-expressible -- a cross-array key-set comparison is outside JSON Schema's reach): every frontback[] entry with decision:\"translate\" MUST have a matching id in segments[] (as that segment's own `seg` value); every frontback[] entry with decision:\"regenerate\" or decision:\"omit\" MUST NOT appear in segments[] at all. extract.py.template's own round-trip self-check suite enforces this as a FATAL named failure in EITHER direction (a translate-decision frontback unit missing from segments[], or a regenerate/omit-decision unit that leaked into segments[] anyway) -- this schema only validates that segments[] and frontback[] are each individually well-shaped, not that the two arrays agree with each other.",
+  "type": "object",
+  "properties": {
+    "blocks": {
+      "type": "object",
+      "description": "Every extracted content unit, keyed by its own block id (e.g. \"HEAD:seg02\", \"PARA:seg02:0001\", \"VERSE:seg02:0012\", \"FN:1\", \"FRONTBACK:fm01\"). The id used as the object key and the block record's own `id` field must agree (checked by extract.py.template's uniqueness/bijection self-checks, not by this schema).",
+      "additionalProperties": {
+        "type": "object",
+        "description": "One block: order_index is this block's position on the single global reading-order axis spine/segments/footnotes/verse.store all key off of.",
+        "properties": {
+          "id": { "type": "string" },
+          "type": {
+            "type": "string",
+            "description": "Adapter-defined block-type tag (e.g. HEAD/PARA/VERSE/FN/FRONTBACK for gutenberg_epub). Deliberately not a fixed enum -- plain_text/custom adapters may introduce their own block types via their # ADAPT-POINT: classification hooks."
+          },
+          "seg": {
+            "type": ["string", "null"],
+            "description": "Owning segment id, or null for a block not (yet) assigned to any segment -- e.g. an unresolved FRONTBACK block before classify_frontback_block runs."
+          },
+          "order_index": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "source_file": { "type": "string" },
+          "source_html": {
+            "type": "string",
+            "description": "Raw source markup for this block. Absent for adapters with no markup concept (e.g. a plain_text source with no HTML to preserve)."
+          },
+          "plain_text": { "type": "string" },
+          "sha1": {
+            "type": "string",
+            "description": "sha1 of this block's own content, as assigned by extract.py.template's generic core."
+          },
+          "fnrefs": {
+            "type": "array",
+            "description": "Footnote numbers this block anchors, if any.",
+            "items": { "type": "integer" }
+          },
+          "decision": {
+            "type": "string",
+            "description": "Present only on FRONTBACK-type blocks -- mirrors the matching frontback[] entry's own decision. Never present on body block types.",
+            "enum": ["translate", "regenerate", "omit"]
+          },
+          "reason": {
+            "type": "string",
+            "description": "Present only on FRONTBACK-type blocks -- human-readable justification for `decision`."
+          },
+          "origin": {
+            "type": "string",
+            "description": "Present only on FRONTBACK-type blocks -- e.g. \"front-matter\"/\"back-matter\" provenance tag."
+          }
+        },
+        "required": ["id", "type", "order_index", "source_file", "plain_text", "sha1"],
+        "additionalProperties": false
+      }
+    },
+    "spine": {
+      "type": "array",
+      "description": "Ordered list of source-file/spine-item classifications extract.py.template's classify_spine_item hook resolved, each overridable per-file via adapter_config.gutenberg_epub.spine_overrides.",
+      "items": {
+        "type": "object",
+        "properties": {
+          "pos": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Position of this item in the source's own native spine/file order (never re-ranked -- order_index on blocks is the derived global axis, this is the adapter's raw input order)."
+          },
+          "idref": {
+            "type": "string",
+            "description": "Adapter-native item identifier (e.g. an EPUB spine idref). Absent for adapters with no such concept."
+          },
+          "file": { "type": "string" },
+          "media_type": { "type": "string" },
+          "klass": {
+            "type": "string",
+            "description": "Content classification for this spine item -- matches profile.yml's adapter_config.gutenberg_epub.spine_overrides value domain.",
+            "enum": ["body", "footnote-defs", "front-back"]
+          }
+        },
+        "required": ["pos", "file", "klass"],
+        "additionalProperties": false
+      }
+    },
+    "segments": {
+      "type": "array",
+      "description": "The full translatable-unit inventory -- EXPLICITLY inclusive of translate-decision FRONTBACK:{id} units (kind:\"frontback\"), not just ordinary body content (kind:\"body\"). A frontback-kind entry's `seg` value equals the matching frontback[] entry's own `id` (the cross-reference invariant this schema cannot itself enforce -- see the top-level description).",
+      "items": {
+        "type": "object",
+        "properties": {
+          "seg": {
+            "type": "string",
+            "pattern": "^(?:FRONTBACK:)?[A-Za-z0-9_]+$",
+            "description": "This segment's own id -- an ordinary body segment id (e.g. \"seg02\") or, for a translate-decision frontback unit, the matching FRONTBACK:{id} string. Enforced at runtime by the consuming scripts (validate_seg); this pattern documents the path/shell-safety contract."
+          },
+          "kind": {
+            "type": "string",
+            "description": "Copied straight into segpack.schema.json's own `kind` field at segpack-generation time, never re-derived.",
+            "enum": ["body", "frontback"]
+          },
+          "title_id": { "type": "string" },
+          "title_text": { "type": "string" },
+          "block_ids": {
+            "type": "array",
+            "description": "Ordered block ids (keys into the top-level blocks{} object) that make up this segment.",
+            "items": { "type": "string" },
+            "minItems": 1
+          },
+          "source_files": {
+            "type": "array",
+            "items": { "type": "string" }
+          },
+          "word_count": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Drives extract.py.template's blocking no_segment_exceeds_max_words self-check against profile.yml's max_segment_words."
+          },
+          "n_para": { "type": "integer", "minimum": 0 },
+          "n_verse": { "type": "integer", "minimum": 0 },
+          "n_quote": { "type": "integer", "minimum": 0 }
+        },
+        "required": ["seg", "kind", "block_ids", "word_count"],
+        "additionalProperties": false
+      }
+    },
+    "footnotes": {
+      "type": "array",
+      "description": "The footnote anchor/definition table. Empty under apparatus_policy: body_refs_only (no FN:{N} block extracted/carried at all -- see body_ref_markers[] on the owning segpack block instead) and under apparatus_policy: omit_apparatus (anchor stripped, nothing left behind).",
+      "items": {
+        "type": "object",
+        "properties": {
+          "n": {
+            "type": "integer",
+            "description": "Footnote number, shared by the anchor sentinel and the FN:{N} definition block id."
+          },
+          "anchor_id": { "type": "string" },
+          "def_id": { "type": "string" },
+          "anchor_block": {
+            "type": "string",
+            "description": "Block id (key into blocks{}) carrying the ⟦FNREF_N⟧ anchor."
+          },
+          "anchor_seg": {
+            "type": "string",
+            "description": "Segment id (matches a segments[] entry's own `seg`) owning the anchor block."
+          },
+          "anchor_file": { "type": "string" },
+          "def_block": {
+            "type": "string",
+            "description": "Block id (key into blocks{}) carrying this footnote's own FN:{N} definition."
+          },
+          "def_file": { "type": "string" }
+        },
+        "required": ["n", "anchor_block", "anchor_seg", "def_block"],
+        "additionalProperties": false
+      }
+    },
+    "frontback": {
+      "type": "array",
+      "description": "Full inventory of every front/back-matter block classify_frontback_block decomposed, each resolved to translate/regenerate/omit (overridable per-element via adapter_config.gutenberg_epub.frontback_overrides). A translate-decision entry gets its own segments[] entry (kind:\"frontback\", `seg` equal to this entry's `id`); a regenerate/omit-decision entry does NOT -- see the top-level description for the full cross-reference invariant, checked procedurally by extract.py.template, never by this schema.",
+      "minItems": 0,
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^FRONTBACK:[A-Za-z0-9_]+$"
+          },
+          "decision": {
+            "type": "string",
+            "enum": ["translate", "regenerate", "omit"]
+          },
+          "reason": {
+            "type": "string",
+            "description": "Human-readable justification for `decision` (e.g. \"Project Gutenberg boilerplate header\", \"title-page / front-matter text\")."
+          },
+          "file": { "type": "string" },
+          "text_head": {
+            "type": "string",
+            "description": "Leading excerpt of this block's plain text, for human review of the decision -- may be empty for a purely structural/decorative block."
+          }
+        },
+        "required": ["id", "decision"],
+        "additionalProperties": false
+      }
+    },
+    "verse": {
+      "type": "object",
+      "description": "The verse-placeholder inventory and summary counts the verse-detection loop (union of container-class and bare-line/stanza fallback) produced.",
+      "properties": {
+        "store": {
+          "type": "array",
+          "description": "One entry per detected verse node -- the authoritative source for the per-block verse-placeholder bijection check every verse_policy.mode enforces identically (see references/verse-policy.md).",
+          "items": {
+            "type": "object",
+            "properties": {
+              "vid": {
+                "type": "string",
+                "description": "This verse's unique key (e.g. \"V001\") -- the same key the ⟦VERSE_{vid}_{shortsha}⟧ placeholder and the segpack/draft verses{} container reference."
+              },
+              "placeholder": {
+                "type": "string",
+                "description": "The exact sentinel string baked into the owning block's plain text in place of this verse's content."
+              },
+              "context": {
+                "type": "string",
+                "enum": ["body", "footnote", "frontback"]
+              },
+              "mount": {
+                "type": "string",
+                "description": "How this verse node attaches to its parent block (e.g. \"block\" for a whole dedicated block, adapter-defined otherwise)."
+              },
+              "parent_block": {
+                "type": "string",
+                "description": "Block id (key into blocks{}) whose plain text carries this verse's placeholder."
+              },
+              "source_file": { "type": "string" },
+              "n_line": { "type": "integer", "minimum": 0 },
+              "n_stanza": { "type": "integer", "minimum": 0 },
+              "source_html": { "type": "string" },
+              "plain_text": { "type": "string" },
+              "sha1": { "type": "string" },
+              "fnrefs": {
+                "type": "array",
+                "items": { "type": "integer" }
+              }
+            },
+            "required": ["vid", "placeholder", "context", "parent_block", "plain_text", "sha1"],
+            "additionalProperties": false
+          }
+        },
+        "n_nodes": { "type": "integer", "minimum": 0 },
+        "n_block": { "type": "integer", "minimum": 0 },
+        "n_embedded": { "type": "integer", "minimum": 0 },
+        "by_context": {
+          "type": "object",
+          "properties": {
+            "body": { "type": "integer", "minimum": 0 },
+            "footnote": { "type": "integer", "minimum": 0 },
+            "frontback": { "type": "integer", "minimum": 0 }
+          },
+          "additionalProperties": false
+        },
+        "total_stanza": { "type": "integer", "minimum": 0 },
+        "total_line": { "type": "integer", "minimum": 0 }
+      },
+      "required": ["store"],
+      "additionalProperties": false
+    },
+    "source_inputs": {
+      "type": "array",
+      "description": "Every source file path this extractor actually read, in read order. For gutenberg_epub/plain_text this is always [source.path]; for custom (which may consume multiple files) this is the sole authoritative full-file-list generation_hashes.source_input_hash actually hashes.",
+      "items": { "type": "string" },
+      "minItems": 1
+    },
+    "generation_hashes": {
+      "type": "object",
+      "description": "Extraction-provenance stamps written by the two-phase cache_key.py write immediately after extraction completes -- particle_config_hash and derivation_bundle_hash are NEVER stamped here (they live in canon.json's own generation_hashes instead, stamped at the glossary-pass merge step).",
+      "properties": {
+        "source_extraction_hash": {
+          "type": "string",
+          "description": "sha1 of canonical JSON {format, adapter_config: <only the one sub-block matching the resolved format>} concatenated with the resolved extractor file's own raw bytes."
+        },
+        "source_input_hash": {
+          "type": "string",
+          "description": "sha1 of canonical JSON {source_path, source_bytes_sha1} derived from source_inputs[]."
+        }
+      },
+      "required": ["source_extraction_hash", "source_input_hash"],
+      "additionalProperties": false
+    }
+  },
+  "required": ["blocks", "spine", "segments", "footnotes", "frontback", "verse", "source_inputs", "generation_hashes"],
+  "additionalProperties": false
+}

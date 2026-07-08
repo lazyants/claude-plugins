@@ -2,6 +2,17 @@
 
 All notable changes to `lazyants/claude-plugins` are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is per-plugin, not repo-wide.
 
+## [literary-translator 1.0.0] — 2026-07-08
+
+Initial release. New plugin — high-fidelity literary book translation over a Gutenberg-style EPUB or plain-text source: a codex-translate → deterministic false-green gate → codex-review → Claude-fix loop run to convergence per segment, with a frozen name/realia canon, a configurable verse policy, and ledger-based resumability. Generalized from the in-house historiettes-t3 project.
+
+### Added
+- `plugins/literary-translator/skills/literary-translator/SKILL.md` — the engine-loop skill: codex-translate → false-green gate → codex-review → Claude-fix, frozen name/realia canon, configurable verse policy, ledger-based resumability, and `gutenberg_epub` / `plain_text` / `custom` source adapters.
+- `skills/literary-translator/assets/scripts/` — stdlib-first, self-anchored gate/validation scripts (canon validation, the `validate_draft.py` false-green gate, ledger update/merge, final audit, segment selection, and the `canon_adjudication_audit.py` human-adjudication gate); each emits exactly one JSON line to stdout with human detail to stderr, under a shared exit-code convention (0 clean / 1 gate-fail / 2 fatal).
+- `skills/literary-translator/assets/schemas/` + `references/` — JSON Schemas for every machine-checked artifact plus the reference docs (engine loop, canon/glossary, ledger/resumability, verse policy, source-format adapters, false-green gate).
+- `tests/` — pytest suite (`*.test.py`, `--import-mode=importlib`) over synthetic fixtures: 500+ tests across every script, schema-literal drift, and an end-to-end ledger acceptance run. Run with `cd plugins/literary-translator && python3 -m pytest`.
+- Honesty caveats carried from the source project: extraction is proven against Historiettes' 17th-century French specifically (every other language/source is an unverified starter preset gated by a mandatory smoke test), and one of the two source adapters plus the expert custom extractor remain experimental until pilot-proven end-to-end.
+
 ## [enduser-handbook 1.1.0] — 2026-06-21
 
 First additive publish-target adapter since 1.0.0, fulfilling the 1.0.0 promise of additional publish targets. No change to the existing authoring rules; the only base-skill edits are correctness fixes the new adapter exposed.

@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "canon-file.schema.json",
+  "title": "Canon File",
+  "description": "Validates the WHOLE canon.json file -- the frozen, hash-versioned, cross-segment name/realia glossary. entries{} holds resolved ACCEPTED canon-entry.schema.json-shaped records keyed by source_form; review_queue[] holds low-confidence/disputed candidates in the QUEUED shape from canon-batch.schema.json's discriminated union (disposition:\"review_queue\"); generation_hashes stamps the particle_config/derivation-bundle provenance canon.json was generated under, so select_segments.py's derivation-state gate can detect staleness. All three top-level keys are required unconditionally -- a merge that skipped either generation_hashes stamp, or that never initialized review_queue, must fail schema validation loudly rather than be discovered later mid-dispatch.",
+  "type": "object",
+  "properties": {
+    "entries": {
+      "type": "object",
+      "description": "Resolved, ACCEPTED canon entries keyed by source_form.",
+      "additionalProperties": { "$ref": "canon-entry.schema.json" }
+    },
+    "review_queue": {
+      "type": "array",
+      "description": "Low-confidence/disputed candidates, each in the QUEUED shape from canon-batch.schema.json's discriminated union -- not yet resolved into entries{}.",
+      "items": { "$ref": "canon-batch.schema.json#/items/oneOf/1" }
+    },
+    "generation_hashes": {
+      "type": "object",
+      "description": "Provenance stamps recorded at merge time by the glossary-pass merge step -- NEVER manifest.json. particle_config_hash and derivation_bundle_hash together let select_segments.py's derivation-state gate detect an edit to the particle config or to bootstrap_names.py/segpack.py since this canon.json was last (re)generated.",
+      "required": ["particle_config_hash", "derivation_bundle_hash"],
+      "properties": {
+        "particle_config_hash": { "type": "string" },
+        "derivation_bundle_hash": { "type": "string" }
+      }
+    }
+  },
+  "required": ["entries", "review_queue", "generation_hashes"]
+}
