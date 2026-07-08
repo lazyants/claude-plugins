@@ -87,10 +87,11 @@ trust the code, not the docstring or the plan's prior description of it),
 or decided how much of it generalizes cleanly to arbitrary language pairs /
 source formats versus how much is specific to Historiettes' own layout.
 
-A v1.1 assembly effort should start by reading `build_epub.py` directly at
-`/Users/moi/lazy-ants/development/historiettes-t3/build_epub.py` and
-verifying its real behavior firsthand — not by guessing at its shape from
-this reference or from the plan that preceded this plugin.
+A v1.1 assembly effort should start by reading `build_epub.py` directly —
+`historiettes-t3/build_epub.py` in the (non-shipped) in-house provenance
+project — and verifying its real behavior firsthand, if you have access to
+that project — not by guessing at its shape from this reference or from the
+plan that preceded this plugin.
 
 ## Also out of scope for v1
 
