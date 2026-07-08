@@ -125,10 +125,12 @@
         "translation",
         "literary",
         "book",
-        "translate",
         "codex",
         "gutenberg",
-        "epub"
+        "epub",
+        "canon",
+        "verse",
+        "ledger"
       ]
     }
   ]

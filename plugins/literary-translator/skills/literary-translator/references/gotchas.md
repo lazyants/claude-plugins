@@ -9,14 +9,17 @@ deliberate and the inconsistency is documented below.
 
 ## 1. Ground truth for anything "proven" is the real project, not this doc
 
-Read `/Users/moi/lazy-ants/development/historiettes-t3/` directly — `extract.py`,
-`bootstrap_names.py`, `segpack.py`, `validate_draft.py`, `draft_ready.py`,
-`final_audit.py`, `reference/historiettes-mass-translate-wf.reference.js` —
-for anything this plugin's docs call "source-proven." Do not infer real
-behavior from a paraphrase in this plugin's own reference files when the real
-file is one `Read` away. The real project ran at ~75-segment scale; that is
-the actual evidence base, and it is narrower than it sounds (one book, one
-language pair).
+`historiettes-t3` is this plugin's in-house, private provenance project —
+the battle-tested origin that `extract.py`, `bootstrap_names.py`,
+`segpack.py`, `validate_draft.py`, `draft_ready.py`, `final_audit.py`, and
+`reference/historiettes-mass-translate-wf.reference.js` were generalized
+from. It is not shipped with this plugin and isn't a path an installed user
+can open — this file's "source-proven" claims describe what that project
+demonstrated, not something you can go re-check firsthand. If you have
+access to the source project, the real file is one `Read` away and is
+better ground truth than a paraphrase in this plugin's own reference files.
+The real project ran at ~75-segment scale; that is the actual evidence
+base, and it is narrower than it sounds (one book, one language pair).
 
 ## 2. New hardening is not source-proven — pilot it
 

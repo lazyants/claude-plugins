@@ -165,8 +165,8 @@ hand-edited): every file in `assets/scripts/*.py` (except
 Touches only the exact shipped filenames — never clobbers a project-local
 override coexisting under a different filename (e.g. `fr.local.json`).
 
-Also copies (ONCE, each individually guarded on its own destination's
-absence — never re-copied, never regenerated): `PLAN.template.md` →
+Also copies from `assets/templates/` (ONCE, each individually guarded on its
+own destination's absence — never re-copied, never regenerated): `PLAN.template.md` →
 `${durable_root}/PLAN.md`, `style_bible.template.md` →
 `${durable_root}/style_bible.md`, `consistency_issues.template.md` →
 `${durable_root}/consistency_issues.md`, `extract.py.template` →
@@ -439,8 +439,9 @@ starts. Never the output of an automated script, never read back in or
 acted on programmatically.
 
 **W7 Final audit** — `scripts/final_audit.py`, generalized directly from the
-real, proven `historiettes-t3/final_audit.py` (5 checks over 75 converged
-segments, zero hard defects — read that file directly for ground truth).
+proven `final_audit.py` in the in-house historiettes-t3 provenance project
+(5 checks over 75 converged segments, zero hard defects; that project is the
+plugin's private origin, not shipped with it).
 Runs at W7 over every converged segment:
 
 - **Hard check 1 (`coverage_failures`):** re-invokes `validate_draft.py`

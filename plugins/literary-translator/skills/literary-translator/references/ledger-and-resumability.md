@@ -352,6 +352,17 @@ programmatically in tests (e.g. assert `cache_key.py --seg <id>`'s own
 printed JSON keys equal `ledger-record-base.schema.json`'s declared
 `cache_key` property set) rather than hand-typing the same list twice.
 
+**The six-category segment classifier is a second restatement pair.**
+`select_segments.py`'s full classification set — `reusable`, `stale`,
+`blocked_needs_regeneration`, `recoverable`, `not_started`,
+`human_escalation` — plus its `--only-segs`/`--allow-empty` CLI surface, is
+restated in full here (see the classification section below) and again in
+`SKILL.md`'s W5 section for the linear-workflow reader. Both restatements
+are intentional and stay — SKILL.md's inline copy serves the linear-workflow
+reader — but when changing the category names, their meaning, or the CLI
+flags, update both sites. `final_audit.py` also hardcodes this same category
+enum, so check it too when the set changes.
+
 ## The three separate bundle hashes — exact membership
 
 Do not conflate these. They gate different things and have different
