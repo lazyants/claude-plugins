@@ -162,6 +162,7 @@ CANON_ENTRY_FIELDS = (
     "source",
     "confidence",
     "note",
+    "category",
 )
 
 

@@ -24,7 +24,11 @@
             "type": "string",
             "enum": ["high", "medium", "low"]
           },
-          "note": { "type": "string" }
+          "note": { "type": "string" },
+          "category": {
+            "type": "string",
+            "description": "Optional, OPEN-vocabulary per-project entity category -- see canon-entry.schema.json's own 'category' field. Kept in sync here so an accepted batch item carrying it is not rejected at intake (this branch is additionalProperties:false)."
+          }
         },
         "required": ["source_form", "is_proper_name", "disposition", "canonical_target_form", "basis", "confidence"],
         "additionalProperties": false,

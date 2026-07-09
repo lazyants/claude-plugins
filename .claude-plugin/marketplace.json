@@ -115,8 +115,8 @@
     {
       "name": "literary-translator",
       "source": "./plugins/literary-translator",
-      "description": "High-fidelity literary book translation over a Gutenberg-style EPUB or plain-text source: a codex-translate -> deterministic false-green gate -> codex-review -> Claude-fix loop run to convergence, with a frozen name/realia canon, a configurable verse policy, and ledger-based resumability.",
-      "version": "1.0.0",
+      "description": "High-fidelity literary book translation over a Gutenberg-style EPUB or plain-text source: a codex-translate -> deterministic false-green gate -> codex-review -> Claude-fix loop run to convergence, with a frozen name/realia canon, a configurable verse policy, and ledger-based resumability. As of 1.1, optionally assembles the converged drafts into a rendered Obsidian glossary-wiki behind a deterministic render/diff acceptance gate.",
+      "version": "1.1.0",
       "author": {
         "name": "Lazy Ants"
       },

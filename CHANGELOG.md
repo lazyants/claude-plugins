@@ -2,6 +2,21 @@
 
 All notable changes to `lazyants/claude-plugins` are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is per-plugin, not repo-wide.
 
+## [literary-translator 1.1.0] — 2026-07-08
+
+Adds optional **book assembly + output rendering**, lifting the 1.0.0 non-goal "v1 delivers converged per-segment drafts, not an assembled book". Converged per-segment drafts can now be assembled and rendered into an output target — an Obsidian glossary-wiki keyed on the frozen canon — behind a deterministic render/diff acceptance gate. New; not yet pilot-proven at scale.
+
+### Added
+- `skills/literary-translator/assets/scripts/assemble.py` — fail-closed 3-source assembler joining `manifest.json` + per-segment `*.draft.json` + `segpack_*.json`, gated on the ledger (every in-scope segment `converged` + sha1-matched); emits a target-agnostic NodeStream + anchor map to `out/.assembled/`, then dispatches the resolved output adapter.
+- `skills/literary-translator/assets/scripts/render_obsidian.py` — the `obsidian` output adapter: chapter notes with folder-qualified `[[People/…|display]]` wikilinks, footnotes, verse blocks with literal glosses, and one entity note per `canon.json` entry (canon IS the entity registry). Fail-closed against symlink data-loss (ownership-marker gate + no-follow atomic writes; `out_dir`, its parent, the leaf, and the marker all guarded).
+- `skills/literary-translator/assets/scripts/output_resolve.py` — target-agnostic adapter + `out_dir` resolution from `profile.yml`'s `output.*`, shared by assemble and diff.
+- `skills/literary-translator/assets/scripts/diff_rendered_output.py` — deterministic render/diff acceptance gate: `--accept-baseline` freezes the render; a re-render must match line-for-line (exit 0). Same symlink-safe discipline for its `.baseline/` snapshot.
+- `skills/literary-translator/references/output-target-adapters/` + schema shapes — normative adapter docs (`assembly-and-output`, `obsidian`) and the NodeStream / adapter-result schema literals.
+- Suite grows to 676+ tests (from 500+), including adversarial symlink-safety regressions across all three new scripts.
+
+### Changed
+- `SKILL.md`, `assets/profile.example.yml`, `assets/schemas/profile.schema.json` — `output.v1_scope: assembled_book` wiring and the `output.*` config surface (adapter target, destination, wikilinks + category-folder options).
+
 ## [literary-translator 1.0.0] — 2026-07-08
 
 Initial release. New plugin — high-fidelity literary book translation over a Gutenberg-style EPUB or plain-text source: a codex-translate → deterministic false-green gate → codex-review → Claude-fix loop run to convergence per segment, with a frozen name/realia canon, a configurable verse policy, and ledger-based resumability. Generalized from the in-house historiettes-t3 project.

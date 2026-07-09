@@ -380,7 +380,9 @@ def warn_glossary_diff(converged):
         if len(forms) > 1:
             warns.append(
                 f"GLOSSARY-DIFF canon.json self-inconsistent: source_form "
-                f"{sf!r} -> {sorted(forms)}"
+                f"{sf!r} -> {sorted(forms)} -- may reflect an intentional "
+                f"split already accepted in canon_adjudications.json; "
+                f"reconcile there before treating this as a defect"
             )
 
     # source_form -> {target_form -> [segs]}

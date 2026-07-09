@@ -17,7 +17,11 @@
       "type": "string",
       "enum": ["high", "medium", "low"]
     },
-    "note": { "type": "string" }
+    "note": { "type": "string" },
+    "category": {
+      "type": "string",
+      "description": "Optional, OPEN-vocabulary per-project entity category (e.g. 'person', 'place', 'work', 'group', 'divine-name') -- declared and catalogued per-project in output.adapter_config.obsidian.folders, NOT a hardcoded schema enum (the catalog differs per work). Orthogonal to 'basis' (HOW the rendering was decided) and 'is_proper_name' (whether this is a name at all) -- 'category' is WHAT KIND of entity this is. Absent or blank is a valid value: consumers (e.g. the obsidian adapter) treat it as 'other'."
+    }
   },
   "required": [
     "source_form",

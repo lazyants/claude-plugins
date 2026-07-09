@@ -516,13 +516,98 @@
       "properties": {
         "v1_scope": {
           "type": "string",
-          "enum": ["segment_drafts_and_audit"]
+          "enum": ["segment_drafts_and_audit", "assembled_book"]
         },
         "destination": {
           "type": "string",
           "minLength": 1
+        },
+        "target": {
+          "type": "string",
+          "enum": ["obsidian", "epub", "custom"]
+        },
+        "name_display": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "parenthetical_originals": {
+              "type": "string",
+              "enum": ["never", "first_occurrence"]
+            }
+          }
+        },
+        "index": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": false
+            },
+            "person_grouping": {
+              "type": "boolean",
+              "default": false
+            }
+          }
+        },
+        "adapter_config": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "obsidian": {
+              "type": ["object", "null"],
+              "additionalProperties": false,
+              "properties": {
+                "folders": {
+                  "type": "object",
+                  "additionalProperties": { "type": "string" },
+                  "description": "Optional category -> folder catalog (e.g. {\"person\": \"people\", \"place\": \"places\"}) for the obsidian adapter's vault/<folder>/ note placement -- OPEN, per-project vocabulary (no enum): a category absent from this map routes to an 'other' folder, never a hard failure. See references/output-target-adapters/obsidian.md for documented preset examples."
+                }
+              }
+            },
+            "epub": {
+              "type": ["object", "null"]
+            },
+            "custom": {
+              "type": ["object", "null"],
+              "additionalProperties": false,
+              "properties": {
+                "renderer_path": {
+                  "type": ["string", "null"],
+                  "pattern": "^[A-Za-z0-9._/-]+$",
+                  "description": "Bare relative path (no '..' segments, no leading '/') to the co-designed custom output renderer, resolved as {durable_root}/scripts/custom_renderers/<value> by output_resolve.py. null means co-design hasn't happened yet -- output_resolve.py halts for co-design rather than silently swallowing the gap."
+                }
+              }
+            }
+          }
         }
-      }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "index": {
+                "properties": {
+                  "person_grouping": { "const": true }
+                },
+                "required": ["person_grouping"]
+              }
+            },
+            "required": ["index"]
+          },
+          "then": {
+            "properties": {
+              "index": {
+                "properties": {
+                  "enabled": { "const": true }
+                },
+                "required": ["enabled"]
+              }
+            },
+            "required": ["index"]
+          }
+        }
+      ]
     }
   },
   "patternProperties": {
