@@ -89,12 +89,16 @@ TERMINATORS = frozenset(".!?:;»\"”…—―")
 # what keeps is_upper_initial() (and this whole script) fully generic.
 _ASCII_UPPER = frozenset(chr(c) for c in range(ord("A"), ord("Z") + 1))
 
-# A token = one Unicode letter, then zero or more further letters or an
-# internal apostrophe/hyphen (covers "d'Artagnan", "Saint-Simon", accented
-# names in any script). `[^\W\d_]` is the standard "any Unicode letter"
-# idiom: Python's `\w` is Unicode-aware by default for `str` patterns, and
-# subtracting `\d` and `_` from it leaves exactly the letter categories.
-TOKEN_RE = re.compile(r"[^\W\d_](?:[^\W\d_]|['’‑-])*")
+# A token = one Unicode letter, then zero or more (optional internal
+# apostrophe/hyphen connector + another letter) units -- so every token both
+# STARTS and ENDS in a letter and a connector is only ever matched BETWEEN two
+# letters (covers "d'Artagnan", "Saint-Simon", accented names in any script).
+# A trailing connector is deliberately left UNCONSUMED: a stray apostrophe
+# after a name (e.g. "Fiona’ George") is no longer fused into the token -- see
+# plugin issue #82. `[^\W\d_]` is the standard "any Unicode letter" idiom:
+# Python's `\w` is Unicode-aware by default for `str` patterns, and subtracting
+# `\d` and `_` from it leaves exactly the letter categories.
+TOKEN_RE = re.compile(r"[^\W\d_](?:['’‑-]?[^\W\d_])*")
 
 APOSTROPHES = "'’"  # ' and the Unicode right single quote
 

@@ -101,7 +101,7 @@ except ImportError:
 
 try:
     from bs4 import BeautifulSoup, FeatureNotFound, XMLParsedAsHTMLWarning
-    from bs4.element import NavigableString, Tag
+    from bs4.element import Comment, NavigableString, Tag
 except ImportError:
     _missing_dep("beautifulsoup4")
 
@@ -379,7 +379,23 @@ def verse_plain(container: Tag) -> str:
     if stanzas:
         parts = []
         for st in stanzas:
-            parts.extend(normalize_text(ln.get_text()) for ln in st.select(".line"))
+            # #84: a stanza whose lines are bare <p>s (no `.line` class) has no
+            # `.line` children -- fall back to the stanza's own get_text (the
+            # same fallback the no-stanza branch below uses) so its text (and
+            # any FNREF sentinel `_prep_clone` baked into it) is not silently
+            # dropped. When the stanza DOES have `.line` children this branch is
+            # byte-identical to the pre-#84 `parts.extend(...)`: the lines are
+            # joined by "\n" with NO intermediate `.strip()`, so an empty
+            # boundary `.line` keeps its blank position (a bare `.strip()` here
+            # would collapse `A\n\n\nB` to `A\n\nB`). The `if st_lines` guard --
+            # not `... or ...` -- means the fallback fires ONLY when there are
+            # genuinely zero `.line` elements, never for an all-empty stanza.
+            st_lines = [normalize_text(ln.get_text()) for ln in st.select(".line")]
+            if st_lines:
+                st_text = "\n".join(st_lines)
+            else:
+                st_text = normalize_text(st.get_text("\n"))
+            parts.append(st_text)
             parts.append("")  # blank line between stanzas
         return "\n".join(parts).strip()
     lines = [normalize_text(ln.get_text()) for ln in container.select(".line")]
@@ -593,8 +609,8 @@ def build(profile: dict):
     para_ord = [0]
     cur_seg = [None]
     seen_first_h2 = [False]
-    body_toplevel_total = 0
-    body_toplevel_classified = 0
+    body_toplevel_total = [0]
+    body_toplevel_classified = [0]
     unclassified = []
 
     def start_segment(h2tag, file_label):
@@ -655,46 +671,102 @@ def build(profile: dict):
         record_anchors(fnrefs, bid, seg["seg"], file_label)
         link_embedded(bid, plain)
 
+    def _record_stray_text(sub, file_label):
+        # #83 fail-closed: a bare NavigableString sibling of a body element --
+        # whether a DIRECT child of <body> (top-level loop) or bare text inside
+        # a heading-bearing wrapper (flatten branch) -- is real body content
+        # that classification would otherwise silently drop. Significant text is
+        # routed to `unclassified` (NEVER counted classified) so
+        # `body_coverage_no_holes` fails on it; whitespace-only strings and HTML
+        # comments are structural noise, ignored (no false-fail). Shared by both
+        # call sites so the two cannot diverge.
+        if isinstance(sub, NavigableString) and not isinstance(sub, Comment):
+            stray = normalize_text(str(sub))
+            if stray:
+                unclassified.append((file_label, stray[:40]))
+
+    def process_body_node(node, file_label):
+        # #83: a wrapper element that is NOT itself the heading but CONTAINS one
+        # (e.g. `<div class="header"><h2>...</h2></div>`, or a whole-chapter
+        # `<div>` wrapping the `<h2>` together with its body `<p>`s) is
+        # FLATTENED, UNCONDITIONALLY -- recurse into its element children so the
+        # heading AND its sibling body content are each classified in document
+        # order. Without this, such a wrapper collapses into ONE front-matter
+        # block, dropping every paragraph inside it (do NOT skip past the
+        # wrapper's other children -- that is the silent-drop this guards
+        # against). Recursion (rather than a single flatten level) also handles a
+        # heading nested more than one wrapper deep. For a direct-child `<h2>`
+        # (no wrapper) the flatten never fires, so output and counts are
+        # byte-identical to pre-#83.
+        #
+        # ACCEPTED, USER-RATIFIED LIMITATION (see follow-up issue): the flatten
+        # is UNCONDITIONAL -- it is NOT gated on the front/back classifier. A
+        # TOC/notes block that (rarely) lives in a BODY spine file and carries an
+        # `<h2>` before the first real chapter is therefore promoted to a
+        # spurious chapter. That is the deliberately-SAFE direction: its content
+        # is PRESERVED and VISIBLE (translated as a chapter), merely
+        # mis-labelled. The rejected alternative -- gating the flatten on a
+        # `translate` classification -- risked the OPPOSITE, unsafe failure: a
+        # genuine illustrated chapter (`<div class="chapter"><h2>..</h2>
+        # <p><img></p>..</div>`) classifies as `regenerate` (its first child is
+        # an image), so the gate would have emitted it as a `regenerate`
+        # FRONTBACK and assemble.py would replace it with a placeholder --
+        # SILENT DATA LOSS of a real chapter. Over-flattening (visible,
+        # preserved) beats under-flattening (silent loss); the unconditional
+        # flatten is kept.
+        if node.name != "h2" and node.find("h2") is not None:
+            for sub in node.children:
+                if isinstance(sub, Tag):
+                    process_body_node(sub, file_label)
+                else:
+                    _record_stray_text(sub, file_label)
+            return
+        body_toplevel_total[0] += 1
+        if node.name == "h2":
+            seen_first_h2[0] = True
+            start_segment(node, file_label)
+            body_toplevel_classified[0] += 1
+            return
+        if not seen_first_h2[0]:
+            decision, reason = classify_frontback_block(node)
+            fb_id = f"FRONTBACK:fm{len(frontback) + 1:02d}"
+            decision, reason = _apply_frontback_override(fb_id, decision, reason, frontback_overrides)
+            html, plain, fnrefs = serialize_prose(node, apparatus_policy)
+            add_block(fb_id, {
+                "id": fb_id, "type": "FRONTBACK", "seg": fb_id if decision == "translate" else None,
+                "order_index": next_order(), "source_file": file_label, "source_html": html,
+                "plain_text": plain, "sha1": sha1(plain), "fnrefs": fnrefs, "decision": decision,
+                "reason": reason, "origin": "front-matter",
+            })
+            frontback.append({
+                "id": fb_id, "decision": decision, "reason": reason,
+                "file": file_label, "text_head": plain[:80],
+            })
+            body_toplevel_classified[0] += 1
+            return
+        if node.name == "p" and not normalize_text(node.get_text(" ")):
+            body_toplevel_classified[0] += 1  # empty spacer paragraph, structural skip
+            return
+        seg = cur_seg[0]
+        if seg is None:
+            unclassified.append((file_label, normalize_text(node.get_text(" "))[:40]))
+            body_toplevel_classified[0] += 1
+            return
+        if file_label not in seg["source_files"]:
+            seg["source_files"].append(file_label)
+        add_content_block(node, file_label)
+        body_toplevel_classified[0] += 1
+
     for soup, file_label in body_soups:
         body_el = soup.body or soup
         for child in body_el.children:
-            if not isinstance(child, Tag):
-                continue
-            body_toplevel_total += 1
-            if child.name == "h2":
-                seen_first_h2[0] = True
-                start_segment(child, file_label)
-                body_toplevel_classified += 1
-                continue
-            if not seen_first_h2[0]:
-                decision, reason = classify_frontback_block(child)
-                fb_id = f"FRONTBACK:fm{len(frontback) + 1:02d}"
-                decision, reason = _apply_frontback_override(fb_id, decision, reason, frontback_overrides)
-                html, plain, fnrefs = serialize_prose(child, apparatus_policy)
-                add_block(fb_id, {
-                    "id": fb_id, "type": "FRONTBACK", "seg": fb_id if decision == "translate" else None,
-                    "order_index": next_order(), "source_file": file_label, "source_html": html,
-                    "plain_text": plain, "sha1": sha1(plain), "fnrefs": fnrefs, "decision": decision,
-                    "reason": reason, "origin": "front-matter",
-                })
-                frontback.append({
-                    "id": fb_id, "decision": decision, "reason": reason,
-                    "file": file_label, "text_head": plain[:80],
-                })
-                body_toplevel_classified += 1
-                continue
-            if child.name == "p" and not normalize_text(child.get_text(" ")):
-                body_toplevel_classified += 1  # empty spacer paragraph, structural skip
-                continue
-            seg = cur_seg[0]
-            if seg is None:
-                unclassified.append((file_label, normalize_text(child.get_text(" "))[:40]))
-                body_toplevel_classified += 1
-                continue
-            if file_label not in seg["source_files"]:
-                seg["source_files"].append(file_label)
-            add_content_block(child, file_label)
-            body_toplevel_classified += 1
+            if isinstance(child, Tag):
+                process_body_node(child, file_label)
+            else:
+                # #83: a bare text sibling of a top-level <h2>/<p> (e.g.
+                # `<body><h2>Ch</h2>Loose text<p>ok</p></body>`) must fail
+                # closed, not vanish -- same handling as inside a wrapper.
+                _record_stray_text(child, file_label)
 
     # ---- footnote definitions ----
     fn_groups, orphan_fn = build_footnote_table(notes_soups, apparatus_policy)
@@ -823,8 +895,8 @@ def build(profile: dict):
         "n_fn": sum(1 for b in blocks.values() if b["type"] == "FN"),
         "n_frontback": len(frontback),
         "total_words_body": sum(s["word_count"] for s in segments if s["kind"] == "body"),
-        "body_toplevel_total": body_toplevel_total,
-        "body_toplevel_classified": body_toplevel_classified,
+        "body_toplevel_total": body_toplevel_total[0],
+        "body_toplevel_classified": body_toplevel_classified[0],
         "unclassified": unclassified,
         "orphan_fn": orphan_fn,
         "uncovered_verse_lines": uncovered,
@@ -900,6 +972,7 @@ def build_footnote_table(notes_soups, apparatus_policy):
 # NEVER persisted into manifest.json -- manifest.schema.json's
 # additionalProperties:false forbids any field beyond its declared shape).
 # ---------------------------------------------------------------------------
+# BEGIN SELF-CHECK REGION -- DO NOT EDIT (editing a check to reach green is a false-green anti-pattern; take genuine gaps to a plugin issue)
 def run_self_checks(manifest, report, max_segment_words):
     results = []
 
@@ -936,6 +1009,19 @@ def run_self_checks(manifest, report, max_segment_words):
     body_segments = [s for s in segments if s["kind"] == "body"]
     empty = [s["seg"] for s in body_segments if not (s["n_para"] + s["n_verse"] + s["n_quote"])]
     chk("segmentation_nonempty", not empty, f"n_body_segments={len(body_segments)} empty={empty}")
+
+    # #83: a body-classified source file that yields ZERO body segments means
+    # the body walk collapsed the whole file -- historically a wrapper-`<div>`
+    # around the `<h2>` missed by the old direct-child match, misclassifying
+    # every chapter as front-matter. BLOCKING: a source that HAS body files
+    # must produce at least one body segment. (Gated on n_body_files > 0 so a
+    # legitimately body-file-free source -- notes-only or all front/back --
+    # does not false-fail.)
+    chk(
+        "body_files_yield_segments",
+        not (report["n_body_files"] > 0 and len(body_segments) == 0),
+        f"n_body_files={report['n_body_files']} n_body_segments={len(body_segments)}",
+    )
 
     # no body segment built entirely from notes-classified files (a
     # mis-classified spine item leaking footnote-definition text into the
@@ -1002,6 +1088,13 @@ def run_self_checks(manifest, report, max_segment_words):
         f"n={len(placeholders)} unique={len(set(placeholders))} unmounted={unmounted[:5]}",
     )
 
+    # #84: every verse.store entry must carry non-empty plain_text -- a stanza
+    # whose lines were bare `<p>`s (no `.line` class) previously produced an
+    # empty plain_text, silently dropping the poem's words and any FNREF
+    # sentinel carried in them. BLOCKING.
+    empty_verse = [e["vid"] for e in verse_store if not (e.get("plain_text") or "").strip()]
+    chk("verse_plain_text_nonempty", not empty_verse, f"empty_plain_text={empty_verse[:5]}")
+
     # verse structure: no uncovered lines (the fallback pass in build() should
     # have grouped every bare .stanza/.line into its own verse entry already --
     # anything left here means the fallback's own grouping heuristic missed it)
@@ -1023,6 +1116,7 @@ def run_self_checks(manifest, report, max_segment_words):
     )
 
     return {"all_pass": all(r["ok"] for r in results), "results": results}
+# END SELF-CHECK REGION
 
 
 # ---------------------------------------------------------------------------

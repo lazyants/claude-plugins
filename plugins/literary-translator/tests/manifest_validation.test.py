@@ -180,6 +180,10 @@ def _baseline_report() -> dict:
         "orphan_fn": [],
         "uncovered_verse_lines": [],
         "n_verse_blocks": 0,
+        # #83: the body_files_yield_segments self-check reads this. The baseline
+        # has exactly one body file (spine's body.xhtml) yielding one body
+        # segment (seg01), so the check passes cleanly here.
+        "n_body_files": 1,
     }
 
 
@@ -380,3 +384,103 @@ def test_correct_frontback_disposition_does_not_trip_either_direction(extract_mo
     assert frontback_check["ok"] is True, frontback_check["detail"]
     assert "missing_from_segments=[]" in frontback_check["detail"], frontback_check["detail"]
     assert "leaked_into_segments=[]" in frontback_check["detail"], frontback_check["detail"]
+
+
+# ---------------------------------------------------------------------------
+# #83: body_files_yield_segments -- a body-classified source that produces ZERO
+# body segments (the div-wrapped-<h2> collapse) is a FATAL, named failure. Both
+# directions locked, isolated from every other check via the clean baseline.
+# ---------------------------------------------------------------------------
+
+def test_body_files_yield_segments_fatal_when_body_file_yields_no_segment(extract_mod):
+    """n_body_files > 0 but no kind=='body' segment survived -- the whole body
+    file collapsed. Must be a FATAL, body_files_yield_segments-named failure,
+    with every other check still passing."""
+    manifest = _baseline_manifest()
+    # drop the sole body segment; the body file (spine body.xhtml, n_body_files=1)
+    # now yields nothing.
+    manifest["segments"] = [s for s in manifest["segments"] if s["kind"] != "body"]
+
+    checks = extract_mod.run_self_checks(manifest, _baseline_report(), max_segment_words=100)
+
+    assert checks["all_pass"] is False, checks["results"]
+    check = _find_check(checks["results"], "body_files_yield_segments")
+    assert check["ok"] is False, check["detail"]
+    assert "n_body_files=1" in check["detail"], check["detail"]
+    assert "n_body_segments=0" in check["detail"], check["detail"]
+
+    for result in checks["results"]:
+        if result["name"] != "body_files_yield_segments":
+            assert result["ok"] is True, result
+
+
+def test_body_files_yield_segments_passes_when_source_has_no_body_files(extract_mod):
+    """Companion regression-lock: a source with NO body files (n_body_files==0)
+    legitimately has no body segment -- the check is gated on n_body_files>0 and
+    must NOT false-fail here (guards against an over-eager fix that fires on any
+    empty body-segment list)."""
+    manifest = _baseline_manifest()
+    manifest["segments"] = [s for s in manifest["segments"] if s["kind"] != "body"]
+    report = _baseline_report()
+    report["n_body_files"] = 0
+
+    checks = extract_mod.run_self_checks(manifest, report, max_segment_words=100)
+
+    check = _find_check(checks["results"], "body_files_yield_segments")
+    assert check["ok"] is True, check["detail"]
+
+
+# ---------------------------------------------------------------------------
+# #84: verse_plain_text_nonempty -- a verse.store entry with empty/whitespace
+# plain_text (the bare-<p>-stanza drop) is a FATAL, named failure.
+# ---------------------------------------------------------------------------
+
+def _manifest_with_one_verse(plain_text: str) -> dict:
+    """Baseline + a single embedded verse.store entry. Every OTHER verse check
+    (placeholders unique + mounted, counts reconcile, no uncovered) is
+    satisfied so only verse_plain_text_nonempty can attribute a failure."""
+    manifest = _baseline_manifest()
+    manifest["verse"] = {
+        "store": [
+            {
+                "vid": "V001",
+                "placeholder": "⟦VERSE_V001_deadbeef⟧",
+                "parent_block": "PARA:seg01:0001",
+                "mount": "embedded",
+                "plain_text": plain_text,
+            }
+        ],
+        "n_nodes": 1,
+        "n_block": 0,
+        "n_embedded": 1,
+        "by_context": {"body": 1, "footnote": 0, "frontback": 0},
+        "total_stanza": 0,
+        "total_line": 0,
+    }
+    return manifest
+
+
+def test_verse_plain_text_nonempty_fatal_on_whitespace_plain_text(extract_mod):
+    manifest = _manifest_with_one_verse("   ")  # whitespace-only -> must FATAL
+
+    checks = extract_mod.run_self_checks(manifest, _baseline_report(), max_segment_words=100)
+
+    assert checks["all_pass"] is False, checks["results"]
+    check = _find_check(checks["results"], "verse_plain_text_nonempty")
+    assert check["ok"] is False, check["detail"]
+    assert "V001" in check["detail"], check["detail"]
+
+    for result in checks["results"]:
+        if result["name"] != "verse_plain_text_nonempty":
+            assert result["ok"] is True, result
+
+
+def test_verse_plain_text_nonempty_passes_on_populated_plain_text(extract_mod):
+    """Companion regression-lock: a verse entry with real plain_text must pass
+    -- isolates whitespace-emptiness as the sole cause of the failure above."""
+    manifest = _manifest_with_one_verse("Some real verse text")
+
+    checks = extract_mod.run_self_checks(manifest, _baseline_report(), max_segment_words=100)
+
+    check = _find_check(checks["results"], "verse_plain_text_nonempty")
+    assert check["ok"] is True, check["detail"]

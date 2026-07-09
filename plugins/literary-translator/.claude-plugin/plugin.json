@@ -1,7 +1,7 @@
 {
   "name": "literary-translator",
   "description": "High-fidelity literary book translation from a Gutenberg EPUB or plain-text source, run to convergence through a codex-translate -> false-green gate -> codex-review -> Claude-fix loop over a frozen name/realia canon, with configurable verse policy, ledger resumability, and optional assembly into a rendered Obsidian glossary-wiki.",
-  "version": "1.1.2",
+  "version": "1.2.0",
   "author": { "name": "Lazy Ants" },
   "skills": "./skills/"
 }

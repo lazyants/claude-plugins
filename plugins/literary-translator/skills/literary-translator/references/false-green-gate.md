@@ -13,6 +13,17 @@ draft must clear *before* it is ever handed to the codex reviewer — the
 reviewer's job is literary/accuracy judgment; this script's job is "did
 anything mechanically get corrupted."
 
+There is a second false-green move this discipline names explicitly:
+**editing a self-check to make it pass.** A deterministic check protects you
+only while it stays honest — silencing, weakening, or faking one to reach
+green manufactures exactly the false-green it existed to prevent, and is never
+acceptable. A check that fires wrongly on a legitimately-different input is a
+plugin issue to file; a genuine coverage gap is a new check to add and
+regression-lock — never a line to quietly delete. The post-extraction gate
+below (`validate_extraction.py`) enforces this structurally, pinning the
+extractor's own self-check region by hash so a locally-weakened check is
+caught rather than trusted.
+
 Reads `segpack_{seg}.json` (the source) and `draft_path(seg) =
 segments/{seg}.draft.json` (no target-language suffix — see
 [`ledger-and-resumability.md`](./ledger-and-resumability.md) for why the
@@ -167,6 +178,69 @@ gate. The split is what prevents a Claude fix-agent from ever ending up
 authoring a missing translation from scratch: a fix agent only ever edits
 an existing draft that has already passed `draft_ready.py`, never
 originates new translated content.
+
+## The post-extraction gate (`validate_extraction.py`)
+
+`validate_extraction.py` is the false-green gate for the *extraction* stage —
+the earlier sibling of `validate_draft.py`, run once at W2 the moment
+`extract.py` produces `manifest.json`, before any draft exists. The pipeline
+advances only on its exit 0.
+
+It exists to make the "editing a self-check to make it pass" anti-pattern
+above structurally harmless. `extract.py` runs its own in-file self-check
+suite (the sentinel-delimited `# BEGIN SELF-CHECK REGION` …
+`# END SELF-CHECK REGION` block — see
+[`source-format-adapters/gutenberg-epub.md`](./source-format-adapters/gutenberg-epub.md)),
+but that suite lives in a file each project is expected to hand-adapt. A
+hand-edited `extract.py` that skips, weakens, or fakes its own enforcement
+could otherwise manufacture a green `manifest.json`. `validate_extraction.py`
+closes that hole two ways:
+
+1. **Independent re-derivation of the manifest-derivable invariants.** It
+   self-anchors to the plugin's own install path (like `profile_validate.py`),
+   is **never copied to the durable root**, and is **not** a bundle member —
+   so it cannot itself be hand-edited as part of a project's `extract.py`
+   adaptation. It loads the produced `manifest.json` plus the profile and
+   **re-derives every manifest-derivable invariant from scratch**, ignoring
+   whatever result `extract.py`'s own checks claimed: block-id uniqueness,
+   spine order, segmentation-nonempty, body-files-yield-segments,
+   no-pseudo-segments-from-notes, the footnote bijection + sentinel-uniqueness
+   (or, under `body_refs_only`, body-ref-marker well-formedness/uniqueness —
+   branching on `footnotes.apparatus_policy` exactly as the extractor does),
+   frontback inventory, verse-placeholder uniqueness/mounting, verse
+   plain-text non-emptiness, the per-segment word cap, and the full
+   verse-count reconciliation. Any failure is FATAL. A green manifest a
+   tampered extractor produced still fails here, because this gate never trusts
+   the extractor's self-report — it recomputes each invariant from the
+   manifest itself.
+2. **Self-check region hash pin.** It computes a normalized hash of
+   `extract.py`'s self-check region (the text strictly between the two
+   sentinel lines) and compares it against the shipped
+   `CURRENT_EXTRACTOR_SELFCHECK_HASH`. A missing/malformed region, or a hash
+   mismatch, is FATAL — naming the "editing a self-check to reach green"
+   anti-pattern and pointing genuine gaps at a plugin issue.
+
+**The honest residual.** Three of the extractor's self-checks —
+`body_coverage_no_holes`, `no_orphan_footnote_continuation`, and
+`verse_no_uncovered` — depend on intermediate parse state that is **not**
+recorded in `manifest.json`, so `validate_extraction.py` cannot independently
+re-derive them. They are covered by the **region hash pin only**: if the
+self-check region is byte-for-byte the shipped implementation (hash matches),
+these three are trusted to have run as shipped; the gate does not re-prove
+them from the manifest. This is a deliberate, documented limit — stated
+plainly so nobody mistakes the hash pin for a full independent re-derivation
+of these three.
+
+Invocation mirrors `profile_validate.py`'s exit-code discipline (exit `0` =
+every check passed, `1` = any check or the hash pin failed, `2` = usage/env
+error such as bad args or an unreadable file):
+
+```
+python3 {{PLUGIN_ROOT}}/assets/scripts/validate_extraction.py \
+  --manifest <durable manifest.json path> \
+  --extract  <durable extract.py path> \
+  --profile  <profile.yml path>
+```
 
 ## See also
 

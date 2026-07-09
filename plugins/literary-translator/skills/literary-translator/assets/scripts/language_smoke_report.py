@@ -108,12 +108,16 @@ SAMPLE_WORD_CAP = 750
 LOW_NAME_DENSITY_FLOOR = 10
 
 # Generalized tokenizer: first char = any Unicode letter (not digit/underscore),
-# followed by letters, apostrophe/right-single-quote, or a hyphen -- makes no
-# assumption about which alphabet the source language uses (Latin-accented,
-# Cyrillic, Greek, ...). Whether a given alphabet actually WORKS is exactly
-# what this smoke test exists to establish -- this regex only makes it
+# then zero or more (optional internal apostrophe/right-single-quote/hyphen
+# connector + another letter) units -- so every token both STARTS and ENDS in a
+# letter and a connector is only matched BETWEEN two letters. A trailing
+# connector is deliberately left UNCONSUMED (a stray apostrophe after a name,
+# e.g. "Fiona’ George", is not fused into the token -- see plugin issue #82).
+# Makes no assumption about which alphabet the source language uses (Latin-
+# accented, Cyrillic, Greek, ...). Whether a given alphabet actually WORKS is
+# exactly what this smoke test exists to establish -- this regex only makes it
 # plausible (see references/language-pair-parameterization.md).
-TOKEN_RE = re.compile(r"[^\W\d_](?:[^\W\d_]|['’‑-])*")
+TOKEN_RE = re.compile(r"[^\W\d_](?:['’‑-]?[^\W\d_])*")
 # — (U+2014 em-dash) and ― (U+2015 horizontal bar) are included because they
 # are the dominant dialogue-line delimiter in French/Russian/Spanish literary
 # prose -- this plugin's core domain -- not just a stylistic aside.

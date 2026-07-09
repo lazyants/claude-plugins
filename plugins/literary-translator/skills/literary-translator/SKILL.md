@@ -105,10 +105,13 @@ Implemented by `scripts/profile_validate.py`, invoked as:
 python3 {{PLUGIN_ROOT}}/assets/scripts/profile_validate.py --profile .claude/literary-translator/profile.yml
 ```
 
-Run by the **orchestrating session directly**. This is the ONE script always
-invoked from the plugin's own install path, never a durable-root copy — it
-runs before Step 0a exists to create one (same exception as Step 0c reading
-`references/source-format-adapters/*.md` directly from the plugin).
+Run by the **orchestrating session directly**, always from the plugin's own
+install path, never a durable-root copy — it runs before Step 0a exists to
+create one (same exception as Step 0c reading
+`references/source-format-adapters/*.md` directly from the plugin). It is one
+of two scripts never copied to `durable_root`; the other,
+`validate_extraction.py` (the W2 post-extraction gate), is kept plugin-only
+for tamper-proofing rather than because it predates the durable root.
 
 Order of operations:
 
@@ -219,7 +222,8 @@ same for `smoke_test.report_path` (skipped when null).
 
 Copies (unconditional overwrite, safe since these files are never
 hand-edited): every file in `assets/scripts/*.py` (except
-`profile_validate.py`, never copied), every shipped file in `assets/languages/`
+`profile_validate.py` and `validate_extraction.py`, both run only from the
+plugin path and are never copied), every shipped file in `assets/languages/`
 (`fr.json`, `de.json`, `es.json`, `it.json`, `README.md`), every file in
 `assets/schemas/*.json` → `${durable_root}/scripts/`,
 `${durable_root}/languages/`, `${durable_root}/schemas/` respectively.
@@ -408,6 +412,23 @@ segmentation-nonempty, sentinel-uniqueness, front-back inventory,
 verse-structure, `no_segment_exceeds_max_words`) must be green before
 anything downstream runs. Plus a `manifest.schema.json` validation pass
 immediately after extraction using the real `jsonschema.Draft202012Validator`.
+
+Then a MANDATORY managed post-extraction gate: `extract.py`'s in-file
+self-checks live in a hand-adapted file and could be silenced to fake green,
+so they are never the last word. After extraction produces `manifest.json`,
+run:
+
+```
+python3 {{PLUGIN_ROOT}}/assets/scripts/validate_extraction.py --manifest ${durable_root}/manifest.json --extract ${durable_root}/extract.py --profile .claude/literary-translator/profile.yml
+```
+
+from the plugin's own install path — never a durable-root copy (same
+exception class as `profile_validate.py`; it is deliberately not a bundle
+member and never adapted per-project). It independently RE-DERIVES the
+manifest-derivable invariants directly from `manifest.json` (so a hand-edited
+extractor that skips or fakes its own enforcement cannot manufacture a green
+manifest) and pins `extract.py`'s self-check region by hash. The pipeline
+advances to W3 ONLY on its exit `0` (see R2 / `references/false-green-gate.md`).
 
 **W3 Bootstrap style bible + language smoke test.** After W2 produces
 `manifest.json`, W3's own procedural code (never `profile.schema.json`)

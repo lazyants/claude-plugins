@@ -47,6 +47,14 @@ def test_terminators_identical_across_both_extractors():
     assert bn.TERMINATORS == lsr.TERMINATORS
 
 
+def test_token_re_identical_across_both_extractors():
+    # The tokenizer pattern must be byte-identical in both copies, or one
+    # extractor would carve tokens differently from the other (e.g. absorb a
+    # trailing apostrophe the other strips -- issue #82). Pinning the compiled
+    # pattern makes the next edit to one tokenizer touch the other.
+    assert bn.TOKEN_RE.pattern == lsr.TOKEN_RE.pattern
+
+
 def test_wrapper_set_identical_across_both_extractors():
     # The set of transparent bracket/quote wrappers the back-scan skips must be
     # the same in both copies (bootstrap names it WRAPPERS; the smoke report

@@ -307,6 +307,50 @@ def test_tokenize_no_terminator_behind_wrapper_stays_non_initial():
     assert george[1] not in bn.TERMINATORS
 
 
+def test_token_re_leaves_trailing_apostrophe_unconsumed():
+    # Issue #82: the tokenizer used to ABSORB a trailing apostrophe into the
+    # token (e.g. "Fiona’" as one token), so a stray apostrophe after a name
+    # fused into the candidate. Every token must now both START and END in a
+    # letter -- a connector is matched only BETWEEN two letters -- so a trailing
+    # "'"/"’" is left unconsumed. Cover both the straight and curly variants.
+    for text in ("Fiona’ George nodded.", "Fiona' George nodded."):
+        tokens = bn.TOKEN_RE.findall(text)
+        assert tokens == ["Fiona", "George", "nodded"], text
+        assert not any("’" in t or "'" in t for t in tokens), text
+
+
+def test_extract_candidates_strips_trailing_apostrophe_not_split():
+    # STRIP-ONLY resolution of #82: the trailing apostrophe is dropped from the
+    # token stream (not turned into its own token or a split point). "'"/"’" is
+    # a WRAPPER, not a TERMINATOR, so with no real sentence boundary present the
+    # run still fuses exactly as before -- but the candidate no longer carries
+    # the apostrophe. Pin the EXACT result to lock strip-not-split.
+    lang = make_lang(particles=["de", "du", "von"], elision_pattern=FR_ELISION_PATTERN)
+    for text in ("Fiona’ George nodded.", "Fiona' George nodded."):
+        out = bn.extract_candidates(text, lang)
+        assert out == [("Fiona George", False)], text
+        assert all("’" not in n and "'" not in n for n, _ in out), text
+
+
+def test_over_correction_guard_internal_connectors_and_elision_intact():
+    # The #82 fix must NOT over-correct: an internal connector between two
+    # letters is still consumed, so elision still splits d'/l' off a
+    # capitalized name (d'Effiat, l'Autriche captured), a hyphenated name stays
+    # one token, and a lowercase elided contraction (aujourd'hui) is not
+    # fragmented. Both straight and curly apostrophe variants must behave alike.
+    lang = make_lang(particles=["de", "du", "von"], elision_pattern=FR_ELISION_PATTERN)
+    for text in ("Le marquis d'Effiat vit l'Autriche.", "Le marquis d’Effiat vit l’Autriche."):
+        names = [n for n, _ in bn.extract_candidates(text, lang)]
+        assert "Effiat" in names and "Autriche" in names, text
+    # Saint-Simon stays a single hyphenated token / candidate.
+    assert bn.TOKEN_RE.findall("Saint-Simon") == ["Saint-Simon"]
+    saint = [n for n, _ in bn.extract_candidates("Le duc de Saint-Simon parla.", lang)]
+    assert "Saint-Simon" in saint
+    # aujourd'hui: internal apostrophe kept, token not fragmented (both variants).
+    assert bn.TOKEN_RE.findall("aujourd'hui") == ["aujourd'hui"]
+    assert bn.TOKEN_RE.findall("aujourd’hui") == ["aujourd’hui"]
+
+
 def test_extract_candidates_mid_sentence_flag():
     lang = make_lang()
     out = bn.extract_candidates("Marie vit Paul hier soir.", lang)

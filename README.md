@@ -11,7 +11,7 @@ Public plugins for [Claude Code](https://claude.com/claude-code), maintained und
 | [`obsidian-project-vault`](#obsidian-project-vault--v100) | 1.0.0 | Set up, migrate, audit, and operate an Obsidian vault as an LLM Wiki — a persistent, compounding knowledge base maintained by Claude Code. |
 | [`cc-usage-coach`](#cc-usage-coach--v100) | 1.0.0 | Personalized, behavior-aware analysis of where your Claude Code (Max/Pro) usage-limit tokens go, with ranked, low-effort ways to use fewer — computed entirely from your local session logs. Python measures; Claude concludes. |
 | [`enduser-handbook`](#enduser-handbook--v111) | 1.1.1 | Author, capture, and publish a Diátaxis-structured end-user handbook for any project — methodology shipped as a reusable skill, project-specific bindings supplied via `.claude/handbook/profile.yml`. |
-| [`literary-translator`](#literary-translator--v112) | 1.1.2 | High-fidelity literary book translation over a Gutenberg-style EPUB or plain-text source — a codex-translate → deterministic false-green gate → codex-review → Claude-fix loop run to convergence, with a frozen name/realia canon, a configurable verse policy, and ledger-based resumability. v1.1 adds optional book assembly into an Obsidian glossary-wiki behind a deterministic render/diff gate. |
+| [`literary-translator`](#literary-translator--v120) | 1.2.0 | High-fidelity literary book translation over a Gutenberg-style EPUB or plain-text source — a codex-translate → deterministic false-green gate → codex-review → Claude-fix loop run to convergence, with a frozen name/realia canon, a configurable verse policy, and ledger-based resumability. v1.1 adds optional book assembly into an Obsidian glossary-wiki behind a deterministic render/diff gate. |
 
 ## Install / update / uninstall
 
@@ -158,7 +158,7 @@ Trigger phrases: "write the end-user handbook", "update the user manual", "add a
 - **Review from more than one perspective.** Have several agents read the drafted chapter, each from a different angle (a first-time user, a power user, a skeptic hunting for fabricated or undocumented behavior). More viewpoints beat one — no single pass catches everything.
 - **Rerun and validate coverage.** When a chapter (or the whole handbook) is done, run the skill again as a completeness pass: walk the actual feature surface and confirm every feature is described. The first pass always misses some.
 
-## `literary-translator` — v1.1.2
+## `literary-translator` — v1.2.0
 
 High-fidelity literary **book translation** over a Gutenberg-style EPUB or plain-text source (or, in expert mode, a hand-co-designed custom extractor for any other source shape): a `codex-translate → deterministic false-green gate → codex-review → Claude-fix` loop, run to convergence per segment, with a frozen name/realia **canon**, a configurable **verse policy**, and **ledger-based resumability**. The loop runs per segment / per novella, never per book. v1.0 delivered converged per-segment drafts plus a full audit trail; **v1.1 adds optional book assembly + output rendering** — the converged drafts assemble into an Obsidian glossary-wiki (keyed on the frozen canon) behind a deterministic render/diff acceptance gate.
 
