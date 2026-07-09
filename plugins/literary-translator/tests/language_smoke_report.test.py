@@ -358,32 +358,6 @@ def test_stratified_selection_picks_first_middle_late_and_highest_density_anchor
     assert report["pass"] is True
 
 
-@pytest.mark.xfail(
-    reason=(
-        "GENUINE BUG in language_smoke_report.py's own extract_candidate_names(), "
-        "discovered while writing this suite -- NOT a test-fixture defect. Its "
-        "run-continuation loop (`while k < n: t2, _ = tokens[k]; if "
-        "is_upper_initial(t2) ...`) discards each continuation token's own "
-        "`preceding` char and never checks it against TERMINATORS, so it "
-        "silently fuses two unrelated proper nouns across a sentence boundary "
-        "into one bogus multiword candidate whenever a sentence's LAST token "
-        "is capitalized and the immediately next sentence's FIRST token is "
-        "also capitalized (e.g. 'Fiona. George arrived' -> merged candidate "
-        "'Fiona George' instead of two separate candidates 'Fiona'/'George'). "
-        "The sibling script bootstrap_names.py's extract_candidates() -- which "
-        "this script's own module docstring says it 'generalizes... into a "
-        "config-driven re-implementation' -- explicitly guards against exactly "
-        "this ('if preceding2 in TERMINATORS: break ... never let a "
-        "capitalized-token run bridge a sentence boundary'), and "
-        "tests/bootstrap_names.test.py locks that invariant in "
-        "(test_extract_candidates_never_bridges_sentence_boundary) using the "
-        "identical 'Effiat. Ensuite revint.' pattern. "
-        "language_smoke_report.py's own re-implementation dropped that guard. "
-        "strict=True: remove this xfail once the script is fixed to preserve "
-        "the same sentence-boundary invariant."
-    ),
-    strict=True,
-)
 def test_extract_candidate_names_never_bridges_sentence_boundary_regression(tmp_path, root):
     # Mirrors tests/bootstrap_names.test.py's
     # test_extract_candidates_never_bridges_sentence_boundary, applied to
@@ -395,6 +369,44 @@ def test_extract_candidate_names_never_bridges_sentence_boundary_regression(tmp_
         checked_names=["Fiona", "George"],
         low_name_density_confirmed=True,
         no_particles_confirmed=True,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert report is not None
+    assert report["candidate_names_total"] == 2
+    by_name = {c["name"]: c["found"] for c in report["checked_names"]}
+    assert by_name == {"Fiona": True, "George": True}
+
+
+def test_extract_candidate_names_respects_em_dash_boundary_regression(tmp_path, root):
+    # Em-dash is the dominant dialogue-line delimiter in French/Russian/
+    # Spanish literary prose -- must be treated exactly like a period/etc.
+    # sentence boundary, or "Fiona. -- George arriva." fuses into the bogus
+    # candidate "Fiona George".
+    manifest = build_manifest(["Fiona. — George arriva."])
+    proc, report, _ = run_smoke(
+        root, tmp_path, manifest, NO_PARTICLES_NO_ELISION,
+        checked_names=["Fiona", "George"],
+        low_name_density_confirmed=True,
+        no_particles_confirmed=True,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert report is not None
+    assert report["candidate_names_total"] == 2
+    by_name = {c["name"]: c["found"] for c in report["checked_names"]}
+    assert by_name == {"Fiona": True, "George": True}
+
+
+def test_extract_candidate_names_particle_branch_respects_boundary_regression(tmp_path, root):
+    # The particle-continuation branch (e.g. French "du") must not bridge a
+    # sentence terminator sitting before the trailing name, or "parla Fiona
+    # du. George arriva." fuses into the bogus candidate "Fiona du George".
+    manifest = build_manifest(["parla Fiona du. George arriva."])
+    lang = particle_config_payload(particles=["du"])
+    proc, report, _ = run_smoke(
+        root, tmp_path, manifest, lang,
+        checked_names=["Fiona", "George"],
+        low_name_density_confirmed=True,
+        particle_cases=[{"token": "du", "is_particle": True}],
     )
     assert proc.returncode == 0, proc.stderr
     assert report is not None

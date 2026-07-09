@@ -188,7 +188,7 @@ no effect — so no call site can accidentally omit declaring the precondition):
   `offending` (an array of strings).
 
 - **Dependency preflight first**: wraps `import jsonschema` in a try/except,
-  printing a clear "install with `pip install -r {{PLUGIN_ROOT}}/requirements.txt`"
+  printing a clear "install with `pip install -r requirements.txt`"
   message and exiting non-zero on `ImportError` — never a raw traceback.
 - **Pass 1 — per-item.** Constructs a validator over `canon-batch.schema.json`'s
   item shape with

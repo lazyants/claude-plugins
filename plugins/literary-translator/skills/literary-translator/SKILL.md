@@ -69,18 +69,22 @@ translate+gloss job ends up quietly provisioning apparatus it will never use.
    exhaustive alternative (live research, a fuller apparatus, index on) as an
    explicit opt-in the user chooses through the same knobs, never as a
    separate code path.
-4. **Agree pipeline role assignment.** Ask who translates, who reviews, who
-   fixes, and who orchestrates. The reviewer must be independent of the
-   translator — ideally a different engine/family
-   (`references/operating-constellation.md`). Offer the valid combinations:
-   (1) Claude translates → Codex reviews → Claude fixes — this plugin's
-   default, cross-engine and the strongest combination at catching errors;
-   (2) Claude translates → a separate fresh Claude agent reviews → Claude
-   fixes; (3) Codex translates → a separate agent reviews → Claude only
-   applies fixes, orchestrates, and verifies. Degrade gracefully to a single
-   engine if the user has only Claude or only Codex. This is NOT a new
-   profile knob — a mechanical engine-per-role knob is deferred; record the
-   agreed constellation in `PLAN.md`, not `profile.yml`.
+4. **Agree pipeline role assignment.** Translate and review are
+   **hard-locked to `codex:codex-rescue`** (R1, `references/engine-loop.md`)
+   — every shipped template enforces this and no profile knob swaps either
+   role to a different engine. Claude (the orchestrating session) **only**
+   applies fixes, orchestrates, and verifies — it never originates a
+   translation or grades its own output. **codex-translate → deterministic
+   gate → codex-review → Claude-fix, looped to convergence, IS the v1
+   default** — not a menu of interchangeable options. Confirm the user has
+   Codex CLI access before scaffolding proceeds; v1 has no
+   degrade-to-Claude-only fallback. Other constellations — Claude
+   translating, a fresh Claude agent reviewing, or any other engine-per-role
+   split — are the **durable, reusable pattern** documented in
+   `references/operating-constellation.md`: the general shape a future
+   engine-per-role knob would unlock, not a v1 choice. This fixed pairing
+   needs no profile knob; note it in `PLAN.md` for project-level clarity if
+   useful, never in `profile.yml`.
 5. **State why the lean default is worth it.** A plain translate+gloss job
    that turns on every knob pays for machinery — live-research round-trips, a
    heavier apparatus, an occurrence index — it will never read. Naming that
@@ -90,6 +94,10 @@ translate+gloss job ends up quietly provisioning apparatus it will never use.
    the project's own scope genuinely grows to need it.
 
 ## Step 0 — Read + validate `profile.yml`
+
+Throughout this skill, `{{PLUGIN_ROOT}}` denotes the plugin's install
+directory — under Claude Code, the `${CLAUDE_PLUGIN_ROOT}` environment
+variable.
 
 Implemented by `scripts/profile_validate.py`, invoked as:
 
@@ -110,11 +118,14 @@ Order of operations:
    existing filled-in profile is never touched again) and HALT, naming the
    path and instructing the user to fill in every placeholder. Do not run
    dependency preflight or schema validation in this branch.
-2. If present, dependency preflight first: `import jsonschema` and
-   `import yaml` each wrapped in their own try/except; on `ImportError`
-   print `"ERROR: this plugin requires the 'jsonschema'/'PyYAML' Python
-   package(s). Install with: pip install -r {{PLUGIN_ROOT}}/requirements.txt"`
-   and exit non-zero.
+2. If present, dependency preflight first: `import yaml` and
+   `import jsonschema` each wrapped in their own try/except; on
+   `ImportError`, print an actionable message naming the specific missing
+   package (`"ERROR: this plugin requires the '<package>' Python package.
+   Install with: pip install -r <path>"`), where `<path>` is a real
+   `requirements.txt` resolved at runtime by walking up from the script's
+   own location (never a literal `{{PLUGIN_ROOT}}` string), and exit
+   non-zero.
 3. Parse YAML with `yaml.safe_load` (never `yaml.load`). Unknown
    `profile_version` halts with a migration hint.
 4. Unknown top-level keys are FATAL by default, naming the exact key —
@@ -332,8 +343,16 @@ this HALT once `output.v1_scope: assembled_book` is actually chosen.
 
 ## Pre-read mandate
 
-Read every file under `references/` (once per session) before any
-extraction, prompting, or reviewing work.
+Before any extraction, prompting, or reviewing work, read (once per
+session) the six hard-rule references — `engine-loop.md`,
+`false-green-gate.md`, `ledger-and-resumability.md`,
+`canon-and-glossary.md`, `verse-policy.md`,
+`workflow-schema-validation.md` — plus whichever source/output adapter
+this project actually resolves to (Step 0c/0d). Defer the rest — e.g.
+`assembly-and-output.md`, `output-target-adapters/obsidian.md` — to the
+step that needs them; both sit inert under the default
+`output.v1_scope: segment_drafts_and_audit`, and reading them up front pays
+for machinery a plain project will never use.
 
 ## Hard rules R1–R7
 
