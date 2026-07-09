@@ -415,6 +415,77 @@ def test_extract_candidate_names_particle_branch_respects_boundary_regression(tm
     assert by_name == {"Fiona": True, "George": True}
 
 
+def test_extract_candidate_names_quote_masked_boundary_regression(tmp_path, root):
+    # A closing quote sitting between the terminator and the next
+    # capitalized token must not mask the boundary, or "'we saw Fiona.'
+    # George nodded." fuses into the bogus candidate "Fiona George".
+    manifest = build_manifest(["'we saw Fiona.' George nodded."])
+    proc, report, _ = run_smoke(
+        root, tmp_path, manifest, NO_PARTICLES_NO_ELISION,
+        checked_names=["Fiona", "George"],
+        low_name_density_confirmed=True,
+        no_particles_confirmed=True,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert report is not None
+    assert report["candidate_names_total"] == 2
+    by_name = {c["name"]: c["found"] for c in report["checked_names"]}
+    assert by_name == {"Fiona": True, "George": True}
+
+
+def test_extract_candidate_names_bracket_masked_boundary_regression(tmp_path, root):
+    # A closing bracket sitting between the terminator and the next
+    # capitalized token must not mask the boundary, or "(Fiona.) George
+    # arrived." fuses into the bogus candidate "Fiona George".
+    manifest = build_manifest(["(Fiona.) George arrived."])
+    proc, report, _ = run_smoke(
+        root, tmp_path, manifest, NO_PARTICLES_NO_ELISION,
+        checked_names=["Fiona", "George"],
+        low_name_density_confirmed=True,
+        no_particles_confirmed=True,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert report is not None
+    assert report["candidate_names_total"] == 2
+    by_name = {c["name"]: c["found"] for c in report["checked_names"]}
+    assert by_name == {"Fiona": True, "George": True}
+
+
+def test_extract_candidate_names_guillemet_masked_boundary_regression(tmp_path, root):
+    # An opening guillemet sitting between the terminator and the next
+    # capitalized token must not mask the boundary, or "Fiona. « George
+    # arriva. »" fuses into the bogus candidate "Fiona George".
+    manifest = build_manifest(["Fiona. « George arriva. »"])
+    proc, report, _ = run_smoke(
+        root, tmp_path, manifest, NO_PARTICLES_NO_ELISION,
+        checked_names=["Fiona", "George"],
+        low_name_density_confirmed=True,
+        no_particles_confirmed=True,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert report is not None
+    assert report["candidate_names_total"] == 2
+    by_name = {c["name"]: c["found"] for c in report["checked_names"]}
+    assert by_name == {"Fiona": True, "George": True}
+
+
+def test_extract_candidate_names_nested_wrapper_masked_boundary_regression(tmp_path, root):
+    # Two stacked wrappers ")" + "]" mask the terminator before George; the
+    # back-scan must skip BOTH to reach the "." behind them.
+    manifest = build_manifest(["([Fiona.]) George arrived."])
+    proc, report, _ = run_smoke(
+        root, tmp_path, manifest, NO_PARTICLES_NO_ELISION,
+        checked_names=["Fiona", "George"],
+        low_name_density_confirmed=True,
+        no_particles_confirmed=True,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert report is not None
+    assert report["candidate_names_total"] == 2
+    by_name = {c["name"]: c["found"] for c in report["checked_names"]}
+    assert by_name == {"Fiona": True, "George": True}
+
+
 def test_empty_sample_with_no_body_and_no_frontback_is_fatal(tmp_path, root):
     manifest = build_manifest([])  # no body segments, no frontback entries
     proc, report, _ = run_smoke(root, tmp_path, manifest, NO_PARTICLES_NO_ELISION)
