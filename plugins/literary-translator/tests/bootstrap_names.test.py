@@ -228,6 +228,85 @@ def test_extract_candidates_never_bridges_sentence_boundary():
     assert "Ensuite" in names
 
 
+def test_extract_candidates_quote_masked_boundary():
+    # A real terminator masked behind a closing quote (the '.' sits before
+    # the "'") must still be found -- "Fiona" and "George" are two unrelated
+    # proper nouns in adjacent sentences, not one fused run.
+    lang = make_lang()
+    out = bn.extract_candidates("'I saw Fiona.' George nodded.", lang)
+    names = [n for n, _ in out]
+    assert "Fiona George" not in names
+    assert "Fiona" in names
+    assert "George" in names
+
+
+def test_extract_candidates_bracket_masked_boundary():
+    lang = make_lang()
+    out = bn.extract_candidates("(Fiona.) George arrived.", lang)
+    names = [n for n, _ in out]
+    assert "Fiona George" not in names
+    assert "Fiona" in names
+    assert "George" in names
+
+
+def test_extract_candidates_guillemet_masked_boundary():
+    lang = make_lang()
+    out = bn.extract_candidates("Fiona. « George arriva. »", lang)
+    names = [n for n, _ in out]
+    assert "Fiona George" not in names
+    assert "Fiona" in names
+    assert "George" in names
+
+
+def test_extract_candidates_nested_wrapper_masked_boundary():
+    # Two stacked wrapper chars ")" + "]" mask the terminator before George;
+    # the back-scan must skip BOTH to reach the "." behind them (exercises the
+    # skip loop iterating more than once).
+    lang = make_lang()
+    out = bn.extract_candidates("([Fiona.]) George arrived.", lang)
+    names = [n for n, _ in out]
+    assert "Fiona George" not in names
+    assert "Fiona" in names
+    assert "George" in names
+
+
+def test_extract_candidates_em_dash_boundary():
+    # Proves TERMINATORS now includes the em-dash "—" (a dialogue-line
+    # delimiter): before this sync, "—" was not a terminator here, so
+    # "Fiona" and "George" would fuse across it.
+    lang = make_lang()
+    out = bn.extract_candidates("Fiona. — George arriva.", lang)
+    names = [n for n, _ in out]
+    assert "Fiona George" not in names
+    assert "Fiona" in names
+    assert "George" in names
+
+
+def test_extract_candidates_particle_branch_respects_boundary():
+    # The particle-continuation branch must not bridge a sentence terminator
+    # before its trailing name -- "du" is a particle, but "George" starts a
+    # new sentence, so "Fiona du George" must never form.
+    lang = make_lang(particles=["du"])
+    out = bn.extract_candidates("parla Fiona du. George arriva.", lang)
+    names = [n for n, _ in out]
+    assert "Fiona du George" not in names
+
+
+def test_tokenize_backscan_skips_wrapper_to_terminator():
+    tokens = bn.tokenize("Fiona.' George", None)
+    george = next(t for t in tokens if t[0] == "George")
+    assert george[1] == "."
+
+
+def test_tokenize_no_terminator_behind_wrapper_stays_non_initial():
+    # Documents the intended non-regression: no period sits behind the ")",
+    # so "George" is not treated as sentence-initial -- the run still fuses
+    # exactly as today.
+    tokens = bn.tokenize("(Fiona) George", None)
+    george = next(t for t in tokens if t[0] == "George")
+    assert george[1] not in bn.TERMINATORS
+
+
 def test_extract_candidates_mid_sentence_flag():
     lang = make_lang()
     out = bn.extract_candidates("Marie vit Paul hier soir.", lang)

@@ -79,8 +79,9 @@ PARTICLE_CONFIG_FILENAME_RE = re.compile(r"^[A-Za-z0-9._-]+\.json$")
 SENTINEL_RE = re.compile(r"⟦[^⟧]*⟧")
 
 # A run "closes" at one of these trailing punctuation marks; the token right
-# after one of these is sentence-initial.
-TERMINATORS = frozenset(".!?:»")
+# after one of these is sentence-initial. — (U+2014) / ― (U+2015) are the
+# dominant dialogue-line delimiter in French/Russian/Spanish literary prose.
+TERMINATORS = frozenset(".!?:;»\"”…—―")
 
 # Fast-path ASCII uppercase set; unicodedata's 'Lu' category is the general,
 # script-agnostic fallback (Cyrillic/Greek/accented-Latin capitals alike).
@@ -96,6 +97,14 @@ _ASCII_UPPER = frozenset(chr(c) for c in range(ord("A"), ord("Z") + 1))
 TOKEN_RE = re.compile(r"[^\W\d_](?:[^\W\d_]|['’‑-])*")
 
 APOSTROPHES = "'’"  # ' and the Unicode right single quote
+
+# Bracket/quote characters that WRAP text without ending a sentence -- the
+# back-scan skips them so a real terminator masked behind a closing (or
+# opening) quote/bracket is still found (e.g. "Fiona.' George", "(Fiona.)
+# George", "Fiona. « George"). Every member is deliberately NOT in
+# TERMINATORS; the closing quotes that DO end a sentence (" ” ») stay in
+# TERMINATORS so they keep acting as boundaries.
+WRAPPERS = frozenset("()[]{}'’‘“«")
 
 
 class BootstrapNamesError(Exception):
@@ -274,9 +283,11 @@ def load_language_config(particle_config_filename: str,
 def tokenize(text: str, elision_re: Optional["re.Pattern"]):
     """Split ``text`` into ``(token, preceding_char)`` pairs.
 
-    ``preceding_char`` is the last non-whitespace character before the
-    token (or ``"."`` at the very start of the text, treated as a sentence
-    boundary) -- used to decide whether a token is sentence-initial.
+    ``preceding_char`` is the last non-whitespace, non-``WRAPPERS`` character
+    before the token (or ``"."`` at the very start of the text, treated as a
+    sentence boundary) -- used to decide whether a token is sentence-initial.
+    Skipping ``WRAPPERS`` too means a real terminator masked behind a
+    closing/opening quote or bracket (e.g. "Fiona.' George") is still found.
 
     When ``elision_re`` matches a raw token (e.g. French "d'Effiat"), it is
     split into two tokens: the elided article's own remnant (group 1, e.g.
@@ -290,7 +301,7 @@ def tokenize(text: str, elision_re: Optional["re.Pattern"]):
     for m in TOKEN_RE.finditer(text):
         start = m.start()
         j = start - 1
-        while j >= 0 and text[j] in " \t\n":
+        while j >= 0 and (text[j].isspace() or text[j] in WRAPPERS):
             j -= 1
         preceding = text[j] if j >= 0 else "."
         raw = m.group(0)
@@ -339,7 +350,12 @@ def extract_candidates(text: str, lang: LanguageConfig):
             if is_upper_initial(t2) and t2 not in lang.stopwords:
                 run.append(t2)
                 k += 1
-            elif is_particle(t2, lang) and k + 1 < n and is_upper_initial(tokens[k + 1][0]):
+            elif (
+                is_particle(t2, lang)
+                and k + 1 < n
+                and is_upper_initial(tokens[k + 1][0])
+                and tokens[k + 1][1] not in TERMINATORS
+            ):
                 run.append(t2)
                 run.append(tokens[k + 1][0])
                 k += 2

@@ -119,6 +119,13 @@ TOKEN_RE = re.compile(r"[^\W\d_](?:[^\W\d_]|['’‑-])*")
 # prose -- this plugin's core domain -- not just a stylistic aside.
 TERMINATORS = frozenset(".!?:;»\"”…—―")
 _APOSTROPHES = "'’"
+# Bracket/quote characters that WRAP text without ending a sentence -- the
+# back-scan skips them so a real terminator masked behind a closing (or
+# opening) quote/bracket is still found (e.g. "Fiona.' George", "(Fiona.)
+# George", "Fiona. « George"). Every member is deliberately NOT in
+# TERMINATORS; the closing quotes that DO end a sentence (" ” ») stay in
+# TERMINATORS so they keep acting as boundaries.
+_WRAPPERS = frozenset("()[]{}'’‘“«")
 
 
 def fatal(message) -> NoReturn:
@@ -356,7 +363,7 @@ def extract_candidate_names(text, lang):
         raw = m.group(0)
         start = m.start()
         j = start - 1
-        while j >= 0 and text[j] in " \t\n":
+        while j >= 0 and (text[j].isspace() or text[j] in _WRAPPERS):
             j -= 1
         preceding = text[j] if j >= 0 else "."
         elided = elision_re.match(raw) if (has_elision and elision_re is not None) else None
@@ -391,11 +398,11 @@ def extract_candidate_names(text, lang):
                 # run is stopped at any TERMINATORS boundary so two unrelated
                 # proper nouns in adjacent sentences don't fuse into one
                 # bogus multiword candidate (e.g. "Fiona. George arrived
-                # quietly." must NOT become "Fiona George"). KNOWN LIMITATION
-                # (a follow-up): a boundary masked by an intervening closing
-                # quote/bracket (e.g. "Fiona.' George") is missed, because
-                # the back-scan stops at the quote/bracket rather than the
-                # terminator behind it. t2 is re-examined as its own run
+                # quietly." must NOT become "Fiona George"). A boundary masked
+                # by an intervening closing/opening quote or bracket (e.g.
+                # "Fiona.' George", "(Fiona.) George", "Fiona. « George") is
+                # caught too: the back-scan skips _WRAPPERS to reach the real
+                # terminator behind them. t2 is re-examined as its own run
                 # start by the outer loop.
                 break
             low = t2.lower().rstrip(_APOSTROPHES)
