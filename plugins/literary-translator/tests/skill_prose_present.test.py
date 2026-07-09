@@ -20,6 +20,9 @@ Covers:
 4. references/operating-constellation.md existing and actually carrying
    the Part-6 review-orchestration content (LESSONS items 20-24), not just
    an empty stub.
+5. SKILL.md's intake step 4 states plainly that codex-translate/review is
+   hard-locked (R1) and IS the v1 default, not one of several options.
+6. SKILL.md's Step 0 defines `{{PLUGIN_ROOT}}` before its first use.
 """
 from __future__ import annotations
 
@@ -54,6 +57,26 @@ def test_pipeline_role_assignment_prompt_present():
     # The prompt must actually point at the constellation doc, not merely
     # use the word "independent" in passing elsewhere in the file.
     assert "operating-constellation.md" in text
+
+
+def test_codex_translate_review_hard_lock_is_default_present():
+    # "hard-locked to `codex:codex-rescue`" sits fully on one line as of
+    # this writing ("   **hard-locked to `codex:codex-rescue`** (R1,
+    # `references/engine-loop.md`)") -- the corrected wording replacing
+    # the old "this plugin's default" among a menu of three options.
+    text = _skill_text()
+    assert "hard-locked to `codex:codex-rescue`" in text
+    # "not a menu of interchangeable options" also sits fully on one line
+    # as of this writing, confirming this IS the v1 default, not a choice.
+    assert "not a menu of interchangeable options" in text
+
+
+def test_plugin_root_defined_at_step_0_present():
+    # "denotes the plugin's install" sits fully on one line as of this
+    # writing ("Throughout this skill, `{{PLUGIN_ROOT}}` denotes the
+    # plugin's install" / "directory -- ..."), just before the token's
+    # first use in the Step 0 command block.
+    assert "denotes the plugin's install" in _skill_text()
 
 
 def test_f3_adjudication_fence_sentence_present():

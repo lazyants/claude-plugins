@@ -4,11 +4,11 @@ Deliver, run once over every currently-converged segment plus the whole
 project.
 
 Generalized directly from the real, proven `historiettes-t3/final_audit.py`
-(5 checks over 75 converged segments, zero hard defects -- that file is
-ground truth for the checks below; read it directly before changing this
-one). See SKILL.md's "W7 Final audit" section for the authoritative spec and
-`assets/schemas/final-audit-summary.schema.json` for this script's exact
-output shape.
+(5 checks over 75 converged segments, zero hard defects -- the origin this
+script generalizes). See SKILL.md's "W7 Final audit" section for the
+authoritative spec and `assets/schemas/final-audit-summary.schema.json` for
+this script's exact output shape -- those are the ground truth to read
+before changing this one, not the non-shipped origin project above.
 
 ## What it runs
 

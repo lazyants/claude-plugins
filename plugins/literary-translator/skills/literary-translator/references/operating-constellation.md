@@ -8,12 +8,12 @@ roles are* and *how dispatch works* (hard rules, never profile-configurable).
 This file is a recommended answer to "which concrete agent/model/effort
 should sit in each seat, and how tightly should the review loop run,
 today." It changes nothing about R1 role separation or the `pipeline()`-only
-dispatch rule — the per-segment translate → gate → review → fix loop stays
-exactly as specified there, always through a schema-validated workflow-level
-`agent()` call, never ad hoc named-teammate fan-out. Pipeline role
-assignment itself (who translates / reviews / fixes / orchestrates) is an
-intake-time agreement, not a profile knob — see SKILL.md's "Intake &
-proportionality" step.
+dispatch rule — the per-segment codex-translate → deterministic gate →
+codex-review → Claude-fix loop stays exactly as specified there, always
+through a schema-validated workflow-level `agent()` call, never ad hoc
+named-teammate fan-out. Pipeline role assignment itself (who translates /
+reviews / fixes / orchestrates) is fixed by R1 — confirmed, not chosen, at
+intake time; see SKILL.md's "Intake & proportionality" step.
 
 Two parts, on purpose: a **durable pattern** that should stay true regardless
 of which models or tool defaults exist this month, and a **dated snapshot**
@@ -25,12 +25,17 @@ trusting it — the pattern is the part meant to outlive any one generation.
 - **Independent reviewer, always.** Whatever checks a piece of work must run
   as a *separate* process from whatever produced it — never let the
   producing context grade its own output; it rubber-stamps. Prefer
-  **cross-engine** review (e.g. Claude translates, Codex reviews) — the
-  strongest combination for catching errors — but at minimum use a fresh,
-  separate agent. Require at least one independent reviewer engine, and make
-  the choice configurable so a user with only Claude *or* only Codex still
-  works: degrade gracefully to single-engine review rather than refusing to
-  run.
+  **cross-engine** review (e.g. one engine translates, a different engine
+  reviews) — the strongest combination for catching errors — but at minimum
+  use a fresh, separate agent. Require at least one independent reviewer
+  engine, and make the choice configurable so a user with only one engine
+  still works: degrade gracefully to single-engine review rather than
+  refusing to run. **This plugin's own v1 wiring is narrower than the
+  general pattern above**: `codex:codex-rescue` is hard-locked as both
+  translator and reviewer (R1, `references/engine-loop.md`), with no
+  profile knob to swap either role or to degrade to single-engine —
+  independence here comes from Claude orchestrating/fixing around a
+  separate codex call, not from a configurable engine-per-role split.
 - **Unit of review = the smallest independently-checkable deliverable**, not
   a vague "chunk": a translation's unit is one segment/novella (exactly
   where this plugin's own engine loop already dispatches — R1,
@@ -76,13 +81,15 @@ trusting it — the pattern is the part meant to outlive any one generation.
 - **Example constellation** for running this plugin's own work: orchestrator
   = Claude Code at its highest-effort mode (as of 2026-07, "ultracode" at
   `xhigh` reasoning effort), doing the parallel decomposition the durable
-  pattern describes; implementer (per-segment translate/fix) = Sonnet 5 at
-  `effort: "high"` (this plugin already hard-locks `engine.effort: "high"`
-  for every codex accuracy-bearing call); adversarial reviewer =
-  Codex/GPT-5.5 via `codex:codex-rescue`, pinned explicitly to `high` for
-  routine review or `xhigh` for the hardest correctness passes — the same
-  role R7 already requires to be schema-validated
-  (`references/workflow-schema-validation.md`).
+  pattern describes; translator AND reviewer (R1, the same subagent type
+  fills both roles, hard-locked, no engine-per-role choice) =
+  `codex:codex-rescue`, pinned explicitly to `high` for routine
+  translate/review or `xhigh` for the hardest correctness passes (this
+  plugin already hard-locks `engine.effort: "high"` for every codex
+  accuracy-bearing call) — the same role R7 already requires to be
+  schema-validated (`references/workflow-schema-validation.md`); fixer
+  (Claude, no `agentType`, R1) = Sonnet 5, applying findings only, never
+  originating new translated content.
 
 Model names, generations, and tool config defaults all change fast — a name
 or default pinned here today is stale by the time this project reruns next
@@ -98,5 +105,5 @@ above is what's meant to survive any one generation.
   mechanics, the smallest-fan-out principle the "unit of review" rule
   mirrors.
 - SKILL.md's "Intake & proportionality" step — where pipeline role
-  assignment (who translates/reviews/fixes/orchestrates) is actually agreed
-  and recorded, per project.
+  assignment (who translates/reviews/fixes/orchestrates) is confirmed and
+  recorded, per project.

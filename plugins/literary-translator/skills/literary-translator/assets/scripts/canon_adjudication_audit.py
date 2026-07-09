@@ -7,13 +7,15 @@ name/realia glossary.
 Ported from the real, proven `historiettes-t3/audit_human_adjudications.py`
 (a rollout-blocking gate that recomputes its required-item worklist fresh
 from live data on every run and cross-checks it against a persisted verdict
-file -- ground truth for the methodology below; read it directly before
-changing this one). Generalized to this plugin's actual data model
-(`canon.json`'s `entries{}`/`review_queue[]`, verified against
+file -- the methodology this script generalizes). Generalized to this
+plugin's actual data model (`canon.json`'s `entries{}`/`review_queue[]`,
+verified against
 `canon-entry.schema.json`/`canon-file.schema.json`/`canon-batch.schema.json`
 -- no `entity_id`, no `aliases[]`, no edge/candidate/reconciliation/rejected
 store, no two-pass agreement). See `references/canon-and-glossary.md` for
-the authoritative narrative this script's behavior must match.
+the authoritative narrative this script's behavior must match -- that is
+the ground truth to read before changing this one, not the non-shipped
+origin project above.
 
 IRON RULE (plugin-wide, restated here because this script sits right on the
 boundary): scripts SURFACE candidates and ENFORCE schemas; they NEVER make

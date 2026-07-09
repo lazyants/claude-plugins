@@ -568,7 +568,10 @@ def test_ledger_e2e_acceptance_full_batch_cycle(tmp_path):
 
     # Full-replace assertion (item 4): NONE of seg_beta's old (now-stale)
     # fragment values survive into the freshly re-converged fragment.
-    assert beta_fragment_batch2["timestamp"] != beta_fragment_batch1["timestamp"]
+    # (A wall-clock `timestamp` inequality check was deliberately dropped
+    # here -- it raced when both writes landed in the same second-resolution
+    # clock tick. The four checks below already prove the full-replace
+    # property from fragment *content*, per gotchas.md §13.)
     assert beta_fragment_batch1["rounds"] == 1
     assert beta_fragment_batch2["rounds"] == 2
     assert beta_fragment_batch2["cache_key"] != beta_fragment_batch1["cache_key"]

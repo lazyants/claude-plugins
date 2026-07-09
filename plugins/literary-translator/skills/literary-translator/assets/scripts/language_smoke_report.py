@@ -114,7 +114,10 @@ LOW_NAME_DENSITY_FLOOR = 10
 # what this smoke test exists to establish -- this regex only makes it
 # plausible (see references/language-pair-parameterization.md).
 TOKEN_RE = re.compile(r"[^\W\d_](?:[^\W\d_]|['’‑-])*")
-TERMINATORS = frozenset(".!?:;»\"”…")
+# — (U+2014 em-dash) and ― (U+2015 horizontal bar) are included because they
+# are the dominant dialogue-line delimiter in French/Russian/Spanish literary
+# prose -- this plugin's core domain -- not just a stylistic aside.
+TERMINATORS = frozenset(".!?:;»\"”…—―")
 _APOSTROPHES = "'’"
 
 
@@ -381,12 +384,33 @@ def extract_candidate_names(text, lang):
         run = [tok]
         k = idx + 1
         while k < n:
-            t2, _ = tokens[k]
+            t2, preceding2 = tokens[k]
+            if preceding2 in TERMINATORS:
+                # t2 is itself sentence-initial (a '.', '!', '?', ':', '»' or
+                # a dialogue dash sits between the run so far and t2) -- the
+                # run is stopped at any TERMINATORS boundary so two unrelated
+                # proper nouns in adjacent sentences don't fuse into one
+                # bogus multiword candidate (e.g. "Fiona. George arrived
+                # quietly." must NOT become "Fiona George"). KNOWN LIMITATION
+                # (a follow-up): a boundary masked by an intervening closing
+                # quote/bracket (e.g. "Fiona.' George") is missed, because
+                # the back-scan stops at the quote/bracket rather than the
+                # terminator behind it. t2 is re-examined as its own run
+                # start by the outer loop.
+                break
             low = t2.lower().rstrip(_APOSTROPHES)
             if is_upper_initial(t2) and t2 not in stopwords:
                 run.append(t2)
                 k += 1
-            elif low in particles_lower and k + 1 < n and is_upper_initial(tokens[k + 1][0]):
+            elif (
+                low in particles_lower
+                and k + 1 < n
+                and is_upper_initial(tokens[k + 1][0])
+                # Don't bridge a sentence boundary sitting between the
+                # particle and the trailing name either (e.g. "Fiona du.
+                # George" must not fuse into "Fiona du George").
+                and tokens[k + 1][1] not in TERMINATORS
+            ):
                 run.append(t2)
                 run.append(tokens[k + 1][0])
                 k += 2

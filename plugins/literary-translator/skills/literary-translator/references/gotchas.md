@@ -390,16 +390,17 @@ unhandled `ImportError`/raw traceback.
   from `cache_key.py --seg <id>`'s own printed JSON keys and assert it
   equals `ledger-record-base.schema.json`'s declared property set) rather
   than hand-typing the same list twice and letting the copies drift.
-- **`tests/ledger_e2e_acceptance.test.py` is flaky at line 571 (known,
-  deferred).** The batch-2 full-replace assertion
-  `beta_fragment_batch2["timestamp"] != beta_fragment_batch1["timestamp"]`
-  races when both re-converge writes land in the same clock tick — verified
-  non-deterministic (pass / fail / pass across isolated runs, 2026-07-08).
-  The CHANGELOG names this test a ship-ready **release gate**, so the race
-  must be fixed before the gate can be trusted: assert on fragment *content*
-  (or a monotonic counter / injected clock), not wall-clock timestamp
-  inequality. Unrelated to `canon_adjudication_audit.py` (that gate's own 87
-  tests are deterministic).
+- **`tests/ledger_e2e_acceptance.test.py`'s line-571 flake is RESOLVED
+  (1.1.1).** The batch-2 full-replace assertion used to also check
+  `beta_fragment_batch2["timestamp"] != beta_fragment_batch1["timestamp"]`,
+  which raced when both re-converge writes landed in the same
+  second-resolution clock tick — verified non-deterministic (pass / fail /
+  pass across isolated runs, 2026-07-08). The wall-clock check was removed;
+  the full-replace property is still proven from fragment *content*
+  (`rounds`, `cache_key`, `style_contract_hash`, `reviewed_draft_sha1`, plus
+  a fresh `cache_key` recompute), which loses zero coverage. Unrelated to
+  `canon_adjudication_audit.py` (that gate's own 87 tests are
+  deterministic).
 
 ## See also
 
