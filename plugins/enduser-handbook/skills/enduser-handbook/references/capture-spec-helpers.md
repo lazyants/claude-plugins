@@ -55,7 +55,11 @@ as-is. The reference doc is normative; the `*.playwright.*` asset is one impleme
 - **Identity assertion** — before every shot, prove the page is the one the manifest declares: the
   route matches, the loading state is gone, and either the awaited response arrived
   (client-rendered) **or** the primary heading/DOM is visible (server-rendered — a first-class
-  case, not a fallback). Fail loudly; never shoot whatever is on screen.
+  case, not a fallback). Fail loudly; never shoot whatever is on screen. An optional **state
+  marker** (`state.present` / `state.absent`) is a third, first-class readiness+identity path for a
+  state-variant capture (empty/error/denied) whose normal heading may be absent: `present` is
+  waited visible as the readiness anchor, `absent` asserts the wrong-state marker is not visible;
+  both matched `{ exact: true }`. See `references/state-variants.md`.
 
 - **Region / viewport capture** — element-scoped for a single component; viewport for long
   unpaginated lists that overflow the element frame. An opt-in `{ maxHeight }` clamps a

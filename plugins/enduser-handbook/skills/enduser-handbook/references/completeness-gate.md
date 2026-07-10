@@ -110,6 +110,26 @@ capture) when **any** of the following holds.
 If none of these holds, the row is capturable — document it. If one does, write
 a disclosure sentence from the templates above.
 
+## Per-page state-coverage checklist
+
+Trigger coverage is one axis; the **page state** a trigger was captured in is another. For each
+page in the matrix, track state coverage separately:
+
+| State | Status |
+|---|---|
+| populated | documented — required; every page must reach this |
+| empty | documented \| disclosed \| n/a |
+| error | documented \| disclosed \| n/a |
+| denied | documented \| disclosed \| n/a |
+
+**populated** is always required — the happy-state capture is never optional. **empty / error /
+denied** are opt-in: capture them only where the variant adds documentation value, and mark each
+either `documented` (a real captured variant, per `references/state-variants.md`), `disclosed`
+(prose names the variant and why it is not shown), or `n/a` (the page genuinely has no such state —
+e.g. a list that can never legitimately be empty). Do not leave a row blank; a blank row is the same
+un-resolved-row defect as an unclassified trigger. See `references/state-variants.md` for how each
+variant is captured as a real app state and the `state` marker that anchors identity on it.
+
 ## The audit walk-through
 
 Run this before every publish, not only on first authoring:

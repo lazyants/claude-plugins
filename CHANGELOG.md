@@ -28,6 +28,17 @@ Initial release. New plugin — high-fidelity literary book translation over a G
 - `tests/` — pytest suite (`*.test.py`, `--import-mode=importlib`) over synthetic fixtures: 500+ tests across every script, schema-literal drift, and an end-to-end ledger acceptance run. Run with `cd plugins/literary-translator && python3 -m pytest`.
 - Honesty caveats carried from the source project: extraction is proven against Historiettes' 17th-century French specifically (every other language/source is an unverified starter preset gated by a mandatory smoke test), and one of the two source adapters plus the expert custom extractor remain experimental until pilot-proven end-to-end.
 
+## [enduser-handbook 1.2.0] — 2026-07-10
+
+A feature release adding five authoring-ergonomics and coverage enhancements. No change to the fail-closed capture guard — its seven-sentinel route order is untouched.
+
+### Added
+- A dependency-free profile validator: a normative `assets/profile.schema.json` pins the profile shape, `references/profile-validation.md` holds the supported-version list and the ordered Step-0 checks, and `assets/lib/profile-version.mjs` reads `profile_version` via a pure, parse-safe column-0 line-scan (no YAML parser — Node has none and the plugin ships zero dependencies). It allowlists the whole top level and fails closed on every other YAML spelling, proved by differential testing against a real parser; a small `node` CLI tail (exit 0/1/2) is optional and Step 0 never requires `node`. (#64)
+- A `/scaffold-profile` command (the plugin's first `commands/` entry) that generates `.claude/handbook/profile.yml` interactively — auto-detecting `stack.*` from `composer.json` / `package.json` / framework markers and confirming with the user, then writing a filled copy of the canonical example plus a `style-guide.md` stub. It never overwrites an existing profile (writes a `.new` sidecar) and never invokes the capture workflow (`Skill` and `Bash` excluded from `allowed-tools`). (#66)
+- State-variant capture: `assertIdentity` gains an optional `state: { present, absent }` marker so a chapter can capture **real** empty / error / denied states (never a synthesized response) — `state.present` is a first-class readiness anchor for screens with no normal heading, and `state.absent` fails the run closed if a staged precondition reverted. `references/state-variants.md` and the completeness gate's per-page state-coverage checklist document it. (#67)
+- A per-role surface re-audit: `assets/lib/surface-diff.mjs` (`structuralKey` + `diffSurfaces`) diffs the interactive surface between roles on the PII-free structural tuple `[tag, role, name, testId]` — never per-role label/class fields — with counts 0-filled across the full declared role set so both membership and count asymmetry are caught. It reuses `matrixLabel` from `control-inventory.mjs` for display only. (#73)
+- `references/capture-engines.md` — one reference documenting the four `capture.engine` values (Playwright / Cypress / Puppeteer / manual), each engine's guard `resourceType` obligation, and where a recipe must fail at install rather than pretend coverage (Cypress's `req.resourceType` is deprecated as of 14.0.0). Marked "illustrative recipes, not tested contracts". (#70)
+
 ## [enduser-handbook 1.1.2] — 2026-07-10
 
 A maintenance release closing seven issues — one guard-hardening fix, three correctness fixes, one test-harness fix, and two documentation-accuracy trims.
