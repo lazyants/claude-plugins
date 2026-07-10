@@ -102,3 +102,33 @@ test('capture: items chapter', async ({ browser }) => {
     await context.close();
   }
 });
+
+// State-variant capture (references/state-variants.md) — a REAL error screen the app paints itself,
+// reached read-only via a bad-id route. No new guard mechanism: the guard ALLOWS the GET (it is a
+// read) and the app renders its own not-found UI. No `heading` and no `apiReady`: a real 4xx/5xx
+// response has no normal heading and never satisfies armApiWait's res.ok() check, so identity is
+// anchored on the error-state marker instead via `state.present`.
+test('capture: items chapter — error-state variant', async ({ browser }) => {
+  const context = await browser.newContext({
+    serviceWorkers: 'block',
+    storageState: STORAGE_STATE,
+  });
+  const guard = await installCaptureGuard(context, {
+    denyPatterns: ['/delete', '/send', '/approve', '/finalize'],
+  });
+
+  const page = await context.newPage();
+  try {
+    // A bad-id route the seeded role can genuinely never resolve — the app's own real not-found
+    // screen, reached read-only.
+    await page.goto(`${ROUTE}/does-not-exist`);
+    await assertIdentity(page, { route: ROUTE, state: { present: 'Page not found' } });
+
+    const main = page.getByRole('main');
+    await main.waitFor({ state: 'visible' });
+    await captureRegion(main, `${OUTPUT_DIR}/error-not-found.png`);
+  } finally {
+    await guard.assertNoDangerousHits();
+    await context.close();
+  }
+});

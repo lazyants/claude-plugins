@@ -90,7 +90,8 @@
   # ------------------------------------------------------------------
 
   # Playwright projects fill this in (pre-goto response wait); other engines
-  # use their equivalent (Cypress: cy.intercept; Puppeteer: page.waitForResponse)
+  # use their equivalent (Cypress: cy.intercept; Puppeteer: page.waitForResponse;
+  # see references/capture-engines.md)
   # or omit. When set, this is the network signal the capture engine waits on
   # before asserting the page is mounted; the base skill consumes it via the
   # `capture.page_identity_signal` directive (see references/page-identity.md).
@@ -99,3 +100,23 @@
   # the engine falls back to the profile-level `capture.page_identity_signal`
   # description alone.
   waitForApi: ""
+
+  # ------------------------------------------------------------------
+  # OPTIONAL — engine-agnostic
+  # ------------------------------------------------------------------
+
+  # State variants beyond the default populated capture, so the human manifest review sees
+  # intended coverage before any capture code runs (references/manifest-discipline.md,
+  # references/state-variants.md). Every variant here is captured as a REAL app state — never
+  # synthesized. Uncomment only what this chapter actually captures; the completeness gate's
+  # per-page state-coverage checklist (references/completeness-gate.md) tracks the rest as
+  # disclosed or n/a.
+  states:
+    - populated                       # Always captured — the happy-state default, never optional.
+    # - empty                         # Empty-fixture storageState + a state.present marker.
+    # - error                         # A REAL error response reached read-only (bad-id route /
+                                       #   staged broken seed / a resource the role can't read) +
+                                       #   a state.present marker. If no real error can be staged
+                                       #   read-only, see references/state-variants.md.
+    # - denied                        # Reduced-role storageState lacking the permission + a
+                                       #   state.present marker.

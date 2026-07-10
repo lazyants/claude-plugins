@@ -23,6 +23,11 @@ to produce, with — per chapter — the fields a human can audit in under a min
   the kind of drift the manifest review exists to catch.
 - `steps[]` — ordered list of `{ id, label, action?, screenshot }` covering the
   flow the chapter teaches.
+- `states` — optional; enumerates the state variants (beyond the default
+  populated capture) this chapter intends to capture — empty / error / denied.
+  Every variant is a **real** app state, never a synthesized response. See
+  `references/state-variants.md` and the state-coverage checklist in
+  `references/completeness-gate.md`.
 
 That enumeration is what the user reviews. They can immediately catch: a feature
 you invented, a route that no longer exists, a role that can't actually reach

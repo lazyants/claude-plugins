@@ -180,6 +180,17 @@ export interface IdentityOptions {
    * resolves before a wait registered after goto() attaches and is missed.
    */
   apiReady?: Promise<unknown>;
+  /**
+   * A state-variant marker for a page whose normal heading may be absent (an empty/error/denied
+   * screen). `present` is a first-class READINESS + identity anchor — waited visible EARLY, before
+   * the heading assertion — so a variant whose data-load returns a non-2xx (which armApiWait never
+   * accepts) and whose normal heading never renders still has a valid readiness path. `absent`
+   * asserts the WRONG-state marker is NOT visible, so a reverted precondition (e.g. the empty state
+   * was restored to populated before a re-capture) fails the run instead of silently shipping the
+   * wrong-but-real state. Both are matched with { exact: true }, mirroring dismissModal's identity
+   * check (:422). See references/state-variants.md.
+   */
+  state?: { present?: string; absent?: string };
 }
 
 /**
@@ -202,12 +213,14 @@ export function armApiWait(page: Page, waitForApi: string | RegExp): Promise<unk
  * pre-armed apiReady, else a post-goto waitForApi). That API wait does NOT replace the heading
  * assertion: whenever a heading is supplied it is asserted additively, so an API-satisfied-but-DOM-
  * broken page (the response returned but the view never painted) cannot certify identity on the API
- * signal alone. Server-rendered pages use the heading as their sole signal. Always assert the route
- * and that no spinner remains. Fail loudly — a wrong screenshot is worse than no screenshot.
+ * signal alone. Server-rendered pages use the heading as their sole signal. A state-variant marker
+ * (`state.present`) is an equivalent, third readiness+identity signal for a screen whose normal
+ * heading may be absent (empty/error/denied) — see references/state-variants.md. Always assert the
+ * route and that no spinner remains. Fail loudly — a wrong screenshot is worse than no screenshot.
  */
 export async function assertIdentity(
   page: Page,
-  { route, heading, waitForApi, apiReady }: IdentityOptions,
+  { route, heading, waitForApi, apiReady, state }: IdentityOptions,
 ): Promise<void> {
   if (apiReady !== undefined) {
     // Pre-armed before navigation — no post-goto race.
@@ -215,8 +228,20 @@ export async function assertIdentity(
   } else if (waitForApi !== undefined) {
     // Legacy post-goto path (caller did not pre-arm): same predicate as armApiWait, registered now.
     await armApiWait(page, waitForApi);
-  } else if (heading === undefined) {
-    throw new Error('assertIdentity needs apiReady, waitForApi (client-rendered), or heading (server-rendered).');
+  } else if (heading === undefined && state?.present === undefined) {
+    throw new Error(
+      'assertIdentity needs apiReady, waitForApi (client-rendered), heading (server-rendered), or ' +
+        'state.present (a state-variant marker for an empty/error/denied screen).',
+    );
+  }
+
+  // A state-variant marker (present) is a first-class READINESS + identity anchor, waited visible
+  // EARLY — before the heading assertion — so an empty/error/denied screen whose normal heading is
+  // absent, and whose data-load may return a non-2xx (which armApiWait never accepts), still has a
+  // valid readiness signal. { exact: true } mirrors dismissModal's identity check (:422) so a
+  // substring/case-insensitive match cannot false-trip. See references/state-variants.md.
+  if (state?.present !== undefined) {
+    await page.getByText(state.present, { exact: true }).first().waitFor({ state: 'visible' });
   }
 
   // Whenever a heading is supplied, assert the DOM actually rendered it — additively, regardless of
@@ -231,6 +256,19 @@ export async function assertIdentity(
   const url = page.url();
   if (!urlMatchesTarget(url, route)) {
     throw new Error(`Page identity failed: expected route ${String(route)}, got ${url}`);
+  }
+
+  // A state-variant WRONG-state marker must be absent — a reverted staged precondition (e.g. the
+  // empty state was restored to populated before a re-capture) has the same route and may still lack
+  // a heading momentarily, so it would otherwise pass identity and silently ship the wrong-but-real
+  // state (the staged-state rule in page-identity.md). { exact: true } as above.
+  if (state?.absent !== undefined) {
+    const wrongStateVisible = await page.getByText(state.absent, { exact: true }).filter({ visible: true }).count();
+    if (wrongStateVisible > 0) {
+      throw new Error(
+        `Page identity failed: wrong-state marker "${state.absent}" is unexpectedly visible on ${url}.`,
+      );
+    }
   }
 
   // No spinner/skeleton/loading overlay covering the capture area. Assert that NONE of the union

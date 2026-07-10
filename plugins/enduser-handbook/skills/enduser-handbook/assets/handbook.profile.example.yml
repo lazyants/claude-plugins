@@ -30,6 +30,9 @@ capture:
   manifest_path: "tests/handbook/manifest.ts"
   capture_specs_dir: "tests/handbook"
 
+  # Per-role re-audit (references/surface-diff.md) reuses these labels as its role vocabulary; each
+  # role's storageState fixture path lives in the capture spec (reaudit.example.spec.ts), not here —
+  # storage-state paths are spec-level per manifest-discipline.md.
   auth_role_enum: [admin, internal, external]
   role_flags:                       # optional per-role permission gates beyond plain role assignment
     admin:

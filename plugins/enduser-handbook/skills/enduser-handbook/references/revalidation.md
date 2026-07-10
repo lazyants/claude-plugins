@@ -61,3 +61,5 @@ This is why the carve-out is not a loophole: it skips the review only where the
 re-derived surface is provably identical to what was already blessed. Any
 deviation that a reviewer would want to see is, by definition, a material delta
 that emits a delta manifest and halts.
+
+For a role-axis diff of the interactive surface — how it differs between roles rather than over time — see [surface-diff.md](surface-diff.md).

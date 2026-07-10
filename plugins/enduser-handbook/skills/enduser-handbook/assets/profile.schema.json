@@ -1,0 +1,227 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$comment": "NORMATIVE profile contract for enduser-handbook — see references/profile-validation.md. JSON carries no comment syntax, so this file bears no reference-impl banner; it IS the normative data. Root additionalProperties stays open so sibling v1.2.0 packages (#67/#73) can add profile keys without a lockstep schema update — unknown-key warnings are procedure-driven, never a hard reject.",
+  "title": "enduser-handbook profile.yml",
+  "type": "object",
+  "additionalProperties": true,
+  "required": [
+    "profile_version",
+    "language",
+    "audience",
+    "stack",
+    "capture",
+    "publish",
+    "diataxis",
+    "style_guide",
+    "glossary"
+  ],
+  "properties": {
+    "profile_version": {
+      "const": 1,
+      "description": "Base skill refuses unknown versions. See references/profile-validation.md."
+    },
+    "language": {
+      "type": "object",
+      "required": ["code", "register", "date_format", "decimal_separator", "currency_symbol"],
+      "properties": {
+        "code": {
+          "type": "string",
+          "pattern": "^[a-z]{2}$",
+          "description": "ISO-639-1."
+        },
+        "register": {
+          "type": "string",
+          "description": "Open-ended (e.g. formal_Sie, formal_vous, informal_du, informal_tu, formal_you, informal_you, …) — deliberately not a closed enum."
+        },
+        "date_format": { "type": "string" },
+        "decimal_separator": { "type": "string" },
+        "currency_symbol": { "type": "string" }
+      }
+    },
+    "audience": {
+      "type": "object",
+      "required": ["persona", "description"],
+      "properties": {
+        "persona": { "type": "string" },
+        "description": { "type": "string" }
+      }
+    },
+    "stack": {
+      "type": "object",
+      "required": ["backend", "frontend", "surface"],
+      "properties": {
+        "backend": {
+          "type": "object",
+          "required": ["type"],
+          "properties": {
+            "type": {
+              "type": "string",
+              "enum": ["laravel", "django", "rails", "nextjs", "fastapi", "spring", "none"]
+            },
+            "route_globs": {
+              "type": "array",
+              "items": { "type": "string" }
+            },
+            "api_url_prefix": { "type": "string" }
+          }
+        },
+        "frontend": {
+          "type": "object",
+          "required": ["type"],
+          "properties": {
+            "type": {
+              "type": "string",
+              "enum": ["vue", "react", "svelte", "angular", "none"]
+            },
+            "page_globs": {
+              "type": "array",
+              "items": { "type": "string" }
+            }
+          }
+        },
+        "surface": {
+          "type": "string",
+          "enum": ["web_ui", "mobile_app", "cli", "api"]
+        }
+      }
+    },
+    "capture": {
+      "type": "object",
+      "required": [
+        "engine",
+        "manifest_path",
+        "capture_specs_dir",
+        "auth_role_enum",
+        "command",
+        "locale",
+        "output_dir",
+        "page_identity_signal"
+      ],
+      "properties": {
+        "engine": {
+          "type": "string",
+          "enum": ["playwright", "cypress", "puppeteer", "manual"]
+        },
+        "manifest_path": { "type": "string" },
+        "capture_specs_dir": { "type": "string" },
+        "auth_role_enum": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Project-defined role names — not a fixed enum."
+        },
+        "role_flags": {
+          "type": "object",
+          "description": "Optional per-role permission gates beyond plain role assignment.",
+          "additionalProperties": {
+            "type": "array",
+            "items": { "type": "string" }
+          }
+        },
+        "command": { "type": "string" },
+        "locale": { "type": "string" },
+        "output_dir": { "type": "string" },
+        "page_identity_signal": {
+          "type": "string",
+          "description": "May be an empty string; the principle in references/page-identity.md still applies."
+        },
+        "live_action_examples": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "pii_categories": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    },
+    "publish": {
+      "type": "object",
+      "required": [
+        "target",
+        "chapters_dir",
+        "index_file",
+        "glossary_dir",
+        "glossary_seed",
+        "frontmatter_required",
+        "section_labels",
+        "wikilinks"
+      ],
+      "properties": {
+        "target": {
+          "type": "string",
+          "enum": ["obsidian_vault", "static_md"],
+          "description": "Shipped adapters only — see references/publish-targets/. Additional targets are not yet implemented."
+        },
+        "chapters_dir": { "type": "string" },
+        "index_file": { "type": "string" },
+        "glossary_dir": { "type": "string" },
+        "glossary_seed": { "type": "string" },
+        "frontmatter_required": { "type": "boolean" },
+        "section_labels": {
+          "type": "object",
+          "description": "Localized literal strings the chapter template substitutes — see assets/chapter-template.md.",
+          "required": ["prerequisites", "related"],
+          "additionalProperties": true,
+          "properties": {
+            "prerequisites": { "type": "string" },
+            "related": { "type": "string" }
+          }
+        },
+        "wikilinks": { "type": "boolean" }
+      }
+    },
+    "diataxis": {
+      "type": "object",
+      "required": ["quadrants_in_use"],
+      "properties": {
+        "quadrants_in_use": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": ["tutorials", "howtos", "reference", "explanation"]
+          },
+          "minItems": 1
+        }
+      }
+    },
+    "style_guide": {
+      "type": "object",
+      "required": ["source"],
+      "properties": {
+        "source": {
+          "type": ["string", "null"]
+        },
+        "inline": {
+          "type": "object",
+          "description": "Minimal fallback ONLY, used when source is null. Deliberately closed to exactly these 4 fields — see references/profile-validation.md, \"stays minimal\".",
+          "additionalProperties": false,
+          "required": ["sentence_style", "address_form_examples", "ui_label_rule", "do_donts"],
+          "properties": {
+            "sentence_style": { "type": "string" },
+            "address_form_examples": {
+              "type": "array",
+              "items": { "type": "string" }
+            },
+            "ui_label_rule": { "type": "string" },
+            "do_donts": {
+              "type": "array",
+              "items": { "type": "string" }
+            }
+          }
+        }
+      }
+    },
+    "glossary": {
+      "type": "object",
+      "required": ["canonical_term_language", "english_code_required", "synonym_field_name"],
+      "properties": {
+        "canonical_term_language": {
+          "type": "string",
+          "pattern": "^[a-z]{2}$"
+        },
+        "english_code_required": { "type": "boolean" },
+        "synonym_field_name": { "type": "string" }
+      }
+    }
+  }
+}

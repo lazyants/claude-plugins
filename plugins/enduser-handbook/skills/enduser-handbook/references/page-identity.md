@@ -133,7 +133,9 @@ representative of what a reader will see.
   silently ships the wrong-but-real state. Pair every staged precondition with an explicit
   assertion that it holds — assert the staged-state marker is **present** and/or the wrong-state
   marker is **absent** — before the shot, so a missed precondition fails the run instead of
-  shipping the wrong screen.
+  shipping the wrong screen. The empty / error / permission-denied state variants are the
+  canonical case this rule exists for — see `references/state-variants.md` for the full
+  methodology and the `state` option on `assertIdentity`.
 - **For long unpaginated lists, capture the viewport, not the full element.** A full-element
   screenshot of a list that renders all rows (no pagination) produces an unusably tall image —
   a 100-row table becomes a strip nobody can read. Capture the **viewport** (the visible

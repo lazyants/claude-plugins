@@ -20,9 +20,9 @@ The **running UI is the primary source**; the code only tells you which features
 
 Read `.claude/handbook/profile.yml` (relative to the project root, i.e. the current working directory at invocation time).
 
-- If the file does not exist, you halt with: `Missing .claude/handbook/profile.yml. Copy the example at ${plugin_path}/skills/enduser-handbook/assets/handbook.profile.example.yml, edit values for this project, and re-run.`
-- If `profile_version` is unknown, you halt with a migration hint naming the supported versions.
-- If a key inside a known `profile_version` is unknown, you emit a one-line warning naming the key and continue.
+- If the file does not exist, you halt with: `Missing .claude/handbook/profile.yml. Copy the example at ${plugin_path}/skills/enduser-handbook/assets/handbook.profile.example.yml, edit values for this project, and re-run.` Or run `/scaffold-profile` to generate one interactively.
+- Validate `profile_version` against the supported set per [references/profile-validation.md](references/profile-validation.md) — a read-only procedure, plus an **optional** `node` helper (`assets/lib/profile-version.mjs`) for node-present / authoring contexts; Step 0 does not require `node`. Unsupported, missing, duplicate, or malformed → halt with the exact message in that procedure. Non-interactive runs (/loop, scheduled) get an actionable halt, never a silent skip.
+- Validate the profile's structure (types, enums, required fields) against [assets/profile.schema.json](assets/profile.schema.json) per that same procedure. An unknown top-level key, or an unknown `style_guide.inline` key, earns a one-line warning naming the key and you continue. A required field missing from a known object, or a wrong enum/type at a known key, halts with the field named.
 
 ## Step 0a — Verify the style guide
 
@@ -63,7 +63,7 @@ You classify every end-user-facing function as read-only · mutating-reversible 
 
 ### R4 — Coverage matrix audit
 
-Before publishing, you build a coverage matrix (function → side-effect → documented | disclosed) and confirm no row is missing. "Out of scope" means written for the reader, not silently dropped. See [references/completeness-gate.md](references/completeness-gate.md).
+Before publishing, you build a coverage matrix (function → side-effect → documented | disclosed) and confirm no row is missing. "Out of scope" means written for the reader, not silently dropped. See [references/completeness-gate.md](references/completeness-gate.md). You also track per-page **state coverage** — populated (always required) / empty / error / denied — as documented | disclosed | n/a; see the per-page state-coverage checklist in [references/completeness-gate.md](references/completeness-gate.md) and [references/state-variants.md](references/state-variants.md).
 
 ### R5 — Live / irreversible safety
 
@@ -89,6 +89,8 @@ Then you enumerate the interactive surface within the page — root and componen
 
 You record the chapter entry in the capture manifest per [references/manifest-discipline.md](references/manifest-discipline.md). The manifest must have a step for every capturable end-user-facing overlay — not just top-level page states.
 
+Optional per-role re-audit (diff). When `capture.auth_role_enum` lists more than one role and you want to see how the interactive surface differs between roles, run the enumeration once per role and diff the results — the single-role path above stays the default. Each role runs against its own seeded, hermetic fixture so the diff reflects permission-driven surface differences, not data-state ones; the diff keys on stable structural identity (tag / role / name / data-testid), never per-role label/class fields. See [references/surface-diff.md](references/surface-diff.md); [assets/reaudit.example.spec.ts](assets/reaudit.example.spec.ts) is a non-normative reference implementation.
+
 ### W2 — Capture screenshots
 
 You drive the capture using `capture.engine` and run `capture.command` exactly as written in the profile. The harness runs container-only per [references/container-isolation.md](references/container-isolation.md) — you never run the engine on the host.
@@ -96,6 +98,8 @@ You drive the capture using `capture.engine` and run `capture.command` exactly a
 After navigation to each page, you apply: **{{capture.page_identity_signal}}**. This sentence is the profile's engine-aware recipe; you translate it into the appropriate engine API call given `capture.engine` and `capture.command`. The principle (assert page identity before screenshot, not just URL) lives in [references/page-identity.md](references/page-identity.md) and applies even if the field is empty.
 
 You write captured assets to `capture.output_dir`. The capture pins the sandbox locale to `capture.locale` (a full POSIX locale such as `de_DE.UTF-8`), which drives both process locale and UI language in the running app; the bare content-language code lives in `language.code`. Live / irreversible / PII constraints from R5 and R6 bind every step — see [references/capture-safety.md](references/capture-safety.md). The reusable capture-spec helper contract — fail-closed request guard, page-identity assertion, reproducible mask + leak-assert, safe dialog dismiss — lives in [references/capture-spec-helpers.md](references/capture-spec-helpers.md).
+
+Where a chapter's manifest entry declares `states` beyond the default populated capture, you capture each declared variant (empty / error / denied) as a **real** app state — never a synthesized response — anchored by the fail-closed `state` marker on `assertIdentity`, per [references/state-variants.md](references/state-variants.md). Per-engine recipes for the `capture.engine` values — the idiomatic `capture.page_identity_signal` and a representative `capture.command` for playwright, cypress, puppeteer, and manual — live in [references/capture-engines.md](references/capture-engines.md).
 
 ### W3 — Author the chapter
 

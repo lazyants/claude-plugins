@@ -326,7 +326,15 @@ for f in \
   "$ASSETS/lib/identity-match.mjs" \
   "$ASSETS/lib/identity-match.d.mts" \
   "$ASSETS/lib/graphql-read-classifier.mjs" \
-  "$ASSETS/lib/graphql-read-classifier.d.mts"; do
+  "$ASSETS/lib/graphql-read-classifier.d.mts" \
+  "$ASSETS/lib/profile-version.mjs" \
+  "$ASSETS/lib/profile-version.d.mts" \
+  "$REFS/profile-validation.md" \
+  "$REFS/capture-engines.md" \
+  "$ASSETS/lib/surface-diff.mjs" \
+  "$ASSETS/lib/surface-diff.d.mts" \
+  "$ASSETS/reaudit.example.spec.ts" \
+  "$REFS/surface-diff.md"; do
   base="$(basename "$f")"
   if [ ! -f "$f" ]; then bad "normative banner: $base does not exist yet"; continue; fi
   has "normative banner present: $base" "$NORMATIVE" "$f"
@@ -341,7 +349,7 @@ fi
 
 echo "== executable unit tests (node --test) =="
 if command -v node >/dev/null 2>&1; then
-  for t in control-inventory.test.mjs capture-guard-policy.test.mjs identity-match.test.mjs graphql-read-classifier.test.mjs; do
+  for t in control-inventory.test.mjs capture-guard-policy.test.mjs identity-match.test.mjs graphql-read-classifier.test.mjs profile-version.test.mjs surface-diff.test.mjs; do
     if node --test "$TEST_DIR/$t" >/dev/null 2>&1; then
       ok "$t passes under node --test"
     else
@@ -353,7 +361,7 @@ else
 fi
 
 echo "== optional local TypeScript syntax check =="
-TS_FILES="$ASSETS/surface-audit.playwright.ts $ASSETS/capture-helpers.playwright.ts $ASSETS/capture.example.spec.ts"
+TS_FILES="$ASSETS/surface-audit.playwright.ts $ASSETS/capture-helpers.playwright.ts $ASSETS/capture.example.spec.ts $ASSETS/reaudit.example.spec.ts"
 if command -v esbuild >/dev/null 2>&1; then
   ts_ok=1
   for f in $TS_FILES; do
@@ -478,6 +486,78 @@ for f in \
   hasnt "no residual fork-it wording (prose): $(basename "$f")" 'fork it for'    "$f"
 done
 has "capture-spec-helpers: read classifier is documented GraphQL-only" 'is GraphQL-only' "$REFS/capture-spec-helpers.md"
+
+echo "== profile validator (#64) =="
+SCHEMA="$ASSETS/profile.schema.json"
+PV="$ASSETS/lib/profile-version.mjs"
+PVMTS="$ASSETS/lib/profile-version.d.mts"
+PVALID="$REFS/profile-validation.md"
+[ -f "$SCHEMA" ] && ok "profile.schema.json exists" || bad "profile.schema.json missing"
+has "profile-schema: pins profile_version const 1"          '"const": 1'                    "$SCHEMA"
+has "profile-schema: inline closed to its 4 fields"         '"additionalProperties": false'  "$SCHEMA"
+has "profile-schema: root stays open for sibling packages"  '"additionalProperties": true'   "$SCHEMA"
+has "profile-schema: normative provenance note"             'NORMATIVE profile contract'     "$SCHEMA"
+for k in '"profile_version"' '"language"' '"audience"' '"stack"' '"capture"' \
+         '"publish"' '"diataxis"' '"style_guide"' '"glossary"'; do
+  has "profile-schema: defines top-level key $k" "$k" "$SCHEMA"
+done
+has   "profile-schema: backend.type enum"                 '"laravel"'   "$SCHEMA"
+has   "profile-schema: capture.engine enum"               '"playwright"' "$SCHEMA"
+has   "profile-schema: publish.target shipped set"        '"static_md"' "$SCHEMA"
+hasnt "profile-schema: no fabricated future publish target" '"confluence"' "$SCHEMA"
+has "profile-version: exports readProfileVersion"         'export function readProfileVersion' "$PV"
+has "profile-version: exports SUPPORTED_PROFILE_VERSIONS" 'SUPPORTED_PROFILE_VERSIONS'         "$PV"
+has "profile-version: exports MIGRATIONS extension point" 'export const MIGRATIONS'            "$PV"
+has "profile-version: optional CLI tail present"          'import.meta.url'                    "$PV"
+has "profile-version.d.mts: declares ProfileVersionVerdict" 'ProfileVersionVerdict'             "$PVMTS"
+has "profile-validation: supported-version list"          'Supported profile_version'          "$PVALID"
+has "profile-validation: no fabricated v2 migration"      'no cross-version migration'          "$PVALID"
+has "profile-validation: inline-stays-minimal decision"   'stays minimal'                      "$PVALID"
+has "profile-validation: node helper is optional"         'optional'                           "$PVALID"
+has "profile-validation: honest invariant quoted"         'pre-flight version reader, not a YAML validator' "$PVALID"
+has "skill: Step 0 validates against the schema"          'profile.schema.json'                "$SKILL"
+has "skill: Step 0 points at the validation procedure"    'profile-validation.md'              "$SKILL"
+
+echo "== scaffold-profile command (#66) =="
+CMD="$PLUGIN_DIR/commands/scaffold-profile.md"
+STUB="$ASSETS/style-guide.example.md"
+if [ -f "$CMD" ]; then ok "scaffold-profile command exists"; else bad "scaffold-profile command missing"; fi
+hasnt "scaffold-profile: normative (no reference-impl banner)" 'non-normative reference implementation' "$CMD"
+has "scaffold-profile: reads the canonical profile example" 'handbook.profile.example.yml' "$CMD"
+has "scaffold-profile: reads the style-guide stub template" 'style-guide.example.md' "$CMD"
+has "scaffold-profile: writes profile.yml"      '.claude/handbook/profile.yml'    "$CMD"
+has "scaffold-profile: writes style-guide stub" '.claude/handbook/style-guide.md' "$CMD"
+has "scaffold-profile: refuses to clobber existing files" 'already exists' "$CMD"
+has "scaffold-profile: references the Step 0 existence gates" 'Step 0' "$CMD"
+has "scaffold-profile: allowed-tools is the safe set" 'allowed-tools: Read, Glob, Grep, Write, Edit, AskUserQuestion' "$CMD"
+has "scaffold-profile: static target forces wikilinks false" 'wikilinks: false' "$CMD"
+has "scaffold-profile: syncs capture.command locale (LC_ALL)" 'LC_ALL' "$CMD"
+has "scaffold-profile: disable-model-invocation set" 'disable-model-invocation: true' "$CMD"
+has_ci "scaffold-profile: detect-then-confirm discipline" 'confirm' "$CMD"
+if [ -f "$STUB" ]; then ok "style-guide.example stub exists"; else bad "style-guide.example stub missing"; fi
+has_ci "style-guide stub: covers register/address form" 'register' "$STUB"
+
+echo "== state-variant capture (#67 CORE) =="
+has "capture-helpers: IdentityOptions gains a state-variant marker" 'state?: { present' "$CH"
+has "capture-helpers: assertIdentity supports a state-variant marker" 'wrong-state marker' "$CH"
+if [ -f "$REFS/state-variants.md" ]; then ok "state-variants.md exists"; else bad "state-variants.md missing"; fi
+has "capture-manifest example: optional states field for variant intent" 'states:' "$ASSETS/capture-manifest.example.yml"
+
+echo "== capture-engine docs (#70) =="
+if [ -f "$REFS/capture-engines.md" ]; then ok "capture-engines.md exists"; else bad "capture-engines.md missing"; fi
+has "capture-engines: illustrative-not-tested banner" 'illustrative recipes, not tested contracts' "$REFS/capture-engines.md"
+has "capture-engines: Cypress resourceType deprecation" '14.0.0' "$REFS/capture-engines.md"
+
+echo "== surface-diff (per-role re-audit, #73) =="
+SD="$ASSETS/lib/surface-diff.mjs"
+SDDOC="$REFS/surface-diff.md"
+has "surface-diff: exports diffSurfaces"  'export function diffSurfaces'  "$SD"
+has "surface-diff: exports structuralKey" 'export function structuralKey' "$SD"
+has "surface-diff: structural key order documented" '[tag, role, name, testId]' "$SD"
+has "surface-diff.md: single-role remains the default"   'single-role' "$SDDOC"
+has "surface-diff.md: documents the structural diff key"  'tag / role / name / data-testid' "$SDDOC"
+hasnt "surface-diff: no import type in the .mjs" 'import type' "$SD"
+has "surface-diff: imports matrixLabel from control-inventory" "from './control-inventory.mjs'" "$SD"
 
 TOTAL=$((PASS + FAIL))
 echo "----"
