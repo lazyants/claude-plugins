@@ -55,17 +55,25 @@ accepted here -- see --verify-merged]
 M.json]
     Disk-INDEPENDENT verification that a set of already-processed
     fragments is correctly reflected in the CURRENT canon.json -- no
-    write, fresh reads only. Per fragment item, by disposition: an
-    'accepted' item must equal `canon["entries"][source_form]` exactly; a
-    'review_queue' item must either still be present verbatim in
-    `canon["review_queue"]`, OR its source_form must now be a key in
-    `canon["entries"]` (accept-supersedes -- a later batch's ACCEPTED
-    resolution for the same name is not a failure, never reported
-    missing). When --expect-source-forms-file is given, additionally
-    asserts every manifest name is covered by SOME fragment item. Reports
-    `{"verified": true}` or `{"verified": false, "missing": [...]}` -- the
-    exact relay shape the glossary-pass Workflow's disk-verify agent
-    (`CANON_VERIFY_SCHEMA`) returns.
+    write, fresh reads only. Also runs Pass 2 (`_validate_whole_file`,
+    the same whole-file schema validation plus the entries{}/
+    review_queue[] overlap invariant that every write path already runs)
+    against the freshly re-read canon.json itself -- this is the
+    Workflow's own actual trusted final gate, so a hand-corrupted or
+    otherwise not-merged-through-`_merge_batch` canon.json must be caught
+    here too, not only by `--batch`/`--merge-batches`' pre-write checks.
+    Any Pass-2 failure is folded into `missing` (never raises past this
+    function -- same as every other failure this mode reports). Per
+    fragment item, by disposition: an 'accepted' item must equal
+    `canon["entries"][source_form]` exactly; a 'review_queue' item must
+    either still be present verbatim in `canon["review_queue"]`, OR its
+    source_form must now be a key in `canon["entries"]` (accept-supersedes
+    -- a later batch's ACCEPTED resolution for the same name is not a
+    failure, never reported missing). When --expect-source-forms-file is
+    given, additionally asserts every manifest name is covered by SOME
+    fragment item. Reports `{"verified": true}` or `{"verified": false,
+    "missing": [...]}` -- the exact relay shape the glossary-pass
+    Workflow's disk-verify agent (`CANON_VERIFY_SCHEMA`) returns.
 
 --batch PATH (legacy, single-fragment merge -- KEPT for existing callers)
     The pre-1.2.0 merge path: Pass 1 + offline backstop on the one
@@ -623,6 +631,35 @@ def _merge_batch(canon: dict, batch: list) -> dict:
 # ---------------------------------------------------------------------------
 
 
+def _assert_no_entries_review_queue_overlap(canon: dict) -> None:
+    """Whole-file invariant (issue #102): no source_form may be both a key
+    in entries{} AND appear as a review_queue[] item's source_form -- this
+    module's own stated invariant ("a name that is now resolved and
+    accepted no longer belongs in review_queue", see _merge_batch's
+    accepted-item branch). _merge_batch's own review_queue-append guard
+    (`if source_form in entries: continue`) keeps this true for anything
+    merged through this script, but a hand-corrupted or otherwise
+    not-merged-through-_merge_batch canon.json is not itself schema-
+    constrained against it -- a cross-key constraint spanning two top-level
+    collections is awkward to express as a JSON-schema `not`-clause, so it
+    is checked here directly instead.
+    """
+    entries_forms = set(canon.get("entries", {}).keys())
+    queued_forms = {
+        item.get("source_form")
+        for item in canon.get("review_queue", [])
+        if isinstance(item, dict) and isinstance(item.get("source_form"), str)
+    }
+    overlap = sorted(entries_forms & queued_forms)
+    if overlap:
+        raise CanonValidationError(
+            "canon.json failed whole-file invariant: source_form(s) present "
+            "in both entries{} and review_queue[]: "
+            + ", ".join(repr(o) for o in overlap),
+            offending=overlap,
+        )
+
+
 def _validate_whole_file(canon: dict, registry: "Registry") -> None:
     validator = _validator_for_schema_file("canon-file.schema.json", registry)
     errors = _sorted_errors(validator, canon)
@@ -630,6 +667,7 @@ def _validate_whole_file(canon: dict, registry: "Registry") -> None:
         raise CanonValidationError(
             f"canon.json failed whole-file schema validation: {_format_errors(errors)}"
         )
+    _assert_no_entries_review_queue_overlap(canon)
 
 
 # ---------------------------------------------------------------------------
@@ -785,6 +823,11 @@ def run_verify_merged(
     canon = _load_canon(canon_path)
 
     missing = []
+    try:
+        _validate_whole_file(canon, registry)
+    except CanonValidationError as e:
+        missing.append(str(e))
+
     covered_forms = set()
     for batch_path in batch_paths:
         batch = _load_batch(batch_path)

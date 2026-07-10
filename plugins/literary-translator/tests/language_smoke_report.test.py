@@ -38,6 +38,7 @@ path" + "Zero-candidate case" + "particle_smoke_cases is DECOUPLED" +
   - elision_test_cases's conditional requirement, driven by the in-report
     has_elision field copied verbatim from the resolved particle_config file.
 """
+import importlib.util
 import json
 import re
 import shutil
@@ -518,6 +519,116 @@ def test_extract_candidate_names_strips_trailing_apostrophe_regression(tmp_path,
     assert all(c["passed"] for c in report["elision_test_cases"])
 
 
+def test_sentinel_does_not_fuse_into_candidate_extraction_regression(tmp_path, root):
+    # Issue #89: block plain_text carries literal ⟦FNREF_N⟧ / ⟦VERSE_...⟧
+    # sentinels (see extract.py.template) that must be stripped before
+    # candidate extraction -- otherwise a sentinel fuses into the adjacent
+    # name token (e.g. "Bouchard⟦FNREF_5⟧" -> bogus candidate
+    # "Bouchard FNREF"), which flips the real checked name to found:false
+    # and false-fails the W3 gate.
+    manifest = build_manifest(["Bouchard⟦FNREF_5⟧ said nothing."])
+    proc, report, _ = run_smoke(
+        root, tmp_path, manifest, NO_PARTICLES_NO_ELISION,
+        checked_names=["Bouchard"],
+        low_name_density_confirmed=True,
+        no_particles_confirmed=True,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert report is not None
+    assert report["candidate_names_total"] == 1
+    by_name = {c["name"]: c["found"] for c in report["checked_names"]}
+    assert by_name == {"Bouchard": True}
+    assert report["pass"] is True
+
+
+def test_sentinel_fused_candidate_is_never_produced_regression(tmp_path, root):
+    # Inverse of the above: the bogus fused candidate "Bouchard FNREF" must
+    # never be produced once sentinels are stripped, so explicitly checking
+    # for that exact string must come back not-found.
+    manifest = build_manifest(["Bouchard⟦FNREF_5⟧ said nothing."])
+    proc, report, _ = run_smoke(
+        root, tmp_path, manifest, NO_PARTICLES_NO_ELISION,
+        checked_names=["Bouchard FNREF"],
+        low_name_density_confirmed=True,
+        no_particles_confirmed=True,
+    )
+    assert proc.returncode == 1
+    assert report is not None
+    by_name = {c["name"]: c["found"] for c in report["checked_names"]}
+    assert by_name == {"Bouchard FNREF": False}
+    assert report["pass"] is False
+
+
+def test_sentinel_heavy_segment_does_not_win_density_selection_regression(tmp_path, root):
+    # Issue #89 (density_score half): density_score() must also strip
+    # sentinels before scoring, or a segment stuffed with sentinel markers
+    # (each contributing a spurious upper-initial TOKEN_RE match -- the
+    # "FNREF" in ⟦FNREF_N⟧ -- with no matching increase in word count) can
+    # out-score a segment with genuinely dense real capitalized content,
+    # flipping WHICH segment gets selected as the "high_density" sample.
+    # N=5 stratified layout mirrors
+    # test_stratified_selection_picks_first_middle_late_and_highest_density_anchor:
+    # first=seg0, middle=seg2, late=seg4, remaining={seg1, seg3} compete.
+    legit = "Bertrand Charlotte Desmond Eleanor Frederick gathered together for a meeting."
+    sentinel_heavy = (
+        "the plain filler text here has almost no capital letters at all "
+        "really truly nothing special whatsoever today"
+        + "".join(f"⟦FNREF_{i}⟧" for i in range(1, 21))
+    )
+    body_texts = [
+        "Anna opened the door slowly.",       # seg0 -- first
+        legit,                                 # seg1 -- remaining candidate A (legit high density)
+        "Middle passage continues onward.",    # seg2 -- middle
+        sentinel_heavy,                        # seg3 -- remaining candidate B (sentinel trap)
+        "Zoe closed the final chapter today.", # seg4 -- late
+    ]
+    manifest = build_manifest(body_texts)
+    checked = ["Anna", "Bertrand Charlotte Desmond Eleanor Frederick", "Middle", "Zoe"]
+    proc, report, _ = run_smoke(
+        root, tmp_path, manifest, NO_PARTICLES_NO_ELISION,
+        checked_names=checked, low_name_density_confirmed=True, no_particles_confirmed=True,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert report is not None
+    used = report["source_sample_selection"]["segments_used"]
+    high_density = [s["segment_id"] for s in used if s["anchor"] == "high_density"]
+    assert high_density == ["seg1"]
+    assert all(s["segment_id"] != "seg3" for s in used)
+    assert report["candidate_names_total"] == 4
+    assert report["pass"] is True
+
+
+def test_sentinel_stripped_before_word_cap_regression(tmp_path, root):
+    # Issue #89 follow-up (codex-rescue finding): stripping sentinels only
+    # at the candidate-extraction call site happens too LATE relative to
+    # cap_words() -- a sentinel occupying a "word" slot in the RAW
+    # (unstripped) text consumes part of the SAMPLE_WORD_CAP (750) budget
+    # before it's ever stripped, so a legitimate name sitting just past the
+    # cap boundary can be silently dropped. One sentinel + 749 ordinary
+    # filler words + "Bouchard" as the 751st raw word: capping-before-
+    # stripping drops Bouchard entirely (the sentinel occupies a real word
+    # slot pre-strip); stripping-before-capping correctly retains it (the
+    # sentinel takes no real word budget once it's gone).
+    filler = " ".join(f"word{i}" for i in range(749))
+    text = f"⟦VERSE_V001_deadbeef⟧ {filler} Bouchard"
+    manifest = build_manifest([text])
+    proc, report, _ = run_smoke(
+        root, tmp_path, manifest, NO_PARTICLES_NO_ELISION,
+        checked_names=["Bouchard"],
+        low_name_density_confirmed=True,
+        no_particles_confirmed=True,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert report is not None
+    assert report["candidate_names_total"] == 1
+    by_name = {c["name"]: c["found"] for c in report["checked_names"]}
+    assert by_name == {"Bouchard": True}
+    assert report["pass"] is True
+    # word_count must be exactly 750 (749 filler + Bouchard) -- proves the
+    # sentinel itself never occupied a word-cap slot at all.
+    assert report["source_sample_selection"]["word_count"] == 750
+
+
 def test_empty_sample_with_no_body_and_no_frontback_is_fatal(tmp_path, root):
     manifest = build_manifest([])  # no body segments, no frontback entries
     proc, report, _ = run_smoke(root, tmp_path, manifest, NO_PARTICLES_NO_ELISION)
@@ -995,6 +1106,70 @@ def test_report_matches_json_schema_on_success(tmp_path, root):
     assert proc.returncode == 0, proc.stderr
     schema = json.loads(SCHEMA_SRC.read_text(encoding="utf-8"))
     jsonschema.validate(instance=report, schema=schema)
+
+
+# ---------------------------------------------------------------------------
+# Issue #91 -- investigated and NOT fixed: widening ELISION_RE to also split
+# a sentence-initial CAPITALIZED elision (e.g. treating "L'Enclos" like
+# lowercase "d'Effiat") would collide with a deliberate, documented design
+# decision protecting fixed proper-noun spellings such as "D'Artagnan" /
+# "L'Aquila" (see assets/languages/README.md's it.json entry) -- those must
+# stay fused as a single token, not be split into an article + name. Loaded
+# via importlib (module under test lives outside any Python package) to
+# call extract_candidate_names() directly with a hand-built lang dict,
+# mirroring bootstrap_names.test.py's make_lang() pattern -- self-contained
+# so it doesn't depend on fr.json's shipped ELISION_RE staying lowercase-only.
+# ---------------------------------------------------------------------------
+
+def _load_language_smoke_report_module():
+    spec = importlib.util.spec_from_file_location(
+        "language_smoke_report_under_test", SCRIPT_SRC
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+_lsr = _load_language_smoke_report_module()
+
+
+def make_lang_dict(particles=(), stopwords=(), elision_pattern=None, has_elision=None):
+    """Build the same dict shape ``load_particle_config()`` returns, bypassing
+    the JSON file entirely, for a pure algorithm-level test."""
+    elision_re = re.compile(elision_pattern) if elision_pattern else None
+    if has_elision is None:
+        has_elision = elision_re is not None
+    return {
+        "raw_bytes": b"{}",
+        "particles": list(particles),
+        "particles_lower": {p.lower() for p in particles},
+        "stopwords": set(stopwords),
+        "has_elision": has_elision,
+        "elision_re": elision_re,
+    }
+
+
+def test_extract_candidate_names_keeps_fixed_capitalized_elision_fused_regression():
+    # ELISION_RE (FR_ELISION_RE above) matches ONLY a lowercase remnant +
+    # apostrophe + capitalized remainder ("d'Effiat", "l'Autriche") -- a
+    # sentence-initial or otherwise capitalized elided form ("D'Artagnan")
+    # never matches it (no re.IGNORECASE), so the whole raw apostrophe-
+    # joined token is appended as-is by the tokenizer's non-elided branch
+    # and, already starting with a capital, survives the is_upper_initial()
+    # gate intact as ONE fused candidate -- exactly the documented behavior
+    # this file's own tokenizer must preserve alongside bootstrap_names.py's.
+    lang = make_lang_dict(elision_pattern=FR_ELISION_RE)
+    produced = {
+        name
+        for name, _ in _lsr.extract_candidate_names(
+            "D'Artagnan arriva. Puis d'Effiat partit.", lang
+        )
+    }
+    assert "D'Artagnan" in produced
+    assert "Artagnan" not in produced
+    assert "Effiat" in produced
 
 
 if __name__ == "__main__":

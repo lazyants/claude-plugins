@@ -536,5 +536,74 @@ def test_verify_merged_research_mode_value_is_ignored(tmp_path):
     assert_verify_passed(offline_payload)
 
 
+# ===========================================================================
+# 7. Issue #102 hardening: --verify-merged is the Workflow's actual trusted
+#    final gate, so it must run Pass 2 (`_validate_whole_file` -- whole-file
+#    SCHEMA validation, e.g. canon-file.schema.json's unconditionally
+#    required generation_hashes, PLUS the entries{}/review_queue[] overlap
+#    invariant) against the freshly re-read canon.json itself, not just
+#    compare fragments against it item-by-item.
+# ===========================================================================
+
+
+def test_verify_merged_rejects_source_form_present_in_both_entries_and_review_queue(tmp_path):
+    # run_verify_merged calls the full `_validate_whole_file` (schema +
+    # overlap invariant) against the freshly re-read canon.json. The
+    # fragment here claims "Ivan" as ACCEPTED with a shape that matches
+    # canon.json's entries{} value EXACTLY, so `_verify_merged_item`'s own
+    # per-item check passes clean for it -- isolating that the failure
+    # below comes only from `_validate_whole_file`'s overlap invariant, not
+    # the pre-existing per-item comparison logic.
+    accepted_item = accepted_batch_item(
+        "Ivan", canonical_target_form="Ivan", basis="transliterated", confidence="high"
+    )
+    root = make_durable_root(tmp_path)
+    write_canon(
+        root,
+        canon_file_doc(
+            entries={"Ivan": entry_for_accepted(accepted_item)},
+            review_queue=[queued_batch_item("Ivan", note="needs a human call")],
+        ),
+    )
+    frag = write_fragment(root, [accepted_item])
+
+    proc = run_verify_merged(root, "live", [frag])
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    payload = parse_stdout(proc)
+    assert payload["verified"] is False
+    assert any("Ivan" in m for m in payload["missing"]), payload["missing"]
+
+
+def test_verify_merged_rejects_canon_json_missing_required_generation_hashes(tmp_path):
+    # Codex-rescue follow-up regression (#102): before this fix,
+    # run_verify_merged only ran the narrower entries{}/review_queue[]
+    # overlap check, never the full canon-file.schema.json Pass 2 -- so a
+    # hand-corrupted canon.json missing the unconditionally-required
+    # generation_hashes field (or either of its two required sub-fields)
+    # still returned {"verified": true, "missing": []} as long as every
+    # fragment's own item-by-item comparison happened to pass. The fragment
+    # here matches entries{} EXACTLY (same isolation technique as the test
+    # above), so the only thing that can catch the missing generation_hashes
+    # is the whole-file schema validation half of `_validate_whole_file`.
+    accepted_item = accepted_batch_item(
+        "Guerin", canonical_target_form="Gerin", basis="transliterated", confidence="medium"
+    )
+    root = make_durable_root(tmp_path)
+    write_canon(
+        root,
+        canon_file_doc(
+            entries={"Guerin": entry_for_accepted(accepted_item)},
+            generation_hashes=None,  # canon-file.schema.json requires this key
+        ),
+    )
+    frag = write_fragment(root, [accepted_item])
+
+    proc = run_verify_merged(root, "live", [frag])
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    payload = parse_stdout(proc)
+    assert payload["verified"] is False
+    assert any("generation_hashes" in m for m in payload["missing"]), payload["missing"]
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))

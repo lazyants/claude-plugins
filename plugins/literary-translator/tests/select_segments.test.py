@@ -686,5 +686,53 @@ def test_default_run_fatals_on_empty_segs_unless_allow_empty(tmp_path):
     assert payload2["excluded_only_segs"] == []
 
 
+# ---------------------------------------------------------------------------
+# 5. Regression: the blocked_needs_regeneration hint for derivation_bundle_hash
+#    must name the step that actually re-stamps it (the W3 glossary-pass
+#    merge), not segpack.py -- segpack.py only ever copies the hash verbatim
+#    from canon.json and never recomputes it, so the old wording sent
+#    operators into a dead-end retry loop.
+# ---------------------------------------------------------------------------
+
+def test_derivation_bundle_hash_regen_hint_names_glossary_pass(tmp_path):
+    root = make_durable_root(tmp_path)
+    seg = "seg12_blocked_regen_derivation"
+    write_manifest(root, [seg])
+
+    current_key = make_cache_key("current")
+    sha1 = write_draft(root, seg, {"text": f"draft-{seg}-content"})
+    stored = with_field(current_key, "derivation_bundle_hash", "derivation_bundle_hash-OLD")
+    write_fragment(root, seg, converged_fragment(stored, sha1))
+    write_segpack(
+        root,
+        seg,
+        {"derivation_bundle_hash": "derivation_bundle_hash-OLD-SEGPACK-NOT-CAUGHT-UP"},
+    )
+    write_fixture_cache_keys(root, {seg: current_key})
+
+    # This project's only segment is blocked_needs_regeneration, which is
+    # excluded from SEGS -- emitted SEGS is therefore empty and the run
+    # needs --allow-empty to avoid the unrelated empty-SEGS FATAL (the
+    # classification report is folded into that FATAL payload too, but
+    # --allow-empty keeps this test's assertions scoped to the successful
+    # path, matching every other classification-only test in this file).
+    proc = run_select(root, "--allow-empty")
+    assert proc.returncode == 0, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    payload = parse_stdout(proc)
+    assert payload["success"] is True
+
+    assert payload["classification"][seg] == {
+        "category": "blocked_needs_regeneration",
+        "pending_fields": ["derivation_bundle_hash"],
+        "message": (
+            f"segment {seg!r} is blocked on regeneration: rerun "
+            "W3/W3a (re-run bootstrap_names.py to regenerate name candidates, "
+            "then the glossary pass to re-stamp canon.json's "
+            "derivation_bundle_hash, then segpack.py) "
+            "before this segment can be reclassified"
+        ),
+    }
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))

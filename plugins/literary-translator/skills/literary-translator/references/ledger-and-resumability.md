@@ -746,14 +746,31 @@ not match** (regeneration hasn't happened) → classify
 **`blocked_needs_regeneration`** — excluded from `SEGS` like
 `human_escalation`, with an actionable message naming which regeneration
 step is missing (re-run W2 for `source_extraction_hash`/`source_input_hash`;
-re-run W3/W3a for `particle_config_hash`; re-run W3a for
-`derivation_bundle_hash`). This is a classification label only (computed by
+re-run W3/W3a for `particle_config_hash`; re-run W3/W3a for
+`derivation_bundle_hash` — `derivation_bundle_hash` covers BOTH
+`bootstrap_names.py` and `segpack.py`'s own script bytes (`cache_key.py`'s
+`DERIVATION_BUNDLE_MEMBERS`), so the hint names `bootstrap_names.py` first:
+re-run it to regenerate `name_candidates.json`, then the glossary pass at W3
+consumes those candidates and re-stamps `canon.json`'s
+`derivation_bundle_hash`, then `segpack.py` at W3a copies it forward.
+Skipping straight to the glossary pass when only `bootstrap_names.py`'s
+bytes changed would consume stale `name_candidates.json` rows and still
+re-stamp the hash, silently papering over the staleness; segpack.py alone
+never recomputes it at all). This is a classification label only (computed
+by
 `select_segments.py`), never written to the ledger fragment's own `status`
 — the underlying fragment stays `converged` throughout. No `--only-segs`
 override is needed to escape it — it's self-clearing once the operator
 actually reruns the regeneration step (segpack naturally re-stamps current
 hashes, and the segment reclassifies to ordinary `stale` on the very next
 invocation).
+
+A rerun of `bootstrap_names.py` that yields zero new name candidates (every
+name already known) is a separate, deferred gap: `resume_setup.py` currently
+rejects a zero-candidate rerun outright, which can leave this gate unable to
+clear cleanly in that specific case. That gap is intentionally out of scope
+here and tracked as its own follow-up (#101) rather than worked around in
+this hint text.
 
 For context, `select_segments.py`'s full classification set (see also
 `SKILL.md` W5) is: `reusable` (converged, every cache-key field matches,

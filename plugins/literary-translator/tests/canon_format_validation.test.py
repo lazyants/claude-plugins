@@ -765,5 +765,36 @@ def test_validate_only_accepts_a_fully_well_formed_canon_file(tmp_path):
     assert payload["review_queue_count"] == 1
 
 
+def test_validate_only_rejects_source_form_present_in_both_entries_and_review_queue(tmp_path):
+    # Issue #102 hardening gap (the original bug -- `_merge_batch` re-
+    # queuing an already-accepted source_form -- is already fixed; this is
+    # the remaining schema-cross-constraint gap). canon-file.schema.json has
+    # no cross-key constraint linking entries{} and review_queue[], so a
+    # hand-corrupted (or otherwise not-merged-through-`_merge_batch`)
+    # canon.json with the SAME source_form in BOTH collections previously
+    # passed whole-file (Pass 2) validation silently. Written directly here
+    # via write_canon(), bypassing `_merge_batch` entirely, to prove the
+    # NEW `_validate_whole_file` invariant check (not schema validation)
+    # catches it.
+    root = make_durable_root(tmp_path)
+    write_canon(
+        root,
+        canon_file_doc(
+            entries={
+                "Ivan": canon_entry(
+                    "Ivan", canonical_target_form="Ivan", basis="transliterated", confidence="high"
+                )
+            },
+            review_queue=[queued_batch_item("Ivan", note="needs a human call")],
+        ),
+    )
+
+    proc = run_canon_validate(root, "live")
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    payload = parse_stdout(proc)
+    assert payload["success"] is False
+    assert "Ivan" in payload["error"]
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))

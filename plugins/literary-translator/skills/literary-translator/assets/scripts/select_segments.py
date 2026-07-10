@@ -196,7 +196,7 @@ FIELD_TO_REGEN_STEP = {
     "source_extraction_hash": "W2 (re-run the source-format extractor)",
     "source_input_hash": "W2 (re-run the source-format extractor)",
     "particle_config_hash": "W3/W3a (re-run bootstrap_names.py, the glossary pass, then segpack.py)",
-    "derivation_bundle_hash": "W3a (re-run segpack.py)",
+    "derivation_bundle_hash": "W3/W3a (re-run bootstrap_names.py to regenerate name candidates, then the glossary pass to re-stamp canon.json's derivation_bundle_hash, then segpack.py)",
 }
 
 # Fragment statuses that mean "a human must resolve this before automated
