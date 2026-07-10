@@ -1,7 +1,7 @@
 // enduser-handbook capture asset — non-normative reference implementation for the Playwright
 // reference case. The normative, engine-agnostic contract lives in
-// references/capture-spec-helpers.md (and capture-safety.md / page-identity.md). Fork for other
-// engines.
+// references/capture-spec-helpers.md (and capture-safety.md / page-identity.md).
+// Engine-neutral: reused as-is by any engine's driver glue.
 //
 // control-inventory.mjs — the pure, browser-agnostic logic behind the surface-enumeration pass
 // (completeness-gate.md: "a short script that enumerates triggers …"): per-control extraction +
@@ -25,12 +25,26 @@ const ATTR_TYPE = 'type';
 const ATTR_VALUE = 'value';
 const ATTR_NAME = 'name';
 const ATTR_CLASS = 'class';
-// A native <input type="submit|button|reset|image"> carries its visible LABEL in the `value`
-// attribute, not textContent — reading it keeps "<input type=submit value=Delete>" from becoming a
-// label-less, mis-counted control. BUT a text-entry input's `value` attribute can be PREFILLED USER
-// DATA (a server-rendered `<input type=text value="jane@example.com">`), and extractRecord's output
-// is console.logged by the surface audit — so `value` is read ONLY for these button-like input types
-// and is nulled for every other control, to avoid leaking PII into the inventory.
+// A native <input type="submit|button|reset"> carries its visible LABEL in the `value` attribute, not
+// textContent — reading it keeps "<input type=submit value=Delete>" from becoming a label-less,
+// mis-counted control. BUT a text-entry input's `value` attribute can be PREFILLED USER DATA (a
+// server-rendered `<input type=text value="jane@example.com">`), and extractRecord's output is
+// console.logged by the surface audit — so `value` is read ONLY for these three button-like input
+// types and is nulled for every other control, to avoid leaking PII into the inventory.
+//
+// `image` is DELIBERATELY EXCLUDED from this set. Per HTML-AAM, an <input type=image> renders an
+// IMAGE, not its `value` — its accessible name comes from aria-label / alt / title, NEVER from
+// `value`. Its `value` attribute is instead the SUBMITTED DATA (often a record id), so reading it
+// here would surface that payload as the control's apparent label (via matrixLabel, below). Used ONLY
+// at the value-capture call site in extractRecord — see BUTTON_LIKE_INPUT_TYPES below for the
+// (deliberately different) set used for the value-bearing CLASSIFICATION.
+const VALUE_LABELLED_INPUT_TYPES = new Set(['submit', 'button', 'reset']);
+
+// The BROADER "acts like a button, not a free-text field" set, used ONLY by isValueBearing below —
+// includes `image` because an image input's `value` is a fixed submit payload, never user-typed free
+// text, so it should not be classified as a value-bearing text input either. Kept as a SEPARATE set
+// from VALUE_LABELLED_INPUT_TYPES (rather than reusing one set for both purposes) so widening or
+// narrowing one can never silently change the other's behavior.
 const BUTTON_LIKE_INPUT_TYPES = new Set(['submit', 'button', 'reset', 'image']);
 
 // Broad interactive-surface selector — what the surface audit enumerates as a control.
@@ -249,11 +263,12 @@ export async function extractRecord(handle) {
   // action, and must NOT flag.
   const hasDestructiveText = tag === 'SELECT' && containsDestructiveToken(rawText);
 
-  // Type-aware value: keep it only for button-like inputs (where value IS the label); null it for
-  // text-entry inputs (and everything else) so a prefilled field's user data never enters the
-  // console-logged inventory.
+  // Type-aware value: keep it only for VALUE-LABELLED inputs (submit/button/reset, where value IS the
+  // label); null it for text-entry inputs AND image inputs (and everything else) so a prefilled
+  // field's user data — or an image input's submitted record id — never enters the console-logged
+  // inventory.
   const value =
-    tag === 'INPUT' && BUTTON_LIKE_INPUT_TYPES.has(type.toLowerCase())
+    tag === 'INPUT' && VALUE_LABELLED_INPUT_TYPES.has(type.toLowerCase())
       ? await handle.getAttribute(ATTR_VALUE)
       : null;
 
@@ -351,4 +366,32 @@ export function buildScopedSelector(rowSelector, interactiveSelector) {
   if (!rowSelector) return interactiveSelector;
   const scope = `:is(${rowSelector})`;
   return `:is(${scope} :is(${interactiveSelector}), ${scope}:is(${interactiveSelector}))`;
+}
+
+/**
+ * Human-facing coverage-matrix label fallback chain. `value` sits directly below `ariaLabel` —
+ * deliberately NOT below `text` — because per HTML-AAM the accessible name of a native
+ * `<input type="submit">` resolves aria-labelledby -> aria-label -> the value attribute; ranking
+ * `value` above `ariaLabel` would invert that precedence and let a raw value attribute win over an
+ * author-supplied aria-label. Placing it just below ariaLabel still recovers the label a submit
+ * input with no name/aria-label/class would otherwise lose (falling through to
+ * '(unlabelled control)'), since title and everything after it are the fallbacks the bug fell
+ * through to.
+ *
+ * @param {{ text?: string|null, ariaLabel?: string|null, value?: string|null, title?: string|null,
+ *           testId?: string|null, name?: string|null, href?: string|null, className?: string|null }} record
+ * @returns {string}
+ */
+export function matrixLabel(record) {
+  return (
+    record.text ||
+    record.ariaLabel ||
+    record.value ||
+    record.title ||
+    record.testId ||
+    record.name ||
+    record.href ||
+    record.className ||
+    '(unlabelled control)'
+  );
 }

@@ -197,3 +197,71 @@ test('hasDangerousVerb decodes percent-encoded paths and scans the query string'
 test('decideRoute blocks a percent-encoded dangerous GET via the deny step', () => {
   assert.equal(decideRoute(req({ method: 'GET', url: 'https://app.test/items/%64elete' })).reason, 'deny-dangerous-verb');
 });
+
+test('hasDangerousVerb decodes to a fixed point, catching doubly/triply percent-encoded verbs', () => {
+  // "%2564elete": "%25" decodes to "%", leaving "%64elete" undecoded after a SINGLE pass — this is
+  // the #71 regression. It must decode to "delete" and be caught.
+  assert.equal(hasDangerousVerb('https://app.test/items/%2564elete'), true);
+  // Same, but in the query string.
+  assert.equal(hasDangerousVerb('https://app.test/items?action=%2564elete'), true);
+  // Triple-encoded — proves the loop iterates past two passes, not just doubly.
+  assert.equal(hasDangerousVerb('https://app.test/items/%252564elete'), true);
+  // End-to-end via decideRoute.
+  assert.equal(decideRoute(req({ method: 'GET', url: 'https://app.test/items/%2564elete' })).reason, 'deny-dangerous-verb');
+});
+
+test('hasDangerousVerb fixed-point decoding does not introduce new false positives', () => {
+  // Double-encoded non-verb, multi-byte UTF-8 ("café") must still be benign after iterating.
+  assert.equal(hasDangerousVerb('https://app.test/caf%25C3%25A9/list'), false);
+  // Token-exactness survives fixed-point decoding: "deleted" is still not "delete".
+  assert.equal(hasDangerousVerb('https://app.test/deletedAt/report'), false);
+  // Malformed escapes at any decode depth must not throw and must not trip the verb scan.
+  assert.equal(hasDangerousVerb('https://app.test/items/%zz/%25'), false);
+});
+
+test('hasDangerousVerb: an encoded verb in a query token is the same pre-existing intentional class as the unencoded form', () => {
+  // Pins today's already-shipped, already-documented policy (capture-guard-policy.mjs's own doc
+  // comment): a route/query whose literal content matches a dangerous token is blocked, encoded or
+  // not — the fixed-point decode closes a false-ADMIT hole in this class, it does not create it.
+  assert.equal(hasDangerousVerb('https://app.test/search?q=delete'), true);
+});
+
+test('hasDangerousVerb fails closed when the decode cap is hit before a fixed point (encode depth >= 6)', () => {
+  // Depth-6 doubly(+)-encoded "delete": each safeDecode pass peels one layer of "%25"->"%", so this
+  // needs 6 passes to fully resolve to "delete" — one more than the 5-pass cap. Before this fix, the
+  // guard scanned only the still-partially-encoded value reached after 5 passes and silently ADMITTED
+  // it (the doc comment even called this "the fail-closed direction", which was backwards). The fix
+  // must fail closed instead: hitting the cap before a fixed point blocks the request.
+  assert.equal(hasDangerousVerb('https://app.test/items/%252525252564elete'), true);
+  // One layer deeper still — also blocked, not just at the exact boundary.
+  assert.equal(hasDangerousVerb('https://app.test/items/%25252525252564elete'), true);
+  assert.equal(
+    decideRoute(req({ method: 'GET', url: 'https://app.test/items/%252525252564elete' })).reason,
+    'deny-dangerous-verb',
+  );
+});
+
+test('hasDangerousVerb catches a plain verb fused with a stray escape by iterative decoding (delete%2573)', () => {
+  // Regression guard: decoding to a fixed point turns "delete%2573" into "deletes" (not a dangerous
+  // verb — "%25"->"%", then "%73"->"s"), which would silently ADMIT a request that a raw/single-pass
+  // scan (origin/main's behavior) correctly blocked, since there "delete" tokenizes out cleanly on its
+  // own. Scanning the RAW string as well as every intermediate decode pass restores that coverage:
+  // "delete%2573" already contains the exact token "delete" before any decoding happens.
+  assert.equal(hasDangerousVerb('https://app.test/items/delete%2573'), true);
+});
+
+test('hasDangerousVerb decode-cap fix does not regress the benign encoded/malformed controls', () => {
+  assert.equal(hasDangerousVerb('https://app.test/caf%25C3%25A9/list'), false);
+  assert.equal(hasDangerousVerb('https://app.test/deletedAt/report'), false);
+  assert.equal(hasDangerousVerb('https://app.test/items/%zz/%25'), false);
+  assert.equal(hasDangerousVerb('https://app.test/items/list'), false);
+});
+
+test('hasDangerousVerb decode-sequence scan completes quickly on a huge percent-run (no exponential blowup)', () => {
+  const huge = 'https://app.test/x/' + '%25'.repeat(333333); // ~1,000,000 chars
+  const start = Date.now();
+  const result = hasDangerousVerb(huge);
+  const elapsedMs = Date.now() - start;
+  assert.equal(result, false, 'a %25-run alone decodes to literal "%" characters, never a verb');
+  assert.ok(elapsedMs < 1000, `expected well under 1000ms, took ${elapsedMs}ms`);
+});

@@ -8,8 +8,9 @@ import them instead of re-implementing them.
 This is a contract, not the code. The normative, engine-agnostic rules live in
 `capture-safety.md` and `page-identity.md`; this file says only *what each helper must
 guarantee*. A **non-normative reference implementation** for the Playwright reference case ships at
-`../assets/capture-helpers.playwright.ts` and `../assets/surface-audit.playwright.ts` — fork it for
-other engines. The reference doc is normative; the `*.playwright.*` asset is one implementation.
+`../assets/capture-helpers.playwright.ts` and `../assets/surface-audit.playwright.ts` — reimplement
+the driver glue for another engine; the engine-neutral `../assets/lib/*.mjs` helpers are reused
+as-is. The reference doc is normative; the `*.playwright.*` asset is one implementation.
 
 ## What each helper must guarantee
 
@@ -41,6 +42,15 @@ other engines. The reference doc is normative; the `*.playwright.*` asset is one
   are not "both block". `classifyRequest` must be **total**: return `undefined` for anything it does
   not recognize and never throw (the guard now consults it for beacon/SSE requests too). There is
   still **NO write allowlist** — `'benign'` silences a block, it does not permit a write.
+
+  **The shipped `classifyRequest` is GraphQL-only.** `../assets/lib/graphql-read-classifier.mjs`'s
+  `classifyGraphqlRead` admits only a POST carrying an inline, single-operation GraphQL **query**; a
+  project whose reads are REST/RPC POST calls (Django/DRF, JSON-RPC) has every such read fail closed,
+  with no built-in admit path. That is not a gap to patch centrally — the project supplies its own
+  `classifyRequest` that recognizes its own read shape, returning `'read'` only for unambiguous,
+  side-effect-free reads and `undefined` otherwise, the same fail-closed contract the shipped
+  classifier follows. No code change is required: the guard already accepts a custom
+  `classifyRequest`.
 
 - **Identity assertion** — before every shot, prove the page is the one the manifest declares: the
   route matches, the loading state is gone, and either the awaited response arrived

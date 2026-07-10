@@ -1,7 +1,8 @@
 // enduser-handbook capture asset — non-normative reference implementation for the Playwright
 // reference case. The normative, engine-agnostic contract lives in
-// references/capture-spec-helpers.md (and capture-safety.md / page-identity.md). Fork for other
-// engines.
+// references/capture-spec-helpers.md (and capture-safety.md / page-identity.md).
+// Reimplement this driver glue for another engine; the engine-neutral lib/*.mjs helpers are
+// reused as-is.
 //
 // capture-helpers.playwright.ts — the safety / identity / masking machinery as importable
 // functions, mapping 1:1 to the prose rules in capture-safety.md and page-identity.md. This is
@@ -10,6 +11,10 @@
 // fires anyway (a mis-classified control, a hook, a beacon), not to make clicking safe.
 //
 // Auth is assumed via a pre-seeded storageState, NOT a live login — a live OAuth POST is a write.
+//
+// MODULE MINIMUM: this file requires Playwright >= 1.51, because assertIdentity's spinner check
+// uses `locator.filter({ visible: true })`, which was added in Playwright 1.51 (the separate
+// routeWebSocket floor noted below is 1.48 and is unaffected by this higher module-wide minimum).
 
 import type { Browser, BrowserContext, Locator, Page, Route, Request } from '@playwright/test';
 // The ordered classifier lives in a pure, browser-agnostic module so its branch ORDER (deny <
@@ -72,9 +77,9 @@ export interface CaptureGuard {
  * context.route (page.route would miss it).
  *
  * HTTP is routed via context.route('**\/*'); each request is classified by the pure decideRoute
- * policy (deny < eventsource < beacon < classify-read < get-head < fail-closed). denyPatterns and
- * the built-in dangerous-verb path block win over everything; the default is fail-closed on
- * unclassified non-GET (and on dangerous-verb GETs).
+ * policy (deny < classify-benign < eventsource < beacon < classify-read < get-head < fail-closed).
+ * denyPatterns and the built-in dangerous-verb path block win over everything; the default is
+ * fail-closed on unclassified non-GET (and on dangerous-verb GETs).
  *
  * WebSockets are routed via context.routeWebSocket (Playwright >= 1.48) so a socket is blocked
  * WITHOUT connecting. If routeWebSocket is unavailable we THROW at install time rather than fall
@@ -417,7 +422,7 @@ export async function dismissModal(
   await dialog.getByText(expectedText, { exact: true }).first().waitFor({ state: 'visible' });
 
   await page.keyboard.press('Escape');
-  if (!(await dialog.isVisible().catch(() => false))) return;
+  if (await dialog.waitFor({ state: 'hidden', timeout: 1000 }).then(() => true, () => false)) return;
 
   // Escape did not close it — use a known-safe negative control from the allowlist, never the
   // primary button.

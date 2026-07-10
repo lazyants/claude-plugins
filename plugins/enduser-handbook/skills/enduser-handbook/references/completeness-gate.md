@@ -168,7 +168,8 @@ before.
 
 This guidance is the normative, engine-agnostic rule;
 `../assets/surface-audit.playwright.ts` is a **non-normative reference implementation**
-for the Playwright reference case — fork it for other engines.
+for the Playwright reference case — reimplement the driver glue for another engine; the
+engine-neutral `../assets/lib/*.mjs` helpers are reused as-is.
 
 **PII boundary of the mechanical pass.** The enumeration captures control
 **identity** verbatim — `aria-label`, `title`, `name`, `href` (including
