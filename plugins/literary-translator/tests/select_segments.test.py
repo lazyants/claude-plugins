@@ -178,13 +178,20 @@ def write_fixture_cache_keys(root, mapping):
     )
 
 
-def write_draft(root, seg, content: bytes) -> str:
-    """Writes segments/{seg}.draft.json's raw bytes and returns its sha1 hex
-    digest (draft_path(seg)'s exact canonical location, per select_segments.py's
-    own `draft_path` helper)."""
+def write_draft(root, seg, content: dict) -> str:
+    """Writes segments/{seg}.draft.json as canonical JSON (sorted keys,
+    compact separators -- byte-identical to what draft_content_sha1() in
+    draft_sha1.py/ledger_update.py/select_segments.py itself would
+    re-serialize) and returns its CONTENT sha1 hex digest -- exactly the
+    reviewed_draft_sha1 a real converged fragment would record for this
+    draft (draft_path(seg)'s exact canonical location, per
+    select_segments.py's own `draft_path` helper)."""
     path = root / "segments" / f"{seg}.draft.json"
-    path.write_bytes(content)
-    return hashlib.sha1(content).hexdigest()
+    raw = json.dumps(
+        content, sort_keys=True, ensure_ascii=False, separators=(",", ":")
+    ).encode("utf-8")
+    path.write_bytes(raw)
+    return hashlib.sha1(raw).hexdigest()
 
 
 def write_segpack(root, seg, generation_hashes):
@@ -286,14 +293,14 @@ def build_full_project(root):
     fixture_keys = {}
 
     # seg01: cache key AND draft sha1 both match -> reusable.
-    sha1_01 = write_draft(root, "seg01_reusable", b"draft-seg01-content")
+    sha1_01 = write_draft(root, "seg01_reusable", {"text": "draft-seg01-content"})
     fixture_keys["seg01_reusable"] = current_key
     write_fragment(root, "seg01_reusable", converged_fragment(dict(current_key), sha1_01))
 
     # seg02: cache key matches, but the on-disk draft's sha1 no longer
     # matches reviewed_draft_sha1 (e.g. a hand-edit after review) -> stale,
     # stale_reason=[draft_sha1_mismatch] only, mismatched_fields=[].
-    write_draft(root, "seg02_stale_draftonly", b"draft-seg02-CURRENT-content")
+    write_draft(root, "seg02_stale_draftonly", {"text": "draft-seg02-CURRENT-content"})
     fixture_keys["seg02_stale_draftonly"] = current_key
     write_fragment(
         root,
@@ -303,14 +310,14 @@ def build_full_project(root):
 
     # seg03: cache key mismatches on ONE non-derivation field, draft matches
     # -> stale, stale_reason=[cache_key_mismatch] only.
-    sha1_03 = write_draft(root, "seg03_stale_cachekey", b"draft-seg03-content")
+    sha1_03 = write_draft(root, "seg03_stale_cachekey", {"text": "draft-seg03-content"})
     fixture_keys["seg03_stale_cachekey"] = current_key
     stored_03 = with_field(current_key, "style_contract_hash", "style_contract_hash-OLD")
     write_fragment(root, "seg03_stale_cachekey", converged_fragment(stored_03, sha1_03))
 
     # seg04: cache key mismatches on a non-derivation field AND the draft
     # sha1 also mismatches -> stale, stale_reason carries BOTH triggers.
-    write_draft(root, "seg04_stale_both", b"draft-seg04-CURRENT-content")
+    write_draft(root, "seg04_stale_both", {"text": "draft-seg04-CURRENT-content"})
     fixture_keys["seg04_stale_both"] = current_key
     stored_04 = with_field(current_key, "prompt_hash", "prompt_hash-OLD")
     write_fragment(
@@ -322,7 +329,7 @@ def build_full_project(root):
     # seg05: cache key mismatches on a DERIVATION-STATE field, draft
     # matches, and the segpack's own generation_hashes has NOT caught up
     # with the current value yet -> blocked_needs_regeneration.
-    sha1_05 = write_draft(root, "seg05_blocked_regen", b"draft-seg05-content")
+    sha1_05 = write_draft(root, "seg05_blocked_regen", {"text": "draft-seg05-content"})
     fixture_keys["seg05_blocked_regen"] = current_key
     stored_05 = with_field(current_key, "particle_config_hash", "particle_config_hash-OLD")
     write_fragment(root, "seg05_blocked_regen", converged_fragment(stored_05, sha1_05))
@@ -336,7 +343,7 @@ def build_full_project(root):
     # matches, but the segpack HAS already caught up (its generation_hashes
     # entry matches the current value) -> self-clearing, reclassified as
     # ordinary stale, never blocked_needs_regeneration.
-    sha1_06 = write_draft(root, "seg06_stale_regen_caughtup", b"draft-seg06-content")
+    sha1_06 = write_draft(root, "seg06_stale_regen_caughtup", {"text": "draft-seg06-content"})
     fixture_keys["seg06_stale_regen_caughtup"] = current_key
     stored_06 = with_field(current_key, "derivation_bundle_hash", "derivation_bundle_hash-OLD")
     write_fragment(root, "seg06_stale_regen_caughtup", converged_fragment(stored_06, sha1_06))
@@ -354,7 +361,7 @@ def build_full_project(root):
     # segment at all: if the implementation ever regressed into consulting
     # the derivation gate here, it would blow up on a missing segpack
     # instead of silently passing.
-    write_draft(root, "seg07_stale_draft_and_derivmismatch", b"draft-seg07-CURRENT-content")
+    write_draft(root, "seg07_stale_draft_and_derivmismatch", {"text": "draft-seg07-CURRENT-content"})
     fixture_keys["seg07_stale_draft_and_derivmismatch"] = current_key
     stored_07 = with_field(current_key, "source_extraction_hash", "source_extraction_hash-OLD")
     write_fragment(
@@ -646,7 +653,7 @@ def test_default_run_fatals_on_empty_segs_unless_allow_empty(tmp_path):
     root = make_durable_root(tmp_path)
     write_manifest(root, ["seg01_only"])
     key = make_cache_key("only")
-    sha1 = write_draft(root, "seg01_only", b"draft-content-only-segment")
+    sha1 = write_draft(root, "seg01_only", {"text": "draft-content-only-segment"})
     write_fragment(root, "seg01_only", converged_fragment(dict(key), sha1))
     write_fixture_cache_keys(root, {"seg01_only": key})
 

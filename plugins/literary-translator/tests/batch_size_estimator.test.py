@@ -12,74 +12,159 @@ just above its `estimatedCalls` line). This filename is inferred to fit the
 
 Targets: the `batch_agent_cap` preflight estimator inside
 `mass-translate-wf.template.js`, i.e. exactly this block (see the template's
-own "batch_agent_cap preflight" comment, right above the `pipeline()` call):
+own "batch_agent_cap preflight" comment, right above the `pipeline()` call),
+as of the 1.2.0 reliability build (CONTRACT-1.2.0-reliability.md sec7 / the
+approved plan's "Estimator -- pinned" note). This is the REAL, landed shape
+(verified directly against the shipped template, not merely the contract):
 
-    const estimatedCalls = 1 + SEGS.length * (6 + 3 * MAXFIX);
+    const estimatedCalls = 1 + SEGS.length * (10 + 7 * MAXFIX);
     if (estimatedCalls > BATCH_AGENT_CAP) {
       log(...);
       return { converged: [], failed: [], reason: "batch-too-large",
                estimatedCalls: estimatedCalls, cap: BATCH_AGENT_CAP };
     }
 
-The formula comes from enumerating every mutually exclusive per-segment
-branch (orchestration-and-batching.md's own derivation, restated here only
-to anchor the fixtures below -- this file does not re-derive it):
+This REPLACES the pre-1.2.0 `1 + N*(6 + 3*MAXFIX)` formula: the review step
+was restructured (`getVerifiedReview`) from a single `review:*`/
+`artifact-check:*` call pair per round into a four-call review POINT
+(`review-dispatch:*` codex fire-and-forget, `review-wait:*` bounded poll of
+`review_ready.py`, `review-read:*`, `artifact-check:*`) with a single SHARED
+retry budget covering the (read, check) pair together -- never two
+independent retries. The batch-level term dropped from N-dependent
+housekeeping to exactly **1** (the single `merge-ledger`/`mergeLedgerPrompt`
+call) now that `{{RUN_ID}}`-scoped `dispatch_token`s make every fire-and-
+forget artifact fresh-by-construction, removing the old batch pre-clean call
+entirely.
 
-  - every segment, unconditionally: 3 fixed calls (ledger in_progress write,
-    translate call, wait/poll call).
-  - timeout branch: +1 ledger write -> 4 total, no review ever happens.
-  - blocked branch: up to `max_fix_rounds - 1` completed NORMAL rounds (3
-    calls each: review + artifact-check + fix), then ONE terminating round
-    whose cost depends on which of three mutually exclusive sub-cases fires
-    (`review-null` -> 2, `draft-missing` -> 3, `review-artifact-mismatch`
-    -> 4 -- the largest), then +1 ledger write.
-  - converged / non-converged-at-cap branch: the full `max_fix_rounds`
-    normal rounds (3 calls each, no early clean exit) + 1 final confirming
-    review + its own artifact-check (2 calls) + 1 ledger write -- this is
-    the TRUE per-segment maximum, `3*max_fix_rounds + 6`, which is exactly
-    what `6 + 3*MAXFIX` in the formula above encodes.
+Per-segment worst case, re-derived from the real `getVerifiedReview`/
+`runRound`/`reviewFixLoop` functions (mirrored in the template's own comment
+directly above `estimatedCalls`):
 
-This file does not re-implement any of that arithmetic in Python and trust
-its own reimplementation -- it extracts the REAL, substituted
+  - every segment, unconditionally: 3 fixed calls (`ledger:in_progress:*`
+    write, `translate:*` dispatch, `wait:*` translate-readiness poll).
+  - a "review point" -- one call to `getVerifiedReview` -- is:
+    `review-dispatch:*` (1, codex, fire-and-forget, return value discarded)
+    + `review-wait:*` (1, bounded poll; a non-READY result ends the point
+    immediately as `blocked/review-timeout`, no read/check ever attempted)
+    + `readAndCheck(isRetry=false)`: `review-read:*` (1); if that reads back
+    falsy, `artifact-check:*` is **never called** for that attempt
+    (`readAndCheck`'s own `if (!rev) return {rev:null, art:null}`
+    short-circuit) -- otherwise `artifact-check:*` (1) follows immediately.
+    If the first attempt's check matched (`artifactCheckMatched`), the point
+    ends there (happy path, 4 calls total: dispatch+wait+read+check). Else
+    ONE shared retry of `readAndCheck(isRetry=true)` fires (same
+    short-circuit rules): if the retried read is STILL falsy ->
+    `blocked/review-null` (no second check call, ever); if the retried
+    read succeeds but its check still doesn't match -> `blocked/review-
+    artifact-mismatch`; if the retried check DOES match -> the point
+    succeeds with the retried verdict. The TRUE worst case -- 6 calls,
+    dispatch+wait+read+check+read+check -- only happens when the FIRST
+    attempt's read succeeds but its check reports `match:false` (so both
+    read and check fire on both attempts); this is the case this file's
+    worst-case fixtures force.
+  - each of the `max_fix_rounds` NORMAL rounds (`runRound(seg, round,
+    isFinal=false)`, every round except the final confirming one) = review
+    point (6, worst case) + fix (1, `callFix`) = **7**, provided the
+    review point's resulting verdict is NOT `clean && coverage_ok` (a clean
+    verdict converges the segment immediately at that round instead,
+    cheaper than the worst case and not what these fixtures exercise).
+  - the FINAL confirming round (`runRound(seg, MAXFIX+1, isFinal=true)`) is
+    one more review point (6, worst case) with NO fix call after it,
+    whether it comes back clean (`converged`, via `runRound`'s own
+    `ledger:converged:*` write) or not (`non_converged`/`cap`, via
+    `reviewFixLoop`'s trailing `ledger:cap:*` write once the for-loop
+    exhausts) -- both are the same branch at the same cost, per the
+    template's own derivation.
+  - +1 terminal per-segment ledger write (`ledger:converged:*` /
+    `ledger:blocked:{reason}:*` / `ledger:cap:*` / `ledger:timeout:*`,
+    exactly one of these fires per segment).
+  - per-segment total: 3 + 7*max_fix_rounds + 6 + 1 == **10 + 7*max_fix_rounds**,
+    exactly the `10 + 7*MAXFIX` term inside `estimatedCalls`.
+  - batch-level: exactly **1** (`merge-ledger`, colon-free).
+
+Blocked-branch terminating sub-cases (same taxonomy as the pre-1.2.0 file,
+re-costed for the new review-point shape and the real `readAndCheck`
+short-circuit above -- these fixtures do NOT need to hit the estimator's own
+worst-case ceiling per round, only be internally consistent between the PLAN
+queues fed to the mock and the assertions below; each fixture's `max_fix_rounds
+- 1` completed prior rounds are deliberately modeled at the SAME worst-case-
+recovered shape (7 each) the estimator itself assumes, so `test_
+review_artifact_mismatch_actual_calls_never_exceed_formula_bound` below
+exercises a genuinely maximal blocked branch, not an artificially cheap one):
+  - `review-null`: both the first AND the retried read come back falsy --
+    `readAndCheck`'s short-circuit means `artifact-check:*` is NEVER called
+    for this round -- 4 calls total (dispatch+wait+read+read), no fix.
+  - `review-artifact-mismatch`: the first attempt's read succeeds but its
+    check reports `match:false`; the retried read ALSO succeeds but its
+    check STILL mismatches -- the true 6-call worst case, no fix.
+  - `draft-missing`: the review point succeeds WITHOUT a retry (happy path,
+    4 calls), a fix is dispatched, and the fix call itself reports the
+    draft went missing (`fx.indexOf("DRAFT_MISSING") !== -1"`) -- 5 calls;
+    unrelated to the read/check retry mechanic, since it is `callFix`, not
+    `getVerifiedReview`, that fails here.
+  - `review-timeout` (NEW sub-case -- the review restructure gives review
+    its own bounded poll, `review-wait:*`, independent of translate's own
+    `wait:*`): `review-wait:*` returns non-READY on the very first poll --
+    2 calls (dispatch+wait), the read/check/fix machinery is never reached.
+  - `timeout` (translate's own, unchanged from pre-1.2.0): the translator
+    never delivers READY -- `wait:*`'s own `ready.indexOf("READY") === -1`
+    check fires on the very first wait call, before any review call is ever
+    made. Cost stays 4 (in_progress ledger + translate + wait + timeout
+    ledger), independent of `max_fix_rounds`.
+
+This file does not re-implement any of that arithmetic and trust its own
+reimplementation -- it extracts the REAL, substituted
 `mass-translate-wf.template.js` source, wraps it exactly the way the
-Workflow tool that actually executes this file must (the file is
-self-contained, uses only the `agent()`/`pipeline()`/`log()`/`args` globals
-the Workflow tool supplies, and its top-level `return`/`await` statements
-only make sense inside such a wrapper -- confirmed directly: a plain
-`node --check` on the raw file fails with "Illegal return statement"), then
-drives it with Node.js under a scripted mock `agent()`/`pipeline()` that
-counts every real call made and lets each fixture below force one specific
-branch. Skipped entirely if Node.js is not on PATH -- this plugin has no
-hard Node.js dependency (same stance
-`tests/workflow_template_instantiation.test.py` already takes for its own
-best-effort `node --check` pass).
+Workflow tool that actually executes this file must (self-contained, uses
+only the `agent()`/`pipeline()`/`log()`/`args` globals the Workflow tool
+supplies; confirmed a plain `node --check` on the raw file fails with
+"Illegal return statement"), then drives it with Node.js under a scripted
+mock `agent()`/`pipeline()` that counts every real call made and lets each
+fixture below force one specific branch. Skipped entirely if Node.js is not
+on PATH -- this plugin has no hard Node.js dependency.
 
-Fixtures, one per branch (per the build spec's own enumeration):
+Fixtures, one per branch:
   1. `test_estimator_boundary_exactly_at_cap_permits_dispatch_and_converges`
-     -- a batch sized so `estimatedCalls` lands EXACTLY at `batch_agent_cap`
-     for the cap/converged branch: the gate must NOT trip (`>`, not `>=`),
-     `pipeline()` must actually run, and the real total agent-call count
-     made while every segment converges on its worst-case-within-branch
-     path (never clean until the final confirming round) must equal the
-     formula's own estimate exactly.
+     -- a batch sized so `estimatedCalls` lands EXACTLY at `batch_agent_cap`:
+     the gate must NOT trip (`>`, not `>=`), `pipeline()` must actually run,
+     and the real total agent-call count made while every segment converges
+     on its worst-case-within-branch path (every round's review point forced
+     through the full 6-call shared retry) must equal the formula's own
+     estimate exactly.
   2. `test_estimator_one_below_boundary_blocks_dispatch_entirely` -- the
      same configuration with `batch_agent_cap` one less: the gate MUST
      trip, `pipeline()` must never run, and zero real agent calls happen.
   3/4/5. One fixture per blocked terminating sub-case: `review-null`,
      `draft-missing`, `review-artifact-mismatch`.
-  6. The timeout branch.
+  6. The timeout branch (translate's own).
   7. A dedicated case re-asserting that the `review-artifact-mismatch`
-     segment's ACTUAL call count never exceeds the per-segment bound
-     (`6 + 3*max_fix_rounds`) the estimator itself relies on.
+     segment's ACTUAL call count -- built from worst-case-recovered prior
+     rounds, matching the estimator's own per-round assumption -- never
+     exceeds the per-segment bound (`10 + 7*max_fix_rounds`) the estimator
+     itself relies on.
   8. A parametrized, cheap (no `pipeline()` execution at all -- the gate
      trips before it) check that the real script's own `estimatedCalls`
-     matches the closed form `1 + N*(6 + 3*maxFixRounds)` across several
+     matches the closed form `1 + N*(10 + 7*maxFixRounds)` across several
      `(segment_count, max_fix_rounds)` pairs.
   9. A bonus (not separately required by the spec, included because it is
      nearly free given the machinery above): the SAME per-segment call
      total applies when the final confirming round ends non-convergent
      rather than convergent -- both are "the cap/converged branch" in the
      formula's own derivation, at the same cost.
+  10. NEW `test_blocked_review_timeout_terminating_subcase` -- the review
+     restructure's own new terminating sub-case (review's bounded poll,
+     independent of translate's), costing exactly 2 calls.
+  11. NEW `test_shared_retry_recovers_mid_loop_and_matches_exact_count` -- a
+     narrower companion to fixture 1 above: rather than forcing EVERY round
+     through the shared-retry worst case, this forces it in exactly ONE
+     mid-loop round (the last normal round) while every other round --
+     including the final confirming one -- takes the cheap happy path, and
+     asserts the resulting total against a hand-computed (not formula-
+     derived) expectation. This isolates the shared-retry mechanic itself
+     from the estimator's own worst-case ceiling, proving the harness's
+     queue machinery counts a PARTIAL-worst-case run correctly too, per the
+     CONTRACT's explicit "force a mid-loop read/check->retry->fix max round
+     and assert EXACT equality" requirement.
 """
 from __future__ import annotations
 
@@ -129,9 +214,14 @@ def instantiate_mass_translate(
     own header comment documents (same contract
     tests/workflow_template_instantiation.test.py's instantiate helper
     implements -- duplicated here, not imported, so this file stays
-    self-contained like every other sibling test file in this directory)."""
+    self-contained like every other sibling test file in this directory).
+    Deliberately does NOT substitute {{RUN_ID}} -- this file's mock never
+    inspects prompt text (only opts.label), so RUN_ID's exact value is
+    irrelevant to the call-counting this file cares about; it is left
+    unresolved on purpose and simply never asserted against."""
     text = MASS_TRANSLATE_TEMPLATE.read_text(encoding="utf-8")
     text = text.replace("{{DURABLE_ROOT}}", durable_root)
+    text = text.replace("{{RUN_ID}}", "fixture-run-id")
     text = text.replace("{{SOURCE_LANG}}", source_lang)
     text = text.replace("{{TARGET_LANG}}", target_lang)
     text = text.replace("{{MAX_FIX_ROUNDS}}", str(int(max_fix_rounds)))
@@ -164,8 +254,25 @@ def _wrap_for_execution(js_source: str) -> str:
 # agent() call made (label + metadata), and lets a Python-supplied PLAN
 # script exactly what each segment's calls should return, in the order the
 # real script's own functions (translateStage, reviewFixLoop, runRound,
-# getVerifiedReview, recordLedgerCall, ...) actually issue them -- this file
-# never reimplements THEIR logic, only the ambient globals they call.
+# getVerifiedReview, readAndCheck, recordLedgerCall, ...) actually issue
+# them -- this file never reimplements THEIR logic, only the ambient
+# globals they call.
+#
+# Per-segment PLAN shape: {
+#   "wait": <translate's own wait:* response, e.g. "READY seg"/"TIMEOUT seg">,
+#   "reviewWaits": [<one review-wait:* response per review point, in round
+#                     order -- NOT per retry; the shared retry re-runs only
+#                     read+check, never dispatch/wait>, ...],
+#   "reviews": [<one review-read:* response per read call, in call order --
+#                a round with a shared retry contributes TWO entries here>,
+#               ...],
+#   "artifactChecks": [<one artifact-check:* response per check call, in
+#                        call order -- omitted entirely for a read that came
+#                        back falsy, per readAndCheck's own short-circuit>,
+#                      ...],
+#   "fixes": [<one fix:* response per non-final round that reaches a fix
+#               call, in round order>, ...],
+# }
 # ---------------------------------------------------------------------------
 HARNESS_TEMPLATE = r"""
 'use strict';
@@ -181,6 +288,7 @@ let pipelineCalled = false;
 const queues = {};
 for (const seg of Object.keys(PLAN)) {
   queues[seg] = {
+    reviewWaits: (PLAN[seg].reviewWaits || []).slice(),
     reviews: (PLAN[seg].reviews || []).slice(),
     artifactChecks: (PLAN[seg].artifactChecks || []).slice(),
     fixes: (PLAN[seg].fixes || []).slice(),
@@ -204,6 +312,10 @@ async function agent(promptText, opts) {
   });
 
   if (label.indexOf("ledger:") === 0) {
+    // Handles both the pre-1.2.0 "ledger:{kind}:{seg}" shape and the
+    // current "ledger:blocked:{reason}:{seg}" shape (kind is always
+    // parts[1]; seg is always the LAST colon-separated part, regardless of
+    // how many reason segments sit in between).
     const parts = label.split(":");
     const kind = parts[1];
     const seg = parts[parts.length - 1];
@@ -233,19 +345,25 @@ async function agent(promptText, opts) {
   const seg = segFromLabel(label);
   if (label.indexOf("translate:") === 0) return "DONE " + seg;
   if (label.indexOf("wait:") === 0) return (PLAN[seg] || {}).wait;
-  if (label.indexOf("review:") === 0) {
+  if (label.indexOf("review-dispatch:") === 0) return "REVIEWED " + seg;
+  if (label.indexOf("review-wait:") === 0) {
+    const q = queues[seg].reviewWaits;
+    if (q.length === 0) throw new Error("PLAN reviewWaits queue exhausted for " + seg + " label=" + label);
+    return q.shift();
+  }
+  if (label.indexOf("review-read:") === 0) {
     const q = queues[seg].reviews;
-    if (q.length === 0) throw new Error("PLAN review queue exhausted for " + seg + " label=" + label);
+    if (q.length === 0) throw new Error("PLAN reviews queue exhausted for " + seg + " label=" + label);
     return q.shift();
   }
   if (label.indexOf("artifact-check:") === 0) {
     const q = queues[seg].artifactChecks;
-    if (q.length === 0) throw new Error("PLAN artifact-check queue exhausted for " + seg + " label=" + label);
+    if (q.length === 0) throw new Error("PLAN artifactChecks queue exhausted for " + seg + " label=" + label);
     return q.shift();
   }
   if (label.indexOf("fix:") === 0) {
     const q = queues[seg].fixes;
-    if (q.length === 0) throw new Error("PLAN fix queue exhausted for " + seg + " label=" + label);
+    if (q.length === 0) throw new Error("PLAN fixes queue exhausted for " + seg + " label=" + label);
     return q.shift();
   }
   throw new Error("mock agent(): unrecognized label " + label);
@@ -319,12 +437,13 @@ def run_workflow(
 
 
 # ---------------------------------------------------------------------------
-# Response-object builders -- shapes matching REVIEW_SCHEMA /
-# REVIEW_ARTIFACT_SCHEMA closely enough to drive the real script's own
-# branching (`rev.clean`, `rev.coverage_ok`, `rev.findings`, `art.match`);
-# this harness never itself validates against the JSON schemas (that is the
-# real Workflow tool's job, out of scope here) -- only exercises the plain
-# JS branching logic that reads these fields directly.
+# Response-object builders -- shapes matching REVIEW_SCHEMA / REVIEW_ARTIFACT_
+# SCHEMA closely enough to drive the real script's own branching
+# (`rev.clean`, `rev.coverage_ok`, `rev.findings`, `art.match`,
+# `"mismatch_detail" in art`, matching `artifactCheckMatched()`'s exact
+# check); this harness never itself validates against the JSON schemas
+# (that is the real Workflow tool's job, out of scope here) -- only
+# exercises the plain JS branching logic that reads these fields directly.
 # ---------------------------------------------------------------------------
 def review_obj(*, clean: bool, coverage_ok: bool = True) -> dict:
     return {
@@ -345,81 +464,131 @@ def match_false(detail: str = "artifact mismatch") -> dict:
 
 def converged_worst_case_plan(seg: str, max_fix_rounds: int, *, final_clean: bool) -> dict:
     """The worst-case-within-the-converged/non-converged-at-cap branch: every
-    one of the `max_fix_rounds` normal rounds comes back non-null,
-    artifact-matching, but NOT clean (so none of them exit early), then the
-    final confirming round is queried once more. `final_clean` selects
-    between the branch's two possible terminal statuses (`converged` vs
-    `non_converged`/`cap`) -- both cost exactly the same number of calls,
-    which is the entire point of the doc calling this one combined branch."""
-    reviews = [review_obj(clean=False) for _ in range(max_fix_rounds)]
-    reviews.append(review_obj(clean=final_clean, coverage_ok=True))
-    artifact_checks = [match_true() for _ in range(max_fix_rounds + 1)]
-    fixes = [f"FIXED {seg} r{i}" for i in range(1, max_fix_rounds + 1)]
-    return {"wait": f"READY {seg}", "reviews": reviews, "artifactChecks": artifact_checks, "fixes": fixes}
-
-
-def blocked_plan(seg: str, max_fix_rounds: int, terminal_kind: str) -> dict:
-    """`max_fix_rounds - 1` completed normal rounds (non-null, matching, not
-    clean -- so each costs exactly 3: review + artifact-check + fix), then a
-    terminating round whose shape depends on `terminal_kind`, matching
-    orchestration-and-batching.md's own three mutually exclusive sub-cases
-    exactly, each scripted to fire at the LATEST possible round (round
-    `max_fix_rounds` itself) -- the worst case the branch total assumes."""
+    one of the `max_fix_rounds` normal rounds AND the final confirming round
+    forces its review point through the true 6-call shared-retry worst case
+    (first read+check attempt fails via a mismatch, the retry succeeds) --
+    per getVerifiedReview's own derivation, this is the ONLY path that costs
+    exactly 6 per review point. Every normal round's resulting verdict is
+    kept non-clean (so a fix always dispatches and the loop never converges
+    early); `final_clean` selects between the branch's two possible terminal
+    statuses (`converged` vs `non_converged`/`cap`) on the final round --
+    both cost exactly the same number of calls, which is the entire point
+    of the template's own comment calling this one combined branch."""
+    review_waits: list = []
     reviews: list = []
     artifact_checks: list = []
     fixes: list = []
+
+    for i in range(1, max_fix_rounds + 1):
+        review_waits.append(f"READY {seg}")
+        reviews.append(review_obj(clean=False))
+        artifact_checks.append(match_false(f"round {i} first attempt mismatch"))
+        reviews.append(review_obj(clean=False))
+        artifact_checks.append(match_true())
+        fixes.append(f"FIXED {seg} r{i}")
+
+    # Final confirming round -- also forced through the shared retry (worst
+    # case); no fix call follows it regardless of clean/non-clean outcome.
+    review_waits.append(f"READY {seg}")
+    reviews.append(review_obj(clean=False))
+    artifact_checks.append(match_false("final round first attempt mismatch"))
+    reviews.append(review_obj(clean=final_clean, coverage_ok=True))
+    artifact_checks.append(match_true())
+
+    return {
+        "wait": f"READY {seg}",
+        "reviewWaits": review_waits,
+        "reviews": reviews,
+        "artifactChecks": artifact_checks,
+        "fixes": fixes,
+    }
+
+
+def blocked_plan(seg: str, max_fix_rounds: int, terminal_kind: str) -> dict:
+    """`max_fix_rounds - 1` completed normal rounds, each forced through the
+    SAME worst-case-recovered review-point shape `converged_worst_case_plan`
+    uses (6-call shared retry + 1 fix == 7 each) -- matching the estimator's
+    own per-round worst-case assumption, so a blocked branch built from this
+    helper is a genuinely maximal one, not an artificially cheap one -- then
+    a terminating round whose shape depends on `terminal_kind`, matching
+    this file's own three-sub-case derivation (module docstring) exactly."""
+    review_waits: list = []
+    reviews: list = []
+    artifact_checks: list = []
+    fixes: list = []
+
     for i in range(1, max_fix_rounds):
+        review_waits.append(f"READY {seg}")
+        reviews.append(review_obj(clean=False))
+        artifact_checks.append(match_false(f"round {i} first attempt mismatch"))
         reviews.append(review_obj(clean=False))
         artifact_checks.append(match_true())
         fixes.append(f"FIXED {seg} r{i}")
 
     if terminal_kind == "review-null":
-        # Original call null, single retry ALSO null -> blocked immediately,
-        # neither call ever reaches the artifact-check gate. 2 calls.
+        # readAndCheck's own "if (!rev) return {rev:null, art:null}"
+        # short-circuit means artifact-check:* is NEVER called when the
+        # read itself is falsy -- neither on the first attempt nor the
+        # retry. 4 calls: dispatch + wait + read + read(retry).
+        review_waits.append(f"READY {seg}")
         reviews.append(None)
         reviews.append(None)
     elif terminal_kind == "draft-missing":
-        # A normal, non-null, artifact-matching review, but the fix call
-        # itself reports DRAFT_MISSING. 3 calls.
+        # The review point succeeds WITHOUT a retry (happy path) -- draft-
+        # missing is a callFix-level failure, unrelated to the read/check
+        # retry mechanic. 5 calls: dispatch+wait+read+check+fix.
+        review_waits.append(f"READY {seg}")
         reviews.append(review_obj(clean=False))
         artifact_checks.append(match_true())
         fixes.append(f"DRAFT_MISSING {seg}")
     elif terminal_kind == "review-artifact-mismatch":
-        # Non-null review, artifact-check reports a mismatch; the retry
-        # review is ALSO non-null, and its own artifact-check STILL
-        # mismatches -- no fix call ever dispatches. 4 calls, the largest
-        # terminating sub-case.
+        # The first attempt's read succeeds but its check reports a
+        # mismatch; the retried read ALSO succeeds but its check STILL
+        # mismatches -- the true 6-call worst case, no fix ever dispatches.
+        review_waits.append(f"READY {seg}")
         reviews.append(review_obj(clean=False))
         artifact_checks.append(match_false("first mismatch"))
         reviews.append(review_obj(clean=False))
         artifact_checks.append(match_false("second mismatch"))
+    elif terminal_kind == "review-timeout":
+        # getVerifiedReview's own bounded review-wait poll times out on the
+        # very first attempt -- 2 calls (dispatch + wait); the read/check/
+        # fix machinery is never reached at all.
+        review_waits.append(f"TIMEOUT {seg}")
     else:
         raise ValueError(f"unknown terminal_kind {terminal_kind!r}")
 
-    return {"wait": f"READY {seg}", "reviews": reviews, "artifactChecks": artifact_checks, "fixes": fixes}
+    return {
+        "wait": f"READY {seg}",
+        "reviewWaits": review_waits,
+        "reviews": reviews,
+        "artifactChecks": artifact_checks,
+        "fixes": fixes,
+    }
 
 
 def timeout_plan(seg: str) -> dict:
     """The translator never delivers READY in time -- reviewFixLoop's own
     `ready.indexOf("READY") === -1` check fires on the very first wait call,
-    before a single review/fix call is ever made."""
-    return {"wait": f"TIMEOUT {seg}", "reviews": [], "artifactChecks": [], "fixes": []}
+    before a single review call is ever made."""
+    return {"wait": f"TIMEOUT {seg}", "reviewWaits": [], "reviews": [], "artifactChecks": [], "fixes": []}
 
 
 def blocked_branch_total(max_fix_rounds: int, terminating_cost: int) -> int:
-    """orchestration-and-batching.md's own blocked-branch derivation:
-    3 (fixed) + 3*(max_fix_rounds-1) (completed normal rounds) +
-    terminating_cost + 1 (ledger write)."""
-    return 3 + 3 * (max_fix_rounds - 1) + terminating_cost + 1
+    """3 (fixed) + 7*(max_fix_rounds-1) (completed WORST-CASE-RECOVERED
+    normal rounds -- review point with a forced shared retry (6) + fix (1)
+    == 7 each, matching the estimator's own per-round assumption) +
+    terminating_cost + 1 (terminal ledger write)."""
+    return 3 + 7 * (max_fix_rounds - 1) + terminating_cost + 1
 
 
 def converged_branch_total(max_fix_rounds: int) -> int:
-    """orchestration-and-batching.md's own converged/non-converged-at-cap
-    branch total: 3 (fixed) + 3*max_fix_rounds (all normal rounds
-    completed) + 2 (final confirming review + artifact-check) + 1 (ledger
-    write) == 3*max_fix_rounds + 6, exactly the `6 + 3*MAXFIX` per-segment
-    term inside estimatedCalls."""
-    return 3 + 3 * max_fix_rounds + 2 + 1
+    """The converged/non-converged-at-cap branch total: 3 (fixed) +
+    7*max_fix_rounds (all MAXFIX normal rounds, each a 6-call worst-case
+    review point + 1 fix) + 6 (final confirming review point, worst case,
+    no fix) + 1 (terminal ledger write) == 3*... == 10 + 7*max_fix_rounds,
+    exactly the `10 + 7*MAXFIX` per-segment term inside estimatedCalls."""
+    return 3 + 7 * max_fix_rounds + 6 + 1
 
 
 def bucket_calls_by_segment(calls: list[dict]) -> tuple[dict[str, list[dict]], list[dict]]:
@@ -446,7 +615,7 @@ def bucket_calls_by_segment(calls: list[dict]) -> tuple[dict[str, list[dict]], l
 def test_estimator_boundary_exactly_at_cap_permits_dispatch_and_converges(tmp_path):
     max_fix_rounds = 2
     segs = ["seg01", "seg02"]
-    estimated = 1 + len(segs) * (6 + 3 * max_fix_rounds)  # 1 + 2*12 = 25
+    estimated = 1 + len(segs) * (10 + 7 * max_fix_rounds)  # 1 + 2*24 = 49
 
     plan = {seg: converged_worst_case_plan(seg, max_fix_rounds, final_clean=True) for seg in segs}
     out = run_workflow(
@@ -472,13 +641,13 @@ def test_estimator_boundary_exactly_at_cap_permits_dispatch_and_converges(tmp_pa
     assert len(batch_level) == 1, "exactly one mandatory batch-level mergeLedgerPrompt call"
     for seg in segs:
         assert len(per_seg[seg]) == converged_branch_total(max_fix_rounds)
-        assert len(per_seg[seg]) == 6 + 3 * max_fix_rounds
+        assert len(per_seg[seg]) == 10 + 7 * max_fix_rounds
 
 
 def test_estimator_one_below_boundary_blocks_dispatch_entirely(tmp_path):
     max_fix_rounds = 2
     segs = ["seg01", "seg02"]
-    estimated = 1 + len(segs) * (6 + 3 * max_fix_rounds)  # 25
+    estimated = 1 + len(segs) * (10 + 7 * max_fix_rounds)  # 49
 
     # Same configuration as the boundary-permits test above, but the cap is
     # one less -- deliberately reuse a plan that WOULD converge if pipeline()
@@ -533,7 +702,7 @@ def test_blocked_review_null_terminating_subcase(tmp_path):
 
     per_seg, batch_level = bucket_calls_by_segment(out["calls"])
     assert len(batch_level) == 1
-    assert len(per_seg[seg]) == blocked_branch_total(max_fix_rounds, terminating_cost=2)
+    assert len(per_seg[seg]) == blocked_branch_total(max_fix_rounds, terminating_cost=4)
 
 
 def test_blocked_draft_missing_terminating_subcase(tmp_path):
@@ -557,7 +726,7 @@ def test_blocked_draft_missing_terminating_subcase(tmp_path):
 
     per_seg, batch_level = bucket_calls_by_segment(out["calls"])
     assert len(batch_level) == 1
-    assert len(per_seg[seg]) == blocked_branch_total(max_fix_rounds, terminating_cost=3)
+    assert len(per_seg[seg]) == blocked_branch_total(max_fix_rounds, terminating_cost=5)
 
 
 def test_blocked_review_artifact_mismatch_terminating_subcase(tmp_path):
@@ -581,11 +750,42 @@ def test_blocked_review_artifact_mismatch_terminating_subcase(tmp_path):
 
     per_seg, batch_level = bucket_calls_by_segment(out["calls"])
     assert len(batch_level) == 1
-    assert len(per_seg[seg]) == blocked_branch_total(max_fix_rounds, terminating_cost=4)
+    assert len(per_seg[seg]) == blocked_branch_total(max_fix_rounds, terminating_cost=6)
 
 
 # ---------------------------------------------------------------------------
-# 6: the timeout branch.
+# 10 (NEW): review's own bounded-poll timeout -- distinct from translate's,
+# and from the pre-1.2.0 file's three sub-cases, since the review restructure
+# gave review its own independent readiness gate.
+# ---------------------------------------------------------------------------
+
+
+def test_blocked_review_timeout_terminating_subcase(tmp_path):
+    max_fix_rounds = 3
+    seg = "segG"
+    out = run_workflow(
+        tmp_path=tmp_path,
+        max_fix_rounds=max_fix_rounds,
+        batch_agent_cap=10_000,
+        segs=[seg],
+        plan={seg: blocked_plan(seg, max_fix_rounds, "review-timeout")},
+    )
+
+    result = out["result"]
+    assert result["converged"] == []
+    assert len(result["failed"]) == 1
+    failed = result["failed"][0]
+    assert failed["seg"] == seg
+    assert failed["converged"] is False
+    assert failed["reason"] == "review-timeout"
+
+    per_seg, batch_level = bucket_calls_by_segment(out["calls"])
+    assert len(batch_level) == 1
+    assert len(per_seg[seg]) == blocked_branch_total(max_fix_rounds, terminating_cost=2)
+
+
+# ---------------------------------------------------------------------------
+# 6: the timeout branch (translate's own).
 # ---------------------------------------------------------------------------
 
 
@@ -617,8 +817,9 @@ def test_timeout_branch(tmp_path):
 
 # ---------------------------------------------------------------------------
 # 7: dedicated case -- a review-artifact-mismatch segment's ACTUAL call
-# count never exceeds the formula's own per-segment bound (6 + 3*MAXFIX),
-# even though it is the largest of the three blocked terminating sub-cases.
+# count, built from worst-case-recovered prior rounds (matching the
+# estimator's own per-round assumption), never exceeds the formula's own
+# per-segment bound (10 + 7*MAXFIX).
 # ---------------------------------------------------------------------------
 
 
@@ -639,9 +840,9 @@ def test_review_artifact_mismatch_actual_calls_never_exceed_formula_bound(tmp_pa
 
     per_seg, _ = bucket_calls_by_segment(out["calls"])
     actual_calls = len(per_seg[seg])
-    per_segment_bound = 6 + 3 * max_fix_rounds  # the exact term estimatedCalls sizes per segment
+    per_segment_bound = 10 + 7 * max_fix_rounds  # the exact term estimatedCalls sizes per segment
 
-    assert actual_calls == blocked_branch_total(max_fix_rounds, terminating_cost=4)
+    assert actual_calls == blocked_branch_total(max_fix_rounds, terminating_cost=6)
     assert actual_calls <= per_segment_bound, (
         f"a review-artifact-mismatch segment made {actual_calls} real agent() calls, "
         f"exceeding the estimator's own per-segment bound of {per_segment_bound} "
@@ -664,7 +865,7 @@ def test_review_artifact_mismatch_actual_calls_never_exceed_formula_bound(tmp_pa
 )
 def test_estimator_formula_matches_closed_form(tmp_path, n_segs, max_fix_rounds):
     segs = [f"seg{idx:03d}" for idx in range(n_segs)]
-    expected = 1 + n_segs * (6 + 3 * max_fix_rounds)
+    expected = 1 + n_segs * (10 + 7 * max_fix_rounds)
 
     out = run_workflow(
         tmp_path=tmp_path,
@@ -714,3 +915,76 @@ def test_non_converged_at_cap_costs_the_same_as_converged(tmp_path):
 
     per_seg, _ = bucket_calls_by_segment(out["calls"])
     assert len(per_seg[seg]) == converged_branch_total(max_fix_rounds)
+
+
+# ---------------------------------------------------------------------------
+# 11 (NEW): a dedicated, narrower companion to fixture 1 -- rather than
+# forcing EVERY round through the shared-retry worst case, this forces it in
+# exactly ONE mid-loop round (the last normal round, i.e. round max_fix_
+# rounds itself) while every other round -- including the final confirming
+# one -- takes the cheap happy path (no retry). This isolates the shared-
+# retry mechanic in getVerifiedReview from the estimator's own worst-case
+# ceiling, and the expected total below is hand-computed per-round, not
+# read back off the closed-form formula -- a genuinely independent check
+# that the harness's queue machinery counts a PARTIAL-worst-case run
+# correctly, not just the all-worst-case boundary fixture above. Directly
+# exercises the CONTRACT's explicit "force a mid-loop read/check->retry->fix
+# max round and assert EXACT equality" requirement.
+# ---------------------------------------------------------------------------
+
+
+def test_shared_retry_recovers_mid_loop_and_matches_exact_count(tmp_path):
+    max_fix_rounds = 3
+    seg = "segRetry"
+
+    review_waits = [f"READY {seg}"] * (max_fix_rounds + 1)
+    reviews = [
+        review_obj(clean=False),  # round 1 -- happy-path read (no retry)
+        review_obj(clean=False),  # round 2 -- happy-path read (no retry)
+        review_obj(clean=False),  # round 3 (the max round) -- first attempt
+        review_obj(clean=False),  # round 3 -- shared-retry attempt, succeeds
+        review_obj(clean=True, coverage_ok=True),  # final round -- happy-path read
+    ]
+    artifact_checks = [
+        match_true(),                                    # round 1
+        match_true(),                                     # round 2
+        match_false("round 3 first attempt mismatch"),     # round 3, first attempt fails
+        match_true(),                                      # round 3, retry succeeds
+        match_true(),                                       # final round
+    ]
+    fixes = [f"FIXED {seg} r1", f"FIXED {seg} r2", f"FIXED {seg} r3"]
+
+    plan = {
+        seg: {
+            "wait": f"READY {seg}",
+            "reviewWaits": review_waits,
+            "reviews": reviews,
+            "artifactChecks": artifact_checks,
+            "fixes": fixes,
+        }
+    }
+
+    out = run_workflow(
+        tmp_path=tmp_path,
+        max_fix_rounds=max_fix_rounds,
+        batch_agent_cap=10_000,
+        segs=[seg],
+        plan=plan,
+    )
+
+    result = out["result"]
+    assert result["batchComplete"] is True
+    assert [r["seg"] for r in result["converged"]] == [seg]
+    assert result["failed"] == []
+
+    # round1 (happy, 4+1fix=5) + round2 (happy, 5) + round3 (shared retry,
+    # 6+1fix=7) + final review (happy, 4, no fix) + 3 fixed + 1 terminal
+    # ledger -- hand-computed independently of converged_branch_total (which
+    # assumes EVERY round hits the 6-call worst case, not just one).
+    expected_total = 3 + (5 + 5 + 7) + 4 + 1
+    assert expected_total == 25
+
+    per_seg, batch_level = bucket_calls_by_segment(out["calls"])
+    assert len(batch_level) == 1
+    assert len(per_seg[seg]) == expected_total
+    assert len(out["calls"]) == expected_total + 1

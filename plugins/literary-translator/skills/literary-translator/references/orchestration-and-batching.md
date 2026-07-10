@@ -136,13 +136,22 @@ generated script surviving in place.
 Bundle membership stays split exactly as follows: `plugin_bundle_hash` gates
 cache reuse and covers `validate_draft.py`, `canon_validate.py`,
 `cache_key.py`, `draft_sha1.py`, `review_artifact_check.py`,
-`ledger_update.py`, plus `mass-translate-wf.template.js` and
-`glossary-pass-wf.template.js`; `orchestration_bundle_hash` is diagnostic
-only, never part of the composite cache key, and covers exactly
-`draft_ready.py`, `ledger_merge.py`, `language_smoke_report.py`, and
-`select_segments.py`; `derivation_bundle_hash` covers exactly
-`bootstrap_names.py` and `segpack.py` and is the cache-key field that drives
-the `blocked_needs_regeneration` treatment.
+`ledger_update.py`, `review_ready.py`, `resume_setup.py`, plus
+`mass-translate-wf.template.js` and `glossary-pass-wf.template.js`.
+`review_ready.py` and `resume_setup.py` (both new in 1.2.0) are correctness-
+determining in the same sense as `review_artifact_check.py`/`ledger_update.py`
+— a bug in either could certify a stale or wrongly-scoped artifact as safe to
+consume, or wrongly permit/refuse a resume — so both are gating members, not
+diagnostic-only, unlike their sibling readiness/merge scripts below.
+`orchestration_bundle_hash` is diagnostic only, never part of the composite
+cache key, and covers exactly `draft_ready.py`, `ledger_merge.py`,
+`language_smoke_report.py`, and `select_segments.py`; `derivation_bundle_hash`
+covers exactly `bootstrap_names.py` and `segpack.py` and is the cache-key
+field that drives the `blocked_needs_regeneration` treatment. See
+`references/ledger-and-resumability.md` for the full three-bundle-hash
+membership table (the authoritative restatement site) and the
+resume-integrity digest that reads both `plugin_bundle_hash` and
+`orchestration_bundle_hash` as version inputs.
 
 ## Structural properties preserved exactly from the proven reference
 
@@ -162,23 +171,19 @@ preserved exactly because they are precisely what made the original reliable:
   model (`gotcha_workflow_const_tdz_silent_fail`). This applies to
   `REVIEW_SCHEMA`, `REVIEW_ARTIFACT_SCHEMA`, `LEDGER_WRITE_SCHEMA`, and
   `LEDGER_MERGE_SCHEMA` in `mass-translate-wf.template.js`, and to
-  `CANON_BATCH_SCHEMA` in `glossary-pass-wf.template.js`.
+  `CANON_VERIFY_SCHEMA` in `glossary-pass-wf.template.js`.
 - Every `agent()` call carries `phase`/`label` metadata (pure logging,
   non-load-bearing — e.g. `phase: 'Translate'`, `label: 'translate:${seg}'`).
   The file exports a top-level `meta = { name, description, phases }` object.
   Both details are real in the proven reference and kept for parity, but
   neither is load-bearing for correctness.
-- The inline schema literals match their shipped schemas exactly:
-  `REVIEW_SCHEMA` has `{clean, coverage_ok, findings[{loc, severity, issue,
-  suggest}], draft_sha1}` with `additionalProperties:false` and no
-  `verse_status`; `REVIEW_ARTIFACT_SCHEMA` is a
-  `oneOf` of `{match:true}` or `{match:false, mismatch_detail}`;
-  `LEDGER_WRITE_SCHEMA` is a `oneOf` of `{success:true, status,
-  fragment_path, fragment_sha1}` or `{success:false, error, exit_code?,
-  stderr?}`; `LEDGER_MERGE_SCHEMA` is a `oneOf` of `{success:true,
-  ledger_path, n_segments, missing_segments: [], stale_segments}` or
-  `{success:false, error, missing_segments?, exit_code?, stderr?}`. Each
-  branch is `additionalProperties:false`.
+- **Every agent-facing schema literal is top-level `type:"object"`, with no
+  top-level `oneOf`/`allOf`/`anyOf`** (the `#87` fix — see
+  `references/workflow-schema-validation.md` for the full flat shapes,
+  the reasoning, and the exact-key-set JS guards that re-establish branch
+  discrimination on the *agent-relayed* object). Do not restate the exact
+  field lists here — that reference file is the single authoritative site;
+  this file only needs the orchestration-level fact that they are flat.
 
 ## The exact per-segment loop: translate → readiness-poll → review/fix loop → confirming final review
 
@@ -208,50 +213,53 @@ instructs the agent to self-validate coverage before returning; nothing in
 stage 2 depends on stage 1's own return string).
 
 1. **Translate.** `agent(translatePrompt(seg), { agentType: 'codex:codex-rescue', effort: 'high' })`
-   — fire-and-forget; the translator prompt itself instructs the agent to
-   self-validate coverage via the deterministic gate
+   — fire-and-forget, the DISPATCH half of the shared codex work-call
+   pattern (`references/workflow-schema-validation.md`); the translator
+   prompt writes `draft_path(seg) = segments/{seg}.draft.json` carrying a
+   `dispatch_token = <RUN_ID>:<seg>` metadata field and instructs the agent
+   to self-validate coverage via the deterministic gate
    (`validate_draft.py`) before returning. This is the one deliberate
-   exception to the "codex accuracy calls need a schema" rule (R7 in
+   exception to the "codex accuracy calls need a schema" framing (R7 in
    `references/engine-loop.md`): the translate call is intentionally
    schema-less, gated instead by file output plus
    `draft_ready.py`/`validate_draft.py` — see
    `references/false-green-gate.md`.
-2. **Readiness poll.** A low-effort wait/poll step (`draft_ready.py` in a
-   bash polling loop, `effort: 'low'`) blocks the review loop from starting
-   until the async translator has actually delivered a complete file. This
+2. **Readiness poll.** A low-effort wait/poll step (`draft_ready.py
+   --expect-token <RUN_ID:seg>` in a bounded bash polling loop, `effort:
+   'low'`) blocks the review loop from starting until the async translator
+   has actually delivered a complete, current-run-tokened file. This
    specifically prevents a Claude fix-agent from ever ending up authoring a
    missing translation, since "codex only translates" would otherwise be
    silently violated the moment a fix step ran against a
-   nonexistent/partial draft. On timeout, this branch returns
+   nonexistent/partial/stale-run draft. On timeout, this branch returns
    `{ seg, converged: false, reason: 'translate-timeout' }` and the loop
    never reaches a review call at all for this segment.
 3. **Review/fix loop**, up to `engine.max_fix_rounds` rounds of review → fix
    → re-review, exiting early the moment a review reports
-   `clean && coverage_ok`:
-   - **Review call** — schema-validated, workflow-level,
-     `agentType: 'codex:codex-rescue'`, `effort: 'high'`, schema
-     `REVIEW_SCHEMA` (see `references/workflow-schema-validation.md` for the
-     exact shape).
-   - **Null-review handling** (a deliberate plan enhancement, absent from
-     the proven reference, which blocks on the first null with no retry):
-     if the review call returns null, retry that SAME call once, fresh; if
-     the retry also returns null, exit immediately as `blocked` with reason
-     `review-null` rather than consuming a fix round.
-   - **Review-artifact gate**, right after a non-null verdict:
-     `agent(verifyReviewArtifactPrompt(seg, revObj), { effort: 'low', schema: REVIEW_ARTIFACT_SCHEMA })`
-     verifies the on-disk `review_path(seg)` byte-matches the `revObj` the
-     review call actually returned, via
-     `scripts/review_artifact_check.py`'s deterministic comparison. On
-     `match: false`, retry the original review call once, fresh, and re-run
-     the same check against the retry's write; if it still mismatches, exit
-     as `blocked` with reason `review-artifact-mismatch`. Full mechanics and
-     what this gate does and doesn't protect (it no longer gates the fix
-     step's own input, only the ledger-binding/audit-trail question) are in
-     `references/engine-loop.md` and `references/ledger-and-resumability.md`.
+   `clean && coverage_ok`. Each round's review point is itself the shared
+   DISPATCH → WAIT → CONSUME pattern, not one call:
+   - **`reviewDispatchPrompt`** — codex, schema-less, fire-and-forget:
+     computes `draft_sha1` hash-first, reviews, atomically writes
+     `review_path(seg) = segments/{seg}.review.json` carrying
+     `dispatch_token = <RUN_ID>:<seg>:r<roundLabel>` (`roundLabel` = the
+     round number or `final`), prints `REVIEWED {seg}`.
+   - **`reviewWaitPrompt`** — Claude, `effort:'low'`, bounded poll of
+     `review_ready.py {seg} --expect-token <RUN_ID:seg:rN>` (`for i in
+     $(seq 1 45)` shape, matching translate's own poll). `TIMEOUT` → exit
+     immediately as `blocked review-timeout`, no retry.
+   - **`readReviewPrompt` + `verifyReviewArtifactPrompt`** — the two CONSUME calls,
+     schema-validated (`REVIEW_SCHEMA`, flat `REVIEW_ARTIFACT_SCHEMA`),
+     covered under **one shared retry budget**: read → check; on a `null`
+     read OR a `match:false` check, retry the SAME `(read, check)` pair
+     once, fresh; still failing → `blocked review-null` or `blocked
+     review-artifact-mismatch`, whichever triggered it. Full mechanics —
+     including why this replaces the old "retry the whole dispatch"
+     shape — are in `references/workflow-schema-validation.md` and
+     `references/ledger-and-resumability.md`.
    - **Fix call**, only on `match: true`:
      `agent(fixPrompt(seg, round, revObj), { effort: 'high' })` — no
      `agentType` field, keeping it on plain Claude. `fixPrompt` receives
-     `revObj` directly (the same schema-validated object the review call
+     `revObj` directly (the same schema-validated object `readReviewPrompt`
      already returned this round, still in memory) rather than reading
      `review_path(seg)` back off disk — a deliberate, documented departure
      from the proven reference's 2-argument `fixPrompt(seg, round)` shape.
@@ -259,20 +267,23 @@ stage 2 depends on stage 1's own return string).
 4. **Confirming final review.** Always one final confirming review after the
    round cap, even if the loop exited because of the cap rather than
    convergence — a fix that goes unverified is the single most common source
-   of a silently-broken "done" segment. This final review carries its own
-   review-artifact-gate call too (the gate fires after every non-null
-   verdict, including the final confirming one).
+   of a silently-broken "done" segment. This final review point runs the
+   identical dispatch → wait → read → check sequence (`roundLabel: 'final'`
+   in its `dispatch_token`).
 5. **Result.** Ordinary translate/review non-convergence returns a structured
    `{ seg, converged: false, reason, rounds, lastFindings }` object — never
    throws, never silently marks done. `reason` is one of
-   `translate-timeout`, `review-null`, `draft-missing`,
+   `translate-timeout`, `review-timeout`, `review-null`, `draft-missing`,
    `review-artifact-mismatch`, or `cap` (non-converged after the final
    confirming review). Ledger-write failures are surfaced through the Workflow
    result instead of being written back through the same ledger channel:
    `success:false` from `recordLedgerPrompt` returns
    `{ seg, converged: false, reason: 'ledger-write-failed', detail: <error> }`,
    while the JS-side fragment/status payload-intent mismatch returns
-   `reason: 'ledger-write-mismatch'`.
+   `reason: 'ledger-write-mismatch'`. A `dispatch_token`/sha mismatch at the
+   convergence ledger write (see `references/ledger-and-resumability.md`'s
+   commit-gate chain) also surfaces as `reason: 'ledger-write-failed'` —
+   never recorded `converged`.
 
 No sub-chunking exists anywhere in this loop in v1 — `mass-translate-wf.template.js`
 operates only on whole `seg` items; a segment whose `word_count` exceeds
@@ -281,11 +292,19 @@ W4).
 
 ## Prompt functions — generated from the profile at instantiation time
 
-`mass-translate-wf.template.js` defines seven prompt functions:
-`translatePrompt`, `reviewPrompt`, `waitPrompt`, `fixPrompt`,
-`recordLedgerPrompt`, `mergeLedgerPrompt`, `verifyReviewArtifactPrompt`.
-`glossary-pass-wf.template.js` defines its own, smaller set including
-`glossaryPrompt`.
+`mass-translate-wf.template.js` defines nine prompt functions:
+`translatePrompt`, `waitPrompt`, `reviewDispatchPrompt`,
+`reviewWaitPrompt`, `readReviewPrompt`, `verifyReviewArtifactPrompt`, `fixPrompt`,
+`recordLedgerPrompt`, `mergeLedgerPrompt`. (`reviewPrompt` — the old,
+single, schema-validated review call — no longer exists; the review point
+is now four functions, one per DISPATCH/WAIT/CONSUME×2 step, per
+`references/workflow-schema-validation.md`. `verifyReviewArtifactPrompt`
+keeps its pre-1.2.0 name but is now dispatched as a separate call after
+`readReviewPrompt` returns, rather than immediately after the old single
+`reviewPrompt` call.) `glossary-pass-wf.template.js` defines its own,
+smaller set: `batchDispatchPrompt`, `batchWaitPrompt`, a final-merge prompt,
+and `glossaryVerifyPrompt` (`CANON_VERIFY_SCHEMA`) — see
+`references/canon-and-glossary.md`.
 
 **There is no templating engine at Workflow-runtime.** Every prompt function
 is plain JavaScript string interpolation against constants the orchestrating
@@ -293,8 +312,9 @@ session substitutes once, at the moment it instantiates the template file
 from the plugin's shipped copy — before the Workflow tool ever executes it.
 The template documents its own substitution tokens explicitly:
 `{{SOURCE_LANG}}`, `{{TARGET_LANG}}`, `{{DURABLE_ROOT}}`,
-`{{VERSE_POLICY_INSTRUCTION_BLOCK}}`, `{{MAX_FIX_ROUNDS}}`, and (glossary-pass
-template only) `{{RESEARCH_MODE}}`. `{{VERSE_POLICY_INSTRUCTION_BLOCK}}` in
+`{{VERSE_POLICY_INSTRUCTION_BLOCK}}`, `{{MAX_FIX_ROUNDS}}`, `{{RUN_ID}}`
+(new in 1.2.0, both templates — see below), and (glossary-pass template
+only) `{{RESEARCH_MODE}}`. `{{VERSE_POLICY_INSTRUCTION_BLOCK}}` in
 particular is read fresh from the CURRENT `profile.yml` every time a run is
 scaffolded — never spliced into `translate_TASK.md`/`review_TASK.md`
 directly — which is what keeps it staleness-immune when `verse_policy.mode`
@@ -304,18 +324,90 @@ Because substitution happens once at instantiation time and never again at
 runtime, a leftover `{{...}}` token in the generated script is a hard bug,
 not a cosmetic one — it means a substitution the instantiation step should
 have performed didn't happen. `tests/workflow_template_instantiation.test.py`
-instantiates both templates against a fixture profile and greps the output
-for the literal substring `{{`, asserting zero matches; the glossary-pass
-case runs twice, once per `research_mode` value, to prove
-`{{RESEARCH_MODE}}` resolves correctly in both directions.
+instantiates both templates against a fixture profile (substituting a stable
+fixture value for `{{RUN_ID}}` too) and greps the output for the literal
+substring `{{`, asserting zero matches; the glossary-pass case runs twice,
+once per `research_mode` value, to prove `{{RESEARCH_MODE}}` resolves
+correctly in both directions.
 
-**Storage location (pinned):** the instantiated script is written to
-`${durable_root}/runs/workflows/<run_id>/mass-translate-wf.js` (and
-`glossary-pass-wf.js` for the glossary pass), where `run_id` is a fresh,
-sortable identifier (an ISO-8601-ish timestamp works) generated once per
-invocation — the same ID a later resumed run's `resumeFromRunId` would refer
-back to. `runs/workflows/` is created by Step 0a. The full path is logged in
-W8's status output.
+### `{{RUN_ID}}` derivation — a resolve-once, resume-stable contract
+
+**Corrected from the pre-1.2.0 wording, which said "a fresh id per
+invocation" — that was true only for a brand-new run.** The orchestrating
+session resolves `{{RUN_ID}}` exactly **once**, at instantiation time, as:
+
+```
+effectiveRunId = resumeFromRunId  (on a resume whose input_digest MATCHES — see below)
+             else a fresh, sortable id
+```
+
+The fresh-id case uses a **colon-free** timestamp form, `YYYYMMDDTHHMMSSZ` —
+a raw ISO-8601 string with `:` is intentionally rejected, since `:` is
+unsafe in some path contexts this ID ends up embedded in. Either way, the
+value is validated against a **hardened, path-safe allowlist**:
+`^[A-Za-z0-9][A-Za-z0-9._-]*$`, and the whole value must not be `.` or `..`,
+and must not contain a `..` substring anywhere (rejecting directory-escape
+and dot-segment-collapse tricks). The identical value both names the run
+directory (`${durable_root}/runs/workflows/<RUN_ID>/`,
+`${durable_root}/glossary/runs/<RUN_ID>/`) and substitutes `{{RUN_ID}}`
+inside the instantiated template — so a fresh instantiation and a resumed
+one that reuses the same `RUN_ID` produce byte-identical
+tokens/paths throughout. `runs/workflows/` is created by Step 0a. The full
+path is logged in W8's status output.
+
+**Whether to resume at all is a separate decision from the `RUN_ID` value
+itself** — gated by the resume-integrity digest below, never by "a
+`resumeFromRunId` was supplied" alone.
+
+### The resume-integrity gate and its digest inputs
+
+Embedding `{{RUN_ID}}` in dispatch prompts closes staleness for the
+artifacts that carry it (`draft.json`, `review.json`, glossary fragments —
+see `references/ledger-and-resumability.md`), but it does **not** by itself
+decide whether resuming is *safe*: `readReviewPrompt`, `verifyReviewArtifactPrompt`,
+`fixPrompt`, and the ledger calls never carry `RUN_ID` in their own prompts,
+so a fresh `RUN_ID` alone would still let a resumed run replay their cached
+results against inputs that changed underneath them. The orchestrating
+session closes this at a single pre-workflow choke point instead: before
+ever calling `pipeline()`, it computes an `input_digest` and
+**create-or-compares** it against `runs/<RUN_ID>/input.digest`.
+
+```
+input_digest = sha256(canonical_json({
+  kind: "mass" | "glossary",
+  args: <the full ordered args this invocation was given>,
+  subst: {research_mode, verse_policy, source_lang, target_lang,
+          max_fix_rounds, batch_agent_cap},   // resolved profile substitutions
+  domain: mass: {seg: <cache_key.py's 15-field composite per seg>}
+        | glossary: {glossary_rule, canon_hash},
+  version: {plugin_bundle_hash: <runs/.plugin_bundle_hash>,
+            orchestration_bundle_hash: <runs/.orchestration_bundle_hash>,
+            schemas: <sha of the schemas/ dir>},
+}))
+```
+
+**MATCH** the prior run's own recorded digest → resume with
+`resumeFromRunId` — every digest input is byte-identical, so every cached
+result (including the four unscoped-prompt calls above) is provably still
+valid. **MISMATCH, or no prior digest** → launch a **fresh run**, a fresh
+`RUN_ID`, and explicitly **no** `resumeFromRunId` — reuse nothing. This is
+the general principle the digest closes: cover *every* input that can change
+a cached agent output, not just the ones a naive "did the source text
+change" check would think to cover — a `research_mode: live→offline` flip,
+for instance, changes agent policy and `--check-batch` validity without
+changing a single hashed content byte, which is exactly why `subst` is a
+first-class digest input alongside `args`/`domain`/`version`, not folded
+into one of them. `resume_setup.py` (new script, `assets/scripts/`)
+implements this: given the run kind, `args`, resolved substitutions, and the
+per-seg cache keys / glossary candidates, it computes `input_digest`,
+create-or-compares `runs/<RUN_ID>/input.digest`, creates the run
+directory/directories, and (glossary only) atomically writes the manifest
+files below — aborting (nonzero exit) before any dispatch on any failure.
+It emits the resolved `effectiveRunId` and `resume: true|false` as one JSON
+line. See `references/ledger-and-resumability.md` for the
+per-artifact-consumption token/sha commit-gate chain this digest gate
+complements (the digest decides *whether* to resume; the commit-gate chain
+polices every individual artifact even when resuming is in principle safe).
 
 ## `batch_agent_cap` — the worst-case preflight estimator
 
@@ -330,48 +422,54 @@ same "carefully designed, unproven at scale" confidence
 `references/ledger-and-resumability.md` already applies to the ledger
 subsystem, pending a first real pilot run.
 
-The formula comes from enumerating every mutually-exclusive per-segment
-branch and taking the true worst case, not from padding a flat guess:
+The formula was re-derived for 1.2.0's DISPATCH/WAIT/CONSUME review shape
+and the removal of the batch-level pre-clean step (see the resume-integrity
+gate above, which makes a pre-clean unnecessary — `{{RUN_ID}}` scoping is
+what used to need a clean-slate wipe). It still comes from enumerating every
+mutually-exclusive per-segment branch and taking the true worst case, not
+from padding a flat guess:
 
-- **Every segment, unconditionally:** 1 `in_progress` ledger write + 1
-  translate call + 1 wait/poll call = **3 fixed calls**, before any branch is
-  even reached.
-- **Timeout branch:** no review call ever happens on this path; +1 ledger
-  write. Branch total: `3 + 1 = 4`.
-- **Blocked branch:** up to `max_fix_rounds - 1` completed NORMAL rounds,
-  each **3 calls** (review + artifact-check + fix — a normal round's review
-  is non-null by definition, since a null review diverts into the
-  terminating sub-case below instead), then a terminating round whose call
-  count depends on which of three mutually exclusive sub-cases fires:
-  - `review-null` (after one retry): 2 calls — neither the original nor the
-    retry triggers the artifact-check, since that gate only fires after a
-    non-null verdict.
-  - `draft-missing`: 3 calls — a non-null review + its artifact-check
-    (matching) + a fix call that hits `DRAFT_MISSING`.
-  - `review-artifact-mismatch`: 4 calls — a non-null review + its
-    artifact-check reporting `match: false` + a fresh retry of the original
-    review call + the retry's own artifact-check, which STILL reports
-    `match: false`. No fix call ever dispatches on this path. This is the
-    largest of the three terminating sub-cases.
-  Terminating-round maximum: 4 calls. Branch total:
-  `3 + 3*(max_fix_rounds - 1) + 4 + 1 = 3*max_fix_rounds + 5`.
-- **Converged / non-converged-at-cap branch:** the full `max_fix_rounds`
-  rounds of review + artifact-check + fix (3 calls per round, no early clean
-  exit), then one final confirming review plus its own artifact-check (2
-  calls — the gate fires after every non-null verdict, including the final
-  confirming one), then 1 ledger write. Branch total:
-  `3 + 3*max_fix_rounds + 2 + 1 = 3*max_fix_rounds + 6` — **this is the true
-  per-segment maximum across all branches** (the blocked branch's own worst
-  sub-case is always exactly one call lower, since whichever way a blocked
-  path terminates it substitutes for, rather than adds to, the converged
-  branch's final confirming-review-plus-artifact-check pair).
+- **A review point, worst case, is exactly 6 calls**: `reviewDispatchPrompt`
+  (1) + `reviewWaitPrompt` (1) + the CONSUME pair under its **one shared
+  retry budget** — `readReviewPrompt` + `verifyReviewArtifactPrompt` run once, then
+  (worst case) the identical pair retried once more = 4 — for
+  `1 + 1 + 2×(1 + 1) = 6`. This is a single number now, not a set of
+  mutually-exclusive terminating sub-cases: `reviewWaitPrompt` timing out is
+  the only way a review point resolves in fewer than 6 calls, and that
+  terminates the segment immediately (see below), so it is never the
+  binding case for the worst-case estimate.
+- **Every segment, unconditionally, before any review point is even
+  reached:** 1 `in_progress` ledger write + 1 translate DISPATCH + 1
+  translate WAIT = **3 fixed calls**.
+- **A NORMAL round** (one that neither converges nor terminates the loop):
+  one review point (6) + one fix call (1) = **7 calls**.
+- **The final confirming review** (always runs, even after the round cap):
+  one review point = **6 calls**, no fix call attached to it.
+- **+1 terminal ledger write**, whichever terminal status fires
+  (`converged`/`non_converged`/`blocked`).
+
+Per-segment worst case, across every branch (converged-at-cap,
+non-converged-at-cap, and blocked-on-the-final-round-before-cap — a
+`review-timeout`/`review-null`/`review-artifact-mismatch`/`draft-missing`
+block always terminates via a *shorter* path than running every round to
+cap, so it is never the binding case):
 
 ```
-estimatedCalls = 1 + SEGS.length * (6 + 3 * maxFixRounds)
+perSegment = 3 (fixed) + 7 * maxFixRounds (normal rounds) + 6 (final review) + 1 (terminal ledger)
+           = 10 + 7 * maxFixRounds
 ```
 
-The leading `+1` is the one mandatory, batch-level (not per-segment)
-`mergeLedgerPrompt` call every batch makes exactly once before returning.
+```
+estimatedCalls = 1 + SEGS.length * (10 + 7 * maxFixRounds)
+```
+
+The leading `+1` is the one mandatory, **batch-level** (not per-segment)
+`mergeLedgerPrompt` call every batch makes exactly once before returning —
+unchanged in kind from before, just no longer accompanied by a pre-clean
+call (removed; see the resume-integrity gate above).
+`tests/batch_size_estimator.test.py`'s mock harness forces a mid-loop
+shared-retry (read/check → retry → fix, one full max round) and asserts
+**exact** equality to this formula, not `≤`.
 
 If `estimatedCalls > engine.batch_agent_cap`: `log()` the estimate and the
 segment count, then return immediately with
@@ -402,58 +500,118 @@ mass-translate template ever runs at W5. **Labeled explicitly: new
 hardening, not itself source-proven.** The real project ran its glossary
 pass as ad hoc `glossary/TASK.md` plus codex batches producing
 `glossary/out_*.json` — not a schema-validated Workflow script. This
-template applies the proven review-loop *mechanics* (schema-validated,
-workflow-level `agent()` calls) to a new context by analogy — sound
-engineering, but not "this exact script ran on a real project." A first real
-project should pilot this template on one small batch and manually verify
-its `canon.json` merge output before treating it as fully load-bearing, the
-same stress-gate discipline W4 applies to translation.
+template applies the proven review-loop *mechanics* (fire-and-forget
+dispatch, bounded disk-poll, disk-is-truth) to a new context by analogy —
+sound engineering, but not "this exact script ran on a real project." A
+first real project should pilot this template on one small batch and
+manually verify its `canon.json` merge output before treating it as fully
+load-bearing, the same stress-gate discipline W4 applies to translation.
 
-Structurally, it is a single-stage `pipeline()` call over batches of
-candidate name/term forms, not per-segment IDs:
+**1.2.0 restructure (#87, #88, #90, #97).** The pre-1.2.0 shape had a single
+schema-validated codex `agent()` call per batch, banking the codex return
+directly into `canon.json` with no independent disk check (#88) and racing
+concurrent batches against one shared `canon.json` (#90) — on top of the
+`CANON_BATCH_SCHEMA` top-level-`array` shape that made every dispatch fail
+outright (#87). 1.2.0 brings the glossary batch into the same shared
+DISPATCH → WAIT → CONSUME pattern review already uses, plus one serialized
+final merge to close the concurrent-write race:
+
+**Deterministic PRE-WORKFLOW setup**, run by the orchestrating session
+*before* `pipeline()` is ever called — not itself an unbounded Workflow
+step, and independent of the codex batch calls, so a batch can't pass
+coverage by omitting names from a manifest it also controls:
+
+1. Resolve `effectiveRunId` via the resume-integrity gate above.
+2. Create + validate `glossary/runs/<RUN_ID>/`.
+3. Atomically serialize each batch's exact `args.candidates[].name` list to
+   `glossary/runs/<RUN_ID>/manifest_{index}.json`, plus an aggregate
+   `glossary/runs/<RUN_ID>/manifest_all.json` (the union of every batch).
+4. Abort (nonzero, no dispatch at all) if writing/reconciling any manifest
+   fails.
+
+`resume_setup.py` implements steps 1–4 (see above); `SKILL.md`'s Step 0a
+scaffold pre-creates `glossary/runs/` itself.
+
+**Per-batch (DISPATCH → WAIT):**
 
 ```js
-pipeline(batches, (batch) => agent(glossaryPrompt(batch), {
-  agentType: 'codex:codex-rescue', effort: 'high', schema: CANON_BATCH_SCHEMA,
-}))
+pipeline(batches, (batch) => batchDispatchWaitLoop(batch))
 ```
 
-Every batch call is workflow-level and schema-validated, never raw or
-nested — the same discipline as the review call above, for the same reason.
-`CANON_BATCH_SCHEMA` is declared above the `pipeline()` call, for the
-identical temporal-dead-zone reason as `mass-translate-wf.template.js`'s own
-schemas.
+- `batchDispatchPrompt(batch)` — codex, `agentType:'codex:codex-rescue'`,
+  `effort:'high'`, **schema-less**, fire-and-forget: writes the run-scoped
+  fragment `glossary/runs/{{RUN_ID}}/out_{index}.json` **atomically**,
+  self-validates it via `canon_validate.py --check-batch <frag>
+  --research-mode X --expect-source-forms-file
+  glossary/runs/{{RUN_ID}}/manifest_{index}.json` (shape **and** exact
+  coverage against the trusted manifest — no write), and prints
+  `FRAGMENT {index}`.
+- `batchWaitPrompt(batch)` — Claude, `effort:'low'`, bounded poll of the
+  same `--check-batch` invocation, returning `READY`/`TIMEOUT`.
 
-The batch output is not just accepted on trust: each validated array result is
-merged into `canon.json` with dedup + collision checking and then routed by
-`disposition` (`entries{}` for accepted items, `review_queue` for queued
-items), and no `canon_hash` field exists anywhere.
-`scripts/canon_validate.py` re-validates every merged item against
-`canon-batch.schema.json` with `format_checker=jsonschema.FormatChecker()`,
-then re-reads the whole written `canon.json` and validates it against
-`canon-file.schema.json`, including required
-`generation_hashes.particle_config_hash` and `.derivation_bundle_hash`.
-`canon_validate.py --research-mode live|offline` is required, never defaulted;
-`offline` fatally rejects any merged `basis:"established"` entry. Batch
-construction also excludes every `source_form` already present in the current
-`canon.json`'s `entries{}`.
+Fragment paths are run-scoped (`{{RUN_ID}}` in the path itself), so — unlike
+the pre-1.2.0 design — **no pre-clean call is needed**: a stale fragment
+from a prior run simply sits at a different, unreferenced path.
+
+**After every fragment is `READY`, two final calls, never per-batch:**
+
+1. **Final merge** — Claude, `effort:'low'`, **no** `agentType`, **no**
+   `schema`: runs `canon_validate.py --merge-batches <frag1> <frag2> …
+   --research-mode X` — the single serialized writer that closes #90 (see
+   `references/canon-and-glossary.md` for the merge algorithm).
+2. **Disk-verify** — Claude, `effort:'low'`, no `agentType`,
+   `schema: CANON_VERIFY_SCHEMA` (flat, new — see
+   `references/workflow-schema-validation.md`) + its own exact-key-set JS
+   guard: runs `canon_validate.py --verify-merged --batch <frag1> <frag2> …
+   --research-mode X --expect-source-forms-file
+   glossary/runs/{{RUN_ID}}/manifest_all.json`, a **disk-independent**
+   re-check that every fragment's items actually landed in `canon.json`
+   correctly, closing #88 (the pre-1.2.0 design banked the codex return with
+   no disk verification at all). `merged: true` is returned only after
+   `--verify-merged` passes AND the JS guard confirms `verified:true` with
+   an empty `missing[]`.
+
+`CANON_BATCH_SCHEMA` and the "pilot one batch" special-case prose are both
+gone — deleted, not flattened, since the glossary batch dispatch carries no
+agent-facing schema at all now (see
+`references/workflow-schema-validation.md`'s `#87` section).
+
+The merged output is not accepted on trust at any step: `--check-batch`
+validates one fragment (Pass-1 + offline backstop) before it's ever trusted
+as `READY`; `--merge-batches` re-validates every fragment again before
+threading them into `canon.json` (dedup + collision checking, routed by each
+item's own `disposition` field — `entries{}` for accepted, `review_queue`
+for queued — no `canon_hash` field exists anywhere) and re-reads the whole
+written file against `canon-file.schema.json`, including required
+`generation_hashes.particle_config_hash` and `.derivation_bundle_hash`;
+`--verify-merged` then independently re-derives, from a **fresh** disk read,
+that every item actually landed. `--research-mode live|offline` is required
+on every mode, never defaulted; `offline` fatally rejects any merged
+`basis:"established"` entry. Batch construction also excludes every
+`source_form` already present in the current `canon.json`'s `entries{}`.
 
 ## Ledger writes stay orchestration-adjacent, not orchestration-owned
 
 Every per-segment ledger-fragment write goes through the schema-validated,
 low-effort `agent(recordLedgerPrompt(seg, fields), {effort:'low', schema:
-LEDGER_WRITE_SCHEMA})`; no fragment write happens any other way. It is called
-from five distinct points inside the per-segment loop above (before translate
-dispatch, on wait timeout, and for each of the three JS-decided terminal
-outcomes). Immediately after any `success:true` ledger-write return, the
-Workflow JS itself compares the returned `fragment_path`'s segment-ID component
-against `seg` and the returned `status` against `fields.status`; a mismatch is
-handled as `reason:'ledger-write-mismatch'`, never retried through the same
-ledger-write channel. `mergeLedgerPrompt` is called once at the end of the
-whole batch as `agent(mergeLedgerPrompt({expectedSegs: SEGS}), {effort:'low',
-schema: LEDGER_MERGE_SCHEMA})`, using the same `SEGS` array
+LEDGER_WRITE_SCHEMA})` (flat now — see
+`references/workflow-schema-validation.md`); no fragment write happens any
+other way. It is called from five distinct points inside the per-segment
+loop above (before translate dispatch, on wait timeout, and for each of the
+three JS-decided terminal outcomes). Immediately after any `success:true`
+ledger-write return, the Workflow JS itself compares the returned
+`fragment_path`'s segment-ID component against `seg` and the returned
+`status` against `fields.status`; a mismatch is handled as
+`reason:'ledger-write-mismatch'`, never retried through the same
+ledger-write channel. The **converged**-status write additionally carries
+the token/sha commit-gate precondition — see
+`references/ledger-and-resumability.md`'s commit-gate chain. `mergeLedgerPrompt`
+is called once at the end of the whole batch as
+`agent(mergeLedgerPrompt({expectedSegs: SEGS}), {effort:'low', schema:
+LEDGER_MERGE_SCHEMA})` (also flat now), using the same `SEGS` array
 `select_segments.py` emitted, and the batch is not complete until that
-mandatory completeness check passes. The schemas, exact payload shapes, and why
-`pipeline()`'s per-segment
+mandatory completeness check — now including its own per-segment
+token/sha re-check, the last link in the commit-gate chain — passes. The
+schemas, exact payload shapes, and why `pipeline()`'s per-segment
 concurrency rules out a single shared read-modify-write of one `ledger.json`
 are `references/ledger-and-resumability.md`'s subject in full.

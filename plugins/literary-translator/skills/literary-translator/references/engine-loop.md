@@ -70,10 +70,10 @@ different engine for either role.
   departure** from that proven 2-argument shape — the same class of addition as
   the null-review retry-once behavior below, never a silent, unexplained
   deviation. `revObj` is the third argument: the SAME schema-validated object
-  `reviewPrompt` already returned this round, still in the JS's own in-memory
-  state, never re-read off disk. The fix agent's prompt-generation logic embeds
-  `revObj`'s literal canonical-JSON text directly (the identical deterministic
-  splice mechanism `verifyReviewArtifactPrompt` uses — see
+  `readReviewPrompt` already returned this round, still in the JS's own
+  in-memory state, never re-read off disk. The fix agent's prompt-generation
+  logic embeds `revObj`'s literal canonical-JSON text directly (the identical
+  deterministic splice mechanism `verifyReviewArtifactPrompt` uses — see
   `references/ledger-and-resumability.md` and
   `references/workflow-schema-validation.md` for the review-artifact gate this
   interacts with) rather than instructing the agent to re-read
@@ -82,9 +82,9 @@ different engine for either role.
   specifically: there is no longer a second on-disk artifact for the fix step's
   own input to independently drift against. `review_path(seg)` still stays on
   disk, unchanged, for audit/back-compat and for `ledger_update.py`'s
-  `reviewed_draft_sha1` binding check and later audit-trail inspection — those
-  consumers still read it — but the fix step's own correctness no longer depends
-  on it.
+  `reviewed_draft_sha1`/`dispatch_token` binding check and later audit-trail
+  inspection — those consumers still read it — but the fix step's own
+  correctness no longer depends on it.
 
   The fix prompt's job is **constrained to editing an EXISTING
   `draft_path(seg) = segments/{seg}.draft.json` file** that codex already
@@ -103,23 +103,33 @@ order, preserved from the proven reference; plugin additions are labeled in the
 steps below:
 
 1. `agent(translatePrompt(seg), {agentType: 'codex:codex-rescue', effort:'high'})`
-   — fire-and-forget; the translator prompt itself instructs the agent to
-   self-validate coverage via the deterministic gate (`validate_draft.py`) before
-   returning. This is the one deliberate exception to R7's "codex accuracy calls
-   need a schema" rule: the translate call is intentionally schema-less, gated
-   instead by file output plus `draft_ready.py`/`validate_draft.py` — see
+   — fire-and-forget, the DISPATCH half of the shared codex work-call
+   pattern (`references/workflow-schema-validation.md`); the translator
+   prompt itself instructs the agent to self-validate coverage via the
+   deterministic gate (`validate_draft.py`) before returning, and writes
+   `draft_path(seg)` carrying a run-scoped `dispatch_token`. This is the one
+   deliberate exception to R7's "codex accuracy calls need a schema"
+   framing: the translate call is intentionally schema-less, gated instead
+   by file output plus `draft_ready.py`/`validate_draft.py` — see
    `references/false-green-gate.md` and `references/workflow-schema-validation.md`.
-2. A **low-effort wait/poll step** (`draft_ready.py` in a bash polling loop, called
-   at `effort: 'low'`) blocks the review loop from starting until the async
-   translator has actually delivered a complete file. This specifically prevents
-   a Claude fix-agent from ever ending up authoring a missing translation, since
-   "codex only translates" would otherwise be silently violated the moment a fix
-   step ran against a nonexistent/partial draft.
-3. Up to `engine.max_fix_rounds` rounds of **review (schema-validated,
-   `agentType: 'codex:codex-rescue'`, `effort: 'high'`) → Claude fix
-   (`effort: 'high'`, no `agentType`) → re-review**, exiting early the moment a
-   review reports `clean && coverage_ok`. Each round's review call carries
-   `REVIEW_SCHEMA`, matching `review.schema.json` 1:1:
+2. A **low-effort wait/poll step** (`draft_ready.py --expect-token` in a
+   bounded bash polling loop, called at `effort: 'low'`) blocks the review
+   loop from starting until the async translator has actually delivered a
+   complete, current-run-tokened file. This specifically prevents a Claude
+   fix-agent from ever ending up authoring a missing translation, since
+   "codex only translates" would otherwise be silently violated the moment a
+   fix step ran against a nonexistent/partial/stale-run draft.
+3. Up to `engine.max_fix_rounds` rounds of **review point (dispatch → bounded
+   wait → schema-validated consume, `agentType: 'codex:codex-rescue'` on the
+   dispatch half only, `effort: 'high'`) → Claude fix (`effort: 'high'`, no
+   `agentType`) → re-review**, exiting early the moment a review reports
+   `clean && coverage_ok`. Each round's review point runs four functions in
+   sequence — `reviewDispatchPrompt` (codex, schema-less, writes
+   `review_path(seg)` with `dispatch_token`) → `reviewWaitPrompt` (Claude,
+   bounded poll) → `readReviewPrompt` (Claude, `schema: REVIEW_SCHEMA`) →
+   `verifyReviewArtifactPrompt` (Claude, flat `schema: REVIEW_ARTIFACT_SCHEMA`) — see
+   `references/orchestration-and-batching.md` for the exact call shapes.
+   `REVIEW_SCHEMA` matches `review.schema.json`'s four verdict fields:
    `{clean: boolean, coverage_ok: boolean, findings: [{loc, severity, issue,
    suggest}], draft_sha1: string}`, all fields required,
    `additionalProperties: false`, and **no `verse_status` field**. `draft_sha1`
@@ -128,33 +138,42 @@ steps below:
    `python3 {{DURABLE_ROOT}}/scripts/draft_sha1.py <seg>` — never raw
    `sha1sum`. See `references/workflow-schema-validation.md` for the full
    shipped schema.
-   - **Null-review handling** (a deliberate plan enhancement, confirmed absent
-     from the reference script itself): if a schema-validated review call still
-     returns null, retry that SAME review call once, fresh. If the retry also
-     returns null, the segment exits immediately as `blocked` rather than
-     consuming a fix round on a segment with no real verdict to act on. The real
-     reference script has no such retry — it marks `converged: false, reason:
-     'review-null'` on the first null. See `references/ledger-and-resumability.md`
-     for the full ledger-status treatment.
-   - **Review-artifact gate**, after every non-null review verdict (including the
-     mandatory final confirming review), before any fix or terminal ledger
-     decision: `agent(verifyReviewArtifactPrompt(seg, revObj), {effort:'low',
-     schema: REVIEW_ARTIFACT_SCHEMA})`. The prompt embeds `revObj`'s canonical
-     JSON text and instructs the agent to write it verbatim to a scratch
-     `--expected-file <path>`, invoke
+   - **Timeout and shared-retry handling** (1.2.0): `reviewWaitPrompt`
+     timing out exits immediately as `blocked review-timeout`, no retry — a
+     genuine failure to even get a dispatched review to complete. Once
+     `READY`, the CONSUME pair (`readReviewPrompt` + `verifyReviewArtifactPrompt`)
+     shares **one retry budget**: a null read OR a `match:false` check
+     retries the SAME `(read, check)` pair once, fresh; still failing →
+     `blocked review-null` or `blocked review-artifact-mismatch`,
+     whichever triggered it. This replaces the pre-1.2.0 shape (retrying
+     the whole review dispatch on a mismatch) — the DISPATCH call already
+     wrote a complete, token-scoped artifact by the time `READY` fires, so
+     re-dispatching a fresh codex review on a mismatch would burn a call
+     fixing nothing a fresh read/check pair wouldn't also fix. See
+     `references/ledger-and-resumability.md` for the full ledger-status
+     treatment and `references/workflow-schema-validation.md` for the
+     retry-budget mechanics.
+   - **Review-artifact gate**, the `verifyReviewArtifactPrompt` half of the CONSUME
+     pair, after every non-null review read (including the mandatory final
+     confirming review), before any fix or terminal ledger decision: the
+     prompt embeds `revObj`'s canonical JSON text (the object
+     `readReviewPrompt` just returned) and instructs the agent to write it
+     verbatim to a scratch `--expected-file <path>`, invoke
      `python3 {{DURABLE_ROOT}}/scripts/review_artifact_check.py <seg>
      --expected-file <path>`, and relay the script's own printed
      `{match:true}`/`{match:false, mismatch_detail}` line. The script, not the
-     agent, canonicalizes `review_path(seg)` and the expected file with
-     sorted-key JSON and byte-compares those canonical forms. On `match:false`,
-     retry the original review call once, then `blocked` with reason
-     `review-artifact-mismatch` if it still mismatches. Known residual: the
-     `--expected-file` is still written by an LLM agent, so this gate's
-     deterministic comparison can compare against the wrong expected file if that
-     write is wrong. Since `fixPrompt` now works from in-memory `revObj` (see R1
-     above), that residual is confined to `ledger_update.py`'s later
-     `reviewed_draft_sha1` binding check and audit-trail inspection, not the fix
-     step's own input. Full mechanics:
+     agent, projects both `review_path(seg)` (which now also carries
+     `dispatch_token`) and the expected file down to the four verdict
+     fields, canonicalizes both with sorted-key JSON, and byte-compares
+     those canonical forms. On `match:false`, the shared retry budget above
+     fires; still mismatching after the retry → `blocked` with reason
+     `review-artifact-mismatch`. Known residual: the `--expected-file` is
+     still written by an LLM agent, so this gate's deterministic comparison
+     can compare against the wrong expected file if that write is wrong.
+     Since `fixPrompt` now works from in-memory `revObj` (see R1 above),
+     that residual is confined to `ledger_update.py`'s later
+     `reviewed_draft_sha1`/`dispatch_token` binding check and audit-trail
+     inspection, not the fix step's own input. Full mechanics:
      `references/ledger-and-resumability.md`.
 4. **Always one final confirming review after the cap**, even if the loop exited
    because of the cap rather than convergence — a fix that goes unverified is
@@ -175,18 +194,22 @@ fatal extraction preflight, not by an under-specified fan-out.
 
 ### Effort discipline
 
-**Every ACCURACY-BEARING agent call in this loop uses `effort: 'high'`** —
-translate, review, fix, and glossary-pass batches. No such agent inherits a
-session-level xhigh/ultracode effort. This is both a literal requirement and the
-fix for a known `max_tokens` wedge on synthesis-heavy agent configs.
+**Every ACCURACY-BEARING agent's DISPATCH call in this loop uses
+`effort: 'high'`** — translate, `reviewDispatchPrompt`, `fixPrompt`, and
+glossary-pass `batchDispatchPrompt`. No such agent inherits a session-level
+xhigh/ultracode effort. This is both a literal requirement and the fix for a
+known `max_tokens` wedge on synthesis-heavy agent configs.
 
 The purely mechanical, no-judgment calls are deliberately `effort: 'low'` — this
 is **not** an oversight to be "fixed" to high:
-- the translator-readiness poll (`waitPrompt`/`draft_ready.py` wait loop),
-- the review-artifact gate (`verifyReviewArtifactPrompt`/
-  `review_artifact_check.py`),
-- the ledger-bookkeeping call (`recordLedgerPrompt`, see
-  `references/ledger-and-resumability.md`).
+- every WAIT/readiness poll (`waitPrompt`/`draft_ready.py`,
+  `reviewWaitPrompt`/`review_ready.py`, `batchWaitPrompt`/
+  `canon_validate.py --check-batch`),
+- every CONSUME call (`readReviewPrompt`, the review-artifact gate —
+  `verifyReviewArtifactPrompt`/`review_artifact_check.py` — and the glossary
+  disk-verify call),
+- the ledger-bookkeeping calls (`recordLedgerPrompt`/`mergeLedgerPrompt`,
+  see `references/ledger-and-resumability.md`).
 
 ## R6 — Word-sense/realia accuracy is first-class
 
@@ -238,9 +261,9 @@ One rule, stated identically everywhere it's discussed. After the round cap
 still not clean, the segment's status is simply `non_converged` — **full stop,
 no further automated review/adjudication pass.**
 
-`blocked` is a **separate, distinct failure mode** reached only via review-null
-(after one retry), draft-missing, or review-artifact-mismatch (after one retry)
-paths — never via cap-exhaustion.
+`blocked` is a **separate, distinct failure mode** reached only via
+review-timeout, review-null (after one retry), draft-missing, or
+review-artifact-mismatch (after one retry) paths — never via cap-exhaustion.
 
 Resolving a `non_converged` segment (a fresh look, a manual fix, a re-run with
 adjusted style-bible guidance, etc.) is out of scope for the automated workflow

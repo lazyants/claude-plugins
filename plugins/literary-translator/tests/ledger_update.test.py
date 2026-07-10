@@ -393,6 +393,16 @@ def _extract_js_function(source, signature_prefix):
     raise ValueError(f"unbalanced braces extracting {signature_prefix!r}")
 
 
+def _extract_js_const(source, const_name):
+    """Returns the full `const NAME = ...;` statement text for a single-line
+    const declaration (the exact-key-set guard array literals below are all
+    single-line) -- a lighter sibling of _extract_js_function for
+    declarations that aren't function bodies."""
+    idx = source.index(f"const {const_name} ")
+    end = source.index(";", idx)
+    return source[idx:end + 1]
+
+
 _TEMPLATE_JS_SOURCE = TEMPLATE_JS_PATH.read_text(encoding="utf-8")
 
 ENDS_WITH_SEG_JSON_SRC = _extract_js_function(
@@ -409,6 +419,21 @@ assert "ledger-write-mismatch" in RECORD_LEDGER_CALL_SRC, (
     "'ledger-write-mismatch' reason literal -- extraction may have grabbed "
     "the wrong function, or the mismatch reason string was renamed"
 )
+
+# 1.2.0 (CONTRACT-1.2.0-reliability.md section 5, #87 fix): recordLedgerCall
+# now gates on ledgerWriteSucceeded(raw) -- the exact-key-set JS guard --
+# instead of trusting a bare `raw.success` truthiness check the way the
+# pre-1.2.0 template did. That guard, and its own small dependency chain
+# (isNonEmptyString/hasOnlyKeys/LEDGER_WRITE_SUCCESS_KEYS/FAILURE_ONLY_KEYS),
+# must be extracted and spliced into the harness alongside the three
+# functions above, or recordLedgerCall's first line throws a bare
+# ReferenceError before ever reaching the payload-intent-mismatch logic
+# this section exists to test.
+IS_NON_EMPTY_STRING_SRC = _extract_js_function(_TEMPLATE_JS_SOURCE, "function isNonEmptyString(")
+HAS_ONLY_KEYS_SRC = _extract_js_function(_TEMPLATE_JS_SOURCE, "function hasOnlyKeys(")
+LEDGER_WRITE_SUCCESS_KEYS_SRC = _extract_js_const(_TEMPLATE_JS_SOURCE, "LEDGER_WRITE_SUCCESS_KEYS")
+FAILURE_ONLY_KEYS_SRC = _extract_js_const(_TEMPLATE_JS_SOURCE, "FAILURE_ONLY_KEYS")
+LEDGER_WRITE_SUCCEEDED_SRC = _extract_js_function(_TEMPLATE_JS_SOURCE, "function ledgerWriteSucceeded(")
 
 
 def build_harness_js(tmp_path):
@@ -428,6 +453,15 @@ def build_harness_js(tmp_path):
         + ENDS_WITH_SEG_JSON_SRC + "\n"
         "\n"
         + RECORD_LEDGER_PROMPT_SRC + "\n"
+        "\n"
+        + IS_NON_EMPTY_STRING_SRC + "\n"
+        "\n"
+        + HAS_ONLY_KEYS_SRC + "\n"
+        "\n"
+        + LEDGER_WRITE_SUCCESS_KEYS_SRC + "\n"
+        + FAILURE_ONLY_KEYS_SRC + "\n"
+        "\n"
+        + LEDGER_WRITE_SUCCEEDED_SRC + "\n"
         "\n"
         "const __MOCK_RAW__ = JSON.parse(process.argv[2]);\n"
         "async function agent(prompt, opts) { return __MOCK_RAW__; }\n"

@@ -221,8 +221,28 @@ def fatal(message: str, **extra) -> NoReturn:
     raise FatalError(json.dumps({"success": False, "error": message, **extra}))
 
 
-def sha1_hex_bytes(data: bytes) -> str:
-    return hashlib.sha1(data).hexdigest()
+def draft_content_sha1(path: Path) -> str:
+    """sha1 of a draft's CONTENT, with the 'dispatch_token' metadata field
+    deliberately EXCLUDED -- see draft_sha1.py's own module docstring for why.
+
+    Must match, byte for byte, draft_sha1.py's and ledger_update.py's own
+    draft_content_sha1() -- both parse the draft as JSON, drop
+    'dispatch_token' if present, and re-serialize the remainder via
+    identical sorted-key canonical JSON before hashing.
+
+    Raises OSError (unreadable file), json.JSONDecodeError (not valid
+    JSON), or ValueError (valid JSON but not an object) on failure --
+    callers handle all three.
+    """
+    raw = path.read_text(encoding="utf-8")
+    doc = json.loads(raw)
+    if not isinstance(doc, dict):
+        raise ValueError(f"draft at {path} must be a JSON object, got {type(doc).__name__}")
+    projected = {k: v for k, v in doc.items() if k != "dispatch_token"}
+    canonical = json.dumps(
+        projected, sort_keys=True, ensure_ascii=False, separators=(",", ":")
+    ).encode("utf-8")
+    return hashlib.sha1(canonical).hexdigest()
 
 
 def read_json(path: Path, what: str):
@@ -419,7 +439,12 @@ def classify_converged_segment(seg: str, record: dict) -> dict:
     cache_key_mismatch = bool(mismatched)
 
     dp = draft_path(seg)
-    current_draft_sha1 = sha1_hex_bytes(dp.read_bytes()) if dp.is_file() else None
+    current_draft_sha1 = None
+    if dp.is_file():
+        try:
+            current_draft_sha1 = draft_content_sha1(dp)
+        except (OSError, json.JSONDecodeError, ValueError):
+            current_draft_sha1 = None
     reviewed_draft_sha1 = record.get("reviewed_draft_sha1")
     draft_sha1_mismatch = current_draft_sha1 is None or current_draft_sha1 != reviewed_draft_sha1
 

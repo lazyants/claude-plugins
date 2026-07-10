@@ -10,12 +10,23 @@ because `review.schema.json` carries a deliberate plugin addition
 what got WRITTEN to disk at review_path(seg) actually matches the object
 the calling Workflow JS received.
 
-The gap this closes: `reviewPrompt` returns a schema-validated
-`REVIEW_SCHEMA` object to the JS, but it also writes that same content to
-disk as a side effect. Nothing about the schema-validated return itself
-guarantees the on-disk file matches -- a stale or divergent file could sit
-there unnoticed. This script performs that check, deterministically,
-rather than trusting the write blindly.
+The gap this closes: `reviewDispatchPrompt` (1.2.0; formerly `reviewPrompt`)
+writes the review verdict to disk, and a SEPARATE `readReviewPrompt` agent
+call later returns a schema-validated `REVIEW_SCHEMA` object to the JS.
+Nothing about that schema-validated return itself guarantees the on-disk
+file matches what the JS actually received -- a stale or divergent file
+could sit there unnoticed. This script performs that check,
+deterministically, rather than trusting the write blindly.
+
+1.2.0 addition -- field projection: `review.schema.json` now carries a 5th
+field, `dispatch_token` (a run-scoped freshness metadata string -- see that
+schema's own field description), which `REVIEW_SCHEMA` (readReviewPrompt's
+agent return, the --expected-file's own source) deliberately does NOT
+include. So before comparing, this script projects BOTH the on-disk review
+artifact AND the expected-file's contents down to exactly the 4 verdict
+fields (`clean`, `coverage_ok`, `findings`, `draft_sha1`) -- a 5-field
+on-disk file still correctly MATCHES a 4-field expected object; only a
+divergence in one of the 4 projected fields counts as a real mismatch.
 
 CLI:
 
@@ -93,6 +104,13 @@ SEGMENTS_DIR = DURABLE_ROOT / "segments"
 # findings[] array or issue string doesn't blow up the printed line.
 _TRUNCATE_LEN = 120
 
+# The 4 REVIEW_SCHEMA verdict fields (readReviewPrompt's own agent return
+# shape) -- both the on-disk review.json (5 fields, including 1.2.0's
+# dispatch_token) and the --expected-file (already 4 fields) are projected
+# down to exactly this set before comparing. See this file's own module
+# docstring, "1.2.0 addition -- field projection".
+REVIEW_VERDICT_FIELDS = ("clean", "coverage_ok", "findings", "draft_sha1")
+
 # The canonical allowlist (kept identical to select_segments.py's own
 # validate_seg() per this project's "no shared lib between self-contained
 # scripts" convention): [A-Za-z0-9_], with an optional literal 'FRONTBACK:'
@@ -163,6 +181,19 @@ def canonical_text(obj):
     review artifact and the expected-file are compared in, so differing
     key order alone never counts as a mismatch."""
     return json.dumps(obj, sort_keys=True, ensure_ascii=False)
+
+
+def project_verdict_fields(obj):
+    """Projects an arbitrary JSON value down to exactly the 4
+    REVIEW_VERDICT_FIELDS -- so an on-disk review.json carrying the 5th
+    dispatch_token metadata field still compares equal to REVIEW_SCHEMA's
+    own 4-field expected object. Non-dict inputs pass through unprojected
+    (the subsequent comparison / first_diff() call reports the resulting
+    type mismatch on its own -- this function's only job is dropping extra
+    keys off an already-dict-shaped value, never type-checking)."""
+    if not isinstance(obj, dict):
+        return obj
+    return {k: obj[k] for k in REVIEW_VERDICT_FIELDS if k in obj}
 
 
 def _fmt(value):
@@ -282,10 +313,18 @@ def main(argv=None):
     if err is not None:
         return emit_error(err)
 
-    if canonical_text(disk_obj) == canonical_text(expected_obj):
+    # Project BOTH sides down to the 4 verdict fields BEFORE comparing --
+    # see "1.2.0 addition -- field projection" in this file's own module
+    # docstring. expected_obj is already 4-field in practice (REVIEW_SCHEMA
+    # never carries dispatch_token), so this is a no-op on that side; the
+    # projection is what lets a 5-field on-disk review.json still match.
+    disk_projected = project_verdict_fields(disk_obj)
+    expected_projected = project_verdict_fields(expected_obj)
+
+    if canonical_text(disk_projected) == canonical_text(expected_projected):
         return emit_match(True)
 
-    detail = first_diff(disk_obj, expected_obj)
+    detail = first_diff(disk_projected, expected_projected)
     if detail is None:
         # The canonical forms differ but the structural walk found nothing
         # -- should not be reachable for two plain JSON objects/arrays/

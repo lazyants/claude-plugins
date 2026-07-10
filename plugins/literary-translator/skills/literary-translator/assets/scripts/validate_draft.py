@@ -49,7 +49,16 @@ source project's own scripts) structural self-check of the draft file
 against draft.schema.json's MODE-NEUTRAL container shape, before any of the
 six checks run -- a draft that fails this can't safely be walked by the
 content checks below (wrong container types would raise, not report a
-clean defect list).
+clean defect list). 1.2.0 addition: `dispatch_token` (a run-scoped
+freshness metadata string, OPTIONAL in draft.schema.json) is allowed but
+never required here -- when present, only type-checked (must be a string);
+when absent (e.g. a legacy pre-1.2.0 draft), that's not a structural
+defect. Either way it is deliberately EXCLUDED from every one of the six
+content checks below -- it carries no translated content, so it never
+participates in coverage/placeholder/content-fidelity judgment. Presence+
+correctness where it actually matters is enforced by the runtime freshness
+gates (draft_ready.py --expect-token, ledger_update.py's run_token
+precondition), not by this structural check.
 
 ## Adapt points (what generalizes this beyond the real source)
 
@@ -290,6 +299,16 @@ _DRAFT_CONTAINER_SPECS = [
     ("notes",     list, str,  "array of strings"),
 ]
 _DRAFT_REQUIRED_KEYS = ["seg"] + [spec[0] for spec in _DRAFT_CONTAINER_SPECS]
+# "dispatch_token" (1.2.0) is a run-scoped freshness metadata field --
+# OPTIONAL, matching draft.schema.json's own (not-required) property.
+# It is deliberately OUT OF SCOPE for this script's six content checks
+# below; it is listed here only so its PRESENCE doesn't trip the
+# "unexpected extra top-level keys" rejection -- absence is fine (a legacy
+# pre-1.2.0 draft), presence is fine (type-checked below when present), the
+# runtime freshness gates (draft_ready.py --expect-token, ledger_update.py's
+# run_token precondition) are what actually enforce correctness.
+_DRAFT_OPTIONAL_KEYS = ["dispatch_token"]
+_DRAFT_ALLOWED_KEYS = _DRAFT_REQUIRED_KEYS + _DRAFT_OPTIONAL_KEYS
 
 
 def check_draft_structure(draft):
@@ -306,6 +325,8 @@ def check_draft_structure(draft):
 
     if not isinstance(draft["seg"], str):
         errs.append("draft.schema.json: 'seg' must be a string")
+    if "dispatch_token" in draft and not isinstance(draft["dispatch_token"], str):
+        errs.append("draft.schema.json: 'dispatch_token' must be a string when present")
 
     for key, container_type, item_type, desc in _DRAFT_CONTAINER_SPECS:
         value = draft[key]
@@ -316,7 +337,7 @@ def check_draft_structure(draft):
         if not all(isinstance(item, item_type) for item in items):
             errs.append(f"draft.schema.json: {key!r} must be an {desc}")
 
-    extra = set(draft) - set(_DRAFT_REQUIRED_KEYS)
+    extra = set(draft) - set(_DRAFT_ALLOWED_KEYS)
     if extra:
         errs.append(f"draft.schema.json: unexpected extra top-level keys: {sorted(extra)}")
     return errs

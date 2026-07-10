@@ -47,49 +47,114 @@ The concrete rule this produces for every workflow template in this plugin:
   glossary-pass batch call — is dispatched via the Workflow tool's `agent()`
   function, at the top level, from that JS.
 
-## Two categories of schema-validated calls — not one blanket rule
+## The shared codex work-call pattern (1.2.0): dispatch → bounded wait → schema-validated consume
 
-Not every `agent(..., {schema: ...})` call in this plugin exists for the
-same reason. Conflating the two categories below is a real mistake this
-plan corrected explicitly (an earlier draft's "every codex call needs a
-schema" framing implicitly swept ledger-write confirmations in as if they
-were codex accuracy calls, which they are not).
+Earlier revisions had review and the glossary-pass batch call codex directly
+with a `schema` param, betting on the harness's retry-until-valid to force a
+real verdict out of an async job. That bet had a real gap (#97): a
+forwarder-detached codex job can still hang the workflow indefinitely on that
+one `await` — a `schema` param does nothing to *bound how long* the call sits
+unresolved, it only shapes what comes back once it does. Only translate's
+original fire-and-forget-plus-poll shape was ever actually bounded. 1.2.0
+generalizes that proven shape to review and the glossary batch instead of
+inventing a second discipline for them:
 
-### 1. Codex structured-accuracy/canon calls
+1. **DISPATCH** — codex (`agentType:'codex:codex-rescue'`, pinned),
+   **schema-less**, fire-and-forget. The agent does the work and writes its
+   result **atomically** to a `{{RUN_ID}}`-scoped path carrying a
+   `dispatch_token`, self-validates its own shape via a shipped script, and
+   returns a short sentinel string (`REVIEWED {seg}`, `FRAGMENT {index}`,
+   `DONE {seg}`). The Workflow JS never depends on this call's own return
+   value — see `references/orchestration-and-batching.md` and
+   `references/ledger-and-resumability.md` for the `{{RUN_ID}}`/token
+   mechanics this closes (#90, the resume-integrity gate).
+2. **WAIT** — Claude, `effort:'low'`, **no** `agentType`, **no** `schema`: a
+   **bounded** bash polling loop (the same shape `waitPrompt`/
+   `draft_ready.py` already used for translate) against a readiness script
+   that fully validates the on-disk artifact, including its run-scoped
+   token. Returns `READY`/`TIMEOUT` as plain text.
+3. **CONSUME** — Claude, schema-validated: reads the artifact and returns it
+   (`readReviewPrompt` → `REVIEW_SCHEMA`), then a **separate**
+   schema-validated call runs the deterministic cross-check script against
+   the workflow-held return (`verifyReviewArtifactPrompt` → flat
+   `REVIEW_ARTIFACT_SCHEMA`; glossary's disk-verify call → flat
+   `CANON_VERIFY_SCHEMA`).
 
-Review and the canon/glossary-pass batch calls. These **MUST** carry both
-`agentType: 'codex:codex-rescue'` **and** a `schema` param, because the
-specific failure mode being guarded against is an ambiguous async-job
-string standing in for a real codex verdict:
+This bounds the **forwarder-hollow-return** and **detached-job-hang** failure
+modes for every codex work-call, not just translate. It does **not** bound a
+*synchronous* codex block-and-hang on the DISPATCH `await` itself — translate
+already carried that residual, and review/glossary batch now carry it too;
+see `references/gotchas.md`.
 
-- Review: `agent(reviewPrompt(seg), {agentType:'codex:codex-rescue', schema: REVIEW_SCHEMA})`
-- Glossary-pass batch: `agent(glossaryPrompt(batch), {agentType:'codex:codex-rescue', effort:'high', schema: CANON_BATCH_SCHEMA})`
+`fixPrompt` is the one deliberate exception to the whole pattern: it stays a
+plain Claude call (no `agentType`, no `schema`, no dispatch/wait/consume
+split) — it can't forward-detach (it isn't codex), and the poll pattern has
+nothing to bound since a fix call doesn't make a blocking codex `await` in
+the first place.
 
-**The translate call is the one deliberate exception even within this
-category.** It is intentionally schema-less — gated instead by file output
-plus the deterministic checks (`draft_ready.py` for readiness,
-`validate_draft.py` for the false-green gate — see
-`references/false-green-gate.md`) — exactly matching the proven reference
-script's own behavior:
+## What carries a `schema` param now, and why
+
+Not every `agent()` call in this design carries a `schema` param, and
+conflating "codex work-call" with "schema-validated call" is a mistake this
+1.2.0 revision corrected explicitly — the two are now largely disjoint (an
+earlier draft's "every codex call needs a schema" framing is exactly what
+produced the #87 top-level-`oneOf`/`array` schemas that made review and the
+glossary batch call fail outright — see below).
+
+### DISPATCH calls — codex, schema-less, by design
+
+`translatePrompt`, `reviewDispatchPrompt`, `batchDispatchPrompt` (glossary).
+All three are `agentType:'codex:codex-rescue'`, fire-and-forget, and carry
+**no** `schema` param — a schema on a call whose return the workflow never
+reads only slows down a job that's already bounded by the WAIT step's own
+poll timeout. Structured verdicts come from the on-disk artifact these calls
+write, read back by a later CONSUME call instead:
 
 ```
 agent(translatePrompt(seg), {agentType: 'codex:codex-rescue', effort: 'high'})
+agent(reviewDispatchPrompt(seg, round), {agentType: 'codex:codex-rescue', effort: 'high'})
+agent(batchDispatchPrompt(batch), {agentType: 'codex:codex-rescue', effort: 'high'})
 ```
 
-### 2. Non-codex mechanical schema-confirmation calls
+### WAIT calls — Claude, schema-less, bounded poll
 
-`recordLedgerPrompt`, `mergeLedgerPrompt`, and `verifyReviewArtifactPrompt`.
-These use a `schema` param for a **different reason**: verifying that a
-shell script's own JSON stdout, plus the required deterministic follow-up
-checks, produced a well-formed and complete mechanical confirmation — not
-forcing a real verdict out of an ambiguous codex async job. They do **not**
-specify `agentType: 'codex:codex-rescue'` at all, and run at `effort: 'low'`
-since no judgment is involved:
+`waitPrompt` (translate), `reviewWaitPrompt`, `batchWaitPrompt` (glossary).
+Plain Claude, `effort:'low'`, no `agentType`, no `schema` — a bounded
+`for i in $(seq 1 45)`-shaped bash polling loop against a readiness script
+(`draft_ready.py --expect-token`, `review_ready.py --expect-token`,
+`canon_validate.py --check-batch`), returning `READY`/`TIMEOUT` as plain
+text.
+
+### CONSUME calls — Claude, schema-validated
+
+`readReviewPrompt` (`schema: REVIEW_SCHEMA`), `verifyReviewArtifactPrompt`
+(`schema: REVIEW_ARTIFACT_SCHEMA`, now flat — see below), glossary's
+disk-verify call (`schema: CANON_VERIFY_SCHEMA`, new). These exist to force
+a real structured object out of a call whose entire job is "read this file
+and relay it" or "run this script and relay its printed line" — the same
+retry-until-valid guarantee this file's opening section describes, now
+applied to a Claude call reading a codex-written artifact rather than to the
+codex call itself:
+
+```
+agent(readReviewPrompt(seg), {effort:'low', schema: REVIEW_SCHEMA})
+agent(verifyReviewArtifactPrompt(seg, revObj), {effort:'low', schema: REVIEW_ARTIFACT_SCHEMA})
+agent(glossaryVerifyPrompt(fragments), {effort:'low', schema: CANON_VERIFY_SCHEMA})
+```
+
+### Non-codex mechanical schema-confirmation calls (unchanged in kind)
+
+`recordLedgerPrompt`, `mergeLedgerPrompt`. Still schema-validated
+(`LEDGER_WRITE_SCHEMA`, `LEDGER_MERGE_SCHEMA` — both now flat, see below),
+still not `agentType:'codex:codex-rescue'`, still `effort:'low'`, for the
+same reason as before: verifying that a shell script's own JSON stdout,
+plus the required deterministic follow-up checks, produced a well-formed and
+complete mechanical confirmation — not forcing a real verdict out of an
+ambiguous codex async job:
 
 ```
 agent(recordLedgerPrompt(seg, fields), {effort:'low', schema: LEDGER_WRITE_SCHEMA})
 agent(mergeLedgerPrompt({expectedSegs: SEGS}), {effort:'low', schema: LEDGER_MERGE_SCHEMA})
-agent(verifyReviewArtifactPrompt(seg, revObj), {effort:'low', schema: REVIEW_ARTIFACT_SCHEMA})
 ```
 
 `recordLedgerPrompt` must independently re-read the fragment file
@@ -104,9 +169,51 @@ through the same channel.
 by `select_segments.py`, then independently re-reads `ledger.json` and
 verifies a completeness/subset condition: every expected ID must be present,
 while extra keys from previous batches are allowed. It is never an exact
-key-set equality check. `verifyReviewArtifactPrompt` is the category-2 call
-whose agent task is only to write the expected-file, invoke
-`review_artifact_check.py`, and relay that script's printed line verbatim.
+key-set equality check.
+
+### Calls with neither `agentType` nor `schema`
+
+`fixPrompt` (unchanged — see above). The glossary final-merge call
+(`canon_validate.py --merge-batches`) — Claude, `effort:'low'`, no
+`agentType`, no `schema`: its job is to shell out and its own exit code is
+the signal; nothing downstream reads a structured return from this call,
+only from the disk-verify call that follows it. See
+`references/canon-and-glossary.md` for the full glossary-pass flow.
+
+## #87: an `agent()` schema is a tool `input_schema` — plain top-level object only
+
+The Workflow tool's `agent(..., {schema})` param becomes a tool-use API
+`input_schema`. The API requires that to be a top-level `type:"object"` — it
+does **not** accept a top-level `oneOf`/`allOf`/`anyOf`, and would not
+enforce an `if`/`then` discriminator even if it did. Before 1.2.0, three
+literals violated this directly: `CANON_BATCH_SCHEMA` was a top-level
+`array` (blocking every glossary dispatch with an HTTP 400), and
+`REVIEW_ARTIFACT_SCHEMA`/`LEDGER_WRITE_SCHEMA`/`LEDGER_MERGE_SCHEMA` were
+each a top-level `oneOf` (blocking mass-translate). This is `#87`, and the
+fix has two parts that must not be conflated:
+
+1. **Flatten every agent-facing literal** to `type:"object"`, no top-level
+   combinator, `additionalProperties:false`, with a *relaxed union* of the
+   fields from every branch the old `oneOf` used to discriminate, each field
+   individually optional except a single always-required discriminator
+   (`success`/`match`/`verified`).
+2. **Branch discrimination does not disappear — it moves.** The on-disk
+   schemas (`ledger-write-confirmation.schema.json`,
+   `ledger-merge-confirmation.schema.json`, `review-artifact-check.schema.json`)
+   **stay strong `oneOf`** and validate the *script's* real output at
+   runtime (`ledger_merge.py` self-validates its own stdout, for instance).
+   The **exact-key-set JS guard**, at every flat-schema consume site, is what
+   re-establishes discrimination on the *agent-relayed* object — see
+   `references/ledger-and-resumability.md` for the guard field sets. A flat
+   schema without its paired JS guard is not safe to trust on its own: it
+   would accept `{success:true, error:"x"}` as a success just as readily as
+   a genuine one.
+
+`CANON_BATCH_SCHEMA` itself is **deleted**, not flattened — the glossary
+batch dispatch is schema-less fire-and-forget now (see above), so there is
+no agent-facing literal for it at all; the on-disk `canon-batch.schema.json`
+stays an `array` and is validated only by `canon_validate.py --check-batch`,
+never by an `agent()` call.
 
 ## The TDZ gotcha: declare schema literals ABOVE the `pipeline()` call
 
@@ -135,10 +242,8 @@ const REVIEW_SCHEMA = { /* ... */ };
 const REVIEW_ARTIFACT_SCHEMA = { /* ... */ };
 const LEDGER_WRITE_SCHEMA = { /* ... */ };
 const LEDGER_MERGE_SCHEMA = { /* ... */ };
-// (glossary-pass-wf.template.js only:)
-const CANON_BATCH_SCHEMA = { /* ... */ };
 
-// ... prompt-builder functions (translatePrompt, reviewPrompt, etc.) ...
+// ... prompt-builder functions (translatePrompt, reviewDispatchPrompt, etc.) ...
 
 // pipeline() is called LAST, after every schema it references above
 // is already fully initialized.
@@ -148,95 +253,142 @@ pipeline(SEGS, (seg) => reviewFixLoop(seg));
 `mass-translate-wf.template.js` declares `REVIEW_SCHEMA`,
 `REVIEW_ARTIFACT_SCHEMA`, `LEDGER_WRITE_SCHEMA`, and `LEDGER_MERGE_SCHEMA`
 above its `pipeline()` call for the same TDZ reason.
-`glossary-pass-wf.template.js` declares `CANON_BATCH_SCHEMA` above its own,
-separate `pipeline()` call for the identical reason — it is a second,
-smaller workflow script, not a shared module, so it repeats its own
-declare-above-use discipline independently.
+`glossary-pass-wf.template.js` declares its own `CANON_VERIFY_SCHEMA` above
+its own, separate `pipeline()` call for the identical reason — it is a
+second, smaller workflow script, not a shared module, so it repeats its own
+declare-above-use discipline independently. `CANON_BATCH_SCHEMA` is gone
+(see the #87 section above) — the glossary batch dispatch carries no schema
+at all now.
 
-The exact shapes of the four `mass-translate-wf.template.js` schema
-literals, matching the shipped `assets/schemas/*.json` files 1:1:
+The exact shapes of the schema literals still declared as `agent()`
+`schema` params, matching the shipped `assets/schemas/*.json` files' field
+sets (not their combinator structure — see the #87 section above for why
+these are flat while the on-disk files stay strong `oneOf`):
 
-- **`REVIEW_SCHEMA`** — matches `review.schema.json`: `{clean: boolean,
-  coverage_ok: boolean, findings: [{loc, severity, issue, suggest}],
-  draft_sha1: string}`, all fields required, `additionalProperties: false`.
-  No `verse_status` field — verse issues surface as ordinary `findings[]`
-  entries (`loc: "VERSE:{vid}"`); verse coverage is exclusively the
-  deterministic validator's job, never review judgment. `draft_sha1` is a
-  deliberate plugin addition over the real reference schema: the reviewer
+- **`REVIEW_SCHEMA`** — unchanged, matches `review.schema.json`'s four
+  verdict fields projected out of the five-field on-disk shape (which now
+  also carries `dispatch_token` — see
+  `references/ledger-and-resumability.md`): `{clean: boolean, coverage_ok:
+  boolean, findings: [{loc, severity, issue, suggest}], draft_sha1: string}`,
+  all fields required, `additionalProperties: false`. No `verse_status`
+  field, no `dispatch_token` field — verse issues surface as ordinary
+  `findings[]` entries (`loc: "VERSE:{vid}"`); verse coverage is exclusively
+  the deterministic validator's job, never review judgment. `draft_sha1` is
+  a deliberate plugin addition over the real reference schema: the reviewer
   computes it itself, before reading the draft, by shelling out to
   `python3 {{DURABLE_ROOT}}/scripts/draft_sha1.py <seg>`.
-- **`REVIEW_ARTIFACT_SCHEMA`** — matches `review-artifact-check.schema.json`:
-  `{oneOf: [{match: true} (required), {match: false, mismatch_detail}
-  (required)]}`, each branch `additionalProperties: false`.
-- **`LEDGER_WRITE_SCHEMA`** — matches `ledger-write-confirmation.schema.json`:
-  `{oneOf: [{success: true, status, fragment_path, fragment_sha1} (all
-  required), {success: false, error} (required, +optional
-  exit_code/stderr)]}`, each branch `additionalProperties: false`.
-- **`LEDGER_MERGE_SCHEMA`** — matches `ledger-merge-confirmation.schema.json`:
-  `{oneOf: [{success: true, ledger_path, n_segments, missing_segments,
-  stale_segments} (all required), {success: false, error} (required,
-  +optional missing_segments/exit_code/stderr)]}`, each branch
-  `additionalProperties: false`.
+- **`REVIEW_ARTIFACT_SCHEMA`** — now flat: `{type:"object",
+  additionalProperties:false, required:["match"], properties:{match:
+  {type:"boolean"}, mismatch_detail:{type:"string"}}}`. The on-disk
+  `review-artifact-check.schema.json` stays the strong `oneOf` of
+  `{match:true}` / `{match:false, mismatch_detail}` — `review_artifact_check.py`
+  itself still emits one of those two exact shapes; the flat literal is only
+  what the *agent* is allowed to relay back into the Workflow.
+- **`LEDGER_WRITE_SCHEMA`** — now flat, a relaxed union of both former
+  branches: `{type:"object", additionalProperties:false, required:["success"],
+  properties:{success:{type:"boolean"}, status:{type:"string"},
+  fragment_path:{type:"string"}, fragment_sha1:{type:"string"},
+  error:{type:"string"}, exit_code:{type:"integer"}, stderr:{type:"string"}}}`.
+  The on-disk `ledger-write-confirmation.schema.json` stays the strong
+  `oneOf` — `ledger_update.py` itself still only ever emits a genuine
+  success or a genuine failure shape, never a mix.
+- **`LEDGER_MERGE_SCHEMA`** — now flat: `{type:"object",
+  additionalProperties:false, required:["success"],
+  properties:{success:{type:"boolean"}, ledger_path:{type:"string"},
+  n_segments:{type:"integer"}, missing_segments:{type:"array",
+  items:{type:"string"}}, stale_segments:{type:"array",
+  items:{type:"string"}}, error:{type:"string"}, exit_code:{type:"integer"},
+  stderr:{type:"string"}}}`. `missing_segments` is the deliberately relaxed
+  union (no `maxItems`, unlike the on-disk success branch's `{type:"array",
+  maxItems:0}`) — the flat literal can't express "empty on success, present
+  on failure" without a combinator, so the JS guard (see
+  `references/ledger-and-resumability.md`) is what actually enforces
+  emptiness on the success path. The on-disk `ledger-merge-confirmation.schema.json`
+  stays the strong `oneOf`.
+- **`CANON_VERIFY_SCHEMA`** — new, glossary-only, flat: `{type:"object",
+  additionalProperties:false, required:["verified"], properties:{verified:
+  {type:"boolean"}, missing:{type:"array", items:{type:"string"}}}}`. Relays
+  `canon_validate.py --verify-merged`'s own `{verified, missing[]}` line —
+  see `references/canon-and-glossary.md`.
 
-`tests/schema_literal_drift.test.py` locks all five inline workflow schema
-literals in against their matching `assets/schemas/*.json` files:
-`REVIEW_SCHEMA`, `LEDGER_WRITE_SCHEMA`, `CANON_BATCH_SCHEMA`,
-`LEDGER_MERGE_SCHEMA`, and `REVIEW_ARTIFACT_SCHEMA`. `CANON_BATCH_SCHEMA`
-is compared directly against `canon-batch.schema.json`, not an ad hoc wrapper
-around a different canon schema.
+None of the four flat literals above are safe to trust without their paired
+exact-key-set JS guard at the consume site (a flat schema alone would accept
+`{success:true, error:"x"}` as a success) — the guard field sets are
+`references/ledger-and-resumability.md`'s subject.
+
+`tests/agent_schema_top_level_object.test.py` asserts every remaining agent
+`schema:` const (`REVIEW_SCHEMA`, flat `REVIEW_ARTIFACT_SCHEMA`, flat
+`LEDGER_WRITE_SCHEMA`/`LEDGER_MERGE_SCHEMA`, `CANON_VERIFY_SCHEMA`) is
+top-level `type:"object"` with no top-level combinator — the direct
+regression lock for #87.
+
+`tests/schema_literal_drift.test.py` locks the surviving inline workflow
+schema literals against their matching `assets/schemas/*.json` files, but no
+longer as strict equality across the board: `REVIEW_SCHEMA` is asserted as
+an intentional 4-field **projection** of the 5-field on-disk
+`review.schema.json` (which now also requires `dispatch_token`), while the
+flat `LEDGER_WRITE_SCHEMA`/`LEDGER_MERGE_SCHEMA` literals are decoupled from
+strict on-disk parity and instead asserted (a) API-legal (top-level object,
+no combinator) and (b) that they accept the real scripts' actual success and
+failure outputs. `CANON_BATCH_SCHEMA` is gone from this test entirely — its
+coverage moved to the `--check-batch` CLI tests in
+`references/canon-and-glossary.md`.
 
 `tests/workflow_template_instantiation.test.py` instantiates both templates
-against a fixture profile and greps the output for a literal `{{`, asserting
-zero matches — no substitution token left unresolved, which would otherwise
-be an easy way for a declare-order refactor to silently break instantiation
-without touching the TDZ ordering at all.
+against a fixture profile (substituting a stable fixture `{{RUN_ID}}`) and
+greps the output for a literal `{{`, asserting zero matches — no
+substitution token left unresolved, which would otherwise be an easy way for
+a declare-order refactor to silently break instantiation without touching
+the TDZ ordering at all.
 
 ## The review-artifact gate: `review-artifact-check.schema.json` / `scripts/review_artifact_check.py`
 
 This is the mechanism that stops later ledger/audit-trail consumers from ever
 trusting a `review.json` on disk that doesn't actually match the structured
-verdict the review call returned.
+verdict the workflow itself holds. As of 1.2.0 it is the **CONSUME**-side
+half of the shared codex work-call pattern (above): `reviewDispatchPrompt`
+writes `review.json` to disk during DISPATCH; `readReviewPrompt` and
+`verifyReviewArtifactPrompt` are two **separate** CONSUME calls that run only after
+`reviewWaitPrompt`'s poll reports `READY`.
 
 ### The gap it closes
 
-`reviewPrompt` returns a schema-validated `REVIEW_SCHEMA` object to the JS,
-but it **also** writes that same content to disk, at the canonical
-`review_path(seg) = segments/{seg}.review.json` (see
-`references/ledger-and-resumability.md`'s canonical path invariants), as a
-side effect. Nothing about the schema-validated return itself guarantees
-that the file on disk matches the object the JS actually received — a stale
-or divergent file could otherwise sit there unnoticed. The review-artifact
-gate exists to catch exactly that divergence, deterministically, rather than
-trusting the write blindly.
+`readReviewPrompt` reads `review_path(seg) = segments/{seg}.review.json`
+from disk and returns a schema-validated `REVIEW_SCHEMA` object to the JS —
+a genuine disk read, not a fresh judgment call. Nothing about that read
+alone proves the file it just read is the current run's own artifact rather
+than a leftover from an earlier run or round: `review.json` is an unscoped,
+overwritable path, and a stale file sitting there is exactly the class of
+bug the resume-integrity work below exists to close. The review-artifact
+gate's `verifyReviewArtifactPrompt` step exists to make that trustworthy
+deterministically, never on an LLM's own say-so.
 
-### What the gate protects today (its purpose changed at round 60)
+### What the gate protects today
 
-Earlier in this plugin's design, the gate's result fed directly into what
-the fix step saw. That is **no longer true**. `fixPrompt(seg, round,
-revObj)` now receives the review object (`revObj`) **directly**, spliced
-into its own prompt text via the JS's deterministic serialization — the
-same substitution mechanism `{{DURABLE_ROOT}}` uses elsewhere — and never
-reads `review_path(seg)` from disk at all. So the gate no longer protects
-the fix step's own input.
-
-What it **still** protects: `scripts/ledger_update.py`'s
-`reviewed_draft_sha1` binding check, and any later audit-trail inspection —
-both of which still read `review_path(seg)` from disk, at a point in time
-*after* this gate has already run. The gate's job is now "prove the on-disk
-artifact these later consumers will read is trustworthy," not "prove the fix
-step's own input is trustworthy" — a narrower, but still real, purpose.
+`fixPrompt(seg, round, revObj)` receives the review object (`revObj`)
+**directly** — the same in-memory value `readReviewPrompt` already returned
+this round — spliced into its own prompt text via the JS's deterministic
+serialization, and never reads `review_path(seg)` from disk itself. So the
+gate does **not** protect the fix step's own input; it protects
+`scripts/ledger_update.py`'s `reviewed_draft_sha1`/`dispatch_token` binding
+check at the convergence write (see
+`references/ledger-and-resumability.md`) and any later audit-trail
+inspection — both of which still read `review_path(seg)` from disk, at a
+point in time *after* this gate has already run.
 
 ### The mechanism, step by step
 
-Right after a **non-null** `REVIEW_SCHEMA` verdict comes back, the JS
-dispatches a schema-validated, mechanical (category 2, above) call:
+Right after `reviewWaitPrompt` reports `READY`, the JS runs the two CONSUME
+calls in sequence:
 
 ```
-agent(verifyReviewArtifactPrompt(seg, revObj), {effort:'low', schema: REVIEW_ARTIFACT_SCHEMA})
+const revObj = await agent(readReviewPrompt(seg), {effort:'low', schema: REVIEW_SCHEMA});
+// on revObj === null, see "Null-review and the shared retry budget" below
+const artifactResult = await agent(verifyReviewArtifactPrompt(seg, revObj), {effort:'low', schema: REVIEW_ARTIFACT_SCHEMA});
 ```
 
-The prompt instructs the calling agent to do exactly three things, and
-nothing more:
+`verifyReviewArtifactPrompt`'s prompt instructs the calling agent to do exactly three
+things, and nothing more:
 
 1. Write `revObj`'s own canonical-JSON text — already fully formed by the
    JS, no hashing/formatting logic needed since the JS has no imports — to a
@@ -250,12 +402,19 @@ nothing more:
    agent never performs the comparison itself.
 
 The **script** (never the agent) does the actual work: it reads the
-canonical `review_path(seg)` from disk, canonicalizes both it and the
-`--expected-file`'s contents via sorted-key JSON serialization, and does a
-byte-for-byte comparison of the two canonical forms — a diff that cannot be
-misjudged. It prints `{match:true}` on an exact match, or `{match:false,
-mismatch_detail:"<the first differing key/value pair, named>"}` otherwise,
-matching `review-artifact-check.schema.json` exactly:
+canonical `review_path(seg)` from disk, **projects both** the on-disk object
+and the `--expected-file`'s contents down to exactly the four verdict fields
+`{clean, coverage_ok, findings, draft_sha1}` — dropping `dispatch_token` from
+whichever side carries it, since `review.json` on disk now carries
+`dispatch_token` while `revObj`/`--expected-file` never do (`REVIEW_SCHEMA`
+is a deliberate 4-field projection, not the on-disk file's full shape) —
+canonicalizes both projections via sorted-key JSON serialization, and does a
+byte-for-byte comparison of the two canonical forms. It prints `{match:true}`
+on an exact match, or `{match:false, mismatch_detail:"<the first differing
+key/value pair, named>"}` otherwise. The agent-facing `REVIEW_ARTIFACT_SCHEMA`
+is flat (see the #87 section above); the script's own printed line still only
+ever takes one of the two shapes the on-disk `review-artifact-check.schema.json`
+strong `oneOf` requires:
 
 ```json
 {"oneOf": [
@@ -266,12 +425,26 @@ matching `review-artifact-check.schema.json` exactly:
 
 (each branch `additionalProperties: false`, `match` required in both.)
 
-On `match:false`: retry the **original** review call once, fresh, then
-re-run the same script against the retry's own write. If it **still**
-reports `match:false`, the segment is `blocked` with reason
-`review-artifact-mismatch` — the identical retry-once-then-blocked shape the
-null-review path already uses elsewhere in the loop, just gating a
-different failure mode.
+### Null-review and the shared retry budget
+
+`getVerifiedReview(seg, round)` runs: DISPATCH → WAIT (`TIMEOUT` → `blocked
+review-timeout`, no retry) → **one shared retry budget** covering both
+CONSUME calls together: `read → check`; if the read comes back `null` **or**
+the check reports `match:false`, retry the *same* `(read, check)` pair
+**once** — never retrying read and check independently of each other. Still
+failing after the retry → `blocked review-null` (persistent null read) or
+`blocked review-artifact-mismatch` (persistent mismatch), whichever
+triggered it. This caps one review point's worst case at
+`dispatch + wait + 2×(read + check) = 6` calls — see
+`references/orchestration-and-batching.md`'s estimator section for how this
+feeds `estimatedCalls`.
+
+This is a deliberate change from the pre-1.2.0 shape, which retried the
+*entire dispatch* on a mismatch. Retrying only the CONSUME pair is correct
+now because DISPATCH already wrote an atomically-complete, token-scoped
+artifact by the time WAIT reports `READY` — there is nothing left for a
+fresh dispatch to fix that a fresh read/check pair wouldn't also fix, and
+re-dispatching would burn a second codex call for no reason.
 
 On `match:true`, the fix step dispatches:
 `agent(fixPrompt(seg, round, revObj), {effort:'high'})`.
@@ -279,16 +452,17 @@ On `match:true`, the fix step dispatches:
 ### The residual risk this gate cannot fully close, and why
 
 The **comparison** itself — `review_artifact_check.py` diffing two
-already-on-disk files — is genuinely deterministic. But one of its two
-inputs, the `--expected-file`, is still **written by an LLM agent** inside
-its own turn, not by the JS or any deterministic script (the Workflow JS has
-no direct filesystem access at all — every write in this design is either
-an agent-turn action or a `python3` script shelled out from one, never
-invoked by the JS directly). If that agent ever wrote something other than
-`revObj`'s own exact text — a transcription slip, a stale substitution — the
-deterministic script would still "correctly" compare `review_path(seg)`
-against a **wrong** expected-file, and the whole point of the gate is to
-catch exactly the kind of drift a wrong expected-file would then hide.
+already-on-disk-or-freshly-written files — is genuinely deterministic. But
+one of its two inputs, the `--expected-file`, is still **written by an LLM
+agent** inside its own turn, not by the JS or any deterministic script (the
+Workflow JS has no direct filesystem access at all — every write in this
+design is either an agent-turn action or a `python3` script shelled out from
+one, never invoked by the JS directly). If that agent ever wrote something
+other than `revObj`'s own exact text — a transcription slip, a stale
+substitution — the deterministic script would still "correctly" compare
+`review_path(seg)` against a **wrong** expected-file, and the whole point of
+the gate is to catch exactly the kind of drift a wrong expected-file would
+then hide.
 
 This residual is now confined to the narrower purpose described above (the
 ledger-binding/audit-trail question), never to a wrong-findings-reach-the-
@@ -302,18 +476,23 @@ is explicitly **not** covered by any fixture: `review_path(seg)` and
 byte-for-byte agree. This is an accepted residual risk, not one any test in
 this plugin claims to close — no fixture can exercise it directly, since the
 failure requires a specific wrong choice by an LLM agent, not a script bug,
-and this plan's test coverage stops at the deterministic-script boundary.
+and this plugin's test coverage stops at the deterministic-script boundary.
 It is no longer a fix-step risk: `fixPrompt` receives `revObj` as an
 in-memory value and never reads either on-disk artifact for its findings.
+The **stale-run** case (a straggler artifact from an OLD run, not just an
+old round) is a distinct, separately-closed problem — see the
+`dispatch_token`/resume-integrity mechanics in
+`references/ledger-and-resumability.md`.
 
 ### Tests
 
 `tests/review_artifact_check.test.py` covers, at minimum:
 
-- A fixture `review_path(seg)` plus a byte-identical expected-file asserts
-  `{match:true}`.
-- A fixture with one differing field (e.g. `coverage_ok` flipped) asserts
-  `{match:false}`, naming that exact field in `mismatch_detail`.
+- A fixture `review_path(seg)` (with `dispatch_token`) plus a 4-field
+  expected-file (no `dispatch_token`) asserts `{match:true}` — the
+  field-projection positive case ([cx4#1]).
+- A fixture with one differing verdict field (e.g. `coverage_ok` flipped)
+  asserts `{match:false}`, naming that exact field in `mismatch_detail`.
 - A missing `review_path(seg)` asserts a named, non-zero-exit error, never a
   raw traceback.
 - A fixture where `--expected-file` is populated with a **stale**,
@@ -322,9 +501,9 @@ in-memory value and never reads either on-disk artifact for its findings.
   holds a genuinely different, later review — asserts `{match:false}`,
   proving the comparison mechanism has no blind spot that would let a
   wrongly-populated expected-file slip through as a false match.
-- The pre-existing workflow-level retry/blocked case: a forced `match:false`
-  on both the original and retried check ends the segment as `blocked` with
-  reason `review-artifact-mismatch`.
+- The workflow-level shared-retry/blocked case: a forced `match:false` on
+  both the original and retried `(read, check)` pair ends the segment as
+  `blocked` with reason `review-artifact-mismatch`.
 
 `review_artifact_check.py` itself is dependency-free (stdlib `json` only —
 no `requirements.txt` entry, no dependency preflight needed).

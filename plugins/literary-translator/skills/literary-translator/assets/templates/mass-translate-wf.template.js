@@ -8,20 +8,23 @@
 //
 //   ${durable_root}/runs/workflows/<run_id>/mass-translate-wf.js
 //
-// where <run_id> is a fresh, sortable identifier (an ISO-8601-ish timestamp
-// works) generated once per invocation -- the same id a later resumed run's
-// resumeFromRunId refers back to. ${durable_root}/runs/.plugin_bundle_hash
-// covers this exact template's own bytes, so a plugin update is never
-// silently masked by an old generated script surviving on disk.
+// where <run_id> is the SAME value substituted below as {{RUN_ID}} -- a
+// fresh, sortable identifier on a fresh run, or the identical id a resumed
+// run's resumeFromRunId refers back to (see references/ledger-and-
+// resumability.md's resume-integrity gate). ${durable_root}/runs/
+// .plugin_bundle_hash covers this exact template's own bytes, so a plugin
+// update is never silently masked by an old generated script surviving on
+// disk.
 //
 // Generalized from the real, proven historiettes-t3 reference script
 // (historiettes-t3/reference/historiettes-mass-translate-wf.reference.js).
 // The per-segment engine loop, the schema-validated workflow-level agent()
 // discipline, and the self-contained/no-imports constraint are preserved
 // exactly from that proven script; the ledger-fragment bookkeeping, the
-// review-artifact gate, and the batch_agent_cap preflight are new plugin
-// hardening layered on top (see references/gotchas.md item 2 -- careful
-// design, not itself proven at scale).
+// review-artifact gate, the batch_agent_cap preflight, and the run-scoped
+// dispatch_token freshness discipline are new plugin hardening layered on
+// top (see references/gotchas.md item 2 -- careful design, not itself
+// proven at scale).
 //
 // Self-contained by design: only the Workflow tool's own globals are used
 // (agent(), pipeline(), log(), args) plus python3 shelled out via agent
@@ -34,6 +37,18 @@
 // the instantiation step, never a cosmetic one):
 //
 //   {{DURABLE_ROOT}}                     -- absolute path to the project's durable root
+//   {{RUN_ID}}                           -- this run's identifier, resolved ONCE by the orchestrating
+//                                          session before instantiation via the resume-integrity gate:
+//                                          fresh on a new/mismatched-digest run, or the identical value
+//                                          reused via resumeFromRunId on a matched-digest resumed run
+//                                          (see references/ledger-and-resumability.md). Validated
+//                                          upstream against ^[A-Za-z0-9][A-Za-z0-9._-]*$, never
+//                                          '.'/'..', never containing a '..' sequence, and always
+//                                          colon-free -- this script splices it unguarded into shell
+//                                          commands and JSON dispatch_token fields exactly like
+//                                          {{DURABLE_ROOT}} above; an unresolved or malformed value
+//                                          here is a bug in the instantiation step, never this script's
+//                                          job to re-validate.
 //   {{SOURCE_LANG}}                      -- source.language.code, e.g. "fr"
 //   {{TARGET_LANG}}                      -- target.language.code, e.g. "ru"
 //   {{MAX_FIX_ROUNDS}}                   -- engine.max_fix_rounds, substituted as a BARE integer literal
@@ -47,7 +62,7 @@
 //                                          quote or newline in the resolved instruction text stays
 //                                          a valid JS string body -- never a raw, unescaped splice.
 //   {{BATCH_AGENT_CAP}}                  -- engine.batch_agent_cap, substituted as a BARE integer
-//                                          literal. This one extra token (beyond the five documented
+//                                          literal. This one extra token (beyond the six documented
 //                                          in references/orchestration-and-batching.md's "prompt
 //                                          functions" section) exists because the batch_agent_cap
 //                                          preflight estimator below needs this value and this
@@ -59,13 +74,18 @@
 //   draft_path(seg)   = segments/{seg}.draft.json      (no target-language suffix)
 //   review_path(seg)  = segments/{seg}.review.json     (no target-language suffix)
 //   segpack_path(seg) = segments/segpack_{seg}.json
+// Both draft_path(seg) and review_path(seg) carry one extra top-level
+// dispatch_token field beyond their user-facing schema content -- run-scoped
+// freshness metadata (draft: "{{RUN_ID}}:{seg}"; review: "{{RUN_ID}}:{seg}:r
+// {roundLabel}"), never a path component, and excluded from draft_sha1.py's
+// content hash and validate_draft.py's coverage check.
 
 export const meta = {
   name: "literary-translator-mass-translate",
-  description: "Per-segment mass-translate pipeline: codex-translate, then a deterministic validate gate, then codex-review, then a Claude fix, looped to convergence, with schema-validated ledger bookkeeping and a batch-size preflight. Instantiated fresh from the plugin's own shipped copy for every run -- never a stale generated copy reused across runs.",
+  description: "Per-segment mass-translate pipeline: codex-translate, then a deterministic validate gate, then codex-review (dispatch/wait/read/check), then a Claude fix, looped to convergence, with schema-validated ledger bookkeeping and a batch-size preflight. Instantiated fresh from the plugin's own shipped copy for every run -- never a stale generated copy reused across runs.",
   phases: [
     { title: "Translate", detail: "codex translates each segpack to a draft and self-validates coverage before returning" },
-    { title: "ReviewFix", detail: "codex reviews and Claude fixes, looped until clean and coverage_ok, capped at MAX_FIX_ROUNDS plus one mandatory final confirming review" },
+    { title: "ReviewFix", detail: "codex reviews (fire-and-forget, bounded-polled) and Claude fixes, looped until clean and coverage_ok, capped at MAX_FIX_ROUNDS plus one mandatory final confirming review" },
     { title: "Ledger", detail: "schema-validated ledger bookkeeping: per-segment status writes plus the mandatory batch-completeness merge check" },
   ],
 };
@@ -76,14 +96,32 @@ export const meta = {
 // to temporal-dead-zone semantics in this execution model (see
 // references/gotchas.md item 10) -- there is no runtime error to catch it,
 // so declaration order here is load-bearing, not a style choice.
+//
+// Every schema below is a plain top-level `object`, with no top-level
+// `oneOf`/`allOf`/`anyOf` -- an agent's `schema` is a tool `input_schema`,
+// and a top-level combinator there is REJECTED by the tool-use API outright
+// (HTTP 400 on first dispatch), not merely under-enforced (see
+// references/gotchas.md's "agent schema is a tool input_schema" item). The
+// on-disk schemas some of these mirror (ledger-write-confirmation.schema.json,
+// ledger-merge-confirmation.schema.json, review-artifact-check.schema.json)
+// stay strong `oneOf` and validate the underlying *scripts'* Python stdout
+// at runtime -- they are deliberately NOT the same shape as the flattened
+// literals below, which only need to be API-legal. Branch discrimination
+// the flat literals can no longer express is instead enforced by the
+// exact-key-set JS guards further down this file (ledgerWriteSucceeded,
+// ledgerMergeSucceeded, artifactCheckMatched).
 // ---------------------------------------------------------------------------
 
-// Matches review.schema.json exactly. No verse_status field: verse-specific
-// issues surface as ordinary findings[] entries (loc: "VERSE:{vid}"); verse
-// COVERAGE is exclusively validate_draft.py's job, never review judgment.
-// draft_sha1 is a deliberate plugin addition over the proven reference's own
-// schema -- the reviewer computes it itself, before reading the draft, via
-// draft_sha1.py (hash-first-then-read).
+// Matches review.schema.json's four verdict fields exactly. No verse_status
+// field: verse-specific issues surface as ordinary findings[] entries (loc:
+// "VERSE:{vid}"); verse COVERAGE is exclusively validate_draft.py's job,
+// never review judgment. draft_sha1 is a deliberate plugin addition over
+// the proven reference's own schema -- the reviewer computes it itself,
+// before reading the draft, via draft_sha1.py (hash-first-then-read). This
+// is an intentional four-field PROJECTION of the five-field on-disk
+// review.schema.json (which also carries dispatch_token, run-scoped
+// freshness metadata never part of the verdict) -- readReviewPrompt below
+// reads the five-field file but returns only these four.
 const REVIEW_SCHEMA = {
   type: "object",
   additionalProperties: false,
@@ -122,87 +160,64 @@ const REVIEW_SCHEMA = {
   },
 };
 
-// Matches review-artifact-check.schema.json exactly.
+// Flat agent-facing literal (CONTRACT §1) -- deliberately NOT the same
+// shape as review-artifact-check.schema.json on disk, which stays a strong
+// oneOf and validates review_artifact_check.py's own stdout at the script
+// level. artifactCheckMatched() below is what actually enforces
+// match:true-implies-no-mismatch_detail for this literal's return.
 const REVIEW_ARTIFACT_SCHEMA = {
-  oneOf: [
-    {
-      type: "object",
-      additionalProperties: false,
-      required: ["match"],
-      properties: {
-        match: { const: true },
-      },
-    },
-    {
-      type: "object",
-      additionalProperties: false,
-      required: ["match", "mismatch_detail"],
-      properties: {
-        match: { const: false },
-        mismatch_detail: { type: "string" },
-      },
-    },
-  ],
+  type: "object",
+  additionalProperties: false,
+  required: ["match"],
+  properties: {
+    match: { type: "boolean" },
+    mismatch_detail: { type: "string" },
+  },
 };
 
-// Matches ledger-write-confirmation.schema.json exactly. The two branches
-// are deliberately not the same shape -- a failure never claims a
-// fragment_path/fragment_sha1 that was never written.
+// Flat agent-facing literal (CONTRACT §1) -- a union of the on-disk
+// ledger-write-confirmation.schema.json's two branches' fields, all
+// optional except success. Deliberately NOT the same shape as the on-disk
+// schema, which stays a strong oneOf and validates ledger_update.py's own
+// stdout at the script level. ledgerWriteSucceeded() below is what
+// actually enforces the success-branch field set and rejects a
+// success:true return that also carries a failure-only key.
 const LEDGER_WRITE_SCHEMA = {
-  oneOf: [
-    {
-      type: "object",
-      additionalProperties: false,
-      required: ["success", "status", "fragment_path", "fragment_sha1"],
-      properties: {
-        success: { const: true },
-        status: { type: "string" },
-        fragment_path: { type: "string" },
-        fragment_sha1: { type: "string" },
-      },
-    },
-    {
-      type: "object",
-      additionalProperties: false,
-      required: ["success", "error"],
-      properties: {
-        success: { const: false },
-        error: { type: "string" },
-        exit_code: { type: "integer" },
-        stderr: { type: "string" },
-      },
-    },
-  ],
+  type: "object",
+  additionalProperties: false,
+  required: ["success"],
+  properties: {
+    success: { type: "boolean" },
+    status: { type: "string" },
+    fragment_path: { type: "string" },
+    fragment_sha1: { type: "string" },
+    error: { type: "string" },
+    exit_code: { type: "integer" },
+    stderr: { type: "string" },
+  },
 };
 
-// Matches ledger-merge-confirmation.schema.json exactly.
+// Flat agent-facing literal (CONTRACT §1) -- same union treatment as
+// LEDGER_WRITE_SCHEMA above. missing_segments uses the RELAXED union shape
+// {type:"array", items:{type:"string"}} (no maxItems) so the same literal
+// can carry either branch's missing_segments; ledgerMergeSucceeded() below
+// is what actually enforces the success branch's missing_segments.length
+// === 0 requirement (the maxItems:0 the old success-branch literal used to
+// express directly).
 const LEDGER_MERGE_SCHEMA = {
-  oneOf: [
-    {
-      type: "object",
-      additionalProperties: false,
-      required: ["success", "ledger_path", "n_segments", "missing_segments", "stale_segments"],
-      properties: {
-        success: { const: true },
-        ledger_path: { type: "string" },
-        n_segments: { type: "integer" },
-        missing_segments: { type: "array", maxItems: 0 },
-        stale_segments: { type: "array", items: { type: "string" } },
-      },
-    },
-    {
-      type: "object",
-      additionalProperties: false,
-      required: ["success", "error"],
-      properties: {
-        success: { const: false },
-        error: { type: "string" },
-        missing_segments: { type: "array", items: { type: "string" } },
-        exit_code: { type: "integer" },
-        stderr: { type: "string" },
-      },
-    },
-  ],
+  type: "object",
+  additionalProperties: false,
+  required: ["success"],
+  properties: {
+    success: { type: "boolean" },
+    ledger_path: { type: "string" },
+    n_segments: { type: "integer" },
+    missing_segments: { type: "array", items: { type: "string" } },
+    stale_segments: { type: "array", items: { type: "string" } },
+    error: { type: "string" },
+    exit_code: { type: "integer" },
+    stderr: { type: "string" },
+  },
 };
 
 // ---------------------------------------------------------------------------
@@ -213,6 +228,7 @@ const LEDGER_MERGE_SCHEMA = {
 
 const PY = "python3";
 const ROOT = "{{DURABLE_ROOT}}";
+const RUN_ID = "{{RUN_ID}}";
 const SOURCE_LANG = "{{SOURCE_LANG}}";
 const TARGET_LANG = "{{TARGET_LANG}}";
 const MAXFIX = {{MAX_FIX_ROUNDS}};
@@ -227,9 +243,10 @@ const SEGS = Array.isArray(args) ? args : JSON.parse(args);
 
 // ---------------------------------------------------------------------------
 // Defense-in-depth segment id guard. Every id in SEGS is spliced, unquoted,
-// into shell command strings below (translatePrompt/reviewPrompt/fixPrompt/
-// waitPrompt/recordLedgerPrompt/mergeLedgerPrompt), including a bash for-loop
-// in waitPrompt -- an unsafe id ('../', '/', shell metacharacters) would
+// into shell command strings below (translatePrompt/reviewDispatchPrompt/
+// reviewWaitPrompt/readReviewPrompt/fixPrompt/waitPrompt/recordLedgerPrompt/
+// mergeLedgerPrompt), including bash for-loops in waitPrompt and
+// reviewWaitPrompt -- an unsafe id ('../', '/', shell metacharacters) would
 // otherwise escape the durable root or inject arbitrary shell commands.
 // select_segments.py already validates every id it emits against this same
 // allowlist BEFORE it ever reaches this script's args, so this check should
@@ -260,6 +277,53 @@ function endsWithSegJson(fragmentPath, seg) {
 }
 
 // ---------------------------------------------------------------------------
+// Exact-key-set JS guards (CONTRACT §5). The flat schemas above no longer
+// discriminate success/failure shape the way the old oneOf branches did --
+// the tool-use API cannot enforce a top-level combinator, so a returned
+// object that claims success:true/match:true while ALSO carrying a
+// failure-only key (error/exit_code/stderr/mismatch_detail), or that is
+// missing a required success-branch field, must be treated as a failed
+// call here -- never trusted, never routed down the success path. The
+// on-disk strong schemas plus each script's own runtime self-validation
+// are the second layer behind these guards, not a substitute for them.
+// ---------------------------------------------------------------------------
+
+function isNonEmptyString(v) {
+  return typeof v === "string" && v.length > 0;
+}
+
+function hasOnlyKeys(obj, allowedKeys) {
+  return Object.keys(obj).every((k) => allowedKeys.indexOf(k) !== -1);
+}
+
+const LEDGER_WRITE_SUCCESS_KEYS = ["success", "status", "fragment_path", "fragment_sha1"];
+const LEDGER_MERGE_SUCCESS_KEYS = ["success", "ledger_path", "n_segments", "missing_segments", "stale_segments"];
+const FAILURE_ONLY_KEYS = ["error", "exit_code", "stderr"];
+
+function ledgerWriteSucceeded(raw) {
+  if (!raw || raw.success !== true) return false;
+  if (FAILURE_ONLY_KEYS.some((k) => k in raw)) return false;
+  if (!hasOnlyKeys(raw, LEDGER_WRITE_SUCCESS_KEYS)) return false;
+  return isNonEmptyString(raw.status) && isNonEmptyString(raw.fragment_path) && isNonEmptyString(raw.fragment_sha1);
+}
+
+function ledgerMergeSucceeded(raw) {
+  if (!raw || raw.success !== true) return false;
+  if (FAILURE_ONLY_KEYS.some((k) => k in raw)) return false;
+  if (!hasOnlyKeys(raw, LEDGER_MERGE_SUCCESS_KEYS)) return false;
+  return (
+    isNonEmptyString(raw.ledger_path) &&
+    Number.isInteger(raw.n_segments) &&
+    Array.isArray(raw.missing_segments) && raw.missing_segments.length === 0 &&
+    Array.isArray(raw.stale_segments)
+  );
+}
+
+function artifactCheckMatched(art) {
+  return !!art && art.match === true && !("mismatch_detail" in art);
+}
+
+// ---------------------------------------------------------------------------
 // Prompt-builder functions. All plain JavaScript string interpolation
 // against the constants above -- there is no templating engine at Workflow
 // runtime, so every one of these is built with ordinary string
@@ -269,34 +333,88 @@ function endsWithSegJson(fragmentPath, seg) {
 // ---------------------------------------------------------------------------
 
 function translatePrompt(seg) {
+  const dispatchToken = RUN_ID + ":" + seg;
   const lines = [];
   lines.push("Effort: high. Literary translation of segment " + seg + " (" + SOURCE_LANG + " to " + TARGET_LANG + ").");
   lines.push("Read in order: " + ROOT + "/translate_TASK.md ; " + ROOT + "/style_bible.md (in full, especially the word-sense/realia traps section) ; " + ROOT + "/segments/segpack_" + seg + ".json (source text plus the frozen name/realia canon for this segment).");
   lines.push("Verse policy for this project: " + VERSE_POLICY_INSTRUCTION_BLOCK);
   lines.push("Translate every block, footnote, and verse this segpack contains. Copy every placeholder sentinel (e.g. ⟦FNREF_N⟧, ⟦VERSE_...⟧) byte for byte, in its correct position in the sentence -- never translate, drop, or reword a sentinel itself. Any embedded third-language text (Latin, an older form of the source language, or similar) gets an in-text gloss, never a notes-only translation. Use canon_names forms verbatim; for a new_names entry not yet in the canon, choose a reasoned rendering and flag it in notes as NEW:.");
-  lines.push("Write your draft exactly per translate_TASK.md's own schema to: " + ROOT + "/segments/" + seg + ".draft.json");
+  lines.push("Write your draft exactly per translate_TASK.md's own schema to: " + ROOT + "/segments/" + seg + ".draft.json -- and add one extra top-level field beyond that schema: dispatch_token, with exactly this literal string value: " + JSON.stringify(dispatchToken) + ". This is run-scoping freshness metadata, not part of the translation itself.");
   lines.push("Then self-check coverage: run " + PY + " " + ROOT + "/scripts/validate_draft.py " + seg + ". If it prints FAIL, fix the draft and rewrite the file, and repeat until it prints OK.");
   lines.push("Return exactly the line: DONE " + seg);
   return lines.join("\n");
 }
 
-function reviewPrompt(seg) {
+// The dispatch half of the review restructure (#97 #88 #87-artifact --
+// reviewDispatchPrompt/reviewWaitPrompt/readReviewPrompt/callArtifactCheck
+// replace the old, single schema-validated reviewPrompt/callReview).
+// Schema-less, fire-and-forget, matching translateStage's own discipline:
+// the codex reviewer writes segments/{seg}.review.json atomically and
+// self-validates its own shape before returning -- this script never
+// trusts the agent's return value here, only the on-disk artifact
+// reviewWaitPrompt's bounded poll below confirms.
+//
+// Self-contained: this prompt carries the FULL review.schema.json field
+// contract inline and explicitly supersedes review_TASK.md for that
+// contract -- a resumed project's review_TASK.md may predate this change
+// and must never be trusted over the fields spelled out here.
+function reviewDispatchPrompt(seg, roundLabel) {
+  const dispatchToken = RUN_ID + ":" + seg + ":r" + roundLabel;
+  const draftToken = RUN_ID + ":" + seg;
   const lines = [];
-  lines.push("Effort: high. Single reviewer covering both accuracy and literary quality for segment " + seg + " (" + SOURCE_LANG + " to " + TARGET_LANG + ").");
+  lines.push("Effort: high. Single reviewer covering both accuracy and literary quality for segment " + seg + " (" + SOURCE_LANG + " to " + TARGET_LANG + "), round " + roundLabel + ".");
+  lines.push("This prompt is self-contained and supersedes " + ROOT + "/review_TASK.md for the field contract below. Read review_TASK.md for narrative guidance only -- it may predate this instruction, and its own field list must never override the fields spelled out here.");
   lines.push("First run the deterministic gate: " + PY + " " + ROOT + "/scripts/validate_draft.py " + seg + " -- remember whether it printed OK or FAIL, and any defects it named.");
-  lines.push("Before reading the draft, compute its current sha1 by running: " + PY + " " + ROOT + "/scripts/draft_sha1.py " + seg + " -- this becomes your draft_sha1 return value below, and it must be computed BEFORE you read the draft file itself.");
+  lines.push("Before reading the draft, compute its current sha1 by running: " + PY + " " + ROOT + "/scripts/draft_sha1.py " + seg + " -- this becomes your draft_sha1 value below, and it must be computed BEFORE you read the draft file itself.");
   lines.push("Then read: " + ROOT + "/review_TASK.md ; " + ROOT + "/style_bible.md ; " + ROOT + "/segments/segpack_" + seg + ".json ; " + ROOT + "/segments/" + seg + ".draft.json.");
+  lines.push("As soon as you read the draft, check its own dispatch_token field: it must equal exactly this literal string: " + JSON.stringify(draftToken) + ". If it does not match exactly, STOP here -- this draft belongs to a different, stale run. Do not review it, do not write " + ROOT + "/segments/" + seg + ".review.json at all, and return exactly the line: DRAFT_TOKEN_MISMATCH " + seg + " instead of the REVIEWED line below.");
   lines.push("Verse policy for this project: " + VERSE_POLICY_INSTRUCTION_BLOCK);
   lines.push("Check the draft against the source for: full accuracy (no omissions or distortions), word-sense and realia fidelity for the source era and context -- ask explicitly whether each notable word means what it meant in that period and context, not what it means today -- name/canon fidelity, placeholder sentinel fidelity, verse per the policy above, and literary quality (register, idiom, natural seams, rhythm).");
-  lines.push("Return a structured result with exactly these fields: clean (true only if there are no findings that require a fix round), coverage_ok (true only if the deterministic gate above printed OK), findings (an array of objects with loc/severity/issue/suggest -- use a loc like \"VERSE:{vid}\" for a verse-specific finding), and draft_sha1 (the value you computed before reading the draft, above).");
-  lines.push("Also write that exact same JSON object to: " + ROOT + "/segments/" + seg + ".review.json");
+  lines.push("Build a JSON object with exactly these five fields: clean (true only if there are no findings that require a fix round), coverage_ok (true only if the deterministic gate above printed OK), findings (an array of objects with loc/severity/issue/suggest -- use a loc like \"VERSE:{vid}\" for a verse-specific finding), draft_sha1 (the value you computed before reading the draft, above), and dispatch_token (exactly this literal string: " + JSON.stringify(dispatchToken) + ").");
+  lines.push("Write that exact object to a fresh temp file in the same directory (e.g. via python3, json.dump to " + ROOT + "/segments/." + seg + ".review.json.tmp.<a unique suffix, e.g. your own process id>), then atomically rename/replace it (e.g. os.replace) into place at: " + ROOT + "/segments/" + seg + ".review.json -- never write that destination path directly, so a concurrent reader never observes a half-written file.");
+  lines.push("Return exactly the line: REVIEWED " + seg);
   return lines.join("\n");
 }
 
+// Bounded poll for the review dispatch above -- review_ready.py fully
+// validates the on-disk review.json (full schema, draft_sha1 freshness,
+// AND the dispatch_token this round's dispatch just wrote) before
+// reporting ready, so a stale or still-mid-write artifact never passes.
+// Same 45x20s/~15min bound as translate's own waitPrompt below.
+function reviewWaitPrompt(seg, dispatchToken) {
+  const lines = [];
+  lines.push("The codex reviewer for segment " + seg + " is working in the background. Wait for it to finish: run exactly one bash command, a polling loop:");
+  lines.push("for i in $(seq 1 45); do " + PY + " " + ROOT + "/scripts/review_ready.py " + seg + " --expect-token " + dispatchToken + " && exit 0; sleep 20; done; exit 1");
+  lines.push("If that command exits successfully (review_ready.py reported ready), return exactly the line: READY " + seg);
+  lines.push("Otherwise, after the timeout (about 15 minutes), return exactly the line: TIMEOUT " + seg);
+  lines.push("Do nothing else -- do not touch any files, and do not review anything yourself.");
+  return lines.join("\n");
+}
+
+// Mechanical read only, once reviewWaitPrompt confirms the on-disk artifact
+// is ready. review.json carries five fields on disk (the four verdict
+// fields plus dispatch_token); this prompt returns only the four verdict
+// fields, matching REVIEW_SCHEMA exactly -- dispatch_token is run-scoping
+// metadata, never part of the returned verdict.
+function readReviewPrompt(seg) {
+  const lines = [];
+  lines.push("Effort: low. Mechanical read only -- do not judge or second-guess the reviewer's verdict.");
+  lines.push("Segment: " + seg + ". Durable root: " + ROOT + ".");
+  lines.push("Read: " + ROOT + "/segments/" + seg + ".review.json");
+  lines.push("That file has five top-level fields: clean, coverage_ok, findings, draft_sha1, and dispatch_token. Return a structured result with exactly the first four -- clean, coverage_ok, findings, draft_sha1 -- verbatim from the file. Omit dispatch_token from your return; it is internal run-scoping metadata, not part of the verdict.");
+  return lines.join("\n");
+}
+
+// Bounded poll for the translate dispatch above -- draft_ready.py's
+// --expect-token requires the on-disk draft's dispatch_token to equal this
+// run's own token before reporting READY, so an old-run straggler
+// translator's draft (old token) is never accepted here (references/
+// ledger-and-resumability.md's resume-integrity gate, commit-gate point (i)).
 function waitPrompt(seg) {
+  const dispatchToken = RUN_ID + ":" + seg;
   const lines = [];
   lines.push("The codex translator for segment " + seg + " is working in the background. Wait for it to finish: run exactly one bash command, a polling loop:");
-  lines.push("for i in $(seq 1 45); do " + PY + " " + ROOT + "/scripts/draft_ready.py " + seg + " && exit 0; sleep 20; done; exit 1");
+  lines.push("for i in $(seq 1 45); do " + PY + " " + ROOT + "/scripts/draft_ready.py " + seg + " --expect-token " + dispatchToken + " && exit 0; sleep 20; done; exit 1");
   lines.push("If that command exits successfully (draft_ready.py printed READY), return exactly the line: READY " + seg);
   lines.push("Otherwise, after the timeout (about 15 minutes), return exactly the line: TIMEOUT " + seg);
   lines.push("Do nothing else -- do not touch any files, and do not translate anything yourself.");
@@ -306,9 +424,21 @@ function waitPrompt(seg) {
 // Deliberate, documented 3-argument departure from the proven reference's
 // 2-argument fixPrompt(seg, round) shape -- see references/gotchas.md item 5
 // and references/engine-loop.md's R1. revObj is the SAME schema-validated
-// object reviewPrompt already returned this round, still in this script's
-// own in-memory state, spliced in directly rather than re-read off
+// object readReviewPrompt already returned this round, still in this
+// script's own in-memory state, spliced in directly rather than re-read off
 // review_path(seg). Do not revert this to a 2-argument shape.
+//
+// The call/dispatch shape here is deliberately UNCHANGED by the #97
+// restructure (a plain, unbounded, schema-less Claude await, no agentType --
+// see references/engine-loop.md's "The FIX call is NOT restructured" note):
+// a forward-detached job can't happen on a Claude call, and a sha-changed
+// readiness gate would false-time-out a no-op fix. The one content addition
+// below (preserve dispatch_token) is load-bearing, not an architecture
+// change: this prompt tells the agent to REWRITE the entire draft.json, and
+// without this line it would have no way to know a dispatch_token field
+// even exists, silently dropping it on every fixed segment's first round --
+// which would then always fail ledger_update.py's convergence-time
+// dispatch_token check (references/ledger-and-resumability.md).
 function fixPrompt(seg, round, revObj) {
   const revObjJSON = JSON.stringify(revObj);
   const lines = [];
@@ -318,6 +448,7 @@ function fixPrompt(seg, round, revObj) {
   lines.push("Important: only codex translates. If the draft is missing or is not actually ready -- check by running " + PY + " " + ROOT + "/scripts/draft_ready.py " + seg + " -- do not translate it yourself: return exactly the line DRAFT_MISSING " + seg + " and write nothing.");
   lines.push("Otherwise, read " + ROOT + "/segments/" + seg + ".draft.json and " + ROOT + "/segments/segpack_" + seg + ".json, and carefully apply every finding above to the draft. Never touch a placeholder sentinel (e.g. ⟦FNREF_...⟧, ⟦VERSE_...⟧) -- copy each one byte for byte in place. Keep the verse policy: " + VERSE_POLICY_INSTRUCTION_BLOCK);
   lines.push("Never change the set of block, footnote, or verse keys -- they must stay exactly 1:1 with the segpack.");
+  lines.push("The draft also carries a dispatch_token top-level field -- copy its existing value byte for byte into your rewritten draft, unchanged; never invent, drop, or recompute it.");
   lines.push("Rewrite " + ROOT + "/segments/" + seg + ".draft.json with your fixes. Then run " + PY + " " + ROOT + "/scripts/validate_draft.py " + seg + " and confirm it prints OK -- if your own edit broke coverage or a placeholder, repair it and rewrite the file again until it prints OK.");
   lines.push("Return exactly the line: FIXED " + seg + " r" + round);
   return lines.join("\n");
@@ -329,7 +460,10 @@ function fixPrompt(seg, round, revObj) {
 // converged call site, a needsCacheKey marker (a JS-side-only signal to
 // this prompt builder, never itself a real ledger_update.py payload field)
 // instructing the agent to compute the current 15-field cache_key itself
-// via cache_key.py and fold it into the payload it writes.
+// via cache_key.py and fold it into the payload it writes, alongside a
+// run_token field carrying this run's bare RUN_ID -- ledger_update.py uses
+// run_token to refuse recording convergence when the on-disk draft or
+// review artifact's own dispatch_token belongs to a different (stale) run.
 function recordLedgerPrompt(seg, fields) {
   const knownFields = {};
   if (fields.status !== undefined) knownFields.status = fields.status;
@@ -345,6 +479,7 @@ function recordLedgerPrompt(seg, fields) {
   if (fields.needsCacheKey) {
     lines.push("This is a convergence write. Before writing the payload file, run: " + PY + " " + ROOT + "/scripts/cache_key.py --seg " + seg);
     lines.push("Take that command's full printed JSON object verbatim and add it to the payload object as its cache_key field, unmodified.");
+    lines.push("Also add a run_token field to the payload object with exactly this literal string value: " + JSON.stringify(RUN_ID) + " -- this run's identifier. ledger_update.py uses it to refuse recording convergence if the on-disk draft's or review.json's own dispatch_token belongs to a stale, different run.");
   }
   lines.push("Write the resulting payload object, and nothing else, to a fresh scratch file at " + ROOT + "/runs/.ledger_update_payload." + seg + ".<a unique suffix, e.g. your own process id> -- never reuse an existing scratch file.");
   lines.push("Then run: " + PY + " " + ROOT + "/scripts/ledger_update.py " + seg + " --payload-file <the scratch file path you just wrote>");
@@ -354,22 +489,35 @@ function recordLedgerPrompt(seg, fields) {
   return lines.join("\n");
 }
 
+// --run-token RUN_ID (new CLI flag, alongside the existing --expected-segs)
+// is this function's own field to document for ledger_merge.py: before
+// reporting success/batchComplete, the script re-asserts for EACH expected
+// converged segment that its on-disk draft's and review.json's own
+// dispatch_token both equal this run's token, and that the draft's current
+// sha1 still matches the ledger-recorded draft_sha1 -- closing the window
+// between a per-segment convergence write and this batch-final check
+// (references/ledger-and-resumability.md).
 function mergeLedgerPrompt(segs) {
   const segsCsv = segs.join(",");
   const lines = [];
   lines.push("Effort: low. Mechanical ledger completeness check only -- no translation or review judgment.");
   lines.push("Durable root: " + ROOT + ".");
-  lines.push("Run: " + PY + " " + ROOT + "/scripts/ledger_merge.py --expected-segs " + segsCsv);
+  lines.push("Run: " + PY + " " + ROOT + "/scripts/ledger_merge.py --expected-segs " + segsCsv + " --run-token " + RUN_ID);
   lines.push("Capture that command's single printed JSON line.");
   lines.push("Independently re-read " + ROOT + "/runs/ledger.json and confirm every one of these segment ids has a matching key: " + segsCsv + ". This is a completeness/subset check only: ledger.json may also contain extra keys left over from earlier batches, and that is expected, never a failure by itself. Only a listed segment id with no matching key at all is a failure.");
   lines.push("Return exactly one structured result matching the required schema: on a verified success, success: true plus the ledger_path/n_segments/missing_segments/stale_segments the command reported; on any failure, or if your own independent check disagrees with the command's claim, success: false plus an error string.");
   return lines.join("\n");
 }
 
-// Right after every non-null review verdict, including the final confirming
-// one. revObj is spliced in directly (same mechanism fixPrompt uses); the
-// script, not the agent, does the actual byte-for-byte comparison against
-// the on-disk review_path(seg) -- see references/workflow-schema-validation.md.
+// Right after every review verdict readReviewPrompt returns, including the
+// final confirming one. revObj is spliced in directly (same mechanism
+// fixPrompt uses); the script, not the agent, does the actual comparison
+// against the on-disk review_path(seg) -- see
+// references/workflow-schema-validation.md. review_artifact_check.py
+// projects BOTH sides down to exactly {clean, coverage_ok, findings,
+// draft_sha1} before comparing, so a disk file that also carries
+// dispatch_token (five fields) still matches this four-field expected
+// object.
 function verifyReviewArtifactPrompt(seg, revObj) {
   const revObjJSON = JSON.stringify(revObj);
   const lines = [];
@@ -384,19 +532,20 @@ function verifyReviewArtifactPrompt(seg, revObj) {
 
 // ---------------------------------------------------------------------------
 // recordLedgerCall -- wraps the schema-validated recordLedgerPrompt call
-// with the mandatory JS-side payload-intent verification: after a
-// success:true return, this script itself (not a new prompt) confirms the
-// returned fragment_path's segment component matches seg and the returned
-// status matches fields.status. A mismatch is treated the same as
-// success:false, never retried through the same ledger-write channel.
+// with the mandatory JS-side payload-intent verification: after
+// ledgerWriteSucceeded() accepts the return, this script itself (not a new
+// prompt) confirms the returned fragment_path's segment component matches
+// seg and the returned status matches fields.status. A mismatch is treated
+// the same as a failed write, never retried through the same ledger-write
+// channel.
 // ---------------------------------------------------------------------------
 async function recordLedgerCall(seg, fields, label) {
   const raw = await agent(recordLedgerPrompt(seg, fields), {
     effort: "low", phase: "Ledger", label: label, schema: LEDGER_WRITE_SCHEMA,
   });
 
-  if (!raw || raw.success !== true) {
-    const detail = raw && raw.error ? raw.error : "ledger_update.py write did not report success";
+  if (!ledgerWriteSucceeded(raw)) {
+    const detail = raw && typeof raw.error === "string" ? raw.error : "ledger_update.py write did not report success";
     return {
       ok: false,
       failResult: { seg: seg, converged: false, reason: "ledger-write-failed", detail: detail },
@@ -422,10 +571,17 @@ async function recordLedgerCall(seg, fields, label) {
 // Per-round call helpers.
 // ---------------------------------------------------------------------------
 
-async function callReview(seg, roundLabel, isRetry) {
-  const label = "review:" + seg + ":r" + roundLabel + (isRetry ? ":retry" : "");
-  return await agent(reviewPrompt(seg), {
-    agentType: "codex:codex-rescue", effort: "high", phase: "ReviewFix", label: label, schema: REVIEW_SCHEMA,
+async function callReviewDispatch(seg, roundLabel) {
+  const label = "review-dispatch:" + seg + ":r" + roundLabel;
+  return await agent(reviewDispatchPrompt(seg, roundLabel), {
+    agentType: "codex:codex-rescue", effort: "high", phase: "ReviewFix", label: label,
+  });
+}
+
+async function callReadReview(seg, roundLabel, isRetry) {
+  const label = "review-read:" + seg + ":r" + roundLabel + (isRetry ? ":retry" : "");
+  return await agent(readReviewPrompt(seg), {
+    effort: "low", phase: "ReviewFix", label: label, schema: REVIEW_SCHEMA,
   });
 }
 
@@ -445,29 +601,52 @@ async function callFix(seg, round, revObj) {
   });
 }
 
-// Runs one review verdict through to a verified, artifact-gate-confirmed
-// result, handling both retry-once-then-blocked paths documented in
-// references/engine-loop.md and references/workflow-schema-validation.md:
-//   - a null review is retried once, fresh; still null -> blocked review-null.
-//   - a match:false artifact check retries the ORIGINAL review call once,
-//     fresh, then re-checks the retry's own write; still mismatched ->
-//     blocked review-artifact-mismatch. If that retry review itself comes
-//     back null, this is treated the same as the review-null path above --
-//     there is no usable verdict to act on either way.
+// The read+check pair getVerifiedReview below retries as ONE shared unit
+// (never independently) -- see getVerifiedReview's own comment for the
+// full retry-budget rationale.
+async function readAndCheck(seg, roundLabel, isRetry) {
+  const rev = await callReadReview(seg, roundLabel, isRetry);
+  if (!rev) return { rev: null, art: null };
+  const art = await callArtifactCheck(seg, rev, roundLabel, isRetry);
+  return { rev: rev, art: art };
+}
+
+// Runs one review point -- dispatch, bounded wait, read, artifact-check --
+// through to a verified verdict, per references/workflow-schema-validation.md
+// and references/false-green-gate.md. The dispatch is a schema-less,
+// fire-and-forget codex call (translateStage's own pattern); this function
+// never trusts its return value, only the on-disk artifact the bounded
+// poll below confirms. TIMEOUT ends the point immediately as
+// blocked/review-timeout -- no read/check is attempted against a draft
+// that may still be mid-write.
+//
+// After a successful wait, ONE shared retry budget covers the read and
+// the check together: a null read OR a match:false check retries the
+// (read THEN check) pair once, fresh; still failing afterward ->
+// blocked/review-null (the retry's own read came back null) or
+// blocked/review-artifact-mismatch (the retry's read succeeded but still
+// didn't match) -- never two independent read-retry/check-retry budgets.
+// Call budget for one review point: dispatch(1) + wait(1) + read(1) +
+// check(1) + [retry: read(1) + check(1)] = 6 calls, worst case.
 async function getVerifiedReview(seg, roundLabel) {
-  let rev = await callReview(seg, roundLabel, false);
-  if (!rev) {
-    rev = await callReview(seg, roundLabel, true);
-    if (!rev) return { status: "blocked", reason: "review-null" };
+  const dispatchToken = RUN_ID + ":" + seg + ":r" + roundLabel;
+
+  await callReviewDispatch(seg, roundLabel);
+
+  const waitLabel = "review-wait:" + seg + ":r" + roundLabel;
+  const ready = await agent(reviewWaitPrompt(seg, dispatchToken), {
+    effort: "low", phase: "ReviewFix", label: waitLabel,
+  });
+  if (!ready || ready.indexOf("READY") === -1) {
+    return { status: "blocked", reason: "review-timeout" };
   }
 
-  let art = await callArtifactCheck(seg, rev, roundLabel, false);
-  if (art.match === true) return { status: "ok", rev: rev };
+  const first = await readAndCheck(seg, roundLabel, false);
+  if (artifactCheckMatched(first.art)) return { status: "ok", rev: first.rev };
 
-  const rev2 = await callReview(seg, roundLabel, true);
-  if (!rev2) return { status: "blocked", reason: "review-null" };
-  const art2 = await callArtifactCheck(seg, rev2, roundLabel, true);
-  if (art2.match === true) return { status: "ok", rev: rev2 };
+  const retry = await readAndCheck(seg, roundLabel, true);
+  if (!retry.rev) return { status: "blocked", reason: "review-null" };
+  if (artifactCheckMatched(retry.art)) return { status: "ok", rev: retry.rev };
 
   return { status: "blocked", reason: "review-artifact-mismatch" };
 }
@@ -574,8 +753,15 @@ async function translateStage(seg) {
 // plugin hardening, not itself source-proven (the real reference script has
 // no such check anywhere). Must run, and must be able to return, BEFORE
 // pipeline() is ever called below.
+//
+// Per segment: 3 fixed calls (in_progress ledger write, translate dispatch,
+// translate wait) + up to MAXFIX normal rounds at 7 calls each (a review
+// point's 6-call worst case plus 1 fix call) + 1 mandatory final review
+// point (6 calls, no fix dispatched) + 1 terminal ledger write
+// = 3 + 7*MAXFIX + 6 + 1 = 10 + 7*MAXFIX. Batch-level: 1 (the final
+// merge-ledger completeness check; there is no batch pre-clean call).
 // ---------------------------------------------------------------------------
-const estimatedCalls = 1 + SEGS.length * (6 + 3 * MAXFIX);
+const estimatedCalls = 1 + SEGS.length * (10 + 7 * MAXFIX);
 if (estimatedCalls > BATCH_AGENT_CAP) {
   log(
     "Batch too large: estimatedCalls=" + estimatedCalls +
@@ -604,8 +790,8 @@ const mergeResult = await agent(mergeLedgerPrompt(SEGS), {
   effort: "low", phase: "Ledger", label: "merge-ledger", schema: LEDGER_MERGE_SCHEMA,
 });
 
-if (!mergeResult || mergeResult.success !== true) {
-  const detail = mergeResult && mergeResult.error ? mergeResult.error : "ledger_merge.py completeness check did not report success";
+if (!ledgerMergeSucceeded(mergeResult)) {
+  const detail = mergeResult && typeof mergeResult.error === "string" ? mergeResult.error : "ledger_merge.py completeness check did not report success";
   log("Ledger merge/completeness check failed: " + detail);
   return {
     converged: converged, failed: failed,

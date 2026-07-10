@@ -20,12 +20,20 @@ invariants):
 
 Exit 0 = delivered: file exists, valid JSON, draft.schema.json/
 segpack.schema.json container SHAPE is valid (right types, not just right
-keys), AND block/footnote/verse KEY SETS match the segpack 1:1. Exit 1 = not
-ready yet, or the segpack/draft itself is missing/invalid/schema-malformed
-(prints the reason either way). Exit 2 = usage error.
+keys), block/footnote/verse KEY SETS match the segpack 1:1, AND (when
+--expect-token is given) the draft's own dispatch_token field equals it
+exactly. Exit 1 = not ready yet, or the segpack/draft itself is missing/
+invalid/schema-malformed (prints the reason either way). Exit 2 = usage
+error.
 
-Usage: python3 draft_ready.py SEG
+--expect-token TOK (1.2.0 addition, optional): closes the resume-integrity
+gap where a stale/straggler draft from a DIFFERENT run (or a pre-1.2.0
+draft with no dispatch_token at all) would otherwise look READY. Omit for
+the pre-1.2.0 behavior (no token check) -- backward compatible.
+
+Usage: python3 draft_ready.py SEG [--expect-token TOK]
 """
+import argparse
 import json
 import re
 import sys
@@ -160,11 +168,28 @@ def check_segpack_structure(segpack) -> list:
     return errs
 
 
+def build_arg_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Readiness probe for segments/{seg}.draft.json -- see this file's own module docstring.",
+    )
+    parser.add_argument("seg", help="Segment identifier.")
+    parser.add_argument(
+        "--expect-token",
+        default=None,
+        metavar="TOK",
+        help=(
+            "When given, READY additionally requires the draft's own "
+            "dispatch_token field to equal TOK exactly (RUN_ID:seg form) -- "
+            "closes a stale/straggler-draft-from-an-old-run gap. Omit for "
+            "the pre-1.2.0 behavior (no token check)."
+        ),
+    )
+    return parser
+
+
 def main() -> None:
-    if len(sys.argv) != 2:
-        print("usage: python3 draft_ready.py SEG", file=sys.stderr)
-        sys.exit(2)
-    seg = sys.argv[1]
+    args = build_arg_parser().parse_args()
+    seg = args.seg
     _seg_err = validate_seg(seg)
     if _seg_err:
         print(f"Error: {_seg_err}", file=sys.stderr)
@@ -222,6 +247,16 @@ def main() -> None:
             f"verses {len(got_v)}/{len(want_v)})"
         )
         sys.exit(1)
+
+    if args.expect_token is not None:
+        token = draft.get("dispatch_token")
+        if token != args.expect_token:
+            print(
+                f"[{seg}] not ready: dispatch_token mismatch "
+                f"(draft={token!r}, expected={args.expect_token!r}) -- "
+                f"stale/straggler draft from a different run"
+            )
+            sys.exit(1)
 
     print(f"[{seg}] READY (delivered)")
     sys.exit(0)

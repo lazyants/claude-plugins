@@ -246,16 +246,30 @@ def segpack_path(seg: str) -> Path:
     return SEGMENTS_DIR / f"segpack_{seg}.json"
 
 
-def sha1_bytes_of_file(path: Path) -> str:
-    """sha1 of a file's raw on-disk bytes -- MUST match ledger_update.py's
-    own sha1_bytes_of_file() exactly (both hash raw bytes, nothing
-    re-serialized), since this is compared directly against
-    reviewed_draft_sha1."""
-    h = hashlib.sha1()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(65536), b""):
-            h.update(chunk)
-    return h.hexdigest()
+def draft_content_sha1(path: Path) -> str:
+    """sha1 of a draft's CONTENT, with the 'dispatch_token' metadata field
+    deliberately EXCLUDED -- see draft_sha1.py's own module docstring for why.
+
+    Must match, byte for byte, draft_sha1.py's and ledger_update.py's own
+    draft_content_sha1() -- both parse the draft as JSON, drop
+    'dispatch_token' if present, and re-serialize the remainder via
+    identical sorted-key canonical JSON before hashing. This is compared
+    directly against reviewed_draft_sha1, which ledger_update.py writes via
+    this exact algorithm -- NOT a raw-bytes hash of the on-disk file.
+
+    Raises OSError (unreadable file), json.JSONDecodeError (not valid
+    JSON), or ValueError (valid JSON but not an object) on failure --
+    callers handle all three.
+    """
+    raw = path.read_text(encoding="utf-8")
+    doc = json.loads(raw)
+    if not isinstance(doc, dict):
+        raise ValueError(f"draft at {path} must be a JSON object, got {type(doc).__name__}")
+    projected = {k: v for k, v in doc.items() if k != "dispatch_token"}
+    canonical = json.dumps(
+        projected, sort_keys=True, ensure_ascii=False, separators=(",", ":")
+    ).encode("utf-8")
+    return hashlib.sha1(canonical).hexdigest()
 
 
 def read_json(path: Path, label: str):
@@ -360,7 +374,14 @@ def load_converged_segments(ledger: dict) -> dict:
                 f"runs/ledger.json segment {seg!r} has status=converged but "
                 f"its draft is missing on disk at {dp}"
             )
-        actual_sha1 = sha1_bytes_of_file(dp)
+        try:
+            actual_sha1 = draft_content_sha1(dp)
+        except (OSError, json.JSONDecodeError, ValueError) as exc:
+            raise AssembleError(
+                f"segment {seg!r} draft at {dp} is unreadable/corrupt -- "
+                f"cannot confirm the reviewer saw it; re-review before "
+                f"assembling ({exc})"
+            )
         if actual_sha1 != expected_sha1:
             raise AssembleError(
                 f"segment {seg!r} draft has changed since review (current "

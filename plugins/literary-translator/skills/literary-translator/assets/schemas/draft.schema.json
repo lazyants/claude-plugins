@@ -43,6 +43,10 @@
       "items": {
         "type": "string"
       }
+    },
+    "dispatch_token": {
+      "type": "string",
+      "description": "1.2.0 addition. Run-scoped freshness token = '<RUN_ID>:<seg>' (one live draft per segment per run), written by translatePrompt. OPTIONAL at the schema level -- it is runtime freshness metadata, not structural draft content, so its absence (e.g. a legacy pre-1.2.0 draft) is not itself a structural defect. Presence+correctness is enforced where it actually matters: draft_ready.py's --expect-token gate and the per-segment convergence ledger write (ledger_update.py's run_token precondition) both require an exact match against the CURRENT run's expected token, so a missing or stale value is still caught at those gates, just not by this schema. Deliberately EXCLUDED from draft_sha1.py's/ledger_update.py's own content-sha1 computation (metadata, not translated content -- see draft_sha1.py's own module docstring) and from validate_draft.py's six content checks."
     }
   },
   "required": ["seg", "blocks", "footnotes", "verses", "names", "notes"],

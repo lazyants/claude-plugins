@@ -1,9 +1,26 @@
 """tests/seg_safety_positional.test.py -- regression-lock suite for the
-segment-id safety allowlist shared by draft_sha1.py, draft_ready.py, and
-validate_draft.py -- the three scripts that splice a manifest-supplied `seg`
-string directly into filesystem paths (segments/{seg}.draft.json,
-segments/segpack_{seg}.json) via a positional CLI argv, before any other
+segment-id safety allowlist shared by draft_sha1.py, draft_ready.py,
+validate_draft.py, and (1.2.0+, when landed) review_ready.py -- the scripts
+that splice a manifest-supplied `seg` string directly into filesystem paths
+(segments/{seg}.draft.json, segments/segpack_{seg}.json,
+segments/{seg}.review.json) via a positional CLI argv, before any other
 validation runs.
+
+review_ready.py (CONTRACT-1.2.0-reliability.md §4, NEW) is explicitly
+specified to "carry the byte-identical _SEG_ID_RE+validate_seg() from
+draft_ready.py" and to "call validate_seg(seg) FIRST" -- so it belongs in
+this same regression-lock suite. Unlike the three original scripts it also
+requires a `--expect-token TOK` flag (argparse `required=True`, no
+backward-compatible omission -- it is a brand-new script, unlike
+draft_ready.py's own optional `--expect-token`), so every subprocess
+invocation below passes a harmless placeholder token alongside `seg` via
+SCRIPT_EXTRA_ARGS -- this file's own malicious/valid-seg vocabulary and
+assertions are otherwise identical for review_ready.py; only the extra
+`--expect-token` plumbing differs. Guarded with a file-existence skip
+(rather than the module-level `assert _path.is_file()` the original three
+scripts get) since review_ready.py is a NEW file another owner lands
+separately in this same parallel build -- its absence must never break
+collection of this file's coverage for the three already-shipped scripts.
 
 The vulnerability this locks shut: a malicious/custom extractor can emit a
 `seg` value containing '../', an absolute path, or shell metacharacters,
@@ -50,6 +67,28 @@ SCRIPT_SRCS = {name: SCRIPTS_DIR / name for name in SCRIPT_NAMES}
 
 for _name, _path in SCRIPT_SRCS.items():
     assert _path.is_file(), f"{_name} not found at {_path}"
+
+# review_ready.py (1.2.0, NEW -- CONTRACT §4) joins this same regression-lock
+# suite, but is landed by a different owner in this same parallel build --
+# guard its inclusion with a plain file-existence check (never a
+# module-level assert) so its temporary absence can't break collection of
+# the three already-shipped scripts' coverage above.
+REVIEW_READY_NAME = "review_ready.py"
+REVIEW_READY_SRC = SCRIPTS_DIR / REVIEW_READY_NAME
+REVIEW_READY_LANDED = REVIEW_READY_SRC.is_file()
+if REVIEW_READY_LANDED:
+    SCRIPT_NAMES = SCRIPT_NAMES + [REVIEW_READY_NAME]
+    SCRIPT_SRCS[REVIEW_READY_NAME] = REVIEW_READY_SRC
+
+# Extra CLI argv every invocation of a given script needs beyond its bare
+# `seg` positional -- only review_ready.py needs one (a REQUIRED
+# `--expect-token TOK`; unlike draft_ready.py's own optional
+# `--expect-token`, review_ready.py has no legacy callers to stay
+# backward-compatible with). The token value itself is irrelevant to every
+# test in this file -- they all probe seg-id rejection/acceptance, which
+# CONTRACT §4 requires fire BEFORE the token comparison ("call
+# validate_seg(seg) FIRST").
+SCRIPT_EXTRA_ARGS = {REVIEW_READY_NAME: ["--expect-token", "placeholder-token-for-seg-safety-tests"]}
 
 
 # ---------------------------------------------------------------------------
@@ -104,8 +143,10 @@ def make_durable_root(tmp_path, script_name):
 
 
 def run_script(root, script_name, seg):
+    argv = [sys.executable, str(root / "scripts" / script_name), seg]
+    argv.extend(SCRIPT_EXTRA_ARGS.get(script_name, []))
     return subprocess.run(
-        [sys.executable, str(root / "scripts" / script_name), seg],
+        argv,
         capture_output=True,
         text=True,
         timeout=30,
@@ -198,6 +239,18 @@ def test_validate_seg_agrees_across_all_three_scripts(seg):
         f"validate_seg({seg!r}) disagrees across scripts (accept/reject "
         f"should be identical since the helper is BYTE-IDENTICAL): {results}"
     )
+
+
+@pytest.mark.skipif(
+    REVIEW_READY_LANDED,
+    reason="review_ready.py has landed -- covered by the parametrized "
+    "SCRIPT_NAMES-driven tests above instead of this placeholder.",
+)
+def test_review_ready_not_yet_landed_placeholder():
+    """Purely informational: makes review_ready.py's pending status visible
+    in test output (rather than silently absent from SCRIPT_NAMES) while
+    Owner C's part of this parallel 1.2.0 build is still in flight."""
+    pytest.skip(f"{REVIEW_READY_SRC} does not exist yet (Owner C, CONTRACT §4)")
 
 
 if __name__ == "__main__":

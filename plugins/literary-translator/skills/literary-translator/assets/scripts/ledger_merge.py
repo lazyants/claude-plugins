@@ -33,6 +33,20 @@ What it does, in order:
      `status` enum -- never against `ledger-fragment.schema.json` itself).
   5. Atomically writes `runs/ledger.json` (tmp-write-then-`os.replace()`,
      the same durable pattern `ledger_update.py` uses for fragments).
+  5.5. 1.2.0 addition -- if `--run-token` (a bare RUN_ID) is given together
+     with `--expected-from-manifest`/`--expected-segs`, re-asserts, for EACH
+     expected segment whose materialized status is still `converged`, that
+     its on-disk draft's own `dispatch_token` equals the reconstructed
+     `expected_draft_token(run_token, seg)` = `<run_token>:<seg>` EXACTLY,
+     that `review.json`'s own `dispatch_token` equals that same value plus a
+     `:r<roundLabel>` SUFFIX (a prefix match), and that the draft's current
+     content sha1 (via `draft_content_sha1()`, dispatch_token-excluded)
+     still matches the fragment's own recorded `reviewed_draft_sha1`. Any
+     mismatch fails the WHOLE merge (nothing is written) -- closing a race
+     where a stale/straggler draft+review pair is restored on disk
+     *between* the per-segment convergence write (`ledger_update.py`, which
+     already checked this once at write time) and this batch-final merge, so no
+     false-green `batchComplete` can materialize from it.
   6. Prints one JSON line to stdout matching
      `ledger-merge-confirmation.schema.json`'s `oneOf` (SUCCESS/FAILURE are
      genuinely different shapes -- a failure never claims a `ledger_path`/
@@ -52,6 +66,7 @@ printed to stdout -- callers (the `mergeLedgerPrompt` agent prompt, tests)
 should read stdout, not rely on the exit code alone.
 """
 import argparse
+import hashlib
 import json
 import os
 import subprocess
@@ -79,9 +94,18 @@ except ImportError as e:
 DURABLE_ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS_DIR = Path(__file__).resolve().parent
 SCHEMAS_DIR = DURABLE_ROOT / "schemas"
+SEGMENTS_DIR = DURABLE_ROOT / "segments"
 LEDGER_D = DURABLE_ROOT / "runs" / "ledger.d"
 LEDGER_JSON_PATH = DURABLE_ROOT / "runs" / "ledger.json"
 CACHE_KEY_SCRIPT = SCRIPTS_DIR / "cache_key.py"
+
+
+def draft_path(seg):
+    return SEGMENTS_DIR / f"{seg}.draft.json"
+
+
+def review_path(seg):
+    return SEGMENTS_DIR / f"{seg}.review.json"
 
 # The authoritative 15-field cache-key list (references/ledger-and-
 # resumability.md, "Composite cache key -- exact 15-field structure"). Kept
@@ -306,6 +330,116 @@ def _compute_stale_segments(fragments: dict, skip_stale_check: bool) -> set:
     return stale
 
 
+def expected_draft_token(run_token: str, seg: str) -> str:
+    """Constructs the exact draft-form dispatch_token expected for THIS
+    segment under the given bare run_token: '<run_token>:<seg>' -- draft
+    dispatch_token's own documented format. Reconstructing the FULL
+    expected token (not just extracting/comparing a RUN_ID prefix) also
+    catches a same-run-but-wrong-segment token. Must match, byte for byte,
+    ledger_update.py's own copy of this function.
+    """
+    return f"{run_token}:{seg}"
+
+
+def review_token_matches(review_token, draft_token: str) -> bool:
+    """review.json's own dispatch_token = '<draft_token>:r<roundLabel>' --
+    a ':r<roundLabel>' SUFFIX the draft's own token does not carry.
+    Matched by PREFIX here, not exact string equality, since the round
+    label varies per review round. Must match, byte for byte,
+    ledger_update.py's own copy of this function.
+    """
+    return isinstance(review_token, str) and review_token.startswith(f"{draft_token}:r")
+
+
+def draft_content_sha1(path: Path) -> str:
+    """sha1 of a draft's CONTENT, with the 'dispatch_token' metadata field
+    deliberately EXCLUDED -- must match, byte for byte, draft_sha1.py's own
+    (and ledger_update.py's own byte-identical duplicate of)
+    draft_content_sha1(), per this project's "no shared lib between
+    self-contained scripts" convention. See draft_sha1.py's own module
+    docstring for the full rationale.
+    """
+    raw = path.read_text(encoding="utf-8")
+    doc = json.loads(raw)
+    if not isinstance(doc, dict):
+        raise ValueError(f"draft at {path} must be a JSON object, got {type(doc).__name__}")
+    projected = {k: v for k, v in doc.items() if k != "dispatch_token"}
+    canonical = json.dumps(
+        projected, sort_keys=True, ensure_ascii=False, separators=(",", ":")
+    ).encode("utf-8")
+    return hashlib.sha1(canonical).hexdigest()
+
+
+def _read_json_file(path: Path, what: str):
+    if not path.is_file():
+        return None, f"{what} not found at {path}"
+    try:
+        return json.loads(path.read_text(encoding="utf-8")), None
+    except (OSError, json.JSONDecodeError) as exc:
+        return None, f"{what} at {path} is not valid JSON: {exc}"
+
+
+def _reassert_token_and_sha(seg: str, record: dict, run_token: str) -> "str | None":
+    """1.2.0 addition: re-asserts, for one EXPECTED CONVERGED segment, that
+    the on-disk draft's own dispatch_token equals
+    expected_draft_token(run_token, seg) = '<run_token>:<seg>' EXACTLY, that
+    review.json's own dispatch_token equals that same value plus a
+    ':r<roundLabel>' SUFFIX (review_token_matches(), a prefix match), and
+    that the draft's current content-sha1 (dispatch_token-excluded,
+    matching draft_sha1.py's own algorithm) still equals the ledger
+    fragment's own recorded reviewed_draft_sha1.
+
+    Closes the race where a stale/straggler draft+review pair (consistent
+    with each other, but from an OLD run) is restored on disk sometime
+    *between* the per-segment convergence write (ledger_update.py, which
+    already re-checked this at write time) and this batch-final merge --
+    the whole point of re-checking it again here, right before reporting
+    batchComplete.
+
+    Returns a human-readable error string naming the specific mismatch, or
+    None if all checks pass.
+    """
+    dpath = draft_path(seg)
+    rpath = review_path(seg)
+
+    draft_obj, err = _read_json_file(dpath, f"draft for segment '{seg}'")
+    if err is not None:
+        return err
+    review_obj, err = _read_json_file(rpath, f"review artifact for segment '{seg}'")
+    if err is not None:
+        return err
+
+    expected_token = expected_draft_token(run_token, seg)
+
+    draft_token = draft_obj.get("dispatch_token") if isinstance(draft_obj, dict) else None
+    if draft_token != expected_token:
+        return (
+            f"segment '{seg}': draft dispatch_token {draft_token!r} != "
+            f"expected {expected_token!r} (run_token={run_token!r})"
+        )
+
+    review_token = review_obj.get("dispatch_token") if isinstance(review_obj, dict) else None
+    if not review_token_matches(review_token, expected_token):
+        return (
+            f"segment '{seg}': review dispatch_token {review_token!r} does "
+            f"not match expected prefix {expected_token + ':r'!r} "
+            f"(run_token={run_token!r})"
+        )
+
+    recorded_sha1 = record.get("reviewed_draft_sha1")
+    try:
+        current_sha1 = draft_content_sha1(dpath)
+    except (OSError, json.JSONDecodeError, ValueError) as exc:
+        return f"segment '{seg}': could not compute current draft content sha1: {exc}"
+    if current_sha1 != recorded_sha1:
+        return (
+            f"segment '{seg}': draft content sha1 {current_sha1!r} != "
+            f"ledger-recorded reviewed_draft_sha1 {recorded_sha1!r} -- draft "
+            f"changed since convergence was recorded"
+        )
+    return None
+
+
 def _atomic_write_json(path: Path, doc: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = path.parent / f".{path.name}.tmp.{os.getpid()}"
@@ -340,6 +474,33 @@ def merge(args, registry: "Registry") -> dict:
         if seg in stale_segments:
             entry["status"] = "stale"
         materialized_segments[seg] = entry
+
+    # 1.2.0 addition: for EACH expected segment whose materialized status is
+    # still 'converged' (i.e. not just flipped 'stale' above), re-assert its
+    # on-disk draft+review dispatch_token against the reconstructed
+    # expected_draft_token(run_token, seg) AND that the draft's content
+    # hasn't drifted since convergence was recorded --
+    # closing a race where a stale/straggler pair is restored between the
+    # per-segment convergence write and this batch-final merge. Only runs
+    # when BOTH an expected-segment list AND --run-token were given;
+    # "batch completeness" has no meaning without the former, and this check
+    # is an independent addition on top of it, backward-compatible when the
+    # latter is omitted.
+    if expected is not None and args.run_token is not None:
+        reassert_errors = []
+        for seg in expected:
+            entry = materialized_segments.get(seg)
+            if entry is None or entry.get("status") != "converged":
+                continue
+            err = _reassert_token_and_sha(seg, entry, args.run_token)
+            if err is not None:
+                reassert_errors.append(err)
+        if reassert_errors:
+            raise LedgerMergeError(
+                f"batch-final re-verification failed for "
+                f"{len(reassert_errors)} segment(s) -- refusing to report "
+                f"batchComplete:\n  " + "\n  ".join(reassert_errors)
+            )
 
     ledger_doc = {"segments": materialized_segments}
 
@@ -421,6 +582,27 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "Skip the cache_key.py-based staleness recomputation entirely "
             "(diagnostic/testing use only -- production runs should always "
             "leave this on)."
+        ),
+    )
+    parser.add_argument(
+        "--run-token",
+        metavar="RUN_ID",
+        default=None,
+        help=(
+            "The current run's bare RUN_ID (mergeLedgerPrompt's own "
+            "invocation: '--run-token <RUN_ID>', no payload file -- unlike "
+            "ledger_update.py, which reads run_token from its --payload-file "
+            "instead). When given together with --expected-from-manifest/"
+            "--expected-segs, re-asserts for each expected CONVERGED "
+            "segment that its on-disk draft's own dispatch_token equals the "
+            "reconstructed '<run_token>:<seg>' exactly, that review's own "
+            "dispatch_token equals that value plus a ':r<roundLabel>' "
+            "suffix, and that the draft's current content sha1 still "
+            "matches the ledger-recorded reviewed_draft_sha1, before "
+            "reporting success -- closing a race where a stale/straggler "
+            "pair is restored between the per-segment convergence write and "
+            "this batch merge. Omit for the pre-1.2.0 behavior (no "
+            "re-verification)."
         ),
     )
     return parser

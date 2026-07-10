@@ -179,6 +179,18 @@ authoring a missing translation from scratch: a fix agent only ever edits
 an existing draft that has already passed `draft_ready.py`, never
 originates new translated content.
 
+**1.2.0:** `draft_ready.py` gains `--expect-token TOK` — READY only when
+the on-disk draft's `dispatch_token` also equals `TOK` (backward-compatible
+when the flag is omitted), so a straggler draft from an interrupted OLD run
+can never be accepted as this run's own delivery. `review_ready.py` is the
+new, sibling readiness probe for the review point — see
+`references/ledger-and-resumability.md`'s `dispatch_token`/commit-gate
+chain and `references/orchestration-and-batching.md`'s shared
+DISPATCH → WAIT → CONSUME pattern for the full mechanics; both scripts
+share the byte-identical `_SEG_ID_RE`/`validate_seg()` and the same
+self-anchoring discipline this file's §3 "canonical path invariants"
+sibling doc (`references/ledger-and-resumability.md`) already documents.
+
 ## The post-extraction gate (`validate_extraction.py`)
 
 `validate_extraction.py` is the false-green gate for the *extraction* stage —

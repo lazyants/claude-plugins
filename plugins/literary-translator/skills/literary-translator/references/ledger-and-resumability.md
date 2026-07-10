@@ -75,18 +75,33 @@ hardcodes a different path is a bug, not a faithful port.
   `mass-translate-wf.template.js` — must use this exact path.
   `tests/draft_path_convention.test.py` instantiates every one of these
   against a fixture and asserts the exact path, failing loudly and naming
-  the offender if any one disagrees.
+  the offender if any one disagrees. **1.2.0:** the written file also
+  carries a `dispatch_token` metadata field, `<RUN_ID>:<seg>` — see
+  "`dispatch_token` and the resume-integrity commit-gate chain" below.
+  `draft_sha1.py`/`validate_draft.py` exclude this field from the content
+  hash / structural coverage (it's metadata, not translated content, the
+  same treatment `review.json`'s own token gets).
 
 - **`review_path(seg) = segments/{seg}.review.json`** — same no-suffix
   reasoning, and the `segments/` prefix is required (matches the real
   reference project exactly — never a top-level
-  `${durable_root}/{seg}.review.json`). Readers: `reviewPrompt` (writes it),
-  `verifyReviewArtifactPrompt` (reads it), `scripts/review_artifact_check.py`
-  (reads it), `scripts/ledger_update.py` (reads it for the
-  `reviewed_draft_sha1` binding check). **`fixPrompt` is deliberately not one
-  of this file's readers** — it works from the JS-in-memory `revObj`
-  directly instead. `tests/draft_path_convention.test.py` is extended (not
-  duplicated) to cover these four call sites too.
+  `${durable_root}/{seg}.review.json`). Readers/writers, 1.2.0: writer is
+  `reviewDispatchPrompt` (was `reviewPrompt`); readers are `readReviewPrompt`
+  (new) and `verifyReviewArtifactPrompt` (unchanged name, now called
+  separately after `readReviewPrompt` rather than immediately after the old
+  single `reviewPrompt` call), `scripts/review_artifact_check.py`,
+  `scripts/ledger_update.py` (reads it for the
+  `reviewed_draft_sha1`/`dispatch_token` binding check at convergence).
+  **`fixPrompt` is deliberately not one of this file's readers** — it works
+  from the JS-in-memory `revObj` directly instead.
+  `tests/draft_path_convention.test.py` is extended (not duplicated) to
+  cover all these call sites, repointed from the removed `reviewPrompt` to
+  `reviewDispatchPrompt`/`reviewWaitPrompt`/`readReviewPrompt`, with
+  `verifyReviewArtifactPrompt` kept but now probed as its own separate
+  post-`readReviewPrompt` call site.
+  **1.2.0:** the written file also carries `dispatch_token =
+  <RUN_ID>:<seg>:r<roundLabel>` (`roundLabel` = the round number or
+  `final`) — see below.
 
 - **Script self-anchoring.** Every script copied under `scripts/` derives
   its own working root via `Path(__file__).resolve().parents[1]`, since it
@@ -102,6 +117,75 @@ hardcodes a different path is a bug, not a faithful port.
 
 - **Durable root, never scratchpad.** Step 0a rejects any `durable_root`
   resolving under `/tmp`, `scratchpad`, or similar.
+
+## `dispatch_token` and the resume-integrity commit-gate chain (1.2.0)
+
+New in 1.2.0, closing the resumability half of #97/#87's fallout: once
+review became its own fire-and-forget DISPATCH artifact (see
+`references/workflow-schema-validation.md` and
+`references/orchestration-and-batching.md`), `draft.json`/`review.json`
+became unscoped, overwritable paths a straggler write from an OLD,
+interrupted run could repopulate *after* a fresh run started — the
+`{{RUN_ID}}`-derived `dispatch_token` is what closes that, and it is
+checked at every point an artifact's bytes are consumed or committed for a
+durable decision, not just once at the readiness poll (closing a
+check-vs-use TOCTOU window):
+
+1. **The reviewer's own dispatch** (`reviewDispatchPrompt`) asserts the
+   **draft's** token equals the current run's token when it hash-first-reads
+   the draft, before ever reviewing it.
+2. **`readReviewPrompt`** asserts `review.json`'s token equals the current
+   run's token before returning it to the JS.
+3. **The per-segment convergence ledger write**
+   (`recordLedgerPrompt(seg, {status:'converged', ...})` /
+   `scripts/ledger_update.py`) re-asserts that **both** the on-disk draft
+   AND `review.json` carry the current run's token, **and** that the
+   draft's current sha1 still equals the reviewer's own recorded
+   `draft_sha1` — all **before** recording `status: 'converged'`. Any
+   mismatch refuses convergence outright (a structured `success:false`
+   failure, never a silently-accepted stale convergence) — the same
+   escape-hatch shape the pre-existing `reviewed_draft_sha1` mismatch
+   check already used, now widened to cover the token too.
+4. **The batch-final `merge-ledger` check**
+   (`mergeLedgerPrompt`/`scripts/ledger_merge.py`) re-asserts, for **each**
+   expected converged segment, that its on-disk draft + `review.json` still
+   carry the current run's token AND that the draft's sha1 still matches the
+   ledger-recorded `draft_sha1` — **before** reporting `batchComplete`. This
+   closes the gap a per-segment check alone can't: an old-token straggler
+   pair could in principle be restored *between* step 3's per-segment write
+   and this batch-level check, materializing a false-green `batchComplete`
+   that step 3 alone would never catch. A mismatch here means
+   `success:false` — not complete, even though every individual segment's
+   own convergence write already passed.
+5. **Every downstream draft consumer** (assembly, `final_audit.py`) re-checks
+   `draft_sha1` against the ledger-recorded value the same way step 3
+   already established — unchanged from before 1.2.0, restated here only to
+   close the chain: per-segment ledger → batch merge-ledger → assembly is
+   the **complete** set of durable commit points, and a consistent
+   old-token straggler pair restored at any single moment is rejected at
+   the very next gate in this chain, never allowed to accumulate silently
+   past two.
+
+This chain is what `resume_setup.py`'s resume-integrity digest (see
+`references/orchestration-and-batching.md`) *complements*, not duplicates:
+the digest decides **whether resuming at all is safe** (an input/version
+match); this chain polices **every individual artifact's freshness** even
+when resuming is in principle safe — a cached-completed call under a
+digest-MATCH resume still has its actual bytes re-checked at every one of
+the five points above, never trusted purely because the digest matched.
+
+`ledger_update.py` is a `plugin_bundle_hash` member (see the three-bundle-hash
+table below) precisely because this token/sha-aware precondition logic is
+exactly the kind of correctness-determining code that bundle exists to gate
+on. `ledger_merge.py` keeps its pre-1.2.0 `orchestration_bundle_hash`
+membership (diagnostic-only, never part of any segment's cache key) even
+though it now also carries this batch-final token/sha re-check — its bytes
+still feed the resume-integrity digest's `version` input (which reads
+*both* bundle hashes, see `references/orchestration-and-batching.md`), just
+never a per-segment cache-key comparison. A fix to `ledger_merge.py`'s own
+re-check logic is therefore visible to the resume-integrity gate (forces a
+fresh, no-resume run) but never flips an individual converged segment
+`stale` on its own.
 
 ## Three ledger schema files
 
@@ -370,15 +454,21 @@ membership.
 
 - **`plugin_bundle_hash`** (global, read from
   `${durable_root}/runs/.plugin_bundle_hash` — a marker file Step 0a writes
-  once per run, not recomputed per segment) — covers exactly **six
-  scripts** plus the two workflow templates: `validate_draft.py`,
+  once per run, not recomputed per segment) — covers exactly **eight
+  scripts** (six pre-1.2.0, plus `review_ready.py` and `resume_setup.py`,
+  new in 1.2.0) plus the two workflow templates: `validate_draft.py`,
   `canon_validate.py`, `cache_key.py`, `draft_sha1.py`,
-  `review_artifact_check.py`, `ledger_update.py`, plus
+  `review_artifact_check.py`, `ledger_update.py`, `review_ready.py`,
+  `resume_setup.py`, plus
   `mass-translate-wf.template.js`/`glossary-pass-wf.template.js`. These are
   scripts that directly shape extraction/translation/review/validation
   content, or determine whether a convergence verdict was correctly
-  recorded. **Part of the cache key** (as `plugin_bundle_hash`) — a mismatch
-  flips a segment straight to `stale`.
+  recorded — `review_ready.py` (the review-side readiness counterpart, but
+  gating and correctness-critical rather than a diagnostic poll: it's what
+  certifies a `review.json` safe to consume) and `resume_setup.py`
+  (computes the resume-integrity digest itself) both meet that bar. **Part
+  of the cache key** (as `plugin_bundle_hash`) — a mismatch flips a segment
+  straight to `stale`.
 - **`orchestration_bundle_hash`** (global, sibling marker file
   `${durable_root}/runs/.orchestration_bundle_hash`, same computation
   timing) — covers exactly **four scripts**: `draft_ready.py`,
@@ -422,9 +512,20 @@ The script reads the payload and validates it against an embedded payload
 sub-schema. The caller may set only: `status`, `rounds` (a **bare
 integer**), `reason`, `note`, `cache_key` — deliberately never
 `n_blocks`/`n_footnotes`/`n_verses`, which the script derives itself from
-`segpack_{seg}.json`'s array lengths for a `converged` payload. A malformed
-payload is refused (non-zero exit, no write). The scratch payload file is
-deleted on success.
+`segpack_{seg}.json`'s array lengths for a `converged` payload. **1.2.0:**
+a `status:'converged'` payload also carries the current run's
+`dispatch_token`, so the script can perform the commit-gate check below
+before it commits to recording convergence. A malformed payload is refused
+(non-zero exit, no write). The scratch payload file is deleted on success.
+
+**The converged-write commit-gate check (1.2.0, point 3 of the token/sha
+chain above).** Before writing `status: 'converged'` to the fragment, the
+script additionally asserts: the on-disk draft's `dispatch_token` equals the
+payload's token, AND `review_path(seg)`'s `dispatch_token` equals the same
+token, AND (the pre-existing check, widened, see below) the draft's current
+sha1 equals `review_path(seg)`'s recorded `draft_sha1`. Any one of these
+three failing refuses the write outright — `{"success": false,
+"error": "..."}`, never a partial or best-effort convergence record.
 
 **Every write is a full replace, never a read-modify-write merge.** The
 fragment written is built entirely fresh from: (1) `timestamp: now()`
@@ -452,20 +553,33 @@ doesn't exist.
 
 `agent(recordLedgerPrompt(seg, fields), {effort:'low', schema:
 LEDGER_WRITE_SCHEMA})` where `fields = {status, reason?, rounds?,
-cache_key?}`. No ledger write happens through any other channel. The prompt
-instructs the agent to: (1) write the payload file and run
-`ledger_update.py`; (2) **re-read the fragment file `ledger_update.py`
-claimed to write, from disk, and compute its sha1 independently — then
-compare it against the `fragment_sha1` the script's stdout claimed** (this
-closes the gap where a model could echo back a fabricated or stale claim);
-(3) only then return the structured response — `success:false` with a
-descriptive error if the independent re-read's hash doesn't match.
+cache_key?}` (a converged call additionally threads the current run's
+`dispatch_token` through to the payload — see the commit-gate check above).
+No ledger write happens through any other channel. The prompt instructs the
+agent to: (1) write the payload file and run `ledger_update.py`; (2)
+**re-read the fragment file `ledger_update.py` claimed to write, from disk,
+and compute its sha1 independently — then compare it against the
+`fragment_sha1` the script's stdout claimed** (this closes the gap where a
+model could echo back a fabricated or stale claim); (3) only then return
+the structured response — `success:false` with a descriptive error if the
+independent re-read's hash doesn't match.
 
-`LEDGER_WRITE_SCHEMA` (matches `ledger-write-confirmation.schema.json`) is a
-real `oneOf`: the success branch requires `{success: true, status: string,
-fragment_path: string, fragment_sha1: string}`; the failure branch requires
-`{success: false, error: string}` (plus optional `exit_code`/`stderr`) —
-must not also require a fragment path/hash that was never written.
+`LEDGER_WRITE_SCHEMA` is now **flat** (the `#87` fix — see
+`references/workflow-schema-validation.md`): `{type:"object",
+additionalProperties:false, required:["success"], properties:{success:
+{boolean}, status:{string}, fragment_path:{string}, fragment_sha1:{string},
+error:{string}, exit_code:{integer}, stderr:{string}}}`. The on-disk
+`ledger-write-confirmation.schema.json` stays the strong `oneOf` it always
+was (success requires `{success: true, status, fragment_path,
+fragment_sha1}`; failure requires `{success: false, error}`, plus optional
+`exit_code`/`stderr`) — `ledger_update.py` itself still only ever emits one
+of those two exact shapes; the flat literal only relaxes what the *agent* is
+allowed to relay. The Workflow's own exact-key-set JS guard re-establishes
+the branch discrimination the flat schema can't: a `success:true` return is
+only trusted when its key set is exactly `{success, status, fragment_path,
+fragment_sha1}` (all three non-empty strings) with **no** failure-only key
+(`error`/`exit_code`/`stderr`) present — a crossover payload like
+`{success:true, error:"x"}` is treated as a failure, never a success.
 
 **JS-side payload-intent verification** (closes "wrong segment/status
 silently accepted as success"): immediately after the schema-validated
@@ -503,12 +617,36 @@ explicitly allowed; only a `SEGS` name with no matching key at all is a
 failure; (4) return `LEDGER_MERGE_SCHEMA` only after this independent
 check.
 
-`LEDGER_MERGE_SCHEMA` (`ledger-merge-confirmation.schema.json`) is a real
-`oneOf`: success requires `{success: true, ledger_path: string, n_segments:
-integer, missing_segments: array (empty), stale_segments: [string]}`,
-`additionalProperties:false`; failure requires `{success: false, error:
-string}` (plus optional `missing_segments`/`exit_code`/`stderr`),
-`additionalProperties:false`.
+`LEDGER_MERGE_SCHEMA` is now **flat** (the `#87` fix): `{type:"object",
+additionalProperties:false, required:["success"], properties:{success:
+{boolean}, ledger_path:{string}, n_segments:{integer}, missing_segments:
+{array,items:string}, stale_segments:{array,items:string}, error:{string},
+exit_code:{integer}, stderr:{string}}}`. `missing_segments` is a
+deliberately **relaxed** union — no `maxItems` — unlike the on-disk success
+branch's `{type:"array", maxItems:0}`; the JS guard is what actually
+enforces emptiness on the success path. The on-disk
+`ledger-merge-confirmation.schema.json` stays the strong `oneOf` it always
+was (success requires `{success: true, ledger_path, n_segments,
+missing_segments: [] (empty), stale_segments}`; failure requires
+`{success: false, error}`, plus optional
+`missing_segments`/`exit_code`/`stderr`) — the exact-key-set JS guard
+re-establishes discrimination on the agent-relayed object: a `success:true`
+return is only trusted when its keys are exactly `{success, ledger_path,
+n_segments, missing_segments, stale_segments}` (ledger_path a string,
+n_segments an integer, `missing_segments` an EMPTY array, `stale_segments`
+an array) with no `error`/`exit_code`/`stderr` key present.
+
+**1.2.0: the batch-final commit-gate check (point 4 of the token/sha chain
+above).** Before this check reports `success:true`/lets `batchComplete`
+proceed, it additionally re-asserts, for **each** segment `select_segments.py`
+expected converged this batch: the on-disk draft's `dispatch_token` equals
+the current run's token, `review_path(seg)`'s `dispatch_token` equals the
+same token, AND the draft's current sha1 still matches the
+ledger-recorded `draft_sha1`. Any single segment failing this flips the
+whole check to `success:false` — not complete — even if every individual
+segment's own per-segment convergence write (above) already passed; this is
+the gap a per-segment-only check can't close (a straggler pair restored
+*between* the per-segment write and this batch-level check).
 
 `mass-translate-wf.template.js` runs this check itself as its own final
 step, right before the Workflow returns its overall result — a batch is not
@@ -528,12 +666,16 @@ on-disk fragment is never rewritten). Flags: `--expected-from-manifest
 `segments[]`) or `--expected-segs seg05,seg06,...` (explicit partial-batch
 list) — either enables the missing-fragment completeness check; without
 either, it still materializes `ledger.json` but skips the completeness
-check.
+check. **1.2.0:** the completeness check itself now also requires the
+current run's token (threaded through the same invocation) to perform the
+per-segment token/sha re-check above.
 
-## The five `recordLedgerPrompt` call sites
+## The `recordLedgerPrompt` call sites
 
 All in `mass-translate-wf.template.js`, all through this one
-schema-validated call — no ledger write happens any other way.
+schema-validated call — no ledger write happens any other way. **Six sites
+as of 1.2.0** (`review-timeout` is new, alongside review-null/draft-missing/
+review-artifact-mismatch at the same blocked-terminal call site).
 
 0. **Translate-dispatch** — right before `agent(translatePrompt(seg), ...)`
    fires: `recordLedgerPrompt(seg, {status:'in_progress'})`, awaited.
@@ -541,31 +683,38 @@ schema-validated call — no ledger write happens any other way.
    write would otherwise leave zero durable record.
 1. **Translate-timeout** — on `waitPrompt` returning `TIMEOUT {seg}`:
    `recordLedgerPrompt(seg, {status:'non_converged', reason:'translate-timeout'})`.
-2. **Review-null (after one retry) or draft-missing mid-fix** —
-   `{status:'blocked', reason:'review-null'}` when the schema-validated
-   review call returns null twice (retry once, still null — a deliberate
-   plan addition beyond the real reference script, which blocks on the
-   first null with no retry); `{status:'blocked', reason:'draft-missing'}`
-   when a fix round's `DRAFT_MISSING` branch fires (matches the real
-   reference exactly). A third blocked reason, `review-artifact-mismatch`,
-   fires after one retry of the review-artifact verification gate also
-   reports a mismatch (same retry-once-then-blocked pattern).
+2. **Review-timeout, review-null (after one retry), draft-missing mid-fix,
+   or review-artifact-mismatch (after one retry)** — all four terminate the
+   same way, `{status:'blocked', reason:'<one of the four>'}`:
+   - `review-timeout` (new in 1.2.0) — `reviewWaitPrompt` returns `TIMEOUT`;
+     no retry, since nothing was ever dispatched successfully to retry.
+   - `review-null` — the CONSUME pair's shared retry budget (one retry of
+     `read → check` together) still returns a null read on the second
+     attempt — a deliberate plan addition beyond the real reference script,
+     which blocks on the first null with no retry.
+   - `draft-missing` — a fix round's `DRAFT_MISSING` branch fires (matches
+     the real reference exactly).
+   - `review-artifact-mismatch` — the same shared retry budget's second
+     attempt still reports `match:false` from `verifyReviewArtifactPrompt`.
 3. **Converged** — `recordLedgerPrompt(seg, {status:'converged',
-   rounds:<bare integer>, cache_key:{...freshly computed 15 fields...}})`.
-   The payload does not include `n_blocks`/`n_footnotes`/`n_verses`
-   (`ledger_update.py` derives them). **`reviewed_draft_sha1` binding:**
-   `review.schema.json` requires the reviewer's own `draft_sha1` —
-   computed by the reviewer before reading the draft (hash-first-then-read
-   narrows, but does not eliminate, a TOCTOU window — best-effort
-   risk-reduction, not airtight closure). At the converged call site,
-   `ledger_update.py` reads this value back off `review_path(seg)`,
-   computes a fresh sha1 of the current on-disk draft, and compares:
-   **match** → store as `reviewed_draft_sha1` (the hash of what the
-   reviewer most likely judged); **mismatch** (draft changed in the window)
-   → refuses to write converged at all, returns `{success:false,
-   error:"draft changed since review; cannot record convergence"}`, which
-   becomes `{seg, converged:false, reason:'ledger-write-failed', detail}` —
-   the same escape hatch every other write failure uses.
+   rounds:<bare integer>, cache_key:{...freshly computed 15 fields...}})`
+   (plus the current run's `dispatch_token`, 1.2.0). The payload does not
+   include `n_blocks`/`n_footnotes`/`n_verses` (`ledger_update.py` derives
+   them). **`reviewed_draft_sha1`/`dispatch_token` binding:**
+   `review.schema.json` requires the reviewer's own `draft_sha1` — computed
+   by the reviewer before reading the draft (hash-first-then-read narrows,
+   but does not eliminate, a TOCTOU window — best-effort risk-reduction,
+   not airtight closure). At the converged call site, `ledger_update.py`
+   reads this value back off `review_path(seg)`, computes a fresh sha1 of
+   the current on-disk draft, and compares — **and, 1.2.0, also checks
+   both the draft's and `review_path(seg)`'s `dispatch_token` against the
+   current run's token** (see the commit-gate chain above): **all match** →
+   store `reviewed_draft_sha1` (the hash of what the reviewer most likely
+   judged); **any mismatch** (draft changed in the window, or either
+   artifact belongs to a different run) → refuses to write converged at
+   all, returns `{success:false, error:"..."}` naming which check failed,
+   which becomes `{seg, converged:false, reason:'ledger-write-failed',
+   detail}` — the same escape hatch every other write failure uses.
 4. **Non-converged (cap reached)** — terminal, no further automated step:
    `recordLedgerPrompt(seg, {status:'non_converged', reason:'cap',
    rounds: MAXFIX+1})`, `reviewFixLoop()` returns `{converged:false,
@@ -665,14 +814,34 @@ IDs beside actually-emitted IDs.
 `non_converged`→`in_progress` transition asserts no `reason`/`rounds`
 survive; a `converged`→`in_progress` transition asserts no
 `rounds`/`cache_key`/`n_blocks`/etc. survive; an object-shaped `rounds`
-payload is rejected; a payload-intent mismatch is caught),
-`tests/ledger_merge.test.py`, `tests/ledger_composite_key.test.py` (one
-case per of the 15 hash fields, plus the two asymmetric `used_terms_hash`
-cases), `tests/draft_path_convention.test.py`, `tests/select_segments.test.py`
-(`--only-segs`/`--allow-empty` cases), and
+payload is rejected; a payload-intent mismatch is caught; 1.2.0 adds the
+converged-write token/sha commit-gate cases — draft-token mismatch,
+review-token mismatch, and sha mismatch each independently refuse the
+write), `tests/ledger_merge.test.py` (1.2.0 adds the batch-final
+per-segment token/sha re-check cases — a straggler old-token pair restored
+after an individual segment's own convergence write still fails
+`batchComplete`), `tests/ledger_composite_key.test.py` (one case per of the
+15 hash fields, plus the two asymmetric `used_terms_hash` cases),
+`tests/draft_path_convention.test.py` (repointed from the removed
+`reviewPrompt`/`verifyReviewArtifactPrompt` builders to
+`reviewDispatchPrompt`/`reviewWaitPrompt`/`readReviewPrompt`/`verifyReviewArtifactPrompt`,
+`fixPrompt` unchanged), `tests/select_segments.test.py`
+(`--only-segs`/`--allow-empty` cases), `tests/ledger_confirmation_schema.test.py`
+(1.2.0, new — the flat `LEDGER_WRITE_SCHEMA`/`LEDGER_MERGE_SCHEMA` accept-side
+driven via real `ledger_update.py`/`ledger_merge.py` subprocess calls,
+reject-side crossover/missing/unknown fixtures against both the on-disk
+strong schema and the JS-guard field sets), and
 `tests/ledger_e2e_acceptance.test.py` (the mandatory 7-step mocked-batch
 fixture described above) together cover this subsystem. Per the plugin's
 own release gate, the plugin is not ship-ready until
 `tests/ledger_e2e_acceptance.test.py` **and** a genuine pilot run against a
 second real book have both actually run and passed against real data —
-CI-green on synthetic fixtures alone is not sufficient.
+CI-green on synthetic fixtures alone is not sufficient. The 1.2.0
+resume-integrity regression cases (a metadata-only candidate change, a
+changed segment `cache_key`, a changed `.plugin_bundle_hash`/
+`.orchestration_bundle_hash`, a schema-only edit, a legacy tokenless
+`review.json`, and a straggler-token draft/review pair restored at each of
+the five commit-gate points above) live alongside
+`resume_setup.py`'s own test file — see
+`references/orchestration-and-batching.md` for the digest definition they
+exercise.

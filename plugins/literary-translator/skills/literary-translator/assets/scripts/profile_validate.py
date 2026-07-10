@@ -135,7 +135,7 @@ jsonschema = None
 # hand-adapted copy stale. All three are plugin-build constants, never
 # profile.yml fields.
 CURRENT_PROFILE_VERSION = 1
-CURRENT_PROMPT_CONTRACT_VERSION = 1
+CURRENT_PROMPT_CONTRACT_VERSION = 2
 CURRENT_EXTRACTOR_CONTRACT_VERSION = 1
 
 # The exact top-level keys profile.schema.json's own `required` list names --

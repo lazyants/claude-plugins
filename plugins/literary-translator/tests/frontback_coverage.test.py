@@ -297,7 +297,12 @@ def write_minimal_segment(root, seg):
         "names": [],
         "notes": [],
     }
-    draft_bytes = json.dumps(draft_obj, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    # Canonical (sorted keys, compact separators -- see draft_sha1.py's
+    # draft_content_sha1()) so this raw-bytes sha1 matches what
+    # select_segments.py itself now recomputes for the same on-disk content.
+    draft_bytes = json.dumps(
+        draft_obj, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
     (segments_dir / f"{seg}.draft.json").write_bytes(draft_bytes)
     return hashlib.sha1(draft_bytes).hexdigest()
 

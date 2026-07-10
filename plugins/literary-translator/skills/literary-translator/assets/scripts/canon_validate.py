@@ -4,8 +4,8 @@ canon.json, the literary-translator plugin's frozen, hash-versioned,
 cross-segment name/realia glossary.
 
 STATUS: new plugin hardening -- the glossary-pass Workflow template that
-feeds this script's MERGE mode is itself not yet source-proven (see
-references/canon-and-glossary.md's "Glossary-pass call discipline"
+feeds this script's batch-fragment modes is itself not yet source-proven
+(see references/canon-and-glossary.md's "Glossary-pass call discipline"
 section: the real historiettes-t3 project ran its glossary pass as ad hoc
 `glossary/TASK.md` + codex batches, never through this schema-validated
 pipeline). Authoritative spec for everything below:
@@ -14,85 +14,84 @@ validation passes" and "Research preflight and offline-fallback policy for
 `basis: "established"`" -- read those before changing anything here; this
 file's behavior must match that doc exactly.
 
-Two independent operating modes, selected by whether --batch is given:
+1.2.0 CHANGE -- fire-and-forget batch fragments, no agent-schema return:
+pre-1.2.0, a glossary-pass batch call returned its result directly to the
+JS via a discriminated-union agent `schema` (`CANON_BATCH_SCHEMA`) -- which
+violates the tool-use API's "top-level object, no combinator" constraint
+(issue #87). Since 1.2.0, glossary batches are schema-less, fire-and-forget
+codex dispatches (`batchDispatchPrompt`) that write their own fragment file
+atomically and self-validate it via THIS script's `--check-batch` mode,
+never via an agent-returned schema. `CANON_BATCH_SCHEMA` no longer exists
+in any template. Five CLI modes now exist, selected by which flag is given
+(mutually exclusive; `--research-mode {live,offline}` is REQUIRED for
+every one of them, even where it has no effect, so no call site can
+accidentally omit declaring the precondition):
 
-MERGE mode (--batch PATH given)
-    Reads a glossary-pass batch result -- the real return contract of
-        agent(glossaryPrompt(batch), {agentType:'codex:codex-rescue',
-        effort:'high', schema: CANON_BATCH_SCHEMA})
-    (a JSON array on disk, canon-batch.schema.json shape) and merges it
-    into canon.json:
+--check-batch PATH [--expect-source-forms-file M.json]
+    Pass 1 (per-item) + the offline backstop on the ONE fragment at PATH.
+    NO write. When --expect-source-forms-file is given (a JSON array of
+    expected source_form strings, read from the FILE, never inline argv),
+    additionally asserts the fragment's item source_forms are an EXACT
+    match (no missing, no extra) -- the coverage half of the manifest-
+    trust design (references/canon-and-glossary.md's "manifest disk-
+    verify"), closing the gap where a codex batch could pass shape
+    validation while silently omitting a candidate name.
 
-    Pass 1 (per-batch-item). Every item is independently re-validated
-    against canon-batch.schema.json's own discriminated-union item shape
-    -- via jsonschema.Draft202012Validator(..., format_checker=<a
-    FormatChecker with a stdlib urllib.parse-based "uri" checker registered
-    on it>) set EXPLICITLY, since jsonschema.validate()'s convenience
-    wrapper does not enable format assertions by default -- never the bare
-    canon-entry.schema.json shape, since a batch item also carries the
-    'disposition' field that shape does not have.
+--merge-batches P1 P2 ... [--expect-source-forms-file M.json is NOT
+accepted here -- see --verify-merged]
+    ONE process, single canon.json load: validates ALL given fragments
+    (Pass 1 + offline backstop) FIRST, before merging any of them, so a
+    later fragment's failure never leaves an earlier one half-applied.
+    Then threads `acc = _merge_batch(acc, frag)` across every fragment IN
+    THE GIVEN ORDER, stamps generation_hashes fresh, validates the
+    in-memory accumulator against canon-file.schema.json (Pass 2) BEFORE
+    ever touching disk, performs ONE atomic write, then re-reads the
+    JUST-WRITTEN file fresh from disk and Pass-2-validates it AGAIN --
+    genuinely from disk this time, with no masking fallback for a missing
+    generation_hashes value, so a dropped-hash write corruption is
+    actually caught rather than silently papered over.
 
-    Offline research-mode backstop. If --research-mode offline and ANY
-    item in the batch claims basis:"established" (accepted or queued --
-    the spec says "ANY entry", not "any accepted entry"), the WHOLE merge
-    is FATALLY REJECTED, naming every offending item's source_form --
-    never silently downgraded, never silently accepted. Nothing is written
-    to canon.json when this fires. The correct upstream fix is for the
-    glossary-pass agent to have assigned basis:"transliterated", or
-    disposition:"review_queue" with a note carrying the literal prefix
-    "SOURCE_UNAVAILABLE:" instead -- this script only enforces the
-    backstop; it never re-decides an accuracy call itself (that is exactly
-    the kind of judgment call this plugin reserves for codex, never a
-    script).
+--verify-merged --batch F1 [--batch F2 ...] [--expect-source-forms-file
+M.json]
+    Disk-INDEPENDENT verification that a set of already-processed
+    fragments is correctly reflected in the CURRENT canon.json -- no
+    write, fresh reads only. Per fragment item, by disposition: an
+    'accepted' item must equal `canon["entries"][source_form]` exactly; a
+    'review_queue' item must either still be present verbatim in
+    `canon["review_queue"]`, OR its source_form must now be a key in
+    `canon["entries"]` (accept-supersedes -- a later batch's ACCEPTED
+    resolution for the same name is not a failure, never reported
+    missing). When --expect-source-forms-file is given, additionally
+    asserts every manifest name is covered by SOME fragment item. Reports
+    `{"verified": true}` or `{"verified": false, "missing": [...]}` -- the
+    exact relay shape the glossary-pass Workflow's disk-verify agent
+    (`CANON_VERIFY_SCHEMA`) returns.
 
-    Dedup + collision checks, then routes each item into canon.json's
-    entries{} (disposition:"accepted" -> canon-entry.schema.json shape,
-    'disposition' field stripped -- entries{} values are
-    additionalProperties:false and have no such field) or review_queue[]
-    (disposition:"review_queue" -> appended AS-IS, 'disposition' kept --
-    canon-file.schema.json's own review_queue items $ref the QUEUED branch,
-    which requires 'disposition'). A source_form re-submitted identically
-    to what is already on file is a silent no-op (idempotent re-run); a
-    source_form re-submitted with a DIFFERENT resolution is a fatal
-    collision, naming both the old and new values -- canon.json entries are
-    frozen, never silently overwritten.
+--batch PATH (legacy, single-fragment merge -- KEPT for existing callers)
+    The pre-1.2.0 merge path: Pass 1 + offline backstop on the one
+    fragment, merge, stamp generation_hashes, in-memory Pass 2, one atomic
+    write, disk-re-read Pass 2 (same no-masking discipline as
+    --merge-batches above). Equivalent to `--merge-batches PATH` with
+    exactly one fragment, kept as its own code path only because existing
+    tests/callers already invoke it this way.
 
-    Stamps generation_hashes.particle_config_hash and
-    .derivation_bundle_hash by shelling out to `cache_key.py --field
-    <name>` (the one shared hashing implementation -- never independently
-    recomputed here).
-
-    Atomically writes canon.json (tmp-write-then-os.replace(), the same
-    durable pattern ledger_update.py/ledger_merge.py use).
-
-    Pass 2 (whole-file). Re-reads the JUST-WRITTEN canon.json fresh from
-    disk and validates it against canon-file.schema.json, fatally halting
-    -- naming the specific problem -- if entries{} / review_queue /
-    generation_hashes.particle_config_hash /
-    generation_hashes.derivation_bundle_hash are missing or malformed. This
-    is the check that actually enforces the two generation_hashes fields'
-    presence, which select_segments.py's derivation-state gate is entirely
-    load-bearing on.
-
-VALIDATE-ONLY mode (--batch omitted)
-    A read-only health check: no merge, no write, no offline backstop (that
-    backstop only ever applies to NEW entries in an incoming --batch, per
-    the authoritative spec's own "for every new entry" framing -- an
+(no batch flag at all) -- VALIDATE-ONLY mode
+    A read-only health check: no merge, no write, no offline backstop
+    (that backstop only ever applies to NEW entries in an incoming batch,
+    per the authoritative spec's own "for every new entry" framing -- an
     already-frozen canon.json is not retroactively re-litigated just
     because this run happens to pass --research-mode offline for other
-    reasons).
+    reasons). Pass 1 (per-entry) validates every canon.json entries{}
+    value against canon-entry.schema.json and every review_queue[] item
+    against the QUEUED shape; Pass 2 validates the whole loaded document.
 
-    Pass 1 (per-entry). Every canon.json entries{} value is independently
-    validated against canon-entry.schema.json, and every review_queue[]
-    item against the same QUEUED shape MERGE mode uses.
-
-    Pass 2 (whole-file). The loaded document is validated against
-    canon-file.schema.json.
-
-    --research-mode is still a required flag in this mode (never
-    defaulted, per the authoritative spec) even though it has no effect
-    here -- kept required uniformly so no call site can accidentally omit
-    declaring the precondition.
+Single-writer note: canon.json has exactly one concurrent writer by
+OPERATIONAL PRECONDITION -- the orchestrating Workflow serializes every
+merge/verify call for one glossary pass onto a single Claude
+`effort:"low"` invocation, never dispatches concurrent merges (see
+references/orchestration-and-batching.md, "one serialized final merge").
+This script performs no file locking of its own; it relies entirely on
+that precondition, same as ledger_merge.py's own materialization step.
 
 Reads canon-entry.schema.json / canon-batch.schema.json /
 canon-file.schema.json from ${durable_root}/schemas/ -- never the plugin's
@@ -100,14 +99,19 @@ own assets/schemas/ (this script always runs from the durable, per-project
 copy).
 
 Usage:
+    python3 canon_validate.py --research-mode live --check-batch out_0.json
+    python3 canon_validate.py --research-mode live --check-batch out_0.json --expect-source-forms-file manifest_0.json
+    python3 canon_validate.py --research-mode live --merge-batches out_0.json out_1.json
+    python3 canon_validate.py --research-mode live --verify-merged --batch out_0.json --batch out_1.json --expect-source-forms-file manifest_all.json
     python3 canon_validate.py --research-mode live --batch glossary_out.json
     python3 canon_validate.py --research-mode offline --batch glossary_out.json
     python3 canon_validate.py --research-mode live
     python3 canon_validate.py --research-mode live --canon-path /path/to/canon.json
 
-Exit code 0 on success, 1 on failure. Exactly one JSON line is printed to
-stdout either way -- callers (the glossary-pass merge step, tests) should
-read stdout, not rely on the exit code alone.
+Exit code 0 on success, 1 on failure (for --verify-merged, "success" means
+`verified: true`). Exactly one JSON line is printed to stdout either way --
+callers (the glossary-pass Workflow, tests) should read stdout, not rely
+on the exit code alone.
 """
 import argparse
 import json
@@ -369,6 +373,43 @@ def _load_batch(batch_path_str: str) -> list:
     return doc
 
 
+def _load_source_forms_manifest(manifest_path_str: str) -> list:
+    """Loads --expect-source-forms-file's own JSON array of expected
+    source_form strings -- always a FILE, never inline argv (the manifest
+    can be arbitrarily long and may contain names with spaces/apostrophes/
+    unicode, none of which belong on a command line)."""
+    manifest_path = Path(manifest_path_str)
+    doc = _read_json_file(manifest_path, "--expect-source-forms-file")
+    if not isinstance(doc, list) or not all(isinstance(x, str) for x in doc):
+        raise CanonValidationError(
+            f"--expect-source-forms-file at {manifest_path} must be a JSON "
+            f"array of strings"
+        )
+    return doc
+
+
+def _assert_exact_source_form_coverage(items: list, expected_forms: list) -> None:
+    """Asserts the set of source_form values across `items` EXACTLY equals
+    `expected_forms` -- no missing, no extra. Raises CanonValidationError
+    naming both sides of any discrepancy (mirrors the naming discipline of
+    every other CanonValidationError raised in this module)."""
+    got = {item.get("source_form") for item in items if isinstance(item, dict)}
+    want = set(expected_forms)
+    missing = sorted(want - got)
+    extra = sorted(got - want)
+    if missing or extra:
+        parts = []
+        if missing:
+            parts.append(f"missing from batch: {missing}")
+        if extra:
+            parts.append(f"unexpected extra in batch: {extra}")
+        raise CanonValidationError(
+            "batch does not exactly cover the expected source_form "
+            "manifest (" + "; ".join(parts) + ")",
+            offending=missing + extra,
+        )
+
+
 def _atomic_write_json(path: Path, doc: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = path.parent / f".{path.name}.tmp.{os.getpid()}"
@@ -547,6 +588,15 @@ def _merge_batch(canon: dict, batch: list) -> dict:
             ]
 
         elif disposition == "review_queue":
+            if source_form in entries:
+                # Already resolved/accepted -- either from a prior
+                # canon.json, or from an EARLIER item in this same batch
+                # (or an earlier fragment, when this is called repeatedly
+                # by run_merge_batches's threaded acc = _merge_batch(acc,
+                # frag) loop) -- a review_queue submission for an
+                # already-accepted source_form is superseded, never
+                # appended, regardless of merge order.
+                continue
             if item not in review_queue:
                 review_queue.append(item)
 
@@ -587,7 +637,39 @@ def _validate_whole_file(canon: dict, registry: "Registry") -> None:
 # ---------------------------------------------------------------------------
 
 
+def _stamp_write_verify(canon_path: Path, merged: dict, registry: "Registry") -> dict:
+    """Shared by every mode that writes canon.json (`run_merge`,
+    `run_merge_batches`): stamps generation_hashes fresh onto the in-memory
+    `merged` document, Pass-2-validates it BEFORE ever touching disk (so a
+    corrupted merge is caught before it's written, not just after), performs
+    ONE atomic write, then re-reads the JUST-WRITTEN file fresh from disk
+    and Pass-2-validates it AGAIN -- genuinely from disk, with NO masking
+    fallback for a missing generation_hashes value (the pre-1.2.0 version of
+    this function re-injected the just-stamped value via
+    `on_disk.setdefault("generation_hashes", ...)` here, which silently
+    defeated the whole point of the post-write re-read: a write that
+    somehow dropped generation_hashes would still "validate" against the
+    value this script itself remembered, not what actually landed on disk).
+    Returns the freshly re-read on-disk document.
+    """
+    merged.setdefault("generation_hashes", {})
+    for field in GENERATION_HASH_FIELDS:
+        merged["generation_hashes"][field] = _stamp_generation_hash(field)
+
+    _validate_whole_file(merged, registry)
+
+    _atomic_write_json(canon_path, merged)
+
+    on_disk = _load_canon(canon_path)
+    _validate_whole_file(on_disk, registry)
+    return on_disk
+
+
 def run_merge(canon_path: Path, batch_path: str, research_mode: str, registry: "Registry") -> dict:
+    """Legacy single-fragment merge path (--batch PATH). Equivalent to
+    `run_merge_batches(canon_path, [batch_path], ...)`, kept as its own
+    code path because existing tests/callers already invoke it this way.
+    """
     batch = _load_batch(batch_path)
     canon = _load_canon(canon_path)
 
@@ -595,17 +677,7 @@ def run_merge(canon_path: Path, batch_path: str, research_mode: str, registry: "
     _enforce_offline_backstop(batch, research_mode)
     merged = _merge_batch(canon, batch)
 
-    merged.setdefault("generation_hashes", {})
-    for field in GENERATION_HASH_FIELDS:
-        merged["generation_hashes"][field] = _stamp_generation_hash(field)
-
-    _atomic_write_json(canon_path, merged)
-
-    # Pass 2 re-reads the JUST-WRITTEN file fresh from disk -- never trusts
-    # the in-memory `merged` dict this script itself just built.
-    on_disk = _load_canon(canon_path)
-    on_disk.setdefault("generation_hashes", merged.get("generation_hashes", {}))
-    _validate_whole_file(on_disk, registry)
+    on_disk = _stamp_write_verify(canon_path, merged, registry)
 
     n_accepted = sum(1 for item in batch if item.get("disposition") == "accepted")
     n_queued = sum(1 for item in batch if item.get("disposition") == "review_queue")
@@ -620,6 +692,116 @@ def run_merge(canon_path: Path, batch_path: str, research_mode: str, registry: "
         "entries_count": len(on_disk["entries"]),
         "review_queue_count": len(on_disk["review_queue"]),
     }
+
+
+def run_check_batch(
+    batch_path: str, research_mode: str, manifest_path: "str | None", registry: "Registry"
+) -> dict:
+    """--check-batch PATH [--expect-source-forms-file M.json]: Pass 1 +
+    offline backstop on ONE fragment, NO write. When a manifest is given,
+    additionally asserts exact source_form coverage."""
+    batch = _load_batch(batch_path)
+    _validate_batch_items(batch, registry)
+    _enforce_offline_backstop(batch, research_mode)
+    if manifest_path is not None:
+        expected_forms = _load_source_forms_manifest(manifest_path)
+        _assert_exact_source_form_coverage(batch, expected_forms)
+
+    return {
+        "success": True,
+        "mode": "check_batch",
+        "source_forms": len({item.get("source_form") for item in batch if isinstance(item, dict)}),
+    }
+
+
+def run_merge_batches(
+    canon_path: Path, batch_paths: list, research_mode: str, registry: "Registry"
+) -> dict:
+    """--merge-batches P1 P2 ...: single process, single canon.json load.
+    Validates ALL given fragments (Pass 1 + offline backstop) FIRST, before
+    merging any of them, then threads `acc = _merge_batch(acc, frag)`
+    across every fragment IN THE GIVEN ORDER."""
+    batches = [_load_batch(p) for p in batch_paths]
+    for batch in batches:
+        _validate_batch_items(batch, registry)
+        _enforce_offline_backstop(batch, research_mode)
+
+    canon = _load_canon(canon_path)
+    acc = canon
+    for batch in batches:
+        acc = _merge_batch(acc, batch)
+
+    on_disk = _stamp_write_verify(canon_path, acc, registry)
+
+    n_accepted = sum(1 for batch in batches for item in batch if item.get("disposition") == "accepted")
+    n_queued = sum(1 for batch in batches for item in batch if item.get("disposition") == "review_queue")
+    return {
+        "success": True,
+        "mode": "merge_batches",
+        "canon_path": str(canon_path),
+        "research_mode": research_mode,
+        "fragments_merged": len(batch_paths),
+        "merged_accepted": n_accepted,
+        "merged_queued": n_queued,
+        "entries_count": len(on_disk["entries"]),
+        "review_queue_count": len(on_disk["review_queue"]),
+    }
+
+
+def _verify_merged_item(canon: dict, item: dict) -> "str | None":
+    """Verifies ONE already-processed batch item is correctly reflected in
+    the CURRENT canon.json, by disposition. Returns the item's own
+    source_form (to be reported in `missing`) if verification fails, or
+    None if it passes."""
+    source_form = item.get("source_form") if isinstance(item, dict) else None
+    label = source_form if isinstance(source_form, str) and source_form else "<item without a valid source_form>"
+    disposition = item.get("disposition") if isinstance(item, dict) else None
+
+    if disposition == "accepted":
+        expected_entry = _entry_from_accepted_item(item)
+        actual_entry = canon.get("entries", {}).get(source_form)
+        return None if actual_entry == expected_entry else label
+
+    if disposition == "review_queue":
+        in_queue = item in canon.get("review_queue", [])
+        # Accept-supersedes: a LATER batch's accepted resolution for the
+        # same source_form is not a failure -- never reported missing.
+        superseded = isinstance(source_form, str) and source_form in canon.get("entries", {})
+        return None if (in_queue or superseded) else label
+
+    # An unrecognized disposition here means the fragment was never Pass-1
+    # validated before --verify-merged ran (this mode is disk-independent
+    # and does not itself re-run Pass 1) -- unverifiable, report it.
+    return label
+
+
+def run_verify_merged(
+    canon_path: Path, batch_paths: list, manifest_path: "str | None", registry: "Registry"
+) -> dict:
+    """--verify-merged --batch F1 [--batch F2 ...] [--expect-source-forms-file
+    M.json]: disk-INDEPENDENT verification, fresh reads only, no write."""
+    if not canon_path.is_file():
+        raise CanonValidationError(f"canon.json not found at {canon_path} (nothing to verify)")
+    canon = _load_canon(canon_path)
+
+    missing = []
+    covered_forms = set()
+    for batch_path in batch_paths:
+        batch = _load_batch(batch_path)
+        for item in batch:
+            source_form = item.get("source_form") if isinstance(item, dict) else None
+            if isinstance(source_form, str) and source_form:
+                covered_forms.add(source_form)
+            failure_label = _verify_merged_item(canon, item)
+            if failure_label is not None:
+                missing.append(failure_label)
+
+    if manifest_path is not None:
+        expected_forms = _load_source_forms_manifest(manifest_path)
+        missing.extend(sorted(set(expected_forms) - covered_forms))
+
+    missing = sorted(set(missing))
+    return {"verified": not missing, "missing": missing}
 
 
 def run_validate_only(canon_path: Path, research_mode: str, registry: "Registry") -> dict:
@@ -643,10 +825,10 @@ def run_validate_only(canon_path: Path, research_mode: str, registry: "Registry"
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Two-pass jsonschema validation (and, with --batch, merge) "
-            "backstop for canon.json -- see this file's own module "
-            "docstring and references/canon-and-glossary.md for the full "
-            "spec."
+            "Two-pass jsonschema validation (and, with --batch/"
+            "--merge-batches, merge) backstop for canon.json -- see this "
+            "file's own module docstring and references/canon-and-"
+            "glossary.md for the full spec."
         )
     )
     parser.add_argument(
@@ -654,26 +836,73 @@ def build_arg_parser() -> argparse.ArgumentParser:
         required=True,
         choices=RESEARCH_MODES,
         help=(
-            "REQUIRED, never defaulted -- profile.yml's own "
-            "glossary.research_mode, resolved once by the orchestrating "
-            "Claude session. In MERGE mode (--batch given), 'offline' "
-            "fatally forbids basis:\"established\" for every new entry in "
-            "the batch. Has no effect in VALIDATE-ONLY mode (--batch "
-            "omitted) -- kept required anyway so no call site can "
-            "accidentally omit declaring the precondition."
+            "REQUIRED, never defaulted, for EVERY mode below -- profile.yml's "
+            "own glossary.research_mode, resolved once by the orchestrating "
+            "Claude session. In any mode that validates a batch fragment "
+            "(--check-batch, --merge-batches, legacy --batch), 'offline' "
+            "fatally forbids basis:\"established\" for every new entry. Has "
+            "no effect in --verify-merged or VALIDATE-ONLY mode -- kept "
+            "required anyway so no call site can accidentally omit "
+            "declaring the precondition."
         ),
     )
     parser.add_argument(
         "--batch",
         metavar="PATH",
+        action="append",
         default=None,
         help=(
-            "Path to a glossary-pass batch result JSON file (an array, "
-            "canon-batch.schema.json shape). When given, runs MERGE mode: "
-            "Pass 1 + offline backstop + dedup/collision merge + "
-            "generation_hashes stamping + atomic write + Pass 2. When "
-            "omitted, runs VALIDATE-ONLY mode against the existing "
-            "canon.json (no write)."
+            "Legacy single-fragment MERGE mode when given ALONE (a JSON "
+            "array, canon-batch.schema.json shape): Pass 1 + offline "
+            "backstop + dedup/collision merge + generation_hashes stamping "
+            "+ atomic write + Pass 2. Repeatable ONLY under --verify-merged, "
+            "where it names the set of already-processed fragments to "
+            "verify against the current canon.json. Omitted entirely: runs "
+            "VALIDATE-ONLY mode against the existing canon.json (no write)."
+        ),
+    )
+    parser.add_argument(
+        "--check-batch",
+        metavar="PATH",
+        default=None,
+        help=(
+            "Pass 1 + offline backstop on the ONE fragment at PATH, NO "
+            "write. Combine with --expect-source-forms-file for exact "
+            "coverage checking."
+        ),
+    )
+    parser.add_argument(
+        "--merge-batches",
+        metavar="PATH",
+        nargs="+",
+        default=None,
+        help=(
+            "Merge MULTIPLE fragments, in the given order, in ONE atomic "
+            "operation (validate all first, thread the merge, stamp "
+            "generation_hashes, in-memory Pass 2, one atomic write, "
+            "disk-re-read Pass 2)."
+        ),
+    )
+    parser.add_argument(
+        "--verify-merged",
+        action="store_true",
+        help=(
+            "Disk-independent verification that the fragment(s) named by "
+            "--batch are correctly reflected in the CURRENT canon.json -- "
+            "no write. Requires one or more --batch PATH."
+        ),
+    )
+    parser.add_argument(
+        "--expect-source-forms-file",
+        metavar="PATH",
+        default=None,
+        help=(
+            "Path to a JSON array of expected source_form strings (a FILE, "
+            "never inline argv). --check-batch: asserts the one fragment's "
+            "own coverage is EXACT. --verify-merged: asserts the union of "
+            "every named fragment's coverage is EXACT against this list "
+            "(pass the aggregate manifest_all.json here for the final "
+            "verify call)."
         ),
     )
     parser.add_argument(
@@ -694,10 +923,47 @@ def main(argv=None) -> int:
 
     canon_path = Path(args.canon_path) if args.canon_path else DEFAULT_CANON_PATH
 
+    modes_selected = sum([
+        args.check_batch is not None,
+        args.merge_batches is not None,
+        args.verify_merged,
+    ])
+    if modes_selected > 1:
+        parser.error(
+            "--check-batch, --merge-batches, and --verify-merged are "
+            "mutually exclusive"
+        )
+    if args.verify_merged and not args.batch:
+        parser.error("--verify-merged requires one or more --batch PATH")
+    if not args.verify_merged and args.batch is not None and len(args.batch) > 1:
+        parser.error(
+            "--batch may be given more than once only under --verify-merged"
+        )
+    if args.merge_batches is not None and args.expect_source_forms_file is not None:
+        # --merge-batches does not enforce source-form coverage (that is the
+        # job of --check-batch per fragment and --verify-merged for the merged
+        # set); silently dropping the flag would give a false sense that merge
+        # verified coverage. Fail loud instead.
+        parser.error(
+            "--expect-source-forms-file is not accepted with --merge-batches "
+            "(coverage is enforced by --check-batch per fragment and by "
+            "--verify-merged for the merged set)"
+        )
+
     try:
         registry = _build_schema_registry()
-        if args.batch is not None:
-            result = run_merge(canon_path, args.batch, args.research_mode, registry)
+        if args.check_batch is not None:
+            result = run_check_batch(
+                args.check_batch, args.research_mode, args.expect_source_forms_file, registry
+            )
+        elif args.merge_batches is not None:
+            result = run_merge_batches(canon_path, args.merge_batches, args.research_mode, registry)
+        elif args.verify_merged:
+            result = run_verify_merged(
+                canon_path, args.batch, args.expect_source_forms_file, registry
+            )
+        elif args.batch is not None:
+            result = run_merge(canon_path, args.batch[0], args.research_mode, registry)
         else:
             result = run_validate_only(canon_path, args.research_mode, registry)
     except CanonValidationError as e:
@@ -713,6 +979,8 @@ def main(argv=None) -> int:
         return 1
 
     print(json.dumps(result, ensure_ascii=False))
+    if args.verify_merged:
+        return 0 if result.get("verified") else 1
     return 0
 
 
