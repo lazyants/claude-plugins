@@ -118,6 +118,13 @@ LOW_NAME_DENSITY_FLOOR = 10
 # exactly what this smoke test exists to establish -- this regex only makes it
 # plausible (see references/language-pair-parameterization.md).
 TOKEN_RE = re.compile(r"[^\W\d_](?:['’‑-]?[^\W\d_])*")
+# Sentinels this plugin bakes into plain_text (footnote refs, verse
+# placeholders -- see manifest.schema.json's FNREF_N / VERSE_{vid}_{shortsha}
+# descriptions). Matched generically as any ⟦...⟧ bracketed token, mirroring
+# bootstrap_names.py's own SENTINEL_RE -- unstripped, a sentinel fuses into an
+# adjacent name token (e.g. "Bouchard⟦FNREF_5⟧" -> bogus candidate "Bouchard
+# FNREF") and skews density_score()'s upper-initial ratio.
+SENTINEL_RE = re.compile(r"⟦[^⟧]*⟧")
 # — (U+2014 em-dash) and ― (U+2015 horizontal bar) are included because they
 # are the dominant dialogue-line delimiter in French/Russian/Spanish literary
 # prose -- this plugin's core domain -- not just a stylistic aside.
@@ -463,6 +470,15 @@ def segment_plain_text(seg_record, blocks):
     return "\n".join(parts)
 
 
+def segment_clean_text(seg_record, blocks):
+    """`segment_plain_text` with SENTINEL_RE stripped (see SENTINEL_RE's
+    module-level comment for why every consumer in `build_source_sample`
+    must see the sentinel-free text -- density scoring, the word cap, and
+    candidate extraction all break in different ways if a raw sentinel
+    reaches them)."""
+    return SENTINEL_RE.sub(" ", segment_plain_text(seg_record, blocks))
+
+
 def segment_order_index(seg_record, blocks):
     idxs = [
         blocks[bid]["order_index"]
@@ -500,10 +516,13 @@ def build_source_sample(manifest, lang):
 
         remaining = [s for s in body_segs if s["seg"] not in chosen_ids]
         if remaining:
-            # Highest density; break ties by ascending seg id.
+            # Highest density; break ties by ascending seg id. Sentinels are
+            # stripped (via segment_clean_text) before scoring so a
+            # sentinel-heavy segment can't win selection purely by inflating
+            # its upper-initial ratio.
             best = min(
                 remaining,
-                key=lambda s: (-density_score(segment_plain_text(s, blocks), lang), s["seg"]),
+                key=lambda s: (-density_score(segment_clean_text(s, blocks), lang), s["seg"]),
             )
             add("high_density", best)
 
@@ -519,7 +538,12 @@ def build_source_sample(manifest, lang):
             "anchor": anchor,
             "kind": "body",
         })
-        body_pieces.append(cap_words(segment_plain_text(seg_record, blocks)))
+        # Sentinels are stripped (via segment_clean_text) BEFORE cap_words()
+        # -- a sentinel occupying a "word" slot in the raw text would
+        # otherwise consume part of the SAMPLE_WORD_CAP budget before ever
+        # being stripped, silently dropping a legitimate word/name sitting
+        # just past the cap.
+        body_pieces.append(cap_words(segment_clean_text(seg_record, blocks)))
 
     # Fifth anchor: every translate-decision FRONTBACK segment, concatenated
     # as ONE bucket, capped once as a whole (front matter is short/discrete,
@@ -541,7 +565,9 @@ def build_source_sample(manifest, lang):
             "anchor": "frontback",
             "kind": "frontback",
         })
-        frontback_pieces.append(segment_plain_text(seg_record, blocks))
+        # Same ordering rule as body_pieces above: strip before this bucket
+        # is later capped as a whole (line below, "cap_words(...)").
+        frontback_pieces.append(segment_clean_text(seg_record, blocks))
 
     if not chosen and not frontback_segs:
         fatal(
@@ -699,10 +725,14 @@ def main():
     smoke_report_contract_hash = sha1_file(THIS_SCRIPT_PATH)
 
     # Extracted per-piece (never across the concatenated blob) -- see the
-    # comment in build_source_sample() for why.
+    # comment in build_source_sample() for why. extraction_pieces are already
+    # sentinel-free by construction (stripped upstream of cap_words() in
+    # build_source_sample()) -- this second SENTINEL_RE.sub() is deliberate
+    # defense-in-depth, not the primary fix.
     candidate_name_set = set()
     for piece in extraction_pieces:
-        for name, _ in extract_candidate_names(piece, lang):
+        clean_piece = SENTINEL_RE.sub(" ", piece)
+        for name, _ in extract_candidate_names(clean_piece, lang):
             candidate_name_set.add(name)
     candidate_names_total = len(candidate_name_set)
 

@@ -347,7 +347,18 @@ def test_merge_batches_conflicting_overlap_is_fatal_collision_and_canon_untouche
 
 
 def test_merge_batches_lower_index_accepted_survives_higher_index_queued_same_source_form(tmp_path):
-    """The single most important regression case in this file. A
+    """PARITY/CHARACTERIZATION coverage, not a new regression test: issue
+    #102's `_merge_batch` guard (`if source_form in entries: continue` on
+    the review_queue-append branch) is ALREADY landed on this file's
+    current code -- this test locks down that already-fixed behavior, it
+    does not test new hardening. (The remaining #102 hardening gap -- a
+    hand-corrupted canon.json that never went through `_merge_batch` at all
+    can still land the same source_form in both entries{} and
+    review_queue[] -- is covered separately by
+    `_assert_no_entries_review_queue_overlap`'s tests in
+    canon_format_validation.test.py and merged_disk_verify.test.py.)
+
+    The single most important regression case in this file. A
     source_form is ACCEPTED in a LOWER-index fragment (P1, merged first)
     and independently QUEUED for the SAME source_form in a HIGHER-index
     fragment (P2, merged second) -- e.g. two concurrent glossary batches

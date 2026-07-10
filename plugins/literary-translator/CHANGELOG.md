@@ -1,5 +1,42 @@
 # Changelog
 
+## 1.3.2 — 2026-07-10
+
+Bugfix release: closes three open issues (#89, #100, #102) from the 2026-07-09 five-agent audit.
+#91 was investigated and found to conflict with an existing, deliberate design decision — see "Not
+fixed" below.
+
+### Fixed
+
+- **`select_segments.py` regen hint named the wrong step for a stale `derivation_bundle_hash`** (#100) —
+  the hint told operators to re-run `segpack.py`, which only ever copies `derivation_bundle_hash`
+  verbatim from `canon.json` and never recomputes it, leaving the segment `blocked_needs_regeneration`
+  forever. The hint (and the matching doc in `references/ledger-and-resumability.md`) now correctly
+  names `bootstrap_names.py` and the W3/W3a glossary pass, which is what actually regenerates
+  candidates and re-stamps the hash.
+- **`language_smoke_report.py` never stripped `⟦FNREF_N⟧`/`⟦VERSE_…⟧` sentinels before candidate
+  extraction or density scoring** (#89) — a sentinel-adjacent name (e.g. `Bouchard⟦FNREF_5⟧`) fused
+  into a garbage candidate, inflating counts and able to flip a legitimate name to `found:false`,
+  false-failing the mandatory W3 smoke gate; sentinel-heavy segments could also out-score a
+  legitimate high-density segment during sample selection. Both call sites now strip sentinels first,
+  before the word cap is applied.
+- **`canon_validate.py` had no whole-file guard against a `source_form` present in both `entries{}`
+  and `review_queue[]`** (#102) — the originally-reported bug (a name accepted in one glossary batch
+  and re-queued by a later batch) was already fixed in 1.2.0's `_merge_batch`, but a hand-corrupted or
+  otherwise not-batch-merged `canon.json` with the same overlap still passed both schema validation
+  and `--verify-merged` silently. Both `_validate_whole_file` and `run_verify_merged` (the Workflow
+  template's actual disk-independent trusted gate) now reject it.
+
+### Not fixed
+
+- **#91 — `ELISION_RE` splitting only lowercase `d'`/`l'`** was investigated: widening the article
+  class to also match capitalized, sentence-initial elisions (`L'Enclos`) turned out to conflict with
+  a deliberate, already-documented design decision (see `assets/languages/README.md`) protecting fixed
+  proper-noun compounds that happen to start the same way — `D'Artagnan`, `L'Aquila`, `D'Annunzio`,
+  `L'Oréal` — from being wrongly split into `Artagnan`, `Aquila`, etc. No code change ships for #91 in
+  this release; it needs either a curated exception mechanism or a different resolution strategy,
+  which is a larger design question than this bugfix round scoped for.
+
 ## 1.3.1 — 2026-07-10
 
 Hardens two W1-adjacent authoring gates and closes a doc-prose leak: closes #94 and #103.

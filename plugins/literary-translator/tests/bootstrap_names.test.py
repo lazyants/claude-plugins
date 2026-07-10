@@ -619,9 +619,15 @@ def test_regression_collect_candidates_end_to_end_with_real_fr_config():
     sources = [
         ("seg1", "Le marquis d'Effiat partit pour l'Autriche."),
         # kept lowercase "d'"/"l'" throughout (mid-sentence elision only) --
-        # ELISION_RE's group 1 is the literal char class [dl], so a
-        # sentence-initial capitalized "D'Effiat" would NOT match and is
-        # deliberately out of scope for this fixture.
+        # a sentence-initial capitalized elision (e.g. "D'Effiat") is
+        # intentionally NOT split: ELISION_RE's group 1 is deliberately
+        # lowercase-only ([dl]) so a fixed proper-noun spelling such as
+        # "D'Artagnan"/"L'Aquila" survives whole instead of being torn into
+        # a bogus "Artagnan"/"Aquila" (see assets/languages/README.md's
+        # it.json status row). #91 proposed widening ELISION_RE to also
+        # split capitalized elisions; that was investigated and reverted
+        # for conflicting with this design -- see
+        # test_fixed_compound_dartagnan_stays_fused_fr below.
         ("seg2", "Le marquis d'Effiat revint bientot d'Autriche."),
     ]
     result = bn.collect_candidates(sources, lang)
@@ -631,6 +637,34 @@ def test_regression_collect_candidates_end_to_end_with_real_fr_config():
     effiat_row = next(r for r in result["candidates"] if r["name"] == "Effiat")
     assert effiat_row["freq"] >= 2
     assert effiat_row["n_segments"] == 2
+
+
+def test_fixed_compound_dartagnan_stays_fused_fr():
+    # #91 proposed making ELISION_RE's article-capture class
+    # case-insensitive so a sentence-initial capitalized elision (e.g.
+    # "L'Enclos") would split like its mid-sentence lowercase counterpart.
+    # Investigated and reverted: assets/languages/README.md documents this
+    # as INTENTIONAL -- a sentence-initial capitalized elided form is a
+    # fixed proper-noun spelling (D'Artagnan, L'Aquila, D'Annunzio,
+    # L'Oreal) that already starts with a capital and survives the
+    # extractor's capitalization gate whole; widening the regex would
+    # wrongly tear these into "Artagnan"/"Aquila"/etc. This regression
+    # guards the documented tradeoff against a future accidental re-fix.
+    lang = load_real_fr_config()
+    text = "D'Artagnan arriva a la cour."
+    names = [n for n, _ in bn.extract_candidates(text, lang)]
+    assert "D'Artagnan" in names, f"fixed compound was wrongly split; got {names}"
+    assert "Artagnan" not in names, f"fixed compound was wrongly split; got {names}"
+
+
+def test_fixed_compound_laquila_stays_fused_it():
+    # Italian analogue -- see test_fixed_compound_dartagnan_stays_fused_fr
+    # and assets/languages/README.md's it.json status row.
+    lang = bn.load_language_config("it.json", languages_dir=REAL_LANGUAGES_DIR)
+    text = "L'Aquila e una citta antica."
+    names = [n for n, _ in bn.extract_candidates(text, lang)]
+    assert "L'Aquila" in names, f"fixed compound was wrongly split; got {names}"
+    assert "Aquila" not in names, f"fixed compound was wrongly split; got {names}"
 
 
 if __name__ == "__main__":
