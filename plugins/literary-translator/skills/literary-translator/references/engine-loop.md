@@ -244,7 +244,11 @@ kind: not "was a new trap ever added" but "did THIS SPECIFIC book's own example
 (no `LT_REQUIRED_FILL` span involved, since nothing is required to be filled in):
 it FATALLY rejects `translate_TASK.md`/`review_TASK.md` if the literal substring
 `guéridon=refrain-song` still appears anywhere — never a requirement that a new
-trap be entered before the run starts.
+trap be entered before the run starts. A second, complementary check catches
+survivors the exact substring alone would miss — a separator-mangled pairing
+(`guéridon = refrain-song`) or the pairing deleted while its explanatory
+sentence survives — by checking, scoped to the callout's own HTML comment,
+whether the label and the content word `guéridon` still co-occur there.
 
 ## Foreign-language insertions
 

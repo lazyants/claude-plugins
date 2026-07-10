@@ -283,11 +283,11 @@ Historiettes' own layout. Until that reading happens, `output.target: epub`
 stays resolvable (Step 0d validates the enum) but unimplemented — a later
 phase, not this one.
 
-A future `epub` output-target effort should start by reading `build_epub.py`
-directly — `historiettes-t3/build_epub.py` in the (non-shipped) in-house
-provenance project — and verifying its real behavior firsthand, if you have
-access to that project — not by guessing at its shape from this reference or
-from the plan that preceded this plugin.
+The same discipline applies to any future `epub` output-target effort:
+`build_epub.py`'s real, current behavior — not this reference's description
+of it, nor the plan that preceded this plugin — is the ground truth, but
+verifying it firsthand is only possible for whoever has access to the
+non-shipped historiettes-t3 provenance project referenced above.
 
 ## Also out of scope for this increment
 
