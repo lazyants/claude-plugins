@@ -19,10 +19,11 @@ Two HARD checks, each counted separately, both rolling into `hard_failures`
      reimplemented) against every converged segment's CURRENT on-disk draft.
      Catches a structurally-broken hand-edit.
   2. **stale_review_failures** -- compares every converged segment's CURRENT
-     draft sha1 (raw on-disk bytes, matching `ledger_update.py`'s own
-     `sha1_bytes_of_file`) against its ledger FRAGMENT's own
-     `reviewed_draft_sha1`. Catches a hand-edit that stays structurally valid
-     but silently substitutes prose the reviewer never saw.
+     draft content sha1 (canonical JSON, `dispatch_token` excluded, matching
+     `ledger_update.py`'s own `draft_content_sha1()`) against its ledger
+     FRAGMENT's own `reviewed_draft_sha1`. Catches a hand-edit that stays
+     structurally valid but silently substitutes prose the reviewer never
+     saw.
 
 Four WARN-only, advisory, non-gating checks (generalized from the real
 reference's A1/A3/A4/A5 -- the real `main()` only ever gated on coverage):
@@ -226,16 +227,31 @@ def segpack_path(seg):
     return SEGMENTS_DIR / f"segpack_{seg}.json"
 
 
-def sha1_bytes_of_file(path):
-    """sha1 of a file's raw on-disk bytes -- MUST match ledger_update.py's
-    own `sha1_bytes_of_file` exactly (both hash raw bytes, nothing
-    re-serialized), since this is compared directly against a fragment's
-    `reviewed_draft_sha1` (itself written by that same function)."""
-    h = hashlib.sha1()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(65536), b""):
-            h.update(chunk)
-    return h.hexdigest()
+def draft_content_sha1(path):
+    """sha1 of a draft's CONTENT, with the 'dispatch_token' metadata field
+    deliberately EXCLUDED -- see draft_sha1.py's own module docstring for why.
+
+    Must match, byte for byte, draft_sha1.py's and ledger_update.py's own
+    draft_content_sha1() -- both parse the draft as JSON, drop
+    'dispatch_token' if present, and re-serialize the remainder via
+    identical sorted-key canonical JSON before hashing. This is compared
+    directly against a fragment's `reviewed_draft_sha1`, which
+    ledger_update.py writes via this exact algorithm -- NOT a raw-bytes
+    hash of the on-disk file.
+
+    Raises OSError (unreadable file), json.JSONDecodeError (not valid
+    JSON), or ValueError (valid JSON but not an object) on failure --
+    callers handle all three.
+    """
+    raw = path.read_text(encoding="utf-8")
+    doc = json.loads(raw)
+    if not isinstance(doc, dict):
+        raise ValueError(f"draft at {path} must be a JSON object, got {type(doc).__name__}")
+    projected = {k: v for k, v in doc.items() if k != "dispatch_token"}
+    canonical = json.dumps(
+        projected, sort_keys=True, ensure_ascii=False, separators=(",", ":")
+    ).encode("utf-8")
+    return hashlib.sha1(canonical).hexdigest()
 
 
 def _norm_ws(s):
@@ -317,7 +333,15 @@ def hard_check_stale_review(converged):
             n_failing += 1
             details.append(f"[{seg}] STALE-REVIEW draft missing: {dp}")
             continue
-        current = sha1_bytes_of_file(dp)
+        try:
+            current = draft_content_sha1(dp)
+        except (OSError, json.JSONDecodeError, ValueError) as exc:
+            n_failing += 1
+            details.append(
+                f"[{seg}] STALE-REVIEW draft at {dp} is unreadable/corrupt "
+                f"-- cannot confirm the reviewer saw the current draft ({exc})"
+            )
+            continue
         if current != expected:
             n_failing += 1
             details.append(

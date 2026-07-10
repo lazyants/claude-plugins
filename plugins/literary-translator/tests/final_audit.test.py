@@ -316,7 +316,26 @@ def clean_draft(seg="seg01", p1_text=None, extra_footnotes=None, names=None):
     }
 
 
-def add_converged_segment(root: Path, seg: str, segpack: dict, draft: dict, reviewed_sha1_override=None, rounds=1) -> dict:
+def draft_content_sha1_of(doc: dict) -> str:
+    """1.2.0: ledger_update.py/draft_sha1.py/final_audit.py all hash a
+    segment draft's CONTENT, not its raw on-disk bytes -- CONTRACT-1.2.0-
+    reliability.md section 2. Independent, stdlib-only ground truth (drop
+    'dispatch_token' if present, sha1 the sorted-key canonical
+    re-serialization); duplicated here rather than imported, matching this
+    suite's "each test file stays self-contained" convention (see
+    tests/draft_sha1.test.py's own canonical_expected_sha1() for the
+    more-exhaustively-tested original)."""
+    projected = {k: v for k, v in doc.items() if k != "dispatch_token"}
+    canonical = json.dumps(
+        projected, sort_keys=True, ensure_ascii=False, separators=(",", ":")
+    ).encode("utf-8")
+    return hashlib.sha1(canonical).hexdigest()
+
+
+def add_converged_segment(
+    root: Path, seg: str, segpack: dict, draft: dict, reviewed_sha1_override=None, rounds=1,
+    raw_draft_bytes: bytes | None = None,
+) -> dict:
     """Writes segments/segpack_{seg}.json + {seg}.draft.json, computes the
     REAL 15-field cache_key by actually invoking cache_key.py --seg <seg>
     (never hand-typed), and writes a schema-shaped converged ledger fragment
@@ -326,12 +345,30 @@ def add_converged_segment(root: Path, seg: str, segpack: dict, draft: dict, revi
     reviewed_draft_sha1 (simulating a hand-edit after the review that
     approved the draft) -- the sole mechanism these tests use to trigger
     hard check 2 (stale_review_failures) in isolation from hard check 1.
+
+    raw_draft_bytes, when given, writes these EXACT bytes to disk instead of
+    a canonical serialization of `draft` -- for exercising a deliberately
+    non-canonical on-disk draft (unsorted keys, pretty-printed, a
+    dispatch_token field present) while reviewed_draft_sha1 is still
+    computed from `draft`'s own canonical content hash, matching what a
+    real ledger_update.py write records. `raw_draft_bytes` must decode to
+    content equivalent to `draft` (minus any dispatch_token) or the fixture
+    is internally inconsistent.
     """
     segments_dir = root / "segments"
     (segments_dir / f"segpack_{seg}.json").write_text(
         json.dumps(segpack, ensure_ascii=False), encoding="utf-8"
     )
-    draft_bytes = json.dumps(draft, ensure_ascii=False).encode("utf-8")
+    if raw_draft_bytes is not None:
+        draft_bytes = raw_draft_bytes
+    else:
+        # Canonical (sorted keys, compact separators) -- not load-bearing for
+        # correctness (reviewed_draft_sha1 below is computed from `draft`
+        # itself via draft_content_sha1_of, independent of how these bytes
+        # are serialized), just keeps the on-disk fixture tidy by default.
+        draft_bytes = json.dumps(
+            draft, sort_keys=True, ensure_ascii=False, separators=(",", ":")
+        ).encode("utf-8")
     (segments_dir / f"{seg}.draft.json").write_bytes(draft_bytes)
 
     proc = subprocess.run(
@@ -346,10 +383,14 @@ def add_converged_segment(root: Path, seg: str, segpack: dict, draft: dict, revi
     )
     cache_key = json.loads(proc.stdout)
 
+    # The exact algorithm ledger_update.py/final_audit.py/assemble.py all use
+    # in production -- NOT a raw-bytes hash of draft_bytes above -- so this
+    # stays correct regardless of how the on-disk file happens to be
+    # serialized (see raw_draft_bytes above).
     reviewed_sha1 = (
         reviewed_sha1_override
         if reviewed_sha1_override is not None
-        else hashlib.sha1(draft_bytes).hexdigest()
+        else draft_content_sha1_of(draft)
     )
 
     fragment = {
@@ -456,7 +497,11 @@ def test_coverage_failure_isolated_from_stale_review(tmp_path):
 
 def test_stale_review_failure_isolated_from_coverage(tmp_path):
     root = make_durable_root(tmp_path, seg_ids=("seg01",))
-    draft_bytes = json.dumps(clean_draft(), ensure_ascii=False).encode("utf-8")
+    # Same canonical serialization add_converged_segment writes to disk with,
+    # so actual_sha1 below matches the real on-disk file byte for byte.
+    draft_bytes = json.dumps(
+        clean_draft(), sort_keys=True, ensure_ascii=False, separators=(",", ":")
+    ).encode("utf-8")
     wrong_sha1 = hashlib.sha1(draft_bytes + b"tamper").hexdigest()
     add_converged_segment(
         root, "seg01", clean_segpack(), clean_draft(), reviewed_sha1_override=wrong_sha1
@@ -482,6 +527,43 @@ def test_stale_review_failure_isolated_from_coverage(tmp_path):
         f"[seg01] STALE-REVIEW current draft sha1 {actual_sha1} != "
         f"reviewed_draft_sha1 {wrong_sha1}" in result.stderr
     )
+
+
+def test_stale_review_survives_non_canonical_draft_bytes(tmp_path):
+    """Companion to test_stale_review_failure_isolated_from_coverage above:
+    the OPPOSITE case must NOT false-positive. A converged segment's on-disk
+    draft is deliberately NON-canonical (keys in human-authored,
+    non-alphabetical order -- clean_draft()'s own natural key order --
+    pretty-printed with indentation, and a 'dispatch_token' metadata field
+    present) -- exactly what a real draft looks like on disk, never the
+    compact sorted-key form draft_content_sha1() re-serializes to.
+    final_audit.py's hard check 2 must NOT flag this stale: its own freshly
+    recomputed draft-content-sha1 must equal the ledger's
+    reviewed_draft_sha1 (itself recorded via the very same canonical
+    draft_content_sha1() algorithm ledger_update.py uses in production). A
+    regression back to a raw-bytes hash in final_audit.py would
+    misclassify this as a stale_review_failures hard failure even though
+    nothing about the draft actually changed since review.
+    """
+    root = make_durable_root(tmp_path, seg_ids=("seg01", PAD_SEG))
+    draft = clean_draft()
+    raw_draft_bytes = json.dumps(
+        {"dispatch_token": "some-run-token:seg01", **draft}, indent=2, ensure_ascii=False
+    ).encode("utf-8")
+    add_converged_segment(root, "seg01", clean_segpack(), draft, raw_draft_bytes=raw_draft_bytes)
+
+    result = run_final_audit(root)
+
+    assert result.returncode == 0, (
+        f"a non-canonical but otherwise unchanged draft must not trip a "
+        f"false stale-review failure:\nstdout:\n{result.stdout}\n"
+        f"stderr:\n{result.stderr}"
+    )
+    summary = parse_summary(result)
+    assert_schema_valid(summary)
+    assert summary["coverage_failures"] == 0
+    assert summary["stale_review_failures"] == 0
+    assert summary["hard_failures"] == 0
 
 
 # ---------------------------------------------------------------------------
@@ -699,9 +781,15 @@ def test_warn_verse_structure_paste_duplicate_field(tmp_path):
     assert_schema_valid(summary)
     assert summary["hard_failures"] == 0
     assert summary["warnings"] >= 1
+    # warn_verse_structure() reports fields in the on-disk draft's own key
+    # order (whichever field it meets second names the first as its match).
+    # add_converged_segment() now writes the draft as canonical JSON (sorted
+    # keys), so 'literal_gloss' precedes 'rendered' on disk regardless of
+    # this dict literal's own key order above -- the message names 'rendered'
+    # (met second) as matching the already-seen 'literal_gloss'.
     assert (
-        "[seg01] VERSE-STRUCTURE verse vA: field 'literal_gloss' == field "
-        "'rendered' up to whitespace (paste/duplicate -- need genuinely "
+        "[seg01] VERSE-STRUCTURE verse vA: field 'rendered' == field "
+        "'literal_gloss' up to whitespace (paste/duplicate -- need genuinely "
         "distinct content)" in result.stderr
     )
 

@@ -296,6 +296,22 @@ def write_segpack(root, seg, blocks, footnotes=None, verses=None):
     )
 
 
+def draft_content_sha1_of(doc: dict) -> str:
+    """1.2.0: ledger_update.py/draft_sha1.py/assemble.py all hash a segment
+    draft's CONTENT, not its raw on-disk bytes -- CONTRACT-1.2.0-
+    reliability.md section 2. Independent, stdlib-only ground truth (drop
+    'dispatch_token' if present, sha1 the sorted-key canonical
+    re-serialization); duplicated here rather than imported, matching this
+    suite's "each test file stays self-contained" convention (see
+    tests/draft_sha1.test.py's own canonical_expected_sha1() for the
+    more-exhaustively-tested original)."""
+    projected = {k: v for k, v in doc.items() if k != "dispatch_token"}
+    canonical = json.dumps(
+        projected, sort_keys=True, ensure_ascii=False, separators=(",", ":")
+    ).encode("utf-8")
+    return hashlib.sha1(canonical).hexdigest()
+
+
 def write_draft(root, seg, blocks, footnotes=None, verses=None, names=None, notes=None) -> bytes:
     draft = {
         "seg": seg,
@@ -312,7 +328,9 @@ def write_draft(root, seg, blocks, footnotes=None, verses=None, names=None, note
 
 def write_ledger(root, entries: dict) -> None:
     """entries: seg -> {"status": ..., "reviewed_draft_sha1_override": optional}.
-    reviewed_draft_sha1 auto-computed from the on-disk draft unless a literal
+    reviewed_draft_sha1 auto-computed from the on-disk draft -- via the same
+    canonical draft_content_sha1() algorithm the real ledger_update.py/
+    assemble.py use, NOT a raw-bytes hash of the file -- unless a literal
     override is supplied (used to simulate a post-review hand-edit)."""
     segments = {}
     for seg, cfg in entries.items():
@@ -322,9 +340,8 @@ def write_ledger(root, entries: dict) -> None:
         }
         if cfg["status"] == "converged":
             draft_path = root / "segments" / f"{seg}.draft.json"
-            sha1 = cfg.get("reviewed_draft_sha1_override") or hashlib.sha1(
-                draft_path.read_bytes()
-            ).hexdigest()
+            draft_doc = json.loads(draft_path.read_text(encoding="utf-8"))
+            sha1 = cfg.get("reviewed_draft_sha1_override") or draft_content_sha1_of(draft_doc)
             record.update(
                 rounds=1,
                 cache_key=DUMMY_CACHE_KEY,
@@ -1126,6 +1143,63 @@ def test_draft_sha1_mismatch_against_reviewed_draft_sha1_is_fatal(tmp_path):
     payload = parse_one_json_line(result)
     assert payload["success"] is False
     assert "seg01" in payload["error"]
+
+
+def test_reusable_survives_non_canonical_draft_bytes(tmp_path):
+    """Companion to test_draft_sha1_mismatch_against_reviewed_draft_sha1_is_fatal
+    above: the OPPOSITE case must NOT false-positive. A converged segment's
+    on-disk draft is deliberately NON-canonical (keys in human-authored,
+    non-alphabetical order, pretty-printed with indentation, and a
+    'dispatch_token' metadata field present) -- exactly what a real draft
+    looks like on disk, never the compact sorted-key form
+    draft_content_sha1() re-serializes to. assemble.py must still assemble
+    it: its own freshly recomputed draft-content-sha1 must equal the
+    ledger's reviewed_draft_sha1 (itself recorded via the very same
+    canonical draft_content_sha1() algorithm ledger_update.py uses in
+    production). A regression back to a raw-bytes hash in assemble.py would
+    misclassify this as a stale-review mismatch and refuse to assemble the
+    whole run, even though nothing about the draft actually changed since
+    review.
+    """
+    root = make_root(tmp_path)
+    write_manifest(
+        root,
+        blocks={"p1": {"type": "PARA", "seg": "seg01", "order_index": 0, "plain_text": "Body."}},
+        segments=[{"seg": "seg01", "kind": "body", "title_text": "Ch1",
+                   "block_ids": ["p1"], "word_count": 10}],
+    )
+    write_segpack(root, "seg01", blocks=[{"id": "p1", "order_index": 0, "plain_text": "Body."}])
+
+    draft_doc = {
+        "notes": [],
+        "dispatch_token": "some-run-token:seg01",
+        "blocks": {"p1": "Translated body, never touched after review."},
+        "seg": "seg01",
+        "footnotes": {},
+        "verses": {},
+        "names": [],
+    }
+    (root / "segments" / "seg01.draft.json").write_text(
+        json.dumps(draft_doc, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
+    # The hash a real reviewer/ledger_update.py would compute: canonical
+    # content hash, dispatch_token excluded -- deliberately NOT the raw
+    # bytes of the pretty-printed file just written above.
+    draft_sha1 = draft_content_sha1_of(draft_doc)
+    write_ledger(root, {"seg01": {"status": "converged", "reviewed_draft_sha1_override": draft_sha1}})
+
+    result = run_assemble(root)
+    assert result.returncode == 0, (
+        f"a non-canonical but otherwise unchanged draft must assemble "
+        f"cleanly, never trip a false stale-review mismatch:\n"
+        f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    )
+    payload = parse_one_json_line(result)
+    assert payload["success"] is True
+
+    ns = read_nodestream(root)
+    node_ids = [n["id"] for n in ns["nodes"]]
+    assert node_ids == ["p1"]
 
 
 # ===========================================================================

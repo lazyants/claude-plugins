@@ -1,4 +1,4 @@
-<!-- PROMPT_CONTRACT_VERSION: 1 -->
+<!-- PROMPT_CONTRACT_VERSION: 2 -->
 <!--
   translate_TASK.template.md -- one-time-seed prompt contract for the
   per-segment translator agent.

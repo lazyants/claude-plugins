@@ -48,10 +48,12 @@ calibration, not a warning to work around.
 4. **The glossary-pass workflow template.** The real project ran its
    glossary pass as ad hoc `glossary/TASK.md` + codex batches producing
    `glossary/out_*.json` files — not a schema-validated Workflow script. The
-   template applies the proven review-loop *mechanics* (schema-validated
-   workflow-level `agent()` calls) to a new context by analogy. Pilot this on
-   one small batch and manually verify the `canon.json` merge output before
-   treating it as fully load-bearing.
+   template applies the proven review-loop *mechanics* — 1.2.0: fire-and-
+   forget dispatch, bounded disk-poll, disk-is-truth (the same
+   DISPATCH → WAIT → CONSUME pattern review now uses, see
+   `references/workflow-schema-validation.md`) — to a new context by
+   analogy. Pilot this on one small batch and manually verify the
+   `canon.json` merge output before treating it as fully load-bearing.
 5. **The non-Historiettes adapter surfaces (`plain_text` and `custom`).**
    `plain_text` is fully specified but its fixtures/round-trip self-check
    tests were planned, not already run in the source project; `custom` is a
@@ -257,11 +259,16 @@ scoped as accepted:**
 
 ## 10. TDZ gotcha — schema literals must be declared ABOVE the `pipeline()` call
 
-In both workflow-script templates (`mass-translate-wf.template.js`,
-`glossary-pass-wf.template.js`), every inline schema literal
-(`REVIEW_SCHEMA`, `REVIEW_ARTIFACT_SCHEMA`, `LEDGER_WRITE_SCHEMA`,
-`LEDGER_MERGE_SCHEMA`, `CANON_BATCH_SCHEMA`) must be declared *above* its
-first use in the pipeline call. A schema declared after its first use
+In both workflow-script templates, every inline schema literal must be
+declared *above* its first use in the pipeline call.
+`mass-translate-wf.template.js` declares `REVIEW_SCHEMA`,
+`REVIEW_ARTIFACT_SCHEMA`, `LEDGER_WRITE_SCHEMA`, `LEDGER_MERGE_SCHEMA`;
+`glossary-pass-wf.template.js` declares its own `CANON_VERIFY_SCHEMA` (new
+in 1.2.0 — `CANON_BATCH_SCHEMA` is gone entirely, not merely relocated: the
+glossary batch dispatch carries no agent-facing schema at all now, see §14
+below). Each template repeats its own declare-above-use discipline
+independently — they are two separate Workflow scripts, not a shared
+module with one schema owner. A schema declared after its first use
 silently no-ops due to temporal-dead-zone semantics in this execution
 model — this is a known gotcha in the Workflow tool's execution model, not
 a JS style preference. There is no runtime error to catch it; it just
@@ -374,13 +381,19 @@ unhandled `ImportError`/raw traceback.
   `style_bible.md`/`canon.json` fresh on every dispatch. v1's honest scope
   is "resumable via the ledger, with a redundant but safe re-translation for
   any interrupted-but-already-drafted segment" — not zero-waste resumption.
-- **`REVIEW_SCHEMA` is exact-shape (`additionalProperties: false`);
-  `CANON_BATCH_SCHEMA` is a real `oneOf` accepted/queued return contract; and
-  `REVIEW_ARTIFACT_SCHEMA`, `LEDGER_WRITE_SCHEMA`, `LEDGER_MERGE_SCHEMA` are
-  `oneOf` mechanical-result schemas with `additionalProperties: false` per
-  branch** — a failure branch must never also require a success-only field
-  (e.g. a `fragment_path`/`fragment_sha1` that was never written), and vice
-  versa.
+- **`REVIEW_SCHEMA` is exact-shape (`additionalProperties: false`), the
+  four verdict fields, no `dispatch_token`; `REVIEW_ARTIFACT_SCHEMA`,
+  `LEDGER_WRITE_SCHEMA`, `LEDGER_MERGE_SCHEMA`, and `CANON_VERIFY_SCHEMA`
+  are all FLAT `agent()`-facing schemas as of 1.2.0 (§14 below) —
+  `additionalProperties: false`, a relaxed union of every field the old
+  `oneOf` branches used to discriminate.** `CANON_BATCH_SCHEMA` is gone
+  entirely, not merely flattened. The on-disk `ledger-write-confirmation
+  .schema.json`/`ledger-merge-confirmation.schema.json`/`review-artifact
+  -check.schema.json` stay strong `oneOf` — a failure branch must never
+  also require a success-only field (e.g. a `fragment_path`/`fragment_sha1`
+  that was never written), and vice versa — and the exact-key-set JS guard
+  at each flat-schema consume site is what re-establishes that
+  discrimination on the agent-relayed object.
 - **The composite cache-key field list and bundle memberships get restated
   in multiple places** (`ledger-record-base.schema.json`'s property set,
   `select_segments.py`/`ledger_update.py`/`cache_key.py`, the design-decision
@@ -401,6 +414,40 @@ unhandled `ImportError`/raw traceback.
   a fresh `cache_key` recompute), which loses zero coverage. Unrelated to
   `canon_adjudication_audit.py` (that gate's own 87 tests are
   deterministic).
+
+## 14. An `agent()` schema is a tool `input_schema` — plain object only, no combinator (`#87`)
+
+The Workflow tool's `agent(..., {schema})` param becomes a tool-use API
+`input_schema`. The API requires a top-level `type:"object"` — it does
+**not** accept a top-level `oneOf`/`allOf`/`anyOf`, and would not enforce an
+`if`/`then` discriminator even if it did. A file-validation schema shape
+(a discriminated union, or a bare `array`) is simply **not a valid agent
+schema**, full stop — it is not "stricter than needed," it is a different
+kind of object that produces an HTTP 400 on first dispatch.
+
+Before 1.2.0, three literals violated this directly: `CANON_BATCH_SCHEMA`
+was a top-level `array` (blocking every glossary batch dispatch outright),
+and `REVIEW_ARTIFACT_SCHEMA`/`LEDGER_WRITE_SCHEMA`/`LEDGER_MERGE_SCHEMA`
+were each a top-level `oneOf` (blocking mass-translate outright). The fix
+generalizes: whenever a schema is genuinely a discriminated union on disk
+(review/ledger confirmation, canon-batch), the **on-disk** schema file stays
+the strong `oneOf` — it validates a *script's* real stdout/file content at
+runtime — while any literal actually passed to `agent()` is a **flattened**
+`type:"object"`, relaxed-union version, or is deleted outright if nothing
+downstream needs the agent to relay a schema-shaped return at all (as
+`CANON_BATCH_SCHEMA` was — the glossary batch dispatch is schema-less
+fire-and-forget now). Branch discrimination does not disappear when a
+schema flattens; it moves to two other places: the on-disk schema
+(Python-validated) and, for the agent-relayed object specifically, an
+**exact-key-set JS guard** at the consume site — see
+`references/workflow-schema-validation.md` and
+`references/ledger-and-resumability.md` for the guard field sets. Never
+trust a flattened literal alone: it would accept `{success:true,
+error:"x"}` as a success just as readily as a genuine one.
+
+`tests/agent_schema_top_level_object.test.py` is the direct regression lock:
+every remaining `schema:` const, top-level `object`, no top-level
+combinator.
 
 ## See also
 

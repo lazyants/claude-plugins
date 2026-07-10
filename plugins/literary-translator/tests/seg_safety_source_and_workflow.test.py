@@ -323,9 +323,15 @@ def instantiate_mass_translate(*, batch_agent_cap: int) -> str:
     re-implements. `batch_agent_cap` is the only value these tests care
     about -- deliberately set to 0 by the "safe id" tests below so the
     batch-too-large gate trips immediately AFTER the seg-id guard runs,
-    without ever needing a real agent()/pipeline() mock."""
+    without ever needing a real agent()/pipeline() mock. {{RUN_ID}} (CONTRACT
+    -1.2.0-reliability.md sec2, a NEW documented substitution token the
+    1.2.0 reliability build added to this template) is substituted here with
+    a stable, colon-free, allowlist-legal fixture value purely so the
+    "no leftover {{...}}" assertion below stays meaningful -- this file's
+    own SEG_ID-guard assertions never read or depend on RUN_ID's value."""
     text = MASS_TRANSLATE_TEMPLATE.read_text(encoding="utf-8")
     text = text.replace("{{DURABLE_ROOT}}", "/fixture/project/durable_root")
+    text = text.replace("{{RUN_ID}}", "20260710T000000Z")
     text = text.replace("{{SOURCE_LANG}}", "fr")
     text = text.replace("{{TARGET_LANG}}", "ru")
     text = text.replace("{{MAX_FIX_ROUNDS}}", "2")

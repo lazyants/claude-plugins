@@ -41,6 +41,36 @@ the structural contract (what shape of object is valid) is what the four
 schema-validated `agent()` calls in the pipeline actually enforce, not the
 prose.
 
+1.2.0 CHANGE (CONTRACT-1.2.0-reliability.md sections 1-2, #87 fix): three of
+the four literals are no longer 1:1 with their canonical `.schema.json`
+file at all. `REVIEW_ARTIFACT_SCHEMA`/`LEDGER_WRITE_SCHEMA`/
+`LEDGER_MERGE_SCHEMA` are now FLAT (`type:"object"`, no top-level `oneOf`
+-- a discriminated `oneOf` cannot be a tool `input_schema`, the #87 bug this
+build fixes), while their canonical `.schema.json` files stay STRONG
+`oneOf`s (Owner C deliberately keeps these unchanged -- they still validate
+each script's own stdout at runtime). Strict structural PARITY between a
+flat literal and a `oneOf` schema is therefore no longer a meaningful
+comparison for these three -- see `tests/agent_schema_top_level_object
+.test.py` (locks every flat literal's top-level-object/no-combinator shape)
+and `tests/ledger_confirmation_schema.test.py` (locks that the flat ledger
+literals ACCEPT what the real scripts actually emit, plus the on-disk
+strong schemas' own reject-side behavior) for where that coverage now
+lives; THIS file no longer re-asserts it for the two ledger schemas.
+`REVIEW_ARTIFACT_SCHEMA`'s own "accepts real review_artifact_check.py
+output" containment check stays in THIS file (no dedicated sibling file
+owns it) -- see its own test below.
+
+`REVIEW_SCHEMA` is UNCHANGED (still the flat 4-field verdict shape:
+clean/coverage_ok/findings/draft_sha1) but its canonical file,
+`review.schema.json`, gained a 5th, OPTIONAL `dispatch_token` field (1.2.0
+resume-integrity metadata -- see that field's own schema description).
+`REVIEW_SCHEMA` is therefore now an intentional 4-field PROJECTION of the
+5-field canonical schema, not full equality -- this file's parity
+assertion for `REVIEW_SCHEMA` checks exactly that (property/required-set
+containment with a NAMED single permitted extra field, plus full
+structural parity on every field the two DO share), not byte-equal
+property sets.
+
 Named assertions from the build inventory's "Exact schema literals"
 subsection are locked explicitly, on both representations:
   - REVIEW_SCHEMA has NO `verse_status` field (verse issues report as
@@ -48,17 +78,18 @@ subsection are locked explicitly, on both representations:
     is validate_draft.py's job, never review judgment).
   - REVIEW_SCHEMA REQUIRES `draft_sha1` (a deliberate plugin addition over
     the real reference schema).
-  - Every one of the four schemas (and every oneOf branch, where
-    applicable) sets `additionalProperties: false`.
-  - The two `oneOf`-shaped confirmation schemas' SUCCESS/FAILURE branches
-    are asymmetric by design: a FAILURE branch never claims a field
-    (`fragment_path`/`fragment_sha1`/`ledger_path`/`n_segments`/
-    `stale_segments`) that was never written.
+  - Every one of the four schemas sets `additionalProperties: false`
+    (REVIEW_ARTIFACT/LEDGER_WRITE/LEDGER_MERGE at their own flat top level;
+    the two on-disk `oneOf`-shaped confirmation schemas retain their own
+    per-branch `additionalProperties:false` + SUCCESS/FAILURE asymmetry --
+    see `ledger_confirmation_schema.test.py`'s reject-side tests, which now
+    own that specific lock).
 
 A mutation ("regression-catcher") test proves the comparison helper itself
 is not vacuously true -- it deliberately breaks a couple of the invariants
-above on a copy of the canonical schema and asserts the parity helper
-raises, before trusting a clean pass on the real, unmutated files above.
+above on a copy of the canonical schema and asserts the parity/projection
+helper raises, before trusting a clean pass on the real, unmutated files
+above.
 
 Collection note: like every ``*.test.py`` file in this suite, pytest's
 default "prepend" import mode cannot resolve the dotted module name (e.g.
@@ -69,9 +100,13 @@ plugin root works without any extra flags.
 """
 import json
 import re
+import shutil
+import subprocess
+import sys
 from pathlib import Path
 from typing import Union, cast
 
+import jsonschema
 import pytest
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
@@ -368,10 +403,19 @@ def _canonicalize(value: _CanonicalValue) -> _CanonicalValue:
 
 
 def assert_schema_structural_parity(js_literal, canonical_schema, *, label: str) -> None:
-    """Asserts the JS literal and the canonical `.schema.json` file describe
-    the identical structural (validation-affecting) contract -- see module
+    """Asserts two already-canonicalizable schema shapes describe the
+    identical structural (validation-affecting) contract -- see module
     docstring for exactly which keys are excluded from this comparison, and
-    why."""
+    why. Not called for cross-representation parity within THIS file
+    anymore (post-1.2.0, only REVIEW_SCHEMA vs review.schema.json is still
+    a meaningful parity-shaped comparison, and that one is now a documented
+    PROJECTION -- see assert_schema_is_projection below); kept as a public
+    helper because tests/agent_schema_top_level_object.test.py imports it
+    (via importlib, house style: reuse this file's parser/compare helpers
+    rather than vendoring a second copy) to lock each flattened literal's
+    exact pinned shape against a hand-written expected-shape literal, which
+    IS a legitimate byte-equal comparison (two Python dicts, not a JS
+    literal vs. a oneOf schema)."""
     js_canon = _canonicalize(js_literal)
     json_canon = _canonicalize(canonical_schema)
     assert js_canon == json_canon, (
@@ -383,6 +427,60 @@ def assert_schema_structural_parity(js_literal, canonical_schema, *, label: str)
         f"  JS literal   (canonicalized): {json.dumps(js_canon, indent=2, sort_keys=True)}\n"
         f"  canonical schema (canonicalized): {json.dumps(json_canon, indent=2, sort_keys=True)}"
     )
+
+
+def assert_schema_is_projection(js_literal, canonical_schema, *, extra_fields: set, label: str) -> None:
+    """1.2.0: REVIEW_SCHEMA is a deliberate PROJECTION of the (now larger)
+    canonical review.schema.json, not a byte-equal parity pair -- see module
+    docstring. Asserts: both are top-level `object`/`additionalProperties:
+    false`; the canonical schema's property set is EXACTLY the JS literal's
+    own property set PLUS `extra_fields` (named precisely, not just "a
+    superset") -- catching both an unwanted extra field AND a silently
+    dropped/renamed `extra_fields` member; `required` sets are identical
+    (the extra field(s) must stay optional-only, per CONTRACT-1.2.0-
+    reliability.md's own field description); and every property the two DO
+    share is fully structurally identical (recursing through
+    `_canonicalize`, so a drift in a SHARED field's own shape -- e.g. a
+    relaxed `additionalProperties` inside `findings[]` -- is still caught,
+    exactly as strict parity would have caught it)."""
+    js_canon = _canonicalize(js_literal)
+    canon_canon = _canonicalize(canonical_schema)
+
+    assert js_canon["type"] == canon_canon["type"] == "object", (
+        f"{label}: both must be top-level 'object'"
+    )
+    assert js_canon["additionalProperties"] is False and canon_canon["additionalProperties"] is False, (
+        f"{label}: both must set additionalProperties:false"
+    )
+
+    js_props = set(js_canon["properties"].keys())
+    canon_props = set(canon_canon["properties"].keys())
+    actual_extra = canon_props - js_props
+    assert actual_extra == extra_fields, (
+        f"{label}: canonical schema's property set diverges from the JS "
+        f"literal's own by more/fewer than the documented projection gap "
+        f"-- expected exactly {sorted(extra_fields)} extra field(s) on the "
+        f"canonical side, got {sorted(actual_extra)} (canonical-only: "
+        f"{sorted(canon_props - js_props)}, JS-only: {sorted(js_props - canon_props)})"
+    )
+
+    js_required = set(js_canon.get("required", []))
+    canon_required = set(canon_canon.get("required", []))
+    assert js_required == canon_required, (
+        f"{label}: 'required' sets must be identical (the projection's "
+        f"extra field(s) {sorted(extra_fields)} must stay OPTIONAL-only) "
+        f"-- JS required={sorted(js_required)}, canonical required={sorted(canon_required)}"
+    )
+
+    for shared_prop in sorted(js_props & canon_props):
+        js_sub = js_canon["properties"][shared_prop]
+        canon_sub = canon_canon["properties"][shared_prop]
+        assert js_sub == canon_sub, (
+            f"{label}: shared property {shared_prop!r} has structurally "
+            f"drifted between the JS literal and the canonical schema:\n"
+            f"  JS: {json.dumps(js_sub, indent=2, sort_keys=True)}\n"
+            f"  canonical: {json.dumps(canon_sub, indent=2, sort_keys=True)}"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -436,16 +534,97 @@ def test_all_four_canonical_schema_files_exist_and_parse(canonical_schemas):
 
 
 # ---------------------------------------------------------------------------
-# The core drift-detection assertion: structural parity, one pair at a time.
+# The core drift-detection assertion. 1.2.0: only REVIEW_SCHEMA is still
+# compared against its canonical file here (as a documented PROJECTION, not
+# byte-equal parity -- see module docstring). REVIEW_ARTIFACT_SCHEMA/
+# LEDGER_WRITE_SCHEMA/LEDGER_MERGE_SCHEMA are flat vs. their canonical
+# files' own strong `oneOf` -- no longer a meaningful parity comparison;
+# their own coverage lives in agent_schema_top_level_object.test.py (shape)
+# and ledger_confirmation_schema.test.py (ledger ones' real-output
+# acceptance) -- REVIEW_ARTIFACT_SCHEMA's own acceptance test is the one
+# still homed in THIS file, immediately below.
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize("const_name", sorted(CONST_TO_SCHEMA_FILE))
-def test_js_schema_literal_matches_canonical_schema_file(js_schemas, canonical_schemas, const_name):
-    assert_schema_structural_parity(
-        js_schemas[const_name],
-        canonical_schemas[const_name],
-        label=f"{const_name} vs {CONST_TO_SCHEMA_FILE[const_name]}",
+def test_review_schema_is_a_projection_of_canonical_review_schema(js_schemas, canonical_schemas):
+    assert_schema_is_projection(
+        js_schemas["REVIEW_SCHEMA"],
+        canonical_schemas["REVIEW_SCHEMA"],
+        extra_fields={"dispatch_token"},
+        label="REVIEW_SCHEMA vs review.schema.json",
     )
+
+
+# ---------------------------------------------------------------------------
+# REVIEW_ARTIFACT_SCHEMA's own "decoupled acceptance" check (CONTRACT
+# section 1's "DECOUPLE the flat ledger literals from strict on-disk
+# parity" instruction, applied here to REVIEW_ARTIFACT_SCHEMA -- the one
+# flattened schema with no dedicated sibling test file of its own): drives
+# the REAL review_artifact_check.py script via subprocess for both its
+# MATCH and MISMATCH outcomes, and asserts the flat JS literal ACCEPTS
+# both real emitted shapes (never that the two representations are
+# byte-identical -- they can't be; one is flat, the other a strong oneOf).
+# ---------------------------------------------------------------------------
+
+REVIEW_ARTIFACT_CHECK_SCRIPT = (
+    Path(__file__).resolve().parents[1]
+    / "skills" / "literary-translator" / "assets" / "scripts" / "review_artifact_check.py"
+)
+
+
+def _make_review_artifact_check_root(tmp_path):
+    root = tmp_path / "durable_root"
+    scripts_dir = root / "scripts"
+    scripts_dir.mkdir(parents=True)
+    (root / "segments").mkdir()
+    assert REVIEW_ARTIFACT_CHECK_SCRIPT.is_file(), f"expected {REVIEW_ARTIFACT_CHECK_SCRIPT}"
+    shutil.copy2(REVIEW_ARTIFACT_CHECK_SCRIPT, scripts_dir / "review_artifact_check.py")
+    return root
+
+
+def _run_review_artifact_check(root, seg, expected_file):
+    return subprocess.run(
+        [sys.executable, str(root / "scripts" / "review_artifact_check.py"), seg, "--expected-file", str(expected_file)],
+        capture_output=True, text=True, timeout=30,
+    )
+
+
+def test_review_artifact_schema_flat_literal_accepts_real_review_artifact_check_output(
+    tmp_path, js_schemas, canonical_schemas,
+):
+    root = _make_review_artifact_check_root(tmp_path)
+    flat_schema = js_schemas["REVIEW_ARTIFACT_SCHEMA"]
+    strong_schema = canonical_schemas["REVIEW_ARTIFACT_SCHEMA"]
+
+    # -- MATCH: on-disk review artifact == expected-file content exactly.
+    seg_match = "segMatch"
+    rev_obj = {"clean": True, "coverage_ok": True, "findings": [], "draft_sha1": "a" * 40}
+    (root / "segments" / f"{seg_match}.review.json").write_text(json.dumps(rev_obj), encoding="utf-8")
+    expected_file = tmp_path / "expected_match.json"
+    expected_file.write_text(json.dumps(rev_obj), encoding="utf-8")
+    result = _run_review_artifact_check(root, seg_match, expected_file)
+    assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
+    match_payload = json.loads(result.stdout.strip())
+    assert match_payload == {"match": True}
+    jsonschema.validate(instance=match_payload, schema=strong_schema)
+    jsonschema.validate(instance=match_payload, schema=flat_schema)
+
+    # -- MISMATCH: on-disk review artifact diverges from expected-file.
+    seg_mismatch = "segMismatch"
+    (root / "segments" / f"{seg_mismatch}.review.json").write_text(
+        json.dumps({"clean": True, "coverage_ok": True, "findings": [], "draft_sha1": "b" * 40}),
+        encoding="utf-8",
+    )
+    expected_file2 = tmp_path / "expected_mismatch.json"
+    expected_file2.write_text(
+        json.dumps({"clean": True, "coverage_ok": True, "findings": [], "draft_sha1": "c" * 40}),
+        encoding="utf-8",
+    )
+    result2 = _run_review_artifact_check(root, seg_mismatch, expected_file2)
+    assert result2.returncode == 0, f"{result2.stdout}\n{result2.stderr}"
+    mismatch_payload = json.loads(result2.stdout.strip())
+    assert mismatch_payload["match"] is False and "mismatch_detail" in mismatch_payload
+    jsonschema.validate(instance=mismatch_payload, schema=strong_schema)
+    jsonschema.validate(instance=mismatch_payload, schema=flat_schema)
 
 
 # ---------------------------------------------------------------------------
@@ -488,63 +667,27 @@ def test_review_schema_forbids_additional_properties(request, source):
     assert sorted(findings_items["required"]) == sorted(["loc", "severity", "issue", "suggest"])
 
 
-@pytest.mark.parametrize("source", ["js_schemas", "canonical_schemas"])
-def test_review_artifact_schema_both_branches_forbid_additional_properties(request, source):
-    schemas = request.getfixturevalue(source)
-    branches = schemas["REVIEW_ARTIFACT_SCHEMA"]["oneOf"]
-    assert len(branches) == 2
-    for branch in branches:
-        assert branch["additionalProperties"] is False
-
-
-@pytest.mark.parametrize("source", ["js_schemas", "canonical_schemas"])
-def test_ledger_write_schema_failure_branch_omits_fragment_fields(request, source):
-    """The two branches are deliberately asymmetric: a failure never claims
-    a fragment_path/fragment_sha1 that was never written."""
-    schemas = request.getfixturevalue(source)
-    branches = schemas["LEDGER_WRITE_SCHEMA"]["oneOf"]
-    failure = next(b for b in branches if b["properties"]["success"]["const"] is False)
-    success = next(b for b in branches if b["properties"]["success"]["const"] is True)
-
-    assert set(failure["required"]) == {"success", "error"}
-    assert "fragment_path" not in failure["properties"]
-    assert "fragment_sha1" not in failure["properties"]
-    assert failure["additionalProperties"] is False
-
-    assert set(success["required"]) == {"success", "status", "fragment_path", "fragment_sha1"}
-    assert success["additionalProperties"] is False
-
-
-@pytest.mark.parametrize("source", ["js_schemas", "canonical_schemas"])
-def test_ledger_merge_schema_success_branch_requires_empty_missing_segments(request, source):
-    """SUCCESS's missing_segments must be a strictly EMPTY array -- a
-    completeness/subset check that already succeeded has nothing missing
-    by definition; FAILURE's own missing_segments (below) is unrestricted."""
-    schemas = request.getfixturevalue(source)
-    branches = schemas["LEDGER_MERGE_SCHEMA"]["oneOf"]
-    success = next(b for b in branches if b["properties"]["success"]["const"] is True)
-    assert success["properties"]["missing_segments"]["maxItems"] == 0
-    assert set(success["required"]) == {
-        "success", "ledger_path", "n_segments", "missing_segments", "stale_segments",
-    }
-    assert success["additionalProperties"] is False
-
-
-@pytest.mark.parametrize("source", ["js_schemas", "canonical_schemas"])
-def test_ledger_merge_schema_failure_branch_omits_ledger_fields(request, source):
-    schemas = request.getfixturevalue(source)
-    branches = schemas["LEDGER_MERGE_SCHEMA"]["oneOf"]
-    failure = next(b for b in branches if b["properties"]["success"]["const"] is False)
-    assert set(failure["required"]) == {"success", "error"}
-    assert "ledger_path" not in failure["properties"]
-    assert "n_segments" not in failure["properties"]
-    assert "stale_segments" not in failure["properties"]
-    # failure's own optional missing_segments (unlike success's) carries no
-    # maxItems:0 restriction -- a failed merge may legitimately report which
-    # segments are missing.
-    if "missing_segments" in failure["properties"]:
-        assert "maxItems" not in failure["properties"]["missing_segments"]
-    assert failure["additionalProperties"] is False
+# 1.2.0 (CONTRACT section 1, #87 fix): the four named oneOf-branch-indexing
+# tests that used to live here (REVIEW_ARTIFACT_SCHEMA's both-branches
+# additionalProperties check; LEDGER_WRITE_SCHEMA's/LEDGER_MERGE_SCHEMA's
+# SUCCESS/FAILURE asymmetry checks) are DELETED, not merely reparametrized
+# -- js_schemas["REVIEW_ARTIFACT_SCHEMA"]/["LEDGER_WRITE_SCHEMA"]/
+# ["LEDGER_MERGE_SCHEMA"] no longer HAVE a top-level "oneOf" key at all
+# post-flatten (that IS the #87 fix), so indexing schemas[...]["oneOf"] on
+# the js_schemas side would KeyError. The on-disk canonical_schemas side of
+# these same four checks is still real, valid coverage of the STRONG
+# schemas' own SUCCESS/FAILURE branch asymmetry -- but it's no longer this
+# JS-literal-drift file's concern; ledger_confirmation_schema.test.py's own
+# REJECT-SIDE section (crossover-success-with-error /
+# success-missing-fragment-fields / success-with-nonempty-missing-segments
+# / success-plus-unknown-field / failure-missing-error, for BOTH
+# ledger-write-confirmation.schema.json and
+# ledger-merge-confirmation.schema.json) now owns that exact lock.
+# REVIEW_ARTIFACT_SCHEMA's own on-disk oneOf branch shape is exercised
+# indirectly by test_review_artifact_schema_flat_literal_accepts_real_
+# review_artifact_check_output above (both a MATCH and a MISMATCH real
+# payload validate against review-artifact-check.schema.json's strong
+# oneOf).
 
 
 # ---------------------------------------------------------------------------
@@ -580,45 +723,70 @@ def test_schema_literals_declared_above_the_real_pipeline_call(js_source):
 # catch that same divergence if it ever crept into either source file.
 # ---------------------------------------------------------------------------
 
-def test_parity_helper_catches_added_verse_status_field(js_schemas, canonical_schemas):
+def test_projection_helper_catches_added_verse_status_field(js_schemas, canonical_schemas):
+    """A THIRD, unnamed extra field (verse_status) beyond the one documented
+    projection gap (dispatch_token) must be caught -- the extra-fields set
+    check is exact, not merely "canonical is a superset"."""
     mutated = json.loads(json.dumps(canonical_schemas["REVIEW_SCHEMA"]))
     mutated["properties"]["verse_status"] = {"type": "string"}
-    mutated["required"].append("verse_status")
     with pytest.raises(AssertionError):
-        assert_schema_structural_parity(
-            js_schemas["REVIEW_SCHEMA"], mutated, label="mutated REVIEW_SCHEMA (added verse_status)"
+        assert_schema_is_projection(
+            js_schemas["REVIEW_SCHEMA"], mutated, extra_fields={"dispatch_token"},
+            label="mutated REVIEW_SCHEMA (added verse_status)",
         )
 
 
-def test_parity_helper_catches_dropped_draft_sha1_requirement(js_schemas, canonical_schemas):
+def test_projection_helper_catches_dropped_draft_sha1_requirement(js_schemas, canonical_schemas):
     mutated = json.loads(json.dumps(canonical_schemas["REVIEW_SCHEMA"]))
     mutated["required"].remove("draft_sha1")
     with pytest.raises(AssertionError):
-        assert_schema_structural_parity(
-            js_schemas["REVIEW_SCHEMA"], mutated, label="mutated REVIEW_SCHEMA (dropped draft_sha1 requirement)"
+        assert_schema_is_projection(
+            js_schemas["REVIEW_SCHEMA"], mutated, extra_fields={"dispatch_token"},
+            label="mutated REVIEW_SCHEMA (dropped draft_sha1 requirement)",
         )
 
 
-def test_parity_helper_catches_relaxed_additional_properties(js_schemas, canonical_schemas):
-    mutated = json.loads(json.dumps(canonical_schemas["LEDGER_WRITE_SCHEMA"]))
-    mutated["oneOf"][0]["additionalProperties"] = True
+def test_projection_helper_catches_dispatch_token_promoted_to_required(js_schemas, canonical_schemas):
+    """The projection's one permitted extra field (dispatch_token) must stay
+    OPTIONAL-only -- promoting it to required on the canonical side (without
+    REVIEW_SCHEMA following suit, which it structurally can't -- it doesn't
+    even have the field) must be caught, not silently accepted as "still a
+    valid projection"."""
+    mutated = json.loads(json.dumps(canonical_schemas["REVIEW_SCHEMA"]))
+    mutated["required"].append("dispatch_token")
     with pytest.raises(AssertionError):
-        assert_schema_structural_parity(
-            js_schemas["LEDGER_WRITE_SCHEMA"], mutated,
-            label="mutated LEDGER_WRITE_SCHEMA (relaxed additionalProperties)",
+        assert_schema_is_projection(
+            js_schemas["REVIEW_SCHEMA"], mutated, extra_fields={"dispatch_token"},
+            label="mutated REVIEW_SCHEMA (dispatch_token promoted to required)",
         )
 
 
-def test_parity_helper_ignores_description_only_divergence(js_schemas, canonical_schemas):
-    """Sanity companion to the three catches above: a PURE prose edit (no
+def test_projection_helper_catches_relaxed_additional_properties_on_a_shared_field(js_schemas, canonical_schemas):
+    """A structural drift on a SHARED field (findings[].additionalProperties,
+    relaxed from false to true) must still be caught by the projection
+    helper, exactly as strict parity would have caught it -- the projection
+    relaxation applies ONLY to the documented extra top-level field(s),
+    never to fields both representations actually share."""
+    mutated = json.loads(json.dumps(canonical_schemas["REVIEW_SCHEMA"]))
+    mutated["properties"]["findings"]["items"]["additionalProperties"] = True
+    with pytest.raises(AssertionError):
+        assert_schema_is_projection(
+            js_schemas["REVIEW_SCHEMA"], mutated, extra_fields={"dispatch_token"},
+            label="mutated REVIEW_SCHEMA (relaxed findings[].additionalProperties)",
+        )
+
+
+def test_projection_helper_ignores_description_only_divergence(js_schemas, canonical_schemas):
+    """Sanity companion to the catches above: a PURE prose edit (no
     structural change) must NOT be flagged -- otherwise the helper would be
     too strict to ever pass against these two independently-worded, but
-    structurally-identical, real files."""
+    structurally-compatible, real files."""
     mutated = json.loads(json.dumps(canonical_schemas["REVIEW_SCHEMA"]))
     mutated["properties"]["clean"]["description"] = "Completely different prose, on purpose."
     mutated["description"] = "Also completely different top-level prose."
-    assert_schema_structural_parity(
-        js_schemas["REVIEW_SCHEMA"], mutated, label="mutated REVIEW_SCHEMA (description-only edit)"
+    assert_schema_is_projection(
+        js_schemas["REVIEW_SCHEMA"], mutated, extra_fields={"dispatch_token"},
+        label="mutated REVIEW_SCHEMA (description-only edit)",
     )
 
 

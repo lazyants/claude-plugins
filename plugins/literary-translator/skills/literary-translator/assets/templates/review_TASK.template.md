@@ -1,4 +1,4 @@
-<!-- PROMPT_CONTRACT_VERSION: 1 -->
+<!-- PROMPT_CONTRACT_VERSION: 2 -->
 <!--
   review_TASK.template.md -- one-time-seed prompt contract for the
   per-segment review agent.
@@ -8,9 +8,22 @@
   references/ledger-and-resumability.md's canonical-path invariants).
   Hand-adapt the bracketed [PLACEHOLDER] spots below for THIS project right
   after the copy, then leave the file alone -- mass-translate-wf.template.js's
-  `reviewPrompt()` re-reads `${durable_root}/review_TASK.md` fresh for every
-  segment it dispatches, so any later edit here applies retroactively to
-  every not-yet-reviewed segment.
+  `reviewDispatchPrompt()` re-reads `${durable_root}/review_TASK.md` fresh
+  for every segment it dispatches, so any later edit here applies
+  retroactively to every not-yet-reviewed segment.
+
+  1.2.0: `reviewDispatchPrompt()`'s own generated prompt text carries the
+  FULL review contract inline -- the dispatch/wait/consume shape, the
+  `dispatch_token` this file's own output section below now requires, and
+  the exact write path -- and SUPERSEDES this durable file's own
+  instructions on any point of conflict. This file may predate that change
+  on a project resumed from an older plugin version; a drift between this
+  file's prose and `reviewDispatchPrompt()`'s generated contract is
+  expected on such a project, not a bug to reconcile by hand -- the
+  generated prompt always wins. This file still matters for the
+  hand-adapted PLACEHOLDER content (source/target language, project title,
+  the era/domain trap example) that `reviewDispatchPrompt()` reads back out
+  of it.
 
   This file is deliberately verse-policy-NEUTRAL, for the same reason
   translate_TASK.template.md is: verse-handling expectations for THIS run
@@ -95,13 +108,21 @@ example baked into this file):
   intentionally awkward or archaic passage) is NOT itself a defect --
   distinguish "faithfully odd" from "translation is wrong."
 
-## Output -- EXACTLY this JSON (no markdown fencing):
+## Output -- write the file, then print one sentinel line
 
-Return a structured result with exactly these fields, and ALSO write that
-exact same JSON object to `${durable_root}/segments/{SEG}.review.json`
+This is a fire-and-forget dispatch: nothing reads your own turn's return
+value as the verdict. Your job is to WRITE the file correctly, not to
+return a structured result -- a separate, later call reads
+`${durable_root}/segments/{SEG}.review.json` back off disk (see
+`references/workflow-schema-validation.md`'s DISPATCH -> WAIT -> CONSUME
+pattern).
+
+Write EXACTLY this JSON object (no markdown fencing) to
+`${durable_root}/segments/{SEG}.review.json`
 (see `review.schema.json`; this filename never carries a target-language
 suffix -- always `{SEG}.review.json`, regardless of this project's target
-language):
+language) -- write it ATOMICALLY (temp file + rename, never a partial file
+visible mid-write):
 
 ```
 {
@@ -111,7 +132,8 @@ language):
     {"loc": "<block_id | FN:n | VERSE:vid>", "severity": "high|medium|low",
      "issue": "<what is wrong>", "suggest": "<how to fix it -- brief, concrete>"}
   ],
-  "draft_sha1": "<the sha1 you computed BEFORE reading the draft, above>"
+  "draft_sha1": "<the sha1 you computed BEFORE reading the draft, above>",
+  "dispatch_token": "<the exact token your dispatch prompt gave you for this call -- copy it verbatim>"
 }
 ```
 
@@ -120,8 +142,9 @@ you have judged none of them require a fix round). `coverage_ok: true`
 only if the deterministic gate
 (`python3 ${durable_root}/scripts/validate_draft.py {SEG}`) printed `OK`
 for you when you ran it -- run it yourself as part of this review, do not
-assume it.
+assume it. `dispatch_token` is metadata, not part of the accuracy verdict
+-- it identifies which run and round this write belongs to, so a later
+readiness check can tell your write apart from a stale one.
 
-Final response: exactly the line
-`REVIEW {SEG} clean=<true|false> findings=<N>`. The work lives in the
+Final response: exactly the line `REVIEWED {SEG}`. The work lives in the
 file, not in your response text.

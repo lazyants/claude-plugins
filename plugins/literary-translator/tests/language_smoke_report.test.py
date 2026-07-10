@@ -486,6 +486,38 @@ def test_extract_candidate_names_nested_wrapper_masked_boundary_regression(tmp_p
     assert by_name == {"Fiona": True, "George": True}
 
 
+def test_extract_candidate_names_strips_trailing_apostrophe_regression(tmp_path, root):
+    # Issue #82 mirror on THIS script's own generalized extractor, exercised
+    # through the real subprocess with the FR elision config active. A trailing
+    # apostrophe after a name (e.g. "Fiona’ George") must be STRIPPED by the
+    # tokenizer, not absorbed into the token -- so the single fused candidate is
+    # the apostrophe-free "Fiona George", never "Fiona’ George". "’" is a
+    # WRAPPER (not a TERMINATOR), so with no real sentence boundary present the
+    # run still fuses; only the stray apostrophe is gone. Both the straight and
+    # curly variants dedupe to the same candidate, so candidate_names_total==1.
+    manifest = build_manifest(["Fiona’ George nodded.", "Fiona' George nodded."])
+    lang = particle_config_payload(has_elision=True, elision_re=FR_ELISION_RE)
+    elision_cases = [
+        {"sentence": "Il visita le chateau d'Effiat hier.", "expected_names": ["Effiat"]},
+    ]
+    proc, report, _ = run_smoke(
+        root, tmp_path, manifest, lang,
+        checked_names=["Fiona George"],
+        low_name_density_confirmed=True,
+        no_particles_confirmed=True,
+        elision_cases=elision_cases,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert report is not None
+    # The apostrophe never survives into the candidate: the ONLY candidate is
+    # the apostrophe-free fused form, so an absorbed "Fiona’ George" (which
+    # would leave "Fiona George" not-found) is impossible.
+    assert report["candidate_names_total"] == 1
+    by_name = {c["name"]: c["found"] for c in report["checked_names"]}
+    assert by_name == {"Fiona George": True}
+    assert all(c["passed"] for c in report["elision_test_cases"])
+
+
 def test_empty_sample_with_no_body_and_no_frontback_is_fatal(tmp_path, root):
     manifest = build_manifest([])  # no body segments, no frontback entries
     proc, report, _ = run_smoke(root, tmp_path, manifest, NO_PARTICLES_NO_ELISION)

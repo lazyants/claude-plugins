@@ -40,6 +40,10 @@
     "draft_sha1": {
       "type": "string",
       "description": "Deliberate plugin addition -- the real reference schema lacks this field. The reviewer's own sha1 of the draft it is about to review, computed by shelling out to draft_sha1.py BEFORE reading the draft (hash-first-then-read). This is a staleness-detection mechanism: at convergence, ledger_update.py re-reads this value, computes a fresh sha1 of the current on-disk draft, and compares -- a mismatch (the draft changed since this review was written) refuses to record convergence at all. Hash-first-then-read narrows but does not fully close the TOCTOU window."
+    },
+    "dispatch_token": {
+      "type": "string",
+      "description": "1.2.0 addition. Run-scoped freshness token = '<RUN_ID>:<seg>:r<roundLabel>' (roundLabel = the round number or 'final'), written by reviewDispatchPrompt. OPTIONAL at the schema level -- it is runtime freshness metadata, not structural review content, so its absence (e.g. a legacy pre-1.2.0 review.json) is not itself a structural defect. Presence+correctness is enforced where it actually matters: review_ready.py explicitly compares this field against --expect-token (a missing value simply fails that equality check, same as a wrong one) and it is re-asserted at every downstream consume/commit point (the per-segment convergence ledger write, the batch-final merge-ledger). NOT part of REVIEW_SCHEMA (the agent's own 4-field verdict return used by readReviewPrompt) -- review_artifact_check.py projects both the on-disk file and the expected object down to exactly {clean, coverage_ok, findings, draft_sha1} before comparing, so a 5-field on-disk file still matches a 4-field expected object."
     }
   },
   "required": ["clean", "coverage_ok", "findings", "draft_sha1"],

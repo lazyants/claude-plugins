@@ -105,10 +105,13 @@ Implemented by `scripts/profile_validate.py`, invoked as:
 python3 {{PLUGIN_ROOT}}/assets/scripts/profile_validate.py --profile .claude/literary-translator/profile.yml
 ```
 
-Run by the **orchestrating session directly**. This is the ONE script always
-invoked from the plugin's own install path, never a durable-root copy — it
-runs before Step 0a exists to create one (same exception as Step 0c reading
-`references/source-format-adapters/*.md` directly from the plugin).
+Run by the **orchestrating session directly**, always from the plugin's own
+install path, never a durable-root copy — it runs before Step 0a exists to
+create one (same exception as Step 0c reading
+`references/source-format-adapters/*.md` directly from the plugin). It is one
+of two scripts never copied to `durable_root`; the other,
+`validate_extraction.py` (the W2 post-extraction gate), is kept plugin-only
+for tamper-proofing rather than because it predates the durable root.
 
 Order of operations:
 
@@ -211,7 +214,10 @@ Four outcomes, in this exact order:
    or "claimed by a different project (`<owner_profile_path>`)".
 
 Then: creates `project.durable_root` if it doesn't exist; creates the fixed
-skeleton: `segments/`, `glossary/`, `verses/`, `runs/`, `runs/ledger.d/`,
+skeleton: `segments/`, `glossary/`, `glossary/runs/` (1.2.0 — the parent
+directory for every glossary-pass run's `{{RUN_ID}}`-scoped fragments and
+manifests, see `references/orchestration-and-batching.md` and
+`references/canon-and-glossary.md`), `verses/`, `runs/`, `runs/ledger.d/`,
 `runs/workflows/`, `scripts/`, `languages/`, `schemas/`, `out/`. Also
 explicitly creates the specific resolved parent of `output.destination`
 (mkdir -p, idempotent) whenever it resolves inside `durable_root`, and the
@@ -219,7 +225,8 @@ same for `smoke_test.report_path` (skipped when null).
 
 Copies (unconditional overwrite, safe since these files are never
 hand-edited): every file in `assets/scripts/*.py` (except
-`profile_validate.py`, never copied), every shipped file in `assets/languages/`
+`profile_validate.py` and `validate_extraction.py`, both run only from the
+plugin path and are never copied), every shipped file in `assets/languages/`
 (`fr.json`, `de.json`, `es.json`, `it.json`, `README.md`), every file in
 `assets/schemas/*.json` → `${durable_root}/scripts/`,
 `${durable_root}/languages/`, `${durable_root}/schemas/` respectively.
@@ -368,18 +375,22 @@ here, follow the linked doc:
   `references/verse-policy.md`
 - **R6 — Word-sense/realia accuracy is first-class.** Covered as a review
   dimension in `references/engine-loop.md`.
-- **R7 — Workflow-script schema requirement**, two explicit categories:
-  1. Codex structured-accuracy/canon calls (review + canon/glossary-pass
-     batches) — MUST be `agentType:'codex:codex-rescue'` + a `schema` param.
-     The translate call is the one deliberate exception even within this
-     category: intentionally schema-less, gated by file output +
-     `draft_ready.py`/`validate_draft.py` instead, matching the proven
-     reference script exactly.
-  2. Non-codex mechanical schema-confirmation calls — `recordLedgerPrompt` —
-     use a `schema` param for a different reason (verifying a shell script's
-     JSON stdout was well-formed, not forcing a codex verdict). Not
-     `agentType:'codex:codex-rescue'`. `effort:'low'` since no judgment is
-     involved.
+- **R7 — Workflow-script schema requirement**, 1.2.0 shape: every codex
+  accuracy-bearing call (translate, review, canon/glossary-pass batches) is
+  a **schema-less, fire-and-forget DISPATCH** — `agentType:'codex:codex-rescue'`,
+  no `schema` param — that writes its verdict to a `{{RUN_ID}}`-scoped disk
+  artifact. A bounded Claude WAIT poll, then a schema-validated Claude
+  CONSUME call (`readReviewPrompt`/`REVIEW_SCHEMA`, the glossary disk-verify
+  call/`CANON_VERIFY_SCHEMA`), read that artifact back and force a real
+  structured object out of it — never the codex call itself. Non-codex
+  mechanical schema-confirmation calls — `recordLedgerPrompt`,
+  `mergeLedgerPrompt`, `verifyReviewArtifactPrompt` — use a `schema` param for a
+  different reason (verifying a shell script's own JSON stdout/printed line
+  was well-formed, not forcing a codex verdict); none specify
+  `agentType:'codex:codex-rescue'`; all run at `effort:'low'` since no
+  judgment is involved. Every agent-facing `schema` literal is a flat
+  top-level `object` (`#87` — an `agent()` schema is a tool `input_schema`,
+  which cannot be a top-level `oneOf`/`allOf`/`anyOf`/`array`).
 
   `references/workflow-schema-validation.md`
 
@@ -409,6 +420,23 @@ verse-structure, `no_segment_exceeds_max_words`) must be green before
 anything downstream runs. Plus a `manifest.schema.json` validation pass
 immediately after extraction using the real `jsonschema.Draft202012Validator`.
 
+Then a MANDATORY managed post-extraction gate: `extract.py`'s in-file
+self-checks live in a hand-adapted file and could be silenced to fake green,
+so they are never the last word. After extraction produces `manifest.json`,
+run:
+
+```
+python3 {{PLUGIN_ROOT}}/assets/scripts/validate_extraction.py --manifest ${durable_root}/manifest.json --extract ${durable_root}/extract.py --profile .claude/literary-translator/profile.yml
+```
+
+from the plugin's own install path — never a durable-root copy (same
+exception class as `profile_validate.py`; it is deliberately not a bundle
+member and never adapted per-project). It independently RE-DERIVES the
+manifest-derivable invariants directly from `manifest.json` (so a hand-edited
+extractor that skips or fakes its own enforcement cannot manufacture a green
+manifest) and pins `extract.py`'s self-check region by hash. The pipeline
+advances to W3 ONLY on its exit `0` (see R2 / `references/false-green-gate.md`).
+
 **W3 Bootstrap style bible + language smoke test.** After W2 produces
 `manifest.json`, W3's own procedural code (never `profile.schema.json`)
 computes three hashes: the resolved `particle_config` file's content hash, a
@@ -435,12 +463,26 @@ a mismatched `has_elision` value, is treated as no report at all.
 Then run `bootstrap_names.py` (configured from
 `${durable_root}/languages/<particle_config's literal value>` — never
 rebuilt from `source.language.code` alone) to get frequency-ranked name
-candidates. Run the codex-glossary-pass as a schema-validated Workflow-level
-`agent()` call — instantiate `glossary-pass-wf.template.js` fresh from the
-plugin's current copy every time — batched over
-`${durable_root}/glossary_TASK.md`, each batch call is
-`agent(glossaryPrompt(batch), {agentType:'codex:codex-rescue', effort:'high', schema: CANON_BATCH_SCHEMA})`
-— to freeze `canon.json`. Write `style_contract` sections A–F by hand/
+candidates. Run the codex-glossary-pass, instantiating
+`glossary-pass-wf.template.js` fresh from the plugin's current copy every
+time — batched over `${durable_root}/glossary_TASK.md`. **1.2.0:** before
+ever calling `pipeline()`, a deterministic pre-workflow step invokes
+`resume_setup.py` (kind `glossary`) — it resolves `effectiveRunId` via the
+resume-integrity digest gate, creates `glossary/runs/<RUN_ID>/`, and
+atomically writes each batch's `manifest_{index}.json` plus the aggregate
+`manifest_all.json`, aborting before any dispatch if any of that fails (see
+`references/orchestration-and-batching.md`). Only then does each batch run
+the shared fire-and-forget dispatch → bounded poll → disk-truth pattern:
+`agent(batchDispatchPrompt(batch), {agentType:'codex:codex-rescue',
+effort:'high'})` (schema-less, writes the run-scoped fragment
+`glossary/runs/{{RUN_ID}}/out_{index}.json`, self-checks against its own
+manifest) → `batchWaitPrompt` (bounded poll) → once every fragment is
+`READY`, one serialized `canon_validate.py --merge-batches` call plus one
+disk-verify call (`schema: CANON_VERIFY_SCHEMA`) close the pass and freeze
+`canon.json` — see `references/canon-and-glossary.md` for the full
+mechanics and `references/workflow-schema-validation.md` for why the
+pre-1.2.0 single schema-validated `agent()` call per batch was replaced
+(`#87`/`#88`/`#90`/`#97`). Write `style_contract` sections A–F by hand/
 interview with the user; leave section G (glossary) to the glossary-pass
 output.
 
@@ -549,6 +591,22 @@ is called. It:
   confirmation run).
 - Every invocation logs requested `--only-segs` IDs alongside
   actually-emitted `SEGS` IDs side by side.
+
+**1.2.0: the deterministic pre-workflow step, after `SEGS` and before
+`pipeline()`.** With `SEGS` finalized, invoke `resume_setup.py` (kind
+`mass`) before the Workflow tool ever launches: it computes each segment in
+`SEGS`'s current `cache_key.py` composite key, resolves `effectiveRunId` via
+the resume-integrity digest gate (`input_digest` MATCH against a prior
+`runs/<RUN_ID>/input.digest` → resume with `resumeFromRunId`; MISMATCH or
+absent → fresh `RUN_ID`, no `resumeFromRunId`), and creates
+`runs/workflows/<RUN_ID>/` — aborting before any dispatch on failure. Only
+then is `mass-translate-wf.template.js` instantiated (fresh from the
+plugin's current copy every run — never reuse a stale generated copy),
+substituting the resolved `{{RUN_ID}}` alongside every other token, and
+`pipeline()` launched. See `references/orchestration-and-batching.md` for
+the full `{{RUN_ID}}` derivation contract and digest definition, and
+`references/ledger-and-resumability.md` for the `dispatch_token`
+commit-gate chain this sets up for translate/review to enforce per segment.
 
 **W6 Consistency pass** — cross-segment sweep using `consistency_issues.md`
 as a lightweight, hand-maintained tracker after every batch, before the next

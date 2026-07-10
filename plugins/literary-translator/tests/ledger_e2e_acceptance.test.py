@@ -286,6 +286,21 @@ def sha1_of_bytes(data: bytes) -> str:
     return hashlib.sha1(data).hexdigest()
 
 
+def draft_content_sha1_of(doc: dict) -> str:
+    """1.2.0: ledger_update.py/draft_sha1.py now hash a segment draft's
+    CONTENT, not its raw on-disk bytes -- CONTRACT-1.2.0-reliability.md
+    section 2. Independent, stdlib-only ground truth (drop 'dispatch_token'
+    if present, sha1 the sorted-key canonical re-serialization); duplicated
+    here rather than imported, matching this suite's "each test file stays
+    self-contained" convention (see tests/draft_sha1.test.py's own
+    canonical_expected_sha1() for the more-exhaustively-tested original)."""
+    projected = {k: v for k, v in doc.items() if k != "dispatch_token"}
+    canonical = json.dumps(
+        projected, sort_keys=True, ensure_ascii=False, separators=(",", ":")
+    ).encode("utf-8")
+    return hashlib.sha1(canonical).hexdigest()
+
+
 def _run(script_path: Path, args, root: Path, timeout: int = 60) -> subprocess.CompletedProcess:
     return subprocess.run(
         [sys.executable, str(script_path), *args],
@@ -360,13 +375,19 @@ def write_draft_and_review(root: Path, seg: str, text: str) -> str:
     """Writes a fresh draft + matching review artifact for `seg` -- standing
     in for the codex translate/review agents' real output files (the part of
     the engine loop this test mocks; only the LEDGER/RESUMABILITY MACHINERY
-    is under test here). Returns the draft's own sha1, the value a real
+    is under test here). Returns the draft's own content-sha1 (1.2.0:
+    ledger_update.py's draft_content_sha1() algorithm -- canonical JSON,
+    dispatch_token excluded, NOT a raw-bytes hash), the value a real
     reviewer would stamp into segments/{seg}.review.json's draft_sha1 field.
-    """
+    `text` is wrapped in a minimal valid draft.schema.json-shaped object
+    (1.2.0 requires the draft file to be a JSON object) -- distinct `text`
+    values still produce genuinely distinct content and therefore distinct
+    hashes, so every caller's "different draft content -> different
+    fragment/cache behavior" scenario is unaffected."""
     draft_path = root / "segments" / f"{seg}.draft.json"
-    draft_bytes = text.encode("utf-8")
-    draft_path.write_bytes(draft_bytes)
-    draft_sha1 = sha1_of_bytes(draft_bytes)
+    draft_doc = {"seg": seg, "blocks": {"p1": text}}
+    draft_path.write_text(json.dumps(draft_doc, ensure_ascii=False), encoding="utf-8")
+    draft_sha1 = draft_content_sha1_of(draft_doc)
     review_path = root / "segments" / f"{seg}.review.json"
     review_path.write_text(
         json.dumps({"draft_sha1": draft_sha1, "clean": True, "coverage_ok": True}),
@@ -502,6 +523,11 @@ def test_ledger_e2e_acceptance_full_batch_cycle(tmp_path):
     gamma_cls = batch2_classification["classification"][SEG_GAMMA]
     delta_cls = batch2_classification["classification"][SEG_DELTA]
 
+    # Only style_bible.md changed here, so cache_key_mismatch alone fires
+    # (the draft itself is byte-for-byte untouched since batch 1).
+    # select_segments.py's draft-sha1 recomputation now uses the same
+    # draft_content_sha1() algorithm as ledger_update.py, so the two stay
+    # consistent and draft_sha1_mismatch does not spuriously fire.
     assert alpha_cls == {
         "category": "stale",
         "stale_reason": ["cache_key_mismatch"],
@@ -655,6 +681,75 @@ def test_ledger_e2e_acceptance_full_batch_cycle(tmp_path):
     assert SEG_BETA not in final_merge["stale_segments"]
     assert SEG_GAMMA not in final_merge["stale_segments"]
     assert SEG_DELTA not in final_merge["stale_segments"]
+
+
+# ---------------------------------------------------------------------------
+# Regression-catcher: select_segments.py's own draft-sha1 recomputation must
+# use the exact same draft_content_sha1() algorithm ledger_update.py writes
+# `reviewed_draft_sha1` with -- never a raw-bytes hash of the file. This is
+# the precise writer<->reader seam that regressed in 1.2.0: every converged
+# segment above (batch 1 of the big acceptance test) would have been
+# misclassified `stale` with `draft_sha1_mismatch` forever, purely because
+# their on-disk draft bytes are never in canonical form. Pins the seam
+# directly rather than relying on that indirectly.
+# ---------------------------------------------------------------------------
+
+
+def test_select_segments_reusable_survives_non_canonical_draft_bytes(tmp_path):
+    """A converged segment whose on-disk draft is deliberately NON-canonical
+    (top-level keys out of sorted order, pretty-printed with extra
+    indentation, and a `dispatch_token` metadata field present) must still
+    classify `reusable` -- proving select_segments.py's freshly recomputed
+    draft-sha1 equals ledger_update.py's recorded `reviewed_draft_sha1`
+    despite the on-disk bytes never matching the canonical serialization
+    either algorithm re-derives its hash from. A regression back to a
+    raw-bytes hash in select_segments.py would misclassify this `stale` with
+    `draft_sha1_mismatch` even though nothing about the draft actually
+    changed since review.
+    """
+    root = make_durable_root(tmp_path)
+    seg = SEG_ALPHA
+
+    # Deliberately non-canonical: keys in human-authored (non-alphabetical)
+    # order, pretty-printed with indentation, and a `dispatch_token` metadata
+    # field present -- exactly the shape a real on-disk draft has, never the
+    # compact sorted-key form draft_content_sha1() re-serializes to.
+    draft_doc = {
+        "zzz_last_block": "content placed first on purpose",
+        "dispatch_token": "some-run-token:seg_alpha",
+        "seg": seg,
+        "blocks": {"p1": "Translated prose for seg_alpha.\n"},
+    }
+    (root / "segments" / f"{seg}.draft.json").write_text(
+        json.dumps(draft_doc, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
+
+    # The hash a real reviewer (and ledger_update.py, independently) would
+    # compute: canonical content hash, dispatch_token excluded -- deliberately
+    # NOT the raw bytes of the pretty-printed file just written above.
+    draft_sha1 = draft_content_sha1_of(draft_doc)
+    (root / "segments" / f"{seg}.review.json").write_text(
+        json.dumps({"draft_sha1": draft_sha1, "clean": True, "coverage_ok": True}),
+        encoding="utf-8",
+    )
+
+    cache_key = run_cache_key(root, seg)
+    write_result = run_ledger_update(
+        root, seg, {"status": "converged", "rounds": 1, "cache_key": cache_key}, tag="noncanonical"
+    )
+    assert write_result["status"] == "converged"
+
+    fragment = read_fragment(root, seg)
+    # ledger_update.py computed this itself, independently, from the same
+    # on-disk file -- sanity-check the fixture before trusting
+    # select_segments.py's own separate recomputation below.
+    assert fragment["reviewed_draft_sha1"] == draft_sha1
+
+    # seg_beta/seg_gamma/seg_delta are untouched (not_started), so the
+    # emitted SEGS is non-empty on its own -- no --allow-empty needed.
+    rc, classification = run_select_segments(root)
+    assert rc == 0, classification
+    assert classification["classification"][seg] == {"category": "reusable"}
 
 
 if __name__ == "__main__":

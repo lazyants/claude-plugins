@@ -68,9 +68,16 @@ except ImportError:  # pragma: no cover - exercised only when PyYAML is absent
 
 DURABLE_ROOT = Path(__file__).resolve().parents[1]
 
-# The six scripts (+ two workflow templates) that make up plugin_bundle_hash.
+# The eight scripts (+ two workflow templates) that make up plugin_bundle_hash.
 # NEVER bootstrap_names.py/segpack.py (their own derivation_bundle_hash) and
 # NEVER the four orchestration-only scripts (orchestration_bundle_hash).
+# review_ready.py and resume_setup.py (1.2.0) join this list rather than
+# orchestration_bundle_hash's diagnostic-only bucket -- unlike draft_ready.py's
+# hand-rolled structural probe, review_ready.py performs FULL review.schema.json
+# validation (a correctness-determining check, like review_artifact_check.py's),
+# and resume_setup.py's digest logic directly determines whether a run resumes
+# or reuses cached results at all -- both squarely "directly shape ... whether a
+# convergence verdict was correctly recorded" territory, not diagnostic logging.
 PLUGIN_BUNDLE_MEMBERS = (
     "validate_draft.py",
     "canon_validate.py",
@@ -78,6 +85,8 @@ PLUGIN_BUNDLE_MEMBERS = (
     "draft_sha1.py",
     "review_artifact_check.py",
     "ledger_update.py",
+    "review_ready.py",
+    "resume_setup.py",
     "mass-translate-wf.template.js",
     "glossary-pass-wf.template.js",
 )

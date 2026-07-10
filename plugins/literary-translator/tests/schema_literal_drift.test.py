@@ -560,6 +560,24 @@ def test_profile_validate_excluded_from_every_bundle(cache_key_module):
     )
 
 
+def test_review_ready_and_resume_setup_are_plugin_bundle_members(cache_key_module):
+    """1.2.0 (CONTRACT-1.2.0-reliability.md §4): 'Add review_ready.py +
+    resume_setup.py to PLUGIN_BUNDLE_MEMBERS.' Every other assertion in this
+    file is fully derived (it would accept either script's addition or
+    absence silently, as long as both restatement sites agree) -- this is a
+    NAMED regression-catcher locking the two specific new memberships the
+    CONTRACT commits to, so a build that forgets one fails loudly here
+    rather than only via a downstream resume-integrity/cache-invalidation
+    surprise."""
+    plugin_members = frozenset(cache_key_module.PLUGIN_BUNDLE_MEMBERS)
+    missing = {"review_ready.py", "resume_setup.py"} - plugin_members
+    assert not missing, (
+        f"PLUGIN_BUNDLE_MEMBERS is missing 1.2.0's new member(s) {sorted(missing)} "
+        f"-- CONTRACT-1.2.0-reliability.md §4 requires both review_ready.py and "
+        f"resume_setup.py to gate plugin_bundle_hash (and therefore cache reuse)"
+    )
+
+
 def test_bundle_member_scripts_and_templates_exist_on_disk(cache_key_module):
     """Every filename named in either code-level bundle-membership tuple
     must actually resolve to a real, shipped file -- scripts under

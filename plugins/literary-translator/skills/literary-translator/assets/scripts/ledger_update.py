@@ -17,7 +17,8 @@ The caller (an agent, shelling out mid-turn) first writes its intended
 fields as a JSON object to a scratch payload file -- no shell
 interpolation of field values -- then invokes this script with just that
 path. The payload may set ONLY: status (required), rounds (a bare
-integer), reason, note, cache_key. Anything else is refused.
+integer), reason, note, cache_key, run_token (a bare RUN_ID string, 1.2.0
+addition -- see below). Anything else is refused.
 
 Every write is a FULL REPLACE, never a read-modify-write merge: the
 fragment written is built entirely fresh from (1) a freshly generated
@@ -44,6 +45,24 @@ ledger-write-confirmation.schema.json. Success:
 Failure: {"success": false, "error": ...} (plus optional exit_code/stderr).
 The two shapes are never mixed -- a failure never claims a fragment_path/
 fragment_sha1 that was never written.
+
+1.2.0 addition -- payload's `run_token`: when the payload's status is
+'converged', this script ALREADY re-checks draft_sha1 (via
+draft_content_sha1(), which deliberately excludes the draft's own
+dispatch_token metadata field from the hash -- see that function's own
+docstring). `run_token` (a bare RUN_ID string, written by the calling
+recordLedgerPrompt agent alongside `cache_key`) layers an INDEPENDENT
+precondition on top: this script reconstructs the exact expected draft
+token, expected_draft_token(run_token, seg) = '<run_token>:<seg>', and
+requires the on-disk draft's own dispatch_token to equal it EXACTLY, and
+review.json's own dispatch_token to equal it plus a ':r<roundLabel>'
+SUFFIX (review_token_matches(), a prefix match -- review's token format
+carries a round label the draft's own form does not). Reconstructing the
+FULL expected token (not just a bare RUN_ID comparison) also catches a
+same-run-but-wrong-segment token. A mismatch refuses convergence
+(structured failure, not recorded) -- closing a stale/straggler
+draft-or-review-from-a-different-run gap that a content-sha1 match alone
+cannot catch. Optional and backward-compatible when the payload omits it.
 """
 
 import argparse
@@ -104,16 +123,68 @@ def segpack_path(seg):
 
 
 def sha1_bytes_of_file(path):
-    """sha1 of a file's raw on-disk bytes.
-
-    Must match draft_sha1.py's own hash exactly -- both hash the file's raw
-    bytes, nothing re-serialized or re-canonicalized.
+    """sha1 of a file's raw on-disk bytes -- used for this script's OWN
+    ledger-fragment output file (write_fragment_atomically()'s
+    fragment_sha1), never for a draft. Plain files have no dispatch_token
+    to exclude, so raw-byte hashing is exactly right here; see
+    draft_content_sha1() below for the (different) draft-hashing scheme.
     """
     h = hashlib.sha1()
     with open(path, "rb") as f:
         for chunk in iter(lambda: f.read(65536), b""):
             h.update(chunk)
     return h.hexdigest()
+
+
+def expected_draft_token(run_token, seg):
+    """Constructs the exact draft-form dispatch_token expected for THIS
+    segment under the given bare run_token: '<run_token>:<seg>' -- draft
+    dispatch_token's own documented format. Reconstructing the FULL
+    expected token (not just extracting/comparing a RUN_ID prefix) also
+    catches a same-run-but-wrong-segment token (e.g. a corrupted/misplaced
+    draft carrying some OTHER segment's token under the same run), which a
+    bare RUN_ID-component comparison alone would miss. Must match, byte for
+    byte, ledger_merge.py's own copy of this function.
+    """
+    return f"{run_token}:{seg}"
+
+
+def review_token_matches(review_token, draft_token):
+    """review.json's own dispatch_token = '<draft_token>:r<roundLabel>' --
+    a ':r<roundLabel>' SUFFIX the draft's own token does not carry (see
+    review.schema.json's/draft.schema.json's field descriptions). Matched
+    by PREFIX here, not exact string equality, since the round label
+    varies per review round and this precondition only cares that the
+    review is from the SAME run+segment as `draft_token`, never which
+    round it happened to converge at. Must match, byte for byte,
+    ledger_merge.py's own copy of this function.
+    """
+    return isinstance(review_token, str) and review_token.startswith(f"{draft_token}:r")
+
+
+def draft_content_sha1(path):
+    """sha1 of a draft's CONTENT, with the 'dispatch_token' metadata field
+    deliberately EXCLUDED -- must match, byte for byte, draft_sha1.py's own
+    draft_content_sha1() (a byte-identical duplicate, per this project's
+    "no shared lib between self-contained scripts" convention). See that
+    script's own module docstring for the full rationale: dispatch_token is
+    a run-scoped freshness token, checked independently at every consume/
+    commit point, and must never perturb the "has the translated CONTENT
+    changed since review" question this hash answers.
+
+    Raises OSError (unreadable file), json.JSONDecodeError (not valid
+    JSON), or ValueError (valid JSON but not an object) on failure --
+    callers handle all three via emit_failure().
+    """
+    raw = path.read_text(encoding="utf-8")
+    doc = json.loads(raw)
+    if not isinstance(doc, dict):
+        raise ValueError(f"draft at {path} must be a JSON object, got {type(doc).__name__}")
+    projected = {k: v for k, v in doc.items() if k != "dispatch_token"}
+    canonical = json.dumps(
+        projected, sort_keys=True, ensure_ascii=False, separators=(",", ":")
+    ).encode("utf-8")
+    return hashlib.sha1(canonical).hexdigest()
 
 
 def now_iso8601():
@@ -182,7 +253,11 @@ def build_payload_schema(base_schema, fragment_schema):
     files, rather than hand-typing the 15-field cache_key list (or the
     status enum) a third time anywhere in this codebase.
 
-    The caller may set only: status, rounds, reason, note, cache_key.
+    The caller may set only: status, rounds, reason, note, cache_key,
+    run_token (1.2.0 -- a bare RUN_ID string, hand-written here since it is
+    a transient precondition input, never a ledger-record-base.schema.json
+    field and never persisted into the written fragment; see
+    enrich_converged_fields()'s own docstring).
     """
     status_enum = fragment_schema.get("properties", {}).get("status", {}).get(
         "enum", FRAGMENT_STATUS_FALLBACK_ENUM
@@ -203,6 +278,7 @@ def build_payload_schema(base_schema, fragment_schema):
             "reason": base_props["reason"],
             "note": base_props["note"],
             "cache_key": base_props["cache_key"],
+            "run_token": {"type": "string"},
         },
         "required": ["status"],
         "additionalProperties": False,
@@ -245,10 +321,24 @@ def read_json_file(path, what):
         return None, f"{what} at {path} is not valid JSON: {exc}"
 
 
-def enrich_converged_fields(seg, fragment):
+def enrich_converged_fields(seg, fragment, run_token=None):
     """Populate n_blocks/n_footnotes/n_verses (from the segpack) and
     reviewed_draft_sha1 (via the review-artifact binding check) -- fields
     the calling agent's payload is never allowed to supply directly.
+
+    1.2.0 addition: when `run_token` is given (a bare RUN_ID, from the
+    payload's own `run_token` field), ALSO asserts -- before recording
+    convergence -- that the on-disk draft's own dispatch_token equals
+    expected_draft_token(run_token, seg) = '<run_token>:<seg>' EXACTLY, and
+    that review.json's own dispatch_token equals that same value plus a
+    ':r<roundLabel>' SUFFIX (review_token_matches(), a prefix match --
+    review's token format carries a round label the draft's own form does
+    not). Reconstructing the full expected draft token (not just comparing
+    a bare RUN_ID) also catches a same-run-but-wrong-segment token.
+    Refuses convergence (structured failure) for a stale/straggler draft or
+    review from a different run, even one that otherwise looks
+    content-valid. Omit for the pre-1.2.0 behavior (no token precondition)
+    -- backward compatible.
 
     Calls emit_failure() (which exits the process) on any problem, so this
     function either returns normally having mutated `fragment` in place,
@@ -284,13 +374,46 @@ def enrich_converged_fields(seg, fragment):
             f"at {rpath} has no draft_sha1."
         )
 
+    expected_token = expected_draft_token(run_token, seg) if run_token is not None else None
+
+    if expected_token is not None:
+        review_token = review_obj.get("dispatch_token") if isinstance(review_obj, dict) else None
+        if not review_token_matches(review_token, expected_token):
+            emit_failure(
+                f"Cannot record convergence for segment '{seg}': review "
+                f"artifact's dispatch_token {review_token!r} does not match "
+                f"the expected prefix '{expected_token}:r' (run_token="
+                f"{run_token!r}) -- stale/straggler review, refusing to "
+                f"record convergence."
+            )
+
     dpath = draft_path(seg)
     if not dpath.is_file():
         emit_failure(
             f"Cannot record convergence for segment '{seg}': draft not found "
             f"at {dpath}."
         )
-    current_draft_sha1 = sha1_bytes_of_file(dpath)
+
+    if expected_token is not None:
+        draft_obj, err = read_json_file(dpath, f"Draft for segment '{seg}'")
+        if err is not None:
+            emit_failure(f"Cannot record convergence for segment '{seg}': {err}")
+        draft_token = draft_obj.get("dispatch_token") if isinstance(draft_obj, dict) else None
+        if draft_token != expected_token:
+            emit_failure(
+                f"Cannot record convergence for segment '{seg}': draft's "
+                f"dispatch_token {draft_token!r} does not equal the expected "
+                f"{expected_token!r} (run_token={run_token!r}) -- "
+                f"stale/straggler draft, refusing to record convergence."
+            )
+
+    try:
+        current_draft_sha1 = draft_content_sha1(dpath)
+    except (OSError, json.JSONDecodeError, ValueError) as exc:
+        emit_failure(
+            f"Cannot record convergence for segment '{seg}': could not "
+            f"compute draft content sha1 at {dpath}: {exc}"
+        )
 
     if current_draft_sha1 != reviewer_draft_sha1:
         # Exact literal per references/ledger-and-resumability.md -- the
@@ -353,7 +476,8 @@ def main():
         required=True,
         help=(
             "Path to a JSON file with the intended fields: status "
-            "(required), plus optionally rounds, reason, note, cache_key."
+            "(required), plus optionally rounds, reason, note, cache_key, "
+            "run_token."
         ),
     )
     args = parser.parse_args()
@@ -390,14 +514,16 @@ def main():
 
     # Build the fragment entirely fresh -- the prior on-disk fragment (if
     # any) is never read for its field values, only implicitly superseded
-    # by os.replace()'s atomic rename below.
+    # by os.replace()'s atomic rename below. `run_token` is deliberately
+    # NOT copied in here -- it is a transient precondition input for
+    # enrich_converged_fields() below, never a persisted fragment field.
     fragment = {"timestamp": now_iso8601(), "status": payload["status"]}
     for key in ("reason", "note", "rounds", "cache_key"):
         if key in payload:
             fragment[key] = payload[key]
 
     if fragment["status"] == "converged":
-        enrich_converged_fields(seg, fragment)
+        enrich_converged_fields(seg, fragment, payload.get("run_token"))
 
     validate_final_fragment(fragment, base_schema, fragment_schema)
 

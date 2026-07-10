@@ -1,5 +1,84 @@
 # Changelog
 
+## 1.2.0 — 2026-07-10
+
+Combined bugfix + hardening release closing eight open issues (#82–#88, #90, #97): two
+EPUB-extraction correctness bugs, a name-extractor tokenizer fix, a documentation correction, a
+new managed post-extraction gate that makes the extractor's self-checks tamper-evident, and a
+Workflow-orchestration reliability pass over the review and glossary-pass mechanisms.
+
+### Workflow-orchestration reliability (#87, #88, #90, #97)
+
+Four bugs surfaced by a five-agent audit attacked the plugin's Workflow templates directly — the
+engine of its primary deliverable, W3's glossary pass and W5's mass-translate:
+
+- **#87 (schema shape):** `agent({schema})` requires a top-level `object` — the tool-use API
+  never accepts a top-level `oneOf`/`allOf`/`anyOf`/`array`. The glossary batch's
+  `CANON_BATCH_SCHEMA` (a top-level `array`) blocked every W3 dispatch outright with an HTTP 400;
+  three top-level-`oneOf` schemas in `mass-translate-wf.template.js` blocked W5 the same way.
+  Fixed by flattening every agent-facing literal to a relaxed-union `type:"object"` (branch
+  discrimination moves to the still-strong on-disk schemas plus a new exact-key-set JS guard at
+  each consume site — see `references/workflow-schema-validation.md`) and deleting
+  `CANON_BATCH_SCHEMA` outright, since the glossary batch dispatch no longer carries a schema at
+  all.
+- **#97 (unbounded await):** review and the glossary-pass batch call were bare, unbounded
+  `await agent()` calls to codex — a forwarder-detached job could hang the whole run indefinitely
+  with zero ambient monitoring, the same failure class a real 11-teammate incident on the source
+  project already proved. Only translate's original fire-and-forget-plus-bounded-poll shape was
+  ever actually bounded. Fixed by generalizing that shape to review and the glossary batch:
+  schema-less codex DISPATCH (writes an atomic, `{{RUN_ID}}`-scoped artifact) → bounded Claude WAIT
+  poll → schema-validated Claude CONSUME (reads the artifact back). This closes the
+  forwarder-hollow-return and detached-job-hang modes for every codex work-call; a *synchronous*
+  codex block-and-hang on the DISPATCH `await` itself remains a residual translate already carried
+  (see `references/gotchas.md`).
+- **#88 (false-green merge):** the glossary batch's codex return was banked into `canon.json`
+  directly, with no independent disk verification. Fixed by adding a disk-independent
+  `canon_validate.py --verify-merged` step (schema `CANON_VERIFY_SCHEMA`, new) that re-derives,
+  from a fresh read, that every fragment's items actually landed correctly — accept/queue
+  disposition-aware, with queued-then-accepted supersession correctly treated as a pass, not a
+  false-red.
+- **#90 (concurrent-batch race):** concurrent glossary batches wrote to the same shared
+  `canon.json`, risking silently lost updates. Fixed by fragment-per-batch (each batch writes to
+  its own run-scoped path, never `canon.json` directly) plus exactly one serialized final
+  `canon_validate.py --merge-batches` call as the sole writer.
+
+`{{RUN_ID}}` is a new substitution token in both Workflow templates, resolved once per run
+(`resumeFromRunId` on a verified resume, else fresh) and validated against a path-safe allowlist.
+Every fire-and-forget artifact (`draft.json`, `review.json`, glossary fragments) is scoped by it
+via a `dispatch_token` field, checked not just at the readiness poll but at every later point the
+artifact's bytes are consumed or committed for a durable decision (the reviewer's own read, the
+convergence ledger write, the batch-final completeness check) — closing a stale-straggler-from-an-
+interrupted-run class of bug the pre-1.2.0 design had no mechanism to detect. Whether to resume a
+run at all is now gated by a dedicated `input_digest` (args + resolved profile substitutions +
+per-segment cache keys + template/script/schema bundle hashes) computed by a new deterministic
+pre-workflow script, `resume_setup.py` — a digest mismatch forces a fresh run with no
+`resumeFromRunId`, never a silent replay of stale cached results.
+
+**Caveats, stated plainly:** this reliability pass is new plugin hardening, not itself
+pilot-proven — the shipped test suite locks the mechanism's contracts (schema shape, token
+enforcement, digest gating, estimator formula) but a real end-to-end pilot run against a live
+project is still the honest gate before treating it as fully load-bearing, the same posture
+`references/gotchas.md` already applies to the rest of the orchestration subsystem. The
+synchronous codex block-and-hang residual named above under #97 is real and not closed by this
+release.
+
+### Fixed
+- **Tokenizer trailing-apostrophe fusion in both `assets/scripts/bootstrap_names.py` and `assets/scripts/language_smoke_report.py`** (#82) — `TOKEN_RE` absorbed a trailing apostrophe into a name token, so a stray apostrophe after a name (e.g. `Fiona’ George`) fused into one bogus candidate. Connectors (`'`, `’`, `‑`, `-`) are now matched only *between* letters, so a trailing apostrophe is left unconsumed (the name is stripped, not fused); internal elision/hyphen forms (`d'Effiat`, `Saint-Simon`, `aujourd'hui`) are unaffected. The two extractor copies' `TOKEN_RE` are now pinned byte-identical by a drift guard.
+- **A wrapper `<div>` around a chapter `<h2>` collapsed the whole body file to front-matter** (#83) — the body walk matched `<h2>` only as a direct child, so a `<div>`-wrapped heading was never seen, misclassifying the entire file as front-matter and silently dropping its paragraphs. Heading-bearing wrappers are now flattened (recursively, handling multi-level nesting and multiple chapters per wrapper) so the heading and its sibling body content are each classified in document order; the direct-child path stays byte-identical. A new BLOCKING self-check `body_files_yield_segments` fails closed if a body-bearing source yields zero body segments.
+- **Verse stanzas made of bare `<p>`s lost their text** (#84) — a `.stanza` whose lines are bare `<p>`s (no `.line` class) produced empty `verse_plain` text, dropping the poem's words and any footnote-anchor sentinel carried in them. Each stanza now falls back to its own `get_text` the same way the no-stanza branch already did (behavior-identical when `.line` children are present). A new BLOCKING self-check `verse_plain_text_nonempty` fails closed on any empty verse entry.
+- **`agent({schema})` shapes that could never pass the tool-use API** (#87) — `CANON_BATCH_SCHEMA` (top-level `array`) blocked every glossary-pass dispatch; `REVIEW_ARTIFACT_SCHEMA`/`LEDGER_WRITE_SCHEMA`/`LEDGER_MERGE_SCHEMA` (each a top-level `oneOf`) blocked mass-translate. Every agent-facing literal is now a flat, relaxed-union `type:"object"`; `CANON_BATCH_SCHEMA` is deleted outright. On-disk schemas keep their strong `oneOf`/`array` shapes unchanged; a new exact-key-set JS guard at each consume site re-establishes the branch discrimination the flat literal can't express on its own. See `references/workflow-schema-validation.md`.
+- **Unbounded `await agent()` on review and the glossary-pass batch call** (#97) — a forwarder-detached codex job on either call could hang the whole run indefinitely with no visible failure, the same class of incident that already forced translate onto a bounded shape. Both now follow translate's proven dispatch → bounded-poll → disk-read pattern: a schema-less codex DISPATCH writes an atomic, `{{RUN_ID}}`-scoped artifact; a bounded Claude WAIT poll gates progress; a schema-validated Claude CONSUME call reads the result back. A synchronous codex block-and-hang on the DISPATCH `await` itself remains an accepted residual, same as translate's.
+- **Glossary batch results banked into `canon.json` with no independent verification** (#88) — a codex return was trusted directly, with no disk re-check that the merge actually landed. `canon_validate.py --verify-merged` (new) re-derives, from a fresh disk read, that every fragment's items are correctly present in `canon.json` by disposition (accepted vs. queued, with queued-then-accepted supersession correctly treated as a pass).
+- **Concurrent glossary batches racing on a shared `canon.json`** (#90) — silently lost updates were possible when multiple batches wrote toward the same file. Each batch now writes only to its own run-scoped fragment; exactly one serialized `canon_validate.py --merge-batches` call is the sole writer of `canon.json` per glossary pass.
+
+### Added
+- **`assets/scripts/validate_extraction.py`** (#86) — a managed post-extraction gate, run from the plugin's own install path (never copied into the durable project, so it cannot be adapted or weakened). It independently re-derives all 11 manifest-derivable self-check invariants from `manifest.json` and pins the extractor's self-check region by SHA-1, so a hand-weakened, deleted, or bypassed self-check can no longer certify a false-green extraction. Wired into `SKILL.md` as a MANDATORY post-extraction step — the pipeline advances only on its exit 0.
+- **Tamper-evident self-check region in `assets/templates/extract.py.template`** (#86) — `run_self_checks` is wrapped in `# BEGIN/END SELF-CHECK REGION` sentinels pinned by `validate_extraction.py`, with a drift test (`tests/extractor_selfcheck_hash_drift.test.py`) proving the shipped region matches the pinned hash.
+
+### Changed
+- **Corrected a misleading `assets/profile.example.yml` comment** (#85) — the `plain_text.verse_detection`/`footnotes` `CHOOSE_` placeholders were documented as sitting "inertly" while another `source.format` is active; in fact Step 0's placeholder scan is format-agnostic by design and fatally rejects any surviving `CHOOSE_` value regardless of `source.format`. The comment now states the sentinels must be replaced even in an inactive block. The strict scan itself (a deliberate, name-tested backstop) is unchanged.
+- **Documented the self-check region as off-limits during adaptation** (#86) — `references/source-format-adapters/gutenberg-epub.md` and `references/false-green-gate.md` now name "editing a self-check to reach green" as a false-green anti-pattern, direct genuine gaps to a plugin issue, and describe the new `validate_extraction.py` gate as the hard guarantee.
+
 ## 1.1.2 — 2026-07-09
 
 Follow-up from #80 (deferred from the #79/1.1.1 review): closes two remaining gaps in the

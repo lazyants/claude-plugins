@@ -57,22 +57,31 @@ discover has no `generation_hashes` at all, later, with no clear point of failur
 
 ## Glossary-pass call discipline
 
-The glossary-pass gets **identical schema-validated-workflow-level-call discipline
-as review** — canon/realia decisions are exactly as accuracy-load-bearing as
-review findings. Every glossary-pass batch call MUST be:
+The glossary-pass gets the **identical dispatch → bounded-wait →
+schema-validated-consume discipline review uses** (1.2.0, closing #87/#88/
+#90/#97 — see `references/workflow-schema-validation.md` and
+`references/orchestration-and-batching.md` for the full mechanics; this
+section covers only the glossary-specific parts of that shared pattern) —
+canon/realia decisions are exactly as accuracy-load-bearing as review
+findings, and codex accuracy-bearing calls in this plugin are never bare,
+never nested, and never trusted on their own in-turn say-so.
 
-```
-agent(glossaryPrompt(batch), {agentType:'codex:codex-rescue', effort:'high', schema: CANON_BATCH_SCHEMA})
-```
-
-dispatched from `glossary-pass-wf.template.js` — **never** a raw/ad hoc
-`Agent(subagent_type: "codex:codex-rescue")` call, and never nested inside another
-agent's own turn. A schema-less call — even top-level, even non-nested — can return
-an ambiguous background-job string instead of a real batch result; only a
-schema-validated Workflow-tool `agent()` call has automatic retry-until-valid.
-`CANON_BATCH_SCHEMA` matches the shipped `canon-batch.schema.json` exactly (see
-below) — it is a discriminated union over each item's own `disposition` field, not
-a bare array of `canon-entry.schema.json` shapes.
+Per batch: `batchDispatchPrompt(batch)` is codex, `agentType:'codex:codex-rescue'`,
+`effort:'high'`, **schema-less**, fire-and-forget — it writes the run-scoped
+fragment `${durable_root}/glossary/runs/{{RUN_ID}}/out_{index}.json`
+atomically and self-validates it via `canon_validate.py --check-batch`
+before printing `FRAGMENT {index}`; `batchWaitPrompt(batch)` is Claude,
+bounded-poll, `READY`/`TIMEOUT`. Two final calls run once, after every
+fragment is `READY`, never per-batch: a merge call
+(`canon_validate.py --merge-batches`, no schema — the single serialized
+writer) and a disk-verify call (`canon_validate.py --verify-merged`,
+`schema: CANON_VERIFY_SCHEMA`, flat, new). The pre-1.2.0 shape — a single
+schema-validated `agent(glossaryPrompt(batch), {agentType:'codex:codex-rescue',
+schema: CANON_BATCH_SCHEMA})` call per batch, banking its return directly —
+is gone: `CANON_BATCH_SCHEMA` was a top-level `array`, which the tool-use
+API's `agent()` schema param can never accept (#87 — see
+`references/workflow-schema-validation.md`), and banking an un-verified
+codex return risked a false-green merge (#88).
 
 This Workflow template is **new plugin hardening, not itself source-proven**. The
 real reference project ran its glossary pass as ad hoc `glossary/TASK.md` plus
@@ -114,11 +123,19 @@ Note the field-name generalization from the source project: the proven
 `canonical_ru`); the plugin generalizes these to `source_form` and
 `canonical_target_form` so the same schema works for any language pair.
 
-### `canon-batch.schema.json` — the glossary-pass batch's real return contract
+### `canon-batch.schema.json` — one fragment's real content contract
 
 ```
 { type: "array", items: { oneOf: [ACCEPTED, QUEUED] } }
 ```
+
+**Never an agent-facing `schema:` param as of 1.2.0** (that was the pre-1.2.0
+`CANON_BATCH_SCHEMA`, deleted for `#87` — a top-level `array` can't be an
+`agent()` schema at all; see `references/workflow-schema-validation.md`).
+This shape now governs exactly one thing: what
+`canon_validate.py --check-batch <fragment>` validates a codex-written
+fragment file against, on disk, after the fact — never what an `agent()`
+call is asked to return.
 
 Every item REQUIRES `source_form`, `is_proper_name`, and `disposition:
 "accepted" | "review_queue"`:
@@ -152,77 +169,136 @@ Every item REQUIRES `source_form`, `is_proper_name`, and `disposition:
 `entries{}`, `review_queue`, AND `generation_hashes` are ALL THREE required
 unconditionally at the top level.
 
-## `canon_validate.py`'s two validation passes
+## `canon_validate.py`'s CLI modes
 
 `scripts/canon_validate.py` is the plugin-owned backstop for schema enforcement —
-never trust the Workflow-level `agent(..., {schema: ...})` call's own
-format-assertion behavior alone; that platform-owned enforcement is a separate
-trust boundary the plugin cannot configure or guarantee.
+never trust the Workflow-level `agent(...)` call's own say-so alone; the
+DISPATCH → WAIT → CONSUME pattern's whole point is that codex's own output
+is not trusted until an independent, deterministic script re-checks it (see
+`references/workflow-schema-validation.md`). **`--research-mode
+live|offline` is required on every mode**, never defaulted, even in a mode
+where it has no effect — so no call site can accidentally omit declaring
+the precondition. `--canon-path PATH` (every mode, optional) overrides the
+default `${durable_root}/canon.json` location. Every mode prints exactly one
+JSON line to stdout and exits 0 on success / 1 on failure — callers should
+read stdout, not rely on the exit code alone.
 
-**Two CLI modes, selected by whether `--batch PATH` is given** (both require
-`--research-mode live|offline`, never defaulted, even in the mode where it has
-no effect — so no call site can accidentally omit declaring the precondition):
+1.2.0 adds three new modes to close #87 (schema-less glossary dispatch,
+`references/orchestration-and-batching.md`), #90 (concurrent-batch races),
+and #88 (unverified merge) — routed by `main()` on which flag is given,
+alongside the original `--batch PATH` merge path (kept working unchanged;
+existing tests exercise it directly):
 
-- **MERGE mode** (`--batch PATH` given) — merges a glossary-pass batch result
-  into `canon.json`, running Pass 1 + the offline backstop + the dedup/collision
-  merge + `generation_hashes` stamping + the atomic write + Pass 2, exactly as
-  described below.
-- **VALIDATE-ONLY mode** (`--batch` omitted) — a read-only health check against
-  the CURRENT, already-frozen `canon.json`: no merge, no write, and no offline
-  `basis:"established"` backstop (that backstop only ever applies to NEW entries
-  in an incoming `--batch`; an already-frozen `canon.json` is not retroactively
-  re-litigated just because this run happens to pass `--research-mode offline`
-  for other reasons). Pass 1 instead validates every EXISTING `entries{}` value
-  against `canon-entry.schema.json` directly, and every existing `review_queue[]`
-  item against the QUEUED shape; Pass 2 is unchanged — the loaded document is
-  validated against `canon-file.schema.json`.
-- **`--canon-path PATH`** (either mode, optional) overrides the default
-  `${durable_root}/canon.json` location — e.g. for a one-off health check
-  against a specific file, or a test fixture. Omitted → the default is used.
-- Both modes print exactly one JSON line to stdout and exit 0 on success / 1 on
-  failure — callers should read stdout, not rely on the exit code alone. The
-  success payload always carries `mode` (`"merge"` or `"validate"`),
-  `canon_path`, `research_mode`, `entries_count`, `review_queue_count`; MERGE
-  mode additionally reports `batch_items`, `merged_accepted`, `merged_queued`. A
-  failure payload carries `error` and, when the failure names specific items,
-  `offending` (an array of strings).
+### `--check-batch PATH [--expect-source-forms-file M.json]` — one fragment, no write
+
+The `batchWaitPrompt`/`batchDispatchPrompt` self-check invocation (see
+`references/orchestration-and-batching.md`). Pass-1 per-item validation plus
+the offline backstop on the ONE fragment at `PATH` — never touches
+`canon.json`, never writes anything. When `--expect-source-forms-file` is
+given (a JSON array of candidate names, read from a **file**, never argv —
+so a multiword/apostrophe name is never a shell-quoting hazard), asserts the
+fragment's item `source_form`s **exactly** equal the manifest set: no
+missing, no extra. stdout: `{"success":true,"mode":"check_batch",
+"source_forms":N}` or `{"success":false,"error":"...","offending":[...]}`.
+
+### `--merge-batches P1 P2 …` — the single serialized writer (closes #90)
+
+One process, run once per glossary pass, never per-batch. Loads `canon.json`
+once; validates **all** given fragments (Pass 1 + the offline backstop)
+**first**, before merging any of them; threads
+`acc = _merge_batch(acc, frag)` across the fragments **in the given
+argument order**; stamps `generation_hashes`; runs the whole-file Pass 2 on
+the **in-memory** accumulator **before** the atomic write (catching a
+corrupt merge before it ever touches disk, not after); one atomic write;
+re-reads the file post-write and re-validates it, **without** re-injecting
+`generation_hashes` defaults (an earlier revision's
+`on_disk.setdefault("generation_hashes", …)` masked a dropped-hash
+corruption from this very re-read — removed). `_merge_batch` itself gained
+a guard on its review-queue-append branch (`if source_form in entries:
+continue`) so an item already accepted under one fragment doesn't also land
+in `review_queue` from a later one. stdout:
+`{"success":true,"mode":"merge_batches","entries_count":N,
+"review_queue_count":N,...}` or a failure line naming the offending
+fragment/item.
+
+Concurrency is closed by **being** this one process, not by locking: every
+batch writes to its own run-scoped fragment path (never `canon.json`
+directly), and exactly one `--merge-batches` call — after every fragment is
+confirmed `READY` — is the sole writer of `canon.json` for this glossary
+pass. The docstring states this precisely as single-writer-by-operational-
+precondition, not a locking guarantee.
+
+### `--verify-merged --batch f1 --batch f2 … [--expect-source-forms-file M.json]` — disk-independent re-check (closes #88)
+
+The glossary disk-verify call's own invocation (`schema: CANON_VERIFY_SCHEMA`
+in the Workflow — see `references/workflow-schema-validation.md`). Reads
+`canon.json` and every named fragment **fresh from disk** — no dependency on
+what `--merge-batches` believes it just wrote. Per fragment item, checked
+**by disposition**: `accepted` → `canon["entries"][sf] ==
+_entry_from_accepted_item(item)` (exact equality, not "a key exists");
+`review_queue` → the exact queued object is present in
+`canon["review_queue"]` **OR** its `source_form` is already a key in
+`canon["entries"]` (accept-supersedes — an item queued in one fragment and
+independently accepted by a later one is correct, not a missing-item false
+positive). When `--expect-source-forms-file` is given, also asserts exact
+manifest coverage. stdout: `{"verified":true}` or `{"verified":false,
+"missing":["sf1",...]}` — matching `CANON_VERIFY_SCHEMA`'s relay contract
+exactly. `merged: true` in the Workflow's own return is gated on both this
+script reporting `verified:true` with an empty `missing[]` **and** the
+JS-side exact-key-set guard confirming it (see
+`references/ledger-and-resumability.md` for the guard-field-set discipline
+applied identically to the ledger literals).
+
+### `--batch PATH` — the original single-fragment merge path (kept)
+
+Unchanged from pre-1.2.0: merges one glossary-pass batch result into
+`canon.json` in a single call, running Pass 1 + the offline backstop + the
+dedup/collision merge + `generation_hashes` stamping + the atomic write +
+Pass 2. Existing tests exercise this path directly; it is not deprecated,
+just no longer how the Workflow template itself drives a real multi-batch
+glossary pass (that's `--merge-batches` now).
+
+### `--batch` omitted entirely — VALIDATE-ONLY mode (kept)
+
+A read-only health check against the CURRENT, already-frozen `canon.json`:
+no merge, no write, and no offline `basis:"established"` backstop (that
+backstop only ever applies to NEW entries in an incoming batch; an
+already-frozen `canon.json` is not retroactively re-litigated just because
+this run happens to pass `--research-mode offline` for other reasons).
+Pass 1 instead validates every EXISTING `entries{}` value against
+`canon-entry.schema.json` directly, and every existing `review_queue[]`
+item against the QUEUED shape; Pass 2 is unchanged — the loaded document is
+validated against `canon-file.schema.json`.
+
+### Shared machinery across every mode
 
 - **Dependency preflight first**: wraps `import jsonschema` in a try/except,
   printing a clear "install with `pip install -r requirements.txt`"
   message and exiting non-zero on `ImportError` — never a raw traceback.
-- **Pass 1 — per-item.** Constructs a validator over `canon-batch.schema.json`'s
-  item shape with
+- **Pass 1 — per-item**, whichever mode is active. Constructs a validator
+  over `canon-batch.schema.json`'s item shape with
   `jsonschema.Draft202012Validator(..., format_checker=jsonschema.FormatChecker())`
-  explicitly (`format_checker` is
-  REQUIRED — `jsonschema`'s own convenience `validate()` does not enable format
-  assertions by default). In MERGE mode, re-validates every batch item
-  independently against that discriminated-union item shape — not the bare
-  `canon-entry.schema.json` shape, since a batch item also carries the
-  `disposition` field that shape doesn't have — right after the glossary-pass
-  merge step and before routing into `entries{}`/`review_queue`. In
-  VALIDATE-ONLY mode, validates every EXISTING `entries{}` value against the
-  bare `canon-entry.schema.json` shape instead (no `disposition` field there),
-  and every existing `review_queue[]` item against the same QUEUED shape.
-- **Pass 2 — whole-file.** In MERGE mode, immediately after the merge step
-  writes the updated `canon.json` to disk, re-reads the WHOLE file and
-  validates it against `canon-file.schema.json`. In VALIDATE-ONLY mode, the
-  already-loaded document is validated against the same schema directly (no
-  write happened). Either way, this pass fatally halts, naming the specific
-  problem, if `entries{}` / `review_queue` / `generation_hashes.particle_config_hash`
+  explicitly (`format_checker` is REQUIRED — `jsonschema`'s own convenience
+  `validate()` does not enable format assertions by default).
+- **Pass 2 — whole-file.** Fatally halts, naming the specific problem, if
+  `entries{}` / `review_queue` / `generation_hashes.particle_config_hash`
   / `generation_hashes.derivation_bundle_hash` are missing or malformed — a
   genuinely incomplete `canon.json` (e.g. one missing `entries` or
-  `review_queue` entirely) must fail loudly here, never be silently patched up
-  with empty defaults before this check runs. This is the check that actually
-  enforces the two `generation_hashes` fields' presence, which
+  `review_queue` entirely) must fail loudly here, never be silently patched
+  up with empty defaults before this check runs. This is the check that
+  actually enforces the two `generation_hashes` fields' presence, which
   `select_segments.py`'s derivation-state gate is entirely load-bearing on.
 - Reads `canon-entry.schema.json` / `canon-batch.schema.json` /
-  `canon-file.schema.json` from `${durable_root}/schemas/` — never the plugin's
-  own `assets/schemas/`.
+  `canon-file.schema.json` from `${durable_root}/schemas/` — never the
+  plugin's own `assets/schemas/`.
+- The module docstring no longer mentions `CANON_BATCH_SCHEMA` as an
+  agent-facing schema anywhere (STATUS/MERGE/Usage sections) — only as the
+  on-disk fragment-content shape `--check-batch` validates against.
 
-Both passes are schema-driven validation, not free-text judgment — this is the
-same "independent re-check, don't trust the agent's own self-report" discipline
-applied everywhere else load-bearing in this plugin (e.g. the ledger's disk
-re-read after `recordLedgerPrompt`).
+Every mode's passes are schema-driven validation, not free-text judgment —
+this is the same "independent re-check, don't trust the agent's own
+self-report" discipline applied everywhere else load-bearing in this plugin
+(e.g. the ledger's disk re-read after `recordLedgerPrompt`).
 
 ## Research preflight and offline-fallback policy for `basis: "established"`
 

@@ -27,12 +27,18 @@ ledger-and-resumability.md's own enumeration:
     7. templates/translate_TASK.template.md
     8. templates/mass-translate-wf.template.js (translatePrompt/fixPrompt)
 
-  review_path(seg) (4 sites):
-    1. mass-translate-wf.template.js's reviewPrompt (writes it)
-    2. mass-translate-wf.template.js's verifyReviewArtifactPrompt (reads it,
-       indirectly -- see that test's own docstring)
-    3. scripts/review_artifact_check.py (reads it)
-    4. scripts/ledger_update.py (reads it, for the reviewed_draft_sha1
+  review_path(seg) (5 sites -- 1.2.0 CONTRACT §8 split the old single
+  reviewPrompt writer/`readReview`-in-one call into a DISPATCH-then-READ
+  pair, adding one genuinely new direct-read call site):
+    1. mass-translate-wf.template.js's reviewDispatchPrompt (1.2.0; formerly
+       reviewPrompt -- writes it)
+    2. mass-translate-wf.template.js's readReviewPrompt (1.2.0, NEW -- reads
+       it directly, mechanically, returning only the 4 REVIEW_SCHEMA
+       verdict fields)
+    3. mass-translate-wf.template.js's verifyReviewArtifactPrompt (reads it,
+       indirectly -- see that test's own docstring; UNCHANGED by 1.2.0)
+    4. scripts/review_artifact_check.py (reads it)
+    5. scripts/ledger_update.py (reads it, for the reviewed_draft_sha1
        binding check)
 
 Plus one explicit design-confirmation: `fixPrompt` is DELIBERATELY NOT a
@@ -74,6 +80,7 @@ functions for the exact assertion.
 """
 import hashlib
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -178,7 +185,13 @@ def test_validate_draft_reads_canonical_draft_path(tmp_path):
         "footnotes": [],
         "verses": [],
     }
-    draft = {"seg": seg, "blocks": {"p1": "Privet"}, "footnotes": {}, "verses": {}, "names": [], "notes": []}
+    draft = {
+        "seg": seg, "blocks": {"p1": "Privet"}, "footnotes": {}, "verses": {}, "names": [], "notes": [],
+        # 1.2.0: draft.schema.json requires dispatch_token -- any string is
+        # fine here, this test's own invariant is the canonical PATH, not
+        # the token's content.
+        "dispatch_token": "tok-seg01",
+    }
     segments_dir = root / "segments"
     (segments_dir / f"segpack_{seg}.json").write_text(json.dumps(segpack), encoding="utf-8")
     (segments_dir / f"{seg}.draft.json").write_text(json.dumps(draft), encoding="utf-8")
@@ -303,6 +316,14 @@ def make_ledger_update_root(tmp_path):
     scripts_dir.mkdir(parents=True)
     schemas_dir.mkdir(parents=True)
     shutil.copy2(LEDGER_UPDATE_SRC, scripts_dir / "ledger_update.py")
+    # 1.2.0: ledger_update.py's own draft_content_sha1() re-serializes the
+    # draft as canonical (sorted-key, dispatch_token-excluded) JSON before
+    # hashing -- a byte-identical duplicate of draft_sha1.py's own
+    # algorithm (see that script's 1.2.0 module docstring). Copying the
+    # REAL draft_sha1.py alongside it lets this file's tests get a
+    # ground-truth draft_sha1 value from the real script (real_draft_sha1()
+    # below) instead of reimplementing that canonicalization here.
+    shutil.copy2(DRAFT_SHA1_SRC, scripts_dir / "draft_sha1.py")
     shutil.copy2(SCHEMAS_SRC_DIR / "ledger-record-base.schema.json", schemas_dir / "ledger-record-base.schema.json")
     shutil.copy2(SCHEMAS_SRC_DIR / "ledger-fragment.schema.json", schemas_dir / "ledger-fragment.schema.json")
     (root / "segments").mkdir()
@@ -319,6 +340,18 @@ def run_ledger_update(root, seg, payload):
     )
 
 
+def real_draft_sha1(root, seg):
+    """The REAL draft_sha1.py's own reported digest for the draft currently
+    on disk at the canonical path -- never reimplemented here (see
+    make_ledger_update_root's own comment above)."""
+    result = subprocess.run(
+        [sys.executable, str(root / "scripts" / "draft_sha1.py"), seg],
+        capture_output=True, text=True, timeout=30,
+    )
+    assert result.returncode == 0, f"draft_sha1.py failed:\n{result.stdout}\n{result.stderr}"
+    return result.stdout.strip()
+
+
 def test_ledger_update_converged_reads_canonical_draft_path(tmp_path):
     """The ONLY place ledger_update.py reads draft_path(seg) is the
     convergence enrichment path (reviewed_draft_sha1 binding). Proves it
@@ -329,13 +362,17 @@ def test_ledger_update_converged_reads_canonical_draft_path(tmp_path):
 
     # -- positive: draft at canonical path, review.json's draft_sha1 matches it.
     seg = "seg01"
-    draft_bytes = json.dumps({"seg": seg, "blocks": {"p1": "hi"}}).encode("utf-8")
+    draft_bytes = json.dumps({"seg": seg, "blocks": {"p1": "hi"}, "dispatch_token": "tok-seg01"}).encode("utf-8")
     (segments_dir / f"{seg}.draft.json").write_bytes(draft_bytes)
     (segments_dir / f"segpack_{seg}.json").write_text(
         json.dumps({"blocks": [{"id": "p1"}], "footnotes": [], "verses": []}), encoding="utf-8"
     )
+    # 1.2.0: ledger_update.py's own draft_content_sha1() canonicalizes (and
+    # excludes dispatch_token) before hashing, so the ground-truth value
+    # here must come from the REAL draft_sha1.py, not a raw-byte hash of
+    # this fixture's own on-disk bytes (see real_draft_sha1()'s docstring).
     (segments_dir / f"{seg}.review.json").write_text(
-        json.dumps({"draft_sha1": sha1_of_bytes(draft_bytes)}), encoding="utf-8"
+        json.dumps({"draft_sha1": real_draft_sha1(root, seg)}), encoding="utf-8"
     )
     result = run_ledger_update(root, seg, {"status": "converged", "rounds": 1, "cache_key": FULL_CACHE_KEY})
     assert result.returncode == 0, f"expected convergence to succeed:\n{result.stdout}\n{result.stderr}"
@@ -378,20 +415,24 @@ def test_ledger_update_converged_reads_canonical_review_path(tmp_path):
     # -- positive baseline (mirrors the draft_path test's own positive case,
     #    proving this harness is sound before trusting the negative below).
     seg = "seg03"
-    draft_bytes = json.dumps({"seg": seg, "blocks": {"p1": "hi"}}).encode("utf-8")
+    draft_bytes = json.dumps({"seg": seg, "blocks": {"p1": "hi"}, "dispatch_token": "tok-seg03"}).encode("utf-8")
     (segments_dir / f"{seg}.draft.json").write_bytes(draft_bytes)
     (segments_dir / f"segpack_{seg}.json").write_text(
         json.dumps({"blocks": [{"id": "p1"}], "footnotes": [], "verses": []}), encoding="utf-8"
     )
+    # 1.2.0: ground-truth draft_sha1 must come from the REAL draft_sha1.py
+    # (canonicalized, dispatch_token-excluded), not a raw-byte hash -- see
+    # the sibling draft_path test's own comment above.
+    expected_sha1 = real_draft_sha1(root, seg)
     (segments_dir / f"{seg}.review.json").write_text(
-        json.dumps({"draft_sha1": sha1_of_bytes(draft_bytes)}), encoding="utf-8"
+        json.dumps({"draft_sha1": expected_sha1}), encoding="utf-8"
     )
     result = run_ledger_update(root, seg, {"status": "converged", "rounds": 1, "cache_key": FULL_CACHE_KEY})
     assert result.returncode == 0, f"expected convergence to succeed:\n{result.stdout}\n{result.stderr}"
     stdout = json.loads(result.stdout.strip())
     assert stdout["success"] is True
     fragment = json.loads((root / "runs" / "ledger.d" / f"{seg}.json").read_text(encoding="utf-8"))
-    assert fragment["reviewed_draft_sha1"] == sha1_of_bytes(draft_bytes)
+    assert fragment["reviewed_draft_sha1"] == expected_sha1
 
     # -- negative: review.json ONLY at the legacy-suffixed decoy path;
     #    canonical review path absent. Must be refused as "review artifact
@@ -531,14 +572,41 @@ def run_draft_sha1(root, seg):
 
 
 def test_draft_sha1_hashes_canonical_path_content(tmp_path):
+    """Positive control: draft_sha1.py's reported digest is a genuine
+    function of draft_path(seg)'s CURRENT content -- reproducible for the
+    SAME content, and different for different content at that same
+    canonical path. 1.2.0 changed draft_sha1.py's own hashing to a
+    canonicalized (sorted-key, dispatch_token-excluded) form (see that
+    script's own module docstring), so a plain raw-byte sha1 of this
+    fixture's own on-disk bytes is no longer the right comparison target
+    here -- verifying the ALGORITHM is draft_sha1.test.py's own job, not
+    this file's (whose charter is the canonical PATH invariant); this test
+    proves the path invariant without reimplementing that algorithm."""
     root = make_draft_sha1_root(tmp_path)
     seg = "seg01"
-    content = b'{"seg": "seg01", "blocks": {"p1": "hi"}}'
-    (root / "segments" / f"{seg}.draft.json").write_bytes(content)
+    content_a = b'{"seg": "seg01", "blocks": {"p1": "hi"}}'
+    (root / "segments" / f"{seg}.draft.json").write_bytes(content_a)
 
-    result = run_draft_sha1(root, seg)
-    assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
-    assert result.stdout.strip() == sha1_of_bytes(content)
+    result_a = run_draft_sha1(root, seg)
+    assert result_a.returncode == 0, f"{result_a.stdout}\n{result_a.stderr}"
+    digest_a = result_a.stdout.strip()
+    assert re.fullmatch(r"[0-9a-f]{40}", digest_a), f"expected a sha1 hex digest, got {digest_a!r}"
+
+    # Re-running against the SAME canonical-path content reproduces the
+    # identical digest (determinism)...
+    result_a2 = run_draft_sha1(root, seg)
+    assert result_a2.returncode == 0
+    assert result_a2.stdout.strip() == digest_a
+
+    # ...while DIFFERENT content at that SAME canonical path changes it --
+    # together, this proves the digest is genuinely a function of
+    # draft_path(seg)'s current content, not a fixed/cached value.
+    content_b = b'{"seg": "seg01", "blocks": {"p1": "DIFFERENT"}}'
+    (root / "segments" / f"{seg}.draft.json").write_bytes(content_b)
+    result_b = run_draft_sha1(root, seg)
+    assert result_b.returncode == 0, f"{result_b.stdout}\n{result_b.stderr}"
+    digest_b = result_b.stdout.strip()
+    assert digest_b != digest_a, "different canonical-path content must hash differently"
 
 
 def test_draft_sha1_ignores_ru_suffixed_decoy(tmp_path):
@@ -603,9 +671,22 @@ def test_translate_task_template_follows_draft_path_convention():
 # ===========================================================================
 # JS prompt-builder harness -- shared by the remaining call sites:
 #   draft_path(seg)  site 8/8: mass-translate-wf.template.js (translatePrompt/fixPrompt)
-#   review_path(seg) site 1/4: reviewPrompt (writes it)
-#   review_path(seg) site 2/4: verifyReviewArtifactPrompt (reads it, indirectly)
+#   review_path(seg) site 1/5: reviewDispatchPrompt (1.2.0; formerly reviewPrompt -- writes it)
+#   review_path(seg) site 2/5: readReviewPrompt (1.2.0, NEW -- reads it directly)
+#   review_path(seg) site 3/5: verifyReviewArtifactPrompt (reads it, indirectly; UNCHANGED)
 #   design confirmation:       fixPrompt is NOT a review_path(seg) reader
+#
+# 1.2.0 (CONTRACT §8) replaced the old single reviewPrompt/callReview call
+# with a DISPATCH -> WAIT -> READ -> CHECK sequence: reviewDispatchPrompt
+# (codex, writes review_path(seg)) -> reviewWaitPrompt (bounded poll of
+# review_ready.py) -> readReviewPrompt (mechanical read, returns the
+# 4-field REVIEW_SCHEMA projection) -> verifyReviewArtifactPrompt (the
+# artifact-check step, UNCHANGED, kept as a separate prompt-builder
+# function per the PLAN's own test-update note). reviewWaitPrompt is
+# included in the probe below for basic instantiation/arity coverage; its
+# OWN bounded-poll content is tests/bounded_poll_present.test.py's job, not
+# this file's (whose charter is the canonical draft_path/review_path
+# invariant, not the #97 poll-boundedness invariant).
 # ===========================================================================
 #
 # The real mass-translate-wf.template.js has top-level `await pipeline(...)`
@@ -634,6 +715,13 @@ def _instantiate_and_slice_js(durable_root_str):
 
     substitutions = {
         "{{DURABLE_ROOT}}": durable_root_str,
+        # 1.2.0 (CONTRACT §2): a stable fixture run id -- colon-free
+        # YYYYMMDDTHHMMSSZ form, matching the allowlist
+        # ^[A-Za-z0-9][A-Za-z0-9._-]*$. Only this file's own no-leftover-
+        # token assertion below cares that it's substituted at all; the
+        # exact value is irrelevant to every prompt-text assertion in this
+        # file (they only check draft_path(seg)/review_path(seg) strings).
+        "{{RUN_ID}}": "20260710T000000Z",
         "{{SOURCE_LANG}}": "fr",
         "{{TARGET_LANG}}": "ru",
         "{{MAX_FIX_ROUNDS}}": "3",
@@ -646,31 +734,50 @@ def _instantiate_and_slice_js(durable_root_str):
     # ESM syntax; strip it so the sliced body runs as a plain CommonJS
     # script under `node file.js` (no --input-type=module dance needed).
     head = head.replace("export const meta", "const meta", 1)
-    assert "{{" not in head and "}}" not in head, (
-        "an instantiation substitution token survived unresolved -- the "
-        "template's own token list changed; update `substitutions` above"
+    # A genuine unresolved substitution token always has this ALL-CAPS/
+    # underscore shape ({{RUN_ID}}, {{DURABLE_ROOT}}, ...) -- every token
+    # this template documents is named that way (see the template's own
+    # header comment). A blind "{{" / "}}" substring check is too broad:
+    # this file's own "RELAXED union" schema-literal comment legitimately
+    # contains the literal text `{type:"string"}}` (a nested JS object
+    # literal's own closing braces, not a template token), which a plain
+    # substring check would wrongly flag as an unresolved token.
+    leftover = re.search(r"\{\{[A-Z][A-Z0-9_]*\}\}", head)
+    assert leftover is None, (
+        f"an instantiation substitution token survived unresolved "
+        f"({leftover.group(0)!r}) -- the template's own token list "
+        f"changed; update `substitutions` above"
     )
     return head, raw
 
 
 def run_prompt_probe(tmp_path, durable_root_str, seg, round_num, rev_obj):
     """Instantiates + slices the real template, appends a small footer that
-    calls the four real prompt-builder functions under test, and executes
-    the whole thing under real node."""
+    calls the real prompt-builder functions under test (translatePrompt,
+    reviewDispatchPrompt, reviewWaitPrompt, readReviewPrompt, fixPrompt,
+    verifyReviewArtifactPrompt -- the 1.2.0 DISPATCH/WAIT/READ/CHECK
+    sequence, see the JS prompt-builder harness section comment above),
+    and executes the whole thing under real node."""
     assert NODE_PATH is not None, "node executable not found on PATH -- required to run this test file"
     head, raw = _instantiate_and_slice_js(durable_root_str)
     footer = (
         "\nvar __seg = " + json.dumps(seg) + ";\n"
         "var __round = " + json.dumps(round_num) + ";\n"
+        "var __roundLabel = String(__round);\n"
         "var __revObj = " + json.dumps(rev_obj) + ";\n"
+        "var __dispatchToken = RUN_ID + \":\" + __seg + \":r\" + __roundLabel;\n"
         "var __out = {\n"
         "  translatePrompt: translatePrompt(__seg),\n"
-        "  reviewPrompt: reviewPrompt(__seg),\n"
+        "  reviewDispatchPrompt: reviewDispatchPrompt(__seg, __roundLabel),\n"
+        "  reviewWaitPrompt: reviewWaitPrompt(__seg, __dispatchToken),\n"
+        "  readReviewPrompt: readReviewPrompt(__seg),\n"
         "  fixPrompt: fixPrompt(__seg, __round, __revObj),\n"
         "  verifyReviewArtifactPrompt: verifyReviewArtifactPrompt(__seg, __revObj),\n"
         "  arities: {\n"
         "    translatePrompt: translatePrompt.length,\n"
-        "    reviewPrompt: reviewPrompt.length,\n"
+        "    reviewDispatchPrompt: reviewDispatchPrompt.length,\n"
+        "    reviewWaitPrompt: reviewWaitPrompt.length,\n"
+        "    readReviewPrompt: readReviewPrompt.length,\n"
         "    fixPrompt: fixPrompt.length,\n"
         "    verifyReviewArtifactPrompt: verifyReviewArtifactPrompt.length\n"
         "  }\n"
@@ -702,6 +809,12 @@ def test_mass_translate_wf_static_source_never_mentions_legacy_suffix():
 
 @requires_node
 def test_mass_translate_wf_translate_prompt_writes_canonical_draft_path(tmp_path):
+    """1.2.0: translatePrompt(seg) also embeds a dispatch_token/RUN_ID
+    (CONTRACT §2) -- the assertion below only checks the canonical
+    draft_path(seg) SUBSTRING is still present (a substring check already
+    tolerates/ignores any extra token content around it; it never requires
+    the whole prompt text to match exactly), so no change was needed here
+    beyond this note."""
     root_str = str(tmp_path / "durable_root")
     seg = "segA1"
     out, _raw = run_prompt_probe(tmp_path, root_str, seg, 1, {
@@ -718,8 +831,15 @@ def test_mass_translate_wf_translate_prompt_writes_canonical_draft_path(tmp_path
 
 
 @requires_node
-def test_mass_translate_wf_review_prompt_reads_draft_and_writes_review_path(tmp_path):
-    """review_path(seg) call site 1/4: reviewPrompt is the WRITER."""
+def test_mass_translate_wf_review_dispatch_prompt_reads_draft_and_writes_review_path(tmp_path):
+    """review_path(seg) call site 1/5: reviewDispatchPrompt (1.2.0;
+    formerly the single combined reviewPrompt) is the WRITER -- the
+    DISPATCH half of CONTRACT §8's restructured review sequence
+    (reviewDispatchPrompt -> reviewWaitPrompt -> readReviewPrompt ->
+    verifyReviewArtifactPrompt). Same invariant the old reviewPrompt test
+    locked (reads draft_path(seg), writes review_path(seg), no legacy
+    suffix, an explicit "write" instruction), repointed to the new
+    2-argument function (seg, roundLabel) 1.2.0 split it into."""
     root_str = str(tmp_path / "durable_root")
     seg = "segA2"
     out, _raw = run_prompt_probe(tmp_path, root_str, seg, 1, {
@@ -727,27 +847,56 @@ def test_mass_translate_wf_review_prompt_reads_draft_and_writes_review_path(tmp_
     })
     expected_draft = f"{root_str}/segments/{seg}.draft.json"
     expected_review = f"{root_str}/segments/{seg}.review.json"
-    assert expected_draft in out["reviewPrompt"], (
-        f"reviewPrompt(seg) must read the canonical draft_path(seg); "
-        f"expected substring {expected_draft!r} not found in:\n{out['reviewPrompt']}"
+    assert expected_draft in out["reviewDispatchPrompt"], (
+        f"reviewDispatchPrompt(seg, roundLabel) must read the canonical "
+        f"draft_path(seg); expected substring {expected_draft!r} not found "
+        f"in:\n{out['reviewDispatchPrompt']}"
     )
-    assert expected_review in out["reviewPrompt"], (
-        f"reviewPrompt(seg) must write the canonical review_path(seg); "
-        f"expected substring {expected_review!r} not found in:\n{out['reviewPrompt']}"
+    assert expected_review in out["reviewDispatchPrompt"], (
+        f"reviewDispatchPrompt(seg, roundLabel) must write the canonical "
+        f"review_path(seg); expected substring {expected_review!r} not "
+        f"found in:\n{out['reviewDispatchPrompt']}"
     )
-    assert f"{seg}.ru.draft.json" not in out["reviewPrompt"]
-    assert f"{seg}.ru.review.json" not in out["reviewPrompt"]
-    assert out["arities"]["reviewPrompt"] == 1
-    # It is specifically the WRITER, per ledger-and-resumability.md's
-    # "Readers: reviewPrompt (writes it)" -- the write instruction is
-    # phrased as an explicit "write" sentence, not merely a passing mention.
-    assert "write" in out["reviewPrompt"].lower()
+    assert f"{seg}.ru.draft.json" not in out["reviewDispatchPrompt"]
+    assert f"{seg}.ru.review.json" not in out["reviewDispatchPrompt"]
+    assert out["arities"]["reviewDispatchPrompt"] == 2, (
+        "reviewDispatchPrompt is a deliberate 2-argument (seg, roundLabel) "
+        "shape -- CONTRACT §8"
+    )
+    # It is specifically the WRITER -- the write instruction is phrased as
+    # an explicit "write" sentence, not merely a passing mention.
+    assert "write" in out["reviewDispatchPrompt"].lower()
+
+
+@requires_node
+def test_mass_translate_wf_read_review_prompt_reads_canonical_review_path(tmp_path):
+    """review_path(seg) call site 2/5 (1.2.0, NEW): readReviewPrompt is a
+    direct, mechanical READER of review_path(seg) -- distinct from
+    verifyReviewArtifactPrompt's INDIRECT read (delegated entirely to
+    review_artifact_check.py, see the next test group). Pre-1.2.0 there
+    was no separate read step at all (the single reviewPrompt wrote and
+    the calling Workflow trusted its own schema-validated return);
+    CONTRACT §8 splits DISPATCH (write) from this mechanical read."""
+    root_str = str(tmp_path / "durable_root")
+    seg = "segA2b"
+    out, _raw = run_prompt_probe(tmp_path, root_str, seg, 1, {
+        "clean": True, "coverage_ok": True, "findings": [], "draft_sha1": "deadbeef",
+    })
+    expected_review = f"{root_str}/segments/{seg}.review.json"
+    assert expected_review in out["readReviewPrompt"], (
+        f"readReviewPrompt(seg) must read the canonical review_path(seg); "
+        f"expected substring {expected_review!r} not found in:\n{out['readReviewPrompt']}"
+    )
+    assert f"{seg}.ru.review.json" not in out["readReviewPrompt"]
+    assert out["arities"]["readReviewPrompt"] == 1
 
 
 @requires_node
 def test_mass_translate_wf_verify_review_artifact_prompt_delegates_the_read(tmp_path):
-    """review_path(seg) call site 2/4: verifyReviewArtifactPrompt is a
-    READER, but INDIRECTLY -- per references/workflow-schema-validation.md,
+    """review_path(seg) call site 3/5: verifyReviewArtifactPrompt is a
+    READER, but INDIRECTLY -- UNCHANGED by 1.2.0 (kept as a separate
+    prompt-builder function, per the PLAN's own test-update note). Per
+    references/workflow-schema-validation.md,
     the actual byte-for-byte read of review_path(seg) is performed by
     review_artifact_check.py (see that script's own dedicated test group
     below), never by the JS prompt text itself. This test locks down that

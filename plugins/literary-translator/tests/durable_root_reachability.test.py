@@ -576,6 +576,23 @@ def _make_self_anchor_fixture(tmp_path: Path, name: str, draft_bytes: bytes) -> 
     return durable_root
 
 
+def _canonical_draft_sha1(draft_bytes: bytes) -> str:
+    """Independent, stdlib-only ground truth for draft_sha1.py's 1.2.0
+    content-hash algorithm (CONTRACT-1.2.0-reliability.md section 2):
+    parse as JSON, drop 'dispatch_token' if present, sha1 the sorted-key
+    canonical re-serialization -- see tests/draft_sha1.test.py's own
+    canonical_expected_sha1() for the authoritative, more-exhaustively-
+    tested copy of this same small algorithm; duplicated here (not
+    imported) so this file stays self-contained like every sibling test
+    file in this directory."""
+    doc = json.loads(draft_bytes)
+    projected = {k: v for k, v in doc.items() if k != "dispatch_token"}
+    canonical = json.dumps(
+        projected, sort_keys=True, ensure_ascii=False, separators=(",", ":")
+    ).encode("utf-8")
+    return hashlib.sha1(canonical).hexdigest()
+
+
 def test_representative_script_self_anchors_regardless_of_invocation_cwd(tmp_path):
     """draft_sha1.py -- tiny, dependency-free, self-anchors via
     Path(__file__).resolve().parents[1] (see its own module docstring).
@@ -583,7 +600,9 @@ def test_representative_script_self_anchors_regardless_of_invocation_cwd(tmp_pat
     script and its own distinct draft content, both invoked from a THIRD,
     unrelated cwd -- proves each copy resolves durable_root from its OWN
     on-disk location, never cwd and never some fixed/shared path (each
-    fixture must independently produce its OWN correct, DIFFERENT hash)."""
+    fixture must independently produce its OWN correct, DIFFERENT hash).
+    1.2.0: draft_sha1.py now hashes canonicalized CONTENT (dispatch_token
+    excluded), not raw on-disk bytes -- see _canonical_draft_sha1() above."""
     root_a = _make_self_anchor_fixture(tmp_path, "project_a", b'{"paragraphs": ["fixture A content"]}')
     root_b = _make_self_anchor_fixture(tmp_path, "project_b", b'{"paragraphs": ["fixture B, deliberately different bytes"]}')
 
@@ -591,8 +610,8 @@ def test_representative_script_self_anchors_regardless_of_invocation_cwd(tmp_pat
     foreign_cwd.mkdir()
     assert foreign_cwd not in (root_a, root_b, root_a / "scripts", root_b / "scripts")
 
-    expected_a = hashlib.sha1((root_a / "segments" / "testseg.draft.json").read_bytes()).hexdigest()
-    expected_b = hashlib.sha1((root_b / "segments" / "testseg.draft.json").read_bytes()).hexdigest()
+    expected_a = _canonical_draft_sha1((root_a / "segments" / "testseg.draft.json").read_bytes())
+    expected_b = _canonical_draft_sha1((root_b / "segments" / "testseg.draft.json").read_bytes())
     assert expected_a != expected_b, "sanity: the two fixtures must be genuinely distinct"
 
     result_a = subprocess.run(

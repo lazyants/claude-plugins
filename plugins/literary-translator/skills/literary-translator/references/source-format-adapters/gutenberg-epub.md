@@ -492,6 +492,49 @@ assignment, hashing, `order_index` re-ranking, the structural self-checks,
 new project — only these four adapt points, and only after consulting the
 matching `adapter_config.gutenberg_epub` overrides, should change.
 
+### The self-check region is off-limits — and the pre-green handoff diff
+
+The full round-trip structural self-check suite ships wrapped in a
+sentinel-delimited region inside `extract.py.template`:
+
+```python
+# BEGIN SELF-CHECK REGION -- DO NOT EDIT (editing a check to reach green is a false-green anti-pattern; take genuine gaps to a plugin issue)
+def run_self_checks(...):
+    ...
+# END SELF-CHECK REGION
+```
+
+Per-project adaptation touches **only** the four `# ADAPT-POINT:` regions
+above. Everything between `# BEGIN SELF-CHECK REGION` and
+`# END SELF-CHECK REGION` — every invariant in the suite — is off-limits: it
+is the very machinery that tells you your four edits didn't corrupt the
+extraction. **Editing a self-check to make it pass is a false-green
+anti-pattern.** It manufactures a green result while the defect the check
+existed to catch ships silently — exactly the failure this whole methodology
+is built to prevent. If a check fires on a legitimately-different book and you
+believe the *check* is at fault (too Historiettes-specific, a false positive
+on valid markup, or a genuine structural gap it doesn't cover), that is a
+**plugin issue to file, not a line to edit locally**. Adapt the four adapt
+points until the shipped checks pass honestly; never move the goalposts to
+reach green.
+
+The managed post-extraction gate `validate_extraction.py` (see
+[`../false-green-gate.md`](../false-green-gate.md)) backstops this: it runs
+from the plugin path, independently re-derives the manifest-derivable
+invariants from `manifest.json`, and pins this region by hash — so a
+locally-weakened self-check is caught rather than trusted. But the discipline
+is yours to keep first; the gate is the safety net, not the license.
+
+**Recommended pre-green handoff diff.** Before treating an adapted
+`extract.py` as ready, diff it against the shipped template and read every
+change that lands **outside** the four `# ADAPT-POINT:` regions — diff the
+adapted `${durable_root}/extract.py` against
+`assets/templates/extract.py.template`. A faithful adaptation shows hunks
+*only* inside the four adapt points. **Any** hunk inside the
+`# BEGIN SELF-CHECK REGION`/`# END SELF-CHECK REGION` span — or anywhere else
+in the generic core — is a red flag to explain or revert before proceeding,
+and the single most important thing to eyeball in that diff.
+
 ## `adapter_config.gutenberg_epub` fields (verbatim, `profile.example.yml`)
 
 ```yaml

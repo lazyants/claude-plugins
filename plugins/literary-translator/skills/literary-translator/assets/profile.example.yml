@@ -86,10 +86,14 @@ source:
         heading_regex: null     # heading_regex only -- REQUIRED, a compilable regex, when this method is active
       verse_detection: CHOOSE_none_confirmed_or_regex
         # Ships as an intentionally INVALID placeholder -- Step 0 fatally rejects it until you consciously replace
-        # it with `none_confirmed` (this source has no verse) or `regex` (verse_regex below detects it). This
-        # enum is enforced ONLY while `source.format: plain_text` is the active format -- while a different format
-        # is active (as in this example), it sits inertly and does not block Step 0. Once you set `plain_text` as
-        # your real format, replace this value consciously before proceeding.
+        # it with `none_confirmed` (this source has no verse) or `regex` (verse_regex below detects it). You MUST
+        # replace this CHOOSE_ sentinel EVEN while a different format is active (as in this example, where
+        # `plain_text` is inert): profile_validate.py's Step-0 placeholder scan rejects any surviving CHOOSE_
+        # value anywhere in the profile regardless of `source.format`, by design -- the schema's enum check is
+        # format-gated, so this scan is the format-agnostic backstop. Set it to a valid value (e.g.
+        # `none_confirmed`) even though it is unused here; the enum's own legality and coupling rules (which
+        # value is legal, whether verse_regex is required) only become load-bearing once you actually select
+        # `source.format: plain_text`.
       verse_regex: null
         # Only meaningful, and then REQUIRED, when verse_detection: regex; ignored (must stay null) for
         # none_confirmed.

@@ -27,30 +27,36 @@ for BOTH templates. The glossary-pass case runs TWICE, once with
 
 Beyond the bare "zero {{ matches" grep, this file also positively checks
 that each substituted value actually landed in the right place (a
-DURABLE_ROOT const, bare-integer MAX_FIX_ROUNDS/BATCH_AGENT_CAP literals
--- never quoted strings -- and a correctly JSON-escaped
+DURABLE_ROOT/RUN_ID const, bare-integer MAX_FIX_ROUNDS/BATCH_AGENT_CAP
+literals -- never quoted strings -- and a correctly JSON-escaped
 VERSE_POLICY_INSTRUCTION_BLOCK, per that token's own documented escaping
 contract) so the "zero matches" assertion can't pass vacuously against an
 instantiation helper that silently no-ops.
 
-KNOWN, CURRENTLY-FAILING CASE (a real defect in the shipped template, not
-in this test): ``glossary-pass-wf.template.js``'s own header comment (the
-lines documenting this very test, "so every {{...}} token below must
-already be gone" and "greps the instantiated output for a literal \"{{\"")
-itself contains two literal ``{{`` substrings that are plain English
-prose, not one of the four real, named substitution tokens. Because
-instantiation is a whole-file, plain-text copy ("instantiate ... fresh
-from the plugin's current copy every time" -- SKILL.md W3/W5) with no
-comment-stripping step anywhere in this codebase, those two prose
-occurrences survive verbatim into every instantiated output and make the
-literal "zero {{ matches" check fail for BOTH ``research_mode`` directions
--- independent of whether the real, named tokens (``{{DURABLE_ROOT}}``,
-``{{SOURCE_LANG}}``, ``{{TARGET_LANG}}``, ``{{RESEARCH_MODE}}``) were
-substituted correctly, which they were (see the narrower
-``test_glossary_pass_template_has_no_unresolved_named_token`` below, which
-passes). This test intentionally keeps the literal, spec-mandated
-assertion rather than narrowing it to dodge that pre-existing template
-defect.
+FORMERLY-KNOWN-FAILING CASE, now resolved: an earlier revision of
+``glossary-pass-wf.template.js``'s own header comment contained two literal
+``{{`` substrings inside plain English prose (describing this very test),
+which survived whole-file plain-text instantiation and made the bare
+"zero {{ matches" grep fail for both ``research_mode`` directions even
+though every real, named token substituted correctly. The 1.2.0
+reliability build's glossary-pass-wf.template.js rewrite (adding
+``{{RUN_ID}}`` among other changes) no longer contains that stray prose
+``{{`` -- confirmed via ``grep -n '{{' glossary-pass-wf.template.js`` showing
+only the five real, named tokens -- so the bare "zero {{ matches" assertion
+now passes cleanly for both directions, same as mass-translate-wf's own.
+``test_glossary_pass_template_has_no_unresolved_named_token`` below is kept
+regardless, as the narrower, second-order check it always was.
+
+``{{RUN_ID}}`` (CONTRACT-1.2.0-reliability.md sec2): a NEW documented
+substitution token both templates gained in the 1.2.0 reliability build,
+resolved once by the orchestrating session (fresh id, or the identical
+value reused via ``resumeFromRunId`` on a matched-digest resumed run) and
+substituted the same plain-string way ``{{DURABLE_ROOT}}`` already is. This
+file's ``FIXTURE_RUN_ID`` is a stable, colon-free, allowlist-legal value;
+``test_run_id_token_resolves_with_zero_unresolved_braces`` further exercises
+several other allowlist-legal shapes (the allowlist regex validation itself
+is upstream orchestrator logic, out of scope for a plain-text-substitution
+test like this one).
 """
 from __future__ import annotations
 
@@ -72,6 +78,7 @@ GLOSSARY_PASS_TEMPLATE = TEMPLATES_DIR / "glossary-pass-wf.template.js"
 # expectation for what the instantiated OUTPUT should equal.
 MASS_TRANSLATE_TOKENS = (
     "{{DURABLE_ROOT}}",
+    "{{RUN_ID}}",
     "{{SOURCE_LANG}}",
     "{{TARGET_LANG}}",
     "{{MAX_FIX_ROUNDS}}",
@@ -80,6 +87,7 @@ MASS_TRANSLATE_TOKENS = (
 )
 GLOSSARY_PASS_TOKENS = (
     "{{DURABLE_ROOT}}",
+    "{{RUN_ID}}",
     "{{SOURCE_LANG}}",
     "{{TARGET_LANG}}",
     "{{RESEARCH_MODE}}",
@@ -104,6 +112,13 @@ NAMED_TOKEN_RE = re.compile(r"\{\{[A-Z][A-Z0-9_]*\}\}")
 # ---------------------------------------------------------------------------
 
 FIXTURE_DURABLE_ROOT = "/fixture/project/durable_root"
+# A stable, colon-free, allowlist-legal fixture value -- CONTRACT sec2's
+# {{RUN_ID}} allowlist (`^[A-Za-z0-9][A-Za-z0-9._-]*$`, never '.'/'..', no
+# '..' substring) plus its own "colon-free YYYYMMDDTHHMMSSZ form" example.
+# This file only substitutes it (the allowlist itself is a JS/orchestrator-
+# side concern, out of scope here) -- see test_run_id_token_resolves_with_
+# zero_unresolved_braces below for coverage across several legal shapes.
+FIXTURE_RUN_ID = "20260710T000000Z"
 FIXTURE_SOURCE_LANG = "fr"
 FIXTURE_TARGET_LANG = "ru"
 FIXTURE_MAX_FIX_ROUNDS = 4
@@ -135,6 +150,7 @@ FIXTURE_VERSE_POLICY_INSTRUCTION_BLOCK = (
 def instantiate_mass_translate(
     *,
     durable_root: str,
+    run_id: str,
     source_lang: str,
     target_lang: str,
     max_fix_rounds: int,
@@ -147,6 +163,7 @@ def instantiate_mass_translate(
     # template (e.g. `const ROOT = "{{DURABLE_ROOT}}";`), so the raw value
     # is spliced in as-is.
     text = text.replace("{{DURABLE_ROOT}}", durable_root)
+    text = text.replace("{{RUN_ID}}", run_id)
     text = text.replace("{{SOURCE_LANG}}", source_lang)
     text = text.replace("{{TARGET_LANG}}", target_lang)
 
@@ -171,6 +188,7 @@ def instantiate_mass_translate(
 def instantiate_glossary_pass(
     *,
     durable_root: str,
+    run_id: str,
     source_lang: str,
     target_lang: str,
     research_mode: str,
@@ -178,6 +196,7 @@ def instantiate_glossary_pass(
     text = GLOSSARY_PASS_TEMPLATE.read_text(encoding="utf-8")
 
     text = text.replace("{{DURABLE_ROOT}}", durable_root)
+    text = text.replace("{{RUN_ID}}", run_id)
     text = text.replace("{{SOURCE_LANG}}", source_lang)
     text = text.replace("{{TARGET_LANG}}", target_lang)
     # research_mode is passed through literally -- "this script never
@@ -237,6 +256,7 @@ def test_glossary_pass_raw_template_declares_every_documented_token():
 def test_mass_translate_template_instantiates_with_zero_unresolved_tokens():
     out = instantiate_mass_translate(
         durable_root=FIXTURE_DURABLE_ROOT,
+        run_id=FIXTURE_RUN_ID,
         source_lang=FIXTURE_SOURCE_LANG,
         target_lang=FIXTURE_TARGET_LANG,
         max_fix_rounds=FIXTURE_MAX_FIX_ROUNDS,
@@ -250,6 +270,7 @@ def test_mass_translate_template_instantiates_with_zero_unresolved_tokens():
     # vacuously -- confirm each value actually landed, in the exact shape
     # the header comment documents.
     assert f'const ROOT = "{FIXTURE_DURABLE_ROOT}";' in out
+    assert f'const RUN_ID = "{FIXTURE_RUN_ID}";' in out
     assert f'const SOURCE_LANG = "{FIXTURE_SOURCE_LANG}";' in out
     assert f'const TARGET_LANG = "{FIXTURE_TARGET_LANG}";' in out
     assert f"const MAXFIX = {FIXTURE_MAX_FIX_ROUNDS};" in out, (
@@ -276,6 +297,7 @@ def test_mass_translate_template_instantiates_with_zero_unresolved_tokens():
 def test_glossary_pass_template_instantiates_with_zero_unresolved_tokens(research_mode):
     out = instantiate_glossary_pass(
         durable_root=FIXTURE_DURABLE_ROOT,
+        run_id=FIXTURE_RUN_ID,
         source_lang=FIXTURE_SOURCE_LANG,
         target_lang=FIXTURE_TARGET_LANG,
         research_mode=research_mode,
@@ -284,6 +306,7 @@ def test_glossary_pass_template_instantiates_with_zero_unresolved_tokens(researc
     _assert_no_double_brace(out, f"glossary-pass-wf.template.js (research_mode={research_mode})")
 
     assert f'const ROOT = "{FIXTURE_DURABLE_ROOT}"' in out
+    assert f'const RUN_ID = "{FIXTURE_RUN_ID}"' in out
     assert f'const SOURCE_LANG = "{FIXTURE_SOURCE_LANG}"' in out
     assert f'const TARGET_LANG = "{FIXTURE_TARGET_LANG}"' in out
     assert f'const RESEARCH_MODE = "{research_mode}"' in out, (
@@ -304,6 +327,7 @@ def test_glossary_pass_template_has_no_unresolved_named_token(research_mode):
     out for glossary-pass-wf.template.js's header comment)."""
     out = instantiate_glossary_pass(
         durable_root=FIXTURE_DURABLE_ROOT,
+        run_id=FIXTURE_RUN_ID,
         source_lang=FIXTURE_SOURCE_LANG,
         target_lang=FIXTURE_TARGET_LANG,
         research_mode=research_mode,
@@ -311,3 +335,42 @@ def test_glossary_pass_template_has_no_unresolved_named_token(research_mode):
 
     leftover = NAMED_TOKEN_RE.findall(out)
     assert leftover == [], f"unresolved named substitution token(s) remain: {leftover}"
+
+
+# ---------------------------------------------------------------------------
+# {{RUN_ID}} -- a NEW substitution token both templates gained in the 1.2.0
+# reliability build (CONTRACT-1.2.0-reliability.md sec2: "NEW documented
+# substitution token in BOTH templates' token lists"). Beyond the blanket
+# "zero unresolved tokens" coverage above (which already exercises ONE fixed
+# RUN_ID value per template), this exercises RUN_ID specifically, across
+# several allowlist-legal shapes (a colon-free timestamp, a short id, and an
+# id containing every allowlisted punctuation character), mirroring how
+# this file already gives every other individual token its own targeted
+# check.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("run_id", ["20260710T000000Z", "a1", "run-01.beta_2"])
+def test_run_id_token_resolves_with_zero_unresolved_braces(run_id):
+    mass_out = instantiate_mass_translate(
+        durable_root=FIXTURE_DURABLE_ROOT,
+        run_id=run_id,
+        source_lang=FIXTURE_SOURCE_LANG,
+        target_lang=FIXTURE_TARGET_LANG,
+        max_fix_rounds=FIXTURE_MAX_FIX_ROUNDS,
+        batch_agent_cap=FIXTURE_BATCH_AGENT_CAP,
+        verse_policy_instruction_block=FIXTURE_VERSE_POLICY_INSTRUCTION_BLOCK,
+    )
+    _assert_no_double_brace(mass_out, f"mass-translate-wf.template.js (run_id={run_id})")
+    assert f'const RUN_ID = "{run_id}";' in mass_out
+
+    glossary_out = instantiate_glossary_pass(
+        durable_root=FIXTURE_DURABLE_ROOT,
+        run_id=run_id,
+        source_lang=FIXTURE_SOURCE_LANG,
+        target_lang=FIXTURE_TARGET_LANG,
+        research_mode="live",
+    )
+    leftover = NAMED_TOKEN_RE.findall(glossary_out)
+    assert leftover == [], f"unresolved named substitution token(s) remain: {leftover}"
+    assert f'const RUN_ID = "{run_id}"' in glossary_out

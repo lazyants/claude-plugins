@@ -1,4 +1,4 @@
-<!-- PROMPT_CONTRACT_VERSION: 1 -->
+<!-- PROMPT_CONTRACT_VERSION: 2 -->
 <!--
   glossary_TASK.template.md -- one-time-seed prompt contract for the
   canon/glossary-pass agent (the codex-glossary-pass).
@@ -8,21 +8,31 @@
   references/ledger-and-resumability.md's canonical-path invariants).
   Hand-adapt the bracketed [PLACEHOLDER] spots below for THIS project right
   after the copy, then leave the file alone -- glossary-pass-wf.template.js's
-  `glossaryPrompt()` re-reads `${durable_root}/glossary_TASK.md` fresh for
-  every batch it dispatches, so any later edit here applies retroactively
-  to every not-yet-resolved batch.
+  `batchDispatchPrompt()` re-reads `${durable_root}/glossary_TASK.md` fresh
+  for every batch it dispatches, so any later edit here applies
+  retroactively to every not-yet-resolved batch.
 
   This file holds the canonicalization RULES and PHILOSOPHY -- it is not
   the sole enforcement of the per-item output shape. That shape is
-  schema-enforced independently, twice over: the Workflow-level `agent()`
-  call passes `schema: CANON_BATCH_SCHEMA` (glossary-pass-wf.template.js),
-  and `scripts/canon_validate.py` re-checks every batch item against
-  `canon-batch.schema.json` before merging into `canon.json` (see
-  references/canon-and-glossary.md). This file never overrides or loosens
-  that contract -- it exists to carry THIS project's own naming
-  conventions and judgment guidance, which no schema can express, and to
-  restate the contract in full so a call reading only this file (plus its
-  own dispatch prompt) is self-contained.
+  schema-enforced by `scripts/canon_validate.py`, never by an `agent()`
+  `schema` param: the batch dispatch call in `glossary-pass-wf.template.js`
+  is deliberately schema-less fire-and-forget (see
+  references/workflow-schema-validation.md's "shared codex work-call
+  pattern"), so the dispatched agent is instead required to self-check its
+  own fragment, before returning, by running
+  `canon_validate.py --check-batch` against `canon-batch.schema.json` --
+  and, later, a separate disk-independent `--verify-merged` call re-checks
+  the eventual `canon.json` merge itself (see references/canon-and-glossary.md).
+  This file never overrides or loosens that contract -- it exists to carry
+  THIS project's own naming conventions and judgment guidance, which no
+  schema can express, and to restate the contract in full so a call
+  reading only this file (plus its own dispatch prompt) is self-contained.
+  The dispatch prompt's OWN self-check command is always authoritative over
+  this file's own self-check prose below -- `glossary-pass-wf.template.js`
+  is regenerated fresh from the plugin's current copy every run (never a
+  one-time-seed file the way this file is), so a resumed project whose
+  copy of this file predates a plugin update still gets the current
+  command from its dispatch prompt.
 
   On a resumed project, `scripts/profile_validate.py` checks the
   `PROMPT_CONTRACT_VERSION` marker above against its own hardcoded
@@ -55,7 +65,7 @@ against the current `canon.json` before you were dispatched.
 
 ## Input
 
-Your dispatch prompt (`glossaryPrompt(batch)` in
+Your dispatch prompt (`batchDispatchPrompt(batch)` in
 `glossary-pass-wf.template.js`) hands you, fresh at call time -- never
 baked into this file:
 
@@ -135,8 +145,10 @@ segments benefit from it too.
 
 Write a plain JSON array, one item per candidate, in the same order you
 were given, to the path your dispatch prompt names (normally
-`${durable_root}/glossary/out_{index}.json`) -- no markdown code fence, no
-comment, nothing else in the file:
+`${durable_root}/glossary/runs/<run_id>/out_{index}.json` -- a fresh,
+run-scoped path, never a single shared file every batch writes into) --
+ATOMICALLY (a temp file in the same directory, then renamed into place),
+no markdown code fence, no comment, nothing else in the file:
 
 ```
 [
@@ -163,16 +175,21 @@ matching `canon-batch.schema.json` exactly (see
 item's own `disposition` field, never a bare array of resolved entries.
 
 Self-check before returning: run
-`python3 ${durable_root}/scripts/canon_validate.py --research-mode <live|offline> --batch <the file you just wrote>`
+`python3 ${durable_root}/scripts/canon_validate.py --check-batch <the file you just wrote> --research-mode <live|offline> --expect-source-forms-file <the manifest file your dispatch prompt named>`
 and confirm it prints a line with `"success": true`. If it prints a line
 with `"success": false`, it names every offending item -- fix each one in
 your own array (reassign `basis`/`disposition`/`note` as the rules above
 require; never weaken the offline backstop, never fabricate a source URL
-to make the check pass), rewrite the file, and repeat until it prints
-`"success": true` -- only then does `canon.json` actually hold this
-batch's decisions.
+to make the check pass, never drop or add a candidate), rewrite the file
+the same atomic way, and repeat until it prints `"success": true`. This
+command checks only THIS fragment's own shape and its exact candidate
+coverage against the manifest -- it never merges into `canon.json` itself;
+never run `--batch` (the old, mutating, single-fragment merge mode) here.
 
-Final response: exactly the same validated array you just wrote, in the
-same order as the candidates you were given, matching
-`canon-batch.schema.json`. The frozen decision lives in `canon.json`, not
-in your response text.
+Final response: exactly the line your dispatch prompt asks for (e.g.
+`FRAGMENT {index}`), once the self-check above prints `"success": true`.
+The fragment file you just wrote is not yet the frozen record on its own:
+only after every batch's own fragment has independently passed this
+self-check does a separate, later, ONE serialized merge step fold every
+batch's fragment into `canon.json`, followed by an independent
+disk-verify check -- see `references/canon-and-glossary.md`.
