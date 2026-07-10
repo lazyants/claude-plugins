@@ -53,6 +53,17 @@ SCRIPT_PATH = (
     / "skills" / "literary-translator" / "assets" / "scripts" / "profile_validate.py"
 )
 
+# beside SCRIPT_PATH: the SHIPPED template's own marker, checked against
+# CURRENT_EXTRACTOR_CONTRACT_VERSION below -- every OTHER test in this file
+# exercises the resumed-project logic against SYNTHETIC fixtures built from
+# the constant and never reads this file, so nothing else here catches a
+# one-sided bump (mirrors extractor_selfcheck_hash_drift.test.py's own
+# TEMPLATE_PATH on the OTHER stale-detection axis).
+TEMPLATE_PATH = (
+    Path(__file__).resolve().parents[1]
+    / "skills" / "literary-translator" / "assets" / "templates" / "extract.py.template"
+)
+
 EXTRACT_PY_FILENAME = "extract.py"
 
 
@@ -397,4 +408,25 @@ def test_marker_without_inner_whitespace_is_still_recognized(pv, tmp_path, monke
     assert exit_code == 0, (
         f"a space-free '#' comment marker is valid Python and must be "
         f"recognized as well-formed; stderr:\n{err}"
+    )
+
+
+def test_template_marker_matches_current_constant(pv):
+    """template line-1 EXTRACTOR_CONTRACT_VERSION marker MUST equal
+    pv.CURRENT_EXTRACTOR_CONTRACT_VERSION -- else a one-sided bump ships
+    silently and every freshly-seeded project fails its own first resume
+    check. Closes the gap in the rest of this file (synthetic fixtures only,
+    never reads template:1); mirrors extractor_selfcheck_hash_drift's
+    test_region_hash_matches_pinned_constant on the OTHER stale-detection
+    axis. Proof-of-correctness is NOT pristine-vs-final (both would read
+    1==1/2==2 green) -- a ONE-SIDED bump of either side is what this guards."""
+    assert TEMPLATE_PATH.is_file(), TEMPLATE_PATH
+    first = next(
+        (ln for ln in TEMPLATE_PATH.read_text(encoding="utf-8").splitlines() if ln.strip()), None
+    )
+    assert first is not None, "template has no non-blank lines"
+    m = pv.EXTRACTOR_CONTRACT_MARKER_RE.match(first)
+    assert m is not None, f"template line 1 not a well-formed marker: {first!r}"
+    assert int(m.group(1)) == pv.CURRENT_EXTRACTOR_CONTRACT_VERSION, (
+        f"marker {m.group(1)!r} != constant {pv.CURRENT_EXTRACTOR_CONTRACT_VERSION}"
     )

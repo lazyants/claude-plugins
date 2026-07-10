@@ -292,10 +292,24 @@ class _Linker:
 # absent under mode: skip)
 # ---------------------------------------------------------------------------
 
+_VERSE_FNREF_RE = re.compile(r"⟦FNREF_(\d+)⟧")
+
+
+def _convert_verse_fnrefs(text):
+    # A footnote cited inside a verse (⟦FNREF_N⟧ baked into the source poem)
+    # becomes an Obsidian [^N]. Prose/heading FNREFs are converted in
+    # _render_block via node.fnrefs; verse content is not on that path (the
+    # block-verse branch returns early, and an embedded verse's FNREF lives in
+    # the verse content, not the carrier text), so the verse renderers convert
+    # their own. The [^N]: definition line is emitted by _render_segment_note
+    # from node.fnrefs, which assemble now populates from verse content.
+    return _VERSE_FNREF_RE.sub(lambda m: f"[^{m.group(1)}]", text)
+
+
 def _verse_texts(content):
     content = content or {}
-    rendered = (content.get("rendered") or "").strip()
-    gloss = (content.get("literal_gloss") or "").strip()
+    rendered = _convert_verse_fnrefs((content.get("rendered") or "").strip())
+    gloss = _convert_verse_fnrefs((content.get("literal_gloss") or "").strip())
     return rendered, gloss
 
 

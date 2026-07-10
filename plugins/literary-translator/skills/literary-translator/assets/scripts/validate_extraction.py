@@ -140,7 +140,7 @@ END_SENTINEL_PREFIX = "# END SELF-CHECK REGION"
 # text>) AFTER the region is finalized -- never computed or hardcoded here. Until
 # it is filled, the region-pin check FAILS by design, so an un-provisioned build
 # cannot certify green.
-CURRENT_EXTRACTOR_SELFCHECK_HASH = "4c23d44cecbb15ed0bab0044e7e34aafee1ab1cc"
+CURRENT_EXTRACTOR_SELFCHECK_HASH = "d81dd7c83488f4d1ff2cf9a71569e477c6982e40"
 
 
 def selfcheck_region_hash(extract_py_text: str):
@@ -444,6 +444,25 @@ def run_derivable_checks(manifest: dict, apparatus_policy: str, max_segment_word
                 n = int(m)
                 ref_count[n] = ref_count.get(n, 0) + 1
                 ref_block.setdefault(n, set()).add(b["id"])
+        # ALSO scan footnotes cited INSIDE an embedded verse -- mirrors
+        # extract.py.template's #93 Fix B post-mount scan byte-for-byte (the
+        # carrier block's plain_text holds only the ⟦VERSE_...⟧ placeholder,
+        # the ⟦FNREF_n⟧ sentinel lives on the verse.store entry itself).
+        for e in verse_store:
+            if e.get("mount") != "embedded":
+                continue
+            parent = e.get("parent_block")
+            if not parent:
+                # Unmounted embedded verse -> surfaced by
+                # verse_placeholders_unique_and_mounted below. NEVER add None to
+                # ref_block: a set mixing None + a real block id crashes
+                # `sorted(bs)` at the `multi` comprehension below, aborting
+                # run_derivable_checks before the unmounted entry can report.
+                continue
+            for m in FNREF_RE.findall(e.get("plain_text", "")):
+                n = int(m)
+                ref_count[n] = ref_count.get(n, 0) + 1
+                ref_block.setdefault(n, set()).add(parent)
         dup = {n: c for n, c in ref_count.items() if c != 1}
         multi = {n: sorted(bs) for n, bs in ref_block.items() if len(bs) != 1}
         chk(
@@ -455,6 +474,12 @@ def run_derivable_checks(manifest: dict, apparatus_policy: str, max_segment_word
         markers = []
         for b in blocks.values():
             markers.extend(BODY_REF_MARKER_RE.findall(b["plain_text"]))
+        # ALSO scan a literal [n] marker inside an embedded verse (mirrors the
+        # template's #93 Fix B, same carrier-only-holds-the-placeholder reasoning).
+        for e in verse_store:
+            if e.get("mount") != "embedded" or not e.get("parent_block"):
+                continue
+            markers.extend(BODY_REF_MARKER_RE.findall(e.get("plain_text", "")))
         dup = {n: markers.count(n) for n in set(markers) if markers.count(n) != 1}
         chk("body_ref_markers_well_formed_and_unique", not dup, f"n_markers={len(markers)} duplicated={dup}")
     else:  # omit_apparatus

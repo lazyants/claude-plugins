@@ -83,7 +83,7 @@
     },
     "verses": {
       "type": "array",
-      "description": "Verse-placeholder map for this segment's own standalone verse blocks -- the array verse_map_hash hashes over (vid + placeholder + parent_block per entry). The actual verse source text lives in the blocks[] entry identified by parent_block; this array is purely the lookup map enforcing the per-block verse-placeholder bijection (never flat set membership) required under every verse_policy.mode, including skip.",
+      "description": "Verse map for this segment. verse_map_hash hashes over (vid + placeholder + parent_block) per entry. A mount:\"block\" verse is a standalone verse block among blocks[] whose translation must equal its own placeholder (per-block bijection). A mount:\"embedded\" verse is quoted inside another block (a prose/quote/front-back block in blocks[], or a footnote-definition block in footnotes[]); its parent_block is that carrier, its placeholder survives in the carrier's translated text, and the standalone bijection does NOT apply to it.",
       "items": {
         "type": "object",
         "properties": {
@@ -97,10 +97,20 @@
           },
           "parent_block": {
             "type": "string",
-            "description": "The id of the blocks[] entry this verse is parented to -- the standalone verse block whose translation must equal this verse's own placeholder, a per-block bijection, not flat set membership."
+            "description": "The id of the carrier block this verse is parented to -- a blocks[] entry (for mount:\"block\" and for prose-embedded) or a footnotes[] definition block (for footnote-embedded)."
+          },
+          "mount": {
+            "type": "string",
+            "enum": ["block", "embedded"],
+            "description": "Attachment class, read from the manifest verse.store node's own mount (extract.py.template's authoritative classification) and normalized tolerantly by segpack.py: exactly \"embedded\" -> \"embedded\"; anything else -> \"block\". \"block\" = standalone verse block among blocks[] (per-block placeholder bijection, check 3). \"embedded\" = verse quoted inside another block -- a PARA/QUOTE/HEAD/front-back block in blocks[], or a footnote-definition block in footnotes[]; check 3's bijection is skipped, placeholder survival is enforced by the prose multiset (check 2) or footnote placeholder-fidelity (check 4)."
+          },
+          "n_line": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Source line count for this verse, threaded directly from the manifest verse node's authoritative n_line (post-#92 verse_payload counts bare-<p> stanza lines from the DOM before normalize_text collapses them, so n_line is correct for both `.line`-marked and bare-<p> poems). plain_text/source_html non-blank line counts are a legacy-only fallback when n_line is missing or 0. Feeds validate_draft.py check 5's per-verse line policy (mixed_by_length threshold; multi-line-source -> non-single-line-rendering). Load-bearing for embedded verses, whose carrier block's source text is not this inline verse's own line count."
           }
         },
-        "required": ["vid", "placeholder", "parent_block"],
+        "required": ["vid", "placeholder", "parent_block", "mount", "n_line"],
         "additionalProperties": false
       }
     },

@@ -136,7 +136,7 @@ jsonschema = None
 # profile.yml fields.
 CURRENT_PROFILE_VERSION = 1
 CURRENT_PROMPT_CONTRACT_VERSION = 2
-CURRENT_EXTRACTOR_CONTRACT_VERSION = 1
+CURRENT_EXTRACTOR_CONTRACT_VERSION = 2
 
 # The exact top-level keys profile.schema.json's own `required` list names --
 # kept as a plain constant here (rather than re-derived from the schema at

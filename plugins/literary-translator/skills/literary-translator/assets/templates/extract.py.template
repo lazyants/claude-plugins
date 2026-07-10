@@ -1,4 +1,4 @@
-# EXTRACTOR_CONTRACT_VERSION: 1
+# EXTRACTOR_CONTRACT_VERSION: 2
 #
 # This marker MUST stay the file's first non-blank line (mirrors the
 # `<!-- PROMPT_CONTRACT_VERSION: N -->` convention `translate_TASK.md` /
@@ -402,11 +402,65 @@ def verse_plain(container: Tag) -> str:
     return "\n".join(lines).strip() or normalize_text(container.get_text("\n"))
 
 
+def _dom_line_count(container: Tag) -> int:
+    """Count VERSE LINE UNITS for the manifest's verse.store n_line, read from
+    the DOM BEFORE normalize_text (_WS matches \r\n) collapses newlines. A verse
+    LINE is one `.line` element OR one bare line-level `<p>` (not itself `.line`,
+    not inside a `.line`, not wrapping `.line` children) -- so inline markup in a
+    line (<p>a <i>b</i> c</p>) counts as ONE line, never per inline fragment.
+
+      (a) bare-<p> stanza     -> number of bare <p> lines
+      (b) `.line` stanza      -> number of `.line` elements
+      (c) MIXED stanza        -> `.line` count PLUS bare-<p> count
+      (d) inline markup line  -> 1 (the <p>/`.line`, not its fragments)
+      (e) no-stanza container -> `.line` count, else bare-<p> count
+
+    Byte-identical to the old len(container.select('.line')) for the pure-`.line`
+    shape (`.line`s under stanzas, or a stanza-less `.line` poem): bare_p == 0
+    there, so nothing is added."""
+    def bare_p(scope):
+        return sum(
+            1 for p in scope.find_all("p")
+            if not has_class(p, "line")
+            and p.find_parent(class_="line") is None
+            and p.find(class_="line") is None
+        )
+    # OUTERMOST stanzas only: container.select(".stanza") returns nested stanzas
+    # too, so summing per-stanza st.select(".line") would DOUBLE-COUNT a nested
+    # stanza's `.line`s (codex r5 finding 3). Count `.line` ONCE at the container
+    # level (byte-exact vs the old len(container.select(".line")), nesting-safe),
+    # then ADD bare-<p> per outermost stanza so a MIXED stanza counts both kinds.
+    # Prose never lives INSIDE a .stanza, so every bare <p> child is a verse line;
+    # scoping bare_p to stanzas (not the container) keeps a fallback wrapper's
+    # prose <p> out. Each bare <p> lives in exactly one stanza -> counted once
+    # even under nesting.
+    stanzas = [st for st in container.select(".stanza") if st.find_parent(class_="stanza") is None]
+    if stanzas:
+        return len(container.select(".line")) + sum(bare_p(st) for st in stanzas)
+    # No-stanza: MIRROR verse_plain()'s no-stanza branch (:401-402), which is
+    # EITHER/OR, never additive -- when any `.line` exist, plain_text is built
+    # from ONLY those `.line` texts (bare <p> dropped), so n_line MUST equal
+    # len(.line) to stay consistent with the plain_text stored beside it (:554),
+    # which is exactly what the segpack/validate_draft verse-coverage checks
+    # compare against. Do NOT "fix" this into additive (codex r6 finding 3 asked
+    # for that -- it is a false positive): the sole reachable mixed no-stanza
+    # container is the bare-stanza fallback's RAW PARENT (build() :591-592), NOT
+    # an authored verse wrapper, so it can hold PROSE <p> beside orphan `.line`s
+    # -- additive would miscount that prose as a verse line, AND would disagree
+    # with the plain_text (which drops it). Bare <p> is counted ONLY when there
+    # is no `.line` at all (bare-<p>-line sources, #84) -- the sole case the old
+    # len(container.select(".line")) undercounted (it returned 0).
+    line_els = container.select(".line")
+    if line_els:
+        return len(line_els)
+    return bare_p(container)
+
+
 def verse_payload(container: Tag, apparatus_policy: str):
     clone = _prep_clone(container, apparatus_policy)
     html = str(clone)
     plain = verse_plain(clone)
-    n_line = len(container.select(".line"))
+    n_line = _dom_line_count(container)
     n_stanza = len(container.select(".stanza"))
     fnrefs = [int(m) for m in FNREF_RE.findall(plain)]
     return html, plain, n_line, n_stanza, fnrefs
@@ -535,13 +589,13 @@ def build(profile: dict):
     vcount = 0
     total_stanza = total_line = 0
 
-    def _register_verse_node(container, label, ctx, force_embedded=False):
+    def _register_verse_node(container, label, ctx, force_embedded=False, force_standalone=False):
         nonlocal vcount
         vcount += 1
         vid = f"V{vcount:03d}"
         html, plain, n_line, n_stanza, fnrefs = verse_payload(container, apparatus_policy)
         placeholder = f"⟦VERSE_{vid}_{sha1(plain)[:8]}⟧"
-        standalone = (
+        standalone = force_standalone or (
             not force_embedded
             and ctx == "body"
             and container.parent is not None
@@ -563,6 +617,49 @@ def build(profile: dict):
             container.replace_with(NavigableString(placeholder))
         return standalone
 
+    def _outermost_orphan_verse_parent(node):
+        """Grouping unit for a bare .stanza/.line orphan: walk UP to the OUTERMOST
+        ancestor (incl. self) that is itself .stanza/.line and return THAT element's
+        parent. A nested .line (parent = its .stanza) and that .stanza (parent = the
+        wrapper) therefore BOTH map to the wrapper -- grouped ONCE, the inner .stanza
+        never collected as a SECOND parent. `node` is already known orphan (no
+        .poetry-container ancestor), so the walk never crosses a container boundary."""
+        top = node
+        cur = node.parent
+        while cur is not None:
+            if has_class(cur, "stanza") or has_class(cur, "line"):
+                top = cur
+            cur = cur.parent
+        return top.parent
+
+    def _wrap_orphan_runs_standalone(soup, parent, label, ctx):
+        """Wrap each MAXIMAL CONTIGUOUS run of orphan .stanza/.line DIRECT
+        children of `parent` into its own synthetic div.poetry-container,
+        registered STANDALONE. Contiguous-run keeps every orphan line covered
+        even when prose interleaves the stanzas (verse_no_uncovered, template:1098);
+        leaving <h2>/prose siblings in place lets #83 flatten emit heading AND
+        each container."""
+        run = []
+        def flush():
+            nonlocal run
+            if not run:
+                return
+            synth = soup.new_tag("div")
+            synth["class"] = ["poetry-container"]
+            run[0].insert_before(synth)
+            for nd in run:
+                synth.append(nd.extract())
+            _register_verse_node(synth, label, ctx, force_standalone=True)
+            run = []
+        for child in list(parent.children):
+            if (isinstance(child, Tag)
+                    and (has_class(child, "stanza") or has_class(child, "line"))
+                    and not child.find_parent(class_="poetry-container")):
+                run.append(child)
+            elif isinstance(child, Tag):
+                flush()  # a non-verse element breaks the run
+        flush()
+
     for soup, label, ctx in scopes:
         total_stanza += len(soup.select(".stanza"))
         total_line += len(soup.select(".line"))
@@ -570,26 +667,45 @@ def build(profile: dict):
             _register_verse_node(pc, label, ctx)
 
     # fallback (b): bare .stanza/.line not covered by any (surviving or
-    # already-replaced) .poetry-container -- group by immediate parent.
-    # Always registered as "embedded" (never "block"/standalone), even when
-    # the grouping parent happens to sit directly under <body>: without an
-    # explicit ".poetry-container" class, add_content_block()'s own
-    # class-based dispatch has no way to recognize a surviving node as verse,
-    # so it must always be replaced in-place by its placeholder sentinel and
-    # picked up like any other embedded verse reference via link_embedded().
+    # already-replaced) .poetry-container -- group by the OUTERMOST orphan
+    # verse element's parent (kills nested double-collection, #92 finding 1a).
+    # A grouping parent that itself carries a heading (the #83 flatten target)
+    # is normalized into real, STANDALONE .poetry-container(s) so the heading
+    # and its prose siblings stay in place for #83's own flatten; every other
+    # grouping parent is registered "embedded" (never "block"/standalone), even
+    # when it happens to sit directly under <body>: without an explicit
+    # ".poetry-container" class, add_content_block()'s own class-based dispatch
+    # has no way to recognize a surviving node as verse, so it must always be
+    # replaced in-place by its placeholder sentinel and picked up like any
+    # other embedded verse reference via link_embedded().
     for soup, label, ctx in scopes:
         seen_parent_ids = set()
-        orphan_parents = []
+        grouping_parents = []
         for node in soup.select(".stanza, .line"):
             if node.find_parent(class_="poetry-container"):
                 continue
-            parent = node.parent
-            if parent is None or id(parent) in seen_parent_ids:
+            gparent = _outermost_orphan_verse_parent(node)
+            if gparent is None or id(gparent) in seen_parent_ids:
                 continue
-            seen_parent_ids.add(id(parent))
-            orphan_parents.append(parent)
-        for parent in orphan_parents:
-            _register_verse_node(parent, label, ctx, force_embedded=True)
+            seen_parent_ids.add(id(gparent))
+            grouping_parents.append(gparent)
+        for parent in grouping_parents:
+            # PRUNE (belt-and-suspenders): a parent whose orphan run an EARLIER
+            # heading-wrapper wrap moved under a synthetic .poetry-container is
+            # now covered -- skip so it is never independently re-registered
+            # (document order guarantees an ancestor wrapper precedes any
+            # descendant parent).
+            if has_class(parent, "poetry-container") or parent.find_parent(class_="poetry-container"):
+                continue
+            if ctx == "body" and parent.name != "h2" and parent.find("h2") is not None:
+                # heading-bearing #83 flatten target (predicate MIRRORS template:717):
+                # do NOT replace it (would swallow <h2>). Normalize its orphan
+                # verse into a real synthetic .poetry-container, registered
+                # STANDALONE; <h2>/prose siblings stay in place so #83 flatten
+                # emits heading + container(s) to add_content_block.
+                _wrap_orphan_runs_standalone(soup, parent, label, ctx)
+            else:
+                _register_verse_node(parent, label, ctx, force_embedded=True)
 
     # anything still uncovered after both passes is a genuine self-check
     # failure (e.g. a .line/.stanza node with no addressable parent element).
@@ -738,6 +854,7 @@ def build(profile: dict):
                 "plain_text": plain, "sha1": sha1(plain), "fnrefs": fnrefs, "decision": decision,
                 "reason": reason, "origin": "front-matter",
             })
+            link_embedded(fb_id, plain)
             frontback.append({
                 "id": fb_id, "decision": decision, "reason": reason,
                 "file": file_label, "text_head": plain[:80],
@@ -816,6 +933,7 @@ def build(profile: dict):
                 "plain_text": plain, "sha1": sha1(plain), "fnrefs": fnrefs, "decision": decision,
                 "reason": reason, "origin": "back-matter",
             })
+            link_embedded(fb_id, plain)
             frontback.append({
                 "id": fb_id, "decision": decision, "reason": reason,
                 "file": file_label, "text_head": plain[:80],
@@ -847,6 +965,20 @@ def build(profile: dict):
         start=1,
     ):
         b["order_index"] = rank
+
+    # post-mount: register embedded-verse footnote anchors now that every embedded
+    # verse has been mounted onto its carrier block. GUARDED -- an unmounted entry
+    # (parent_block None, or absent from blocks) is a self-check FAILURE
+    # (verse_placeholders_unique_and_mounted), NEVER a KeyError here.
+    if apparatus_policy in ("translate_all", "preserve_source"):
+        for e in verse_store:
+            if e["mount"] != "embedded" or not e["fnrefs"]:
+                continue
+            parent_id = e.get("parent_block")
+            parent = blocks.get(parent_id) if parent_id else None
+            if parent is None:
+                continue  # unmounted -> caught downstream, do not raise
+            record_anchors(e["fnrefs"], parent_id, parent.get("seg"), parent.get("source_file"))
 
     # ---- footnotes join table ----
     footnotes = []
@@ -1047,6 +1179,25 @@ def run_self_checks(manifest, report, max_segment_words):
                 n = int(m)
                 ref_count[n] = ref_count.get(n, 0) + 1
                 ref_block.setdefault(n, set()).add(b["id"])
+        # ALSO scan footnotes cited INSIDE an embedded verse -- the carrier
+        # block's plain_text holds only the ⟦VERSE_...⟧ placeholder (the
+        # ⟦FNREF_n⟧ sentinel lives on the verse.store entry itself), so the
+        # blocks-only scan above never sees it (#93 Fix B).
+        for e in verse_store:
+            if e.get("mount") != "embedded":
+                continue
+            parent = e.get("parent_block")
+            if not parent:
+                # Unmounted embedded verse -> surfaced by
+                # verse_placeholders_unique_and_mounted below. NEVER add None to
+                # ref_block: a set mixing None + a real block id crashes
+                # `sorted(bs)` at the `multi` comprehension below, aborting
+                # run_self_checks before the unmounted entry can report.
+                continue
+            for m in FNREF_RE.findall(e.get("plain_text", "")):
+                n = int(m)
+                ref_count[n] = ref_count.get(n, 0) + 1
+                ref_block.setdefault(n, set()).add(parent)
         dup = {n: c for n, c in ref_count.items() if c != 1}
         multi = {n: sorted(bs) for n, bs in ref_block.items() if len(bs) != 1}
         chk(
@@ -1058,6 +1209,12 @@ def run_self_checks(manifest, report, max_segment_words):
         markers = []
         for b in blocks.values():
             markers.extend(BODY_REF_MARKER_RE.findall(b["plain_text"]))
+        # ALSO scan a literal [n] marker inside an embedded verse (same carrier
+        # -only-holds-the-placeholder reasoning as above, #93 Fix B).
+        for e in verse_store:
+            if e.get("mount") != "embedded" or not e.get("parent_block"):
+                continue
+            markers.extend(BODY_REF_MARKER_RE.findall(e.get("plain_text", "")))
         dup = {n: markers.count(n) for n in set(markers) if markers.count(n) != 1}
         chk("body_ref_markers_well_formed_and_unique", not dup, f"n_markers={len(markers)} duplicated={dup}")
     else:

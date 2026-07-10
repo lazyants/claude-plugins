@@ -191,7 +191,7 @@ def _extract_text(body: str) -> str:
     ``body`` (which must already end in a newline)."""
     return (
         "#!/usr/bin/env python3\n"
-        "# EXTRACTOR_CONTRACT_VERSION: 1\n"
+        "# EXTRACTOR_CONTRACT_VERSION: 2\n"
         f"{ve.BEGIN_SENTINEL_PREFIX} -- DO NOT EDIT (false-green anti-pattern)\n"
         f"{body}"
         f"{ve.END_SENTINEL_PREFIX}\n"
@@ -464,6 +464,105 @@ def test_verse_counts_reconcile_rederived_block_count_violation():
     m = _manifest_with_verse()
     del m["blocks"]["VERSE:seg01:0001"]
     assert _ok(ve.run_derivable_checks(m, "omit_apparatus", 700), "verse_counts_reconcile") is False
+
+
+# ---------------------------------------------------------------------------
+# #93 Fix B gate mirror -- an embedded verse's own FNREF/body-ref sentinel
+# lives ONLY on verse.store[].plain_text (the carrier block's own plain_text
+# holds just the ⟦VERSE_...⟧ placeholder), so fnref_sentinel_unique /
+# body_ref_markers_well_formed_and_unique must scan verse_store too -- byte-
+# mirroring extract.py.template's in-region #93 Fix B scan.
+# ---------------------------------------------------------------------------
+
+def _manifest_embedded_verse_fnref_translate_all() -> dict:
+    """Clean manifest: one embedded verse (mount=="embedded") whose OWN
+    plain_text carries the footnote's sole FNREF citation -- the carrier
+    block's plain_text holds only the VERSE placeholder (mirrors #93 Fix A
+    mounting; the carrier's own fnrefs never see the verse's FNREF)."""
+    m = _manifest_translate_all()
+    m["blocks"]["PARA:seg01:0001"]["plain_text"] = "Some body prose ⟦VERSE_V1_deadbeef⟧."
+    m["blocks"]["PARA:seg01:0001"]["sha1"] = _sha1(m["blocks"]["PARA:seg01:0001"]["plain_text"])
+    m["verse"] = {
+        "store": [{
+            "vid": "V1", "placeholder": "⟦VERSE_V1_deadbeef⟧", "context": "body",
+            "mount": "embedded", "parent_block": "PARA:seg01:0001",
+            "plain_text": "A line of verse ⟦FNREF_1⟧",
+            "sha1": _sha1("A line of verse ⟦FNREF_1⟧"),
+        }],
+        "n_nodes": 1, "n_block": 0, "n_embedded": 1,
+        "by_context": {"body": 1, "footnote": 0, "frontback": 0},
+    }
+    return m
+
+
+def test_embedded_verse_fnref_counted_translate_all():
+    m = _manifest_embedded_verse_fnref_translate_all()
+    results = ve.run_derivable_checks(m, "translate_all", 700)
+    assert _ok(results, "fn_bijection") is True
+    assert _ok(results, "fnref_sentinel_unique") is True
+
+
+def test_embedded_verse_fnref_duplicate_across_blocks_is_caught():
+    """Negative twin: the SAME n also cited in the carrier block's OWN text
+    (alongside the verse placeholder) must trip the cross-block-duplicate
+    detection -- proving the embedded occurrence is really aggregated into the
+    SAME ref_count/ref_block as the block scan, not tracked separately."""
+    m = _manifest_embedded_verse_fnref_translate_all()
+    m["blocks"]["PARA:seg01:0001"]["plain_text"] = "Some body prose ⟦VERSE_V1_deadbeef⟧ ⟦FNREF_1⟧."
+    m["blocks"]["PARA:seg01:0001"]["sha1"] = _sha1(m["blocks"]["PARA:seg01:0001"]["plain_text"])
+    results = ve.run_derivable_checks(m, "translate_all", 700)
+    assert _ok(results, "fnref_sentinel_unique") is False
+
+
+def _manifest_embedded_verse_body_ref() -> dict:
+    """Clean manifest for the body_refs_only branch: one embedded verse whose
+    OWN plain_text carries a literal `[1]` body-ref marker."""
+    m = _manifest_body_refs()
+    m["blocks"]["PARA:seg01:0001"]["plain_text"] = "Some body prose ⟦VERSE_V1_deadbeef⟧."
+    m["blocks"]["PARA:seg01:0001"]["sha1"] = _sha1(m["blocks"]["PARA:seg01:0001"]["plain_text"])
+    m["verse"] = {
+        "store": [{
+            "vid": "V1", "placeholder": "⟦VERSE_V1_deadbeef⟧", "context": "body",
+            "mount": "embedded", "parent_block": "PARA:seg01:0001",
+            "plain_text": "A line citing [1]", "sha1": _sha1("A line citing [1]"),
+        }],
+        "n_nodes": 1, "n_block": 0, "n_embedded": 1,
+        "by_context": {"body": 1, "footnote": 0, "frontback": 0},
+    }
+    return m
+
+
+def test_embedded_verse_body_ref_marker_counted_body_refs_only():
+    m = _manifest_embedded_verse_body_ref()
+    assert _ok(
+        ve.run_derivable_checks(m, "body_refs_only", 700), "body_ref_markers_well_formed_and_unique"
+    ) is True
+
+
+def test_embedded_verse_body_ref_marker_duplicate_across_blocks_is_caught():
+    m = _manifest_embedded_verse_body_ref()
+    m["blocks"]["PARA:seg01:0001"]["plain_text"] = "Some body prose [1]."
+    m["blocks"]["PARA:seg01:0001"]["sha1"] = _sha1(m["blocks"]["PARA:seg01:0001"]["plain_text"])
+    assert _ok(
+        ve.run_derivable_checks(m, "body_refs_only", 700), "body_ref_markers_well_formed_and_unique"
+    ) is False
+
+
+def test_unmounted_embedded_fnref_surfaces_as_unmounted_not_typeerror():
+    """#93 Fix B None-guard (finding-3 methodology -- an INTERMEDIATE-MUTATION
+    checkpoint, NOT RED-on-pristine): an UNMOUNTED embedded verse entry
+    (parent_block=None) carrying an FNREF, alongside a real block citing the
+    SAME n directly, must surface as verse_placeholders_unique_and_mounted
+    failing -- run_derivable_checks must RETURN (never raise a TypeError from
+    sorted({str, None})), and fnref_sentinel_unique (which never sees the
+    unmounted entry, guarded at the source) stays green."""
+    m = _manifest_embedded_verse_fnref_translate_all()
+    m["verse"]["store"][0]["parent_block"] = None
+    m["blocks"]["PARA:seg01:0001"]["plain_text"] = "Some body prose ⟦FNREF_1⟧."
+    m["blocks"]["PARA:seg01:0001"]["sha1"] = _sha1(m["blocks"]["PARA:seg01:0001"]["plain_text"])
+    results = ve.run_derivable_checks(m, "translate_all", 700)
+    assert _ok(results, "verse_placeholders_unique_and_mounted") is False
+    assert _ok(results, "fnref_sentinel_unique") is True
 
 
 # ---------------------------------------------------------------------------
