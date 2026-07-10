@@ -403,14 +403,23 @@ not just prose: `style_bible.template.md`/`PLAN.template.md` wrap their
 must-fill sections in `<!-- LT_REQUIRED_FILL_BEGIN: <id> -->`/
 `<!-- LT_REQUIRED_FILL_END -->` marker pairs containing the fixed sentinel
 `LT_PLACEHOLDER_UNFILLED`. `scripts/scaffold_validate.py` runs as a hard gate
-before W2 begins: FATALLY halts (naming file + marker id) if
-`LT_PLACEHOLDER_UNFILLED` survives inside any marker span across any
-scaffolded file — text outside marker spans is never scanned. Plus a
-separate, marker-free check: FATALLY rejects `translate_TASK.md`/
-`review_TASK.md` if the literal string `guéridon=refrain-song` (the shipped
-illustrative era/domain trap example) survives a copy-paste into a new
-project — deliberately not marker-gated (traps are discovered during the
-run, nothing to require at W1).
+before W2 begins, with three independent checks: (1) FATALLY halts (naming
+file + marker id) if `LT_PLACEHOLDER_UNFILLED` survives inside any marker
+span across any scaffolded file — text outside marker spans is not scanned
+by *this* check; (2) separately, FATALLY rejects any of the six
+Step-0a-copied files (`PLAN.md`/`style_bible.md`/`consistency_issues.md`/
+`translate_TASK.md`/`review_TASK.md`/`glossary_TASK.md`) that still contain
+an unfilled inline bracket placeholder (`[SOURCE LANGUAGE]`, `[TARGET
+LANGUAGE]`, `[PROJECT TITLE / AUTHOR / PERIOD -- fill in]`), matched as a
+closed, exact list rather than a generic `[...]` shape so a translator's own
+legitimate editorial brackets are never blocked; (3) FATALLY rejects
+`translate_TASK.md`/`review_TASK.md` if the shipped illustrative era/domain
+trap example survives a copy-paste into a new project — checked two ways,
+an exact-substring match on the literal `guéridon=refrain-song` plus a
+co-occurrence check (scoped to the callout's own HTML comment) catching a
+separator-mangled or partially-deleted survivor the exact match alone would
+miss — deliberately not marker-gated (traps are discovered during the run,
+nothing to require at W1).
 
 **W2 Extract** — adapt `extract.py.template` for the source (spine/footnote/
 verse detection per the resolved source-format adapter); run it; its own

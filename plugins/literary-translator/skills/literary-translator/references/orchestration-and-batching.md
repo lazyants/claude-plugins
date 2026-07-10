@@ -59,9 +59,13 @@ is the orchestration-level summary of what each stage hands to the next):
 - **W1 Scaffold** — fill in every placeholder Step 0/0a already copied into
   place. Gated by `scripts/scaffold_validate.py` before W2 can start: it
   fatally rejects `LT_PLACEHOLDER_UNFILLED` inside any
-  `LT_REQUIRED_FILL_BEGIN`/`LT_REQUIRED_FILL_END` marker span, and separately
-  rejects `translate_TASK.md`/`review_TASK.md` if the shipped
-  `guéridon=refrain-song` trap example survived into a real project.
+  `LT_REQUIRED_FILL_BEGIN`/`LT_REQUIRED_FILL_END` marker span; separately
+  rejects any of the six copied files still carrying an unfilled inline
+  bracket placeholder (`[SOURCE LANGUAGE]`, etc.); and separately rejects
+  `translate_TASK.md`/`review_TASK.md` if the shipped era/domain trap
+  example survived into a real project (an exact-substring match plus a
+  co-occurrence check that also catches a mangled or partially-deleted
+  survivor).
 - **W2 Extract** — run the adapted `extract.py`, producing `manifest.json`;
   its own blocking self-checks (bijection, coverage, spine-order,
   `no_segment_exceeds_max_words`, etc.) must be green before anything
@@ -156,9 +160,9 @@ resume-integrity digest that reads both `plugin_bundle_hash` and
 ## Structural properties preserved exactly from the proven reference
 
 `mass-translate-wf.template.js` is generalized from the real, proven
-`historiettes-t3/reference/historiettes-mass-translate-wf.reference.js` —
-read that file directly for ground truth on structure. These properties are
-preserved exactly because they are precisely what made the original reliable:
+`historiettes-t3/reference/historiettes-mass-translate-wf.reference.js`.
+These properties are preserved exactly because they are precisely what
+made the original reliable:
 
 - **Self-contained, no imports.** The template uses only the Workflow tool's
   provided globals (`agent()`, `pipeline()`, `log()`, `args`) plus `python3`

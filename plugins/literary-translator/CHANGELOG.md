@@ -1,5 +1,27 @@
 # Changelog
 
+## 1.3.1 — 2026-07-10
+
+Hardens two W1-adjacent authoring gates and closes a doc-prose leak: closes #94 and #103.
+
+### Fixed
+
+- **Unfilled bracket placeholders never rejected `scaffold_validate.py`'s W1 gate** (#94) — the hand-adapted
+  `PLAN.md`/`style_bible.md`/`consistency_issues.md`/`translate_TASK.md`/`review_TASK.md`/`glossary_TASK.md`
+  could still carry unfilled `[SOURCE LANGUAGE]`/`[TARGET LANGUAGE]`/`[PROJECT TITLE / AUTHOR / PERIOD --
+  fill in]` placeholders past the scaffold check. A closed-list, whitespace-normalized bracket scan now
+  fatally rejects each survivor by name, without risk of blocking legitimate hand-authored editorial
+  brackets (`[NOTE]`, `[SIC]`, ...). The companion ERA/DOMAIN trap-string check gained a second,
+  co-occurrence-based scan that also catches a separator-mangled or partially-deleted trap example, closing
+  bypasses the original exact-substring check missed.
+- **Two reference docs instructed the reader to read a non-shipped `historiettes-t3` path directly**
+  (#103) — `orchestration-and-batching.md` and `assembly-and-output.md` carried leftover imperative
+  "read `historiettes-t3/...` directly" clauses pointing at a private, unreachable origin-project file
+  (the same leak class #77 fixed in script docstrings). Both now state the same provenance as a
+  descriptive fact rather than an actionable instruction. `authoring_hygiene_drift.test.py`'s drift guard
+  is extended with an independent, paragraph-scoped proximity check over `references/**/*.md` so this class
+  can no longer recur silently in doc prose (the existing guard only ever scanned `.py` scripts).
+
 ## 1.3.0 — 2026-07-10
 
 Verse×footnote correctness cluster: closes five open issues (#84, #92, #93, #96, #106) and the
