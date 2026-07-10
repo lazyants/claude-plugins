@@ -441,6 +441,18 @@ def validate(seg, cfg):
     verses_list = src.get("verses") or []
     parent_block_claims = {}
     for v in verses_list:
+        # Embedded verse (mount=="embedded"): a verse quoted INSIDE another
+        # block (a PARA/QUOTE/FRONTBACK prose block, or a footnote-definition
+        # block). There is no STANDALONE verse block in draft.blocks{} for
+        # it, so the per-block placeholder bijection (check 3) does not
+        # apply. Its placeholder survival is enforced elsewhere: by the
+        # prose multiset (check 2) when the carrier is a blocks[] entry, or
+        # by footnote placeholder-fidelity (check 4) when the carrier is a
+        # footnote-def. Coverage + content are enforced by check 5 under
+        # every mode. A NON-embedded verse whose parent_block is missing
+        # from blocks[] is still a genuine SOURCE DEFECT below.
+        if v.get("mount") == "embedded":
+            continue
         parent_block_claims.setdefault(v["parent_block"], []).append(v)
 
     bid_to_verse_ph = {}
@@ -525,7 +537,21 @@ def validate(seg, cfg):
             errs.append(f"[{vid}] verse entry must be an object, got {type(rv).__name__}")
             continue
 
-        n_line = _source_line_count(src_block_text.get(v.get("parent_block"), ""))
+        if v.get("mount") == "embedded":
+            # Parent may be a footnote-def block (absent from this
+            # segment's blocks[]) OR a prose block whose own source line
+            # count is the whole carrier, not this inline verse -- either
+            # way use the count segpack.py threaded from the manifest verse
+            # node.
+            n_line = v.get("n_line")
+            if not isinstance(n_line, int) or isinstance(n_line, bool) or n_line < 0:
+                n_line = 0
+        else:
+            # Standalone block-mount verse: derive from the parent block's
+            # own source text exactly as before (behavior-preserving for
+            # existing segpacks and every hand-built fixture, which carry no
+            # mount).
+            n_line = _source_line_count(src_block_text.get(v.get("parent_block"), ""))
         effective_mode = cfg.verse_mode
         if effective_mode == "mixed_by_length":
             effective_mode = (

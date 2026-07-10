@@ -398,6 +398,235 @@ def test_dropped_body_refs_only_marker_fails_gate(tmp_path):
     assert defect_count(result.stdout) == 1
 
 
+# ---------------------------------------------------------------------------
+# 6. #96 -- embedded verse (mount=="embedded") skips the per-block
+#    placeholder bijection (check 3) and threads n_line straight off the
+#    manifest verse node (check 5), instead of deriving it from the WHOLE
+#    prose carrier block's own source text.
+# ---------------------------------------------------------------------------
+
+V_PH_MIXED = "⟦VERSE_vMixed⟧"
+
+MIXED_BY_LENGTH_PROFILE = {
+    "verse_policy": {"mode": "mixed_by_length", "threshold_lines": 3},
+    "footnotes": {"apparatus_policy": "translate_all"},
+    "validation": {"untranslated_sentinel": "[TODO-UNTRANSLATED]"},
+}
+
+
+def embedded_mixed_segpack(seg="seg03"):
+    return {
+        "seg": seg,
+        "blocks": [
+            {
+                "id": "p1",
+                "order_index": 0,
+                "plain_text": f"Some prose introducing a poem {V_PH_MIXED} right here.",
+            },
+        ],
+        "footnotes": [],
+        "verses": [
+            {
+                "vid": "vMixed",
+                "placeholder": V_PH_MIXED,
+                "parent_block": "p1",
+                "mount": "embedded",
+                "n_line": 5,
+            }
+        ],
+        "names": [],
+        "canon_names": [],
+        "new_names": [],
+    }
+
+
+def embedded_mixed_draft(seg="seg03"):
+    return {
+        "seg": seg,
+        "blocks": {
+            "p1": f"Some translated prose introducing a poem {V_PH_MIXED} right here.",
+        },
+        "footnotes": {},
+        "verses": {
+            "vMixed": {
+                "rendered": "First rendered line\nSecond rendered line",
+                "literal_gloss": "A literal gloss that says something else entirely",
+            },
+        },
+        "names": [],
+        "notes": [],
+    }
+
+
+def test_embedded_verse_mixed_by_length_uses_threaded_n_line(tmp_path):
+    """#96 regression: an EMBEDDED verse (mount=="embedded") under
+    verse_policy.mode=mixed_by_length must resolve its effective mode from
+    the manifest-threaded n_line (5 >= threshold_lines=3 ->
+    full_rhymed_plus_literal), not from _source_line_count() of the whole
+    PROSE carrier block (irrelevant to this inline verse's own line count).
+    Pre-fix, check 3 ALSO unconditionally added this verse to
+    parent_block_claims and then demanded the carrier's ENTIRE translated
+    text equal the verse's bare placeholder -- the false per-block
+    bijection this cluster fixes -- so this fixture fails that way on
+    pristine code."""
+    root = make_durable_root(tmp_path, profile=MIXED_BY_LENGTH_PROFILE)
+    write_segment(root, "seg03", embedded_mixed_segpack(), embedded_mixed_draft())
+
+    result = run_validate(root, "seg03")
+
+    assert result.returncode == 0, (
+        f"expected the embedded-verse mixed_by_length draft to pass, got rc="
+        f"{result.returncode}\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    )
+    assert "[seg03] OK" in result.stdout
+
+
+V_PH_FNPOEM = "⟦VERSE_vFnPoem⟧"
+
+LITERAL_ONLY_PROFILE = {
+    "verse_policy": {"mode": "literal_only"},
+    "footnotes": {"apparatus_policy": "translate_all"},
+    "validation": {"untranslated_sentinel": "[TODO-UNTRANSLATED]"},
+}
+
+
+def fn_embedded_segpack(seg="seg04"):
+    return {
+        "seg": seg,
+        "blocks": [
+            {
+                "id": "p1",
+                "order_index": 0,
+                "plain_text": f"Some prose with a note {FN_PH} attached.",
+            },
+        ],
+        "footnotes": [
+            {"n": 1, "source_text": f"A note quoting a poem {V_PH_FNPOEM} within it."}
+        ],
+        "verses": [
+            {
+                "vid": "vFnPoem",
+                "placeholder": V_PH_FNPOEM,
+                # parent_block is the FOOTNOTE-DEF block's own id -- NEVER a
+                # member of this segpack's own blocks[] (a footnote-def
+                # block is not a segment block).
+                "parent_block": "fn1def",
+                "mount": "embedded",
+                "n_line": 2,
+            }
+        ],
+        "names": [],
+        "canon_names": [],
+        "new_names": [],
+    }
+
+
+def fn_embedded_draft(seg="seg04"):
+    return {
+        "seg": seg,
+        "blocks": {
+            "p1": f"Some translated prose with a note {FN_PH} attached.",
+        },
+        "footnotes": {
+            "1": f"A translated note quoting a poem {V_PH_FNPOEM} within it.",
+        },
+        "verses": {
+            "vFnPoem": {"literal_gloss": "A plain literal rendering of the quoted poem."},
+        },
+        "names": [],
+        "notes": [],
+    }
+
+
+def test_embedded_verse_parented_to_footnote_def_block_passes_gate(tmp_path):
+    """#96 regression: an embedded verse quoted INSIDE a footnote definition
+    has parent_block == that footnote-def block's own id, which is NEVER a
+    member of this segpack's own blocks[] (footnote-def blocks aren't
+    segment blocks). Pre-fix, check 3 unconditionally added every verse to
+    parent_block_claims and then demanded parent_block be a key of
+    block_meta -- false-firing a 'SOURCE DEFECT ... not found among this
+    segpack's blocks' for every footnote-embedded verse. Post-fix, check 3
+    skips mount=='embedded' entries entirely, so this passes clean."""
+    root = make_durable_root(tmp_path, profile=LITERAL_ONLY_PROFILE)
+    write_segment(root, "seg04", fn_embedded_segpack(), fn_embedded_draft())
+
+    result = run_validate(root, "seg04")
+
+    assert result.returncode == 0, (
+        f"expected the footnote-embedded verse draft to pass, got rc="
+        f"{result.returncode}\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    )
+    assert "[seg04] OK" in result.stdout
+
+
+SKIP_PROFILE = {
+    "verse_policy": {"mode": "skip"},
+    "footnotes": {"apparatus_policy": "translate_all"},
+    "validation": {"untranslated_sentinel": "[TODO-UNTRANSLATED]"},
+}
+
+
+def ghost_parent_segpack(seg="seg05"):
+    return {
+        "seg": seg,
+        "blocks": [
+            {
+                "id": "p1",
+                "order_index": 0,
+                "plain_text": "Ordinary prose, no verse here.",
+            },
+        ],
+        "footnotes": [],
+        "verses": [
+            {
+                # NON-embedded (mount absent -> the pre-#96 default):
+                # parent_block references a block that does not exist
+                # anywhere in this segpack -- a genuine SOURCE DEFECT, which
+                # the mount=="embedded" skip must NEVER swallow.
+                "vid": "vGhost",
+                "placeholder": "⟦VERSE_vGhost⟧",
+                "parent_block": "missingBlock",
+            }
+        ],
+        "names": [],
+        "canon_names": [],
+        "new_names": [],
+    }
+
+
+def ghost_parent_draft(seg="seg05"):
+    return {
+        "seg": seg,
+        "blocks": {"p1": "Ordinary translated prose, no verse here."},
+        "footnotes": {},
+        "verses": {"vGhost": {}},
+        "names": [],
+        "notes": [],
+    }
+
+
+def test_source_defect_floor_still_fires_for_non_embedded_verse_with_missing_parent(tmp_path):
+    """Control (GREEN both before and after #96): a NON-embedded verse
+    (mount absent, i.e. the pre-#96 default) whose parent_block is missing
+    from this segpack's blocks[] must still be flagged as a SOURCE DEFECT --
+    proves check 3's new mount=="embedded" skip is scoped exactly to
+    embedded verses and does not swallow this pre-existing floor."""
+    root = make_durable_root(tmp_path, profile=SKIP_PROFILE)
+    write_segment(root, "seg05", ghost_parent_segpack(), ghost_parent_draft())
+
+    result = run_validate(root, "seg05")
+
+    assert result.returncode == 1, (
+        f"a verse with a missing parent_block must still fail the gate, got "
+        f"rc={result.returncode}\nstdout:\n{result.stdout}"
+    )
+    assert (
+        "SOURCE DEFECT: verse 'vGhost' parent_block 'missingBlock' not found "
+        "among this segpack's blocks" in result.stdout
+    )
+    assert defect_count(result.stdout) == 1
+
+
 if __name__ == "__main__":
     import pytest
 

@@ -622,6 +622,97 @@ def test_syntax_aware_linker_does_not_wrap_inside_a_raw_sentinel_token(tmp_path)
 
 
 # ===========================================================================
+# 6b. #105 render close -- a footnote cited from INSIDE a verse's own
+#     translated content (not the surrounding prose) must render as an
+#     Obsidian [^N] ref + the page's own [^N]: def, never a raw ⟦FNREF_N⟧
+#     leak. assemble.py's _scan_verse_content_fnrefs merges such a footnote
+#     into the verse node's own fnrefs -- these tests exercise the render
+#     side of that contract with a hand-built NodeStream, for both mounts.
+# ===========================================================================
+
+
+def test_verse_block_embedded_footnote_ref_renders_as_ref_and_def(tmp_path):
+    """mount=block: a dedicated verse block (kind="verse") whose own
+    content.rendered carries ⟦FNREF_1⟧. The block-verse branch of
+    _render_block returns early via _render_verse_block, which never reaches
+    the node's own prose fnref-substitution loop -- so the conversion must
+    happen inside the verse renderer itself (_verse_texts ->
+    _convert_verse_fnrefs), not rely on that loop."""
+    v_ph = "⟦VERSE_vA_00000001⟧"
+    node = make_node(
+        "vblockA", "seg01", v_ph, kind="verse", fnrefs=[1],
+        verses=[{
+            "vid": "vA", "placeholder": v_ph,
+            "content": {"rendered": "First line here.\nSecond line ⟦FNREF_1⟧ done.",
+                        "literal_gloss": "Gloss line one and two."},
+        }],
+    )
+    ns = make_nodestream([node], footnotes=[{"n": 1, "text": "A footnote definition."}])
+    canon = make_canon({})
+    profile = make_profile()
+
+    out_dir, manifest = render_into(tmp_path, ns, canon, profile)
+    body_matches = find_file_with_content(
+        all_written_paths(out_dir, manifest), lambda t: "First line here" in t
+    )
+    assert len(body_matches) == 1
+    body_text = body_matches[0].read_text(encoding="utf-8")
+
+    assert "[^1]" in body_text, f"the verse-embedded footnote ref must render as [^1] -- got:\n{body_text}"
+    assert "[^1]: A footnote definition." in body_text, (
+        f"the footnote's own [^1]: definition line must be emitted -- got:\n{body_text}"
+    )
+    assert "⟦FNREF_1⟧" not in body_text, (
+        f"the raw sentinel must never leak into rendered output -- got:\n{body_text}"
+    )
+
+
+def test_verse_inline_embedded_footnote_ref_renders_as_ref_and_def(tmp_path):
+    """mount=embedded: a verse spliced inline into a prose block's own text
+    via _render_verse_inline, whose own content.rendered carries
+    ⟦FNREF_1⟧. Unlike the block-verse case (which returns early and never
+    reaches _render_block's own prose fnref-substitution loop), the embedded
+    case's carrier text DOES reach that loop after splicing -- and since it
+    is a blind string-replace over the WHOLE post-splice text (regardless of
+    whether _convert_verse_fnrefs already converted the sentinel), this
+    control test is intentionally GREEN on BOTH pristine and fixed code
+    (verified via git-stash): the mount=embedded path already worked, given
+    assemble.py supplies the verse-content footnote in node.fnrefs. It pins
+    that _convert_verse_fnrefs' earlier conversion is harmless/idempotent
+    here, not a regression discriminator -- the block-mount test above is."""
+    v_ph = "⟦VERSE_vInline_00000002⟧"
+    node = make_node(
+        "p1", "seg01", f"Before the couplet: {v_ph} after the couplet.",
+        fnrefs=[1],
+        verses=[{
+            "vid": "vInline", "placeholder": v_ph,
+            "content": {"rendered": "A rendered line ⟦FNREF_1⟧ here."},
+        }],
+    )
+    ns = make_nodestream([node], footnotes=[{"n": 1, "text": "An inline footnote definition."}])
+    canon = make_canon({})
+    profile = make_profile()
+
+    out_dir, manifest = render_into(tmp_path, ns, canon, profile)
+    body_matches = find_file_with_content(
+        all_written_paths(out_dir, manifest), lambda t: "Before the couplet" in t
+    )
+    assert len(body_matches) == 1
+    body_text = body_matches[0].read_text(encoding="utf-8")
+
+    assert "[^1]" in body_text, f"the verse-embedded footnote ref must render as [^1] -- got:\n{body_text}"
+    assert "[^1]: An inline footnote definition." in body_text, (
+        f"the footnote's own [^1]: definition line must be emitted -- got:\n{body_text}"
+    )
+    assert "⟦FNREF_1⟧" not in body_text, (
+        f"the raw sentinel must never leak into rendered output -- got:\n{body_text}"
+    )
+    assert v_ph not in body_text, (
+        f"the embedded verse's own placeholder must be substituted, not leaked -- got:\n{body_text}"
+    )
+
+
+# ===========================================================================
 # 7. Wikilink TARGET must be the emitted note identity (FIXSPEC round 1 C3 +
 #    round 2 C2) -- never the raw source_form (which may itself be
 #    path-like), and, since round 2, FOLDER-QUALIFIED (a bare stem is not

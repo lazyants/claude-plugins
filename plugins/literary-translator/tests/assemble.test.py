@@ -817,6 +817,315 @@ def test_verse_embedded_in_a_footnote_def_is_also_stripped(tmp_path):
     )
 
 
+def test_footnote_cited_in_verse_content_whose_def_embeds_a_verse_is_not_orphan(tmp_path):
+    """r6 finding 2 -- a near-clone of test_verse_embedded_in_a_footnote_def_is_also_stripped
+    above, with the ⟦FNREF_1⟧ citation moved OUT of p1's own block text and
+    INTO an embedded verse's (vA) translated content instead: p1's block text
+    now carries only vA's placeholder, and vA's own draft.verses content
+    (rendered) is the one that cites ⟦FNREF_1⟧. Footnote 1's own definition
+    (FN1) in turn embeds a SECOND verse (vFoot, mount=embedded,
+    context=footnote) -- exactly like the original test. Pre-fix (no
+    verse-content FNREF scan at all), footnote 1 is never referenced anywhere
+    in this segment and this fatals (orphan_footnote_def, since
+    seg_referenced_ns never sees n=1); post-fix, _scan_verse_content_fnrefs
+    registers n=1 from vA's own content AND (the r6 finding-2 inline splice)
+    marks vFoot referenced too, so orphan_verse doesn't false-fatal it
+    either. REGRESSION-class (git-stash the fix -> confirm RED)."""
+    v_ph_a = "⟦VERSE_vA_abc12345⟧"
+    v_ph_foot = "⟦VERSE_vFoot_cafe1234⟧"
+    root = make_root(tmp_path)
+    write_manifest(
+        root,
+        blocks={
+            "p1": {"type": "PARA", "seg": "seg01", "order_index": 0,
+                   "plain_text": f"Body text {v_ph_a} here."},
+            "FN1": {"type": "FN", "seg": None, "order_index": 1,
+                    "plain_text": f"A cited couplet: {v_ph_foot}"},
+        },
+        segments=[{"seg": "seg01", "kind": "body", "title_text": "Ch1",
+                   "block_ids": ["p1"], "word_count": 10}],
+        footnotes=[{"n": 1, "anchor_block": "p1", "anchor_seg": "seg01", "def_block": "FN1"}],
+        verse_store=[
+            {"vid": "vA", "placeholder": v_ph_a, "context": "body",
+             "parent_block": "p1", "mount": "embedded"},
+            {"vid": "vFoot", "placeholder": v_ph_foot, "context": "footnote",
+             "parent_block": "FN1", "mount": "embedded"},
+        ],
+    )
+    write_segpack(
+        root, "seg01",
+        blocks=[{"id": "p1", "order_index": 0, "plain_text": f"Body text {v_ph_a} here."}],
+        footnotes=[{"n": 1, "source_text": f"A cited couplet: {v_ph_foot}"}],
+        verses=[
+            {"vid": "vA", "placeholder": v_ph_a, "parent_block": "p1"},
+            {"vid": "vFoot", "placeholder": v_ph_foot, "parent_block": "FN1"},
+        ],
+    )
+    write_draft(
+        root, "seg01",
+        # p1's OWN block text carries only vA's placeholder -- no ⟦FNREF_1⟧
+        # here at all; the footnote citation lives inside vA's own content.
+        blocks={"p1": f"Translated body {v_ph_a} here."},
+        footnotes={"1": f"A cited couplet: {v_ph_foot}"},
+        verses={
+            "vA": {"rendered": f"Rendered line {FN_PH_1}", "literal_gloss": "Gloss line, no ref"},
+            "vFoot": {"rendered": "Rendered embedded couplet", "literal_gloss": "Gloss embedded couplet"},
+        },
+    )
+    write_ledger(root, {"seg01": {"status": "converged"}})
+
+    result = run_assemble(root)
+    assert result.returncode == 0, f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    ns = read_nodestream(root)
+    by_id = {n["id"]: n for n in ns["nodes"]}
+    assert 1 in by_id["p1"]["fnrefs"], (
+        "footnote 1, cited only inside vA's own verse content, must be merged "
+        "into the carrier block node's fnrefs"
+    )
+    fn_ns = {fn["n"] for fn in ns["footnotes"]}
+    assert 1 in fn_ns, "footnote 1 must be in the book-wide footnotes[] table"
+    fn1_text = next(fn["text"] for fn in ns["footnotes"] if fn["n"] == 1)
+    assert v_ph_foot not in fn1_text, (
+        "the inner verse placeholder embedded in footnote 1's own def text "
+        "must still be stripped (Phase 0 policy), same as the un-nested case"
+    )
+    all_verse_vids = {v["vid"] for n in ns["nodes"] for v in n["verses"]}
+    assert "vA" in all_verse_vids
+    assert "vFoot" not in all_verse_vids, (
+        "the inner verse (referenced only via the footnote-def embed) must "
+        "never be independently resolved into any node's own verses[] -- "
+        "referenced-only, never rendered"
+    )
+
+
+def test_footnote_cited_twice_in_one_block_is_duplicate(tmp_path):
+    """r7 finding 2 -- a defensive pin of the UNTOUCHED block-branch
+    invariant _scan_verse_content_fnrefs's own docstring says it deliberately
+    mirrors rather than shares: a single block whose OWN text cites
+    ⟦FNREF_1⟧ TWICE is still duplicate_footnote_ref, exercising the
+    ORIGINAL per-occurrence within-block duplicate pass (unchanged by adding
+    the verse-content scan alongside it). Must pass on pristine AND after the
+    verse-content changes -- a byte-compat pin, not a regression test."""
+    root = make_root(tmp_path)
+    write_manifest(
+        root,
+        blocks={
+            "p1": {"type": "PARA", "seg": "seg01", "order_index": 0,
+                   "plain_text": f"{FN_PH_1} middle {FN_PH_1}", "fnrefs": [1]},
+            "FN1": {"type": "FN", "seg": None, "order_index": 1, "plain_text": "The definition."},
+        },
+        segments=[{"seg": "seg01", "kind": "body", "title_text": "Ch1",
+                   "block_ids": ["p1"], "word_count": 10}],
+        footnotes=[{"n": 1, "anchor_block": "p1", "anchor_seg": "seg01", "def_block": "FN1"}],
+    )
+    write_segpack(
+        root, "seg01",
+        blocks=[{"id": "p1", "order_index": 0, "plain_text": f"{FN_PH_1} middle {FN_PH_1}"}],
+        footnotes=[{"n": 1, "source_text": "The definition."}],
+    )
+    write_draft(
+        root, "seg01",
+        blocks={"p1": f"{FN_PH_1} middle {FN_PH_1}"},
+        footnotes={"1": "The translated definition."},
+    )
+    write_ledger(root, {"seg01": {"status": "converged"}})
+
+    result = run_assemble(root)
+    assert result.returncode == 1, f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    payload = parse_one_json_line(result)
+    assert payload["success"] is False
+    assert (
+        payload.get("reason") == "duplicate_footnote_ref"
+        or "duplicate" in payload["error"].lower()
+    )
+
+
+def test_verse_fnref_in_both_fields_deduped_across_fields(tmp_path):
+    """r6 finding 4 -- a footnote cited naturally in BOTH a verse's rhymed
+    `rendered` and its `literal_gloss` (full_rhymed_plus_literal mode) is ONE
+    citation, not a duplicate: _scan_verse_content_fnrefs dedups ACROSS
+    fields. RED against an unconditional-union/combined-field scan that
+    treats the two fields as one combined string (that reading would trip
+    duplicate_footnote_ref on this exact, legitimate shape)."""
+    root = make_root(tmp_path)
+    write_manifest(
+        root,
+        blocks={
+            "vblockA": {"type": "VERSE", "seg": "seg01", "order_index": 0,
+                        "plain_text": V_PH_A},
+            "FN1": {"type": "FN", "seg": None, "order_index": 1, "plain_text": "The definition."},
+        },
+        segments=[{"seg": "seg01", "kind": "body", "title_text": "Ch1",
+                   "block_ids": ["vblockA"], "word_count": 10}],
+        footnotes=[{"n": 1, "anchor_block": "vblockA", "anchor_seg": "seg01", "def_block": "FN1"}],
+        verse_store=[{"vid": "vA", "placeholder": V_PH_A, "context": "body",
+                       "parent_block": "vblockA", "mount": "block"}],
+    )
+    write_segpack(
+        root, "seg01",
+        blocks=[{"id": "vblockA", "order_index": 0, "plain_text": V_PH_A}],
+        footnotes=[{"n": 1, "source_text": "The definition."}],
+        verses=[{"vid": "vA", "placeholder": V_PH_A, "parent_block": "vblockA"}],
+    )
+    write_draft(
+        root, "seg01",
+        blocks={"vblockA": V_PH_A},
+        footnotes={"1": "The translated definition."},
+        verses={"vA": {"rendered": f"Rhymed line {FN_PH_1}",
+                       "literal_gloss": f"Literal gloss {FN_PH_1}"}},
+    )
+    write_ledger(root, {"seg01": {"status": "converged"}})
+
+    result = run_assemble(root)
+    assert result.returncode == 0, f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    ns = read_nodestream(root)
+    by_id = {n["id"]: n for n in ns["nodes"]}
+    assert by_id["vblockA"]["fnrefs"] == [1], (
+        "the same footnote cited in BOTH rendered and literal_gloss is ONE "
+        "citation, not a duplicate -- must appear exactly once in fnrefs"
+    )
+    assert [fn["n"] for fn in ns["footnotes"]].count(1) == 1
+
+
+def test_verse_fnref_duplicated_within_field_is_fatal(tmp_path):
+    """r6 finding 4 companion -- the same footnote cited TWICE inside ONE
+    field (rendered alone) is a genuine duplicate_footnote_ref, matching
+    assemble's block-branch 'repeat anywhere' invariant. RED against a
+    cross-field-only set() that collapses same-field repeats (a bare set()
+    over all tokens in one field would silently drop the repeat)."""
+    root = make_root(tmp_path)
+    write_manifest(
+        root,
+        blocks={
+            "vblockA": {"type": "VERSE", "seg": "seg01", "order_index": 0,
+                        "plain_text": V_PH_A},
+            "FN1": {"type": "FN", "seg": None, "order_index": 1, "plain_text": "The definition."},
+        },
+        segments=[{"seg": "seg01", "kind": "body", "title_text": "Ch1",
+                   "block_ids": ["vblockA"], "word_count": 10}],
+        footnotes=[{"n": 1, "anchor_block": "vblockA", "anchor_seg": "seg01", "def_block": "FN1"}],
+        verse_store=[{"vid": "vA", "placeholder": V_PH_A, "context": "body",
+                       "parent_block": "vblockA", "mount": "block"}],
+    )
+    write_segpack(
+        root, "seg01",
+        blocks=[{"id": "vblockA", "order_index": 0, "plain_text": V_PH_A}],
+        footnotes=[{"n": 1, "source_text": "The definition."}],
+        verses=[{"vid": "vA", "placeholder": V_PH_A, "parent_block": "vblockA"}],
+    )
+    write_draft(
+        root, "seg01",
+        blocks={"vblockA": V_PH_A},
+        footnotes={"1": "The translated definition."},
+        verses={"vA": {"rendered": f"{FN_PH_1} twice in one field {FN_PH_1}",
+                       "literal_gloss": "No ref here"}},
+    )
+    write_ledger(root, {"seg01": {"status": "converged"}})
+
+    result = run_assemble(root)
+    assert result.returncode == 1, f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    payload = parse_one_json_line(result)
+    assert payload["success"] is False
+    assert (
+        payload.get("reason") == "duplicate_footnote_ref"
+        or "duplicate" in payload["error"].lower()
+    )
+
+
+def test_unrecognized_sentinel_in_verse_content_is_fatal(tmp_path):
+    """codex HIGH (post-hoc round): _scan_verse_content_fnrefs's per-field
+    token scan only ever inspected tokens matching FNREF_RE, silently
+    ignoring any OTHER ⟦...⟧ sentinel ANY_SENTINEL_RE.findall found -- unlike
+    the block-text branch's terminal else-raise (:594), a stray/unregistered
+    sentinel (here an unrelated verse placeholder) inside a verse's own
+    content used to leak through completely unvalidated (assemble exited 0,
+    and the raw sentinel survived byte-for-byte into the rendered book). A
+    verse's own translated content may only ever cite ⟦FNREF_n⟧ -- there is
+    no such thing as a verse embedding another verse (verse.store[].context
+    is only ever "body"/"footnote"/"frontback", never "verse") -- any other
+    sentinel here is a data defect and must fail closed, exactly like the
+    block branch. REGRESSION-class (git-stash the fix -> confirm RED)."""
+    stray = "⟦VERSE_vZ_00000000⟧"
+    root = make_root(tmp_path)
+    write_manifest(
+        root,
+        blocks={
+            "vblockA": {"type": "VERSE", "seg": "seg01", "order_index": 0,
+                        "plain_text": V_PH_A},
+        },
+        segments=[{"seg": "seg01", "kind": "body", "title_text": "Ch1",
+                   "block_ids": ["vblockA"], "word_count": 10}],
+        verse_store=[{"vid": "vA", "placeholder": V_PH_A, "context": "body",
+                       "parent_block": "vblockA", "mount": "block"}],
+    )
+    write_segpack(
+        root, "seg01",
+        blocks=[{"id": "vblockA", "order_index": 0, "plain_text": V_PH_A}],
+        verses=[{"vid": "vA", "placeholder": V_PH_A, "parent_block": "vblockA"}],
+    )
+    write_draft(
+        root, "seg01",
+        blocks={"vblockA": V_PH_A},
+        # vA's own content carries a stray sentinel that is neither a known
+        # ⟦FNREF_N⟧ nor anything this segment's block-text scan ever sees.
+        verses={"vA": {"rendered": f"A line with {stray} embedded.",
+                       "literal_gloss": "A gloss line, no sentinel here."}},
+    )
+    write_ledger(root, {"seg01": {"status": "converged"}})
+
+    result = run_assemble(root)
+    assert result.returncode == 1, f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    payload = parse_one_json_line(result)
+    assert payload["success"] is False
+    assert "unrecognized" in payload["error"].lower() or "sentinel" in payload["error"].lower()
+    assert not (root / "out" / ".assembled" / "nodestream.json").is_file(), (
+        "a fatal fail-closed error must not leave a partial nodestream.json artifact"
+    )
+
+
+def test_unbalanced_bracket_in_verse_content_is_fatal(tmp_path):
+    """codex HIGH companion: _scan_verse_content_fnrefs dropped the block
+    branch's bracket-balance guard (:477-485) entirely -- an unclosed
+    ⟦FNREF_9 (no closing ⟧) inside a verse's own content used to be silently
+    swallowed (ANY_SENTINEL_RE requires a closing bracket to match at all,
+    so it simply found nothing there and moved on). REGRESSION-class
+    (git-stash the fix -> confirm RED)."""
+    root = make_root(tmp_path)
+    write_manifest(
+        root,
+        blocks={
+            "vblockA": {"type": "VERSE", "seg": "seg01", "order_index": 0,
+                        "plain_text": V_PH_A},
+        },
+        segments=[{"seg": "seg01", "kind": "body", "title_text": "Ch1",
+                   "block_ids": ["vblockA"], "word_count": 10}],
+        verse_store=[{"vid": "vA", "placeholder": V_PH_A, "context": "body",
+                       "parent_block": "vblockA", "mount": "block"}],
+    )
+    write_segpack(
+        root, "seg01",
+        blocks=[{"id": "vblockA", "order_index": 0, "plain_text": V_PH_A}],
+        verses=[{"vid": "vA", "placeholder": V_PH_A, "parent_block": "vblockA"}],
+    )
+    write_draft(
+        root, "seg01",
+        blocks={"vblockA": V_PH_A},
+        # An unclosed sentinel bracket -- no matching ⟧ anywhere in the field.
+        verses={"vA": {"rendered": "A line with ⟦FNREF_9 unclosed.",
+                       "literal_gloss": "A gloss line, no sentinel here."}},
+    )
+    write_ledger(root, {"seg01": {"status": "converged"}})
+
+    result = run_assemble(root)
+    assert result.returncode == 1, f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    payload = parse_one_json_line(result)
+    assert payload["success"] is False
+    assert "malformed" in payload["error"].lower() or "bracket" in payload["error"].lower()
+    assert not (root / "out" / ".assembled" / "nodestream.json").is_file(), (
+        "a fatal fail-closed error must not leave a partial nodestream.json artifact"
+    )
+
+
 def test_verse_parented_to_a_footnote_def_block_but_never_actually_placed_is_still_orphan(tmp_path):
     """Boundary companion #1 to the strip test above (per the lead's
     request): the CURRENT fix (see assemble.py ~629,

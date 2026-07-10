@@ -119,6 +119,38 @@ LITERAL_MARKER_RE = re.compile(r"\[\d+\]")
 
 _TAG_RE = re.compile(r"<[^>]+>")
 
+
+def _verse_line_count(v):
+    """Source line count for one manifest verse.store node -- feeds
+    validate_draft.py check 5's per-verse line policy (mixed_by_length; the
+    multi-line-source -> non-single-line-rendering guard).
+
+    Thread the extractor's authoritative n_line DIRECTLY. Post-#92
+    verse_payload counts a bare-<p> stanza's lines (mirrors verse_plain)
+    BEFORE normalize_text collapses newlines, so a manifest n_line is
+    correct for both `.line`-marked and bare-<p> poems. A missing/non-
+    positive n_line means a LEGACY manifest (pre-#92 extractor); fall back
+    to plain_text / source_html non-blank line counts as best-effort -- but
+    note plain_text has ALREADY been newline-collapsed by normalize_text
+    for a legacy bare-<p> stanza, so that fallback under-counts it
+    (source_html tag boundaries recover it more faithfully). For all NEW
+    manifests the fallback is never reached."""
+    n = v.get("n_line")
+    if isinstance(n, int) and not isinstance(n, bool) and n > 0:
+        return n
+    text = v.get("plain_text")
+    if isinstance(text, str) and text.strip():
+        c = len([ln for ln in text.splitlines() if ln.strip()])
+        if c > 0:
+            return c
+    html = v.get("source_html")
+    if isinstance(html, str) and html:
+        c = len([ln for ln in _TAG_RE.sub("\n", html).splitlines() if ln.strip()])
+        if c > 0:
+            return c
+    return 0
+
+
 # ---------------------------------------------------------------------------
 # segpack.schema.json's own shape, hand-rolled (see validate_segpack() below).
 # ---------------------------------------------------------------------------
@@ -128,7 +160,7 @@ _TOP_LEVEL_KEYS = {
 }
 _BLOCK_KEYS = {"id", "order_index", "source_html", "plain_text", "body_ref_markers"}
 _FOOTNOTE_KEYS = {"n", "source_text"}
-_VERSE_KEYS = {"vid", "placeholder", "parent_block"}
+_VERSE_KEYS = {"vid", "placeholder", "parent_block", "mount", "n_line"}
 _GENERATION_HASH_KEYS = {
     "source_extraction_hash", "source_input_hash",
     "particle_config_hash", "derivation_bundle_hash",
@@ -217,6 +249,26 @@ def build_pack(seg_id, manifest, canon, lang_config, apparatus_policy):
         fn_ns_in_text = set()
         for entry in blocks_out:
             fn_ns_in_text.update(int(m) for m in FNREF_RE.findall(_scan_text(entry)))
+
+        # ALSO: footnotes cited INSIDE an EMBEDDED verse. An embedded verse's
+        # own text is lifted out of the carrier block (replaced by its
+        # ⟦VERSE_…⟧ placeholder), so neither the carrier's fnrefs[] nor its
+        # plain_text carries that footnote n -- it survives ONLY on the
+        # verse.store node. Restrict to embedded verses parented to one of
+        # THIS segment's own blocks (a mount=="block" standalone verse is a
+        # real blocks[] entry, already counted in fn_ns_recorded above -- do
+        # NOT double-scan it, per "keep non-embedded behavior unchanged").
+        # Without this an embedded-verse footnote is dropped from
+        # footnotes_out -> absent from the draft -> a raw ⟦FNREF_n⟧ leaks at
+        # render.
+        for v in manifest.get("verse", {}).get("store", []):
+            if v.get("mount") != "embedded":
+                continue
+            if v.get("parent_block") not in seg_block_ids:
+                continue
+            fn_ns_recorded.update(v.get("fnrefs") or [])
+            fn_ns_in_text.update(int(m) for m in FNREF_RE.findall(v.get("plain_text") or ""))
+
         if fn_ns_in_text != fn_ns_recorded:
             print(
                 f"WARN [{seg_id}]: FNREF sentinels found in text {sorted(fn_ns_in_text)} "
@@ -266,18 +318,33 @@ def build_pack(seg_id, manifest, canon, lang_config, apparatus_policy):
     verses_out = []
     for v in manifest.get("verse", {}).get("store", []):
         parent = v.get("parent_block")
-        if parent in seg_block_ids or (
-            v.get("mount") == "embedded" and parent in footnote_def_block_ids
-        ):
-            for key in ("vid", "placeholder", "parent_block"):
-                if key not in v:
-                    raise SegpackError(
-                        f"segment {seg_id!r}: verse.store entry for parent_block "
-                        f"{parent!r} missing required field {key!r}"
-                    )
-            verses_out.append(
-                {"vid": v["vid"], "placeholder": v["placeholder"], "parent_block": parent}
-            )
+        # Include a verse iff its parent is materialized in THIS segpack --
+        # either the segment's own blocks[] (a standalone VERSE block, OR the
+        # PARA/QUOTE/HEAD/FRONTBACK block an inline verse was replaced within)
+        # OR one of the segment's referenced footnote-definition blocks (a
+        # verse quoted inside a footnote).
+        if parent not in seg_block_ids and parent not in footnote_def_block_ids:
+            continue
+        for key in ("vid", "placeholder", "parent_block"):
+            if key not in v:
+                raise SegpackError(
+                    f"segment {seg_id!r}: verse.store entry for parent_block "
+                    f"{parent!r} missing required field {key!r}"
+                )
+        # mount is the EXTRACTOR's authoritative classification
+        # (extract.py.template's mounting pass), normalized TOLERANTLY onto
+        # segpack's own {block,embedded} output enum: exactly "embedded" ->
+        # "embedded"; anything else (missing, "block", or an unknown adapter
+        # value) -> "block". Do NOT re-derive from parent-kind -- a verse
+        # embedded inside a PARA/QUOTE/translated-FRONTBACK block has its
+        # parent IN seg_block_ids yet is authoritatively "embedded".
+        verses_out.append({
+            "vid": v["vid"],
+            "placeholder": v["placeholder"],
+            "parent_block": parent,
+            "mount": "embedded" if v.get("mount") == "embedded" else "block",
+            "n_line": _verse_line_count(v),
+        })
 
     # ---- proper-noun candidates: scan this segment's own blocks + whatever
     #      footnote definitions it carries, reusing bootstrap_names.py's own
@@ -422,6 +489,14 @@ def validate_segpack(pack, seg_id=None):
             for key in ("vid", "placeholder", "parent_block"):
                 if not isinstance(v.get(key), str) or not v.get(key):
                     errors.append(f"segpack {label}: verses[{i}] missing/invalid {key!r}")
+            mount = v.get("mount")
+            if mount not in ("block", "embedded"):
+                errors.append(
+                    f"segpack {label}: verses[{i}] 'mount' must be 'block' or 'embedded', got {mount!r}"
+                )
+            n_line = v.get("n_line")
+            if not isinstance(n_line, int) or isinstance(n_line, bool) or n_line < 0:
+                errors.append(f"segpack {label}: verses[{i}] 'n_line' must be a non-negative integer")
 
     for list_field in ("names", "canon_names", "new_names"):
         val = pack.get(list_field)

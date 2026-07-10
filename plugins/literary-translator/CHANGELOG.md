@@ -1,5 +1,55 @@
 # Changelog
 
+## 1.3.0 — 2026-07-10
+
+Verse×footnote correctness cluster: closes five open issues (#84, #92, #93, #96, #106) and the
+render half of #105. The extractor now handles poems whose stanzas lack `.line` children and verses
+nested in heading-wrapping `<div>`s; footnotes cited INSIDE a verse are recorded, carried through
+segpack/validate/assemble, and rendered (previously dropped or left as a dangling definition); and a
+shared verse×footnote fixture corpus exercises the full extractor→segpack→validate→assemble→render
+chain across seven cross-product cases.
+
+### Fixed
+
+- **Body-top-level fallback verse left unmounted** (#92) — a poem at the body top level fell back to a
+  `NavigableString` the body walk skipped, so the verse was never mounted and the extractor self-check
+  failed closed. Orphan verse runs are now grouped by their outermost parent and, when that parent
+  carries a chapter heading, normalized into standalone verse block(s); otherwise mounted embedded as
+  before. (Also fixes a latent nested-`.stanza` double-registration in the same fallback path.)
+- **Footnotes cited inside an embedded verse were never anchored** (#93) — footnote anchors inside an
+  embedded verse were not recorded in the anchor index nor scanned by the fnref uniqueness self-checks,
+  so a footnote quoted only within a poem was silently dropped. Post-mount anchor registration and the
+  two fnref self-checks now scan the verse store's embedded entries (guarded against unmounted verses).
+- **Verse-in-footnote no longer wedges a segment** (#96) — an embedded verse (verse-in-footnote) used to
+  trigger a permanent, regeneration-proof `validate_draft` source defect. Segpack now threads verse
+  `mount`/`n_line` and discovers footnotes cited inside embedded verses, so the segment converges.
+- **`.stanza` blocks without `.line` children** (#84) — the verse line count (`n_line`) now counts DOM
+  line units (bare `<p>`, mixed, and inline-markup stanzas) rather than raw text fragments, consistent
+  with the 1.2.0 verse-text preservation fix.
+- **Renderer dropped a footnote cited in a standalone verse** (#105, render half) — a footnote cited
+  inside a `mount=block` verse rendered its verse but dropped the footnote marker, leaving a dangling
+  `[^n]:` definition with no `[^n]` reference. The verse renderer now converts the footnote sentinel so
+  the reference and its definition both render. (Embedded-mount verse footnotes already rendered via the
+  prose substitution path.)
+- **Verse content no longer silently swallows a malformed footnote sentinel** — the verse-content
+  sentinel scanner now fails closed (bracket-balance check + reject-unrecognized-sentinel) exactly like
+  the block-text scanner, so a stray or truncated sentinel inside a verse aborts the build instead of
+  leaking verbatim into the published output.
+
+### Added
+
+- **Shared verse×footnote fixture corpus** (#106) — `tests/verse_footnote_corpus.py` plus per-layer test
+  files drive seven minimal EPUB fixtures (prose / embedded-verse / verse-in-footnote-def /
+  standalone-verse crossed with footnote presence) through the real
+  extractor→segpack→validate→assemble→render chain, regression-locking the cluster end-to-end.
+
+### Changed
+
+- **Extractor contract version 1 → 2** — the extractor now emits verse `mount`/`n_line` and records
+  embedded-verse footnote anchors; the contract-version marker and its consumers are bumped in lockstep
+  (pinned by the contract drift test), and the pinned self-check region hash is recomputed for the
+  extended self-checks.
+
 ## 1.2.0 — 2026-07-10
 
 Combined bugfix + hardening release closing eight open issues (#82–#88, #90, #97): two

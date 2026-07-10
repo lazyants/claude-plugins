@@ -621,6 +621,110 @@ def _scan_and_validate_sentinels(
     return sorted(fnrefs), referenced_vids
 
 
+def _scan_verse_content_fnrefs(content, seg, block_id, vid,
+                               footnote_entries_by_n, draft_footnotes, book_footnotes,
+                               placeholder_set, placeholder_to_vid, draft_verses,
+                               book_seen_placeholders):
+    """FNREFs cited INSIDE a verse's translated content (rendered/literal_gloss)
+    -- validated exactly like the block-text FNREF branch (dangling / anchor_seg
+    / draft-def / cross-ref duplicate), then registered into book_footnotes so
+    nodestream.footnotes carries the def. Per-field distinct-n dedup below; per-n
+    it ALSO mirrors the block branch's embedded-verse-in-def sub-branch
+    (assemble.py:537-559) INLINE, so a footnote whose OWN def embeds a verse
+    marks that inner vid referenced (else orphan_verse at :828 false-fatals it).
+    Deliberately mirrors assemble.py:489-565 -- keep the two in lockstep (see the
+    residual). Returns (set of distinct n, set of embedded-verse vids)."""
+    content = content or {}
+    # Scan the two alternate representations SEPARATELY (codex r5 finding 4):
+    # dedup ACROSS fields (a footnote naturally in BOTH the rhymed `rendered` and
+    # the `literal_gloss` of full_rhymed_plus_literal is ONE citation), but RETAIN
+    # within-field duplicate detection (the same footnote cited TWICE inside one
+    # field is a genuine `duplicate_footnote_ref`, matching assemble's block
+    # "repeat anywhere" invariant). Distinct-n = union of each field's set.
+    ns = set()
+    for field in ("rendered", "literal_gloss"):
+        field_text = content.get(field) or ""
+        tokens = ANY_SENTINEL_RE.findall(field_text)
+        # Mirror the block branch's bracket-balance guard (:477-485) -- an
+        # unclosed/malformed sentinel in verse content must fail closed the
+        # same way, not silently pass through unscanned.
+        open_count = field_text.count("⟦")
+        close_count = field_text.count("⟧")
+        if open_count != len(tokens) or close_count != len(tokens):
+            raise AssembleError(
+                f"[{seg}/{block_id}] malformed sentinel bracket(s) in verse "
+                f"{vid}'s {field} text -- mismatched ⟦/⟧ count (found "
+                f"{open_count} '⟦' and {close_count} '⟧' for {len(tokens)} "
+                f"matched sentinel(s))"
+            )
+        field_counts = {}
+        for tok in tokens:
+            m = FNREF_RE.fullmatch(tok)
+            if m is None:
+                # Mirror the block branch's terminal else-raise (:594) -- a
+                # verse's own translated content may only ever cite
+                # ⟦FNREF_n⟧ (the embedded-verse-in-def case is a FOOTNOTE's
+                # own def text, never a verse's own rendered/literal_gloss;
+                # there is no such thing as a verse embedding another verse).
+                # Any other sentinel here -- a stray ⟦VERSE_...⟧ placeholder,
+                # a typo, garbage -- must fail closed, never leak unresolved.
+                raise AssembleError(
+                    f"[{seg}/{block_id}] verse {vid}'s {field} text contains "
+                    f"unrecognized sentinel {tok!r} -- matches neither a "
+                    f"known ⟦FNREF_N⟧ footnote nor any sentinel a verse's own "
+                    f"translated content may legitimately carry"
+                )
+            n = int(m.group(1))
+            field_counts[n] = field_counts.get(n, 0) + 1
+        for n, c in field_counts.items():
+            if c > 1:
+                raise AssembleError(f"[{seg}/{block_id}] footnote n={n} (cited in verse {vid}) "
+                                    f"is referenced {c}x within one field", reason="duplicate_footnote_ref")
+            ns.add(n)
+    referenced_vids = set()
+    for n in sorted(ns):
+        fe = footnote_entries_by_n.get(n)
+        if fe is None:
+            raise AssembleError(f"[{seg}/{block_id}] verse {vid} cites ⟦FNREF_{n}⟧ "
+                                f"but no manifest.footnotes[] entry for n={n}")
+        if fe.get("anchor_seg") != seg:
+            raise AssembleError(f"[{seg}/{block_id}] verse {vid} cites ⟦FNREF_{n}⟧ but its "
+                                f"anchor_seg is {fe.get('anchor_seg')!r} -- data inconsistency")
+        text_for_n = (draft_footnotes or {}).get(str(n))
+        if text_for_n is None:
+            raise AssembleError(f"[{seg}/{block_id}] verse {vid} cites ⟦FNREF_{n}⟧ "
+                                f"but draft.footnotes has no entry for n={n}")
+        if n in book_footnotes:
+            raise AssembleError(f"[{seg}/{block_id}] footnote n={n} (cited in verse {vid}) "
+                                f"is referenced more than once", reason="duplicate_footnote_ref")
+        # MIRROR assemble.py:537-559 INLINE (codex r6 finding 2): footnote n's OWN
+        # def text may embed a verse (verse.store[].context=="footnote"), which
+        # segpack attributes to THIS segment -> its vid is in draft_verses and
+        # orphan_verse (:828) would false-fatal it. Mark it referenced. Its
+        # placeholder is STRIPPED from the def below (Phase 0) and NEVER enters a
+        # node's `verses` -> referenced-only, NOT rendered. Keep BYTE-IDENTICAL to
+        # :537-559 (lockstep residual).
+        for embedded_token in ANY_SENTINEL_RE.findall(text_for_n):
+            if FNREF_RE.fullmatch(embedded_token):
+                continue
+            if embedded_token not in placeholder_set:
+                continue
+            embedded_vid = placeholder_to_vid[embedded_token]
+            if embedded_vid not in draft_verses:
+                raise AssembleError(f"[{seg}/{block_id}] footnote n={n}'s own definition text "
+                                    f"embeds verse placeholder {embedded_token!r} "
+                                    f"(vid={embedded_vid}), but draft.verses has no entry for it")
+            if embedded_token in book_seen_placeholders:
+                raise AssembleError(f"[{seg}/{block_id}] verse placeholder {embedded_token!r} "
+                                    f"(vid={embedded_vid}), embedded in footnote n={n}'s own "
+                                    f"definition text, is referenced more than once across the book",
+                                    reason="duplicate_verse_placeholder")
+            book_seen_placeholders.add(embedded_token)
+            referenced_vids.add(embedded_vid)
+        book_footnotes[n] = ANY_SENTINEL_RE.sub("", text_for_n)
+    return ns, referenced_vids
+
+
 # ---------------------------------------------------------------------------
 # Kind classification (contract section 4, point 3).
 # ---------------------------------------------------------------------------
@@ -805,6 +909,7 @@ def build_nodestream(profile: dict, manifest: dict, converged: dict) -> tuple:
             seg_referenced_vids.update(referenced_vids)
 
             verses_field = []
+            verse_fnrefs = set()
             for c in claims:
                 vid = c["vid"]
                 if vid not in draft_verses:
@@ -813,9 +918,25 @@ def build_nodestream(profile: dict, manifest: dict, converged: dict) -> tuple:
                         f"vid={vid!r} parented to this block, but draft.verses "
                         f"has no entry for it"
                     )
+                # A verse's own translated content (rendered/literal_gloss) may
+                # itself carry ⟦FNREF_n⟧ -- a footnote cited from inside the
+                # poem, not the surrounding block text -- which the block-text
+                # scan above never sees (it only tokenizes `text`). Scan it here
+                # so the footnote is registered into book_footnotes/node.fnrefs
+                # (else render leaks a raw sentinel with no [^n]: def) and its
+                # orphan-definition/orphan-verse checks below don't false-fatal.
+                v_ns, v_ref_vids = _scan_verse_content_fnrefs(
+                    draft_verses[vid], seg, bid, vid,
+                    footnote_entries_by_n, draft_footnotes, book_footnotes,
+                    placeholder_set, placeholder_to_vid, draft_verses,
+                    book_seen_placeholders,
+                )
+                verse_fnrefs.update(v_ns)
+                seg_referenced_vids.update(v_ref_vids)
                 verses_field.append(
                     {"vid": vid, "placeholder": c["placeholder"], "content": draft_verses[vid]}
                 )
+            seg_referenced_ns.update(verse_fnrefs)
 
             all_nodes.append(
                 {
@@ -826,7 +947,7 @@ def build_nodestream(profile: dict, manifest: dict, converged: dict) -> tuple:
                     "order_index": order_index,
                     "medium": medium,
                     "text": text,
-                    "fnrefs": fnrefs,
+                    "fnrefs": sorted(set(fnrefs) | verse_fnrefs),
                     "verses": verses_field,
                 }
             )
