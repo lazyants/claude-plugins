@@ -1,7 +1,7 @@
 // enduser-handbook capture asset — non-normative reference implementation for the Playwright
 // reference case. The normative, engine-agnostic contract lives in
-// references/capture-spec-helpers.md (and capture-safety.md / page-identity.md). Fork for other
-// engines.
+// references/capture-spec-helpers.md (and capture-safety.md / page-identity.md).
+// Engine-neutral: reused as-is by any engine's driver glue.
 //
 // control-inventory.d.mts — TypeScript declarations for control-inventory.mjs so a downstream
 // project that DOES typecheck can resolve the .ts → .mjs import (surface-audit.playwright.ts
@@ -102,3 +102,18 @@ export function buildScopedSelector(
   rowSelector: string | null | undefined,
   interactiveSelector: string,
 ): string;
+
+/**
+ * Human-facing coverage-matrix label fallback chain. `value` sits directly below `ariaLabel`
+ * (not below `text`) per HTML-AAM accessible-name precedence for `<input type="submit">`.
+ */
+export function matrixLabel(record: {
+  text?: string | null;
+  ariaLabel?: string | null;
+  value?: string | null;
+  title?: string | null;
+  testId?: string | null;
+  name?: string | null;
+  href?: string | null;
+  className?: string | null;
+}): string;

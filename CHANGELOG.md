@@ -28,6 +28,35 @@ Initial release. New plugin — high-fidelity literary book translation over a G
 - `tests/` — pytest suite (`*.test.py`, `--import-mode=importlib`) over synthetic fixtures: 500+ tests across every script, schema-literal drift, and an end-to-end ledger acceptance run. Run with `cd plugins/literary-translator && python3 -m pytest`.
 - Honesty caveats carried from the source project: extraction is proven against Historiettes' 17th-century French specifically (every other language/source is an unverified starter preset gated by a mandatory smoke test), and one of the two source adapters plus the expert custom extractor remain experimental until pilot-proven end-to-end.
 
+## [enduser-handbook 1.1.2] — 2026-07-10
+
+A maintenance release closing seven issues — one guard-hardening fix, three correctness fixes, one test-harness fix, and two documentation-accuracy trims.
+
+### Security
+- `hasDangerousVerb` percent-decoded URL segments only once, letting a doubly-encoded dangerous verb (e.g. `%2564elete`) bypass the capture guard's deny step on a destructive GET. Decoding now iterates to a fixed point (capped at 5 passes). The always-on protection was never affected: every non-GET already failed closed. (#71)
+
+### Fixed
+- `dismissModal` fell through to the cancel-button branch on a fading-out modal because `dialog.isVisible()` resolves instantly rather than waiting for the close animation; it now uses a bounded `waitFor({ state: 'hidden', timeout: 1000 })`. (#49)
+- The `capture-helpers.playwright.ts` header advertised only the WebSocket-routing Playwright floor (>= 1.48) and omitted the higher floor actually required by `assertIdentity`'s `filter({ visible: true })` spinner check (Playwright 1.51); both floors are now documented, each attached to the API that needs it. (#50)
+- The JSDoc above `installCaptureGuard` described the route-classification order as six branches, omitting `classify-benign`; it now lists the full seven-branch order matching `decideRoute`. (#51)
+- `surface-audit.playwright.ts`'s coverage-matrix label chain omitted a control's `value`, so a native `<input type=submit value=Delete>` printed as `(unlabelled control)` even though the JSON inventory captured `value` correctly. The chain moved to a unit-tested `matrixLabel()` in `assets/lib/control-inventory.mjs`, with `value` ranked directly below `ariaLabel` — HTML-AAM accessible-name order for `<input type=submit>`. (#52)
+- `count_fixed` in `tests/reference-assets.test.sh` emitted `0\n0` for an absent needle (`grep -c` already prints 0 before exiting 1), so the per-sentinel check errored and fell into its OK branch — reporting a MISSING guard sentinel as "present exactly once". (#53)
+
+### Changed
+- Corrected an overstated "fork it for other engines" claim across 19 sites (`SKILL.md`, six reference docs, `README.md`, and eleven asset-banner comments): the methodology is normative and engine-agnostic, the Playwright driver assets get reimplemented per engine, and the engine-neutral `assets/lib/*.mjs` helpers are reused as-is by any engine's driver glue. (#69)
+- Documented that the shipped `classifyGraphqlRead` read-classifier admits only inline single-operation GraphQL queries; a project whose reads are REST/RPC POST calls (Django/DRF, JSON-RPC) must supply its own fail-closed `classifyRequest`. No code change — the hook already accepts one. (#69)
+
+## [enduser-handbook 1.1.1] — 2026-06-22
+
+Two fixes shipped across two stacked PRs: a capture-safety correctness correction and a set of capture-determinism guardrails for page-identity assertions.
+
+### Fixed
+- `references/capture-spec-helpers.md`, `assets/capture-helpers.playwright.ts` — a broken/failed `<img>`'s `alt` text *is* painted into the frame via browser replacement-rendering, but it is not a DOM text node, so the text/value/placeholder leak-scan misses it exactly like it misses `::before`/`::after` content. `alt` moves out of the "non-rendered attributes" group into the painted-but-unscannable eyeball-backstop bucket; only `title`/`aria-label` remain genuinely non-rendered. (#15)
+- `references/capture-safety.md` — documents the bidirectional mask/leak-scan scope rule: scope must equal the captured frame, never narrower. A full-viewport/full-page shot scans the document root (so framed app chrome, e.g. a logged-in user name, is never left unscanned); a `captureRegion` shot scans its own element-scoped locator — `maskAndAssert` is locator-driven, so a non-modal capture otherwise gets no automated scan at all. (#15)
+
+### Added
+- `references/page-identity.md` — four author-time capture-determinism guardrails, each guarding a shot that ships wrong or broken while the run still looks green: a zero-height layout wrapper false-negatives `toBeVisible()` (assert a content-bearing child instead); a mid-animation frame gets captured before a transition settles (disable animations or wait for it); a full-element shot of lazy-loaded/virtualized content ships blank below-the-fold rows (scroll to load first); and a deliberately staged data-state precondition silently reverts unnoticed (pair it with a fail-closed assertion that it held). (#17)
+
 ## [enduser-handbook 1.1.0] — 2026-06-21
 
 First additive publish-target adapter since 1.0.0, fulfilling the 1.0.0 promise of additional publish targets. No change to the existing authoring rules; the only base-skill edits are correctness fixes the new adapter exposed.

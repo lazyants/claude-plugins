@@ -1,7 +1,7 @@
 // enduser-handbook capture asset — non-normative reference implementation for the Playwright
 // reference case. The normative, engine-agnostic contract lives in
-// references/capture-spec-helpers.md (and capture-safety.md / page-identity.md). Fork for other
-// engines.
+// references/capture-spec-helpers.md (and capture-safety.md / page-identity.md).
+// Engine-neutral: reused as-is by any engine's driver glue.
 //
 // capture-guard-policy.mjs — the PURE classifier decision for the capture guard, factored out of
 // capture-helpers.playwright.ts so it is unit-testable without a browser and so the branch ORDER is
@@ -90,19 +90,57 @@ function safeDecode(value) {
   });
 }
 
+function hasDangerousVerbToken(value) {
+  for (const token of tokenize(value)) {
+    if (DANGEROUS_VERB_SET.has(token)) return true;
+  }
+  return false;
+}
+
+// Doubly (or triply...) percent-encoded verbs — "%2564elete" ("%25"→"%", leaving "%64elete") — must
+// not slip past a single safeDecode pass. But scanning ONLY the fully-decoded fixed point is not
+// enough either: iterative decoding can FUSE an already-plain verb sitting next to a stray escape into
+// a longer word that no longer matches ("delete%2573" decodes to "deletes", not "delete"), even though
+// the RAW string already contains the exact token "delete" (tokenize splits on "%"). So this checks
+// the RAW value AND every intermediate decode pass — s0 (raw) through s5 (after 5 decode passes) — and
+// flags a hit on ANY of them.
+//
+// Termination of the decode sequence is provable, not assumed: every pass that changes the string
+// strictly SHORTENS it (each "%XX" escape, 3 chars, collapses to at most one UTF-16 code unit —
+// including on the byte-level fallback path, where an invalid sequence collapses to a single U+FFFD),
+// so length is a strictly decreasing natural number and a fixed point is reached in at most len/2
+// passes. The cap of 5 is a defensive BOUND, not the termination argument — and it fails CLOSED: if
+// decoding s5 once more would still change it (the cap was hit before a fixed point, encode depth >=
+// 6), the input is REJECTED as dangerous rather than scanned in its still-partially-encoded state,
+// which could be hiding the verb behind one more layer of encoding we chose not to peel.
+function decodeSequenceHasDangerousVerb(value) {
+  let current = value;
+  for (let pass = 0; pass <= 5; pass += 1) {
+    if (hasDangerousVerbToken(current)) return true;
+    if (pass === 5) break;
+    current = safeDecode(current);
+  }
+  return safeDecode(current) !== current;
+}
+
 /**
  * True when the URL path OR query contains a dangerous verb token. Uses the parsed URL's pathname +
- * search when parseable, else the raw string. Both are percent-decoded first so "/items/%64elete"
- * and "/x/l%C3%B6schen" are caught (an undecoded scan would let them through). The query is scanned
- * too so "/items?action=delete" is blocked. Token-exact so "deletedAt" does not match (token is
- * "deleted", not "delete") — the URL forms we guard ("/x/delete", "/x/delete-now", "deleteUser",
- * "?action=delete") all tokenize to a bare verb.
+ * search when parseable, else the raw string. The RAW value AND every intermediate percent-decode pass
+ * are scanned (see decodeSequenceHasDangerousVerb) so "/items/%64elete", "/items/%2564elete"
+ * (doubly-encoded), "/x/l%C3%B6schen", and "/items/delete%2573" (a plain verb fused with a stray
+ * escape by iterative decoding) are all caught — a single-pass, undecoded, or fixed-point-only scan
+ * would let some of these through. The query is scanned too so "/items?action=delete" is blocked.
+ * Token-exact so "deletedAt" does not match (token is "deleted", not "delete") — the URL forms we
+ * guard ("/x/delete", "/x/delete-now", "deleteUser", "?action=delete") all tokenize to a bare verb.
  *
  * NOTE (fail-closed by design): a legitimate page whose ROUTE itself contains a dangerous token —
  * "/settings/reset-password", "/account/delete" as a view — is blocked here too. That is correct
  * for a fail-closed guard: the author must add a `classifyRequest` that admits that specific
  * read-only navigation, rather than the guard guessing. There is deliberately no auto-exemption for
- * the first document GET (it would be a reusable bypass surface).
+ * the first document GET (it would be a reusable bypass surface). This extends to the query string
+ * too: an encoded verb token there (e.g. "?q=%2564elete") normalizes to the same fail-closed outcome
+ * as the unencoded form. A search UI whose query legitimately carries such a token as literal search
+ * text — not a route action — needs a `classifyRequest` that admits that specific read.
  *
  * @param {string} url
  * @returns {boolean}
@@ -110,16 +148,16 @@ function safeDecode(value) {
 export function hasDangerousVerb(url) {
   let scanned;
   try {
-    // new URL throws on a relative URL; fall back to the raw string in that case.
+    // new URL throws on a relative URL; fall back to the raw string in that case. The pathname and
+    // search are concatenated RAW (before any decoding) — the inserted space is a literal separator,
+    // never part of a "%XX" run, so decoding the combined string is equivalent to decoding each part
+    // separately and is what lets a single decode-sequence scan cover both.
     const u = new URL(url);
-    scanned = safeDecode(u.pathname) + ' ' + safeDecode(u.search);
+    scanned = u.pathname + ' ' + u.search;
   } catch {
-    scanned = safeDecode(url);
+    scanned = url;
   }
-  for (const token of tokenize(scanned)) {
-    if (DANGEROUS_VERB_SET.has(token)) return true;
-  }
-  return false;
+  return decodeSequenceHasDangerousVerb(scanned);
 }
 
 /**

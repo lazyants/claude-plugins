@@ -156,8 +156,8 @@ version, so do not pin to a guessed cancel selector; press Escape first and fall
 negative/cancel-label button only if Escape does not dismiss. The importable helper contract
 for this is in `capture-spec-helpers.md`. That contract is the normative, engine-agnostic
 rule; `../assets/capture-helpers.playwright.ts` is a
-**non-normative reference implementation** for the Playwright reference case — fork it for
-other engines.
+**non-normative reference implementation** for the Playwright reference case — reimplement the
+driver glue for another engine; the engine-neutral `../assets/lib/*.mjs` helpers are reused as-is.
 
 For success-toast screenshots (a different case — a reversible mutating action whose
 outcome the reader needs to see), only fire the action when the side-effect is safely

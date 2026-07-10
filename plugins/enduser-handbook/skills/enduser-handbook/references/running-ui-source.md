@@ -24,7 +24,8 @@ off the source — use a tool that walks the **live DOM** and captures each cont
 text/title/aria-label/href/role (see the surface-enumeration pass in `completeness-gate.md`).
 That enumeration guidance is the normative, engine-agnostic rule;
 `../assets/surface-audit.playwright.ts` is a **non-normative reference implementation** for
-the Playwright reference case — fork it for other engines.
+the Playwright reference case — reimplement the driver glue for another engine; the
+engine-neutral `../assets/lib/*.mjs` helpers are reused as-is.
 
 ## Why secondary sources lie
 
