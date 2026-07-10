@@ -1,7 +1,7 @@
 // enduser-handbook capture asset — non-normative reference implementation for the Playwright
 // reference case. The normative, engine-agnostic contract lives in
-// references/capture-spec-helpers.md (and capture-safety.md / page-identity.md). Fork for other
-// engines.
+// references/capture-spec-helpers.md (and capture-safety.md / page-identity.md). Reimplement
+// this driver glue for another engine; the engine-neutral lib/*.mjs helpers are reused as-is.
 //
 // capture.example.spec.ts — a skeleton chapter capture spec wiring the canonical, safe flow. Copy
 // it into the project's capture.capture_specs_dir and adapt the route/heading/selectors/labels to

@@ -127,7 +127,8 @@ project the first time two chapter efforts collide on a shared list.
 
 The engine-agnostic rules here are normative; any `*.playwright.*` asset shipped
 under `../assets/` is a **non-normative reference implementation** for the
-Playwright reference case — fork it for other engines.
+Playwright reference case — reimplement the driver glue for another engine; the
+engine-neutral `../assets/lib/*.mjs` helpers are reused as-is.
 
 ## When the manifest changes
 

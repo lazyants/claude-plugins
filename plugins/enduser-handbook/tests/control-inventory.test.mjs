@@ -14,6 +14,7 @@ import {
   normalizeControls,
   classifyByShape,
   buildScopedSelector,
+  matrixLabel,
   INTERACTIVE_SELECTOR,
 } from '../skills/enduser-handbook/assets/lib/control-inventory.mjs';
 
@@ -89,8 +90,9 @@ test('extractRecord reads the value of a BUTTON-LIKE input; a native submit with
 
 test('extractRecord does NOT copy a text-entry input value (prefilled PII must not enter the inventory)', async () => {
   // A server-rendered <input type="text" value="jane.smith@example.com"> carries USER DATA in value.
-  // The inventory is console.logged, so value must be nulled for text-entry inputs — only button-like
-  // inputs (submit/button/reset/image) expose value (where it is the visible label).
+  // The inventory is console.logged, so value must be nulled for text-entry inputs — only
+  // VALUE-LABELLED inputs (submit/button/reset) expose value (where it is the visible label); `image`
+  // is deliberately excluded — see the matrixLabel/image-input tests below.
   for (const type of ['text', 'email', 'password', 'search', 'tel', 'url', 'number']) {
     const record = await extractRecord(stub({ type, value: 'jane.smith@example.com' }, { tag: 'INPUT', text: '' }));
     assert.equal(record.value, null, `value must be null for input[type=${type}] (PII)`);
@@ -412,6 +414,78 @@ test('classifyByShape: destructive verbs (EN/DE) and delete-shaped routes are ca
   assert.equal(classifyByShape({ text: '', title: null, ariaLabel: 'Entfernen', href: null, role: null, testId: null }), 'candidate-destructive');
   assert.equal(classifyByShape({ text: '', title: null, ariaLabel: null, href: '/items/5/delete', role: null, testId: null }), 'candidate-destructive');
   assert.equal(classifyByShape({ text: 'Save', title: null, ariaLabel: null, href: '/items/5', role: null, testId: null }), 'unclassified');
+});
+
+test('matrixLabel: a native submit input with no other identity falls back to value (#52 regression)', () => {
+  // <input type=submit value=Delete> with every other identity field null/absent — the label lives
+  // ONLY in value. Before the fix this collapsed to '(unlabelled control)', defeating the reason
+  // control-inventory.mjs captures value at all.
+  const record = {
+    text: null,
+    ariaLabel: null,
+    value: 'Delete',
+    title: null,
+    testId: null,
+    name: null,
+    href: null,
+    className: null,
+  };
+  assert.equal(matrixLabel(record), 'Delete');
+});
+
+test('matrixLabel: precedence pin — ariaLabel outranks value (HTML-AAM accessible-name order)', () => {
+  assert.equal(matrixLabel({ text: null, ariaLabel: 'Remove item', value: 'Delete' }), 'Remove item');
+});
+
+test('matrixLabel: text still outranks value', () => {
+  assert.equal(matrixLabel({ text: 'Save', value: 'Submit' }), 'Save');
+});
+
+test('matrixLabel: value outranks title', () => {
+  assert.equal(matrixLabel({ value: 'Delete', title: 'Delete this row' }), 'Delete');
+});
+
+test('extractRecord nulls value for <input type=image> (its value is submitted data, not a label)', async () => {
+  // Per HTML-AAM an <input type=image>'s accessible name comes from aria-label/alt/title, never
+  // `value` — its `value` attribute is SUBMITTED DATA (often a record id). Capturing it would leak
+  // that payload into the console-logged inventory and, via matrixLabel's fallback chain, surface it
+  // as the control's apparent label ahead of the real title-based label.
+  const record = await extractRecord(
+    stub({ type: 'image', value: 'record-42', title: 'Delete' }, { tag: 'INPUT', text: '' }),
+  );
+  assert.equal(record.value, null, "an image input's value must never be captured");
+  assert.equal(record.title, 'Delete');
+});
+
+test('matrixLabel: an <input type=image> is labelled from title, never from its value payload (finding 2)', async () => {
+  // Reproduces the finding: before the fix, VALUE_LABELLED_INPUT_TYPES did not exist and
+  // BUTTON_LIKE_INPUT_TYPES (which includes 'image') gated value capture directly, so
+  // value='record-42' was captured and outranked title in the matrixLabel fallback chain — surfacing
+  // the submitted record id as the control's "label" instead of "Delete".
+  const record = await extractRecord(
+    stub({ type: 'image', value: 'record-42', title: 'Delete' }, { tag: 'INPUT', text: '' }),
+  );
+  assert.equal(matrixLabel(record), 'Delete', 'must fall back to title, not the (now null) value');
+});
+
+test('matrixLabel: a genuine <input type=submit value=Delete> still labels from value (no regression)', async () => {
+  const record = await extractRecord(stub({ type: 'submit', value: 'Delete' }, { tag: 'INPUT', text: '' }));
+  assert.equal(record.value, 'Delete');
+  assert.equal(matrixLabel(record), 'Delete');
+});
+
+test('matrixLabel: a text-entry input (value null) with no other identity is unlabelled (no PII widening)', () => {
+  const record = {
+    text: null,
+    ariaLabel: null,
+    value: null,
+    title: null,
+    testId: null,
+    name: null,
+    href: null,
+    className: null,
+  };
+  assert.equal(matrixLabel(record), '(unlabelled control)');
 });
 
 test('classifyByShape: camelCase / snake_case / kebab joins are tokenized and matched', () => {

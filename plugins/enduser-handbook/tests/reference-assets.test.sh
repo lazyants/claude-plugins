@@ -50,9 +50,15 @@ has_ci() {
   if grep -qiF -- "$needle" "$file" 2>/dev/null; then ok "$msg"; else bad "$msg ('$needle' not in $(basename "$file"))"; fi
 }
 
-# Count exact occurrences of a fixed string in a file (line-based).
+# Count exact occurrences of a fixed string in a file (line-based). grep exits 1 (not just non-zero
+# from a real error) when the needle is simply ABSENT — the common, expected case for a not-yet-fixed
+# sentinel — so the `|| true` here is load-bearing: without it, a plain assignment's exit status
+# propagates the grep failure and this function silently ABORTS the whole script under `bash -e`
+# before the caller ever sees "0" and reports the missing sentinel.
 count_fixed() {
-  grep -cF -- "$1" "$2" 2>/dev/null || echo 0
+  local c
+  c="$(grep -cF -- "$1" "$2" 2>/dev/null || true)"
+  printf '%s\n' "${c:-0}"
 }
 
 # Line number of the first match of a fixed string, or empty if absent.
@@ -293,7 +299,11 @@ has "completeness-gate: disclosure prose templates"              'Disclosure pro
 has "completeness-gate: disclose trigger list"                   'TRIGGER LIST' "$REFS/completeness-gate.md"
 has "completeness-gate: className in the PII-boundary field list" 'className' "$REFS/completeness-gate.md"
 has "capture-spec-helpers: lists className in verbatim fields"    'className' "$REFS/capture-spec-helpers.md"
-has "surface-audit: className in the matrix-label fallback"       'className' "$SA"
+has "surface-audit: matrixLabel used by the surface audit"        'matrixLabel' "$SA"
+# NOTE: 'record.className' alone is NOT a valid sentinel here — that bare substring already existed on
+# origin/main (in classifyByShape's field list), so it is green even without matrixLabel. Pin the
+# needle to the '||' suffix, which is unique to matrixLabel's fallback chain.
+has "control-inventory: matrix-label fallback chain lives in the lib" 'record.className ||' "$CI"
 has "control-inventory.d.mts: declares className"                 'className' "$ASSETS/lib/control-inventory.d.mts"
 
 echo "== normative-vs-reference one-liner in every decision-5 touch point + asset header =="
@@ -434,6 +444,40 @@ hasnt "publish-targets README: no raw adapter path"  '<publish.target>.md' "$PTR
 
 # Profile honesty: the example must not over-promise a single-adapter ship.
 hasnt "profile: no over-promise" 'only obsidian_vault ships' "$PROF"
+
+echo "== Package A/B/D regression sentinels (#49, #50, #51, #52, #71) =="
+hasnt "no non-waiting isVisible after Escape"    'isVisible'                    "$CH"
+has   "bounded hidden-wait after Escape"         "state: 'hidden', timeout:"    "$CH"
+has   "states the Playwright 1.51 module minimum" 'Playwright >= 1.51'          "$CH"
+hasnt "no stale six-branch guard-order comment"  'deny < eventsource'           "$CH"
+
+echo "== #69: no residual 'fork it for other engines' wording =="
+for f in \
+  "$CH" \
+  "$SA" \
+  "$SPEC" \
+  "$CI" \
+  "$ASSETS/lib/control-inventory.d.mts" \
+  "$POLICY" \
+  "$ASSETS/lib/capture-guard-policy.d.mts" \
+  "$ASSETS/lib/identity-match.mjs" \
+  "$ASSETS/lib/identity-match.d.mts" \
+  "$GQL" \
+  "$ASSETS/lib/graphql-read-classifier.d.mts"; do
+  hasnt "no residual fork-it wording (banner): $(basename "$f")" 'Fork for other' "$f"
+done
+for f in \
+  "$SKILL" \
+  "$REFS/completeness-gate.md" \
+  "$REFS/running-ui-source.md" \
+  "$REFS/container-isolation.md" \
+  "$REFS/manifest-discipline.md" \
+  "$REFS/capture-spec-helpers.md" \
+  "$REFS/capture-safety.md"; do
+  hasnt "no residual fork-it wording (prose): $(basename "$f")" 'fork the asset' "$f"
+  hasnt "no residual fork-it wording (prose): $(basename "$f")" 'fork it for'    "$f"
+done
+has "capture-spec-helpers: read classifier is documented GraphQL-only" 'is GraphQL-only' "$REFS/capture-spec-helpers.md"
 
 TOTAL=$((PASS + FAIL))
 echo "----"

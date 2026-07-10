@@ -1,7 +1,7 @@
 // enduser-handbook capture asset — non-normative reference implementation for the Playwright
 // reference case. The normative, engine-agnostic contract lives in
-// references/capture-spec-helpers.md (and capture-safety.md / page-identity.md). Fork for other
-// engines.
+// references/capture-spec-helpers.md (and capture-safety.md / page-identity.md). Reimplement
+// this driver glue for another engine; the engine-neutral lib/*.mjs helpers are reused as-is.
 //
 // surface-audit.playwright.ts — the mechanical surface-enumeration pass that feeds the coverage
 // matrix in references/completeness-gate.md. It enumerates the live DOM (NOT the route/Blade
@@ -39,6 +39,7 @@ import {
   extractRecord,
   normalizeControls,
   buildScopedSelector,
+  matrixLabel,
   // The broad interactive-surface selector lives in control-inventory.mjs (the audit's pure logic lib,
   // alongside buildScopedSelector) so it is unit-testable; imported here for enumeration.
   INTERACTIVE_SELECTOR,
@@ -100,11 +101,12 @@ export async function auditSurface({ page, route, heading, waitForApi, rowSelect
   console.log('| Trigger (verbatim UI label) | Side-effect class | Status |');
   console.log('|---|---|---|');
   for (const c of inventory) {
-    // className is the LAST fallback (after the identity fields) so a class-only glyph control — a
-    // '<span class="btn glyphicon-trash">' enumerated via the broadened matchers but carrying no
-    // text/aria-label/title/testid/name/href — surfaces its class string in the matrix instead of
-    // collapsing to '(unlabelled control)'. It is captured verbatim (under the PII boundary above).
-    const label = c.text || c.ariaLabel || c.title || c.testId || c.name || c.href || c.className || '(unlabelled control)';
+    // matrixLabel (lib/control-inventory.mjs) is the fallback chain; className is its LAST fallback
+    // (after the identity fields) so a class-only glyph control — a '<span class="btn
+    // glyphicon-trash">' enumerated via the broadened matchers but carrying no
+    // text/aria-label/value/title/testid/name/href — surfaces its class string in the matrix instead
+    // of collapsing to '(unlabelled control)'. It is captured verbatim (under the PII boundary above).
+    const label = matrixLabel(c);
     console.log(`| ${label} | TODO | TODO |`);
   }
 

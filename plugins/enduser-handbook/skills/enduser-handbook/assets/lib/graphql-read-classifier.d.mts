@@ -1,7 +1,7 @@
 // enduser-handbook capture asset — non-normative reference implementation for the Playwright
 // reference case. The normative, engine-agnostic contract lives in
-// references/capture-spec-helpers.md (and capture-safety.md / page-identity.md). Fork for other
-// engines.
+// references/capture-spec-helpers.md (and capture-safety.md / page-identity.md).
+// Engine-neutral: reused as-is by any engine's driver glue.
 //
 // graphql-read-classifier.d.mts — TypeScript declarations for graphql-read-classifier.mjs so a
 // downstream typechecking project resolves the .ts → .mjs import. This repo does not compile

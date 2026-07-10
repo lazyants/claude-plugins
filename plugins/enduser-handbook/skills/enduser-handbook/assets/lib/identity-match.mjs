@@ -1,7 +1,7 @@
 // enduser-handbook capture asset — non-normative reference implementation for the Playwright
 // reference case. The normative, engine-agnostic contract lives in
-// references/capture-spec-helpers.md (and capture-safety.md / page-identity.md). Fork for other
-// engines.
+// references/capture-spec-helpers.md (and capture-safety.md / page-identity.md).
+// Engine-neutral: reused as-is by any engine's driver glue.
 //
 // identity-match.mjs — the pure URL-matching predicate used by assertIdentity/armApiWait for the
 // route check and the API-readiness wait. Kept browser-agnostic so the boundary-matching rules are
