@@ -9,7 +9,7 @@ just-scaffolded file" -- profile.yml's own placeholder scan lives entirely
 in profile_validate.py (a whole-parsed-object scan), which never touches
 these free-form hand-adapted markdown files. This script closes THAT gap.
 
-Three independent, unrelated checks:
+Four independent, unrelated checks:
 
 1. LT_REQUIRED_FILL marker scan. `style_bible.md`/`PLAN.md`/
    `consistency_issues.md` (the shipped `*.template.md` copies, once
@@ -65,13 +65,28 @@ Three independent, unrelated checks:
    or a deleted trap line whose surrounding explanatory sentence survives
    -- bypasses the exact-substring check alone would miss).
 
+4. STYLE_CONTRACT marker scan (#129). `style_bible.md` wraps its own
+   style_contract span (sections A-F) in a pair of
+   `<!-- STYLE_CONTRACT_BEGIN -->` / `<!-- STYLE_CONTRACT_END -->`
+   HTML-comment markers, load-bearing well past W1: `cache_key.py`'s
+   `compute_style_contract_hash` hard-requires exactly one of each, in
+   order, to compute the global `style_contract_hash` cache-key field at
+   every convergence write. Before this check existed, a freshly scaffolded
+   project that never got these markers (e.g. the pre-#129 shipped
+   template) passed W1 clean and only FATALed much later, opaquely, on the
+   first convergence attempt ("0 converged" with no clear cause). This scan
+   surfaces the exact same requirement at W1 instead -- before any real
+   translation spend -- naming the file and which of the five ways it can
+   be malformed: the begin marker missing, the end marker missing, either
+   marker duplicated, or the end marker preceding the begin marker.
+
 Dependency-free by design: stdlib `re`/`os` only, no jsonschema, no
 requirements.txt entry, no preflight needed.
 
 Exit 0 = clean (every scanned file present, no unfilled marker span, no
-surviving bracket placeholder, no surviving trap example). Exit 1 = one or
-more fatal findings (all are printed, not just the first). Exit 2 = usage
-error.
+surviving bracket placeholder, no surviving trap example, well-formed
+STYLE_CONTRACT markers). Exit 1 = one or more fatal findings (all are
+printed, not just the first). Exit 2 = usage error.
 
 Usage: python3 scaffold_validate.py
 """
@@ -110,6 +125,12 @@ BRACKET_SCAN_FILES = [
 # the ERA/DOMAIN TRAP EXAMPLE callout, never an LT_REQUIRED_FILL marker.
 TRAP_STRING_SCAN_FILES = ["translate_TASK.md", "review_TASK.md"]
 
+# The one file checked for well-formed STYLE_CONTRACT markers (#129).
+# Deliberately its own list, separate from MARKER_SCAN_FILES -- these
+# markers wrap style_contract sections A-F and are unrelated to the
+# LT_REQUIRED_FILL scan.
+STYLE_CONTRACT_SCAN_FILES = ["style_bible.md"]
+
 SENTINEL = "LT_PLACEHOLDER_UNFILLED"
 
 # The finite, closed list of exact shipped inline bracket placeholders the
@@ -143,6 +164,14 @@ TRAP_STRING = "guéridon=refrain-song"
 # French word for a pedestal table) far away from the callout, and a
 # file-wide co-occurrence check would wrongly, permanently reject that.
 ERA_DOMAIN_CALLOUT_RE = re.compile(r"<!--\s*ERA/DOMAIN TRAP EXAMPLE.*?-->", re.DOTALL | re.IGNORECASE)
+
+# Byte-for-byte identical to cache_key.py's `compute_style_contract_hash`
+# marker strings (it matches against `bytes`, this scans `str`, but the
+# literal ASCII content is the same) -- plain exact-string `.count()`, no
+# whitespace tolerance, so this W1 gate and the convergence-time hash can
+# never diverge on what counts as "the marker".
+STYLE_CONTRACT_BEGIN_MARKER = "<!-- STYLE_CONTRACT_BEGIN -->"
+STYLE_CONTRACT_END_MARKER = "<!-- STYLE_CONTRACT_END -->"
 
 MARKER_BEGIN_RE = re.compile(r"<!--\s*LT_REQUIRED_FILL_BEGIN:\s*(?P<id>[^>\n]+?)\s*-->")
 MARKER_END_RE = re.compile(r"<!--\s*LT_REQUIRED_FILL_END\s*-->")
@@ -237,6 +266,64 @@ def scan_era_domain_trap_residue(path: Path, text: str) -> list[str]:
     return []
 
 
+def scan_style_contract_markers(path: Path, text: str) -> list[str]:
+    """Return fatal, named findings for a malformed pair of STYLE_CONTRACT
+    markers (#129).
+
+    These markers wrap `style_bible.md`'s style_contract sections A-F and
+    are hard-required by `cache_key.py`'s `compute_style_contract_hash` to
+    compute the global `style_contract_hash` cache-key field at every
+    convergence write. Pre-#129, a freshly scaffolded project that never
+    got these markers passed W1 clean and only FATALed much later,
+    opaquely, on the first convergence attempt -- this scan surfaces the
+    same requirement here instead, before any real translation spend.
+
+    Checks the same five malformed states `compute_style_contract_hash`
+    itself would fail loudly on, so a clean W1 pass here guarantees the
+    hash computation won't FATAL later on a marker-shape problem: zero
+    BEGIN, zero END, more than one BEGIN, more than one END, and END
+    preceding BEGIN (only meaningful once both markers are confirmed
+    unique).
+    """
+    begin_count = text.count(STYLE_CONTRACT_BEGIN_MARKER)
+    end_count = text.count(STYLE_CONTRACT_END_MARKER)
+    findings: list[str] = []
+
+    if begin_count == 0:
+        findings.append(
+            f"{path}: missing the STYLE_CONTRACT_BEGIN marker "
+            f"({STYLE_CONTRACT_BEGIN_MARKER}) required to wrap style_contract "
+            f"sections A-F -- style_contract_hash cannot be computed without it"
+        )
+    elif begin_count > 1:
+        findings.append(
+            f"{path}: has {begin_count} STYLE_CONTRACT_BEGIN markers -- "
+            f"expected exactly one wrapping style_contract sections A-F"
+        )
+
+    if end_count == 0:
+        findings.append(
+            f"{path}: missing the STYLE_CONTRACT_END marker "
+            f"({STYLE_CONTRACT_END_MARKER}) required to wrap style_contract "
+            f"sections A-F -- style_contract_hash cannot be computed without it"
+        )
+    elif end_count > 1:
+        findings.append(
+            f"{path}: has {end_count} STYLE_CONTRACT_END markers -- "
+            f"expected exactly one wrapping style_contract sections A-F"
+        )
+
+    if begin_count == 1 and end_count == 1:
+        if text.index(STYLE_CONTRACT_END_MARKER) < text.index(STYLE_CONTRACT_BEGIN_MARKER):
+            findings.append(
+                f"{path}: the STYLE_CONTRACT_END marker precedes the "
+                f"STYLE_CONTRACT_BEGIN marker -- markers wrapping style_contract "
+                f"sections A-F are out of order"
+            )
+
+    return findings
+
+
 def collect_findings(
     names: list[str], scanner: Callable[[Path, str], list[str]]
 ) -> list[str]:
@@ -271,6 +358,7 @@ def main() -> None:
         *collect_findings(BRACKET_SCAN_FILES, scan_bracket_placeholders),
         *collect_findings(TRAP_STRING_SCAN_FILES, scan_trap_string),
         *collect_findings(TRAP_STRING_SCAN_FILES, scan_era_domain_trap_residue),
+        *collect_findings(STYLE_CONTRACT_SCAN_FILES, scan_style_contract_markers),
     ]
 
     if findings:
@@ -281,7 +369,8 @@ def main() -> None:
 
     print(
         "scaffold_validate: OK -- no unfilled LT_REQUIRED_FILL markers, "
-        "no unfilled bracket placeholders, no surviving trap example"
+        "no unfilled bracket placeholders, no surviving trap example, "
+        "well-formed STYLE_CONTRACT markers"
     )
     sys.exit(0)
 

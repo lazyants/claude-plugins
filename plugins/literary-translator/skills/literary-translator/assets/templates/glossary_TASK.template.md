@@ -111,6 +111,29 @@ canon-batch item:
     batch, resolve that one on its own merits instead of folding it into
     the title entry.
   - **`not_a_name`** -- paired with `is_proper_name: false`.
+- **Nicknames, epithets, and aliases -- resolved independently, never
+  inherited from a referent.** A salon nickname, epithet, sobriquet, or
+  alias is its own surface form, never shorthand for its referent's
+  `canonical_target_form`. Three rules apply together:
+  1. **Orthographic sharing only.** Only true orthographic spelling
+     variants of the same surface name (e.g. `Sarrasin` / `Sarrazin`) may
+     ever share one `canonical_target_form`. A nickname and the real name
+     it refers to are not spelling variants of each other, however
+     well-known the identity link.
+  2. **Resolve on its own merits.** Decide the nickname's own
+     `canonical_target_form` under the `basis` rules above -- usually
+     `basis: "transliterated"` (e.g. the classical epithet `Sapho` ->
+     `Сафо`), or `basis: "established"` if a genuinely established target
+     form exists for the nickname itself. Never assign it the referent's
+     real-name form instead (e.g. never `Скюдери` for `Sapho`). When sense
+     clearly carries better than transcription and no clean name-basis
+     applies, use `disposition: "review_queue"` with a note rather than a
+     fabricated basis -- see the nicknames/speaking-names guidance in
+     `style_bible.md`.
+  3. **Record the identity link in `note` only.** When the nickname's
+     referent is known, say so in `note` (or route to
+     `disposition: "review_queue"` with a note) -- never by collapsing
+     the two entries' `canonical_target_form` into one.
 - **`confidence`** (accepted items only) -- `high` | `medium` | `low`.
   `low` candidates are still `disposition: "accepted"` if you have a real,
   if tentative, resolution; genuinely unresolved candidates belong in

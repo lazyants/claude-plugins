@@ -216,9 +216,20 @@ def _seed_durable_root(
         else "YES, original script only, no transliteration system needed."
     )
 
+    # A well-formed STYLE_CONTRACT_BEGIN/END pair, unrelated to the
+    # LT_REQUIRED_FILL marker under test here, so scaffold_validate.py's
+    # independent STYLE_CONTRACT check (#129) always passes in this fixture
+    # and the LT_REQUIRED_FILL assertions below stay isolated to their own
+    # single finding.
+    style_contract_block = "<!-- STYLE_CONTRACT_BEGIN -->\nSections A-F.\n<!-- STYLE_CONTRACT_END -->\n"
+
     contents = {
         "PLAN.md": "# Project plan\n\n" + _marker_block(INTAKE_MARKER_ID, intake_body),
-        "style_bible.md": "# Style bible\n\n" + _marker_block(NAME_DISPLAY_MARKER_ID, name_display_body),
+        "style_bible.md": (
+            "# Style bible\n\n"
+            + style_contract_block
+            + _marker_block(NAME_DISPLAY_MARKER_ID, name_display_body)
+        ),
         # consistency_issues.md legitimately ships with zero marker spans (see
         # scaffold_validate.py's own docstring) -- a passing case, not a gap.
         "consistency_issues.md": "# Consistency issues\n\nNone logged yet.\n",
