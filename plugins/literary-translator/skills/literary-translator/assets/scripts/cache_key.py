@@ -68,7 +68,7 @@ except ImportError:  # pragma: no cover - exercised only when PyYAML is absent
 
 DURABLE_ROOT = Path(__file__).resolve().parents[1]
 
-# The eight scripts (+ two workflow templates) that make up plugin_bundle_hash.
+# The nine scripts (+ two workflow templates) that make up plugin_bundle_hash.
 # NEVER bootstrap_names.py/segpack.py (their own derivation_bundle_hash) and
 # NEVER the four orchestration-only scripts (orchestration_bundle_hash).
 # review_ready.py and resume_setup.py (1.2.0) join this list rather than
@@ -78,6 +78,18 @@ DURABLE_ROOT = Path(__file__).resolve().parents[1]
 # and resume_setup.py's digest logic directly determines whether a run resumes
 # or reuses cached results at all -- both squarely "directly shape ... whether a
 # convergence verdict was correctly recorded" territory, not diagnostic logging.
+# glossary_batch_plan.py (1.3.5) likewise belongs here, not the diagnostic
+# bucket: its curation decides exactly which candidates reach the codex
+# glossary pass (and, via resume_setup.py's glossary input_digest hashing
+# plugin_bundle_hash, whether a glossary run is treated as stale) -- so it
+# directly shapes what canon.json is built from. Registering it here (rather
+# than DERIVATION_BUNDLE_MEMBERS) gives it the SAME coarse mass-invalidation
+# behavior as every other plugin-bundle member -- plugin_bundle_hash is itself
+# a CACHE_KEY_FIELD_ORDER member, so a future planner-only edit flips it and
+# stales every converged mass segment at the next Step-0a refresh. That is
+# unchanged from the status quo for all plugin-bundle scripts; the reason to
+# prefer this bucket is that, unlike the derivation route, it actually reaches
+# the glossary digest and leaves the canon generation stamp's semantics intact.
 PLUGIN_BUNDLE_MEMBERS = (
     "validate_draft.py",
     "canon_validate.py",
@@ -87,6 +99,7 @@ PLUGIN_BUNDLE_MEMBERS = (
     "ledger_update.py",
     "review_ready.py",
     "resume_setup.py",
+    "glossary_batch_plan.py",
     "mass-translate-wf.template.js",
     "glossary-pass-wf.template.js",
 )

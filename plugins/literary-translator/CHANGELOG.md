@@ -1,5 +1,71 @@
 # Changelog
 
+## 1.3.5 — 2026-07-11
+
+W3 glossary-pass resumability + cost curation, and a resumability-safe resolution of #91's
+capitalized-elision ambiguity: closes #101, #95, and #91 from the 2026-07-09 five-agent audit. A new
+curation script, `glossary_batch_plan.py`, now sits between `bootstrap_names.py` and the glossary-pass
+Workflow — excluding names already resolved in `canon.json`, curating the survivors by frequency, and
+force-including flagged elision pairs for adjudication.
+
+### Added
+
+- **`assets/scripts/glossary_batch_plan.py` — the W3 candidate→batch planner** (#101, #95, #91) —
+  deterministic curation + batching of `bootstrap_names.py`'s unfiltered candidates into the
+  glossary-pass Workflow's `args`/`batches` payload, run once by the orchestrating session before
+  `resume_setup.py`. It excludes every candidate already resolved in `canon.json` (an `entries{}` key
+  or a non-retried `review_queue[].source_form`), curates the survivors by `likely_name` and
+  `--min-candidate-freq` (default 2), and force-includes flagged elision-ambiguous pairs. When every
+  candidate is already resolved it emits `{"no_new_candidates": true, "batches": []}` and the
+  orchestrator skips `resume_setup.py` and the Workflow entirely. Mechanical only — never an
+  accuracy/identity call (the plugin-wide IRON RULE). Registered in `cache_key.py`'s
+  `PLUGIN_BUNDLE_MEMBERS` (not `DERIVATION_BUNDLE_MEMBERS`): that is the bucket the glossary
+  `input_digest` actually hashes, so a planner edit correctly re-stales a glossary run, and it leaves
+  the canon generation stamp's semantics intact.
+- **Optional `glossary.min_candidate_freq` profile key** (#95) — an integer ≥ 1 added to the existing
+  `glossary` object in `profile.schema.json` as **optional** (absent → the planner's built-in default
+  of 2), so existing profile-version-1 files stay valid under the object's `additionalProperties:
+  false`. The orchestrating session passes its value to `glossary_batch_plan.py --min-candidate-freq`;
+  the script never reads YAML itself.
+
+### Fixed
+
+- **W3's "exclude already-resolved candidates" rule was documented but never applied to
+  `review_queue`** (#101) — the rule lived only as prose in the glossary-pass template's header,
+  delegated to "the orchestrating session," which in practice only ever excluded `entries{}` keys,
+  never `review_queue` entries, so every queued name was re-researched on every W3 re-run.
+  `glossary_batch_plan.py` now enforces the exclusion in code against BOTH `entries{}` and
+  `review_queue`, with an explicit `--retry SRC[,SRC...]` path for the documented "re-research a queued
+  name only on explicit human request" case (a stale `--retry` name absent from both inputs fails
+  loudly, exit 2, rather than silently no-opping).
+- **W3 had no batch-cost guardrail, and W5's `batch_agent_cap` example default was stale** (#95) — the
+  glossary-pass Workflow template gained a preflight cost cap (`estimatedCalls = 3 * BATCHES.length +
+  2` — precheck + dispatch + wait per batch, plus the fixed merge + verify pair) that refuses to
+  dispatch with `{merged: false, reason: "batch-too-large", estimatedCalls, cap}` before spending any
+  agent call, reading the SAME `engine.batch_agent_cap` field W5 uses, via a new `{{BATCH_AGENT_CAP}}`
+  substitution token added to the glossary template. The shipped `profile.example.yml`
+  `batch_agent_cap` default moved 1000 → 3500: W5's real formula is `1 + N*(10 + 7*max_fix_rounds)` =
+  `1 + N*38` at the shipped `max_fix_rounds: 4`, so the old 1000 refused any mass batch over 26
+  segments; 3500 admits the issue's own ~78-segment repro (`1 + 78*38 = 2965`) with headroom. Only
+  fresh Step-0a copies pick up the new default; already-seeded projects are unaffected.
+- **#91 capitalized-elision ambiguity, resolved resumability-safe** (#91 — supersedes the 1.3.2 "Not
+  fixed" note) — `ELISION_RE` stays lowercase-article-only **by design**; it is deliberately NOT
+  widened to catch capitalized sentence-initial elisions (a prior widening attempt split fixed
+  compounds like `D'Artagnan` / `L'Oréal` / `L'Aquila` / `D'Annunzio` and was reverted). Instead,
+  `bootstrap_names.py`'s `collect_candidates()` now DETECTS the ambiguity without touching the
+  tokenizer: for `has_elision` languages, a capitalized single-token candidate whose lowercased-first-
+  char form matches the language's own `ELISION_RE` and whose stripped remainder equals another
+  candidate row's `name` is tagged `elision_ambiguous: true` with `elision_stripped_form`. This is
+  detection-only (the IRON RULE — scripts surface candidates, never make an identity call).
+  `glossary_batch_plan.py` force-includes such a row and its stripped-form target — bypassing the
+  entire step-2 predicate, both the frequency floor AND `likely_name` (a sentence-initial capitalized
+  elision is `likely_name=False`, so requiring it would silently kill #91's dominant case) — and
+  co-locates the pair in one batch; the glossary-pass dispatch prompt then instructs the adjudicator to
+  route an `elision_ambiguous` row to `review_queue` (naming its `elision_stripped_form`) unless it is
+  positively confirmed a distinct entity. The mechanism reuses each language's own `ELISION_RE`
+  verbatim, so it generalizes to `fr.json` and `it.json` with no new language-config key; the two
+  fixed-compound regression tests stay green (they never split).
+
 ## 1.3.4 — 2026-07-11
 
 Verse×footnote correctness cluster, round 2: the two residual discovery/deadlock bugs surfaced while

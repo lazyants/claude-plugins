@@ -404,7 +404,13 @@ def collect_candidates(sources, lang: LanguageConfig):
     Returns the same shape the original script wrote to
     ``name_candidates.json``: ``{n_candidates, n_strong, candidates: [...]}``,
     each candidate row carrying ``name``/``freq``/``mid_sentence``/
-    ``multiword``/``abbrev``/``n_segments``/``likely_name``.
+    ``multiword``/``abbrev``/``n_segments``/``likely_name``. A single-token
+    capitalized row whose lowercased first character would match this
+    language's own ``ELISION_RE`` and whose stripped name-initial remainder is
+    itself another candidate row ADDITIONALLY carries ``elision_ambiguous:
+    true`` and ``elision_stripped_form`` (the re-capitalized remainder) -- a
+    DETECTION-ONLY flag for the glossary adjudicator (see plugin issue #91);
+    both fields are simply absent on every other row.
     """
     freq = defaultdict(int)
     mid = defaultdict(int)
@@ -438,6 +444,39 @@ def collect_candidates(sources, lang: LanguageConfig):
             "n_segments": len(by_source[name]),
             "likely_name": not abbrev and (mid_count > 0 or multiword or f >= 4),
         })
+
+    # #91 -- capitalized-elision ambiguity DETECTION (detection only; obeys the
+    # plugin-wide IRON RULE -- this NEVER auto-splits or auto-merges a name, it
+    # only surfaces the ambiguity for the glossary adjudicator).
+    #
+    # For has_elision languages, a capitalized single-token candidate whose
+    # first character, lowercased, would match this language's own ELISION_RE
+    # (e.g. French "L'Enclos" -> article "l'" + name-initial "Enclos") is
+    # genuinely ambiguous ONLY when the stripped name-initial remainder also
+    # appears as its own candidate row: the surface could be a fixed
+    # proper-noun compound (D'Artagnan, L'Aquila) OR an elided article + an
+    # already-known name. ELISION_RE itself is untouched -- the tokenizer still
+    # keeps such capitalized forms fused (its article group is lowercase-only),
+    # so this is purely an extra flag layered on the finished rows. We reuse
+    # each language's ELISION_RE verbatim (no hardcoded [dDlL]), so it
+    # generalizes to fr.json AND it.json alike. Matching is GLOBAL across all
+    # rows, never per-source: freq is aggregated by name only, and by_source is
+    # empty whenever source_id is None (an explicitly supported text-mode
+    # input), so a same-source-only rule would silently never fire there.
+    if lang.has_elision and lang.elision_re is not None:
+        all_names = {r["name"] for r in rows}
+        for row in rows:
+            name = row["name"]
+            if row["multiword"] or not is_upper_initial(name):
+                continue
+            elided = lang.elision_re.match(name[0].lower() + name[1:])
+            if not elided:
+                continue
+            stripped = elided.group(2)
+            stripped_cap = stripped[:1].upper() + stripped[1:]
+            if stripped_cap != name and stripped_cap in all_names:
+                row["elision_ambiguous"] = True
+                row["elision_stripped_form"] = stripped_cap
 
     rows.sort(key=lambda r: (-r["freq"], -r["mid_sentence"], r["name"]))
 

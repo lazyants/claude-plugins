@@ -472,10 +472,22 @@ a mismatched `has_elision` value, is treated as no report at all.
 Then run `bootstrap_names.py` (configured from
 `${durable_root}/languages/<particle_config's literal value>` — never
 rebuilt from `source.language.code` alone) to get frequency-ranked name
-candidates. Run the codex-glossary-pass, instantiating
-`glossary-pass-wf.template.js` fresh from the plugin's current copy every
-time — batched over `${durable_root}/glossary_TASK.md`. **1.2.0:** before
-ever calling `pipeline()`, a deterministic pre-workflow step invokes
+candidates. **1.3.5:** curate and batch those raw candidates with
+`scripts/glossary_batch_plan.py` FIRST — it reads `name_candidates.json` plus
+the current `canon.json`, drops every candidate already resolved there (an
+`entries{}` key OR a non-retried `review_queue[].source_form` — the #101
+filter, now enforced in code, not merely delegated as prose), curates the
+survivors by `likely_name`/`--min-candidate-freq` (the profile's
+`glossary.min_candidate_freq` when set, else 2), force-includes any
+`elision_ambiguous` pair for adjudication (#91), and prints one JSON line. If
+that line is `{"no_new_candidates": true, "batches": []}`, every candidate is
+already in canon — SKIP `resume_setup.py` and the glossary Workflow entirely
+this run, nothing to research. Otherwise run the codex-glossary-pass,
+instantiating `glossary-pass-wf.template.js` fresh from the plugin's current
+copy every time — batched over `${durable_root}/glossary_TASK.md`, feeding the
+planner's `args` into the Workflow tool and its `batches` into
+`resume_setup.py`'s payload. **1.2.0:** on that non-empty path, before ever
+calling `pipeline()`, a deterministic pre-workflow step invokes
 `resume_setup.py` (kind `glossary`) — it resolves `effectiveRunId` via the
 resume-integrity digest gate, creates `glossary/runs/<RUN_ID>/`, and
 atomically writes each batch's `manifest_{index}.json` plus the aggregate

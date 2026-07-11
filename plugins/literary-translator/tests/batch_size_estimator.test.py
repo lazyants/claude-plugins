@@ -988,3 +988,328 @@ def test_shared_retry_recovers_mid_loop_and_matches_exact_count(tmp_path):
     assert len(batch_level) == 1
     assert len(per_seg[seg]) == expected_total
     assert len(out["calls"]) == expected_total + 1
+
+
+# ===========================================================================
+# GLOSSARY-PASS TEMPLATE (issues #101, #95) -- same extract-substitute-wrap-
+# run-under-node harness mechanism as the mass-translate section above, but
+# for glossary-pass-wf.template.js's own, distinct control flow:
+#
+#   * PREFLIGHT COST CAP (#95): `estimatedCalls = 3*BATCHES.length + 2`
+#     (per batch: precheck + dispatch + wait == 3 worst case, plus the fixed
+#     merge + verify pair == 2). If it exceeds engine.batch_agent_cap the
+#     whole run is refused WITHOUT calling pipeline(), mirroring the mass
+#     template's `{merged:false, reason:"batch-too-large", ...}` shape. The
+#     `3*` (not the round-1 `2*`) is the corrected worst case -- a fresh run
+#     with no fragments on disk pays the precheck AND the dispatch AND the
+#     wait for every batch.
+#   * RESUME-SKIP PRECHECK (#101): batchStep runs one single-shot precheck
+#     agent() call first; if it reports the fragment is already present and
+#     valid (PRESENT), the codex dispatch + wait are SKIPPED and the batch
+#     is returned ready straight away. Any other answer (ABSENT -- a missing
+#     OR corrupt fragment, since both fail the same `--check-batch` command)
+#     falls THROUGH to a normal dispatch + wait. Both halves are asserted by
+#     the mocked agent() CALL LABELS directly, not merely the final result.
+#
+# The glossary template drives a SINGLE-stage `pipeline(BATCHES, batchStep)`
+# (not the mass template's two-stage pipeline), and uses its own agent()
+# call labels (glossary:precheck:N / glossary:dispatch:N / glossary:wait:N,
+# plus the batch-level glossary:merge / glossary:verify), so it needs its
+# own instantiate helper + mock harness below; only `_wrap_for_execution`
+# (owner-agnostic) is reused verbatim.
+# ===========================================================================
+
+GLOSSARY_PASS_TEMPLATE = TEMPLATES_DIR / "glossary-pass-wf.template.js"
+
+
+def instantiate_glossary_pass(
+    *,
+    batch_agent_cap: int,
+    durable_root: str = FIXTURE_DURABLE_ROOT,
+    source_lang: str = FIXTURE_SOURCE_LANG,
+    target_lang: str = FIXTURE_TARGET_LANG,
+    research_mode: str = "live",
+    run_id: str = "fixture-run-id",
+) -> str:
+    """Re-implements glossary-pass-wf.template.js's own one-time substitution
+    contract (its header comment's token list), the glossary twin of
+    instantiate_mass_translate above. Substitutes {{BATCH_AGENT_CAP}} as a
+    BARE integer (feeding the preflight cost cap). The mock never inspects
+    prompt text (only opts.label), so the exact string values are irrelevant
+    beyond being syntactically valid."""
+    text = GLOSSARY_PASS_TEMPLATE.read_text(encoding="utf-8")
+    text = text.replace("{{DURABLE_ROOT}}", durable_root)
+    text = text.replace("{{RUN_ID}}", run_id)
+    text = text.replace("{{SOURCE_LANG}}", source_lang)
+    text = text.replace("{{TARGET_LANG}}", target_lang)
+    text = text.replace("{{RESEARCH_MODE}}", research_mode)
+    text = text.replace("{{BATCH_AGENT_CAP}}", str(int(batch_agent_cap)))
+    assert "{{" not in text, (
+        "glossary fixture instantiation left an unresolved token -- fix the "
+        "fixture, not the assertion"
+    )
+    return text
+
+
+# ---------------------------------------------------------------------------
+# Glossary node harness: single-stage pipeline, and a mock agent() driven by
+# a per-batch PLAN keyed by str(index):
+#   { "0": {"precheck": "PRESENT 0"},                       # -> resume-skip
+#     "1": {"precheck": "ABSENT 1", "wait": "READY 1"} }    # -> dispatch
+# Absent keys default to precheck "ABSENT <idx>" (fall through) and wait
+# "READY <idx>" (fragment becomes ready). The batch-level glossary:merge /
+# glossary:verify calls always succeed (verify returns {verified:true}).
+# ---------------------------------------------------------------------------
+GLOSSARY_HARNESS_TEMPLATE = r"""
+'use strict';
+
+__WRAPPED_SOURCE__
+
+const PLAN = __PLAN_JSON__;
+const BATCHES_ARGS = __BATCHES_JSON__;
+const callsLog = [];
+const logLines = [];
+let pipelineCalled = false;
+
+async function agent(promptText, opts) {
+  opts = opts || {};
+  const label = opts.label || "";
+  callsLog.push({
+    label: label,
+    phase: opts.phase || null,
+    effort: opts.effort || null,
+    agentType: opts.agentType || null,
+    hasSchema: !!opts.schema,
+  });
+
+  if (label === "glossary:merge") return "MERGED (mock)";
+  if (label === "glossary:verify") return { verified: true };
+
+  const parts = label.split(":");
+  const kind = parts[1];
+  const idx = parts[parts.length - 1];
+  const p = PLAN[idx] || {};
+  if (kind === "precheck") return (p.precheck !== undefined) ? p.precheck : ("ABSENT " + idx);
+  if (kind === "dispatch") return "FRAGMENT " + idx;
+  if (kind === "wait") return (p.wait !== undefined) ? p.wait : ("READY " + idx);
+  throw new Error("glossary mock agent(): unrecognized label " + label);
+}
+
+async function pipeline(items, stage) {
+  pipelineCalled = true;
+  const out = [];
+  for (const item of items) {
+    out.push(await stage(item));
+  }
+  return out;
+}
+
+function log(msg) { logLines.push(String(msg)); }
+
+(async () => {
+  try {
+    const result = await __workflowMain__(agent, pipeline, log, BATCHES_ARGS);
+    process.stdout.write(JSON.stringify({
+      result: result,
+      calls: callsLog,
+      log: logLines,
+      pipelineCalled: pipelineCalled,
+    }));
+  } catch (err) {
+    process.stderr.write("HARNESS_ERROR: " + (err && err.stack || String(err)) + "\n");
+    process.exit(1);
+  }
+})();
+"""
+
+
+def build_glossary_harness(js_source: str, batches: list, plan: dict) -> str:
+    wrapped = _wrap_for_execution(js_source)
+    text = GLOSSARY_HARNESS_TEMPLATE.replace("__WRAPPED_SOURCE__", wrapped)
+    text = text.replace("__PLAN_JSON__", json.dumps(plan))
+    text = text.replace("__BATCHES_JSON__", json.dumps(batches))
+    return text
+
+
+def _glossary_batches(n: int) -> list:
+    """n minimal, index-guard-legal glossary batches -- candidate content is
+    irrelevant (the mock never reads prompt text)."""
+    return [
+        {"index": i, "candidates": [{"name": f"Cand{i}", "freq": 3, "likely_name": True}]}
+        for i in range(n)
+    ]
+
+
+def run_glossary_workflow(
+    *,
+    tmp_path: Path,
+    batch_agent_cap: int,
+    batches: list,
+    plan: dict,
+    timeout: int = 30,
+) -> dict:
+    assert NODE is not None, "node executable not found on PATH -- required to run this test file"
+    js_source = instantiate_glossary_pass(batch_agent_cap=batch_agent_cap)
+    harness_text = build_glossary_harness(js_source, batches, plan)
+    harness_path = tmp_path / "glossary_harness.js"
+    harness_path.write_text(harness_text, encoding="utf-8")
+
+    proc = subprocess.run(
+        [NODE, str(harness_path)],
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+    )
+    if proc.returncode != 0:
+        raise AssertionError(
+            f"glossary harness execution failed (exit {proc.returncode}):\n"
+            f"STDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}"
+        )
+    return json.loads(proc.stdout)
+
+
+# ---------------------------------------------------------------------------
+# Preflight cost cap (#95): the corrected 3*BATCHES.length + 2 boundary.
+# ---------------------------------------------------------------------------
+
+
+def test_glossary_preflight_boundary_exactly_at_cap_permits_dispatch(tmp_path):
+    batches = _glossary_batches(2)
+    estimated = 3 * len(batches) + 2  # 8
+
+    out = run_glossary_workflow(
+        tmp_path=tmp_path,
+        batch_agent_cap=estimated,
+        batches=batches,
+        plan={},  # every batch default: precheck ABSENT, wait READY
+    )
+
+    assert out["pipelineCalled"] is True, (
+        "estimatedCalls == cap must NOT trip the gate (the check is '>', not '>=')"
+    )
+    assert out["result"]["merged"] is True
+    # A fresh run (no fragment present) pays precheck+dispatch+wait (3) per
+    # batch plus the fixed merge+verify pair (2) -- the estimate EXACTLY.
+    assert len(out["calls"]) == estimated
+
+
+def test_glossary_preflight_one_below_boundary_blocks_dispatch_entirely(tmp_path):
+    batches = _glossary_batches(2)
+    estimated = 3 * len(batches) + 2  # 8
+
+    out = run_glossary_workflow(
+        tmp_path=tmp_path,
+        batch_agent_cap=estimated - 1,
+        batches=batches,
+        plan={},
+    )
+
+    assert out["pipelineCalled"] is False, "pipeline() must never run once the batch is judged too large"
+    assert out["calls"] == [], "zero real agent() calls once the gate trips -- it must return before any dispatch"
+    assert out["result"] == {
+        "merged": False,
+        "reason": "batch-too-large",
+        "estimatedCalls": estimated,
+        "cap": estimated - 1,
+    }
+    assert any("Batch too large" in line and str(estimated) in line for line in out["log"])
+
+
+@pytest.mark.parametrize("n_batches", [1, 2, 5, 13])
+def test_glossary_preflight_formula_is_3_batches_plus_2(tmp_path, n_batches):
+    """Locks the CORRECTED formula 3*N + 2 (round-1's 2*N + 2 would compute a
+    different estimatedCalls and fail here). Cheap: the gate trips before
+    pipeline() ever runs, so no PLAN and zero agent calls are needed."""
+    batches = _glossary_batches(n_batches)
+    expected = 3 * n_batches + 2
+
+    out = run_glossary_workflow(
+        tmp_path=tmp_path,
+        batch_agent_cap=expected - 1,
+        batches=batches,
+        plan={},
+    )
+
+    assert out["pipelineCalled"] is False
+    assert out["calls"] == []
+    assert out["result"]["reason"] == "batch-too-large"
+    assert out["result"]["estimatedCalls"] == expected
+    assert out["result"]["cap"] == expected - 1
+
+
+# ---------------------------------------------------------------------------
+# Resume-skip precheck (#101): a valid pre-existing fragment is TRUSTED
+# (dispatch + wait skipped); a missing/corrupt fragment falls THROUGH.
+# ---------------------------------------------------------------------------
+
+
+def test_glossary_resume_skip_trusts_valid_fragment_and_skips_dispatch(tmp_path):
+    batches = _glossary_batches(1)
+    out = run_glossary_workflow(
+        tmp_path=tmp_path,
+        batch_agent_cap=10_000,
+        batches=batches,
+        plan={"0": {"precheck": "PRESENT 0"}},
+    )
+
+    labels = [c["label"] for c in out["calls"]]
+    assert "glossary:precheck:0" in labels
+    assert "glossary:dispatch:0" not in labels, (
+        "a valid pre-existing fragment must skip the (expensive) codex dispatch"
+    )
+    assert "glossary:wait:0" not in labels, (
+        "a valid pre-existing fragment must skip the wait poll too"
+    )
+    assert out["result"]["merged"] is True
+    assert out["result"]["batches"][0]["ready"] is True
+    assert out["result"]["batches"][0]["batchIndex"] == 0
+    # precheck (1) + merge (1) + verify (1) -- no dispatch, no wait.
+    assert len(out["calls"]) == 3
+
+
+def test_glossary_resume_precheck_absent_falls_through_to_real_dispatch(tmp_path):
+    """A missing OR corrupt fragment both fail the precheck's own
+    `--check-batch` command (the Python half of that rejection is
+    glossary_fragment_merge.test.py's malformed-JSON case), so the template
+    sees ABSENT and must dispatch for real."""
+    batches = _glossary_batches(1)
+    out = run_glossary_workflow(
+        tmp_path=tmp_path,
+        batch_agent_cap=10_000,
+        batches=batches,
+        plan={"0": {"precheck": "ABSENT 0", "wait": "READY 0"}},
+    )
+
+    labels = [c["label"] for c in out["calls"]]
+    assert "glossary:precheck:0" in labels
+    assert "glossary:dispatch:0" in labels, (
+        "a missing/corrupt fragment must fall through to a real codex dispatch"
+    )
+    assert "glossary:wait:0" in labels
+    assert out["result"]["merged"] is True
+    # precheck (1) + dispatch (1) + wait (1) + merge (1) + verify (1).
+    assert len(out["calls"]) == 5
+
+
+def test_glossary_resume_skip_is_decided_per_batch(tmp_path):
+    """One batch resume-skipped, its neighbour freshly dispatched -- the skip
+    decision is per-batch, never all-or-nothing."""
+    batches = _glossary_batches(2)
+    out = run_glossary_workflow(
+        tmp_path=tmp_path,
+        batch_agent_cap=10_000,
+        batches=batches,
+        plan={
+            "0": {"precheck": "PRESENT 0"},                    # skip
+            "1": {"precheck": "ABSENT 1", "wait": "READY 1"},  # dispatch
+        },
+    )
+
+    labels = [c["label"] for c in out["calls"]]
+    assert "glossary:dispatch:0" not in labels
+    assert "glossary:wait:0" not in labels
+    assert "glossary:dispatch:1" in labels
+    assert "glossary:wait:1" in labels
+    assert out["result"]["merged"] is True
+    # batch0 precheck (1) + batch1 precheck+dispatch+wait (3) + merge+verify (2).
+    assert len(out["calls"]) == 6

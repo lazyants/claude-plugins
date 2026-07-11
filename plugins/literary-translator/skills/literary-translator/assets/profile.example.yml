@@ -144,11 +144,15 @@ engine:
     # NOT apply to purely mechanical, no-judgment calls: the translator-readiness poll and the ledger-bookkeeping
     # call are both effort:'low' by design.
   max_fix_rounds: 4                       # cap before escalating to non_converged / blocked
-  batch_agent_cap: 1000
+  batch_agent_cap: 3500
     # A worst-case agent-call-count ESTIMATE for this batch is computed before dispatch begins -- if the
     # estimate for the given SEGS array would exceed this cap, the run refuses to start, logging the estimate
     # and the offending segment count. Splitting a batch that's too large into smaller ones is the operator's
     # call, not automated in v1.
+    # Calibration: mass-translate's worst case is 1 + N*(10 + 7*max_fix_rounds) = 1 + N*38 at the shipped
+    # max_fix_rounds:4, so 3500 admits a normal ~78-segment batch (1+78*38 = 2965) with headroom. The old
+    # default of 1000 refused any batch over 26 segments at max_fix_rounds:4 -- worse than a full novel needs.
+    # Also read by the W3 glossary-pass preflight (estimate 3*BATCHES.length + 2), reusing this one knob.
 
 footnotes:
   apparatus_policy: translate_all

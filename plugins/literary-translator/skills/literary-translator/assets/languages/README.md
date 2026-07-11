@@ -22,6 +22,16 @@ config that needs to reject elided-contraction openers like `C'est`/`J'ai`
 as false-positive candidates lists their exact surface forms in `STOPWORDS`
 instead, keeping every language file's shape uniform).
 
+The #91 **capitalized-elision ambiguity detection** (1.3.5) also needs no fifth
+key: `bootstrap_names.py` reuses each config's own `ELISION_RE` verbatim to
+*flag* — never split — a capitalized single-token candidate that might be an
+elided article plus an already-known name (`elision_ambiguous: true` +
+`elision_stripped_form`), leaving the accept-vs-`review_queue` call to the
+glossary adjudicator. Because it reuses the existing key rather than adding one,
+it generalizes to `fr.json` and `it.json` alike. See
+[`references/gotchas.md`](../../references/gotchas.md)'s elision lesson and the
+1.3.5 `CHANGELOG.md` entry.
+
 ## Status of each shipped preset
 
 | File | Status | Basis |
@@ -29,7 +39,7 @@ instead, keeping every language file's shape uniform).
 | **`fr.json`** | **Proven.** | Extracted **verbatim** from `historiettes-t3/bootstrap_names.py`'s own `PARTICLES`/`STOPWORDS`/`ELISION_RE` literals — the real, project-specific script that ran correctly over ~143,000 real words of *Les Historiettes de Tallemant des Réaux*, tome 3 (17th-century French). Nothing here was reinvented or approximated; every entry traces back to that one script's actual, battle-tested data. |
 | `de.json` | **Unverified starting point.** | Particle list (`von`, `zu`) from general knowledge. Stopword list intentionally minimal (~30 common capitalized pronouns/articles/conjunctions). `has_elision: false` — German has no article-apostrophe elision comparable to French/Italian. **Not smoke-tested against any real book.** German additionally capitalizes *every* common noun (not just proper nouns), which this stub's stopword list does not attempt to solve — expect to hit far more false-positive candidates here than with `fr.json` until a real project extends it. |
 | `es.json` | **Unverified starting point.** | Particle list (`de`, `del`, `la`, `los`, `las`) from general knowledge. Stopword list intentionally minimal (~40 entries). `has_elision: false` — Spanish `del`/`al` are obligatory `de+el`/`a+el` contractions, not apostrophe elision, so they don't defeat the tokenizer's capitalization gate the way French/Italian elision does. **Not smoke-tested against any real book.** |
-| `it.json` | **Unverified starting point.** | Particle list (`di`, `da`, `del`, `della`, `dei`, `degli`, `delle`, `dal`, `dallo`, `dagli`, `dalla`, plus bare `d`/`l` for post-elision-split joins) from general knowledge. Stopword list intentionally minimal (~40 entries). `has_elision: true` — Italian *does* elide (`d'Annunzio`, `dell'Adige`, `l'Aquila`) — with a starter `ELISION_RE` matching a lowercase remnant + apostrophe + capitalized remainder. **Not smoke-tested against any real book**, and the starter regex only matches a *lowercase*-initial elided remnant — a sentence-initial capitalized form (`L'Aquila` as a fixed proper-noun spelling) is not split by design, since in that case the whole fused token already starts with a capital and survives the extractor's capitalization gate intact. |
+| `it.json` | **Unverified starting point.** | Particle list (`di`, `da`, `del`, `della`, `dei`, `degli`, `delle`, `dal`, `dallo`, `dagli`, `dalla`, plus bare `d`/`l` for post-elision-split joins) from general knowledge. Stopword list intentionally minimal (~40 entries). `has_elision: true` — Italian *does* elide (`d'Annunzio`, `dell'Adige`, `l'Aquila`) — with a starter `ELISION_RE` matching a lowercase remnant + apostrophe + capitalized remainder. **Not smoke-tested against any real book**, and the starter regex only matches a *lowercase*-initial elided remnant — a sentence-initial capitalized form (`L'Aquila` as a fixed proper-noun spelling) is not split by design, since in that case the whole fused token already starts with a capital and survives the extractor's capitalization gate intact. 1.3.5 handles the *ambiguous* case of such a fused form — where the stripped remainder is itself another candidate — without touching this by-design behavior: `bootstrap_names.py` flags it `elision_ambiguous` for the glossary adjudicator rather than splitting it (see the four-key note above and #91). |
 
 **These three are unverified starting points, expected to grow — the first
 real project in each language should treat its `STOPWORDS`/`PARTICLES` list
