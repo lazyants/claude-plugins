@@ -21,6 +21,7 @@ import { fileURLToPath } from 'node:url';
 
 import {
   readProfileVersion,
+  scanStructure,
   CURRENT_PROFILE_VERSION,
   SUPPORTED_PROFILE_VERSIONS,
   MIGRATIONS,
@@ -449,3 +450,525 @@ test('CLI: a nonexistent path exits 2 with a clean message, no stack trace', () 
   assert.doesNotMatch(result.stderr, /\bat file:\/\//);
   assert.doesNotMatch(result.stderr, /Error:\s*ENOENT/); // caught and re-worded, not a raw Node error dump
 });
+
+// ---- cross-line structural guard (issue #110): scanStructure ------------------------------------
+// readProfileVersion's column-0 scan never inspected what happens BETWEEN top-level keys. The cases
+// below are the curated fixtures from the plan's ground-truth table (Psych 3.1.0-verified, ids kept
+// for traceability): an unterminated flow collection or quoted scalar, and an alias to an anchor that
+// does not exist anywhere in the doc. All three now halt with `status: 'malformed'` and a message
+// prefixed `profile_version scan: structural: `. Mechanism B (invalid dedent) is cut this release —
+// see references/profile-validation.md — so block scalars stay purely opaque (never flagged), which
+// several must-stay-ok cases below exercise directly.
+
+// ---- must-halt (structural) — each proven RED against the pre-#110 lib (scanned 'ok') ------------
+
+test('A1: an unterminated flow collection under a nested key halts', () => {
+  const r = readProfileVersion('profile_version: 1\nstack:\n  route_globs: ["a", "b"\n');
+  assert.equal(r.status, 'malformed');
+  assert.match(r.message, /structural:/);
+  assert.match(r.message, /unterminated flow collection/);
+});
+
+test('A3: an unterminated double-quoted scalar halts', () => {
+  const r = readProfileVersion('profile_version: 1\nname: "unterminated\n');
+  assert.equal(r.status, 'malformed');
+  assert.match(r.message, /structural:/);
+  assert.match(r.message, /unterminated quoted scalar/);
+});
+
+test('A4: an unterminated single-quoted scalar halts', () => {
+  const r = readProfileVersion('profile_version: 1\nsep: \'a\n');
+  assert.equal(r.status, 'malformed');
+  assert.match(r.message, /structural:/);
+  assert.match(r.message, /unterminated quoted scalar/);
+});
+
+test('Q6 (empty-then-flow): an empty-value key makes the next indented line a fresh node, so its unterminated flow halts', () => {
+  const r = readProfileVersion('profile_version: 1\nstack:\n  route_globs: ["a"\n');
+  assert.equal(r.status, 'malformed');
+  assert.match(r.message, /structural:/);
+  assert.match(r.message, /unterminated flow collection/);
+});
+
+test('Q7 (plain-then-flow): a closed plain value ends the node, so the next key\'s unterminated flow halts', () => {
+  const r = readProfileVersion('profile_version: 1\na: text\nb: [unterm\n');
+  assert.equal(r.status, 'malformed');
+  assert.match(r.message, /structural:/);
+  assert.match(r.message, /unterminated flow collection/);
+});
+
+test('C2: an inline node-start alias with zero anchors in the doc halts', () => {
+  const r = readProfileVersion('profile_version: 1\nglob: *.md\n');
+  assert.equal(r.status, 'malformed');
+  assert.match(r.message, /structural:/);
+  assert.match(r.message, /alias to undefined anchor/);
+});
+
+test('C4: an inline node-start alias named "undefined" still halts (no special-casing the name)', () => {
+  const r = readProfileVersion('profile_version: 1\nextra: *undefined\n');
+  assert.equal(r.status, 'malformed');
+  assert.match(r.message, /structural:/);
+  assert.match(r.message, /alias to undefined anchor/);
+});
+
+test('C9: an alias with a space before it (still node-start after skipping ws) halts', () => {
+  const r = readProfileVersion('profile_version: 1\nnote: * foo\n');
+  assert.equal(r.status, 'malformed');
+  assert.match(r.message, /structural:/);
+  assert.match(r.message, /alias to undefined anchor/);
+});
+
+test('P11: profile_version itself has no "&" anywhere in the doc, so any later alias halts (BadAlias)', () => {
+  const r = readProfileVersion('profile_version: 1\nextra: *whatever\n');
+  assert.equal(r.status, 'malformed');
+  assert.match(r.message, /structural:/);
+  assert.match(r.message, /alias to undefined anchor/);
+});
+
+// ---- must-stay-ok (structural) — quote/flow/alias look-alikes that are NOT structural errors ------
+
+test('A5: a quote mid-scalar (not at node-start) is literal text, not an opener', () => {
+  const r = readProfileVersion('profile_version: 1\nnote: 5" pipe\n');
+  assert.equal(r.status, 'ok');
+  assert.equal(r.version, 1);
+});
+
+test('A6: a quoted phrase inside an unquoted plain scalar is literal text', () => {
+  const r = readProfileVersion('profile_version: 1\nnote: he said "hi"\n');
+  assert.equal(r.status, 'ok');
+  assert.equal(r.version, 1);
+});
+
+test('A8: a flow collection that wraps to the next line and closes there stays ok', () => {
+  const r = readProfileVersion('profile_version: 1\na: [1,\n2]\n');
+  assert.equal(r.status, 'ok');
+  assert.equal(r.version, 1);
+});
+
+test('A9: a double-quoted scalar that wraps to the next line and closes there stays ok', () => {
+  const r = readProfileVersion('profile_version: 1\na: "l1\n  l2"\n');
+  assert.equal(r.status, 'ok');
+  assert.equal(r.version, 1);
+});
+
+test('A10: a closing bracket mid-scalar (not an opener earlier on the line) is literal text', () => {
+  const r = readProfileVersion('profile_version: 1\nnote: this is fine]\n');
+  assert.equal(r.status, 'ok');
+  assert.equal(r.version, 1);
+});
+
+test('C7: an asterisk mid-plain-scalar is literal text, not an alias', () => {
+  const r = readProfileVersion('profile_version: 1\nnote: a*b\n');
+  assert.equal(r.status, 'ok');
+  assert.equal(r.version, 1);
+});
+
+test('P12: any "&" anywhere in the doc gates off the undefined-alias check, even for an unrelated alias', () => {
+  const r = readProfileVersion('profile_version: 1\na: &x 1\nb: *x\n');
+  assert.equal(r.status, 'ok');
+  assert.equal(r.version, 1);
+});
+
+// -- the anchor gate is an over-approximation of "the document DEFINES an anchor", not a literal "&"
+// -- count (ped-ant review finding): a "&" mid-word (`R&D`, `AT&T`) can never be a real anchor
+// -- introducer (those always sit at a token-start — whitespace/flow-indicator/line-start, i.e. a
+// -- non-word character before the "&"), so excluding it only narrows the gate — it can't miss a real
+// -- anchor. Before this fix these must-halt cases scanned "ok" (a miss); each is a regression.
+
+test('J1: prose "&" with NO real anchor no longer masks an undefined alias (the reported example)', () => {
+  const r = readProfileVersion('profile_version: 1\ndescription: R&D\nglob: *.md\n');
+  assert.equal(r.status, 'malformed');
+  assert.match(r.message, /alias to undefined anchor/);
+});
+
+test('J2: a second prose "&" shape ("AT&T") also no longer masks an undefined alias', () => {
+  const r = readProfileVersion('profile_version: 1\nvendor: AT&T\nx: *undef\n');
+  assert.equal(r.status, 'malformed');
+  assert.match(r.message, /alias to undefined anchor/);
+});
+
+test('J3: a prose "&" inside a comment also no longer masks an undefined alias', () => {
+  const r = readProfileVersion('profile_version: 1\n# R&D department\nx: *undef\n');
+  assert.equal(r.status, 'malformed');
+  assert.match(r.message, /alias to undefined anchor/);
+});
+
+test('J4 (control): a real anchor at a block key still resolves its alias, stays ok', () => {
+  const r = readProfileVersion('profile_version: 1\na: &x 1\nb: *x\n');
+  assert.equal(r.status, 'ok');
+  assert.equal(r.version, 1);
+});
+
+test('J5 (control): a real anchor on a sequence entry still resolves its alias, stays ok', () => {
+  const r = readProfileVersion('profile_version: 1\nnote:\n  - &x 1\n  - *x\n');
+  assert.equal(r.status, 'ok');
+  assert.equal(r.version, 1);
+});
+
+test('J6 (control): a real anchor inside a flow sequence still resolves its alias, stays ok', () => {
+  const r = readProfileVersion('profile_version: 1\nm: [&x 1, *x]\n');
+  assert.equal(r.status, 'ok');
+  assert.equal(r.version, 1);
+});
+
+test('J7 (control): a real anchor as a flow-map value still resolves its alias, stays ok', () => {
+  const r = readProfileVersion('profile_version: 1\nm: {a: &x 1, b: *x}\n');
+  assert.equal(r.status, 'ok');
+  assert.equal(r.version, 1);
+});
+
+test('J8 (control): tag-then-anchor node properties still resolve the alias, stays ok', () => {
+  const r = readProfileVersion('profile_version: 1\na: !!str &x hi\nb: *x\n');
+  assert.equal(r.status, 'ok');
+  assert.equal(r.version, 1);
+});
+
+test('J9 (control): anchor-then-tag node properties still resolve the alias, stays ok', () => {
+  const r = readProfileVersion('profile_version: 1\na: &x !!str hi\nb: *x\n');
+  assert.equal(r.status, 'ok');
+  assert.equal(r.version, 1);
+});
+
+test('J10 (control): a real anchor nested several levels deep still resolves its alias, stays ok', () => {
+  const r = readProfileVersion('profile_version: 1\nouter:\n  inner:\n    a: &x 1\n    b: *x\n');
+  assert.equal(r.status, 'ok');
+  assert.equal(r.version, 1);
+});
+
+test('J11 (control): prose "&" with no alias usage at all stays ok, unaffected', () => {
+  const r = readProfileVersion('profile_version: 1\ndescription: R&D\n');
+  assert.equal(r.status, 'ok');
+  assert.equal(r.version, 1);
+});
+
+test('J12 (control): a genuinely undefined alias with zero "&" anywhere still halts (pre-existing P11)', () => {
+  const r = readProfileVersion('profile_version: 1\nextra: *whatever\n');
+  assert.equal(r.status, 'malformed');
+  assert.match(r.message, /alias to undefined anchor/);
+});
+
+// -- compact-colon flow maps (workflow finding 1): a JSON-style value quote opens without a space,
+// -- and an untyped/floored flow depth means a bracket-shaped character inside it never mismatch-flags
+
+test('F1: a compact flow map value containing "]" inside its own quotes stays ok', () => {
+  const r = readProfileVersion('profile_version: 1\nnote: {"x":"see ] below"}\n');
+  assert.equal(r.status, 'ok');
+  assert.equal(r.version, 1);
+});
+
+test('F2: a compact flow map whose value IS the string "]" stays ok', () => {
+  const r = readProfileVersion('profile_version: 1\na: {"k":"]"}\n');
+  assert.equal(r.status, 'ok');
+  assert.equal(r.version, 1);
+});
+
+test('F3: a compact flow map with single-quoted key/value, value containing "}", stays ok', () => {
+  const r = readProfileVersion('profile_version: 1\na: {\'k\':\'}\'}\n');
+  assert.equal(r.status, 'ok');
+  assert.equal(r.version, 1);
+});
+
+test('F4: a nested flow sequence-of-map with a "]" inside the map value stays ok', () => {
+  const r = readProfileVersion('profile_version: 1\na: [{"k":"]"}]\n');
+  assert.equal(r.status, 'ok');
+  assert.equal(r.version, 1);
+});
+
+test('F5: an ordinary compact flow map with no special characters stays ok (control)', () => {
+  const r = readProfileVersion('profile_version: 1\na: {"k":"v"}\n');
+  assert.equal(r.status, 'ok');
+  assert.equal(r.version, 1);
+});
+
+// -- seq-entry plain-scalar fold (workflow finding 2): a "- value" entry opens a plain scalar at the
+// -- DASH column, so a more-indented continuation line is a folded continuation, never a fresh node
+
+test('G1: a folded continuation that looks like an unterminated flow opener stays ok', () => {
+  const r = readProfileVersion('profile_version: 1\nnote:\n  - value\n    - [x\n');
+  assert.equal(r.status, 'ok');
+  assert.equal(r.version, 1);
+});
+
+test('G2: a folded continuation that looks like an unterminated quote opener stays ok', () => {
+  const r = readProfileVersion('profile_version: 1\nnote:\n  - value\n    - "x\n');
+  assert.equal(r.status, 'ok');
+  assert.equal(r.version, 1);
+});
+
+test('G3: a folded continuation that looks like an undefined alias stays ok', () => {
+  const r = readProfileVersion('profile_version: 1\nnote:\n  - value\n    - *x\n');
+  assert.equal(r.status, 'ok');
+  assert.equal(r.version, 1);
+});
+
+test('G4: a bare (no-dash) folded continuation under a sequence entry stays ok', () => {
+  const r = readProfileVersion('profile_version: 1\nlist:\n  - item\n    [oops\n');
+  assert.equal(r.status, 'ok');
+  assert.equal(r.version, 1);
+});
+
+test('G5: a single-quoted folded continuation under a sequence entry stays ok', () => {
+  const r = readProfileVersion('profile_version: 1\nlist:\n  - item\n    - \'x\n');
+  assert.equal(r.status, 'ok');
+  assert.equal(r.version, 1);
+});
+
+// -- comment lines carrying a colon plus an unbalanced/alias look-alike (workflow finding 3): the
+// -- whole line is a comment, classified BEFORE any separator/node-start detection
+
+test('H1: a column-0 comment with a colon and an unterminated-looking flow stays ok', () => {
+  const r = readProfileVersion('profile_version: 1\n# see: [a, b, c\n');
+  assert.equal(r.status, 'ok');
+  assert.equal(r.version, 1);
+});
+
+test('H2: a column-0 comment with a colon and an unterminated-looking quote stays ok', () => {
+  const r = readProfileVersion('profile_version: 1\n# fixme: "q\n');
+  assert.equal(r.status, 'ok');
+  assert.equal(r.version, 1);
+});
+
+test('H3: a column-0 comment with a colon and an alias look-alike stays ok', () => {
+  const r = readProfileVersion('profile_version: 1\n# note: *x\n');
+  assert.equal(r.status, 'ok');
+  assert.equal(r.version, 1);
+});
+
+test('H4: an indented comment with a colon and an unterminated-looking flow stays ok', () => {
+  const r = readProfileVersion('profile_version: 1\nfoo:\n    # see: [a, b, c\n');
+  assert.equal(r.status, 'ok');
+  assert.equal(r.version, 1);
+});
+
+test('H5: the shipped "# internal: []" comment weaponized by a one-char edit ("# internal: [AuthUser") stays ok', () => {
+  const r = readProfileVersion('profile_version: 1\nfoo:\n  # internal: [AuthUser\n');
+  assert.equal(r.status, 'ok');
+  assert.equal(r.version, 1);
+});
+
+// -- a comment starting with NO space right after a flow closer (post-#116 review round): once the
+// -- outermost flow node closes, `lexFlowChars` must stop lexing THIS line entirely — a `#` glued
+// -- directly to the closing `]`/`}` is still a comment start even though it isn't preceded by
+// -- whitespace, and its contents (however bracket-shaped) must never be treated as live flow again.
+// -- Each was RED (falsely "unterminated flow collection") before that fix.
+
+test('I1: an empty flow closes, then a zero-space "#[" comment tail stays ok', () => {
+  const r = readProfileVersion('profile_version: 1\nnote: []#[\n');
+  assert.equal(r.status, 'ok');
+  assert.equal(r.version, 1);
+});
+
+test('I2: a one-element flow closes, then a zero-space "#[" comment tail stays ok', () => {
+  const r = readProfileVersion('profile_version: 1\nnote: [1]#[\n');
+  assert.equal(r.status, 'ok');
+  assert.equal(r.version, 1);
+});
+
+test('I3: a nested flow closes back to depth 0, then a zero-space "#[" comment tail stays ok', () => {
+  const r = readProfileVersion('profile_version: 1\nnote: [[1]]#[\n');
+  assert.equal(r.status, 'ok');
+  assert.equal(r.version, 1);
+});
+
+test('I4: a compact flow map closes, then a zero-space "#{" comment tail stays ok', () => {
+  const r = readProfileVersion('profile_version: 1\nnote: {a: 1}#{\n');
+  assert.equal(r.status, 'ok');
+  assert.equal(r.version, 1);
+});
+
+test('I5: the shipped route_globs shape, closed flow then a zero-space comment naming an open bracket, stays ok', () => {
+  const r = readProfileVersion('profile_version: 1\nroute_globs: ["a.php"]#TODO: see issue [42\n');
+  assert.equal(r.status, 'ok');
+  assert.equal(r.version, 1);
+});
+
+test('I6 (control): a flow closes with a SPACE before "#[" — already ok pre-fix, must stay ok', () => {
+  const r = readProfileVersion('profile_version: 1\nnote: [1] #[\n');
+  assert.equal(r.status, 'ok');
+  assert.equal(r.version, 1);
+});
+
+test('I7 (control): a flow closes then a balanced trailing comment — already ok pre-fix, must stay ok', () => {
+  const r = readProfileVersion('profile_version: 1\nnote: [1]# balanced comment\n');
+  assert.equal(r.status, 'ok');
+  assert.equal(r.version, 1);
+});
+
+test('I8: a genuinely unterminated flow (no closer at all) is still caught after the depth-0 early return', () => {
+  const r = readProfileVersion('profile_version: 1\nroute_globs: ["a", "b"\n');
+  assert.equal(r.status, 'malformed');
+  assert.match(r.message, /unterminated flow collection/);
+});
+
+// -- block scalars stay purely opaque (mechanism B is cut this release — never flagged) ------------
+
+test('block scalar: a mid-dedent content line (still deeper than the introducer column) stays ok', () => {
+  const r = readProfileVersion('profile_version: 1\nnote: |\n      line one\n   x: [unterm\n');
+  assert.equal(r.status, 'ok');
+  assert.equal(r.version, 1);
+});
+
+test('block scalar: a "#"-first content line is literal, not a comment, and stays ok', () => {
+  const r = readProfileVersion('profile_version: 1\nnote: |\n  # not a comment\n  real content\n');
+  assert.equal(r.status, 'ok');
+  assert.equal(r.version, 1);
+});
+
+test('block scalar: a direct "- |2" sequence-entry block header (innermost dash column) stays ok', () => {
+  const r = readProfileVersion('profile_version: 1\nitems:\n  - |2\n      key: [\n');
+  assert.equal(r.status, 'ok');
+  assert.equal(r.version, 1);
+});
+
+test('block scalar: a nested "- - |" block header (innermost dash column) stays ok', () => {
+  const r = readProfileVersion('profile_version: 1\nm:\n  - - |\n      key: [\n');
+  assert.equal(r.status, 'ok');
+  assert.equal(r.version, 1);
+});
+
+test('block scalar: modifier order "|-2" is recognized as a header, body stays opaque', () => {
+  const r = readProfileVersion('profile_version: 1\na: |-2\n  k: [\n');
+  assert.equal(r.status, 'ok');
+  assert.equal(r.version, 1);
+});
+
+test('block scalar: modifier order "|2-" is recognized as a header, body stays opaque', () => {
+  const r = readProfileVersion('profile_version: 1\na: |2-\n  k: [\n');
+  assert.equal(r.status, 'ok');
+  assert.equal(r.version, 1);
+});
+
+test('block scalar: header-junk ("| pipe") fails the block-header shape and falls through to plain, never flagged', () => {
+  const r = readProfileVersion('profile_version: 1\nnote: | pipe\n');
+  assert.equal(r.status, 'ok');
+  assert.equal(r.version, 1);
+});
+
+test('the shipped capture.command block scalar (colons, quotes, backslashes, parens in its body) stays ok', () => {
+  const r = readProfileVersion(
+    'profile_version: 1\ncommand: |                        # exact, copy-pasteable; engine-specific.\n' +
+      '  docker compose run --rm \\\n' +
+      '    --user "$(id -u):$(id -g)" \\\n' +
+      '    -e HOME=/tmp \\\n' +
+      '    --add-host=app.test:host-gateway \\\n' +
+      '    app npx playwright test tests/handbook --reporter=line\n',
+  );
+  assert.equal(r.status, 'ok');
+  assert.equal(r.version, 1);
+});
+
+// -- explicit controls named in the plan's ground-truth table ---------------------------------------
+
+test('A7 (control): a properly-closed quoted date format value stays ok', () => {
+  const r = readProfileVersion('profile_version: 1\ndate_format: "DD.MM.YYYY"\n');
+  assert.equal(r.status, 'ok');
+  assert.equal(r.version, 1);
+});
+
+test('A11 (control): a properly-closed quoted value containing a non-ASCII currency symbol stays ok', () => {
+  const r = readProfileVersion('profile_version: 1\ncurrency_symbol: "' + String.fromCodePoint(0x20ac) + '"\n');
+  assert.equal(r.status, 'ok');
+  assert.equal(r.version, 1);
+});
+
+test('B9 (control): a sequence of properly-closed quoted scalars stays ok', () => {
+  const r = readProfileVersion('profile_version: 1\nroute_globs:\n  - "a"\n  - "b"\n');
+  assert.equal(r.status, 'ok');
+  assert.equal(r.version, 1);
+});
+
+test('N1 (control): a plain scalar value containing "://" is not mistaken for a mapping separator', () => {
+  const r = readProfileVersion('profile_version: 1\nurl: http://x\n');
+  assert.equal(r.status, 'ok');
+  assert.equal(r.version, 1);
+});
+
+test('N3 (control): a duplicate key nested under a non-profile_version key is not flagged (only the top-level profile_version key is checked for duplicates)', () => {
+  const r = readProfileVersion('profile_version: 1\nother:\n  a: 1\n  a: 2\n');
+  assert.equal(r.status, 'ok');
+  assert.equal(r.version, 1);
+});
+
+// ---- scanStructure called directly (not hidden behind Step-4/tab preemption) ----------------------
+
+test('scanStructure directly: unterminated flow collection at EOF', () => {
+  const lines = 'profile_version: 1\na: [1, 2'.split('\n');
+  const r = scanStructure(lines);
+  assert.ok(r, 'expected a non-null structural verdict');
+  assert.equal(r.status, 'malformed');
+  assert.equal(r.version, null);
+  assert.equal(r.message, 'profile_version scan: structural: unterminated flow collection');
+});
+
+test('scanStructure directly: unterminated quoted scalar at EOF', () => {
+  const lines = 'profile_version: 1\nname: "abc'.split('\n');
+  const r = scanStructure(lines);
+  assert.ok(r, 'expected a non-null structural verdict');
+  assert.equal(r.status, 'malformed');
+  assert.equal(r.version, null);
+  assert.equal(r.message, 'profile_version scan: structural: unterminated quoted scalar');
+});
+
+test('scanStructure directly: alias to an undefined anchor (zero "&" in the doc)', () => {
+  const lines = 'profile_version: 1\nextra: *nope'.split('\n');
+  const r = scanStructure(lines);
+  assert.ok(r, 'expected a non-null structural verdict');
+  assert.equal(r.status, 'malformed');
+  assert.equal(r.version, null);
+  assert.equal(r.message, 'profile_version scan: structural: alias to undefined anchor');
+});
+
+test('scanStructure directly: a quote not at node-start is literal text, returns null', () => {
+  const lines = 'profile_version: 1\nnote: 5" pipe'.split('\n');
+  assert.equal(scanStructure(lines), null);
+});
+
+test('scanStructure directly: "*" mid-plain-scalar is literal, not an alias, returns null', () => {
+  const lines = 'profile_version: 1\nnote: a*b'.split('\n');
+  assert.equal(scanStructure(lines), null);
+});
+
+test('scanStructure directly: any "&" anywhere in the doc gates off the undefined-alias check, returns null', () => {
+  const lines = 'profile_version: 1\na: &x 1\nb: *x'.split('\n');
+  assert.equal(scanStructure(lines), null);
+});
+
+// ---- precedence: missing → duplicate → malformed, structural sits in the malformed tier -----------
+
+test('precedence: a duplicate profile_version key wins over a later structural error (status stays "duplicate")', () => {
+  const r = readProfileVersion('profile_version: 1\nprofile_version: 2\nextra: [unterm\n');
+  assert.equal(r.status, 'duplicate');
+});
+
+test('precedence: profile_version not being the first key wins over a later structural error (status stays "missing")', () => {
+  const r = readProfileVersion('language:\n  code: de\nprofile_version: 1\nextra: [unterm\n');
+  assert.equal(r.status, 'missing');
+});
+
+test('precedence: a valid, first-key profile_version with a real structural error surfaces as "malformed"', () => {
+  const r = readProfileVersion('profile_version: 1\nextra: [unterm\n');
+  assert.equal(r.status, 'malformed');
+  assert.match(r.message, /structural:/);
+});
+
+// ---- never throws (structural adversarial inputs) --------------------------------------------------
+
+for (const [label, raw] of [
+  [
+    'a long "- - - … x" nested-sequence chain (iterative design — no recursion overflow)',
+    'profile_version: 1\nlist:\n  ' + '- '.repeat(5000) + 'x\n',
+  ],
+  [
+    'deeply nested flow-collection brackets',
+    'profile_version: 1\na: ' + '['.repeat(5000) + ']'.repeat(5000) + '\n',
+  ],
+  ['a huge single plain-scalar line', 'profile_version: 1\nnote: ' + 'x'.repeat(200000) + '\n'],
+  ['a lone "-" sequence entry with an empty node (next line is its node)', 'profile_version: 1\nlist:\n  -\n'],
+]) {
+  test(`structural scan never throws: ${label}`, () => {
+    const r = readProfileVersion(raw);
+    assert.equal(typeof r, 'object');
+    assert.equal(typeof r.status, 'string');
+    assert.equal(typeof r.message, 'string');
+  });
+}
