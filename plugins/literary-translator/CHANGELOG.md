@@ -1,5 +1,58 @@
 # Changelog
 
+## 1.3.3 — 2026-07-11
+
+Output-layer polish + first-run robustness patch: closes #98, #99, #104, and partially addresses
+#105 (parts a and c) from the 2026-07-09 five-agent audit.
+
+### Fixed
+
+- **`diff_rendered_output.py`'s baseline reader used `str.splitlines()` while the writer splits on
+  `"\n"` only** (#98) — a rendered line containing a Unicode line-boundary char (U+2028, U+2029,
+  U+0085/NEL, U+000B/0C, U+001C–1E) made the render/diff acceptance gate report `mismatch` forever,
+  and `--accept-baseline` re-froze a form the reader split differently on every subsequent run, so
+  it never converged. `_read_baseline_lines` now mirrors the writer exactly (strip one trailing
+  `\n`, then `split("\n")`, empty → `[]`).
+- **`render_obsidian.py`'s entity-note filename de-duplicator compared exact relpath strings** (#99)
+  — two canon `source_form`s that sanitize to stems differing only in case (`IVAN` vs `Ivan`) or
+  Unicode normalization form (NFC vs NFD `café`) were treated as distinct and got no disambiguation
+  suffix, silently clobbering one note on a case-/normalization-insensitive filesystem (macOS APFS,
+  Windows) and destabilizing a baseline frozen on a different platform. `_dedupe_path` now folds on
+  NFC-normalized casefold for membership while still returning the original, case-preserving path.
+- **Undeclared Python 3.10 floor in `assemble.py`** (#104a) — `AssembleError.__init__`'s `reason:
+  str | None = None` parameter annotation is runtime-evaluated (no `from __future__ import
+  annotations` present), so it raised `TypeError` on import under Python ≤3.9 with no explanation.
+  The annotation is now a quoted forward reference (`"str | None"`). A new AST-based drift-guard
+  test (`python_floor_pep604_drift.test.py`) statically scans every shipped script for a future
+  unquoted/unguarded PEP-604 union so this class of regression can't silently recur.
+- **Un-preflighted `import yaml` in `render_obsidian.py`** (#104b) — every other third-party import
+  across the plugin's scripts wraps in a try/except printing the house "install requirements.txt"
+  message; `render_obsidian.py`'s was the lone exception, raising a raw `ModuleNotFoundError`
+  traceback instead. Now wrapped like its siblings, and added to `dependency_preflight.test.py`'s
+  coverage (10/10 scripts).
+- **`final_audit.py`'s foreign-remainder stopword check was a no-op due to punctuation** (#105a) —
+  `WORD_TOKEN_RE.sub(lambda m: m.group(0), t)` returned `t` unchanged, so a stopword adjacent to
+  punctuation (`"fois,"`) never matched the stopword set and the WARN-only untranslated-run advisory
+  under-counted. Tokens now strip outer Unicode-punctuation-category characters and NFC-normalize
+  before the stopword comparison; the stopword set is NFC-normalized on load too, so both sides
+  compare in the same form regardless of the input text's or the language config's normalization.
+- **Double wikilink for a name appearing in both an inline verse and its host prose** (#105c) — each
+  `_render_block` call now creates exactly one `seen_in_block` set and links the fully-composed
+  block text (verse-then-prose or prose-then-verse) in a single trailing pass, instead of the inline
+  verse and the surrounding prose linking independently with their own first-occurrence bookkeeping.
+  `_render_verse_inline` is now a pure formatter (no longer takes a `linker`), fixing a latent
+  display-order inconsistency as a side effect.
+
+### Not fixed / follow-up filed
+
+- **#105 parts (b) and the verse-footnote residuals** (skip-mode footnote deadlock, nested
+  footnote-in-verse-in-footnote-def, embedded-verse footnote inline-vs-blockquote cosmetic) remain
+  open — out of scope for this patch. Tracked in a dedicated follow-up issue; #105 stays open.
+- **A pre-existing bug found while working this patch, not part of the original audit:**
+  `_render_block`'s `kind == "verse"` branch renders only `verses[0]`, silently dropping any
+  additional verses in the same dedicated verse block (`render_obsidian.py`). Filed as a new
+  follow-up issue rather than folded into this patch, since it's unrelated to #98/#99/#104/#105.
+
 ## 1.3.2 — 2026-07-10
 
 Bugfix release: closes three open issues (#89, #100, #102) from the 2026-07-09 five-agent audit.

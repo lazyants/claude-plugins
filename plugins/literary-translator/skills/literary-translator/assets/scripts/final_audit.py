@@ -125,6 +125,7 @@ import json
 import re
 import subprocess
 import sys
+import unicodedata
 from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -196,13 +197,6 @@ COMPLETENESS_CATEGORIES = [
 # VERSE_V\d+_[0-9a-f]{8}).
 FNREF_RE = re.compile(r"⟦FNREF_(\d+)⟧")
 SENTINEL_RE = re.compile(r"⟦[^⟧]+⟧")
-
-# Word-token pattern used by the foreign-remainder scan -- any run of
-# "letter" characters in ANY script (Unicode-aware), never a Latin-only
-# assumption like the real reference's LATIN_TOKEN regex (which assumed
-# source=French/target=Russian, i.e. two different alphabets -- a
-# generalized plugin cannot assume source and target scripts differ).
-WORD_TOKEN_RE = re.compile(r"[^\W\d_]+", re.UNICODE)
 
 
 def _fatal(msg) -> NoReturn:
@@ -522,6 +516,24 @@ def warn_link_graph(seg):
 # STOPWORDS specifically, never "looks Latin" as a proxy for "is foreign".
 # ---------------------------------------------------------------------------
 
+def _strip_outer_punct(token):
+    """Strip leading/trailing punctuation (Unicode category P) from a
+    whitespace-split token, without touching combining marks (Mn/Mc) --
+    those belong to their base letter, not the surrounding punctuation.
+    '_' (the Markdown emphasis marker) is already covered here: its
+    Unicode category is Pc (Connector Punctuation), so no separate
+    special-case is needed."""
+    def _is_adornment(ch):
+        return unicodedata.category(ch).startswith("P")
+
+    start, end = 0, len(token)
+    while start < end and _is_adornment(token[start]):
+        start += 1
+    while end > start and _is_adornment(token[end - 1]):
+        end -= 1
+    return token[start:end]
+
+
 def warn_foreign_remainder(seg, stopwords_lower):
     warns = []
     if not stopwords_lower:
@@ -535,7 +547,9 @@ def warn_foreign_remainder(seg, stopwords_lower):
             continue
         clean = SENTINEL_RE.sub(" ", txt)
         tokens_ws = clean.split()
-        low_tokens = [WORD_TOKEN_RE.sub(lambda m: m.group(0), t).lower() for t in tokens_ws]
+        low_tokens = [
+            unicodedata.normalize("NFC", _strip_outer_punct(t)).lower() for t in tokens_ws
+        ]
         stop_hits = sum(1 for t in low_tokens if t in stopwords_lower)
         run = maxrun = 0
         for t in low_tokens:
@@ -750,7 +764,9 @@ def main():
         profile = vd.load_profile()
         particle_config = profile["source"]["language"]["particle_config"]
         lang = bn.load_language_config(particle_config)
-        stopwords_lower = frozenset(w.lower() for w in lang.stopwords)
+        stopwords_lower = frozenset(
+            unicodedata.normalize("NFC", w).lower() for w in lang.stopwords
+        )
     except (bn.BootstrapNamesError, KeyError, TypeError) as exc:
         print(
             f"WARNING: could not resolve source-language stopwords for the "

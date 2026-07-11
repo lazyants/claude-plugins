@@ -26,6 +26,8 @@ locks that down per-package, per-script:
     (``bs4.FeatureNotFound``) separately from a missing ``bs4`` import --
     and separately from each other (the loop tries ``"lxml"`` first, and
     only reaches ``"xml"`` if the ``"lxml"`` backend actually worked).
+  - ``render_obsidian.py``'s MODULE-LEVEL try/except (mirrors
+    ``final_audit.py``'s own pattern) covering ``import yaml`` (exit code 2).
 
 A one-shot "control" test per script confirms the preflight is a no-op (no
 ``SystemExit``, real modules bound) when every dependency is genuinely
@@ -75,6 +77,7 @@ TEMPLATES_DIR = PLUGIN_ROOT / "skills" / "literary-translator" / "assets" / "tem
 PROFILE_VALIDATE_PATH = SCRIPTS_DIR / "profile_validate.py"
 CANON_VALIDATE_PATH = SCRIPTS_DIR / "canon_validate.py"
 EXTRACT_TEMPLATE_PATH = TEMPLATES_DIR / "extract.py.template"
+RENDER_OBSIDIAN_PATH = SCRIPTS_DIR / "render_obsidian.py"
 
 
 def _load_module_fresh(path: Path, name: str):
@@ -109,6 +112,16 @@ def _exec_canon_validate_fresh():
 def _exec_extract_template_fresh():
     def _do_exec():
         return _load_module_fresh(EXTRACT_TEMPLATE_PATH, "extract_template_preflight_test")
+    return _do_exec
+
+
+def _exec_render_obsidian_fresh():
+    """render_obsidian.py's `import yaml` preflight runs at MODULE level
+    (mirrors canon_validate.py/final_audit.py's own pattern), so exercising
+    it means exec'ing the module itself, wrapped by the caller in
+    ``pytest.raises(SystemExit)``."""
+    def _do_exec():
+        return _load_module_fresh(RENDER_OBSIDIAN_PATH, "render_obsidian_preflight_test")
     return _do_exec
 
 
@@ -385,3 +398,37 @@ def test_extract_template_control_case_loads_cleanly(capsys):
     assert module.jsonschema is not None
     assert module.BeautifulSoup is not None
     assert module.lxml is not None
+
+
+# ---------------------------------------------------------------------------
+# render_obsidian.py -- module-level try/except (exit code 2, #104b)
+# ---------------------------------------------------------------------------
+
+def test_render_obsidian_missing_pyyaml_is_actionable(monkeypatch, capsys):
+    monkeypatch.setitem(sys.modules, "yaml", None)
+    do_exec = _exec_render_obsidian_fresh()
+
+    with pytest.raises(SystemExit) as exc_info:
+        do_exec()
+
+    assert exc_info.value.code == 2
+    err = capsys.readouterr().err
+    assert "PyYAML" in err
+    assert "render_obsidian.py requires" in err
+    assert "pip install -r requirements.txt" in err
+    assert err.strip().startswith("ERROR:")
+
+
+def test_render_obsidian_control_case_loads_cleanly(capsys):
+    """Control case: with PyYAML genuinely importable, render_obsidian.py
+    loads without exiting and its module-level `yaml` name is bound to the
+    real module. Without this, a preflight that unconditionally exits would
+    still pass the failure-path test above."""
+    do_exec = _exec_render_obsidian_fresh()
+
+    module = do_exec()
+
+    err = capsys.readouterr().err
+    assert err == ""
+    assert module.yaml is not None
+    assert module.yaml.__name__ == "yaml"
