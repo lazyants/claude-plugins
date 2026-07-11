@@ -552,14 +552,41 @@ def _render_block(node, linker):
     if kind == "verse":
         # A dedicated verse block IS its own verse (assemble.py's own
         # classification, contract's reconstruction algorithm step 3) --
-        # render straight from its own verse entry, ignoring the raw
-        # surrounding text (expected to be little more than the
-        # placeholder itself).
-        if not verses:
-            return ""
-        return _render_verse_block(verses[0].get("content") or {}, linker, seen_in_block)
+        # render EVERY claim on the node straight from its own verse entry,
+        # ignoring the raw surrounding text (expected to be little more than
+        # the placeholders themselves). #119: render ALL entries, never just
+        # verses[0] -- a 2+-entry list must not be silently truncated (whole
+        # verse content, rendered+gloss, would otherwise be lost). One shared
+        # `seen_in_block` across all entries (#105c: one wikilink per rendered
+        # block). Empty entries (verse_policy.mode: skip -> "") are skipped;
+        # the rest join with a blank line so each renders as its own distinct
+        # blockquote, exactly as _render_segment_note joins sibling blocks.
+        rendered_blocks = [
+            _render_verse_block(v.get("content") or {}, linker, seen_in_block)
+            for v in verses
+        ]
+        return "\n\n".join(block for block in rendered_blocks if block)
 
     text = node.get("text", "")
+
+    # #118 item 3 (Fix D): when an embedded verse is the ENTIRE content of a
+    # PROSE block (nothing else shares the line), there is no real
+    # mid-paragraph constraint, so render it as a full blockquote -- matching
+    # a mount:"block" verse's own presentation -- instead of the compact
+    # inline italic. Scoped as narrowly as is sound: prose only (NEVER a
+    # heading -- a heading whose whole text is a verse placeholder must keep
+    # its "## " semantics, handled below), exactly one verse claim, and the
+    # ORIGINAL block text must be nothing but that verse's placeholder. A
+    # verse genuinely embedded mid-sentence keeps the compact-italic path
+    # (see _render_verse_inline's "blockquote can't sit mid-paragraph"
+    # docstring). Detected pre-substitution against the raw block text -- far
+    # cheaper and more obviously correct than comparing the post-substitution
+    # composed string.
+    if kind == "prose" and len(verses) == 1:
+        only_placeholder = verses[0].get("placeholder")
+        if only_placeholder and text.strip() == only_placeholder:
+            return _render_verse_block(verses[0].get("content") or {}, linker, seen_in_block)
+
     # Resolve verse placeholders AND fnref sentinels in ONE pass over the
     # ORIGINAL text, never N chained str.replace() calls: a placeholder value is
     # free-form (segpack.schema.json does not constrain it), so one substitution's

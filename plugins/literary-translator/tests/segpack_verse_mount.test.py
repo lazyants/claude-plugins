@@ -370,6 +370,123 @@ def test_no_verse_store_segment_footnote_discovery_is_a_no_op():
 
 
 # ---------------------------------------------------------------------------
+# 2c. Fix C (#118 item 2) -- a footnote cited only inside a verse that is
+#     itself EMBEDDED in another footnote's def block must be discovered, at
+#     arbitrary nesting depth. The old single-pass scan only looked at embedded
+#     verses parented to the segment's OWN block_ids, so a verse embedded in a
+#     footnote-def block (whose parent_block is that def block, never a
+#     block_id) was never scanned -> a footnote cited only inside it was
+#     silently dropped. The worklist seeds the frontier with the segment's
+#     blocks AND every discovered footnote's def block, then chases the chain to
+#     a fixed point.
+# ---------------------------------------------------------------------------
+
+
+def _nested_footnote_manifest(deeper=False):
+    """seg01's block p1 cites fn1 (a round-0 block-scan discovery). fn1's def
+    block (fn1def) -- NOT one of seg01's own block_ids -- embeds a verse V2
+    whose OWN text cites fn2. With ``deeper=True``, fn2's def block (fn2def) in
+    turn embeds a verse V3 whose text cites fn3, one level further down."""
+    blocks = {
+        "p1": {"id": "p1", "order_index": 0,
+               "plain_text": "Prose citing ⟦FNREF_1⟧ then quoting a poem.", "fnrefs": [1]},
+        "fn1def": {"id": "fn1def", "order_index": 90,
+                   "plain_text": "A note quoting a poem: ⟦VERSE_V2⟧"},
+        "fn2def": {"id": "fn2def", "order_index": 91,
+                   "plain_text": "A deeper note about the inner poem."},
+    }
+    footnotes = [{"n": 1, "def_block": "fn1def"}, {"n": 2, "def_block": "fn2def"}]
+    verse_store = [
+        {"vid": "V2", "placeholder": "⟦VERSE_V2⟧", "parent_block": "fn1def",
+         "mount": "embedded", "fnrefs": [2],
+         "plain_text": "Inner poem line ⟦FNREF_2⟧\nInner poem line two", "n_line": 2},
+    ]
+    if deeper:
+        blocks["fn2def"]["plain_text"] = "A deeper note quoting: ⟦VERSE_V3⟧"
+        blocks["fn3def"] = {"id": "fn3def", "order_index": 92,
+                            "plain_text": "The deepest note."}
+        footnotes.append({"n": 3, "def_block": "fn3def"})
+        verse_store.append(
+            {"vid": "V3", "placeholder": "⟦VERSE_V3⟧", "parent_block": "fn2def",
+             "mount": "embedded", "fnrefs": [3],
+             "plain_text": "Deepest poem line ⟦FNREF_3⟧", "n_line": 1}
+        )
+    return {
+        "segments": [
+            {"seg": "seg01", "title_text": "Ch1", "kind": "body",
+             "word_count": 12, "block_ids": ["p1"]},
+        ],
+        "blocks": blocks,
+        "footnotes": footnotes,
+        "verse": {"store": verse_store},
+        "generation_hashes": _base_generation_hashes(),
+    }
+
+
+def test_footnote_in_verse_embedded_in_footnote_def_is_discovered():
+    """Fix C literal issue scenario: fn2, cited only inside verse V2 which is
+    itself embedded in fn1's def block, must land in footnotes_out. Pre-fix the
+    worklist never scanned fn1def (not one of seg01's own block_ids), so V2 was
+    never scanned and fn2 was silently dropped."""
+    manifest = _nested_footnote_manifest()
+    canon = _minimal_canon()
+
+    pack = SEGPACK_MODULE.build_pack("seg01", manifest, canon, LANG_CONFIG, "translate_all")
+
+    fn_ns = {fo["n"] for fo in pack["footnotes"]}
+    assert fn_ns == {1, 2}, fn_ns
+    by_n = {fo["n"]: fo for fo in pack["footnotes"]}
+    assert by_n[2]["source_text"] == "A deeper note about the inner poem."
+
+
+def test_footnote_nested_two_levels_deep_via_footnote_def_verses_is_discovered():
+    """Fix C genuine fixed point (not a one-extra-level patch): fn1def embeds
+    V2 (cites fn2); fn2def embeds V3 (cites fn3). All three footnotes must be
+    discovered by chasing the frontier to convergence."""
+    manifest = _nested_footnote_manifest(deeper=True)
+    canon = _minimal_canon()
+
+    pack = SEGPACK_MODULE.build_pack("seg01", manifest, canon, LANG_CONFIG, "translate_all")
+
+    fn_ns = {fo["n"] for fo in pack["footnotes"]}
+    assert fn_ns == {1, 2, 3}, fn_ns
+
+
+def test_nested_footnote_discovery_does_not_spuriously_warn(capsys):
+    """The per-verse fnrefs[]/plain_text cross-check must stay consistent for a
+    footnote discovered only in a LATER worklist round (fn2, surfaced by
+    scanning fn1's def block) -- no stale-manifest WARN for it."""
+    manifest = _nested_footnote_manifest(deeper=True)
+    canon = _minimal_canon()
+
+    SEGPACK_MODULE.build_pack("seg01", manifest, canon, LANG_CONFIG, "translate_all")
+
+    captured = capsys.readouterr()
+    assert "disagree with manifest fnrefs" not in captured.err, captured.err
+
+
+def test_footnote_def_embedded_verse_citing_nothing_adds_no_extra_footnote():
+    """Control (segpack analog of assemble corpus case g): when the
+    def-embedded verse V2 cites NO footnote, the worklist scans fn1def, finds
+    V2, discovers nothing new, and terminates -- footnotes_out stays exactly
+    {fn1}, never over-collecting."""
+    manifest = _nested_footnote_manifest()
+    # V2 no longer cites any footnote.
+    manifest["verse"]["store"][0]["fnrefs"] = []
+    manifest["verse"]["store"][0]["plain_text"] = "Inner poem line one\nInner poem line two"
+    # fn2 is no longer cited anywhere -> drop its manifest entry too.
+    manifest["footnotes"] = [{"n": 1, "def_block": "fn1def"}]
+    canon = _minimal_canon()
+
+    pack = SEGPACK_MODULE.build_pack("seg01", manifest, canon, LANG_CONFIG, "translate_all")
+
+    fn_ns = {fo["n"] for fo in pack["footnotes"]}
+    assert fn_ns == {1}, fn_ns
+    # V2 (parented to fn1's def block) is still carried into verses_out.
+    assert {v["vid"] for v in pack["verses"]} == {"V2"}
+
+
+# ---------------------------------------------------------------------------
 # 3. validate_segpack() -- hand-rolled structural check, mount/n_line
 #    lockstep with segpack.schema.json's new fields (#96 finding 3).
 # ---------------------------------------------------------------------------
