@@ -97,6 +97,36 @@ NODESTREAM_PATH = DURABLE_ROOT / "out" / ".assembled" / "nodestream.json"
 # never reconstructed from a vid.
 _FNREF_SENTINEL_FMT = "⟦FNREF_{n}⟧"
 
+# LABEL PROTECTION (inline-verse gloss label) --
+# The renderer-authored inline-verse gloss label (`_render_verse_inline`'s
+# literal " (lit.: " prefix) must never itself be swept into a wikilink. Since
+# #105c links the WHOLE composed block text in one pass, and _Linker.pattern is
+# an unanchored literal alternation (no word boundary), a canon entry whose
+# canonical_target_form is/contains "lit" would otherwise match INSIDE this
+# renderer-authored label and steal the block's single first-occurrence slot
+# from the real gloss content.
+#
+# Protection is done by POSITION, never by string content. `_render_verse_inline`
+# emits the label as ordinary literal text and returns the (start, end) char
+# offsets of that label within its own output; `_render_block` maps those to
+# ABSOLUTE offsets in the composed block text (tracked exactly through the
+# verse/fnref substitution pass) and hands them to `_Linker.link(extra_protected=)`,
+# which merges them into the same protected-span machinery a _PROTECTED_SPAN_RE
+# match uses -- never matched into, never counted as "seen", carried through the
+# NFC reconstruction verbatim. The literal label is ALREADY its final,
+# human-readable form, so nothing is ever restored or rewritten afterwards.
+#
+# CORRECTNESS INVARIANT -- protection MUST stay position-based. Rounds 2-4 used a
+# fixed sentinel string as a stand-in for the label, then found/restored it by
+# CONTENT MATCHING; three separate real collisions followed (round 3: a free-form
+# verse placeholder literally EQUAL to the sentinel; round 4: a canon `source_form`
+# CONTAINING it as a substring; round 5: a block's OWN prose/document text
+# containing it verbatim). Any content-matching restore is structurally unable to
+# tell "the occurrence I inserted" from "an identical string from any other
+# source, anywhere in the pipeline", so a 4th collision vector was always
+# inevitable. Position tracking has no such failure mode: only the exact rendered
+# label span is protected, and nothing is rewritten.
+
 DEFAULT_FOLDER = "other"
 
 # Ownership marker (review round 2, item C1): a dotfile stamped into out_dir
@@ -164,6 +194,38 @@ _RTL_LANGUAGE_CODES = {
 # a correct fix needs a balanced-delimiter/stack-based scan, not a regex,
 # which is disproportionate for a currently-untriggerable edge case.
 _PROTECTED_SPAN_RE = re.compile(r"\[\[.*?\]\]|\[\^\d+\]|⟦[^⟧]+⟧")
+
+
+def _merge_spans(spans):
+    r"""Coalesce a list of (start, end) char-offset spans into the minimal set
+    of disjoint, ascending spans covering the same offsets -- overlapping or
+    directly touching spans collapse into their union. `_Linker.link`'s
+    NFC-reconstruction loop requires disjoint, ascending spans; a bare
+    `sorted()` only orders by start and would let an overlap through, causing
+    the loop to re-copy the already-emitted inner span and regress its cursor.
+    Standard interval-merge; pure, order-independent of the caller.
+
+    Known limitation (accepted, not fixed): a zero-length span (start == end)
+    would survive this merge as an empty normalization boundary and could
+    block NFC composition across that position in the reconstruction loop.
+    Not reachable via either of this function's real inputs today:
+    `_PROTECTED_SPAN_RE`'s three alternatives (`\[\[.*?\]\]`, `\[\^\d+\]`,
+    `⟦[^⟧]+⟧`) each require at least one/four characters and can never match
+    zero-length; `_render_verse_inline`'s label span is always exactly
+    `len(" (lit.: ")` (a hardcoded source literal, not data-driven) wide.
+    If a future caller could ever supply a zero-length span, filter it out
+    here rather than relying on this argument staying true."""
+    if not spans:
+        return []
+    spans = sorted(spans)
+    merged = [spans[0]]
+    for start, end in spans[1:]:
+        last_start, last_end = merged[-1]
+        if start <= last_end:  # overlapping or touching -- fuse into one span
+            merged[-1] = (last_start, max(last_end, end))
+        else:
+            merged.append((start, end))
+    return merged
 
 
 # ---------------------------------------------------------------------------
@@ -280,7 +342,16 @@ class _Linker:
         self.parenthetical_mode = parenthetical_mode
         self.global_seen = set()
 
-    def link(self, text, seen_in_block=None):
+    def link(self, text, seen_in_block=None, extra_protected=None):
+        # `extra_protected` (optional): a list of (start, end) char-offset spans
+        # in the SAME coordinate space as `text` (the original, pre-NFC input),
+        # each protected EXACTLY like a _PROTECTED_SPAN_RE match -- never matched
+        # into, never counted as "seen", carried through the NFC reconstruction
+        # verbatim. _render_block passes the absolute positions of each
+        # inline-verse " (lit.: " label here so the linker won't wikilink into
+        # that renderer-authored text. The label is already its final literal
+        # form, so protection alone suffices -- there is nothing to restore
+        # afterwards (see the LABEL PROTECTION comment block above).
         if not text or self.pattern is None:
             return text
 
@@ -291,7 +362,26 @@ class _Linker:
         # "]]", "[^", digits, "⟦", "⟧") are not subject to NFC/NFD
         # decomposition, so their boundaries are identical whichever form
         # the text is in -- safe to locate before normalizing anything.
-        orig_protected = [(m.start(), m.end()) for m in _PROTECTED_SPAN_RE.finditer(text)]
+        # Merge _PROTECTED_SPAN_RE matches with the caller's position-tracked
+        # spans into disjoint, ascending intervals. The NFC-reconstruction loop
+        # below assumes ascending, NON-OVERLAPPING spans, so the two sets MUST be
+        # coalesced first: they can and do overlap. _render_block tracks a verse
+        # " (lit.: " label's absolute position, and that label can land NESTED
+        # INSIDE a _PROTECTED_SPAN_RE span -- e.g. when the verse placeholder sat
+        # between the brackets of a pre-existing [[...]] wikilink, the label ends
+        # up wholly contained in that wikilink span. A bare sort would leave the
+        # nested label as a second, overlapping interval, and the loop would
+        # re-copy that already-emitted substring and regress its cursor,
+        # duplicating/corrupting the output. `_merge_spans` fuses any overlapping
+        # (or touching) spans into their union, which is exactly right here: an
+        # already-emitted wikilink must be preserved byte-for-byte in full, label
+        # included -- once it encloses the label there is nothing to treat
+        # specially. This also handles any other overlap shape (partial, exact
+        # duplicate, adjacent) robustly, without assuming a single scenario.
+        orig_protected = _merge_spans(
+            [(m.start(), m.end()) for m in _PROTECTED_SPAN_RE.finditer(text)]
+            + list(extra_protected or [])
+        )
 
         # NFC-normalize only the MATCHABLE (non-protected) portions -- the
         # compiled pattern's alternatives are themselves NFC
@@ -414,16 +504,30 @@ def _render_verse_inline(content):
     substitution in place of the placeholder, since a real blockquote
     cannot sit mid-paragraph in markdown. Deliberately does NOT link its own
     text (#105c-ordering): entity linking must happen once, over the fully
-    spliced block text, in true document order -- see `_render_block`."""
+    spliced block text, in true document order -- see `_render_block`.
+
+    Returns `(text, label_span)`. `label_span` is None when there is no gloss
+    label, else the (start, end) char offsets of the literal " (lit.: " label
+    WITHIN the returned `text`, so _render_block can protect exactly that span
+    from the linker BY POSITION -- no sentinel, no content matching (see the
+    LABEL PROTECTION comment block above)."""
     rendered, gloss = _verse_texts(content)
     body = rendered or gloss
     if not body:
-        return ""
+        return "", None
     single = " / ".join(line.strip() for line in body.splitlines() if line.strip())
     out = f"*{single}*"
+    label_span = None
     if rendered and gloss:
-        out += f" (lit.: {' '.join(gloss.splitlines())})"
-    return out
+        # Emit the label as ordinary literal text and record its exact offsets,
+        # so _render_block can protect it from the single-pass linker by
+        # position (a canon target of "lit" would otherwise match inside it).
+        label = " (lit.: "
+        label_start = len(out)
+        out += label
+        label_span = (label_start, label_start + len(label))
+        out += f"{' '.join(gloss.splitlines())})"
+    return out, label_span
 
 
 # ---------------------------------------------------------------------------
@@ -456,19 +560,54 @@ def _render_block(node, linker):
         return _render_verse_block(verses[0].get("content") or {}, linker, seen_in_block)
 
     text = node.get("text", "")
+    # Resolve verse placeholders AND fnref sentinels in ONE pass over the
+    # ORIGINAL text, never N chained str.replace() calls: a placeholder value is
+    # free-form (segpack.schema.json does not constrain it), so one substitution's
+    # rendered OUTPUT could be re-matched and corrupted by a later replacement
+    # whose search key happens to equal that output. We match ONLY against the
+    # original `text` (never re-scanning inserted text), exactly as re.sub would,
+    # but reconstruct the output manually via finditer so we can ALSO track the
+    # absolute position each inline-verse " (lit.: " label lands at in the final
+    # composed string -- for position-based linker protection (no sentinel).
+    # `substitutions`: token -> (replacement, label_span_or_None). The span is the
+    # (start, end) offsets of a verse's " (lit.: " label WITHIN its replacement
+    # text; None for fnref tokens and gloss-less verses (nothing to protect).
+    substitutions = {}
     for v in verses:
         placeholder = v.get("placeholder")
-        if not placeholder:
-            continue
-        text = text.replace(
-            placeholder,
-            _render_verse_inline(v.get("content") or {}),
-        )
-
+        if placeholder and placeholder not in substitutions:
+            substitutions[placeholder] = _render_verse_inline(v.get("content") or {})
     for n in node.get("fnrefs") or []:
-        text = text.replace(_FNREF_SENTINEL_FMT.format(n=n), f"[^{n}]")
+        substitutions.setdefault(_FNREF_SENTINEL_FMT.format(n=n), (f"[^{n}]", None))
 
-    text = linker.link(text, seen_in_block).strip()
+    label_ranges = []
+    if substitutions:
+        # Longest key first so a token that is a prefix of another still matches.
+        combined_re = re.compile(
+            "|".join(re.escape(k) for k in sorted(substitutions, key=len, reverse=True))
+        )
+        out_parts = []
+        cursor = 0  # length of output emitted so far == absolute offset in final text
+        last = 0
+        for m in combined_re.finditer(text):
+            gap = text[last:m.start()]
+            out_parts.append(gap)
+            cursor += len(gap)
+            repl, span = substitutions[m.group(0)]
+            if span is not None:
+                label_ranges.append((cursor + span[0], cursor + span[1]))
+            out_parts.append(repl)
+            cursor += len(repl)
+            last = m.end()
+        out_parts.append(text[last:])
+        text = "".join(out_parts)
+
+    # Link the whole composed block text in one pass (#105c document order),
+    # protecting each inline-verse " (lit.: " label BY POSITION. The label text
+    # is already final, so protection (not restoration) is all that is needed,
+    # and it can never be confused with an identical string arriving from prose,
+    # canon data, or a placeholder (see the LABEL PROTECTION comment block).
+    text = linker.link(text, seen_in_block, extra_protected=label_ranges).strip()
     if not text:
         return ""
     if kind == "heading":
