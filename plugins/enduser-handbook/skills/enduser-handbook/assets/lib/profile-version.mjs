@@ -102,7 +102,7 @@ function scanQuoteClose(line, startCol, quoteChar) {
 // map key's `:` — the colon needs no following space when it directly follows a closing quote, so a
 // JSON-style `{"k":"v"}` value quote still opens). Anywhere else these same characters are literal
 // plain-element text (never flagged). Returns the updated { flowDepth, quote, aliasUndefined }.
-function lexFlowChars(line, startCol, flowDepthIn, docHasAmp, nodeStartInitial) {
+function lexFlowChars(line, startCol, flowDepthIn, docHasAnchor, nodeStartInitial) {
   let flowDepth = flowDepthIn;
   let nodeStart = nodeStartInitial;
   let justClosedQuote = false;
@@ -165,7 +165,7 @@ function lexFlowChars(line, startCol, flowDepthIn, docHasAmp, nodeStartInitial) 
       continue;
     }
     if (ch === '*') {
-      if (nodeStart && !docHasAmp) return { flowDepth, quote: null, aliasUndefined: true };
+      if (nodeStart && !docHasAnchor) return { flowDepth, quote: null, aliasUndefined: true };
       col += 1;
       nodeStart = false;
       justClosedQuote = false;
@@ -223,7 +223,7 @@ function findValueStart(line, nodeCol) {
 }
 
 // Skips up to two space-separated node properties at `pos` — a `![^ \t]*` tag and/or a
-// `&[^ \t,[\]{}]*` anchor, either order (each `&` here already satisfies the document-wide `docHasAmp`
+// `&[^ \t,[\]{}]*` anchor, either order (each `&` here already satisfies the document-wide `docHasAnchor`
 // gate, precomputed once in scanStructure) — and returns the position where the real value starts.
 function skipNodeProperties(line, pos) {
   let col = pos;
@@ -248,7 +248,7 @@ function skipNodeProperties(line, pos) {
 // scanStructure's per-line dispatch). Returns one outcome the caller acts on: `noop` (comment, empty
 // value, or an ignored alias — no state change), `aliasUndefined` (fatal), `block`/`plain` (opens that
 // opaque region), or `flowOpenAt`/`quoteOpenAt` (a position to open flow-lexing / a quote scan from).
-function classifyFreshLine(line, docHasAmp) {
+function classifyFreshLine(line, docHasAnchor) {
   if (isBlank(line)) return { noop: true };
   const indent = countIndent(line);
   if (line[indent] === '#') return { noop: true }; // whole line is a comment
@@ -280,7 +280,7 @@ function classifyFreshLine(line, docHasAmp) {
   if (ch === '[' || ch === '{') return { flowOpenAt: valueStart };
   if (ch === '"' || ch === "'") return { quoteOpenAt: valueStart };
   if (ch === '*') {
-    if (!docHasAmp) return { aliasUndefined: true };
+    if (!docHasAnchor) return { aliasUndefined: true };
     return { noop: true }; // a real anchor may define it somewhere in the document
   }
   if (ch === '#') return { noop: true };
@@ -319,7 +319,15 @@ export function scanStructure(lines) {
 // can't — they must be indented past their introducer — so only flow/quote need this exemption).
 // scanStructure's own frozen signature stays `(lines) => verdict|null`; this richer shape is internal.
 function structuralScan(lines) {
-  const docHasAmp = lines.some((line) => line.includes('&'));
+  // An over-approximation of "the document defines an anchor somewhere", not a literal "&" count: a
+  // real anchor introducer always sits at a token-start position (preceded by whitespace, a flow
+  // indicator `[ { , :`, or the start of the line — always a non-word character), so excluding a "&"
+  // that's immediately preceded by a word character (`R&D`, `AT&T`) can only NARROW the gate, never
+  // miss a real anchor — still false-reject-free. Without this exclusion, a stray "&" anywhere in
+  // ordinary prose (a description, a comment) disabled mechanism C's undefined-alias check for the
+  // WHOLE document; it still over-triggers on a space-surrounded prose "&" (`you & me`) — an accepted
+  // false-negative, same as any other "&" that isn't really an anchor.
+  const docHasAnchor = lines.some((line) => /(?:^|[^\w])&/.test(line));
   let flowDepth = 0;
   let quote = null;
   let block = null;
@@ -337,7 +345,7 @@ function structuralScan(lines) {
       if (!r.closed) { i += 1; continue; }
       quote = null;
       if (flowDepth > 0) {
-        const tail = lexFlowChars(line, r.index, flowDepth, docHasAmp, false);
+        const tail = lexFlowChars(line, r.index, flowDepth, docHasAnchor, false);
         flowDepth = tail.flowDepth;
         if (tail.aliasUndefined) return aliasFatal();
         quote = tail.quote;
@@ -347,7 +355,7 @@ function structuralScan(lines) {
     }
 
     if (flowDepth > 0) {
-      const tail = lexFlowChars(line, 0, flowDepth, docHasAmp, false);
+      const tail = lexFlowChars(line, 0, flowDepth, docHasAnchor, false);
       flowDepth = tail.flowDepth;
       if (tail.aliasUndefined) return aliasFatal();
       quote = tail.quote;
@@ -365,7 +373,7 @@ function structuralScan(lines) {
       plain = null; // dedent ends the fold; reprocess this same line as a fresh line below
     }
 
-    const c = classifyFreshLine(line, docHasAmp);
+    const c = classifyFreshLine(line, docHasAnchor);
     if (c.noop) { i += 1; continue; }
     if (c.aliasUndefined) return aliasFatal();
     if (c.block) { block = c.block; i += 1; continue; }
@@ -379,7 +387,7 @@ function structuralScan(lines) {
     }
     if (c.flowOpenAt !== undefined) {
       flowDepth = 1;
-      const tail = lexFlowChars(line, c.flowOpenAt + 1, flowDepth, docHasAmp, true);
+      const tail = lexFlowChars(line, c.flowOpenAt + 1, flowDepth, docHasAnchor, true);
       flowDepth = tail.flowDepth;
       if (tail.aliasUndefined) return aliasFatal();
       quote = tail.quote;

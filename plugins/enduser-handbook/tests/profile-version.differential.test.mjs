@@ -110,6 +110,26 @@ add('anchor-then-tag', 'k: &a !!str hello\n');
 add('anchor-flow', 'k: &a [1, 2]\nm: *a\n');
 add('tag-quote', 'k: !!str "hi"\n');
 
+// anchor gate (ped-ant review finding): the "any & anywhere" gate over-triggers on prose ("R&D",
+// "AT&T") and silently disables mechanism C for the whole document. Narrowed to exclude a "&"
+// immediately preceded by a word character — a real anchor introducer always sits at a token-start
+// (whitespace / flow-indicator / line-start), never glued to a preceding letter/digit. Every real
+// anchor position below must still resolve its alias (ruby-OK, must stay ok); every prose-"&"-with-an-
+// undefined-alias fragment must now be CAUGHT (ruby-BadAlias/SyntaxError, was a silent miss before).
+add('anchor-block-key', 'a: &x 1\nb: *x\n');
+add('anchor-seq-entry', 'note:\n  - &x 1\n  - *x\n');
+add('anchor-flow-seq', 'm: [&x 1, *x]\n');
+add('anchor-flow-map-value', 'm: {a: &x 1, b: *x}\n');
+add('anchor-flow-map-compact', 'm: {"a":&x 1, "b":*x}\n');
+add('anchor-tag-then-anchor-resolved', 'a: !!str &x hi\nb: *x\n');
+add('anchor-then-tag-resolved', 'a: &x !!str hi\nb: *x\n');
+add('anchor-nested-deep', 'outer:\n  inner:\n    a: &x 1\n    b: *x\n');
+add('prose-amp-RandD-undefined-alias', 'description: R&D\nglob: *.md\n');
+add('prose-amp-ATandT-undefined-alias', 'vendor: AT&T\nx: *undef\n');
+add('prose-amp-comment-undefined-alias', '# R&D department\nx: *undef\n');
+add('prose-amp-QandA-no-alias', 'faq: Q&A\n');
+add('prose-amp-no-alias-alone', 'description: R&D\n');
+
 // compact and nested seq indentation (nested under a top-level key so the fragment survives the
 // column-0 shape allowlist and actually reaches scanStructure through the full pipeline)
 add('compact-key', 'note:\n  - key: value\n');
@@ -311,6 +331,7 @@ test('differential fuzz: coverage — the known-invalid A/C representatives are 
     'undefined alias (C4 extra)': 'profile_version: 1\nextra: *undef\n',
     'undefined alias (C9 bare star)': 'profile_version: 1\nnote: * foo\n',
     'flow continuation, unterminated at column 0': 'profile_version: 1\na: [1,\n2\n',
+    'undefined alias behind a prose "&" (anchor-gate narrowing)': 'profile_version: 1\ndescription: R&D\nglob: *.md\n',
   };
   for (const [label, doc] of Object.entries(mustFlag)) {
     const r = readProfileVersion(doc);

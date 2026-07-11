@@ -569,6 +569,84 @@ test('P12: any "&" anywhere in the doc gates off the undefined-alias check, even
   assert.equal(r.version, 1);
 });
 
+// -- the anchor gate is an over-approximation of "the document DEFINES an anchor", not a literal "&"
+// -- count (ped-ant review finding): a "&" mid-word (`R&D`, `AT&T`) can never be a real anchor
+// -- introducer (those always sit at a token-start — whitespace/flow-indicator/line-start, i.e. a
+// -- non-word character before the "&"), so excluding it only narrows the gate — it can't miss a real
+// -- anchor. Before this fix these must-halt cases scanned "ok" (a miss); each is a regression.
+
+test('J1: prose "&" with NO real anchor no longer masks an undefined alias (the reported example)', () => {
+  const r = readProfileVersion('profile_version: 1\ndescription: R&D\nglob: *.md\n');
+  assert.equal(r.status, 'malformed');
+  assert.match(r.message, /alias to undefined anchor/);
+});
+
+test('J2: a second prose "&" shape ("AT&T") also no longer masks an undefined alias', () => {
+  const r = readProfileVersion('profile_version: 1\nvendor: AT&T\nx: *undef\n');
+  assert.equal(r.status, 'malformed');
+  assert.match(r.message, /alias to undefined anchor/);
+});
+
+test('J3: a prose "&" inside a comment also no longer masks an undefined alias', () => {
+  const r = readProfileVersion('profile_version: 1\n# R&D department\nx: *undef\n');
+  assert.equal(r.status, 'malformed');
+  assert.match(r.message, /alias to undefined anchor/);
+});
+
+test('J4 (control): a real anchor at a block key still resolves its alias, stays ok', () => {
+  const r = readProfileVersion('profile_version: 1\na: &x 1\nb: *x\n');
+  assert.equal(r.status, 'ok');
+  assert.equal(r.version, 1);
+});
+
+test('J5 (control): a real anchor on a sequence entry still resolves its alias, stays ok', () => {
+  const r = readProfileVersion('profile_version: 1\nnote:\n  - &x 1\n  - *x\n');
+  assert.equal(r.status, 'ok');
+  assert.equal(r.version, 1);
+});
+
+test('J6 (control): a real anchor inside a flow sequence still resolves its alias, stays ok', () => {
+  const r = readProfileVersion('profile_version: 1\nm: [&x 1, *x]\n');
+  assert.equal(r.status, 'ok');
+  assert.equal(r.version, 1);
+});
+
+test('J7 (control): a real anchor as a flow-map value still resolves its alias, stays ok', () => {
+  const r = readProfileVersion('profile_version: 1\nm: {a: &x 1, b: *x}\n');
+  assert.equal(r.status, 'ok');
+  assert.equal(r.version, 1);
+});
+
+test('J8 (control): tag-then-anchor node properties still resolve the alias, stays ok', () => {
+  const r = readProfileVersion('profile_version: 1\na: !!str &x hi\nb: *x\n');
+  assert.equal(r.status, 'ok');
+  assert.equal(r.version, 1);
+});
+
+test('J9 (control): anchor-then-tag node properties still resolve the alias, stays ok', () => {
+  const r = readProfileVersion('profile_version: 1\na: &x !!str hi\nb: *x\n');
+  assert.equal(r.status, 'ok');
+  assert.equal(r.version, 1);
+});
+
+test('J10 (control): a real anchor nested several levels deep still resolves its alias, stays ok', () => {
+  const r = readProfileVersion('profile_version: 1\nouter:\n  inner:\n    a: &x 1\n    b: *x\n');
+  assert.equal(r.status, 'ok');
+  assert.equal(r.version, 1);
+});
+
+test('J11 (control): prose "&" with no alias usage at all stays ok, unaffected', () => {
+  const r = readProfileVersion('profile_version: 1\ndescription: R&D\n');
+  assert.equal(r.status, 'ok');
+  assert.equal(r.version, 1);
+});
+
+test('J12 (control): a genuinely undefined alias with zero "&" anywhere still halts (pre-existing P11)', () => {
+  const r = readProfileVersion('profile_version: 1\nextra: *whatever\n');
+  assert.equal(r.status, 'malformed');
+  assert.match(r.message, /alias to undefined anchor/);
+});
+
 // -- compact-colon flow maps (workflow finding 1): a JSON-style value quote opens without a space,
 // -- and an untyped/floored flow depth means a bracket-shaped character inside it never mismatch-flags
 

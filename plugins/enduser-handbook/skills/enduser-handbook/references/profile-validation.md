@@ -64,9 +64,14 @@ a false halt on a document a real parser would load is not.
 
 - **Mechanism A — unterminated flow collection or quoted scalar.** An inline `[`/`{` that never
   closes, or an inline `"`/`'` whose closing quote never arrives before EOF, halts as malformed.
-- **Mechanism C — alias to an undefined anchor.** An inline `*alias` halts as malformed, but only in
-  a document containing **zero** `&anchor` definitions anywhere — the moment a document defines even
-  one anchor, this check backs off entirely rather than attempt real anchor resolution.
+- **Mechanism C — alias to an undefined anchor.** An inline `*alias` halts as malformed, but only when
+  the document contains **no anchor definition**. "No anchor definition" is approximated
+  conservatively: the check backs off if a `&` appears anywhere it could legally *start* an anchor —
+  start-of-token, i.e. preceded by whitespace, a flow indicator, or line-start. This over-approximation
+  is deliberate and keeps the check false-reject-free: it never treats a real `&anchor` as absent, so
+  it never flags an alias a real parser would resolve. The trade-off is an accepted false-negative — a
+  `&` surrounded by spaces in prose (`you & me`) still backs the check off, but a mid-word `&` (`R&D`,
+  `AT&T`) does not.
 
 **Deferred — mechanism B (invalid dedent).** A block that dedents to a structurally invalid level —
 reachable, for instance, through a hand-edit of the multi-line `capture.command: |` block scalar — is
@@ -79,22 +84,25 @@ design for B is tracked as a follow-up rather than rushed into this release.
 
 **Honest residual.** These still scan `ok` for a document that is actually invalid YAML: an own-line
 (non-inline) value node reached through a shape the classifier does not enumerate; general and block
-dedent (mechanism B, above); and alias resolution once a document defines *any* anchor (mechanism C's
-zero-anchor gate protects only an anchor-free document). Separately, and in the other direction, a
-pre-existing false-reject halts a *valid* explicit-indent block scalar whose content happens to be
+dedent (mechanism B, above); and alias resolution once a document contains any `&` at a legal
+anchor-start position (mechanism C's anchor-gate approximation only protects a document with no such
+`&` at all — see mechanism C above). Separately, and in the other direction, a pre-existing
+false-reject halts a *valid* explicit-indent block scalar whose content happens to be
 tab-indented, tripping the document-wide tab check meant for structural indentation — not new in this
 release, and tracked as its own follow-up. Likewise, a document that uses a YAML **document marker**
 (`---` document-start or `...` document-end) at column 0 — e.g. a profile that simply opens with a
-leading `---`, or ends with a trailing `---`/`...` — is rejected by the Step-4 top-level-shape
+leading `---`, or ends with a trailing `---`/`...` — **or another unusual column-0 construct, such as
+the explicit-key `?`/`:` block-mapping indicator** — is rejected by the Step-4 top-level-shape
 allowlist ("not a top-level key"), even though a real parser loads such a document and reads
-`profile_version` from it fine. This one predates the #110 guard (it lives in the Step-4 allowlist,
-not in `scanStructure`) and is deliberately left alone rather than patched here: rejecting a `---`
-*separator* is protective, not just a gap — a genuine multi-document stream must still halt rather
-than risk reading the wrong document's version (a real parser's single-document load returns the
-*first* document — `2`, not `1`, for a stream of `---`, `profile_version: 2`, `---`,
-`profile_version: 1` in that order). A proper fix has to distinguish a lone leading/trailing marker
-from a real multi-document stream first, so it is tracked as its own follow-up rather than patched
-narrowly. Each of these is a real, acknowledged gap, not silently assumed fixed by the A/C work above.
+`profile_version` from it fine. These predate the #110 guard (they live in the Step-4 allowlist, not
+in `scanStructure`) and are deliberately left alone rather than patched here. For the document marker
+specifically, rejecting a `---` *separator* is protective, not just a gap — a genuine multi-document
+stream must still halt rather than risk reading the wrong document's version (a real parser's
+single-document load returns the *first* document — `2`, not `1`, for a stream of `---`,
+`profile_version: 2`, `---`, `profile_version: 1` in that order); a proper fix has to distinguish a
+lone leading/trailing marker from a real multi-document stream first. The explicit-key case carries no
+such tension — it is simply an unimplemented shape, tracked the same way. Each of these is a real,
+acknowledged gap, not silently assumed fixed by the A/C work above.
 
 This is still the deliberate edge of the invariant above — a *reader*, not a validator. It never
 returns the wrong *version* (a real parser does not read a *different* `profile_version` from these
@@ -171,11 +179,11 @@ project, and re-run."*).
    `.claude/handbook/profile.yml declares profile_version more than once (lines <N>, <M>). Keep exactly one, as the first top-level key.`
 3. **`profile_version` malformed** (not a top-level key, quoted, non-integer, multi-line, disallowed
    line shape, a tab used for block indentation anywhere in the document, an unterminated flow
-   collection or quoted scalar anywhere in the document, or — in a document with no `&anchor`
-   anywhere — an alias to an undefined anchor; see "Cross-line structural validation" above for what
-   these two structural checks do and do not catch. They fire after the missing/duplicate checks
-   above, so a document that is both missing/duplicated and structurally invalid halts on the earlier
-   reason) — halt:
+   collection or quoted scalar anywhere in the document, or — in a document with no `&` at a legal
+   anchor-start position anywhere — an alias to an undefined anchor; see "Cross-line structural
+   validation" above for what these two structural checks do and do not catch. They fire after the
+   missing/duplicate checks above, so a document that is both missing/duplicated and structurally
+   invalid halts on the earlier reason) — halt:
    `.claude/handbook/profile.yml's profile_version could not be read (<reason>). Write it as the first top-level key, an unquoted integer, with no continuation line, e.g. profile_version: 1.`
 4. **`profile_version` unsupported** — halt:
    `Unsupported profile_version: <N>. Supported: 1. No cross-version migration exists yet — see the table above.`
