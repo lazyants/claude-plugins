@@ -316,7 +316,9 @@ session substitutes once, at the moment it instantiates the template file
 from the plugin's shipped copy — before the Workflow tool ever executes it.
 The template documents its own substitution tokens explicitly:
 `{{SOURCE_LANG}}`, `{{TARGET_LANG}}`, `{{DURABLE_ROOT}}`,
-`{{VERSE_POLICY_INSTRUCTION_BLOCK}}`, `{{MAX_FIX_ROUNDS}}`, `{{RUN_ID}}`
+`{{VERSE_POLICY_INSTRUCTION_BLOCK}}`, `{{MAX_FIX_ROUNDS}}`,
+`{{BATCH_AGENT_CAP}}` (both templates' preflight cost caps — the glossary-pass
+template's use is new in 1.3.5), `{{RUN_ID}}`
 (new in 1.2.0, both templates — see below), and (glossary-pass template
 only) `{{RESEARCH_MODE}}`. `{{VERSE_POLICY_INSTRUCTION_BLOCK}}` in
 particular is read fresh from the CURRENT `profile.yml` every time a run is
@@ -418,8 +420,11 @@ polices every individual artifact even when resuming is in principle safe).
 Before `pipeline()` is ever called, the workflow template computes a
 worst-case estimate of how many total `agent()` calls this batch could make,
 and refuses to start if that estimate exceeds `engine.batch_agent_cap`
-(`profile.yml`'s `engine.batch_agent_cap: 1000` in the shipped example — see
-`assets/profile.example.yml`). **This estimator is new plugin hardening, not
+(`profile.yml`'s `engine.batch_agent_cap: 3500` in the shipped example — see
+`assets/profile.example.yml`; 1.3.5 raised this default from 1000, which the
+`1 + N*38`-at-`max_fix_rounds:4` formula below made refuse any mass batch over
+26 segments — 3500 admits the issue's ~78-segment repro, `1 + 78*38 = 2965`,
+with headroom). **This estimator is new plugin hardening, not
 itself source-proven** — the real reference script has no such check
 anywhere; it simply pipelines whatever `SEGS` it's given. Treat it with the
 same "carefully designed, unproven at scale" confidence
@@ -495,7 +500,10 @@ effect on translation output — it is deliberately excluded from
 `agent_config_hash` (only `effort`/`max_fix_rounds` are hashed), so changing
 the cap alone never re-invalidates an already-converged segment's cache key.
 See `references/ledger-and-resumability.md` for the full cache-key
-membership list.
+membership list. **1.3.5:** W3's glossary-pass template reads this SAME
+`engine.batch_agent_cap` field, with its own smaller worst-case formula
+(`estimatedCalls = 3 * BATCHES.length + 2`) and the same refusal shape — see
+the glossary-pass template section below.
 
 ## The glossary-pass template — a second, smaller `pipeline()` call
 
@@ -542,6 +550,18 @@ scaffold pre-creates `glossary/runs/` itself.
 pipeline(batches, (batch) => batchDispatchWaitLoop(batch))
 ```
 
+- `batchPrecheckPrompt(batch)` — Claude, `effort:'low'`, no `agentType`, no
+  schema, **run FIRST (resume-skip, 1.3.5 #101)**: a single-shot, read-only
+  run of the same `--check-batch` invocation `batchWaitPrompt` polls. If a
+  prior interrupted run of this SAME `{{RUN_ID}}` already left a valid
+  `out_{index}.json` fragment on disk, the precheck returns `PRESENT` and the
+  batch skips its codex dispatch + wait entirely; any non-`PRESENT` answer (a
+  missing, malformed, or wrong-coverage fragment, or a failed precheck) falls
+  THROUGH to the normal dispatch + wait, so a bad fragment is never wrongly
+  trusted. Safe because any plugin update flips `plugin_bundle_hash` (this
+  template is itself a `PLUGIN_BUNDLE_MEMBERS` entry) → a fresh `RUN_ID` with
+  no old fragments on disk, so a fragment that still passes `--check-batch`
+  against the CURRENT manifest is genuinely current, never stale.
 - `batchDispatchPrompt(batch)` — codex, `agentType:'codex:codex-rescue'`,
   `effort:'high'`, **schema-less**, fire-and-forget: writes the run-scoped
   fragment `glossary/runs/{{RUN_ID}}/out_{index}.json` **atomically**,
@@ -591,8 +611,41 @@ written file against `canon-file.schema.json`, including required
 `--verify-merged` then independently re-derives, from a **fresh** disk read,
 that every item actually landed. `--research-mode live|offline` is required
 on every mode, never defaulted; `offline` fatally rejects any merged
-`basis:"established"` entry. Batch construction also excludes every
-`source_form` already present in the current `canon.json`'s `entries{}`.
+`basis:"established"` entry. Batch construction (`glossary_batch_plan.py`, see
+the 1.3.5 subsection below) has already excluded every `source_form` present
+in the current `canon.json`'s `entries{}` AND every non-retried `review_queue`
+entry before any of this runs.
+
+**1.3.5 — batch construction, cost cap, resume-skip (#101/#95/#91).** Two
+things now run before this template is even instantiated, plus one new step
+inside it:
+
+- **`scripts/glossary_batch_plan.py` builds `args`/`batches`** (once, before
+  `resume_setup.py`). It reads `name_candidates.json` + the current
+  `canon.json` and: (1) excludes every candidate already resolved — an
+  `entries{}` key OR a non-retried `review_queue[].source_form` (the #101
+  filter, now in code, not prose; `--retry` is the explicit human re-research
+  path); (2) curates the survivors by `likely_name` and `--min-candidate-freq`
+  (the profile's optional `glossary.min_candidate_freq`, else 2); (3)
+  force-includes any `elision_ambiguous` row and its `elision_stripped_form`
+  target for adjudication (#91), co-locating the pair in one batch. On the
+  all-resolved case it prints `{"no_new_candidates": true, "batches": []}` and
+  the orchestrating session skips `resume_setup.py` and this Workflow entirely
+  — see `references/canon-and-glossary.md`'s Citation-cache section.
+- **Preflight cost cap** (mirroring W5's estimator): right after
+  `const BATCHES = ...`, before dispatching anything, the template computes
+  `estimatedCalls = 3 * BATCHES.length + 2` (per batch: precheck + dispatch +
+  wait; plus the fixed final merge + verify pair) and refuses the whole run
+  with `{merged: false, reason: "batch-too-large", estimatedCalls, cap}` if it
+  exceeds `engine.batch_agent_cap` — the SAME field W5 reads, spliced in as
+  the bare-integer `{{BATCH_AGENT_CAP}}` token. The count is over BATCHES,
+  never candidates-per-batch, so a co-located elision pair nudging one batch a
+  candidate or two over its nominal `--batch-size` never trips it. A refused
+  run re-plans smaller batches (`glossary_batch_plan.py --batch-size`).
+- **Resume-skip precheck** — the `batchPrecheckPrompt` bullet above; a valid
+  pre-existing fragment for this `{{RUN_ID}}` is trusted and its dispatch +
+  wait skipped, so a resumed run never re-pays the codex dispatch for a batch
+  already done.
 
 ## Ledger writes stay orchestration-adjacent, not orchestration-owned
 

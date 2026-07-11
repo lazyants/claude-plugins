@@ -29,7 +29,12 @@ Canon population is not "paste the whole book into context and ask for a glossar
    a project-local override such as `fr.local.json`. This script only surfaces
    candidates; it never decides a translation. It is source-language-parameterized
    (see `references/language-pair-parameterization.md`) via the profile's
-   `source.language.particle_config`, never hardcoded to one language.
+   `source.language.particle_config`, never hardcoded to one language. Its raw,
+   unfiltered output is then curated + batched by `scripts/glossary_batch_plan.py`
+   (1.3.5) — excluding names already resolved in `canon.json`, applying the
+   frequency floor, and force-including flagged elision pairs — before the codex
+   pass ever sees it; see the **Citation cache** section below for the exclusion
+   contract this enforces (#101).
 2. **A codex-glossary-pass**, batched, using the Step-0a-copied
    `${durable_root}/glossary_TASK.md`. Whether an established target-language form
    exists, whether a candidate is a title that needs unpacking, or whether it is
@@ -340,16 +345,27 @@ something a script silently probes (and potentially gets wrong).
 
 `canon.json`'s `entries{}` map is already frozen, hash-versioned, and
 cross-segment — a name once resolved there with `basis: "established"` plus a
-verified `source` URI stays resolved. The candidate list `bootstrap_names.py` hands
-to the glossary-pass batches MUST exclude every `source_form` already present in
-the CURRENT `canon.json`'s `entries{}` map before dispatch — only genuinely new
-candidates (never-before-seen names, or a `review_queue` entry a human has
-explicitly asked to be re-resolved) are ever sent for fresh research. Without this,
-every glossary-pass re-run (a second book sharing recurring historical names, or
-simply re-running the mass-translate step after an interruption) would
-re-research already-settled names, wasting research effort and risking a
-genuinely different citation surfacing on a later run for a name the canon had
-already frozen.
+verified `source` URI stays resolved. Before each glossary pass,
+`scripts/glossary_batch_plan.py` (1.3.5) curates `bootstrap_names.py`'s raw
+candidate list against the CURRENT `canon.json`, excluding every candidate
+already resolved there — both an `entries{}` key AND a
+`review_queue[].source_form` (a queued name is only re-researched when a human
+passes it to `glossary_batch_plan.py --retry`, the documented explicit-request
+path). Only genuinely new candidates — never-before-seen names, or an explicitly
+retried queued entry — are ever sent for fresh research. **Before 1.3.5 this
+filter was prose only** (this very section, and the glossary-pass template's
+header comment), delegated to "the orchestrating session," which in practice
+excluded `entries{}` but never `review_queue` — so every queued name was
+re-researched on every re-run (#101). Without the exclusion, every glossary-pass
+re-run (a second book sharing recurring historical names, or simply re-running
+the mass-translate step after an interruption) would re-research already-settled
+names, wasting research effort and risking a genuinely different citation
+surfacing on a later run for a name the canon had already frozen. When the
+curated list is legitimately empty (every candidate already resolved),
+`glossary_batch_plan.py` emits `{"no_new_candidates": true, "batches": []}` and
+the orchestrating session skips `resume_setup.py` and the Workflow dispatch
+entirely — nothing to research this run (`resume_setup.py` rejects an empty
+`batches` list, which is why the marker exists).
 
 ## `segpack.py`'s canon injection contract
 

@@ -667,5 +667,92 @@ def test_fixed_compound_laquila_stays_fused_it():
     assert "Aquila" not in names, f"fixed compound was wrongly split; got {names}"
 
 
+# ---------------------------------------------------------------------------
+# #91 -- capitalized-elision ambiguity DETECTION (detection only; the flag
+# feeds the glossary adjudicator, this script never auto-splits/auto-merges).
+# collect_candidates() tags a single-token capitalized row as
+# ``elision_ambiguous`` iff its lowercased-first-char form matches the
+# language's own ELISION_RE AND the stripped name-initial remainder is itself
+# another candidate row (global match). ELISION_RE itself is UNCHANGED, so the
+# tokenizer still keeps D'Artagnan / L'Aquila fused (the two
+# test_fixed_compound_*_stays_fused_* regressions above stay green).
+# ---------------------------------------------------------------------------
+
+def test_elision_ambiguous_flags_capitalized_elision_pair_fr():
+    # Genuine ambiguity: "L'Enclos" (a capitalized elision, NOT split by the
+    # lowercase-only ELISION_RE -> stays one token) occurs once, and a bare
+    # "Enclos" also occurs. The surface "L'Enclos" could be a fixed compound
+    # OR elided article "l'" + the already-seen name "Enclos" -> flag it.
+    lang = load_real_fr_config()
+    sources = [("seg1", "L'Enclos entra dans la salle. Il salua Enclos ensuite.")]
+    result = bn.collect_candidates(sources, lang)
+    rows = {r["name"]: r for r in result["candidates"]}
+    assert "L'Enclos" in rows
+    assert "Enclos" in rows
+    lenclos = rows["L'Enclos"]
+    # Realistic DOMINANT case (load-bearing for Teammate B's force-include):
+    # single-word, sentence-initial (mid_sentence=0), freq=1 -> likely_name is
+    # False. A likely_name=True fixture would pass vacuously under the broken
+    # reading, so pin these explicitly.
+    assert lenclos["multiword"] is False
+    assert lenclos["mid_sentence"] == 0
+    assert lenclos["freq"] == 1
+    assert lenclos["likely_name"] is False
+    # The detector fires and names the re-capitalized stripped form.
+    assert lenclos["elision_ambiguous"] is True
+    assert lenclos["elision_stripped_form"] == "Enclos"
+    # The bare "Enclos" row carries no elided article -> never flagged.
+    assert rows["Enclos"].get("elision_ambiguous") in (None, False)
+    assert "elision_stripped_form" not in rows["Enclos"]
+
+
+def test_elision_ambiguous_positive_control_dartagnan_with_bare_artagnan_fr():
+    # POSITIVE CONTROL proving the detector is LIVE code (so the true-negative
+    # below isn't vacuously green because the field never exists): a corpus
+    # with BOTH the fixed-compound surface "D'Artagnan" AND a bare "Artagnan"
+    # occurrence. The stripped form ("Artagnan") matches the bare row, so the
+    # "D'Artagnan" row MUST be flagged. Only CAPITALIZED "D'Artagnan" is used
+    # -- a lowercase "d'Artagnan" would be split by the tokenizer and would
+    # itself manufacture the bare "Artagnan" row, contaminating the fixture.
+    lang = load_real_fr_config()
+    sources = [("seg1", "D'Artagnan degaina son epee. Plus tard, il revit Artagnan seul.")]
+    result = bn.collect_candidates(sources, lang)
+    rows = {r["name"]: r for r in result["candidates"]}
+    assert "D'Artagnan" in rows
+    assert "Artagnan" in rows
+    assert rows["D'Artagnan"]["elision_ambiguous"] is True
+    assert rows["D'Artagnan"]["elision_stripped_form"] == "Artagnan"
+
+
+def test_elision_ambiguous_true_negative_dartagnan_no_bare_artagnan_fr():
+    # TRUE NEGATIVE: a Musketeers-style corpus with "D'Artagnan" and NO bare
+    # "Artagnan" occurrence -- nothing to pair with, so the flag must NOT fire.
+    # Capitalized forms only. (Vacuously green on the pre-fix tree; meaningful
+    # only alongside the positive control above, which proves the field CAN be
+    # set.)
+    lang = load_real_fr_config()
+    sources = [("seg1", "D'Artagnan degaina son epee. D'Artagnan salua le roi.")]
+    result = bn.collect_candidates(sources, lang)
+    rows = {r["name"]: r for r in result["candidates"]}
+    assert "D'Artagnan" in rows
+    assert "Artagnan" not in rows
+    assert rows["D'Artagnan"].get("elision_ambiguous") in (None, False)
+    assert "elision_stripped_form" not in rows["D'Artagnan"]
+
+
+def test_elision_ambiguous_generalizes_to_it_config_laquila_pair():
+    # Proves the detector reuses each language's OWN ELISION_RE verbatim (no
+    # hardcoded [dDlL]): the identical mechanism fires for Italian "L'Aquila"
+    # when a bare "Aquila" also occurs.
+    lang = bn.load_language_config("it.json", languages_dir=REAL_LANGUAGES_DIR)
+    sources = [("seg1", "L'Aquila e una citta. Io vidi Aquila ieri.")]
+    result = bn.collect_candidates(sources, lang)
+    rows = {r["name"]: r for r in result["candidates"]}
+    assert "L'Aquila" in rows
+    assert "Aquila" in rows
+    assert rows["L'Aquila"]["elision_ambiguous"] is True
+    assert rows["L'Aquila"]["elision_stripped_form"] == "Aquila"
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))

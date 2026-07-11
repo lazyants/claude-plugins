@@ -44,7 +44,8 @@ calibration, not a warning to work around.
    composite cache key, and the derivation-state gate are all new.
 3. **`engine.batch_agent_cap`'s preflight call-count estimator.** The real
    reference script has no such estimator anywhere — it simply pipelines
-   whatever `SEGS` it's given.
+   whatever `SEGS` it's given. (1.3.5: W3's glossary-pass template now shares
+   this same cap with its own `3*BATCHES.length + 2` worst-case formula.)
 4. **The glossary-pass workflow template.** The real project ran its
    glossary pass as ad hoc `glossary/TASK.md` + codex batches producing
    `glossary/out_*.json` files — not a schema-validated Workflow script. The
@@ -350,7 +351,15 @@ unhandled `ImportError`/raw traceback.
 - **Regex-based proper-noun extraction plus grammatical elision can silently
   drop names entirely.** A fused elided article can hide the capitalization
   signal (`d'X`/`l'X` patterns), so test any new `languages/<code>.json` with
-  synthetic elision-pattern sentences before trusting it on real text.
+  synthetic elision-pattern sentences before trusting it on real text. The
+  *capitalized* sentence-initial case (`L'Enclos` — the name `Enclos` behind an
+  elided `l'`, or a fixed compound like `L'Aquila`?) is deliberately NOT solved
+  by widening `ELISION_RE` (a reverted attempt split real compounds like
+  `D'Artagnan`); 1.3.5 resolves it at the adjudication stage instead —
+  `bootstrap_names.py` flags such a row `elision_ambiguous` (detection only)
+  and `glossary_batch_plan.py` force-includes the pair so the glossary
+  adjudicator routes it to `review_queue` unless it is confirmed a distinct
+  entity (#91).
 - **`derivation_bundle_hash` is split out of `plugin_bundle_hash`
   deliberately** — closes the gap where a fix to `bootstrap_names.py` or
   `segpack.py` would otherwise flip `plugin_bundle_hash` (ordinary `stale`,

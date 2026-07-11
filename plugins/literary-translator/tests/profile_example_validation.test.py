@@ -165,7 +165,7 @@ def _build_filled_profile(durable_root: Path, source_path: Path) -> dict:
         "engine": {
             "effort": "high",
             "max_fix_rounds": 4,
-            "batch_agent_cap": 1000,
+            "batch_agent_cap": 3500,
         },
         "footnotes": {"apparatus_policy": "translate_all"},
         "glossary": {"research_mode": "offline"},
@@ -314,6 +314,22 @@ def test_fully_filled_fixture_structurally_identical_passes_cleanly(pv, tmp_path
 
     assert exit_code == 0, f"expected a clean Step 0 pass; stdout:\n{out}\nstderr:\n{err}"
     assert "OK -- Step 0 validation passed" in out, out
+
+
+def test_shipped_example_batch_agent_cap_is_1_3_4_default(pv):
+    """#95 shipped-value lock: profile.example.yml's engine.batch_agent_cap
+    must be the 1.3.5 default (3500), never the stale 1000 that refused any
+    glossary/mass batch over ~26 segments (`1+N*38` at max_fix_rounds:4).
+    Reads the REAL shipped example directly -- this is red against
+    origin/main (which still ships 1000) and green once the example is
+    bumped. Only the shipped DEFAULT moves; already-seeded projects keep
+    whatever value they filled in, so this touches fresh Step-0a copies
+    only."""
+    example = yaml.safe_load(EXAMPLE_PATH.read_text(encoding="utf-8"))
+    assert example["engine"]["batch_agent_cap"] == 3500, (
+        "profile.example.yml's engine.batch_agent_cap must be 3500 (the "
+        f"1.3.5 #95 default); found {example['engine']['batch_agent_cap']!r}"
+    )
 
 
 def test_fully_filled_fixture_no_placeholders_survive(pv, tmp_path):

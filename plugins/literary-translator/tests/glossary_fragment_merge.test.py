@@ -540,6 +540,31 @@ def test_check_batch_manifest_extra_source_form_not_in_manifest_is_rejected(tmp_
     assert not (root / "canon.json").exists()
 
 
+def test_check_batch_rejects_truncated_invalid_json_fragment(tmp_path):
+    """#101 resume-skip safety, Python half: a fragment that is not valid
+    JSON at all (e.g. a write truncated mid-flight -- the atomic dot-temp +
+    rename discipline in the dispatch prompt exists precisely to avoid ever
+    exposing such a file at out_{index}.json, but a corrupt fragment that
+    does slip through must still be REJECTED, never trusted) is rejected by
+    `--check-batch` with a clean non-zero exit and no canon.json write. This
+    is what makes the glossary-pass-wf.template.js resume-skip precheck safe:
+    a corrupt pre-existing fragment fails the same `--check-batch` command,
+    so the template falls THROUGH to a fresh dispatch (the template-control-
+    flow half of this property lives in the node-harness test file,
+    batch_size_estimator.test.py). `_read_json_file` surfaces the
+    JSONDecodeError as a CanonValidationError before any schema check runs."""
+    root = make_durable_root(tmp_path)
+    frag = root / "out_0.json"
+    # A JSON array truncated mid-object -- json.loads raises JSONDecodeError.
+    frag.write_text('[{"source_form": "Guerin", "disposition": "accep', encoding="utf-8")
+    proc = run_check_batch(root, "live", frag)
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    payload = parse_stdout(proc)
+    assert payload["success"] is False
+    assert "not valid JSON" in payload["error"], payload
+    assert not (root / "canon.json").exists()
+
+
 # ===========================================================================
 # 4. --research-mode stays required for every new mode.
 # ===========================================================================

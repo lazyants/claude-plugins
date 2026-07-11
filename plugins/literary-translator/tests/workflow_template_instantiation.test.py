@@ -91,6 +91,7 @@ GLOSSARY_PASS_TOKENS = (
     "{{SOURCE_LANG}}",
     "{{TARGET_LANG}}",
     "{{RESEARCH_MODE}}",
+    "{{BATCH_AGENT_CAP}}",
 )
 
 # A named-token shape (always {{UPPER_SNAKE_CASE}} in both templates) --
@@ -192,6 +193,7 @@ def instantiate_glossary_pass(
     source_lang: str,
     target_lang: str,
     research_mode: str,
+    batch_agent_cap: int = FIXTURE_BATCH_AGENT_CAP,
 ) -> str:
     text = GLOSSARY_PASS_TEMPLATE.read_text(encoding="utf-8")
 
@@ -202,6 +204,10 @@ def instantiate_glossary_pass(
     # research_mode is passed through literally -- "this script never
     # parses YAML itself" (the template's own header comment).
     text = text.replace("{{RESEARCH_MODE}}", research_mode)
+    # batch_agent_cap -- the SAME engine.batch_agent_cap field the mass
+    # template reads, substituted as a BARE integer literal (never a quoted
+    # string), feeding the glossary preflight cost cap.
+    text = text.replace("{{BATCH_AGENT_CAP}}", str(int(batch_agent_cap)))
 
     return text
 
@@ -313,6 +319,10 @@ def test_glossary_pass_template_instantiates_with_zero_unresolved_tokens(researc
         f"{{{{RESEARCH_MODE}}}} must resolve to the literal fixture value "
         f"{research_mode!r}"
     )
+    assert f"const BATCH_AGENT_CAP = {FIXTURE_BATCH_AGENT_CAP}" in out, (
+        "{{BATCH_AGENT_CAP}} must substitute as a bare integer literal, not a "
+        "quoted string (matching mass-translate-wf.template.js's own token)"
+    )
 
 
 @pytest.mark.parametrize("research_mode", ["live", "offline"])
@@ -374,3 +384,39 @@ def test_run_id_token_resolves_with_zero_unresolved_braces(run_id):
     leftover = NAMED_TOKEN_RE.findall(glossary_out)
     assert leftover == [], f"unresolved named substitution token(s) remain: {leftover}"
     assert f'const RUN_ID = "{run_id}"' in glossary_out
+
+
+# ---------------------------------------------------------------------------
+# #91 -- the glossary dispatch prompt carries the elision-adjudication rule
+# and names the two new candidate fields (elision_ambiguous /
+# elision_stripped_form). This rule is prose inside batchDispatchPrompt(),
+# regenerated fresh every run, so a content-regression lock here is the only
+# guard against the rule being silently dropped -- the "zero unresolved
+# braces" greps above check substitution, never prompt content. Red against
+# origin/main, which ships neither field name.
+# ---------------------------------------------------------------------------
+
+
+def test_glossary_dispatch_prompt_carries_elision_adjudication_rule():
+    raw = GLOSSARY_PASS_TEMPLATE.read_text(encoding="utf-8")
+
+    # Both new candidate fields are named to the adjudicator.
+    assert "elision_ambiguous" in raw, (
+        "batchDispatchPrompt must reference the elision_ambiguous flag (#91)"
+    )
+    assert "elision_stripped_form" in raw, (
+        "batchDispatchPrompt must reference elision_stripped_form (#91)"
+    )
+
+    # The adjudication rule itself: an elision_ambiguous row must route to
+    # review_queue unless confirmed. Asserting a single line ties the flag to
+    # review_queue prevents a future edit from keeping the field name while
+    # silently dropping the 'queue it for a human' instruction.
+    rule_lines = [
+        ln for ln in raw.splitlines()
+        if "elision_ambiguous" in ln and "review_queue" in ln
+    ]
+    assert rule_lines, (
+        "expected a batchDispatchPrompt line that routes an elision_ambiguous "
+        "candidate to review_queue unless confirmed (#91 adjudication rule)"
+    )

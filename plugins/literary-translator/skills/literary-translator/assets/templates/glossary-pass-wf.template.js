@@ -46,17 +46,28 @@
 //                        run-scoped directory every fragment/manifest this
 //                        script touches lives under; stable under
 //                        resumeFromRunId.
+//   {{BATCH_AGENT_CAP}} -- engine.batch_agent_cap, the SAME profile field
+//                        mass-translate-wf.template.js reads, substituted as
+//                        a BARE integer (never a quoted string). Feeds the
+//                        preflight cost cap below, which refuses to dispatch
+//                        a glossary run whose worst-case agent-call estimate
+//                        (3*BATCHES.length + 2) would exceed it -- the same
+//                        refusal mass-translate-wf.template.js makes for its
+//                        own oversized batch (#95).
 //
 // `args` shape this template expects (an array, or a JSON string of one):
 //   [ { index: 0, candidates: [ {name, freq, mid_sentence, multiword,
 //       abbrev, n_segments, likely_name}, ... ] },
 //     { index: 1, candidates: [...] }, ... ]
 // Each candidates[] row is one bootstrap_names.py candidate row, taken
-// as-is from name_candidates.json. Batch construction -- chunking
-// candidates into batches AND excluding every source_form already present
-// in the CURRENT canon.json's entries{} map -- is the orchestrating
-// session's job before it ever calls the Workflow tool, never this
-// script's own job (canon.json itself is the citation cache; see
+// as-is from name_candidates.json. Batch construction -- curating which
+// candidates survive (excluding every source_form already present in the
+// CURRENT canon.json's entries{} map AND every non-retried review_queue
+// entry, applying the frequency floor, and force-including flagged
+// elision-ambiguous pairs) and chunking the survivors into batches -- is the
+// orchestrating session's job, performed by scripts/glossary_batch_plan.py
+// before it ever calls the Workflow tool, never this script's own job
+// (canon.json itself is the citation cache; see
 // references/canon-and-glossary.md's "Citation cache" section).
 //
 // Deterministic PRE-WORKFLOW setup (the orchestrating session's own
@@ -95,6 +106,7 @@ const TARGET_LANG = "{{TARGET_LANG}}"
 const RESEARCH_MODE = "{{RESEARCH_MODE}}"
 const RUN_ID = "{{RUN_ID}}"
 const RUN_DIR = ROOT + "/glossary/runs/" + RUN_ID
+const BATCH_AGENT_CAP = {{BATCH_AGENT_CAP}}
 
 // ---------------------------------------------------------------------------
 // Schema literal -- declared ABOVE the pipeline() call at the bottom of this
@@ -128,6 +140,31 @@ const CANON_VERIFY_SCHEMA = {
 }
 
 const BATCHES = Array.isArray(args) ? args : JSON.parse(args)
+
+// ---------------------------------------------------------------------------
+// Preflight cost cap (#95). Worst-case agent-call count for a FRESH run:
+// per batch, precheck + dispatch + wait == 3 (a resumed batch whose fragment
+// already passes --check-batch pays only the 1 precheck call, strictly
+// cheaper, so this is the true ceiling), plus the fixed merge + verify pair
+// == 2. So estimatedCalls = 3*BATCHES.length + 2. If that exceeds
+// engine.batch_agent_cap, refuse the whole run WITHOUT dispatching anything,
+// the same refusal shape mass-translate-wf.template.js emits for its own
+// oversized batch -- the caller re-plans smaller batches
+// (glossary_batch_plan.py's --batch-size) and re-runs. Counted in BATCHES,
+// never candidates-per-batch, so a co-located elision pair nudging one batch
+// slightly over its nominal size never trips this. Placed before the
+// index-guard loop below on purpose: a refused run dispatches nothing, so
+// there is no unsafe index to guard against yet.
+// ---------------------------------------------------------------------------
+const estimatedCalls = 3 * BATCHES.length + 2
+if (estimatedCalls > BATCH_AGENT_CAP) {
+  log(
+    "Batch too large: estimatedCalls=" + estimatedCalls +
+    " exceeds engine.batch_agent_cap=" + BATCH_AGENT_CAP +
+    " for " + BATCHES.length + " glossary batch(es)."
+  )
+  return { merged: false, reason: "batch-too-large", estimatedCalls: estimatedCalls, cap: BATCH_AGENT_CAP }
+}
 
 // ---------------------------------------------------------------------------
 // Defense-in-depth batch-index guard. Every batch's index is spliced,
@@ -173,6 +210,31 @@ const MANIFEST_ALL_PATH = RUN_DIR + "/manifest_all.json"
 // literal quotes).
 // ---------------------------------------------------------------------------
 
+// PRECHECK -- Claude, effort:low, no agentType, no schema. Resume-skip
+// (#101): a prior, possibly-interrupted run of this SAME {{RUN_ID}} may have
+// already written a valid out_{index}.json fragment. Because any plugin
+// update flips plugin_bundle_hash (this template is itself a
+// PLUGIN_BUNDLE_MEMBERS entry) and so forces a fresh run_id with no old
+// fragments on disk, ANY fragment that still passes --check-batch against
+// the CURRENT manifest is genuinely current, never stale -- so it can be
+// trusted and the (expensive) codex dispatch skipped. A single-shot run of
+// the SAME --check-batch command batchWaitPrompt polls; any failure at all
+// (missing file, malformed JSON, wrong coverage, offline backstop) makes
+// this return ABSENT, so the batch falls THROUGH to a normal dispatch +
+// wait and a bad or absent fragment is never wrongly trusted.
+function batchPrecheckPrompt(batch) {
+  const outPath = fragmentPath(batch.index)
+  const manifestFile = manifestPath(batch.index)
+  const checkCmd = PY + " " + ROOT + "/scripts/canon_validate.py --check-batch " + outPath + " --research-mode " + RESEARCH_MODE + " --expect-source-forms-file " + manifestFile
+  const lines = []
+  lines.push("A prior run of glossary-pass batch " + batch.index + " may already have written a valid fragment to disk. Check ONCE, read-only, whether it is already present and valid: run exactly this one bash command (a single invocation, NOT a polling loop):")
+  lines.push(checkCmd)
+  lines.push("If that command exits successfully (exit code 0), the fragment is already complete and valid -- return exactly the line: PRESENT " + batch.index)
+  lines.push("If it exits non-zero for ANY reason (the file is missing, is not valid JSON, or fails its shape/offline/coverage checks), return exactly the line: ABSENT " + batch.index)
+  lines.push("Do nothing else -- do not create, modify, dispatch, or resolve any candidates yourself; this is purely a read-only presence check.")
+  return lines.join("\n")
+}
+
 // DISPATCH -- codex, schema-less, fire-and-forget (see
 // references/workflow-schema-validation.md's "shared codex work-call
 // pattern"). Writes this batch's fragment ATOMICALLY to its own run-scoped
@@ -189,7 +251,7 @@ function batchDispatchPrompt(batch) {
   lines.push("Effort: high. Canon-and-glossary pass (codex-glossary-pass) for a " + SOURCE_LANG + " -> " + TARGET_LANG + " literary translation project, batch " + batch.index + ".")
   lines.push("Read in full, in this order: " + ROOT + "/glossary_TASK.md (the canonicalization rules and the exact per-item output contract) and " + ROOT + "/canon.json (the entries already frozen there). Never re-decide or override any source_form already present in canon.json's own entries{} -- this batch resolves only the new candidates listed below, which were already filtered against the current canon.json before you were dispatched.")
   lines.push("research_mode = " + RESEARCH_MODE + ". If it is \"offline\": basis:\"established\" is forbidden outright for every candidate in this batch, with no exception -- use basis:\"transliterated\" when the fixed practical-transcription rule in style_bible.md (section C-translit) is enough on its own, or set disposition:\"review_queue\" instead, with a note that starts with the literal prefix \"SOURCE_UNAVAILABLE:\". If it is \"live\": basis:\"established\" is allowed, but only together with a real, citable reference source URL -- never a fabricated one.")
-  lines.push("This batch's candidates -- deterministically extracted by bootstrap_names.py, never yet decided by any LLM (name = the surface form as it appears in the source text; freq/n_segments = how often and how widely it recurs; likely_name/multiword/mid_sentence/abbrev = this script's own recall-oriented heuristics, not a verdict):")
+  lines.push("This batch's candidates -- deterministically extracted by bootstrap_names.py, never yet decided by any LLM (name = the surface form as it appears in the source text; freq/n_segments = how often and how widely it recurs; likely_name/multiword/mid_sentence/abbrev = this script's own recall-oriented heuristics, not a verdict; elision_ambiguous/elision_stripped_form = present only on some rows, flagging a possible article-elision ambiguity resolved by the adjudication rule below):")
   lines.push(candidatesJson)
   lines.push("For EVERY candidate above, in the SAME order, decide exactly one canon-batch item:")
   lines.push("- source_form: the candidate's own \"name\" field, copied verbatim.")
@@ -198,6 +260,7 @@ function batchDispatchPrompt(batch) {
   lines.push("- When disposition is \"accepted\": canonical_target_form, basis (\"established\" | \"transliterated\" | \"title\" | \"not_a_name\"), and confidence (\"high\" | \"medium\" | \"low\") are all required; when basis is \"established\", source is also required and must be a real, non-empty reference URL, never left empty and never invented.")
   lines.push("- When disposition is \"review_queue\": note is required and must explain, briefly, why the candidate is queued rather than resolved.")
   lines.push("- A title phrase (an honorific plus a bare surname or role -- for instance a form meaning \"Monsieur the Prince\" or \"the Queen Mother\") gets basis:\"title\", with canonical_target_form holding the unpacked target-language phrase; if the underlying surname is ALSO present as its own separate candidate in this same batch, resolve that one on its own merits instead of folding it into the title entry.")
+  lines.push("- ELISION AMBIGUITY: when a candidate row carries elision_ambiguous:true, it is a capitalized, sentence-initial form that MIGHT merely be an article-elision of another name rather than a distinct name of its own (its elision_stripped_form field names that other form -- e.g. \"L'Enclos\", whose elision_stripped_form is \"Enclos\"). Do NOT silently accept such a row as a standalone proper name: unless you can positively confirm from context that it genuinely IS its own distinct entity, set disposition:\"review_queue\" with a note that names its elision_stripped_form, so a human can decide whether the two forms are the same entity. Only when you are confident it is a separate name may you resolve it as accepted.")
   lines.push("Write this exact JSON array, in this exact order, to " + outPath + " ATOMICALLY: write it first to a fresh temp file in the SAME directory (for example a dot-prefixed name alongside the target, holding your own process id), then rename that temp file into place at exactly " + outPath + " -- so a partially-written file is never visible at that path. A plain JSON array of objects, no markdown code fence, no comment, nothing else in the file.")
   lines.push("Then self-check by running this command and reading its one line of JSON output: " + PY + " " + ROOT + "/scripts/canon_validate.py --check-batch " + outPath + " --research-mode " + RESEARCH_MODE + " --expect-source-forms-file " + manifestFile)
   lines.push("This command checks only this fragment's own shape, the offline backstop, and its EXACT candidate coverage against the manifest file above -- it does NOT merge into canon.json; a separate, later, serialized step folds every batch's confirmed-ready fragment into canon.json only once every batch here is done. If it prints a line with \"success\": false, it names every offending item -- fix each one in your own array (reassign basis/disposition/note as the rules above require; never weaken the offline backstop, never fabricate a source URL to make the check pass, never drop or add a candidate), rewrite " + outPath + " the same atomic way, and re-run the command. Repeat until it prints a line with \"success\": true. This self-check command supersedes any older self-check prose you may find in glossary_TASK.md from a prior plugin version -- always run exactly the command above, never --batch.")
@@ -279,6 +342,19 @@ function isVerifiedResult(v) {
 // disk-backed poll decides whether this batch's fragment is ready.
 // ---------------------------------------------------------------------------
 async function batchStep(batch) {
+  // Resume-skip precheck (#101): if this batch's fragment already exists and
+  // passes --check-batch, trust it and skip the codex dispatch + wait. Any
+  // non-PRESENT answer -- including a null/failed precheck, or a corrupt or
+  // missing fragment (both of which the precheck reports as ABSENT) -- falls
+  // through to a full dispatch, so a bad fragment is never wrongly skipped.
+  const precheck = await agent(batchPrecheckPrompt(batch), {
+    effort: "low", phase: "GlossaryPass", label: "glossary:precheck:" + batch.index,
+  })
+  if (precheck && precheck.indexOf("PRESENT") !== -1) {
+    log("batch " + batch.index + ": resume-skip -- existing fragment already passed --check-batch, not re-dispatching")
+    return { batchIndex: batch.index, fragmentPath: fragmentPath(batch.index), ready: true }
+  }
+
   await agent(batchDispatchPrompt(batch), {
     agentType: "codex:codex-rescue",
     effort: "high",

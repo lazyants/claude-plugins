@@ -454,19 +454,28 @@ membership.
 
 - **`plugin_bundle_hash`** (global, read from
   `${durable_root}/runs/.plugin_bundle_hash` — a marker file Step 0a writes
-  once per run, not recomputed per segment) — covers exactly **eight
+  once per run, not recomputed per segment) — covers exactly **nine
   scripts** (six pre-1.2.0, plus `review_ready.py` and `resume_setup.py`,
-  new in 1.2.0) plus the two workflow templates: `validate_draft.py`,
+  new in 1.2.0, and `glossary_batch_plan.py`, new in 1.3.5) plus the two
+  workflow templates: `validate_draft.py`,
   `canon_validate.py`, `cache_key.py`, `draft_sha1.py`,
   `review_artifact_check.py`, `ledger_update.py`, `review_ready.py`,
-  `resume_setup.py`, plus
+  `resume_setup.py`, `glossary_batch_plan.py`, plus
   `mass-translate-wf.template.js`/`glossary-pass-wf.template.js`. These are
   scripts that directly shape extraction/translation/review/validation
   content, or determine whether a convergence verdict was correctly
   recorded — `review_ready.py` (the review-side readiness counterpart, but
   gating and correctness-critical rather than a diagnostic poll: it's what
   certifies a `review.json` safe to consume) and `resume_setup.py`
-  (computes the resume-integrity digest itself) both meet that bar. **Part
+  (computes the resume-integrity digest itself) both meet that bar, as does
+  `glossary_batch_plan.py` (W3's candidate→batch curation: it decides which
+  candidates are dispatched to the glossary pass, so its bytes directly
+  shape glossary content — note that `plugin_bundle_hash` is itself member
+  15 of the cache-key composite, so a change here re-invalidates converged
+  mass segments coarsely, the same as any plugin-bundle member; that is the
+  accepted cost of the correct bucket, chosen because — unlike
+  `derivation_bundle_hash` — it actually reaches the glossary digest and
+  leaves the canon generation stamp intact). **Part
   of the cache key** (as `plugin_bundle_hash`) — a mismatch flips a segment
   straight to `stale`.
 - **`orchestration_bundle_hash`** (global, sibling marker file
