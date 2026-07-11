@@ -32,6 +32,18 @@
   style_contract edit is global and legitimately invalidates every
   segment; a glossary/canon edit invalidates only the segments that
   actually used the changed term (see `references/ledger-and-resumability.md`).
+
+  The style_contract span (sections A-F) is wrapped in a pair of
+  STYLE_CONTRACT_BEGIN / STYLE_CONTRACT_END HTML-comment markers -- placed
+  immediately before section A and immediately after section F, section G
+  staying outside them. `cache_key.py`'s `compute_style_contract_hash`
+  hashes exactly the bytes strictly between those two markers to produce
+  the global `style_contract_hash` cache-key field, and `scaffold_validate.py`
+  enforces at W1 that exactly one of each exists, in order. These markers
+  are therefore load-bearing: never remove, duplicate, or reorder them, and
+  never move section G inside them. (This paragraph deliberately spells the
+  marker names without their comment delimiters, for the same
+  regex-nesting reason explained above.)
 -->
 
 # Style bible -- [PROJECT TITLE / AUTHOR / PERIOD -- fill in]
@@ -49,6 +61,7 @@
 
 ## style_contract (global rules -- editing this section legitimately invalidates every segment)
 
+<!-- STYLE_CONTRACT_BEGIN -->
 ### A. Register and voice
 
 <!-- LT_REQUIRED_FILL_BEGIN: voice-and-register -->
@@ -146,6 +159,8 @@ gate hasn't run). Once the W4 stress-gate segment converges, cite/quote it here 
 every subsequent batch is told to match. If this project has an early landmark passage (e.g. a
 particularly hard verse or set-piece) that converged cleanly and is worth citing as its own anchor, add it
 here too.
+
+<!-- STYLE_CONTRACT_END -->
 
 ---
 

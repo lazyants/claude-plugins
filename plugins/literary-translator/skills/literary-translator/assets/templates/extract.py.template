@@ -77,8 +77,9 @@ import urllib.parse
 import warnings
 import zipfile
 from pathlib import Path
+from typing import NoReturn
 
-def _missing_dep(pip_name: str, hint: str = "") -> None:
+def _missing_dep(pip_name: str, hint: str = "") -> NoReturn:
     suffix = f" ({hint})" if hint else ""
     print(
         f"ERROR: this plugin requires the '{pip_name}' Python package{suffix}.\n"
@@ -152,7 +153,7 @@ BLOCK_TAGS = {
 VALID_APPARATUS_POLICIES = ("translate_all", "preserve_source", "omit_apparatus", "body_refs_only")
 
 
-def die(msg):
+def die(msg) -> NoReturn:
     print(f"FATAL: {msg}", file=sys.stderr)
     sys.exit(1)
 

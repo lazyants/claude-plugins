@@ -505,7 +505,11 @@ mechanics and `references/workflow-schema-validation.md` for why the
 pre-1.2.0 single schema-validated `agent()` call per batch was replaced
 (`#87`/`#88`/`#90`/`#97`). Write `style_contract` sections A–F by hand/
 interview with the user; leave section G (glossary) to the glossary-pass
-output.
+output. The shipped template already wraps sections A–F in
+`STYLE_CONTRACT_BEGIN`/`STYLE_CONTRACT_END` markers -- keep them (do not
+delete, duplicate, or reorder them): they define the `style_contract_hash`
+byte-scope, and `scaffold_validate.py` now enforces exactly one of each, in
+order.
 
 **Canon human-adjudication audit (opt-in rollout gate)** —
 `scripts/canon_adjudication_audit.py` enumerates every canon

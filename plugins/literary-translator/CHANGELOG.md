@@ -1,5 +1,42 @@
 # Changelog
 
+## 1.3.6 — 2026-07-11
+
+Three fixes from the 2026-07-11 shipped-template audit: a HIGH deterministic convergence blocker on
+every freshly scaffolded project (#129), a glossary-pass canonicalization gap (#134), and a
+static-typing house-convention deviation in the shipped extractor (#136).
+
+### Fixed
+
+- **STYLE_CONTRACT markers now ship in `style_bible.template.md` (#129).** The seed template wraps its
+  `style_contract` sections A–F in the `<!-- STYLE_CONTRACT_BEGIN -->` / `<!-- STYLE_CONTRACT_END -->`
+  marker comments that `cache_key.py:compute_style_contract_hash` hard-requires. Before this fix, every
+  fresh project scaffolded without them: each segment translated and reviewed cleanly and wrote a valid
+  draft to disk, but the convergence-recording path FATALed on every segment (`ledger-write-failed`), so
+  the batch reported "0 converged" while 40%+ of drafts were clean on disk — an opaque hard blocker whose
+  root cause (two missing comment lines) was named in no operator-facing instruction. `scaffold_validate.py`
+  gained a fourth W1 gate that rejects a missing / duplicated / out-of-order marker pair before any real
+  translation spend — using the exact same marker byte-strings and failure conditions as the hash
+  consumer, so a clean W1 pass guarantees the hash cannot later FATAL on a marker-shape problem — and
+  SKILL.md now cautions operators to preserve the shipped markers.
+- **Fatal-abort helpers in `extract.py.template` are annotated `-> NoReturn` (#136).** `_missing_dep` and
+  `die` (both of which unconditionally `sys.exit(1)`) now carry the `NoReturn` return type every other
+  shipped script already uses, so a project that lints its copied `extract.py` with Pyright no longer gets
+  spurious "possibly unbound" warnings on the four optional-dependency imports (`yaml`, `jsonschema`,
+  `bs4`, `lxml`).
+
+### Changed
+
+- **Glossary pass gains an epithet/nickname/alias canonicalization rule (#134).** Both `glossary_TASK.md`
+  and the glossary-pass dispatch prompt now state that only true orthographic spelling variants of the
+  same surface name may share one `canonical_target_form`; a salon nickname, epithet, sobriquet, or alias
+  is resolved as its own surface form (usually `transliterated`, e.g. `Sapho` → `Сафо`) and is never given
+  its referent's real-name form (never `Скюдери`), with any known identity link recorded in `note` only.
+  This closes a latent trap where an epithet could be clustered onto the referent's canonical form and
+  then substituted into prose during a canon reconcile. Note: a speaking-name whose correct rendering is
+  a sense-translation still has no lockable `basis` in the current schema and is routed to `review_queue` —
+  a lockable basis for that case is tracked as a follow-up.
+
 ## 1.3.5 — 2026-07-11
 
 W3 glossary-pass resumability + cost curation, and a resumability-safe resolution of #91's
