@@ -54,21 +54,52 @@ separator, legal YAML) is unaffected — only a tab that is itself indentation h
 > Every other input returns a halting status. It does not claim to detect every invalid YAML document,
 > only to never return `ok` for one whose `profile_version` a real parser would read differently.
 
-**Out of scope — no cross-line structural validation.** The scan validates only the column-0
-top-level *shape* documented above; it performs **no cross-line structural checks** — no
-indentation-consistency checking beneath the top level, no bracket/quote balance, no alias resolution.
-A document that is invalid YAML for any such reason — an unterminated flow collection (`[`/`{`) or
-quoted scalar (`"`/`'`); a block that dedents to an invalid level (reachable through a hand-edit of the
-multi-line `capture.command: |` block scalar); or an undefined / forward-referenced `*alias` — but
-whose column-0 top-level shape is still intact, can therefore scan `ok`. This is the deliberate edge of
-the invariant above — a *reader*, not a validator. It never returns the wrong *version* (a real parser
-does not read a *different* `profile_version` from these files — it fails to parse at all), and unlike
-a wrong version the error fails **visibly**: a real YAML read at profile-load time raises with a line
-number. Detecting these would each need a hand-rolled slice of a YAML parser (an indentation-stack
-tracker, a quote/bracket state machine, an anchor table), reintroducing the very mis-parse risk the
-allowlist design avoids — an indentation guard, for one, would false-reject the *valid* shipped
-`capture.command: |` block scalar. The class is tracked for a deliberate, differential-tested
-resolution in issue #110 rather than rushed in here.
+**Cross-line structural validation (v1.3.0) — mechanisms A and C.** Beyond the column-0 top-level
+*shape* documented above, the scan additionally performs two narrow cross-line checks, both
+**provably false-reject-free** by construction: a single forward pass classifies only inline
+node-starts (a `[`/`{`/`"`/`'`/`*` that opens immediately after a real key or sequence introducer);
+anything ambiguous — a folded plain-scalar continuation, block-scalar content, a mid-token quote —
+resolves to *opaque* and is never flagged. That asymmetry is deliberate: a missed error is acceptable,
+a false halt on a document a real parser would load is not.
+
+- **Mechanism A — unterminated flow collection or quoted scalar.** An inline `[`/`{` that never
+  closes, or an inline `"`/`'` whose closing quote never arrives before EOF, halts as malformed.
+- **Mechanism C — alias to an undefined anchor.** An inline `*alias` halts as malformed, but only in
+  a document containing **zero** `&anchor` definitions anywhere — the moment a document defines even
+  one anchor, this check backs off entirely rather than attempt real anchor resolution.
+
+**Deferred — mechanism B (invalid dedent).** A block that dedents to a structurally invalid level —
+reachable, for instance, through a hand-edit of the multi-line `capture.command: |` block scalar — is
+not detected. Block scalars are treated as pure opacity: their content is never classified and never
+flagged, by deliberate design. Modeling block-scalar-content lines (including one that happens to
+start with `#`) together with general indentation tracking reintroduces the exact mini-YAML-parser
+mis-parse risk this document warns against elsewhere — an indentation guard, for one, would
+false-reject the *valid* shipped `capture.command: |` block scalar. A properly false-reject-free
+design for B is tracked as a follow-up rather than rushed into this release.
+
+**Honest residual.** These still scan `ok` for a document that is actually invalid YAML: an own-line
+(non-inline) value node reached through a shape the classifier does not enumerate; general and block
+dedent (mechanism B, above); and alias resolution once a document defines *any* anchor (mechanism C's
+zero-anchor gate protects only an anchor-free document). Separately, and in the other direction, a
+pre-existing false-reject halts a *valid* explicit-indent block scalar whose content happens to be
+tab-indented, tripping the document-wide tab check meant for structural indentation — not new in this
+release, and tracked as its own follow-up. Likewise, a document that uses a YAML **document marker**
+(`---` document-start or `...` document-end) at column 0 — e.g. a profile that simply opens with a
+leading `---`, or ends with a trailing `---`/`...` — is rejected by the Step-4 top-level-shape
+allowlist ("not a top-level key"), even though a real parser loads such a document and reads
+`profile_version` from it fine. This one predates the #110 guard (it lives in the Step-4 allowlist,
+not in `scanStructure`) and is deliberately left alone rather than patched here: rejecting a `---`
+*separator* is protective, not just a gap — a genuine multi-document stream must still halt rather
+than risk reading the wrong document's version (a real parser's single-document load returns the
+*first* document — `2`, not `1`, for a stream of `---`, `profile_version: 2`, `---`,
+`profile_version: 1` in that order). A proper fix has to distinguish a lone leading/trailing marker
+from a real multi-document stream first, so it is tracked as its own follow-up rather than patched
+narrowly. Each of these is a real, acknowledged gap, not silently assumed fixed by the A/C work above.
+
+This is still the deliberate edge of the invariant above — a *reader*, not a validator. It never
+returns the wrong *version* (a real parser does not read a *different* `profile_version` from these
+files — it fails to parse at all), and unlike a wrong version the error fails **visibly**: a real YAML
+read at profile-load time raises with a line number.
 
 **Threat model**, stated once so nobody mistakes this for a security boundary: the profile is a
 trusted, first-party artifact living in the project's own `.claude/handbook/`, authored from the
@@ -139,7 +170,12 @@ project, and re-run."*).
 2. **`profile_version` duplicated** — halt:
    `.claude/handbook/profile.yml declares profile_version more than once (lines <N>, <M>). Keep exactly one, as the first top-level key.`
 3. **`profile_version` malformed** (not a top-level key, quoted, non-integer, multi-line, disallowed
-   line shape, a tab used for block indentation anywhere in the document, etc.) — halt:
+   line shape, a tab used for block indentation anywhere in the document, an unterminated flow
+   collection or quoted scalar anywhere in the document, or — in a document with no `&anchor`
+   anywhere — an alias to an undefined anchor; see "Cross-line structural validation" above for what
+   these two structural checks do and do not catch. They fire after the missing/duplicate checks
+   above, so a document that is both missing/duplicated and structurally invalid halts on the earlier
+   reason) — halt:
    `.claude/handbook/profile.yml's profile_version could not be read (<reason>). Write it as the first top-level key, an unquoted integer, with no continuation line, e.g. profile_version: 1.`
 4. **`profile_version` unsupported** — halt:
    `Unsupported profile_version: <N>. Supported: 1. No cross-version migration exists yet — see the table above.`
