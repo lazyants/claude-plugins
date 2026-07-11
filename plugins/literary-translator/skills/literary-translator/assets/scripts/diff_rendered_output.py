@@ -236,7 +236,12 @@ def _atomic_write_in_baseline_dir(target_path, content):
 
 
 def _read_baseline_lines(path):
-    return path.read_text(encoding="utf-8").splitlines()
+    content = path.read_text(encoding="utf-8")
+    if content == "":
+        return []
+    if content.endswith("\n"):
+        content = content[:-1]
+    return content.split("\n")
 
 
 def _render_version_hash():

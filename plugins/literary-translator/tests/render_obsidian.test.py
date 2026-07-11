@@ -48,6 +48,7 @@ import json
 import shutil
 import subprocess
 import sys
+import unicodedata
 from pathlib import Path
 
 import pytest
@@ -532,38 +533,47 @@ def test_degenerate_whitespace_canonical_target_form_is_not_matched(tmp_path):
     assert " и сел." in body_text
 
 
-def test_syntax_aware_linker_does_not_nest_inside_an_already_emitted_wikilink(tmp_path):
-    """Repro from FIXSPEC C2: an inline-embedded verse's OWN content is
-    linked first (inside _render_verse_inline), producing a real
-    "[[Alice_src|Alice]]" wikilink spliced into the block's text; the
-    OUTER, whole-block linker.link() call that runs afterward must not
-    re-scan and re-wrap the "Alice" that is now sitting inside that
-    already-emitted wikilink's own display portion."""
-    v_ph = "⟦VERSE_vInline_00000001⟧"
+def test_syntax_aware_linker_does_not_corrupt_a_preexisting_literal_wikilink_span(tmp_path):
+    """Retargeted (2026-07): the scenario this test used to guard -- an
+    inline-embedded verse's spliced text getting matched a SECOND time by a
+    later `link()` call, nesting a wikilink inside a wikilink -- no longer
+    exists. `_render_verse_inline` was made a pure formatter (#105c) and all
+    entity linking now happens in exactly ONE pass over the fully composed
+    block text, so a name spliced in from a verse is never matched twice to
+    begin with; deleting `_PROTECTED_SPAN_RE`'s `\\[\\[.*?\\]\\]` alternative
+    does not turn the old scenario red any more.
+
+    What that alternative still guards under the current single-pass
+    architecture: RAW prose/draft text that already contains a literal
+    "[[...]]"-shaped span BEFORE `linker.link()` ever runs on it -- e.g.
+    hand-authored markup carried over from source material, not anything
+    this plugin itself emits. Without the guard, the single regex pass would
+    match an entity name that happens to fall inside that pre-existing span
+    too, nesting a corrupted wikilink inside it."""
     canon = make_canon({"Alice_src": canon_entry("Alice_src", "Alice")})
-    node = make_node(
-        "p1", "seg01",
-        f"Before verse {v_ph}, after verse.",
-        verses=[{"vid": "vInline", "placeholder": v_ph, "content": {"rendered": "Alice said hello"}}],
-    )
-    ns = make_nodestream([node])
+    text = "See [[Alice]] wave, then Alice waved again."
+    ns = make_nodestream([make_node("p1", "seg01", text)])
     profile = make_profile(folders={"person": "people"})
 
     out_dir, manifest = render_into(tmp_path, ns, canon, profile)
     body_matches = find_file_with_content(
-        all_written_paths(out_dir, manifest), lambda t: "said hello" in t
+        all_written_paths(out_dir, manifest), lambda t: "waved again" in t
     )
     assert len(body_matches) == 1
     body_text = body_matches[0].read_text(encoding="utf-8")
 
     identity = entity_note_identity(out_dir, manifest, "Alice_src")
-    assert body_text.count(f"[[{identity}|Alice]]") == 1, (
-        f"expected exactly ONE wikilink for Alice, not a re-wrapped/nested "
-        f"one -- got:\n{body_text}"
+    assert "[[Alice]]" in body_text, (
+        f"a pre-existing literal wikilink-shaped span in the raw text must "
+        f"survive completely untouched, never re-wrapped -- got:\n{body_text}"
     )
-    assert f"[[{identity}|[[" not in body_text, (
-        f"the already-emitted wikilink's own display portion must never be "
-        f"re-wrapped (nested link corruption) -- got:\n{body_text}"
+    assert "[[[[" not in body_text, (
+        f"the pre-existing span must never be nested inside a second "
+        f"wikilink -- got:\n{body_text}"
+    )
+    assert body_text.count(f"[[{identity}|Alice]]") == 1, (
+        f"the LATER, genuinely plain 'Alice' mention (outside the "
+        f"pre-existing span) must still get linked normally -- got:\n{body_text}"
     )
 
 
@@ -621,6 +631,104 @@ def test_syntax_aware_linker_does_not_wrap_inside_a_raw_sentinel_token(tmp_path)
     )
 
 
+def test_syntax_aware_linker_recognizes_entity_across_nfc_and_nfd_normalization_forms(tmp_path):
+    """An entity name can occur in the document in either Unicode
+    normalization form -- NFC (precomposed, e.g. a single "e-acute"
+    codepoint) or NFD (canonically-equivalent decomposed, e.g. plain "e"
+    followed by a combining acute-accent codepoint) -- since draft/segment
+    text can be spliced in from different upstream sources that don't agree
+    on a form. Both must be recognized as the SAME canon target: the
+    compiled matcher pattern is built from ONE literal `canonical_target_form`
+    string, so an unnormalized scan would silently miss whichever occurrence
+    happens to be byte-different from it, breaking both wikilink coverage
+    (a missed link) and the "first true occurrence" invariant (a later,
+    byte-matching occurrence would wrongly become "first")."""
+    nfc_name = unicodedata.normalize("NFC", "René")
+    nfd_name = unicodedata.normalize("NFD", "René")
+    assert nfc_name != nfd_name, "sanity: the two forms must be byte-distinct"
+
+    canon = make_canon({"Rene_src": canon_entry("Rene_src", nfc_name)})
+    # The NFD-form occurrence comes FIRST in true document order; the
+    # NFC-form (byte-identical to canonical_target_form) occurrence second.
+    text = f"{nfd_name} entered the room. Later, {nfc_name} spoke again."
+    ns = make_nodestream([make_node("p1", "seg01", text)])
+    profile = make_profile(folders={"person": "people"})
+
+    out_dir, manifest = render_into(tmp_path, ns, canon, profile)
+    body_matches = find_file_with_content(
+        all_written_paths(out_dir, manifest), lambda t: "entered the room" in t
+    )
+    assert len(body_matches) == 1
+    body_text = body_matches[0].read_text(encoding="utf-8")
+
+    identity = entity_note_identity(out_dir, manifest, "Rene_src")
+    link_nfc = f"[[{identity}|{nfc_name}]]"
+    assert body_text.count(link_nfc) == 1, (
+        f"both the NFD-form and NFC-form occurrences must be recognized as "
+        f"the SAME target and wikilinked exactly once (not zero, not twice) "
+        f"-- got:\n{body_text}"
+    )
+    assert body_text.index(link_nfc) < body_text.index("Later,"), (
+        f"the wikilink must land on the true FIRST (NFD-form) occurrence in "
+        f"document order, not the later NFC-form one -- got:\n{body_text}"
+    )
+    assert nfd_name not in body_text, (
+        f"the raw NFD-form bytes must not survive unlinked in the output -- "
+        f"got:\n{body_text}"
+    )
+
+
+def test_syntax_aware_linker_normalizes_only_matchable_text_not_protected_spans(tmp_path):
+    """A blanket NFC-normalize over the WHOLE incoming text (before
+    protected-span detection) would silently rewrite the bytes of anything
+    inside an already-protected span too -- e.g. a pre-existing, hand-
+    authored `[[...]]` wikilink whose bracketed target text happens to be in
+    NFD form. That corrupts it: the real file on disk was written via
+    `_dedupe_path`, which deliberately preserves ORIGINAL (non-normalized)
+    bytes, so a silently-NFC'd link target in the text would no longer match
+    the real path on a normalization-sensitive filesystem. Protected spans
+    must survive completely untouched; only the genuinely MATCHABLE
+    (non-protected) text should be normalized, so an NFD-form occurrence
+    there is still correctly recognized and linked."""
+    nfc_name = unicodedata.normalize("NFC", "가나")
+    nfd_name = unicodedata.normalize("NFD", "가나")
+    assert nfc_name != nfd_name, "sanity: the two forms must be byte-distinct"
+
+    canon = make_canon({"Gana_src": canon_entry("Gana_src", nfc_name)})
+    # A pre-existing wikilink (protected span) whose bracketed target text is
+    # itself the NFD-decomposed form. A separate, un-bracketed occurrence of
+    # the same underlying text (also NFD-form) appears later, in matchable
+    # prose -- that one must still be normalized and linked.
+    text = f"See [[other/{nfd_name}]] here. Later, {nfd_name} appears again in prose."
+    ns = make_nodestream([make_node("p1", "seg01", text)])
+    profile = make_profile(folders={"person": "people"})
+
+    out_dir, manifest = render_into(tmp_path, ns, canon, profile)
+    body_matches = find_file_with_content(
+        all_written_paths(out_dir, manifest), lambda t: "appears again" in t
+    )
+    assert len(body_matches) == 1
+    body_text = body_matches[0].read_text(encoding="utf-8")
+
+    identity = entity_note_identity(out_dir, manifest, "Gana_src")
+    assert f"[[other/{nfd_name}]]" in body_text, (
+        f"the pre-existing wikilink's bracketed target text must survive "
+        f"byte-for-byte in its ORIGINAL (NFD) form -- a blanket normalize "
+        f"would silently rewrite it to NFC and desync it from the real file "
+        f"path on disk -- got:\n{body_text!r}"
+    )
+    assert f"[[other/{nfc_name}]]" not in body_text, (
+        f"the pre-existing wikilink must never be silently NFC-normalized "
+        f"-- got:\n{body_text!r}"
+    )
+    assert body_text.count(f"[[{identity}|{nfc_name}]]") == 1, (
+        f"the later, genuinely-matchable NFD-form occurrence (outside the "
+        f"protected span) must still be recognized as the same canon target "
+        f"and wikilinked, wrapped with the canonical NFC-form target -- "
+        f"got:\n{body_text!r}"
+    )
+
+
 # ===========================================================================
 # 6b. #105 render close -- a footnote cited from INSIDE a verse's own
 #     translated content (not the surrounding prose) must render as an
@@ -672,10 +780,11 @@ def test_verse_inline_embedded_footnote_ref_renders_as_ref_and_def(tmp_path):
     via _render_verse_inline, whose own content.rendered carries
     ⟦FNREF_1⟧. Unlike the block-verse case (which returns early and never
     reaches _render_block's own prose fnref-substitution loop), the embedded
-    case's carrier text DOES reach that loop after splicing -- and since it
-    is a blind string-replace over the WHOLE post-splice text (regardless of
-    whether _convert_verse_fnrefs already converted the sentinel), this
-    control test is intentionally GREEN on BOTH pristine and fixed code
+    case's carrier text DOES reach that loop after splicing -- and since
+    _render_block resolves every placeholder AND fnref sentinel in one atomic
+    re.sub pass over the composed text (node.fnrefs supplies ⟦FNREF_1⟧ -> [^1]
+    regardless of whether _convert_verse_fnrefs already converted the sentinel),
+    this control test is intentionally GREEN on BOTH pristine and fixed code
     (verified via git-stash): the mount=embedded path already worked, given
     assemble.py supplies the verse-content footnote in node.fnrefs. It pins
     that _convert_verse_fnrefs' earlier conversion is harmless/idempotent
@@ -709,6 +818,423 @@ def test_verse_inline_embedded_footnote_ref_renders_as_ref_and_def(tmp_path):
     )
     assert v_ph not in body_text, (
         f"the embedded verse's own placeholder must be substituted, not leaked -- got:\n{body_text}"
+    )
+
+
+# ===========================================================================
+# 6c. #105c: double wikilink -- a name already linked INSIDE a verse must not
+#     link again in the surrounding prose (mount=embedded), and a name
+#     appearing in BOTH a verse's own rendered text and its literal gloss
+#     (mount=block) must link only once. Root cause: `_Linker.link()` used
+#     to create its own fresh `seen_in_block` set on every call, so the
+#     verse renderers (each calling `link()` independently) and the outer
+#     `_render_block` prose call never shared first-occurrence state.
+# ===========================================================================
+
+
+def test_name_in_inline_verse_and_surrounding_prose_links_once(tmp_path):
+    """The canonical target form appears once inside an inline (mount !=
+    block) verse's own rendered text, and again in the block's surrounding
+    prose. Today: linked twice (the verse's own `link()` call and the outer
+    prose `link()` call each get their own fresh `seen_in_block`). Fixed:
+    one shared `seen_in_block` per rendered block means only the first
+    (verse) occurrence is wrapped; the later prose occurrence stays plain
+    text, per the existing first-occurrence-per-block rule."""
+    v_ph = "⟦VERSE_vInline_00000003⟧"
+    node = make_node(
+        "p1", "seg01", f"Before the verse: {v_ph} Иван stood after.",
+        verses=[{
+            "vid": "vInline", "placeholder": v_ph,
+            "content": {"rendered": "Иван sang a song."},
+        }],
+    )
+    ns = make_nodestream([node])
+    canon = make_canon({"Ivan_src": canon_entry("Ivan_src", "Иван", category="person")})
+    profile = make_profile(folders={"person": "people"})
+
+    out_dir, manifest = render_into(tmp_path, ns, canon, profile)
+    identity = entity_note_identity(out_dir, manifest, "Ivan_src")
+    body_matches = find_file_with_content(
+        all_written_paths(out_dir, manifest), lambda t: "Before the verse" in t
+    )
+    assert len(body_matches) == 1
+    body_text = body_matches[0].read_text(encoding="utf-8")
+
+    link_str = f"[[{identity}|Иван]]"
+    assert body_text.count(link_str) == 1, (
+        f"expected exactly one wikilink for a name already linked inside "
+        f"the verse -- got {body_text.count(link_str)} in:\n{body_text}"
+    )
+    assert "Иван stood after" in body_text, (
+        f"the second (prose) occurrence must survive as plain text, not "
+        f"disappear -- got:\n{body_text}"
+    )
+
+
+def test_name_in_verse_rendered_and_gloss_links_once(tmp_path):
+    """The canonical target form appears in BOTH a dedicated verse block's
+    own `rendered` text and its `literal_gloss` (mount=block). Today:
+    `_render_verse_block` calls `linker.link()` separately for `rendered`
+    and `gloss`, each with its own fresh `seen_in_block`, so both occurrences
+    get wrapped. Fixed: one shared `seen_in_block` across both calls means
+    only the `rendered` occurrence (linked first) is wrapped; the gloss's
+    occurrence stays plain text."""
+    v_ph = "⟦VERSE_vA_00000004⟧"
+    node = make_node(
+        "vblockA", "seg01", v_ph, kind="verse",
+        verses=[{
+            "vid": "vA", "placeholder": v_ph,
+            "content": {"rendered": "Иван sang a song.",
+                        "literal_gloss": "Иван sang literally too."},
+        }],
+    )
+    ns = make_nodestream([node])
+    canon = make_canon({"Ivan_src": canon_entry("Ivan_src", "Иван", category="person")})
+    profile = make_profile(folders={"person": "people"})
+
+    out_dir, manifest = render_into(tmp_path, ns, canon, profile)
+    identity = entity_note_identity(out_dir, manifest, "Ivan_src")
+    body_matches = find_file_with_content(
+        all_written_paths(out_dir, manifest), lambda t: "sang a song" in t
+    )
+    assert len(body_matches) == 1
+    body_text = body_matches[0].read_text(encoding="utf-8")
+
+    link_str = f"[[{identity}|Иван]]"
+    assert body_text.count(link_str) == 1, (
+        f"expected exactly one wikilink for a name appearing in both a "
+        f"verse's rendered text and its own gloss -- got "
+        f"{body_text.count(link_str)} in:\n{body_text}"
+    )
+    assert "sang literally too" in body_text, (
+        f"the gloss's own occurrence must survive as plain text, not "
+        f"disappear -- got:\n{body_text}"
+    )
+
+
+def test_first_occurrence_follows_display_order_not_processing_order(tmp_path):
+    """#105c follow-up: prose text containing the entity name BEFORE an
+    inline verse placeholder, whose own verse content ALSO contains that
+    name. The verse is *processed* before the surrounding prose (its
+    placeholder gets spliced in first), but it *displays* AFTER the prose
+    text that precedes the placeholder. The "first occurrence per block"
+    wikilink rule (obsidian.md: "wrap only the first occurrence per block")
+    must follow DISPLAY order, not processing order -- so the wikilink
+    belongs on the prose occurrence, not the verse occurrence, even though
+    the verse is linked first if verse content is linked independently
+    before being spliced into the prose."""
+    v_ph = "⟦VERSE_vInline_00000005⟧"
+    node = make_node(
+        "p1", "seg01", f"Иван stood before. {v_ph}",
+        verses=[{
+            "vid": "vInline", "placeholder": v_ph,
+            "content": {"rendered": "Иван sang later."},
+        }],
+    )
+    ns = make_nodestream([node])
+    canon = make_canon({"Ivan_src": canon_entry("Ivan_src", "Иван", category="person")})
+    profile = make_profile(folders={"person": "people"})
+
+    out_dir, manifest = render_into(tmp_path, ns, canon, profile)
+    identity = entity_note_identity(out_dir, manifest, "Ivan_src")
+    body_matches = find_file_with_content(
+        all_written_paths(out_dir, manifest), lambda t: "stood before" in t
+    )
+    assert len(body_matches) == 1
+    body_text = body_matches[0].read_text(encoding="utf-8")
+
+    link_str = f"[[{identity}|Иван]]"
+    assert body_text.count(link_str) == 1, (
+        f"expected exactly one wikilink -- got {body_text.count(link_str)} "
+        f"in:\n{body_text}"
+    )
+    assert f"{link_str} stood before" in body_text, (
+        f"expected the wikilink on the PROSE occurrence (first in DISPLAY "
+        f"order), not the verse occurrence (first in processing order) -- "
+        f"got:\n{body_text}"
+    )
+    assert "Иван sang later" in body_text, (
+        f"the verse's own occurrence (already seen in the block, later in "
+        f"display order) must survive as plain, unwrapped text -- "
+        f"got:\n{body_text}"
+    )
+
+
+def test_inline_verse_lit_label_is_not_wikilinked_and_gloss_content_is(tmp_path):
+    """Regression (#105c follow-up): the renderer-authored literal label
+    " (lit.: " that _render_verse_inline emits before an inline verse's gloss
+    must never itself be swept into a wikilink -- even when a canon entry's
+    canonical_target_form is the bare word "lit". Because #105c links the WHOLE
+    composed block text in one pass (true document order) and _Linker.pattern
+    is an unanchored literal alternation (no word boundary), the label's own
+    incidental "lit" used to match FIRST and consume the block's single first-
+    occurrence slot: the LABEL text got wikilinked (e.g. "([[people/lit|lit]].: ")
+    while the REAL gloss-content "lit" went unlinked (already 'seen'). The fix
+    must protect the label from the linker's pass BY POSITION (no sentinel, no
+    content restore), WITHOUT reverting to linking verse content independently
+    (which would reintroduce the #105c double-link)."""
+    v_ph = "⟦VERSE_vLit_00000006⟧"
+    node = make_node(
+        "p1", "seg01", f"Before verse: {v_ph} after.",
+        verses=[{
+            "vid": "vLit", "placeholder": v_ph,
+            "content": {"rendered": "A poem line here.",
+                        "literal_gloss": "lit means bed"},
+        }],
+    )
+    ns = make_nodestream([node])
+    canon = make_canon({"lit_src": canon_entry("lit_src", "lit", category="person")})
+    profile = make_profile(folders={"person": "people"})
+
+    out_dir, manifest = render_into(tmp_path, ns, canon, profile)
+    identity = entity_note_identity(out_dir, manifest, "lit_src")
+    body_matches = find_file_with_content(
+        all_written_paths(out_dir, manifest), lambda t: "Before verse" in t
+    )
+    assert len(body_matches) == 1
+    body_text = body_matches[0].read_text(encoding="utf-8")
+
+    link_str = f"[[{identity}|lit]]"
+    # The renderer-authored label must read back verbatim, never wrapped.
+    assert " (lit.: " in body_text, (
+        f"the renderer-authored '(lit.: ' label must survive verbatim, not be "
+        f"swept into a wikilink -- got:\n{body_text}"
+    )
+    # The one wikilink belongs to the real gloss-content occurrence of "lit".
+    assert f"{link_str} means bed" in body_text, (
+        f"the wikilink must land on the real gloss-content 'lit', not on the "
+        f"label text -- got:\n{body_text}"
+    )
+    assert body_text.count(link_str) == 1, (
+        f"expected exactly one wikilink (on the gloss content) -- got "
+        f"{body_text.count(link_str)} in:\n{body_text}"
+    )
+    # No protection sentinel may leak into the rendered output.
+    assert "⟦" not in body_text and "⟧" not in body_text, (
+        f"no protection sentinel may leak into rendered output -- got:\n{body_text}"
+    )
+
+
+def test_two_gloss_bearing_inline_verses_each_get_own_position_protected_label(tmp_path):
+    """Regression (round 5 redesign): protection is now BY POSITION, not by a
+    sentinel string, so the per-match position arithmetic in _render_block must
+    handle MULTIPLE inline-verse labels in one block. Two gloss-bearing verses
+    each emit their own literal " (lit.: " label at a DIFFERENT absolute offset
+    in the composed text; _render_block must protect BOTH spans (neither matched
+    into by the single-pass linker) while still linking the real gloss-content
+    occurrences. An off-by-N in the running `cursor` would protect the wrong span
+    -- wikilinking a label's incidental "lit", or leaving a real one unprotected.
+
+    (Replaces the old placeholder-equals-sentinel collision test: with no
+    sentinel string there is nothing for a free-form placeholder to coincide
+    with, so that collision class structurally cannot exist anymore. This
+    exercises the mechanism that replaced it -- multi-label position tracking.)"""
+    v1_ph = "⟦VERSE_v1_00000001⟧"
+    v2_ph = "⟦VERSE_v2_00000002⟧"
+    node = make_node(
+        "p1", "seg01",
+        f"One: {v1_ph} and two: {v2_ph} end.",
+        verses=[
+            {"vid": "v1", "placeholder": v1_ph,
+             "content": {"rendered": "First poem line.",
+                         "literal_gloss": "lit alpha"}},
+            {"vid": "v2", "placeholder": v2_ph,
+             "content": {"rendered": "Second poem line.",
+                         "literal_gloss": "lit beta"}},
+        ],
+    )
+    ns = make_nodestream([node])
+    canon = make_canon({"lit_src": canon_entry("lit_src", "lit", category="person")})
+    profile = make_profile(folders={"person": "people"})
+
+    out_dir, manifest = render_into(tmp_path, ns, canon, profile)
+    identity = entity_note_identity(out_dir, manifest, "lit_src")
+    body_matches = find_file_with_content(
+        all_written_paths(out_dir, manifest), lambda t: "One:" in t
+    )
+    assert len(body_matches) == 1
+    body_text = body_matches[0].read_text(encoding="utf-8")
+
+    link_str = f"[[{identity}|lit]]"
+    # BOTH renderer-authored labels survive verbatim at their own positions --
+    # neither label's incidental "lit" swept into a wikilink.
+    assert body_text.count(" (lit.: ") == 2, (
+        f"both inline-verse labels must survive verbatim, position-protected -- "
+        f"got {body_text.count(' (lit.: ')} in:\n{body_text}"
+    )
+    # Both rendered lines and both gloss contents render at their own slots.
+    assert "*First poem line.*" in body_text and "*Second poem line.*" in body_text, (
+        f"both verses must render at their own placeholder positions -- got:\n{body_text}"
+    )
+    assert "alpha)" in body_text and "beta)" in body_text, (
+        f"both gloss contents must render under their own labels -- got:\n{body_text}"
+    )
+    # The one first-occurrence wikilink lands on real gloss content ("lit alpha"),
+    # never on either label's incidental "lit"; the later "lit beta" is already
+    # 'seen' in-block, so exactly one link total.
+    assert f"{link_str} alpha" in body_text, (
+        f"the wikilink must land on the real gloss 'lit', not a label -- got:\n{body_text}"
+    )
+    assert body_text.count(link_str) == 1, (
+        f"exactly one first-occurrence wikilink expected -- got "
+        f"{body_text.count(link_str)} in:\n{body_text}"
+    )
+    # No protection machinery may leak into rendered output.
+    assert "⟦" not in body_text and "⟧" not in body_text, (
+        f"no sentinel/placeholder may leak into rendered output -- got:\n{body_text}"
+    )
+
+
+def test_inline_verse_label_nested_inside_preexisting_wikilink_not_duplicated(tmp_path):
+    """Regression (codex-rescue): an inline-verse " (lit.: " label span
+    (tracked by _render_block as an `extra_protected` position) can end up
+    NESTED INSIDE a _PROTECTED_SPAN_RE-matched span when the verse's
+    placeholder sat between the brackets of a pre-existing `[[...]]` wikilink
+    in the block's raw text. The two spans then OVERLAP -- the label is fully
+    contained in the wikilink span. link()'s NFC-reconstruction loop assumes
+    ascending, DISJOINT spans: it copied the whole wikilink span verbatim,
+    then re-appended the already-copied label substring a SECOND time and
+    regressed `last`, corrupting the output (codex saw the label + trailing
+    gloss duplicated, with the leaked inner "lit" then re-wikilinked). The fix
+    coalesces overlapping/touching spans into their union before the loop, so
+    the nested label collapses into the single enclosing wikilink span and the
+    whole pre-existing wikilink is preserved byte-for-byte, exactly once."""
+    v_ph = "⟦VERSE_vLit_00000006⟧"
+    # The verse placeholder sits BETWEEN the brackets of a pre-existing
+    # wikilink -- after substitution the emitted " (lit.: " label lands nested
+    # inside the `[[...]]` protected span.
+    node = make_node(
+        "p1", "seg01", f"[[people/Existing|{v_ph}]]",
+        verses=[{
+            "vid": "vLit", "placeholder": v_ph,
+            "content": {"rendered": "A poem line here.",
+                        "literal_gloss": "lit means bed"},
+        }],
+    )
+    ns = make_nodestream([node])
+    # A canon target "lit" makes the bug's leaked-out tail visibly re-wikilink
+    # -- a sharp discriminator: in correct output nothing inside the protected
+    # wikilink is ever linked.
+    canon = make_canon({"lit_src": canon_entry("lit_src", "lit", category="person")})
+    profile = make_profile(folders={"person": "people"})
+
+    out_dir, manifest = render_into(tmp_path, ns, canon, profile)
+    body_matches = find_file_with_content(
+        all_written_paths(out_dir, manifest), lambda t: "people/Existing" in t
+    )
+    assert len(body_matches) == 1
+    body_text = body_matches[0].read_text(encoding="utf-8")
+
+    expected_link = "[[people/Existing|*A poem line here.* (lit.: lit means bed)]]"
+    assert body_text.count(expected_link) == 1, (
+        f"the pre-existing wikilink (with the nested verse label inside it) must "
+        f"survive byte-for-byte, exactly once -- got:\n{body_text}"
+    )
+    # The nested label must not be duplicated: exactly one " (lit.: " and one
+    # copy of the trailing gloss content.
+    assert body_text.count(" (lit.: ") == 1, (
+        f"the nested ' (lit.: ' label must appear exactly once, not be re-copied by "
+        f"the overlapping-span reconstruction bug -- got:\n{body_text}"
+    )
+    assert body_text.count("means bed") == 1, (
+        f"the label's trailing gloss must not be duplicated -- got:\n{body_text}"
+    )
+    # Everything inside the protected wikilink stays verbatim: the incidental
+    # "lit" must NOT be wikilinked (it only would be if the label's gloss leaked
+    # out of the protected span, the exact bug -- codex saw "[[people/lit_src|lit]]").
+    assert "|lit]]" not in body_text, (
+        f"no content inside the protected wikilink may leak out and be re-linked -- "
+        f"got:\n{body_text}"
+    )
+    assert "⟦" not in body_text and "⟧" not in body_text, (
+        f"no protection sentinel may leak into rendered output -- got:\n{body_text}"
+    )
+
+
+def test_source_form_containing_literal_lit_label_text_is_unaffected(tmp_path):
+    """Regression (round 4/5 redesign): position-based protection only ever
+    covers a REAL inline-verse label span, so a canon `source_form` that happens
+    to contain the literal label text " (lit.: " itself is completely unaffected.
+    It is injected into the first-occurrence parenthetical via a link()-built
+    `piece` (`piece += f" ({source_form})"`), never appears in this block's
+    `label_ranges`, and is echoed verbatim. Under the old sentinel design this
+    class of author-controlled string was the round-4 corruption vector (a blind
+    content restore rewrote canon data it had no business touching); the round-5
+    redesign removes all content matching, so there is nothing that could rewrite
+    it. This proves position-scoping never spuriously acts on an identical-looking
+    string from a different channel."""
+    hostile_source_form = "src (lit.: name"
+    # An ordinary target word ("Ivan") that appears in the prose so it gets
+    # matched/linked, with first_occurrence so its source_form is appended as a
+    # parenthetical gloss -- the exact channel that injects the look-alike text.
+    canon = make_canon(
+        {hostile_source_form: canon_entry(hostile_source_form, "Ivan", category="person")}
+    )
+    ns = make_nodestream([make_node("p1", "seg01", "Ivan walked into the room.")])
+    profile = make_profile(folders={"person": "people"}, parenthetical_originals="first_occurrence")
+
+    out_dir, manifest = render_into(tmp_path, ns, canon, profile)
+    body_matches = find_file_with_content(
+        all_written_paths(out_dir, manifest), lambda t: "walked into the room" in t
+    )
+    assert len(body_matches) == 1
+    body_text = body_matches[0].read_text(encoding="utf-8")
+
+    # The source_form's parenthetical must render VERBATIM, its literal
+    # " (lit.: " substring intact and unremarkable -- position protection covers
+    # only genuine inline-verse labels, never a linker-injected gloss.
+    assert f"({hostile_source_form})" in body_text, (
+        f"the canon source_form's parenthetical gloss must survive verbatim, its "
+        f"literal ' (lit.: ' substring included -- got:\n{body_text}"
+    )
+
+
+def test_block_prose_containing_old_sentinel_string_is_not_rewritten(tmp_path):
+    """Regression (round 5): rounds 2-4 restored a fixed sentinel string by
+    CONTENT MATCHING over every verbatim slice link() copied out of its input. A
+    block's OWN raw prose could coincidentally contain that exact string --
+    nothing to do with verses, canon, or placeholders -- and be silently
+    rewritten into "(lit.: ", corrupting a translator's actual words. Codex
+    reproduced it with plain prose == the sentinel and no verse involved at all.
+    The round-5 redesign removes ALL content matching: protection is by POSITION
+    only, so any pre-existing text is rendered verbatim (the old sentinel string
+    is now just an ordinary ⟦...⟧ span, echoed untouched). Verified RED on the
+    round-4 restore code via git-stash ("⟦LIT_LABEL⟧" prose rewritten to
+    "(lit.: ")."""
+    # The literal string that WAS `_VERSE_LIT_LABEL_SENTINEL` in rounds 2-4. It
+    # is deleted from the module now; here it is just ordinary document prose.
+    old_sentinel = "⟦LIT_LABEL⟧"
+    node = make_node("p1", "seg01", f"The bracket macro {old_sentinel} appears here.")
+    ns = make_nodestream([node])
+    # Non-empty canon with a target IN the prose, so the FULL link path runs
+    # (not the pattern-is-None early return) -- the round-4 restore corrupted the
+    # verbatim tail slice on exactly this path.
+    canon = make_canon(
+        {"bracket_src": canon_entry("bracket_src", "bracket", category="person")}
+    )
+    profile = make_profile(folders={"person": "people"})
+
+    out_dir, manifest = render_into(tmp_path, ns, canon, profile)
+    identity = entity_note_identity(out_dir, manifest, "bracket_src")
+    body_matches = find_file_with_content(
+        all_written_paths(out_dir, manifest), lambda t: "appears here" in t
+    )
+    assert len(body_matches) == 1
+    body_text = body_matches[0].read_text(encoding="utf-8")
+
+    # Full link path actually ran (a real canon target in the prose got linked).
+    assert f"[[{identity}|bracket]]" in body_text, (
+        f"the canon target 'bracket' must link, proving the full (non-early-return) "
+        f"link path ran -- got:\n{body_text}"
+    )
+    # The old sentinel string is ordinary prose: echoed verbatim, NEVER rewritten
+    # into a "(lit.: " label by any content-matching restore (the round-4 bug).
+    assert old_sentinel in body_text, (
+        f"the prose's literal '{old_sentinel}' must survive verbatim -- got:\n{body_text}"
+    )
+    assert "(lit.: " not in body_text, (
+        f"no '(lit.: ' label may appear -- this block has no inline-verse gloss, so "
+        f"any '(lit.: ' is the old restore corrupting prose -- got:\n{body_text}"
     )
 
 
@@ -923,6 +1449,35 @@ def test_two_entities_same_bare_stem_different_folders_get_distinct_wikilink_tar
     assert (out_dir / f"{identity_b}.md").is_file()
     assert f"{identity_a}.md" in manifest["written"]
     assert f"{identity_b}.md" in manifest["written"]
+
+
+def test_case_differing_source_forms_in_the_same_folder_get_casefold_distinct_targets(tmp_path):
+    """#99: "IVAN" and "Ivan" sanitize to two EXACT-STRING-distinct stems
+    ("People/IVAN.md" vs "People/Ivan.md") in the SAME folder, so
+    `_dedupe_path`'s plain `in used_paths` check never applies its `-2`
+    disambiguation suffix -- both targets are already unequal as exact
+    strings. But a case-insensitive filesystem (APFS default, Windows)
+    resolves both writes to ONE inode, so the second `write_text` silently
+    clobbers the first. Asserting plain `!=` here would be true both before
+    and after the fix and prove nothing; the real invariant is that the two
+    targets must also be distinct under casefold, which only the fixed
+    `_dedupe_path` (folding the membership key) guarantees."""
+    canon = make_canon({
+        "IVAN": canon_entry("IVAN", "Иван-А", category="person"),
+        "Ivan": canon_entry("Ivan", "Иван-Б", category="person"),
+    })
+    ns = make_nodestream([make_node("p1", "seg01", "Здесь Иван-А и там Иван-Б.")])
+    profile = make_profile(folders={"person": "people"})
+
+    out_dir, manifest = render_into(tmp_path, ns, canon, profile)
+    identity_a = entity_note_identity(out_dir, manifest, "IVAN")
+    identity_b = entity_note_identity(out_dir, manifest, "Ivan")
+
+    assert identity_a.casefold() != identity_b.casefold(), (
+        f"case-differing source forms in the same folder must resolve to "
+        f"casefold-distinct wikilink targets (else they collide on a "
+        f"case-insensitive filesystem), got: {identity_a!r} vs {identity_b!r}"
+    )
 
 
 def test_symlinked_out_dir_is_refused_and_nothing_is_deleted(tmp_path):

@@ -153,6 +153,26 @@ def test_accept_baseline_then_rediff_unchanged_matches_exit_0(tmp_path):
     assert payload["reason"] == "ok"
 
 
+def test_accept_baseline_then_rediff_converges_with_embedded_unicode_line_boundary(tmp_path):
+    """`str.splitlines()` (former `_read_baseline_lines` body) splits on 8
+    boundaries beyond LF (\\v \\f \\x1c \\x1d \\x1e NEL U+0085, LS U+2028, PS
+    U+2029) that the writer's `text.split("\\n")` does NOT split on -- a
+    stored line with one of those chars interior to it read back as
+    multiple lines, causing a permanent mismatch that --accept-baseline
+    could never converge (it re-freezes the same form that reads back
+    split again)."""
+    root = make_root(tmp_path)
+    reset_vault(root, {"people/ivan.md": "# Ivan\n\nbefore" + chr(0x2028) + "after\n\ntail line\n"})
+
+    accept = run_diff(root, "--accept-baseline")
+    assert accept.returncode == 0, f"stdout:\n{accept.stdout}\nstderr:\n{accept.stderr}"
+
+    rediff = run_diff(root)
+    assert rediff.returncode == 0, f"stdout:\n{rediff.stdout}\nstderr:\n{rediff.stderr}"
+    payload = parse_one_json_line(rediff)
+    assert payload["reason"] == "ok"
+
+
 # ===========================================================================
 # 3. Overwrite guard: refuse without --force-accept-baseline, succeed with it.
 # ===========================================================================

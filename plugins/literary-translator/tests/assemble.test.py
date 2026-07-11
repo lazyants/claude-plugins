@@ -2153,5 +2153,107 @@ def test_output_destination_via_symlinked_parent_is_refused_no_escape(tmp_path):
     )
 
 
+# ===========================================================================
+# 15. codex-rescue adversarial review: a built-in adapter module (e.g.
+#     render_obsidian.py) can sys.exit() DURING dispatch_adapter()'s own
+#     `__import__(adapter)` call -- deep inside main()'s try block, well
+#     after profile/manifest/ledger/nodestream have all already succeeded.
+#     SystemExit deliberately does not subclass Exception, so it escaped
+#     both dispatch_adapter()'s own `except Exception` and main()'s
+#     outermost `except Exception` catch-all, crashing the process with NO
+#     JSON on stdout -- breaking the documented one-JSON-line contract.
+#     Distinct from test_dependency_precondition_emits_one_json_line_when_
+#     validate_draft_exits_at_import above, which pokes the SAME failure
+#     mode at assemble.py's own TOP-OF-FILE sibling import, long before
+#     main() ever starts; this one pokes it at the adapter-dispatch import
+#     boundary specifically.
+# ===========================================================================
+
+
+def test_dependency_precondition_emits_one_json_line_when_builtin_adapter_exits_at_import(tmp_path):
+    root = make_root(tmp_path)
+    build_clean_two_segment_book(root)
+
+    # Poison the built-in adapter module itself (render_obsidian.py) with a
+    # stub that sys.exits(2) at import time -- mirroring its own real
+    # module-level PyYAML guard's failure mode -- AFTER a fully valid
+    # profile/manifest/ledger/nodestream have already been built, so the
+    # SystemExit is guaranteed to originate from dispatch_adapter()'s
+    # `__import__(adapter)` call, not from assemble.py's own top-of-file
+    # imports.
+    (root / "scripts" / "render_obsidian.py").write_text(
+        "import sys\n"
+        "print('ERROR: poisoned render_obsidian.py dependency preflight', file=sys.stderr)\n"
+        "sys.exit(2)\n",
+        encoding="utf-8",
+    )
+
+    result = run_assemble(root)
+    payload = parse_one_json_line(result)
+    assert result.returncode == 2, f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    assert payload["success"] is False
+    assert payload.get("reason") == "dependency_precondition"
+
+    # Whatever nodestream.json/anchor_map.json DOES exist (written before
+    # dispatch) must still be complete, valid JSON -- never truncated.
+    ns_path = root / "out" / ".assembled" / "nodestream.json"
+    if ns_path.is_file():
+        json.loads(ns_path.read_text(encoding="utf-8"))
+
+
+def test_dependency_precondition_preserves_string_sys_exit_message_from_builtin_adapter(tmp_path):
+    # codex-rescue adversarial review: dispatch_adapter()'s `except
+    # SystemExit` handlers classified EVERY SystemExit as
+    # `dependency_precondition` with a fixed generic "see stderr" message,
+    # discarding whatever `sys.exit("...")` actually packed into
+    # `exc.code` -- that string is never auto-printed by Python once this
+    # handler catches it, so it was silently lost even when the halting
+    # module wrote nothing of its own to stderr. This proves the specific
+    # message now survives into the JSON payload's `error` field.
+    root = make_root(tmp_path)
+    build_clean_two_segment_book(root)
+
+    (root / "scripts" / "render_obsidian.py").write_text(
+        "import sys\n"
+        "sys.exit('some specific custom reason')\n",
+        encoding="utf-8",
+    )
+
+    result = run_assemble(root)
+    payload = parse_one_json_line(result)
+    assert result.returncode == 2, f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    assert payload["success"] is False
+    assert payload.get("reason") == "dependency_precondition"
+    assert "some specific custom reason" in payload["error"], payload["error"]
+
+
+def test_custom_renderer_system_exit_gets_adapter_import_precondition_not_dependency_precondition(tmp_path):
+    # codex-rescue adversarial review (substitute, round 5): dispatch_adapter()'s
+    # custom-renderer branch reused the built-in-adapter branch's
+    # `dependency_precondition` reason verbatim -- but a custom renderer is an
+    # open, user-authored extension point, so its own module-level sys.exit()
+    # is not necessarily about a missing dependency. Reusing that reason (and
+    # its "dependency preflight" wording) mischaracterizes the failure for any
+    # caller that branches on `reason` alone. This proves the custom-renderer
+    # path now gets its own distinct, honest reason.
+    root = make_root(tmp_path, output_target="custom", custom_renderer_path="halts_renderer.py")
+    custom_dir = root / "scripts" / "custom_renderers"
+    custom_dir.mkdir(parents=True)
+    (custom_dir / "halts_renderer.py").write_text(
+        "import sys\n"
+        "sys.exit('missing API_KEY env var for license check')\n",
+        encoding="utf-8",
+    )
+    build_clean_two_segment_book(root)
+
+    result = run_assemble(root)
+    payload = parse_one_json_line(result)
+    assert result.returncode == 2, f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    assert payload["success"] is False
+    assert payload.get("reason") == "adapter_import_precondition"
+    assert payload.get("reason") != "dependency_precondition"
+    assert "missing API_KEY env var for license check" in payload["error"], payload["error"]
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))

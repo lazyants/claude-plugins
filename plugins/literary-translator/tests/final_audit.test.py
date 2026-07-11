@@ -95,6 +95,7 @@ import json
 import shutil
 import subprocess
 import sys
+import unicodedata
 from pathlib import Path
 
 import jsonschema
@@ -696,6 +697,153 @@ def test_warn_link_graph_orphan_footnote(tmp_path):
 def test_warn_foreign_remainder_stopword_run(tmp_path):
     root = make_durable_root(tmp_path, seg_ids=("seg01", PAD_SEG))
     p1_text = f"Some translated prose with a note {FN_PH} attached. Voici de la le texte."
+    add_converged_segment(root, "seg01", clean_segpack(), clean_draft(p1_text=p1_text))
+
+    result = run_final_audit(root)
+
+    assert result.returncode == 0
+    summary = parse_summary(result)
+    assert_schema_valid(summary)
+    assert summary["hard_failures"] == 0
+    assert summary["warnings"] >= 1
+    assert (
+        "[seg01] FOREIGN-REMNANT possible untranslated source-language text "
+        "in p1: stopword_hits=3 longest_run=3" in result.stderr
+    )
+
+
+def test_warn_foreign_remainder_stopword_run_with_punctuation(tmp_path):
+    root = make_durable_root(tmp_path, seg_ids=("seg01", PAD_SEG))
+    p1_text = f"Some translated prose with a note {FN_PH} attached. Voici de, la, le texte."
+    add_converged_segment(root, "seg01", clean_segpack(), clean_draft(p1_text=p1_text))
+
+    result = run_final_audit(root)
+
+    assert result.returncode == 0
+    summary = parse_summary(result)
+    assert_schema_valid(summary)
+    assert summary["hard_failures"] == 0
+    assert (
+        "[seg01] FOREIGN-REMNANT possible untranslated source-language text "
+        "in p1: stopword_hits=3 longest_run=3" in result.stderr
+    )
+
+
+def test_warn_foreign_remainder_stopword_run_markdown_emphasis(tmp_path):
+    # "_" is a \w word character, so a naive \W-based outer-punctuation strip
+    # never unwraps Markdown italic emphasis -- a stopword run adorned with
+    # it must still be detected as such.
+    root = make_durable_root(tmp_path, seg_ids=("seg01", PAD_SEG))
+    p1_text = f"Some translated prose with a note {FN_PH} attached. _de_ _la_ _le_ texte."
+    add_converged_segment(root, "seg01", clean_segpack(), clean_draft(p1_text=p1_text))
+
+    result = run_final_audit(root)
+
+    assert result.returncode == 0
+    summary = parse_summary(result)
+    assert_schema_valid(summary)
+    assert summary["hard_failures"] == 0
+    assert summary["warnings"] >= 1
+    assert (
+        "[seg01] FOREIGN-REMNANT possible untranslated source-language text "
+        "in p1: stopword_hits=3 longest_run=3" in result.stderr
+    )
+
+
+def test_warn_foreign_remainder_nfd_combining_mark_not_stripped(tmp_path):
+    # An outer-punctuation strip based on Unicode category "not word char"
+    # also matches combining marks (category Mn) -- an NFD-decomposed
+    # accented letter (e.g. Spanish "Si" = 'S' 'i' COMBINING ACUTE ACCENT)
+    # would lose its trailing mark and collapse into a bare, unaccented
+    # stopword of an unrelated language. The mark must stay attached to its
+    # base letter so this never produces a false-positive foreign-remnant.
+    root = make_durable_root(
+        tmp_path,
+        seg_ids=("seg01", PAD_SEG),
+        stopwords=DEFAULT_STOPWORDS + ["si"],
+    )
+    nfd_si = unicodedata.normalize("NFD", "Sí")
+    assert len(nfd_si) == 3, "fixture assumption: NFD 'Si' decomposes to 3 codepoints"
+    p1_text = (
+        f"Some translated prose with a note {FN_PH} attached. "
+        f"{nfd_si} {nfd_si} {nfd_si} posible."
+    )
+    add_converged_segment(root, "seg01", clean_segpack(), clean_draft(p1_text=p1_text))
+
+    result = run_final_audit(root)
+
+    assert result.returncode == 0
+    summary = parse_summary(result)
+    assert_schema_valid(summary)
+    assert summary["hard_failures"] == 0
+    assert summary["warnings"] == 0
+    assert "FOREIGN-REMNANT" not in result.stderr
+
+
+def test_warn_foreign_remainder_nfd_stopword_matches_nfd_document(tmp_path):
+    # Mirror-image of the NFD-document/NFC-stopword test above: a
+    # project-local, user-authored custom preset may legally ship an
+    # NFD-decomposed STOPWORDS entry (unlike the shipped presets under
+    # assets/languages/*.json, confirmed NFC by inspection). NFC-normalizing
+    # only the DOCUMENT-token side (as the previous fix did) is one-sided --
+    # it silently breaks an NFD stopword that used to match an NFD document
+    # token by lucky same-form consistency before that fix existed. Both
+    # sides of the comparison must be NFC-normalized, matching the token
+    # side's own unicodedata.normalize("NFC", ...) call.
+    nfd_stopword = unicodedata.normalize("NFD", "Sí").lower()
+    assert len(nfd_stopword) == 3, "fixture assumption: NFD 'sí' decomposes to 3 codepoints"
+    root = make_durable_root(
+        tmp_path,
+        seg_ids=("seg01", PAD_SEG),
+        stopwords=DEFAULT_STOPWORDS + [nfd_stopword],
+    )
+    nfd_si = unicodedata.normalize("NFD", "Sí")
+    assert len(nfd_si) == 3, "fixture assumption: NFD 'Sí' decomposes to 3 codepoints"
+    p1_text = (
+        f"Some translated prose with a note {FN_PH} attached. "
+        f"{nfd_si} {nfd_si} {nfd_si} posible."
+    )
+    add_converged_segment(root, "seg01", clean_segpack(), clean_draft(p1_text=p1_text))
+
+    result = run_final_audit(root)
+
+    assert result.returncode == 0
+    summary = parse_summary(result)
+    assert_schema_valid(summary)
+    assert summary["hard_failures"] == 0
+    assert summary["warnings"] >= 1
+    assert (
+        "[seg01] FOREIGN-REMNANT possible untranslated source-language text "
+        "in p1: stopword_hits=3 longest_run=3" in result.stderr
+    )
+
+
+def test_warn_foreign_remainder_nfd_document_matches_nfc_stopword(tmp_path):
+    # The shipped language JSONs (assets/languages/*.json) ship their
+    # STOPWORDS entries pre-composed (NFC) -- confirmed by inspection, e.g.
+    # fr.json's "Après"/"Voilà" and es.json's "Tú"/"Sí" are all single
+    # precomposed codepoints, never a base letter + combining mark. But a
+    # translated draft's own text is free-form and can legitimately contain
+    # an NFD-decomposed accented word (e.g. from a different editor/OS). A
+    # stopword match that only works when both sides happen to already share
+    # the same normalization form would silently miss a genuine
+    # foreign-remnant run whenever the DOCUMENT text (not the stopword list)
+    # is NFD -- the mirror-image gap of the NFD-combining-mark-not-stripped
+    # test above, which only proves stripping doesn't corrupt an NFD token,
+    # not that a genuinely NFD token still matches an NFC stopword.
+    nfc_stopword = unicodedata.normalize("NFC", "Sí").lower()
+    assert len(nfc_stopword) == 2, "fixture assumption: NFC 'sí' is 2 codepoints (s + í)"
+    root = make_durable_root(
+        tmp_path,
+        seg_ids=("seg01", PAD_SEG),
+        stopwords=DEFAULT_STOPWORDS + [nfc_stopword],
+    )
+    nfd_si = unicodedata.normalize("NFD", "Sí")
+    assert len(nfd_si) == 3, "fixture assumption: NFD 'Sí' decomposes to 3 codepoints"
+    p1_text = (
+        f"Some translated prose with a note {FN_PH} attached. "
+        f"{nfd_si} {nfd_si} {nfd_si} posible."
+    )
     add_converged_segment(root, "seg01", clean_segpack(), clean_draft(p1_text=p1_text))
 
     result = run_final_audit(root)

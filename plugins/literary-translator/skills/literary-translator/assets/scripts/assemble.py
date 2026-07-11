@@ -123,7 +123,16 @@ line, `success:false`, `reason` naming the exact state
 completeness gate: at least one manifest segment -- including any
 translate-decision front/back matter -- is not yet converged, so the book
 would be incomplete; assembly refuses a partial project rather than shipping
-a book missing segments) | `profile_precondition`).
+a book missing segments) | `profile_precondition` | `dependency_precondition`
+(a BUILT-IN adapter module halted via sys.exit() during its own
+module-level dependency preflight, e.g. a missing-package guard, while
+dispatch_adapter() was importing it; mirrors the same reason this script's
+own top-of-file validate_draft.py/output_resolve.py imports already use) |
+`adapter_import_precondition` (a CUSTOM renderer module halted via
+sys.exit() during its own module-level import-time precondition check --
+distinct from `dependency_precondition` because a custom renderer is an
+open extension point and its halt reason isn't necessarily a missing
+dependency)).
 """
 import hashlib
 import importlib.util
@@ -214,7 +223,7 @@ class AssembleError(Exception):
     reviewer-hardened fail-closed checks; older call sites that don't
     pass one simply omit the field, unchanged."""
 
-    def __init__(self, message: str, reason: str | None = None):
+    def __init__(self, message: str, reason: "str | None" = None):
         super().__init__(message)
         self.reason = reason
 
@@ -1095,6 +1104,20 @@ def build_nodestream(profile: dict, manifest: dict, converged: dict) -> tuple:
 # ---------------------------------------------------------------------------
 
 
+def _system_exit_detail(exc: SystemExit) -> str:
+    """`sys.exit(some_string)` sets `SystemExit.code` to that string, but
+    Python only auto-prints it to stderr when the exception propagates all
+    the way to the interpreter uncaught -- since dispatch_adapter() catches
+    it here, that message would otherwise be silently discarded even when
+    the halting module never itself wrote anything to stderr. Surface it
+    when present; `exc.code` is `None`/an int/empty for a plain
+    `sys.exit()` or `sys.exit(2)`, which carries no extra information
+    beyond "see stderr"."""
+    if isinstance(exc.code, str) and exc.code:
+        return f"it exited with: {exc.code!r}"
+    return "see this run's stderr for the specific reason it halted"
+
+
 def dispatch_adapter(nodestream: dict, canon: dict, profile: dict, out_dir: Path) -> dict:
     try:
         adapter = output_resolve.resolve_output_adapter(profile, DURABLE_ROOT)
@@ -1110,6 +1133,22 @@ def dispatch_adapter(nodestream: dict, canon: dict, profile: dict, out_dir: Path
                 f"could not import built-in adapter module {adapter!r} from "
                 f"{SCRIPTS_DIR}: {exc} -- has this adapter shipped yet?"
             ) from exc
+        except SystemExit as exc:
+            # A built-in adapter (e.g. render_obsidian.py) can halt via
+            # sys.exit() during its own module-level dependency preflight
+            # (a missing-package guard) -- SystemExit deliberately does not
+            # subclass Exception, so it would otherwise escape both this
+            # function's own `except Exception` below and main()'s
+            # outermost `except Exception` too, crashing the process with
+            # no JSON on stdout. Re-surface it as the same
+            # `dependency_precondition` contract the top-of-file
+            # validate_draft/output_resolve imports already use.
+            raise AssemblePrecondition(
+                "dependency_precondition",
+                f"built-in adapter module {adapter!r} halted during its "
+                f"own module-level dependency preflight while being "
+                f"imported from {SCRIPTS_DIR} -- {_system_exit_detail(exc)}",
+            ) from exc
     else:
         # A Path -- the resolved, path-safety-checked custom renderer module.
         if not adapter.is_file():
@@ -1120,6 +1159,22 @@ def dispatch_adapter(nodestream: dict, canon: dict, profile: dict, out_dir: Path
         mod = importlib.util.module_from_spec(spec)
         try:
             spec.loader.exec_module(mod)
+        except SystemExit as exc:
+            # Mirrors the built-in-adapter case above -- SystemExit would
+            # otherwise escape uncaught the same way -- but unlike a
+            # built-in adapter (whose only module-level sys.exit() is a
+            # known dependency guard), a user-authored custom renderer is
+            # an open extension point: its own module-level halt could be
+            # ANY precondition it chooses to check, not necessarily a
+            # missing dependency. Use a distinct, honest reason rather than
+            # claiming "dependency preflight" for a cause we don't actually
+            # know.
+            raise AssemblePrecondition(
+                "adapter_import_precondition",
+                f"custom renderer module at {adapter} halted during its "
+                f"own module-level import-time precondition check -- "
+                f"{_system_exit_detail(exc)}",
+            ) from exc
         except Exception as exc:
             raise AssembleError(f"custom renderer module at {adapter} failed to import: {exc}") from exc
 
