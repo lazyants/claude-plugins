@@ -189,6 +189,24 @@ def _scan_text(entry):
     return _TAG_RE.sub(" ", entry.get("source_html", "") or "")
 
 
+def _def_blocks_for(fn_ns, fn_entries_by_n):
+    """The set of def_block ids for the given footnote numbers, skipping any
+    number with no manifest.footnotes[] entry or no def_block. Feeds the
+    embedded-verse discovery worklist's frontier in build_pack() -- a footnote's
+    def block must itself be scanned for embedded verses (a verse quoted inside
+    that footnote's definition may cite yet another footnote, at arbitrary
+    nesting depth)."""
+    out = set()
+    for n in fn_ns:
+        fe = fn_entries_by_n.get(n)
+        if fe is None:
+            continue
+        db = fe.get("def_block")
+        if db:
+            out.add(db)
+    return out
+
+
 def build_pack(seg_id, manifest, canon, lang_config, apparatus_policy):
     """Assemble one segpack dict for seg_id. Raises SegpackError on any
     structural problem in the SOURCE data (missing segment/block/hash field);
@@ -244,31 +262,65 @@ def build_pack(seg_id, manifest, canon, lang_config, apparatus_policy):
     footnote_def_block_ids = set()
 
     if apparatus_policy in FOOTNOTE_CARRYING_POLICIES:
+        fn_entries_by_n = {fe.get("n"): fe for fe in manifest.get("footnotes", [])}
+
+        # Embedded verses indexed by their parent_block. Only mount=="embedded"
+        # verses carry footnote citations that survive ONLY on the verse.store
+        # node: an embedded verse's own text is lifted out of its carrier block
+        # (replaced by its ⟦VERSE_…⟧ placeholder), so neither the carrier's
+        # fnrefs[] nor its plain_text carries that footnote n. A mount=="block"
+        # standalone verse is a real blocks[] entry, already covered by the
+        # ordinary-block scan below -- do NOT double-scan it ("keep non-embedded
+        # behavior unchanged").
+        embedded_verses_by_parent = {}
+        for v in manifest.get("verse", {}).get("store", []):
+            if v.get("mount") != "embedded":
+                continue
+            embedded_verses_by_parent.setdefault(v.get("parent_block"), []).append(v)
+
+        # Round 0: footnotes discovered directly by scanning this segment's own
+        # ordinary blocks (recorded fnrefs[] + sentinel occurrences present in
+        # the assembled text).
         fn_ns_recorded = {n for b in seg_blocks for n in (b.get("fnrefs") or [])}
-        # cross-check: sentinel occurrences actually present in the assembled text
         fn_ns_in_text = set()
         for entry in blocks_out:
             fn_ns_in_text.update(int(m) for m in FNREF_RE.findall(_scan_text(entry)))
 
-        # ALSO: footnotes cited INSIDE an EMBEDDED verse. An embedded verse's
-        # own text is lifted out of the carrier block (replaced by its
-        # ⟦VERSE_…⟧ placeholder), so neither the carrier's fnrefs[] nor its
-        # plain_text carries that footnote n -- it survives ONLY on the
-        # verse.store node. Restrict to embedded verses parented to one of
-        # THIS segment's own blocks (a mount=="block" standalone verse is a
-        # real blocks[] entry, already counted in fn_ns_recorded above -- do
-        # NOT double-scan it, per "keep non-embedded behavior unchanged").
-        # Without this an embedded-verse footnote is dropped from
-        # footnotes_out -> absent from the draft -> a raw ⟦FNREF_n⟧ leaks at
-        # render.
-        for v in manifest.get("verse", {}).get("store", []):
-            if v.get("mount") != "embedded":
-                continue
-            if v.get("parent_block") not in seg_block_ids:
-                continue
-            fn_ns_recorded.update(v.get("fnrefs") or [])
-            fn_ns_in_text.update(int(m) for m in FNREF_RE.findall(v.get("plain_text") or ""))
+        # Worklist / fixed point (#118 item 2): a footnote can be cited inside a
+        # verse that is itself embedded in ANOTHER footnote's def block, at
+        # arbitrary nesting depth (fn1's def embeds V2, V2 cites fn2 whose def
+        # embeds V3, ...). Each round scans embedded verses parented to the
+        # current frontier of blocks, folds their footnote citations into the
+        # discovered set, then grows the frontier to include the def-blocks of
+        # every footnote discovered so far. SEED the frontier with this
+        # segment's own blocks AND the def-blocks of the round-0 footnotes: the
+        # issue's own primary topology (an outer block cites fn1, fn1's def
+        # embeds a verse) has fn1 discovered by the round-0 block scan, so its
+        # def-block must be seeded here -- a worklist enqueuing only def-blocks
+        # of footnotes surfaced by embedded-verse rounds would never reach it,
+        # never find that verse, and silently terminate. `scanned` bounds the
+        # frontier against a pathological citation cycle in source data (which
+        # must never legitimately occur, but must not infinite-loop).
+        scanned = set()
+        frontier = set(seg_block_ids)
+        frontier.update(_def_blocks_for(fn_ns_recorded | fn_ns_in_text, fn_entries_by_n))
+        while True:
+            current = frontier - scanned
+            if not current:
+                break
+            scanned |= current
+            for parent in current:
+                for v in embedded_verses_by_parent.get(parent, []):
+                    fn_ns_recorded.update(v.get("fnrefs") or [])
+                    fn_ns_in_text.update(
+                        int(m) for m in FNREF_RE.findall(v.get("plain_text") or "")
+                    )
+            frontier.update(_def_blocks_for(fn_ns_recorded | fn_ns_in_text, fn_entries_by_n))
 
+        # Stale-manifest cross-check -- run ONCE after the fixed point converges,
+        # over the WHOLE accumulated set, so a footnote first discovered in a
+        # LATER worklist round still gets the same consistency WARN as a
+        # first-pass one (the restructure must not silently drop that coverage).
         if fn_ns_in_text != fn_ns_recorded:
             print(
                 f"WARN [{seg_id}]: FNREF sentinels found in text {sorted(fn_ns_in_text)} "
@@ -277,7 +329,6 @@ def build_pack(seg_id, manifest, canon, lang_config, apparatus_policy):
             )
         fn_ns = sorted(fn_ns_in_text | fn_ns_recorded)
 
-        fn_entries_by_n = {fe.get("n"): fe for fe in manifest.get("footnotes", [])}
         for n in fn_ns:
             fe = fn_entries_by_n.get(n)
             if fe is None:

@@ -1,5 +1,50 @@
 # Changelog
 
+## 1.3.4 — 2026-07-11
+
+Verse×footnote correctness cluster, round 2: the two residual discovery/deadlock bugs surfaced while
+closing #105's render half (#118), plus a medium-severity multi-verse data-loss bug found
+independently while working #117 (#119).
+
+### Fixed
+
+- **`render_obsidian.py`'s `_render_block` rendered only `verses[0]` for a `kind:"verse"` node** (#119)
+  — any 2nd+ entry in a dedicated verse block's `verses[]` was silently dropped (whole content,
+  `rendered` and `gloss` both), and a footnote cited only in a dropped entry left a dangling `[^N]:`
+  definition with no in-body `[^N]`. `_render_block` now loops over every entry (one shared
+  `seen_in_block`, empty skip-mode entries omitted, non-empty joined as separate blockquotes).
+  Defense-in-depth: `validate_draft.py` rejects this carrier shape upstream today, but
+  `render_obsidian.py` is built independently of `assemble.py` and must not truncate a hand-built or
+  future NodeStream.
+- **`verse_policy.mode: skip` footnote deadlock** (#118 item 1) — under skip a verse's content is
+  voided (`{}`), so a footnote whose sole citation site is that content could never be discovered by
+  any sentinel scan, yet `validate_draft.py` check 4 still required its draft text non-empty — an
+  unsatisfiable deadlock that fatally raised `orphan_footnote_def` at whole-book assembly for a
+  segment that passed per-segment validation. `assemble.py`'s orphan-definition check now exempts
+  such a footnote when the manifest's mode-independent `verse.store` ground truth (its `fnrefs[]`
+  **or** a direct `⟦FNREF_n⟧` scan of its `plain_text`) proves the footnote is verse-cited; it is
+  stripped-not-rendered so nothing dangles, and any verse embedded in the exempted footnote's own
+  definition is likewise marked referenced (else `orphan_verse` false-fatals it — including across an
+  arbitrarily deep skip-voided `V001→fn1→V002→fn2→…` chain, which converges via the flat exemption
+  loop with no worklist).
+- **Nested footnote-in-verse-in-footnote-def not discovered** (#118 item 2) — a footnote cited only
+  inside a verse that is itself embedded in *another* footnote's definition (arbitrary nesting depth)
+  was invisible to both `segpack.py` (never handed to the translator) and `assemble.py` (never
+  validated), leaking a raw `⟦FNREF_n⟧`. `segpack.py`'s embedded-verse discovery is now a
+  worklist/fixed-point over a growing frontier (the segment's own blocks **plus** every discovered
+  footnote's def-block); `assemble.py`'s two footnote-embeds-verse branches are de-duplicated into
+  one shared recursive helper that recurses into each def-embedded verse's content for further nested
+  footnotes. Nested footnotes are referenced-only: their text lands in the book-wide `footnotes[]`
+  table but never in any node's `fnrefs`, and the inner verse is stripped-not-rendered — no dangling
+  `[^n]:`, no leaked sentinel.
+- **An embedded verse that is the entire content of a prose block rendered as inline italic, not a
+  blockquote** (#118 item 3) — when a verse placeholder is the whole text of a `kind:"prose"` block
+  (the dominant real case), `_render_block` now promotes it to a blockquote matching a `mount:"block"`
+  verse's presentation. Narrowly scoped: prose only (never a heading, which keeps `## ` semantics),
+  exactly one verse claim, and only when the original block text is nothing but the placeholder — a
+  verse genuinely embedded mid-sentence keeps the compact-italic rendering (a blockquote can't sit
+  mid-paragraph).
+
 ## 1.3.3 — 2026-07-11
 
 Output-layer polish + first-run robustness patch: closes #98, #99, #104, and partially addresses

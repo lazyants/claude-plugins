@@ -170,10 +170,16 @@ emitted: every `⟦FNREF_N⟧` present in any block text has exactly one
 `draft.footnotes[str(N)]`; every verse placeholder present has exactly one
 `draft.verses[vid]`; footnote `n` is unique book-wide; no dangling reference,
 no duplicate. Under `verse_policy.mode: skip`, a verse's `content == {}` is
-expected — there is intentionally no verse body to insert. A footnote
-definition's own nested sentinels are stripped, not recursively expanded, in
-Phase 0/1 — proportional to what the reference project's own markdown path
-does.
+expected — there is intentionally no verse body to insert. As a corollary of
+that voided content, a `skip`-mode footnote whose *sole* citation site is a
+mode-voided verse's own content is legitimately unresolvable-by-design (no
+sentinel scan can reach it, yet the draft still supplies its text) and is
+allowed through, not treated as an orphan footnote — it is stripped, never
+rendered, so nothing dangles; any verse embedded in that footnote's own
+definition is likewise marked referenced (never orphaned) and stripped. A
+footnote definition's own nested sentinels are stripped, not recursively
+expanded, in Phase 0/1 — proportional to what the reference project's own
+markdown path does.
 
 #### The NodeStream and anchor-map artifacts
 

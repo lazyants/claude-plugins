@@ -465,6 +465,91 @@ def assert_project_complete(manifest: dict, converged: dict) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _scan_footnote_def_embedded_verses(
+    text_for_n,
+    seg,
+    block_id,
+    n,
+    footnote_entries_by_n,
+    draft_footnotes,
+    book_footnotes,
+    placeholder_set,
+    placeholder_to_vid,
+    draft_verses,
+    book_seen_placeholders,
+):
+    """Shared "a footnote's own def text embeds a verse" scan, extracted from
+    the two footnote-embeds-verse branches (`_scan_and_validate_sentinels`'s
+    ⟦FNREF_N⟧ branch and `_scan_verse_content_fnrefs`) that previously carried
+    it as a byte-identical "lockstep residual" duplication -- now ONE helper
+    both call so they can't drift.
+
+    Given footnote `n`'s own definition text `text_for_n`, find the verse
+    placeholders embedded in it (`verse.store[].context == "footnote"`), mark
+    each REFERENCED (book-wide `duplicate_verse_placeholder` dedup via
+    `book_seen_placeholders`, plus the fail-closed "the embedded vid must exist
+    in draft.verses" guard), and then RECURSE into each embedded verse's OWN
+    translated content: that content may itself cite footnotes (whose defs may
+    embed further verses...), an arbitrarily deep chain the single-level scan
+    used to miss (#118 item 2). Everything discovered THROUGH a def-embedded
+    verse is REFERENCED-ONLY -- the embedded verse is stripped-not-rendered, so
+    neither it nor any footnote reached via its content may ever surface in a
+    node's `fnrefs`/`verses`; they only satisfy the orphan checks. Returns
+    `(embedded_vids, nested_ns)`:
+      - `embedded_vids`: every def-embedded verse vid marked referenced across
+        the whole recursion (feeds the caller's `referenced_vids`; already
+        added to `book_seen_placeholders`).
+      - `nested_ns`: every footnote number discovered by recursing INTO a
+        def-embedded verse's own content -- referenced-only, funnelled into
+        `seg_referenced_ns` (+ `book_footnotes`, set by the recursive
+        `_scan_verse_content_fnrefs` call), NEVER any node's `fnrefs`.
+
+    `book_seen_placeholders.add(...)` happens BEFORE the recursive call (bounds
+    the recursion against a pathological verse<->footnote citation cycle in
+    source data: a repeat placeholder is caught as `duplicate_verse_placeholder`
+    rather than looping forever)."""
+    embedded_vids = set()
+    nested_ns = set()
+    for embedded_token in ANY_SENTINEL_RE.findall(text_for_n):
+        if FNREF_RE.fullmatch(embedded_token):
+            continue
+        if embedded_token not in placeholder_set:
+            continue
+        embedded_vid = placeholder_to_vid[embedded_token]
+        if embedded_vid not in draft_verses:
+            raise AssembleError(
+                f"[{seg}/{block_id}] footnote n={n}'s own definition text "
+                f"embeds verse placeholder {embedded_token!r} "
+                f"(vid={embedded_vid}), but draft.verses has no entry for it"
+            )
+        if embedded_token in book_seen_placeholders:
+            raise AssembleError(
+                f"[{seg}/{block_id}] verse placeholder {embedded_token!r} "
+                f"(vid={embedded_vid}), embedded in footnote n={n}'s own "
+                f"definition text, is referenced more than once across the book",
+                reason="duplicate_verse_placeholder",
+            )
+        book_seen_placeholders.add(embedded_token)
+        embedded_vids.add(embedded_vid)
+        inner_ns, inner_vids, inner_nested = _scan_verse_content_fnrefs(
+            draft_verses[embedded_vid],
+            seg,
+            block_id,
+            embedded_vid,
+            footnote_entries_by_n,
+            draft_footnotes,
+            book_footnotes,
+            placeholder_set,
+            placeholder_to_vid,
+            draft_verses,
+            book_seen_placeholders,
+        )
+        embedded_vids.update(inner_vids)
+        nested_ns.update(inner_ns)
+        nested_ns.update(inner_nested)
+    return embedded_vids, nested_ns
+
+
 def _scan_and_validate_sentinels(
     text,
     seg,
@@ -478,13 +563,17 @@ def _scan_and_validate_sentinels(
     book_footnotes,
     book_seen_placeholders,
 ):
-    """Returns (fnrefs, referenced_vids): `fnrefs` is the sorted, distinct
-    list of footnote numbers referenced by `text`; `referenced_vids` is the
-    set of verse vids referenced by `text` -- INCLUDING any verse embedded
+    """Returns (fnrefs, referenced_vids, nested_ns): `fnrefs` is the sorted,
+    distinct list of footnote numbers referenced by `text` (these feed BOTH
+    this block node's own `fnrefs` and seg_referenced_ns); `referenced_vids` is
+    the set of verse vids referenced by `text` -- INCLUDING any verse embedded
     inside a referenced footnote's own definition text (see below), even
     though that embedded verse's placeholder is uniformly stripped, never
-    resolved into any node's own `verses` list. The caller accumulates both
-    per-segment, to drive the orphan-definition check below. Raises
+    resolved into any node's own `verses` list; `nested_ns` is the set of
+    footnote numbers discovered by recursing INTO a def-embedded verse's own
+    translated content -- REFERENCED-ONLY, feeding seg_referenced_ns (+
+    book_footnotes) but NEVER this node's `fnrefs`. The caller accumulates all
+    three per-segment, to drive the orphan-definition check below. Raises
     AssembleError (fatal) on any dangling FNREF, unknown verse placeholder,
     misplaced verse placeholder (found in a different block than segpack
     records as its parent_block), malformed sentinel bracket, a repeated
@@ -516,6 +605,7 @@ def _scan_and_validate_sentinels(
 
     fnrefs = set()
     referenced_vids = set()
+    nested_ns = set()
     for token in tokens:
         m = FNREF_RE.fullmatch(token)
         if m:
@@ -547,52 +637,35 @@ def _scan_and_validate_sentinels(
                     f"repeat anywhere in the book is a data-model violation",
                     reason="duplicate_footnote_ref",
                 )
-            # A footnote's own definition text may itself embed a verse
-            # (verse.store[].context == "footnote") -- segpack.py attributes
-            # such an embedded verse to the SAME segment that anchors this
-            # footnote (the footnote-def block itself owns no segment), so
-            # `placeholder_set`/`placeholder_to_vid` already know about it.
-            # It must count as REFERENCED (so the orphan-verse check doesn't
-            # false-fatal it below) even though -- per Phase 0 policy -- its
-            # placeholder is uniformly STRIPPED from the footnote text below,
-            # never independently resolved into any node's own `verses`
-            # list. The parent_block-equality check that ordinary body
-            # verses get does NOT apply here (an embedded verse's own
-            # parent_block is the footnote-def block, never this body
-            # block) -- skipped for this branch, not adapted, per design. A
-            # nested ⟦FNREF_m⟧ inside this same footnote text is left alone
-            # entirely (correctly stripped-and-not-double-counted as-is --
-            # every footnote already has its own single manifest anchor, so
-            # there is no analogous orphan/duplicate risk to guard here).
-            for embedded_token in ANY_SENTINEL_RE.findall(text_for_n):
-                if FNREF_RE.fullmatch(embedded_token):
-                    continue
-                if embedded_token not in placeholder_set:
-                    continue
-                embedded_vid = placeholder_to_vid[embedded_token]
-                if embedded_vid not in draft_verses:
-                    raise AssembleError(
-                        f"[{seg}/{block_id}] footnote n={n}'s own definition "
-                        f"text embeds verse placeholder {embedded_token!r} "
-                        f"(vid={embedded_vid}), but draft.verses has no "
-                        f"entry for it"
-                    )
-                if embedded_token in book_seen_placeholders:
-                    raise AssembleError(
-                        f"[{seg}/{block_id}] verse placeholder "
-                        f"{embedded_token!r} (vid={embedded_vid}), embedded "
-                        f"in footnote n={n}'s own definition text, is "
-                        f"referenced more than once across the book",
-                        reason="duplicate_verse_placeholder",
-                    )
-                book_seen_placeholders.add(embedded_token)
-                referenced_vids.add(embedded_vid)
-
             # Phase 0 policy: strip nested sentinels from footnote DEF text
             # (never recursively expand) -- a footnote may itself embed a
-            # verse (verse.store[].context == "footnote").
+            # verse (verse.store[].context == "footnote"). Register the
+            # stripped def text and count n BEFORE the embedded-verse scan
+            # below, which RECURSES via the shared helper: the
+            # `n in book_footnotes` guard runs on entry, so a nested duplicate
+            # citation of THIS same n (from inside a def-embedded verse's own
+            # content) must see it already registered -- else it would slip
+            # that guard and fail later as a confusing
+            # duplicate_verse_placeholder instead of the correct
+            # duplicate_footnote_ref.
             book_footnotes[n] = ANY_SENTINEL_RE.sub("", text_for_n)
             fnrefs.add(n)
+            # An embedded verse in this footnote's own def text (segpack.py
+            # attributes it to the SAME segment that anchors this footnote, so
+            # `placeholder_set`/`placeholder_to_vid` already know about it) is
+            # marked REFERENCED (so the orphan-verse check doesn't false-fatal
+            # it) and recursed into for further nested footnotes -- all
+            # referenced-only (stripped-not-rendered, never resolved into any
+            # node's `verses`). Its nested_ns feed seg_referenced_ns only,
+            # NEVER this block node's own fnrefs.
+            emb_vids, emb_nested = _scan_footnote_def_embedded_verses(
+                text_for_n, seg, block_id, n,
+                footnote_entries_by_n, draft_footnotes, book_footnotes,
+                placeholder_set, placeholder_to_vid, draft_verses,
+                book_seen_placeholders,
+            )
+            referenced_vids.update(emb_vids)
+            nested_ns.update(emb_nested)
             continue
 
         if token in placeholder_set:
@@ -627,7 +700,7 @@ def _scan_and_validate_sentinels(
             f"placeholder for this segment"
         )
 
-    return sorted(fnrefs), referenced_vids
+    return sorted(fnrefs), referenced_vids, nested_ns
 
 
 def _scan_verse_content_fnrefs(content, seg, block_id, vid,
@@ -638,11 +711,17 @@ def _scan_verse_content_fnrefs(content, seg, block_id, vid,
     -- validated exactly like the block-text FNREF branch (dangling / anchor_seg
     / draft-def / cross-ref duplicate), then registered into book_footnotes so
     nodestream.footnotes carries the def. Per-field distinct-n dedup below; per-n
-    it ALSO mirrors the block branch's embedded-verse-in-def sub-branch
-    (assemble.py:537-559) INLINE, so a footnote whose OWN def embeds a verse
-    marks that inner vid referenced (else orphan_verse at :828 false-fatals it).
-    Deliberately mirrors assemble.py:489-565 -- keep the two in lockstep (see the
-    residual). Returns (set of distinct n, set of embedded-verse vids)."""
+    it delegates the "does this footnote's OWN def embed a verse" scan to the
+    SHARED helper `_scan_footnote_def_embedded_verses` (the same one the block
+    branch now uses -- the old byte-identical "lockstep residual" duplication is
+    gone), which marks that inner vid referenced (else orphan_verse false-fatals
+    it) AND recurses into the inner verse's own content for further nested
+    footnotes (#118 item 2). Returns (ns, referenced_vids, nested_ns): `ns` =
+    distinct footnote numbers cited directly in THIS verse's content;
+    `referenced_vids` = def-embedded verse vids marked referenced;
+    `nested_ns` = footnote numbers discovered by recursing into a def-embedded
+    verse's content -- referenced-only, funnelled to seg_referenced_ns (never a
+    node's `fnrefs`, since that inner verse is stripped-not-rendered)."""
     content = content or {}
     # Scan the two alternate representations SEPARATELY (codex r5 finding 4):
     # dedup ACROSS fields (a footnote naturally in BOTH the rhymed `rendered` and
@@ -691,6 +770,7 @@ def _scan_verse_content_fnrefs(content, seg, block_id, vid,
                                     f"is referenced {c}x within one field", reason="duplicate_footnote_ref")
             ns.add(n)
     referenced_vids = set()
+    nested_ns = set()
     for n in sorted(ns):
         fe = footnote_entries_by_n.get(n)
         if fe is None:
@@ -706,32 +786,26 @@ def _scan_verse_content_fnrefs(content, seg, block_id, vid,
         if n in book_footnotes:
             raise AssembleError(f"[{seg}/{block_id}] footnote n={n} (cited in verse {vid}) "
                                 f"is referenced more than once", reason="duplicate_footnote_ref")
-        # MIRROR assemble.py:537-559 INLINE (codex r6 finding 2): footnote n's OWN
-        # def text may embed a verse (verse.store[].context=="footnote"), which
-        # segpack attributes to THIS segment -> its vid is in draft_verses and
-        # orphan_verse (:828) would false-fatal it. Mark it referenced. Its
-        # placeholder is STRIPPED from the def below (Phase 0) and NEVER enters a
-        # node's `verses` -> referenced-only, NOT rendered. Keep BYTE-IDENTICAL to
-        # :537-559 (lockstep residual).
-        for embedded_token in ANY_SENTINEL_RE.findall(text_for_n):
-            if FNREF_RE.fullmatch(embedded_token):
-                continue
-            if embedded_token not in placeholder_set:
-                continue
-            embedded_vid = placeholder_to_vid[embedded_token]
-            if embedded_vid not in draft_verses:
-                raise AssembleError(f"[{seg}/{block_id}] footnote n={n}'s own definition text "
-                                    f"embeds verse placeholder {embedded_token!r} "
-                                    f"(vid={embedded_vid}), but draft.verses has no entry for it")
-            if embedded_token in book_seen_placeholders:
-                raise AssembleError(f"[{seg}/{block_id}] verse placeholder {embedded_token!r} "
-                                    f"(vid={embedded_vid}), embedded in footnote n={n}'s own "
-                                    f"definition text, is referenced more than once across the book",
-                                    reason="duplicate_verse_placeholder")
-            book_seen_placeholders.add(embedded_token)
-            referenced_vids.add(embedded_vid)
+        # Phase 0 policy: strip nested sentinels from the def text. Register it
+        # (book_footnotes[n]) BEFORE the shared embedded-verse scan below (which
+        # RECURSES): the `n in book_footnotes` guard runs on entry, so a nested
+        # duplicate citation of THIS same n (from inside a def-embedded verse's
+        # content) must see it already registered -- else it fails later as a
+        # confusing duplicate_verse_placeholder instead of duplicate_footnote_ref.
         book_footnotes[n] = ANY_SENTINEL_RE.sub("", text_for_n)
-    return ns, referenced_vids
+        # A verse embedded in footnote n's OWN def text (context=="footnote"),
+        # attributed by segpack to THIS segment, is marked referenced (else
+        # orphan_verse false-fatals it) and recursed into for further nested
+        # footnotes -- all referenced-only (stripped-not-rendered).
+        emb_vids, emb_nested = _scan_footnote_def_embedded_verses(
+            text_for_n, seg, block_id, n,
+            footnote_entries_by_n, draft_footnotes, book_footnotes,
+            placeholder_set, placeholder_to_vid, draft_verses,
+            book_seen_placeholders,
+        )
+        referenced_vids.update(emb_vids)
+        nested_ns.update(emb_nested)
+    return ns, referenced_vids, nested_ns
 
 
 # ---------------------------------------------------------------------------
@@ -748,6 +822,39 @@ def _classify_kind(raw_type: str, claims: list, verse_store_by_vid: dict) -> str
     if is_block_mount:
         return "verse"
     return "prose"
+
+
+def _fnref_numbers_in(text) -> set:
+    """Set of footnote numbers whose ⟦FNREF_n⟧ sentinel appears anywhere in
+    `text` (order-independent). Reuses ANY_SENTINEL_RE + the anchored FNREF_RE
+    rather than introducing a second, drift-prone non-anchored FNREF pattern."""
+    out = set()
+    for tok in ANY_SENTINEL_RE.findall(text or ""):
+        m = FNREF_RE.fullmatch(tok)
+        if m:
+            out.add(int(m.group(1)))
+    return out
+
+
+def _footnote_verse_cited_in_segment(n, draft_verses, verse_store_by_vid) -> bool:
+    """True iff footnote number `n` is cited by SOME verse in this segment's
+    `draft_verses`, per the manifest's MODE-INDEPENDENT verse.store ground
+    truth -- either the verse's recorded `fnrefs[]` OR a direct ⟦FNREF_n⟧ scan
+    of its `plain_text` (mirroring the union segpack.py uses to decide a
+    footnote is verse-cited, so a stale manifest whose sentinel survives in
+    plain_text but is missing from fnrefs[] -- the exact case segpack.py itself
+    WARNs about -- cannot silently re-open the skip-mode deadlock through a gap
+    in this exemption's own condition). Defensive `.get()` throughout (never
+    bracket-index), matching the `_classify_kind` precedent -- a manifest with
+    no verse.store entry for a draft vid must contribute nothing, never
+    KeyError."""
+    for vid in draft_verses:
+        store = verse_store_by_vid.get(vid, {})
+        if n in (store.get("fnrefs") or []):
+            return True
+        if n in _fnref_numbers_in(store.get("plain_text") or ""):
+            return True
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -818,6 +925,13 @@ def build_nodestream(profile: dict, manifest: dict, converged: dict) -> tuple:
     book_seen_placeholders = set()  # every verse placeholder STRING seen so far, book-wide
     all_nodes = []
     seg_min_order_index = {}
+
+    # Fix B (#118 item 1): under verse_policy.mode: skip a verse's content is
+    # voided, so a footnote whose sole citation site is that content is
+    # legitimately unresolvable-by-design -- the orphan-definition check below
+    # exempts it rather than fatally raising orphan_footnote_def. Read once here
+    # (mode-independent, book-wide), matching the `meta` field's own read below.
+    verse_skip_mode = _profile_get(profile, "verse_policy.mode") == "skip"
 
     # -- ordinary segments (body + translate-decision frontback) --------
     for seg_entry in manifest_segments:
@@ -901,7 +1015,7 @@ def build_nodestream(profile: dict, manifest: dict, converged: dict) -> tuple:
             claims = verses_by_parent.get(bid, [])
             kind = _classify_kind(raw_type, claims, verse_store_by_vid)
 
-            fnrefs, referenced_vids = _scan_and_validate_sentinels(
+            fnrefs, referenced_vids, block_nested_ns = _scan_and_validate_sentinels(
                 text,
                 seg,
                 bid,
@@ -915,6 +1029,10 @@ def build_nodestream(profile: dict, manifest: dict, converged: dict) -> tuple:
                 book_seen_placeholders,
             )
             seg_referenced_ns.update(fnrefs)
+            # nested_ns (footnotes reached only THROUGH a def-embedded verse's
+            # content) are referenced-only -- they satisfy the orphan check but
+            # must NEVER join this block node's own fnrefs below.
+            seg_referenced_ns.update(block_nested_ns)
             seg_referenced_vids.update(referenced_vids)
 
             verses_field = []
@@ -934,7 +1052,7 @@ def build_nodestream(profile: dict, manifest: dict, converged: dict) -> tuple:
                 # so the footnote is registered into book_footnotes/node.fnrefs
                 # (else render leaks a raw sentinel with no [^n]: def) and its
                 # orphan-definition/orphan-verse checks below don't false-fatal.
-                v_ns, v_ref_vids = _scan_verse_content_fnrefs(
+                v_ns, v_ref_vids, v_nested_ns = _scan_verse_content_fnrefs(
                     draft_verses[vid], seg, bid, vid,
                     footnote_entries_by_n, draft_footnotes, book_footnotes,
                     placeholder_set, placeholder_to_vid, draft_verses,
@@ -942,6 +1060,10 @@ def build_nodestream(profile: dict, manifest: dict, converged: dict) -> tuple:
                 )
                 verse_fnrefs.update(v_ns)
                 seg_referenced_vids.update(v_ref_vids)
+                # Referenced-only: nested footnotes reached through a
+                # def-embedded verse's content satisfy the orphan check but must
+                # never join this rendered verse's carrier node fnrefs.
+                seg_referenced_ns.update(v_nested_ns)
                 verses_field.append(
                     {"vid": vid, "placeholder": c["placeholder"], "content": draft_verses[vid]}
                 )
@@ -969,13 +1091,49 @@ def build_nodestream(profile: dict, manifest: dict, converged: dict) -> tuple:
         # -- somewhere in its own blocks -- a defined-but-never-referenced
         # -- entry is a fatal bijection violation, not silently dropped.
         for n_str in draft_footnotes:
-            if int(n_str) not in seg_referenced_ns:
-                raise AssembleError(
-                    f"[{seg}] draft.footnotes[{n_str!r}] is defined but "
-                    f"never referenced by any ⟦FNREF_{n_str}⟧ sentinel in "
-                    f"this segment's blocks -- orphan footnote definition",
-                    reason="orphan_footnote_def",
+            n = int(n_str)
+            if n in seg_referenced_ns:
+                continue
+            if verse_skip_mode and _footnote_verse_cited_in_segment(
+                n, draft_verses, verse_store_by_vid
+            ):
+                # Fix B (#118 item 1): a skip-mode footnote whose sole citation
+                # site is a mode-voided verse's content -- legitimately
+                # unresolvable, not an orphan. Referenced-ONLY: its def text is
+                # NOT registered into book_footnotes and n never joins any
+                # node's fnrefs, so nothing dangles at render. But a verse
+                # EMBEDDED in this exempted footnote's own def text must still be
+                # marked referenced (else the orphan_verse loop below
+                # false-fatals it): scan it via the shared helper and fold the
+                # found vids into seg_referenced_vids. Under skip the helper's
+                # recursion into each embedded verse's own content is a no-op
+                # (content == {}), so no book_footnotes are set and nested_ns is
+                # empty -- an arbitrarily deep skip-voided chain
+                # (V001->fn1->V002->fn2->...) converges via THIS flat loop
+                # instead, because every footnote in the chain is independently
+                # exempted by the same manifest-ground-truth condition,
+                # order-independent, and each exemption scans its own def text.
+                emb_vids, _emb_nested = _scan_footnote_def_embedded_verses(
+                    draft_footnotes.get(n_str) or "",
+                    seg,
+                    f"{n_str}:skip-exempt",
+                    n,
+                    footnote_entries_by_n,
+                    draft_footnotes,
+                    book_footnotes,
+                    placeholder_set,
+                    placeholder_to_vid,
+                    draft_verses,
+                    book_seen_placeholders,
                 )
+                seg_referenced_vids.update(emb_vids)
+                continue
+            raise AssembleError(
+                f"[{seg}] draft.footnotes[{n_str!r}] is defined but "
+                f"never referenced by any ⟦FNREF_{n_str}⟧ sentinel in "
+                f"this segment's blocks -- orphan footnote definition",
+                reason="orphan_footnote_def",
+            )
         for vid in draft_verses:
             if vid not in seg_referenced_vids:
                 raise AssembleError(

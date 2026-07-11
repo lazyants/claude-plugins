@@ -1987,5 +1987,268 @@ def test_correct_full_marker_payload_still_cleans_normally(tmp_path):
     assert render_obsidian._is_valid_vault_marker(marker_path)
 
 
+# ===========================================================================
+# 15. #119 (Fix A): a kind:"verse" node's `verses[]` may carry 2+ entries --
+#     _render_block must render EVERY entry, not silently truncate to
+#     verses[0]. Framed as DEFENSE-IN-DEPTH: the real validated pipeline
+#     does not feed render a 2+-entry `verses` list today (validate_draft.py
+#     rejects the carrier shape earlier), but render_obsidian.py is built and
+#     tested independently of assemble.py -- a hand-built NodeStream, a future
+#     assemble.py change, or a different adapter could still feed it one, and
+#     it must not drop content. All three tests below are RED against the
+#     pre-fix verses[0]-only code and GREEN after the multi-entry loop lands.
+# ===========================================================================
+
+
+def test_verse_block_renders_all_entries_not_only_the_first(tmp_path):
+    """A kind:"verse" node carrying TWO verse entries must render BOTH, as
+    two separate blockquotes (blank line between them, matching how
+    _render_segment_note joins sibling blocks) -- neither dropped. RED
+    pre-fix: verses[1] is silently lost (only verses[0] rendered)."""
+    v1_ph = "⟦VERSE_va1_00000110⟧"
+    v2_ph = "⟦VERSE_va2_00000111⟧"
+    node = make_node(
+        "vblockMulti", "seg01", f"{v1_ph}\n{v2_ph}", kind="verse",
+        verses=[
+            {"vid": "va1", "placeholder": v1_ph,
+             "content": {"rendered": "First verse line one.\nFirst verse line two."}},
+            {"vid": "va2", "placeholder": v2_ph,
+             "content": {"rendered": "Second verse line one.\nSecond verse line two."}},
+        ],
+    )
+    ns = make_nodestream([node])
+    canon = make_canon({})
+    profile = make_profile()
+
+    out_dir, manifest = render_into(tmp_path, ns, canon, profile)
+    body_matches = find_file_with_content(
+        all_written_paths(out_dir, manifest), lambda t: "First verse line one" in t
+    )
+    assert len(body_matches) == 1
+    body_text = body_matches[0].read_text(encoding="utf-8")
+
+    # Both verse entries render, neither truncated.
+    assert "> First verse line one." in body_text, body_text
+    assert "> Second verse line one." in body_text, (
+        f"the SECOND verse entry must not be silently dropped (#119) -- "
+        f"got:\n{body_text}"
+    )
+    # They render as two DISTINCT blockquotes (blank line between), not one
+    # merged blockquote -- the blank-line join is what makes Obsidian treat
+    # them as separate quote blocks.
+    assert "> First verse line two.\n\n> Second verse line one." in body_text, (
+        f"the two verse entries must render as SEPARATE blockquotes "
+        f"(blank line between), not merged into one -- got:\n{body_text}"
+    )
+
+
+def test_verse_block_multi_entry_shares_one_seen_in_block(tmp_path):
+    """A name appearing in BOTH verse entries of one kind:"verse" node must
+    wikilink only ONCE -- the multi-entry loop shares ONE `seen_in_block`
+    across all entries (#105c: one wikilink per rendered block). RED pre-fix
+    on the "second entry rendered at all" axis (verses[1] dropped, so its
+    occurrence is absent); a naive fix using a fresh seen_in_block per entry
+    would make count==2, which this pins to 1."""
+    v1_ph = "⟦VERSE_vb1_00000112⟧"
+    v2_ph = "⟦VERSE_vb2_00000113⟧"
+    node = make_node(
+        "vblockShared", "seg01", f"{v1_ph}\n{v2_ph}", kind="verse",
+        verses=[
+            {"vid": "vb1", "placeholder": v1_ph,
+             "content": {"rendered": "Иван walks first."}},
+            {"vid": "vb2", "placeholder": v2_ph,
+             "content": {"rendered": "Иван walks again."}},
+        ],
+    )
+    ns = make_nodestream([node])
+    canon = make_canon({"Ivan_src": canon_entry("Ivan_src", "Иван", category="person")})
+    profile = make_profile(folders={"person": "people"})
+
+    out_dir, manifest = render_into(tmp_path, ns, canon, profile)
+    identity = entity_note_identity(out_dir, manifest, "Ivan_src")
+    body_matches = find_file_with_content(
+        all_written_paths(out_dir, manifest), lambda t: "walks first" in t
+    )
+    assert len(body_matches) == 1
+    body_text = body_matches[0].read_text(encoding="utf-8")
+
+    # The second entry renders (RED pre-fix: dropped entirely).
+    assert "Иван walks again" in body_text, (
+        f"the second verse entry must render (#119) -- got:\n{body_text}"
+    )
+    link_str = f"[[{identity}|Иван]]"
+    assert body_text.count(link_str) == 1, (
+        f"a name in BOTH verse entries must link exactly once (shared "
+        f"seen_in_block across entries) -- got {body_text.count(link_str)} "
+        f"in:\n{body_text}"
+    )
+
+
+def test_verse_block_footnote_cited_only_in_second_entry_is_not_dropped(tmp_path):
+    """A footnote cited ONLY inside the second verse entry's content must
+    render its [^N] ref in the body -- with no dangling [^N]: definition. The
+    node's fnrefs (built from ALL entries' footnotes) emits the [^N]: def
+    line regardless; pre-fix, verses[1] is dropped so the [^N] REF never
+    appears in the body -> a dangling def. RED pre-fix on the body-ref
+    assertion."""
+    v1_ph = "⟦VERSE_vc1_00000114⟧"
+    v2_ph = "⟦VERSE_vc2_00000115⟧"
+    node = make_node(
+        "vblockFn", "seg01", f"{v1_ph}\n{v2_ph}", kind="verse", fnrefs=[7],
+        verses=[
+            {"vid": "vc1", "placeholder": v1_ph,
+             "content": {"rendered": "First verse, no footnote here."}},
+            {"vid": "vc2", "placeholder": v2_ph,
+             "content": {"rendered": "Second verse cites ⟦FNREF_7⟧ inline."}},
+        ],
+    )
+    ns = make_nodestream([node], footnotes=[{"n": 7, "text": "The seventh footnote."}])
+    canon = make_canon({})
+    profile = make_profile()
+
+    out_dir, manifest = render_into(tmp_path, ns, canon, profile)
+    body_matches = find_file_with_content(
+        all_written_paths(out_dir, manifest), lambda t: "First verse, no footnote" in t
+    )
+    assert len(body_matches) == 1
+    body_text = body_matches[0].read_text(encoding="utf-8")
+
+    # The [^7] REF must appear in the body, inside the second verse's own
+    # blockquote line (RED pre-fix: that whole entry is dropped, leaving the
+    # [^7]: def dangling with no in-body reference).
+    assert "> Second verse cites [^7] inline." in body_text, (
+        f"the footnote cited only in the SECOND verse entry must render its "
+        f"[^7] ref in the body (#119 compounding symptom) -- got:\n{body_text}"
+    )
+    assert "[^7]: The seventh footnote." in body_text, (
+        f"the footnote's own [^7]: definition line must be present -- "
+        f"got:\n{body_text}"
+    )
+    assert "⟦FNREF_7⟧" not in body_text, (
+        f"the raw sentinel must never leak into rendered output -- got:\n{body_text}"
+    )
+
+
+# ===========================================================================
+# 16. #118 item 3 (Fix D): a verse embedded as the ENTIRE content of a prose
+#     block renders as a full blockquote (matching a mount:"block" verse's
+#     presentation), not the compact inline italic. Scoped narrowly: prose
+#     only (NEVER heading), exactly one verse claim, and the ORIGINAL block
+#     text must be nothing but that verse's placeholder. A verse genuinely
+#     embedded mid-sentence, or in a heading, keeps today's compact-italic
+#     rendering UNCHANGED (regression guards below).
+# ===========================================================================
+
+
+def test_embedded_verse_sole_content_of_prose_block_renders_as_blockquote(tmp_path):
+    """A prose block whose ENTIRE text is a single verse placeholder (the
+    dominant real case) renders that verse as a blockquote, with its own
+    cited footnote [^n] inside it. RED pre-fix: rendered as compact inline
+    italic (*...*), not a blockquote."""
+    v_ph = "⟦VERSE_vSole_00000120⟧"
+    node = make_node(
+        "p1", "seg01", v_ph, kind="prose", fnrefs=[3],
+        verses=[{
+            "vid": "vSole", "placeholder": v_ph,
+            "content": {"rendered": "A whole-block verse line ⟦FNREF_3⟧ here."},
+        }],
+    )
+    ns = make_nodestream([node], footnotes=[{"n": 3, "text": "Sole-content footnote."}])
+    canon = make_canon({})
+    profile = make_profile()
+
+    out_dir, manifest = render_into(tmp_path, ns, canon, profile)
+    body_matches = find_file_with_content(
+        all_written_paths(out_dir, manifest), lambda t: "whole-block verse line" in t
+    )
+    assert len(body_matches) == 1
+    body_text = body_matches[0].read_text(encoding="utf-8")
+
+    # Blockquote rendering, with the footnote ref inside the quote.
+    assert "> A whole-block verse line [^3] here." in body_text, (
+        f"a verse that is the SOLE content of a prose block must render as a "
+        f"blockquote (#118 item 3) -- got:\n{body_text}"
+    )
+    # NOT the old compact inline italic.
+    assert "*A whole-block verse line [^3] here.*" not in body_text, (
+        f"the sole-content embedded verse must NOT keep the compact inline "
+        f"italic rendering -- got:\n{body_text}"
+    )
+    assert "[^3]: Sole-content footnote." in body_text, body_text
+    assert "⟦FNREF_3⟧" not in body_text, body_text
+
+
+def test_embedded_verse_with_surrounding_prose_stays_compact_italic(tmp_path):
+    """Regression guard for Fix D's narrow scope: the SAME embedded verse,
+    but with real prose text before AND after it in the same block, is
+    genuinely mid-paragraph -- a blockquote cannot sit there -- so it MUST
+    keep today's compact inline-italic rendering, UNCHANGED. Green both
+    pre-fix and post-fix (proves the fix does not over-reach)."""
+    v_ph = "⟦VERSE_vMid_00000121⟧"
+    node = make_node(
+        "p1", "seg01", f"Before it: {v_ph} and after it.", kind="prose", fnrefs=[3],
+        verses=[{
+            "vid": "vMid", "placeholder": v_ph,
+            "content": {"rendered": "A mid-sentence verse line ⟦FNREF_3⟧ here."},
+        }],
+    )
+    ns = make_nodestream([node], footnotes=[{"n": 3, "text": "Mid footnote."}])
+    canon = make_canon({})
+    profile = make_profile()
+
+    out_dir, manifest = render_into(tmp_path, ns, canon, profile)
+    body_matches = find_file_with_content(
+        all_written_paths(out_dir, manifest), lambda t: "Before it:" in t
+    )
+    assert len(body_matches) == 1
+    body_text = body_matches[0].read_text(encoding="utf-8")
+
+    assert "Before it: *A mid-sentence verse line [^3] here.* and after it." in body_text, (
+        f"a verse embedded mid-sentence must keep the compact inline-italic "
+        f"rendering (a blockquote cannot sit mid-paragraph) -- got:\n{body_text}"
+    )
+    assert "> A mid-sentence verse line" not in body_text, (
+        f"a mid-sentence embedded verse must NOT be promoted to a blockquote "
+        f"-- got:\n{body_text}"
+    )
+    assert "[^3]: Mid footnote." in body_text, body_text
+    assert "⟦FNREF_3⟧" not in body_text, body_text
+
+
+def test_embedded_verse_sole_content_of_heading_stays_inline_not_blockquote(tmp_path):
+    """Regression guard for Fix D's `kind == "prose"`-only scope: a HEADING
+    node whose entire text is a verse placeholder must keep its "## " heading
+    semantics with a compact inline rendering -- NEVER become a bare
+    blockquote (a "## > ..." would be nonsense). Green both pre-fix and
+    post-fix (the fix explicitly excludes kind == "heading")."""
+    v_ph = "⟦VERSE_vHead_00000122⟧"
+    node = make_node(
+        "h1", "seg01", v_ph, kind="heading",
+        verses=[{
+            "vid": "vHead", "placeholder": v_ph,
+            "content": {"rendered": "A heading-embedded verse line."},
+        }],
+    )
+    ns = make_nodestream([node])
+    canon = make_canon({})
+    profile = make_profile()
+
+    out_dir, manifest = render_into(tmp_path, ns, canon, profile)
+    body_matches = find_file_with_content(
+        all_written_paths(out_dir, manifest), lambda t: "heading-embedded verse line" in t
+    )
+    assert len(body_matches) == 1
+    body_text = body_matches[0].read_text(encoding="utf-8")
+
+    assert "## *A heading-embedded verse line.*" in body_text, (
+        f"a heading whose whole text is a verse placeholder must keep its "
+        f"## heading + compact-italic rendering -- got:\n{body_text}"
+    )
+    assert "> A heading-embedded verse line" not in body_text, (
+        f"a heading-embedded verse must NEVER be promoted to a blockquote "
+        f"-- got:\n{body_text}"
+    )
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))

@@ -2255,5 +2255,509 @@ def test_custom_renderer_system_exit_gets_adapter_import_precondition_not_depend
     assert "missing API_KEY env var for license check" in payload["error"], payload["error"]
 
 
+# ===========================================================================
+# 16. #118 item 1 (Fix B) -- verse_policy.mode: skip footnote deadlock, and
+#     #118 item 2 (Fix C) -- a footnote cited only inside a verse that is
+#     itself embedded in another footnote's def text (arbitrary nesting depth).
+#     Fix B's orphan_verse extension reuses Fix C's shared def-embedded-verse
+#     helper, so the two are exercised together here.
+# ===========================================================================
+
+FN_PH_3 = "⟦FNREF_3⟧"
+V_PH_OUTER = "⟦VERSE_vOuter_11111111⟧"
+V_PH_INNER = "⟦VERSE_vInner_22222222⟧"
+V_PH_INNER2 = "⟦VERSE_vInner2_33333333⟧"
+V_PH_GHOST = "⟦VERSE_vGhost_44444444⟧"
+
+
+def _all_rendered_markdown(root: Path) -> str:
+    """Concatenated text of every rendered .md the obsidian adapter wrote under
+    out/. Used to prove a footnote/verse that is stripped-not-rendered leaves
+    NO dangling `[^n]:` definition and NO leaked raw sentinel in the real
+    output, not just in the intermediate nodestream."""
+    return "".join(p.read_text(encoding="utf-8") for p in (root / "out").rglob("*.md"))
+
+
+def test_skip_mode_footnote_cited_only_in_voided_verse_content_is_not_orphan(tmp_path):
+    """Fix B base exemption: under verse_policy.mode: skip a verse's content is
+    voided ({}), so a footnote whose SOLE citation site is that verse's content
+    can never be discovered by any sentinel scan -- yet the draft still supplies
+    placeholder footnote text (satisfies validate_draft check 4). Pre-fix this
+    deadlocks as a fatal orphan_footnote_def; post-fix it is exempted (the
+    manifest's mode-independent verse.store.fnrefs proves the footnote is
+    verse-cited). The footnote is stripped-not-rendered: no dangling [^1]:."""
+    root = make_root(tmp_path, verse_mode="skip")
+    write_manifest(
+        root,
+        blocks={
+            "vblockA": {"type": "VERSE", "seg": "seg01", "order_index": 0,
+                        "plain_text": V_PH_OUTER},
+            "FN1": {"type": "FN", "seg": None, "order_index": 1,
+                    "plain_text": "A plain footnote about the poem."},
+        },
+        segments=[{"seg": "seg01", "kind": "body", "title_text": "Ch1",
+                   "block_ids": ["vblockA"], "word_count": 10}],
+        footnotes=[{"n": 1, "anchor_block": "vblockA", "anchor_seg": "seg01", "def_block": "FN1"}],
+        # The manifest's own ground truth: verse vOuter's SOURCE cites footnote 1.
+        verse_store=[{"vid": "vOuter", "placeholder": V_PH_OUTER, "context": "body",
+                       "parent_block": "vblockA", "mount": "block", "fnrefs": [1]}],
+    )
+    write_segpack(
+        root, "seg01",
+        blocks=[{"id": "vblockA", "order_index": 0, "plain_text": V_PH_OUTER}],
+        footnotes=[{"n": 1, "source_text": "A plain footnote about the poem."}],
+        verses=[{"vid": "vOuter", "placeholder": V_PH_OUTER, "parent_block": "vblockA"}],
+    )
+    write_draft(
+        root, "seg01",
+        blocks={"vblockA": V_PH_OUTER},
+        # draft.footnotes supplies text (check 4); draft.verses is voided (skip).
+        footnotes={"1": "Translated footnote about the poem."},
+        verses={"vOuter": {}},
+    )
+    write_ledger(root, {"seg01": {"status": "converged"}})
+
+    result = run_assemble(root)
+    assert result.returncode == 0, (
+        f"a skip-mode footnote cited only inside a mode-voided verse's content "
+        f"must be exempted, not fatally orphaned:\n"
+        f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    )
+    ns = read_nodestream(root)
+    assert 1 not in {fn["n"] for fn in ns["footnotes"]}, (
+        "the exempted (stripped-not-rendered) footnote must NOT enter the "
+        "book-wide footnotes[] table"
+    )
+    assert all(1 not in n["fnrefs"] for n in ns["nodes"]), (
+        "the exempted footnote must never join any node's fnrefs"
+    )
+    md = _all_rendered_markdown(root)
+    assert "[^1]:" not in md, f"no dangling footnote definition may render -- got:\n{md}"
+
+
+def test_skip_mode_genuine_orphan_footnote_still_fatal(tmp_path):
+    """Fix B is scoped, not a blanket skip-mode bypass: a footnote defined in
+    the draft but cited by NO verse (and no prose) under skip is still a
+    genuine orphan and must still fatally raise orphan_footnote_def."""
+    root = make_root(tmp_path, verse_mode="skip")
+    write_manifest(
+        root,
+        blocks={
+            "p1": {"type": "PARA", "seg": "seg01", "order_index": 0,
+                   "plain_text": "Prose with no footnote citation at all."},
+            "FN9": {"type": "FN", "seg": None, "order_index": 1, "plain_text": "Orphan def."},
+        },
+        segments=[{"seg": "seg01", "kind": "body", "title_text": "Ch1",
+                   "block_ids": ["p1"], "word_count": 10}],
+        footnotes=[{"n": 9, "anchor_block": "p1", "anchor_seg": "seg01", "def_block": "FN9"}],
+    )
+    write_segpack(
+        root, "seg01",
+        blocks=[{"id": "p1", "order_index": 0, "plain_text": "Prose with no footnote citation at all."}],
+        footnotes=[{"n": 9, "source_text": "Orphan def."}],
+    )
+    write_draft(
+        root, "seg01",
+        blocks={"p1": "Translated prose with no footnote citation at all."},
+        footnotes={"9": "Translated orphan def."},
+    )
+    write_ledger(root, {"seg01": {"status": "converged"}})
+
+    result = run_assemble(root)
+    assert result.returncode == 1, (
+        f"a genuine orphan footnote (cited by no verse) must still fatal even "
+        f"under skip mode:\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    )
+    payload = parse_one_json_line(result)
+    assert payload["success"] is False
+    assert payload.get("reason") == "orphan_footnote_def" or "orphan" in payload["error"].lower()
+    assert "9" in payload["error"]
+
+
+def test_skip_mode_exemption_uses_plain_text_fallback_when_fnrefs_stale(tmp_path):
+    """Fix B robustness: the exemption condition mirrors the UNION segpack
+    itself uses -- verse.store.fnrefs OR a direct ⟦FNREF_n⟧ scan of
+    verse.store.plain_text. A stale manifest whose sentinel survives in
+    plain_text but is missing from fnrefs[] (the exact case segpack.py WARNs
+    about) must still exempt, never re-open the deadlock through a gap in the
+    exemption's own condition."""
+    root = make_root(tmp_path, verse_mode="skip")
+    write_manifest(
+        root,
+        blocks={
+            "vblockA": {"type": "VERSE", "seg": "seg01", "order_index": 0,
+                        "plain_text": V_PH_OUTER},
+            "FN1": {"type": "FN", "seg": None, "order_index": 1, "plain_text": "A footnote."},
+        },
+        segments=[{"seg": "seg01", "kind": "body", "title_text": "Ch1",
+                   "block_ids": ["vblockA"], "word_count": 10}],
+        footnotes=[{"n": 1, "anchor_block": "vblockA", "anchor_seg": "seg01", "def_block": "FN1"}],
+        # STALE: fnrefs[] omits 1, but plain_text still carries the ⟦FNREF_1⟧
+        # sentinel -- the union must still recognize the verse cites footnote 1.
+        verse_store=[{"vid": "vOuter", "placeholder": V_PH_OUTER, "context": "body",
+                       "parent_block": "vblockA", "mount": "block", "fnrefs": [],
+                       "plain_text": f"Poem line {FN_PH_1} in source"}],
+    )
+    write_segpack(
+        root, "seg01",
+        blocks=[{"id": "vblockA", "order_index": 0, "plain_text": V_PH_OUTER}],
+        footnotes=[{"n": 1, "source_text": "A footnote."}],
+        verses=[{"vid": "vOuter", "placeholder": V_PH_OUTER, "parent_block": "vblockA"}],
+    )
+    write_draft(
+        root, "seg01",
+        blocks={"vblockA": V_PH_OUTER},
+        footnotes={"1": "Translated footnote."},
+        verses={"vOuter": {}},
+    )
+    write_ledger(root, {"seg01": {"status": "converged"}})
+
+    result = run_assemble(root)
+    assert result.returncode == 0, (
+        f"the exemption must recognize a footnote cited via the verse's "
+        f"plain_text even when fnrefs[] is stale:\n"
+        f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    )
+
+
+def test_skip_mode_case_g_footnote_def_embeds_verse_succeeds(tmp_path):
+    """Fix B orphan_verse extension (the round-3 must-fix), issue's own primary
+    topology under skip: vOuter (mount:block) cites fn1 only inside its content,
+    and fn1's def text embeds a SECOND verse vInner. Under skip vOuter's content
+    is voided, so fn1 is never discovered -> base-exempted; the exemption must
+    ALSO mark vInner referenced (via the shared def-scan helper), else the
+    orphan_verse loop false-fatals vInner. Two-stage red: orphan_footnote_def
+    before the base exemption, orphan_verse before the extension."""
+    root = make_root(tmp_path, verse_mode="skip")
+    write_manifest(
+        root,
+        blocks={
+            "vblockA": {"type": "VERSE", "seg": "seg01", "order_index": 0,
+                        "plain_text": V_PH_OUTER},
+            "FN1": {"type": "FN", "seg": None, "order_index": 1,
+                    "plain_text": f"A note quoting another poem: {V_PH_INNER}"},
+        },
+        segments=[{"seg": "seg01", "kind": "body", "title_text": "Ch1",
+                   "block_ids": ["vblockA"], "word_count": 10}],
+        footnotes=[{"n": 1, "anchor_block": "vblockA", "anchor_seg": "seg01", "def_block": "FN1"}],
+        verse_store=[
+            {"vid": "vOuter", "placeholder": V_PH_OUTER, "context": "body",
+             "parent_block": "vblockA", "mount": "block", "fnrefs": [1]},
+            {"vid": "vInner", "placeholder": V_PH_INNER, "context": "footnote",
+             "parent_block": "FN1", "mount": "embedded", "fnrefs": []},
+        ],
+    )
+    write_segpack(
+        root, "seg01",
+        blocks=[{"id": "vblockA", "order_index": 0, "plain_text": V_PH_OUTER}],
+        footnotes=[{"n": 1, "source_text": f"A note quoting another poem: {V_PH_INNER}"}],
+        verses=[
+            {"vid": "vOuter", "placeholder": V_PH_OUTER, "parent_block": "vblockA"},
+            {"vid": "vInner", "placeholder": V_PH_INNER, "parent_block": "FN1"},
+        ],
+    )
+    write_draft(
+        root, "seg01",
+        blocks={"vblockA": V_PH_OUTER},
+        footnotes={"1": f"A note quoting another poem: {V_PH_INNER}"},
+        verses={"vOuter": {}, "vInner": {}},
+    )
+    write_ledger(root, {"seg01": {"status": "converged"}})
+
+    result = run_assemble(root)
+    assert result.returncode == 0, (
+        f"case-g under skip must succeed (no orphan_footnote_def AND no "
+        f"orphan_verse):\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    )
+    ns = read_nodestream(root)
+    all_verse_vids = {v["vid"] for n in ns["nodes"] for v in n["verses"]}
+    assert "vInner" not in all_verse_vids, (
+        "the def-embedded verse is stripped-not-rendered -- never a node's verse"
+    )
+    assert 1 not in {fn["n"] for fn in ns["footnotes"]}
+    md = _all_rendered_markdown(root)
+    assert "[^1]:" not in md, f"no dangling footnote definition may render -- got:\n{md}"
+    assert "⟦" not in md and "⟧" not in md, f"no raw sentinel may leak into render -- got:\n{md}"
+
+
+def test_skip_mode_deeper_chain_footnote_def_verse_cites_footnote_succeeds(tmp_path):
+    """Fix B convergence across depth WITHOUT a Fix-B worklist: vOuter cites
+    fn1; fn1's def embeds vInner; vInner's (voided) source content cites fn2;
+    fn2's def embeds vInner2. Every footnote in the chain is INDEPENDENTLY
+    exempted by the flat orphan_footnote_def loop (each on its own
+    manifest-ground-truth condition, order-independent), and each exemption
+    scans its own def text -> the whole chain of verses is marked referenced."""
+    root = make_root(tmp_path, verse_mode="skip")
+    write_manifest(
+        root,
+        blocks={
+            "vblockA": {"type": "VERSE", "seg": "seg01", "order_index": 0,
+                        "plain_text": V_PH_OUTER},
+            "FN1": {"type": "FN", "seg": None, "order_index": 1,
+                    "plain_text": f"Note one quoting: {V_PH_INNER}"},
+            "FN2": {"type": "FN", "seg": None, "order_index": 2,
+                    "plain_text": f"Note two quoting: {V_PH_INNER2}"},
+        },
+        segments=[{"seg": "seg01", "kind": "body", "title_text": "Ch1",
+                   "block_ids": ["vblockA"], "word_count": 10}],
+        footnotes=[
+            {"n": 1, "anchor_block": "vblockA", "anchor_seg": "seg01", "def_block": "FN1"},
+            {"n": 2, "anchor_block": "FN1", "anchor_seg": "seg01", "def_block": "FN2"},
+        ],
+        verse_store=[
+            {"vid": "vOuter", "placeholder": V_PH_OUTER, "context": "body",
+             "parent_block": "vblockA", "mount": "block", "fnrefs": [1]},
+            {"vid": "vInner", "placeholder": V_PH_INNER, "context": "footnote",
+             "parent_block": "FN1", "mount": "embedded", "fnrefs": [2]},
+            {"vid": "vInner2", "placeholder": V_PH_INNER2, "context": "footnote",
+             "parent_block": "FN2", "mount": "embedded", "fnrefs": []},
+        ],
+    )
+    write_segpack(
+        root, "seg01",
+        blocks=[{"id": "vblockA", "order_index": 0, "plain_text": V_PH_OUTER}],
+        footnotes=[{"n": 1, "source_text": f"Note one quoting: {V_PH_INNER}"},
+                   {"n": 2, "source_text": f"Note two quoting: {V_PH_INNER2}"}],
+        verses=[
+            {"vid": "vOuter", "placeholder": V_PH_OUTER, "parent_block": "vblockA"},
+            {"vid": "vInner", "placeholder": V_PH_INNER, "parent_block": "FN1"},
+            {"vid": "vInner2", "placeholder": V_PH_INNER2, "parent_block": "FN2"},
+        ],
+    )
+    write_draft(
+        root, "seg01",
+        blocks={"vblockA": V_PH_OUTER},
+        footnotes={"1": f"Note one quoting: {V_PH_INNER}",
+                   "2": f"Note two quoting: {V_PH_INNER2}"},
+        verses={"vOuter": {}, "vInner": {}, "vInner2": {}},
+    )
+    write_ledger(root, {"seg01": {"status": "converged"}})
+
+    result = run_assemble(root)
+    assert result.returncode == 0, (
+        f"a deeper skip-voided chain must converge via the flat exemption "
+        f"loop:\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    )
+    ns = read_nodestream(root)
+    all_verse_vids = {v["vid"] for n in ns["nodes"] for v in n["verses"]}
+    # vOuter is a mount:block verse -> a node verse (with voided {} content
+    # under skip); only the def-embedded vInner/vInner2 are stripped-not-rendered.
+    assert all_verse_vids == {"vOuter"}, (
+        "only the mount:block outer verse is a node verse; the def-embedded "
+        "chain verses are stripped-not-rendered"
+    )
+
+
+def test_skip_mode_orphan_verse_extension_is_scoped_not_a_blanket_bypass(tmp_path):
+    """Companion to the case-g success test: the orphan_verse extension only
+    marks verses actually embedded in an EXEMPTED footnote's def text. A verse
+    whose placeholder appears in NO block and NO exempted footnote's def
+    (vGhost here -- registered with real draft coverage, parented to FN1 whose
+    def never mentions it) must still fatally raise orphan_verse under skip."""
+    root = make_root(tmp_path, verse_mode="skip")
+    write_manifest(
+        root,
+        blocks={
+            "vblockA": {"type": "VERSE", "seg": "seg01", "order_index": 0,
+                        "plain_text": V_PH_OUTER},
+            "FN1": {"type": "FN", "seg": None, "order_index": 1,
+                    "plain_text": "A note that never mentions the ghost verse."},
+        },
+        segments=[{"seg": "seg01", "kind": "body", "title_text": "Ch1",
+                   "block_ids": ["vblockA"], "word_count": 10}],
+        footnotes=[{"n": 1, "anchor_block": "vblockA", "anchor_seg": "seg01", "def_block": "FN1"}],
+        verse_store=[
+            {"vid": "vOuter", "placeholder": V_PH_OUTER, "context": "body",
+             "parent_block": "vblockA", "mount": "block", "fnrefs": [1]},
+            {"vid": "vGhost", "placeholder": V_PH_GHOST, "context": "footnote",
+             "parent_block": "FN1", "mount": "embedded", "fnrefs": []},
+        ],
+    )
+    write_segpack(
+        root, "seg01",
+        blocks=[{"id": "vblockA", "order_index": 0, "plain_text": V_PH_OUTER}],
+        footnotes=[{"n": 1, "source_text": "A note that never mentions the ghost verse."}],
+        verses=[
+            {"vid": "vOuter", "placeholder": V_PH_OUTER, "parent_block": "vblockA"},
+            {"vid": "vGhost", "placeholder": V_PH_GHOST, "parent_block": "FN1"},
+        ],
+    )
+    write_draft(
+        root, "seg01",
+        blocks={"vblockA": V_PH_OUTER},
+        # FN1's def text (translated) never mentions vGhost's placeholder.
+        footnotes={"1": "A translated note that never mentions the ghost verse."},
+        verses={"vOuter": {}, "vGhost": {}},
+    )
+    write_ledger(root, {"seg01": {"status": "converged"}})
+
+    result = run_assemble(root)
+    assert result.returncode == 1, (
+        f"a verse embedded in NO exempted footnote's def must still be a fatal "
+        f"orphan_verse under skip:\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    )
+    payload = parse_one_json_line(result)
+    assert payload["success"] is False
+    assert payload.get("reason") == "orphan_verse" or "orphan" in payload["error"].lower()
+    assert "vGhost" in payload["error"]
+
+
+def test_footnote_cited_in_def_embedded_verse_content_is_discovered_not_orphan(tmp_path):
+    """Fix C literal issue scenario (#118 item 2), NON-skip: p1's embedded verse
+    vA cites fn1; fn1's def embeds a SECOND verse vFoot; vFoot's OWN translated
+    content cites fn2. Pre-fix nothing scans vFoot's content -> fn2 is invisible
+    and fatals orphan_footnote_def; post-fix the recursive shared helper
+    discovers it. fn2 is referenced-ONLY: present in the book-wide footnotes[]
+    table but in NO node's fnrefs, and its inner verse vFoot is
+    stripped-not-rendered -- so no raw ⟦FNREF_2⟧ and no dangling [^2]: appears
+    anywhere in the rendered output."""
+    v_ph_a = "⟦VERSE_vA_abc12345⟧"
+    v_ph_foot = "⟦VERSE_vFoot_cafe1234⟧"
+    root = make_root(tmp_path)
+    write_manifest(
+        root,
+        blocks={
+            "p1": {"type": "PARA", "seg": "seg01", "order_index": 0,
+                   "plain_text": f"Body text {v_ph_a} here."},
+            "FN1": {"type": "FN", "seg": None, "order_index": 1,
+                    "plain_text": f"A cited couplet: {v_ph_foot}"},
+            "FN2": {"type": "FN", "seg": None, "order_index": 2,
+                    "plain_text": "The second, deeper footnote."},
+        },
+        segments=[{"seg": "seg01", "kind": "body", "title_text": "Ch1",
+                   "block_ids": ["p1"], "word_count": 10}],
+        footnotes=[
+            {"n": 1, "anchor_block": "p1", "anchor_seg": "seg01", "def_block": "FN1"},
+            {"n": 2, "anchor_block": "FN1", "anchor_seg": "seg01", "def_block": "FN2"},
+        ],
+        verse_store=[
+            {"vid": "vA", "placeholder": v_ph_a, "context": "body",
+             "parent_block": "p1", "mount": "embedded"},
+            {"vid": "vFoot", "placeholder": v_ph_foot, "context": "footnote",
+             "parent_block": "FN1", "mount": "embedded"},
+        ],
+    )
+    write_segpack(
+        root, "seg01",
+        blocks=[{"id": "p1", "order_index": 0, "plain_text": f"Body text {v_ph_a} here."}],
+        footnotes=[{"n": 1, "source_text": f"A cited couplet: {v_ph_foot}"},
+                   {"n": 2, "source_text": "The second, deeper footnote."}],
+        verses=[
+            {"vid": "vA", "placeholder": v_ph_a, "parent_block": "p1"},
+            {"vid": "vFoot", "placeholder": v_ph_foot, "parent_block": "FN1"},
+        ],
+    )
+    write_draft(
+        root, "seg01",
+        blocks={"p1": f"Translated body {v_ph_a} here."},
+        footnotes={"1": f"A cited couplet: {v_ph_foot}", "2": "The translated deeper footnote."},
+        verses={
+            "vA": {"rendered": f"Rendered line {FN_PH_1}", "literal_gloss": "Gloss, no ref"},
+            "vFoot": {"rendered": f"Embedded couplet {FN_PH_2}", "literal_gloss": "Gloss embedded"},
+        },
+    )
+    write_ledger(root, {"seg01": {"status": "converged"}})
+
+    result = run_assemble(root)
+    assert result.returncode == 0, (
+        f"a footnote cited only inside a def-embedded verse's content must be "
+        f"discovered, not orphaned:\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    )
+    ns = read_nodestream(root)
+    by_id = {n["id"]: n for n in ns["nodes"]}
+    assert by_id["p1"]["fnrefs"] == [1], (
+        "fn1 (cited in the RENDERED verse vA) belongs in the carrier node's "
+        "fnrefs; fn2 (reached only through the stripped inner verse) must NOT"
+    )
+    fn_ns = {fn["n"] for fn in ns["footnotes"]}
+    assert fn_ns == {1, 2}, "both footnotes' text must land in the book-wide table"
+    assert all(2 not in n["fnrefs"] for n in ns["nodes"]), (
+        "fn2 is referenced-only -- it must appear in NO node's fnrefs"
+    )
+    all_verse_vids = {v["vid"] for n in ns["nodes"] for v in n["verses"]}
+    assert all_verse_vids == {"vA"}, "the inner def-embedded verse vFoot is never rendered"
+    md = _all_rendered_markdown(root)
+    assert FN_PH_2 not in md and "⟦" not in md, f"no raw sentinel may leak -- got:\n{md}"
+    assert "[^2]:" not in md, f"fn2, referenced by no node, must render no [^2]: -- got:\n{md}"
+
+
+def test_footnote_nested_two_levels_deep_in_def_embedded_verses_is_discovered(tmp_path):
+    """Fix C genuine fixed-point recursion (NON-skip), one level deeper than the
+    test above: fn2's def ALSO embeds a verse vFoot2 whose content cites fn3.
+    Proves the discovery is a true fixed point, not a hardcoded one-extra-level
+    patch. fn3 lands referenced-only (book footnotes[], no node fnrefs)."""
+    v_ph_a = "⟦VERSE_vA_abc12345⟧"
+    v_ph_foot = "⟦VERSE_vFoot_cafe1234⟧"
+    v_ph_foot2 = "⟦VERSE_vFoot2_beef5678⟧"
+    root = make_root(tmp_path)
+    write_manifest(
+        root,
+        blocks={
+            "p1": {"type": "PARA", "seg": "seg01", "order_index": 0,
+                   "plain_text": f"Body text {v_ph_a} here."},
+            "FN1": {"type": "FN", "seg": None, "order_index": 1,
+                    "plain_text": f"A cited couplet: {v_ph_foot}"},
+            "FN2": {"type": "FN", "seg": None, "order_index": 2,
+                    "plain_text": f"A deeper couplet: {v_ph_foot2}"},
+            "FN3": {"type": "FN", "seg": None, "order_index": 3,
+                    "plain_text": "The third, deepest footnote."},
+        },
+        segments=[{"seg": "seg01", "kind": "body", "title_text": "Ch1",
+                   "block_ids": ["p1"], "word_count": 10}],
+        footnotes=[
+            {"n": 1, "anchor_block": "p1", "anchor_seg": "seg01", "def_block": "FN1"},
+            {"n": 2, "anchor_block": "FN1", "anchor_seg": "seg01", "def_block": "FN2"},
+            {"n": 3, "anchor_block": "FN2", "anchor_seg": "seg01", "def_block": "FN3"},
+        ],
+        verse_store=[
+            {"vid": "vA", "placeholder": v_ph_a, "context": "body",
+             "parent_block": "p1", "mount": "embedded"},
+            {"vid": "vFoot", "placeholder": v_ph_foot, "context": "footnote",
+             "parent_block": "FN1", "mount": "embedded"},
+            {"vid": "vFoot2", "placeholder": v_ph_foot2, "context": "footnote",
+             "parent_block": "FN2", "mount": "embedded"},
+        ],
+    )
+    write_segpack(
+        root, "seg01",
+        blocks=[{"id": "p1", "order_index": 0, "plain_text": f"Body text {v_ph_a} here."}],
+        footnotes=[{"n": 1, "source_text": f"A cited couplet: {v_ph_foot}"},
+                   {"n": 2, "source_text": f"A deeper couplet: {v_ph_foot2}"},
+                   {"n": 3, "source_text": "The third, deepest footnote."}],
+        verses=[
+            {"vid": "vA", "placeholder": v_ph_a, "parent_block": "p1"},
+            {"vid": "vFoot", "placeholder": v_ph_foot, "parent_block": "FN1"},
+            {"vid": "vFoot2", "placeholder": v_ph_foot2, "parent_block": "FN2"},
+        ],
+    )
+    write_draft(
+        root, "seg01",
+        blocks={"p1": f"Translated body {v_ph_a} here."},
+        footnotes={"1": f"A cited couplet: {v_ph_foot}",
+                   "2": f"A deeper couplet: {v_ph_foot2}",
+                   "3": "The translated deepest footnote."},
+        verses={
+            "vA": {"rendered": f"Rendered line {FN_PH_1}", "literal_gloss": "Gloss"},
+            "vFoot": {"rendered": f"Embedded couplet {FN_PH_2}", "literal_gloss": "Gloss"},
+            "vFoot2": {"rendered": f"Deeper couplet {FN_PH_3}", "literal_gloss": "Gloss"},
+        },
+    )
+    write_ledger(root, {"seg01": {"status": "converged"}})
+
+    result = run_assemble(root)
+    assert result.returncode == 0, (
+        f"a two-levels-deep nested footnote must be discovered by the "
+        f"fixed-point recursion:\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    )
+    ns = read_nodestream(root)
+    fn_ns = {fn["n"] for fn in ns["footnotes"]}
+    assert fn_ns == {1, 2, 3}, "all three footnotes' text must land in the book-wide table"
+    assert all(2 not in n["fnrefs"] and 3 not in n["fnrefs"] for n in ns["nodes"]), (
+        "fn2 and fn3 are referenced-only -- neither may appear in any node's fnrefs"
+    )
+    all_verse_vids = {v["vid"] for n in ns["nodes"] for v in n["verses"]}
+    assert all_verse_vids == {"vA"}, "only the outer rendered verse is a node verse"
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
