@@ -82,8 +82,13 @@ written and refuse to record a stale convergence.
        was period slang for a type of song refrain; a reviewer relying on
        the modern sense alone would silently wave through a
        mistranslation. -->
-- Names/dates/titles: `canon_names` forms were used verbatim; any
-  `new_names` were resolved and flagged `NEW:` in the draft's own `notes`.
+- Names/dates/titles: each `canon_names` name renders its `canon_map`
+  target form's stem/spelling, correctly declined/inflected as the target
+  grammar requires -- a correctly inflected form of the canonical stem is
+  CORRECT and must NOT be flagged. Flag a canon name ONLY for: a different
+  name, a different transliteration of the stem, an untranslated canonical
+  name, or an epithet swapped in for a real surname. Any `new_names` were
+  resolved and flagged `NEW:` in the draft's own `notes`.
 - **Placeholder sentinels** (`⟦FNREF_N⟧` / `⟦VERSE_...⟧`) -- present,
   byte-for-byte, at the same in-sentence position, 1:1 in count and set
   with the source.

@@ -156,7 +156,7 @@ def _verse_line_count(v):
 # ---------------------------------------------------------------------------
 _TOP_LEVEL_KEYS = {
     "seg", "title", "kind", "word_count", "blocks", "footnotes",
-    "verses", "names", "canon_names", "new_names", "generation_hashes",
+    "verses", "names", "canon_names", "new_names", "canon_map", "generation_hashes",
 }
 _BLOCK_KEYS = {"id", "order_index", "source_html", "plain_text", "body_ref_markers"}
 _FOOTNOTE_KEYS = {"n", "source_text"}
@@ -414,11 +414,25 @@ def build_pack(seg_id, manifest, canon, lang_config, apparatus_policy):
         key=lambda name: (-name_stats[name]["freq"], name),
     )
 
-    # ---- canon injection: split into locked (canon_names) vs unresolved (new_names) ----
+    # ---- canon injection: split into locked (canon_names) vs unresolved (new_names),
+    #      plus canon_map (source_form -> frozen canonical_target_form) for every
+    #      canonized name that carries a non-empty target form (#130: the frozen
+    #      target form must actually reach the translate/review prompts, not just
+    #      the canon_names source-form list). A canon entry with an empty/missing
+    #      canonical_target_form is validly omitted from canon_map (canon_names
+    #      is still the source of truth for "is this name canonized"). ----
     canon_entries = canon.get("entries", {})
     canon_names, new_names = [], []
+    canon_map = {}
     for name in strong_names:
-        (canon_names if name in canon_entries else new_names).append(name)
+        entry = canon_entries.get(name)
+        if entry is None:
+            new_names.append(name)
+            continue
+        canon_names.append(name)
+        tf = entry.get("canonical_target_form") if isinstance(entry, dict) else None
+        if isinstance(tf, str) and tf:
+            canon_map[name] = tf
 
     # ---- generation_hashes: copied verbatim, never recomputed ----
     manifest_hashes = manifest.get("generation_hashes", {})
@@ -444,6 +458,7 @@ def build_pack(seg_id, manifest, canon, lang_config, apparatus_policy):
         "names": strong_names,
         "canon_names": canon_names,
         "new_names": new_names,
+        "canon_map": canon_map,
         "generation_hashes": generation_hashes,
     }
 
@@ -553,6 +568,24 @@ def validate_segpack(pack, seg_id=None):
         val = pack.get(list_field)
         if isinstance(val, list) and not all(isinstance(x, str) for x in val):
             errors.append(f"segpack {label}: '{list_field}' must be an array of strings")
+
+    # canon_map: source_form -> frozen canonical_target_form, for the segment's
+    # already-canonized names. Every key must be a non-empty string that is
+    # ITSELF one of canon_names (a subset, not necessarily equal -- a canon
+    # entry with an empty/missing target form is validly omitted; see #130).
+    cm = pack.get("canon_map")
+    if not isinstance(cm, dict):
+        errors.append(f"segpack {label}: 'canon_map' must be an object")
+    else:
+        canon_names_val = pack.get("canon_names")
+        canon_names_set = set(canon_names_val) if isinstance(canon_names_val, list) else None
+        for k, v in cm.items():
+            if not isinstance(k, str) or not k:
+                errors.append(f"segpack {label}: 'canon_map' has a non-string/empty key {k!r}")
+            elif canon_names_set is not None and k not in canon_names_set:
+                errors.append(f"segpack {label}: 'canon_map' key {k!r} is not in 'canon_names'")
+            if not isinstance(v, str) or not v:
+                errors.append(f"segpack {label}: canon_map[{k!r}] must be a non-empty string")
 
     gh = pack.get("generation_hashes")
     if not isinstance(gh, dict):

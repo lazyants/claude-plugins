@@ -15,7 +15,7 @@
     },
     "findings": {
       "type": "array",
-      "description": "Issues the reviewer wants fixed. Empty when clean is true.",
+      "description": "Issues the reviewer wants fixed. May remain non-empty even when clean is true (residual low/cosmetic items the reviewer chose not to fix-round); clean is judged solely on whether any finding requires a fix round.",
       "items": {
         "type": "object",
         "properties": {

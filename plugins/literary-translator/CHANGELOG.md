@@ -1,5 +1,60 @@
 # Changelog
 
+## 1.3.7 — 2026-07-11
+
+Canon-enforcement + transient-recovery + review-gate correctness cluster from the 2026-07-11 issue
+sweep: closes #130, #131, #132, #133, and #135.
+
+### Added
+
+- **`canon_map` segpack field (#130)** — `segpack.py:build_pack` now emits a `canon_map`
+  (`source_form` → frozen `canonical_target_form`) for this segment's already-canonized names,
+  required in `segpack.schema.json` and enforced by `validate_segpack`, and spliced into
+  `translatePrompt` and `reviewDispatchPrompt` so the frozen canon target form actually reaches
+  translate/review time. The rule is to render the canonical STEM/spelling **declined as the target
+  grammar requires** (a correctly inflected form of the canonical stem is correct); the reviewer flags
+  only a different name, a different transliteration of the stem, an untranslated canonical name, or an
+  epithet→real-surname swap.
+
+### Fixed
+
+- **The frozen canon was unenforced at translate/review time (#130).** The segpack carried only
+  source-form name strings; `canonical_target_form` reached no prompt, so an `established`-basis name
+  drifted freely and the reviewer had no target reference to check against. `canon_map` now delivers it;
+  the false "use verbatim, no exceptions" descriptions in `translate_TASK.template.md`,
+  `review_TASK.template.md`, and `segpack.schema.json` are corrected. No `cache_key.py` change is needed
+  — `used_terms_hash` already hashes the full canon entry values, so a `canonical_target_form` edit
+  already re-stales a converged segment (the bug was purely a delivery gap).
+- **Transient/mechanical mass-translate failures were parked in `human_escalation` (#131).** A review
+  poll timeout, or a fix call that died / hit the 64k output-token ceiling / was safety-classifier-blocked
+  on an otherwise-valid draft, was recorded as a terminal `blocked`/`non_converged` ledger status that
+  `select_segments.py` excludes from auto-redispatch. These now skip the terminal ledger write — the
+  `in_progress` fragment classifies `recoverable` and auto-redispatches next run. A fix-call failure is
+  disambiguated by a fresh `draft_ready.py` + `validate_draft.py` probe (a present, valid draft is
+  recorded `fix-call-failed`/recoverable, never mislabeled `draft-missing`); because the probe call can
+  itself fail transiently, an inconclusive probe is also treated recoverable, reserving terminal
+  `blocked/draft-missing` for a probe-confirmed genuinely-absent/invalid draft. Only genuine content
+  non-convergence (`cap`) still escalates to a human.
+- **The review read→check byte-compared free-text finding bodies (#132).** `review_artifact_check.py`
+  now projects each `findings[]` element to `{loc, severity}` before comparing, dropping the free-text
+  `issue`/`suggest` prose, so a transcription slip in review prose no longer terminal-blocks an
+  already-validated review (a slipped/dropped/fabricated finding — loc, severity, or array-length
+  divergence — still fails the compare). To keep the fixer applying the REAL reviewer guidance rather
+  than a lossy read-agent copy, `fixPrompt` now sources the findings it applies from the authoritative
+  on-disk `review.json` (validated fresh this round by `review_ready.py`'s `dispatch_token` check),
+  never the in-memory transcription — closing the gap where a substantive mis-transcription of
+  `issue`/`suggest` could otherwise misdirect the fixer once the compare stopped binding those fields.
+- **No authenticity gate on `findings[].loc` (#133).** A review verdict left behind by a codex call
+  killed mid-judgment (real `draft_sha1`/`dispatch_token`, sentinel `loc` such as `TASK`/`PROCESS`) was
+  trusted and false-blocked a clean draft. `getVerifiedReview` now rejects any verdict whose
+  `findings[].loc` is not a colon-delimited structural reference (real locs are `{btype}:{seg}` / `FN:n`
+  / `VERSE:vid`; block types are deliberately not a fixed enum, so only the colon shape is invariant),
+  routing it to a recoverable `review-fabricated-loc` before a fix dispatches against the phantom
+  finding.
+- **Stale `findings` schema description (#135).** `review.schema.json` and the workflow `REVIEW_SCHEMA`
+  no longer claim `findings` is "Empty when clean is true"; they state it may carry residual low/cosmetic
+  items even when `clean` is true (clean is judged solely on whether any finding requires a fix round).
+
 ## 1.3.6 — 2026-07-11
 
 Three fixes from the 2026-07-11 shipped-template audit: a HIGH deterministic convergence blocker on

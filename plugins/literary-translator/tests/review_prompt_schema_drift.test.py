@@ -667,6 +667,30 @@ def test_review_schema_forbids_additional_properties(request, source):
     assert sorted(findings_items["required"]) == sorted(["loc", "severity", "issue", "suggest"])
 
 
+# 1.3.6 (#135): the findings[] description previously claimed "Empty when
+# clean is true" -- false under the softened low-only clean bar (clean is
+# judged solely on whether any finding requires a fix round; residual
+# low/cosmetic findings may remain even when clean is true, per
+# review.schema.json's own `clean` description / the template's matching
+# REVIEW_SCHEMA `clean` description above). Description is an annotation-only
+# key (excluded from the structural parity/projection comparisons above), so
+# it needs its own explicit lock here on BOTH representations -- a
+# description-only edit is otherwise invisible to every other assertion in
+# this file.
+@pytest.mark.parametrize("source", ["js_schemas", "canonical_schemas"])
+def test_findings_description_no_longer_claims_empty_when_clean(request, source):
+    schemas = request.getfixturevalue(source)
+    description = schemas["REVIEW_SCHEMA"]["properties"]["findings"]["description"]
+    assert "Empty when clean is true" not in description, (
+        f"REVIEW_SCHEMA findings description ({source}) still claims the stale "
+        f"'Empty when clean is true' invariant (#135)"
+    )
+    assert "non-empty" in description and "clean" in description, (
+        f"REVIEW_SCHEMA findings description ({source}) should state findings may "
+        f"remain non-empty even when clean is true"
+    )
+
+
 # 1.2.0 (CONTRACT section 1, #87 fix): the four named oneOf-branch-indexing
 # tests that used to live here (REVIEW_ARTIFACT_SCHEMA's both-branches
 # additionalProperties check; LEDGER_WRITE_SCHEMA's/LEDGER_MERGE_SCHEMA's

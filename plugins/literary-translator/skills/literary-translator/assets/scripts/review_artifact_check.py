@@ -28,6 +28,37 @@ fields (`clean`, `coverage_ok`, `findings`, `draft_sha1`) -- a 5-field
 on-disk file still correctly MATCHES a 4-field expected object; only a
 divergence in one of the 4 projected fields counts as a real mismatch.
 
+1.3.6 addition (#132) -- per-finding projection: each `findings[]` element
+is further projected down to `{loc, severity}` on BOTH sides before
+comparing, dropping the free-text `issue`/`suggest` bodies. By the time
+this script ever runs, `review_ready.py` already guarantees the on-disk
+artifact is schema-valid, `draft_sha1`-fresh, and `dispatch_token`-matched
+-- so byte-comparing free-text prose can only false-block a valid,
+already-verified review over an immaterial transcription slip; it can
+never catch a decision-relevant divergence that the retained structural
+fields wouldn't already catch.
+
+1.3.6 (#132 option b) -- the fix-step-input gap this projection's own
+narrowing opened (a read-agent transcription slip in `issue`/`suggest`
+text, while `loc`/`severity` still matched, would pass this compare and
+then have the fixer apply the WRONG free-text instruction from its
+in-memory copy) is now closed a DIFFERENT way, not by this compare: the
+fixer (`fixPrompt` in `mass-translate-wf.template.js`) no longer consumes
+that in-memory copy at all -- it reads `review_path(seg)` from disk
+itself, fresh and token-validated by `review_ready.py` this same round.
+This compare's remaining job is narrower than "protects the fixer": it is
+the structural binding for `ledger_update.py`'s later
+`reviewed_draft_sha1`/`dispatch_token` check and audit-trail inspection
+(see `references/ledger-and-resumability.md`) -- a slipped, dropped, or
+fabricated finding in the CONSUME agent's own transcription still fails
+this compare on `loc`, `severity`, or the findings array's own length,
+which is what keeps THAT later binding meaningful. Do NOT "restore" the
+free-text `issue`/`suggest` compare as a future bugfix -- see
+`project_verdict_fields()`'s own docstring for why that would reintroduce
+exactly the false-block this projection removes, without closing any real
+gap (the fix-step gap it might look like it's protecting against is
+already closed by the fixer's own disk read, not by this compare).
+
 CLI:
 
     python3 review_artifact_check.py {seg} --expected-file <path>
@@ -111,6 +142,11 @@ _TRUNCATE_LEN = 120
 # docstring, "1.2.0 addition -- field projection".
 REVIEW_VERDICT_FIELDS = ("clean", "coverage_ok", "findings", "draft_sha1")
 
+# 1.3.6 (#132): each findings[] element is further projected down to just
+# these two fields before comparing -- see project_verdict_fields()'s own
+# docstring for why the free-text issue/suggest bodies are excluded.
+_FINDING_COMPARE_FIELDS = ("loc", "severity")
+
 # The canonical allowlist (kept identical to select_segments.py's own
 # validate_seg() per this project's "no shared lib between self-contained
 # scripts" convention): [A-Za-z0-9_], with an optional literal 'FRONTBACK:'
@@ -183,6 +219,16 @@ def canonical_text(obj):
     return json.dumps(obj, sort_keys=True, ensure_ascii=False)
 
 
+def _project_finding(f):
+    """Projects a single findings[] element down to _FINDING_COMPARE_FIELDS
+    (`loc`, `severity`), dropping the free-text `issue`/`suggest` bodies.
+    Non-dict elements pass through unprojected -- same reasoning as
+    project_verdict_fields()'s own non-dict passthrough, below."""
+    if not isinstance(f, dict):
+        return f
+    return {k: f[k] for k in _FINDING_COMPARE_FIELDS if k in f}
+
+
 def project_verdict_fields(obj):
     """Projects an arbitrary JSON value down to exactly the 4
     REVIEW_VERDICT_FIELDS -- so an on-disk review.json carrying the 5th
@@ -190,10 +236,40 @@ def project_verdict_fields(obj):
     own 4-field expected object. Non-dict inputs pass through unprojected
     (the subsequent comparison / first_diff() call reports the resulting
     type mismatch on its own -- this function's only job is dropping extra
-    keys off an already-dict-shaped value, never type-checking)."""
+    keys off an already-dict-shaped value, never type-checking).
+
+    1.3.6 addition (#132) -- each findings[] element is ALSO projected down
+    to {loc, severity} via _project_finding(), dropping the free-text
+    `issue`/`suggest` bodies. review_ready.py already guarantees the
+    on-disk artifact is schema-valid, draft_sha1-fresh, and
+    dispatch_token-matched by the time this script runs, so byte-comparing
+    free-text prose can only false-block a valid review on an immaterial
+    transcription slip -- it can never catch a decision-relevant divergence
+    the retained structural fields wouldn't already catch.
+
+    1.3.6 (#132 option b): the structural binding this compare keeps --
+    clean/coverage_ok/draft_sha1, plus each finding's loc, severity, and the
+    findings array's own length (still enforced by first_diff()'s
+    list-length check) -- is NO LONGER what protects the fixer. The fixer
+    (fixPrompt in mass-translate-wf.template.js) now reads review_path(seg)
+    from disk itself, fresh and token-validated by review_ready.py this
+    same round, instead of consuming the in-memory revObj copy this compare
+    validates -- so a slipped/dropped/fabricated finding in THAT copy can no
+    longer reach the fixer regardless of what this compare concludes. This
+    compare's remaining job is narrower: the structural binding for
+    ledger_update.py's later reviewed_draft_sha1/dispatch_token check and
+    audit-trail inspection (references/ledger-and-resumability.md). Do NOT
+    "restore" the free-text issue/suggest compare as a future bugfix --
+    that would reintroduce exactly the false-block this projection exists
+    to remove, without closing any real gap (the fix-step gap it might look
+    like it's protecting against is already closed by the fixer's own disk
+    read, not by this compare)."""
     if not isinstance(obj, dict):
         return obj
-    return {k: obj[k] for k in REVIEW_VERDICT_FIELDS if k in obj}
+    out = {k: obj[k] for k in REVIEW_VERDICT_FIELDS if k in obj}
+    if isinstance(out.get("findings"), list):
+        out["findings"] = [_project_finding(f) for f in out["findings"]]
+    return out
 
 
 def _fmt(value):
@@ -313,11 +389,16 @@ def main(argv=None):
     if err is not None:
         return emit_error(err)
 
-    # Project BOTH sides down to the 4 verdict fields BEFORE comparing --
-    # see "1.2.0 addition -- field projection" in this file's own module
+    # Project BOTH sides down to the 4 verdict fields (and each finding down
+    # to {loc, severity}) BEFORE comparing -- see "1.2.0 addition -- field
+    # projection" and "1.3.6 addition (#132)" in this file's own module
     # docstring. expected_obj is already 4-field in practice (REVIEW_SCHEMA
-    # never carries dispatch_token), so this is a no-op on that side; the
-    # projection is what lets a 5-field on-disk review.json still match.
+    # never carries dispatch_token), so the top-level projection is a no-op
+    # on that side; it's what lets a 5-field on-disk review.json still
+    # match. The per-finding projection strips the free-text issue/suggest
+    # bodies from BOTH sides -- deliberate, not a bug (#132): see
+    # project_verdict_fields()'s own docstring for why restoring the
+    # free-text compare would be a net-negative.
     disk_projected = project_verdict_fields(disk_obj)
     expected_projected = project_verdict_fields(expected_obj)
 

@@ -277,9 +277,20 @@ stage 2 depends on stage 1's own return string).
 5. **Result.** Ordinary translate/review non-convergence returns a structured
    `{ seg, converged: false, reason, rounds, lastFindings }` object — never
    throws, never silently marks done. `reason` is one of
-   `translate-timeout`, `review-timeout`, `review-null`, `draft-missing`,
-   `review-artifact-mismatch`, or `cap` (non-converged after the final
-   confirming review). Ledger-write failures are surfaced through the Workflow
+   `translate-timeout`, `review-timeout`, `review-null`,
+   `review-artifact-mismatch`, `review-fabricated-loc` (1.3.6/#133 — a
+   schema-valid, artifact-matched verdict whose finding carries a bare,
+   colonless infra-sentinel `loc` instead of a real content location),
+   `fix-call-failed` (1.3.6/#131 facet A — the fix call came back falsy/
+   `DRAFT_MISSING` but the `draftPresentAndValid` probe confirmed the draft
+   is present-and-valid, or the probe call itself failed inconclusively),
+   `draft-missing`, or `cap` (non-converged after the final confirming
+   review). **1.3.6 (#131):** every reason above EXCEPT `draft-missing` and
+   `cap` is now recoverable rather than terminal — no ledger write happens
+   for them at all (see `references/ledger-and-resumability.md`'s
+   `recordLedgerPrompt` call-sites section), so the segment's `in_progress`
+   fragment stays the durable record and `select_segments.py`
+   auto-redispatches it next run. Ledger-write failures are surfaced through the Workflow
    result instead of being written back through the same ledger channel:
    `success:false` from `recordLedgerPrompt` returns
    `{ seg, converged: false, reason: 'ledger-write-failed', detail: <error> }`,
@@ -459,9 +470,12 @@ from padding a flat guess:
 
 Per-segment worst case, across every branch (converged-at-cap,
 non-converged-at-cap, and blocked-on-the-final-round-before-cap — a
-`review-timeout`/`review-null`/`review-artifact-mismatch`/`draft-missing`
-block always terminates via a *shorter* path than running every round to
-cap, so it is never the binding case):
+`review-timeout`/`review-null`/`review-artifact-mismatch`/`review-fabricated-loc`/
+`draft-missing`/`fix-call-failed` block always terminates via a *shorter*
+path than running every round to cap, so it is never the binding case;
+1.3.6/#131 additionally removes the terminal ledger write for every one of
+those reasons except `draft-missing`, which only shortens those paths
+further and does not change which branch is binding):
 
 ```
 perSegment = 3 (fixed) + 7 * maxFixRounds (normal rounds) + 6 (final review) + 1 (terminal ledger)
