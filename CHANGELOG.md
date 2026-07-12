@@ -2,6 +2,17 @@
 
 All notable changes to `lazyants/claude-plugins` are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is per-plugin, not repo-wide.
 
+## [ai-cli-optout 1.1.1] — 2026-07-12
+
+Retires the root `KNOWN_ISSUES.md`; its tracked caveats and planned-coverage list now live as GitHub issues. Mostly a documentation move, but the shipped `vendors/anthropic.json` carries two `tradeoff_note` strings that pointed at `KNOWN_ISSUES.md §C2`, so retargeting them ships a patch release.
+
+### Changed
+- `vendors/anthropic.json` — the two `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` `tradeoff_note` strings now cite <https://github.com/lazyants/claude-plugins/issues/142> instead of `KNOWN_ISSUES.md §C2`. Wording otherwise unchanged.
+- `README.md`, `CONTRIBUTING.md` — every in-repo `KNOWN_ISSUES.md` pointer retargeted to the corresponding issue: the §C2 GrowthBook trade-off → #142, the Vercel Claude Code plugin planned-coverage note → #144, the Linux privacy surfaces out-of-scope note → #145. The contributor sweep/checklist prose is rewritten to the GitHub-issue workflow (file or update an issue labeled `plugin:ai-cli-optout`; close the tracking issue in the same PR).
+
+### Removed
+- `KNOWN_ISSUES.md` (root) — content migrated to GitHub issues: documented caveats C1 / C2 / C3 → #141 / #142 / #143; planned coverage → Vercel Claude Code plugin #144, Windsurf/Codeium + Zed + Ollama #58, Linux privacy surfaces #145.
+
 ## [literary-translator 1.1.0] — 2026-07-08
 
 Adds optional **book assembly + output rendering**, lifting the 1.0.0 non-goal "v1 delivers converged per-segment drafts, not an assembled book". Converged per-segment drafts can now be assembled and rendered into an output target — an Obsidian glossary-wiki keyed on the frozen canon — behind a deterministic render/diff acceptance gate. New; not yet pilot-proven at scale.

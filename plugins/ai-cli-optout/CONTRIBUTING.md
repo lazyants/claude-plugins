@@ -22,7 +22,7 @@ The `detect_paths[]` array is an OR fallback for when `detect_cmd` is missing fr
 
 ### Forbidden shared-ancestor paths
 
-`tests/vendor-schema.test.sh` ships a `FORBIDDEN_DETECT_PATHS` array that blocks 16 known shared / ancestor paths: `~`, `~/Library`, `~/Library/Application Support`, `~/Library/Caches`, `~/Library/Preferences`, `~/.config`, `~/.cache`, `~/.local`, `~/.local/share`, JetBrains config roots, `/Applications`, `/Library`, `/opt`, `/usr/local`, `/etc`, `/var`, `/tmp`. If you hit a new sibling-config trap that isn't covered, add the ancestor to the array and note it in `KNOWN_ISSUES.md`.
+`tests/vendor-schema.test.sh` ships a `FORBIDDEN_DETECT_PATHS` array that blocks 16 known shared / ancestor paths: `~`, `~/Library`, `~/Library/Application Support`, `~/Library/Caches`, `~/Library/Preferences`, `~/.config`, `~/.cache`, `~/.local`, `~/.local/share`, JetBrains config roots, `/Applications`, `/Library`, `/opt`, `/usr/local`, `/etc`, `/var`, `/tmp`. If you hit a new sibling-config trap that isn't covered, add the ancestor to the array and file (or update) a GitHub issue labeled `plugin:ai-cli-optout`.
 
 ### Vendor doc research: seed `doc_urls[]` with every relevant page
 
@@ -47,12 +47,12 @@ Authoring `vendors/vercel.json` from only the first page omitted the env var. An
 
 ### README sweep when adding or renaming a vendor
 
-A vendor change touches more surfaces than `vendors/<name>.json`. After editing the vendor JSON, sweep the top-level `README.md` and `KNOWN_ISSUES.md` for the following — each one bit us in v1.1.0 when adding Vercel CLI silently replaced the existing Vercel Claude Code plugin warning:
+A vendor change touches more surfaces than `vendors/<name>.json`. After editing the vendor JSON, sweep the top-level `README.md` and the open `plugin:ai-cli-optout` tracking issues for the following — each one bit us in v1.1.0 when adding Vercel CLI silently replaced the existing Vercel Claude Code plugin warning:
 
-1. **Adjacent-name collisions.** If the vendor you are adding shares a brand with something already referenced in the warnings block or `KNOWN_ISSUES.md` planned-coverage list, treat them as distinct entries — do not merge. Real example: "Vercel CLI" (the `vercel` binary) and "Vercel Claude Code plugin" (auto-instruments bash, posts to `telemetry.vercel.com`) are two different products with the same brand. The 1.1.0 README refresh swapped the plugin warning for a CLI bullet, deleting the only public pointer to `VERCEL_PLUGIN_TELEMETRY=off` until it was caught later.
+1. **Adjacent-name collisions.** If the vendor you are adding shares a brand with something already referenced in the warnings block or an open `plugin:ai-cli-optout` planned-coverage issue, treat them as distinct entries — do not merge. Real example: "Vercel CLI" (the `vercel` binary) and "Vercel Claude Code plugin" (auto-instruments bash, posts to `telemetry.vercel.com`) are two different products with the same brand. The 1.1.0 README refresh swapped the plugin warning for a CLI bullet, deleting the only public pointer to `VERCEL_PLUGIN_TELEMETRY=off` until it was caught later.
 2. **Vendor count in the prose blurb.** The "One skill, N vendors" sentence under the plugin heading must match the table row count.
 3. **Trade-off visibility in the table's `Kind` cell.** If a vendor has any `requires_confirmation: true` edits, surface that in the table cell (e.g. *(N edits confirmation-gated — see warnings)*). A bare "settings.json + env" reads identical to a fully-automated vendor and hides the trade-off until the reader hits the warnings section.
-4. **`KNOWN_ISSUES.md` planned-coverage entries.** If the new vendor partially or fully resolves a planned-coverage bullet, update or remove that bullet in the same commit. Stale "planned" entries for things now shipped erode the signal of the rest of the list.
+4. **Planned-coverage tracking issues.** If the new vendor partially or fully resolves a planned-coverage item, update or close the corresponding GitHub issue in the same PR. Stale open "planned" issues for things now shipped erode the signal of the rest of the list.
 
 ### Confirmation gate — when to use it
 
@@ -64,7 +64,7 @@ If an edit you're adding could break user-visible Claude Code features (not just
   "value": "1",
   "disables": "What it disables",
   "requires_confirmation": true,
-  "tradeoff_note": "Also breaks X feature / degrades Y mode. See KNOWN_ISSUES.md §Zn."
+  "tradeoff_note": "Also breaks X feature / degrades Y mode. See issue #NN."
 }
 ```
 
@@ -81,5 +81,5 @@ Two files, ~300 assertions. Required to pass before any PR merges.
 ## Out of scope for PRs
 
 - Changes to `~/.claude-bm/settings.json` semantics — the `-bm` profile is a user-specific convention (bypass mode), not a distribution target.
-- Linux-only OS privacy surfaces (flatpak reports, GNOME/KDE agents) — not scoped, see `KNOWN_ISSUES.md`.
+- Linux-only OS privacy surfaces (flatpak reports, GNOME/KDE agents) — not scoped, see #145.
 - Vendor additions that can't pass the `detect_paths` rule above.
