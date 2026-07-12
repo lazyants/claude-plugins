@@ -406,9 +406,120 @@ def test_both_stale_but_agreeing_reports_match_true(tmp_path):
     # only that the two on-disk artifacts agree with each other. That gap is
     # confined to the LATER ledger-binding/audit-trail question (see
     # ledger_update.py's reviewed_draft_sha1 check), never a
-    # wrong-findings-reach-the-fix-step question -- fixPrompt no longer reads
-    # review_path(seg) at all (round 60).
+    # wrong-findings-reach-the-fix-step question -- 1.3.6 (#132 option b):
+    # fixPrompt now reads review_path(seg) itself, fresh and token-validated
+    # by review_ready.py this same round, independent of whatever this
+    # script's own compare concluded here.
     assert payload == {"match": True}
+
+
+# ---------------------------------------------------------------------------
+# 9. 1.3.6 (#132): the per-finding compare projects each findings[] element
+#    down to {loc, severity}, dropping the free-text issue/suggest bodies --
+#    review_ready.py already guarantees the on-disk artifact is schema-valid,
+#    draft_sha1-fresh, and dispatch_token-matched by the time this script
+#    runs, so a transcription slip confined to prose must no longer
+#    terminal-block a valid review. The structural binding this compare
+#    keeps -- loc, severity, and the findings array's own length (already
+#    covered by test 4 above) -- is no longer what protects the fixer
+#    (option b: fixPrompt reads review_path(seg) itself for that); it now
+#    protects ledger_update.py's later reviewed_draft_sha1/dispatch_token
+#    binding check and audit-trail inspection instead, so it must still
+#    catch a real divergence.
+# ---------------------------------------------------------------------------
+
+def test_match_true_findings_differ_only_in_issue_suggest_text(tmp_path):
+    """Two verdicts agree on clean/coverage_ok/draft_sha1 and on every
+    finding's loc+severity, but the free-text issue/suggest bodies differ --
+    an immaterial transcription slip in prose, not a structural divergence.
+    #132 narrows the compare so this no longer reports match:false."""
+    root = make_durable_root(tmp_path)
+    disk_obj = dict(
+        FRESH_REVOBJ,
+        clean=False,
+        findings=[
+            {
+                "loc": "PARA:seg01:0001",
+                "severity": "minor",
+                "issue": "awkward phrasing here",
+                "suggest": "rephrase for flow and rhythm",
+            }
+        ],
+    )
+    write_review_artifact(root, "seg01", disk_obj)
+
+    expected_obj = dict(
+        FRESH_REVOBJ,
+        clean=False,
+        findings=[
+            {
+                "loc": "PARA:seg01:0001",
+                "severity": "minor",
+                "issue": "phrasing feels off",  # different prose, same finding
+                "suggest": "consider a smoother rendering",  # different prose
+            }
+        ],
+    )
+    expected_path = write_expected_file(tmp_path, expected_obj)
+
+    result = run_check(root, "seg01", expected_path)
+
+    assert result.returncode == 0, (
+        f"expected match, got rc={result.returncode}\nstderr:\n{result.stderr}"
+    )
+    assert parse_match_line(result.stdout) == {"match": True}
+
+
+def test_match_false_findings_differ_in_loc(tmp_path):
+    """A real loc divergence (a slipped/fabricated/misattributed finding)
+    must still fail the compare -- the free-text projection narrows nothing
+    about the structural loc/severity binding."""
+    root = make_durable_root(tmp_path)
+    disk_obj = dict(
+        FRESH_REVOBJ,
+        clean=False,
+        findings=[{"loc": "PARA:seg01:0001", "severity": "minor", "issue": "x", "suggest": "y"}],
+    )
+    write_review_artifact(root, "seg01", disk_obj)
+
+    expected_obj = dict(
+        FRESH_REVOBJ,
+        clean=False,
+        findings=[{"loc": "PARA:seg01:0002", "severity": "minor", "issue": "x", "suggest": "y"}],
+    )
+    expected_path = write_expected_file(tmp_path, expected_obj)
+
+    result = run_check(root, "seg01", expected_path)
+
+    assert result.returncode == 0
+    payload = parse_match_line(result.stdout)
+    assert payload["match"] is False
+    assert "loc" in payload["mismatch_detail"]
+
+
+def test_match_false_findings_differ_in_severity(tmp_path):
+    """A real severity divergence must still fail the compare."""
+    root = make_durable_root(tmp_path)
+    disk_obj = dict(
+        FRESH_REVOBJ,
+        clean=False,
+        findings=[{"loc": "PARA:seg01:0001", "severity": "minor", "issue": "x", "suggest": "y"}],
+    )
+    write_review_artifact(root, "seg01", disk_obj)
+
+    expected_obj = dict(
+        FRESH_REVOBJ,
+        clean=False,
+        findings=[{"loc": "PARA:seg01:0001", "severity": "major", "issue": "x", "suggest": "y"}],
+    )
+    expected_path = write_expected_file(tmp_path, expected_obj)
+
+    result = run_check(root, "seg01", expected_path)
+
+    assert result.returncode == 0
+    payload = parse_match_line(result.stdout)
+    assert payload["match"] is False
+    assert "severity" in payload["mismatch_detail"]
 
 
 if __name__ == "__main__":

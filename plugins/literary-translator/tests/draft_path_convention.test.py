@@ -27,9 +27,10 @@ ledger-and-resumability.md's own enumeration:
     7. templates/translate_TASK.template.md
     8. templates/mass-translate-wf.template.js (translatePrompt/fixPrompt)
 
-  review_path(seg) (5 sites -- 1.2.0 CONTRACT §8 split the old single
+  review_path(seg) (6 sites -- 1.2.0 CONTRACT §8 split the old single
   reviewPrompt writer/`readReview`-in-one call into a DISPATCH-then-READ
-  pair, adding one genuinely new direct-read call site):
+  pair, adding one genuinely new direct-read call site; 1.3.6/#132 option b
+  added a second new direct-read call site, fixPrompt):
     1. mass-translate-wf.template.js's reviewDispatchPrompt (1.2.0; formerly
        reviewPrompt -- writes it)
     2. mass-translate-wf.template.js's readReviewPrompt (1.2.0, NEW -- reads
@@ -37,18 +38,29 @@ ledger-and-resumability.md's own enumeration:
        verdict fields)
     3. mass-translate-wf.template.js's verifyReviewArtifactPrompt (reads it,
        indirectly -- see that test's own docstring; UNCHANGED by 1.2.0)
-    4. scripts/review_artifact_check.py (reads it)
-    5. scripts/ledger_update.py (reads it, for the reviewed_draft_sha1
+    4. mass-translate-wf.template.js's fixPrompt (1.3.6/#132 option b, NEW
+       -- reads it directly for its findings[] array, closing the gap
+       where a read-agent transcription slip in issue/suggest text could
+       reach the fixer via the in-memory revObj copy; see
+       references/engine-loop.md's R1)
+    5. scripts/review_artifact_check.py (reads it)
+    6. scripts/ledger_update.py (reads it, for the reviewed_draft_sha1
        binding check)
 
-Plus one explicit design-confirmation: `fixPrompt` is DELIBERATELY NOT a
-review_path(seg) reader (round-60 change, see references/engine-loop.md's
-R1) -- it works from the in-memory `revObj` its own 3rd argument carries,
-never re-reading review_path(seg) from disk. Its output DOES mention the
-review_path(seg) string once, but only inside a "do not re-read ... for
-findings" negation -- this file asserts that shape specifically, so a
-regression that makes fixPrompt actually re-read the file would be caught
-even though the literal path substring alone would not distinguish the two.
+Design confirmation, UPDATED for 1.3.6 (#132 option b): `fixPrompt` is now
+DELIBERATELY a review_path(seg) reader (it was NOT, pre-1.3.6 -- see
+references/engine-loop.md's R1 for the full history of both the round-60
+in-memory design and this round's reversal of it) -- it instructs the
+agent to READ review_path(seg) and apply every entry in its on-disk
+findings[] array, rather than working from the in-memory `revObj` its own
+3rd argument still carries (that argument is kept for other consumers --
+the convergence decision and the review-artifact gate's own
+`--expected-file` -- but fixPrompt's own prompt text no longer splices its
+JSON as the findings source). This file asserts the new shape directly: an
+affirmative "Read ... review.json" instruction, no trace of the old "do
+not re-read ... for findings" negation, and no trace of the revObj
+fixture's own distinctive marker text in the rendered prompt (proving the
+in-memory object is genuinely not spliced in anymore).
 
 For every script call site, each test builds an ISOLATED durable_root
 fixture (the REAL script copied into {root}/scripts/, so its
@@ -296,7 +308,7 @@ def test_draft_ready_ignores_ru_suffixed_decoy(tmp_path):
 
 
 # ===========================================================================
-# draft_path(seg) + review_path(seg) call site 3/8 & 4/4 -- scripts/ledger_update.py
+# draft_path(seg) + review_path(seg) call site 3/8 & 6/6 -- scripts/ledger_update.py
 # ===========================================================================
 
 FULL_CACHE_KEY = {
@@ -671,10 +683,10 @@ def test_translate_task_template_follows_draft_path_convention():
 # ===========================================================================
 # JS prompt-builder harness -- shared by the remaining call sites:
 #   draft_path(seg)  site 8/8: mass-translate-wf.template.js (translatePrompt/fixPrompt)
-#   review_path(seg) site 1/5: reviewDispatchPrompt (1.2.0; formerly reviewPrompt -- writes it)
-#   review_path(seg) site 2/5: readReviewPrompt (1.2.0, NEW -- reads it directly)
-#   review_path(seg) site 3/5: verifyReviewArtifactPrompt (reads it, indirectly; UNCHANGED)
-#   design confirmation:       fixPrompt is NOT a review_path(seg) reader
+#   review_path(seg) site 1/6: reviewDispatchPrompt (1.2.0; formerly reviewPrompt -- writes it)
+#   review_path(seg) site 2/6: readReviewPrompt (1.2.0, NEW -- reads it directly)
+#   review_path(seg) site 3/6: verifyReviewArtifactPrompt (reads it, indirectly; UNCHANGED)
+#   review_path(seg) site 4/6: fixPrompt (1.3.6/#132 option b, NEW -- reads it directly)
 #
 # 1.2.0 (CONTRACT §8) replaced the old single reviewPrompt/callReview call
 # with a DISPATCH -> WAIT -> READ -> CHECK sequence: reviewDispatchPrompt
@@ -832,7 +844,7 @@ def test_mass_translate_wf_translate_prompt_writes_canonical_draft_path(tmp_path
 
 @requires_node
 def test_mass_translate_wf_review_dispatch_prompt_reads_draft_and_writes_review_path(tmp_path):
-    """review_path(seg) call site 1/5: reviewDispatchPrompt (1.2.0;
+    """review_path(seg) call site 1/6: reviewDispatchPrompt (1.2.0;
     formerly the single combined reviewPrompt) is the WRITER -- the
     DISPATCH half of CONTRACT §8's restructured review sequence
     (reviewDispatchPrompt -> reviewWaitPrompt -> readReviewPrompt ->
@@ -870,7 +882,7 @@ def test_mass_translate_wf_review_dispatch_prompt_reads_draft_and_writes_review_
 
 @requires_node
 def test_mass_translate_wf_read_review_prompt_reads_canonical_review_path(tmp_path):
-    """review_path(seg) call site 2/5 (1.2.0, NEW): readReviewPrompt is a
+    """review_path(seg) call site 2/6 (1.2.0, NEW): readReviewPrompt is a
     direct, mechanical READER of review_path(seg) -- distinct from
     verifyReviewArtifactPrompt's INDIRECT read (delegated entirely to
     review_artifact_check.py, see the next test group). Pre-1.2.0 there
@@ -893,7 +905,7 @@ def test_mass_translate_wf_read_review_prompt_reads_canonical_review_path(tmp_pa
 
 @requires_node
 def test_mass_translate_wf_verify_review_artifact_prompt_delegates_the_read(tmp_path):
-    """review_path(seg) call site 3/5: verifyReviewArtifactPrompt is a
+    """review_path(seg) call site 3/6: verifyReviewArtifactPrompt is a
     READER, but INDIRECTLY -- UNCHANGED by 1.2.0 (kept as a separate
     prompt-builder function, per the PLAN's own test-update note). Per
     references/workflow-schema-validation.md,
@@ -925,17 +937,24 @@ def test_mass_translate_wf_verify_review_artifact_prompt_delegates_the_read(tmp_
 
 
 @requires_node
-def test_mass_translate_wf_fix_prompt_is_not_a_review_path_reader(tmp_path):
-    """Design confirmation: fixPrompt(seg, round, revObj) is DELIBERATELY
-    NOT one of review_path(seg)'s readers (round-60 change, see
-    references/engine-loop.md's R1) -- it works from the in-memory revObj
-    (its own 3rd argument) instead of re-reading review_path(seg) from
-    disk. Its output does mention the review_path(seg) string once, but
-    only inside a "do not re-read ... for findings" negation -- a plain
-    substring-presence check alone would NOT catch a regression to
-    actually reading the file, so this test additionally asserts the
-    negation phrasing and that there is exactly one such mention (never a
-    second, affirmative read instruction)."""
+def test_mass_translate_wf_fix_prompt_reads_canonical_review_path(tmp_path):
+    """Design confirmation, UPDATED for 1.3.6 (#132 option b): fixPrompt(seg,
+    round, revObj) is now DELIBERATELY one of review_path(seg)'s readers
+    (a reversal of the round-60 in-memory design -- see
+    references/engine-loop.md's R1 for the full history). It instructs the
+    agent to READ review_path(seg) and apply every entry in its on-disk
+    findings[] array, closing the gap where a read-agent transcription slip
+    in issue/suggest text (while loc/severity still matched) could reach
+    the fixer via an in-memory copy that review_artifact_check.py's
+    narrowed #132 compare no longer binds byte-for-byte. `revObj` (the 3rd
+    argument) is kept -- other callers still use it for the convergence
+    decision and the review-artifact gate's own `--expected-file` -- but
+    fixPrompt's own prompt text must no longer splice its JSON in as the
+    findings source at all. This test asserts the affirmative read
+    instruction, the absence of the old "do not re-read ... for findings"
+    negation, and the absence of the revObj fixture's own distinctive
+    marker text (proving the in-memory object is genuinely not spliced in
+    anymore, not merely re-worded)."""
     root_str = str(tmp_path / "durable_root")
     seg = "segA4"
     round_num = 2
@@ -955,25 +974,36 @@ def test_mass_translate_wf_fix_prompt_is_not_a_review_path_reader(tmp_path):
     )
 
     expected_review = f"{root_str}/segments/{seg}.review.json"
-    occurrences = fix_text.count(expected_review)
-    assert occurrences == 1, (
-        f"fixPrompt(seg, round, revObj) must mention review_path(seg) "
-        f"exactly once (inside the 'do not re-read' negation), got "
-        f"{occurrences} occurrences in:\n{fix_text}"
+    assert expected_review in fix_text, (
+        f"fixPrompt(seg, round, revObj) must instruct reading the canonical "
+        f"review_path(seg); expected substring {expected_review!r} not "
+        f"found in:\n{fix_text}"
     )
-    negation = f"do not re-read {expected_review} for findings"
-    assert negation in fix_text, (
-        f"fixPrompt's sole mention of review_path(seg) must be the explicit "
-        f"'do not re-read ... for findings' negation (proving it never "
-        f"instructs actually reading the file), expected substring "
-        f"{negation!r} not found in:\n{fix_text}"
+    assert f"Read {expected_review}" in fix_text, (
+        f"fixPrompt must issue an explicit, affirmative READ instruction for "
+        f"review_path(seg), not merely mention the path in passing; expected "
+        f"substring 'Read {expected_review}' not found in:\n{fix_text}"
+    )
+    assert "findings[]" in fix_text or "findings[" in fix_text, (
+        "fixPrompt must instruct applying the on-disk findings[] array"
     )
 
-    # The revObj JSON itself (the actual findings source) must be spliced
-    # in directly -- draft_sha1 is a distinctive marker unique to this
-    # test's revObj fixture, so its presence proves the in-memory object
-    # (not a disk re-read) is what carries the findings.
-    assert rev_obj["draft_sha1"] in fix_text
+    stale_negation = f"do not re-read {expected_review} for findings"
+    assert stale_negation not in fix_text, (
+        "fixPrompt must no longer carry the pre-1.3.6 'do not re-read ... "
+        "for findings' negation -- it now instructs an affirmative read "
+        "(#132 option b)"
+    )
+
+    # The revObj JSON itself must NO LONGER be spliced in as the findings
+    # source -- draft_sha1 is a distinctive marker unique to this test's
+    # revObj fixture; its ABSENCE proves the in-memory object is genuinely
+    # not spliced into the prompt anymore.
+    assert rev_obj["draft_sha1"] not in fix_text, (
+        "fixPrompt must no longer splice revObj's own JSON text into its "
+        "prompt -- the fixer now reads review_path(seg) from disk instead "
+        "(#132 option b)"
+    )
 
     # draft_path(seg) IS legitimately read/rewritten by fixPrompt (it edits
     # an existing draft) -- confirm that separately, and that no
@@ -985,7 +1015,7 @@ def test_mass_translate_wf_fix_prompt_is_not_a_review_path_reader(tmp_path):
 
 
 # ===========================================================================
-# review_path(seg) call site 3/4 -- scripts/review_artifact_check.py
+# review_path(seg) call site 5/6 -- scripts/review_artifact_check.py
 # ===========================================================================
 
 def make_review_artifact_check_root(tmp_path):

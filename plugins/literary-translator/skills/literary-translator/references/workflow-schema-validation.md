@@ -365,16 +365,23 @@ deterministically, never on an LLM's own say-so.
 
 ### What the gate protects today
 
-`fixPrompt(seg, round, revObj)` receives the review object (`revObj`)
-**directly** — the same in-memory value `readReviewPrompt` already returned
-this round — spliced into its own prompt text via the JS's deterministic
-serialization, and never reads `review_path(seg)` from disk itself. So the
-gate does **not** protect the fix step's own input; it protects
-`scripts/ledger_update.py`'s `reviewed_draft_sha1`/`dispatch_token` binding
-check at the convergence write (see
-`references/ledger-and-resumability.md`) and any later audit-trail
-inspection — both of which still read `review_path(seg)` from disk, at a
-point in time *after* this gate has already run.
+**1.3.6 (#132 option b):** `fixPrompt(seg, round, revObj)` no longer splices
+`revObj` into its own prompt as the findings source — it instructs the
+fixer to READ `review_path(seg)` itself and apply every entry in its
+on-disk `findings[]` array. `review_ready.py` already token-validated this
+exact file fresh THIS round before the fix call was ever dispatched, and it
+is not rewritten again until the NEXT round's review dispatch, so this read
+is fresh and race-free. This is what closes the fix-step-input question:
+the fixer's own disk read, not this gate. The narrowed `{loc, severity}`
+compare below no longer needs to bind the free-text `issue`/`suggest`
+bodies for that same reason — the fixer never consumes the CONSUME agent's
+transcribed copy of them at all, so a transcription slip there can no
+longer reach the fixer, regardless of what this gate's own compare does or
+doesn't catch. This gate still protects `scripts/ledger_update.py`'s
+`reviewed_draft_sha1`/`dispatch_token` binding check at the convergence
+write (see `references/ledger-and-resumability.md`) and any later
+audit-trail inspection — both of which still read `review_path(seg)` from
+disk, at a point in time *after* this gate has already run.
 
 ### The mechanism, step by step
 
@@ -407,11 +414,19 @@ and the `--expected-file`'s contents down to exactly the four verdict fields
 `{clean, coverage_ok, findings, draft_sha1}` — dropping `dispatch_token` from
 whichever side carries it, since `review.json` on disk now carries
 `dispatch_token` while `revObj`/`--expected-file` never do (`REVIEW_SCHEMA`
-is a deliberate 4-field projection, not the on-disk file's full shape) —
-canonicalizes both projections via sorted-key JSON serialization, and does a
-byte-for-byte comparison of the two canonical forms. It prints `{match:true}`
-on an exact match, or `{match:false, mismatch_detail:"<the first differing
-key/value pair, named>"}` otherwise. The agent-facing `REVIEW_ARTIFACT_SCHEMA`
+is a deliberate 4-field projection, not the on-disk file's full shape).
+**1.3.6 addition (#132):** each `findings[]` element is further projected
+down to `{loc, severity}` on both sides, dropping the free-text
+`issue`/`suggest` bodies — by the time this script runs, `review_ready.py`
+has already guaranteed the on-disk artifact is schema-valid,
+`draft_sha1`-fresh, and `dispatch_token`-matched, so byte-comparing
+free-text prose can only false-block a valid review over an immaterial
+transcription slip, never catch a decision-relevant divergence the
+retained `loc`/`severity`/array-length binding wouldn't already catch. The
+script then canonicalizes both projections via sorted-key JSON
+serialization, and does a byte-for-byte comparison of the two canonical
+forms. It prints `{match:true}` on an exact match, or `{match:false,
+mismatch_detail:"<the first differing key/value pair, named>"}` otherwise. The agent-facing `REVIEW_ARTIFACT_SCHEMA`
 is flat (see the #87 section above); the script's own printed line still only
 ever takes one of the two shapes the on-disk `review-artifact-check.schema.json`
 strong `oneOf` requires:
@@ -466,9 +481,10 @@ then hide.
 
 This residual is now confined to the narrower purpose described above (the
 ledger-binding/audit-trail question), never to a wrong-findings-reach-the-
-fix-step question — that question is structurally closed by `fixPrompt`
-receiving `revObj` as an in-memory value directly, with no second on-disk
-artifact for it to independently drift against.
+fix-step question — that question is closed by `fixPrompt` reading
+`review_path(seg)` itself (1.3.6/#132 option b), a fresh, token-validated
+disk read the fixer performs independently of whatever this gate's own
+`--expected-file` comparison concluded.
 
 For the later ledger/audit-trail purpose only, a second, rarer compound case
 is explicitly **not** covered by any fixture: `review_path(seg)` and
@@ -477,8 +493,9 @@ byte-for-byte agree. This is an accepted residual risk, not one any test in
 this plugin claims to close — no fixture can exercise it directly, since the
 failure requires a specific wrong choice by an LLM agent, not a script bug,
 and this plugin's test coverage stops at the deterministic-script boundary.
-It is no longer a fix-step risk: `fixPrompt` receives `revObj` as an
-in-memory value and never reads either on-disk artifact for its findings.
+It is no longer a fix-step risk: `fixPrompt` reads the on-disk
+`review_path(seg)` itself for its findings (1.3.6/#132 option b), a fresh
+read independent of this gate's own comparison.
 The **stale-run** case (a straggler artifact from an OLD run, not just an
 old round) is a distinct, separately-closed problem — see the
 `dispatch_token`/resume-integrity mechanics in
@@ -504,6 +521,12 @@ old round) is a distinct, separately-closed problem — see the
 - The workflow-level shared-retry/blocked case: a forced `match:false` on
   both the original and retried `(read, check)` pair ends the segment as
   `blocked` with reason `review-artifact-mismatch`.
+- 1.3.6 (#132): two verdicts identical in `clean`/`coverage_ok`/`draft_sha1`
+  and in every finding's `loc`+`severity`, differing ONLY in a finding's
+  free-text `issue`/`suggest` text, assert `{match:true}` — the narrowed
+  per-finding projection's positive case. A difference in `loc`, `severity`,
+  or the findings array's own length still asserts `{match:false}` — the
+  structural binding that protects the fixer is unchanged.
 
 `review_artifact_check.py` itself is dependency-free (stdlib `json` only —
 no `requirements.txt` entry, no dependency preflight needed).

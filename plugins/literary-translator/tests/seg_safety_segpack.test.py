@@ -190,6 +190,7 @@ def _well_formed_pack(seg: str) -> dict:
         "names": [],
         "canon_names": [],
         "new_names": [],
+        "canon_map": {},
         "generation_hashes": {
             "source_extraction_hash": "a" * 40,
             "source_input_hash": "b" * 40,

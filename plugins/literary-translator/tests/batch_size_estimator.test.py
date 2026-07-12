@@ -91,26 +91,63 @@ queues fed to the mock and the assertions below; each fixture's `max_fix_rounds
 recovered shape (7 each) the estimator itself assumes, so `test_
 review_artifact_mismatch_actual_calls_never_exceed_formula_bound` below
 exercises a genuinely maximal blocked branch, not an artificially cheap one):
+
+1.3.6 CHANGE (#131 -- transient/mechanical failures become recoverable, not
+terminal): every one of `runRound`'s `getVerifiedReview`-blocked reasons
+(`review-null`, `review-artifact-mismatch`, `review-timeout`, and -- #133 --
+`review-fabricated-loc`) no longer records a terminal ledger write at all --
+the in_progress fragment stays the durable record and select_segments.py
+classifies the segment recoverable. Each of those sub-cases below therefore
+costs exactly ONE FEWER real agent() call than the pre-1.3.6 file recorded
+(no `ledger:blocked:*:*` write). `draft-missing` is UNCHANGED in this
+respect (a genuinely absent/invalid draft after translate reported READY
+stays terminal, still writes the ledger) but now costs one MORE call than
+before -- the new `draft-probe:*` call `runRound`'s fix-call branch makes to
+tell a genuine missing draft apart from a merely-transient fix-call failure
+on a present, valid draft (the NEW `fix-call-failed` sub-case below).
+
   - `review-null`: both the first AND the retried read come back falsy --
     `readAndCheck`'s short-circuit means `artifact-check:*` is NEVER called
-    for this round -- 4 calls total (dispatch+wait+read+read), no fix.
+    for this round -- 4 calls total (dispatch+wait+read+read), no fix, NO
+    ledger write (#131 facet B -- recoverable).
   - `review-artifact-mismatch`: the first attempt's read succeeds but its
     check reports `match:false`; the retried read ALSO succeeds but its
-    check STILL mismatches -- the true 6-call worst case, no fix.
+    check STILL mismatches -- the true 6-call worst case, no fix, NO ledger
+    write (#131 facet B -- recoverable).
+  - `review-fabricated-loc` (NEW, #133): the review point succeeds WITHOUT a
+    retry (happy path -- first attempt's read+check matches), but the
+    verdict's one finding carries a bare, colonless infra-sentinel `loc`
+    (e.g. `TASK`) -- `findingsAuthentic()` rejects it right there, before any
+    fix ever dispatches. 4 calls total (dispatch+wait+read+check), no fix,
+    NO ledger write (#131 facet B makes this reason recoverable too, for
+    free -- no extra wiring needed).
   - `draft-missing`: the review point succeeds WITHOUT a retry (happy path,
     4 calls), a fix is dispatched, and the fix call itself reports the
-    draft went missing (`fx.indexOf("DRAFT_MISSING") !== -1"`) -- 5 calls;
-    unrelated to the read/check retry mechanic, since it is `callFix`, not
-    `getVerifiedReview`, that fails here.
-  - `review-timeout` (NEW sub-case -- the review restructure gives review
-    its own bounded poll, `review-wait:*`, independent of translate's own
-    `wait:*`): `review-wait:*` returns non-READY on the very first poll --
-    2 calls (dispatch+wait), the read/check/fix machinery is never reached.
-  - `timeout` (translate's own, unchanged from pre-1.2.0): the translator
-    never delivers READY -- `wait:*`'s own `ready.indexOf("READY") === -1`
-    check fires on the very first wait call, before any review call is ever
-    made. Cost stays 4 (in_progress ledger + translate + wait + timeout
-    ledger), independent of `max_fix_rounds`.
+    draft went missing (`fx.indexOf("DRAFT_MISSING") !== -1"`); the new
+    `draftPresentAndValid` probe then confirms the draft is genuinely
+    absent/invalid (`present:false`) -- 6 calls total
+    (dispatch+wait+read+check+fix+probe), and this sub-case STILL writes
+    the terminal ledger entry (blocked/draft-missing -> human_escalation,
+    a real anomaly worth human attention, unchanged from before).
+  - `fix-call-failed` (NEW, #131 facet A): the review point succeeds WITHOUT
+    a retry exactly like `draft-missing` above, and the fix call ALSO comes
+    back falsy/DRAFT_MISSING -- but this time the probe confirms the draft
+    IS present and valid (`present:true`): a transient fix-call failure
+    (agent died / output-token ceiling / classifier block), not a genuine
+    missing draft. 6 calls total (dispatch+wait+read+check+fix+probe), NO
+    ledger write (recoverable, same as the other #131 facets).
+  - `review-timeout` (the review restructure gives review its own bounded
+    poll, `review-wait:*`, independent of translate's own `wait:*`):
+    `review-wait:*` returns non-READY on the very first poll -- 2 calls
+    (dispatch+wait), the read/check/fix machinery is never reached, NO
+    ledger write (#131 facet B -- recoverable).
+  - `timeout` (translate's own, #131 facet C): the translator never delivers
+    READY -- `wait:*`'s own `ready.indexOf("READY") === -1` check fires on
+    the very first wait call, before any review call is ever made. Cost is
+    3 (in_progress ledger + translate + wait), independent of
+    `max_fix_rounds` -- NO terminal ledger write anymore (was 4, with a
+    `ledger:timeout:*` write, pre-1.3.6; the segment now stays in_progress
+    and recoverable instead of writing non_converged/translate-timeout).
 
 This file does not re-implement any of that arithmetic and trust its own
 reimplementation -- it extracts the REAL, substituted
@@ -165,6 +202,25 @@ Fixtures, one per branch:
      queue machinery counts a PARTIAL-worst-case run correctly too, per the
      CONTRACT's explicit "force a mid-loop read/check->retry->fix max round
      and assert EXACT equality" requirement.
+  12. NEW (1.3.6, #131 facet A) `test_blocked_fix_call_failed_terminating_
+     subcase` -- the SAME falsy/DRAFT_MISSING `fx` as the `draft-missing`
+     sub-case (3/4/5 above), but the new `draftPresentAndValid` probe
+     reports the draft IS present and valid: ends `fix-call-failed`, no fix
+     forensics needed, and -- unlike `draft-missing` -- NO terminal ledger
+     write (recoverable).
+  13. NEW (1.3.6, #133) `test_blocked_review_fabricated_loc_terminating_
+     subcase` -- a schema-valid, artifact-matched verdict whose one finding
+     carries a bare, colonless infra-sentinel `loc`: `findingsAuthentic()`
+     rejects it before any fix ever dispatches, ending the segment
+     `review-fabricated-loc` with no terminal ledger write.
+  14. NEW (1.3.6, #131 facet A review-fix pass -- MAJOR correctness fix)
+     `test_blocked_fix_call_failed_probe_itself_fails_terminating_subcase`
+     -- the SAME falsy/DRAFT_MISSING `fx` as fixture 12, but this time the
+     draft-probe AGENT CALL ITSELF fails (mock returns `null`, simulating a
+     correlated outage on both the fix call and the probe call). Locks that
+     `draftPresentAndValid` treats a `null` probe result as INCONCLUSIVE,
+     never as proof of absence -- before this fix, a null probe result
+     collapsed to `false` and wrongly landed on terminal `draft-missing`.
 """
 from __future__ import annotations
 
@@ -366,6 +422,19 @@ async function agent(promptText, opts) {
     if (q.length === 0) throw new Error("PLAN fixes queue exhausted for " + seg + " label=" + label);
     return q.shift();
   }
+  if (label.indexOf("draft-probe:") === 0) {
+    // #131 facet A -- a single per-segment value (not a queue), since the
+    // probe fires at most once per segment (it only ever runs from
+    // runRound's terminal fix-call-failed/draft-missing branch, which ends
+    // the segment). Absent PLAN[seg].present defaults to false.
+    const p = PLAN[seg] || {};
+    // present: null (JSON null, distinct from the key being absent) means
+    // this fixture wants to simulate the PROBE CALL ITSELF failing (agent
+    // death / output-token ceiling / classifier block on the probe, not
+    // just the fix) -- draftPresentAndValid's own null-return path.
+    if (p.present === null) return null;
+    return { present: p.present === true };
+  }
   throw new Error("mock agent(): unrecognized label " + label);
 }
 
@@ -446,10 +515,33 @@ def run_workflow(
 # exercises the plain JS branching logic that reads these fields directly.
 # ---------------------------------------------------------------------------
 def review_obj(*, clean: bool, coverage_ok: bool = True) -> dict:
+    # loc is a real colon-form structural reference ("PARA:seg01:0001", the
+    # shape extract.py.template's own PARA blocks emit) -- NOT a degenerate
+    # bare token. #133's authenticity gate (AUTHENTIC_LOC_RE) rejects any
+    # colonless loc, so a fixture using a bare "1" here would make every
+    # non-clean round in this file blocked/review-fabricated-loc instead of
+    # exercising the branch each test actually targets (memory: test a gate
+    # against realistic legit content, not a degenerate token that happens
+    # to be shaped like what the gate rejects).
     return {
         "clean": clean,
         "coverage_ok": coverage_ok,
-        "findings": [] if clean else [{"loc": "1", "severity": "minor", "issue": "x", "suggest": "y"}],
+        "findings": [] if clean else [{"loc": "PARA:seg01:0001", "severity": "minor", "issue": "x", "suggest": "y"}],
+        "draft_sha1": "a" * 40,
+    }
+
+
+def review_obj_fabricated_loc(sentinel: str = "TASK") -> dict:
+    """A schema-valid, clean:false verdict whose one finding carries a bare,
+    colonless infra-sentinel `loc` (TASK/PROCESS/SYSTEM/RUN) -- the #133
+    fabrication shape a codex reviewer killed mid-judgment leaves behind
+    after it already computed a real draft_sha1/dispatch_token but before it
+    ever inspected actual draft content. AUTHENTIC_LOC_RE rejects this loc
+    (no ":") while accepting review_obj's own real colon-form loc above."""
+    return {
+        "clean": False,
+        "coverage_ok": True,
+        "findings": [{"loc": sentinel, "severity": "major", "issue": "x", "suggest": "y"}],
         "draft_sha1": "a" * 40,
     }
 
@@ -504,18 +596,32 @@ def converged_worst_case_plan(seg: str, max_fix_rounds: int, *, final_clean: boo
     }
 
 
+# Sentinel distinct from True/False/None: signals that `blocked_plan` should
+# simulate the draft-probe AGENT CALL ITSELF failing (agent death/output-
+# token ceiling/classifier block ON THE PROBE, not just the fix) -- the mock
+# harness's "draft-probe:" branch maps this to a JSON `null` PLAN["present"]
+# value, distinct from the field being absent entirely (no probe expected
+# for this terminal_kind) and from a real True/False probe result.
+_PROBE_ITSELF_FAILS = object()
+
+
 def blocked_plan(seg: str, max_fix_rounds: int, terminal_kind: str) -> dict:
     """`max_fix_rounds - 1` completed normal rounds, each forced through the
     SAME worst-case-recovered review-point shape `converged_worst_case_plan`
     uses (6-call shared retry + 1 fix == 7 each) -- matching the estimator's
     own per-round worst-case assumption, so a blocked branch built from this
     helper is a genuinely maximal one, not an artificially cheap one -- then
-    a terminating round whose shape depends on `terminal_kind`, matching
-    this file's own three-sub-case derivation (module docstring) exactly."""
+    a terminating round whose shape depends on `terminal_kind` (module
+    docstring's own per-kind derivation). `present` is set on the returned
+    dict only for the three `callFix`-branch kinds (`draft-missing`,
+    `fix-call-failed`, `fix-call-failed-probe-null`) where the mock's
+    `draft-probe:*` branch reads it; every other kind never triggers a
+    probe call at all, so it is omitted."""
     review_waits: list = []
     reviews: list = []
     artifact_checks: list = []
     fixes: list = []
+    present: bool | None | object = None
 
     for i in range(1, max_fix_rounds):
         review_waits.append(f"READY {seg}")
@@ -529,42 +635,95 @@ def blocked_plan(seg: str, max_fix_rounds: int, terminal_kind: str) -> dict:
         # readAndCheck's own "if (!rev) return {rev:null, art:null}"
         # short-circuit means artifact-check:* is NEVER called when the
         # read itself is falsy -- neither on the first attempt nor the
-        # retry. 4 calls: dispatch + wait + read + read(retry).
+        # retry. 4 calls: dispatch + wait + read + read(retry). #131 facet B
+        # -- NO terminal ledger write (recoverable).
         review_waits.append(f"READY {seg}")
         reviews.append(None)
         reviews.append(None)
     elif terminal_kind == "draft-missing":
         # The review point succeeds WITHOUT a retry (happy path) -- draft-
         # missing is a callFix-level failure, unrelated to the read/check
-        # retry mechanic. 5 calls: dispatch+wait+read+check+fix.
+        # retry mechanic. The fix call itself reports DRAFT_MISSING, and the
+        # new #131 probe then confirms the draft is genuinely absent/invalid
+        # (present:false) -- 6 calls: dispatch+wait+read+check+fix+probe.
+        # This kind STILL writes the terminal ledger entry, unchanged.
         review_waits.append(f"READY {seg}")
         reviews.append(review_obj(clean=False))
         artifact_checks.append(match_true())
         fixes.append(f"DRAFT_MISSING {seg}")
+        present = False
+    elif terminal_kind == "fix-call-failed":
+        # #131 facet A (NEW): identical review-point shape to draft-missing
+        # above (happy path, no retry) and the SAME falsy/DRAFT_MISSING fx
+        # (fx alone can't tell a genuine missing draft apart from a
+        # transient agent death/output-token-ceiling/classifier-block on a
+        # perfectly fine draft -- that is exactly why the probe exists) --
+        # but this time the probe confirms the draft IS present and valid
+        # (present:true), so the segment ends fix-call-failed with NO
+        # terminal ledger write (recoverable) instead of blocked/draft-
+        # missing. 6 calls: dispatch+wait+read+check+fix+probe.
+        review_waits.append(f"READY {seg}")
+        reviews.append(review_obj(clean=False))
+        artifact_checks.append(match_true())
+        fixes.append(f"DRAFT_MISSING {seg}")
+        present = True
+    elif terminal_kind == "fix-call-failed-probe-null":
+        # #131 facet A regression test (review-fix pass MAJOR fix): the SAME
+        # falsy/DRAFT_MISSING fx as fix-call-failed above, but this time the
+        # PROBE CALL ITSELF fails (agent death/output-token ceiling/
+        # classifier block on the probe, not just the fix) -- a correlated
+        # outage the original `!!(raw && raw.present === true)` return used
+        # to conflate with genuine absence, wrongly landing on terminal
+        # draft-missing. draftPresentAndValid must return null (inconclusive,
+        # never proof of absence), and runRound must route it the SAME
+        # recoverable way as present:true. 6 calls: dispatch+wait+read+
+        # check+fix+probe, NO ledger write.
+        review_waits.append(f"READY {seg}")
+        reviews.append(review_obj(clean=False))
+        artifact_checks.append(match_true())
+        fixes.append(f"DRAFT_MISSING {seg}")
+        present = _PROBE_ITSELF_FAILS
     elif terminal_kind == "review-artifact-mismatch":
         # The first attempt's read succeeds but its check reports a
         # mismatch; the retried read ALSO succeeds but its check STILL
         # mismatches -- the true 6-call worst case, no fix ever dispatches.
+        # #131 facet B -- NO terminal ledger write (recoverable).
         review_waits.append(f"READY {seg}")
         reviews.append(review_obj(clean=False))
         artifact_checks.append(match_false("first mismatch"))
         reviews.append(review_obj(clean=False))
         artifact_checks.append(match_false("second mismatch"))
+    elif terminal_kind == "review-fabricated-loc":
+        # #133 (NEW): the review point succeeds WITHOUT a retry (happy path
+        # -- first attempt's read+check matches), but the verdict's one
+        # finding carries a bare, colonless infra-sentinel loc --
+        # findingsAuthentic() rejects it right there, before any fix ever
+        # dispatches. 4 calls: dispatch+wait+read+check. #131 facet B makes
+        # this reason recoverable too (NO terminal ledger write), for free.
+        review_waits.append(f"READY {seg}")
+        reviews.append(review_obj_fabricated_loc())
+        artifact_checks.append(match_true())
     elif terminal_kind == "review-timeout":
         # getVerifiedReview's own bounded review-wait poll times out on the
         # very first attempt -- 2 calls (dispatch + wait); the read/check/
-        # fix machinery is never reached at all.
+        # fix machinery is never reached at all. #131 facet B -- NO terminal
+        # ledger write (recoverable).
         review_waits.append(f"TIMEOUT {seg}")
     else:
         raise ValueError(f"unknown terminal_kind {terminal_kind!r}")
 
-    return {
+    result = {
         "wait": f"READY {seg}",
         "reviewWaits": review_waits,
         "reviews": reviews,
         "artifactChecks": artifact_checks,
         "fixes": fixes,
     }
+    if present is _PROBE_ITSELF_FAILS:
+        result["present"] = None  # JSON null -> mock's draft-probe branch returns JS null
+    elif present is not None:
+        result["present"] = present
+    return result
 
 
 def timeout_plan(seg: str) -> dict:
@@ -574,12 +733,17 @@ def timeout_plan(seg: str) -> dict:
     return {"wait": f"TIMEOUT {seg}", "reviewWaits": [], "reviews": [], "artifactChecks": [], "fixes": []}
 
 
-def blocked_branch_total(max_fix_rounds: int, terminating_cost: int) -> int:
+def blocked_branch_total(max_fix_rounds: int, terminating_cost: int, *, ledger_write: bool = True) -> int:
     """3 (fixed) + 7*(max_fix_rounds-1) (completed WORST-CASE-RECOVERED
     normal rounds -- review point with a forced shared retry (6) + fix (1)
     == 7 each, matching the estimator's own per-round assumption) +
-    terminating_cost + 1 (terminal ledger write)."""
-    return 3 + 7 * (max_fix_rounds - 1) + terminating_cost + 1
+    terminating_cost + (1 if ledger_write else 0) (terminal ledger write --
+    #131 SKIPS this write entirely for every transient/recoverable
+    terminating reason: review-null, review-artifact-mismatch,
+    review-timeout, review-fabricated-loc, and fix-call-failed. Only
+    draft-missing, a genuine anomaly, still writes -- `ledger_write`
+    defaults to True/unchanged for callers that don't pass it."""
+    return 3 + 7 * (max_fix_rounds - 1) + terminating_cost + (1 if ledger_write else 0)
 
 
 def converged_branch_total(max_fix_rounds: int) -> int:
@@ -702,7 +866,7 @@ def test_blocked_review_null_terminating_subcase(tmp_path):
 
     per_seg, batch_level = bucket_calls_by_segment(out["calls"])
     assert len(batch_level) == 1
-    assert len(per_seg[seg]) == blocked_branch_total(max_fix_rounds, terminating_cost=4)
+    assert len(per_seg[seg]) == blocked_branch_total(max_fix_rounds, terminating_cost=4, ledger_write=False)
 
 
 def test_blocked_draft_missing_terminating_subcase(tmp_path):
@@ -726,7 +890,141 @@ def test_blocked_draft_missing_terminating_subcase(tmp_path):
 
     per_seg, batch_level = bucket_calls_by_segment(out["calls"])
     assert len(batch_level) == 1
-    assert len(per_seg[seg]) == blocked_branch_total(max_fix_rounds, terminating_cost=5)
+    # terminating_cost=6, not 5: the new #131 draft-probe call
+    # (dispatch+wait+read+check+fix+probe) fires whenever fx comes back
+    # falsy/DRAFT_MISSING, and this kind still writes the terminal ledger
+    # entry (ledger_write defaults True) -- a real anomaly worth human
+    # attention, unchanged.
+    assert len(per_seg[seg]) == blocked_branch_total(max_fix_rounds, terminating_cost=6)
+
+
+def test_blocked_fix_call_failed_terminating_subcase(tmp_path):
+    """#131 facet A (NEW): the SAME falsy/DRAFT_MISSING fx as draft-missing
+    above, but the probe confirms the draft IS present and valid -- a
+    transient fix-call failure (agent died / output-token ceiling /
+    classifier block), not a genuine missing draft. Ends the segment as
+    fix-call-failed with NO terminal ledger write (recoverable)."""
+    max_fix_rounds = 3
+    seg = "segI"
+    out = run_workflow(
+        tmp_path=tmp_path,
+        max_fix_rounds=max_fix_rounds,
+        batch_agent_cap=10_000,
+        segs=[seg],
+        plan={seg: blocked_plan(seg, max_fix_rounds, "fix-call-failed")},
+    )
+
+    result = out["result"]
+    assert result["converged"] == []
+    assert len(result["failed"]) == 1
+    failed = result["failed"][0]
+    assert failed["seg"] == seg
+    assert failed["converged"] is False
+    assert failed["reason"] == "fix-call-failed"
+
+    per_seg, batch_level = bucket_calls_by_segment(out["calls"])
+    assert len(batch_level) == 1
+    labels = [c["label"] for c in per_seg[seg]]
+    assert any(label.startswith("draft-probe:") for label in labels), (
+        "fix-call-failed must be reached via the draftPresentAndValid probe"
+    )
+    # "ledger:in_progress:*" (translateStage's own unconditional write) is
+    # still present -- only the TERMINAL "ledger:blocked:*" write must be
+    # absent (that is the one #131 facet A skips).
+    assert not any(label.startswith("ledger:blocked:") for label in labels), (
+        "fix-call-failed must NOT write a terminal ledger entry -- it stays "
+        "in_progress and recoverable, exactly like the other #131 facets"
+    )
+    assert len(per_seg[seg]) == blocked_branch_total(max_fix_rounds, terminating_cost=6, ledger_write=False)
+
+
+def test_blocked_fix_call_failed_probe_itself_fails_terminating_subcase(tmp_path):
+    """#131 facet A regression test (review-fix pass MAJOR fix): the probe
+    AGENT CALL ITSELF fails (mock returns null, simulating agent death /
+    output-token ceiling / classifier block on the PROBE, not just the fix
+    -- a correlated outage). draftPresentAndValid must return null
+    (inconclusive), and runRound must route it the SAME recoverable way as
+    present:true -- NOT fall through to a terminal draft-missing write.
+    Before the MAJOR fix, `!!(raw && raw.present === true)` collapsed a null
+    probe result to `false`, wrongly landing on terminal draft-missing;
+    this is the regression lock for that."""
+    max_fix_rounds = 3
+    seg = "segJ"
+    out = run_workflow(
+        tmp_path=tmp_path,
+        max_fix_rounds=max_fix_rounds,
+        batch_agent_cap=10_000,
+        segs=[seg],
+        plan={seg: blocked_plan(seg, max_fix_rounds, "fix-call-failed-probe-null")},
+    )
+
+    result = out["result"]
+    assert result["converged"] == []
+    assert len(result["failed"]) == 1
+    failed = result["failed"][0]
+    assert failed["seg"] == seg
+    assert failed["converged"] is False
+    assert failed["reason"] == "fix-call-failed", (
+        "a probe call that itself fails (null) must be treated as INCONCLUSIVE, "
+        "never as proof of absence -- it must end fix-call-failed, not draft-missing"
+    )
+
+    per_seg, batch_level = bucket_calls_by_segment(out["calls"])
+    assert len(batch_level) == 1
+    labels = [c["label"] for c in per_seg[seg]]
+    assert any(label.startswith("draft-probe:") for label in labels)
+    assert not any(label.startswith("ledger:blocked:") for label in labels), (
+        "a probe-call-itself-failed outcome must NOT write a terminal ledger "
+        "entry -- it stays in_progress and recoverable, exactly like a "
+        "confirmed-present probe result"
+    )
+    assert len(per_seg[seg]) == blocked_branch_total(max_fix_rounds, terminating_cost=6, ledger_write=False)
+
+
+def test_blocked_review_fabricated_loc_terminating_subcase(tmp_path):
+    """#133 (NEW): a schema-valid, artifact-matched verdict whose one
+    finding carries a bare, colonless infra-sentinel loc -- the shape a
+    codex reviewer killed mid-judgment (after obtaining a real
+    draft_sha1/dispatch_token but before inspecting real content) leaves
+    behind. findingsAuthentic() must reject it BEFORE any fix dispatches,
+    routing to blocked/review-fabricated-loc, which #131 facet B already
+    makes recoverable (no extra ledger-skip wiring needed for this reason)."""
+    max_fix_rounds = 3
+    seg = "segH"
+    out = run_workflow(
+        tmp_path=tmp_path,
+        max_fix_rounds=max_fix_rounds,
+        batch_agent_cap=10_000,
+        segs=[seg],
+        plan={seg: blocked_plan(seg, max_fix_rounds, "review-fabricated-loc")},
+    )
+
+    result = out["result"]
+    assert result["converged"] == []
+    assert len(result["failed"]) == 1
+    failed = result["failed"][0]
+    assert failed["seg"] == seg
+    assert failed["converged"] is False
+    assert failed["reason"] == "review-fabricated-loc"
+
+    per_seg, batch_level = bucket_calls_by_segment(out["calls"])
+    assert len(batch_level) == 1
+    # The terminal round itself (round max_fix_rounds, where the fabricated
+    # loc appears) must never reach a fix call -- the `max_fix_rounds - 1`
+    # PRIOR completed rounds each legitimately have their own "fix:*:r{i}"
+    # call, so this checks the terminal round specifically, not "no fix
+    # calls at all".
+    labels = [c["label"] for c in per_seg[seg]]
+    assert f"fix:{seg}:r{max_fix_rounds}" not in labels, (
+        "a fabricated-loc verdict must never reach the fix call"
+    )
+    # "ledger:in_progress:*" (translateStage's own unconditional write) is
+    # still present -- only the TERMINAL "ledger:blocked:*" write must be
+    # absent (that is the one #131 facet B skips for this reason too).
+    assert not any(label.startswith("ledger:blocked:") for label in labels), (
+        "review-fabricated-loc must NOT write a terminal ledger entry"
+    )
+    assert len(per_seg[seg]) == blocked_branch_total(max_fix_rounds, terminating_cost=4, ledger_write=False)
 
 
 def test_blocked_review_artifact_mismatch_terminating_subcase(tmp_path):
@@ -750,7 +1048,7 @@ def test_blocked_review_artifact_mismatch_terminating_subcase(tmp_path):
 
     per_seg, batch_level = bucket_calls_by_segment(out["calls"])
     assert len(batch_level) == 1
-    assert len(per_seg[seg]) == blocked_branch_total(max_fix_rounds, terminating_cost=6)
+    assert len(per_seg[seg]) == blocked_branch_total(max_fix_rounds, terminating_cost=6, ledger_write=False)
 
 
 # ---------------------------------------------------------------------------
@@ -781,7 +1079,7 @@ def test_blocked_review_timeout_terminating_subcase(tmp_path):
 
     per_seg, batch_level = bucket_calls_by_segment(out["calls"])
     assert len(batch_level) == 1
-    assert len(per_seg[seg]) == blocked_branch_total(max_fix_rounds, terminating_cost=2)
+    assert len(per_seg[seg]) == blocked_branch_total(max_fix_rounds, terminating_cost=2, ledger_write=False)
 
 
 # ---------------------------------------------------------------------------
@@ -810,9 +1108,15 @@ def test_timeout_branch(tmp_path):
 
     per_seg, batch_level = bucket_calls_by_segment(out["calls"])
     assert len(batch_level) == 1
-    # 1 in_progress ledger write + 1 translate call + 1 wait call + 1 timeout
-    # ledger write == 4, independent of max_fix_rounds.
-    assert len(per_seg[seg]) == 4
+    # 1 in_progress ledger write + 1 translate call + 1 wait call == 3,
+    # independent of max_fix_rounds. #131 facet C: NO terminal
+    # "ledger:timeout:*" write anymore -- the segment stays in_progress and
+    # recoverable instead of a terminal non_converged/translate-timeout.
+    assert len(per_seg[seg]) == 3
+    assert not any(c["label"].startswith("ledger:timeout:") for c in per_seg[seg]), (
+        "translate-timeout must NOT write a terminal ledger entry (#131 facet C) "
+        "-- only the in_progress write from translateStage should appear"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -842,7 +1146,7 @@ def test_review_artifact_mismatch_actual_calls_never_exceed_formula_bound(tmp_pa
     actual_calls = len(per_seg[seg])
     per_segment_bound = 10 + 7 * max_fix_rounds  # the exact term estimatedCalls sizes per segment
 
-    assert actual_calls == blocked_branch_total(max_fix_rounds, terminating_cost=6)
+    assert actual_calls == blocked_branch_total(max_fix_rounds, terminating_cost=6, ledger_write=False)
     assert actual_calls <= per_segment_bound, (
         f"a review-artifact-mismatch segment made {actual_calls} real agent() calls, "
         f"exceeding the estimator's own per-segment bound of {per_segment_bound} "

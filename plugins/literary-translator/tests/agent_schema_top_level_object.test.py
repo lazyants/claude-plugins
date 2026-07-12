@@ -238,11 +238,20 @@ CONST_TEMPLATE_OWNER = {
     "REVIEW_ARTIFACT_SCHEMA": "mass_translate",
     "LEDGER_WRITE_SCHEMA": "mass_translate",
     "LEDGER_MERGE_SCHEMA": "mass_translate",
+    # 1.3.6 (#131 facet A): DRAFT_PROBE_SCHEMA is a NEW flat literal, not
+    # part of CONTRACT-1.2.0-reliability.md section 1's pinned set -- it
+    # gets the generic top-level-object/no-combinator check (below) via
+    # CONST_TEMPLATE_OWNER, but deliberately has NO entry in
+    # PINNED_CONTRACT_SHAPES (that dict is scoped to the four schemas the
+    # 1.2.0 #87 fix flattened/added, quoted verbatim from that CONTRACT --
+    # DRAFT_PROBE_SCHEMA predates none of that history).
+    "DRAFT_PROBE_SCHEMA": "mass_translate",
     "CANON_VERIFY_SCHEMA": "glossary",
 }
 
 EXPECTED_MASS_TRANSLATE_SCHEMA_IDENTIFIERS = {
     "REVIEW_SCHEMA", "REVIEW_ARTIFACT_SCHEMA", "LEDGER_WRITE_SCHEMA", "LEDGER_MERGE_SCHEMA",
+    "DRAFT_PROBE_SCHEMA",
 }
 EXPECTED_GLOSSARY_SCHEMA_IDENTIFIERS = {"CANON_VERIFY_SCHEMA"}
 

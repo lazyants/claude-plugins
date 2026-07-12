@@ -28,6 +28,7 @@ final case confirms a brand-new project with no *_TASK.md files yet (not
 resumed) is never mistaken for the "missing marker" violation.
 """
 import importlib.util
+import re
 import textwrap
 from pathlib import Path
 
@@ -320,3 +321,96 @@ def test_marker_after_leading_blank_lines_is_still_leading(pv, tmp_path, monkeyp
         f"a marker on the file's first NON-BLANK line should pass, blank lines "
         f"before it notwithstanding; stderr:\n{err}"
     )
+
+
+# ===========================================================================
+# CANON_MAP PROMPT CONTRACT (#130) -- unrelated to the PROMPT_CONTRACT_VERSION
+# marker mechanism above (a distinct "prompt contract" concern sharing this
+# file only by name convention, the same appended-unrelated-section
+# convention tests/batch_size_estimator.test.py already uses for its own
+# glossary-pass section below the mass-translate one):
+#
+# Locks that mass-translate-wf.template.js's translatePrompt and
+# reviewDispatchPrompt actually reference the segpack's canon_map field and
+# the declined-stem enforcement rule (CONTRACT §4) instead of the old "Use
+# canon_names forms verbatim, no exceptions" wording -- which would make the
+# reviewer flag a correctly inflected/declined form as wrong, causing chronic
+# non-convergence (the exact failure #130 fixes). Pure string-level checks
+# on the REAL, shipped prompt-builder function bodies -- no Node dependency:
+# extracts each function's body via review_prompt_schema_drift.test.py's
+# brace-matching helper (house style, via importlib -- see
+# tests/agent_schema_top_level_object.test.py's identical reuse), the same
+# technique tests/transient_failure_recoverable.test.py uses for its own
+# #131 structural locks.
+# ===========================================================================
+
+MASS_TRANSLATE_TEMPLATE_PATH = (
+    Path(__file__).resolve().parents[1]
+    / "skills" / "literary-translator" / "assets" / "templates" / "mass-translate-wf.template.js"
+)
+
+_DRIFT_TEST_PATH_FOR_CANON_MAP = Path(__file__).resolve().parent / "review_prompt_schema_drift.test.py"
+assert _DRIFT_TEST_PATH_FOR_CANON_MAP.is_file(), f"expected sibling test file not found: {_DRIFT_TEST_PATH_FOR_CANON_MAP}"
+
+_drift_spec_for_canon_map = importlib.util.spec_from_file_location(
+    "review_prompt_schema_drift_shared_for_prompt_contract_drift", _DRIFT_TEST_PATH_FOR_CANON_MAP
+)
+assert _drift_spec_for_canon_map is not None and _drift_spec_for_canon_map.loader is not None, (
+    f"could not load spec for {_DRIFT_TEST_PATH_FOR_CANON_MAP}"
+)
+_drift_for_canon_map = importlib.util.module_from_spec(_drift_spec_for_canon_map)
+_drift_spec_for_canon_map.loader.exec_module(_drift_for_canon_map)
+
+_find_balanced_brace_span_for_canon_map = _drift_for_canon_map._find_balanced_brace_span
+
+
+def _extract_prompt_function_body(source: str, function_name: str) -> str:
+    """Locates ``function <function_name>(...) {`` (a plain, non-async
+    function -- both translatePrompt and reviewDispatchPrompt are) and
+    returns the text strictly BETWEEN its outer braces."""
+    m = re.search(r"function\s+" + re.escape(function_name) + r"\s*\([^)]*\)\s*", source)
+    assert m, f"expected 'function {function_name}(...)' in {MASS_TRANSLATE_TEMPLATE_PATH}"
+    brace_start = source.index("{", m.end())
+    brace_end = _find_balanced_brace_span_for_canon_map(source, brace_start)
+    return source[brace_start + 1 : brace_end - 1]
+
+
+@pytest.fixture(scope="module")
+def mass_translate_js_source() -> str:
+    assert MASS_TRANSLATE_TEMPLATE_PATH.is_file(), f"expected {MASS_TRANSLATE_TEMPLATE_PATH}"
+    return MASS_TRANSLATE_TEMPLATE_PATH.read_text(encoding="utf-8")
+
+
+@pytest.fixture(scope="module")
+def translate_prompt_body(mass_translate_js_source: str) -> str:
+    return _extract_prompt_function_body(mass_translate_js_source, "translatePrompt")
+
+
+@pytest.fixture(scope="module")
+def review_dispatch_prompt_body(mass_translate_js_source: str) -> str:
+    return _extract_prompt_function_body(mass_translate_js_source, "reviewDispatchPrompt")
+
+
+def test_translate_prompt_references_canon_map_and_declined_stem_rule(translate_prompt_body):
+    assert "canon_map" in translate_prompt_body, (
+        "translatePrompt must reference the segpack's canon_map field (#130)"
+    )
+    assert "declined as the target grammar requires" in translate_prompt_body, (
+        "translatePrompt must state the declined-stem enforcement rule (CONTRACT §4)"
+    )
+    assert "Use canon_names forms verbatim" not in translate_prompt_body, (
+        "the old 'verbatim, no exceptions' wording must be gone -- it would make the "
+        "reviewer flag a correctly inflected/declined form as wrong, causing chronic "
+        "non-convergence (#130)"
+    )
+
+
+def test_review_dispatch_prompt_references_canon_map_fidelity_rule(review_dispatch_prompt_body):
+    assert "canon_map" in review_dispatch_prompt_body, (
+        "reviewDispatchPrompt must reference the segpack's canon_map field (#130)"
+    )
+    assert "correctly inflected/declined form of the canonical stem is CORRECT" in review_dispatch_prompt_body, (
+        "reviewDispatchPrompt must state that a correctly inflected/declined form "
+        "is CORRECT and must not be flagged (CONTRACT §4)"
+    )
+    assert "must NOT be flagged" in review_dispatch_prompt_body

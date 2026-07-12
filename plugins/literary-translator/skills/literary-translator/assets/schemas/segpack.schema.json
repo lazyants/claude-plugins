@@ -121,13 +121,18 @@
     },
     "canon_names": {
       "type": "array",
-      "description": "Name forms appearing in this segment that are ALREADY canonized in canon.json's entries{} at segpack-generation time -- locked forms the translator MUST use verbatim. Together with new_names, this is the list used_terms_hash's per-segment computation references to look up canon.json entries currently keyed by these names.",
+      "description": "Source-form names appearing in this segment that are ALREADY canonized in canon.json's entries{} at segpack-generation time. Their frozen target forms are NOT carried here -- see canon_map. Together with new_names, this is the list used_terms_hash's per-segment computation references to look up canon.json entries currently keyed by these names.",
       "items": { "type": "string" }
     },
     "new_names": {
       "type": "array",
       "description": "Name forms appearing in this segment that are NOT yet canonized in canon.json at segpack-generation time -- the translator resolves these by context and flags them NEW: in the draft's own notes[]. Invalidation-load-bearing: used_terms_hash's per-segment computation includes new_names (not just canon_names) so that canonizing one of these elsewhere later correctly flips this segment stale the moment its bytes first enter canon.json.",
       "items": { "type": "string" }
+    },
+    "canon_map": {
+      "type": "object",
+      "additionalProperties": { "type": "string" },
+      "description": "Source_form -> frozen canonical_target_form, for every name in canon_names whose canon.json entry carries a non-empty canonical_target_form (a canon entry with an empty/missing target form is validly omitted here). This is what actually delivers the frozen canon to the translate/review prompts (#130) -- canon_names alone is only the source-form membership list. Always present (possibly {}). Keys are a subset of canon_names, not necessarily equal."
     },
     "generation_hashes": {
       "type": "object",
@@ -170,6 +175,7 @@
     "names",
     "canon_names",
     "new_names",
+    "canon_map",
     "generation_hashes"
   ],
   "additionalProperties": false

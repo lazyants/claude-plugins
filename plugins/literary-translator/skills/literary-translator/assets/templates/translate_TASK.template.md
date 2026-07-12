@@ -48,8 +48,13 @@ and re-read it whenever it changes.
   How to render each verse for THIS run arrives in your own dispatch
   prompt, spliced fresh from the current verse policy -- follow that
   instruction, not any example baked into this file.
-- `canon_names[]` -- the FROZEN name/realia canon for this segment: source
-  form -> canonical target form. Use these forms verbatim, no exceptions.
+- `canon_names[]` -- the source-form names/realia already canonized for
+  this segment. `canon_map` (source form -> frozen `canonical_target_form`)
+  carries the actual target forms -- render each canonized name using its
+  `canon_map` target form's **stem/spelling, declined as the target
+  grammar requires**: a correctly inflected/case form of the canonical
+  stem is CORRECT; do not copy the citation form verbatim where grammar
+  needs another case.
 - `new_names[]` -- names/realia not yet canonized: choose a reasoned
   rendering (see `style_bible.md`'s naming-convention section) and record
   your choice in `notes` as `NEW: ...` so a later glossary pass can review

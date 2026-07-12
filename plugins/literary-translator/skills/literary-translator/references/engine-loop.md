@@ -69,22 +69,28 @@ different engine for either role.
   This plugin's `fixPrompt(seg, round, revObj)` is a **deliberate, documented
   departure** from that proven 2-argument shape — the same class of addition as
   the null-review retry-once behavior below, never a silent, unexplained
-  deviation. `revObj` is the third argument: the SAME schema-validated object
-  `readReviewPrompt` already returned this round, still in the JS's own
-  in-memory state, never re-read off disk. The fix agent's prompt-generation
-  logic embeds `revObj`'s literal canonical-JSON text directly (the identical
-  deterministic splice mechanism `verifyReviewArtifactPrompt` uses — see
-  `references/ledger-and-resumability.md` and
-  `references/workflow-schema-validation.md` for the review-artifact gate this
-  interacts with) rather than instructing the agent to re-read
-  `review_path(seg) = segments/{seg}.review.json` from disk. This closes the
-  review-artifact gate's residual risk structurally for the fix step
-  specifically: there is no longer a second on-disk artifact for the fix step's
-  own input to independently drift against. `review_path(seg)` still stays on
-  disk, unchanged, for audit/back-compat and for `ledger_update.py`'s
+  deviation. `revObj` is still the third argument (used elsewhere for the
+  clean/coverage_ok convergence decision and the review-artifact gate's own
+  `--expected-file` content), but **1.3.6 (#132 option b)**: the fix agent's
+  prompt no longer splices `revObj`'s findings into its own text at all — it
+  instead instructs the agent to READ the canonical
+  `review_path(seg) = segments/{seg}.review.json` from disk itself and apply
+  every entry in its on-disk `findings[]` array. `review_ready.py` already
+  token-validated this exact file fresh THIS round before the fix call was
+  ever dispatched, and it is not rewritten again until the NEXT round's
+  review dispatch, so this read is fresh and race-free. This closes the
+  review-artifact gate's residual risk for the fix step by a DIFFERENT
+  mechanism than the pre-1.3.6 design intended: not because there is no
+  second on-disk artifact to drift against (there is — `revObj`'s own
+  transcribed copy, still used for the gate's `--expected-file` and the
+  convergence decision), but because the fix step no longer CONSUMES that
+  transcribed copy for its findings at all — a transcription slip in it can
+  no longer reach the fixer, regardless of what the gate's own compare does
+  or doesn't catch. `review_path(seg)` stays on disk, unchanged, for
+  audit/back-compat and for `ledger_update.py`'s
   `reviewed_draft_sha1`/`dispatch_token` binding check and later audit-trail
-  inspection — those consumers still read it — but the fix step's own
-  correctness no longer depends on it.
+  inspection — those consumers still read it — and now the fix step reads it
+  too, independently.
 
   The fix prompt's job is **constrained to editing an EXISTING
   `draft_path(seg) = segments/{seg}.draft.json` file** that codex already
@@ -164,16 +170,22 @@ steps below:
      `{match:true}`/`{match:false, mismatch_detail}` line. The script, not the
      agent, projects both `review_path(seg)` (which now also carries
      `dispatch_token`) and the expected file down to the four verdict
-     fields, canonicalizes both with sorted-key JSON, and byte-compares
-     those canonical forms. On `match:false`, the shared retry budget above
+     fields — and (1.3.6, #132) each `findings[]` element further down to
+     `{loc, severity}`, dropping the free-text `issue`/`suggest` bodies so a
+     transcription slip in prose can't false-block an already-validated
+     review — canonicalizes both projections with sorted-key JSON, and
+     byte-compares those canonical forms. On `match:false`, the shared
+     retry budget above
      fires; still mismatching after the retry → `blocked` with reason
      `review-artifact-mismatch`. Known residual: the `--expected-file` is
      still written by an LLM agent, so this gate's deterministic comparison
      can compare against the wrong expected file if that write is wrong.
-     Since `fixPrompt` now works from in-memory `revObj` (see R1 above),
-     that residual is confined to `ledger_update.py`'s later
-     `reviewed_draft_sha1`/`dispatch_token` binding check and audit-trail
-     inspection, not the fix step's own input. Full mechanics:
+     Since `fixPrompt` now reads `review_path(seg)` itself (1.3.6/#132
+     option b, see R1 above), that residual is confined to
+     `ledger_update.py`'s later `reviewed_draft_sha1`/`dispatch_token`
+     binding check and audit-trail inspection, not the fix step's own input
+     — the fixer's own disk read closes that question, independent of
+     whatever this gate's own comparison concludes. Full mechanics:
      `references/ledger-and-resumability.md`.
 4. **Always one final confirming review after the cap**, even if the loop exited
    because of the cap rather than convergence — a fix that goes unverified is

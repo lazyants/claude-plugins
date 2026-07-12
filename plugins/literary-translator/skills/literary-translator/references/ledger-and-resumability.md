@@ -682,30 +682,48 @@ per-segment token/sha re-check above.
 ## The `recordLedgerPrompt` call sites
 
 All in `mass-translate-wf.template.js`, all through this one
-schema-validated call — no ledger write happens any other way. **Six sites
-as of 1.2.0** (`review-timeout` is new, alongside review-null/draft-missing/
-review-artifact-mismatch at the same blocked-terminal call site).
+schema-validated call — no ledger write happens any other way. **1.3.6
+(#131) removed two of the six sites that existed as of 1.2.0.** The
+translate-timeout write, and the blocked-terminal write covering
+review-timeout/review-null/review-artifact-mismatch (and, 1.3.6/#133, the
+NEW review-fabricated-loc reason — see `findingsAuthentic`/
+`AUTHENTIC_LOC_RE`), are GONE: every one of those reasons is
+transient/mechanical (a codex agent that died mid-dispatch, an infra
+hiccup, a schema-valid verdict caught referencing a phantom finding),
+never genuine content non-convergence, so writing a terminal status there
+would incorrectly take the segment out of `select_segments.py`'s
+recoverable classification for good. Instead, the segment's `in_progress`
+fragment (site 0 below) is left as the durable record, and
+`select_segments.py`'s own "any non-terminal/unrecognized status ->
+recoverable" rule auto-redispatches it on the next run. **Four sites
+remain**:
 
 0. **Translate-dispatch** — right before `agent(translatePrompt(seg), ...)`
    fires: `recordLedgerPrompt(seg, {status:'in_progress'})`, awaited.
    Closes the gap where an interruption between dispatch and any terminal
-   write would otherwise leave zero durable record.
-1. **Translate-timeout** — on `waitPrompt` returning `TIMEOUT {seg}`:
-   `recordLedgerPrompt(seg, {status:'non_converged', reason:'translate-timeout'})`.
-2. **Review-timeout, review-null (after one retry), draft-missing mid-fix,
-   or review-artifact-mismatch (after one retry)** — all four terminate the
-   same way, `{status:'blocked', reason:'<one of the four>'}`:
-   - `review-timeout` (new in 1.2.0) — `reviewWaitPrompt` returns `TIMEOUT`;
-     no retry, since nothing was ever dispatched successfully to retry.
-   - `review-null` — the CONSUME pair's shared retry budget (one retry of
-     `read → check` together) still returns a null read on the second
-     attempt — a deliberate plan addition beyond the real reference script,
-     which blocks on the first null with no retry.
-   - `draft-missing` — a fix round's `DRAFT_MISSING` branch fires (matches
-     the real reference exactly).
-   - `review-artifact-mismatch` — the same shared retry budget's second
-     attempt still reports `match:false` from `verifyReviewArtifactPrompt`.
-3. **Converged** — `recordLedgerPrompt(seg, {status:'converged',
+   write would otherwise leave zero durable record. **1.3.6:** this
+   `in_progress` write is now also the ONLY durable record a
+   translate-timeout, a review-timeout/review-null/review-artifact-mismatch/
+   review-fabricated-loc, or a transient fix-call failure (the new
+   `draftPresentAndValid` probe reports the draft present-and-valid, OR the
+   probe call itself fails and returns `null` — inconclusive, never treated
+   as proof of absence) leaves behind — none of those write a terminal
+   status anymore.
+1. **Draft-missing** — a fix round's `DRAFT_MISSING` branch fires, AND
+   (1.3.6/#131) the `draftPresentAndValid` probe confirms the draft is
+   genuinely absent/invalid (`present === false`):
+   `recordLedgerPrompt(seg, {status:'blocked', reason:'draft-missing'})`.
+   Matches the real reference's own `DRAFT_MISSING` handling, refined by
+   1.3.6 to require the probe's confirmation first — a probe result of
+   `true` (draft present and valid) or `null` (the probe call itself
+   failed) instead ends the segment as `fix-call-failed`, reusing the
+   in_progress write from site 0 with NO additional ledger write (see that
+   site's note above, and `draftPresentAndValid`'s own comment in
+   `mass-translate-wf.template.js` for why a `null` probe result must never
+   be treated as proof of absence — a correlated outage on both the fix
+   call and the probe call must stay recoverable, not fall through to a
+   terminal `draft-missing` write).
+2. **Converged** — `recordLedgerPrompt(seg, {status:'converged',
    rounds:<bare integer>, cache_key:{...freshly computed 15 fields...}})`
    (plus the current run's `dispatch_token`, 1.2.0). The payload does not
    include `n_blocks`/`n_footnotes`/`n_verses` (`ledger_update.py` derives
@@ -724,7 +742,7 @@ review-artifact-mismatch at the same blocked-terminal call site).
    all, returns `{success:false, error:"..."}` naming which check failed,
    which becomes `{seg, converged:false, reason:'ledger-write-failed',
    detail}` — the same escape hatch every other write failure uses.
-4. **Non-converged (cap reached)** — terminal, no further automated step:
+3. **Non-converged (cap reached)** — terminal, no further automated step:
    `recordLedgerPrompt(seg, {status:'non_converged', reason:'cap',
    rounds: MAXFIX+1})`, `reviewFixLoop()` returns `{converged:false,
    reason:'cap', ...}` — full stop, human-escalation item exactly like

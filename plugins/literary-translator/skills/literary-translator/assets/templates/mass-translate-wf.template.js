@@ -137,7 +137,7 @@ const REVIEW_SCHEMA = {
     },
     findings: {
       type: "array",
-      description: "Issues the reviewer wants fixed. Empty when clean is true.",
+      description: "Issues the reviewer wants fixed. May remain non-empty even when clean is true (residual low/cosmetic items the reviewer chose not to fix-round); clean is judged solely on whether any finding requires a fix round.",
       items: {
         type: "object",
         additionalProperties: false,
@@ -220,6 +220,21 @@ const LEDGER_MERGE_SCHEMA = {
   },
 };
 
+// #131 facet A -- flat agent-facing literal for draftPresentAndValid's probe
+// call below. Declared here with the other schema literals per the same TDZ
+// rule the block comment above documents: the probe fires from inside
+// runRound, which is defined (and, more importantly, called via pipeline())
+// well after this point in the file, but the const itself must still sit
+// above every use textually.
+const DRAFT_PROBE_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: ["present"],
+  properties: {
+    present: { type: "boolean" },
+  },
+};
+
 // ---------------------------------------------------------------------------
 // Constants substituted once at instantiation time (see the header comment
 // above for the full token list and the JSON-escaping contract on the verse
@@ -263,6 +278,46 @@ for (let i = 0; i < SEGS.length; i++) {
   if (typeof s !== "string" || !SEG_ID_RE.test(s)) {
     throw new Error(`Unsafe segment id ${JSON.stringify(s)}: must match (FRONTBACK:)?[A-Za-z0-9_]+`);
   }
+}
+
+// ---------------------------------------------------------------------------
+// #133 finding-loc authenticity gate. A schema-valid review verdict can
+// still carry a fabricated finding if the reviewer agent died mid-judgment
+// after it had already obtained a real draft_sha1/dispatch_token but before
+// it ever inspected the actual draft content -- what it leaves behind is a
+// clean-looking verdict whose finding(s) reference an abstract sentinel
+// (TASK/PROCESS/SYSTEM/RUN) rather than any real content location. A
+// genuine loc is ALWAYS a colon-delimited structural reference: a block id
+// ("{btype}:{seg}:{ord}", e.g. PARA:seg01:0001, or the shorter HEAD:seg01
+// shape some adapters emit -- btype is deliberately NOT a fixed enum, see
+// manifest.schema.json; custom/plain_text adapters add their own block
+// types via ADAPT-POINT hooks, so only the ":" shape is invariant across all
+// of them), FN:n, or VERSE:vid. The named infra sentinels are bare,
+// colonless tokens -- that is the one true invariant this gate can lean on
+// without hardcoding a block-type allowlist (which would over-reject a
+// legitimate custom adapter's own block types) or a segpack-membership
+// check (which would over-reject a healthy reviewer's slightly-off but
+// genuine content ref). Residual false-block: a healthy reviewer emitting a
+// colonless holistic loc (e.g. "overall") would also be caught here --
+// deviates from the shipped block_id|FN:n|VERSE:vid contract, but the
+// failure direction stays safe: findingsAuthentic() feeding into
+// getVerifiedReview below routes a non-authentic verdict to
+// blocked/review-fabricated-loc, which #131's blanket blocked-branch
+// ledger-skip already makes recoverable (re-reviewed next run), never a
+// terminal escalation.
+const AUTHENTIC_LOC_RE = /^[^\s:]+:.+$/;
+function findingsAuthentic(rev) {
+  if (!rev || !Array.isArray(rev.findings)) return true; // clean/empty verdict -> authentic
+  return rev.findings.every((f) => f && typeof f.loc === "string" && AUTHENTIC_LOC_RE.test(f.loc));
+}
+
+// #133 -- shared "artifact matched -> authenticity gate -> ok" step, used
+// by both the first attempt and the shared retry in getVerifiedReview
+// below (DRY: keeps those two copies of the exact same check from
+// silently drifting apart from each other over time).
+function matchedVerdict(rev) {
+  if (!findingsAuthentic(rev)) return { status: "blocked", reason: "review-fabricated-loc" };
+  return { status: "ok", rev: rev };
 }
 
 // ---------------------------------------------------------------------------
@@ -338,7 +393,7 @@ function translatePrompt(seg) {
   lines.push("Effort: high. Literary translation of segment " + seg + " (" + SOURCE_LANG + " to " + TARGET_LANG + ").");
   lines.push("Read in order: " + ROOT + "/translate_TASK.md ; " + ROOT + "/style_bible.md (in full, especially the word-sense/realia traps section) ; " + ROOT + "/segments/segpack_" + seg + ".json (source text plus the frozen name/realia canon for this segment).");
   lines.push("Verse policy for this project: " + VERSE_POLICY_INSTRUCTION_BLOCK);
-  lines.push("Translate every block, footnote, and verse this segpack contains. Copy every placeholder sentinel (e.g. ⟦FNREF_N⟧, ⟦VERSE_...⟧) byte for byte, in its correct position in the sentence -- never translate, drop, or reword a sentinel itself. Any embedded third-language text (Latin, an older form of the source language, or similar) gets an in-text gloss, never a notes-only translation. Use canon_names forms verbatim; for a new_names entry not yet in the canon, choose a reasoned rendering and flag it in notes as NEW:.");
+  lines.push("Translate every block, footnote, and verse this segpack contains. Copy every placeholder sentinel (e.g. ⟦FNREF_N⟧, ⟦VERSE_...⟧) byte for byte, in its correct position in the sentence -- never translate, drop, or reword a sentinel itself. Any embedded third-language text (Latin, an older form of the source language, or similar) gets an in-text gloss, never a notes-only translation. The segpack's canon_map gives each already-canonized name's frozen canonical target form (source form -> target form): render each such name using that target form's stem/spelling, declined as the target grammar requires -- a correctly inflected form of the canonical stem is correct, never a verbatim copy of the citation form where grammar needs another case. For a new_names entry not yet in canon_map, choose a reasoned rendering and flag it in notes as NEW:.");
   lines.push("Write your draft exactly per translate_TASK.md's own schema to: " + ROOT + "/segments/" + seg + ".draft.json -- and add one extra top-level field beyond that schema: dispatch_token, with exactly this literal string value: " + JSON.stringify(dispatchToken) + ". This is run-scoping freshness metadata, not part of the translation itself.");
   lines.push("Then self-check coverage: run " + PY + " " + ROOT + "/scripts/validate_draft.py " + seg + ". If it prints FAIL, fix the draft and rewrite the file, and repeat until it prints OK.");
   lines.push("Return exactly the line: DONE " + seg);
@@ -370,6 +425,7 @@ function reviewDispatchPrompt(seg, roundLabel) {
   lines.push("As soon as you read the draft, check its own dispatch_token field: it must equal exactly this literal string: " + JSON.stringify(draftToken) + ". If it does not match exactly, STOP here -- this draft belongs to a different, stale run. Do not review it, do not write " + ROOT + "/segments/" + seg + ".review.json at all, and return exactly the line: DRAFT_TOKEN_MISMATCH " + seg + " instead of the REVIEWED line below.");
   lines.push("Verse policy for this project: " + VERSE_POLICY_INSTRUCTION_BLOCK);
   lines.push("Check the draft against the source for: full accuracy (no omissions or distortions), word-sense and realia fidelity for the source era and context -- ask explicitly whether each notable word means what it meant in that period and context, not what it means today -- name/canon fidelity, placeholder sentinel fidelity, verse per the policy above, and literary quality (register, idiom, natural seams, rhythm).");
+  lines.push("Canon-name fidelity specifically: the segpack's canon_map gives each already-canonized name's frozen canonical target form. Flag a canon name ONLY if the draft renders a different name, a different transliteration of the canonical stem, leaves a canonical name untranslated, or swaps an epithet for a real surname -- a correctly inflected/declined form of the canonical stem is CORRECT and must NOT be flagged.");
   lines.push("Build a JSON object with exactly these five fields: clean (true only if there are no findings that require a fix round), coverage_ok (true only if the deterministic gate above printed OK), findings (an array of objects with loc/severity/issue/suggest -- use a loc like \"VERSE:{vid}\" for a verse-specific finding), draft_sha1 (the value you computed before reading the draft, above), and dispatch_token (exactly this literal string: " + JSON.stringify(dispatchToken) + ").");
   lines.push("Write that exact object to a fresh temp file in the same directory (e.g. via python3, json.dump to " + ROOT + "/segments/." + seg + ".review.json.tmp.<a unique suffix, e.g. your own process id>), then atomically rename/replace it (e.g. os.replace) into place at: " + ROOT + "/segments/" + seg + ".review.json -- never write that destination path directly, so a concurrent reader never observes a half-written file.");
   lines.push("Return exactly the line: REVIEWED " + seg);
@@ -421,12 +477,27 @@ function waitPrompt(seg) {
   return lines.join("\n");
 }
 
-// Deliberate, documented 3-argument departure from the proven reference's
-// 2-argument fixPrompt(seg, round) shape -- see references/gotchas.md item 5
-// and references/engine-loop.md's R1. revObj is the SAME schema-validated
-// object readReviewPrompt already returned this round, still in this
-// script's own in-memory state, spliced in directly rather than re-read off
-// review_path(seg). Do not revert this to a 2-argument shape.
+// 1.3.6 (#132 option b): the fixer now reads its findings from the
+// AUTHORITATIVE on-disk review_path(seg) file, not from a spliced in-memory
+// JSON object -- closes a gap where a read-agent transcription slip
+// (issue/suggest text differing from what is on disk, while loc/severity
+// still match) would previously pass review_artifact_check.py's narrowed
+// {loc,severity} compare and then have the fixer apply the WRONG free-text
+// instruction from the in-memory copy. review_ready.py already
+// token-validated this exact file fresh THIS round before the fix call was
+// ever dispatched (dispatch_token = <RUN_ID>:<seg>:r<roundLabel>), and it is
+// not rewritten again until the NEXT round's review dispatch -- long after
+// this fix call returns -- so this read is fresh and race-free, never a
+// stale or mid-write artifact.
+//
+// Deliberate, documented 3-argument signature (kept from the proven
+// reference's own 2-argument fixPrompt(seg, round) shape, extended once --
+// see references/gotchas.md item 5 and references/engine-loop.md's R1):
+// revObj is still passed through (the SAME schema-validated object
+// readReviewPrompt already returned this round -- used elsewhere for the
+// clean/coverage_ok convergence decision in runRound and
+// review_artifact_check.py's loc/severity/count binding), but fixPrompt
+// itself no longer splices it into the prompt as the findings source.
 //
 // The call/dispatch shape here is deliberately UNCHANGED by the #97
 // restructure (a plain, unbounded, schema-less Claude await, no agentType --
@@ -440,17 +511,33 @@ function waitPrompt(seg) {
 // which would then always fail ledger_update.py's convergence-time
 // dispatch_token check (references/ledger-and-resumability.md).
 function fixPrompt(seg, round, revObj) {
-  const revObjJSON = JSON.stringify(revObj);
   const lines = [];
   lines.push("Effort: high. You are the Claude editor applying review findings to segment " + seg + ", round " + round + ".");
-  lines.push("The reviewer's structured verdict for this round, to apply in full, is exactly this JSON object -- use only this, do not re-read " + ROOT + "/segments/" + seg + ".review.json for findings:");
-  lines.push(revObjJSON);
+  lines.push("Read " + ROOT + "/segments/" + seg + ".review.json -- this is the AUTHORITATIVE source of the reviewer's findings for this round. review_ready.py already confirmed, before this fix call was ever dispatched, that this exact file is fresh (its dispatch_token matches this run and round) -- so this read is race-free. Apply every entry in its findings[] array, in full, to the draft.");
   lines.push("Important: only codex translates. If the draft is missing or is not actually ready -- check by running " + PY + " " + ROOT + "/scripts/draft_ready.py " + seg + " -- do not translate it yourself: return exactly the line DRAFT_MISSING " + seg + " and write nothing.");
-  lines.push("Otherwise, read " + ROOT + "/segments/" + seg + ".draft.json and " + ROOT + "/segments/segpack_" + seg + ".json, and carefully apply every finding above to the draft. Never touch a placeholder sentinel (e.g. ⟦FNREF_...⟧, ⟦VERSE_...⟧) -- copy each one byte for byte in place. Keep the verse policy: " + VERSE_POLICY_INSTRUCTION_BLOCK);
+  lines.push("Otherwise, read " + ROOT + "/segments/" + seg + ".draft.json and " + ROOT + "/segments/segpack_" + seg + ".json, and carefully apply every finding from " + ROOT + "/segments/" + seg + ".review.json to the draft. Never touch a placeholder sentinel (e.g. ⟦FNREF_...⟧, ⟦VERSE_...⟧) -- copy each one byte for byte in place. Keep the verse policy: " + VERSE_POLICY_INSTRUCTION_BLOCK);
   lines.push("Never change the set of block, footnote, or verse keys -- they must stay exactly 1:1 with the segpack.");
   lines.push("The draft also carries a dispatch_token top-level field -- copy its existing value byte for byte into your rewritten draft, unchanged; never invent, drop, or recompute it.");
   lines.push("Rewrite " + ROOT + "/segments/" + seg + ".draft.json with your fixes. Then run " + PY + " " + ROOT + "/scripts/validate_draft.py " + seg + " and confirm it prints OK -- if your own edit broke coverage or a placeholder, repair it and rewrite the file again until it prints OK.");
   lines.push("Return exactly the line: FIXED " + seg + " r" + round);
+  return lines.join("\n");
+}
+
+// #131 facet A helper -- fires ONLY from runRound's fix-call branch, on the
+// terminal path taken when callFix comes back falsy/DRAFT_MISSING, to tell
+// apart a genuinely absent draft from a transient fix-call failure (agent
+// died / output-token ceiling / classifier block) on an otherwise present,
+// valid draft. This terminal path is strictly SHORTER than the worst-case
+// full-MAXFIX-rounds-then-final path the batch_agent_cap estimator sizes
+// against (see the one-line note above estimatedCalls further down), so
+// this extra call never affects the preflight bound.
+function draftProbePrompt(seg) {
+  const lines = [];
+  lines.push("Effort: low. Mechanical probe only -- do not translate, fix, or judge anything.");
+  lines.push("Segment: " + seg + ". Durable root: " + ROOT + ".");
+  lines.push("Run: " + PY + " " + ROOT + "/scripts/draft_ready.py " + seg + " -- note whether it exits 0 (ready) or not.");
+  lines.push("Then run: " + PY + " " + ROOT + "/scripts/validate_draft.py " + seg + " -- note whether it prints OK or FAIL.");
+  lines.push("Return present: true only if BOTH commands above succeeded (draft_ready.py exited 0 AND validate_draft.py printed OK); otherwise return present: false.");
   return lines.join("\n");
 }
 
@@ -510,9 +597,11 @@ function mergeLedgerPrompt(segs) {
 }
 
 // Right after every review verdict readReviewPrompt returns, including the
-// final confirming one. revObj is spliced in directly (same mechanism
-// fixPrompt uses); the script, not the agent, does the actual comparison
-// against the on-disk review_path(seg) -- see
+// final confirming one. revObj is spliced in directly to build the
+// --expected-file below (1.3.6/#132 option b: fixPrompt no longer uses this
+// splice mechanism itself -- it reads review_path(seg) from disk instead;
+// see that function's own comment); the script, not the agent, does the
+// actual comparison against the on-disk review_path(seg) -- see
 // references/workflow-schema-validation.md. review_artifact_check.py
 // projects BOTH sides down to exactly {clean, coverage_ok, findings,
 // draft_sha1} before comparing, so a disk file that also carries
@@ -601,6 +690,25 @@ async function callFix(seg, round, revObj) {
   });
 }
 
+// #131 facet A -- see draftProbePrompt's own comment above for the full
+// rationale. Label frozen as "draft-probe:" + seg (CONTRACT §4). Returns
+// true (draft present and valid), false (the probe genuinely ran and
+// confirmed the draft is absent/invalid), or null (the probe call ITSELF
+// failed -- agent death / output-token ceiling / classifier block, the
+// SAME transient modes this whole facet exists to disambiguate for the fix
+// call). A null return is inconclusive, never treated as proof of absence
+// -- the caller must route it the same recoverable way as true, or a
+// correlated outage on both the fix call and the probe call would defeat
+// facet A entirely by falling through to a terminal draft-missing write.
+async function draftPresentAndValid(seg) {
+  const label = "draft-probe:" + seg;
+  const raw = await agent(draftProbePrompt(seg), {
+    effort: "low", phase: "ReviewFix", label: label, schema: DRAFT_PROBE_SCHEMA,
+  });
+  if (!raw) return null;
+  return raw.present === true;
+}
+
 // The read+check pair getVerifiedReview below retries as ONE shared unit
 // (never independently) -- see getVerifiedReview's own comment for the
 // full retry-budget rationale.
@@ -642,11 +750,11 @@ async function getVerifiedReview(seg, roundLabel) {
   }
 
   const first = await readAndCheck(seg, roundLabel, false);
-  if (artifactCheckMatched(first.art)) return { status: "ok", rev: first.rev };
+  if (artifactCheckMatched(first.art)) return matchedVerdict(first.rev);
 
   const retry = await readAndCheck(seg, roundLabel, true);
   if (!retry.rev) return { status: "blocked", reason: "review-null" };
-  if (artifactCheckMatched(retry.art)) return { status: "ok", rev: retry.rev };
+  if (artifactCheckMatched(retry.art)) return matchedVerdict(retry.rev);
 
   return { status: "blocked", reason: "review-artifact-mismatch" };
 }
@@ -659,11 +767,17 @@ async function runRound(seg, round, isFinal) {
 
   const verified = await getVerifiedReview(seg, roundLabel);
   if (verified.status === "blocked") {
-    const rec = await recordLedgerCall(
-      seg, { status: "blocked", reason: verified.reason },
-      "ledger:blocked:" + verified.reason + ":" + seg,
-    );
-    if (!rec.ok) return { terminal: true, value: rec.failResult };
+    // #131 facet B: every getVerifiedReview blocked reason (review-timeout,
+    // review-null, review-artifact-mismatch, and -- #133 -- review-
+    // fabricated-loc) is transient/infra, never genuine content
+    // non-convergence: a codex reviewer that died mid-dispatch, a review
+    // artifact that never landed or never matched on either attempt, or a
+    // schema-valid verdict caught referencing a phantom finding. Do NOT
+    // record a terminal ledger write here -- the in_progress fragment
+    // translateStage already wrote stays the durable record, and
+    // select_segments.py's own "any non-terminal/unrecognized status ->
+    // recoverable" rule (references/ledger-and-resumability.md) picks the
+    // segment back up and auto-redispatches it on the next run.
     return { terminal: true, value: { seg: seg, converged: false, reason: verified.reason, rounds: round } };
   }
 
@@ -683,6 +797,26 @@ async function runRound(seg, round, isFinal) {
 
   const fx = await callFix(seg, round, rev);
   if (!fx || fx.indexOf("DRAFT_MISSING") !== -1) {
+    // #131 facet A: a falsy/DRAFT_MISSING return conflates (a) a genuine
+    // missing draft with (b) a hard API/output-token-ceiling error and (c) a
+    // classifier block -- both (b) and (c) also yield a falsy fx even though
+    // the draft itself is present and fine. Probe before concluding which
+    // one this is.
+    const present = await draftPresentAndValid(seg);
+    if (present !== false) {
+      // present === true (draft present and valid) OR present === null
+      // (the probe call itself failed -- inconclusive, NOT proof of
+      // absence -- see draftPresentAndValid's own comment) -- both are
+      // transient: skip the ledger write; the in_progress fragment
+      // classifies recoverable and auto-redispatches next run, same as
+      // facets B/C above. Reuses the "fix-call-failed" reason rather than
+      // adding a new one for the probe-failed sub-case.
+      return { terminal: true, value: { seg: seg, converged: false, reason: "fix-call-failed", rounds: round } };
+    }
+    // present === false: the probe genuinely ran and confirmed the draft is
+    // absent/invalid after a translate that reported READY -- a real
+    // anomaly worth human attention -- keep this path terminal
+    // (blocked/draft-missing -> human_escalation), unchanged from before.
     const rec = await recordLedgerCall(
       seg, { status: "blocked", reason: "draft-missing" },
       "ledger:blocked:draft-missing:" + seg,
@@ -703,11 +837,14 @@ async function reviewFixLoop(stage1Result, seg) {
 
   const ready = await agent(waitPrompt(seg), { effort: "low", phase: "ReviewFix", label: "wait:" + seg });
   if (!ready || ready.indexOf("READY") === -1) {
-    const rec = await recordLedgerCall(
-      seg, { status: "non_converged", reason: "translate-timeout" },
-      "ledger:timeout:" + seg,
-    );
-    if (!rec.ok) return rec.failResult;
+    // #131 facet C: a translate-timeout is transient/mechanical (the codex
+    // translator agent died, hit an infra hiccup, or is simply still
+    // running past the bounded poll) -- not genuine content
+    // non-convergence. Do NOT record a terminal ledger write here: the
+    // in_progress fragment translateStage already wrote stays the durable
+    // record, and select_segments.py's own "any non-terminal/unrecognized
+    // status -> recoverable" rule (references/ledger-and-resumability.md)
+    // picks the segment back up and auto-redispatches it on the next run.
     return { seg: seg, converged: false, reason: "translate-timeout" };
   }
 
@@ -760,6 +897,12 @@ async function translateStage(seg) {
 // point (6 calls, no fix dispatched) + 1 terminal ledger write
 // = 3 + 7*MAXFIX + 6 + 1 = 10 + 7*MAXFIX. Batch-level: 1 (the final
 // merge-ledger completeness check; there is no batch pre-clean call).
+//
+// #131's draftPresentAndValid probe does NOT change this formula: it fires
+// only from runRound's fix-call-failed terminal branch, which ENDS the
+// segment right there -- strictly shorter than the worst-case path this
+// formula already sizes against (a full MAXFIX rounds then the final
+// review), so the ceiling this preflight enforces stays sound.
 // ---------------------------------------------------------------------------
 const estimatedCalls = 1 + SEGS.length * (10 + 7 * MAXFIX);
 if (estimatedCalls > BATCH_AGENT_CAP) {
