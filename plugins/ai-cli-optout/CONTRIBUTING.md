@@ -70,6 +70,12 @@ If an edit you're adding could break user-visible Claude Code features (not just
 
 The schema-test invariant blocks `requires_confirmation` without a populated `tradeoff_note` — no silent-consent theater. Current confirmed cases live in `vendors/anthropic.json` for `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` and `DISABLE_TELEMETRY` (both break `/remote-control` and Opus 1M per upstream `anthropics/claude-code#34178`).
 
+### Never point users at a patched binary
+
+When an opt-out breaks a user-visible feature, document the **cause** and the **safe mitigation** — narrow the opt-out, drop the offending variable — and stop there. Do not document, link to, or ship a binary-patch workaround (for example, patching `node_modules/@anthropic-ai/claude-code/cli.js`) — not in the README, not in a `tradeoff_note`, not in a vendor's `notes[]`, and not in a GitHub issue. This holds even when such a patch is known to work.
+
+A binary patch carries a different risk profile than a documented opt-out: it breaks on the next vendor update, voids support, and invites users to modify vendor code they did not audit. A privacy-tools skill that tells people to patch a vendor binary undermines the trust it trades on. Documented environment-variable and settings opt-outs only.
+
 ## Running tests
 
 ```
@@ -83,3 +89,4 @@ Two files, ~300 assertions. Required to pass before any PR merges.
 - Changes to `~/.claude-bm/settings.json` semantics — the `-bm` profile is a user-specific convention (bypass mode), not a distribution target.
 - Linux-only OS privacy surfaces (flatpak reports, GNOME/KDE agents) — not scoped, see #145.
 - Vendor additions that can't pass the `detect_paths` rule above.
+- Binary-patch workarounds for features a kill-switch disables — see "Never point users at a patched binary" above.
