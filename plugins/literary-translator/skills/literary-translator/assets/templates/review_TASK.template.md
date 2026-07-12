@@ -1,4 +1,4 @@
-<!-- PROMPT_CONTRACT_VERSION: 2 -->
+<!-- PROMPT_CONTRACT_VERSION: 3 -->
 <!--
   review_TASK.template.md -- one-time-seed prompt contract for the
   per-segment review agent.
@@ -89,6 +89,16 @@ written and refuse to record a stale convergence.
   name, a different transliteration of the stem, an untranslated canonical
   name, or an epithet swapped in for a real surname. Any `new_names` were
   resolved and flagged `NEW:` in the draft's own `notes`.
+- A `canon_map` target form is authoritative as given. **Never flag a
+  canon name merely because its frozen canonical target form is lexically
+  unrelated to the source form** -- for a sense-translated speaking name
+  (`basis: "sense_translated"`) that is expected and correct. The
+  deviation triggers above still apply (a draft that renders a different
+  name, a different transliteration of the canonical stem, an
+  untranslated canonical name, or an epithet for a surname). Correctness
+  of the frozen canon decision itself is out of scope for this review --
+  a suspected error is reopened via the glossary/adjudication route,
+  never flagged here.
 - **Placeholder sentinels** (`⟦FNREF_N⟧` / `⟦VERSE_...⟧`) -- present,
   byte-for-byte, at the same in-sentence position, 1:1 in count and set
   with the source.

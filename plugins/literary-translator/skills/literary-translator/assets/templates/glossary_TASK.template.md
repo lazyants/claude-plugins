@@ -1,4 +1,4 @@
-<!-- PROMPT_CONTRACT_VERSION: 2 -->
+<!-- PROMPT_CONTRACT_VERSION: 3 -->
 <!--
   glossary_TASK.template.md -- one-time-seed prompt contract for the
   canon/glossary-pass agent (the codex-glossary-pass).
@@ -110,6 +110,18 @@ canon-batch item:
     surname is ALSO present as its own separate candidate in this same
     batch, resolve that one on its own merits instead of folding it into
     the title entry.
+  - **`sense_translated`** -- the candidate is a **speaking name** whose
+    correct rendering is a deliberate sense-translation rather than a
+    transcription (`style_bible.md` section C). `canonical_target_form`
+    holds the sense-rendering itself; `is_proper_name` must be `true`;
+    `note` is required and must explain the sense choice; `source` is
+    forbidden -- `sense_translated` is a project-specific editorial
+    rendering, never a citable established form. **`established` WINS**
+    over `sense_translated` whenever a citable conventional target form
+    actually exists -- cite it under `established` instead; reserve
+    `sense_translated` for exactly the case where no established-form
+    claim can be made at all. Legal under `research_mode: offline` (it
+    makes no citation claim -- see below).
   - **`not_a_name`** -- paired with `is_proper_name: false`.
 - **Nicknames, epithets, and aliases -- resolved independently, never
   inherited from a referent.** A salon nickname, epithet, sobriquet, or
@@ -123,12 +135,16 @@ canon-batch item:
   2. **Resolve on its own merits.** Decide the nickname's own
      `canonical_target_form` under the `basis` rules above -- usually
      `basis: "transliterated"` (e.g. the classical epithet `Sapho` ->
-     `Сафо`), or `basis: "established"` if a genuinely established target
-     form exists for the nickname itself. Never assign it the referent's
-     real-name form instead (e.g. never `Скюдери` for `Sapho`). When sense
-     clearly carries better than transcription and no clean name-basis
-     applies, use `disposition: "review_queue"` with a note rather than a
-     fabricated basis -- see the nicknames/speaking-names guidance in
+     `Сафо`), `basis: "established"` if a genuinely established target
+     form exists for the nickname itself, or `basis: "sense_translated"`
+     when sense clearly carries better than transcription and a clean
+     sense-rendering exists (see the `sense_translated` bullet above --
+     `established` still wins whenever a citable conventional form
+     exists). Never assign it the referent's real-name form instead (e.g.
+     never `Скюдери` for `Sapho`). When none of `transliterated`,
+     `established`, or `sense_translated` cleanly applies, use
+     `disposition: "review_queue"` with a note rather than a fabricated
+     basis -- see the nicknames/speaking-names guidance in
      `style_bible.md`.
   3. **Record the identity link in `note` only.** When the nickname's
      referent is known, say so in `note` (or route to
@@ -150,9 +166,12 @@ canon-batch item:
 
 - **`offline`** forbids `basis: "established"` outright, no exception --
   use `transliterated` when the fixed rule in `style_bible.md` section
-  C-translit is enough on its own, or route the candidate to
-  `review_queue` instead, with a `note` starting with the literal prefix
-  `SOURCE_UNAVAILABLE:`. Never fabricate a citation to get around this.
+  C-translit is enough on its own, use `sense_translated` instead when the
+  candidate is a speaking name with a clean sense-rendering (it makes no
+  citation claim at all, so it stays legal under offline), or route the
+  candidate to `review_queue` instead, with a `note` starting with the
+  literal prefix `SOURCE_UNAVAILABLE:`. Never fabricate a citation to get
+  around this.
 - **`live`** allows `established`, but only together with a real, citable
   reference URL -- never an invented one.
 
@@ -180,7 +199,7 @@ no markdown code fence, no comment, nothing else in the file:
     "is_proper_name": true,
     "disposition": "accepted",
     "canonical_target_form": "<resolved target-language form>",
-    "basis": "established|transliterated|title|not_a_name",
+    "basis": "established|transliterated|title|sense_translated|not_a_name",
     "source": "<reference URL -- required and must be a non-empty URI when basis is established>",
     "confidence": "high|medium|low"
   },

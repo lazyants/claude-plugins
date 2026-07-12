@@ -2250,5 +2250,91 @@ def test_embedded_verse_sole_content_of_heading_stays_inline_not_blockquote(tmp_
     )
 
 
+# ===========================================================================
+# 9. #138 sense_translated: the entity note is emitted and `basis` round-
+#    trips like any other basis, but the body-link matcher deliberately
+#    excludes it (D14) -- a sense-rendering is an ordinary word by
+#    construction ("Hope", "Wolf"), so the unanchored, no-word-boundary
+#    matcher would otherwise wikilink every incidental occurrence of that
+#    word in the prose, not just the entity's own mentions.
+# ===========================================================================
+
+
+def test_sense_translated_entity_note_is_emitted_and_basis_round_trips(tmp_path):
+    """TP-12 (CHARACTERIZATION -- cannot go red: #138 only narrows the
+    body-link matcher in build_entity_index; _render_entity_note never
+    branches on basis, so entity-note emission for basis:'sense_translated'
+    is unchanged behavior, asserted here for completeness)."""
+    canon = make_canon({
+        "Nadezhda_src": canon_entry(
+            "Nadezhda_src", "Hope", category="person", is_proper_name=True,
+            basis="sense_translated", note="a sense-translated speaking name",
+        ),
+    })
+    ns = make_nodestream([make_node("p1", "seg01", "Some unrelated prose.")])
+    profile = make_profile(folders={"person": "people"})
+
+    out_dir, manifest = render_into(tmp_path, ns, canon, profile)
+    paths = all_written_paths(out_dir, manifest)
+    matches = [
+        p for p in find_file_with_content(paths, lambda t: "Nadezhda_src" in t)
+        if parse_frontmatter(p.read_text(encoding="utf-8")).get("source_form") == "Nadezhda_src"
+    ]
+    assert len(matches) == 1, f"expected exactly one entity note, found {len(matches)}"
+    fm = parse_frontmatter(matches[0].read_text(encoding="utf-8"))
+    assert fm["basis"] == "sense_translated"
+    assert fm["canonical_target_form"] == "Hope"
+    assert fm["note"] == "a sense-translated speaking name"
+
+
+def test_sense_translated_target_is_not_body_linked_capitalized_or_lowercase(tmp_path):
+    """TP-13 (RED pre-fix -- D14). Over-correction check done FIRST (per the
+    build contract): test_realia_entry_not_a_name_still_gets_a_note above
+    already proves a basis:'not_a_name'/is_proper_name:false entry STAYS
+    body-matched -- so this skip must be scoped to
+    basis == 'sense_translated' only, never to is_proper_name or any other
+    basis. Confirmed: build_entity_index's new guard checks
+    `entry.get("basis") == "sense_translated"` specifically.
+
+    RED pre-fix -> GREEN post-fix pivot: before the `continue` guard landed
+    in build_entity_index, 'Hope' -- an ordinary word by construction --
+    was an unqualified matcher target like any other canon entry, so its one
+    case-sensitive-matching (capitalized, sentence-initial) occurrence WAS
+    wikilinked. After the guard, the target is never added to the matcher at
+    all, so neither the capitalized nor the lowercase occurrence links."""
+    canon = make_canon({
+        "Nadezhda_src": canon_entry(
+            "Nadezhda_src", "Hope", category="person", is_proper_name=True,
+            basis="sense_translated", note="a sense-translated speaking name",
+        ),
+    })
+    text = "Hope walked in. Later she lost all hope entirely."
+    ns = make_nodestream([make_node("p1", "seg01", text)])
+    profile = make_profile(folders={"person": "people"})
+
+    out_dir, manifest = render_into(tmp_path, ns, canon, profile)
+    paths = all_written_paths(out_dir, manifest)
+    body_matches = find_file_with_content(paths, lambda t: "walked in" in t)
+    assert len(body_matches) == 1
+    body_text = body_matches[0].read_text(encoding="utf-8")
+
+    assert "[[" not in body_text, (
+        f"a sense_translated target must never be body-wikilinked, "
+        f"capitalized or lowercase -- got:\n{body_text}"
+    )
+    assert "Hope walked in" in body_text, body_text
+    assert "lost all hope entirely" in body_text, body_text
+
+    # The entity note itself is unaffected by the body-link suppression --
+    # still emitted, its basis intact (same invariant as TP-12, re-asserted
+    # here on the exact fixture this test renders).
+    note_matches = [
+        p for p in find_file_with_content(paths, lambda t: "Nadezhda_src" in t)
+        if parse_frontmatter(p.read_text(encoding="utf-8")).get("source_form") == "Nadezhda_src"
+    ]
+    assert len(note_matches) == 1
+    assert parse_frontmatter(note_matches[0].read_text(encoding="utf-8"))["basis"] == "sense_translated"
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))

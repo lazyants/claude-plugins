@@ -131,6 +131,7 @@ from urllib.parse import urlparse
 
 try:
     import jsonschema
+    from jsonschema.exceptions import best_match
     from referencing import Registry, Resource
 except ImportError as e:
     sys.stderr.write(
@@ -271,11 +272,152 @@ def _sorted_errors(validator, instance):
     return sorted(validator.iter_errors(instance), key=_error_path_key)
 
 
-def _format_errors(errors):
+def _is_boolean_false_property_error(e) -> bool:
+    """True for the exact shape D17 identifies: a `properties` keyword
+    rejecting a value against a boolean-`false` subschema (e.g.
+    `"source": false`) reports with `validator=None` and a `schema_path`
+    ending at 'properties' -- NOT at the property's own name. Verified
+    empirically against jsonschema==4.26.0."""
+    return e.validator is None and bool(e.schema_path) and e.schema_path[-1] == "properties"
+
+
+def _forbidden_keys_for_schema(schema, instance) -> list:
+    """D17(b) key-recovery. A boolean-`false` property rejection reports at
+    the PARENT with the offending key STRIPPED -- `absolute_path=[]`, the
+    message is a bare "False schema does not allow '<value>'" naming the
+    REJECTED VALUE, never the key (verified: `jsonschema==4.26.0`). Neither
+    the path nor the message can name the key, so the schema itself is
+    walked directly instead: every `allOf` clause whose `if` the instance
+    actually satisfies (a plain const-on-one-property check, matching this
+    plugin's own conditional shape), intersected against that clause's own
+    false-valued `then.properties` keys the instance actually carries.
+    Works uniformly against canon-entry.schema.json's own top-level shape
+    and a single canon-batch.schema.json `oneOf` branch's shape -- both
+    carry the identical `allOf:[{if,then}, ...]` structure (S1/TP-2c)."""
+    if not isinstance(schema, dict) or not isinstance(instance, dict):
+        return []
+    offending = set()
+    for clause in schema.get("allOf", []):
+        if_props = clause.get("if", {}).get("properties", {})
+        if not if_props:
+            continue
+        satisfied = all(
+            isinstance(cond, dict) and "const" in cond and instance.get(prop) == cond["const"]
+            for prop, cond in if_props.items()
+        )
+        if not satisfied:
+            continue
+        then_props = clause.get("then", {}).get("properties", {})
+        offending.update(k for k, v in then_props.items() if v is False and k in instance)
+    return sorted(offending)
+
+
+def _format_single_error(e, prefix: str = "") -> str:
+    loc = "/".join(str(p) for p in e.path) or "<root>"
+    return f"{prefix}at '{loc}': {e.message}"
+
+
+def _forbidden_keys_message(keys, basis, prefix: str = "") -> str:
+    """Shared D17(b) rendering -- "property <key> is forbidden for basis
+    <basis>", joined over every recovered forbidden key. `prefix` lets the
+    oneOf-branch path prepend its "<label> item: " marker without repeating
+    the (test-pinned) offending-token string in two places."""
+    return "; ".join(
+        f"{prefix}property {key!r} is forbidden for basis {basis!r}" for key in keys
+    )
+
+
+def _disposition_const_mismatch(subs) -> bool:
+    """True iff one of `subs` (one oneOf branch's own sub-errors) is a
+    `const` failure on the top-level 'disposition' property -- i.e. this
+    branch's own disposition constant does not match the instance's, so it
+    is NOT the branch the instance's own discriminator selects."""
+    return any(
+        sub.validator == "const" and list(sub.absolute_path) == ["disposition"] for sub in subs
+    )
+
+
+def _format_oneof_branch_sub_error(sub, branch_schema, branch_label, instance) -> str:
+    if _is_boolean_false_property_error(sub):
+        keys = _forbidden_keys_for_schema(branch_schema, instance)
+        if keys:
+            return _forbidden_keys_message(
+                keys, instance.get("basis"), prefix=f"{branch_label} item: "
+            )
+    return _format_single_error(sub, prefix=f"{branch_label} item ")
+
+
+def _format_oneof_error(e, instance) -> str:
+    """D17(a)+(b)+(c) for a `oneOf`/`anyOf` failure (canon-batch.schema.json's
+    discriminated union): through a bare `oneOf`, `e.message` is a whole-
+    instance dump -- printing only that leaves the retry agent nothing
+    actionable (the T-14 hang by another road). Instead: (a) select the
+    branch matching the instance's own 'disposition' (dropping the sibling
+    branch's discriminator-mismatch sub-errors); (b) recover a boolean-false
+    property rejection's offending key via _forbidden_keys_for_schema;
+    (c) on an absent/non-string/unrecognized 'disposition' (matches neither
+    branch, or -- a malformed value -- mismatches both), fall back to
+    jsonschema's own best_match across every branch's sub-errors, so an
+    invalid item still gets an actionable message, never empty or a crash.
+    """
+    branches = e.schema.get("oneOf") if isinstance(e.schema, dict) else None
+    context = list(e.context or [])
+    by_branch = {}
+    for sub in context:
+        if sub.schema_path:
+            by_branch.setdefault(sub.schema_path[0], []).append(sub)
+
+    candidates = [idx for idx, subs in by_branch.items() if not _disposition_const_mismatch(subs)]
+
+    if len(candidates) == 1:
+        idx = candidates[0]
+        branch_schema = branches[idx] if isinstance(branches, list) and idx < len(branches) else {}
+        # Label by the branch's own 'disposition' const VALUE (e.g.
+        # "accepted"/"review_queue") -- the same lowercase, machine-value
+        # form the instance itself carries -- falling back to the branch's
+        # schema 'title' only if that const is somehow unavailable.
+        if not isinstance(branch_schema, dict):
+            branch_label = f"branch[{idx}]"
+        else:
+            branch_disposition = (
+                branch_schema.get("properties", {}).get("disposition", {}).get("const")
+            )
+            if isinstance(branch_disposition, str):
+                branch_label = branch_disposition
+            else:
+                branch_label = branch_schema.get("title", f"branch[{idx}]")
+        return "; ".join(
+            _format_oneof_branch_sub_error(sub, branch_schema, branch_label, instance)
+            for sub in by_branch[idx]
+        )
+
+    # (c) fallback -- disposition absent/non-string, or unrecognized (matches
+    # neither branch, or a malformed value mismatches both): never empty or a
+    # crash. jsonschema's own best_match ranks the single most-specific
+    # sub-error across every branch; if context itself is empty, fall back to
+    # the oneOf error's own (whole-instance-dump) message rather than nothing.
+    if context:
+        best = best_match(context)
+        if best is not None:
+            return _format_single_error(
+                best, prefix="(disposition absent/unrecognized -- best match across all branches) "
+            )
+    return _format_single_error(e)
+
+
+def _format_errors(errors, instance=None, root_schema=None) -> str:
     parts = []
     for e in errors:
-        loc = "/".join(str(p) for p in e.path) or "<root>"
-        parts.append(f"at '{loc}': {e.message}")
+        if e.validator in ("oneOf", "anyOf") and isinstance(instance, dict):
+            parts.append(_format_oneof_error(e, instance))
+        elif _is_boolean_false_property_error(e) and isinstance(instance, dict):
+            keys = _forbidden_keys_for_schema(root_schema, instance)
+            if keys:
+                parts.append(_forbidden_keys_message(keys, instance.get("basis")))
+            else:
+                parts.append(_format_single_error(e))
+        else:
+            parts.append(_format_single_error(e))
     return "; ".join(parts)
 
 
@@ -479,7 +621,7 @@ def _validate_batch_items(batch: list, registry: "Registry") -> None:
         errors = _sorted_errors(validator, item)
         if errors:
             label = _indexed_item_label("batch", i, item)
-            problems.append(f"{label}: {_format_errors(errors)}")
+            problems.append(f"{label}: {_format_errors(errors, instance=item)}")
     if problems:
         raise CanonValidationError(
             "batch failed per-item schema validation:\n  " + "\n  ".join(problems),
@@ -500,13 +642,14 @@ def _validate_existing_entries(canon: dict, registry: "Registry") -> None:
     for source_form, entry in sorted(canon.get("entries", {}).items()):
         errors = _sorted_errors(entry_validator, entry)
         if errors:
-            problems.append(f"entries[{source_form!r}]: {_format_errors(errors)}")
+            formatted = _format_errors(errors, instance=entry, root_schema=entry_validator.schema)
+            problems.append(f"entries[{source_form!r}]: {formatted}")
 
     for i, item in enumerate(canon.get("review_queue", [])):
         errors = _sorted_errors(queued_validator, item)
         if errors:
             label = _indexed_item_label("review_queue", i, item)
-            problems.append(f"{label}: {_format_errors(errors)}")
+            problems.append(f"{label}: {_format_errors(errors, instance=item)}")
 
     if problems:
         raise CanonValidationError(
@@ -525,9 +668,12 @@ def _enforce_offline_backstop(batch: list, research_mode: str) -> None:
     when ANY item claims basis:"established" -- accepted or queued alike,
     matching the authoritative spec's literal "ANY entry" wording. Nothing
     is written to canon.json when this fires; the correct fix is upstream,
-    in the glossary-pass agent's own output (basis:"transliterated", or
-    disposition:"review_queue" with a note:"SOURCE_UNAVAILABLE: ..."
-    prefix), never a silent downgrade performed by this script.
+    in the glossary-pass agent's own output (basis:"transliterated" if
+    mechanical transliteration suffices, basis:"sense_translated" if a
+    project-specific editorial sense-rendering fits -- both are offline-legal,
+    neither needs an external citation -- or disposition:"review_queue" with
+    a note:"SOURCE_UNAVAILABLE: ..." prefix), never a silent downgrade
+    performed by this script.
     """
     if research_mode != "offline":
         return
@@ -541,7 +687,9 @@ def _enforce_offline_backstop(batch: list, research_mode: str) -> None:
             "research_mode=offline forbids basis:\"established\" for every new "
             "entry, but the batch claims it for: " + ", ".join(repr(o) for o in offenders)
             + ". Reassign basis:\"transliterated\" (if mechanical transliteration "
-            "suffices) or disposition:\"review_queue\" with a note carrying the "
+            "suffices), basis:\"sense_translated\" (if a project-specific editorial "
+            "sense-rendering fits -- style_bible.md §C -- no external citation "
+            "needed), or disposition:\"review_queue\" with a note carrying the "
             "literal prefix \"SOURCE_UNAVAILABLE:\" instead -- the whole batch "
             "merge is rejected, canon.json is unchanged.",
             offending=offenders,
@@ -883,10 +1031,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "own glossary.research_mode, resolved once by the orchestrating "
             "Claude session. In any mode that validates a batch fragment "
             "(--check-batch, --merge-batches, legacy --batch), 'offline' "
-            "fatally forbids basis:\"established\" for every new entry. Has "
-            "no effect in --verify-merged or VALIDATE-ONLY mode -- kept "
-            "required anyway so no call site can accidentally omit "
-            "declaring the precondition."
+            "fatally forbids basis:\"established\" for every new entry "
+            "(basis:\"transliterated\" and basis:\"sense_translated\" both "
+            "remain legal under offline -- neither needs an external "
+            "citation). Has no effect in --verify-merged or VALIDATE-ONLY "
+            "mode -- kept required anyway so no call site can accidentally "
+            "omit declaring the precondition."
         ),
     )
     parser.add_argument(

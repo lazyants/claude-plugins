@@ -169,9 +169,10 @@ here too.
 Not a required-fill span: the actual canon is built by `bootstrap_names.py` plus the codex-glossary-pass
 (see `references/canon-and-glossary.md`), which runs after W2 extraction, not at W1 scaffold time. The full
 canon lives in `canon.json` -- do not inline hundreds of entries into this always-loaded file. Once the
-canon exists, record here: the frozen-as-of summary (entry count, how many `established` /
-`transliterated` / `title` / `not_a_name`, how many still in `review_queue`), and a short table of the
-established forms most worth calling out for a human skimming this document.
+canon exists, record here: the frozen-as-of summary -- entry count by basis (`established` /
+`transliterated` / `title` / `sense_translated` / `not_a_name`), plus how many entries still sit in
+`review_queue` -- and a short table of the established forms most worth calling out for a human skimming
+this document.
 
 `segpack.py` injects `canon_names[]` (locked forms a translator must use verbatim) and `new_names[]` (not
 yet canonized -- the translator resolves by context and flags `NEW:` in its own notes) into every segment.

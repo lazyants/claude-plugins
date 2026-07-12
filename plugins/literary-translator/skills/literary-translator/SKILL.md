@@ -109,9 +109,11 @@ Run by the **orchestrating session directly**, always from the plugin's own
 install path, never a durable-root copy — it runs before Step 0a exists to
 create one (same exception as Step 0c reading
 `references/source-format-adapters/*.md` directly from the plugin). It is one
-of two scripts never copied to `durable_root`; the other,
-`validate_extraction.py` (the W2 post-extraction gate), is kept plugin-only
-for tamper-proofing rather than because it predates the durable root.
+of three plugin-path gates never copied to `durable_root` — the others,
+`validate_extraction.py` (the W2 post-extraction gate) and
+`glossary_preflight.py` (the W3 glossary staleness gate, 1.4.0), are kept
+plugin-only for tamper-proofing and freshness-on-resume rather than because
+either predates the durable root.
 
 Order of operations:
 
@@ -225,8 +227,11 @@ same for `smoke_test.report_path` (skipped when null).
 
 Copies (unconditional overwrite, safe since these files are never
 hand-edited): every file in `assets/scripts/*.py` (except
-`profile_validate.py` and `validate_extraction.py`, both run only from the
-plugin path and are never copied), every shipped file in `assets/languages/`
+`profile_validate.py`, `validate_extraction.py`, and `glossary_preflight.py`
+— all three run only from the plugin path and are never copied; a copied
+`glossary_preflight.py` would resolve its own `__file__`-relative schema
+lookup against the *durable* schemas and compare durable-vs-durable, a
+vacuous pass that could never detect staleness), every shipped file in `assets/languages/`
 (`fr.json`, `de.json`, `es.json`, `it.json`, `README.md`), every file in
 `assets/schemas/*.json` → `${durable_root}/scripts/`,
 `${durable_root}/languages/`, `${durable_root}/schemas/` respectively.
@@ -374,7 +379,12 @@ here, follow the linked doc:
 - **R5 — Verse policy is configurable, never hardcoded.**
   `references/verse-policy.md`
 - **R6 — Word-sense/realia accuracy is first-class.** Covered as a review
-  dimension in `references/engine-loop.md`.
+  dimension in `references/engine-loop.md`. **1.4.0:** this dimension judges
+  the DRAFT's word-sense fidelity to the source, never the correctness of an
+  already-frozen canon `basis` decision (including `sense_translated`) — a
+  suspected-wrong canon entry is reopened via the glossary/adjudication route,
+  never flagged in the per-segment review loop (`references/canon-and-glossary.md`,
+  `references/orchestration-and-batching.md`'s reviewer carve-out).
 - **R7 — Workflow-script schema requirement**, 1.2.0 shape: every codex
   accuracy-bearing call (translate, review, canon/glossary-pass batches) is
   a **schema-less, fire-and-forget DISPATCH** — `agentType:'codex:codex-rescue'`,
@@ -486,7 +496,30 @@ this run, nothing to research. Otherwise run the codex-glossary-pass,
 instantiating `glossary-pass-wf.template.js` fresh from the plugin's current
 copy every time — batched over `${durable_root}/glossary_TASK.md`, feeding the
 planner's `args` into the Workflow tool and its `batches` into
-`resume_setup.py`'s payload. **1.2.0:** on that non-empty path, before ever
+`resume_setup.py`'s payload. **1.4.0:** on that same non-empty-candidates
+path, after `glossary_batch_plan.py` and strictly before `resume_setup.py`
+runs (and before any dispatch), invoke the glossary staleness preflight:
+
+```
+python3 {{PLUGIN_ROOT}}/assets/scripts/glossary_preflight.py --durable-root ${durable_root}
+```
+
+Exit `0` (stdout `{"preflight":"ok"}`) means this project's durable
+`schemas/` and `glossary_TASK.md` already teach `basis:"sense_translated"`
+correctly — proceed. **Any non-zero exit HALTS immediately, dispatching
+nothing**, and surfaces the script's one-line stderr message verbatim: a
+schema-axis failure means re-run Step 0 + Step 0a to refresh
+`${durable_root}/schemas/`; a prompt-axis failure means hand-re-apply the
+current `glossary_TASK.template.md` into `${durable_root}/glossary_TASK.md`
+(never auto-overwritten, per item 12 above) and bump its
+`PROMPT_CONTRACT_VERSION` marker. Without this gate, a resumed project whose
+durable schemas or prompt predate this basis value would either reject a
+`sense_translated` batch item outright or never teach the agent the value in
+the first place — this preflight is run fresh on every dispatch (never
+cached against a resumed run's `input_digest`), so the operator's remedy
+takes effect on the very next attempt with nothing stale left to replay.
+Run only on the glossary path — the mass/W5 path never validates `basis` and
+so cannot hang this way. **1.2.0:** on that non-empty path, before ever
 calling `pipeline()`, a deterministic pre-workflow step invokes
 `resume_setup.py` (kind `glossary`) — it resolves `effectiveRunId` via the
 resume-integrity digest gate, creates `glossary/runs/<RUN_ID>/`, and
@@ -516,7 +549,13 @@ order.
 name-adjudication a human/codex must sign off (duplicate source forms,
 existing merges, all candidate missed-merge pairs, and un-drained
 `review_queue[]` items) and cross-checks them against
-`canon_adjudications.json`. Run before Deliver (W7/W8):
+`canon_adjudications.json`. **1.4.0:** the `basis:"sense_translated"` value
+(`references/canon-and-glossary.md`) gives the glossary-pass agent a
+truthful basis for a sense-translated speaking name that previously had none
+— such a candidate now resolves straight into `entries{}` instead of parking
+permanently in `review_queue[]`, so this gate's category-4
+(`review_queue_unresolved`) blocks less often in practice; `review_queue[]`
+now holds only genuinely disputed/unresolvable names. Run before Deliver (W7/W8):
 `python3 ${durable_root}/scripts/canon_adjudication_audit.py --check` —
 exit `0` = every required item has a matching `confirmed_ok` (or a valid
 risk-acceptance / the queue is drained), `1` = blocking findings, `2` =
@@ -528,7 +567,10 @@ gets the full gate. The accuracy calls it audits are authored by a human
 reviewer or a schema-validated codex workflow — the script never decides
 identity itself. Enable ONLY when a per-person index, per-person bios, or
 enforced cross-document consistency is in scope; on a plain translate+gloss
-job leave it off — the lightweight `review_queue` is the correct tool.
+job leave it off — the lightweight `review_queue` remains the correct tool
+for genuinely disputed/unresolvable names (a speaking name with a clear
+sense-rendering resolves via `basis:"sense_translated"` instead, so the
+queue's role is narrower than it once was, not eliminated).
 
 **W3a Segpack generation** (runs right after W3, since `segpack.py`'s canon
 injection needs the just-frozen `canon.json`). Run `scripts/segpack.py` for

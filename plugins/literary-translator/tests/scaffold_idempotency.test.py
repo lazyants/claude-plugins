@@ -12,7 +12,10 @@ re-invoke across a project's whole lifetime:
       ``profile_validate.py`` as a subprocess, exactly the way SKILL.md
       documents invoking it (``python3 assets/scripts/profile_validate.py
       --profile <path>``, always from the plugin's own install path --
-      this is the ONE script never copied to durable_root), against a
+      this is one of THREE plugin-path scripts never copied to
+      durable_root: ``profile_validate.py``, ``validate_extraction.py``
+      (the W2 post-extraction gate), and ``glossary_preflight.py`` (1.4.0,
+      the W3 glossary staleness gate)), against a
       constructed fixture profile built from the real shipped
       ``profile.example.yml`` with every placeholder substituted for real
       values (mirroring the "case 3" fixture in
@@ -26,9 +29,10 @@ re-invoke across a project's whole lifetime:
       re-copied, never regenerated, once a project has hand-adapted them.
 
       IMPORTANT: unlike (A), Step 0a has NO standalone shipped script under
-      ``assets/scripts/`` -- SKILL.md names exactly one script invocation
-      anywhere ("Implemented by scripts/profile_validate.py..."; grep
-      SKILL.md for "python3"/"Implemented by" turns up nothing else). Step
+      ``assets/scripts/`` -- SKILL.md names exactly THREE plugin-path script
+      invocations in the whole document (``profile_validate.py`` at Step 0,
+      ``validate_extraction.py`` at W2, and ``glossary_preflight.py`` at W3,
+      1.4.0), none of which is Step 0a's own copy logic. Step
       0a's copy logic is orchestrating-session prose the Claude session
       itself executes at scaffold time, not an importable/subprocess-able
       module. So this half of the suite (1) transcribes the documented

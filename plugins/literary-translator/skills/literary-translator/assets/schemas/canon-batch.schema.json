@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "canon-batch.schema.json",
   "title": "Canon Batch (glossary-pass return contract)",
-  "description": "The real return contract of a codex glossary-pass batch call (agent(glossaryPrompt(batch), {agentType:'codex:codex-rescue', effort:'high', schema: CANON_BATCH_SCHEMA})). A discriminated union over each item's own 'disposition' field: 'accepted' items are ready to merge into canon.json's entries{} map (the full canon-entry.schema.json shape); 'review_queue' items are not yet resolved and only need a note explaining why. The merge step routes on 'disposition' directly, never infers routing from basis/confidence after the fact. The established->URI constraint on the ACCEPTED branch is inlined here (rather than $ref'd to canon-entry.schema.json) so this file validates standalone under a hand-rolled or relative-$ref-less resolver; keep the two constraints in sync if canon-entry.schema.json's own conditional ever changes.",
+  "description": "The real return contract of a codex glossary-pass batch call (agent(glossaryPrompt(batch), {agentType:'codex:codex-rescue', effort:'high', schema: CANON_BATCH_SCHEMA})). A discriminated union over each item's own 'disposition' field: 'accepted' items are ready to merge into canon.json's entries{} map (the full canon-entry.schema.json shape); 'review_queue' items are not yet resolved and only need a note explaining why. The merge step routes on 'disposition' directly, never infers routing from basis/confidence after the fact. The established->URI and sense_translated (note/is_proper_name required, source forbidden) constraints on the ACCEPTED branch are both inlined here (rather than $ref'd to canon-entry.schema.json) so this file validates standalone under a hand-rolled or relative-$ref-less resolver; keep BOTH constraints in sync if canon-entry.schema.json's own conditionals ever change. PRECEDENCE (D12): basis:\"established\" wins whenever a citable conventional target form exists (cite it via source); basis:\"sense_translated\" is reserved for a rendering with no established-form claim.",
   "type": "array",
   "items": {
     "oneOf": [
@@ -17,7 +17,7 @@
           "canonical_target_form": { "type": "string" },
           "basis": {
             "type": "string",
-            "enum": ["established", "transliterated", "title", "not_a_name"]
+            "enum": ["established", "transliterated", "title", "not_a_name", "sense_translated"]
           },
           "source": { "type": "string" },
           "confidence": {
@@ -32,16 +32,35 @@
         },
         "required": ["source_form", "is_proper_name", "disposition", "canonical_target_form", "basis", "confidence"],
         "additionalProperties": false,
-        "if": {
-          "properties": { "basis": { "const": "established" } },
-          "required": ["basis"]
-        },
-        "then": {
-          "properties": {
-            "source": { "type": "string", "format": "uri", "minLength": 1 }
+        "allOf": [
+          {
+            "if": {
+              "properties": { "basis": { "const": "established" } },
+              "required": ["basis"]
+            },
+            "then": {
+              "properties": {
+                "source": { "type": "string", "format": "uri", "minLength": 1 }
+              },
+              "required": ["source"]
+            }
           },
-          "required": ["source"]
-        }
+          {
+            "if": {
+              "properties": { "basis": { "const": "sense_translated" } },
+              "required": ["basis"]
+            },
+            "then": {
+              "required": ["note", "is_proper_name"],
+              "properties": {
+                "is_proper_name": { "const": true },
+                "note": { "type": "string", "pattern": "\\S" },
+                "canonical_target_form": { "type": "string", "pattern": "\\S" },
+                "source": false
+              }
+            }
+          }
+        ]
       },
       {
         "title": "QUEUED",
@@ -54,7 +73,7 @@
           "canonical_target_form": { "type": "string" },
           "basis": {
             "type": "string",
-            "enum": ["established", "transliterated", "title", "not_a_name"]
+            "enum": ["established", "transliterated", "title", "not_a_name", "sense_translated"]
           },
           "source": { "type": "string" },
           "confidence": {

@@ -688,9 +688,9 @@ def test_merge_batches_pass2_failure_on_stale_malformed_existing_entry_leaves_ca
                     "is_proper_name": True,
                     "canonical_target_form": "Atlantis",
                     # Not a member of canon-entry.schema.json's basis enum
-                    # (established/transliterated/title/not_a_name) --
-                    # Pass 1 never sees this pre-existing entry, only
-                    # Pass 2 (whole-file) does.
+                    # (established/transliterated/title/sense_translated/
+                    # not_a_name) -- Pass 1 never sees this pre-existing
+                    # entry, only Pass 2 (whole-file) does.
                     "basis": "mythical",
                     "confidence": "high",
                 }

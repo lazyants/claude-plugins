@@ -92,9 +92,14 @@ def test_task_template_carries_clause1_orthographic_sharing_only():
 
 
 def test_task_template_carries_clause2_independent_resolution_never_referent():
+    """#138 [STRENGTHENED]: clause 2 ("resolve on its own merits") now also
+    names `sense_translated` as one of the bases a nickname/epithet may
+    resolve to -- added to the required-fragment set so a future edit that
+    drops the new basis from this clause (while leaving the older
+    epithet/own/never/referent wording intact) still fails this test."""
     window = _window_around(TASK_TEXT, ANCHOR)
     _assert_fragments_present(
-        window, ["epithet", "own", "never", "referent"],
+        window, ["epithet", "own", "never", "referent", "sense_translated"],
         source_label="glossary_TASK.template.md",
         clause_label="clause 2 (independent resolution, never the referent's form)",
     )
@@ -106,6 +111,27 @@ def test_task_template_carries_clause3_identity_link_in_note_only():
         window, ["note", "review_queue"],
         source_label="glossary_TASK.template.md",
         clause_label="clause 3 (identity link recorded in note only)",
+    )
+
+
+def test_task_template_carries_sense_translated_routing_for_epithets():
+    """#138 TP-7 -- NEW routing assertion (distinct from the strengthened
+    clause-2 test above, which only proves `sense_translated` wasn't
+    dropped from the "resolve on its own merits" list). This proves the
+    epithet/nickname clause routes a nickname with a CLEAR sense-rendering
+    to `basis: "sense_translated"` while `review_queue` is reserved for the
+    genuinely unresolvable case (D9) -- both tokens must co-occur within
+    the anchor window. Pre-#138, `sense_translated` appeared NOWHERE in
+    this file at all (verified via `git diff`: zero removed lines mention
+    it -- the token is purely additive), so this assertion is a genuine
+    red-before-green pivot: it fails on the pre-C-prompts-edit tree (the
+    fragment search finds no `sense_translated` occurrence anywhere, let
+    alone inside the window) and passes once the routing sentence lands."""
+    window = _window_around(TASK_TEXT, ANCHOR)
+    _assert_fragments_present(
+        window, ["sense_translated", "review_queue"],
+        source_label="glossary_TASK.template.md",
+        clause_label="sense_translated-vs-review_queue routing for epithets/nicknames",
     )
 
 
@@ -174,6 +200,23 @@ def test_workflow_template_carries_the_review_queue_routing_reinforcement():
         window, ["review_queue", "note"],
         source_label="glossary-pass-wf.template.js batchDispatchPrompt",
         clause_label="review_queue-routing reinforcement",
+    )
+
+
+def test_workflow_template_carries_the_sense_translated_routing_reinforcement():
+    """#138 TP-7 -- the inline batchDispatchPrompt reinforcement (dual-
+    placement precedent) must ALSO carry the sense_translated-vs-
+    review_queue routing rule, not just the authoritative
+    glossary_TASK.template.md copy. Same red-before-green pivot as
+    test_task_template_carries_sense_translated_routing_for_epithets:
+    `sense_translated` is purely additive here too (verified via `git
+    diff` -- zero removed lines mention it)."""
+    body = _extract_function_body(WF_TEXT, "batchDispatchPrompt")
+    window = _window_around(body, ANCHOR)
+    _assert_fragments_present(
+        window, ["sense_translated", "review_queue"],
+        source_label="glossary-pass-wf.template.js batchDispatchPrompt",
+        clause_label="sense_translated-vs-review_queue routing reinforcement",
     )
 
 

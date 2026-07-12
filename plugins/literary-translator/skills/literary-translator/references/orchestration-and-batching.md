@@ -542,6 +542,22 @@ outright (#87). 1.2.0 brings the glossary batch into the same shared
 DISPATCH → WAIT → CONSUME pattern review already uses, plus one serialized
 final merge to close the concurrent-write race:
 
+**1.4.0 — glossary staleness preflight, runs BEFORE this whole PRE-WORKFLOW
+setup.** After `glossary_batch_plan.py` returns non-empty batches and
+strictly before `resume_setup.py` (kind `glossary`) runs, the orchestrating
+session invokes a separate, standalone script —
+`glossary_preflight.py` (`{{PLUGIN_ROOT}}/assets/scripts/`, never copied to
+`durable_root`) — comparing the durable `schemas/canon-*.schema.json` and
+`glossary_TASK.md` against the plugin's own shipped copies, halting
+(non-zero exit, no dispatch at all) on any mismatch. See
+`references/canon-and-glossary.md` and `SKILL.md`'s W3 section for the CLI
+contract and remediation. This is deliberately a **plain script, not an
+`agent()` call**, so it is never resume-cached against the `input_digest`
+below, and it does **not** perturb the `estimatedCalls = 3 * BATCHES.length +
+2` cost formula further down this section or add a `{{BATCH_AGENT_CAP}}`-style
+template token — a future reader should not "fix" that estimator to `+3` for
+this step; the gate makes no `agent()` call at all.
+
 **Deterministic PRE-WORKFLOW setup**, run by the orchestrating session
 *before* `pipeline()` is ever called — not itself an unbounded Workflow
 step, and independent of the codex batch calls, so a batch can't pass

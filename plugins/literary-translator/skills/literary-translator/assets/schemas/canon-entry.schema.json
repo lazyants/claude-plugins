@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "canon-entry.schema.json",
   "title": "Canon Entry",
-  "description": "One resolved, ACCEPTED canon entry -- a proper-name/realia decision that has already cleared the glossary-pass merge step and lives in canon.json's entries{} map. Renamed from the historiettes-t3 reference project's canon.schema.json. If basis == \"established\", source is required and must be a non-empty URI (the glossary-pass agent's cited reference for the established rendering).",
+  "description": "One resolved, ACCEPTED canon entry -- a proper-name/realia decision that has already cleared the glossary-pass merge step and lives in canon.json's entries{} map. Renamed from the historiettes-t3 reference project's canon.schema.json. If basis == \"established\", source is required and must be a non-empty URI (the glossary-pass agent's cited reference for the established rendering). If basis == \"sense_translated\", note and is_proper_name are required, is_proper_name must be true, and source is forbidden -- a sense-translated speaking name is a project-specific editorial rendering, not a citable conventional form. PRECEDENCE (D12): basis:\"established\" wins whenever a citable conventional target form exists (cite it via source); basis:\"sense_translated\" is reserved for a rendering with no established-form claim.",
   "type": "object",
   "properties": {
     "source_form": { "type": "string" },
@@ -10,7 +10,7 @@
     "canonical_target_form": { "type": "string" },
     "basis": {
       "type": "string",
-      "enum": ["established", "transliterated", "title", "not_a_name"]
+      "enum": ["established", "transliterated", "title", "not_a_name", "sense_translated"]
     },
     "source": { "type": "string" },
     "confidence": {
@@ -31,20 +31,41 @@
     "confidence"
   ],
   "additionalProperties": false,
-  "if": {
-    "required": ["basis"],
-    "properties": {
-      "basis": { "const": "established" }
-    }
-  },
-  "then": {
-    "required": ["source"],
-    "properties": {
-      "source": {
-        "type": "string",
-        "format": "uri",
-        "minLength": 1
+  "allOf": [
+    {
+      "if": {
+        "required": ["basis"],
+        "properties": {
+          "basis": { "const": "established" }
+        }
+      },
+      "then": {
+        "required": ["source"],
+        "properties": {
+          "source": {
+            "type": "string",
+            "format": "uri",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": ["basis"],
+        "properties": {
+          "basis": { "const": "sense_translated" }
+        }
+      },
+      "then": {
+        "required": ["note", "is_proper_name"],
+        "properties": {
+          "is_proper_name": { "const": true },
+          "note": { "type": "string", "pattern": "\\S" },
+          "canonical_target_form": { "type": "string", "pattern": "\\S" },
+          "source": false
+        }
       }
     }
-  }
+  ]
 }

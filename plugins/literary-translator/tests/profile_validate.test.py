@@ -26,8 +26,10 @@ design (every placeholder in it is an intentionally invalid sentinel).
 
 The target script is loaded directly from its real location under
 ``skills/literary-translator/assets/scripts/`` via ``importlib`` (it is not a
-package, and it is the one script in this plugin that is NEVER copied to a
-durable_root -- always invoked from the plugin's own install path).
+package, and it is one of THREE plugin-path scripts in this plugin that are
+NEVER copied to a durable_root -- alongside ``validate_extraction.py`` and
+``glossary_preflight.py`` (1.4.0) -- always invoked from the plugin's own
+install path).
 """
 
 import copy
