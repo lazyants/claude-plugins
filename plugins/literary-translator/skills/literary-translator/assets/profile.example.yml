@@ -172,7 +172,11 @@ glossary:
                                           # and gets wrong. Under `offline`, basis:"established" is FATALLY
                                           # forbidden for every canon entry this run produces -- candidates that
                                           # would otherwise warrant it get basis:"transliterated" or are routed to
-                                          # review_queue instead, tagged with a SOURCE_UNAVAILABLE: note. Replace
+                                          # review_queue instead, tagged with a SOURCE_UNAVAILABLE: note. A
+                                          # candidate needing basis:"sense_translated" (a deliberate,
+                                          # project-specific sense-rendering of a speaking name -- see
+                                          # style_bible.md section G) is unaffected either way: it never claims
+                                          # a citable source, in live or offline mode alike. Replace
                                           # with `live` or `offline`, consciously, matching THIS run's own actual
                                           # environment.
 

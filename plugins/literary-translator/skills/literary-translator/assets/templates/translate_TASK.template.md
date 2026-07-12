@@ -1,4 +1,4 @@
-<!-- PROMPT_CONTRACT_VERSION: 2 -->
+<!-- PROMPT_CONTRACT_VERSION: 3 -->
 <!--
   translate_TASK.template.md -- one-time-seed prompt contract for the
   per-segment translator agent.
@@ -114,7 +114,7 @@ regardless of this project's target language)
   "blocks": { "<block_id>": "<target text with sentinels>", ... },
   "footnotes": { "<n>": "<target text>", ... },
   "verses": { "<vid>": { "...": "per this run's own spliced-in verse-policy instructions" }, ... },
-  "names": [ {"source_form": "...", "canonical_target_form": "...", "basis": "established|transliterated", "confidence": "high|medium|low"}, ... ],
+  "names": [ {"source_form": "...", "canonical_target_form": "...", "basis": "established|transliterated|title|sense_translated|not_a_name", "confidence": "high|medium|low"}, ... ],
   "notes": [ "NEW: ...", "..." ]
 }
 ```

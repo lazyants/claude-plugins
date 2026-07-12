@@ -279,6 +279,16 @@ def build_entity_index(entries, note_identity_by_source_form):
     otherwise a blank/whitespace target would become a matcher that wraps
     the first space (or nothing) in every block (review round 1 finding).
 
+    `basis: "sense_translated"` entries (#138) are ALSO skipped here --
+    deliberately, and unlike every other basis. A sense-rendering is an
+    ordinary word BY CONSTRUCTION ("Hope", "Wolf"), so the unanchored,
+    no-word-boundary alternation below would otherwise wikilink every
+    incidental occurrence of that word in the prose, not just the entity's
+    own mentions. The entity note itself is still emitted and still carries
+    its `basis` in frontmatter (`_render_entity_note` never branches on
+    `basis`) -- only the body auto-linking is suppressed, erring toward the
+    recoverable failure (a missing auto-link) over a false-link flood.
+
     The compiled pattern alternates every distinct target string, LONGEST
     FIRST, so a shorter name can never shadow a longer one that contains it
     as a substring -- Python's `re` alternation tries alternatives in order
@@ -291,6 +301,8 @@ def build_entity_index(entries, note_identity_by_source_form):
             continue
         target = entry.get("canonical_target_form")
         if not target or not target.strip():
+            continue
+        if entry.get("basis") == "sense_translated":
             continue
         # NFC-normalize so a canon entry stored in decomposed (NFD) form
         # collapses onto the same target as an NFC one, and so the pattern

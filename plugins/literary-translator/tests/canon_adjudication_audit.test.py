@@ -1079,6 +1079,67 @@ def test_scope_filter_excludes_non_proper_names_from_cats_1_to_3(tmp_path):
 
 
 # ===========================================================================
+# 17b (#138 TP-14). basis:"sense_translated" scope-filter participation.
+#
+# CHARACTERIZATION -- red-before-green is STRUCTURALLY IMPOSSIBLE for both
+# tests below. The scope filter (see this module's own docstring, "Scope",
+# and `_proper_name_records` at scripts/canon_adjudication_audit.py:533) is
+# a DENYLIST -- `is_proper_name is True and basis != "not_a_name"` -- with
+# zero hardcoded enum literals besides "not_a_name" itself. A
+# basis:"sense_translated" entry was therefore ALREADY included in Cats 1-3
+# before #138 touched a single schema/prompt surface (there is no code path
+# that could ever have excluded it), and D11's is_proper_name:true
+# requirement was already enforced by this SAME pre-existing filter, not by
+# anything #138 adds here. These two tests lock both halves of D11 for the
+# new basis value specifically.
+# ===========================================================================
+
+
+def test_sense_translated_included_in_cat1_scope(tmp_path):
+    """D11 inclusion half: two basis:"sense_translated" proper-name records
+    sharing N(source_form) must still form a Cat 1 duplicate -- the
+    denylist admits any basis other than "not_a_name"."""
+    root = make_durable_root(tmp_path)
+    write_canon(root, [
+        entry("Loup", "Wolf", basis="sense_translated", note="sense-rendering of a speaking name"),
+        entry("loup", "Wolf", basis="sense_translated", note="sense-rendering of a speaking name"),
+    ])
+
+    proc = run_audit(root, "--check")
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    summary = parse_stdout(proc)
+    assert_summary_schema_valid(summary)
+    assert summary["totals"]["by_kind"]["duplicate_source_form"] == 1, (
+        "two sense_translated proper-name records sharing N(source_form) must "
+        "still form a Cat 1 duplicate -- the denylist admits any basis != 'not_a_name'"
+    )
+    assert summary["blocking_count"] == 1
+
+
+def test_sense_translated_excluded_from_scope_when_is_proper_name_false(tmp_path):
+    """D11 negative half: is_proper_name:false EXCLUDES a
+    basis:"sense_translated" entry from Cats 1-3, mirroring
+    test_scope_filter_excludes_non_proper_names_from_cats_1_to_3 above for
+    other bases -- the excluded record must not pair with its
+    is_proper_name:true twin into a Cat 1 duplicate."""
+    root = make_durable_root(tmp_path)
+    write_canon(root, [
+        entry("Loup", "Wolf", basis="sense_translated", is_proper_name=False, note="x"),
+        entry("loup", "Wolf", basis="sense_translated", note="x"),  # sole surviving proper-name record
+    ])
+
+    proc = run_audit(root, "--check", "--pair-review-cap", "10")
+    assert proc.returncode == 0, proc.stdout + proc.stderr  # only 1 surviving proper-name record -> nothing to dup
+    summary = parse_stdout(proc)
+    assert_summary_schema_valid(summary)
+    assert summary["totals"]["by_kind"]["duplicate_source_form"] == 0, (
+        "excluded is_proper_name:false sense_translated record must not pair "
+        "into a Cat 1 duplicate with its is_proper_name:true twin"
+    )
+    assert summary["totals"]["required_items"] == 0
+
+
+# ===========================================================================
 # 18 (plan case 18). --init --check together -> exactly one stdout line.
 # ===========================================================================
 

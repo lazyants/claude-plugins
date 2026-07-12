@@ -110,7 +110,7 @@ them. Every shipped schema, including these three, declares:
 { source_form, is_proper_name, canonical_target_form, basis, source, confidence, note }
 ```
 
-`basis ∈ {established, transliterated, title, not_a_name}`.
+`basis ∈ {established, transliterated, title, not_a_name, sense_translated}`.
 `confidence` is also schema-constrained as an enum, not free text.
 
 - **`established`** requires a cited reference. This is schema-enforced, not just
@@ -122,6 +122,24 @@ them. Every shipped schema, including these three, declares:
   rule for the whole book. That rule is documented in THIS project's own style
   bible (`style_bible.md`, section C-translit) — it is language-pair-specific data,
   never plugin code (see `references/language-pair-parameterization.md`).
+- **`sense_translated`** (1.4.0) is a proper name whose correct rendering is a
+  deliberate *sense*-translation rather than a citable form or a mechanical
+  transliteration — a genuine speaking name (`style_bible.md` section C). Also
+  schema-enforced: `note` and `is_proper_name` are REQUIRED, `is_proper_name`
+  must be `true` (excluding it from adjudication would let a common-noun
+  candidate freeze and be delivered by the basis-blind `segpack.py` while
+  falling outside every adjudication category), `canonical_target_form` and
+  `note` must contain non-whitespace content (`"pattern": "\\S"`, not merely
+  `minLength:1`), and `source` is FORBIDDEN (`false`) — a project-specific
+  editorial rendering has no citable reference to record. **Legal under
+  `research_mode: offline`**, exactly like `transliterated`: no external
+  citation is ever claimed. **Precedence:** `established` wins whenever a
+  citable conventional target form genuinely exists (cite it via `source`);
+  `sense_translated` is reserved for a rendering that makes no established-form
+  claim at all. Frozen the same way every other basis is — emitted directly
+  with `disposition:"accepted"`, no separate human sign-off (the glossary
+  agent's judgment, adjudication dedup, and `review_queue` for genuinely
+  disputed names are this basis's quality controls, same as every other).
 
 Note the field-name generalization from the source project: the proven
 `historiettes-t3` reference used French/Russian-specific field names (`fr`,
@@ -320,14 +338,20 @@ something a script silently probes (and potentially gets wrong).
   `verse_policy.mode` or `apparatus_policy`.
 - **`research_mode: offline` forbids `basis: "established"` outright.** Every
   candidate that would otherwise warrant `established` must instead be assigned
-  either `basis: "transliterated"` (the existing fixed practical-transcription
-  rule, if mechanical transliteration is adequate) or routed into `review_queue`
-  (if the name is genuinely disputed and needs a human's real research later) —
+  `basis: "transliterated"` (the existing fixed practical-transcription
+  rule, if mechanical transliteration is adequate), `basis: "sense_translated"`
+  (1.4.0 — if the candidate is a genuine speaking name and the correct
+  rendering is a deliberate sense-translation rather than a citable form; see
+  the precedence rule above), or routed into `review_queue` (if the name is
+  genuinely disputed and needs a human's real research later) —
   never left with a fabricated citation, and never silently forced into
-  `established` anyway. Either way, the entry's `note` carries the literal prefix
-  `SOURCE_UNAVAILABLE:` — mirroring the `NEW:` note-prefix convention used for
-  `new_names[]` below — so a human reviewing `canon.json`/`review_queue` later can
-  find every entry that still needs real research once it becomes available.
+  `established` anyway. The `transliterated`/`review_queue` outcomes carry the
+  literal note prefix `SOURCE_UNAVAILABLE:` — mirroring the `NEW:` note-prefix
+  convention used for `new_names[]` below — so a human reviewing
+  `canon.json`/`review_queue` later can find every entry that still needs real
+  research once it becomes available. `sense_translated` carries no such
+  prefix and is unaffected by `research_mode` either way: it never claims a
+  citable source in `live` mode any more than in `offline` mode.
 - **`scripts/canon_validate.py`'s merge-time backstop FATALLY REJECTS** the whole
   batch merge if ANY entry claims `basis: "established"` while
   `research_mode == offline`, naming every offending entry — the same
@@ -372,6 +396,11 @@ entirely — nothing to research this run (`resume_setup.py` rejects an empty
 Every per-segment pack gets:
 
 - **`canon_names[]`** — locked forms the translator MUST use verbatim.
+  Populated from `canon.json`'s `entries{}` map and never from
+  `review_queue[]` — a queued, not-yet-resolved candidate has no frozen
+  `canonical_target_form` to inject, so it can only ever surface to the
+  translator via `new_names[]` (improvised, per-segment) until it is drained
+  into `entries{}` by a later glossary pass.
 - **`new_names[]`** — not yet canonized; the translator resolves by context and
   flags `NEW:` in its own `notes[]`, per the shipped task templates.
 

@@ -423,6 +423,35 @@ unhandled `ImportError`/raw traceback.
   a fresh `cache_key` recompute), which loses zero coverage. Unrelated to
   `canon_adjudication_audit.py` (that gate's own 87 tests are
   deterministic).
+- **`basis:"sense_translated"` (1.4.0) structurally forbids `source`** — it is
+  not a convention an agent is merely asked to follow; both
+  `canon-entry.schema.json` and `canon-batch.schema.json`'s ACCEPTED branch
+  set `"source": false` under this basis's conditional, so a batch item that
+  tries to attach a citation to a sense-rendering fails schema validation
+  outright. **Precedence (D12):** `established` wins whenever a citable
+  conventional target form genuinely exists — `sense_translated` is reserved
+  for a rendering that makes no established-form claim at all; do not "fix" a
+  `sense_translated` entry by adding a `source` — reclassify it as
+  `established` instead, through a fresh glossary-pass adjudication, never by
+  hand-editing `canon.json`.
+- **`sense_translated` targets are deliberately NOT body-wikilinked in the
+  Obsidian renderer.** A sense-rendering is an ordinary word by construction
+  ("Hope", "Wolf") — `render_obsidian.py`'s unanchored, case-sensitive
+  alternation would otherwise link every occurrence of that word in prose.
+  `build_entity_index` skips `basis:"sense_translated"` entries when building
+  the body-link alternation; the entity **note is still emitted** and its
+  frontmatter `basis` still round-trips — only the automatic in-prose
+  linking is suppressed, erring toward a missing link over a false-link
+  flood. See `references/output-target-adapters/obsidian.md`.
+- **The elision-ambiguous / speaking-name overlap resolves to `review_queue`,
+  never `sense_translated`, when both apply (#91).** A candidate flagged
+  `elision_ambiguous` by `bootstrap_names.py` is force-included in its
+  glossary batch for adjudication regardless of what basis it might otherwise
+  earn; if that same candidate also reads as a clear speaking name, the
+  elision-ambiguity routing still wins — it goes to `review_queue` for a
+  human/codex to confirm it is a distinct entity before any basis (including
+  `sense_translated`) is ever assigned. Don't "fix" this ordering by letting a
+  confident speaking-name read skip the elision adjudication step.
 
 ## 14. An `agent()` schema is a tool `input_schema` — plain object only, no combinator (`#87`)
 

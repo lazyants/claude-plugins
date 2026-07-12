@@ -13,10 +13,11 @@ conflict"):
 
       IMPORTANT, verified against this repo's actual current state (not
       assumed): Step 0a has NO standalone shipped script under
-      assets/scripts/. SKILL.md names exactly one script invocation
-      anywhere in the whole document ("Implemented by scripts/
-      profile_validate.py..."; grepping SKILL.md for "python3"/
-      "Implemented by" turns up nothing else), profile_validate.py's own
+      assets/scripts/. SKILL.md names exactly THREE plugin-path script
+      invocations in the whole document ("Implemented by scripts/
+      profile_validate.py..." at Step 0, plus validate_extraction.py at W2
+      and glossary_preflight.py at W3 (1.4.0)), none of which is Step 0a's
+      own copy/ownership logic; profile_validate.py's own
       real main() deliberately stops at "Step 0 validation passed" and
       never touches MANAGED_ENTRIES/ownership markers (see its
       check_durable_root(), which only checks durable_root's PARENT), and

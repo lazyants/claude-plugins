@@ -5,16 +5,21 @@ Authoritative spec: SKILL.md's "Step 0 -- Read + validate profile.yml"
 section, cross-checked against ``assets/schemas/profile.schema.json`` and
 ``assets/profile.example.yml``. Read those before changing anything here.
 
-**ONE OF TWO SCRIPTS NEVER COPIED TO ``durable_root``** (the other is
-``validate_extraction.py``, the W2 post-extraction gate). Every *other* script
-in this plugin gets physically copied to ``${durable_root}/scripts/`` by
-Step 0a and self-anchors relative to ITS OWN location under durable_root. This
-script is never copied for a specific reason: it runs *before* Step 0a exists
-to do that copying -- there is no durable-root copy of it yet, and there never
-will be one. (``validate_extraction.py`` is never copied for a *different*
-reason -- it is kept plugin-only so a hand-edited extractor cannot bypass it;
-see ``references/false-green-gate.md``.) This script is always invoked directly
-from the plugin's own install path:
+**ONE OF THREE SCRIPTS NEVER COPIED TO ``durable_root``** (the other two are
+``validate_extraction.py``, the W2 post-extraction gate, and
+``glossary_preflight.py``, the W3 glossary pre-dispatch staleness gate).
+Every *other* script in this plugin gets physically copied to
+``${durable_root}/scripts/`` by Step 0a and self-anchors relative to ITS OWN
+location under durable_root. This script is never copied for a specific
+reason: it runs *before* Step 0a exists to do that copying -- there is no
+durable-root copy of it yet, and there never will be one. (``validate_extraction.py``
+is never copied for a *different* reason -- it is kept plugin-only so a
+hand-edited extractor cannot bypass it; see ``references/false-green-gate.md``.
+``glossary_preflight.py`` is never copied for a *third* reason -- a copied
+durable instance would resolve its own schemas from the durable root and
+compare durable-vs-durable, a vacuous pass that can never detect staleness;
+see SKILL.md's Step 0a copy-exclusion list.) This script is always invoked
+directly from the plugin's own install path:
 
     python3 {{PLUGIN_ROOT}}/assets/scripts/profile_validate.py \\
         --profile .claude/literary-translator/profile.yml
@@ -106,12 +111,12 @@ import sys
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
-# Self-anchoring: this script is one of two deliberate exceptions to "every
+# Self-anchoring: this script is one of THREE deliberate exceptions to "every
 # script lives under ${durable_root}/scripts/ and self-anchors via
-# Path(__file__).resolve().parents[1]" (the other is validate_extraction.py)
-# -- it lives at the PLUGIN'S OWN ``assets/scripts/`` directory and is never
-# copied to durable_root, so its parents[1] gives the plugin's ``assets/``
-# root instead of a durable_root.
+# Path(__file__).resolve().parents[1]" (the other two are validate_extraction.py
+# and glossary_preflight.py) -- it lives at the PLUGIN'S OWN
+# ``assets/scripts/`` directory and is never copied to durable_root, so its
+# parents[1] gives the plugin's ``assets/`` root instead of a durable_root.
 # It never assumes cwd and never takes a --plugin-root flag.
 # ---------------------------------------------------------------------------
 ASSETS_ROOT = Path(__file__).resolve().parents[1]
@@ -135,7 +140,7 @@ jsonschema = None
 # hand-adapted copy stale. All three are plugin-build constants, never
 # profile.yml fields.
 CURRENT_PROFILE_VERSION = 1
-CURRENT_PROMPT_CONTRACT_VERSION = 2
+CURRENT_PROMPT_CONTRACT_VERSION = 3
 CURRENT_EXTRACTOR_CONTRACT_VERSION = 2
 
 # The exact top-level keys profile.schema.json's own `required` list names --

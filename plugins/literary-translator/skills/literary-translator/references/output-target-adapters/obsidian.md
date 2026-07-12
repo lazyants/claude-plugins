@@ -50,7 +50,7 @@ source_form: <original-script identity, canon.json's entries{} key>
 canonical_target_form: <the target-language rendering that appears in body text>
 category: <open vocabulary, e.g. person/place/work/group/divine-name -- blank/absent renders as "other">
 is_proper_name: <bool>
-basis: established | transliterated | title | not_a_name
+basis: established | transliterated | title | not_a_name | sense_translated
 confidence: high | medium | low
 source: <URI, required when basis: established>
 note: <free-text human note -- singular field name, matching canon-entry.schema.json>
@@ -86,7 +86,17 @@ inside `[[...]]`.
 
 - Build the matcher over the set of every entry's `canonical_target_form`
   value, **sorted longest-first**, so a longer name is never shadowed by a
-  shorter one that happens to be its substring.
+  shorter one that happens to be its substring — **except** entries with
+  `basis: sense_translated` (#138), which are deliberately **excluded from
+  the matcher entirely**. A sense-rendering is an ordinary word by
+  construction ("Hope", "Wolf"), and this unanchored, no-word-boundary
+  matcher would otherwise wikilink every incidental occurrence of that word
+  in the prose, not just the entity's own mentions. Such an entry still gets
+  a full entity note (frontmatter, `basis` included) — only the body
+  auto-linking is suppressed, erring toward the recoverable failure (a
+  missing auto-link) over a false-link flood. (The pre-existing `not_a_name`
+  realia case above is unaffected by this rule and stays body-matched as
+  before.)
 - Match within a single narrative block's text (a plain string match against
   the resolved text, never entity/NLP matching); wrap only the **first
   occurrence per block** — a name repeated three times in one paragraph

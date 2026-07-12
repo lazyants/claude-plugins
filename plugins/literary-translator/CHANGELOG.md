@@ -1,5 +1,38 @@
 # Changelog
 
+## 1.4.0 — 2026-07-12
+
+Sense-translated speaking-name support: a fifth canon `basis` value plus a durable-root staleness
+preflight that keeps a mid-pipeline resume from hanging on a stale schema. Closes #138.
+
+### Added
+
+- **`basis: "sense_translated"` — a fifth canon basis value (#138).** `canon-entry.schema.json` and
+  `canon-batch.schema.json` gain a fifth `basis` enum member so a speaking / meaningful name rendered
+  by SENSE (its meaning) rather than transliterated can be locked in canon `entries{}` with a frozen
+  `canonical_target_form`, instead of being re-parked in `review_queue` on every run. A
+  `sense_translated` entry is constrained by a dedicated schema conditional — `is_proper_name: true`,
+  a non-empty `note` (the sense rationale), a non-empty `canonical_target_form`, and no `source` field
+  — enforced end-to-end by `canon_validate.py`; the glossary / translate / review prompts and the
+  style-bible + profile seeds carry the new basis so the adjudicator can assign and lock it.
+- **`glossary_preflight.py` — a W3 glossary pre-dispatch staleness gate (#138).** A new stdlib-only,
+  plugin-path script run right before any glossary batch is dispatched: it compares a resumed
+  project's durable copy of `canon-entry.schema.json` / `canon-batch.schema.json` / the seed
+  `glossary_TASK.md` against the plugin's own shipped copies (whole-artifact, order-exact
+  canonical-JSON equality, with duplicate-key rejection) and HALTS with one actionable line if the
+  durable root is a stale pre-1.4.0 copy that cannot accept a `sense_translated` item — turning what
+  would otherwise be an unbounded retry-until-valid hang on mid-pipeline resume into a clean "re-run
+  Step 0 + 0a". Fresh on every run and never copied into the durable root (same exception class as
+  `profile_validate.py`).
+
+### Changed
+
+- The canon/glossary reference docs, the W3 orchestration-and-batching notes, gotchas, the Obsidian
+  output-adapter doc, and `render_obsidian.py` are updated for the new basis. New regression suites
+  cover the enum/schema drift (`canon_enum_drift.test.py`), the preflight gate
+  (`glossary_preflight.test.py`), and end-to-end `sense_translated` behaviour
+  (`sense_translated_behaviour.test.py`).
+
 ## 1.3.7 — 2026-07-11
 
 Canon-enforcement + transient-recovery + review-gate correctness cluster from the 2026-07-11 issue

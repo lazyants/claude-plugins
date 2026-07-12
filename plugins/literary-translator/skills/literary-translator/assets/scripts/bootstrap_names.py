@@ -5,7 +5,8 @@ No LLM. Scans a source-language text (either the whole project's
 ``manifest.json``, or an ad hoc text sample) and produces a frequency-ranked
 list of proper-noun / title / toponym candidates. This is the INPUT to the
 later codex glossary pass, which decides the canonical target-language form
-of each candidate (established vs transliterated vs "not actually a name")
+of each candidate -- established, transliterated, a title requiring
+unpacking, a sense-translated speaking name, or not actually a name at all
 -- this script only surfaces candidates; it never decides a translation.
 
 Heuristics (recall-oriented; the codex glossary pass prunes precision
