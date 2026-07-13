@@ -1,5 +1,50 @@
 # Changelog
 
+## 1.4.3 — 2026-07-13
+
+A validation-robustness patch closing three LOW-severity findings from the v1.4.0 Hebrew→English
+smoke test and the v1.4.1 documentation sweep. Closes #174, #180, #181.
+
+### Fixed
+
+- **`select_segments.py` no longer aborts the whole run when one segment's segpack is unreadable
+  (#174).** The blocked-regeneration derivation-state gate read `segpack_{seg}.json` through
+  `read_json`, which calls `fatal()` (raising `FatalError`) on a missing / corrupt /
+  invalid-UTF-8 / non-object file — killing selection for every other segment too. A new
+  `read_segpack_nonfatal()` catches `FileNotFoundError`, `UnicodeDecodeError` (a `ValueError`
+  subclass, so not caught by `except OSError`), `OSError`, and `JSONDecodeError` (plus a non-dict
+  top level) and escalates just that one segment as `human_escalation` / `segpack_read_failed`; a
+  nested non-mapping `generation_hashes` is guarded the same way instead of raising an uncaught
+  `AttributeError`.
+- **W2 post-extraction gate no longer wedges a `custom` source on plugin upgrade (#180).** The
+  `extract.py` `EXTRACTOR_CONTRACT_VERSION` drift check (`profile_validate.py`) and the self-check
+  region-hash pin (`validate_extraction.py`) both ran against `extract.py` even for a `custom`
+  source — but for `custom` that file is Step 0a's unadapted `extract.py.template` copy, never the
+  real co-designed extractor at `scripts/custom_extractors/<value>`, so pinning it could only ever
+  vacuously pass or spuriously fail on upgrade. Both checks are now format-gated OFF for
+  `source.format: custom` (fail-safe: a missing/malformed `source.format` is treated as
+  non-custom, so the checks stay ON); the schema-validation and derivable re-derivation checks stay
+  unconditional. The managed-gate docs, `manifest.schema.json` field descriptions, and the
+  source-format-adapter references are reconciled to this custom/template-based split.
+- **W3 language-smoke completeness check is dedup-aware and set-coverage-based (#181).**
+  `parse_checked_names` silently kept duplicate `--checked-name` entries, so the low-name-density
+  branch's entry-count floor could be satisfied by repeating one name (`Alice,Alice` reads as "2
+  names") while a genuine candidate went unchecked. Names are now de-duplicated (first-occurrence
+  order) and the low-density branch asserts real SET COVERAGE of the candidate set, naming every
+  still-uncovered candidate in its fatal message.
+
+### Migration
+
+No cache-key member is touched (none of `draft` / `review` / `segpack.schema.json`, nor a
+`PLUGIN_BUNDLE_MEMBERS` / `DERIVATION_BUNDLE_MEMBERS` script), so **no converged segment is
+re-translated** by this release. Two lower-impact hashes change automatically:
+
+- The **resume digest** changes (`select_segments.py`, `language_smoke_report.py`, and the two
+  edited `*.schema.json` files all feed it) — an interrupted / in-flight run restarts fresh on the
+  next engine invocation; already-converged segments stay reusable.
+- **`smoke_report_contract_hash`** changes because `language_smoke_report.py` changed — the W3
+  language smoke test re-runs once on the next engine invocation.
+
 ## 1.4.2 — 2026-07-13
 
 A rendering / validation fidelity patch closing three medium-severity bugs surfaced by a

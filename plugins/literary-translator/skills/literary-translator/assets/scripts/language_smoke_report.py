@@ -605,7 +605,14 @@ def build_source_sample(manifest, lang):
 def parse_checked_names(cli_value):
     if not cli_value:
         return []
-    return [n.strip() for n in cli_value.split(",") if n.strip()]
+    seen = set()
+    out = []
+    for n in cli_value.split(","):
+        n = n.strip()
+        if n and n not in seen:
+            seen.add(n)
+            out.append(n)
+    return out
 
 
 def load_elision_test_file(path):
@@ -762,17 +769,18 @@ def main():
                 f"candidate_names_total is {candidate_names_total} (below "
                 f"the {LOW_NAME_DENSITY_FLOOR}-name floor) -- re-run with "
                 "--low-name-density-confirmed and supply --checked-names "
-                f"with exactly {candidate_names_total} entries -- this is a "
-                "dedup-blind entry-COUNT floor (len must equal "
-                "candidate_names_total), not distinct-name coverage"
+                "covering EVERY distinct candidate name -- this is a "
+                "dedup-aware set-coverage requirement (duplicate entries do "
+                "not count), not a bare entry count"
             )
-        if len(checked_names) != candidate_names_total:
+        uncovered = sorted(candidate_name_set - set(checked_names))
+        if uncovered:
             fatal(
-                "low-name-density path requires the checked-name COUNT to "
-                f"be EXACTLY {candidate_names_total} (len(--checked-names) "
-                f"must equal candidate_names_total; got {len(checked_names)}) "
-                "-- a dedup-blind entry-COUNT check (duplicate entries each "
-                "count), NOT distinct-name coverage"
+                "low-name-density path requires EVERY distinct candidate name to be "
+                f"hand-checked (set-coverage of the {candidate_names_total} distinct "
+                "candidates, dedup-aware -- duplicates do not count). "
+                f"{len(uncovered)} still uncovered: {uncovered}. Supply each distinct "
+                "candidate in --checked-names."
             )
         low_name_density_confirmed = True
         no_names_confirmed = False
@@ -786,9 +794,9 @@ def main():
         if len(checked_names) < LOW_NAME_DENSITY_FLOOR:
             fatal(
                 f"--checked-names must supply at least {LOW_NAME_DENSITY_FLOOR} "
-                f"names (got {len(checked_names)}) -- refusing to run a "
-                "vacuous pass. If this source is genuinely name-sparse, "
-                "re-run with --low-name-density-confirmed instead."
+                f"DISTINCT names (got {len(checked_names)} distinct) -- "
+                "refusing to run a vacuous pass. If this source is genuinely "
+                "name-sparse, re-run with --low-name-density-confirmed instead."
             )
         low_name_density_confirmed = False
         no_names_confirmed = False

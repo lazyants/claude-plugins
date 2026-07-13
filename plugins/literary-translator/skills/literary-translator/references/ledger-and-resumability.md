@@ -283,8 +283,10 @@ any other restatement of the field count/list elsewhere must match it.
 15 (plus the one named exception below). CLI: `python3
 {{DURABLE_ROOT}}/scripts/cache_key.py --seg <id>` prints the full JSON
 object to stdout. `--field <name>` (no `--seg`) prints just one named
-**global** field's current value — used by `extract.py.template` (W2) and
-the glossary-pass merge step (W3) to stamp their own `generation_hashes`
+**global** field's current value — used at W2 by the producing extractor
+(`extract.py.template` for `gutenberg_epub`/`plain_text`; the co-designed
+custom extractor for `custom`, same two-phase-write obligation) and at W3
+by the glossary-pass merge step to stamp their own `generation_hashes`
 markers. Passing `--field` with a per-segment field name and no `--seg` is
 a usage error.
 
@@ -369,7 +371,9 @@ Exact byte-scope per field:
   **Two-phase write**
   (chicken-and-egg: `source_inputs[]` lives inside `manifest.json` but
   `manifest.schema.json` also requires this hash to be present):
-  `extract.py.template` first writes a DRAFT `manifest.json`
+  The producing extractor (`extract.py.template` for `gutenberg_epub`/
+  `plain_text`; the co-designed custom extractor for `custom`, same
+  obligation) first writes a DRAFT `manifest.json`
   (`source_inputs` populated, `generation_hashes.source_extraction_hash`/
   `.source_input_hash` absent, deliberately not yet schema-valid, never
   validated at this point) → `cache_key.py --field source_input_hash`/
@@ -759,7 +763,9 @@ config/extraction/source-file/derivation-script change — none of them,
 alone, proves the downstream artifacts (`canon.json`/`segpack_{seg}.json`)
 actually regenerated. This is closed mechanically: `manifest.json` records
 `generation_hashes.source_extraction_hash`/`.source_input_hash` (stamped at
-W2 by `extract.py.template`); `canon.json` records
+W2 by the producing extractor — `extract.py.template` for `gutenberg_epub`/
+`plain_text`, the co-designed custom extractor for `custom`); `canon.json`
+records
 `generation_hashes.particle_config_hash`/`.derivation_bundle_hash` (stamped
 at W3 by the glossary-pass merge step — never `manifest.json`, a
 deliberate single-owner split); `segpack_{seg}.json` records all four,

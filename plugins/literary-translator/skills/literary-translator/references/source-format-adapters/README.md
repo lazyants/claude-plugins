@@ -76,8 +76,10 @@ plugin has ever had to generalize from).
 
 Regardless of which adapter runs, extraction must produce a `manifest.json`
 matching the same shape, validated by `manifest.schema.json` immediately
-after extraction (alongside, never instead of, the round-trip self-check
-suite `extract.py.template` runs): the block-ID/`order_index` model,
+after extraction (alongside, never instead of, the producing extractor's own
+round-trip self-check suite — `extract.py.template`'s for `gutenberg_epub`/
+`plain_text`; a documented equivalent the custom extractor itself must run
+for `custom`, see [`custom.md`](./custom.md)): the block-ID/`order_index` model,
 `spine[]`, `segments[]` (explicitly inclusive of translate-decision
 `FRONTBACK:{id}` units, not just body content), `footnotes[]`, `verse.store`,
 `generation_hashes.source_extraction_hash` (required), `source_inputs: [string]`
@@ -122,12 +124,19 @@ covering the same invariants) — a custom source is exempt from *how*
 block/footnote/verse detection works, never from *what* it must ultimately
 produce and prove.
 
-`extract.py.template`'s format-independent core — block-ID assignment, sha1
-hashing, `order_index` re-ranking, the self-check suite, hash stamping, and
-schema validation — stays intact across adapters. Source-specific work belongs
-only in the marked `# ADAPT-POINT:` areas around `classify_spine_item`,
+This describes `gutenberg_epub` (and `plain_text`, once #62 implements it) —
+both adapt the shipped `extract.py.template`. `extract.py.template`'s
+format-independent core — block-ID assignment, sha1 hashing, `order_index`
+re-ranking, the self-check suite, hash stamping, and schema validation —
+stays intact across THOSE adapters. Source-specific work belongs only in the
+marked `# ADAPT-POINT:` areas around `classify_spine_item`,
 `classify_frontback_block`, the footnote-grouping loop, and the verse-detection
-loop. The Gutenberg points consult
+loop. **This does not describe `custom`**: a `custom` source ships a
+STANDALONE extractor at `${durable_root}/scripts/custom_extractors/<value>`
+that does not extend `extract.py.template` and has no `# ADAPT-POINT:`
+hooks at all — see
+[`custom.md`](./custom.md#extractpy-exists-for-custom-too-but-is-never-the-real-extractor).
+The Gutenberg points consult
 `source.adapter_config.gutenberg_epub.spine_overrides` and
 `source.adapter_config.gutenberg_epub.frontback_overrides` before adapter
 defaults. (Once `plain_text` is implemented — #62 — its adapt-points will

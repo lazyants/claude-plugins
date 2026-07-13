@@ -2,12 +2,12 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "manifest.schema.json",
   "title": "Extraction Manifest",
-  "description": "The extraction manifest every source-format adapter (gutenberg_epub, plain_text, custom) must produce -- the EXACT same shape regardless of adapter, validated immediately after extraction by extract.py.template using the real jsonschema.Draft202012Validator (never the hand-rolled checker validate_draft.py/segpack.py use elsewhere). Encodes the block-ID/order_index model (blocks{}, keyed by block id, each block carrying its own order_index -- the single global reading-order axis spine[]/segments[]/footnotes[]/verse.store all reference by id rather than duplicating), the reading-order spine (spine[]), the translatable-unit inventory (segments[], EXPLICITLY inclusive of translate-decision FRONTBACK:{id} units and not just body content -- a translate-decision frontback unit gets its own segments[] entry with kind:\"frontback\" and is segpacked/dispatched/reviewed/ledgered through the exact same generic pipeline as a body segment), the footnote anchor/definition table (footnotes[]), the verse-placeholder inventory (verse.store), the full front/back-matter disposition inventory (frontback[]), and the extraction provenance hashes (generation_hashes.source_extraction_hash/.source_input_hash) alongside the raw source-file list they are derived from (source_inputs[]). CROSS-REFERENCE INVARIANT THIS SCHEMA CANNOT EXPRESS (checked PROCEDURALLY instead, never schema-expressible -- a cross-array key-set comparison is outside JSON Schema's reach): every frontback[] entry with decision:\"translate\" MUST have a matching id in segments[] (as that segment's own `seg` value); every frontback[] entry with decision:\"regenerate\" or decision:\"omit\" MUST NOT appear in segments[] at all. extract.py.template's own round-trip self-check suite enforces this as a FATAL named failure in EITHER direction (a translate-decision frontback unit missing from segments[], or a regenerate/omit-decision unit that leaked into segments[] anyway) -- this schema only validates that segments[] and frontback[] are each individually well-shaped, not that the two arrays agree with each other.",
+  "description": "The extraction manifest every source-format adapter (gutenberg_epub, plain_text, custom) must produce -- the EXACT same shape regardless of adapter, validated immediately after extraction by each adapter's OWN extractor (extract.py.template for gutenberg_epub/plain_text; the co-designed custom extractor at scripts/custom_extractors/<value> for custom -- see references/source-format-adapters/custom.md) using the real jsonschema.Draft202012Validator (never the hand-rolled checker validate_draft.py/segpack.py use elsewhere). Encodes the block-ID/order_index model (blocks{}, keyed by block id, each block carrying its own order_index -- the single global reading-order axis spine[]/segments[]/footnotes[]/verse.store all reference by id rather than duplicating), the reading-order spine (spine[]), the translatable-unit inventory (segments[], EXPLICITLY inclusive of translate-decision FRONTBACK:{id} units and not just body content -- a translate-decision frontback unit gets its own segments[] entry with kind:\"frontback\" and is segpacked/dispatched/reviewed/ledgered through the exact same generic pipeline as a body segment), the footnote anchor/definition table (footnotes[]), the verse-placeholder inventory (verse.store), the full front/back-matter disposition inventory (frontback[]), and the extraction provenance hashes (generation_hashes.source_extraction_hash/.source_input_hash) alongside the raw source-file list they are derived from (source_inputs[]). CROSS-REFERENCE INVARIANT THIS SCHEMA CANNOT EXPRESS (checked PROCEDURALLY instead, never schema-expressible -- a cross-array key-set comparison is outside JSON Schema's reach): every frontback[] entry with decision:\"translate\" MUST have a matching id in segments[] (as that segment's own `seg` value); every frontback[] entry with decision:\"regenerate\" or decision:\"omit\" MUST NOT appear in segments[] at all. The producing extractor's own round-trip self-check suite (extract.py.template for gutenberg_epub/plain_text; the co-designed custom extractor, or a documented equivalent, for custom) enforces this as a FATAL named failure in EITHER direction (a translate-decision frontback unit missing from segments[], or a regenerate/omit-decision unit that leaked into segments[] anyway) -- this schema only validates that segments[] and frontback[] are each individually well-shaped, not that the two arrays agree with each other.",
   "type": "object",
   "properties": {
     "blocks": {
       "type": "object",
-      "description": "Every extracted content unit, keyed by its own block id (e.g. \"HEAD:seg02\", \"PARA:seg02:0001\", \"VERSE:seg02:0012\", \"FN:1\", \"FRONTBACK:fm01\"). The id used as the object key and the block record's own `id` field must agree (checked by extract.py.template's uniqueness/bijection self-checks, not by this schema).",
+      "description": "Every extracted content unit, keyed by its own block id (e.g. \"HEAD:seg02\", \"PARA:seg02:0001\", \"VERSE:seg02:0012\", \"FN:1\", \"FRONTBACK:fm01\"). The id used as the object key and the block record's own `id` field must agree (checked by the producing extractor's own uniqueness/bijection self-checks -- extract.py.template for gutenberg_epub/plain_text, the custom extractor for custom -- not by this schema).",
       "additionalProperties": {
         "type": "object",
         "description": "One block: order_index is this block's position on the single global reading-order axis spine/segments/footnotes/verse.store all key off of.",
@@ -15,7 +15,7 @@
           "id": { "type": "string" },
           "type": {
             "type": "string",
-            "description": "Adapter-defined block-type tag (e.g. HEAD/PARA/VERSE/FN/FRONTBACK for gutenberg_epub). Deliberately not a fixed enum -- plain_text/custom adapters may introduce their own block types via their # ADAPT-POINT: classification hooks."
+            "description": "Adapter-defined block-type tag (e.g. HEAD/PARA/VERSE/FN/FRONTBACK for gutenberg_epub). Deliberately not a fixed enum -- plain_text introduces its own block types via extract.py.template's # ADAPT-POINT: classification hooks (#62); a custom adapter defines its own block-type tags directly in its own standalone extractor (scripts/custom_extractors/<value>), which does not extend extract.py.template or use its ADAPT-POINTs at all."
           },
           "seg": {
             "type": ["string", "null"],
@@ -33,7 +33,7 @@
           "plain_text": { "type": "string" },
           "sha1": {
             "type": "string",
-            "description": "sha1 of this block's own content, as assigned by extract.py.template's generic core."
+            "description": "sha1 of this block's own content, as assigned by the producing extractor (extract.py.template's generic core for gutenberg_epub/plain_text; the custom extractor's own hashing for custom)."
           },
           "fnrefs": {
             "type": "array",
@@ -60,7 +60,7 @@
     },
     "spine": {
       "type": "array",
-      "description": "Ordered list of source-file/spine-item classifications extract.py.template's classify_spine_item hook resolved, each overridable per-file via adapter_config.gutenberg_epub.spine_overrides.",
+      "description": "Ordered list of source-file/spine-item classifications the producing extractor resolved (extract.py.template's classify_spine_item hook for gutenberg_epub, each overridable per-file via adapter_config.gutenberg_epub.spine_overrides; the custom extractor's own equivalent logic for custom).",
       "items": {
         "type": "object",
         "properties": {
@@ -116,7 +116,7 @@
           "word_count": {
             "type": "integer",
             "minimum": 0,
-            "description": "Drives extract.py.template's blocking no_segment_exceeds_max_words self-check against profile.yml's max_segment_words."
+            "description": "Drives the blocking no_segment_exceeds_max_words self-check against profile.yml's max_segment_words -- extract.py.template's own check for gutenberg_epub/plain_text; a documented equivalent the custom extractor must implement for custom (see references/source-format-adapters/custom.md). Also independently re-derived by validate_extraction.py's managed gate for every format."
           },
           "n_para": { "type": "integer", "minimum": 0 },
           "n_verse": { "type": "integer", "minimum": 0 },
@@ -159,7 +159,7 @@
     },
     "frontback": {
       "type": "array",
-      "description": "Full inventory of every front/back-matter block classify_frontback_block decomposed, each resolved to translate/regenerate/omit (overridable per-element via adapter_config.gutenberg_epub.frontback_overrides). A translate-decision entry gets its own segments[] entry (kind:\"frontback\", `seg` equal to this entry's `id`); a regenerate/omit-decision entry does NOT -- see the top-level description for the full cross-reference invariant, checked procedurally by extract.py.template, never by this schema.",
+      "description": "Full inventory of every front/back-matter block the producing extractor decomposed (extract.py.template's classify_frontback_block hook for gutenberg_epub, each overridable per-element via adapter_config.gutenberg_epub.frontback_overrides; the custom extractor's own equivalent logic for custom), each resolved to translate/regenerate/omit. A translate-decision entry gets its own segments[] entry (kind:\"frontback\", `seg` equal to this entry's `id`); a regenerate/omit-decision entry does NOT -- see the top-level description for the full cross-reference invariant, checked procedurally by the producing extractor, never by this schema.",
       "minItems": 0,
       "items": {
         "type": "object",

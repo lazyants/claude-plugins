@@ -389,10 +389,17 @@ block-id assignment, sha1 hashing, `order_index` re-ranking, the structural
 self-check suite, `no_segment_exceeds_max_words`, and the final
 `generation_hashes`/`manifest.schema.json` validation.
 
-## `extract.py.template`'s generic core — stays intact across all adapters
+## `extract.py.template`'s generic core — stays intact across all `extract.py.template`-based adapters
 
 The following mechanics are format-independent and ship unchanged regardless
-of which adapter's `# ADAPT-POINT:`-marked functions are in use:
+of which adapter's `# ADAPT-POINT:`-marked functions are in use — this
+covers `gutenberg_epub` (this page) and `plain_text` (once #62 implements
+it), the two formats that adapt `extract.py.template`. It does **not** cover
+`custom`: a `custom` source ships a standalone extractor at
+`scripts/custom_extractors/<value>` that does not extend
+`extract.py.template` at all, has none of these mechanics for free, and must
+reproduce the equivalent invariants itself — see
+`source-format-adapters/custom.md`.
 
 - **Block-ID assignment** — the `HEAD:{seg}` / `PARA:{seg}:{ord}` /
   `QUOTE:{seg}:{ord}` / `VERSE:{seg}:{ord}` / `FN:{N}` / `FRONTBACK:{id}`

@@ -110,7 +110,7 @@ def _realistic_extract_py_body() -> str:
     )
 
 
-def _write_valid_profile(tmp_path: Path) -> tuple[Path, Path]:
+def _write_valid_profile(tmp_path: Path, source_format: str = "gutenberg_epub") -> tuple[Path, Path]:
     """Builds a fully schema-valid, placeholder-free profile.yml (same
     recipe as tests/prompt_contract_drift.test.py's own fixture) plus its
     prerequisite filesystem fixtures -- an existing source file, and a
@@ -119,7 +119,14 @@ def _write_valid_profile(tmp_path: Path) -> tuple[Path, Path]:
     CI runners honoring `TMPDIR=/tmp`), so any caller expecting Step 0's
     exit-0 pass must set `LT_PROFILE_VALIDATE_ALLOW_TMP_ROOT=1` (see
     profile_validate.py's `check_durable_root`) -- callers that only
-    assert a halt don't need it. Returns (profile_path, durable_root)."""
+    assert a halt don't need it. Returns (profile_path, durable_root).
+
+    ``source_format`` defaults to ``gutenberg_epub`` (every pre-existing
+    caller in this file relies on that default unchanged); pass ``"custom"``
+    for #180's format-gate tests below -- the fixture's
+    ``adapter_config.custom: {{extractor_path: null}}`` and ``gutenberg_id:
+    null`` already satisfy profile.schema.json's custom-format `allOf`
+    branch (schema.json:362-380) with no further changes needed."""
     durable_root = tmp_path / "durable"
     durable_root.mkdir()
     source_file = tmp_path / "source.epub"
@@ -135,7 +142,7 @@ def _write_valid_profile(tmp_path: Path) -> tuple[Path, Path]:
           pipeline_version: v1
           max_segment_words: 15000
         source:
-          format: gutenberg_epub
+          format: {source_format}
           path: "{source_file}"
           gutenberg_id: null
           language:
@@ -409,6 +416,84 @@ def test_marker_without_inner_whitespace_is_still_recognized(pv, tmp_path, monke
         f"a space-free '#' comment marker is valid Python and must be "
         f"recognized as well-formed; stderr:\n{err}"
     )
+
+
+# ---------------------------------------------------------------------------
+# #180: source.format: custom -- the drift check must be SKIPPED, because
+# Step 0a's extract.py is an unadapted extract.py.template copy for custom,
+# never the real extractor (scripts/custom_extractors/<value>). Drift against
+# CURRENT_EXTRACTOR_CONTRACT_VERSION is meaningless for a file nobody runs or
+# adapts. custom.md already documented this intent; check_resumed_contract_
+# versions() now honors it via the `source_format` gate.
+# ---------------------------------------------------------------------------
+
+def test_extractor_contract_drift_check_skipped_for_custom_format(pv, tmp_path, monkeypatch, capsys):
+    """A STALE (well-formed but wrong-version) EXTRACTOR_CONTRACT_VERSION
+    marker on extract.py must NOT be a fatal drift when source.format is
+    custom. Red proof: before the format-gate, this fixture is byte-identical
+    to a gutenberg_epub stale-version fixture and would halt exit!=0."""
+    monkeypatch.setenv(pv.ALLOW_TMP_ROOT_ENV_VAR, "1")
+    profile_path, durable_root = _write_valid_profile(tmp_path, source_format="custom")
+    stale = pv.CURRENT_EXTRACTOR_CONTRACT_VERSION - 1
+    (durable_root / EXTRACT_PY_FILENAME).write_text(
+        _well_formed_marker(stale) + _realistic_extract_py_body(),
+        encoding="utf-8",
+    )
+
+    exit_code, _out, err = _run_main(pv, profile_path, capsys)
+
+    assert exit_code == 0, (
+        f"a stale extract.py EXTRACTOR_CONTRACT_VERSION marker must not be a "
+        f"fatal drift for source.format: custom (extract.py isn't the real "
+        f"custom extractor); stderr:\n{err}"
+    )
+    assert "EXTRACTOR_CONTRACT_VERSION" not in err, err
+
+
+def test_extractor_contract_drift_check_skipped_for_custom_format_missing_marker(
+    pv, tmp_path, monkeypatch, capsys
+):
+    """Same skip, but for the 'missing marker' state (treated as version 0,
+    normally always stale) -- the format-gate must short-circuit BEFORE
+    check_contract_marker() runs at all for extract.py, not merely tolerate
+    one particular stale value."""
+    monkeypatch.setenv(pv.ALLOW_TMP_ROOT_ENV_VAR, "1")
+    profile_path, durable_root = _write_valid_profile(tmp_path, source_format="custom")
+    (durable_root / EXTRACT_PY_FILENAME).write_text(
+        _realistic_extract_py_body(), encoding="utf-8"
+    )
+
+    exit_code, _out, err = _run_main(pv, profile_path, capsys)
+
+    assert exit_code == 0, (
+        f"a missing extract.py marker must not be a fatal drift for "
+        f"source.format: custom; stderr:\n{err}"
+    )
+    assert "EXTRACTOR_CONTRACT_VERSION" not in err, err
+
+
+def test_extractor_contract_drift_check_still_enforced_for_gutenberg_epub_stale_version(
+    pv, tmp_path, capsys
+):
+    """CONVERSE of the two tests above: the format-gate lifts the check ONLY
+    for custom -- a stale (well-formed, wrong-version) marker for
+    gutenberg_epub (this file's default source_format) must still halt."""
+    profile_path, durable_root = _write_valid_profile(tmp_path)
+    stale = pv.CURRENT_EXTRACTOR_CONTRACT_VERSION - 1
+    (durable_root / EXTRACT_PY_FILENAME).write_text(
+        _well_formed_marker(stale) + _realistic_extract_py_body(),
+        encoding="utf-8",
+    )
+
+    exit_code, _out, err = _run_main(pv, profile_path, capsys)
+
+    assert exit_code != 0, (
+        "a stale extract.py EXTRACTOR_CONTRACT_VERSION marker must still be "
+        "a fatal drift for gutenberg_epub -- the format-gate must not lift "
+        "the check for non-custom formats"
+    )
+    assert str(durable_root / EXTRACT_PY_FILENAME) in err, err
+    assert f"is version {stale}, current is {pv.CURRENT_EXTRACTOR_CONTRACT_VERSION}" in err, err
 
 
 def test_template_marker_matches_current_constant(pv):

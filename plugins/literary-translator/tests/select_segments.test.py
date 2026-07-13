@@ -734,5 +734,119 @@ def test_derivation_bundle_hash_regen_hint_names_glossary_pass(tmp_path):
     }
 
 
+# ---------------------------------------------------------------------------
+# 6. Issue #174 regression: a segpack that is unreadable/corrupt/invalid at
+#    the derivation-state gate must escalate ONLY the segment hitting the
+#    gate, never FatalError the whole W5 preflight. read_json's
+#    fatal-on-any-IO-or-parse-error contract (raises FatalError -> top-level
+#    {"success": false} for the WHOLE run) is wrong for this per-segment
+#    gate -- every OTHER per-segment failure in this file degrades to that
+#    segment's own human_escalation instead. read_segpack_nonfatal must
+#    degrade the same way, matching compute_current_cache_key()'s isolation
+#    contract.
+# ---------------------------------------------------------------------------
+
+def setup_blocked_regen_and_reusable_project(tmp_path):
+    """A 2-segment project: 'seg_blocked_regen' hits the derivation-state
+    gate (cache-key mismatch confined to a derivation-state field, draft
+    sha1 matches) -- the segpack itself is left for each test to write (or
+    not write at all). 'seg_reusable_control' is an ordinary reusable
+    segment, present purely to prove a segpack failure on the FIRST segment
+    never takes down classification of the SECOND -- per-segment isolation,
+    not just non-crash."""
+    root = make_durable_root(tmp_path)
+    write_manifest(root, ["seg_blocked_regen", "seg_reusable_control"])
+
+    current_key = make_cache_key("current")
+    fixture_keys = {}
+
+    sha1_blocked = write_draft(root, "seg_blocked_regen", {"text": "draft-blocked-content"})
+    fixture_keys["seg_blocked_regen"] = current_key
+    stored_blocked = with_field(current_key, "particle_config_hash", "particle_config_hash-OLD")
+    write_fragment(root, "seg_blocked_regen", converged_fragment(stored_blocked, sha1_blocked))
+
+    sha1_control = write_draft(root, "seg_reusable_control", {"text": "draft-control-content"})
+    fixture_keys["seg_reusable_control"] = current_key
+    write_fragment(
+        root, "seg_reusable_control", converged_fragment(dict(current_key), sha1_control)
+    )
+
+    write_fixture_cache_keys(root, fixture_keys)
+    return root
+
+
+def test_blocked_regen_gate_missing_segpack_escalates_single_segment_not_whole_run(tmp_path):
+    root = setup_blocked_regen_and_reusable_project(tmp_path)
+    # Deliberately do NOT write a segpack for seg_blocked_regen.
+
+    proc = run_select(root, "--allow-empty")
+    assert proc.returncode == 0, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    payload = parse_stdout(proc)
+    assert payload["success"] is True
+
+    classification = payload["classification"]["seg_blocked_regen"]
+    assert classification["category"] == "human_escalation"
+    assert classification["status"] == "segpack_read_failed"
+    assert "not found" in classification["detail"]
+
+    # Per-segment isolation: the OTHER segment still classifies normally.
+    assert payload["classification"]["seg_reusable_control"] == {"category": "reusable"}
+
+
+def test_blocked_regen_gate_corrupt_segpack_escalates_single_segment(tmp_path):
+    root = setup_blocked_regen_and_reusable_project(tmp_path)
+    (root / "segments" / "segpack_seg_blocked_regen.json").write_text(
+        "{not json", encoding="utf-8"
+    )
+
+    proc = run_select(root, "--allow-empty")
+    assert proc.returncode == 0, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    payload = parse_stdout(proc)
+    assert payload["success"] is True
+
+    classification = payload["classification"]["seg_blocked_regen"]
+    assert classification["category"] == "human_escalation"
+    assert classification["status"] == "segpack_read_failed"
+    assert "not valid JSON" in classification["detail"]
+
+    assert payload["classification"]["seg_reusable_control"] == {"category": "reusable"}
+
+
+def test_blocked_regen_gate_invalid_utf8_segpack_escalates(tmp_path):
+    root = setup_blocked_regen_and_reusable_project(tmp_path)
+    (root / "segments" / "segpack_seg_blocked_regen.json").write_bytes(b"\xff\xfe")
+
+    proc = run_select(root, "--allow-empty")
+    assert proc.returncode == 0, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    payload = parse_stdout(proc)
+    assert payload["success"] is True
+
+    classification = payload["classification"]["seg_blocked_regen"]
+    assert classification["category"] == "human_escalation"
+    assert classification["status"] == "segpack_read_failed"
+    assert "not valid UTF-8" in classification["detail"]
+
+    assert payload["classification"]["seg_reusable_control"] == {"category": "reusable"}
+
+
+def test_blocked_regen_gate_nonmapping_generation_hashes_escalates(tmp_path):
+    root = setup_blocked_regen_and_reusable_project(tmp_path)
+    (root / "segments" / "segpack_seg_blocked_regen.json").write_text(
+        json.dumps({"generation_hashes": ["bad"]}), encoding="utf-8"
+    )
+
+    proc = run_select(root, "--allow-empty")
+    assert proc.returncode == 0, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    payload = parse_stdout(proc)
+    assert payload["success"] is True
+
+    classification = payload["classification"]["seg_blocked_regen"]
+    assert classification["category"] == "human_escalation"
+    assert classification["status"] == "segpack_read_failed"
+    assert "non-object 'generation_hashes'" in classification["detail"]
+
+    assert payload["classification"]["seg_reusable_control"] == {"category": "reusable"}
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))

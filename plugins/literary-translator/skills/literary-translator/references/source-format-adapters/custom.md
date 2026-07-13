@@ -92,19 +92,41 @@ yourself (or have the co-design session do it) as part of writing the
 extractor; Step 0c's existence check is the only thing that requires the
 path to resolve, and it only runs once `extractor_path` is non-null.
 
-### No `EXTRACTOR_CONTRACT_VERSION` drift check for `custom`
+### `extract.py` exists for `custom` too, but is never the real extractor
 
-`${durable_root}/extract.py` — the one-time copy of `extract.py.template`
-that a `gutenberg_epub` project hand-adapts (and a `plain_text` project will
-too, once #62 implements it) — carries a leading
-`# EXTRACTOR_CONTRACT_VERSION: N` marker that Step 0 checks on a resumed
-project against a hardcoded `CURRENT_EXTRACTOR_CONTRACT_VERSION`, to catch a
-project silently running stale extraction logic after a plugin upgrade. A
-`custom` extractor lives at a different path
-(`${durable_root}/scripts/custom_extractors/<value>`), was never generated
-from `extract.py.template`, and has no plugin-shipped template to drift
-from — this drift check does not apply to it, and there is currently no
-analogous mechanism for it. A `custom` extractor's currency is entirely the
+Step 0a copies `extract.py.template` to `${durable_root}/extract.py`
+**unconditionally**, regardless of `source.format` — so a `custom` project
+does have an `extract.py` on disk. For `custom`, though, that copy is never
+adapted or run: the real extractor is whatever the co-design session wrote
+at `${durable_root}/scripts/custom_extractors/<value>` (see
+"Configuring it" above). `extract.py` there is inert scaffolding left over
+from Step 0a, not a second extractor. Two checks that key off `extract.py`
+are deliberately gated OFF for `custom` as a result:
+
+- **No `EXTRACTOR_CONTRACT_VERSION` drift check.** `extract.py` carries a
+  leading `# EXTRACTOR_CONTRACT_VERSION: N` marker that Step 0
+  (`profile_validate.py`) checks on a resumed project against a hardcoded
+  `CURRENT_EXTRACTOR_CONTRACT_VERSION`, to catch a project silently running
+  stale extraction logic after a plugin upgrade — this check does not apply
+  to `custom`. Since `extract.py` there is never adapted, its marker would
+  either be the template's own (a false "this is current" signal) or would
+  drift against a version bump that is meaningless for a file nobody runs,
+  wedging a resumed `custom` project on an unrelated file. `profile_validate.py`
+  format-gates this check off whenever `source.format: custom`.
+- **No W2 region-hash pin.** `validate_extraction.py`'s managed post-extraction
+  gate normally pins `extract.py`'s self-check region hash against
+  `CURRENT_EXTRACTOR_SELFCHECK_HASH` (see
+  [`../false-green-gate.md`](../false-green-gate.md)) — for `custom` this is
+  skipped outright rather than left to vacuously pass, since pinning the
+  unadapted template copy would certify nothing about the extractor that
+  actually produced `manifest.json`. The gate's other check (independently
+  re-deriving every manifest-derivable invariant from `manifest.json`) still
+  runs in full for `custom`.
+
+Neither mechanism has a `custom`-side analog today. A `custom` extractor's
+currency, and its own equivalent of the three residual self-checks the
+region pin would otherwise vouch for (`body_coverage_no_holes`,
+`no_orphan_footnote_continuation`, `verse_no_uncovered`), are entirely the
 co-designing project's own responsibility.
 
 ## The output contract, in full

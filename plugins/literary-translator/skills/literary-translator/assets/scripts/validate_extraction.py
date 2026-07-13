@@ -61,6 +61,15 @@ Order of operations:
      missing/tampered region (``None``) or a hash mismatch is FATAL (exit 1),
      with a message naming the false-green anti-pattern and pointing genuine
      gaps to a plugin issue. (An unreadable ``--extract`` file is exit 2.)
+     **SKIPPED when ``source.format`` is ``custom``** (read from ``--profile``
+     via ``load_profile_values``): Step 0a still copies ``extract.py.template``
+     to ``extract.py`` unconditionally, but for a custom source that copy is
+     never adapted or run -- the real extractor that produced ``manifest.json``
+     is the co-designed ``scripts/custom_extractors/<value>``, so pinning the
+     unadapted template copy would only ever vacuously pass, certifying nothing
+     (see ``references/source-format-adapters/custom.md``). ``region_ok``
+     defaults ``True`` in this case; the gate's exit code for a custom source
+     then depends only on steps 3-4.
   6. Print PASS/FAIL per check plus the region-pin result; exit 0 iff
      everything passed, 1 on any FATAL validation failure, 2 on usage/env
      error -- mirroring ``profile_validate.py``'s exit-code discipline.
@@ -71,9 +80,11 @@ because their inputs live only in the extractor's in-memory build ``report``
 ``uncovered_verse_lines``), none of which are persisted to
 ``manifest.json`` (its schema forbids extra fields). (``n_verse_blocks`` is NOT
 in this list: it is re-derivable as ``count(blocks type=="VERSE")`` and IS
-re-checked, in ``verse_counts_reconcile`` below.) They are covered ONLY by
-the region-hash pin (step 4), which guarantees the extractor's own copy of them
-was not weakened:
+re-checked, in ``verse_counts_reconcile`` below.) For gutenberg_epub/plain_text
+they are covered ONLY by the region-hash pin (step 5), which guarantees the
+extractor's own copy of them was not weakened; for a custom source (region pin
+skipped) they are NOT covered here at all -- the custom extractor's own
+equivalent of these checks is the co-designing project's own responsibility:
 
   * body_coverage_no_holes
   * no_orphan_footnote_continuation
@@ -220,13 +231,16 @@ def _dependency_preflight():
 # ---------------------------------------------------------------------------
 
 def load_profile_values(profile_path: Path):
-    """Returns (max_segment_words, apparatus_policy), resolved exactly as
-    extract.py resolves them (``project.max_segment_words`` and
-    ``footnotes.apparatus_policy`` via yaml.safe_load). Any unreadable/non-YAML/
+    """Returns (max_segment_words, apparatus_policy, source_format), resolved
+    exactly as extract.py resolves the first two (``project.max_segment_words``
+    and ``footnotes.apparatus_policy`` via yaml.safe_load). Any unreadable/non-YAML/
     non-mapping profile, a missing required key, or an unknown apparatus_policy
     is a usage/env error (exit 2): the gate cannot decide what to check without
     them, and profile_validate.py (Step 0) is the place those are diagnosed in
-    full."""
+    full. ``source_format`` (``profile["source"]["format"]``) is read
+    best-effort -- a missing/malformed value is tolerated as ``None`` (treated
+    as non-custom, fail-safe) rather than escalated to exit 2, since this gate's
+    hard requirements are only the two values above."""
     assert yaml is not None, "_dependency_preflight() must run before load_profile_values()"
     try:
         text = profile_path.read_text(encoding="utf-8")
@@ -272,7 +286,14 @@ def load_profile_values(profile_path: Path):
             file=sys.stderr,
         )
         sys.exit(2)
-    return max_segment_words, apparatus_policy
+    source_format = None
+    source = profile.get("source")
+    if isinstance(source, dict):
+        fmt = source.get("format")
+        if isinstance(fmt, str):
+            source_format = fmt
+
+    return max_segment_words, apparatus_policy, source_format
 
 
 # ---------------------------------------------------------------------------
@@ -592,7 +613,7 @@ def main(argv=None):
     manifest = _load_manifest(manifest_path)
 
     _dependency_preflight()
-    max_segment_words, apparatus_policy = load_profile_values(profile_path)
+    max_segment_words, apparatus_policy, source_format = load_profile_values(profile_path)
 
     # --- (a) independent schema validation ------------------------------------
     # A structurally-invalid manifest (missing a required top-level key, a stray
@@ -633,55 +654,79 @@ def main(argv=None):
             derivable_ok = False
             print(f"FAIL {name}: {detail}", file=sys.stderr)
 
-    # --- (c) pin the extractor's self-check region ----------------------------
-    try:
-        extract_text = extract_path.read_text(encoding="utf-8")
-    except OSError as exc:
-        print(f"ERROR: could not read extractor {extract_path}: {exc}", file=sys.stderr)
-        sys.exit(2)
-
+    # --- (c) pin the extractor's self-check region -----------------------------
+    # SKIPPED for source.format: custom -- Step 0a copies extract.py.template to
+    # ${durable_root}/extract.py unconditionally, but for a custom source that
+    # copy is never adapted or run: the real extractor that produced this
+    # manifest.json lives at scripts/custom_extractors/<value>. Pinning the
+    # unadapted template copy would only ever vacuously pass (it matches
+    # CURRENT_EXTRACTOR_SELFCHECK_HASH trivially), certifying nothing about the
+    # actual custom extractor -- see references/source-format-adapters/custom.md
+    # and references/false-green-gate.md.
     region_ok = True
-    actual_hash = selfcheck_region_hash(extract_text)
-    if actual_hash is None:
-        region_ok = False
+    if source_format == "custom":
         print(
-            f"FAIL selfcheck_region_pin: could not locate exactly one "
-            f"BEGIN/END SELF-CHECK REGION sentinel pair in {extract_path} -- the "
-            f"self-check region is missing or tampered. This gate cannot certify "
-            f"a build whose self-check suite has been removed or altered (a "
-            f"false-green anti-pattern). Restore the shipped self-check region "
-            f"verbatim; if a check is genuinely wrong for your source, take the "
-            f"gap to a plugin issue rather than editing the region.",
-            file=sys.stderr,
-        )
-    elif actual_hash != CURRENT_EXTRACTOR_SELFCHECK_HASH:
-        region_ok = False
-        pending = CURRENT_EXTRACTOR_SELFCHECK_HASH == "PENDING_LEAD_FILL"
-        hint = (
-            " (this plugin build ships an un-provisioned "
-            "CURRENT_EXTRACTOR_SELFCHECK_HASH placeholder -- report it as a "
-            "plugin packaging bug)"
-            if pending else ""
+            "NOTE selfcheck_region_pin: SKIPPED for source.format: custom -- "
+            f"{extract_path} is Step 0a's unadapted extract.py.template copy, "
+            "not the co-designed custom extractor "
+            "(scripts/custom_extractors/<value>) that actually produced this "
+            "manifest.json. The custom extractor's own equivalent of the "
+            "residual self-checks is the project's own responsibility."
         )
         print(
-            f"FAIL selfcheck_region_pin: the extractor's SELF-CHECK REGION hash "
-            f"{actual_hash} does not match this plugin build's pinned "
-            f"CURRENT_EXTRACTOR_SELFCHECK_HASH {CURRENT_EXTRACTOR_SELFCHECK_HASH}"
-            f"{hint}. Either a self-check was edited (editing a check to reach "
-            f"green is a false-green anti-pattern -- take genuine gaps to a "
-            f"plugin issue) or this durable extract.py drifted from the shipped "
-            f"template. Re-derive from the shipped template; do NOT weaken a "
-            f"check to pass this gate.",
-            file=sys.stderr,
+            "NOTE report-only residual: NOT covered here for source.format: "
+            "custom (the region pin above is skipped) -- the custom "
+            "extractor's own equivalent of these checks is the project's own "
+            f"responsibility: {', '.join(REPORT_ONLY_RESIDUAL)}"
         )
     else:
-        print(f"PASS selfcheck_region_pin  ({actual_hash})")
+        try:
+            extract_text = extract_path.read_text(encoding="utf-8")
+        except OSError as exc:
+            print(f"ERROR: could not read extractor {extract_path}: {exc}", file=sys.stderr)
+            sys.exit(2)
 
-    print(
-        "NOTE report-only residual (NOT re-derived here -- inputs live only in "
-        "the extractor's in-memory build report; covered by the region pin "
-        f"above): {', '.join(REPORT_ONLY_RESIDUAL)}"
-    )
+        actual_hash = selfcheck_region_hash(extract_text)
+        if actual_hash is None:
+            region_ok = False
+            print(
+                f"FAIL selfcheck_region_pin: could not locate exactly one "
+                f"BEGIN/END SELF-CHECK REGION sentinel pair in {extract_path} -- the "
+                f"self-check region is missing or tampered. This gate cannot certify "
+                f"a build whose self-check suite has been removed or altered (a "
+                f"false-green anti-pattern). Restore the shipped self-check region "
+                f"verbatim; if a check is genuinely wrong for your source, take the "
+                f"gap to a plugin issue rather than editing the region.",
+                file=sys.stderr,
+            )
+        elif actual_hash != CURRENT_EXTRACTOR_SELFCHECK_HASH:
+            region_ok = False
+            pending = CURRENT_EXTRACTOR_SELFCHECK_HASH == "PENDING_LEAD_FILL"
+            hint = (
+                " (this plugin build ships an un-provisioned "
+                "CURRENT_EXTRACTOR_SELFCHECK_HASH placeholder -- report it as a "
+                "plugin packaging bug)"
+                if pending else ""
+            )
+            print(
+                f"FAIL selfcheck_region_pin: the extractor's SELF-CHECK REGION hash "
+                f"{actual_hash} does not match this plugin build's pinned "
+                f"CURRENT_EXTRACTOR_SELFCHECK_HASH {CURRENT_EXTRACTOR_SELFCHECK_HASH}"
+                f"{hint}. Either a self-check was edited (editing a check to reach "
+                f"green is a false-green anti-pattern -- take genuine gaps to a "
+                f"plugin issue) or this durable extract.py drifted from the shipped "
+                f"template. Re-derive from the shipped template; do NOT weaken a "
+                f"check to pass this gate.",
+                file=sys.stderr,
+            )
+        else:
+            print(f"PASS selfcheck_region_pin  ({actual_hash})")
+
+        print(
+            "NOTE report-only residual (NOT re-derived here -- inputs live only in "
+            "the extractor's in-memory build report; covered by the region pin "
+            f"above): {', '.join(REPORT_ONLY_RESIDUAL)}"
+        )
 
     if derivable_ok and region_ok:
         print(f"{manifest_path}: OK -- post-extraction gate passed")
