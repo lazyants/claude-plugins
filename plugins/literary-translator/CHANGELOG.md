@@ -1,5 +1,48 @@
 # Changelog
 
+## 1.4.2 — 2026-07-13
+
+A rendering / validation fidelity patch closing three medium-severity bugs surfaced by a
+multi-agent repo investigation. Closes #171, #172, #173.
+
+### Fixed
+
+- **`validate_draft.py` placeholder fidelity no longer assumes a `VERSE_` prefix (#173).** The
+  prose-block (check 2) and footnote (check 4) placeholder multisets were built from a regex that
+  hardcoded `⟦FNREF_N⟧` / `⟦VERSE_…⟧`. A custom source-format adapter is free to name its
+  embedded-verse placeholders anything (e.g. `⟦POEM_1⟧`), so such a placeholder was invisible to
+  the gate — a draft that DROPPED it passed validation (a false-green), with the loss caught only
+  much later (`final_audit.py` WARN, `assemble.py` FATAL at W8). Placeholders are now matched by an
+  EXACT MAP: a `⟦…⟧` span is a fidelity token only if it is a `⟦FNREF_N⟧` anchor or one of the
+  segpack's own declared `verses[].placeholder` strings. (Deliberately NOT an "any `⟦…⟧` span"
+  widening, which would wrongly require literal editorial prose such as `⟦variant⟧` to survive
+  translation verbatim.)
+- **`render_obsidian.py` no longer leaks a raw `⟦…⟧` sentinel into a segment note's title and
+  filename (#171).** `_segment_title` returned the first heading node's text verbatim, so a chapter
+  heading carrying a footnote anchor or verse placeholder produced `title: ⟦FNREF_1⟧` and a
+  filename like `001 FNREF_1.md`, disagreeing with the correctly-resolved H2 in the note body. A
+  heading's KNOWN sentinels (footnote anchors, declared verse placeholders) are now resolved to
+  plain title text (footnote-reference markup stripped, no entity links); any other bracketed span
+  is preserved as literal prose, and a plain heading's title/slug stays byte-identical to before.
+- **`render_obsidian.py` multi-line footnote definitions and verse-block literal glosses no longer
+  eject their continuation lines out of the construct (#172).** A multi-line footnote definition
+  (or the blank line left after a def-embedded verse's sentinel is stripped) had its continuation
+  rendered as ordinary page-body text; a multi-line `Literal:` gloss under
+  `full_rhymed_plus_literal` ejected its tail out of the blockquote with a dangling `*`. Footnote
+  continuations are now indented (4-space CommonMark continuation) and the gloss is flattened to a
+  single blockquote line, with CRLF / CR / LF line endings normalized (LF-specific — never
+  `str.splitlines()`, which would over-split U+2028 / U+2029 / NEL).
+
+### Migration
+
+No manifest field is hand-edited, but two byte-derived hashes change automatically:
+
+- **`plugin_bundle_hash`** (part of the translate/review cache key) changes because
+  `validate_draft.py` changed — previously-converged segments are considered stale and re-run
+  translate / review / fix on the next engine invocation.
+- **`render_version`** (in `diff_rendered_output.py`) changes because `render_obsidian.py` changed
+  — accepted render baselines are stale and re-render on the next W8 pass.
+
 ## 1.4.1 — 2026-07-13
 
 A documentation-and-gate hardening patch closing three LOW-severity findings from the v1.4.0

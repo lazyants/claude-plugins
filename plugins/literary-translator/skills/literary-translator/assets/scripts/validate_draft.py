@@ -69,11 +69,15 @@ precondition), not by this structural check.
   - The untranslated-sentinel string is read from
     `validation.untranslated_sentinel` in profile.yml -- NEVER hardcoded
     (the real source hardcodes a literal Russian string).
-  - Placeholder tokens are matched by a format-neutral `⟦FNREF_N⟧` /
-    `⟦VERSE_...⟧` pattern -- NOT the real source's
-    `VERSE_V\\d+_[0-9a-f]{8}` internal-naming assumption, since a
-    generalized segpack.schema.json's `vid` field is a free-form string,
-    not guaranteed to follow that one project's own convention.
+  - Placeholder tokens are matched by an EXACT MAP, not a shape/prefix
+    pattern -- NOT the real source's `VERSE_V\\d+_[0-9a-f]{8}` internal-
+    naming assumption, since a generalized segpack.schema.json's `vid`
+    field is a free-form string, not guaranteed to follow that one
+    project's own convention (nor even a `VERSE_`-prefixed shape at all,
+    for a custom adapter). A `⟦…⟧` span counts as a placeholder only if it
+    is a `⟦FNREF_N⟧` footnote anchor or one of the segpack's own declared
+    `verses[].placeholder` strings; any other bracketed span is literal
+    source prose, not a fidelity token.
 
 Usage: python3 validate_draft.py SEG   (e.g. seg05)
 Exit 0 = clean, 1 = defects (printed), 2 = usage/environment error.
@@ -130,12 +134,21 @@ def validate_seg(seg):
     return None
 
 
-# Format-neutral placeholder sentinel: ⟦FNREF_N⟧ for footnote anchors,
-# ⟦VERSE_...⟧ for embedded/standalone verse placeholders. The real source
-# hardcodes VERSE_V\d+_[0-9a-f]{8} (its own internal vid+shortsha naming
-# convention) -- deliberately widened here since segpack.schema.json's `vid`
-# is a free-form string with no guaranteed shape across adapters/projects.
-PH_RE = re.compile(r"⟦(?:FNREF_\d+|VERSE_[^⟧]+)⟧")
+# Placeholder sentinels are matched by an EXACT MAP, not a shape/prefix
+# regex. The real source hardcodes VERSE_V\d+_[0-9a-f]{8} (its own internal
+# vid+shortsha naming convention); an earlier generalized draft of this
+# script widened that to any ⟦VERSE_...⟧-prefixed span, but a segpack.schema.json
+# adapter is free to name its own verse placeholders anything at all (e.g. a
+# custom adapter's ⟦POEM_1⟧), so a fixed prefix can't be trusted to catch
+# every adapter's placeholders -- and widening further to "any ⟦...⟧ span"
+# is worse: block/footnote source text is unconstrained, so literal
+# editorial prose shaped like ⟦variant⟧ would be wrongly required to
+# survive translation verbatim, falsely rejecting a legitimate rendering.
+# Instead: a bracketed span counts as a placeholder ONLY if it is a footnote
+# anchor (⟦FNREF_N⟧, a fixed machine format) or one of THIS segpack's own
+# declared `verses[].placeholder` strings, passed into placeholders() below.
+_FNREF_ANCHOR_RE = re.compile(r"⟦FNREF_\d+⟧")   # footnote anchor: fixed machine format
+_ANY_SENTINEL_RE = re.compile(r"⟦[^⟧]+⟧")        # candidate bracket span (filtered against the known set)
 
 # Recognized verse_policy.mode enum, per profile.schema.json / references/verse-policy.md.
 VERSE_MODES = frozenset({
@@ -163,11 +176,19 @@ def segpack_path(seg):
     return SEGMENTS_DIR / f"segpack_{seg}.json"
 
 
-def placeholders(text):
-    """Sorted multiset of placeholder tokens in `text` (order-independent
-    compare -- catches drop/dup/mangle, not intra-block reorder, which is
+def placeholders(text, verse_placeholders):
+    """Sorted multiset of KNOWN placeholder tokens in `text`: footnote anchors
+    (⟦FNREF_N⟧) plus THIS segpack's declared verse placeholder strings
+    (verse_placeholders). A bracketed span that is neither is literal source
+    prose -- NOT a fidelity token -- and is deliberately excluded, so a
+    translation that renders `⟦variant⟧` is not falsely rejected. A custom
+    adapter's ⟦POEM_1⟧ IS in verse_placeholders and so IS enforced. Order-
+    independent (catches drop/dup/mangle, not intra-block reorder, which is
     deliberately left for the semantic codex review to catch)."""
-    return sorted(PH_RE.findall(text or ""))
+    return sorted(
+        tok for tok in _ANY_SENTINEL_RE.findall(text or "")
+        if _FNREF_ANCHOR_RE.fullmatch(tok) or tok in verse_placeholders
+    )
 
 
 def _norm_ws(s):
@@ -451,6 +472,10 @@ def validate(seg, cfg):
 
     # --- checks 1 (blocks) + 2 (prose multiset) + 3 (verse bijection) -------
     verses_list = src.get("verses") or []
+    # The exact-map basis for placeholders(): every fidelity token this
+    # segpack can carry that isn't a footnote anchor is one of these
+    # declared verse placeholder strings (any mount, any adapter naming).
+    verse_placeholders = {v.get("placeholder") for v in verses_list if v.get("placeholder")}
     parent_block_claims = {}
     for v in verses_list:
         # Embedded verse (mount=="embedded"): a verse quoted INSIDE another
@@ -500,7 +525,7 @@ def validate(seg, cfg):
                 )
             continue
         src_text = src_block_text.get(bid, "")
-        sp_ph, rp_ph = placeholders(src_text), placeholders(rutext)
+        sp_ph, rp_ph = placeholders(src_text, verse_placeholders), placeholders(rutext, verse_placeholders)
         if sp_ph != rp_ph:
             errs.append(f"[{bid}] placeholder mismatch: src={sp_ph} draft={rp_ph}")
         if not rutext.strip() and src_text.strip():
@@ -533,7 +558,7 @@ def validate(seg, cfg):
             errs.append(f"[FN:{n}] empty translation")
         if cfg.sentinel and cfg.sentinel in rutext:
             errs.append(f"[FN:{n}] untranslated sentinel present")
-        sp_ph, rp_ph = placeholders(src_fn[n]), placeholders(rutext)
+        sp_ph, rp_ph = placeholders(src_fn[n], verse_placeholders), placeholders(rutext, verse_placeholders)
         if sp_ph != rp_ph:
             errs.append(f"[FN:{n}] placeholder mismatch: src={sp_ph} draft={rp_ph}")
 
