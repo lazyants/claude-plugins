@@ -2622,5 +2622,125 @@ def test_sense_translated_target_is_not_body_linked_capitalized_or_lowercase(tmp
     assert parse_frontmatter(note_matches[0].read_text(encoding="utf-8"))["basis"] == "sense_translated"
 
 
+# ===========================================================================
+# 19. #183: str.splitlines() breaks on exotic Unicode line-boundary chars
+#     (U+2028/U+2029/NEL/VT/FF/U+001C-1E) beyond the ones a real \n produces
+#     -- the three verse render sites (block body, inline body, inline
+#     gloss) must split/join on LF ONLY, per #172's own precedent for the
+#     block gloss/footnote paths.
+# ===========================================================================
+
+_EXOTIC_LINE_BOUNDARY_CODEPOINTS = [
+    0x2028, 0x2029, 0x0085, 0x000B, 0x000C, 0x001C, 0x001D, 0x001E,
+]
+
+
+@pytest.mark.parametrize("codepoint", _EXOTIC_LINE_BOUNDARY_CODEPOINTS)
+def test_split_lf_lines_keeps_exotic_unicode_boundary_as_one_line(codepoint):
+    """#183 RED pre-fix: `_split_lf_lines` doesn't exist on the unmodified
+    source, so this errors (AttributeError) until the helper lands. Each of
+    the 8 exotic Unicode line-boundary chars that str.splitlines() (but not
+    LF-only splitting) treats as a break must stay inside its one line."""
+    exotic = chr(codepoint)
+    text = "a" + exotic + "b"
+    assert render_obsidian._split_lf_lines(text) == [text]
+
+
+def test_split_lf_lines_matches_splitlines_semantics_for_lf_crlf_and_lone_cr():
+    """#183: LF-only splitting must still mirror str.splitlines()'s own
+    "a trailing line terminator yields no empty trailing element" behavior
+    for the ordinary LF/CRLF/lone-CR cases -- only the EXOTIC boundaries
+    tested above are meant to diverge from str.splitlines()."""
+    assert render_obsidian._split_lf_lines("a\n") == ["a"]
+    assert render_obsidian._split_lf_lines("a\n\n") == ["a", ""]
+    assert render_obsidian._split_lf_lines("") == []
+    assert render_obsidian._split_lf_lines("a\nb") == ["a", "b"]
+    assert render_obsidian._split_lf_lines("a\rb") == ["a", "b"]
+    assert render_obsidian._split_lf_lines("a\r\nb") == ["a", "b"]
+
+
+def test_inline_verse_body_keeps_exotic_unicode_boundary_not_split():
+    """#183 RED pre-fix: body.splitlines() at the inline-verse " / "-join
+    site (:542) treats U+2028 as a line break, joining it with " / " like
+    an ordinary \\n. Post-fix, only \\n is a line break here."""
+    exotic = chr(0x2028)
+    text, _ = render_obsidian._render_verse_inline(
+        {"rendered": "line1" + exotic + "line2"}
+    )
+    assert exotic in text
+    assert " / " not in text
+
+
+def test_inline_verse_gloss_keeps_exotic_unicode_boundary_not_split():
+    """#183 RED pre-fix: gloss.splitlines() at the inline-verse lit-label
+    join site (:553) treats U+2028 as a line break, joining it with a
+    literal space like an ordinary \\n."""
+    exotic = chr(0x2028)
+    text, _ = render_obsidian._render_verse_inline(
+        {"rendered": "r", "literal_gloss": "g1" + exotic + "g2"}
+    )
+    assert exotic in text
+    assert "g1 g2" not in text
+
+
+def test_inline_verse_body_newline_still_joined_with_slash():
+    """REGRESSION: an ordinary \\n-separated inline verse body must still
+    join its lines with " / " -- #183's fix narrows the boundary set, it
+    must not stop splitting on \\n itself."""
+    text, _ = render_obsidian._render_verse_inline({"rendered": "line1\nline2"})
+    assert " / " in text
+
+
+def test_verse_block_body_keeps_exotic_unicode_boundary_not_split(tmp_path):
+    """#183 RED pre-fix: body.splitlines() at the block-verse blockquote
+    site (:516) treats U+2028 as a line break, rendering "> v1" and "> v2"
+    as two separate blockquote lines instead of keeping the char inside
+    one line, exactly the failure #172 already fixed for \\r/\\r\\n."""
+    exotic = chr(0x2028)
+    v_ph = "⟦VERSE_vExotic_00000300⟧"
+    node = make_node(
+        "vblockExotic", "seg01", v_ph, kind="verse",
+        verses=[{
+            "vid": "vExotic", "placeholder": v_ph,
+            "content": {"rendered": "v1" + exotic + "v2"},
+        }],
+    )
+    ns = make_nodestream([node])
+    canon = make_canon({})
+    profile = make_profile()
+
+    out_dir, manifest = render_into(tmp_path, ns, canon, profile)
+    body_matches = find_file_with_content(
+        all_written_paths(out_dir, manifest), lambda t: "v1" in t
+    )
+    assert len(body_matches) == 1
+    body_text = body_matches[0].read_text(encoding="utf-8")
+
+    assert "> v1" + exotic + "v2" in body_text, (
+        f"the exotic boundary char must stay inside one blockquote line -- "
+        f"got:\n{body_text!r}"
+    )
+    assert "> v1\n> v2" not in body_text, (
+        f"the exotic boundary char must not act as a line break -- "
+        f"got:\n{body_text!r}"
+    )
+
+
+def test_inline_verse_exotic_adjacent_to_a_real_newline_still_splits_on_the_newline():
+    """CONTRACT PIN (green both before and after #183's fix -- documents
+    scope): an exotic boundary char immediately followed by a real \\n is
+    still split on the \\n, and the exotic char itself -- being Unicode
+    whitespace -- is then stripped off the end of its own segment by the
+    existing `line.strip()` call, same as pre-fix (str.splitlines() also
+    treats \\u2028 as its own boundary, producing an empty segment there
+    that gets filtered by `if line.strip()`). #183 narrows the SPLIT
+    boundary set to LF only; it does not touch `.strip()`'s unrelated
+    whitespace semantics."""
+    text, _ = render_obsidian._render_verse_inline(
+        {"rendered": "a" + chr(0x2028) + "\nb"}
+    )
+    assert text == "*a / b*"
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))

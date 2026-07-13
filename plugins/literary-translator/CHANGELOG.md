@@ -1,5 +1,29 @@
 # Changelog
 
+## 1.4.4 — 2026-07-13
+
+### Fixed
+
+- **#183** `render_obsidian.py`: verse render/gloss line-splitting is now LF-only. Four sites
+  (`_render_verse_block` body + gloss, `_render_verse_inline` body + gloss) switched off
+  `str.splitlines()` — which also breaks on exotic Unicode boundaries (U+2028/U+2029/U+0085/
+  U+000B/U+000C/U+001C–U+001E) — to a shared LF-specific `_split_lf_lines` / `_flatten_gloss`,
+  so a verse rendered as a block and the same verse mounted inline now split identically and an
+  exotic separator no longer creates a spurious line break. Renderer-only, consistent with #172
+  and #98. (The parallel `validate_draft.py` verse-line count still uses `splitlines()`; that is
+  deferred to a follow-up because it is a plugin-bundle-hash input.)
+
+### Migration
+
+- Editing `render_obsidian.py` flips `render_version` (it is one of the two files hashed into the
+  render-baseline stamp). On the next run `assemble.py` writes a fresh candidate and the render
+  diff-gate reports a **mismatch** against the frozen last-accepted baseline (the gate never
+  re-renders anything itself) for any verse whose reduced markdown changed; review it and
+  explicitly re-accept a replacement baseline (`--force-accept-baseline`). A candidate that is
+  identical after the diff tool's line reduction instead only gets the informational
+  `stale_baseline` warning. **No mass re-translation and no canon effect** — `render_obsidian.py`
+  is in neither `PLUGIN_BUNDLE_MEMBERS` nor `DERIVATION_BUNDLE_MEMBERS`.
+
 ## 1.4.3 — 2026-07-13
 
 A validation-robustness patch closing three LOW-severity findings from the v1.4.0 Hebrew→English

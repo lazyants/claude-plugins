@@ -500,6 +500,29 @@ def _normalize_newlines(s):
     return s.replace("\r\n", "\n").replace("\r", "\n")
 
 
+def _split_lf_lines(s):
+    """Line-split on LF ONLY, mirroring str.splitlines()'s "a trailing line
+    terminator yields no empty trailing element" -- but WITHOUT treating the
+    exotic Unicode boundaries splitlines() also breaks on (U+2028/U+2029/NEL/
+    VT/FF/U+001C-1E) as line breaks. #183: a verse's rendered/gloss text must
+    line-split the same way whether the verse is a block or an inline mount;
+    realistic translator input uses \n, and #172 already made the block
+    gloss/footnote paths LF-specific for the same reason."""
+    normalized = _normalize_newlines(s)
+    lines = normalized.split("\n")
+    if lines and lines[-1] == "":
+        lines.pop()          # mirror splitlines(): a single trailing "\n" adds no empty tail
+    return lines
+
+
+def _flatten_gloss(s):
+    """Flatten a multi-line literal gloss to a single line, LF-specific (NOT
+    str.splitlines()). Shared by the block (`_render_verse_block`) and inline
+    (`_render_verse_inline`) gloss paths so both flatten an exotic-Unicode-
+    containing gloss identically (#183)."""
+    return _normalize_newlines(s).replace("\n", " ")
+
+
 def _render_verse_block(content, linker, seen_in_block=None):
     """A whole dedicated verse block (`kind: "verse"`, `mount: "block"`) --
     rendered as its own blockquote. Empty content (verse_policy.mode: skip)
@@ -513,10 +536,10 @@ def _render_verse_block(content, linker, seen_in_block=None):
     body = rendered or gloss
     if not body:
         return ""
-    lines = [f"> {line}".rstrip() for line in body.splitlines()]
+    lines = [f"> {line}".rstrip() for line in _split_lf_lines(body)]
     if rendered and gloss:
         lines.append(">")
-        flat_gloss = _normalize_newlines(gloss).replace("\n", " ")
+        flat_gloss = _flatten_gloss(gloss)
         lines.append(f"> *Literal: {flat_gloss}*")
     return "\n".join(lines)
 
@@ -539,7 +562,7 @@ def _render_verse_inline(content):
     body = rendered or gloss
     if not body:
         return "", None
-    single = " / ".join(line.strip() for line in body.splitlines() if line.strip())
+    single = " / ".join(line.strip() for line in _split_lf_lines(body) if line.strip())
     out = f"*{single}*"
     label_span = None
     if rendered and gloss:
@@ -550,7 +573,7 @@ def _render_verse_inline(content):
         label_start = len(out)
         out += label
         label_span = (label_start, label_start + len(label))
-        out += f"{' '.join(gloss.splitlines())})"
+        out += f"{_flatten_gloss(gloss)})"
     return out, label_span
 
 
