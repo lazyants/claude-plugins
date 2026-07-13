@@ -90,6 +90,12 @@ Order of operations (numbered to match SKILL.md's Step 0 list exactly):
       ``# EXTRACTOR_CONTRACT_VERSION: N`` **Python comment** (not an
       HTML comment -- this file must stay valid, importable Python), compared
       against a hardcoded ``CURRENT_EXTRACTOR_CONTRACT_VERSION`` constant.
+      **Skipped when ``source.format`` is ``custom``**: Step 0a still copies
+      ``extract.py.template`` to ``extract.py`` unconditionally, but for a
+      custom source that copy is never adapted or run -- the real extractor
+      lives at ``scripts/custom_extractors/<value>`` -- so drift against this
+      constant is meaningless there (see
+      ``references/source-format-adapters/custom.md``).
 
 Every violation is printed as its own field-named, actionable line. The
 script exits non-zero if ANY fatal violation was found (across every step
@@ -660,7 +666,16 @@ def check_contract_marker(path: Path, marker_name: str, pattern, current_version
     return []
 
 
-def check_resumed_contract_versions(durable_root: Path):
+def check_resumed_contract_versions(durable_root: Path, source_format=None):
+    """`source_format` gates the extract.py EXTRACTOR_CONTRACT_VERSION check:
+    for a `custom` source, Step 0a's `extract.py` is an unadapted copy of
+    extract.py.template (never the real extractor -- that lives at
+    scripts/custom_extractors/<value>, see custom.md), so drift against
+    CURRENT_EXTRACTOR_CONTRACT_VERSION is meaningless there and must NOT be
+    checked. A missing/unrecognized `source_format` is treated as non-custom
+    (fail-safe -- the check stays ON unless we positively know it's custom).
+    The three *_TASK.md PROMPT_CONTRACT_VERSION checks are format-independent
+    and always run."""
     errors = []
     for filename in RESUMED_PROMPT_CONTRACT_FILENAMES:
         errors.extend(
@@ -671,14 +686,15 @@ def check_resumed_contract_versions(durable_root: Path):
                 CURRENT_PROMPT_CONTRACT_VERSION,
             )
         )
-    errors.extend(
-        check_contract_marker(
-            durable_root / "extract.py",
-            "EXTRACTOR_CONTRACT_VERSION",
-            EXTRACTOR_CONTRACT_MARKER_RE,
-            CURRENT_EXTRACTOR_CONTRACT_VERSION,
+    if source_format != "custom":
+        errors.extend(
+            check_contract_marker(
+                durable_root / "extract.py",
+                "EXTRACTOR_CONTRACT_VERSION",
+                EXTRACTOR_CONTRACT_MARKER_RE,
+                CURRENT_EXTRACTOR_CONTRACT_VERSION,
+            )
         )
-    )
     return errors
 
 
@@ -766,7 +782,9 @@ def main(argv=None):
     fatal_errors += check_smoke_test_report_path(profile)
 
     durable_root = Path(profile["project"]["durable_root"]).expanduser()
-    fatal_errors += check_resumed_contract_versions(durable_root)
+    fatal_errors += check_resumed_contract_versions(
+        durable_root, profile.get("source", {}).get("format")
+    )
 
     for warning in warnings:
         print(f"WARNING: {warning}")

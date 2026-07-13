@@ -309,6 +309,14 @@ schema can't express:
   arbitrary. Then check it resolves to an existing file — FATAL, naming the
   unresolvable path, if not.
 
+Honesty note for W2's managed gate (see below): for `custom`, that gate runs
+schema validation + independent manifest-derivable re-derivation against the
+custom-produced `manifest.json`, but SKIPS the region-hash pin entirely —
+`extract.py` on disk (Step 0a's unconditional template copy) is never the
+real custom extractor, so pinning it would certify nothing. See
+`references/source-format-adapters/custom.md` /
+`references/false-green-gate.md`.
+
 ## Step 0d — Resolve output-target adapter
 
 Runs only when `output.v1_scope: assembled_book`. Under the default
@@ -433,22 +441,23 @@ separator-mangled or partially-deleted survivor the exact match alone would
 miss — deliberately not marker-gated (traps are discovered during the run,
 nothing to require at W1).
 
-**W2 Extract** — adapt `extract.py.template` for the source (spine/footnote/
-verse detection per the resolved source-format adapter). Currently that
-means `gutenberg_epub` — the one working, source-fidelity-proven adapter —
-or the expert-mode `custom` extractor co-designed per Step 0c;
-`source.format: plain_text` is specified but not yet implemented and
-`extract.py.template` FATALs on it (#62). Run it; its own blocking
-self-checks (bijection, uniqueness, coverage-no-holes, spine-order,
-segmentation-nonempty, sentinel-uniqueness, front-back inventory,
-verse-structure, `no_segment_exceeds_max_words`) must be green before
-anything downstream runs. Plus a `manifest.schema.json` validation pass
-immediately after extraction using the real `jsonschema.Draft202012Validator`.
+**W2 Extract** — run the resolved source-format adapter's extractor
+(spine/footnote/verse detection per Step 0c). Currently that means either
+adapt-and-run `extract.py.template` for `gutenberg_epub` — the one working,
+source-fidelity-proven adapter — or run the expert-mode `custom` extractor
+co-designed per Step 0c; `source.format: plain_text` is specified but not
+yet implemented and `extract.py.template` FATALs on it (#62). Either way,
+the extractor's own blocking self-checks (bijection, uniqueness,
+coverage-no-holes, spine-order, segmentation-nonempty, sentinel-uniqueness,
+front-back inventory, verse-structure, `no_segment_exceeds_max_words`, or a
+documented equivalent for `custom`) must be green before anything downstream
+runs. Plus a `manifest.schema.json` validation pass immediately after
+extraction using the real `jsonschema.Draft202012Validator`.
 
-Then a MANDATORY managed post-extraction gate: `extract.py`'s in-file
-self-checks live in a hand-adapted file and could be silenced to fake green,
-so they are never the last word. After extraction produces `manifest.json`,
-run:
+Then a MANDATORY managed post-extraction gate: the producing extractor's
+in-file self-checks live in a hand-adapted/hand-written file and could be
+silenced to fake green, so they are never the last word. After extraction
+produces `manifest.json`, run:
 
 ```
 python3 {{PLUGIN_ROOT}}/assets/scripts/validate_extraction.py --manifest ${durable_root}/manifest.json --extract ${durable_root}/extract.py --profile .claude/literary-translator/profile.yml
@@ -459,7 +468,15 @@ exception class as `profile_validate.py`; it is deliberately not a bundle
 member and never adapted per-project). It independently RE-DERIVES the
 manifest-derivable invariants directly from `manifest.json` (so a hand-edited
 extractor that skips or fakes its own enforcement cannot manufacture a green
-manifest) and pins `extract.py`'s self-check region by hash. The pipeline
+manifest) and, for `gutenberg_epub`/`plain_text`, pins `extract.py`'s
+self-check region by hash. **For `custom`, the region-hash pin is SKIPPED**
+(not merely trivial): Step 0a copies `extract.py.template` to `extract.py`
+unconditionally even for `custom`, but that copy is never the real extractor
+(the co-designed one lives at `scripts/custom_extractors/<value>`), so
+pinning it would certify nothing — only the manifest-derivable
+re-derivation runs for `custom`, against the manifest the real extractor
+produced. See `references/source-format-adapters/custom.md` and
+`references/false-green-gate.md` for the full reconciliation. The pipeline
 advances to W3 ONLY on its exit `0` (see R2 / `references/false-green-gate.md`).
 
 **W3 Bootstrap style bible + language smoke test.** After W2 produces

@@ -258,6 +258,34 @@ def read_json(path: Path, what: str):
         fatal(f"{what} at {path} is not valid JSON: {exc}")
 
 
+def read_segpack_nonfatal(seg: str) -> "dict | str":
+    """Read segments/segpack_{seg}.json for the derivation-state gate,
+    returning the parsed dict on success or a string error message on
+    failure -- NEVER raising/exiting. A per-segment segpack gone unreadable
+    (concurrent regeneration/cleanup, transient IO) must escalate only THAT
+    segment, never abort the whole W5 preflight -- matching
+    compute_current_cache_key()'s isolation contract and this file's
+    "a per-segment failure must never take down the whole run" rule."""
+    path = segpack_path(seg)
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return f"segpack for segment {seg!r} not found at {path}"
+    except UnicodeDecodeError as exc:
+        # Invalid/truncated UTF-8 -> UnicodeDecodeError is a subclass of
+        # ValueError, NOT OSError, so `except OSError` alone would miss it.
+        return f"segpack for segment {seg!r} at {path} is not valid UTF-8: {exc}"
+    except OSError as exc:
+        return f"could not read segpack for segment {seg!r} at {path}: {exc}"
+    try:
+        doc = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        return f"segpack for segment {seg!r} at {path} is not valid JSON: {exc}"
+    if not isinstance(doc, dict):
+        return f"segpack for segment {seg!r} at {path} is not a JSON object"
+    return doc
+
+
 # ---------------------------------------------------------------------------
 # Segment id validation -- the SOURCE guard. Every seg id this script ever
 # handles (manifest.json's segments[], and --only-segs) ends up spliced,
@@ -468,8 +496,27 @@ def classify_converged_segment(seg: str, record: dict) -> dict:
     # the segpack itself hasn't caught up with yet.
     derivation_mismatched = [f for f in mismatched if f in DERIVATION_STATE_FIELDS]
     if derivation_mismatched:
-        sp = read_json(segpack_path(seg), f"segpack for segment {seg!r}")
-        segpack_gen_hashes = sp.get("generation_hashes") or {}
+        sp = read_segpack_nonfatal(seg)
+        if isinstance(sp, str):
+            return {
+                "category": "human_escalation",
+                "status": "segpack_read_failed",
+                "detail": sp,
+            }
+        # generation_hashes: absent/None -> {} (segpack hasn't caught up, the
+        # existing semantics); present-but-not-a-mapping is an anomalous
+        # segpack and must ESCALATE, never crash (a bare `or {}` would leave
+        # a wrong-type value like a list truthy, and the `.get()` below would
+        # raise an uncaught AttributeError -> whole-run crash).
+        segpack_gen_hashes = sp.get("generation_hashes")
+        if segpack_gen_hashes is None:
+            segpack_gen_hashes = {}
+        elif not isinstance(segpack_gen_hashes, dict):
+            return {
+                "category": "human_escalation",
+                "status": "segpack_read_failed",
+                "detail": f"segpack for segment {seg!r} has a non-object 'generation_hashes'",
+            }
         pending_fields = sorted(
             f for f in derivation_mismatched if segpack_gen_hashes.get(f) != current_key.get(f)
         )

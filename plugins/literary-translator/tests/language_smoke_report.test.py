@@ -29,9 +29,10 @@ path" + "Zero-candidate case" + "particle_smoke_cases is DECOUPLED" +
     text (not just one), while regenerate/omit-decision entries never
     contribute even when a matching segment record exists.
   - The 10-name floor and its two escape branches: the default branch
-    (>=10 checked names), the low-name-density branch
-    (--low-name-density-confirmed + checked_names count == candidates), and
-    the zero-candidate branch (--no-names-confirmed, requiring BOTH flags).
+    (>=10 DISTINCT checked names), the low-name-density branch
+    (--low-name-density-confirmed + checked_names, dedup-aware, must set-
+    cover every distinct candidate), and the zero-candidate branch
+    (--no-names-confirmed, requiring BOTH flags).
   - particle_smoke_cases's requirement DECOUPLED from name density --
     keyed only to particle_list_size > 0, with its own
     --no-particles-confirmed escape for a genuinely particle-free language.
@@ -544,18 +545,23 @@ def test_sentinel_does_not_fuse_into_candidate_extraction_regression(tmp_path, r
 def test_sentinel_fused_candidate_is_never_produced_regression(tmp_path, root):
     # Inverse of the above: the bogus fused candidate "Bouchard FNREF" must
     # never be produced once sentinels are stripped, so explicitly checking
-    # for that exact string must come back not-found.
+    # for that exact string must come back not-found. "Bouchard" (the real,
+    # sole candidate) is ALSO checked here so the low-density set-coverage
+    # gate is satisfied and the run reaches the found-status stage at all
+    # -- checking only the bogus name would leave the real candidate
+    # uncovered and now correctly FATALs before a report is even written.
     manifest = build_manifest(["Bouchard⟦FNREF_5⟧ said nothing."])
     proc, report, _ = run_smoke(
         root, tmp_path, manifest, NO_PARTICLES_NO_ELISION,
-        checked_names=["Bouchard FNREF"],
+        checked_names=["Bouchard", "Bouchard FNREF"],
         low_name_density_confirmed=True,
         no_particles_confirmed=True,
     )
     assert proc.returncode == 1
     assert report is not None
     by_name = {c["name"]: c["found"] for c in report["checked_names"]}
-    assert by_name == {"Bouchard FNREF": False}
+    assert by_name["Bouchard"] is True
+    assert by_name["Bouchard FNREF"] is False
     assert report["pass"] is False
 
 
@@ -689,9 +695,9 @@ def test_frontback_anchor_included_only_for_translate_decision_and_concatenates_
     ]
     # candidate_names_total == 3 (Oskar/Helena/Gustav only) proves the
     # omit/regenerate canary text never reached extraction at all -- if it
-    # had leaked in, this count would be 5 and the low-density completeness
-    # check (len(checked_names) == candidate_names_total) would have failed
-    # this run with exit code 2 instead.
+    # had leaked in, this count would be 5 and the low-density set-coverage
+    # check (checked_names must cover every distinct candidate) would have
+    # failed this run with exit code 2 instead.
     assert report["candidate_names_total"] == 3
     assert report["pass"] is True
 
@@ -777,7 +783,45 @@ def test_low_name_density_branch_requires_checked_names_count_to_exactly_match_c
     )
     assert proc.returncode == 2
     assert report is None
-    assert "EXACTLY" in proc.stderr
+    assert "uncovered" in proc.stderr
+
+
+def test_low_name_density_rejects_duplicate_entries_that_leave_a_candidate_uncovered(
+    tmp_path, root
+):
+    # {Alice, Bob} candidates, --checked-names Alice,Alice -- pre-fix this
+    # satisfied the dedup-blind len(checked_names) == candidate_names_total
+    # count check (2 == 2) even though Bob was never checked. Dedup-aware
+    # set-coverage must reject it: parse_checked_names collapses the
+    # duplicate to a single distinct entry, leaving Bob uncovered.
+    manifest = build_manifest(["Alice sat quietly. Bob laughed today."])
+    proc, report, _ = run_smoke(
+        root, tmp_path, manifest, NO_PARTICLES_NO_ELISION,
+        checked_names=["Alice", "Alice"],
+        low_name_density_confirmed=True,
+        no_particles_confirmed=True,
+    )
+    assert proc.returncode == 2
+    assert report is None
+    assert "uncovered" in proc.stderr
+    assert "Bob" in proc.stderr
+
+
+def test_default_branch_rejects_ten_duplicate_entries_of_one_name(tmp_path, root):
+    # 12 real candidates (MANY_NAMES_TEXT), but --checked-names supplies the
+    # SAME name ten times. Pre-fix, parse_checked_names() didn't dedup, so
+    # len(checked_names) == 10 satisfied the >= LOW_NAME_DENSITY_FLOOR check
+    # though only one distinct name was ever actually checked. Dedup-aware
+    # counting must collapse this to 1 distinct name and refuse to run.
+    manifest = build_manifest([MANY_NAMES_TEXT])
+    proc, report, _ = run_smoke(
+        root, tmp_path, manifest, NO_PARTICLES_NO_ELISION,
+        checked_names=["Alice"] * 10,
+        no_particles_confirmed=True,
+    )
+    assert proc.returncode == 2
+    assert report is None
+    assert "distinct" in proc.stderr
 
 
 def test_low_name_density_branch_succeeds_when_count_matches(tmp_path, root):
@@ -1049,17 +1093,23 @@ def test_elision_test_case_marked_failed_when_expected_name_not_produced(tmp_pat
 # ---------------------------------------------------------------------------
 
 def test_checked_name_not_found_marks_pass_false_and_exit_code_one(tmp_path, root):
-    manifest = build_manifest([FEW_NAMES_TEXT])  # real candidates: Anna, Bob, Carol, Diana
-    checked = ["Anna", "Bob", "Carolz", "Diana"]  # "Carolz" is a deliberate typo
+    # Default branch (>=10 distinct checked names, no set-coverage
+    # requirement), so a typo'd extra entry can coexist with full coverage
+    # of the real candidates and still reach the found-status stage -- on
+    # the low-density branch this same typo would now correctly leave a
+    # real candidate uncovered and FATAL earlier (see the two
+    # set-coverage tests above).
+    manifest = build_manifest([MANY_NAMES_TEXT])  # 12 real candidates
+    checked = [n if n != "Carol" else "Carolz" for n in MANY_NAMES]  # "Carolz" is a deliberate typo
     proc, report, _ = run_smoke(
         root, tmp_path, manifest, NO_PARTICLES_NO_ELISION,
-        checked_names=checked, low_name_density_confirmed=True,
+        checked_names=checked,
         no_particles_confirmed=True,
     )
     assert proc.returncode == 1
     assert report is not None
     by_name = {c["name"]: c["found"] for c in report["checked_names"]}
-    assert by_name["Anna"] is True
+    assert by_name["Alice"] is True
     assert by_name["Bob"] is True
     assert by_name["Carolz"] is False
     assert by_name["Diana"] is True

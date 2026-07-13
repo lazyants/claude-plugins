@@ -66,12 +66,20 @@ is the orchestration-level summary of what each stage hands to the next):
   example survived into a real project (an exact-substring match plus a
   co-occurrence check that also catches a mangled or partially-deleted
   survivor).
-- **W2 Extract** — run the adapted `extract.py`, producing `manifest.json`;
-  its own blocking self-checks (bijection, coverage, spine-order,
-  `no_segment_exceeds_max_words`, etc.) must be green before anything
+- **W2 Extract** — for `gutenberg_epub`/`plain_text`, run the adapted
+  `extract.py`; for `custom`, run the co-designed
+  `scripts/custom_extractors/<value>` extractor instead (`extract.py` there
+  is only Step 0a's unadapted template copy, never run — see
+  `source-format-adapters/custom.md`). Either way, extraction produces
+  `manifest.json`, and the extractor's own blocking self-checks (bijection,
+  coverage, spine-order, `no_segment_exceeds_max_words`, etc., or a
+  documented equivalent for `custom`) must be green before anything
   downstream runs. The final `manifest.json` also passes
   `manifest.schema.json` validation with `jsonschema.Draft202012Validator`
-  immediately after extraction.
+  immediately after extraction, then the managed `validate_extraction.py`
+  gate (schema validation + independent manifest-derivable re-derivation for
+  every format; the self-check region-hash pin only for `gutenberg_epub`/
+  `plain_text` — see `false-green-gate.md`).
 - **W3 Bootstrap** — style bible by hand/interview, plus the mandatory
   language smoke test, plus the codex glossary-pass (its own, smaller
   Workflow pipeline — see below) that freezes `canon.json`.

@@ -90,8 +90,10 @@ pair:
      explicit passthrough marker, satisfies it instead).
 
 6. **Sentinel-lite marker survival — `body_refs_only` policy ONLY.** For
-   every block with a non-empty `body_ref_markers[]` (populated by
-   `extract.py.template`/`segpack.py` when `footnotes.apparatus_policy ==
+   every block with a non-empty `body_ref_markers[]` (populated by the
+   producing extractor — `extract.py.template` for `gutenberg_epub`/
+   `plain_text`, the custom extractor for `custom` — and by `segpack.py`,
+   when `footnotes.apparatus_policy ==
    body_refs_only` — see
    [`source-format-adapters/README.md`](./source-format-adapters/README.md)),
    confirm each recorded marker STRING still appears in that block's
@@ -208,9 +210,18 @@ sibling doc (`references/ledger-and-resumability.md`) already documents.
 ## The post-extraction gate (`validate_extraction.py`)
 
 `validate_extraction.py` is the false-green gate for the *extraction* stage —
-the earlier sibling of `validate_draft.py`, run once at W2 the moment
-`extract.py` produces `manifest.json`, before any draft exists. The pipeline
-advances only on its exit 0.
+the earlier sibling of `validate_draft.py`, run once at W2 the moment the
+adapter's extractor produces `manifest.json`, before any draft exists. The
+pipeline advances only on its exit 0. For `gutenberg_epub`/`plain_text`,
+`extract.py` (adapted from `extract.py.template`) IS that producing
+extractor. For a `custom` source, the *co-designed* extractor at
+`scripts/custom_extractors/<value>` produces `manifest.json` instead —
+`extract.py` on disk is only Step 0a's unadapted template copy, never run;
+see [`source-format-adapters/custom.md`](./source-format-adapters/custom.md).
+The two ways this gate closes the false-green hole below are described in
+terms of `extract.py` because that's the shipped, template-based case
+(`gutenberg_epub`/`plain_text`); §2 (the region-hash pin) does **not** apply
+to a `custom` source — see "The honest residual" below.
 
 It exists to make the "editing a self-check to make it pass" anti-pattern
 above structurally harmless. `extract.py` runs its own in-file self-check
@@ -220,7 +231,8 @@ suite (the sentinel-delimited `# BEGIN SELF-CHECK REGION` …
 but that suite lives in a file each project is expected to hand-adapt. A
 hand-edited `extract.py` that skips, weakens, or fakes its own enforcement
 could otherwise manufacture a green `manifest.json`. `validate_extraction.py`
-closes that hole two ways:
+closes that hole two ways (for `gutenberg_epub`/`plain_text`; see below for
+`custom`):
 
 1. **Independent re-derivation of the manifest-derivable invariants.** It
    self-anchors to the plugin's own install path (like `profile_validate.py`),
@@ -250,12 +262,26 @@ closes that hole two ways:
 `body_coverage_no_holes`, `no_orphan_footnote_continuation`, and
 `verse_no_uncovered` — depend on intermediate parse state that is **not**
 recorded in `manifest.json`, so `validate_extraction.py` cannot independently
-re-derive them. They are covered by the **region hash pin only**: if the
-self-check region is byte-for-byte the shipped implementation (hash matches),
-these three are trusted to have run as shipped; the gate does not re-prove
-them from the manifest. This is a deliberate, documented limit — stated
-plainly so nobody mistakes the hash pin for a full independent re-derivation
-of these three.
+re-derive them. For `gutenberg_epub`/`plain_text` they are covered by the
+**region hash pin only**: if the self-check region is byte-for-byte the
+shipped implementation (hash matches), these three are trusted to have run
+as shipped; the gate does not re-prove them from the manifest. This is a
+deliberate, documented limit — stated plainly so nobody mistakes the hash
+pin for a full independent re-derivation of these three.
+
+**For a `custom` source, the region pin is SKIPPED outright** (not merely
+"trivially passes") — `validate_extraction.py` detects `source.format:
+custom` and never even reads `extract.py`'s self-check region for the pin.
+Pinning it would be worse than a documented limit: `extract.py` there is
+Step 0a's unadapted template copy, so the pin would vacuously match
+`CURRENT_EXTRACTOR_SELFCHECK_HASH` every time and *certify nothing* about
+the extractor that actually ran (`scripts/custom_extractors/<value>`). The
+gate still runs re-derivation (§1 above) against the custom-produced
+`manifest.json` in full — only the region pin is skipped — so a `custom`
+run's exit code depends solely on that re-derivation. The custom extractor's
+own equivalent of these three residual checks is the co-designing project's
+own responsibility; see
+[`source-format-adapters/custom.md`](./source-format-adapters/custom.md).
 
 Invocation mirrors `profile_validate.py`'s exit-code discipline (exit `0` =
 every check passed, `1` = any check or the hash pin failed, `2` = usage/env

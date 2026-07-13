@@ -145,17 +145,21 @@ in. `validate_draft.py` runs ZERO footnote-content checks under
 but under `body_refs_only` specifically still runs the sentinel-lite
 marker-survival check.
 
-## The shared `extract.py.template` core (once implemented — unchanged from every other adapter)
+## The shared `extract.py.template` core (once implemented — unchanged from the OTHER `extract.py.template`-based adapter)
 
 **Once `plain_text` is implemented (#62)**, its extractor will be the same
-`extract.py.template` file every other adapter starts from, with its
+`extract.py.template` file `gutenberg_epub` starts from, with its
 `# ADAPT-POINT:` sections filled in for plain-text's own
 segmentation/verse-detection/footnote-grouping logic — never a separate
 script. The shipped `extract.py.template` currently carries only the
 `gutenberg_epub` fills (4 markers, all gutenberg-specific — spine/frontback)
 and FATALs on any other `source.format` at its format gate; nothing below is
 wired in yet. The generic, format-independent core described here stays intact
-regardless of adapter, once `plain_text`'s adapt-points are filled in:
+regardless of adapter, once `plain_text`'s adapt-points are filled in — but
+**this is `gutenberg_epub`/`plain_text` only**. `custom` does not start from
+`extract.py.template` at all: it ships a standalone extractor at
+`scripts/custom_extractors/<value>` and must reproduce the equivalent
+invariants itself — see `source-format-adapters/custom.md`.
 
 - Block-ID assignment, sha1 hashing, the `order_index` re-ranking pass.
 - The full round-trip self-check suite: bijection, uniqueness,

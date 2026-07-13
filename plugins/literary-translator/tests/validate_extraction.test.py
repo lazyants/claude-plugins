@@ -575,15 +575,23 @@ def _write_manifest(tmp_path: Path, manifest: dict) -> Path:
     return p
 
 
-def _write_profile(tmp_path: Path, apparatus_policy="omit_apparatus", max_segment_words=700) -> Path:
-    p = tmp_path / "profile.yml"
-    p.write_text(
+def _write_profile(tmp_path: Path, apparatus_policy="omit_apparatus", max_segment_words=700,
+                    source_format=None) -> Path:
+    """``source_format`` defaults to omitted entirely (mirrors every
+    pre-existing caller: no ``source`` key at all, exercising
+    ``load_profile_values``'s ``profile.get("source")`` None-tolerance) --
+    pass e.g. ``"custom"``/``"gutenberg_epub"`` for #180's region-pin
+    format-gate tests below."""
+    text = (
         "project:\n"
         f"  max_segment_words: {max_segment_words}\n"
         "footnotes:\n"
-        f"  apparatus_policy: {apparatus_policy}\n",
-        encoding="utf-8",
+        f"  apparatus_policy: {apparatus_policy}\n"
     )
+    if source_format is not None:
+        text += f"source:\n  format: {source_format}\n"
+    p = tmp_path / "profile.yml"
+    p.write_text(text, encoding="utf-8")
     return p
 
 
@@ -595,12 +603,15 @@ def _write_extract(tmp_path: Path, body="    x = 1\n") -> tuple:
 
 
 def _run_gate(tmp_path, monkeypatch, manifest, *, apparatus_policy="omit_apparatus",
-              max_segment_words=700, pinned_hash=None, extract_body="    x = 1\n"):
+              max_segment_words=700, pinned_hash=None, extract_body="    x = 1\n",
+              source_format=None):
     """Writes manifest/profile/extract to tmp_path, monkeypatches the pinned
     hash (defaulting to the fixture region's OWN hash so the pin passes
-    independently of the LEAD's fill), runs main(), and returns the exit code."""
+    independently of the LEAD's fill), runs main(), and returns the exit code.
+    ``source_format`` threads through to ``_write_profile`` -- see #180's
+    region-pin format-gate tests below."""
     manifest_path = _write_manifest(tmp_path, manifest)
-    profile_path = _write_profile(tmp_path, apparatus_policy, max_segment_words)
+    profile_path = _write_profile(tmp_path, apparatus_policy, max_segment_words, source_format)
     extract_path, text = _write_extract(tmp_path, extract_body)
     monkeypatch.setattr(
         ve, "CURRENT_EXTRACTOR_SELFCHECK_HASH",
@@ -704,6 +715,59 @@ def test_pending_lead_fill_placeholder_fails_closed(tmp_path, monkeypatch):
             "--profile", str(profile_path),
         ])
     assert exc.value.code == 1
+
+
+# --- #180: source.format: custom skips the region pin entirely ---------------
+
+def test_region_pin_skipped_for_custom_format(tmp_path, monkeypatch, capsys):
+    """For source.format: custom, extract.py is Step 0a's unadapted
+    extract.py.template copy -- never the real custom extractor
+    (scripts/custom_extractors/<value>) that actually produced this
+    manifest.json. Pinning the copy would only ever vacuously pass, so #180's
+    fix SKIPS the pin outright: a deliberately MISMATCHED region hash must
+    NOT fail the gate. Parts (a) schema validation and (b) derivable
+    re-derivation still run against a clean, schema-valid, derivable-passing
+    manifest -- exit 0 here proves those two ran and passed, not that the
+    whole gate went inert. Red proof: before the format-gate this is the
+    exact fixture shape of test_tampered_region_fails, which exits 1."""
+    code = _run_gate(
+        tmp_path, monkeypatch, _baseline_manifest(),
+        source_format="custom",
+        pinned_hash="deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",  # deliberately mismatched
+    )
+    out, _err = capsys.readouterr()
+    assert code == 0, out
+    assert "skipped for source.format: custom" in out.lower(), out
+
+
+def test_region_pin_still_enforced_for_gutenberg(tmp_path, monkeypatch):
+    """CONVERSE: the skip applies ONLY to source.format: custom -- the SAME
+    mismatched region hash under gutenberg_epub must still fail the gate.
+    (An absent/unrecognized source_format -- every OTHER test in this file,
+    which omits the source key entirely -- is already covered by
+    test_tampered_region_fails; this test locks the explicit gutenberg_epub
+    case specifically, alongside the new custom carve-out.)"""
+    assert _run_gate(
+        tmp_path, monkeypatch, _baseline_manifest(),
+        source_format="gutenberg_epub",
+        pinned_hash="deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+    ) == 1
+
+
+def test_region_pin_skip_does_not_bypass_derivable_checks_for_custom(tmp_path, monkeypatch, capsys):
+    """Guards against an over-broad fix that skips ALL checks for custom, not
+    just the region pin: a manifest that fails a manifest-derivable invariant
+    must still exit 1 for source.format: custom, even with a mismatched
+    (would-be-skipped) region hash."""
+    m = _baseline_manifest()
+    m["spine"] = list(reversed(m["spine"]))
+    code = _run_gate(
+        tmp_path, monkeypatch, m,
+        source_format="custom",
+        pinned_hash="deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+    )
+    out, _err = capsys.readouterr()
+    assert code == 1, out
 
 
 # --- usage / environment errors -> exit 2 -------------------------------------

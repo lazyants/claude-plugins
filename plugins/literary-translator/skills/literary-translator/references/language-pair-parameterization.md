@@ -237,25 +237,25 @@ sample doesn't contain that many. `language_smoke_report.py` computes
 `bootstrap_names.py` itself finds in the selected sample) and branches:
 
 - `candidate_names_total >= 10`: unchanged. `checked_names` must supply at
-  least 10 — a **sample**, not every candidate; `low_name_density_confirmed`
-  is written `false`.
+  least 10 **distinct** names — a **sample**, not every candidate;
+  `low_name_density_confirmed` is written `false`. `parse_checked_names()`
+  deduplicates its input first (first-occurrence order), so this is a
+  genuine distinct-name count, not a raw entry count — `--checked-names
+  Alice,Alice,...` (ten copies of one name) collapses to one distinct name
+  and is refused.
 - `candidate_names_total < 10`: without `--low-name-density-confirmed` on
   the command line, the script still refuses to run — same fatal, no report
   — forcing a conscious human acknowledgment that the source really is this
-  name-sparse. **With** `--low-name-density-confirmed`: `checked_names` must
-  match the candidate count exactly (`len(checked_names) ==
-  candidate_names_total`). `low_name_density_confirmed` is written `true`.
-  **This is an entry-count floor, not a distinct-name coverage floor and not
-  a completeness guarantee.** The check is enforced procedurally by the
-  script itself, not by the schema (a JSON Schema validates shape only, and
-  cross-checking one field's count against another integer field isn't a
-  native schema keyword) — and `parse_checked_names()` does not deduplicate
-  its input. `--checked-names Alice,Alice` against candidates `{Alice, Bob}`
-  satisfies `len(checked_names) == candidate_names_total` (2 == 2), and
-  every entry in the resulting `checked_names[]` is independently marked
-  `found` (both entries are `Alice`, and `Alice` is a real candidate), so
-  `overall_pass` is `true` — `Bob` was never checked. Supply distinct
-  names; the count gate alone does not protect against this.
+  name-sparse. **With** `--low-name-density-confirmed`: `checked_names`
+  (after dedup) must **set-cover every distinct candidate**
+  (`set(checked_names) == candidate_name_set`, checked against the deduped
+  set, not a raw entry count). `low_name_density_confirmed` is written
+  `true`. The check is enforced procedurally by the script itself, not by
+  the schema (a JSON Schema validates shape only, and cross-checking one
+  field's values against another set isn't a native schema keyword).
+  `--checked-names Alice,Alice` against candidates `{Alice, Bob}` first
+  dedupes to `["Alice"]`, which does not cover `Bob` — the script FATALs,
+  naming every still-uncovered candidate, rather than silently passing.
 
 **Zero-candidate case gets its own, separate branch** — a flat `minItems:1`
 on the low-density path would directly conflict with `len==0` when the
