@@ -26,7 +26,11 @@ project:
                                           # raise or lower per project, but never silently overflow.
 
 source:
-  format: gutenberg_epub                 # gutenberg_epub | plain_text | custom
+  format: gutenberg_epub                 # gutenberg_epub | plain_text | custom -- gutenberg_epub is the only
+                                          # WORKING extractor; plain_text is SPECIFIED but not yet implemented
+                                          # (#62) -- selecting it fails FATALLY at W2 today, see the note on its
+                                          # adapter_config block below; custom is supported/experimental
+                                          # (expert-mode, a co-designed extractor -- see custom.md).
   path: "/ABS/PATH/TO/YOUR_SOURCE.epub"  # profile_validate.py FATALLY REJECTS this literal placeholder too --
                                           # e.g. a real project: "/Users/you/Downloads/YourBook.epub". REQUIRED and
                                           # existence-checked for EVERY format, including `custom` -- for a `custom`
@@ -80,6 +84,9 @@ source:
       spine_overrides: {}       # optional: {"<file>": "body|footnote-defs|front-back"} per-file classification override
       frontback_overrides: {}  # optional: {"<FRONTBACK id>": "translate|regenerate|omit"} per-element decision override
     plain_text:
+      # FORWARD-SPEC (#62): plain_text extraction is not yet implemented --
+      # selecting `source.format: plain_text` fails FATALLY at W2 until #62
+      # lands. The fields below document the intended shape only.
       segmentation:
         method: blank_line_run  # blank_line_run | heading_regex
         blank_line_threshold: 2 # blank_line_run only -- REQUIRED, a positive integer, when this method is active

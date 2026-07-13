@@ -1,5 +1,54 @@
 # Changelog
 
+## 1.4.1 — 2026-07-13
+
+A documentation-and-gate hardening patch closing three LOW-severity findings from the v1.4.0
+Hebrew→English smoke test. Closes #176, #177, #178.
+
+### Fixed
+
+- **Draft `seg`-identity gate (#178).** `validate_draft.py` and `draft_ready.py` type-checked
+  `draft["seg"]` but never compared it to the requested segment CLI argument, so a
+  `seg01.draft.json` carrying `"seg":"seg02"` passed `validate_draft.py seg01` (`OK`) and
+  `draft_ready.py seg01 --expect-token …` (`READY`). Both scripts now reject a
+  mislabeled/cross-wired draft with a clear "requested X but file carries Y" error instead of
+  certifying it ready.
+
+### Documentation
+
+- **`plain_text` reconciled from an implied-shipped adapter to specified-but-not-yet-implemented
+  (#176).** The shipped `extract.py.template` FATALs on any `source.format` other than
+  `gutenberg_epub`; the reference docs (source-format-adapters, ledger-and-resumability,
+  output-target-adapters, gotchas), `SKILL.md`, the marketing description, and several code
+  comments all previously presented `plain_text` as a working/shipped source adapter. Every site
+  is reconciled to a consistent three-status framing: `gutenberg_epub` is the one working built-in
+  adapter, `custom` is supported-but-experimental expert mode, and `plain_text` is specified but
+  not yet implemented (tracked by #62).
+- **W3 language-smoke `pass:true` framing made honest for uncased scripts (#177).**
+  `bootstrap_names.py`'s proper-noun candidate gate requires a Unicode `Lu` (uppercase) initial,
+  so uncased scripts (Hebrew, Yiddish, Arabic — all `Lo`, no case) can never surface native-script
+  name candidates; a `pass:true` on such a source certifies only the detector's reach, not that the
+  text has no names. The reference docs and `SKILL.md` W3 now say so explicitly. Separately, the
+  low-density "completeness" label is corrected: the check enforces an **entry-count,
+  dedup-blind** floor (`len(checked_names) == candidate_names_total`, duplicates in
+  `--checked-names` each count), not distinct-name coverage — reworded in
+  `language-pair-parameterization.md` and the `language-smoke-report.schema.json` description.
+  This is no longer doc-only: `language_smoke_report.py`'s own low-density fatal messages are
+  reworded too, from an implied distinct-name-coverage guarantee to an explicit dedup-blind
+  entry-count check, so the CLI's own output matches the corrected docs.
+
+### Migration
+
+- **`validate_draft.py` is a `PLUGIN_BUNDLE_MEMBERS` entry**, so the #178 seg-identity patch flips
+  `plugin_bundle_hash`. In a **resumed** project, every previously-converged segment goes `stale`
+  on the next run and undergoes a **fresh translate/review/fix pass** — not merely re-validation.
+  This is unavoidable (the fix requires editing the script) and is a one-time cost on the first run
+  after upgrading to 1.4.1.
+- **`language_smoke_report.py` is also edited (#177 message reword), which flips
+  `smoke_report_contract_hash`** (a sha1 of the script's own bytes). A resumed project therefore
+  also re-runs its W3 language-smoke test once on the first post-upgrade run. Marginal on top of
+  the re-convergence above — W3 is a cheap, deterministic pass with no codex calls.
+
 ## 1.4.0 — 2026-07-12
 
 Sense-translated speaking-name support: a fifth canon `basis` value plus a durable-root staleness

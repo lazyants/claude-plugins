@@ -213,11 +213,18 @@ doesn't spuriously invalidate a report.
 
 ### No vacuous passes
 
-`--checked-names` must supply at least **10 names**
-(`checked_names.minItems: 10` in `language-smoke-report.schema.json`).
-`language_smoke_report.py` refuses to run — fatal error, no report written —
-if fewer are supplied. There is no silent `pass:true` for an empty or
-near-empty check list.
+On the **default** path (`low_name_density_confirmed:false`, i.e.
+`candidate_names_total >= 10` -- see below), `--checked-names` must supply
+at least **10 names**. This is script-enforced (`language_smoke_report.py`
+refuses to run -- fatal error, no report written -- if fewer are supplied)
+and, on THIS branch only, also schema-enforced: `language-smoke-report.schema.json`'s
+`checked_names` property itself has `minItems: 0` unconditionally, but an
+`if`/`then` keyed on `low_name_density_confirmed:false` raises the
+effective floor to `checked_names.minItems: 10` for exactly this branch.
+There is no silent `pass:true` for an empty or near-empty check list. The
+low-density and zero-candidate branches below relax this floor (each with
+its own script- and/or schema-enforced conditional requirement, not a bare
+`minItems: 10`).
 
 ### Low-name-density path
 
@@ -230,17 +237,25 @@ sample doesn't contain that many. `language_smoke_report.py` computes
 `bootstrap_names.py` itself finds in the selected sample) and branches:
 
 - `candidate_names_total >= 10`: unchanged. `checked_names` must supply at
-  least 10; `low_name_density_confirmed` is written `false`.
+  least 10 — a **sample**, not every candidate; `low_name_density_confirmed`
+  is written `false`.
 - `candidate_names_total < 10`: without `--low-name-density-confirmed` on
   the command line, the script still refuses to run — same fatal, no report
   — forcing a conscious human acknowledgment that the source really is this
   name-sparse. **With** `--low-name-density-confirmed`: `checked_names` must
-  cover *every* candidate the tool found (`len(checked_names) ==
-  candidate_names_total`, not just "at least some"). `low_name_density_confirmed`
-  is written `true`. This completeness check is enforced procedurally by
-  the script itself, not by the schema — a JSON Schema validates shape
-  only, and cross-checking one field's count against another integer field
-  isn't a native schema keyword.
+  match the candidate count exactly (`len(checked_names) ==
+  candidate_names_total`). `low_name_density_confirmed` is written `true`.
+  **This is an entry-count floor, not a distinct-name coverage floor and not
+  a completeness guarantee.** The check is enforced procedurally by the
+  script itself, not by the schema (a JSON Schema validates shape only, and
+  cross-checking one field's count against another integer field isn't a
+  native schema keyword) — and `parse_checked_names()` does not deduplicate
+  its input. `--checked-names Alice,Alice` against candidates `{Alice, Bob}`
+  satisfies `len(checked_names) == candidate_names_total` (2 == 2), and
+  every entry in the resulting `checked_names[]` is independently marked
+  `found` (both entries are `Alice`, and `Alice` is a real candidate), so
+  `overall_pass` is `true` — `Bob` was never checked. Supply distinct
+  names; the count gate alone does not protect against this.
 
 **Zero-candidate case gets its own, separate branch** — a flat `minItems:1`
 on the low-density path would directly conflict with `len==0` when the
@@ -252,6 +267,20 @@ than 10"), and refuses to run without it. With it: `checked_names` is
 legitimately allowed to be empty, and the report writes
 `no_names_confirmed: true` alongside `low_name_density_confirmed: true`
 (zero is a special case of low-density).
+
+**Uncased-script sources are a distinct trap layered on top of this
+branch.** `bootstrap_names.py`'s candidate predicate requires a Unicode
+`Lu` (uppercase) initial — script-agnostic, but Hebrew, Yiddish, and Arabic
+letters are all `Lo` (no case distinction), so no native-script token can
+ever qualify as a candidate. `candidate_names_total` on such a source is
+`0` unless some incidental cased-script token (stray Latin/Cyrillic text)
+survives extraction — and even then that stray token isn't a native-script
+name either. Either way, native-script proper names are **never surfaced**
+by the candidate gate, so a `pass:true` reached via `--no-names-confirmed`
+(the genuine-zero path above) or via checked cased-script candidates
+certifies only that the `Lu`-gated detector found nothing more to check —
+**not** "this text has no names." Inventory native-script names manually
+before trusting either path on an uncased-script source.
 
 ### Particle smoke cases are decoupled from name density
 
@@ -356,7 +385,10 @@ Fix the specific failure class:
 
 Re-run `language_smoke_report.py` against the **same** sample, checked
 names, and elision/particle cases — never silently swap in an easier sample
-to make the gate pass. If `pass:true` now, W3 can proceed.
+to make the gate pass. If `pass:true` now, W3 can proceed — but on an
+uncased-script source a `pass:true` certifies only what the `Lu`-gated
+detector could reach, not native-script name coverage; inventory those
+names by hand before trusting it.
 
 **`particle_config_hash` (the ledger cache-key field) is what guarantees an
 already-converged segment can never silently keep reflecting the pre-fix

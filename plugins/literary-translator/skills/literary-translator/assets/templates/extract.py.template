@@ -23,11 +23,13 @@ absolute path baked in at authoring time.
 
 This file IS the `gutenberg_epub` adapter's extractor (see
 `references/source-format-adapters/gutenberg-epub.md`). It refuses to run
-against a profile whose `source.format` is anything else -- `plain_text`
-sources use a separate, lighter adapter (segmentation-heuristic based, no
-EPUB spine/OPF concept at all); `custom` sources use a hand-co-designed
-extractor under `scripts/custom_extractors/`. A v1.1 dispatcher that shares
-this file across formats is plausible future work, not this build's scope.
+against a profile whose `source.format` is anything else -- once
+`plain_text` is implemented (#62), its extractor will be this same
+template, with its four `# ADAPT-POINT:` fills swapped from
+`gutenberg_epub`'s (spine/frontback classification) to lighter,
+plain-text-specific ones (segmentation-heuristic based, no EPUB spine/OPF
+concept at all) -- never a separate script; not yet wired in. `custom`
+sources use a hand-co-designed extractor under `scripts/custom_extractors/`.
 
 Shipped location: Step 0a copies this template, ONCE, to
 `${durable_root}/extract.py` (a one-time seed, never re-copied over a

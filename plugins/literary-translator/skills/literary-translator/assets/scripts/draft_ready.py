@@ -20,11 +20,12 @@ invariants):
 
 Exit 0 = delivered: file exists, valid JSON, draft.schema.json/
 segpack.schema.json container SHAPE is valid (right types, not just right
-keys), block/footnote/verse KEY SETS match the segpack 1:1, AND (when
---expect-token is given) the draft's own dispatch_token field equals it
-exactly. Exit 1 = not ready yet, or the segpack/draft itself is missing/
-invalid/schema-malformed (prints the reason either way). Exit 2 = usage
-error.
+keys), the draft's own 'seg' field equals the requested seg (guards a
+mislabeled/cross-wired draft -- #178), block/footnote/verse KEY SETS match
+the segpack 1:1, AND (when --expect-token is given) the draft's own
+dispatch_token field equals it exactly. Exit 1 = not ready yet, or the
+segpack/draft itself is missing/invalid/schema-malformed (prints the reason
+either way). Exit 2 = usage error.
 
 --expect-token TOK (1.2.0 addition, optional): closes the resume-integrity
 gap where a stale/straggler draft from a DIFFERENT run (or a pre-1.2.0
@@ -208,6 +209,17 @@ def main() -> None:
     draft_errs = check_draft_structure(draft)
     if draft_errs:
         print(f"[{seg}] not ready: draft not schema-valid ({'; '.join(draft_errs)})")
+        sys.exit(1)
+
+    # #178: check_draft_structure only type-checks 'seg' (must be a str); it
+    # never compares it to the requested seg. A mislabeled/cross-wired draft
+    # would otherwise read READY. Struct check above guarantees draft["seg"]
+    # is a str here.
+    if draft["seg"] != seg:
+        print(
+            f"[{seg}] not ready: draft 'seg' is {draft['seg']!r}, expected {seg!r} "
+            f"(mislabeled/cross-wired draft)"
+        )
         sys.exit(1)
 
     sp = segpack_path(seg)

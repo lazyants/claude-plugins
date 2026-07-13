@@ -431,6 +431,18 @@ def validate(seg, cfg):
     # dict) guard used for the segpack a few lines up.
     assert isinstance(draft, dict), "check_draft_structure should have caught a non-dict draft"
 
+    # #178: check_draft_structure only type-checks 'seg' (must be a str); it
+    # never compares it to the requested seg. A mislabeled/cross-wired draft
+    # (e.g. seg02.draft.json carrying "seg":"seg01", copy-paste or a stale
+    # write from a different run) would otherwise sail through every one of
+    # the six content checks below undetected. Struct check above guarantees
+    # draft["seg"] is a str here.
+    if draft["seg"] != seg:
+        return [
+            f"draft.schema.json: 'seg' is {draft['seg']!r} but this file is "
+            f"segments/{seg}.draft.json (requested {seg!r}) -- mislabeled/cross-wired draft"
+        ]
+
     errs = []
 
     src_blocks_list = src.get("blocks") or []

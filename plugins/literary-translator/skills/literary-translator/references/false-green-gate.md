@@ -168,6 +168,14 @@ Reverting the fix for any one of them must break its test. Any new hole
 found by the adversarial pass gets its own new injected-defect test before
 the fix is considered done.
 
+**1.4.1:** Draft `seg`-identity: `validate_draft.py` and `draft_ready.py`
+now require the draft's top-level `seg` to equal the requested segment id
+(a mislabeled/cross-wired `seg01.draft.json` carrying `seg:seg02` previously
+passed both gates). Regression-locked by
+`tests/seg_identity_enforced.test.py`, a dedicated fixture (not folded into
+`validate_draft.test.py`'s injected-defect suite because the hole spans both
+scripts).
+
 ## `draft_ready.py` — a separate, narrower job
 
 `draft_ready.py` answers a different, cheaper question: has the async

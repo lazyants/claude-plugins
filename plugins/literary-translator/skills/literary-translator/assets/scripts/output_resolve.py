@@ -17,9 +17,10 @@ path-safety-checked escape hatch), mirrored deliberately.
     `{durable_root}/scripts/custom_renderers/`.
 
 `obsidian` and `epub` are two DISTINCT built-in renderers (unlike the
-source side, where `gutenberg_epub` and `plain_text` share one
-`extract.py`) -- there is no generic renderer-plugin framework above these
-three fixed presets, by design (see the plan's proportionality guardrails).
+source side, where `gutenberg_epub` and `plain_text` would share one
+`extract.py` once `plain_text` is implemented (#62)) -- there is no generic
+renderer-plugin framework above these three fixed presets, by design (see
+the plan's proportionality guardrails).
 
 ## The custom escape hatch -- null-path HALT + path-safety trio
 

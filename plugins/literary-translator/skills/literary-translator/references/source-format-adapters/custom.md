@@ -21,12 +21,15 @@ This is design decision 5 (plan §19 / inventory §18): `custom` stays in v1's
 codebase, with no scope change, but is explicitly labeled
 experimental/unstable until it has itself been pilot-proven end-to-end. The
 mandatory second-project release-gate pilot (see
-`../source-format-adapters/README.md`, "two senses of proven") is scoped to
-`gutenberg_epub`/`plain_text` only, since a genuinely custom source can't be
-pre-validated the way a shipped preset can. `custom`'s promotion to stable is
-a separate, later milestone, not a v1 release blocker; until that milestone
-exists, say clearly to the user co-designing one that the adapter is
-experimental/unpiloted.
+`../source-format-adapters/README.md`, "two senses of proven") is currently
+scoped to `gutenberg_epub` only — `plain_text` is specified but not yet
+implemented (`extract.py.template` FATALs on it, #62), so it cannot be the
+pilot's exercised adapter until #62 lands. `custom` itself can't be
+pre-validated the way a shipped preset can either, which is exactly why it
+carries its own separate, later promotion-to-stable milestone rather than
+riding the release-gate pilot at all — that milestone is not a v1 release
+blocker; until it exists, say clearly to the user co-designing one that the
+adapter is experimental/unpiloted.
 
 `profile_validate.py` reinforces this at the moment a project actually
 selects `custom`: it prints a non-fatal warning naming the choice
@@ -92,7 +95,8 @@ path to resolve, and it only runs once `extractor_path` is non-null.
 ### No `EXTRACTOR_CONTRACT_VERSION` drift check for `custom`
 
 `${durable_root}/extract.py` — the one-time copy of `extract.py.template`
-that `gutenberg_epub`/`plain_text` projects hand-adapt — carries a leading
+that a `gutenberg_epub` project hand-adapts (and a `plain_text` project will
+too, once #62 implements it) — carries a leading
 `# EXTRACTOR_CONTRACT_VERSION: N` marker that Step 0 checks on a resumed
 project against a hardcoded `CURRENT_EXTRACTOR_CONTRACT_VERSION`, to catch a
 project silently running stale extraction logic after a plugin upgrade. A
@@ -107,8 +111,9 @@ co-designing project's own responsibility.
 
 Whatever the co-designed extractor's own parsing logic looks like
 internally, it must produce a final `manifest.json` matching the exact same
-shape `gutenberg-epub.md`'s and `plain-text.md`'s own extractors produce,
-schema-validated against `manifest.schema.json`:
+shape `gutenberg-epub.md`'s extractor produces (and `plain-text.md`'s own
+extractor will, once #62 implements it), schema-validated against
+`manifest.schema.json`:
 
 - The same block-ID/`order_index` model, `spine[]`, `segments[]` (explicitly
   inclusive of translate-decision `FRONTBACK:{id}` units, not just body
@@ -120,9 +125,10 @@ schema-validated against `manifest.schema.json`:
 - `source_inputs: [string]` (required, `minItems: 1`) — **this field is
   where a `custom` extractor is the sole party who can populate it
   correctly.** Every source file path this extractor actually read, in
-  read order. `gutenberg_epub`/`plain_text` extractors trivially populate a
-  one-entry array (`[source.path]`) since they only ever read the one file
-  named in `profile.yml`; a `custom` extractor consuming more than one file
+  read order. `gutenberg_epub`'s extractor trivially populates a one-entry
+  array (`[source.path]`) since it only ever reads the one file named in
+  `profile.yml` (`plain_text`'s will too, once #62 implements it); a `custom`
+  extractor consuming more than one file
   — a multi-volume scrape, a directory of OCR pages, a source plus a
   separate glossary/errata file — must list every one of them here, in
   order, or `cache_key.py`'s `source_input_hash` computation (below) will be
@@ -135,7 +141,8 @@ schema-validated against `manifest.schema.json`:
 never schema-expressible): every `frontback[]` entry with
 `decision:"translate"` must have a matching `id` in `segments[]`; every
 `regenerate`/`omit` entry must NOT appear in `segments[]`. A fatal, named
-failure either way, same as for the other two adapters.
+failure either way, same as `gutenberg_epub`'s self-check suite already
+enforces (and `plain_text`'s will, once #62 implements it).
 
 ### `source.path` vs. `manifest.json`'s `source_inputs[]` — don't conflate them
 
@@ -155,8 +162,8 @@ are unchanged — it does not constrain what the extractor may read.
 - **`source_extraction_hash`** — sha1 of canonical JSON `{format:
   source.format, adapter_config: <only the custom sub-block>}`, concatenated
   with the resolved `custom.extractor_path` file's own raw bytes (in place
-  of `${durable_root}/extract.py`, which `gutenberg_epub`/`plain_text` use
-  instead).
+  of `${durable_root}/extract.py`, which `gutenberg_epub` uses instead — and
+  `plain_text` will too, once #62 implements it).
 - **`source_input_hash`** — sha1 of canonical JSON `{source_path: <resolved
   source.path string>, source_bytes_sha1: <see below>}`. For `custom`
   (which may consume multiple files): `source_bytes_sha1` = sha1 of
@@ -277,12 +284,13 @@ new source's behalf.
 
 ## See also
 
-- [`README.md`](./README.md) — why v1 ships exactly three adapters and no
-  generic parser framework, and the "two senses of proven" distinction that
-  keeps `custom`'s experimental status from being confused with a
-  not-yet-piloted-but-provable status.
-- [`gutenberg-epub.md`](./gutenberg-epub.md) / [`plain-text.md`](./plain-text.md)
-  — the two shipped presets, useful as starting patterns for a co-design
+- [`README.md`](./README.md) — why v1 scopes to exactly three named source
+  formats and no generic parser framework, and the "two senses of proven"
+  distinction that keeps `custom`'s experimental status from being confused
+  with a not-yet-piloted-but-provable status.
+- [`gutenberg-epub.md`](./gutenberg-epub.md) — the one shipped, working
+  preset — and [`plain-text.md`](./plain-text.md) — specified but not yet
+  implemented (#62) — useful as starting design patterns for a co-design
   session, not as templates `custom` extends.
 - [`../ledger-and-resumability.md`](../ledger-and-resumability.md) — full
   `cache_key.py` field derivation, including every hash a `custom`
