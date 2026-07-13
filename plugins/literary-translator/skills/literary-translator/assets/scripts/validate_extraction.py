@@ -640,7 +640,7 @@ def main(argv=None):
             f"FAIL manifest_wellformed: {manifest_path} is missing a structural "
             f"field or has a value of the wrong type, so its invariants cannot be "
             f"re-derived ({type(exc).__name__}: {exc}). This is itself a failed "
-            f"extraction -- the manifest is not the shape extract.py.template "
+            f"extraction -- the manifest is not the shape a valid extraction "
             f"produces.",
             file=sys.stderr,
         )

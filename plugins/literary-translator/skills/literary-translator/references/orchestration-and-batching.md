@@ -155,9 +155,11 @@ determining in the same sense as `review_artifact_check.py`/`ledger_update.py`
 — a bug in either could certify a stale or wrongly-scoped artifact as safe to
 consume, or wrongly permit/refuse a resume — so both are gating members, not
 diagnostic-only, unlike their sibling readiness/merge scripts below.
-`orchestration_bundle_hash` is diagnostic only, never part of the composite
-cache key, and covers exactly `draft_ready.py`, `ledger_merge.py`,
-`language_smoke_report.py`, and `select_segments.py`; `derivation_bundle_hash`
+`orchestration_bundle_hash` is non-gating for convergence — never part of
+the composite cache key — but gating for resume, folded into the
+resume-integrity digest (see below); it covers exactly `draft_ready.py`,
+`ledger_merge.py`, `language_smoke_report.py`, and `select_segments.py`;
+`derivation_bundle_hash`
 covers exactly `bootstrap_names.py` and `segpack.py` and is the cache-key
 field that drives the `blocked_needs_regeneration` treatment. See
 `references/ledger-and-resumability.md` for the full three-bundle-hash

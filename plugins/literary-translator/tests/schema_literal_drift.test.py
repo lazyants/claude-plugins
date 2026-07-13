@@ -28,7 +28,8 @@ So this file does exactly that -- for BOTH restatement families it names:
      - `cache_key.py`'s own `PLUGIN_BUNDLE_MEMBERS`/`DERIVATION_BUNDLE_MEMBERS`
        tuples (the only two of the three with a real code-level list --
        `orchestration_bundle_hash` has no computing script of its own, per
-       the doc: it's a Step 0a marker file, never gated against),
+       the doc: it's a Step 0a marker file, non-gating for convergence but
+       gating for resume via the resume-integrity digest),
      - the prose in references/ledger-and-resumability.md's "The three
        separate bundle hashes -- exact membership" section (parsed
        programmatically, not hand-copied here),
@@ -483,10 +484,10 @@ def test_orchestration_bundle_members_from_doc_are_disjoint_from_the_other_two(
     cache_key_module,
 ):
     """orchestration_bundle_hash has no computing script of its own (it's a
-    Step 0a marker file, never gated against -- see the doc's own
-    'purely diagnostic/provenance' wording), so its only restatement sites
-    are the reference doc's prose and each member script's own
-    self-declared docstring comment. Cross-check both against the two
+    Step 0a marker file, non-gating for convergence but gating for resume --
+    see the doc's own resume-integrity-digest wording), so its only
+    restatement sites are the reference doc's prose and each member script's
+    own self-declared docstring comment. Cross-check both against the two
     bundles that DO have a code-level list, and confirm every named file
     actually exists under scripts/ (catches a typo'd/renamed member)."""
     doc_text = _load_ledger_and_resumability_doc()

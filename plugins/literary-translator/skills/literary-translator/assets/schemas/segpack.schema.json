@@ -23,7 +23,7 @@
     "word_count": {
       "type": "integer",
       "minimum": 0,
-      "description": "Total word count of this segment's source content, as recorded by extract.py.template's no_segment_exceeds_max_words check."
+      "description": "Total word count of this segment's source content, as recorded by the producing extractor's no_segment_exceeds_max_words check."
     },
     "blocks": {
       "type": "array",
@@ -38,7 +38,7 @@
           "order_index": {
             "type": "integer",
             "minimum": 0,
-            "description": "Reading-order rank within this segment, per extract.py.template's order_index re-ranking pass."
+            "description": "Reading-order rank within this segment; segpack.py copies it from the manifest block's order_index and sorts the segment's blocks by it."
           },
           "source_html": {
             "type": "string",
@@ -51,7 +51,7 @@
           "body_ref_markers": {
             "type": "array",
             "items": { "type": "string" },
-            "description": "OPTIONAL. Present only under footnotes.apparatus_policy: body_refs_only -- the literal anchor marker string(s) (e.g. \"[N]\") extract.py.template baked into this block's plain text verbatim, recorded here so validate_draft.py's sentinel-lite check can confirm every marker still appears, same multiset count, in the translated draft."
+            "description": "OPTIONAL. Present only under footnotes.apparatus_policy: body_refs_only -- the literal anchor marker string(s) (e.g. \"[N]\") baked into this block's plain text verbatim under this policy, recorded here so validate_draft.py's sentinel-lite check can confirm every marker still appears, same multiset count, in the translated draft."
           }
         },
         "required": ["id", "order_index"],
@@ -64,7 +64,7 @@
     },
     "footnotes": {
       "type": "array",
-      "description": "Footnote definitions referenced by this segment's blocks, present only when footnotes.apparatus_policy resolves to translate_all or preserve_source (empty array under body_refs_only/omit_apparatus, per extract.py.template's three-way footnote-grouping distinction). This is the array note_map_hash hashes over (n + source_text per entry).",
+      "description": "Footnote definitions referenced by this segment's blocks, present only when footnotes.apparatus_policy resolves to translate_all or preserve_source (empty array under body_refs_only/omit_apparatus -- segpack.py selects footnote inclusion from footnotes.apparatus_policy; only translate_all/preserve_source carry definitions). This is the array note_map_hash hashes over (n + source_text per entry).",
       "items": {
         "type": "object",
         "properties": {
@@ -102,7 +102,7 @@
           "mount": {
             "type": "string",
             "enum": ["block", "embedded"],
-            "description": "Attachment class, read from the manifest verse.store node's own mount (extract.py.template's authoritative classification) and normalized tolerantly by segpack.py: exactly \"embedded\" -> \"embedded\"; anything else -> \"block\". \"block\" = standalone verse block among blocks[] (per-block placeholder bijection, check 3). \"embedded\" = verse quoted inside another block -- a PARA/QUOTE/HEAD/front-back block in blocks[], or a footnote-definition block in footnotes[]; check 3's bijection is skipped, placeholder survival is enforced by the prose multiset (check 2) or footnote placeholder-fidelity (check 4)."
+            "description": "Attachment class, read from the manifest verse.store node's own mount (the producing extractor's authoritative classification) and normalized tolerantly by segpack.py: exactly \"embedded\" -> \"embedded\"; anything else -> \"block\". \"block\" = standalone verse block among blocks[] (per-block placeholder bijection, check 3). \"embedded\" = verse quoted inside another block -- a PARA/QUOTE/HEAD/front-back block in blocks[], or a footnote-definition block in footnotes[]; check 3's bijection is skipped, placeholder survival is enforced by the prose multiset (check 2) or footnote placeholder-fidelity (check 4)."
           },
           "n_line": {
             "type": "integer",
