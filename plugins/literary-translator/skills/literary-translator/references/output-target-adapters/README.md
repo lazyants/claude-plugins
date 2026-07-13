@@ -82,9 +82,11 @@ this plugin has ever had to generalize from).
 
 One asymmetry worth naming explicitly, since it's easy to assume the output
 side mirrors the source side exactly and it doesn't: on the *source* side,
-`gutenberg_epub` and `plain_text` **share** one `extract.py.template`, with
-adapter-specific logic living only in marked `# ADAPT-POINT:` sections. On
-the *output* side, `obsidian` and `epub` are **distinct, standalone renderer
+`gutenberg_epub` **uses** one `extract.py.template`, with adapter-specific
+logic living only in marked `# ADAPT-POINT:` sections — `plain_text` is
+specified to share that same template once implemented (#62), but is not
+wired in yet. On the *output* side, `obsidian` and `epub` are **distinct,
+standalone renderer
 modules** with no shared template — a vault and a single EPUB file have
 different-enough structure (many files with frontmatter/backlinks vs. one
 packaged archive) that forcing them through one parameterized template

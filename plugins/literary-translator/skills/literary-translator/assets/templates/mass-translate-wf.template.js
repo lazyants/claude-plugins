@@ -290,13 +290,13 @@ for (let i = 0; i < SEGS.length; i++) {
 // genuine loc is ALWAYS a colon-delimited structural reference: a block id
 // ("{btype}:{seg}:{ord}", e.g. PARA:seg01:0001, or the shorter HEAD:seg01
 // shape some adapters emit -- btype is deliberately NOT a fixed enum, see
-// manifest.schema.json; custom/plain_text adapters add their own block
-// types via ADAPT-POINT hooks, so only the ":" shape is invariant across all
-// of them), FN:n, or VERSE:vid. The named infra sentinels are bare,
-// colonless tokens -- that is the one true invariant this gate can lean on
-// without hardcoding a block-type allowlist (which would over-reject a
-// legitimate custom adapter's own block types) or a segpack-membership
-// check (which would over-reject a healthy reviewer's slightly-off but
+// manifest.schema.json; adapters may emit their own block types, so only
+// the ":" shape is invariant across all of them), FN:n, or VERSE:vid. The
+// named infra sentinels are bare, colonless tokens -- that is the one true
+// invariant this gate can lean on without hardcoding a block-type allowlist
+// (which would over-reject a legitimate custom adapter's own block types)
+// or a segpack-membership check (which would over-reject a healthy
+// reviewer's slightly-off but
 // genuine content ref). Residual false-block: a healthy reviewer emitting a
 // colonless holistic loc (e.g. "overall") would also be caught here --
 // deviates from the shipped block_id|FN:n|VERSE:vid contract, but the

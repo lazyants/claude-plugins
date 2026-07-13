@@ -3,14 +3,18 @@
 `profile.yml`'s `source.format` is always explicit, never sniffed, and resolves
 (Step 0c) to exactly one file in this directory. Filename resolution lowercases
 the value, maps underscore to hyphen, appends `.md`, and halts naming the
-available files if missing. v1 ships exactly **three** adapters — no more, no
-generic parser framework sitting above them. That is a deliberate design
-decision (see "Why only three" below), not an oversight.
+available files if missing. v1 scopes to exactly **three** named source
+formats — no more, no generic parser framework sitting above them — but only
+one of the three currently works: **one working built-in adapter
+(`gutenberg_epub`) plus a supported expert-mode `custom`-extractor path;
+`plain_text` is specified but not yet implemented (#62)**. That three-way
+split is a deliberate design decision (see "Why only three" below), not an
+oversight.
 
 | `source.format` | Adapter doc | Input shape | Status |
 |---|---|---|---|
 | `gutenberg_epub` | [`gutenberg-epub.md`](./gutenberg-epub.md) | Project Gutenberg-style EPUB | Extraction/translation fidelity is **source-proven** against `historiettes-t3` specifically; see caveat below |
-| `plain_text` | [`plain-text.md`](./plain-text.md) | `.txt` transcription, scraped web novel, OCR output | Fully specified, tests planned but **not yet run against a real source** |
+| `plain_text` | [`plain-text.md`](./plain-text.md) | `.txt` transcription, scraped web novel, OCR output | **Specified but NOT YET IMPLEMENTED** — `source.format: plain_text` is rejected FATALLY by `extract.py.template`'s format gate; tracked by #62 |
 | `custom` | [`custom.md`](./custom.md) | Anything else | **Experimental/unstable until a real project exercises it end-to-end** — parsing is co-designed per project, output contract is fixed |
 
 ## Adapter-specific load-bearing rules
@@ -54,16 +58,19 @@ decision (see "Why only three" below), not an oversight.
 ## Why only three, no generic framework
 
 Design decision 1 (plan §19 / inventory §18): keep
-`references/source-format-adapters/` as a directory, but ship exactly these
-three presets. `custom`'s source-specific parsing logic stays deliberately
-undocumented and co-designed per project — a truly custom source can't be
-pre-documented — but its **output contract is fixed, mandatory, and
-schema-validated** (`manifest.schema.json`) exactly like the other two
-adapters' output. There is no generic parser framework behind these three,
-and none is planned for v1: building one now would be premature abstraction
-over a sample size of two (`gutenberg_epub` and `plain_text` are the only two
-real, specified extraction strategies this plugin has ever had to
-generalize from).
+`references/source-format-adapters/` as a directory, but scope it to exactly
+these three named formats — one working built-in adapter (`gutenberg_epub`),
+a supported expert-mode `custom`-extractor path, and `plain_text` (specified
+but not yet implemented, #62) — never a generic parser framework above them.
+`custom`'s source-specific parsing logic stays deliberately undocumented and
+co-designed per project — a truly custom source can't be pre-documented —
+but its **output contract is fixed, mandatory, and schema-validated**
+(`manifest.schema.json`) exactly like `gutenberg_epub`'s output (and
+`plain_text`'s output, once #62 lands). There is no generic parser framework
+behind these three, and none is planned for v1: building one now would be
+premature abstraction over a sample size of two (`gutenberg_epub` and
+`plain_text` are the only two real, specified extraction strategies this
+plugin has ever had to generalize from).
 
 ## The shared output contract
 
@@ -87,12 +94,13 @@ Hash stamping is part of the adapter contract. `source_extraction_hash` is the
 sha1 of canonical JSON `{format: source.format, adapter_config: <ONLY the ONE
 sub-block matching the resolved format, never the whole adapter_config
 object>}` concatenated with the resolved extractor file's raw bytes
-(`${durable_root}/extract.py` for `gutenberg_epub`/`plain_text`, or the
-resolved `adapter_config.custom.extractor_path` file for `custom`).
-`source_input_hash` is the sha1 of canonical JSON `{source_path: <resolved
-source.path STRING itself>, source_bytes_sha1: <see below>}`. For
-`gutenberg_epub`/`plain_text`, `source_bytes_sha1` is the sha1 of the source
-file's raw bytes and the adapter also emits `source_inputs: [source.path]`. For
+(`${durable_root}/extract.py` for `gutenberg_epub` — and for `plain_text`,
+once #62 implements it — or the resolved `adapter_config.custom.extractor_path`
+file for `custom`). `source_input_hash` is the sha1 of canonical JSON
+`{source_path: <resolved source.path STRING itself>, source_bytes_sha1: <see
+below>}`. For `gutenberg_epub` (and `plain_text`, once #62 implements it),
+`source_bytes_sha1` is the sha1 of the source file's raw bytes and the
+adapter also emits `source_inputs: [source.path]`. For
 `custom`, the extractor must emit `source_inputs: [string]` in read order, and
 `source_bytes_sha1` is the sha1 of canonical JSON `[{filename, sha1: <sha1 of
 THAT file's raw bytes>}]`, one entry per file, sorted by filename, hashing
@@ -122,11 +130,11 @@ only in the marked `# ADAPT-POINT:` areas around `classify_spine_item`,
 loop. The Gutenberg points consult
 `source.adapter_config.gutenberg_epub.spine_overrides` and
 `source.adapter_config.gutenberg_epub.frontback_overrides` before adapter
-defaults; the plain-text path reads
-`source.adapter_config.plain_text.segmentation`,
-`source.adapter_config.plain_text.verse_regex`,
-`source.adapter_config.plain_text.footnote_anchor_regex`, and
-`source.adapter_config.plain_text.footnote_def_regex` directly.
+defaults. (Once `plain_text` is implemented — #62 — its adapt-points will
+read `source.adapter_config.plain_text.segmentation`, `.verse_regex`,
+`.footnote_anchor_regex`, and `.footnote_def_regex` directly; the shipped
+`extract.py.template` currently fills only the `gutenberg_epub` adapt-points
+and FATALs on any other `source.format`.)
 
 `footnotes.apparatus_policy` (four enum values: `translate_all` |
 `preserve_source` | `omit_apparatus` | `body_refs_only`) is also defined
@@ -135,19 +143,21 @@ for how detection resolves for that source shape, and
 [`../false-green-gate.md`](../false-green-gate.md) for the `body_refs_only`
 sentinel-lite marker-survival check.
 
-For `plain_text`, footnote detection is the required enum
-`source.adapter_config.plain_text.footnotes`: `none_confirmed` |
-`markdown_ref` | `custom_regex`; `custom_regex` is paired with
-`footnote_anchor_regex`/`footnote_def_regex`. Under `none_confirmed`, all four
-`apparatus_policy` values are no-ops because there is no detected apparatus to
-apply them to. The extraction loop has exactly three apparatus branches:
-`translate_all`/`preserve_source` build the `FN:{N}` table plus body
+For `plain_text`, once implemented (#62), footnote detection is specified as
+the required enum `source.adapter_config.plain_text.footnotes`:
+`none_confirmed` | `markdown_ref` | `custom_regex`; `custom_regex` is paired
+with `footnote_anchor_regex`/`footnote_def_regex`. Under `none_confirmed`, all
+four `apparatus_policy` values are no-ops because there is no detected
+apparatus to apply them to. Its extraction loop is specified to have exactly
+three apparatus branches, identically to `gutenberg_epub`'s already-shipped
+loop: `translate_all`/`preserve_source` build the `FN:{N}` table plus body
 `⟦FNREF_N⟧` sentinel; `body_refs_only` builds no apparatus, keeps a literal
 body marker, and records it in `body_ref_markers[]`; `omit_apparatus` builds no
-apparatus, strips the anchor, and records no marker. `validate_draft.py` runs
-zero footnote-content checks under `body_refs_only`/`omit_apparatus`, but
-`body_refs_only` specifically still runs the sentinel-lite marker-survival
-check.
+apparatus, strips the anchor, and records no marker. `validate_draft.py`
+already runs zero footnote-content checks under
+`body_refs_only`/`omit_apparatus` for `gutenberg_epub`, and will for
+`plain_text` too once it exists — `body_refs_only` specifically still runs the
+sentinel-lite marker-survival check.
 
 ## Two different senses of "proven" — do not conflate them
 
@@ -161,22 +171,27 @@ governs how to read every adapter's status line above:
   entirely, and it is proven against **that one book**, not against EPUBs
   in general.
 - **This plugin's v1 stability** — the ledger-fragment/cache-key/
-  derivation-state machinery, `profile_semantics_hash`, and the adapters
-  generally — is proven only for whichever adapter a real second-project
-  pilot run actually exercises, and that is unknown until the pilot runs.
-  `gutenberg_epub` has **not** already cleared that bar any more than
-  `plain_text` has, despite its older extraction-fidelity claim.
+  derivation-state machinery, `profile_semantics_hash`, and `gutenberg_epub`'s
+  adapter path — is proven only once a real second-project pilot run actually
+  exercises it, and that is unknown until the pilot runs. `gutenberg_epub` has
+  **not** already cleared that bar merely because of its older, narrower
+  extraction-fidelity claim. (`plain_text` isn't pilot-eligible at all yet —
+  it is specified but not implemented, #62; once it lands, it inherits this
+  same not-yet-piloted status.)
 
 The mandatory release-gate pilot (a genuine run against a second real book,
-not `historiettes-t3` again) may use either shipped adapter, operator's
-choice — but whichever one it does *not* exercise carries the same
-"experimental/unstable, not yet pilot-proven with the new ledger machinery"
-label `custom` already carries everywhere (this doc, `custom.md`, the
-marketplace listing). That is a labeling distinction, not a scope change —
-nothing about either adapter's spec is deferred or removed. The release gate
-itself stays scoped to `gutenberg_epub`/`plain_text` only; a genuinely custom
-source can't be pre-validated the way a shipped preset can, so `custom`'s
-promotion to stable is a separate, later milestone.
+not `historiettes-t3` again) is currently scoped to `gutenberg_epub` only —
+the one working, shipped adapter. `plain_text` is specified but not yet
+implemented (`extract.py.template` FATALs on it, #62) and cannot be the
+pilot's exercised adapter until #62 lands; once it does, `plain_text`
+inherits the same "experimental/unstable, not yet pilot-proven with the new
+ledger machinery" label `custom` already carries everywhere (this doc,
+`custom.md`, the marketplace listing) until its own pilot run clears it.
+That is a labeling distinction, not a scope change — nothing about
+`plain_text`'s spec is deferred or removed, only its implementation (#62).
+`custom` can't be pre-validated the way a shipped preset can either, so its
+promotion to stable is its own separate, later milestone, independent of the
+`gutenberg_epub` pilot.
 
 One further status note specific to `FRONTBACK:{id}` handling in
 `gutenberg_epub`: routing front/back-matter elements through the same

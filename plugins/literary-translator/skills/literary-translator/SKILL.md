@@ -292,9 +292,11 @@ schema can't express:
 
 - If `null`: valid, expected starting state — halt and co-design a
   hand-crafted Python extractor with the user (informed by
-  `gutenberg-epub.md`/`plain-text.md` as starting patterns), but its output
-  contract is fixed — must produce a `manifest.json` matching the exact same
-  shape every other adapter produces (block-ID types, `order_index`,
+  `gutenberg-epub.md` as a starting pattern — the one working adapter;
+  `plain-text.md` documents the same target shape as a forward spec for #62,
+  not yet implemented), but its output contract is fixed — must produce a
+  `manifest.json` matching the exact same shape `gutenberg_epub`'s adapter
+  produces (block-ID types, `order_index`,
   `spine`/`segments`/`footnotes`/`verse.store`, `source_inputs[]`, and final
   `generation_hashes.source_extraction_hash`/`.source_input_hash` via the same
   two-phase write), and pass the same round-trip self-check suite plus
@@ -432,8 +434,12 @@ miss — deliberately not marker-gated (traps are discovered during the run,
 nothing to require at W1).
 
 **W2 Extract** — adapt `extract.py.template` for the source (spine/footnote/
-verse detection per the resolved source-format adapter); run it; its own
-blocking self-checks (bijection, uniqueness, coverage-no-holes, spine-order,
+verse detection per the resolved source-format adapter). Currently that
+means `gutenberg_epub` — the one working, source-fidelity-proven adapter —
+or the expert-mode `custom` extractor co-designed per Step 0c;
+`source.format: plain_text` is specified but not yet implemented and
+`extract.py.template` FATALs on it (#62). Run it; its own blocking
+self-checks (bijection, uniqueness, coverage-no-holes, spine-order,
 segmentation-nonempty, sentinel-uniqueness, front-back inventory,
 verse-structure, `no_segment_exceeds_max_words`) must be green before
 anything downstream runs. Plus a `manifest.schema.json` validation pass
@@ -478,6 +484,12 @@ shaped JSON report with `pass:true` only if every checked name found, every
 particle-smoke case passed, and every elision test passed. A
 stale/mismatched report on any of the three hashes, a `pass:false` report, or
 a mismatched `has_elision` value, is treated as no report at all.
+
+On an uncased-script source (Hebrew/Yiddish/Arabic — no `Lu` uppercase
+letters), `pass:true` here certifies only what `bootstrap_names.py`'s
+`Lu`-gated candidate detector could reach, never native-script name
+coverage — see the uncased-script caveat in
+`references/language-pair-parameterization.md` before trusting it.
 
 Then run `bootstrap_names.py` (configured from
 `${durable_root}/languages/<particle_config's literal value>` — never

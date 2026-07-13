@@ -348,13 +348,15 @@ Exact byte-scope per field:
   source.format, adapter_config: <ONLY the one sub-block matching the
   resolved format, never the whole adapter_config object>}`, concatenated
   with the resolved extractor file's own raw bytes
-  (`${durable_root}/extract.py` for `gutenberg_epub`/`plain_text`, or the
-  resolved `adapter_config.custom.extractor_path` file). Same "flags, doesn't
+  (`${durable_root}/extract.py` for `gutenberg_epub` — and `plain_text` once
+  implemented, #62 — or the resolved `adapter_config.custom.extractor_path`
+  file). Same "flags, doesn't
   auto-regenerate" honesty as `particle_config_hash`.
 - **`source_input_hash`** (global) — sha1 of canonical JSON `{source_path:
   <resolved source.path STRING itself>, source_bytes_sha1: <see below>}`.
-  For `gutenberg_epub`/`plain_text`: `source_bytes_sha1` = sha1 of the
-  source file's raw bytes. For `custom` (may consume multiple files): the
+  For `gutenberg_epub` (and `plain_text` once implemented, #62):
+  `source_bytes_sha1` = sha1 of the source file's raw bytes. For `custom`
+  (may consume multiple files): the
   extractor must emit `source_inputs: [string]` in `manifest.json` (every
   file path read, in read order); `source_bytes_sha1` = sha1 of canonical
   JSON `[{filename, sha1: <sha1 of THAT file's raw bytes>}]`, one entry per
@@ -362,8 +364,9 @@ Exact byte-scope per field:
   never bare sorted-and-concatenated bytes (concatenated-bytes-only would
   let a secondary file get silently repointed at a byte-identical different
   file with no hash change — filename must be part of what's hashed, not
-  just the sort key). `gutenberg_epub`/`plain_text` also populate
-  `source_inputs: [source.path]` for consistency. **Two-phase write**
+  just the sort key). `gutenberg_epub` (and `plain_text` once implemented,
+  #62) also populate `source_inputs: [source.path]` for consistency.
+  **Two-phase write**
   (chicken-and-egg: `source_inputs[]` lives inside `manifest.json` but
   `manifest.schema.json` also requires this hash to be present):
   `extract.py.template` first writes a DRAFT `manifest.json`

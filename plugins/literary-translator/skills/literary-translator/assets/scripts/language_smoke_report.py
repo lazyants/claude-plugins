@@ -762,14 +762,17 @@ def main():
                 f"candidate_names_total is {candidate_names_total} (below "
                 f"the {LOW_NAME_DENSITY_FLOOR}-name floor) -- re-run with "
                 "--low-name-density-confirmed and supply --checked-names "
-                "covering EVERY candidate the tool found"
+                f"with exactly {candidate_names_total} entries -- this is a "
+                "dedup-blind entry-COUNT floor (len must equal "
+                "candidate_names_total), not distinct-name coverage"
             )
         if len(checked_names) != candidate_names_total:
             fatal(
-                f"low-name-density path requires --checked-names to list "
-                f"EXACTLY the {candidate_names_total} candidate(s) found "
-                f"(got {len(checked_names)}) -- completeness is enforced by "
-                "count, not just 'at least some'"
+                "low-name-density path requires the checked-name COUNT to "
+                f"be EXACTLY {candidate_names_total} (len(--checked-names) "
+                f"must equal candidate_names_total; got {len(checked_names)}) "
+                "-- a dedup-blind entry-COUNT check (duplicate entries each "
+                "count), NOT distinct-name coverage"
             )
         low_name_density_confirmed = True
         no_names_confirmed = False

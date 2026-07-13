@@ -556,9 +556,10 @@ only, not consumed by any check.
 - [`README.md`](./README.md) — the shared `manifest.json` output contract
   every adapter (including this one) must satisfy, and the "two different
   senses of proven" distinction this file's own status line depends on.
-- [`plain-text.md`](./plain-text.md) — the lighter adapter for non-EPUB
-  sources; contrast its `verse_detection`/`footnotes` enum-based detection
-  with this adapter's unconditional, markup-driven detection.
+- [`plain-text.md`](./plain-text.md) — the lighter adapter specified for
+  non-EPUB sources (not yet implemented, #62); contrast its
+  `verse_detection`/`footnotes` enum-based detection with this adapter's
+  unconditional, markup-driven detection.
 - [`custom.md`](./custom.md) — the escape hatch for a source whose
   structure this adapter's heuristics genuinely can't classify.
 - [`../false-green-gate.md`](../false-green-gate.md) — the sentinel-lite

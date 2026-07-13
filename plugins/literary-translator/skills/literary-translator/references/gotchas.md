@@ -56,11 +56,13 @@ calibration, not a warning to work around.
    analogy. Pilot this on one small batch and manually verify the
    `canon.json` merge output before treating it as fully load-bearing.
 5. **The non-Historiettes adapter surfaces (`plain_text` and `custom`).**
-   `plain_text` is fully specified but its fixtures/round-trip self-check
-   tests were planned, not already run in the source project; `custom` is a
-   co-designed escape hatch with a fixed manifest contract, never a third
-   scaffolded preset implying out-of-the-box coverage. Treat both as
-   unproven until their own tests/pilot runs pass.
+   `plain_text` is **specified but not yet implemented**: the shipped
+   `extract.py.template` FATALs on any non-`gutenberg_epub` `source.format`
+   at its format gate, so there are no fixtures/round-trip self-checks to run yet —
+   tracked by #62. `custom` is a co-designed escape hatch with a fixed
+   manifest contract, never a third scaffolded preset implying out-of-the-box
+   coverage; supported but experimental, unproven until its own tests/pilot
+   runs pass.
 
 `tests/ledger_e2e_acceptance.test.py` is the mandatory first fixture for
 item 2 — build it *before* trusting the subsystem, not after. One
@@ -85,11 +87,11 @@ There is also a separate hard release gate from the plan's §19 item 5 /
 SECOND real book (not `historiettes-t3` again; ideally a different
 language preset, deliberately exercising the smoke-test gate and a real
 `blocked_needs_regeneration` transition) must actually run and pass
-against real data. The pilot may use either shipped adapter, but whichever
-one of `gutenberg_epub` / `plain_text` it does not exercise gets the same
+against real data. The pilot exercises `gutenberg_epub` — the only working,
+shipped source adapter (`plain_text` is specified but not yet implemented,
+#62); `custom` already carries its own
 `experimental/unstable, not yet pilot-proven with the NEW machinery` label
-that `custom` already carries; this is a labeling distinction, not a scope
-change.
+independent of which book the pilot uses.
 
 ## 3. Canonical path invariants have NO language suffix — do not "fix" this
 
@@ -310,8 +312,8 @@ Step 0.
 ## 12. bs4/lxml dependency preflight must actually parse, not just import
 
 `beautifulsoup4` + `lxml` are needed only by `extract.py.template`'s
-`gutenberg_epub` adapter — the `plain_text` adapter needs neither and must
-never import `bs4` on that code path.
+`gutenberg_epub` adapter — `plain_text`, once implemented (#62), will need
+neither and must never import `bs4` on that code path.
 
 The preflight for this dependency pair must not stop at import-level. `bs4`
 can import fine while the `lxml`/`xml` *parser backend* is separately

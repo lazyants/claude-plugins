@@ -1,16 +1,18 @@
 # `plain_text` adapter
 
-**Status: fully specified, tests planned but not yet run.** This is design
-decision 5 (plan §19 / inventory §18): the
-mandatory release-gate pilot run may exercise `gutenberg_epub` or
-`plain_text`, operator's choice — but whichever one it does *not* exercise
-carries this same "experimental/unstable, not yet pilot-proven with the new
-ledger machinery" label everywhere (this doc, the README table, the
-marketplace listing) until a real second-project pilot run actually clears
-it. Nothing about the spec below is deferred or half-built because of this —
-it is a labeling distinction, not a scope gap. See
+**Status: specified but NOT YET IMPLEMENTED.** `source.format: plain_text`
+is rejected FATALLY by `extract.py.template`'s format gate, which
+accepts `gutenberg_epub` only — tracked by #62. Nothing here is executable
+yet; everything below is a forward spec for #62 to implement, not a
+labeling nuance on top of working code. The mandatory release-gate pilot run
+is therefore scoped to `gutenberg_epub` only for now — `plain_text` cannot be
+the pilot's exercised adapter until #62 lands. Once it does, `plain_text`
+inherits the same "experimental/unstable, not yet pilot-proven with the new
+ledger machinery" label `custom` already carries everywhere (this doc, the
+README table, the marketplace listing) until its own pilot run clears it. See
 [`README.md`](./README.md#two-different-senses-of-proven--do-not-conflate-them)
-for the full "two senses of proven" framing this status inherits.
+for the full "two senses of proven" framing `plain_text` will inherit once
+implemented.
 
 A lighter adapter for non-EPUB sources: a `.txt` transcription, a scraped web
 novel, OCR output. Selected via `source.format: plain_text` in `profile.yml`;
@@ -127,27 +129,33 @@ there is nothing detected to apply a policy to:
 | `omit_apparatus` | Every detected footnote definition is dropped entirely; the anchor in body text is also removed, not left dangling. |
 | `body_refs_only` | No `FN:{N}` definition block is extracted or carried AT ALL. The original anchor position is kept as an ordinary literal marker baked directly into the block's plain text (e.g. a literal `[N]` character sequence) — NOT the `⟦FNREF_N⟧` sentinel, since that sentinel's contract presumes a matching `FN:{N}` target to check placeholder fidelity against, and there is nothing to point at under this policy. Net effect: a reader sees "there was a note here" without the apparatus being extracted, translated, or checked. **Marker survival IS checked:** `extract.py.template` records each block's literal marker string(s) verbatim in `body_ref_markers: [string]`; `validate_draft.py` runs the sentinel-lite check (see [`../false-green-gate.md`](../false-green-gate.md)) confirming every recorded marker still appears, at the same multiset count, in the translated text — a best-effort substring/count check, weaker than the other three policies' full placeholder-fidelity guarantee, but real. |
 
-`extract.py.template`'s footnote-grouping loop does exactly one of three
-things based on the resolved policy, identically to the `gutenberg_epub`
-adapter: (a) `translate_all`/`preserve_source` — builds the `FN:{N}` block
-table + body `⟦FNREF_N⟧` sentinel normally (these two differ ONLY at
-translation stage); (b) `body_refs_only` — builds no apparatus, replaces the
-anchor with a plain literal marker, DOES record it in `body_ref_markers[]`;
-(c) `omit_apparatus` — skips the table AND strips the anchor entirely,
-nothing left behind, no `body_ref_markers` entry either. `segpack.py`, the
-task prompt templates, and `validate_draft.py` all branch on this same
-three-way distinction consistently. `validate_draft.py` runs ZERO
-footnote-content checks under `body_refs_only`/`omit_apparatus` (no apparatus
-to check coverage against) — but under `body_refs_only` specifically still
-runs the sentinel-lite marker-survival check.
+Once implemented (#62), `extract.py.template`'s footnote-grouping loop will
+do exactly one of three things based on the resolved policy, identically to
+the `gutenberg_epub` adapter's already-shipped loop: (a)
+`translate_all`/`preserve_source` — builds the `FN:{N}` block table + body
+`⟦FNREF_N⟧` sentinel normally (these two differ ONLY at translation stage);
+(b) `body_refs_only` — builds no apparatus, replaces the anchor with a plain
+literal marker, DOES record it in `body_ref_markers[]`; (c) `omit_apparatus`
+— skips the table AND strips the anchor entirely, nothing left behind, no
+`body_ref_markers` entry either. `segpack.py`, the task prompt templates, and
+`validate_draft.py` already branch on this same three-way distinction
+consistently for `gutenberg_epub`, and will for `plain_text` once it's wired
+in. `validate_draft.py` runs ZERO footnote-content checks under
+`body_refs_only`/`omit_apparatus` (no apparatus to check coverage against) —
+but under `body_refs_only` specifically still runs the sentinel-lite
+marker-survival check.
 
-## The shared `extract.py.template` core (unchanged from every other adapter)
+## The shared `extract.py.template` core (once implemented — unchanged from every other adapter)
 
-This adapter's extractor is the same `extract.py.template` file every other
-adapter starts from, with its `# ADAPT-POINT:` sections filled in for
-plain-text's own segmentation/verse-detection/footnote-grouping logic — never
-a separate script. The generic, format-independent core stays intact
-regardless of adapter:
+**Once `plain_text` is implemented (#62)**, its extractor will be the same
+`extract.py.template` file every other adapter starts from, with its
+`# ADAPT-POINT:` sections filled in for plain-text's own
+segmentation/verse-detection/footnote-grouping logic — never a separate
+script. The shipped `extract.py.template` currently carries only the
+`gutenberg_epub` fills (4 markers, all gutenberg-specific — spine/frontback)
+and FATALs on any other `source.format` at its format gate; nothing below is
+wired in yet. The generic, format-independent core described here stays intact
+regardless of adapter, once `plain_text`'s adapt-points are filled in:
 
 - Block-ID assignment, sha1 hashing, the `order_index` re-ranking pass.
 - The full round-trip self-check suite: bijection, uniqueness,
@@ -156,9 +164,10 @@ regardless of adapter:
 - `no_segment_exceeds_max_words` — blocking; fails the whole extraction if
   any segment's `word_count` exceeds `project.max_segment_words`, naming
   every offending segment. This is v1's sub-chunking-cut mitigation, and it
-  applies to `plain_text` exactly as it does to every other adapter — a
-  plain-text source with a genuinely long natural chapter is out of scope
-  for v1 the same way an EPUB with one is (see the non-goals list).
+  will apply to `plain_text` exactly as it already applies to `gutenberg_epub`
+  once #62 wires the adapter in — a plain-text source with a genuinely long
+  natural chapter is out of scope for v1 the same way an EPUB with one is
+  (see the non-goals list).
 - Stamps `manifest.json`'s `generation_hashes.source_extraction_hash` and
   `.source_input_hash` the moment extraction completes (via `cache_key.py`,
   two-phase write — draft manifest with hashes not yet stamped, hashes
@@ -167,52 +176,56 @@ regardless of adapter:
   immediately after extraction, alongside (never instead of) the round-trip
   self-check suite.
 
-For `plain_text` specifically, the `# ADAPT-POINT:` sections consult
-`adapter_config.plain_text.segmentation`/`.verse_regex`/`.footnotes`/
-`.footnote_anchor_regex`/`.footnote_def_regex` directly — there is no
-content-based classification heuristic to fall back to first (unlike
+For `plain_text` specifically, once implemented, the `# ADAPT-POINT:`
+sections will consult `adapter_config.plain_text.segmentation`/`.verse_regex`/
+`.footnotes`/`.footnote_anchor_regex`/`.footnote_def_regex` directly — there
+is no content-based classification heuristic to fall back to first (unlike
 `gutenberg_epub`'s `classify_spine_item`/`classify_frontback_block`, which
 consult their own `adapter_config` overrides only before falling back to a
 default heuristic). Because this path has no fallback, the active/load-bearing
-fields are fatally validated at Step 0 rather than left to fail — or silently
-misbehave — mid-extraction; inactive segmentation sibling values are warned as
-ignored, not treated as fatal.
+fields are already fatally validated at Step 0 (config-shape validation runs
+regardless of whether extraction itself is wired in) rather than left to fail
+— or silently misbehave — mid-extraction; inactive segmentation sibling
+values are warned as ignored, not treated as fatal.
 
 There is no `FRONTBACK:{id}` mechanism for this adapter — that concept is
 specific to `gutenberg_epub`'s spine-item classification (front/back-matter
 spine files are an EPUB-specific structural signal a plain-text source
-doesn't have). A plain-text source's `manifest.json` still carries the
-REQUIRED `frontback: [{id, decision}]` array from the shared
+doesn't have). Once implemented, a plain-text source's `manifest.json` will
+still carry the REQUIRED `frontback: [{id, decision}]` array from the shared
 `manifest.schema.json` contract, unconditionally present as an empty array
 (`minItems: 0`) — never an omitted field.
 
-## Output contract
+## Output contract (once implemented)
 
-Extraction under this adapter produces the exact same `manifest.json` shape
-every other adapter produces, validated by the same `manifest.schema.json` —
-see [`README.md`](./README.md#the-shared-output-contract) for the complete
+**Nothing in this section is executable yet** — `source.format: plain_text`
+FATALs before extraction runs (see Status above, #62). Once implemented,
+extraction under this adapter must produce the exact same `manifest.json`
+shape every other adapter produces, validated by the same
+`manifest.schema.json` — see
+[`README.md`](./README.md#the-shared-output-contract) for the complete
 shared shape (block-ID/`order_index` model, `spine[]`, `segments[]`,
 `footnotes[]`, `verse.store`, `generation_hashes.source_extraction_hash`,
 `source_inputs: [string]`, `generation_hashes.source_input_hash`,
 `frontback: [{id, decision}]`). There is nothing plain-text-specific about
-the output shape itself — only the extraction logic that produces it
-differs from `gutenberg_epub`.
+the output shape itself — only the extraction logic that produces it will
+differ from `gutenberg_epub`.
 
-For `plain_text`, `source_inputs` is the one-entry array `[source.path]`.
-`source_extraction_hash` is the sha1 of canonical JSON `{format:
-source.format, adapter_config: <ONLY source.adapter_config.plain_text>}`,
+For `plain_text`, `source_inputs` will be the one-entry array
+`[source.path]`. `source_extraction_hash` will be the sha1 of canonical JSON
+`{format: source.format, adapter_config: <ONLY source.adapter_config.plain_text>}`,
 concatenated with `${durable_root}/extract.py`'s raw bytes. `source_input_hash`
-is the sha1 of canonical JSON `{source_path: <resolved source.path STRING
+will be the sha1 of canonical JSON `{source_path: <resolved source.path STRING
 itself>, source_bytes_sha1: <sha1 of the source file's raw bytes>}`.
 
 ## See also
 
 - [`README.md`](./README.md) — the shared output contract, the two senses of
-  "proven," and why v1 ships exactly three adapters with no generic parser
-  framework above them.
-- [`gutenberg-epub.md`](./gutenberg-epub.md) — the proven EPUB adapter, for
-  contrast: spine-item classification instead of segmentation heuristics,
-  `FRONTBACK:{id}` handling this adapter has no equivalent of.
+  "proven," and why v1 scopes to exactly three named source formats with no
+  generic parser framework above them.
+- [`gutenberg-epub.md`](./gutenberg-epub.md) — the one working, proven EPUB
+  adapter, for contrast: spine-item classification instead of segmentation
+  heuristics, `FRONTBACK:{id}` handling this adapter has no equivalent of.
 - [`custom.md`](./custom.md) — the escape hatch for a plain-text source
   whose verse or footnote convention can't be captured by `verse_regex`/
   `footnote_anchor_regex`/`footnote_def_regex`.
