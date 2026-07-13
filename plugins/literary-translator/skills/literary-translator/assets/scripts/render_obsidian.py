@@ -27,8 +27,10 @@ real output.
 - One **narrative page** per `manifest.segments[]` entry (a NodeStream
   `seg`), in `book.seg_order` reading order, named `"{NNN} {title}.md"` at
   the vault root (`NNN` a stable zero-padded position, `title` the
-  segment's own first heading-kind node text, or the raw `seg` id if the
-  segment carries no heading). Sentinels are resolved here: `⟦FNREF_N⟧`
+  segment's own first heading-kind node text -- with that heading's own
+  KNOWN sentinels (footnote anchors, declared verse placeholders) resolved
+  out to plain text first, see `_heading_plain_text` -- or the raw `seg` id
+  if the segment carries no heading). Sentinels are resolved here: `⟦FNREF_N⟧`
   becomes an Obsidian native footnote reference (`[^N]`, definitions
   appended at the foot of the page), and each verse placeholder becomes
   either a full blockquote (a dedicated verse block, `kind: "verse"`) or a
@@ -96,6 +98,9 @@ NODESTREAM_PATH = DURABLE_ROOT / "out" / ".assembled" / "nodestream.json"
 # always taken verbatim from each BlockNode's own `verses[].placeholder`,
 # never reconstructed from a vid.
 _FNREF_SENTINEL_FMT = "⟦FNREF_{n}⟧"
+
+_TITLE_FN_MARKUP_RE = re.compile(r"\[\^\d+\]")       # rendered markdown footnote ref -- unwanted in a title/slug
+_TITLE_FNREF_ANCHOR_RE = re.compile(r"⟦FNREF_\d+⟧")  # machine footnote-anchor sentinel -- never legitimate prose
 
 # LABEL PROTECTION (inline-verse gloss label) --
 # The renderer-authored inline-verse gloss label (`_render_verse_inline`'s
@@ -489,6 +494,12 @@ def _verse_texts(content):
     return rendered, gloss
 
 
+def _normalize_newlines(s):
+    # CRLF first, then lone CR -> LF (order matters). Deliberately LF-specific
+    # afterward -- NOT str.splitlines(), which also splits U+2028/U+2029/NEL/VT/FF.
+    return s.replace("\r\n", "\n").replace("\r", "\n")
+
+
 def _render_verse_block(content, linker, seen_in_block=None):
     """A whole dedicated verse block (`kind: "verse"`, `mount: "block"`) --
     rendered as its own blockquote. Empty content (verse_policy.mode: skip)
@@ -505,7 +516,8 @@ def _render_verse_block(content, linker, seen_in_block=None):
     lines = [f"> {line}".rstrip() for line in body.splitlines()]
     if rendered and gloss:
         lines.append(">")
-        lines.append(f"> *Literal: {gloss}*")
+        flat_gloss = _normalize_newlines(gloss).replace("\n", " ")
+        lines.append(f"> *Literal: {flat_gloss}*")
     return "\n".join(lines)
 
 
@@ -654,10 +666,57 @@ def _render_block(node, linker):
     return text
 
 
+def _heading_plain_text(node):
+    """Resolve a heading node's KNOWN sentinels to PLAIN title text for the
+    frontmatter `title` and filename slug: declared verse placeholders -> their
+    flattened rendered verse text (footnote refs [^N] stripped -- a footnote
+    marker does not belong in a title; no italic, no "(lit.: …)" label, no entity
+    linking), this node's footnote anchors -> removed. Only KNOWN sentinels are
+    touched: any OTHER bracketed span is literal source text and is preserved
+    verbatim (the renderer's unresolved-bracket contract). A stray raw footnote
+    anchor (fixed ⟦FNREF_N⟧ machine shape, never prose) is scrubbed as
+    defense-in-depth. The "plain heading" fast path is gated on WHETHER THERE
+    WAS ANY KNOWN SENTINEL TO RESOLVE (a declared verse placeholder or this
+    node's own footnote anchor), never on "did the text change" -- a
+    degenerate/malformed verse whose rendered content happens to equal its own
+    placeholder sentinel would otherwise make the substitution a no-op and let
+    the raw sentinel through unstripped. When there is nothing to resolve, the
+    ORIGINAL text is returned with only .strip() -- byte-identical to the prior
+    _segment_title, so plain-heading titles/slugs never change (no internal
+    whitespace collapse)."""
+    original = node.get("text") or ""
+    substitutions = {}
+    for v in node.get("verses") or []:
+        ph = v.get("placeholder")
+        if ph and ph not in substitutions:
+            rendered, gloss = _verse_texts(v.get("content") or {})
+            body = _TITLE_FN_MARKUP_RE.sub("", rendered or gloss)   # drop [^N] refs
+            substitutions[ph] = " ".join(body.split())              # flatten multi-line verse to one title line
+    for n in node.get("fnrefs") or []:
+        substitutions.setdefault(_FNREF_SENTINEL_FMT.format(n=n), "")
+    # Plain heading (no known sentinel to resolve): preserve prior behavior EXACTLY
+    # -- .strip() only, no whitespace collapse. A literal ⟦variant⟧ that is neither
+    # a declared placeholder nor a footnote anchor stays verbatim here.
+    if not substitutions and not _TITLE_FNREF_ANCHOR_RE.search(original):
+        return original.strip()
+    text = original
+    if substitutions:
+        combined_re = re.compile(
+            "|".join(re.escape(k) for k in sorted(substitutions, key=len, reverse=True))
+        )
+        text = combined_re.sub(lambda m: substitutions[m.group(0)], text)   # resolve
+        # A well-formed verse never renders to its own sentinel; if a malformed
+        # content field re-introduced a known placeholder via its replacement
+        # value, blank it so a raw ⟦…⟧ can never reach the title (#171 invariant).
+        text = combined_re.sub("", text)
+    text = _TITLE_FNREF_ANCHOR_RE.sub("", text)   # scrub stray anchors not in this node's fnrefs
+    return re.sub(r"\s+", " ", text).strip()
+
+
 def _segment_title(seg_nodes, seg):
     for node in seg_nodes:
         if node.get("kind") == "heading":
-            text = (node.get("text") or "").strip()
+            text = _heading_plain_text(node)
             if text:
                 return text
     return seg
@@ -679,10 +738,11 @@ def _render_segment_note(seg, seg_nodes, footnote_text_by_n, linker, is_rtl):
             body_blocks.append(block_md)
         used_fnrefs.update(node.get("fnrefs") or [])
 
-    fn_lines = [
-        f"[^{n}]: {linker.link(footnote_text_by_n.get(n, ''))}"
-        for n in sorted(used_fnrefs)
-    ]
+    fn_lines = []
+    for n in sorted(used_fnrefs):
+        linked = linker.link(footnote_text_by_n.get(n, ""))
+        indented = _normalize_newlines(linked).replace("\n", "\n    ")
+        fn_lines.append(f"[^{n}]: {indented}")
 
     parts = [_yaml_frontmatter(frontmatter), "\n\n".join(body_blocks)]
     if fn_lines:

@@ -42,7 +42,13 @@ pair:
 2. **Per prose block: the *multiset* of placeholder sentinels
    (footnote-anchor / embedded-verse tokens) matches the source's
    multiset.** Multiset, not set — order-independent, so it catches
-   drop/duplicate/mangle of a placeholder token. The mandatory adversarial
+   drop/duplicate/mangle of a placeholder token. What counts as a
+   placeholder sentinel here is an EXACT MAP, not a shape/prefix pattern: a
+   `⟦…⟧` span is a placeholder iff it is a `⟦FNREF_N⟧` footnote anchor or
+   one of this segpack's own declared `verses[].placeholder` strings
+   (any adapter's own naming, e.g. `⟦POEM_1⟧`) — any other bracketed span
+   is literal source prose, not a fidelity token, so a translation that
+   renders it away is not falsely rejected. The mandatory adversarial
    pass below is what decides whether any newly discovered marker-order hole
    means this check must become stricter.
 

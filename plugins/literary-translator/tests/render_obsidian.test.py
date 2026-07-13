@@ -2251,6 +2251,292 @@ def test_embedded_verse_sole_content_of_heading_stays_inline_not_blockquote(tmp_
 
 
 # ===========================================================================
+# 17. #171: `_segment_title`/`_heading_plain_text` -- a heading node's KNOWN
+#     sentinels (its own footnote anchors, a declared verse placeholder) must
+#     be resolved to plain text before feeding the frontmatter `title` and
+#     the filename slug, never leaked verbatim; any OTHER bracketed span
+#     (literal source prose) must survive completely untouched.
+# ===========================================================================
+
+
+def test_heading_fnref_anchor_is_resolved_out_of_title_and_slug(tmp_path):
+    """A heading's own footnote-anchor sentinel must never leak into the
+    frontmatter title or the filename slug. RED pre-fix: the raw
+    ⟦FNREF_1⟧ sentinel (and its letters, "FNREF", which survive the
+    filename allow-list since they're plain alnum) leaked into both."""
+    node = make_node(
+        "h1", "seg01", "Chapter One ⟦FNREF_1⟧", kind="heading", fnrefs=[1],
+    )
+    assert render_obsidian._segment_title([node], "seg01") == "Chapter One"
+
+    ns = make_nodestream([node], footnotes=[{"n": 1, "text": "A footnote."}])
+    canon = make_canon({})
+    profile = make_profile()
+
+    out_dir, manifest = render_into(tmp_path, ns, canon, profile)
+    body_matches = find_file_with_content(
+        all_written_paths(out_dir, manifest), lambda t: "Chapter One" in t
+    )
+    assert len(body_matches) == 1
+    body_text = body_matches[0].read_text(encoding="utf-8")
+    fm = parse_frontmatter(body_text)
+    assert fm["title"] == "Chapter One", f"got frontmatter title {fm['title']!r}"
+    assert "⟦" not in fm["title"] and "FNREF" not in fm["title"] and "[^" not in fm["title"]
+
+    rel_path = next(rel for rel in manifest["written"] if (out_dir / rel) == body_matches[0])
+    assert "⟦" not in rel_path and "FNREF" not in rel_path and "[^" not in rel_path, (
+        f"the filename slug must not carry the sentinel/its letters -- got: {rel_path!r}"
+    )
+
+
+def test_heading_verse_placeholder_title_resolves_to_flattened_verse_text(tmp_path):
+    """A heading whose ENTIRE text is a declared verse placeholder (free-form,
+    no "VERSE_" naming convention required -- segpack.schema.json does not
+    constrain it) resolves to that verse's own flattened rendered text, with
+    any footnote ref inside it ([^N], itself converted from a raw
+    ⟦FNREF_N⟧ by `_verse_texts`) stripped -- a footnote marker does not
+    belong in a title. RED pre-fix: the raw placeholder sentinel itself was
+    the title verbatim."""
+    v_ph = "⟦POEM_1⟧"
+    node = make_node(
+        "h1", "seg01", v_ph, kind="heading",
+        verses=[{
+            "vid": "poem1", "placeholder": v_ph,
+            "content": {"rendered": "Line one ⟦FNREF_2⟧ line two."},
+        }],
+    )
+    title = render_obsidian._segment_title([node], "seg01")
+    assert title == "Line one line two.", f"got {title!r}"
+    assert "[^2]" not in title and "⟦" not in title
+
+
+def test_heading_degenerate_verse_rendering_to_own_sentinel_does_not_leak(tmp_path):
+    """Codex-rescue regression: a degenerate/malformed verse whose own
+    `content.rendered` renders back to the LITERAL placeholder sentinel that
+    names it (a shape upstream assemble.py rejects, but render()'s own
+    public entry accepts directly, per its own module docstring -- built and
+    tested independently of assemble.py) makes the substitution a NO-OP net
+    change. Gating the "plain heading" fast path on `text == original` would
+    then return the ORIGINAL raw sentinel unstripped -- a #171-invariant
+    violation. The fix gates on "was there a known sentinel to resolve"
+    instead, and blanks any residual known placeholder a malformed
+    replacement re-introduced -- so the title/slug must carry NO `⟦`/`⟧` at
+    all here (falling back to the segment id, since the heading resolves to
+    empty)."""
+    v_ph = "⟦POEM_1⟧"
+    node = make_node(
+        "h1", "seg01", v_ph, kind="heading",
+        verses=[{
+            "vid": "poem1", "placeholder": v_ph,
+            "content": {"rendered": v_ph},   # degenerate: renders to its own sentinel
+        }],
+    )
+    ns = make_nodestream([node])
+    canon = make_canon({})
+    profile = make_profile()
+
+    out_dir, manifest = render_into(tmp_path, ns, canon, profile)
+    assert len(manifest["written"]) == 1
+    rel_path = manifest["written"][0]
+    body_text = (out_dir / rel_path).read_text(encoding="utf-8")
+    fm = parse_frontmatter(body_text)
+
+    assert "⟦" not in fm["title"] and "⟧" not in fm["title"], (
+        f"a degenerate verse rendering to its own sentinel must never leak a "
+        f"raw ⟦…⟧ into the title -- got {fm['title']!r}"
+    )
+    assert "⟦" not in rel_path and "⟧" not in rel_path, (
+        f"nor into the filename slug -- got {rel_path!r}"
+    )
+
+
+def test_heading_unmatched_bracket_span_is_preserved_verbatim(tmp_path):
+    """NEGATIVE (over-reach guard): a bracketed span in a heading that is
+    NEITHER a declared verse placeholder NOR a footnote anchor is ordinary
+    literal source prose -- it must survive completely untouched. Expected
+    to be green both pre- and post-fix (the old `_segment_title` also only
+    `.strip()`ed the raw text) -- verified via git-stash, not a red/green
+    discriminator; it guards the fix against stripping too much."""
+    node = make_node("h1", "seg01", "A ⟦variant⟧ B", kind="heading")
+    title = render_obsidian._segment_title([node], "seg01")
+    assert title == "A ⟦variant⟧ B", (
+        f"a bracketed span with no matching sentinel must be preserved "
+        f"verbatim, not stripped -- got {title!r}"
+    )
+
+
+def test_plain_heading_with_internal_double_space_is_unchanged(tmp_path):
+    """REGRESSION (over-reach guard): a plain heading with no sentinels at
+    all must come back byte-identical modulo `.strip()` -- no internal
+    whitespace collapse. Expected green both pre- and post-fix (verified via
+    git-stash); it guards the fix's "nothing resolved -> exact prior
+    behavior" fast path."""
+    node = make_node("h1", "seg01", "Chapter  Two", kind="heading")
+    title = render_obsidian._segment_title([node], "seg01")
+    assert title == "Chapter  Two", (
+        f"a plain heading's internal whitespace must never be collapsed -- got {title!r}"
+    )
+
+
+# ===========================================================================
+# 18. #172: multi-line footnote-definition continuations and verse-gloss
+#     text must not eject their tail out of the enclosing markdown construct
+#     ([^n]: def / the blockquote's own "> *Literal: …*" line) -- every
+#     continuation line indented (footnote defs, CommonMark convention) or
+#     flattened to one line (the gloss, which can't itself be multi-line
+#     inside a single "> " blockquote line). Both non-LF line endings (CRLF,
+#     lone CR) must normalize to LF first, with no bare "\r" ever surviving.
+# ===========================================================================
+
+
+def test_multiline_footnote_definition_gets_indented_continuation(tmp_path):
+    """#172(a): a footnote definition's own text may itself be multi-line --
+    each continuation line must be indented 4 spaces (CommonMark footnote
+    continuation), never ejected out of the `[^n]:` def at column 0. Covers
+    both a plain two-line def and a blank-line-containing one. RED pre-fix:
+    `fn_lines` built each def as a single un-indented line, so a
+    continuation line landed at column 0, outside the footnote def."""
+    node = make_node(
+        "p1", "seg01", "See ⟦FNREF_1⟧ and ⟦FNREF_2⟧ here.", fnrefs=[1, 2],
+    )
+    ns = make_nodestream([node], footnotes=[
+        {"n": 1, "text": "line1\nline2"},
+        {"n": 2, "text": "a\n\nb"},
+    ])
+    canon = make_canon({})
+    profile = make_profile()
+
+    out_dir, manifest = render_into(tmp_path, ns, canon, profile)
+    body_matches = find_file_with_content(
+        all_written_paths(out_dir, manifest), lambda t: "See [^1]" in t
+    )
+    assert len(body_matches) == 1
+    body_text = body_matches[0].read_text(encoding="utf-8")
+
+    assert "[^1]: line1\n    line2" in body_text, (
+        f"a multi-line footnote def's continuation must be indented, not "
+        f"ejected at column 0 -- got:\n{body_text}"
+    )
+    assert "\nline2" not in body_text, (
+        f"no unindented continuation line may survive at column 0 -- got:\n{body_text}"
+    )
+    assert "[^2]: a\n    \n    b" in body_text, (
+        f"a blank-line-containing footnote def must indent EVERY "
+        f"continuation line, including the blank one -- got:\n{body_text}"
+    )
+
+
+def test_footnote_definition_crlf_and_lone_cr_are_normalized_and_indented(tmp_path):
+    """#172(a) CRLF/lone-CR: a footnote's own text may carry non-LF line
+    endings (CRLF from a Windows-authored source, or a lone CR) -- both must
+    normalize to LF before the continuation-indent transform, and no bare
+    "\\r" may survive in the rendered output. Read back via
+    `read_bytes().decode()`, NOT `read_text()`'s default universal-newline
+    translation, which would silently turn any stray "\\r" the code left
+    behind into "\\n" on READ, making the "\\r" assertion below vacuous
+    (`read_text(newline=...)` is Python 3.13+ only; this plugin's floor is
+    3.10, per tests/python_floor_pep604_drift.test.py)."""
+    node = make_node(
+        "p1", "seg01", "See ⟦FNREF_1⟧ and ⟦FNREF_2⟧ here.", fnrefs=[1, 2],
+    )
+    ns = make_nodestream([node], footnotes=[
+        {"n": 1, "text": "a\r\nb"},
+        {"n": 2, "text": "a\rb"},
+    ])
+    canon = make_canon({})
+    profile = make_profile()
+
+    out_dir, manifest = render_into(tmp_path, ns, canon, profile)
+    body_matches = find_file_with_content(
+        all_written_paths(out_dir, manifest), lambda t: "See [^1]" in t
+    )
+    assert len(body_matches) == 1
+    body_text = body_matches[0].read_bytes().decode("utf-8")
+
+    assert "\r" not in body_text, f"no bare CR may survive -- got:\n{body_text!r}"
+    assert "[^1]: a\n    b" in body_text, (
+        f"a CRLF footnote def must normalize+indent its continuation -- got:\n{body_text}"
+    )
+    assert "[^2]: a\n    b" in body_text, (
+        f"a lone-CR footnote def must normalize+indent its continuation -- got:\n{body_text}"
+    )
+
+
+def test_verse_block_multiline_gloss_flattened_to_single_line(tmp_path):
+    """#172(b): a dedicated verse block's own `literal_gloss` may itself be
+    multi-line -- unlike the rendered verse body (each line its own `> `-
+    prefixed blockquote line, by design), the `> *Literal: …*` line must stay
+    a SINGLE line: a multi-line gloss must not eject its tail out of the
+    blockquote. RED pre-fix: the gloss was appended as one unsplit f-string,
+    so an embedded "\\n" broke the line out of the "> " prefix entirely."""
+    v_ph = "⟦VERSE_vGloss_00000200⟧"
+    node = make_node(
+        "vblockGloss", "seg01", v_ph, kind="verse",
+        verses=[{
+            "vid": "vGloss", "placeholder": v_ph,
+            "content": {"rendered": "Line one.\nLine two.",
+                        "literal_gloss": "Gloss line one.\nGloss line two."},
+        }],
+    )
+    ns = make_nodestream([node])
+    canon = make_canon({})
+    profile = make_profile()
+
+    out_dir, manifest = render_into(tmp_path, ns, canon, profile)
+    body_matches = find_file_with_content(
+        all_written_paths(out_dir, manifest), lambda t: "Line one." in t
+    )
+    assert len(body_matches) == 1
+    body_text = body_matches[0].read_text(encoding="utf-8")
+
+    assert "> Line one." in body_text and "> Line two." in body_text, body_text
+    assert "> *Literal: Gloss line one. Gloss line two.*" in body_text, (
+        f"a multi-line literal_gloss must be flattened to a SINGLE "
+        f"'> *Literal: …*' line -- got:\n{body_text}"
+    )
+    for line in body_text.splitlines():
+        if "*" in line:
+            assert line.startswith(">"), (
+                f"no dangling '*' may appear outside a '> '-prefixed line -- "
+                f"got line {line!r} in:\n{body_text}"
+            )
+
+
+def test_verse_block_gloss_crlf_and_lone_cr_flattened_no_bare_cr(tmp_path):
+    """#172(b) CRLF/lone-CR: the same flattening must normalize non-LF line
+    endings in the gloss before joining with a space, and no bare "\\r" may
+    survive. Read back via `read_bytes().decode()`, NOT `read_text()`'s
+    default universal-newline translation, which would silently turn any
+    stray "\\r" the code left behind into "\\n" on READ, making the "\\r"
+    assertion below vacuous (`read_text(newline=...)` is Python 3.13+ only;
+    this plugin's floor is 3.10, per tests/python_floor_pep604_drift.test.py)."""
+    for content_gloss, label in [("x\r\ny", "crlf"), ("x\ry", "lone-cr")]:
+        v_ph = f"⟦VERSE_vGlossCR_{label}⟧"
+        node = make_node(
+            f"vblockGlossCR_{label}", "seg01", v_ph, kind="verse",
+            verses=[{
+                "vid": f"vGlossCR_{label}", "placeholder": v_ph,
+                "content": {"rendered": "A line.", "literal_gloss": content_gloss},
+            }],
+        )
+        ns = make_nodestream([node])
+        canon = make_canon({})
+        profile = make_profile()
+
+        out_dir, manifest = render_into(tmp_path / label, ns, canon, profile)
+        body_matches = find_file_with_content(
+            all_written_paths(out_dir, manifest), lambda t: "A line." in t
+        )
+        assert len(body_matches) == 1
+        body_text = body_matches[0].read_bytes().decode("utf-8")
+
+        assert "\r" not in body_text, f"no bare CR may survive ({label}) -- got:\n{body_text!r}"
+        assert "> *Literal: x y*" in body_text, (
+            f"the gloss must flatten to a single space-joined line ({label}) -- got:\n{body_text}"
+        )
+
+
+# ===========================================================================
 # 9. #138 sense_translated: the entity note is emitted and `basis` round-
 #    trips like any other basis, but the body-link matcher deliberately
 #    excludes it (D14) -- a sense-rendering is an ordinary word by

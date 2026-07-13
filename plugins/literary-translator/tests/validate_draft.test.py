@@ -627,6 +627,265 @@ def test_source_defect_floor_still_fires_for_non_embedded_verse_with_missing_par
     assert defect_count(result.stdout) == 1
 
 
+# ---------------------------------------------------------------------------
+# 7. #173 -- placeholder fidelity hardcoded the VERSE_ prefix. PH_RE only
+#    matched ⟦FNREF_N⟧ / ⟦VERSE_...⟧-shaped spans, so a custom adapter's
+#    embedded-verse placeholder with a DIFFERENT prefix (e.g. ⟦POEM_1⟧) was
+#    invisible to placeholders() entirely -- dropping it from the draft
+#    silently passed checks 2 and 4. Fixed via an EXACT MAP: a `⟦…⟧` span is
+#    a placeholder iff it is a `⟦FNREF_N⟧` anchor or one of THIS segpack's
+#    own declared verses[].placeholder strings -- not a VERSE_-prefix regex,
+#    and NOT a naive `⟦[^⟧]+⟧` widening (an earlier draft of the fix; codex
+#    rejected it as over-broad, see the over-match-guard test below).
+# ---------------------------------------------------------------------------
+
+V_PH_POEM = "⟦POEM_1⟧"                  # custom-adapter naming: no VERSE_/FNREF_ prefix at all
+V_PH_V001 = "⟦VERSE_V001_deadbeef⟧"     # real-source naming: VERSE_{vid}_{8hex} -- must still work
+V_LITERAL_BRACKET = "⟦variant⟧"         # literal editorial-prose bracket span, NOT a declared placeholder
+
+
+def embedded_placeholder_segpack(seg, placeholder, vid="vEmbed", n_line=2):
+    """An embedded verse (mount=="embedded") quoted inside prose block p1,
+    parametrized on the placeholder STRING so the same shape can be
+    exercised under a custom-adapter naming (V_PH_POEM) and the real
+    source's own VERSE_{vid}_{8hex} naming (V_PH_V001)."""
+    return {
+        "seg": seg,
+        "blocks": [
+            {
+                "id": "p1",
+                "order_index": 0,
+                "plain_text": f"Some prose introducing a poem {placeholder} right here.",
+            },
+        ],
+        "footnotes": [],
+        "verses": [
+            {
+                "vid": vid,
+                "placeholder": placeholder,
+                "parent_block": "p1",
+                "mount": "embedded",
+                "n_line": n_line,
+            }
+        ],
+        "names": [],
+        "canon_names": [],
+        "new_names": [],
+    }
+
+
+def embedded_placeholder_draft(seg, placeholder, vid="vEmbed", keep_placeholder=True):
+    block_text = (
+        f"Some translated prose introducing a poem {placeholder} right here."
+        if keep_placeholder
+        else "Some translated prose introducing a poem right here."
+    )
+    return {
+        "seg": seg,
+        "blocks": {"p1": block_text},
+        "footnotes": {},
+        "verses": {
+            vid: {"literal_gloss": "A plain literal rendering of the quoted poem."},
+        },
+        "names": [],
+        "notes": [],
+    }
+
+
+def test_custom_adapter_embedded_placeholder_dropped_fails_gate(tmp_path):
+    """THE BUG: a custom adapter's embedded-verse placeholder that does NOT
+    follow the VERSE_ prefix convention (⟦POEM_1⟧, declared in
+    verses[].placeholder with mount="embedded") must be enforced by the
+    prose-block placeholder multiset (check 2) via the exact-map, not a
+    prefix regex. Pre-#173 (PH_RE hardcoded to FNREF_/VERSE_-prefixed spans
+    only), ⟦POEM_1⟧ was invisible to placeholders() entirely, so this
+    fixture's dropped placeholder was OBSERVED PASSING (rc=0) on pre-fix
+    code -- must fail post-fix."""
+    root = make_durable_root(tmp_path, profile=LITERAL_ONLY_PROFILE)
+    write_segment(
+        root, "seg06",
+        embedded_placeholder_segpack("seg06", V_PH_POEM),
+        embedded_placeholder_draft("seg06", V_PH_POEM, keep_placeholder=False),
+    )
+
+    result = run_validate(root, "seg06")
+
+    assert result.returncode == 1, (
+        f"a dropped custom-adapter embedded placeholder must fail the gate, "
+        f"got rc={result.returncode}\nstdout:\n{result.stdout}"
+    )
+    assert f"[p1] placeholder mismatch: src=['{V_PH_POEM}'] draft=[]" in result.stdout
+    assert defect_count(result.stdout) == 1
+
+
+def test_custom_adapter_embedded_placeholder_kept_passes_gate(tmp_path):
+    """Sanity companion: the SAME ⟦POEM_1⟧ placeholder, kept intact in the
+    draft, must pass -- proves the previous test's failure is caused solely
+    by the drop, not by ⟦POEM_1⟧ being unrecognized outright."""
+    root = make_durable_root(tmp_path, profile=LITERAL_ONLY_PROFILE)
+    write_segment(
+        root, "seg06",
+        embedded_placeholder_segpack("seg06", V_PH_POEM),
+        embedded_placeholder_draft("seg06", V_PH_POEM, keep_placeholder=True),
+    )
+
+    result = run_validate(root, "seg06")
+
+    assert result.returncode == 0, (
+        f"expected the placeholder-kept draft to pass, got rc="
+        f"{result.returncode}\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    )
+    assert "[seg06] OK" in result.stdout
+
+
+def test_builtin_verse_prefixed_embedded_placeholder_still_enforced(tmp_path):
+    """Regression guard: the real source's own VERSE_{vid}_{8hex} naming
+    (⟦VERSE_V001_deadbeef⟧) must STILL be enforced by the exact-map --
+    the fix must not regress built-in verses just because the prefix regex
+    was removed. Dropping it from the draft must still fail the gate."""
+    root = make_durable_root(tmp_path, profile=LITERAL_ONLY_PROFILE)
+    write_segment(
+        root, "seg06",
+        embedded_placeholder_segpack("seg06", V_PH_V001, vid="v001"),
+        embedded_placeholder_draft("seg06", V_PH_V001, vid="v001", keep_placeholder=False),
+    )
+
+    result = run_validate(root, "seg06")
+
+    assert result.returncode == 1, (
+        f"dropping a VERSE_-prefixed built-in placeholder must still fail "
+        f"the gate, got rc={result.returncode}\nstdout:\n{result.stdout}"
+    )
+    assert f"[p1] placeholder mismatch: src=['{V_PH_V001}'] draft=[]" in result.stdout
+    assert defect_count(result.stdout) == 1
+
+
+def fn_custom_placeholder_segpack(seg, placeholder, vid="vFnPoem"):
+    return {
+        "seg": seg,
+        "blocks": [
+            {
+                "id": "p1",
+                "order_index": 0,
+                "plain_text": f"Some prose with a note {FN_PH} attached.",
+            },
+        ],
+        "footnotes": [
+            {"n": 1, "source_text": f"A note quoting a poem {placeholder} within it."}
+        ],
+        "verses": [
+            {
+                "vid": vid,
+                "placeholder": placeholder,
+                # parent_block is the FOOTNOTE-DEF block's own id -- NEVER a
+                # member of this segpack's own blocks[] (a footnote-def
+                # block is not a segment block).
+                "parent_block": "fn1def",
+                "mount": "embedded",
+                "n_line": 2,
+            }
+        ],
+        "names": [],
+        "canon_names": [],
+        "new_names": [],
+    }
+
+
+def fn_custom_placeholder_draft(seg, placeholder, vid="vFnPoem", keep_placeholder=True):
+    fn_text = (
+        f"A translated note quoting a poem {placeholder} within it."
+        if keep_placeholder
+        else "A translated note quoting a poem within it."
+    )
+    return {
+        "seg": seg,
+        "blocks": {
+            "p1": f"Some translated prose with a note {FN_PH} attached.",
+        },
+        "footnotes": {"1": fn_text},
+        "verses": {
+            vid: {"literal_gloss": "A plain literal rendering of the quoted poem."},
+        },
+        "names": [],
+        "notes": [],
+    }
+
+
+def test_custom_adapter_footnote_placeholder_dropped_fails_gate(tmp_path):
+    """THE BUG, check 4 (footnote) variant: a custom adapter's ⟦POEM_1⟧
+    placeholder embedded in a footnote's source_text, dropped from the
+    translated footnote text, must fail via the exact-map. Pre-#173 this
+    was OBSERVED PASSING (rc=0) for the same PH_RE-prefix reason as the
+    prose-block case above."""
+    root = make_durable_root(tmp_path, profile=LITERAL_ONLY_PROFILE)
+    write_segment(
+        root, "seg07",
+        fn_custom_placeholder_segpack("seg07", V_PH_POEM),
+        fn_custom_placeholder_draft("seg07", V_PH_POEM, keep_placeholder=False),
+    )
+
+    result = run_validate(root, "seg07")
+
+    assert result.returncode == 1, (
+        f"a dropped custom-adapter footnote placeholder must fail the gate, "
+        f"got rc={result.returncode}\nstdout:\n{result.stdout}"
+    )
+    assert f"[FN:1] placeholder mismatch: src=['{V_PH_POEM}'] draft=[]" in result.stdout
+    assert defect_count(result.stdout) == 1
+
+
+def literal_bracket_segpack(seg="seg08"):
+    return {
+        "seg": seg,
+        "blocks": [
+            {
+                "id": "p1",
+                "order_index": 0,
+                "plain_text": f"The manuscript shows {V_LITERAL_BRACKET} in the margin.",
+            },
+        ],
+        "footnotes": [],
+        "verses": [],
+        "names": [],
+        "canon_names": [],
+        "new_names": [],
+    }
+
+
+def literal_bracket_draft(seg="seg08"):
+    return {
+        "seg": seg,
+        "blocks": {"p1": "The manuscript shows a variant reading in the margin."},
+        "footnotes": {},
+        "verses": {},
+        "names": [],
+        "notes": [],
+    }
+
+
+def test_literal_bracket_span_not_declared_placeholder_does_not_false_fire(tmp_path):
+    """Over-match guard for the exact-map choice: a bracketed span in SOURCE
+    prose (⟦variant⟧) that is neither a footnote anchor nor declared in any
+    verses[].placeholder is literal editorial text, not a fidelity token --
+    a translation that renders it away entirely (no ⟦variant⟧ in the draft)
+    must NOT be flagged as a dropped placeholder. This guards against a
+    naive `⟦[^⟧]+⟧` widening (rejected during plan review as over-broad,
+    since block/footnote source text is unconstrained): that widening would
+    wrongly require this literal span to survive verbatim. MUST pass both
+    before AND after #173's fix -- this is the boundary the fix must not
+    cross, not the bug itself."""
+    root = make_durable_root(tmp_path, profile=DEFAULT_PROFILE)
+    write_segment(root, "seg08", literal_bracket_segpack(), literal_bracket_draft())
+
+    result = run_validate(root, "seg08")
+
+    assert result.returncode == 0, (
+        f"a translated-away literal bracket span must NOT fail the gate, "
+        f"got rc={result.returncode}\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    )
+    assert "[seg08] OK" in result.stdout
+
+
 if __name__ == "__main__":
     import pytest
 
