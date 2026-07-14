@@ -30,7 +30,7 @@ Usage
 
     python3 cache_key.py --field <name>
         Prints just one *global* field's current value (bare string, no
-        quoting) to stdout. Used by extract.py.template's two-phase
+        quoting) to stdout. Used by the producing extractor's two-phase
         manifest write (`source_extraction_hash`, `source_input_hash`) and
         by the glossary-pass merge step (`derivation_bundle_hash`,
         `particle_config_hash`). Also supports the one documented
@@ -72,10 +72,12 @@ DURABLE_ROOT = Path(__file__).resolve().parents[1]
 # NEVER bootstrap_names.py/segpack.py (their own derivation_bundle_hash) and
 # NEVER the four orchestration-only scripts (orchestration_bundle_hash).
 # review_ready.py and resume_setup.py (1.2.0) join this list rather than
-# orchestration_bundle_hash's diagnostic-only bucket -- unlike draft_ready.py's
-# hand-rolled structural probe, review_ready.py performs FULL review.schema.json
-# validation (a correctness-determining check, like review_artifact_check.py's),
-# and resume_setup.py's digest logic directly determines whether a run resumes
+# orchestration_bundle_hash's bucket, which is non-gating for convergence but
+# gating for resume (its marker is folded into resume_setup.py's
+# resume-integrity digest) -- unlike draft_ready.py's hand-rolled structural
+# probe, review_ready.py performs FULL review.schema.json validation (a
+# correctness-determining check, like review_artifact_check.py's), and
+# resume_setup.py's digest logic directly determines whether a run resumes
 # or reuses cached results at all -- both squarely "directly shape ... whether a
 # convergence verdict was correctly recorded" territory, not diagnostic logging.
 # glossary_batch_plan.py (1.3.5) likewise belongs here, not the diagnostic

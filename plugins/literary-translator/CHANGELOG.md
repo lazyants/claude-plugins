@@ -1,5 +1,40 @@
 # Changelog
 
+## 1.4.5 — 2026-07-14
+
+A documentation-accuracy patch closing two LOW-severity findings surfaced during the v1.4.3 review.
+Closes #185, #186.
+
+### Fixed
+
+- **`segpack.schema.json` descriptions (plus a `cache_key.py` docstring and a
+  `validate_extraction.py` diagnostic) no longer attribute extraction universally to
+  `extract.py.template` (#185).** For a `source.format: custom` project the `manifest.json` is
+  produced by the co-designed custom extractor at `scripts/custom_extractors/<value>` (not
+  `extract.py.template`), and `segpack.py` builds each segpack from that manifest; the descriptions
+  now attribute each fact to the component that actually produces it (the manifest/extractor vs.
+  `segpack.py`).
+- **`orchestration_bundle_hash` is now documented accurately as non-gating for convergence** (never
+  part of the 15-field composite `cache_key`) **but gating for resume** (its marker is folded into
+  `resume_setup.py`'s resume-integrity digest), across `SKILL.md`,
+  `references/ledger-and-resumability.md`, `references/orchestration-and-batching.md`, and the
+  `cache_key.py` / `draft_ready.py` / `review_ready.py` / `select_segments.py` comments (#186). The
+  old flat "diagnostic-only" / "non-gating" / "never gated against" wording implied it had no
+  runtime effect, which is false for the resume path.
+
+### Migration
+
+1.4.5 corrects inaccurate documentation and intentionally edits cache-key-locked surfaces. Flipped
+on upgrade: `schema_hash` (`segpack.schema.json` edited) and `plugin_bundle_hash` (`cache_key.py` /
+`review_ready.py` edited) — so every converged segment's 15-field composite `cache_key` changes and
+is re-translated once on the next run. `orchestration_bundle_hash` also changes (`draft_ready.py` +
+`select_segments.py` edited), and since the resume-integrity digest folds `plugin_bundle_hash` plus
+a hash of `schemas/`, it changes too — so any interrupted / in-flight run restarts fresh. **Not
+affected:** `derivation_bundle_hash` (`segpack.py` deliberately left untouched — no
+`blocked_needs_regeneration`; the same-class fix there is deferred to a follow-up issue) and
+`smoke_report_contract_hash` (`language_smoke_report.py` untouched). No validation or pipeline
+behavior changed — only documentation strings, comments, one diagnostic message, and test prose.
+
 ## 1.4.4 — 2026-07-13
 
 ### Fixed

@@ -9,9 +9,11 @@ hardening layered on top of the source-proven historiettes-t3 engine loop.
 It has not yet been run at scale; treat it as a careful first design, not
 as something already proven surprise-free.
 
-STATUS: purely diagnostic/orchestration -- covered by `orchestration_bundle_hash`
-(never `plugin_bundle_hash`), and never itself a member of the 15-field
-`cache_key` composite. It classifies; it never writes a ledger fragment.
+STATUS: non-gating for convergence but gating for resume (folded into
+resume_setup.py's resume-integrity digest) -- covered by
+`orchestration_bundle_hash` (never `plugin_bundle_hash`), and never itself a
+member of the 15-field `cache_key` composite. It classifies; it never writes
+a ledger fragment.
 
 What it does (SKILL.md's W5 "Mass-translate" section, authoritative):
 

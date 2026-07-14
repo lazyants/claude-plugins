@@ -414,9 +414,10 @@ Exact byte-scope per field:
   correctness) plus the two workflow templates
   (`mass-translate-wf.template.js`/`glossary-pass-wf.template.js`). Never
   `bootstrap_names.py`/`segpack.py` (their own `derivation_bundle_hash`),
-  and never the four orchestration-only scripts (covered by the separate,
-  non-gating `orchestration_bundle_hash` instead). See the exact membership
-  list below.
+  and never the four orchestration-only scripts (covered by the separate
+  `orchestration_bundle_hash`: non-gating for convergence — never part of
+  the composite cache key — but gating for resume, folded into the
+  resume-integrity digest). See the exact membership list below.
 
 **`--field smoke_report_contract_hash` is a deliberate exception** — not a
 16th `cache_key` member (the 15-field JSON above is authoritative and
@@ -490,7 +491,9 @@ membership.
   timing) — covers exactly **four scripts**: `draft_ready.py`,
   `ledger_merge.py`, `language_smoke_report.py`, `select_segments.py`.
   **Never added to the cache-key composite, never compared against any
-  segment's cache key** — purely diagnostic/provenance, logged in W8's
+  segment's cache key** — non-gating for convergence, but it IS folded
+  into the resume-integrity digest (see below), so it gates resume: a
+  changed marker forces a fresh, no-resume run. Also logged in W8's
   reporting ("processed under plugin-bundle X, orchestration-bundle Y").
 - **`derivation_bundle_hash`** (part of the 15-field cache_key, see above)
   — covers exactly **two scripts**: `bootstrap_names.py`, `segpack.py`.

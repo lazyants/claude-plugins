@@ -9,7 +9,9 @@ authoring a missing translation from scratch -- codex must translate).
 
 Fully generic across projects/languages/verse-policy modes -- no per-project
 adapt point. EXCLUDED from `plugin_bundle_hash` (it never gates cache reuse);
-covered instead by `orchestration_bundle_hash`, which is diagnostic-only.
+covered instead by `orchestration_bundle_hash` -- non-gating for convergence
+but gating for resume (folded into resume_setup.py's resume-integrity
+digest).
 
 Canonical paths (no target-language suffix, unlike the real reference
 project's own `.ru.draft.json` naming) -- matches segpack.py/validate_draft.py

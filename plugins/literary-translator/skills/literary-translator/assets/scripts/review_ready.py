@@ -50,7 +50,9 @@ references/ledger-and-resumability.md's "Script self-anchoring" invariant.
 
 Part of `plugin_bundle_hash` (see cache_key.py's own PLUGIN_BUNDLE_MEMBERS
 and its comment there for why this joins the gating bundle rather than
-orchestration_bundle_hash's diagnostic-only bucket, unlike draft_ready.py).
+orchestration_bundle_hash's bucket -- non-gating for convergence but gating
+for resume, since its marker is folded into resume_setup.py's
+resume-integrity digest -- unlike draft_ready.py).
 """
 import argparse
 import json

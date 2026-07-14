@@ -255,8 +255,10 @@ one-time-seed treatment the other templates get.
 
 Computes/refreshes two marker files: `${durable_root}/runs/.plugin_bundle_hash`
 (read by `cache_key.py` rather than re-hashing the bundle per segment) and
-`${durable_root}/runs/.orchestration_bundle_hash` (sibling, non-gating,
-provenance-only for W8 reporting).
+`${durable_root}/runs/.orchestration_bundle_hash` (non-gating for
+convergence — never part of the composite cache key — but gating for
+resume: folded into the resume-integrity digest, and also surfaced in W8's
+reporting).
 
 Last action: the deferred `particle_config` existence check — resolve
 `source.language.particle_config` as `${durable_root}/languages/<value>`
@@ -757,8 +759,10 @@ Runs at W7 over every converged segment:
   carefully-designed but genuinely untested-at-scale.
 - Reads only the canonical `draft_path(seg) = segments/{seg}.draft.json`.
 - Excluded from `plugin_bundle_hash` (runs strictly after every segment is
-  already converged, over data already on disk) — covered by the separate,
-  non-gating `orchestration_bundle_hash` instead.
+  already converged, over data already on disk) — covered by the separate
+  `orchestration_bundle_hash`: non-gating for convergence (never part of the
+  composite cache key) but gating for resume (folded into the
+  resume-integrity digest).
 
 **W8 Deliver** — report convergence stats, list any `blocked`/
 `non_converged` segments explicitly. Also surface W7's whole-project
