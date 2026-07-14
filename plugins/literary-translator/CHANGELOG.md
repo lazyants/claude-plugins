@@ -1,5 +1,38 @@
 # Changelog
 
+## 1.4.6 — 2026-07-14
+
+A validator/renderer-consistency patch closing the deferred half of #183. Closes #188.
+
+### Fixed
+
+- **#188** `validate_draft.py` verse-line counting is now LF-only at its two direct call sites,
+  matching #183's renderer change. The `rendered`-line count (check 5) and the `_source_line_count`
+  source-line count that feeds it for block-mount verses switched off `str.splitlines()` — which also
+  breaks on exotic Unicode boundaries (U+2028/U+2029/U+0085/U+000B/U+000C/U+001C–U+001E) — to a shared
+  LF-specific `_split_lf_lines`, so the validator and the (already LF-only) renderer split a verse's
+  rendered/source text identically for block-mount verses and an exotic interior separator no longer
+  counts as a line break. A stale `_source_line_count` docstring (claiming the segpack schema carries
+  no `n_line`) is corrected. Behavior is unchanged for realistic `\n`-delimited input.
+
+### Migration
+
+- `validate_draft.py` is a `PLUGIN_BUNDLE_MEMBERS` file, so editing it flips `plugin_bundle_hash` —
+  every converged segment's 15-field composite `cache_key` changes and is **re-translated once** on the
+  next run. The resume-integrity digest folds `plugin_bundle_hash`, so any interrupted / in-flight run
+  also **restarts fresh**. **Not affected:** `schema_hash` (no schema edited), `derivation_bundle_hash`
+  (`segpack.py` untouched), `render_version`, `smoke_report_contract_hash`.
+
+### Known residual (deferred follow-up)
+
+- Embedded verses read their source `n_line` from the segpack field, which `segpack.py`'s
+  `_verse_line_count` copies from the manifest or (when it is missing/0) derives via its own
+  `splitlines()`. That runtime fallback still counts exotic separators, so for an embedded verse with a
+  missing/0 manifest `n_line` and exotic-separator source, line counting is not yet LF-only. Making it
+  so requires editing `segpack.py` (a `DERIVATION_BUNDLE_MEMBERS` file → re-derivation migration); the
+  `segpack.schema.json` `n_line` description also needs a source-neutral rewrite. Both are tracked in a
+  follow-up issue. Real-world inert (realistic input has no exotic separators).
+
 ## 1.4.5 — 2026-07-14
 
 A documentation-accuracy patch closing two LOW-severity findings surfaced during the v1.4.3 review.

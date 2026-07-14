@@ -208,18 +208,33 @@ def _block_source_text(block):
     return block.get("source_html") or ""
 
 
+def _split_lf_lines(s):
+    r"""Line-split on LF ONLY -- NOT str.splitlines(), which also breaks on the
+    exotic Unicode boundaries U+2028/U+2029/U+0085/U+000B/U+000C/U+001C-U+001E.
+    Mirrors render_obsidian.py's _split_lf_lines (#183) so the validator counts a
+    verse's lines the SAME way the renderer will split them (#188); realistic
+    translator input uses \n. Preserves splitlines()'s "a single trailing line
+    terminator yields no empty trailing element"."""
+    lines = (s or "").replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    if lines and lines[-1] == "":
+        lines.pop()
+    return lines
+
+
 def _source_line_count(text):
     """Approximate the ORIGINAL source verse's line count, for check 5's
-    "multi-line source -> non-1-line-rendering" rule. The real source reads
-    a precomputed `n_line` field off its own segpack entries; the
-    generalized segpack.schema.json does not carry one, so this derives an
-    equivalent count from the parent block's own source text -- a tag
-    boundary counts as a line break, so this works for both plain_text (real
-    newlines) and source_html (poem lines wrapped in <br/>/<p> markup)."""
+    "multi-line source -> non-1-line-rendering" rule. Embedded verses carry
+    a segpack-supplied per-verse `n_line`, which the caller uses directly
+    (see the mount branch below); a standalone block-mount verse derives its
+    count here from the parent block's own source text -- a tag boundary
+    counts as a line break, so this works for both plain_text (real
+    newlines) and source_html (poem lines wrapped in <br/>/<p> markup).
+    LF-only per #188 (NOT str.splitlines(), which also breaks on exotic
+    Unicode boundaries)."""
     if not text:
         return 0
     normalized = _TAG_RE.sub("\n", text)
-    return len([ln for ln in normalized.splitlines() if ln.strip()])
+    return len([ln for ln in _split_lf_lines(normalized) if ln.strip()])
 
 
 # ---------------------------------------------------------------------------
@@ -420,7 +435,7 @@ def _verse_required_fields(mode, rv, n_line, sentinel, vid):
                 f"[{vid}] rendered == literal_gloss up to whitespace "
                 f"(paste/rewrap -- need a real rhymed rendering)"
             )
-        if rendered and n_line >= 2 and len(rendered.splitlines()) < 2:
+        if rendered and n_line >= 2 and len(_split_lf_lines(rendered)) < 2:
             errs.append(f"[{vid}] rendered is a single line for a {n_line}-line source verse")
     else:  # pragma: no cover -- guarded earlier by ProfileConfig / mixed_by_length resolution
         errs.append(f"[{vid}] INTERNAL: unrecognized effective verse mode {mode!r}")

@@ -886,6 +886,168 @@ def test_literal_bracket_span_not_declared_placeholder_does_not_false_fire(tmp_p
     assert "[seg08] OK" in result.stdout
 
 
+# ---------------------------------------------------------------------------
+# 8. #188 -- verse-line counting (check 5) must be LF-only, matching
+#    render_obsidian.py's _split_lf_lines (#183). str.splitlines() also
+#    breaks on exotic Unicode line boundaries -- U+2028 LINE SEPARATOR among
+#    them -- so it must not be trusted to count either a rendered verse's
+#    own lines (the multi-line-source -> non-single-line-rendering guard in
+#    `_verse_required_fields`, check 5) or a block-mount verse's SOURCE line
+#    count (`_source_line_count`); fixing only one side would introduce a
+#    false positive/negative on the other (see the plan). SEP is built via
+#    chr(0x2028), never pasted literally, so no invisible byte lands in
+#    this file's source.
+# ---------------------------------------------------------------------------
+
+V_PH_EXOTIC_EMBED = "⟦VERSE_vExoticEmbed⟧"
+
+
+def exotic_embedded_segpack(seg="seg09"):
+    return {
+        "seg": seg,
+        "blocks": [
+            {
+                "id": "p1",
+                "order_index": 0,
+                "plain_text": f"Some prose introducing a poem {V_PH_EXOTIC_EMBED} right here.",
+            },
+        ],
+        "footnotes": [],
+        "verses": [
+            {
+                "vid": "vExoticEmbed",
+                "placeholder": V_PH_EXOTIC_EMBED,
+                "parent_block": "p1",
+                "mount": "embedded",
+                "n_line": 2,
+            }
+        ],
+        "names": [],
+        "canon_names": [],
+        "new_names": [],
+    }
+
+
+def exotic_embedded_draft(seg, rendered):
+    return {
+        "seg": seg,
+        "blocks": {
+            "p1": f"Some translated prose introducing a poem {V_PH_EXOTIC_EMBED} right here.",
+        },
+        "footnotes": {},
+        "verses": {
+            "vExoticEmbed": {
+                "rendered": rendered,
+                "literal_gloss": "A literal gloss that says something else entirely",
+            },
+        },
+        "names": [],
+        "notes": [],
+    }
+
+
+def test_exotic_separated_rendered_flagged_single_line_for_embedded_verse(tmp_path):
+    """#188: rendered-line counting (check 5 in `_verse_required_fields` --
+    the multi-line-source -> non-single-line-rendering guard) must be
+    LF-only -- NOT str.splitlines(), which also breaks on the exotic Unicode boundary
+    U+2028 LINE SEPARATOR. An embedded verse with a segpack-threaded
+    n_line=2 whose 'rendered' uses ONLY U+2028 as its separator (no real
+    \\n) is genuinely single-line under LF-only counting and must be
+    flagged -- pre-#188, str.splitlines() saw 2 lines there and silently
+    let a single-line rendering through."""
+    SEP = chr(0x2028)
+    assert SEP.encode("utf-8") == bytes((0xE2, 0x80, 0xA8))
+    rendered = f"alpha{SEP}beta"
+    assert rendered.count(SEP) == 1
+
+    root = make_durable_root(tmp_path, profile=DEFAULT_PROFILE)
+    write_segment(
+        root, "seg09",
+        exotic_embedded_segpack(),
+        exotic_embedded_draft("seg09", rendered),
+    )
+
+    result = run_validate(root, "seg09")
+
+    assert result.returncode == 1, (
+        f"expected an exotic-separator-only rendered verse to fail the gate, "
+        f"got rc={result.returncode}\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    )
+    assert "rendered is a single line for a 2-line source verse" in result.stdout
+    assert defect_count(result.stdout) == 1
+
+
+V_PH_EXOTIC_BLOCK = "⟦VERSE_vExoticBlock⟧"
+
+
+def exotic_block_mount_segpack(seg, source_text):
+    return {
+        "seg": seg,
+        "blocks": [
+            {
+                "id": "vblockExotic",
+                "order_index": 0,
+                "plain_text": source_text,
+            },
+        ],
+        "footnotes": [],
+        "verses": [
+            {"vid": "vExoticBlock", "placeholder": V_PH_EXOTIC_BLOCK, "parent_block": "vblockExotic"},
+        ],
+        "names": [],
+        "canon_names": [],
+        "new_names": [],
+    }
+
+
+def exotic_block_mount_draft(seg, rendered):
+    return {
+        "seg": seg,
+        "blocks": {"vblockExotic": V_PH_EXOTIC_BLOCK},
+        "footnotes": {},
+        "verses": {
+            "vExoticBlock": {
+                "rendered": rendered,
+                "literal_gloss": "A literal gloss that says something else entirely",
+            },
+        },
+        "names": [],
+        "notes": [],
+    }
+
+
+def test_exotic_separated_block_source_not_spuriously_flagged(tmp_path):
+    """#188: `_source_line_count` (check 5's source side) must ALSO be
+    LF-only -- fixing only the rendered side (the multi-line-source ->
+    non-single-line-rendering guard in `_verse_required_fields`) would leave
+    this asymmetric and introduce a NEW false positive: a block-mount verse
+    whose SOURCE uses U+2028 as an interior separator (not a real \\n) is
+    genuinely single-line under LF-only counting, so n_line stays < 2 and
+    check 5's multi-line-source rule is skipped entirely -- a single real
+    rendered line must NOT be flagged, even though str.splitlines() would
+    have counted the source as 2 lines and wrongly flagged it."""
+    SEP = chr(0x2028)
+    assert SEP.encode("utf-8") == bytes((0xE2, 0x80, 0xA8))
+    source_text = f"A{SEP}B"
+    assert source_text.count(SEP) == 1
+
+    root = make_durable_root(tmp_path, profile=DEFAULT_PROFILE)
+    write_segment(
+        root, "seg10",
+        exotic_block_mount_segpack("seg10", source_text),
+        exotic_block_mount_draft("seg10", "one real rendered line"),
+    )
+
+    result = run_validate(root, "seg10")
+
+    assert result.returncode == 0, (
+        f"expected the exotic-separated-source block-mount verse to pass, "
+        f"got rc={result.returncode}\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    )
+    assert "rendered is a single line" not in result.stdout
+    assert "[seg10] OK" in result.stdout
+
+
 if __name__ == "__main__":
     import pytest
 
