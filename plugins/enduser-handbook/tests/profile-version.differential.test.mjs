@@ -66,6 +66,12 @@ function add(label, body) {
   frags.push('profile_version: 1\n' + body);
   labels.push(label);
 }
+// Same corpus, but the raw document is supplied verbatim (used for fragments whose FIRST line is not
+// `profile_version: 1` — e.g. a leading document marker `---` must precede the version key).
+function addRaw(label, doc) {
+  frags.push(doc);
+  labels.push(label);
+}
 
 // (i) compact-colon flow maps
 const compactMapVals = ['v', ']', '[', '}', '{', ':', ',', '*x', '&a 1'];
@@ -220,6 +226,37 @@ add('unicode-astral-value', `a: "${ASTRAL}"\n`);
 add('unicode-euro', `currency: "${EURO}"\n`);
 add('unicode-combining', `name: "${COMBINING}"\n`);
 
+// PR #126/#127 snake_case must-accepts: a tab INSIDE scalar content (block/quoted/flow/plain), a
+// leading/trailing document marker, and a `? snake_case` explicit key. Every one is loaded by Psych as
+// a single {profile_version: 1, ...} document (verified vs Psych 3.1.0), so the post-fix scan must NOT
+// reject any — assertion 1 (false-reject-free) is the gate. TAB is built with fromCharCode so the code
+// point under test is unambiguous. Do NOT add non-snake_case-key, leading-zero, directive, or quoted-
+// key fragments HERE — those are documented halts and live in the broad corpus below.
+const TAB = String.fromCharCode(0x09);
+add('tab-content-block', `command: |\n  base\n  ${TAB}more\n`);
+add('tab-content-quoted', `name: "abc\n  ${TAB}def"\n`);
+add('tab-content-flow', `route_globs: [a,\n  ${TAB}b]\n`);
+add('tab-content-plain', `note: abc\n  ${TAB}def\n`);
+add('marker-trailing-doc-end', '...\n');
+add('explicit-key-snake', '? some_key\n: some_value\n');
+addRaw('marker-leading-doc-start', '---\nprofile_version: 1\n');
+addRaw('marker-leading-doc-start-comment', '--- # hi\nprofile_version: 1\n');
+
+// version-aware document-marker fuzz: a valid v1 profile wrapped in every combination of an optional
+// leading `---` (bare or with a spaced comment) and an optional trailing `...` (with or without a
+// trailing comment). Each is a single document Psych loads as {profile_version: 1, language: ...}, so
+// the scan must accept them all (assertion 1) AND still read version 1 (assertion 2) regardless of the
+// surrounding markers — a marker must never shift which key is treated as the version.
+const leadMarkers = ['', '---\n', '--- # doc\n'];
+const trailMarkers = ['', '...\n', '...\n# trailing comment\n'];
+let markerFuzz = 0;
+for (const lead of leadMarkers) {
+  for (const trail of trailMarkers) {
+    addRaw(`marker-fuzz-${markerFuzz}`, `${lead}profile_version: 1\nlanguage:\n  code: de\n${trail}`);
+    markerFuzz += 1;
+  }
+}
+
 // randomized combinatorial generation across the same dimensions, seeded and reproducible
 const dashPrefixes = ['', '- ', '- - ', '- - - '];
 const seps = [': ', ':\t'];
@@ -256,19 +293,66 @@ for (let i = 0; i < 2200; i += 1) {
   add(`rand${i}`, doc);
 }
 
+// ---- broad corpus: frags + documented-residual / wrong-version-guard shapes -----------------------
+//
+// Assertion 2 (never-wrong-version) and assertion 3 (multi-document halt) run over this BROADER corpus.
+// It adds shapes that are legitimately halted (or ok-on-parse-invalid) and therefore CANNOT live in the
+// false-reject-free assertion-1 corpus: leading-zero + unsafe integers (each a wrong-version hole the
+// #127 guards close), a mismatched flow (ok-on-parse-invalid), and multi-document streams (must halt).
+// These are seeded explicitly so a regression that drops any single guard trips assertion 2 or 3:
+//   - drop the leading-zero guard  -> `010` scans unsupported/10 while Psych reads octal 8   (10 != 8)
+//   - drop the leading-zero guard  -> `0777` scans unsupported/777 while Psych reads octal 511 (777 != 511)
+//   - drop the unsafe-integer guard-> `9007199254740993` scans .../...992 while Psych reads ...993
+//   - accept a multi-doc stream    -> reads a version from a stream Psych splits into >= 2 documents
+const broadFrags = frags.slice();
+const broadLabels = labels.slice();
+function broadAdd(label, doc) {
+  broadFrags.push(doc);
+  broadLabels.push(label);
+}
+broadAdd('num-leading-zero-010', 'profile_version: 010\n');
+broadAdd('num-leading-zero-0777', 'profile_version: 0777\n');
+broadAdd('num-unsafe-2p53p1', 'profile_version: 9007199254740993\n');
+broadAdd('num-unsafe-2p53', 'profile_version: 9007199254740992\n');
+broadAdd('mismatch-flow-ok-on-parse-invalid', 'profile_version: 1\na: [1, 2}\n');
+broadAdd('multidoc-separator', 'profile_version: 1\n---\nprofile_version: 2\n');
+broadAdd('multidoc-leading', '---\nprofile_version: 1\n---\nother: 2\n');
+
 // ---- oracle: batch every fragment through ONE ruby process ----------------------------------------
 
+// Per fragment the oracle emits one TAB-separated line: `index\tverdict\tpv\tmeaningful` where
+//   verdict    = OK | RAISE  (Psych.load succeeded / raised)
+//   pv         = the DECIMAL STRING of profile_version when Psych.load is a Hash whose profile_version
+//                is an Integer, else empty. CRITICAL: emitted as a string (.to_s), never a JSON number,
+//                so a value like 9007199254740993 survives the Ruby->JS crossing byte-exact instead of
+//                rounding to ...992 and masking a real wrong-version mismatch (assertion 2).
+//   meaningful = the number of NON-empty documents Psych.parse_stream splits the input into (a bare
+//                empty plain scalar with no tag/anchor is not meaningful), or -1 if parse_stream raised.
 const ORACLE_SCRIPT = `
 require 'yaml'
 require 'json'
+def meaningful_count(s)
+  stream = Psych.parse_stream(s)
+  stream.children.count do |doc|
+    root = doc.root
+    empty = root.nil? ||
+      (root.is_a?(Psych::Nodes::Scalar) && root.value == '' &&
+       (root.respond_to?(:plain) ? root.plain : true) &&
+       root.tag.nil? && (root.anchor.nil? || root.anchor == ''))
+    !empty
+  end
+rescue Exception
+  -1
+end
 frags = JSON.parse(File.read(ARGV[0]))
 out = []
 frags.each_with_index do |s, i|
   begin
-    Psych.load(s)
-    out << "#{i}\\tOK"
+    doc = Psych.load(s)
+    pv = (doc.is_a?(Hash) && doc['profile_version'].is_a?(Integer)) ? doc['profile_version'].to_s : ''
+    out << "#{i}\\tOK\\t#{pv}\\t#{meaningful_count(s)}"
   rescue Exception => e
-    out << "#{i}\\tRAISE\\t#{e.class}"
+    out << "#{i}\\tRAISE\\t\\t#{meaningful_count(s)}"
   end
 end
 puts out.join("\\n")
@@ -286,25 +370,42 @@ function runOracle(fragments) {
       maxBuffer: 1024 * 1024 * 64,
     });
     assert.equal(result.status, 0, `ruby oracle failed: ${result.stderr}`);
-    const status = new Array(fragments.length);
+    const oracle = new Array(fragments.length);
     for (const line of result.stdout.trim().split('\n')) {
-      const [idxStr, verdict] = line.split('\t');
-      status[Number(idxStr)] = verdict;
+      const parts = line.split('\t');
+      const idx = Number(parts[0]);
+      oracle[idx] = {
+        ok: parts[1] === 'OK', // Psych.load did not raise
+        pv: parts[2] ? parts[2] : null, // integer profile_version as a decimal STRING, or null
+        meaningful: Number(parts[3]), // parse_stream non-empty document count, or -1 (raised)
+      };
     }
-    return status;
+    return oracle;
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 }
 
+// Run the Ruby oracle ONCE over the BROAD corpus (a superset of `frags`), memoized so all three fatal
+// assertions below share a single ruby spawn. Kept inside a getter (not a module-level const) so a
+// ruby/oracle failure fails a test rather than crashing module load; only the ruby-gated tests call it.
+let oracleCache;
+function getOracle() {
+  if (oracleCache === undefined) oracleCache = runOracle(broadFrags);
+  return oracleCache;
+}
+
 // ---- fatal assertions ------------------------------------------------------------------------------
 
-test('differential fuzz: zero false-rejects across the full generated corpus', { skip: !RUBY_AVAILABLE }, () => {
-  const oracleStatus = runOracle(frags);
+// Assertion 1 — FALSE-REJECT-FREE: over the snake_case must-accept corpus (`frags`), the scan must
+// never call `malformed` a document Psych actually loads. `broadFrags` shares indices [0, frags.length)
+// with `frags`, so oracle[i] lines up here.
+test('differential fuzz: zero false-rejects across the snake_case must-accept corpus', { skip: !RUBY_AVAILABLE }, () => {
+  const oracle = getOracle();
   const violations = [];
   for (let i = 0; i < frags.length; i += 1) {
     const r = readProfileVersion(frags[i]);
-    if (r.status === 'malformed' && oracleStatus[i] === 'OK') {
+    if (r.status === 'malformed' && oracle[i].ok) {
       violations.push({ label: labels[i], message: r.message, fragment: frags[i] });
     }
   }
@@ -314,6 +415,57 @@ test('differential fuzz: zero false-rejects across the full generated corpus', {
       .map((v) => `  [${v.label}] ${v.message}\n    fragment=${JSON.stringify(v.fragment)}`)
       .join('\n');
     assert.fail(`${violations.length} false-reject(s) out of ${frags.length} fragments:\n${detail}`);
+  }
+  assert.equal(violations.length, 0);
+});
+
+// Assertion 2 — NEVER-WRONG-VERSION (the hard invariant): whenever the scan returns ok/unsupported with
+// version V and Psych.load reads a Hash with an Integer profile_version P, V must equal P. Compared as
+// decimal STRINGS: the oracle emits P via .to_s and V is <= Number.MAX_SAFE_INTEGER post-guard, so
+// String(V) is its exact decimal form — a JSON-number transport would round and mask the very mismatch
+// this guards. Does NOT fire on ok-on-parse-invalid (Psych raise => not a Hash => oracle.pv is null).
+test('differential fuzz: never returns a version different from Psych (the hard invariant)', { skip: !RUBY_AVAILABLE }, () => {
+  const oracle = getOracle();
+  const violations = [];
+  for (let i = 0; i < broadFrags.length; i += 1) {
+    const r = readProfileVersion(broadFrags[i]);
+    if ((r.status === 'ok' || r.status === 'unsupported') && oracle[i].ok && oracle[i].pv !== null) {
+      const scanV = String(r.version);
+      if (scanV !== oracle[i].pv) {
+        violations.push({ label: broadLabels[i], scanV, psychV: oracle[i].pv, fragment: broadFrags[i] });
+      }
+    }
+  }
+  if (violations.length > 0) {
+    const detail = violations
+      .slice(0, 10)
+      .map((v) => `  [${v.label}] scan=${v.scanV} psych=${v.psychV}\n    fragment=${JSON.stringify(v.fragment)}`)
+      .join('\n');
+    assert.fail(`${violations.length} wrong-version violation(s):\n${detail}`);
+  }
+  assert.equal(violations.length, 0);
+});
+
+// Assertion 3 — MULTI-DOCUMENT MUST HALT: any input Psych.parse_stream splits into >= 2 meaningful
+// documents must not yield ok/unsupported — a reader cannot safely pick which document's version to
+// trust, so it halts. (`meaningful === -1` means parse_stream raised and is excluded from this bucket.)
+test('differential fuzz: any multi-document stream (>= 2 meaningful docs) halts', { skip: !RUBY_AVAILABLE }, () => {
+  const oracle = getOracle();
+  const violations = [];
+  for (let i = 0; i < broadFrags.length; i += 1) {
+    if (oracle[i].meaningful >= 2) {
+      const r = readProfileVersion(broadFrags[i]);
+      if (r.status === 'ok' || r.status === 'unsupported') {
+        violations.push({ label: broadLabels[i], status: r.status, version: r.version, fragment: broadFrags[i] });
+      }
+    }
+  }
+  if (violations.length > 0) {
+    const detail = violations
+      .slice(0, 10)
+      .map((v) => `  [${v.label}] scan=${v.status}/${v.version}\n    fragment=${JSON.stringify(v.fragment)}`)
+      .join('\n');
+    assert.fail(`${violations.length} multi-doc-not-halted violation(s):\n${detail}`);
   }
   assert.equal(violations.length, 0);
 });
@@ -337,5 +489,49 @@ test('differential fuzz: coverage — the known-invalid A/C representatives are 
     const r = readProfileVersion(doc);
     assert.equal(r.status, 'malformed', `${label} did not get flagged: ${JSON.stringify(r)}`);
     assert.match(r.message, /structural:/, `${label} was flagged for a non-structural reason: ${r.message}`);
+  }
+
+  // numeric-guard representatives (#127) — halt with a NON-structural message (leading-zero / too
+  // large). `010` is the octal wrong-version case; 2^53+1 is the unsafe-integer rounding case.
+  const numericHalts = {
+    'leading-zero octal (010)': ['profile_version: 010\n', /leading-zero/],
+    'unsafe integer 2^53+1 (9007199254740993)': ['profile_version: 9007199254740993\n', /too large/],
+  };
+  for (const [label, [doc, needle]] of Object.entries(numericHalts)) {
+    const r = readProfileVersion(doc);
+    assert.equal(r.status, 'malformed', `${label} did not halt: ${JSON.stringify(r)}`);
+    assert.match(r.message, needle, `${label} halted for the wrong reason: ${r.message}`);
+  }
+});
+
+// Coverage — PR #126/#127 representatives keep their verdicts (scan-only, so NOT ruby-gated). These
+// pair with the false-reject / never-wrong-version fuzz above: a tab in scalar CONTENT and a leading
+// marker are accepted; an explicit `? profile_version` key and a tab in STRUCTURAL indentation halt.
+// The structural-tab must-flags are the inverse of the tab-content must-accepts — a tab that a real
+// YAML parser rejects (Psych raises) must still stop the scan.
+test('differential fuzz: coverage — #126/#127 marker/tab/explicit-key representatives keep verdicts', () => {
+  const mustAccept = {
+    'tab in block-scalar content': 'profile_version: 1\ncommand: |\n  base\n  \tmore\n',
+    'leading document-start marker': '---\nprofile_version: 1\n',
+    'trailing document-end marker': 'profile_version: 1\n...\n',
+  };
+  for (const [label, doc] of Object.entries(mustAccept)) {
+    const r = readProfileVersion(doc);
+    assert.equal(r.status, 'ok', `${label} was not accepted: ${JSON.stringify(r)}`);
+    assert.equal(r.version, 1);
+  }
+  const mustHalt = {
+    'explicit "? profile_version" key': '? profile_version\n: 1\n',
+    'structural tab: tab-indented child key': 'profile_version: 1\nfoo:\n\tbar: 1\n',
+    'structural tab: tab several levels deep': 'profile_version: 1\nstack:\n  backend:\n    type: laravel\n\tapi_url_prefix: "/api/v1"\n',
+    // Trailing bare `---` is a SANCTIONED halt, NOT a must-accept: Psych loads it as {profile_version: 1}
+    // (one document), but the scan cannot cheaply tell a trailing separator from a real second document,
+    // so it conservatively halts. It lives ONLY here — never in the false-reject-free `frags` corpus,
+    // where it would (correctly) trip assertion 1 since Psych loads it. Contrast with trailing `...` (ok).
+    'trailing bare "---" (sanctioned multi-doc-separator halt)': 'profile_version: 1\n---\n',
+  };
+  for (const [label, doc] of Object.entries(mustHalt)) {
+    const r = readProfileVersion(doc);
+    assert.equal(r.status, 'malformed', `${label} did not halt: ${JSON.stringify(r)}`);
   }
 });

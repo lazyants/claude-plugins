@@ -515,6 +515,14 @@ has "profile-validation: no fabricated v2 migration"      'no cross-version migr
 has "profile-validation: inline-stays-minimal decision"   'stays minimal'                      "$PVALID"
 has "profile-validation: node helper is optional"         'optional'                           "$PVALID"
 has "profile-validation: honest invariant quoted"         'pre-flight version reader, not a YAML validator' "$PVALID"
+# #155 — the role_flags ⊆ auth_role_enum membership check is documented as a WARN-level Step-0 item.
+# ERE (grep -E, NOT BRE); the needle is a single metachar-free phrase that must sit on ONE line in
+# profile-validation.md (a needle split across a wrapped line would not match).
+if grep -Eq 'A role_flags key that is not a declared role silently disables its capability gate' "$PVALID"; then
+  ok "profile-validation: #155 role_flags-membership warn item present"
+else
+  bad "profile-validation: #155 role_flags-membership warn wording missing"
+fi
 has "skill: Step 0 validates against the schema"          'profile.schema.json'                "$SKILL"
 has "skill: Step 0 points at the validation procedure"    'profile-validation.md'              "$SKILL"
 
