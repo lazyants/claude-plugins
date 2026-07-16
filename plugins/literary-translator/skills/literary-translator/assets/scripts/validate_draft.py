@@ -82,6 +82,7 @@ precondition), not by this structural check.
 Usage: python3 validate_draft.py SEG   (e.g. seg05)
 Exit 0 = clean, 1 = defects (printed), 2 = usage/environment error.
 """
+import argparse
 import json
 import re
 import sys
@@ -445,7 +446,12 @@ def _verse_required_fields(mode, rv, n_line, sentinel, vid):
     return errs
 
 
-def validate(seg, cfg):
+def validate(seg, cfg, draft_file=None):
+    """Validate the draft for `seg` against its canonical segpack. When
+    `draft_file` is given (a Path), the draft is read from THERE instead of
+    the canonical draft_path(seg) -- the W5 codex_job.py driver's
+    validate-before-promote path (1.4.7, #198); the segpack is always read
+    from its canonical path regardless."""
     sp = segpack_path(seg)
     src, err = _load_json(sp, "segpack")
     if err:
@@ -453,7 +459,7 @@ def validate(seg, cfg):
     if not isinstance(src, dict):
         return [f"segpack at {sp} must be a JSON object, got {type(src).__name__}"]
 
-    dp = draft_path(seg)
+    dp = draft_file if draft_file is not None else draft_path(seg)
     draft, err = _load_json(dp, "draft")
     if err:
         return [err]
@@ -616,27 +622,52 @@ def validate(seg, cfg):
     return errs
 
 
+def build_arg_parser():
+    parser = argparse.ArgumentParser(
+        description=(
+            "False-green coverage/content gate for segments/{seg}.draft.json "
+            "-- see this file's own module docstring."
+        ),
+    )
+    parser.add_argument("seg", help="Segment identifier.")
+    parser.add_argument(
+        "--candidate-file",
+        default=None,
+        metavar="PATH",
+        help=(
+            "When given, validate the draft at PATH instead of the canonical "
+            "segments/{seg}.draft.json -- lets the W5 codex_job.py driver "
+            "FULLY validate an isolated attempt artifact BEFORE promoting it "
+            "to canonical (1.4.7, #198). The segpack is STILL read from its "
+            "canonical path; the six checks run against the candidate. Omit "
+            "for today's canonical-path behavior."
+        ),
+    )
+    return parser
+
+
 def main():
-    if len(sys.argv) != 2:
-        print("usage: python3 validate_draft.py SEG", file=sys.stderr)
-        sys.exit(2)
-    seg = sys.argv[1]
+    args = build_arg_parser().parse_args()
+    seg = args.seg
     _seg_err = validate_seg(seg)
     if _seg_err:
         print(f"Error: {_seg_err}", file=sys.stderr)
         sys.exit(2)
 
+    draft_file = Path(args.candidate_file) if args.candidate_file else None
+
     profile = load_profile()
     cfg = ProfileConfig(profile)
 
-    errs = validate(seg, cfg)
+    errs = validate(seg, cfg, draft_file=draft_file)
     if errs:
         print(f"[{seg}] FAIL ({len(errs)} defects):")
         for e in errs:
             print("   -", e)
         sys.exit(1)
 
-    draft = json.loads(draft_path(seg).read_text(encoding="utf-8"))
+    resolved_draft_path = draft_file if draft_file is not None else draft_path(seg)
+    draft = json.loads(resolved_draft_path.read_text(encoding="utf-8"))
     print(
         f"[{seg}] OK  blocks={len(draft.get('blocks', {}))} "
         f"fn={len(draft.get('footnotes', {}))} verses={len(draft.get('verses', {}))} "

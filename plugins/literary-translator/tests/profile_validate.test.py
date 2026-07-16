@@ -26,10 +26,10 @@ design (every placeholder in it is an intentionally invalid sentinel).
 
 The target script is loaded directly from its real location under
 ``skills/literary-translator/assets/scripts/`` via ``importlib`` (it is not a
-package, and it is one of THREE plugin-path scripts in this plugin that are
-NEVER copied to a durable_root -- alongside ``validate_extraction.py`` and
-``glossary_preflight.py`` (1.4.0) -- always invoked from the plugin's own
-install path).
+package, and it is one of FOUR plugin-path scripts in this plugin that are
+NEVER copied to a durable_root -- alongside ``validate_extraction.py``,
+``glossary_preflight.py`` (1.4.0), and ``resolve_codex_companion.py`` (1.4.7)
+-- always invoked from the plugin's own install path).
 """
 
 import copy
@@ -144,6 +144,17 @@ def test_base_profile_is_schema_valid():
 
 def test_base_profile_has_no_placeholders():
     assert pv.scan_placeholders(make_base_profile()) == []
+
+
+def test_module_docstring_names_four_never_copied_scripts():
+    """1.4.7 copy-exclusion sweep: profile_validate.py's own module docstring
+    must name itself as ONE OF FOUR plugin-path scripts never copied to
+    durable_root, adding resolve_codex_companion.py (the W5 codex-companion
+    resolver) to the exception set. Guards the count from drifting out of sync
+    with SKILL.md's Step 0a copy-exclusion list."""
+    source = SCRIPT_PATH.read_text(encoding="utf-8")
+    assert "ONE OF FOUR SCRIPTS NEVER COPIED" in source
+    assert "resolve_codex_companion.py" in source
 
 
 # ---------------------------------------------------------------------------

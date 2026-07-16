@@ -4,32 +4,35 @@ duplicated seg-id safety helper (issue #63).
 This plugin's "no shared lib between self-contained scripts" convention
 (see tests/seg_safety_source_and_workflow.test.py, tests/
 seg_safety_segpack.test.py) means the path/shell-safety contract for a
-segment id -- `_SEG_ID_RE` + `validate_seg()` -- is hand-copied into EIGHT
+segment id -- `_SEG_ID_RE` + `validate_seg()` -- is hand-copied into TEN
 scripts. The seg_safety_*.test.py suite proves each copy accepts/rejects
 the right *values*, but nothing asserts the copies' *source text* stays in
 sync -- a silent hand-edit to one copy (e.g. narrowing/widening the
 allowlist regex in cache_key.py without mirroring the change everywhere
-else) would pass every existing behavioral test for the seven UNTOUCHED
+else) would pass every existing behavioral test for the nine UNTOUCHED
 scripts while quietly diverging. This file closes that gap.
 
-The 8 scripts (all under skills/literary-translator/assets/scripts/):
+The 10 scripts (all under skills/literary-translator/assets/scripts/):
 cache_key.py, draft_ready.py, draft_sha1.py, ledger_update.py,
-validate_draft.py, select_segments.py, segpack.py, review_artifact_check.py.
+validate_draft.py, select_segments.py, segpack.py, review_artifact_check.py,
+review_ready.py, codex_job.py. review_ready.py (1.2.0) was a PRE-EXISTING
+omission -- it carries the copy but `ALL_SCRIPTS` used to miss it; codex_job.py
+(1.4.7, #198) is the new W5 dispatch driver.
 
-Reality is NOT "all 8 byte-identical" -- three groups (verified by reading
+Reality is NOT "all 10 byte-identical" -- three groups (verified by reading
 every copy):
 
   1. `_SEG_ID_RE = re.compile(r"(?:FRONTBACK:)?[A-Za-z0-9_]+")` -- the
      load-bearing, path/shell-safety-critical allowlist literal -- IS
-     byte-identical across all 8. This is the highest-value invariant to
+     byte-identical across all 10. This is the highest-value invariant to
      guard: it is the actual security boundary (see
      tests/seg_safety_source_and_workflow.test.py's module docstring for
      the vulnerability this regex closes), and it should never need a
      legitimate per-script variant.
-  2. `validate_seg()`'s function body is byte-identical across SIX scripts
+  2. `validate_seg()`'s function body is byte-identical across EIGHT scripts
      (cache_key.py, draft_ready.py, draft_sha1.py, ledger_update.py,
-     validate_draft.py, segpack.py).
-  3. `select_segments.py`'s `validate_seg()` differs from that group of six
+     validate_draft.py, segpack.py, review_ready.py, codex_job.py).
+  3. `select_segments.py`'s `validate_seg()` differs from that group of eight
      by a DOCSTRING LINE-WRAP ONLY -- the same words, rewrapped across
      lines differently. Its executable logic is identical. Normalizing
      docstring whitespace (collapsing all runs of whitespace to a single
@@ -61,7 +64,7 @@ import pytest
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS_DIR = PLUGIN_ROOT / "skills" / "literary-translator" / "assets" / "scripts"
 
-# All 8 scripts carrying a copy of the seg-id safety contract.
+# All 10 scripts carrying a copy of the seg-id safety contract.
 ALL_SCRIPTS = [
     "cache_key.py",
     "draft_ready.py",
@@ -71,6 +74,8 @@ ALL_SCRIPTS = [
     "select_segments.py",
     "segpack.py",
     "review_artifact_check.py",
+    "review_ready.py",
+    "codex_job.py",
 ]
 
 # The canonical copy the function-body check compares everything else
@@ -232,6 +237,83 @@ def test_review_artifact_check_is_the_only_function_body_exemption():
         "review_artifact_check.py's validate_seg() now matches the canonical "
         "body exactly -- the FUNCTION_BODY_EXEMPT exemption is stale and "
         "should be removed so this script is covered by the strict check too."
+    )
+
+
+# ---------------------------------------------------------------------------
+# 3. codex_job.py must be a REAL cache_key.py PLUGIN_BUNDLE_MEMBERS entry
+#    (PLAN #198 §3), not merely listed in this test's ALL_SCRIPTS. The two are
+#    DISTINCT lists: ALL_SCRIPTS enumerates the scripts carrying the seg-id
+#    SAFETY copy; PLUGIN_BUNDLE_MEMBERS is the gating-hash membership tuple in
+#    cache_key.py (which includes non-copy-carriers like canon_validate.py /
+#    resume_setup.py + the two workflow templates, and EXCLUDES copy-carriers
+#    like select_segments.py). A named assertion here -- parsed from
+#    cache_key.py SOURCE, never a doc/test-list echo that could drift in
+#    lockstep -- catches the failure mode where codex_job.py is added to
+#    ALL_SCRIPTS but never registered as a bundle member, so an edit to the W5
+#    dispatch driver would silently NOT flip plugin_bundle_hash.
+# ---------------------------------------------------------------------------
+
+
+def _plugin_bundle_members() -> list[str]:
+    """The string entries of cache_key.py's `PLUGIN_BUNDLE_MEMBERS` tuple,
+    extracted from source via `ast` (never imported -- located by target name,
+    not line number)."""
+    source, tree = _parse("cache_key.py")
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Assign)
+            and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Name)
+            and node.targets[0].id == "PLUGIN_BUNDLE_MEMBERS"
+        ):
+            value = node.value
+            assert isinstance(value, (ast.Tuple, ast.List)), (
+                "cache_key.py PLUGIN_BUNDLE_MEMBERS must be a tuple/list literal"
+            )
+            members = []
+            for elt in value.elts:
+                assert isinstance(elt, ast.Constant) and isinstance(elt.value, str), (
+                    "every PLUGIN_BUNDLE_MEMBERS entry must be a string literal"
+                )
+                members.append(elt.value)
+            return members
+    raise AssertionError("no `PLUGIN_BUNDLE_MEMBERS = ...` assignment found in cache_key.py")
+
+
+def test_codex_job_is_a_plugin_bundle_member():
+    """PLAN #198 §3: codex_job.py (the W5 dispatch driver) must be registered
+    in cache_key.py's PLUGIN_BUNDLE_MEMBERS so an edit to it flips
+    plugin_bundle_hash -- NOT merely present in this test's ALL_SCRIPTS. This
+    asserts the REAL bundle membership (parsed from cache_key.py source), so
+    ALL_SCRIPTS and the actual bundle cannot silently drift apart."""
+    members = _plugin_bundle_members()
+    assert "codex_job.py" in members, (
+        "codex_job.py is in this test's ALL_SCRIPTS (it carries the seg-id "
+        "safety copy) but is NOT a cache_key.py PLUGIN_BUNDLE_MEMBERS entry -- "
+        "register it there so an edit to the W5 dispatch driver flips "
+        f"plugin_bundle_hash. Current members: {members}"
+    )
+
+
+def test_all_scripts_and_plugin_bundle_members_are_distinct_lists():
+    """The two lists encode DIFFERENT contracts and must stay distinct:
+    ALL_SCRIPTS = seg-id-safety-copy carriers; PLUGIN_BUNDLE_MEMBERS =
+    gating-hash members. They overlap but are not the same set. Concrete,
+    stable witnesses of the asymmetry pin that they are not conflated."""
+    all_scripts = set(ALL_SCRIPTS)
+    members = set(_plugin_bundle_members())
+    assert all_scripts != members, (
+        "ALL_SCRIPTS and PLUGIN_BUNDLE_MEMBERS unexpectedly became identical "
+        "-- they encode different contracts and must stay distinct lists."
+    )
+    assert "select_segments.py" in all_scripts and "select_segments.py" not in members, (
+        "select_segments.py carries the seg-safety copy (ALL_SCRIPTS) but is an "
+        "orchestration-bundle member, not a plugin-bundle member -- witness stale."
+    )
+    assert "canon_validate.py" in members and "canon_validate.py" not in all_scripts, (
+        "canon_validate.py is a plugin-bundle member but does not carry the "
+        "seg-safety copy (not in ALL_SCRIPTS) -- witness stale."
     )
 
 

@@ -68,7 +68,7 @@ except ImportError:  # pragma: no cover - exercised only when PyYAML is absent
 
 DURABLE_ROOT = Path(__file__).resolve().parents[1]
 
-# The nine scripts (+ two workflow templates) that make up plugin_bundle_hash.
+# The ten scripts (+ two workflow templates) that make up plugin_bundle_hash.
 # NEVER bootstrap_names.py/segpack.py (their own derivation_bundle_hash) and
 # NEVER the four orchestration-only scripts (orchestration_bundle_hash).
 # review_ready.py and resume_setup.py (1.2.0) join this list rather than
@@ -102,6 +102,7 @@ PLUGIN_BUNDLE_MEMBERS = (
     "review_ready.py",
     "resume_setup.py",
     "glossary_batch_plan.py",
+    "codex_job.py",
     "mass-translate-wf.template.js",
     "glossary-pass-wf.template.js",
 )

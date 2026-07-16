@@ -139,17 +139,21 @@ verse_policy:
     # top-level keys a profile author could set inconsistently.
 
 engine:
-  # translator and reviewer are HARDCODED to codex:codex-rescue in every shipped
-  # template (translate_TASK.template.md, review_TASK.template.md,
-  # mass-translate-wf.template.js) -- this is NOT a configurable swap point in v1.
+  # translator and reviewer are HARDCODED to codex in every shipped template
+  # (translate_TASK.template.md, review_TASK.template.md,
+  # mass-translate-wf.template.js) -- codex is the sole translate/review engine,
+  # launched by the shipped detached codex_job.py driver (1.4.7), not the old
+  # codex:codex-rescue forwarder; this is NOT a configurable swap point in v1.
   # The whole schema-validated, codex-only-translates/codex-only-reviews design is
-  # load-bearing on that specific agent's behavior; letting a profile silently
+  # load-bearing on that specific engine's behavior; letting a profile silently
   # point elsewhere would reintroduce exactly the failure mode this methodology
   # was built to eliminate.
   effort: high
-    # Applies to every ACCURACY-BEARING agent() call -- translate, review, fix, and glossary-pass batches. Does
-    # NOT apply to purely mechanical, no-judgment calls: the translator-readiness poll and the ledger-bookkeeping
-    # call are both effort:'low' by design.
+    # The accuracy-bearing effort tier. For W5 translate/review the codex_job.py driver passes it to codex as a
+    # real --effort high CLI flag (the plain-Claude dispatcher that launches the driver runs at effort:'low'); for
+    # the fix and the glossary-pass batches it is the effort:'high' on those agent() calls. Does NOT apply to
+    # purely mechanical, no-judgment calls: the translator-readiness poll and the ledger-bookkeeping call are both
+    # effort:'low' by design.
   max_fix_rounds: 4                       # cap before escalating to non_converged / blocked
   batch_agent_cap: 3500
     # A worst-case agent-call-count ESTIMATE for this batch is computed before dispatch begins -- if the

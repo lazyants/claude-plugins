@@ -29,6 +29,18 @@ segments/{seg}.draft.json` (no target-language suffix — see
 [`ledger-and-resumability.md`](./ledger-and-resumability.md) for why the
 draft path is deliberately unsuffixed).
 
+**Candidate-file mode (1.4.7, #198).** `validate_draft.py` (and its siblings
+`draft_ready.py`/`review_ready.py`) accept an optional `--candidate-file <attempt>`
+that overrides `draft_path(seg)`/`review_path(seg)` while still reading the segpack
+from the canonical location. The shipped `codex_job.py` driver uses it to run this
+full gate on an ISOLATED attempt artifact and only atomically promote it to the
+canonical path once it passes (validate-before-promote). Independently, #198 means
+this on-disk gate is now reliably REACHED at all: before the driver, the
+`codex:codex-rescue` forwarder backgrounded the codex job and returned a stub, so no
+`draft_path(seg)` was ever written and the gate ran on nothing (every segment
+timed out) — the driver owns the launch deterministically, so a real draft reaches
+this gate.
+
 ## The six checks
 
 Stated as invariants — not fr/ru-specific, not tied to any one language
@@ -306,7 +318,7 @@ python3 {{PLUGIN_ROOT}}/assets/scripts/validate_extraction.py \
   and 6 branch on, and where `body_ref_markers[]` is populated.
 - [`ledger-and-resumability.md`](./ledger-and-resumability.md) — the
   `draft_path(seg)`/`review_path(seg)` canonical-path invariants, and
-  `plugin_bundle_hash`'s inclusion of `validate_draft.py` as one of the six
+  `plugin_bundle_hash`'s inclusion of `validate_draft.py` as one of the ten
   scripts that directly shape translate/review/validation content.
 - [`engine-loop.md`](./engine-loop.md) — where this gate sits in the
   translate → gate → review → fix loop.

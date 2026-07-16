@@ -32,10 +32,21 @@ so there is exactly one place each rule can go stale.
 
 ## R1 — Role separation is a hard rule, never profile-configurable
 
-`codex:codex-rescue` is **hardcoded** as both translator and reviewer in every
+**codex** is **hardcoded** as both translator and reviewer in every
 shipped template (`translate_TASK.template.md`, `review_TASK.template.md`,
 `mass-translate-wf.template.js`). No profile field lets a project swap in a
 different engine for either role.
+
+For the W5 mass-translate loop the codex translator/reviewer is **launched by the
+shipped `codex_job.py` driver** (`assets/scripts/codex_job.py`), NOT by the
+`codex:codex-rescue` subagent forwarder. A plain-Claude drive agent launches the
+driver DETACHED (`nohup`); the driver runs `codex-companion.mjs task --background`
+to a terminal state and, on success, **validates the isolated attempt artifact and
+only then atomically promotes** it to the canonical path (#198 — the forwarder
+backgrounded the job and returned a stub, so no artifact was ever written and every
+segment timed out). codex is still the sole translator/reviewer; Claude only
+drives/polls/fixes, never translates. (The glossary pass (R4) is the one codex work
+path that KEEPS the direct `codex:codex-rescue` call — it is out of #198's scope.)
 
 - **The translator ONLY translates.** It never reviews its own output beyond
   running the deterministic gate (`validate_draft.py`, see
@@ -77,9 +88,19 @@ different engine for either role.
   `review_path(seg) = segments/{seg}.review.json` from disk itself and apply
   every entry in its on-disk `findings[]` array. `review_ready.py` already
   token-validated this exact file fresh THIS round before the fix call was
-  ever dispatched, and it is not rewritten again until the NEXT round's
-  review dispatch, so this read is fresh and race-free. This closes the
-  review-artifact gate's residual risk for the fix step by a DIFFERENT
+  ever dispatched. In the SUPPORTED single-orchestrator obedient model the
+  review for `<seg>` round R is written once by its own detached
+  `codex_job.py --kind review` driver — not concurrently with the fixer's read —
+  so this read is race-free. OUTSIDE that model the guarantee is narrower:
+  `review_ready.py` reads `review.json` in-memory ONCE and checks only
+  schema + expected-token + current-`draft_sha1` (NOT content quality or writer
+  identity, unlike translate's `validate_draft`), so a schema-valid
+  same-token/current-hash FORGERY that is STABLE through acceptance can PASS (the
+  review-path disobedient-writer residual); a mutation after `review_ready`'s read
+  BEGINS and before it returns READY — or between READY and any later canonical
+  re-read to consume the verdict — is the mid-gate TOCTOU residual, and a rewrite
+  after the verdict is consumed is the post-accept residual (all §6, out of scope).
+  This closes the review-artifact gate's residual risk for the fix step by a DIFFERENT
   mechanism than the pre-1.3.6 design intended: not because there is no
   second on-disk artifact to drift against (there is — `revObj`'s own
   transcribed copy, still used for the gate's `--expected-file` and the
@@ -108,16 +129,21 @@ Translate → readiness poll → review/fix loop → confirming final review, in
 order, preserved from the proven reference; plugin additions are labeled in the
 steps below:
 
-1. `agent(translatePrompt(seg), {agentType: 'codex:codex-rescue', effort:'high'})`
-   — fire-and-forget, the DISPATCH half of the shared codex work-call
-   pattern (`references/workflow-schema-validation.md`); the translator
-   prompt itself instructs the agent to self-validate coverage via the
-   deterministic gate (`validate_draft.py`) before returning, and writes
+1. A plain-Claude **drive agent** (`effort: 'low'`, no `agentType`) launches the
+   shipped `codex_job.py --kind translate` driver DETACHED (`nohup`) and returns
+   `DISPATCHED <seg> <DISP>` — it does NOT itself translate. The driver runs codex
+   `task --background` (with `--effort high` as a real CLI flag), and on a completed
+   job **validates the isolated attempt** (`draft_ready.py`/`validate_draft.py` on
+   the `--candidate-file` attempt) and only then **atomically promotes** it to
    `draft_path(seg)` carrying a run-scoped `dispatch_token`. This is the one
-   deliberate exception to R7's "codex accuracy calls need a schema"
-   framing: the translate call is intentionally schema-less, gated instead
-   by file output plus `draft_ready.py`/`validate_draft.py` — see
+   deliberate exception to R7's "codex accuracy calls need a schema" framing: the
+   translate work is intentionally schema-less, gated instead by file output plus
+   the Workflow's own on-disk ACCEPT gate re-running `draft_ready.py`/
+   `validate_draft.py` on the CURRENT canonical — see
    `references/false-green-gate.md` and `references/workflow-schema-validation.md`.
+   (Before #198 this was a direct `agent({agentType:'codex:codex-rescue'})`
+   fire-and-forget call; the forwarder backgrounded codex and returned a stub, so
+   the artifact was never written — the driver now owns the launch deterministically.)
 2. A **low-effort wait/poll step** (`draft_ready.py --expect-token` in a
    bounded bash polling loop, called at `effort: 'low'`) blocks the review
    loop from starting until the async translator has actually delivered a
@@ -125,13 +151,17 @@ steps below:
    fix-agent from ever ending up authoring a missing translation, since
    "codex only translates" would otherwise be silently violated the moment a
    fix step ran against a nonexistent/partial/stale-run draft.
-3. Up to `engine.max_fix_rounds` rounds of **review point (dispatch → bounded
-   wait → schema-validated consume, `agentType: 'codex:codex-rescue'` on the
-   dispatch half only, `effort: 'high'`) → Claude fix (`effort: 'high'`, no
-   `agentType`) → re-review**, exiting early the moment a review reports
-   `clean && coverage_ok`. Each round's review point runs four functions in
-   sequence — `reviewDispatchPrompt` (codex, schema-less, writes
-   `review_path(seg)` with `dispatch_token`) → `reviewWaitPrompt` (Claude,
+3. Up to `engine.max_fix_rounds` rounds of **review point (detached-driver dispatch
+   → bounded wait → schema-validated consume; the DISPATCH half is now the
+   `codex_job.py --kind review` driver launched by a plain-Claude drive agent, NOT
+   an `agentType: 'codex:codex-rescue'` call — codex still reviews, launched via the
+   driver at `--effort high`) → Claude fix (`effort: 'high'`, no `agentType`) →
+   re-review**, exiting early the moment a review reports `clean && coverage_ok`.
+   Each round's review point runs four functions in sequence —
+   `reviewDispatchPrompt` (the drive agent that launches the detached
+   `codex_job.py --kind review` driver, schema-less; the driver validates the
+   isolated review attempt via `review_ready.py --candidate-file` before atomically
+   promoting `review_path(seg)` with `dispatch_token`) → `reviewWaitPrompt` (Claude,
    bounded poll) → `readReviewPrompt` (Claude, `schema: REVIEW_SCHEMA`) →
    `verifyReviewArtifactPrompt` (Claude, flat `schema: REVIEW_ARTIFACT_SCHEMA`) — see
    `references/orchestration-and-batching.md` for the exact call shapes.
@@ -206,14 +236,22 @@ fatal extraction preflight, not by an under-specified fan-out.
 
 ### Effort discipline
 
-**Every ACCURACY-BEARING agent's DISPATCH call in this loop uses
-`effort: 'high'`** — translate, `reviewDispatchPrompt`, `fixPrompt`, and
-glossary-pass `batchDispatchPrompt`. No such agent inherits a session-level
-xhigh/ultracode effort. This is both a literal requirement and the fix for a
-known `max_tokens` wedge on synthesis-heavy agent configs.
+**Every ACCURACY-BEARING codex work-call in this loop runs codex at high effort.**
+For W5 translate and review this is now `--effort high` passed to codex as a REAL
+CLI flag on the `codex_job.py` driver's `task` launch (the plain-Claude drive agent
+that launches the detached driver is itself `effort: 'low'` — it only dispatches, it
+does not translate/review). `fixPrompt` (plain Claude) and the glossary-pass
+`batchDispatchPrompt` (still `agentType: 'codex:codex-rescue'`) keep `effort: 'high'`
+as an agent option. No such call inherits a session-level xhigh/ultracode effort.
+This is both a literal requirement and the fix for a known `max_tokens` wedge on
+synthesis-heavy agent configs.
 
 The purely mechanical, no-judgment calls are deliberately `effort: 'low'` — this
 is **not** an oversight to be "fixed" to high:
+- every W5 translate/review **drive/dispatch** step (the plain-Claude agent that
+  writes the codex task-file and launches the detached `codex_job.py` driver, then
+  returns `DISPATCHED <seg> <DISP>`) — the accuracy-bearing effort lives on codex's
+  own `--effort high` flag, not on this dispatcher,
 - every WAIT/readiness poll (`waitPrompt`/`draft_ready.py`,
   `reviewWaitPrompt`/`review_ready.py`, `batchWaitPrompt`/
   `canon_validate.py --check-batch`),

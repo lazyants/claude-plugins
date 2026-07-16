@@ -2,18 +2,22 @@
 """review_ready.py -- readiness probe for the async codex reviewer's
 review.json artifact.
 
-NEW in 1.2.0, part of the #97/#88 hardening: review is now a fire-and-
-forget codex dispatch (reviewDispatchPrompt, schema-less, atomic write)
-followed by a bounded Claude poll of THIS script (reviewWaitPrompt) --
-mirroring translate's own established dispatch+bounded-poll discipline, so
-review no longer depends on a synchronous agent() return that a detached
-forwarder job could hang on indefinitely. See references/engine-loop.md
-and references/false-green-gate.md's sibling script, draft_ready.py, whose
+NEW in 1.2.0, part of the #97/#88 hardening; the review dispatch was
+rebuilt in 1.4.7 (#198): review is launched by the shipped codex_job.py
+driver -- a DETACHED (nohup) process that runs codex, validates codex's
+isolated attempt, and only then atomically promotes it to the canonical
+review.json -- followed by a bounded Claude poll of THIS script
+(reviewWaitPrompt). codex writes disk; its RETURN is not the verdict --
+this probe reading the promoted canonical review.json is. That mirrors
+translate's own driver+bounded-poll discipline, so review no longer
+depends on a synchronous agent() return that a detached forwarder job
+could hang on indefinitely. See references/engine-loop.md and
+references/false-green-gate.md's sibling script, draft_ready.py, whose
 role this script plays for review.json instead of draft.json.
 
 CLI:
 
-    python3 review_ready.py SEG --expect-token TOK
+    python3 review_ready.py SEG --expect-token TOK [--candidate-file PATH]
 
 Exit 0 = READY:
   1. segments/{seg}.review.json exists, parses as JSON, and validates
@@ -60,6 +64,7 @@ import re
 import subprocess
 import sys
 from pathlib import Path
+from typing import NoReturn
 
 try:
     import jsonschema
@@ -113,7 +118,7 @@ def review_path(seg):
     return SEGMENTS_DIR / f"{seg}.review.json"
 
 
-def _not_ready(seg, reason):
+def _not_ready(seg, reason) -> NoReturn:
     print(json.dumps({"ready": False, "reason": f"[{seg}] {reason}"}))
     sys.exit(1)
 
@@ -174,6 +179,20 @@ def build_arg_parser():
             "this is never READY."
         ),
     )
+    parser.add_argument(
+        "--candidate-file",
+        default=None,
+        metavar="PATH",
+        help=(
+            "When given, read the review artifact from PATH instead of the "
+            "canonical segments/{seg}.review.json -- lets the W5 codex_job.py "
+            "driver FULLY validate an isolated attempt BEFORE promoting it to "
+            "canonical (1.4.7, #198). draft_sha1.py {seg} STILL runs against "
+            "the CURRENT canonical draft (the review must reference the "
+            "on-disk draft); schema + --expect-token run against the "
+            "candidate. Omit for today's canonical-path behavior."
+        ),
+    )
     return parser
 
 
@@ -186,7 +205,7 @@ def main():
         print(f"Error: {seg_err}", file=sys.stderr)
         sys.exit(2)
 
-    rpath = review_path(seg)
+    rpath = Path(args.candidate_file) if args.candidate_file else review_path(seg)
     if not rpath.exists() or rpath.stat().st_size == 0:
         _not_ready(seg, f"review file absent/empty ({rpath})")
 
@@ -196,7 +215,7 @@ def main():
         _not_ready(seg, f"review not valid JSON ({exc})")
 
     schema, err = _load_review_schema()
-    if err is not None:
+    if err is not None or schema is None:
         _not_ready(seg, f"internal error: {err}")
 
     validator_cls = jsonschema.validators.validator_for(schema)

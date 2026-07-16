@@ -1,69 +1,54 @@
-"""tests/bounded_poll_present.test.py -- regression-lock for the #97 fix:
-CONTRACT-1.2.0-reliability.md §7/§8's shared codex work-call pattern
-("DISPATCH -- codex (agentType:'codex:codex-rescue' pinned), schema-less,
-fire-and-forget ... WAIT -- Claude, low-effort, bounded bash poll
-(translate's waitPrompt shape) of a readiness script ...").
+"""tests/bounded_poll_present.test.py -- regression-lock across two eras:
 
-Before 1.2.0, only translate's dispatch was bounded-polled; review and
-glossary-batch were bare unbounded `await agent()` codex calls -- a
-forwarder-detached job hanging on either wedged the whole run (#97). The
-1.2.0 fix moved review and glossary onto translate's own
-dispatch-then-bounded-poll discipline. This file locks THREE
-dispatch/wait pairs across both templates, grep-driven and per-symbol
-(this suite's own established style for a cross-cutting invariant like
-this one -- see review_prompt_schema_drift.test.py's hand-rolled JS
-object-literal parser for the same philosophy applied to schema
-literals):
+  1. the #97/1.2.0 reliability fix (review + glossary-batch each gained
+     translate's dispatch-then-bounded-poll discipline), and
+  2. the #198/1.4.7 fix (W5 mass-translate translate AND review dispatch
+     stop backgrounding codex from a Workflow agent turn -- they now DRIVE
+     the DETACHED codex_job.py driver via a plain-Claude dispatcher).
 
-  translate      : translatePrompt      (mass-translate-wf.template.js, dispatched in translateStage)
-                   <-> waitPrompt        (mass-translate-wf.template.js, polled in reviewFixLoop)     -- draft_ready.py
-  review         : reviewDispatchPrompt (mass-translate-wf.template.js, dispatched in callReviewDispatch)
-                   <-> reviewWaitPrompt  (mass-translate-wf.template.js, polled in getVerifiedReview)  -- review_ready.py
-  glossary batch : batchDispatchPrompt  (glossary-pass-wf.template.js, dispatched in batchStep)
-                   <-> batchWaitPrompt   (glossary-pass-wf.template.js, polled in batchStep)           -- canon_validate.py --check-batch
+GLOSSARY is deliberately UNCHANGED by #198 (glossary-pass-wf.template.js
+still dispatches codex fire-and-forget); only mass-translate's translate/
+review pairs move to the driver model.
 
-For each pair this file asserts, straight off the REAL shipped template
-source (never a reimplementation/guess about its content):
-  (a) the dispatch's own `agent()` call site sets `agentType` to a codex
-      value AND carries NO `schema` option (schema-less, fire-and-forget,
-      CONTRACT §7 step 1);
-  (b) the paired WAIT prompt-builder function's own generated text
-      contains a bounded `for i in $(seq 1 N)` poll loop invoking the
-      correct readiness script, and its OWN `agent()` call site carries
-      NO `agentType` (a plain Claude call, never a second codex dispatch).
+## mass-translate (#198): the driver-dispatch model this file now locks
 
-Plus one EXEMPTION positive control: `callFix`/`fixPrompt` (CONTRACT §8:
-"Keep callFix/fixPrompt as-is") is a direct, unbounded Claude `await
-agent()` with no agentType and, deliberately, NO bounded-poll companion
--- the #97 restructure explicitly does NOT touch it (a forward-detached
-job can't happen on a Claude call; a sha-changed readiness gate would
-false-time-out a no-op fix). This test proves the pattern-matching in
-this file is genuinely discriminating on `agentType`, not flagging every
-bare `await agent(...)` call site indiscriminately.
+Each of translate and review is a THREE-piece shape:
 
-translate's own pair is a POSITIVE CONTROL: it was already bounded
-pre-1.2.0 (only review/glossary needed the #97 restructure), so it must
-be GREEN against the file as it stands today regardless of whether
-Owners A/B/C's own 1.2.0 changes have landed yet -- if it is somehow NOT
-green, that is a self-inconsistency in THIS test file, not a
-pending-owner situation.
+  * a plain-Claude DISPATCHER call site (translateStage / callReviewDispatch)
+    -- `agent(<drive-prompt>, {...})` with NO `agentType` (never a codex
+    dispatch) and NO `schema`, whose return is parsed ONLY to capture the
+    per-dispatch DISP nonce via `parseDisp` (anchored grammar);
+  * a DRIVE prompt-builder (translateDrivePrompt / reviewDrivePrompt) whose
+    generated bash generates DISP, writes the codex task-file, and launches
+    `codex_job.py` DETACHED (`nohup ... </dev/null >/dev/null 2>&1 &`, NO
+    `setsid`, NO external `timeout` binary), returning `DISPATCHED <seg>
+    <DISP>` immediately (codex writes disk, its return is not the verdict);
+  * a WAIT prompt-builder (waitPrompt / reviewWaitPrompt) whose generated
+    bash is an ELAPSED-TIME poll (`end=$((SECONDS + WAIT_BOUND_SEC))`, NOT
+    the old `for i in $(seq 1 N)` loop) that ACCEPTs by re-validating the
+    CANONICAL directly (translate: draft_ready.py --expect-token AND
+    validate_draft.py; review: review_ready.py --expect-token), whose OWN
+    `agent()` call site (in reviewFixLoop / getVerifiedReview) is a plain
+    Claude call (no agentType).
 
-Text-extraction approach (documented so the intent is auditable, not just
-the regexes): every prompt-builder / call-wrapper function in both
-templates is a FLAT, top-level, non-nested `function name(...) { ... }`
-(or `async function`) declaration -- no closure here ever wraps another
-named top-level function -- so `extract_function_body()` below slices a
-function's full text by LINE BOUNDARY (from its own declaration to the
-next top-level function declaration), never by brace-depth counting
-(which would otherwise have to account for every literal '{'/'}'
-appearing inside this file's plain-JS string-concatenation prompt text --
-these templates deliberately avoid backtick template literals for
-exactly this reason, per mass-translate-wf.template.js's own header
-comment). Likewise, every `agent()` call site in both templates is
-formatted as a multi-line `agent(promptBuilderCall, {\\n ...options...\\n
-})` block whose options object is FLAT (no options object anywhere in
-either template nests a '{'/'}'), so a non-greedy regex up to the first
-closing '}' is exact.
+On origin/main (old fire-and-forget shape) the mass-translate assertions
+below FAIL -- there is no translateDrivePrompt/reviewDrivePrompt, the
+dispatch call sites carry `agentType: "codex..."`, and the wait polls are
+`for i in $(seq 1 45)` loops -- so this file is a genuine RED-before-green
+regression-catcher for #198. The glossary + callFix cases stay GREEN
+regardless (unchanged by #198), acting as positive controls that this
+file's pattern-matching still discriminates.
+
+## Text-extraction approach (unchanged from the 1.2.0 file)
+
+Every prompt-builder / call-wrapper in both templates is a FLAT top-level
+`function name(...) { ... }` (or `async function`) declaration, so
+`extract_function_body()` slices a function's full text by LINE BOUNDARY
+(its own declaration to the next top-level function declaration), never by
+brace-depth counting (these templates avoid backtick template literals for
+exactly this reason). Every `agent()` call site is a multi-line
+`agent(promptBuilderCall, {\\n ...options...\\n })` block whose options
+object is FLAT, so a non-greedy regex up to the first closing '}' is exact.
 """
 import re
 from pathlib import Path
@@ -93,8 +78,10 @@ def extract_function_body(source, name):
     """Slice one top-level `function name(...) {...}` (or `async
     function`) declaration's full text, from its own declaration line up
     to (but not including) the NEXT top-level function declaration in the
-    file, or EOF. See module docstring's 'Text-extraction approach' for
-    why a line-boundary slice is exact here without brace-depth matching."""
+    file, or EOF. The slice starts at `function` -- the LEADING comment is
+    excluded; a TRAILING comment (the next function's own lead comment) is
+    included, so negative string checks below target a specific extracted
+    LINE, never the whole slice."""
     pattern = re.compile(rf"^(?:async\s+)?function\s+{re.escape(name)}\s*\(", re.MULTILINE)
     m = pattern.search(source)
     assert m is not None, f"function {name!r} not found in template source"
@@ -142,8 +129,46 @@ def has_schema(options_text):
     return re.search(r"\bschema\s*:", options_text) is not None
 
 
-def has_bounded_poll_loop(body):
+def has_seq_poll_loop(body):
+    """The OLD `for i in $(seq 1 N)` bounded loop -- glossary still uses it;
+    #198's mass-translate wait polls must NOT."""
     return re.search(r"for\s+i\s+in\s+\$\(seq\s+1\s+\d+\)", body) is not None
+
+
+def has_elapsed_poll_loop(body):
+    """#198's elapsed-time poll: `end=$((SECONDS + <bound>)); while true; ...`."""
+    return re.search(r"end=\$\(\(SECONDS\s*\+", body) is not None and "while true" in body
+
+
+def line_containing(body, needle):
+    """The single source LINE of `body` that contains `needle` (asserts
+    exactly one -- so negative substring checks below target that precise
+    line, not an incidental mention in a neighbouring comment)."""
+    hits = [ln for ln in body.splitlines() if needle in ln]
+    assert len(hits) == 1, (
+        f"expected exactly one line containing {needle!r}, found {len(hits)}:\n"
+        + "\n".join(hits[:6])
+    )
+    return hits[0]
+
+
+# Numeric driver-timing consts, read straight off the template so the
+# "elapsed bound >= CODEX_DEADLINE_SEC" check is verified against the real
+# declared values, never a hardcoded guess.
+def _int_const(source, name):
+    m = re.search(rf"^const\s+{re.escape(name)}\s*=\s*(\d+)\s*;", source, re.MULTILINE)
+    assert m is not None, f"expected `const {name} = <int>;` in template source"
+    return int(m.group(1))
+
+
+def resolved_wait_bound(source):
+    """WAIT_BOUND_SEC is declared as the SUM of the three timing consts --
+    recompute it here from their real declared values."""
+    return (
+        _int_const(source, "CODEX_DEADLINE_SEC")
+        + _int_const(source, "CODEX_FINALIZE_BUDGET_SEC")
+        + _int_const(source, "CODEX_WAIT_GRACE_SEC")
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -160,8 +185,11 @@ def test_regression_catcher_helpers_actually_discriminate():
     assert has_schema('schema: REVIEW_SCHEMA, effort: "low"') is True
     assert has_schema('effort: "low", phase: "Ledger"') is False
 
-    assert has_bounded_poll_loop("for i in $(seq 1 45); do true; done") is True
-    assert has_bounded_poll_loop('return await agent(fixPrompt(seg, round, revObj), {});') is False
+    assert has_seq_poll_loop("for i in $(seq 1 45); do true; done") is True
+    assert has_seq_poll_loop("end=$((SECONDS + 3450)); while true; do true; done") is False
+
+    assert has_elapsed_poll_loop("end=$((SECONDS + 3450)); while true; do true; done") is True
+    assert has_elapsed_poll_loop("for i in $(seq 1 45); do true; done") is False
 
     synthetic = (
         "function alpha(x) {\n  return x + 1;\n}\n\n"
@@ -176,25 +204,98 @@ def test_regression_catcher_helpers_actually_discriminate():
     with pytest.raises(AssertionError):
         extract_function_body(synthetic, "does_not_exist")
 
+    assert line_containing("a foo b\nc bar d", "foo") == "a foo b"
+    with pytest.raises(AssertionError):
+        line_containing("foo\nfoo", "foo")
+
 
 # ---------------------------------------------------------------------------
-# translate pair -- POSITIVE CONTROL, already bounded pre-1.2.0.
+# #198 -- parseDisp anchored grammar (HIGH-3). The captured DISP is spliced
+# into the wait command's shell path, so it MUST be validated in JS first.
 # ---------------------------------------------------------------------------
 
-def test_translate_dispatch_is_codex_and_schema_less():
-    body = extract_function_body(MASS_TRANSLATE_SOURCE, "translateStage")
-    options = extract_agent_call_options(body, "translatePrompt(")
-    assert is_codex_dispatch(options), f"translate dispatch must be codex-pinned: {options}"
-    assert not has_schema(options), f"translate dispatch must be schema-less (fire-and-forget): {options}"
-
-
-def test_translate_wait_is_a_bounded_poll_of_draft_ready():
-    wait_body = extract_function_body(MASS_TRANSLATE_SOURCE, "waitPrompt")
-    assert has_bounded_poll_loop(wait_body), (
-        f"waitPrompt must contain a bounded `for i in $(seq 1 N)` poll:\n{wait_body}"
+def test_parse_disp_uses_anchored_exact_grammar():
+    body = extract_function_body(MASS_TRANSLATE_SOURCE, "parseDisp")
+    # Whole-return anchor + capture restricted to the DISP generator alphabet
+    # (uuidgen hex+hyphens / $RANDOM digits).
+    assert "^DISPATCHED " in body, "parseDisp must anchor the whole return on ^DISPATCHED"
+    assert "([0-9A-Fa-f][0-9A-Fa-f-]*)$" in body, (
+        "parseDisp's capture group must be restricted to the shell-safe DISP "
+        "alphabet and anchored at end-of-input"
     )
-    assert "draft_ready.py" in wait_body
+    assert "escapeRegExp(seg)" in body, "the expected seg must be regex-escaped into the anchor"
 
+
+def test_segs_uniqueness_guard_present_before_pipeline():
+    """#198 (BLOCKER r10) source-lock, complementing the behavioural throw
+    test in mass_translate_driver_smoke.test.py: the Set-based duplicate-seg
+    throw sits AFTER the SEG_ID_RE syntax loop and BEFORE `pipeline(`."""
+    guard = "duplicate segment id"
+    assert guard in MASS_TRANSLATE_SOURCE, "the SEGS uniqueness guard throw must be present"
+    guard_pos = MASS_TRANSLATE_SOURCE.index(guard)
+    seg_id_re_pos = MASS_TRANSLATE_SOURCE.index("const SEG_ID_RE =")
+    pipeline_pos = MASS_TRANSLATE_SOURCE.index("await pipeline(SEGS")
+    assert seg_id_re_pos < guard_pos < pipeline_pos, (
+        "the uniqueness guard must sit after the SEG_ID_RE syntax loop and "
+        "before pipeline(SEGS, ...)"
+    )
+    assert "new Set()" in MASS_TRANSLATE_SOURCE, "the guard must be Set-based"
+
+
+# ---------------------------------------------------------------------------
+# mass-translate TRANSLATE pair (#198) -- driver dispatch + elapsed poll.
+# ---------------------------------------------------------------------------
+
+def test_translate_dispatch_is_plain_claude_drive_no_codex_no_schema():
+    body = extract_function_body(MASS_TRANSLATE_SOURCE, "translateStage")
+    options = extract_agent_call_options(body, "translateDrivePrompt(")
+    assert not is_codex_dispatch(options), (
+        f"#198: translate dispatch must be a plain-Claude DRIVE (no agentType), got: {options}"
+    )
+    assert not has_schema(options), f"translate drive must be schema-less: {options}"
+    assert "parseDisp(" in body, (
+        "translateStage must parse the DISPATCHED <seg> <DISP> return via parseDisp"
+    )
+
+
+def test_translate_drive_prompt_launches_detached_codex_job():
+    body = extract_function_body(MASS_TRANSLATE_SOURCE, "translateDrivePrompt")
+    assert "DISP=$(uuidgen" in body, "drive prompt must generate a per-dispatch DISP nonce"
+    assert 'echo "DISPATCHED ' in body or "DISPATCHED " in body, (
+        "drive prompt must echo/return DISPATCHED <seg> <DISP>"
+    )
+    launch = line_containing(body, "codex_job.py --kind translate")
+    assert "nohup " in launch, "the driver must be launched DETACHED via nohup"
+    assert "--companion '" in launch and "COMPANION" in launch, (
+        "COMPANION must be spliced as a SINGLE-QUOTED bash argument"
+    )
+    assert "--disp " in launch, "the launch must pass --disp"
+    assert "</dev/null >/dev/null 2>&1 &" in launch, "the launch must fully detach and background"
+    assert "setsid" not in launch, "no setsid (stock macOS lacks it)"
+    assert "timeout" not in launch and "gtimeout" not in launch, "no external timeout binary"
+
+
+def test_translate_wait_is_elapsed_canonical_gate_poll():
+    wait_body = extract_function_body(MASS_TRANSLATE_SOURCE, "waitPrompt")
+    assert has_elapsed_poll_loop(wait_body), (
+        f"#198: waitPrompt must be an elapsed-time poll, not a seq loop:\n{wait_body}"
+    )
+    assert not has_seq_poll_loop(wait_body), "the old `for i in $(seq 1 N)` loop must be gone"
+
+    poll = line_containing(wait_body, "end=$((SECONDS +")
+    assert "draft_ready.py" in poll and "--expect-token" in poll, (
+        "translate ACCEPT must run draft_ready.py --expect-token on the canonical"
+    )
+    assert "validate_draft.py" in poll, (
+        "translate ACCEPT must ALSO run validate_draft.py (the six quality checks)"
+    )
+    assert "[ $SECONDS -ge $end ] && break" in poll, "gate-then-deadline-break inside the loop"
+    assert "timeout" not in poll and "gtimeout" not in poll, "no external timeout binary in the poll"
+    assert "WAIT_BOUND_SEC" in poll, "the elapsed bound must be the WAIT_BOUND_SEC const"
+    # fail-fast is the DISP-named sentinel, present in the body's failFast const
+    assert ".codex_failed." in wait_body, "the fail-fast sentinel presence check must be present"
+
+    # the wait POLL's own agent() call site (in reviewFixLoop) is a plain Claude call
     wrapper = extract_function_body(MASS_TRANSLATE_SOURCE, "reviewFixLoop")
     wait_call_options = extract_agent_call_options(wrapper, "waitPrompt(")
     assert not is_codex_dispatch(wait_call_options), (
@@ -203,22 +304,50 @@ def test_translate_wait_is_a_bounded_poll_of_draft_ready():
 
 
 # ---------------------------------------------------------------------------
-# review pair -- NEW in 1.2.0 (#97 restructure).
+# mass-translate REVIEW pair (#198) -- driver dispatch + elapsed poll.
 # ---------------------------------------------------------------------------
 
-def test_review_dispatch_is_codex_and_schema_less():
+def test_review_dispatch_is_plain_claude_drive_no_codex_no_schema():
     body = extract_function_body(MASS_TRANSLATE_SOURCE, "callReviewDispatch")
-    options = extract_agent_call_options(body, "reviewDispatchPrompt(")
-    assert is_codex_dispatch(options), f"review dispatch must be codex-pinned: {options}"
-    assert not has_schema(options), f"review dispatch must be schema-less (fire-and-forget): {options}"
-
-
-def test_review_wait_is_a_bounded_poll_of_review_ready():
-    wait_body = extract_function_body(MASS_TRANSLATE_SOURCE, "reviewWaitPrompt")
-    assert has_bounded_poll_loop(wait_body), (
-        f"reviewWaitPrompt must contain a bounded `for i in $(seq 1 N)` poll:\n{wait_body}"
+    options = extract_agent_call_options(body, "reviewDrivePrompt(")
+    assert not is_codex_dispatch(options), (
+        f"#198: review dispatch must be a plain-Claude DRIVE (no agentType), got: {options}"
     )
-    assert "review_ready.py" in wait_body
+    assert not has_schema(options), f"review drive must be schema-less: {options}"
+    assert "parseDisp(" in body, (
+        "callReviewDispatch must parse the DISPATCHED <seg> <DISP> return via parseDisp"
+    )
+
+
+def test_review_drive_prompt_launches_detached_codex_job():
+    body = extract_function_body(MASS_TRANSLATE_SOURCE, "reviewDrivePrompt")
+    assert "DISP=$(uuidgen" in body, "drive prompt must generate a per-dispatch DISP nonce"
+    launch = line_containing(body, "codex_job.py --kind review")
+    assert "nohup " in launch, "the driver must be launched DETACHED via nohup"
+    assert "--companion '" in launch and "COMPANION" in launch, (
+        "COMPANION must be spliced as a SINGLE-QUOTED bash argument"
+    )
+    assert "--disp " in launch, "the launch must pass --disp"
+    assert "</dev/null >/dev/null 2>&1 &" in launch, "the launch must fully detach and background"
+    assert "setsid" not in launch, "no setsid"
+    assert "timeout" not in launch and "gtimeout" not in launch, "no external timeout binary"
+
+
+def test_review_wait_is_elapsed_canonical_gate_poll():
+    wait_body = extract_function_body(MASS_TRANSLATE_SOURCE, "reviewWaitPrompt")
+    assert has_elapsed_poll_loop(wait_body), (
+        f"#198: reviewWaitPrompt must be an elapsed-time poll, not a seq loop:\n{wait_body}"
+    )
+    assert not has_seq_poll_loop(wait_body), "the old `for i in $(seq 1 N)` loop must be gone"
+
+    poll = line_containing(wait_body, "end=$((SECONDS +")
+    assert "review_ready.py" in poll and "--expect-token" in poll, (
+        "review ACCEPT must run review_ready.py --expect-token on the canonical"
+    )
+    assert "[ $SECONDS -ge $end ] && break" in poll, "gate-then-deadline-break inside the loop"
+    assert "timeout" not in poll and "gtimeout" not in poll, "no external timeout binary in the poll"
+    assert "WAIT_BOUND_SEC" in poll, "the elapsed bound must be the WAIT_BOUND_SEC const"
+    assert ".codex_failed." in wait_body, "the fail-fast sentinel presence check must be present"
 
     wrapper = extract_function_body(MASS_TRANSLATE_SOURCE, "getVerifiedReview")
     wait_call_options = extract_agent_call_options(wrapper, "reviewWaitPrompt(")
@@ -227,8 +356,24 @@ def test_review_wait_is_a_bounded_poll_of_review_ready():
     )
 
 
+def test_mass_translate_wait_bound_is_at_least_the_codex_deadline():
+    """The elapsed bound WAIT_BOUND_SEC = DEADLINE + FINALIZE_BUDGET +
+    WAIT_GRACE, so the Workflow poll never gives up before the driver can
+    promote/finalize -- must be >= CODEX_DEADLINE_SEC."""
+    bound = resolved_wait_bound(MASS_TRANSLATE_SOURCE)
+    deadline = _int_const(MASS_TRANSLATE_SOURCE, "CODEX_DEADLINE_SEC")
+    assert bound >= deadline, f"WAIT_BOUND_SEC ({bound}) must be >= CODEX_DEADLINE_SEC ({deadline})"
+    # WAIT_BOUND_SEC itself is declared as the additive expression (never a
+    # stale magic literal that could drift below the deadline).
+    assert re.search(
+        r"const\s+WAIT_BOUND_SEC\s*=\s*CODEX_DEADLINE_SEC\s*\+\s*"
+        r"CODEX_FINALIZE_BUDGET_SEC\s*\+\s*CODEX_WAIT_GRACE_SEC\s*;",
+        MASS_TRANSLATE_SOURCE,
+    ), "WAIT_BOUND_SEC must be the additive expression, not a hardcoded number"
+
+
 # ---------------------------------------------------------------------------
-# glossary batch pair -- NEW in 1.2.0 (#97 restructure, glossary side).
+# glossary batch pair -- UNCHANGED by #198 (still codex fire-and-forget).
 # ---------------------------------------------------------------------------
 
 def test_glossary_batch_dispatch_is_codex_and_schema_less():
@@ -240,7 +385,7 @@ def test_glossary_batch_dispatch_is_codex_and_schema_less():
 
 def test_glossary_batch_wait_is_a_bounded_poll_of_check_batch():
     wait_body = extract_function_body(GLOSSARY_SOURCE, "batchWaitPrompt")
-    assert has_bounded_poll_loop(wait_body), (
+    assert has_seq_poll_loop(wait_body), (
         f"batchWaitPrompt must contain a bounded `for i in $(seq 1 N)` poll:\n{wait_body}"
     )
     assert "canon_validate.py" in wait_body and "--check-batch" in wait_body
@@ -253,15 +398,16 @@ def test_glossary_batch_wait_is_a_bounded_poll_of_check_batch():
 
 
 # ---------------------------------------------------------------------------
-# EXEMPTION positive control: callFix/fixPrompt.
+# EXEMPTION positive control: callFix/fixPrompt (unchanged by #97 AND #198).
 # ---------------------------------------------------------------------------
 
 def test_callfix_is_exempt_from_bounded_poll_requirement():
-    """CONTRACT §8: 'Keep callFix/fixPrompt as-is'. Proves this file's
-    pattern-matching genuinely discriminates on agentType=codex, rather
-    than flagging every bare `await agent(...)` call site as needing a
-    poll companion -- callFix's own dispatch has no agentType (a plain
-    Claude call) and fixPrompt's own body deliberately has no poll loop."""
+    """CONTRACT §8: 'Keep callFix/fixPrompt as-is'. callFix's dispatch has no
+    agentType (a plain, unbounded, blocking Claude call) and fixPrompt's body
+    deliberately has no poll loop -- a forward-detached job can't happen on a
+    Claude call, and a sha-changed readiness gate would false-time-out a
+    no-op fix. Proves this file discriminates on agentType, not by flagging
+    every bare `await agent(...)`."""
     body = extract_function_body(MASS_TRANSLATE_SOURCE, "callFix")
     options = extract_agent_call_options(body, "fixPrompt(")
     assert "agentType" not in options, (
@@ -269,27 +415,26 @@ def test_callfix_is_exempt_from_bounded_poll_requirement():
     )
 
     fix_prompt_body = extract_function_body(MASS_TRANSLATE_SOURCE, "fixPrompt")
-    assert not has_bounded_poll_loop(fix_prompt_body), (
-        "fixPrompt must NOT itself contain a bounded poll loop -- it is a "
-        "direct, unbounded, blocking Claude call, deliberately NOT "
-        "restructured by the #97 fix (see this file's module docstring)"
+    assert not has_seq_poll_loop(fix_prompt_body) and not has_elapsed_poll_loop(fix_prompt_body), (
+        "fixPrompt must NOT itself contain a poll loop -- it is a direct, "
+        "unbounded, blocking Claude call, deliberately NOT restructured"
     )
 
 
 # ---------------------------------------------------------------------------
-# Comprehensive sweep -- every codex-agentType agent() call site found
-# ANYWHERE in either template (not just the three named pairs above) is
-# schema-less, and the exact SET of codex call sites is exactly the
-# expected two (mass-translate) / one (glossary) -- a regression lock
-# against a future codex call site being added without this file noticing.
+# Comprehensive sweep -- #198 makes mass-translate carry ZERO codex-agentType
+# dispatches (all codex work goes through the detached driver); glossary
+# still has exactly its one batch dispatch. A regression lock against a
+# future codex-agentType dispatch being re-introduced into mass-translate.
 # ---------------------------------------------------------------------------
 
-def test_mass_translate_codex_dispatch_set_is_exactly_translate_and_review():
+def test_mass_translate_has_no_codex_agenttype_dispatches():
     calls = find_all_agent_calls(MASS_TRANSLATE_SOURCE)
     codex_builders = {name for name, opts in calls if is_codex_dispatch(opts)}
-    assert codex_builders == {"translatePrompt", "reviewDispatchPrompt"}, (
-        f"expected exactly the translate+review codex work-calls in "
-        f"mass-translate-wf.template.js, got {codex_builders}"
+    assert codex_builders == set(), (
+        f"#198: mass-translate-wf.template.js must carry NO codex-agentType "
+        f"agent() dispatches (translate/review now DRIVE the detached "
+        f"codex_job.py driver), got {codex_builders}"
     )
 
 

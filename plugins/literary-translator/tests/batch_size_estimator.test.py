@@ -27,14 +27,18 @@ approved plan's "Estimator -- pinned" note). This is the REAL, landed shape
 This REPLACES the pre-1.2.0 `1 + N*(6 + 3*MAXFIX)` formula: the review step
 was restructured (`getVerifiedReview`) from a single `review:*`/
 `artifact-check:*` call pair per round into a four-call review POINT
-(`review-dispatch:*` codex fire-and-forget, `review-wait:*` bounded poll of
+(`review-dispatch:*` -- since #198 a plain-Claude DRIVE of the detached
+`codex_job.py` review job, not a codex fire-and-forget agent call, but still
+exactly ONE call that returns immediately -- `review-wait:*` bounded poll of
 `review_ready.py`, `review-read:*`, `artifact-check:*`) with a single SHARED
 retry budget covering the (read, check) pair together -- never two
-independent retries. The batch-level term dropped from N-dependent
-housekeeping to exactly **1** (the single `merge-ledger`/`mergeLedgerPrompt`
-call) now that `{{RUN_ID}}`-scoped `dispatch_token`s make every fire-and-
-forget artifact fresh-by-construction, removing the old batch pre-clean call
-entirely.
+independent retries. The #198 driver-dispatch reshape is call-count-neutral:
+the drive replaces the old dispatch 1:1 and the wait stays 1 call, so the
+`10 + 7*MAXFIX` per-segment term is UNCHANGED. The batch-level term dropped
+from N-dependent housekeeping to exactly **1** (the single `merge-ledger`/
+`mergeLedgerPrompt` call) now that `{{RUN_ID}}`-scoped `dispatch_token`s make
+every driver-promoted artifact fresh-by-construction, removing the old batch
+pre-clean call entirely.
 
 Per-segment worst case, re-derived from the real `getVerifiedReview`/
 `runRound`/`reviewFixLoop` functions (mirrored in the template's own comment
@@ -43,7 +47,8 @@ directly above `estimatedCalls`):
   - every segment, unconditionally: 3 fixed calls (`ledger:in_progress:*`
     write, `translate:*` dispatch, `wait:*` translate-readiness poll).
   - a "review point" -- one call to `getVerifiedReview` -- is:
-    `review-dispatch:*` (1, codex, fire-and-forget, return value discarded)
+    `review-dispatch:*` (1, since #198 a plain-Claude DRIVE of the detached
+    codex_job.py review job -- its return is parsed only to capture DISP)
     + `review-wait:*` (1, bounded poll; a non-READY result ends the point
     immediately as `blocked/review-timeout`, no read/check ever attempted)
     + `readAndCheck(isRetry=false)`: `review-read:*` (1); if that reads back
@@ -284,6 +289,12 @@ def instantiate_mass_translate(
     text = text.replace("{{BATCH_AGENT_CAP}}", str(int(batch_agent_cap)))
     escaped_verse_block = json.dumps(verse_policy_instruction_block)[1:-1]
     text = text.replace("{{VERSE_POLICY_INSTRUCTION_BLOCK}}", escaped_verse_block)
+    # #198 -- CODEX_COMPANION_PATH_JSON: a strict json.dumps JS string literal
+    # (quotes included; the token sits OUTSIDE quotes in the template). This
+    # test's mock never launches the driver, so the exact value is irrelevant
+    # to the call-counting here -- it only needs to resolve so the "{{ not in
+    # text" assertion below (no unresolved token) still holds.
+    text = text.replace("{{CODEX_COMPANION_PATH_JSON}}", json.dumps("/fixture/codex/codex-companion.mjs"))
     assert "{{" not in text, "fixture instantiation left an unresolved token -- fix the fixture, not the assertion below"
     return text
 
@@ -399,9 +410,15 @@ async function agent(promptText, opts) {
   }
 
   const seg = segFromLabel(label);
-  if (label.indexOf("translate:") === 0) return "DONE " + seg;
+  // #198 -- translate/review dispatch are now plain-Claude DRIVES of the
+  // detached codex_job.py driver; the dispatcher agent returns
+  // `DISPATCHED <seg> <DISP>` (parsed by translateStage/callReviewDispatch
+  // via parseDisp). The DISP value does not affect call-counting here -- the
+  // mock's wait branches return READY/TIMEOUT directly rather than running
+  // the poll bash -- so a fixed hex DISP is sufficient.
+  if (label.indexOf("translate:") === 0) return "DISPATCHED " + seg + " a1b2c3";
   if (label.indexOf("wait:") === 0) return (PLAN[seg] || {}).wait;
-  if (label.indexOf("review-dispatch:") === 0) return "REVIEWED " + seg;
+  if (label.indexOf("review-dispatch:") === 0) return "DISPATCHED " + seg + " d4e5f6";
   if (label.indexOf("review-wait:") === 0) {
     const q = queues[seg].reviewWaits;
     if (q.length === 0) throw new Error("PLAN reviewWaits queue exhausted for " + seg + " label=" + label);

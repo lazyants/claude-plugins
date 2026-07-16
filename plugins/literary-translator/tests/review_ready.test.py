@@ -381,5 +381,143 @@ def test_review_ready_rejects_malicious_seg_before_any_file_io(tmp_path, seg):
     )
 
 
+# ---------------------------------------------------------------------------
+# 6. #198 -- `--candidate-file`: the W5 codex_job.py driver FULLY validates an
+#    isolated review attempt BEFORE promoting it to canonical. The option
+#    overrides review_path(seg); `draft_sha1.py {seg}` STILL runs against the
+#    CURRENT canonical draft (the review must reference the on-disk draft);
+#    schema + --expect-token run against the candidate. Backward compatible:
+#    absent option == today's canonical-path behavior.
+# ---------------------------------------------------------------------------
+
+def run_review_ready_candidate(root, seg, expect_token, candidate_file):
+    return subprocess.run(
+        [
+            sys.executable,
+            str(root / "scripts" / "review_ready.py"),
+            seg,
+            "--expect-token",
+            expect_token,
+            "--candidate-file",
+            candidate_file,
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+
+def test_review_ready_candidate_file_valid_passes_without_canonical(tmp_path):
+    """A schema-valid, sha1-fresh, token-matching review at a NON-canonical
+    candidate path passes via --candidate-file even when NO canonical
+    {seg}.review.json exists -- proving the option truly overrides
+    review_path(seg). draft_sha1 is computed against the on-disk canonical
+    draft (present here), proving that check still targets the canonical
+    draft, not the candidate."""
+    root = make_review_ready_root(tmp_path)
+    segments_dir = root / "segments"
+    seg = "seg01"
+    token = "RUN1:seg01:r1"
+    write_draft(segments_dir, seg, dispatch_token="RUN1:seg01")
+    real_sha1 = real_draft_sha1(root, seg)
+    candidate = segments_dir / f".att.{seg}.1.review.json"
+    review = {
+        "clean": True, "coverage_ok": True, "findings": [],
+        "draft_sha1": real_sha1, "dispatch_token": token,
+    }
+    candidate.write_text(json.dumps(review), encoding="utf-8")
+    # NO canonical {seg}.review.json -> proves the candidate override is read.
+
+    result = run_review_ready_candidate(root, seg, token, str(candidate))
+
+    assert result.returncode == 0, (
+        f"a valid --candidate-file review must be READY even with no canonical "
+        f"review on disk, got rc={result.returncode}\nstdout:\n{result.stdout}\n"
+        f"stderr:\n{result.stderr}"
+    )
+    assert json.loads(result.stdout.strip()) == {"ready": True}
+
+
+def test_review_ready_candidate_file_wrong_token_rejected(tmp_path):
+    """The --expect-token check runs against the CANDIDATE: a review whose own
+    dispatch_token differs from --expect-token must be reported not-ready,
+    proving --candidate-file does not weaken the freshness gate."""
+    root = make_review_ready_root(tmp_path)
+    segments_dir = root / "segments"
+    seg = "seg01"
+    write_draft(segments_dir, seg, dispatch_token="RUN1:seg01")
+    real_sha1 = real_draft_sha1(root, seg)
+    candidate = segments_dir / f".att.{seg}.1.review.json"
+    review = {
+        "clean": True, "coverage_ok": True, "findings": [],
+        "draft_sha1": real_sha1, "dispatch_token": "RUN2:seg01:r1",
+    }
+    candidate.write_text(json.dumps(review), encoding="utf-8")
+
+    result = run_review_ready_candidate(root, seg, "RUN1:seg01:r1", str(candidate))
+
+    assert result.returncode == 1, (
+        f"a wrong-token --candidate-file review must be not-ready, got rc="
+        f"{result.returncode}\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    )
+    payload = json.loads(result.stdout.strip())
+    assert payload["ready"] is False
+    assert "token" in payload["reason"].lower()
+
+
+def test_review_ready_candidate_file_schema_invalid_rejected(tmp_path):
+    """The full-schema check runs against the CANDIDATE: a candidate missing a
+    required field (`findings`) must be reported not-ready, naming the schema
+    problem."""
+    root = make_review_ready_root(tmp_path)
+    segments_dir = root / "segments"
+    seg = "seg01"
+    token = "RUN1:seg01:r1"
+    write_draft(segments_dir, seg, dispatch_token="RUN1:seg01")
+    real_sha1 = real_draft_sha1(root, seg)
+    candidate = segments_dir / f".att.{seg}.1.review.json"
+    review = {  # 'findings' omitted -> schema-invalid
+        "clean": True, "coverage_ok": True,
+        "draft_sha1": real_sha1, "dispatch_token": token,
+    }
+    candidate.write_text(json.dumps(review), encoding="utf-8")
+
+    result = run_review_ready_candidate(root, seg, token, str(candidate))
+
+    assert result.returncode == 1, (
+        f"a schema-invalid --candidate-file review must be not-ready, got rc="
+        f"{result.returncode}\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    )
+    payload = json.loads(result.stdout.strip())
+    assert payload["ready"] is False
+    assert "findings" in payload["reason"].lower()
+
+
+def test_review_ready_candidate_file_absent_uses_canonical(tmp_path):
+    """Backward compatibility: with --candidate-file ABSENT, review_ready.py
+    reads the canonical {seg}.review.json and ignores any stray attempt file.
+    A BROKEN candidate file at the isolated-attempt path must NOT affect the
+    result when the flag is not passed."""
+    root = make_review_ready_root(tmp_path)
+    segments_dir = root / "segments"
+    seg = "seg01"
+    token = "RUN1:seg01:r1"
+    write_draft(segments_dir, seg, dispatch_token="RUN1:seg01")
+    real_sha1 = real_draft_sha1(root, seg)
+    write_review(segments_dir, seg, draft_sha1_value=real_sha1, dispatch_token=token)
+    # A broken attempt file that MUST be ignored when the flag is absent.
+    (segments_dir / f".att.{seg}.1.review.json").write_text(
+        "{ not valid json", encoding="utf-8"
+    )
+
+    result = run_review_ready(root, seg, token)  # no --candidate-file
+
+    assert result.returncode == 0, (
+        f"absent --candidate-file must read the canonical review unchanged, "
+        f"got rc={result.returncode}\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    )
+    assert json.loads(result.stdout.strip()) == {"ready": True}
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))

@@ -260,6 +260,121 @@ def test_matching_seg_control_passes_both(tmp_path):
     assert "[seg01] READY" in ready_result.stdout
 
 
+# ---------------------------------------------------------------------------
+# #198 -- draft_ready.py `--candidate-file`: the W5 codex_job.py driver FULLY
+# validates an isolated attempt artifact BEFORE promoting it to canonical. The
+# option overrides draft_path(seg); the segpack is STILL read from its
+# canonical path; all existing checks (schema shape, seg field == seg, key
+# sets, --expect-token) run against the candidate. Backward compatible: absent
+# option == today's canonical-path behavior (already covered by the seg-
+# mismatch tests above, which pass no --candidate-file).
+# ---------------------------------------------------------------------------
+
+def run_draft_ready_candidate(root, requested_seg, expect_token, candidate_file):
+    return subprocess.run(
+        [
+            sys.executable,
+            str(root / "scripts" / "draft_ready.py"),
+            requested_seg,
+            "--expect-token",
+            expect_token,
+            "--candidate-file",
+            candidate_file,
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+
+def write_segpack_only(root, seg, segpack):
+    (root / "segments" / f"segpack_{seg}.json").write_text(
+        json.dumps(segpack, ensure_ascii=False), encoding="utf-8"
+    )
+
+
+def test_draft_ready_candidate_file_valid_passes_without_canonical(tmp_path):
+    """A VALID draft at a non-canonical candidate path passes via
+    --candidate-file even when NO canonical seg01.draft.json exists -- proving
+    the option truly overrides draft_path(seg) (a script still reading the
+    canonical path would report 'draft file absent'). The segpack is at its
+    canonical path, proving it is still read from there."""
+    root = make_durable_root(tmp_path)
+    write_segpack_only(root, "seg01", clean_segpack("seg01"))
+    candidate = root / "segments" / ".att.seg01.1.draft.json"
+    candidate.write_text(json.dumps(clean_draft("seg01"), ensure_ascii=False), encoding="utf-8")
+    # canonical seg01.draft.json deliberately absent.
+
+    result = run_draft_ready_candidate(root, "seg01", DISPATCH_TOKEN, str(candidate))
+
+    assert result.returncode == 0, (
+        f"a valid --candidate-file draft must be READY even with no canonical "
+        f"draft on disk, got rc={result.returncode}\nstdout:\n{result.stdout}\n"
+        f"stderr:\n{result.stderr}"
+    )
+    assert "[seg01] READY" in result.stdout
+
+
+def test_draft_ready_candidate_file_wrong_token_rejected(tmp_path):
+    """The --expect-token check runs against the CANDIDATE: a candidate draft
+    whose dispatch_token differs from --expect-token must be not-ready,
+    proving --candidate-file does not weaken the freshness gate."""
+    root = make_durable_root(tmp_path)
+    write_segpack_only(root, "seg01", clean_segpack("seg01"))
+    stale = clean_draft("seg01")
+    stale["dispatch_token"] = "RUN999:seg01"  # stale token, != DISPATCH_TOKEN
+    candidate = root / "segments" / ".att.seg01.1.draft.json"
+    candidate.write_text(json.dumps(stale, ensure_ascii=False), encoding="utf-8")
+
+    result = run_draft_ready_candidate(root, "seg01", DISPATCH_TOKEN, str(candidate))
+
+    assert result.returncode != 0, (
+        f"a wrong-token --candidate-file draft must be not-ready, got rc="
+        f"{result.returncode}\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    )
+    assert "not ready" in result.stdout
+    assert "dispatch_token mismatch" in result.stdout
+
+
+def test_draft_ready_candidate_file_seg_mismatch_rejected(tmp_path):
+    """The seg field == seg check (#178) runs against the CANDIDATE: a
+    candidate draft whose own 'seg' is cross-wired must be not-ready, proving
+    the full readiness checks (not just the token) run on the candidate."""
+    root = make_durable_root(tmp_path)
+    write_segpack_only(root, "seg01", clean_segpack("seg01"))
+    candidate = root / "segments" / ".att.seg01.1.draft.json"
+    candidate.write_text(json.dumps(tampered_draft(), ensure_ascii=False), encoding="utf-8")
+
+    result = run_draft_ready_candidate(root, "seg01", DISPATCH_TOKEN, str(candidate))
+
+    assert result.returncode != 0, (
+        f"a cross-wired --candidate-file draft must be not-ready, got rc="
+        f"{result.returncode}\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    )
+    assert "not ready" in result.stdout
+    assert "expected 'seg01'" in result.stdout
+
+
+def test_draft_ready_candidate_file_absent_uses_canonical(tmp_path):
+    """Backward compatibility: with --candidate-file ABSENT, draft_ready.py
+    reads the canonical draft and ignores any stray attempt file on disk. A
+    BROKEN candidate file at the isolated-attempt path must NOT affect the
+    result when the flag is not passed."""
+    root = make_durable_root(tmp_path)
+    write_segment(root, "seg01", clean_segpack("seg01"), clean_draft("seg01"))
+    (root / "segments" / ".att.seg01.1.draft.json").write_text(
+        "{ not valid json", encoding="utf-8"
+    )
+
+    result = run_draft_ready(root, "seg01", DISPATCH_TOKEN)  # no --candidate-file
+
+    assert result.returncode == 0, (
+        f"absent --candidate-file must read the canonical draft unchanged, "
+        f"got rc={result.returncode}\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    )
+    assert "[seg01] READY" in result.stdout
+
+
 if __name__ == "__main__":
     import pytest
 

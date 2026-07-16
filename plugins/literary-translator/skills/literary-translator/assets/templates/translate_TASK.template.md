@@ -102,11 +102,20 @@ match the source block.
   the gloss only in `notes` -- a reader of the draft alone would never see
   it there, which is a reviewable defect, not a stylistic choice.
 
-## Output -- EXACTLY this JSON (no markdown fencing), written to:
+## Output -- EXACTLY this JSON (no markdown fencing)
 
-`${durable_root}/segments/{SEG}.draft.json` (see `draft.schema.json`; this
-filename never carries a target-language suffix -- always `{SEG}.draft.json`,
-regardless of this project's target language)
+**Write target:** under W5 mass-translate the per-segment dispatch prompt
+(`mass-translate-wf.template.js`'s `translatePrompt()`, which re-reads this
+file) SUPERSEDES this section and supplies the exact path to write to -- the
+`codex_job.py` driver's own isolated attempt file, NOT the canonical path --
+so write wherever that generated dispatch prompt tells you, never guess a
+path. The driver validates that attempt and only then atomically promotes it
+to the canonical `${durable_root}/segments/{SEG}.draft.json` (see
+`draft.schema.json`; this filename never carries a target-language suffix --
+always `{SEG}.draft.json`, regardless of this project's target language). When
+this contract is followed directly, OUTSIDE the W5 driver (no dispatch prompt
+overriding the target), write that canonical path ATOMICALLY -- temp file +
+rename, never a partial file visible mid-write.
 
 ```
 {
@@ -122,7 +131,10 @@ regardless of this project's target language)
 `blocks`/`footnotes`/`verses` keys must be EXACTLY the ids/n/vids present in
 the input segpack -- 1:1, nothing skipped, nothing invented.
 
-Self-check before returning: run
+Self-check before returning (direct/fallback use only -- under the W5 driver
+the generated dispatch prompt supersedes this step, because the driver's own
+validate-before-promote plus the Workflow's on-disk gate are the acceptance
+authority there): run
 `python3 ${durable_root}/scripts/validate_draft.py {SEG}` and confirm it
 prints `OK`. If it prints `FAIL`, fix the draft, rewrite the file, and
 repeat until it prints `OK`.

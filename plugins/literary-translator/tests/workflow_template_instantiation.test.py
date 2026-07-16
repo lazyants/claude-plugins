@@ -84,6 +84,10 @@ MASS_TRANSLATE_TOKENS = (
     "{{MAX_FIX_ROUNDS}}",
     "{{BATCH_AGENT_CAP}}",
     "{{VERSE_POLICY_INSTRUCTION_BLOCK}}",
+    # #198 -- resolved codex-companion.mjs path, substituted as a strict
+    # json.dumps JS STRING LITERAL (WITH its own quotes -- the token sits
+    # OUTSIDE quotes in `const COMPANION = {{CODEX_COMPANION_PATH_JSON}};`).
+    "{{CODEX_COMPANION_PATH_JSON}}",
 )
 GLOSSARY_PASS_TOKENS = (
     "{{DURABLE_ROOT}}",
@@ -113,6 +117,11 @@ NAMED_TOKEN_RE = re.compile(r"\{\{[A-Z][A-Z0-9_]*\}\}")
 # ---------------------------------------------------------------------------
 
 FIXTURE_DURABLE_ROOT = "/fixture/project/durable_root"
+# #198 -- a resolved codex-companion.mjs path. Deliberately includes a space
+# and a non-ASCII character (both LEGITIMATE per resolve_codex_companion.py,
+# which rejects only a quote / control char / newline) so the json.dumps
+# substitution is exercised on a value that would break a naive splice.
+FIXTURE_COMPANION_PATH = "/Users/José García/codex/1.0.10/codex-companion.mjs"
 # A stable, colon-free, allowlist-legal fixture value -- CONTRACT sec2's
 # {{RUN_ID}} allowlist (`^[A-Za-z0-9][A-Za-z0-9._-]*$`, never '.'/'..', no
 # '..' substring) plus its own "colon-free YYYYMMDDTHHMMSSZ form" example.
@@ -157,6 +166,7 @@ def instantiate_mass_translate(
     max_fix_rounds: int,
     batch_agent_cap: int,
     verse_policy_instruction_block: str,
+    companion_path: str = FIXTURE_COMPANION_PATH,
 ) -> str:
     text = MASS_TRANSLATE_TEMPLATE.read_text(encoding="utf-8")
 
@@ -182,6 +192,12 @@ def instantiate_mass_translate(
     # string body.
     escaped_verse_block = json.dumps(verse_policy_instruction_block)[1:-1]
     text = text.replace("{{VERSE_POLICY_INSTRUCTION_BLOCK}}", escaped_verse_block)
+
+    # #198 CODEX_COMPANION_PATH_JSON -- unlike the plain-string tokens, this
+    # one sits OUTSIDE its quotes in the template
+    # (`const COMPANION = {{CODEX_COMPANION_PATH_JSON}};`), so the orchestrator
+    # substitutes a full json.dumps JS string LITERAL (quotes included).
+    text = text.replace("{{CODEX_COMPANION_PATH_JSON}}", json.dumps(companion_path))
 
     return text
 
@@ -292,6 +308,14 @@ def test_mass_translate_template_instantiates_with_zero_unresolved_tokens():
     assert (
         f'const VERSE_POLICY_INSTRUCTION_BLOCK = "{expected_escaped_verse_block}";' in out
     ), "VERSE_POLICY_INSTRUCTION_BLOCK must be JSON-string-escaped with the outer quotes stripped"
+
+    # #198 -- COMPANION substitutes as a full json.dumps JS string literal
+    # (quotes included, token OUTSIDE quotes in the template), and the
+    # space/non-ASCII fixture path stays a valid JS string body.
+    assert f"const COMPANION = {json.dumps(FIXTURE_COMPANION_PATH)};" in out, (
+        "CODEX_COMPANION_PATH_JSON must substitute as a strict json.dumps JS "
+        "string literal (with its own surrounding quotes)"
+    )
 
 
 # ---------------------------------------------------------------------------

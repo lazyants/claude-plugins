@@ -23,6 +23,8 @@ Covers:
 5. SKILL.md's intake step 4 states plainly that codex-translate/review is
    hard-locked (R1) and IS the v1 default, not one of several options.
 6. SKILL.md's Step 0 defines `{{PLUGIN_ROOT}}` before its first use.
+7. SKILL.md's W5 section names the detached `codex_job.py` driver and the
+   `resolve_codex_companion.py` companion resolver (1.4.7 W5 launch change).
 """
 from __future__ import annotations
 
@@ -60,15 +62,26 @@ def test_pipeline_role_assignment_prompt_present():
 
 
 def test_codex_translate_review_hard_lock_is_default_present():
-    # "hard-locked to `codex:codex-rescue`" sits fully on one line as of
-    # this writing ("   **hard-locked to `codex:codex-rescue`** (R1,
-    # `references/engine-loop.md`)") -- the corrected wording replacing
-    # the old "this plugin's default" among a menu of three options.
+    # "hard-locked to codex" sits fully on one line as of this writing
+    # ("   **hard-locked to codex** (R1, `references/engine-loop.md`) —").
+    # 1.4.7 reframed the old "hard-locked to `codex:codex-rescue`": codex is
+    # still the sole translate/review engine, now LAUNCHED by the detached
+    # codex_job.py driver rather than the codex:codex-rescue forwarder.
     text = _skill_text()
-    assert "hard-locked to `codex:codex-rescue`" in text
+    assert "hard-locked to codex" in text
     # "not a menu of interchangeable options" also sits fully on one line
     # as of this writing, confirming this IS the v1 default, not a choice.
     assert "not a menu of interchangeable options" in text
+
+
+def test_w5_codex_job_driver_and_companion_resolution_present():
+    # 1.4.7 W5 launch change: the detached `codex_job.py` driver launches
+    # codex, and the orchestrator resolves the codex-companion path via
+    # `resolve_codex_companion.py`. Both filenames sit fully on one line each
+    # as of this writing (in the W5 section / R7 / the Step 0 exception list).
+    text = _skill_text()
+    assert "codex_job.py" in text
+    assert "resolve_codex_companion.py" in text
 
 
 def test_plugin_root_defined_at_step_0_present():

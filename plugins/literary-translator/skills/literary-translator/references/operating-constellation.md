@@ -10,8 +10,13 @@ should sit in each seat, and how tightly should the review loop run,
 today." It changes nothing about R1 role separation or the `pipeline()`-only
 dispatch rule — the per-segment codex-translate → deterministic gate →
 codex-review → Claude-fix loop stays exactly as specified there, always
-through a schema-validated workflow-level `agent()` call, never ad hoc
-named-teammate fan-out. Pipeline role assignment itself (who translates /
+through workflow-level `agent()`/`pipeline()` dispatch, never ad hoc
+named-teammate fan-out. (For W5 translate/review the codex work-call is now
+launched by the shipped `codex_job.py` driver, dispatched detached by a
+plain-Claude workflow-level drive agent and gated by the Workflow's own on-disk
+validate-before-promote gate — see `references/engine-loop.md` R1; the glossary
+pass keeps its direct schema-validated `codex:codex-rescue` `agent()` call.)
+Pipeline role assignment itself (who translates /
 reviews / fixes / orchestrates) is fixed by R1 — confirmed, not chosen, at
 intake time; see SKILL.md's "Intake & proportionality" step.
 
@@ -31,10 +36,11 @@ trusting it — the pattern is the part meant to outlive any one generation.
   engine, and make the choice configurable so a user with only one engine
   still works: degrade gracefully to single-engine review rather than
   refusing to run. **This plugin's own v1 wiring is narrower than the
-  general pattern above**: `codex:codex-rescue` is hard-locked as both
-  translator and reviewer (R1, `references/engine-loop.md`), with no
-  profile knob to swap either role or to degrade to single-engine —
-  independence here comes from Claude orchestrating/fixing around a
+  general pattern above**: **codex** is hard-locked as both translator and
+  reviewer (R1, `references/engine-loop.md`), with no profile knob to swap
+  either role or to degrade to single-engine — and for W5 that codex engine is
+  launched by the shipped `codex_job.py` driver, not the `codex:codex-rescue`
+  forwarder. Independence here comes from Claude orchestrating/fixing around a
   separate codex call, not from a configurable engine-per-role split.
 - **Unit of review = the smallest independently-checkable deliverable**, not
   a vague "chunk": a translation's unit is one segment/novella (exactly
@@ -81,14 +87,16 @@ trusting it — the pattern is the part meant to outlive any one generation.
 - **Example constellation** for running this plugin's own work: orchestrator
   = Claude Code at its highest-effort mode (as of 2026-07, "ultracode" at
   `xhigh` reasoning effort), doing the parallel decomposition the durable
-  pattern describes; translator AND reviewer (R1, the same subagent type
-  fills both roles, hard-locked, no engine-per-role choice) =
-  `codex:codex-rescue`, pinned explicitly to `high` for routine
-  translate/review or `xhigh` for the hardest correctness passes (this
-  plugin already hard-locks `engine.effort: "high"` for every codex
-  accuracy-bearing call) — the same role R7 already requires to be
-  schema-validated (`references/workflow-schema-validation.md`); fixer
-  (Claude, no `agentType`, R1) = Sonnet 5, applying findings only, never
+  pattern describes; translator AND reviewer (R1, codex fills both roles,
+  hard-locked, no engine-per-role choice) = **codex, launched by the
+  `codex_job.py` driver** for W5 translate/review, pinned explicitly to
+  `--effort high` as a real CLI flag on the driver's `task` launch (`xhigh` for
+  the hardest correctness passes; this plugin hard-locks `engine.effort: "high"`
+  for every codex accuracy-bearing call) — the plain-Claude drive agent that
+  launches the detached driver is itself `effort: 'low'`. (The glossary pass is
+  the one codex work-call still made directly as `codex:codex-rescue`, the role
+  R7 requires to be schema-validated — `references/workflow-schema-validation.md`.)
+  Fixer (Claude, no `agentType`, R1) = Sonnet 5, applying findings only, never
   originating new translated content.
 
 Model names, generations, and tool config defaults all change fast — a name

@@ -187,6 +187,20 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "the pre-1.2.0 behavior (no token check)."
         ),
     )
+    parser.add_argument(
+        "--candidate-file",
+        default=None,
+        metavar="PATH",
+        help=(
+            "When given, read the draft from PATH instead of the canonical "
+            "segments/{seg}.draft.json -- lets the W5 codex_job.py driver "
+            "FULLY validate an isolated attempt artifact BEFORE promoting it "
+            "to canonical (1.4.7, #198). The segpack is STILL read from its "
+            "canonical path, and every existing check (schema shape, seg "
+            "field == seg, key sets, --expect-token) runs against the "
+            "candidate. Omit for today's canonical-path behavior."
+        ),
+    )
     return parser
 
 
@@ -198,7 +212,7 @@ def main() -> None:
         print(f"Error: {_seg_err}", file=sys.stderr)
         sys.exit(2)
 
-    dp = draft_path(seg)
+    dp = Path(args.candidate_file) if args.candidate_file else draft_path(seg)
     if not dp.exists() or dp.stat().st_size == 0:
         print(f"[{seg}] not ready: draft file absent/empty ({dp})")
         sys.exit(1)
