@@ -68,7 +68,7 @@ except ImportError:  # pragma: no cover - exercised only when PyYAML is absent
 
 DURABLE_ROOT = Path(__file__).resolve().parents[1]
 
-# The ten scripts (+ two workflow templates) that make up plugin_bundle_hash.
+# The eleven scripts (+ two workflow templates) that make up plugin_bundle_hash.
 # NEVER bootstrap_names.py/segpack.py (their own derivation_bundle_hash) and
 # NEVER the four orchestration-only scripts (orchestration_bundle_hash).
 # review_ready.py and resume_setup.py (1.2.0) join this list rather than
@@ -92,6 +92,14 @@ DURABLE_ROOT = Path(__file__).resolve().parents[1]
 # unchanged from the status quo for all plugin-bundle scripts; the reason to
 # prefer this bucket is that, unlike the derivation route, it actually reaches
 # the glossary digest and leaves the canon generation stamp's semantics intact.
+# canon_senses.py (RFC #215) belongs here for the same reason: it is
+# imported by TWO existing members of this same tuple (canon_validate.py's
+# recollapse guard, glossary_batch_plan.py's split-form exclusion), so its
+# `load_senses`/`normalize_form` logic shapes what canon.json is built from
+# just as directly as the modules that import it -- and this tuple is a
+# literal byte-hash allowlist, so a transitive import is otherwise invisible
+# to it. Not DERIVATION_BUNDLE_MEMBERS (it isn't bootstrap_names.py/
+# segpack.py's kind of source-derivation state).
 PLUGIN_BUNDLE_MEMBERS = (
     "validate_draft.py",
     "canon_validate.py",
@@ -103,6 +111,7 @@ PLUGIN_BUNDLE_MEMBERS = (
     "resume_setup.py",
     "glossary_batch_plan.py",
     "codex_job.py",
+    "canon_senses.py",
     "mass-translate-wf.template.js",
     "glossary-pass-wf.template.js",
 )

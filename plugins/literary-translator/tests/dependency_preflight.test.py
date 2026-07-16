@@ -28,6 +28,11 @@ locks that down per-package, per-script:
     only reaches ``"xml"`` if the ``"lxml"`` backend actually worked).
   - ``render_obsidian.py``'s MODULE-LEVEL try/except (mirrors
     ``final_audit.py``'s own pattern) covering ``import yaml`` (exit code 2).
+  - ``canon_senses.py``'s MODULE-LEVEL try/except (RFC #215 1a''), covering
+    ``import jsonschema`` (exit code 1) -- exercised directly, in addition
+    to ``canon_validate.py``'s own preflight above (which never reaches
+    canon_senses.py's import at all when jsonschema is missing, since its
+    own try/except fires first).
 
 A one-shot "control" test per script confirms the preflight is a no-op (no
 ``SystemExit``, real modules bound) when every dependency is genuinely
@@ -76,23 +81,42 @@ TEMPLATES_DIR = PLUGIN_ROOT / "skills" / "literary-translator" / "assets" / "tem
 
 PROFILE_VALIDATE_PATH = SCRIPTS_DIR / "profile_validate.py"
 CANON_VALIDATE_PATH = SCRIPTS_DIR / "canon_validate.py"
+CANON_SENSES_PATH = SCRIPTS_DIR / "canon_senses.py"
 EXTRACT_TEMPLATE_PATH = TEMPLATES_DIR / "extract.py.template"
 RENDER_OBSIDIAN_PATH = SCRIPTS_DIR / "render_obsidian.py"
 
+assert CANON_SENSES_PATH.is_file(), f"canon_senses.py not found at {CANON_SENSES_PATH}"
 
-def _load_module_fresh(path: Path, name: str):
+
+def _load_module_fresh(path: Path, name: str, *, extra_sys_path: Path = None):
     """Loads ``path`` as a brand-new, isolated module object -- NOT
     registered in ``sys.modules`` -- using an explicit ``SourceFileLoader``
     so this also works for ``extract.py.template``, whose ``.template``
     suffix ``importlib.util.spec_from_file_location`` cannot infer a loader
     for on its own (verified: it returns ``None`` for that path without an
-    explicit loader)."""
-    loader = importlib.machinery.SourceFileLoader(name, str(path))
-    spec = importlib.util.spec_from_loader(loader.name, loader)
-    assert spec is not None, f"could not load spec for {path}"
-    module = importlib.util.module_from_spec(spec)
-    loader.exec_module(module)
-    return module
+    explicit loader).
+
+    ``extra_sys_path``, when given, is temporarily prepended to
+    ``sys.path`` for the duration of the exec so a sibling-module import
+    resolves exactly like it would under a real ``python3 <path>``
+    invocation (which auto-adds the script's own directory to
+    ``sys.path[0]`` -- a manually-constructed ``SourceFileLoader`` load
+    does not). ``canon_validate.py``'s own ``from canon_senses import
+    ...`` (RFC #215 1d) needs this; removed again in a ``finally`` so no
+    other fresh load in this same test session is affected by a leaked
+    path entry."""
+    if extra_sys_path is not None:
+        sys.path.insert(0, str(extra_sys_path))
+    try:
+        loader = importlib.machinery.SourceFileLoader(name, str(path))
+        spec = importlib.util.spec_from_loader(loader.name, loader)
+        assert spec is not None, f"could not load spec for {path}"
+        module = importlib.util.module_from_spec(spec)
+        loader.exec_module(module)
+        return module
+    finally:
+        if extra_sys_path is not None:
+            sys.path.remove(str(extra_sys_path))
 
 
 def _load_profile_validate():
@@ -103,9 +127,24 @@ def _exec_canon_validate_fresh():
     """Returns a callable that, when invoked, executes ``canon_validate.py``
     fresh (its dependency preflight runs at MODULE level, not behind a
     function, so exercising it means exec'ing the module itself, wrapped by
-    the caller in ``pytest.raises(SystemExit)``)."""
+    the caller in ``pytest.raises(SystemExit)``). ``canon_validate.py``
+    now does ``from canon_senses import ...`` (RFC #215 1d) as a plain,
+    unwrapped sibling import (canon_senses.py owns its own jsonschema
+    preflight), so ``SCRIPTS_DIR`` must be on ``sys.path`` for that name to
+    resolve -- see ``_load_module_fresh``'s ``extra_sys_path``."""
     def _do_exec():
-        return _load_module_fresh(CANON_VALIDATE_PATH, "canon_validate_preflight_test")
+        return _load_module_fresh(
+            CANON_VALIDATE_PATH, "canon_validate_preflight_test", extra_sys_path=SCRIPTS_DIR
+        )
+    return _do_exec
+
+
+def _exec_canon_senses_fresh():
+    """canon_senses.py imports nothing first-party (a project-dependency
+    LEAF, RFC #215 1a''), so no ``extra_sys_path`` is needed for its own
+    fresh load."""
+    def _do_exec():
+        return _load_module_fresh(CANON_SENSES_PATH, "canon_senses_preflight_test")
     return _do_exec
 
 
@@ -244,6 +283,46 @@ def test_canon_validate_control_case_loads_cleanly(capsys):
     assert err == ""
     assert module.jsonschema is not None
     assert module.RESEARCH_MODES == ("live", "offline")
+    # And the sibling canon_senses.py import (RFC #215 1d) actually
+    # resolved and bound real names, not just "didn't raise".
+    assert module.load_senses is not None
+    assert module.normalize_form is not None
+
+
+# ---------------------------------------------------------------------------
+# canon_senses.py -- module-level try/except (exit code 1, RFC #215 1a'')
+# ---------------------------------------------------------------------------
+
+def test_canon_senses_missing_jsonschema_is_actionable(monkeypatch, capsys):
+    monkeypatch.setitem(sys.modules, "jsonschema", None)
+    do_exec = _exec_canon_senses_fresh()
+
+    with pytest.raises(SystemExit) as exc_info:
+        do_exec()
+
+    assert exc_info.value.code == 1
+    err = capsys.readouterr().err
+    assert "jsonschema" in err
+    assert "canon_senses.py requires" in err
+    assert "pip install -r requirements.txt" in err
+    assert "import error" in err
+
+
+def test_canon_senses_control_case_loads_cleanly(capsys):
+    """Control case: with jsonschema genuinely importable, canon_senses.py
+    loads without exiting and its own load_senses/normalize_form/is_split
+    names are bound to real callables. Without this, a preflight that
+    unconditionally exits would still pass the failure-path test above."""
+    do_exec = _exec_canon_senses_fresh()
+
+    module = do_exec()
+
+    err = capsys.readouterr().err
+    assert err == ""
+    assert module.jsonschema is not None
+    assert callable(module.load_senses)
+    assert callable(module.normalize_form)
+    assert callable(module.is_split)
 
 
 # ---------------------------------------------------------------------------

@@ -19,8 +19,9 @@ later):
     sentence-initial; a high mid-sentence share is strong evidence it is a
     real proper noun and not merely a sentence-opening capital.
 
-Everything source-language-specific -- ``PARTICLES``, ``STOPWORDS``,
-``ELISION_RE``, ``has_elision`` -- is read from the resolved
+Everything source-language-specific -- the four required fields
+``PARTICLES``/``STOPWORDS``/``ELISION_RE``/``has_elision``, plus the
+optional fifth ``name_inventory`` -- is read from the resolved
 ``${durable_root}/languages/<particle_config's LITERAL value>`` file, never
 reconstructed from ``source.language.code``: a project-local override such
 as ``fr.local.json`` must be respected exactly, never silently ignored.
@@ -53,6 +54,7 @@ import sys
 import unicodedata
 from collections import defaultdict
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 from typing import Optional
 
@@ -72,12 +74,39 @@ DEFAULT_OUT_PATH = DURABLE_ROOT / "name_candidates.json"
 # entirely.
 PARTICLE_CONFIG_FILENAME_RE = re.compile(r"^[A-Za-z0-9._-]+\.json$")
 
+# The exact five keys a particle_config file may contain (four required +
+# the optional name_inventory) -- see LanguageConfig's own docstring. Any
+# OTHER top-level key is rejected outright rather than silently ignored: a
+# typo (e.g. "name_inventroy") would otherwise load with an EMPTY
+# name_inventory and disable Phase 0's caseless bypass with no error at all
+# (issue #204's follow-up finding 7).
+PARTICLE_CONFIG_ALLOWED_KEYS = frozenset(
+    {"PARTICLES", "STOPWORDS", "has_elision", "ELISION_RE", "name_inventory"}
+)
+
 # Sentinels this plugin bakes into plain_text (footnote refs, verse
 # placeholders -- see manifest.schema.json's FNREF_N / VERSE_{vid}_{shortsha}
 # descriptions). Matched generically as any ⟦...⟧ bracketed token rather than
 # reconstructing the exact internal shape, since a per-sentinel-kind literal
 # pattern would be a hidden adapt point this script is not supposed to have.
 SENTINEL_RE = re.compile(r"⟦[^⟧]*⟧")
+
+
+def mask_sentinels(text: str) -> str:
+    """Replace each ``⟦...⟧`` sentinel with a SAME-LENGTH run of spaces --
+    never a single collapsing space -- so every remaining character's
+    Unicode-**codepoint** offset in the result is IDENTICAL to its offset in
+    ``text``. A length-COLLAPSING substitution (a single space regardless of
+    the sentinel's own length) would shift every subsequent character's
+    offset by the sentinel's ``len() - 1``, silently corrupting any span
+    computed against the masked copy the moment it is re-applied to the
+    original raw ``text``/block bytes -- exactly the failure
+    ``occ_index.py``'s offset-preserving evidence spans (RFC #215 Phase 0c)
+    must not have. Safe with ``TOKEN_RE`` (see its own comment above): a run
+    of spaces never fuses two tokens across the masked region, same as the
+    single-space form it replaces.
+    """
+    return SENTINEL_RE.sub(lambda m: " " * len(m.group(0)), text)
 
 # A run "closes" at one of these trailing punctuation marks; the token right
 # after one of these is sentence-initial. — (U+2014) / ― (U+2015) are the
@@ -145,16 +174,17 @@ def is_particle(token: str, lang: "LanguageConfig") -> bool:
 class LanguageConfig:
     """The resolved contents of one ``${durable_root}/languages/<file>.json``.
 
-    Exactly the four fields ``references/language-pair-parameterization.md``
-    documents a language config file as containing -- no fifth,
-    project-specific field (e.g. the real historiettes-t3 project's own
-    French-only ``CONTRACTION_RE`` is deliberately NOT part of this
-    contract; a language file that needs to reject elided contraction
-    openers like "C'est"/"J'ai" as false-positive candidates can simply list
-    their exact surface forms in its own ``STOPWORDS`` array instead -- this
-    keeps the script's inputs uniform across every language, and matches
-    this whole tool's recall-oriented design: the codex glossary pass prunes
-    remaining false positives).
+    The four REQUIRED fields ``references/language-pair-parameterization.md``
+    documents a language config file as containing, plus one OPTIONAL fifth,
+    ``name_inventory`` -- a project-local, exact-form allowlist (see below).
+    Beyond these five, no field is added on a whim (e.g. the real
+    historiettes-t3 project's own French-only ``CONTRACTION_RE`` is
+    deliberately NOT part of this contract; a language file that needs to
+    reject elided contraction openers like "C'est"/"J'ai" as false-positive
+    candidates can simply list their exact surface forms in its own
+    ``STOPWORDS`` array instead -- this keeps the script's inputs uniform
+    across every language, and matches this whole tool's recall-oriented
+    design: the codex glossary pass prunes remaining false positives).
     """
 
     path: Path
@@ -163,25 +193,37 @@ class LanguageConfig:
     elision_re: Optional["re.Pattern"]
     has_elision: bool
     raw_bytes: bytes
+    # OPTIONAL fifth field (issue #204): a project-local list of full
+    # native-script name forms (multi-token allowed) matched as COMPLETE
+    # forms by extract_candidate_spans()'s caseless inventory route --
+    # never assembled from a token run the way the particle algorithm
+    # builds candidates. Absent from every shipped Latin preset; empty
+    # frozenset() when the config file omits it (or sets it null). Exists
+    # for scripts is_upper_initial() cannot see at all (Hebrew letters are
+    # Unicode category 'Lo', not 'Lu').
+    name_inventory: frozenset = frozenset()
 
 
 def load_language_config(particle_config_filename: str,
                           languages_dir: Path = LANGUAGES_DIR) -> LanguageConfig:
     """Resolve ``particle_config_filename`` under ``languages_dir`` and load
-    ``PARTICLES``/``STOPWORDS``/``ELISION_RE``/``has_elision`` from it.
+    ``PARTICLES``/``STOPWORDS``/``ELISION_RE``/``has_elision`` (plus the
+    optional ``name_inventory``) from it.
 
     ``particle_config_filename`` MUST be the profile's own
     ``source.language.particle_config`` LITERAL value (a bare filename) --
     never reconstructed from ``source.language.code``. That is what lets a
     project-local override such as ``fr.local.json`` actually take effect.
 
-    Enforces the documented four-field contract exactly --
-    ``PARTICLES``/``STOPWORDS`` must each be present as a JSON array of
-    strings, ``has_elision`` must be present as a JSON boolean (no
-    coercion), and ``ELISION_RE`` must be a non-empty, 2-capture-group
-    string when ``has_elision`` is true (a plain string or ``null``
-    otherwise). Any violation raises :class:`BootstrapNamesError` naming the
-    exact malformed/missing field -- never a silently-coerced or
+    Enforces the documented four required + optional name_inventory field
+    contract exactly -- ``PARTICLES``/``STOPWORDS`` must each be present as
+    a JSON array of strings, ``has_elision`` must be present as a JSON
+    boolean (no coercion), ``ELISION_RE`` must be a non-empty,
+    2-capture-group string when ``has_elision`` is true (a plain string or
+    ``null`` otherwise), and ``name_inventory``, when present and non-null,
+    must be a JSON array of non-empty strings (absent or ``null`` -> empty).
+    Any violation raises :class:`BootstrapNamesError` naming the exact
+    malformed/missing field -- never a silently-coerced or
     silently-defaulted value -- so a malformed particle_config can never
     diverge from what ``scripts/language_smoke_report.py``'s own
     ``load_particle_config`` accepts.
@@ -225,6 +267,13 @@ def load_language_config(particle_config_filename: str,
 
     if not isinstance(data, dict):
         raise BootstrapNamesError(f"{path} must contain a JSON object, got {type(data).__name__}")
+
+    unknown_keys = sorted(set(data.keys()) - PARTICLE_CONFIG_ALLOWED_KEYS)
+    if unknown_keys:
+        raise BootstrapNamesError(
+            f"{path}: unknown key(s) {unknown_keys} -- allowed keys are "
+            f"{sorted(PARTICLE_CONFIG_ALLOWED_KEYS)}"
+        )
 
     particles_raw = data.get("PARTICLES")
     if not isinstance(particles_raw, list) or not all(isinstance(p, str) for p in particles_raw):
@@ -275,6 +324,20 @@ def load_language_config(particle_config_filename: str,
                 f"remainder), got {elision_re.groups}"
             )
 
+    name_inventory_raw = data.get("name_inventory")
+    if name_inventory_raw is None:
+        name_inventory = frozenset()
+    elif not isinstance(name_inventory_raw, list) or not all(
+        isinstance(f, str) and f.strip() for f in name_inventory_raw
+    ):
+        raise BootstrapNamesError(
+            f"{path}: name_inventory, when present, must be a JSON array of "
+            f"non-empty strings (or null/absent for none), got "
+            f"{name_inventory_raw!r}"
+        )
+    else:
+        name_inventory = frozenset(name_inventory_raw)
+
     return LanguageConfig(
         path=path,
         particles=particles,
@@ -282,11 +345,19 @@ def load_language_config(particle_config_filename: str,
         elision_re=elision_re,
         has_elision=has_elision,
         raw_bytes=raw_bytes,
+        name_inventory=name_inventory,
     )
 
 
 def tokenize(text: str, elision_re: Optional["re.Pattern"]):
-    """Split ``text`` into ``(token, preceding_char)`` pairs.
+    """Split ``text`` into ``(token, preceding_char, start, end)`` tuples.
+
+    ``start``/``end`` are half-open Unicode-**codepoint** offsets into
+    ``text`` -- ``text[start:end]`` reconstructs the token's own raw
+    substring. This is the single, shared span-emitting tokenizer every
+    occurrence-span consumer (``extract_candidate_spans()`` below,
+    ``occ_index.py``'s ``production_occurrences()``) relies on -- never a
+    second implementation.
 
     ``preceding_char`` is the last non-whitespace, non-``WRAPPERS`` character
     before the token (or ``"."`` at the very start of the text, treated as a
@@ -296,11 +367,16 @@ def tokenize(text: str, elision_re: Optional["re.Pattern"]):
 
     When ``elision_re`` matches a raw token (e.g. French "d'Effiat"), it is
     split into two tokens: the elided article's own remnant (group 1, e.g.
-    "d") and the name-initial remainder (group 2, e.g. "Effiat"). Without
-    this split, the fused token's lowercase first character would defeat
-    ``is_upper_initial()`` and the name behind the elision would be silently
-    and totally dropped -- see references/gotchas.md's
-    french-elision-tokenizer-miss lesson.
+    "d") and the name-initial remainder (group 2, e.g. "Effiat") -- each
+    carrying its OWN span, computed as ``m.start() + elided.start(group)``
+    .. ``m.start() + elided.end(group)`` (``elided`` matched against ``raw``
+    == ``m.group(0)``, not the full ``text``, so its own group offsets are
+    relative to ``raw`` and must be shifted by ``m.start()``). E.g.
+    ``tokenize("d'Effiat", elision_re)`` emits ``("Effiat", "'", 2, 8)`` --
+    ``"d'Effiat"[2:8] == "Effiat"``. Without this split, the fused token's
+    lowercase first character would defeat ``is_upper_initial()`` and the
+    name behind the elision would be silently and totally dropped -- see
+    references/gotchas.md's french-elision-tokenizer-miss lesson.
     """
     tokens = []
     for m in TOKEN_RE.finditer(text):
@@ -312,37 +388,145 @@ def tokenize(text: str, elision_re: Optional["re.Pattern"]):
         raw = m.group(0)
         elided = elision_re.match(raw) if elision_re else None
         if elided:
-            tokens.append((elided.group(1), preceding))
-            tokens.append((elided.group(2), "'"))
+            tokens.append((elided.group(1), preceding, start + elided.start(1), start + elided.end(1)))
+            tokens.append((elided.group(2), "'", start + elided.start(2), start + elided.end(2)))
         else:
-            tokens.append((raw, preceding))
+            tokens.append((raw, preceding, start, m.end()))
     return tokens
 
 
-def extract_candidates(text: str, lang: LanguageConfig):
-    """Yield ``(name, mid_sentence: bool)`` for each proper-noun run found
-    in ``text``.
+def _build_inventory_trie(inventory_forms):
+    """A nested-dict trie over ``inventory_forms`` (each a non-empty tuple of
+    token strings). A node's ``None`` key marks that the path leading to it
+    IS a complete inventory form -- tokens from ``tokenize()`` are always
+    non-empty strings, never ``None``, so it is a safe terminal sentinel that
+    can never collide with a real token.
 
-    ``text`` should already have this plugin's own ``⟦...⟧`` sentinels
-    stripped (``SENTINEL_RE.sub(" ", text)``) -- callers that scan
-    ``manifest.json`` blocks do this via ``collect_candidates()``; a caller
-    handing in an already-clean text sample (e.g. the language smoke test's
-    stratified sample) may skip that step if it has none to strip.
+    Replaces a linear scan over every inventory form at every token position
+    (O(n_tokens x n_forms), genuinely quadratic when both grow -- see issue
+    #204's follow-up perf finding) with a single build (O(total inventory
+    token count)) plus a walk per position that is O(L) in the worst case,
+    where L is the longest inventory form's token count -- see
+    ``_compiled_inventory_trie()``/``extract_candidate_spans()``'s own
+    docstring for the walk's real bound, since a per-position descent is NOT
+    O(1).
     """
-    tokens = tokenize(text, lang.elision_re)
+    root = {}
+    for form_tokens in inventory_forms:
+        node = root
+        for t in form_tokens:
+            node = node.setdefault(t, {})
+        node[None] = True
+    return root
+
+
+@lru_cache(maxsize=32)
+def _compiled_inventory_trie(name_inventory: frozenset, elision_re: Optional["re.Pattern"]):
+    """The inventory trie for one ``(name_inventory, elision_re)`` pair,
+    built once and cached -- NOT rebuilt on every ``extract_candidate_spans()``
+    call. ``collect_candidates()`` calls the extractor once per manifest
+    block, so an uncached build re-tokenized every inventory form and
+    rebuilt the whole trie on EVERY block (issue #204 follow-up finding 3):
+    O(blocks x inventory_tokens) work before a single block's text was even
+    scanned. Both ``name_inventory`` (a ``frozenset``) and ``elision_re`` (a
+    compiled ``re.Pattern``, hashable by identity) are already hashable, and
+    every call within one script invocation passes the SAME resolved
+    ``LanguageConfig``'s fields, so this cache hits on every block after the
+    first. The trie is read-only after construction -- the pass-2 walk below
+    only ever reads ``node.get(...)``/``None in node`` -- so sharing the same
+    dict object across every block/call is safe.
+    """
+    inventory_forms = (
+        tuple(t for t, _p, _s, _e in tokenize(form, elision_re))
+        for form in name_inventory
+    )
+    return _build_inventory_trie(f for f in inventory_forms if f)
+
+
+def extract_candidate_spans(text: str, lang: LanguageConfig):
+    """Yield ``(name, mid_sentence: bool, start: int, end: int)`` for each
+    proper-noun run found in ``text`` -- the single, richer implementation
+    of the run-building algorithm; ``extract_candidates()`` below is a thin
+    wrapper over this that drops the span for callers with no need of one.
+    ``start``/``end`` are half-open Unicode-codepoint offsets into ``text``
+    (first token's start to last token's end), reconstructing exactly the
+    substring the production tokenizer/matcher consumed for that run --
+    this is the ONE function ``occ_index.py``'s ``production_occurrences()``
+    calls into to re-derive evidence spans (RFC #215 Phase 0c); it never
+    reimplements any part of this decision logic.
+
+    ``text`` is the RAW block/sample text (sentinels included) --
+    ``⟦...⟧`` sentinels are masked internally via ``mask_sentinels()``
+    (a same-length substitution, so every span below is valid directly
+    against the ``text`` argument as given, with no separate remapping
+    step needed by the caller).
+
+    Two passes over the SAME token stream (``tokenize()``, so every span
+    traces back to ``text`` itself); UNLIKE the two passes' original
+    description, they are not mutually exclusive -- their outputs may
+    legitimately overlap, nest, or interleave (see the INVARIANT below):
+
+    1. The original capitalized-run algorithm (unchanged behavior) --
+       gated on ``is_upper_initial()``/``STOPWORDS``/particle continuation.
+    2. An inventory-driven CASELESS route (issue #204): for each of
+       ``lang.name_inventory``'s literal multiword forms, scan EVERY token
+       position for an EXACT token-sequence match -- bypassing
+       ``is_upper_initial()`` entirely, which is what lets a script with no
+       case distinction at all (e.g. Hebrew, Unicode category ``Lo``)
+       surface a candidate at all. At a given start position, forms are
+       tried longest-first and the first one that both token-matches AND
+       is not an exact duplicate (see INVARIANT) wins -- so the longest
+       form wins whenever it is fresh; only when the longest match at a
+       position turns out to be a duplicate does a shorter, still-fresh
+       match at that SAME position get a chance. A match is refused if it
+       would bridge a ``TERMINATORS`` boundary between any two of its own
+       tokens -- the same rule pass 1 enforces -- e.g. a ``name_inventory``
+       entry "משה לייב" must NOT match text "משה. לייב".
+
+    INVARIANT (do not re-introduce a per-token "claimed" bitmap -- three
+    rounds of adversarial review each found a different case it breaks):
+    pass 2 emits EVERY inventory-form token-run occurrence it finds,
+    suppressing ONLY an EXACT duplicate -- an identical ``(name, start,
+    end)`` triple already emitted (by pass 1 or by pass 2 itself). A token
+    being part of some OTHER candidate's span -- whether from pass 1 or an
+    earlier pass-2 match -- never blocks a DIFFERENT candidate from also
+    covering it; only re-emitting the literal same span under the literal
+    same name is refused. Consequently pass 2 always advances by exactly
+    one token position, never by a matched form's length, so a form
+    starting anywhere -- including a position "inside" an already-emitted
+    run -- still gets its chance. This is what a bitmap-based "claimed"
+    approach cannot express, and got caught breaking three different ways:
+    (i) any-token-claimed-rejects (a Latin-script token inside a mostly-
+    Hebrew inventory form, e.g. "Cohen" inside "משה Cohen", poisoned the
+    whole form out of existence); (ii) a solo inventory form fully inside a
+    LARGER pass-1 run (e.g. inventory ``["Cohen"]`` against pass-1's own
+    "Jean Cohen") was suppressed even though pass 1 never emits "Cohen" as
+    its own candidate at all; (iii) advancing by match_len after a match
+    skips positions entirely, so two inventory forms sharing a boundary
+    token (e.g. ``["משה לייב", "לייב כהן"]`` against "משה לייב כהן") only
+    ever surfaced the first -- the second's start position was never
+    visited. Overlapping/nested candidates for DIFFERENT names are
+    expected output, not a bug: downstream consumers
+    (``occ_index.py``'s ``production_occurrences()``) match spans by exact
+    ``source_form`` string, so an overlapping candidate for a different
+    name is never confused with the one being queried.
+    """
+    tokens = tokenize(mask_sentinels(text), lang.elision_re)
     n = len(tokens)
     out = []
+
+    # Pass 1 -- capitalized-run algorithm (unchanged).
     idx = 0
     while idx < n:
-        tok, preceding = tokens[idx]
+        tok, preceding, _start, _end = tokens[idx]
         if not is_upper_initial(tok) or tok in lang.stopwords:
             idx += 1
             continue
         sentence_initial = preceding in TERMINATORS
-        run = [tok]
+        run = [idx]
         k = idx + 1
         while k < n:
-            t2, preceding2 = tokens[k]
+            t2, preceding2, _s2, _e2 = tokens[k]
             if preceding2 in TERMINATORS:
                 # t2 is itself sentence-initial (a '.', '!', '?', ':' or '»'
                 # sits between the run so far and t2) -- never let a
@@ -353,7 +537,7 @@ def extract_candidates(text: str, lang: LanguageConfig):
                 # t2 is re-examined as its own run start by the outer loop.
                 break
             if is_upper_initial(t2) and t2 not in lang.stopwords:
-                run.append(t2)
+                run.append(k)
                 k += 1
             elif (
                 is_particle(t2, lang)
@@ -361,15 +545,97 @@ def extract_candidates(text: str, lang: LanguageConfig):
                 and is_upper_initial(tokens[k + 1][0])
                 and tokens[k + 1][1] not in TERMINATORS
             ):
-                run.append(t2)
-                run.append(tokens[k + 1][0])
+                run.append(k)
+                run.append(k + 1)
                 k += 2
             else:
                 break
-        name = " ".join(run)
-        out.append((name, not sentence_initial))
+        name = " ".join(tokens[i][0] for i in run)
+        run_start = tokens[run[0]][2]
+        run_end = tokens[run[-1]][3]
+        out.append((name, not sentence_initial, run_start, run_end))
         idx = k
+
+    # Pass 2 -- inventory-driven caseless multiword bypass (0a). Each
+    # inventory form is tokenized with the SAME tokenize()/elision_re as the
+    # scanned text, so an inventory entry containing an elidable article
+    # tokenizes identically to how the same text would in the real block.
+    # See the INVARIANT in the docstring above: `seen_spans` (not a
+    # per-token bitmap) is the ONLY suppression state, and every token
+    # position is tried regardless of what any other pass/match covers.
+    if lang.name_inventory:
+        trie = _compiled_inventory_trie(lang.name_inventory, lang.elision_re)
+        seen_spans = {(name, start, end) for name, _mid, start, end in out}
+        idx = 0
+        while idx < n:
+            # Walk the trie as deep as the token run allows, collecting EVERY
+            # depth at which a complete inventory form terminates (`None in
+            # node`) -- not just the deepest. A single deepest-only
+            # `last_match_len` cannot fall back: if the longest match at this
+            # position turns out to be an exact duplicate (see INVARIANT),
+            # any SHORTER-but-fresh terminal found earlier in the same walk
+            # would otherwise be silently discarded (finding 2, RFC #215
+            # Phase 0 review round 4 -- e.g. inventory ["Jean Cohen", "Jean"]
+            # against "Jean Cohen arrived.": pass 1 already emits "Jean
+            # Cohen", so pass 2 must fall back to emit "Jean" instead of
+            # nothing). The `j >= 1` terminator check runs BEFORE descending
+            # to depth j, so it stops the walk from ever reaching a
+            # boundary-violating depth while preserving whatever shorter
+            # match was already found -- equivalent to the old per-length
+            # `any(... for j in range(1, m))` check, since a violation at
+            # position j invalidates every candidate length > j but never one
+            # of length <= j. This walk is O(L) in the worst case (L = the
+            # longest inventory form's token count), restarted at EVERY token
+            # position, so the whole pass is O(n_tokens x L) -- not O(n_tokens)
+            # (finding 9; see
+            # test_bootstrap_inventory_scan_shared_prefix_stays_within_generous_bound
+            # in tests/caseless_offset.test.py for the case the earlier
+            # no-shared-prefix perf fixture hid).
+            node = trie
+            match_lens = []
+            j = 0
+            while idx + j < n:
+                if j >= 1 and tokens[idx + j][1] in TERMINATORS:
+                    break
+                nxt = node.get(tokens[idx + j][0])
+                if nxt is None:
+                    break
+                node = nxt
+                j += 1
+                if None in node:
+                    match_lens.append(j)
+            # Longest-first: match_lens was appended in increasing depth
+            # order, so the reversed iteration tries the longest terminal
+            # first, falling back to shorter ones only when a longer
+            # candidate turns out to be an exact duplicate. Emit AT MOST ONE
+            # candidate per position -- stop at the first fresh one.
+            for m in reversed(match_lens):
+                run_start = tokens[idx][2]
+                run_end = tokens[idx + m - 1][3]
+                name = " ".join(tokens[idx + k][0] for k in range(m))
+                if (name, run_start, run_end) not in seen_spans:
+                    preceding0 = tokens[idx][1]
+                    sentence_initial = preceding0 in TERMINATORS
+                    out.append((name, not sentence_initial, run_start, run_end))
+                    seen_spans.add((name, run_start, run_end))
+                    break
+            idx += 1
+
+    out.sort(key=lambda r: r[2])
     return out
+
+
+def extract_candidates(text: str, lang: LanguageConfig):
+    """Yield ``(name, mid_sentence: bool)`` for each proper-noun run found
+    in ``text`` -- unchanged public contract used by ``collect_candidates()``'s
+    frequency/ranking pipeline, which has no need for per-occurrence spans.
+    Thin wrapper over ``extract_candidate_spans()`` (the single
+    implementation of the run-building + inventory-bypass algorithm --
+    see its docstring for the full behavior, including sentinel-masking,
+    which now happens internally: a caller no longer needs to pre-strip
+    ``⟦...⟧`` sentinels itself).
+    """
+    return [(name, mid) for name, mid, _start, _end in extract_candidate_spans(text, lang)]
 
 
 def iter_manifest_texts(manifest_path: Path):
@@ -418,8 +684,7 @@ def collect_candidates(sources, lang: LanguageConfig):
     by_source = defaultdict(set)
 
     for source_id, text in sources:
-        clean = SENTINEL_RE.sub(" ", text)
-        for name, midsent in extract_candidates(clean, lang):
+        for name, midsent in extract_candidates(text, lang):
             freq[name] += 1
             if midsent:
                 mid[name] += 1

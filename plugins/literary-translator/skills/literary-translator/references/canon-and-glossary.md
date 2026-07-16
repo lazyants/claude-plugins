@@ -23,7 +23,8 @@ Canon population is not "paste the whole book into context and ask for a glossar
 1. **Deterministic candidate extraction** — `bootstrap_names.py` (no LLM,
    frequency-ranked). Its generic core is the tokenizer, run-building algorithm,
    frequency/mid-sentence/multiword scoring, and Unicode-category capitalization
-   check. It reads `PARTICLES`, `STOPWORDS`, `ELISION_RE`, and `has_elision` from
+   check. It reads the four required keys — `PARTICLES`, `STOPWORDS`, `ELISION_RE`,
+   `has_elision` — plus an optional fifth, `name_inventory`, from
    `${durable_root}/languages/<particle_config's LITERAL value>` — never by
    reconstructing a filename from `source.language.code`, since that would ignore
    a project-local override such as `fr.local.json`. This script only surfaces

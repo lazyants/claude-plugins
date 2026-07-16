@@ -38,7 +38,7 @@ project-local override. `bootstrap_names.py` dereferences the same literal
 `particle_config` value — never `source.language.code` — so an override such as
 `fr.local.json` is not silently ignored.
 
-A language config file contains:
+A language config file contains four required keys, plus an optional fifth:
 
 - `PARTICLES` — the source language's particle list (e.g. French
   `de/du/des/la/le/l'/von/van/saint/sainte`; German `von/zu`; Italian
@@ -57,6 +57,24 @@ A language config file contains:
   authoritative. To change whether a language elides, edit the resolved
   language file directly (or fork a `.local.json` override — see
   "Remediation" below).
+- `name_inventory` — optional, `string[] | null`, absent/`null` by default
+  and unset in every shipped preset (`fr.json`/`de.json`/`es.json`/`it.json`
+  are unaffected). A **project-local** list of full native-script name forms
+  — multi-token forms allowed (e.g. a two-word Hebrew name) — that both
+  extraction implementations (`bootstrap_names.py` and
+  `language_smoke_report.py`) match as **complete forms**, not assembled from
+  a token run the way the particle algorithm builds Latin-script candidates.
+  It exists for caseless/multiword surfacing where the ordinary
+  capitalization-run path finds nothing: `is_upper_initial`
+  (`bootstrap_names.py:148`) gates on ASCII or Unicode category `Lu`, and
+  Hebrew letters are category `Lo` — invisible to that gate — so without a
+  `name_inventory` a Hebrew name surfaces zero candidates. Matching a
+  `name_inventory` form never crosses an existing sentence-terminator
+  boundary (the same boundary the particle-run algorithm already respects),
+  so a form split across `. ` is not joined into one candidate. Add it to a
+  language file (a shipped preset, or a project's own `.local.json`
+  override) only when that language's script needs this bypass; it has no
+  effect on any project using the four required keys alone.
 
 **Shipped presets:**
 

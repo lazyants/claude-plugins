@@ -10,10 +10,11 @@ the same generalized algorithm. Deliberate simplification versus the real
 source: the source's extra `CONTRACTION_RE` heuristic (a hardcoded French
 prefix list -- "J|C|N|S|Qu|Lorsqu|Puisqu|Jusqu|Quoiqu" -- for rejecting
 elided contractions like "Qu'il") is NOT reproduced here, because
-`particle_config`'s documented contract is exactly four fields --
-PARTICLES, STOPWORDS, ELISION_RE, has_elision (see
-references/language-pair-parameterization.md) -- and a fifth,
-language-specific regex field is out of scope for this generalization.
+`particle_config`'s documented contract is four REQUIRED fields --
+PARTICLES, STOPWORDS, ELISION_RE, has_elision -- plus one OPTIONAL fifth,
+`name_inventory` (see references/language-pair-parameterization.md); a
+project-specific, per-language REGEX field like the source's own
+CONTRACTION_RE is still out of scope for this generalization.
 STOPWORDS carries the equivalent burden for a project's own book (extend it
 with any missed contraction spelling the smoke test surfaces).
 
@@ -72,6 +73,7 @@ import json
 import os
 import re
 import sys
+from functools import lru_cache
 from pathlib import Path
 from typing import NoReturn
 
@@ -137,6 +139,16 @@ _APOSTROPHES = "'’"
 # TERMINATORS; the closing quotes that DO end a sentence (" ” ») stay in
 # TERMINATORS so they keep acting as boundaries.
 _WRAPPERS = frozenset("()[]{}'’‘“«")
+
+# The exact five keys a particle_config file may contain (four required +
+# the optional name_inventory) -- mirrors bootstrap_names.py's own
+# PARTICLE_CONFIG_ALLOWED_KEYS exactly. Any OTHER top-level key is rejected
+# outright rather than silently ignored: a typo (e.g. "name_inventroy")
+# would otherwise load with an EMPTY name_inventory and disable Phase 0's
+# caseless bypass with no error at all (issue #204's follow-up finding 7).
+PARTICLE_CONFIG_ALLOWED_KEYS = frozenset(
+    {"PARTICLES", "STOPWORDS", "has_elision", "ELISION_RE", "name_inventory"}
+)
 
 
 def fatal(message) -> NoReturn:
@@ -305,7 +317,8 @@ def resolve_report_path(cli_value, profile_path):
 
 
 # ---------------------------------------------------------------------------
-# particle_config loading + validation (the four documented fields, exactly)
+# particle_config loading + validation (the four required fields, plus the
+# optional fifth name_inventory)
 # ---------------------------------------------------------------------------
 def load_particle_config(path):
     raw_bytes = path.read_bytes()
@@ -315,6 +328,13 @@ def load_particle_config(path):
         fatal(f"particle_config at {path} is not valid UTF-8 JSON: {exc}")
     if not isinstance(config, dict):
         fatal(f"particle_config at {path} must be a JSON object")
+
+    unknown_keys = sorted(set(config.keys()) - PARTICLE_CONFIG_ALLOWED_KEYS)
+    if unknown_keys:
+        fatal(
+            f"particle_config at {path}: unknown key(s) {unknown_keys} -- "
+            f"allowed keys are {sorted(PARTICLE_CONFIG_ALLOWED_KEYS)}"
+        )
 
     particles = config.get("PARTICLES")
     stopwords = config.get("STOPWORDS")
@@ -348,6 +368,20 @@ def load_particle_config(path):
     elif elision_re_str is not None and not isinstance(elision_re_str, str):
         fatal(f"particle_config at {path}: ELISION_RE must be a string or null")
 
+    name_inventory_raw = config.get("name_inventory")
+    if name_inventory_raw is None:
+        name_inventory = frozenset()
+    elif not isinstance(name_inventory_raw, list) or not all(
+        isinstance(f, str) and f.strip() for f in name_inventory_raw
+    ):
+        fatal(
+            f"particle_config at {path}: name_inventory, when present, must "
+            f"be a JSON array of non-empty strings (or null/absent for "
+            f"none), got {name_inventory_raw!r}"
+        )
+    else:
+        name_inventory = frozenset(name_inventory_raw)
+
     return {
         "raw_bytes": raw_bytes,
         "particles": particles,
@@ -355,20 +389,26 @@ def load_particle_config(path):
         "stopwords": set(stopwords),
         "has_elision": has_elision,
         "elision_re": elision_re,
+        "name_inventory": name_inventory,
     }
 
 
 # ---------------------------------------------------------------------------
 # Extraction algorithm -- generalized re-implementation of the run-building
 # core of historiettes-t3's bootstrap_names.py, parameterized entirely by
-# the four particle_config fields (no per-language literals here).
+# the four required + optional name_inventory particle_config fields (no
+# per-language literals here).
 # ---------------------------------------------------------------------------
-def extract_candidate_names(text, lang):
-    particles_lower = lang["particles_lower"]
-    stopwords = lang["stopwords"]
-    has_elision = lang["has_elision"]
-    elision_re = lang["elision_re"]
-
+def _tokenize(text, has_elision, elision_re):
+    """(token, preceding_char) pairs -- mirrors bootstrap_names.py's own
+    tokenize() (this script is a deliberately SEPARATE re-implementation,
+    see module docstring), but returns no spans since this script only
+    reports name presence/counts, never occurrence offsets. Reused for BOTH
+    the main text scan and inventory-form tokenization (0a) below, so a
+    name_inventory entry with its own elidable article (e.g. French
+    "d'Effiat") tokenizes IDENTICALLY to how the same text would tokenize in
+    the scanned block.
+    """
     tokens = []
     for m in TOKEN_RE.finditer(text):
         raw = m.group(0)
@@ -389,17 +429,86 @@ def extract_candidate_names(text, lang):
             tokens.append((elided.group(2), "'"))
         else:
             tokens.append((raw, preceding))
+    return tokens
 
+
+def _build_inventory_trie(inventory_forms):
+    """A nested-dict trie over ``inventory_forms`` (each a non-empty tuple of
+    token strings). A node's ``None`` key marks that the path leading to it
+    IS a complete inventory form -- tokens from ``_tokenize()`` are always
+    non-empty strings, never ``None``, so it is a safe terminal sentinel that
+    can never collide with a real token.
+
+    Mirrors ``bootstrap_names.py``'s own ``_build_inventory_trie()`` exactly
+    (parity is a hard requirement here too -- see
+    ``tests/caseless_offset.test.py``'s parity assertions). Replaces a linear
+    scan over every inventory form at every token position (O(n_tokens x
+    n_forms), genuinely quadratic when both grow) with a single build
+    (O(total inventory token count)) plus a walk per position that is O(L)
+    in the worst case, where L is the longest inventory form's token count
+    -- see ``_compiled_inventory_trie()``/``extract_candidate_names()``'s own
+    docstring for the walk's real bound, since a per-position descent is NOT
+    O(1).
+    """
+    root = {}
+    for form_tokens in inventory_forms:
+        node = root
+        for t in form_tokens:
+            node = node.setdefault(t, {})
+        node[None] = True
+    return root
+
+
+@lru_cache(maxsize=32)
+def _compiled_inventory_trie(name_inventory: frozenset, has_elision: bool, elision_re):
+    """The inventory trie for one ``(name_inventory, has_elision, elision_re)``
+    triple, built once and cached -- NOT rebuilt on every
+    ``extract_candidate_names()`` call. Mirrors ``bootstrap_names.py``'s own
+    ``_compiled_inventory_trie()`` exactly (parity is a hard requirement here
+    too), including WHY: an uncached build re-tokenized every inventory form
+    and rebuilt the whole trie once per manifest block scanned (issue #204
+    follow-up finding 3). ``has_elision`` is part of this file's cache key
+    (unlike bootstrap_names.py's, which only ever needs ``elision_re``)
+    because this file's own ``_tokenize()`` gates elision splitting on BOTH
+    ``has_elision`` and ``elision_re`` together, not on ``elision_re`` alone.
+    The trie is read-only after construction, so sharing it across every
+    block/call is safe.
+    """
+    inventory_forms = (
+        tuple(t for t, _p in _tokenize(form, has_elision, elision_re))
+        for form in name_inventory
+    )
+    return _build_inventory_trie(f for f in inventory_forms if f)
+
+
+def extract_candidate_names(text, lang):
+    particles_lower = lang["particles_lower"]
+    stopwords = lang["stopwords"]
+    has_elision = lang["has_elision"]
+    elision_re = lang["elision_re"]
+    name_inventory = lang["name_inventory"]
+
+    tokens = _tokenize(text, has_elision, elision_re)
     n = len(tokens)
-    idx = 0
     out = []
+    # De-dup key for pass 2 (see its own comment below): (name, start_token_
+    # idx, end_token_idx). This file's public output carries no char offsets
+    # (see the module docstring -- it reports name/count presence only), but
+    # a pair of TOKEN indices serves the identical disambiguating role
+    # bootstrap_names.py's (name, char_start, char_end) does -- two distinct
+    # occurrences of the same name string always land at distinct token
+    # positions, so this never conflates them.
+    seen_spans = set()
+
+    # Pass 1 -- capitalized-run algorithm (unchanged behavior).
+    idx = 0
     while idx < n:
         tok, preceding = tokens[idx]
         if not is_upper_initial(tok) or tok in stopwords:
             idx += 1
             continue
         sentence_initial = preceding in TERMINATORS
-        run = [tok]
+        run_idx = [idx]
         k = idx + 1
         while k < n:
             t2, preceding2 = tokens[k]
@@ -418,7 +527,7 @@ def extract_candidate_names(text, lang):
                 break
             low = t2.lower().rstrip(_APOSTROPHES)
             if is_upper_initial(t2) and t2 not in stopwords:
-                run.append(t2)
+                run_idx.append(k)
                 k += 1
             elif (
                 low in particles_lower
@@ -429,14 +538,93 @@ def extract_candidate_names(text, lang):
                 # George" must not fuse into "Fiona du George").
                 and tokens[k + 1][1] not in TERMINATORS
             ):
-                run.append(t2)
-                run.append(tokens[k + 1][0])
+                run_idx.append(k)
+                run_idx.append(k + 1)
                 k += 2
             else:
                 break
-        name = " ".join(run)
+        name = " ".join(tokens[i][0] for i in run_idx)
         out.append((name, not sentence_initial))
+        seen_spans.add((name, run_idx[0], run_idx[-1]))
         idx = k
+
+    # Pass 2 -- inventory-driven caseless multiword bypass (0a; issue #204).
+    # Mirrors bootstrap_names.py's extract_candidate_spans() pass 2 exactly
+    # (parity is a hard requirement -- see extractor_terminators_drift.test.py
+    # for the sibling drift guard on the shared constants): bypasses
+    # is_upper_initial()/STOPWORDS/particles entirely -- an exact token-
+    # sequence match against a name_inventory form is all that's required,
+    # which is what lets a script with no case distinction at all (e.g.
+    # Hebrew, Unicode category 'Lo') surface a candidate here. A match
+    # bridging a TERMINATORS boundary between its own tokens is refused
+    # (e.g. name_inventory entry "משה לייב" must NOT match text
+    # "משה. לייב").
+    #
+    # INVARIANT (mirrors bootstrap_names.py's -- do not re-introduce a
+    # per-token "claimed" bitmap; three rounds of adversarial review each
+    # found a different case it breaks): pass 2 emits EVERY inventory-form
+    # occurrence it finds, suppressing ONLY an exact duplicate -- the same
+    # (name, span) already emitted by pass 1 or by pass 2 itself. A token
+    # being part of some OTHER candidate's span never blocks a DIFFERENT
+    # candidate from covering it too (e.g. "Cohen" inside mixed-script
+    # "משה Cohen"; a solo "Cohen" inventory form inside pass 1's own larger
+    # "Jean Cohen" run). Consequently pass 2 always advances by exactly one
+    # token position, never by a matched form's length -- two inventory
+    # forms sharing a boundary token (e.g. "משה לייב"/"לייב כהן" against
+    # "משה לייב כהן") must BOTH get a chance, which advancing by match_len
+    # would skip. At a given position, forms are tried longest-first and
+    # the first one that token-matches AND is not an exact duplicate wins.
+    if name_inventory:
+        trie = _compiled_inventory_trie(name_inventory, has_elision, elision_re)
+        idx = 0
+        while idx < n:
+            # Walk the trie as deep as the token run allows, collecting EVERY
+            # depth at which a complete inventory form terminates (`None in
+            # node`) -- not just the deepest. A single deepest-only
+            # `last_match_len` cannot fall back: if the longest match at this
+            # position turns out to be an exact duplicate (see INVARIANT),
+            # any SHORTER-but-fresh terminal found earlier in the same walk
+            # would otherwise be silently discarded (finding 2, RFC #215
+            # Phase 0 review round 4 -- mirrors bootstrap_names.py's own fix
+            # exactly). The `j >= 1` terminator check runs BEFORE descending
+            # to depth j, so it stops the walk from ever reaching a
+            # boundary-violating depth while preserving whatever shorter
+            # match was already found -- equivalent to the old per-length
+            # `any(... for j in range(1, m))` check (a violation at position
+            # j invalidates every candidate length > j but never one of
+            # length <= j). This walk is O(L) in the worst case (L = the
+            # longest inventory form's token count), restarted at EVERY token
+            # position, so the whole pass is O(n_tokens x L) -- not O(n_tokens)
+            # (finding 9).
+            node = trie
+            match_lens = []
+            j = 0
+            while idx + j < n:
+                if j >= 1 and tokens[idx + j][1] in TERMINATORS:
+                    break
+                nxt = node.get(tokens[idx + j][0])
+                if nxt is None:
+                    break
+                node = nxt
+                j += 1
+                if None in node:
+                    match_lens.append(j)
+            # Longest-first: match_lens was appended in increasing depth
+            # order, so the reversed iteration tries the longest terminal
+            # first, falling back to shorter ones only when a longer
+            # candidate turns out to be an exact duplicate. Emit AT MOST ONE
+            # candidate per position -- stop at the first fresh one.
+            for m in reversed(match_lens):
+                name = " ".join(tokens[idx + k][0] for k in range(m))
+                span_key = (name, idx, idx + m - 1)
+                if span_key not in seen_spans:
+                    preceding0 = tokens[idx][1]
+                    sentence_initial = preceding0 in TERMINATORS
+                    out.append((name, not sentence_initial))
+                    seen_spans.add(span_key)
+                    break
+            idx += 1
+
     return out
 
 

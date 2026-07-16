@@ -35,13 +35,13 @@ TWO DISTINCT ACTIONS (may be combined; passing neither is a usage error)
            NOT EXIST YET (no-op, reporting what's already on file, unless
            --force is also given -- DESTRUCTIVE: resets it to an empty
            template).
-  --check  Independently RECOMPUTE the four required-item categories fresh
-           from canon.json and cross-check them against
-           canon_adjudications.json. `--init --check` together run init
-           first, then check, and print ONLY the check summary (never two
-           stdout lines).
+  --check  Independently RECOMPUTE the five required-item categories fresh
+           from canon.json (plus canon_senses.json, when non-empty) and
+           cross-check them against canon_adjudications.json. `--init
+           --check` together run init first, then check, and print ONLY
+           the check summary (never two stdout lines).
 
-THE FOUR REQUIRED-ITEM CATEGORIES (recomputed fresh every --check run)
+THE FIVE REQUIRED-ITEM CATEGORIES (recomputed fresh every --check run)
 --------------------------------------------------------------------------
 Entities are DERIVED, mechanically, never an accuracy call: an entity is a
 normalized `canonical_target_form`. Normalization N(s) used for every
@@ -100,6 +100,26 @@ scope filter or not.
      removed, so a fresh --check no longer enumerates it -- or (b) is
      explicitly risk-accepted via `review_queue_risk_overrides[key]`.
      Queued items never use the confirmed_ok/adverse mechanism.
+  5. `homonym_split` -- OPTIONAL: only enumerated when a sibling
+     `canon_senses.json` sidecar (default `{durable_root}/canon_senses.json`,
+     `--senses-path` override) is present and non-empty. Every entry in
+     that sidecar (a `source_form` adjudicated as resolving to two or more
+     distinct target senses within this project -- a split is >=2 senses,
+     enforced by `canon-senses.schema.json`'s own `minItems:2` and the
+     shared `canon_senses.py::load_senses` loader) is one required item,
+     using the SAME confirmed_ok/adverse verdict mechanism as categories
+     1-3 (see VERDICT CLASSES below) -- *has a human/codex reviewer
+     actually verified this split's senses and their evidence are
+     correct?* Key construction mirrors categories 1-3 exactly (see KEY
+     CONSTRUCTION below): any edit to a sense or its evidence (add/remove a
+     sense, change a disambiguator, swap an evidence span) produces a
+     brand-new key, so the OLD confirmed_ok verdict is silently orphaned
+     and the changed split reports as a fresh missing_verdict until
+     re-reviewed. This category is IN ADDITION to two objective,
+     non-adjudicated checks this script also runs whenever the sidecar is
+     non-empty -- see "HOMONYM-SPLIT SIDECAR" below -- `collapsed_split`
+     and evidence-verification failures, both of which are ALWAYS
+     blocking and never masked by `--advisory`.
 
 KEY CONSTRUCTION -- stable, content-derived, never a raw delimiter-join
 --------------------------------------------------------------------------
@@ -127,10 +147,12 @@ FIELD is a data-quality WARNING, never a crash: the field is authoritative
 and used consistently for every grouping/key computation in this script
 (canon-file.schema.json does not enforce map-key == source_form).
 
-VERDICT CLASSES (adjudications{} records, categories 1-3 only)
+VERDICT CLASSES (adjudications{} records, categories 1-3 and 5 only --
+category 4's review_queue never uses this mechanism, see above)
 --------------------------------------------------------------------------
   confirmed_ok -- the reviewer examined the item and the current canon.json
-      state is correct as-is. The only class that satisfies the gate.
+      (or, for category 5, canon_senses.json) state is correct as-is. The
+      only class that satisfies the gate.
   adverse -- the reviewer found the current state IS wrong. Does NOT
       satisfy the gate -- BLOCKING. The underlying canon.json entry/entries
       must be corrected (a human/codex glossary-pass fix, then
@@ -204,6 +226,58 @@ hide a current risk (required items are recomputed fresh from canon.json),
 and full-file schema conformance of non-current records is the authoring
 layer's job, deliberately not duplicated in this stdlib-only reader.
 
+HOMONYM-SPLIT SIDECAR + MANDATORY EVIDENCE VERIFICATION (canon_senses.json)
+--------------------------------------------------------------------------
+`canon_senses.json` (schema: `canon-senses.schema.json`) is read via the
+ONE shared runtime-validating loader, `canon_senses.py::load_senses` --
+never a private partial read. Absent at the implicit default path is
+treated as empty; an EXPLICIT `--senses-path` that does not exist, or any
+non-regular path (directory, dangling symlink, ...), is a load failure and
+therefore FATAL here too (folded into `CanonAdjudicationAuditError`, exit
+2) -- see `load_senses`'s own docstring for the full path-state/schema-
+validation contract.
+
+Whenever the loaded sidecar is NON-EMPTY (at least one adjudicated split),
+three additional things happen on top of the four pre-existing categories,
+and NONE of them can be silenced by `--advisory`:
+
+  - `homonym_split` required items (category 5 above) -- gated by a
+    confirmed_ok verdict exactly like categories 1-3.
+  - `collapsed_split` -- a BLOCKING, non-adjudicated reconciliation: a
+    source_form the sidecar marks split (>=2 senses) but that still
+    appears in canon.json's `entries{}` as a single bare entry (compared
+    via each entry RECORD's own authoritative `source_form` FIELD, never
+    the `entries{}` map key -- a bare entry filed under an unrelated/
+    legacy map key is still caught). Never satisfied by an adjudication
+    record; the underlying canon.json entry must actually be corrected.
+  - evidence verification -- every stored evidence record (block/seg/
+    char_start/char_end/context_start/context_end/sha256, see
+    `canon-senses.schema.json`) is checked against the resolved
+    `--manifest-path` and `--particle-config` via `evidence_verify.py`:
+    block existence, in-bounds nested half-open codepoint ranges, an exact
+    raw-UTF-8-byte sha256 match on the context window, and -- the
+    strongest check -- that `[char_start, char_end)` is one of the exact
+    spans `occ_index.py::production_occurrences` emits for this
+    `source_form` in this block under the resolved language config (never
+    a mere in-bounds substring). Any failing sense is an
+    `evidence_unverified` finding, folded into `blocking_count`.
+
+`--particle-config` is REQUIRED whenever the sidecar is non-empty (evidence
+verification cannot run without a resolved language config) but OPTIONAL
+otherwise -- a project with no adjudicated splits never needs it; a
+non-empty sidecar with no resolvable `--particle-config` is itself FATAL.
+A non-empty sidecar with NO canon.json at all (`canon_present: false`) is
+its own BLOCKING `canon_absent_with_senses` finding, replacing the
+pre-existing early-return's unconditional `gate_passed: true` for that
+case -- a split cannot be meaningfully reconciled against a canon that
+does not exist.
+
+`--advisory` still downgrades a categories 1-4 finding to a non-blocking
+warning (its original WARN-first escape hatch), but it NEVER masks
+`homonym_split`'s missing/stale verdict, `collapsed_split`,
+`evidence_unverified`, or `canon_absent_with_senses` -- see OUTPUT / EXIT
+CODE below.
+
 CLI
 ---
   --init                    write the empty template if absent
@@ -214,10 +288,28 @@ CLI
                             {durable_root}/canon.json)
   --adjudications-path PATH override the persisted adjudications artifact
                             (default: {durable_root}/canon_adjudications.json)
+  --senses-path PATH        override canon_senses.json (default:
+                            {durable_root}/canon_senses.json)
+  --manifest-path PATH      override manifest.json (default:
+                            {durable_root}/manifest.json) -- read only when
+                            canon_senses.json is non-empty (evidence
+                            verification)
+  --particle-config FILENAME
+                            bare filename under ${{durable_root}}/languages/
+                            (the profile's own source.language.
+                            particle_config LITERAL value, never
+                            reconstructed from source.language.code) --
+                            REQUIRED whenever canon_senses.json is
+                            non-empty, unused (and optional) otherwise
   --pair-review-cap N       category-3 pair-count cap (default: 40)
-  --advisory                report every finding but never exit 1 for
-                            blocking findings (WARN-first escape hatch;
-                            never masks a genuine fatal exit 2)
+  --advisory                report every finding but never exit 1 for a
+                            categories-1-4 blocking finding (WARN-first
+                            escape hatch); NEVER masks a genuine fatal exit
+                            2, and NEVER masks homonym_split's missing/
+                            stale verdict, collapsed_split,
+                            evidence_unverified, or
+                            canon_absent_with_senses when canon_senses.json
+                            is non-empty
 
 OUTPUT / EXIT CODE
 --------------------------------------------------------------------------
@@ -225,15 +317,19 @@ Exactly ONE JSON line to stdout -- `canon-adjudication-audit-summary.
 schema.json`-shaped (a check summary, or the distinct --init-only summary
 when --init is given without --check) -- all human-readable detail to
 stderr. Exit 0 = gate clean (or `--init`-only success), 1 = blocking
-findings (unless `--advisory`, which forces 0 while still reporting fully),
-2 = fatal (bad paths, structurally malformed canon/adjudications,
-enumeration-critical row malformation, a genuine key collision, or a usage
-error when neither --init nor --check is given). `--advisory` never masks a
-fatal exit 2.
+findings (categories 1-4, `homonym_split`'s missing/stale verdict,
+`collapsed_split`, `evidence_unverified`, or `canon_absent_with_senses` --
+unless `--advisory`, which forces 0 for the categories-1-4 component only
+while still reporting fully), 2 = fatal (bad paths, structurally malformed
+canon/adjudications/canon_senses.json, enumeration-critical row
+malformation, a genuine key collision, a non-empty canon_senses.json with
+no resolvable --particle-config, or a usage error when neither --init nor
+--check is given). `--advisory` never masks a fatal exit 2.
 
-STATUS: this is an OPT-IN rollout gate, not yet wired as a mandatory
-pipeline step -- see SKILL.md's registration for the exact command and
-when to run it.
+STATUS: categories 1-4 remain an OPT-IN rollout gate. Category 5 (the
+homonym-split evidence gate) is MANDATORY whenever a project has adjudicated
+splits -- see SKILL.md's W-step registration for the exact command and when
+it is wired to run unconditionally.
 """
 
 import argparse
@@ -242,11 +338,14 @@ import itertools
 import json
 import os
 import sys
-import unicodedata
 from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional, TypeGuard
+
+from bootstrap_names import BootstrapNamesError, load_language_config
+from canon_senses import CanonSensesLoadError, SensesResult, is_split, load_senses, normalize_form
+from evidence_verify import verify_senses
 
 # ---------------------------------------------------------------------------
 # Self-anchoring: this script always lives at {durable_root}/scripts/<name>.py.
@@ -256,6 +355,12 @@ SCRIPTS_DIR = Path(__file__).resolve().parent
 DURABLE_ROOT = SCRIPTS_DIR.parent
 CANON_PATH = DURABLE_ROOT / "canon.json"
 DEFAULT_ADJUDICATIONS_PATH = DURABLE_ROOT / "canon_adjudications.json"
+# Siblings of CANON_PATH, self-anchored the same way. NOT imported from
+# canon_validate.py/glossary_batch_plan.py -- each consumer computes its own
+# copy (see canon_senses.py's own module docstring on why DEFAULT_SENSES_PATH
+# is deliberately not defined there).
+DEFAULT_SENSES_PATH = DURABLE_ROOT / "canon_senses.json"
+DEFAULT_MANIFEST_PATH = DURABLE_ROOT / "manifest.json"
 DEFAULT_PAIR_REVIEW_CAP = 40
 EXCLUSION_MATERIALIZATION_BUDGET = 1_000_000  # cap on excluded-pair materialization in
 # compute_cat3_items -- a well-formed canon (each normalized source_form belongs to
@@ -270,7 +375,8 @@ KIND_DUP_SOURCE = "duplicate_source_form"
 KIND_MERGE = "existing_merge"
 KIND_PAIR = "candidate_missed_merge_pair"
 KIND_QUEUE = "review_queue_unresolved"
-ALL_KINDS = (KIND_DUP_SOURCE, KIND_MERGE, KIND_PAIR, KIND_QUEUE)
+KIND_SPLIT = "homonym_split"
+ALL_KINDS = (KIND_DUP_SOURCE, KIND_MERGE, KIND_PAIR, KIND_QUEUE, KIND_SPLIT)
 
 
 class CanonAdjudicationAuditError(Exception):
@@ -291,14 +397,6 @@ class CanonAdjudicationAuditError(Exception):
 # ---------------------------------------------------------------------------
 # Small utilities
 # ---------------------------------------------------------------------------
-
-
-def normalize_form(s: str) -> str:
-    """NFC-normalize, casefold, and collapse-and-strip internal whitespace --
-    the one normalization N(...) every grouping/matching key in this script
-    is computed from. Display fields always keep the original string; only
-    grouping/hashing ever sees the normalized form."""
-    return " ".join(unicodedata.normalize("NFC", s).casefold().split())
 
 
 def canonical_json(value: Any) -> str:
@@ -489,7 +587,81 @@ def read_canon(canon_path: Path, warnings: list) -> tuple:
 
 
 # ---------------------------------------------------------------------------
-# Required-item construction (categories 1-4) -- see module docstring for
+# canon_senses.json reading + --particle-config resolution -- both fold a
+# sibling module's own exception into this script's single fatal-error type,
+# so a blocked sidecar load or an unresolvable language config surfaces
+# through the same "FATAL: ..." stderr line + exit 2 as every other fatal
+# this script raises, never a second error shape.
+# ---------------------------------------------------------------------------
+
+
+def _load_senses_or_raise(senses_path: Path, allow_absent: bool) -> "SensesResult":
+    """Wraps canon_senses.py's `load_senses`, translating a
+    CanonSensesLoadError into this module's own CanonAdjudicationAuditError
+    -- mirrors canon_validate.py's own `_load_senses_or_raise` exactly, so a
+    blocked sidecar load (a schema failure, a typo'd --senses-path, a
+    non-regular path) is FATAL here too, never a silent 'no senses'."""
+    try:
+        return load_senses(senses_path, allow_absent=allow_absent)
+    except CanonSensesLoadError as e:
+        raise CanonAdjudicationAuditError(str(e), offending=e.offending)
+
+
+def _resolve_particle_config_or_raise(particle_config_filename: Optional[str]):
+    """Resolves `--particle-config` (a bare filename under
+    ${durable_root}/languages/) into a `bootstrap_names.LanguageConfig` via
+    `load_language_config`. Called ONLY when `canon_senses.json` is
+    non-empty (evidence verification cannot run without one) -- a missing
+    `--particle-config` at that point, or one that fails to resolve, is
+    FATAL (a non-empty sidecar with no resolvable config, per module
+    docstring)."""
+    if particle_config_filename is None:
+        raise CanonAdjudicationAuditError(
+            "canon_senses.json is non-empty but --particle-config was not given -- "
+            "evidence verification cannot run without a resolved language config. "
+            "Pass the profile's own source.language.particle_config literal value."
+        )
+    try:
+        return load_language_config(particle_config_filename)
+    except BootstrapNamesError as e:
+        raise CanonAdjudicationAuditError(
+            f"canon_senses.json is non-empty but --particle-config "
+            f"{particle_config_filename!r} could not be resolved: {e}"
+        )
+
+
+def _read_manifest_for_evidence(manifest_path: Path) -> Any:
+    """Best-effort read of manifest.json for evidence verification. Mirrors
+    evidence_verify.py's own tolerant design (see its `_blocks_mapping`):
+    a missing/unreadable/malformed manifest is reported the SAME way as a
+    missing block -- a per-sense `evidence_unverified` finding, never a
+    whole-run fatal -- since manifest.json is not in this script's own
+    exit-2 list of structurally-validated inputs (unlike canon.json/
+    canon_adjudications.json/canon_senses.json). Returns whatever
+    `json.loads` produced, or `{}` on any read/parse failure -- either way,
+    `evidence_verify.verify_senses` tolerates a non-dict/missing-`blocks`
+    manifest by treating every referenced block as not-found."""
+    try:
+        raw = manifest_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        # UnicodeDecodeError is a ValueError, not an OSError -- invalid UTF-8 bytes must be
+        # tolerated here too (mirrors _read_json_file's own discipline for canon.json/
+        # canon_adjudications.json, though there it fatals; here it just means "no manifest
+        # text to verify against").
+        return {}
+    try:
+        return json.loads(raw)
+    except ValueError:
+        return {}
+    except RecursionError:
+        # A deeply-nested-but-otherwise-valid manifest exhausts Python's call stack.
+        # RecursionError is a RuntimeError, not a ValueError, so it needs its own handler --
+        # this function must never raise (see docstring: total function, never fatal).
+        return {}
+
+
+# ---------------------------------------------------------------------------
+# Required-item construction (categories 1-5) -- see module docstring for
 # the exact identity_struct shape per category.
 # ---------------------------------------------------------------------------
 
@@ -711,10 +883,58 @@ def compute_cat4_items(review_queue: list, key_to_identity: dict, warnings: list
     return items
 
 
-def compute_all_items(canon: dict, pair_review_cap: int, warnings: list) -> tuple:
-    """Returns (cat1_items, cat2_items, cat3_items, cat4_items, cap_note),
-    all recomputed fresh from `canon` -- never trusts anything cached from a
-    previous run."""
+def compute_cat5_items(senses: "SensesResult", key_to_identity: dict, warnings: list) -> list:
+    """Category 5, homonym_split: every adjudicated split in `senses` (an
+    entries_by_source_form record with >=2 senses -- load_senses already
+    refuses to load a malformed/1-sense record, so every entry present here
+    genuinely qualifies) is one required item. Identity =
+    {"source_form": <entry's own NFC key>, "senses": entry["senses"]} --
+    mirrors the KEY CONSTRUCTION discipline every other category uses (see
+    module docstring): any edit to a sense or its evidence changes
+    canonical_json(identity), so the key changes and the old confirmed_ok
+    verdict is silently orphaned."""
+    items = []
+    for source_form, entry in sorted(senses.entries_by_source_form.items()):
+        senses_list = entry.get("senses", [])
+        item = build_item(
+            key_to_identity, KIND_SPLIT,
+            {"source_form": source_form, "senses": senses_list}, warnings,
+            source_form=source_form, sense_count=len(senses_list),
+        )
+        if item is not None:
+            items.append(item)
+    return items
+
+
+def compute_collapsed_split_findings(canon: dict, senses: "SensesResult") -> list:
+    """`collapsed_split` (RFC #215 1e) -- a BLOCKING, non-adjudicated
+    reconciliation, never gated by any confirmed_ok/adverse verdict: every
+    canon.json entries{} RECORD (not the map key -- a bare entry filed under
+    an unrelated/legacy map key is still caught, see module docstring
+    "entries{} map key" WARNING) whose own authoritative `source_form` field
+    is an adjudicated split in `senses` (>=2 senses, via the shared
+    `is_split` predicate) is a finding: the sidecar says this source_form
+    resolves to 2+ distinct senses, but canon.json still carries it as one
+    bare entry. Never satisfied by an adjudication record -- the underlying
+    canon.json entry must actually be corrected (a human/codex glossary-pass
+    fix, then canon_validate.py, which independently refuses to let a NEW
+    batch item recollapse one -- this reconciliation instead catches an
+    ALREADY-collapsed state, e.g. a split added to the sidecar after the
+    bare entry already existed)."""
+    findings = []
+    for map_key, entry in canon["entries"].items():
+        source_form = entry["source_form"]
+        if is_split(senses, source_form):
+            findings.append({"map_key": map_key, "source_form": source_form})
+    return findings
+
+
+def compute_all_items(canon: dict, pair_review_cap: int, senses: "SensesResult",
+                       warnings: list) -> tuple:
+    """Returns (cat1_items, cat2_items, cat3_items, cat4_items, cat5_items,
+    cap_note), all recomputed fresh from `canon`/`senses` -- never trusts
+    anything cached from a previous run. `cat5_items` is `[]` whenever
+    `senses.is_empty`."""
     key_to_identity: dict = {}
     records = _proper_name_records(canon["entries"])
     target_groups = group_by_normalized(records, "canonical_target_form")
@@ -725,8 +945,11 @@ def compute_all_items(canon: dict, pair_review_cap: int, warnings: list) -> tupl
         target_groups, pair_review_cap, key_to_identity, warnings
     )
     cat4_items = compute_cat4_items(canon["review_queue"], key_to_identity, warnings)
+    cat5_items = (
+        [] if senses.is_empty else compute_cat5_items(senses, key_to_identity, warnings)
+    )
 
-    return cat1_items, cat2_items, cat3_items, cat4_items, cap_note
+    return cat1_items, cat2_items, cat3_items, cat4_items, cat5_items, cap_note
 
 
 # ---------------------------------------------------------------------------
@@ -809,7 +1032,7 @@ def _risk_accepted(override: Any) -> TypeGuard[dict]:
 
 
 def crosscheck_regular_items(items: list, adjudications: dict) -> tuple:
-    """Categories 1-3 only -- category 4 never uses the confirmed_ok/adverse
+    """Categories 1-3 and 5 -- category 4 never uses the confirmed_ok/adverse
     mechanism (see crosscheck_queue). Returns (counts, by_kind, buckets)
     where buckets holds the actual items in each outcome, for the
     stderr report."""
@@ -833,6 +1056,16 @@ def crosscheck_regular_items(items: list, adjudications: dict) -> tuple:
 
     counts = {k: len(v) for k, v in buckets.items()}
     return counts, by_kind, buckets
+
+
+def _count_split_kind(items: list) -> int:
+    """Counts how many `items` (drawn from a crosscheck_regular_items bucket
+    such as missing_verdict/adverse/invalid_verdict_class) are KIND_SPLIT --
+    used to split the aggregate blocking count into its --advisory-maskable
+    (categories 1-3) and never-maskable (category 5, homonym_split) portions
+    (see run_check's exit-code computation and module docstring's OUTPUT /
+    EXIT CODE section)."""
+    return sum(1 for it in items if it["kind"] == KIND_SPLIT)
 
 
 def crosscheck_cap(cap_note: Optional[dict], cap_overrides: dict, warnings: list) -> tuple:
@@ -976,7 +1209,8 @@ def empty_totals() -> dict:
         "required_items": 0, "confirmed_ok": 0, "missing_verdict": 0, "adverse": 0,
         "invalid_verdict_class": 0, "cap_notes": 0, "cap_overrides_ok": 0,
         "cap_overrides_missing": 0, "review_queue_items": 0, "review_queue_unaccepted": 0,
-        "orphaned_records": 0, "by_kind": {k: 0 for k in ALL_KINDS},
+        "orphaned_records": 0, "collapsed_split": 0, "evidence_unverified": 0,
+        "canon_absent_with_senses": 0, "by_kind": {k: 0 for k in ALL_KINDS},
     }
 
 
@@ -986,15 +1220,22 @@ def _print_item_list(label: str, items: list, file) -> None:
         print(f"  {it['key']}  [{it['kind']}]", file=file)
 
 
+def _print_evidence_failures(label: str, failures: list, file) -> None:
+    print(f"\n-- {label} (first 20) --", file=file)
+    for f in failures[:20]:
+        print(f"  {f.source_form!r} sense {f.sense_id!r} block {f.block!r}: {f.reason}", file=file)
+
+
 def print_human_report(canon_path: Path, adjudications_path: Path, totals: dict,
-                        buckets: dict, unaccepted_items: list, blocking_count: int,
+                        buckets: dict, unaccepted_items: list, collapsed_split_findings: list,
+                        evidence_failures: list, blocking_count: int,
                         gate_passed: bool, advisory: bool, warnings: list) -> None:
     print("=" * 70, file=sys.stderr)
     print("canon_adjudication_audit.py -- --check summary", file=sys.stderr)
     print("=" * 70, file=sys.stderr)
     print(f"canon_path: {canon_path}", file=sys.stderr)
     print(f"adjudications_path: {adjudications_path}", file=sys.stderr)
-    print(f"required items (all 4 categories): {totals['required_items']}", file=sys.stderr)
+    print(f"required items (all 5 categories): {totals['required_items']}", file=sys.stderr)
     for kind in ALL_KINDS:
         print(f"  {kind}: {totals['by_kind'][kind]}", file=sys.stderr)
     print(f"  confirmed_ok:                 {totals['confirmed_ok']}", file=sys.stderr)
@@ -1011,9 +1252,19 @@ def print_human_report(canon_path: Path, adjudications_path: Path, totals: dict,
         f"(UNACCEPTED/BLOCKING={totals['review_queue_unaccepted']})",
         file=sys.stderr,
     )
+    print(
+        f"collapsed_split (BLOCKING, never masked by --advisory): "
+        f"{totals['collapsed_split']}",
+        file=sys.stderr,
+    )
+    print(
+        f"evidence_unverified (BLOCKING, never masked by --advisory): "
+        f"{totals['evidence_unverified']}",
+        file=sys.stderr,
+    )
     print(f"orphaned records (informational, non-blocking): {totals['orphaned_records']}", file=sys.stderr)
     print(file=sys.stderr)
-    tail = "  (--advisory: reporting only, never exits 1)" if advisory else ""
+    tail = "  (--advisory: categories 1-4 only, never masks category 5/collapsed_split/evidence_unverified)" if advisory else ""
     print(f"BLOCKING findings: {blocking_count}  gate_passed={gate_passed}{tail}", file=sys.stderr)
 
     if buckets["missing_verdict"]:
@@ -1024,6 +1275,15 @@ def print_human_report(canon_path: Path, adjudications_path: Path, totals: dict,
         _print_item_list("invalid verdict_class / empty reviewed_by or reason", buckets["invalid_verdict_class"], sys.stderr)
     if unaccepted_items:
         _print_item_list("review_queue items with no risk-acceptance", unaccepted_items, sys.stderr)
+    if collapsed_split_findings:
+        print("\n-- collapsed_split (BLOCKING, canon.json must be corrected; first 20) --", file=sys.stderr)
+        for finding in collapsed_split_findings[:20]:
+            print(f"  entries[{finding['map_key']!r}] source_form={finding['source_form']!r}", file=sys.stderr)
+    if evidence_failures:
+        _print_evidence_failures(
+            "evidence_unverified (BLOCKING, canon_senses.json evidence must be corrected)",
+            evidence_failures, sys.stderr,
+        )
 
     if warnings:
         print(f"\n{len(warnings)} warning(s):", file=sys.stderr)
@@ -1048,7 +1308,9 @@ def _orphan_warning(records: dict, current_keys: set, record_label: str,
     return orphaned
 
 
-def run_check(canon_path: Path, adjudications_path: Path, pair_review_cap: int,
+def run_check(canon_path: Path, adjudications_path: Path, senses_path: Path,
+              allow_absent_senses: bool, manifest_path: Path,
+              particle_config_filename: Optional[str], pair_review_cap: int,
               advisory: bool, mode: str) -> tuple:
     """Returns (summary, exit_code). Prints the human-readable report to
     stderr as a side effect; the caller prints the returned summary as the
@@ -1061,25 +1323,110 @@ def run_check(canon_path: Path, adjudications_path: Path, pair_review_cap: int,
     # silently exit 0 for a bad invocation (codex round-13). An ABSENT adjudications file is
     # still treated as empty (non-fatal) as before.
     adjudications_doc = read_adjudications(adjudications_path, warnings)
+    # Load canon_senses.json unconditionally too, for the same reason: a blocked sidecar load
+    # (schema failure, typo'd --senses-path, non-regular path) must fatal regardless of canon
+    # presence, never silently skip the mandatory gate.
+    senses = _load_senses_or_raise(senses_path, allow_absent_senses)
+
+    # --particle-config is REQUIRED whenever the sidecar is non-empty, regardless of canon
+    # presence (evidence verification -- and the canon_absent_with_senses check below --
+    # both need a resolved language config to be meaningful; see module docstring).
+    language_config = None
+    if not senses.is_empty:
+        language_config = _resolve_particle_config_or_raise(particle_config_filename)
 
     if not canon_present:
+        if senses.is_empty:
+            print(
+                f"[check] NOTE: canon.json not found at {canon_path} -- canon *presence* is "
+                f"canon_validate.py's job, not this audit's; reporting 0 required items and "
+                f"canon_present:false rather than a silent green.",
+                file=sys.stderr,
+            )
+            summary = {
+                "success": True, "mode": mode,
+                "canon_path": str(canon_path), "adjudications_path": str(adjudications_path),
+                "senses_path": str(senses_path), "canon_present": False,
+                "pair_review_cap": pair_review_cap, "advisory": advisory,
+                "totals": empty_totals(), "blocking_count": 0, "gate_passed": True,
+                "warnings": warnings, "generated_at": now_iso(),
+            }
+            return summary, 0
+
+        # canon_absent_with_senses: a split cannot be meaningfully reconciled against a canon
+        # that does not exist -- BLOCKING, and NEVER masked by --advisory (a split blocker),
+        # replacing the pre-existing early-return's unconditional gate_passed:true above.
+        #
+        # Evidence verification does NOT depend on canon.json at all (only collapsed_split
+        # reconciliation does -- it needs canon["entries"], so it genuinely cannot run here
+        # and correctly stays 0) -- run it now rather than skip it, so an operator sees EVERY
+        # currently-knowable problem in one summary. Without this, a corrupt/missing-manifest
+        # evidence span would silently report evidence_unverified:0 here even though the
+        # sidecar's own evidence is broken, and the operator would only discover that on the
+        # NEXT run, after fixing canon absence (a reporting-completeness gap a codex round
+        # caught -- never a gate bypass, since this branch already blocks unconditionally).
+        manifest = _read_manifest_for_evidence(manifest_path)
+        evidence_failures = verify_senses(senses, manifest, language_config)
+        evidence_unverified_count = len(evidence_failures)
+
+        # Category 5 (homonym_split) is the SAME story as evidence verification above:
+        # compute_cat5_items(senses, key_to_identity, warnings) takes only `senses` -- no
+        # canon -- so it genuinely can run here too, and must, for the same reporting-
+        # completeness reason (a codex round caught this as the identical gap, now closed
+        # for cat5). key_to_identity starts fresh/empty since cat5 is the only category
+        # computed in this branch (no cat1-4 keys exist without canon to collide against).
+        # Only collapsed_split (reconciling against canon["entries"]) genuinely cannot run
+        # here and correctly stays 0.
+        cat5_items = compute_cat5_items(senses, {}, warnings)
+        cat5_verdict_counts, cat5_by_kind, cat5_buckets = crosscheck_regular_items(
+            cat5_items, adjudications_doc["adjudications"]
+        )
+        cat5_blocking_count = (
+            cat5_verdict_counts["missing_verdict"] + cat5_verdict_counts["adverse"]
+            + cat5_verdict_counts["invalid_verdict_class"]
+        )
+
         print(
-            f"[check] NOTE: canon.json not found at {canon_path} -- canon *presence* is "
-            f"canon_validate.py's job, not this audit's; reporting 0 required items and "
-            f"canon_present:false rather than a silent green.",
+            f"[check] canon.json not found at {canon_path} but canon_senses.json at "
+            f"{senses_path} is non-empty -- a homonym split cannot be reconciled against a "
+            f"canon that does not exist. BLOCKING, never masked by --advisory.",
             file=sys.stderr,
         )
+        if cat5_buckets["missing_verdict"]:
+            _print_item_list("missing verdict", cat5_buckets["missing_verdict"], sys.stderr)
+        if cat5_buckets["adverse"]:
+            _print_item_list("adverse (BLOCKING, canon.json must be corrected)", cat5_buckets["adverse"], sys.stderr)
+        if cat5_buckets["invalid_verdict_class"]:
+            _print_item_list(
+                "invalid verdict_class / empty reviewed_by or reason", cat5_buckets["invalid_verdict_class"], sys.stderr,
+            )
+        if evidence_failures:
+            _print_evidence_failures(
+                "evidence_unverified (BLOCKING, canon_senses.json evidence must be corrected)",
+                evidence_failures, sys.stderr,
+            )
+        totals = empty_totals()
+        totals["canon_absent_with_senses"] = 1
+        totals["evidence_unverified"] = evidence_unverified_count
+        totals["required_items"] = len(cat5_items)
+        totals["confirmed_ok"] = cat5_verdict_counts["confirmed_ok"]
+        totals["missing_verdict"] = cat5_verdict_counts["missing_verdict"]
+        totals["adverse"] = cat5_verdict_counts["adverse"]
+        totals["invalid_verdict_class"] = cat5_verdict_counts["invalid_verdict_class"]
+        totals["by_kind"] = cat5_by_kind
+        blocking_count = 1 + evidence_unverified_count + cat5_blocking_count
         summary = {
             "success": True, "mode": mode,
             "canon_path": str(canon_path), "adjudications_path": str(adjudications_path),
-            "canon_present": False, "pair_review_cap": pair_review_cap, "advisory": advisory,
-            "totals": empty_totals(), "blocking_count": 0, "gate_passed": True,
+            "senses_path": str(senses_path), "canon_present": False,
+            "pair_review_cap": pair_review_cap, "advisory": advisory,
+            "totals": totals, "blocking_count": blocking_count, "gate_passed": False,
             "warnings": warnings, "generated_at": now_iso(),
         }
-        return summary, 0
+        return summary, 1
 
-    cat1, cat2, cat3, cat4, cap_note = compute_all_items(canon, pair_review_cap, warnings)
-    regular_items = cat1 + cat2 + cat3
+    cat1, cat2, cat3, cat4, cat5, cap_note = compute_all_items(canon, pair_review_cap, senses, warnings)
+    regular_items = cat1 + cat2 + cat3 + cat5
 
     verdict_counts, by_kind, buckets = crosscheck_regular_items(regular_items, adjudications_doc["adjudications"])
     by_kind[KIND_QUEUE] = len(cat4)
@@ -1119,12 +1466,46 @@ def run_check(canon_path: Path, adjudications_path: Path, pair_review_cap: int,
         )
     orphaned_records = len(orphaned_adjudications) + len(orphaned_rq) + len(orphaned_cap_keys)
 
+    # --- homonym-split sidecar: collapsed_split reconciliation + evidence verification ---
+    # Both run whenever the sidecar is non-empty; neither is gated by any adjudication verdict
+    # -- always-blocking findings, never satisfied by a confirmed_ok record (module docstring
+    # "HOMONYM-SPLIT SIDECAR + MANDATORY EVIDENCE VERIFICATION").
+    collapsed_split_findings: list = []
+    evidence_failures: list = []
+    if not senses.is_empty:
+        collapsed_split_findings = compute_collapsed_split_findings(canon, senses)
+        manifest = _read_manifest_for_evidence(manifest_path)
+        evidence_failures = verify_senses(senses, manifest, language_config)
+
+    collapsed_split_count = len(collapsed_split_findings)
+    evidence_unverified_count = len(evidence_failures)
+
     blocking_count = (
         verdict_counts["missing_verdict"] + verdict_counts["adverse"]
         + verdict_counts["invalid_verdict_class"] + cap_overrides_missing
-        + len(unaccepted_items)
+        + len(unaccepted_items) + collapsed_split_count + evidence_unverified_count
     )
     gate_passed = blocking_count == 0
+
+    # --advisory masks ONLY the categories-1-4 portion of blocking_count (missing_verdict/
+    # adverse/invalid_verdict_class contributed by categories 1-3, cap_overrides_missing,
+    # review_queue_unaccepted) -- it NEVER masks homonym_split's (category 5's) own
+    # missing/stale verdict, collapsed_split, or evidence_unverified (module docstring
+    # OUTPUT / EXIT CODE). _count_split_kind isolates category 5's share of the three
+    # verdict buckets so the never-maskable portion can be computed without a second
+    # crosscheck pass.
+    split_verdict_blocking = (
+        _count_split_kind(buckets["missing_verdict"])
+        + _count_split_kind(buckets["adverse"])
+        + _count_split_kind(buckets["invalid_verdict_class"])
+    )
+    unmaskable_blocking_count = split_verdict_blocking + collapsed_split_count + evidence_unverified_count
+    if gate_passed:
+        exit_code = 0
+    elif unmaskable_blocking_count > 0:
+        exit_code = 1
+    else:
+        exit_code = 0 if advisory else 1
 
     totals = {
         "required_items": len(regular_items) + len(cat4),
@@ -1138,23 +1519,27 @@ def run_check(canon_path: Path, adjudications_path: Path, pair_review_cap: int,
         "review_queue_items": review_queue_items,
         "review_queue_unaccepted": len(unaccepted_items),
         "orphaned_records": orphaned_records,
+        "collapsed_split": collapsed_split_count,
+        "evidence_unverified": evidence_unverified_count,
+        "canon_absent_with_senses": 0,
         "by_kind": by_kind,
     }
 
     summary = {
         "success": True, "mode": mode,
         "canon_path": str(canon_path), "adjudications_path": str(adjudications_path),
-        "canon_present": True, "pair_review_cap": pair_review_cap, "advisory": advisory,
+        "senses_path": str(senses_path), "canon_present": True,
+        "pair_review_cap": pair_review_cap, "advisory": advisory,
         "totals": totals, "blocking_count": blocking_count, "gate_passed": gate_passed,
         "warnings": warnings, "generated_at": now_iso(),
     }
 
     print_human_report(
         canon_path, adjudications_path, totals, buckets, unaccepted_items,
+        collapsed_split_findings, evidence_failures,
         blocking_count, gate_passed, advisory, warnings,
     )
 
-    exit_code = 0 if (gate_passed or advisory) else 1
     return summary, exit_code
 
 
@@ -1196,8 +1581,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--check", action="store_true",
-        help="Recompute the four required-item categories fresh from canon.json and "
-             "cross-check them against the adjudications file.",
+        help="Recompute the five required-item categories fresh from canon.json "
+             "(plus canon_senses.json, when non-empty) and cross-check them "
+             "against the adjudications file.",
     )
     parser.add_argument(
         "--force", action="store_true",
@@ -1214,6 +1600,32 @@ def build_arg_parser() -> argparse.ArgumentParser:
              f"{DEFAULT_ADJUDICATIONS_PATH}).",
     )
     parser.add_argument(
+        "--senses-path", metavar="PATH", default=None,
+        help=f"Override the canon_senses.json path (default: "
+             f"{DEFAULT_SENSES_PATH}). When non-empty, enumerates category 5 "
+             f"(homonym_split), reconciles collapsed_split against canon.json, "
+             f"and mandatorily verifies every stored evidence span. When "
+             f"omitted, an absent default sidecar is treated as empty (no "
+             f"splits yet); an EXPLICIT --senses-path that does not exist is a "
+             f"hard error instead (a typo'd path must never silently bypass "
+             f"the mandatory gate) -- see canon_senses.py::load_senses.",
+    )
+    parser.add_argument(
+        "--manifest-path", metavar="PATH", default=None,
+        help=f"Override manifest.json (default: {DEFAULT_MANIFEST_PATH}). Read "
+             f"only when canon_senses.json is non-empty, to verify every "
+             f"stored evidence span against the raw block text.",
+    )
+    parser.add_argument(
+        "--particle-config", metavar="FILENAME", default=None,
+        help="Bare filename under ${durable_root}/languages/ -- the profile's "
+             "own source.language.particle_config LITERAL value, never "
+             "reconstructed from source.language.code. REQUIRED whenever "
+             "canon_senses.json is non-empty (evidence verification cannot "
+             "run without a resolved language config); unused and optional "
+             "otherwise.",
+    )
+    parser.add_argument(
         "--pair-review-cap", type=_nonneg_int, default=DEFAULT_PAIR_REVIEW_CAP,
         help=f"Category-3 pair count above which a single, explicit "
              f"degenerate_cap_overrides['{CAP_SCOPE_TOKEN}'] risk-acceptance is required "
@@ -1221,8 +1633,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--advisory", action="store_true",
-        help="Report every finding but never exit 1 for blocking findings (WARN-first "
-             "escape hatch). Never masks a genuine fatal exit 2.",
+        help="Report every finding but never exit 1 for a categories-1-4 "
+             "blocking finding (WARN-first escape hatch). Never masks a "
+             "genuine fatal exit 2, and never masks homonym_split's "
+             "missing/stale verdict, collapsed_split, evidence_unverified, or "
+             "canon_absent_with_senses when canon_senses.json is non-empty.",
     )
     return parser
 
@@ -1239,6 +1654,12 @@ def main(argv=None) -> int:
 
     canon_path = Path(args.canon_path) if args.canon_path else CANON_PATH
     adjudications_path = Path(args.adjudications_path) if args.adjudications_path else DEFAULT_ADJUDICATIONS_PATH
+    senses_path = Path(args.senses_path) if args.senses_path else DEFAULT_SENSES_PATH
+    # allow_absent=True ONLY for the genuinely-implicit default -- an EXPLICIT --senses-path
+    # that turns out missing must BLOCK, never silently read as "no splits yet" (mirrors
+    # canon_validate.py's/glossary_batch_plan.py's own discipline).
+    allow_absent_senses = args.senses_path is None
+    manifest_path = Path(args.manifest_path) if args.manifest_path else DEFAULT_MANIFEST_PATH
 
     try:
         if args.init:
@@ -1258,7 +1679,8 @@ def main(argv=None) -> int:
 
         mode = "init+check" if args.init else "check"
         summary, exit_code = run_check(
-            canon_path, adjudications_path, args.pair_review_cap, args.advisory, mode
+            canon_path, adjudications_path, senses_path, allow_absent_senses,
+            manifest_path, args.particle_config, args.pair_review_cap, args.advisory, mode,
         )
         print(json.dumps(summary, ensure_ascii=False))
         return exit_code

@@ -1,5 +1,27 @@
 # Changelog
 
+## 1.5.0 — 2026-07-16
+
+Implements RFC #215 Phase 0 + Phase 1 (#204, #215): surface names the capitalization gate misses in unicameral scripts, and adjudicate a homonymous source form into distinct senses via a strict, byte-verified sidecar — `canon.json` stays a 1:1 dict.
+
+### Added
+
+- **#204 — caseless multiword surfacing.** `bootstrap_names.py` now does offset-preserving two-pass candidate extraction: pass 2 surfaces `name_inventory` matches invisible to the ASCII/`Lu` capitalization gate (Hebrew and other unicameral scripts). `tokenize()` returns 4-tuples `(token, preceding_char, start, end)`; `mask_sentinels` is equal-length (offset-preserving). `LanguageConfig` gains `name_inventory` (frozenset). New `occ_index.py` builds a source occurrence index over segpack manifests (`production_occurrences()` — the shared production matcher — plus `build_occurrence_records`, `iter_manifest_blocks`, `index_manifest`, and a CLI). `language_smoke_report.py` carries a drift-guarded parity implementation of the two-pass extractor.
+- **Homonym-split senses sidecar (#215).** New `canon_senses.py` + `assets/schemas/canon-senses.schema.json`: a strict `canon_senses.json` sidecar (≥2 senses per split form). Loader API `load_senses(path, *, allow_absent, schema_path) -> SensesResult`, `is_split()`, `normalize_form()` (NFC + casefold + whitespace-collapse), `CanonSensesLoadError`. New `evidence_verify.py` does byte-verified, matcher-authenticated evidence checking — every sense's evidence span must be an exact byte match in the named block **and** a span the production matcher itself yields. Deterministic scripts verify evidence; humans adjudicate identity.
+- **Category 5 audit gate.** `canon_adjudication_audit.py` gains a `homonym_split` category; `run_check` gains the mandatory split-evidence gate (`--particle-config`, a narrowed `--advisory` that never masks a split blocker, `collapsed_split` detection). `SKILL.md` + `orchestration-and-batching.md` add the mandatory W-step running this gate between the W3 rejoin branches and W3a.
+
+### Changed
+
+- `canon_validate.py`: `--merge`/`--check-batch`/`--merge-batches` refuse a batch entry that would recollapse a split form; adds `--senses-path`.
+- `glossary_batch_plan.py`: split forms are excluded from glossary batch planning; adds `--senses-path`.
+- `final_audit.py`: the intentional-split glossary-diff note routes to `canon_senses.json`.
+- `canon_adjudication_audit.py`: the local `normalize_form` is deleted in favor of the shared `canon_senses` import.
+- `cache_key.py`: `canon_senses.py` is added to `PLUGIN_BUNDLE_MEMBERS` — this bundle-hash change means in-flight runs re-translate on next resume (documented, accepted).
+
+### Known limitation
+
+- `TOKEN_RE` excludes Unicode category-M combining marks, so pointed Hebrew / vocalized Arabic / NFD Latin source forms do not surface and cannot authenticate evidence (loud-blocking, never silently wrong). Deferred to a separate plan-reviewed fix.
+
 ## 1.4.7 — 2026-07-16
 
 Fixes #198: W5 mass-translate could not reliably converge because the codex translate/review dispatch was backgrounded by the `codex:codex-rescue` forwarder (which returns a stub and sometimes never launches codex), so no draft artifact appeared and every segment ended in `translate-timeout`, forcing an ad-hoc direct-codex fallback.
