@@ -118,10 +118,11 @@ def _extract_bundle_hashes_section(doc_text: str) -> str:
     This document has TWO distinct restatement sites shaped like
     `- **`plugin_bundle_hash`** ...`: an earlier, deliberately abbreviated
     mention inside the "Composite cache key" field-by-field byte-scope
-    listing (which does not name all six plugin_bundle_hash members --
-    it only names `ledger_update.py` by way of example, plus the two
-    templates), and this section's own bullet, which is the one that
-    names the full, exact membership list. Searching the whole document
+    listing (which does not name all twelve plugin_bundle_hash members --
+    ten scripts + two templates as of 1.4.7/#198 -- it only names
+    `ledger_update.py` by way of example, plus the two templates), and this
+    section's own bullet, which is the one that names the full, exact
+    membership list. Searching the whole document
     for the first matching bullet would silently grab the abbreviated
     one instead -- scope to this header's own section first."""
     start = doc_text.find(BUNDLE_SECTION_HEADER)

@@ -43,9 +43,13 @@ The concrete rule this produces for every workflow template in this plugin:
   go call `codex:codex-rescue`. The orchestration logic lives in the
   Workflow script's own JS control flow, not delegated into an agent's own
   turn.
-- Every codex-rescue call the loop makes — translate, review, the
-  glossary-pass batch call — is dispatched via the Workflow tool's `agent()`
-  function, at the top level, from that JS.
+- Every codex work-call the loop makes is launched at the top level from that
+  JS, never delegated into an agent's own turn: the **glossary-pass batch call**
+  is a direct `codex:codex-rescue` `agent()` call, while **W5 translate and
+  review** are launched by the shipped `codex_job.py` driver — dispatched detached
+  (`nohup`) by a plain-Claude workflow-level drive `agent()` that returns
+  `DISPATCHED <seg> <DISP>` and does NOT itself translate/review (#198; see
+  `references/engine-loop.md` R1 and the DISPATCH section below).
 
 ## The shared codex work-call pattern (1.2.0): dispatch → bounded wait → schema-validated consume
 
@@ -59,13 +63,19 @@ original fire-and-forget-plus-poll shape was ever actually bounded. 1.2.0
 generalizes that proven shape to review and the glossary batch instead of
 inventing a second discipline for them:
 
-1. **DISPATCH** — codex (`agentType:'codex:codex-rescue'`, pinned),
-   **schema-less**, fire-and-forget. The agent does the work and writes its
-   result **atomically** to a `{{RUN_ID}}`-scoped path carrying a
-   `dispatch_token`, self-validates its own shape via a shipped script, and
-   returns a short sentinel string (`REVIEWED {seg}`, `FRAGMENT {index}`,
-   `DONE {seg}`). The Workflow JS never depends on this call's own return
-   value — see `references/orchestration-and-batching.md` and
+1. **DISPATCH** — **schema-less**, fire-and-forget. codex does the work and its
+   result lands **atomically** at a `{{RUN_ID}}`-scoped path carrying a
+   `dispatch_token`. The launch mechanism differs by path (#198): **W5 translate
+   and review** are launched by the shipped `codex_job.py` driver — a plain-Claude
+   workflow-level drive `agent()` writes the codex task-file and launches the
+   driver DETACHED (`nohup`), returning `DISPATCHED <seg> <DISP>`; the driver runs
+   `codex-companion.mjs task --background`, then **validates the isolated attempt
+   and only then atomically promotes** it to canonical (validate-before-promote).
+   The **glossary-pass batch call** stays a direct `agentType:'codex:codex-rescue'`
+   fire-and-forget `agent()` that self-validates its own shape via a shipped script
+   and returns a short sentinel string (`FRAGMENT {index}`). In every case the
+   Workflow JS never depends on the dispatch call's own return value for the
+   verdict — see `references/orchestration-and-batching.md` and
    `references/ledger-and-resumability.md` for the `{{RUN_ID}}`/token
    mechanics this closes (#90, the resume-integrity gate).
 2. **WAIT** — Claude, `effort:'low'`, **no** `agentType`, **no** `schema`: a
@@ -101,18 +111,24 @@ earlier draft's "every codex call needs a schema" framing is exactly what
 produced the #87 top-level-`oneOf`/`array` schemas that made review and the
 glossary batch call fail outright — see below).
 
-### DISPATCH calls — codex, schema-less, by design
+### DISPATCH calls — schema-less, by design
 
-`translatePrompt`, `reviewDispatchPrompt`, `batchDispatchPrompt` (glossary).
-All three are `agentType:'codex:codex-rescue'`, fire-and-forget, and carry
-**no** `schema` param — a schema on a call whose return the workflow never
-reads only slows down a job that's already bounded by the WAIT step's own
-poll timeout. Structured verdicts come from the on-disk artifact these calls
-write, read back by a later CONSUME call instead:
+The W5 translate/review drive prompts (`translateDrivePrompt`,
+`reviewDrivePrompt`) and the glossary `batchDispatchPrompt`. All are
+fire-and-forget and carry **no** `schema` param — a schema on a call whose return
+the workflow never reads only slows down a job that's already bounded by the WAIT
+step's own poll timeout. Structured verdicts come from the on-disk artifact these
+calls write, read back by a later CONSUME call instead. Their LAUNCH mechanism
+splits by path (#198): the **W5 drive prompts** are plain-Claude `agent()` calls
+(NO `agentType`, `effort:'low'`) that write the codex task-file and launch the
+detached `codex_job.py` driver — codex itself runs at `--effort high` as a real
+CLI flag on the driver's `task` launch — and return `DISPATCHED <seg> <DISP>`; the
+**glossary `batchDispatchPrompt`** stays a direct `agentType:'codex:codex-rescue'`
+fire-and-forget call:
 
 ```
-agent(translatePrompt(seg), {agentType: 'codex:codex-rescue', effort: 'high'})
-agent(reviewDispatchPrompt(seg, round), {agentType: 'codex:codex-rescue', effort: 'high'})
+agent(translateDrivePrompt(seg), {effort: 'low'})        // launches codex_job.py --kind translate DETACHED (codex at --effort high); returns "DISPATCHED <seg> <DISP>"
+agent(reviewDrivePrompt(seg, round), {effort: 'low'})    // launches codex_job.py --kind review DETACHED (codex at --effort high)
 agent(batchDispatchPrompt(batch), {agentType: 'codex:codex-rescue', effort: 'high'})
 ```
 
@@ -346,8 +362,10 @@ the TDZ ordering at all.
 This is the mechanism that stops later ledger/audit-trail consumers from ever
 trusting a `review.json` on disk that doesn't actually match the structured
 verdict the workflow itself holds. As of 1.2.0 it is the **CONSUME**-side
-half of the shared codex work-call pattern (above): `reviewDispatchPrompt`
-writes `review.json` to disk during DISPATCH; `readReviewPrompt` and
+half of the shared codex work-call pattern (above): the review DISPATCH
+(`reviewDrivePrompt`, launching the detached `codex_job.py --kind review` driver
+that validates the isolated review attempt before atomically promoting
+`review.json`) writes `review.json` to disk; `readReviewPrompt` and
 `verifyReviewArtifactPrompt` are two **separate** CONSUME calls that run only after
 `reviewWaitPrompt`'s poll reports `READY`.
 
@@ -369,9 +387,15 @@ deterministically, never on an LLM's own say-so.
 `revObj` into its own prompt as the findings source — it instructs the
 fixer to READ `review_path(seg)` itself and apply every entry in its
 on-disk `findings[]` array. `review_ready.py` already token-validated this
-exact file fresh THIS round before the fix call was ever dispatched, and it
-is not rewritten again until the NEXT round's review dispatch, so this read
-is fresh and race-free. This is what closes the fix-step-input question:
+exact file fresh THIS round before the fix call was ever dispatched. In the
+SUPPORTED single-orchestrator obedient model the review for `<seg>` round R is
+written once by its own detached `codex_job.py --kind review` driver — not
+concurrently with the fixer's read — so this read is race-free; OUTSIDE that model
+`review_ready.py` (which reads `review.json` in-memory ONCE and checks only
+schema + expected-token + current-`draft_sha1`, NOT content quality or writer
+identity) can pass a schema-valid same-token/current-hash FORGERY that is STABLE
+through acceptance, and a mutation mid-gate or after consume is the §6 residual (see
+`references/engine-loop.md` R1). This is what closes the fix-step-input question:
 the fixer's own disk read, not this gate. The narrowed `{loc, severity}`
 compare below no longer needs to bind the free-text `issue`/`suggest`
 bodies for that same reason — the fixer never consumes the CONSUME agent's

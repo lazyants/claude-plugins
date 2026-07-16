@@ -1048,6 +1048,99 @@ def test_exotic_separated_block_source_not_spuriously_flagged(tmp_path):
     assert "[seg10] OK" in result.stdout
 
 
+# ---------------------------------------------------------------------------
+# 9. #198 -- `--candidate-file`: the W5 codex_job.py driver FULLY validates an
+#    isolated attempt artifact BEFORE promoting it to canonical. The option
+#    overrides draft_path(seg) with the given path; the segpack is STILL read
+#    from its canonical path; the six checks run against the candidate.
+#    Backward compatible: absent option == today's canonical-path behavior.
+# ---------------------------------------------------------------------------
+
+def run_validate_candidate(root, seg, candidate_file):
+    return subprocess.run(
+        [
+            sys.executable,
+            str(root / "scripts" / "validate_draft.py"),
+            seg,
+            "--candidate-file",
+            candidate_file,
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+
+def test_candidate_file_valid_draft_passes_without_canonical(tmp_path):
+    """A VALID draft at a non-canonical candidate path passes via
+    --candidate-file even when NO canonical {seg}.draft.json exists at all --
+    proving the option truly overrides draft_path(seg) (a script still reading
+    the canonical path would report 'draft missing' instead). The segpack is
+    written at its canonical path, proving it is still read from there."""
+    root = make_durable_root(tmp_path)
+    segments_dir = root / "segments"
+    # segpack canonical (still read from canonical); NO canonical draft.
+    (segments_dir / "segpack_seg01.json").write_text(
+        json.dumps(clean_segpack(), ensure_ascii=False), encoding="utf-8"
+    )
+    candidate = segments_dir / ".att.seg01.1.draft.json"
+    candidate.write_text(json.dumps(clean_draft(), ensure_ascii=False), encoding="utf-8")
+
+    result = run_validate_candidate(root, "seg01", str(candidate))
+
+    assert result.returncode == 0, (
+        f"a valid --candidate-file draft must pass even with no canonical "
+        f"draft on disk, got rc={result.returncode}\nstdout:\n{result.stdout}\n"
+        f"stderr:\n{result.stderr}"
+    )
+    assert "[seg01] OK" in result.stdout
+
+
+def test_candidate_file_invalid_draft_rejected(tmp_path):
+    """The six content checks run against the CANDIDATE: an injected defect
+    (empty footnote translation, check 4) in the candidate must fail the gate,
+    proving --candidate-file does not weaken validation."""
+    root = make_durable_root(tmp_path)
+    segments_dir = root / "segments"
+    (segments_dir / "segpack_seg01.json").write_text(
+        json.dumps(clean_segpack(), ensure_ascii=False), encoding="utf-8"
+    )
+    draft = clean_draft()
+    draft["footnotes"]["1"] = ""  # injected defect in the candidate
+    candidate = segments_dir / ".att.seg01.1.draft.json"
+    candidate.write_text(json.dumps(draft, ensure_ascii=False), encoding="utf-8")
+
+    result = run_validate_candidate(root, "seg01", str(candidate))
+
+    assert result.returncode == 1, (
+        f"an invalid --candidate-file draft must fail the gate, got rc="
+        f"{result.returncode}\nstdout:\n{result.stdout}"
+    )
+    assert "[FN:1] empty translation" in result.stdout
+    assert defect_count(result.stdout) == 1
+
+
+def test_candidate_file_absent_uses_canonical(tmp_path):
+    """Backward compatibility: with --candidate-file ABSENT, validate_draft.py
+    reads the canonical draft and ignores any stray attempt file on disk. A
+    BROKEN candidate file at the isolated-attempt path must NOT affect the
+    result when the flag is not passed."""
+    root = make_durable_root(tmp_path)
+    write_segment(root, "seg01", clean_segpack(), clean_draft())
+    # A broken attempt file that MUST be ignored when the flag is absent.
+    (root / "segments" / ".att.seg01.1.draft.json").write_text(
+        "{ not valid json", encoding="utf-8"
+    )
+
+    result = run_validate(root, "seg01")  # no --candidate-file
+
+    assert result.returncode == 0, (
+        f"absent --candidate-file must read the canonical draft unchanged, "
+        f"got rc={result.returncode}\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    )
+    assert "[seg01] OK" in result.stdout
+
+
 if __name__ == "__main__":
     import pytest
 

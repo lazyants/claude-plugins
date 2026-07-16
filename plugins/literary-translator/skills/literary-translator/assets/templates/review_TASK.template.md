@@ -125,19 +125,24 @@ example baked into this file):
 
 ## Output -- write the file, then print one sentinel line
 
-This is a fire-and-forget dispatch: nothing reads your own turn's return
-value as the verdict. Your job is to WRITE the file correctly, not to
-return a structured result -- a separate, later call reads
+This is a detached-driver dispatch (the `codex_job.py` driver launches you and
+never reads your turn's return): nothing reads your own turn's return value as
+the verdict. Your job is to WRITE the file correctly, not to return a
+structured result -- a separate, later call reads
 `${durable_root}/segments/{SEG}.review.json` back off disk (see
 `references/workflow-schema-validation.md`'s DISPATCH -> WAIT -> CONSUME
 pattern).
 
-Write EXACTLY this JSON object (no markdown fencing) to
-`${durable_root}/segments/{SEG}.review.json`
-(see `review.schema.json`; this filename never carries a target-language
-suffix -- always `{SEG}.review.json`, regardless of this project's target
-language) -- write it ATOMICALLY (temp file + rename, never a partial file
-visible mid-write):
+Write EXACTLY this JSON object (no markdown fencing) to the write target the
+dispatch prompt gives you. Under W5 mass-translate, `reviewDispatchPrompt()`
+SUPERSEDES this section and supplies that path -- the `codex_job.py` driver's
+own isolated attempt file, NOT the canonical path -- and the driver validates
+that attempt and only then atomically promotes it to the canonical
+`${durable_root}/segments/{SEG}.review.json` (see `review.schema.json`; this
+filename never carries a target-language suffix -- always `{SEG}.review.json`,
+regardless of this project's target language). When this contract is followed
+directly, OUTSIDE the W5 driver, write that canonical path ATOMICALLY (temp
+file + rename, never a partial file visible mid-write):
 
 ```
 {

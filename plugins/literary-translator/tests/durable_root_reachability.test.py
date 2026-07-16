@@ -13,10 +13,11 @@ conflict"):
 
       IMPORTANT, verified against this repo's actual current state (not
       assumed): Step 0a has NO standalone shipped script under
-      assets/scripts/. SKILL.md names exactly THREE plugin-path script
+      assets/scripts/. SKILL.md names exactly FOUR plugin-path script
       invocations in the whole document ("Implemented by scripts/
-      profile_validate.py..." at Step 0, plus validate_extraction.py at W2
-      and glossary_preflight.py at W3 (1.4.0)), none of which is Step 0a's
+      profile_validate.py..." at Step 0, validate_extraction.py at W2,
+      glossary_preflight.py at W3 (1.4.0), and resolve_codex_companion.py at
+      W5 (1.4.7)), none of which is Step 0a's
       own copy/ownership logic; profile_validate.py's own
       real main() deliberately stops at "Step 0 validation passed" and
       never touches MANAGED_ENTRIES/ownership markers (see its
@@ -104,14 +105,35 @@ for _name in MANAGED_DIRS:
     )
 
 
+# The four plugin-path scripts Step 0a NEVER copies into
+# ${durable_root}/scripts/ (each runs only from the plugin's own install path)
+# -- so the collision enumeration must not treat any of them as a
+# shipped-into-scripts name. See SKILL.md's Step 0a copy-exclusion list and
+# profile_validate.py's own module docstring. (1.4.7 added
+# resolve_codex_companion.py, the W5 codex-companion path resolver.)
+NEVER_COPIED_SCRIPTS = frozenset({
+    "profile_validate.py",
+    "validate_extraction.py",
+    "glossary_preflight.py",
+    "resolve_codex_companion.py",
+})
+
+
 def _shipped_filenames(managed_dir_name: str) -> list[str]:
     """The exact shipped filenames Step 0a's collision-enumeration check
     stats against an adopted directory's existing contents, read from THIS
     repo's real assets/ subdirectories (never a hardcoded, could-drift
     list) -- see SKILL.md: 'stat every assets/scripts/*.py/assets/
-    schemas/*.json/assets/languages/*.json shipped name'."""
+    schemas/*.json/assets/languages/*.json shipped name'. The
+    NEVER_COPIED_SCRIPTS are excluded because Step 0a does not copy them into
+    scripts/, so a foreign copy of one is not a collision with anything Step
+    0a writes."""
     if managed_dir_name == "scripts":
-        return sorted(p.name for p in (ASSETS_DIR / "scripts").glob("*.py") if p.name != "profile_validate.py")
+        return sorted(
+            p.name
+            for p in (ASSETS_DIR / "scripts").glob("*.py")
+            if p.name not in NEVER_COPIED_SCRIPTS
+        )
     if managed_dir_name == "schemas":
         return sorted(p.name for p in (ASSETS_DIR / "schemas").glob("*.json"))
     if managed_dir_name == "languages":
@@ -310,6 +332,16 @@ def _assert_full_skeleton_and_markers(durable_root: Path, profile_path: Path) ->
 # ---------------------------------------------------------------------------
 # (A) Step 0a ownership / adoption logic
 # ---------------------------------------------------------------------------
+
+def test_skill_lists_resolve_codex_companion_as_fourth_plugin_path_script():
+    """1.4.7: SKILL.md's copy-exclusion sweep now names FOUR plugin-path
+    scripts never copied to durable_root -- resolve_codex_companion.py (the W5
+    codex-companion path resolver) joins profile_validate.py,
+    validate_extraction.py, and glossary_preflight.py. Guards the count from
+    silently drifting back to three when the sweep is next touched."""
+    assert "resolve_codex_companion.py" in _SKILL_TEXT
+    assert "four plugin-path scripts never copied" in _SKILL_TEXT
+
 
 def test_fresh_empty_durable_root_passes_and_marks(tmp_path):
     durable_root = tmp_path / "book_project"  # deliberately not created yet

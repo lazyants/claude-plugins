@@ -70,10 +70,12 @@ translate+gloss job ends up quietly provisioning apparatus it will never use.
    explicit opt-in the user chooses through the same knobs, never as a
    separate code path.
 4. **Agree pipeline role assignment.** Translate and review are
-   **hard-locked to `codex:codex-rescue`** (R1, `references/engine-loop.md`)
-   — every shipped template enforces this and no profile knob swaps either
-   role to a different engine. Claude (the orchestrating session) **only**
-   applies fixes, orchestrates, and verifies — it never originates a
+   **hard-locked to codex** (R1, `references/engine-loop.md`) — codex is the
+   sole translate/review engine, now LAUNCHED by the shipped, detached
+   `codex_job.py` driver (1.4.7) rather than the old `codex:codex-rescue`
+   forwarder; every shipped template enforces this and no profile knob swaps
+   either role to a different engine. Claude (the orchestrating session)
+   **only** applies fixes, orchestrates, and verifies — it never originates a
    translation or grades its own output. **codex-translate → deterministic
    gate → codex-review → Claude-fix, looped to convergence, IS the v1
    default** — not a menu of interchangeable options. Confirm the user has
@@ -109,11 +111,13 @@ Run by the **orchestrating session directly**, always from the plugin's own
 install path, never a durable-root copy — it runs before Step 0a exists to
 create one (same exception as Step 0c reading
 `references/source-format-adapters/*.md` directly from the plugin). It is one
-of three plugin-path gates never copied to `durable_root` — the others,
-`validate_extraction.py` (the W2 post-extraction gate) and
-`glossary_preflight.py` (the W3 glossary staleness gate, 1.4.0), are kept
-plugin-only for tamper-proofing and freshness-on-resume rather than because
-either predates the durable root.
+of four plugin-path scripts never copied to `durable_root`: `validate_extraction.py`
+(the W2 post-extraction gate) and `glossary_preflight.py` (the W3 glossary
+staleness gate, 1.4.0) are kept plugin-only for tamper-proofing and
+freshness-on-resume rather than because either predates the durable root, and
+`resolve_codex_companion.py` (the W5 codex-companion path resolver, 1.4.7) is
+never copied because it must glob the plugin's own install locations to find
+the newest installed `codex-companion.mjs` — a durable-root copy could not.
 
 Order of operations:
 
@@ -227,11 +231,14 @@ same for `smoke_test.report_path` (skipped when null).
 
 Copies (unconditional overwrite, safe since these files are never
 hand-edited): every file in `assets/scripts/*.py` (except
-`profile_validate.py`, `validate_extraction.py`, and `glossary_preflight.py`
-— all three run only from the plugin path and are never copied; a copied
-`glossary_preflight.py` would resolve its own `__file__`-relative schema
-lookup against the *durable* schemas and compare durable-vs-durable, a
-vacuous pass that could never detect staleness), every shipped file in `assets/languages/`
+`profile_validate.py`, `validate_extraction.py`, `glossary_preflight.py`, and
+`resolve_codex_companion.py` — all four run only from the plugin path and are
+never copied; a copied `glossary_preflight.py` would resolve its own
+`__file__`-relative schema lookup against the *durable* schemas and compare
+durable-vs-durable, a vacuous pass that could never detect staleness, and a
+copied `resolve_codex_companion.py` could not glob the plugin's own install
+locations to find the newest installed `codex-companion.mjs`), every shipped
+file in `assets/languages/`
 (`fr.json`, `de.json`, `es.json`, `it.json`, `README.md`), every file in
 `assets/schemas/*.json` → `${durable_root}/scripts/`,
 `${durable_root}/languages/`, `${durable_root}/schemas/` respectively.
@@ -397,22 +404,36 @@ here, follow the linked doc:
   suspected-wrong canon entry is reopened via the glossary/adjudication route,
   never flagged in the per-segment review loop (`references/canon-and-glossary.md`,
   `references/orchestration-and-batching.md`'s reviewer carve-out).
-- **R7 — Workflow-script schema requirement**, 1.2.0 shape: every codex
-  accuracy-bearing call (translate, review, canon/glossary-pass batches) is
-  a **schema-less, fire-and-forget DISPATCH** — `agentType:'codex:codex-rescue'`,
-  no `schema` param — that writes its verdict to a `{{RUN_ID}}`-scoped disk
-  artifact. A bounded Claude WAIT poll, then a schema-validated Claude
-  CONSUME call (`readReviewPrompt`/`REVIEW_SCHEMA`, the glossary disk-verify
-  call/`CANON_VERIFY_SCHEMA`), read that artifact back and force a real
-  structured object out of it — never the codex call itself. Non-codex
-  mechanical schema-confirmation calls — `recordLedgerPrompt`,
-  `mergeLedgerPrompt`, `verifyReviewArtifactPrompt` — use a `schema` param for a
-  different reason (verifying a shell script's own JSON stdout/printed line
-  was well-formed, not forcing a codex verdict); none specify
-  `agentType:'codex:codex-rescue'`; all run at `effort:'low'` since no
-  judgment is involved. Every agent-facing `schema` literal is a flat
-  top-level `object` (`#87` — an `agent()` schema is a tool `input_schema`,
-  which cannot be a top-level `oneOf`/`allOf`/`anyOf`/`array`).
+- **R7 — Workflow-script schema requirement**, mixed mechanism by path:
+  - **W5 translate/review (1.4.7):** codex stays the sole translate/review
+    engine (R1) but is LAUNCHED by the shipped, detached `codex_job.py`
+    driver, NOT a `codex:codex-rescue` `agent()` call. A plain-Claude
+    DISPATCHER prompt (no `agentType`, `effort:'low'`) writes the codex task
+    text and launches the driver detached, returning `DISPATCHED <seg> <DISP>`
+    immediately; the driver validates the isolated attempt and only then
+    atomically promotes it to the canonical
+    `segments/<seg>.{draft,review}.json`. A bounded Claude WAIT poll then
+    gates on the deterministic on-disk validators — translate: `draft_ready.py`
+    AND `validate_draft.py`; review: `review_ready.py` — as the SOLE
+    acceptance authority (never the driver's own return or joblog), consuming
+    the verdict off disk. No `agent()` schema param is involved on this path;
+    the deterministic validators are the check.
+  - **Glossary/canon-pass batches (unchanged, §6):** each batch is still a
+    **schema-less, fire-and-forget DISPATCH** — `agentType:'codex:codex-rescue'`,
+    no `schema` param — that writes its verdict to a `{{RUN_ID}}`-scoped disk
+    artifact; a bounded Claude WAIT poll, then a schema-validated Claude
+    CONSUME/disk-verify call (`canon_validate.py --merge-batches` +
+    `CANON_VERIFY_SCHEMA`) reads that artifact back and forces a real
+    structured object out of it — never the codex call itself.
+  - **Non-codex mechanical schema-confirmation calls** — `recordLedgerPrompt`,
+    `mergeLedgerPrompt`, `verifyReviewArtifactPrompt` — use a `schema` param
+    for a different reason (verifying a shell script's own JSON stdout/printed
+    line was well-formed, not forcing a codex verdict); none specify
+    `agentType:'codex:codex-rescue'`; all run at `effort:'low'` since no
+    judgment is involved.
+  - Every agent-facing `schema` literal is a flat top-level `object` (`#87` —
+    an `agent()` schema is a tool `input_schema`, which cannot be a top-level
+    `oneOf`/`allOf`/`anyOf`/`array`).
 
   `references/workflow-schema-validation.md`
 
@@ -701,7 +722,17 @@ absent → fresh `RUN_ID`, no `resumeFromRunId`), and creates
 then is `mass-translate-wf.template.js` instantiated (fresh from the
 plugin's current copy every run — never reuse a stale generated copy),
 substituting the resolved `{{RUN_ID}}` alongside every other token, and
-`pipeline()` launched. See `references/orchestration-and-batching.md` for
+`pipeline()` launched. **1.4.7:** as part of that same instantiation the
+orchestrator first runs `resolve_codex_companion.py --durable-root
+${durable_root}` from the plugin's own install path (never a durable-root
+copy — it must glob the plugin's install locations to find the newest
+installed `codex-companion.mjs`), ABORTS W5 on any non-zero exit (codex is the
+required engine per R1 — fail-fast, not today's silent no-draft hang), reads
+the raw `companion_path` it prints, `json.dumps`-encodes that string ONCE, and
+substitutes it as the `{{CODEX_COMPANION_PATH_JSON}}` token alongside every
+other. Each per-segment translate/review dispatch then launches codex through
+the detached `codex_job.py` driver (R1/R7), not a `codex:codex-rescue`
+`agent()` call. See `references/orchestration-and-batching.md` for
 the full `{{RUN_ID}}` derivation contract and digest definition, and
 `references/ledger-and-resumability.md` for the `dispatch_token`
 commit-gate chain this sets up for translate/review to enforce per segment.

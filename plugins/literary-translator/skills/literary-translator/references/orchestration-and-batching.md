@@ -148,13 +148,19 @@ generated script surviving in place.
 Bundle membership stays split exactly as follows: `plugin_bundle_hash` gates
 cache reuse and covers `validate_draft.py`, `canon_validate.py`,
 `cache_key.py`, `draft_sha1.py`, `review_artifact_check.py`,
-`ledger_update.py`, `review_ready.py`, `resume_setup.py`, plus
-`mass-translate-wf.template.js` and `glossary-pass-wf.template.js`.
+`ledger_update.py`, `review_ready.py`, `resume_setup.py`,
+`glossary_batch_plan.py`, `codex_job.py`, plus
+`mass-translate-wf.template.js` and `glossary-pass-wf.template.js` (ten
+scripts + two templates as of 1.4.7).
 `review_ready.py` and `resume_setup.py` (both new in 1.2.0) are correctness-
 determining in the same sense as `review_artifact_check.py`/`ledger_update.py`
 — a bug in either could certify a stale or wrongly-scoped artifact as safe to
 consume, or wrongly permit/refuse a resume — so both are gating members, not
 diagnostic-only, unlike their sibling readiness/merge scripts below.
+`glossary_batch_plan.py` (new in 1.3.5) and `codex_job.py` (the W5
+translate/review driver, new in 1.4.7) are gating members too, for the same
+reason — the former shapes glossary content, the latter
+validates-before-promotes each draft/review artifact.
 `orchestration_bundle_hash` is non-gating for convergence — never part of
 the composite cache key — but gating for resume, folded into the
 resume-integrity digest (see below); it covers exactly `draft_ready.py`,
@@ -209,58 +215,75 @@ paths generalized to profile substitutions):
 
 ```js
 const results = await pipeline(
-  SEGS,
-  (seg) => agent(translatePrompt(seg), {
-    agentType: 'codex:codex-rescue', effort: 'high', phase: 'Translate', label: `translate:${seg}`,
+  SEGS,                                       // deduplicated: a duplicate seg id HARD-THROWS before pipeline()
+  (seg) => agent(translateDrivePrompt(seg), {
+    effort: 'low', phase: 'Translate', label: `translate:${seg}`,  // launches codex_job.py --kind translate DETACHED; returns "DISPATCHED <seg> <DISP>"
   }),
-  (_translateResult, seg) => reviewFixLoop(seg),
+  (dispatchResult, seg) => reviewFixLoop(seg, dispatchResult),
 )
 ```
 
-Stage 1 is the translate call itself; stage 2 is `reviewFixLoop(seg)` — a
-plain async function, not another `agent()` call — which runs the
-readiness-poll and the review/fix loop described below and returns this
-segment's final structured result. `pipeline()` feeds stage 1's per-segment
-result into stage 2 alongside `seg`, but `reviewFixLoop` only ever uses `seg`
-— stage 1's return value is fire-and-forget by design (the translator prompt
-instructs the agent to self-validate coverage before returning; nothing in
-stage 2 depends on stage 1's own return string).
+Stage 1 is the translate DISPATCH — a plain-Claude drive agent (no `agentType`,
+`effort: 'low'`) that writes the codex task-file and launches the shipped
+`codex_job.py --kind translate` driver DETACHED (`nohup`), returning
+`DISPATCHED <seg> <DISP>` (#198; codex itself runs at `--effort high` via the
+driver, NOT as an agent effort option). Stage 2 is `reviewFixLoop(seg,
+dispatchResult)` — a plain async function, not another `agent()` call — which
+parses the drive return for the per-dispatch `DISP` nonce (used to key the
+translate wait's fail-fast sentinel), then runs the readiness-poll and the
+review/fix loop below and returns this segment's final structured result. The
+drive agent does NOT itself translate; codex's actual output reaches the
+canonical `draft_path(seg)` only after the driver validates the isolated attempt
+and atomically promotes it.
 
-1. **Translate.** `agent(translatePrompt(seg), { agentType: 'codex:codex-rescue', effort: 'high' })`
-   — fire-and-forget, the DISPATCH half of the shared codex work-call
-   pattern (`references/workflow-schema-validation.md`); the translator
-   prompt writes `draft_path(seg) = segments/{seg}.draft.json` carrying a
-   `dispatch_token = <RUN_ID>:<seg>` metadata field and instructs the agent
-   to self-validate coverage via the deterministic gate
-   (`validate_draft.py`) before returning. This is the one deliberate
+1. **Translate.** `agent(translateDrivePrompt(seg), { effort: 'low' })` (no
+   `agentType`) — the DISPATCH half of the shared codex work-call pattern
+   (`references/workflow-schema-validation.md`), now the plain-Claude drive
+   agent that launches the detached `codex_job.py --kind translate` driver and
+   returns `DISPATCHED <seg> <DISP>`. codex (at `--effort high`) writes its
+   attempt carrying a `dispatch_token = <RUN_ID>:<seg>` metadata field; the
+   driver **validates the isolated attempt** (`draft_ready.py`/`validate_draft.py`
+   on the `--candidate-file`) and only then atomically promotes it to
+   `draft_path(seg) = segments/{seg}.draft.json`. This is the one deliberate
    exception to the "codex accuracy calls need a schema" framing (R7 in
-   `references/engine-loop.md`): the translate call is intentionally
-   schema-less, gated instead by file output plus
-   `draft_ready.py`/`validate_draft.py` — see
-   `references/false-green-gate.md`.
-2. **Readiness poll.** A low-effort wait/poll step (`draft_ready.py
-   --expect-token <RUN_ID:seg>` in a bounded bash polling loop, `effort:
-   'low'`) blocks the review loop from starting until the async translator
-   has actually delivered a complete, current-run-tokened file. This
-   specifically prevents a Claude fix-agent from ever ending up authoring a
-   missing translation, since "codex only translates" would otherwise be
-   silently violated the moment a fix step ran against a
-   nonexistent/partial/stale-run draft. On timeout, this branch returns
-   `{ seg, converged: false, reason: 'translate-timeout' }` and the loop
+   `references/engine-loop.md`): the translate work is intentionally
+   schema-less, gated instead by file output plus the Workflow's own on-disk
+   `draft_ready.py`/`validate_draft.py` ACCEPT gate on the current canonical —
+   see `references/false-green-gate.md`. (Before #198 this was a direct
+   `agentType: 'codex:codex-rescue'` fire-and-forget call whose forwarder
+   backgrounded codex and returned a stub — the driver owns the launch now.)
+2. **Readiness poll.** A low-effort wait/poll step (`effort: 'low'`) blocks the
+   review loop from starting until the driver has delivered a complete,
+   current-run-tokened draft. Its ACCEPT runs the FULL canonical gate directly on
+   `draft_path(seg)` — `draft_ready.py <seg> --expect-token <RUN_ID:seg>` AND
+   `validate_draft.py <seg>` — in a bounded bash loop (no external `timeout`
+   binary), and its **fail-fast** is a presence check on the DISP-named sentinel
+   `[ -f segments/.codex_failed.<seg>.<DISP> ]` (keyed on the `DISP` captured from
+   stage 1's `DISPATCHED` return), evaluated only AFTER ACCEPT did not pass this
+   iteration — so a genuine driver failure short-circuits the poll instead of
+   waiting out the whole bound. This specifically prevents a Claude fix-agent from
+   ever ending up authoring a missing translation, since "codex only translates"
+   would otherwise be silently violated the moment a fix step ran against a
+   nonexistent/partial/stale-run draft. On timeout (or fail-fast), this branch
+   returns `{ seg, converged: false, reason: 'translate-timeout' }` and the loop
    never reaches a review call at all for this segment.
 3. **Review/fix loop**, up to `engine.max_fix_rounds` rounds of review → fix
    → re-review, exiting early the moment a review reports
    `clean && coverage_ok`. Each round's review point is itself the shared
    DISPATCH → WAIT → CONSUME pattern, not one call:
-   - **`reviewDispatchPrompt`** — codex, schema-less, fire-and-forget:
-     computes `draft_sha1` hash-first, reviews, atomically writes
-     `review_path(seg) = segments/{seg}.review.json` carrying
-     `dispatch_token = <RUN_ID>:<seg>:r<roundLabel>` (`roundLabel` = the
-     round number or `final`), prints `REVIEWED {seg}`.
-   - **`reviewWaitPrompt`** — Claude, `effort:'low'`, bounded poll of
-     `review_ready.py {seg} --expect-token <RUN_ID:seg:rN>` (`for i in
-     $(seq 1 45)` shape, matching translate's own poll). `TIMEOUT` → exit
-     immediately as `blocked review-timeout`, no retry.
+   - **Review DISPATCH (`reviewDrivePrompt`)** — the plain-Claude drive agent
+     (`effort: 'low'`, no `agentType`) that launches the detached
+     `codex_job.py --kind review` driver and returns `DISPATCHED <seg> <DISP>`.
+     codex computes `draft_sha1` hash-first, reviews, and its attempt carries
+     `dispatch_token = <RUN_ID>:<seg>:r<roundLabel>` (`roundLabel` = the round
+     number or `final`); the driver validates it (`review_ready.py
+     --candidate-file`) before atomically promoting `review_path(seg) =
+     segments/{seg}.review.json`.
+   - **`reviewWaitPrompt`** — Claude, `effort:'low'`, bounded poll whose ACCEPT
+     runs `review_ready.py {seg} --expect-token <RUN_ID:seg:rN>` on the canonical
+     and whose fail-fast is the DISP-named sentinel `[ -f
+     segments/.codex_failed.<seg>.<DISP> ]` (no external `timeout` binary).
+     `TIMEOUT`/fail-fast → exit immediately as `blocked review-timeout`, no retry.
    - **`readReviewPrompt` + `verifyReviewArtifactPrompt`** — the two CONSUME calls,
      schema-validated (`REVIEW_SCHEMA`, flat `REVIEW_ARTIFACT_SCHEMA`),
      covered under **one shared retry budget**: read → check; on a `null`
@@ -272,12 +295,15 @@ stage 2 depends on stage 1's own return string).
      `references/ledger-and-resumability.md`.
    - **Fix call**, only on `match: true`:
      `agent(fixPrompt(seg, round, revObj), { effort: 'high' })` — no
-     `agentType` field, keeping it on plain Claude. `fixPrompt` receives
-     `revObj` directly (the same schema-validated object `readReviewPrompt`
-     already returned this round, still in memory) rather than reading
-     `review_path(seg)` back off disk — a deliberate, documented departure
-     from the proven reference's 2-argument `fixPrompt(seg, round)` shape.
-     See `references/engine-loop.md` R1 for the full reasoning.
+     `agentType` field, keeping it on plain Claude. Since 1.3.6/#132 option b
+     `fixPrompt` instructs the fixer to READ `review_path(seg)` back off disk
+     and apply its on-disk `findings[]` array; `revObj` (the same
+     schema-validated object `readReviewPrompt` returned this round, still in
+     memory) remains its third argument for the convergence decision and the
+     review-artifact gate's `--expected-file`, but is no longer the findings
+     source — a deliberate, documented departure from the proven reference's
+     2-argument `fixPrompt(seg, round)` shape. See `references/engine-loop.md`
+     R1 for the full reasoning.
 4. **Confirming final review.** Always one final confirming review after the
    round cap, even if the loop exited because of the cap rather than
    convergence — a fix that goes unverified is the single most common source
@@ -317,16 +343,21 @@ W4).
 
 ## Prompt functions — generated from the profile at instantiation time
 
-`mass-translate-wf.template.js` defines nine prompt functions:
-`translatePrompt`, `waitPrompt`, `reviewDispatchPrompt`,
-`reviewWaitPrompt`, `readReviewPrompt`, `verifyReviewArtifactPrompt`, `fixPrompt`,
-`recordLedgerPrompt`, `mergeLedgerPrompt`. (`reviewPrompt` — the old,
-single, schema-validated review call — no longer exists; the review point
-is now four functions, one per DISPATCH/WAIT/CONSUME×2 step, per
-`references/workflow-schema-validation.md`. `verifyReviewArtifactPrompt`
-keeps its pre-1.2.0 name but is now dispatched as a separate call after
-`readReviewPrompt` returns, rather than immediately after the old single
-`reviewPrompt` call.) `glossary-pass-wf.template.js` defines its own,
+`mass-translate-wf.template.js` defines twelve prompt functions:
+`translatePrompt`, `translateDrivePrompt`, `waitPrompt`,
+`reviewDispatchPrompt`, `reviewDrivePrompt`, `reviewWaitPrompt`,
+`readReviewPrompt`, `verifyReviewArtifactPrompt`, `fixPrompt`,
+`draftProbePrompt`, `recordLedgerPrompt`, `mergeLedgerPrompt`. The #198 drive
+prompts `translateDrivePrompt`/`reviewDrivePrompt` are the plain-Claude
+dispatchers that launch the detached `codex_job.py` driver (returning
+`DISPATCHED <seg> <DISP>`); `translatePrompt`/`reviewDispatchPrompt` remain,
+now supplying the codex TASK body text that the drive prompts embed into the
+driver's task-file. (`reviewPrompt` — the old, single, schema-validated review
+call — no longer exists; the review point is now the DISPATCH/WAIT/CONSUME×2
+sequence, per `references/workflow-schema-validation.md`.
+`verifyReviewArtifactPrompt` keeps its pre-1.2.0 name but is now dispatched as
+a separate call after `readReviewPrompt` returns, rather than immediately after
+the old single `reviewPrompt` call.) `glossary-pass-wf.template.js` defines its own,
 smaller set: `batchDispatchPrompt`, `batchWaitPrompt`, a final-merge prompt,
 and `glossaryVerifyPrompt` (`CANON_VERIFY_SCHEMA`) — see
 `references/canon-and-glossary.md`.
@@ -340,8 +371,12 @@ The template documents its own substitution tokens explicitly:
 `{{VERSE_POLICY_INSTRUCTION_BLOCK}}`, `{{MAX_FIX_ROUNDS}}`,
 `{{BATCH_AGENT_CAP}}` (both templates' preflight cost caps — the glossary-pass
 template's use is new in 1.3.5), `{{RUN_ID}}`
-(new in 1.2.0, both templates — see below), and (glossary-pass template
-only) `{{RESEARCH_MODE}}`. `{{VERSE_POLICY_INSTRUCTION_BLOCK}}` in
+(new in 1.2.0, both templates — see below), `{{CODEX_COMPANION_PATH_JSON}}`
+(new in 1.4.7, mass-translate template only — the `json.dumps`-encoded absolute
+`codex-companion.mjs` path, resolved once at instantiation by
+`resolve_codex_companion.py` and handed to `codex_job.py --companion`;
+JSON-encoded so a path with a space or non-ASCII character stays a safe JS/bash
+literal), and (glossary-pass template only) `{{RESEARCH_MODE}}`. `{{VERSE_POLICY_INSTRUCTION_BLOCK}}` in
 particular is read fresh from the CURRENT `profile.yml` every time a run is
 scaffolded — never spliced into `translate_TASK.md`/`review_TASK.md`
 directly — which is what keeps it staleness-immune when `verse_policy.mode`
@@ -459,9 +494,12 @@ what used to need a clean-slate wipe). It still comes from enumerating every
 mutually-exclusive per-segment branch and taking the true worst case, not
 from padding a flat guess:
 
-- **A review point, worst case, is exactly 6 calls**: `reviewDispatchPrompt`
-  (1) + `reviewWaitPrompt` (1) + the CONSUME pair under its **one shared
-  retry budget** — `readReviewPrompt` + `verifyReviewArtifactPrompt` run once, then
+- **A review point, worst case, is exactly 6 calls**: the review DISPATCH
+  drive agent `reviewDrivePrompt` (1 — it launches the detached
+  `codex_job.py --kind review` driver; #198 replaces the old
+  `reviewDispatchPrompt` codex `agent()` call 1:1, so the count is unchanged) +
+  `reviewWaitPrompt` (1) + the CONSUME pair under its **one shared retry
+  budget** — `readReviewPrompt` + `verifyReviewArtifactPrompt` run once, then
   (worst case) the identical pair retried once more = 4 — for
   `1 + 1 + 2×(1 + 1) = 6`. This is a single number now, not a set of
   mutually-exclusive terminating sub-cases: `reviewWaitPrompt` timing out is

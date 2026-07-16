@@ -15,9 +15,10 @@ file's job is to catch exactly that class of regression, at EVERY call
 site named in the spec, not just in one script.
 
 Call sites this file instantiates against real fixtures, per
-ledger-and-resumability.md's own enumeration:
+ledger-and-resumability.md's own enumeration (12 draft / 10 review as of
+1.4.7/#198):
 
-  draft_path(seg) (8 sites):
+  draft_path(seg) (12 sites):
     1. scripts/validate_draft.py
     2. scripts/draft_ready.py
     3. scripts/ledger_update.py
@@ -26,11 +27,15 @@ ledger-and-resumability.md's own enumeration:
     6. templates/review_TASK.template.md
     7. templates/translate_TASK.template.md
     8. templates/mass-translate-wf.template.js (translatePrompt/fixPrompt)
+    9. scripts/assemble.py            (1.4.7 -- pre-existing omission, draft_path)
+   10. scripts/ledger_merge.py        (1.4.7 -- pre-existing omission, draft_path)
+   11. scripts/select_segments.py     (1.4.7 -- pre-existing omission, draft_path)
+   12. scripts/codex_job.py           (1.4.7/#198 -- CodexJob.canonical, --kind translate)
 
-  review_path(seg) (6 sites -- 1.2.0 CONTRACT §8 split the old single
+  review_path(seg) (10 sites -- 1.2.0 CONTRACT §8 split the old single
   reviewPrompt writer/`readReview`-in-one call into a DISPATCH-then-READ
-  pair, adding one genuinely new direct-read call site; 1.3.6/#132 option b
-  added a second new direct-read call site, fixPrompt):
+  pair; 1.3.6/#132 option b added fixPrompt as a direct reader; 1.4.7/#198
+  added four more derivers):
     1. mass-translate-wf.template.js's reviewDispatchPrompt (1.2.0; formerly
        reviewPrompt -- writes it)
     2. mass-translate-wf.template.js's readReviewPrompt (1.2.0, NEW -- reads
@@ -46,6 +51,19 @@ ledger-and-resumability.md's own enumeration:
     5. scripts/review_artifact_check.py (reads it)
     6. scripts/ledger_update.py (reads it, for the reviewed_draft_sha1
        binding check)
+    7. scripts/review_ready.py         (1.4.7 -- review_path deriver)
+    8. scripts/ledger_merge.py         (1.4.7 -- review_path deriver)
+    9. templates/review_TASK.template.md (1.4.7 -- the codex review-task writer output line)
+   10. scripts/codex_job.py           (1.4.7/#198 -- CodexJob.canonical, --kind review)
+
+The four 1.4.7 draft derivers (9-12), the four 1.4.7 review derivers (7-10),
+and codex_job.py's dual (draft+review) canonical derivation are exercised by
+the parametrized `test_new_deriver_*`, `test_codex_job_*`, and
+`test_review_task_template_writes_canonical_review_path` tests near the end of
+this file (each proving the real path function/attribute resolves to the exact
+unsuffixed canonical path and ignores a legacy `.ru.`-suffixed decoy). The
+"N/8" / "N/6" section-header comments below label the ORIGINAL 1.2.0-era 8
+draft / 6 review sites; the 1.4.7 additions bring the totals to 12 / 10.
 
 Design confirmation, UPDATED for 1.3.6 (#132 option b): `fixPrompt` is now
 DELIBERATELY a review_path(seg) reader (it was NOT, pre-1.3.6 -- see
@@ -118,11 +136,26 @@ FINAL_AUDIT_SRC = SCRIPTS_SRC_DIR / "final_audit.py"
 BOOTSTRAP_NAMES_SRC = SCRIPTS_SRC_DIR / "bootstrap_names.py"
 DRAFT_SHA1_SRC = SCRIPTS_SRC_DIR / "draft_sha1.py"
 REVIEW_ARTIFACT_CHECK_SRC = SCRIPTS_SRC_DIR / "review_artifact_check.py"
+# 1.4.7 (#198): four more draft-path derivers (assemble.py, ledger_merge.py,
+# select_segments.py, codex_job.py) and four more review-path derivers
+# (review_ready.py, ledger_merge.py, review_TASK.template.md, codex_job.py),
+# recomputing the canonical-path site counts to 12 draft / 10 review -- see the
+# module docstring's own enumeration and references/ledger-and-resumability.md.
+ASSEMBLE_SRC = SCRIPTS_SRC_DIR / "assemble.py"
+LEDGER_MERGE_SRC = SCRIPTS_SRC_DIR / "ledger_merge.py"
+SELECT_SEGMENTS_SRC = SCRIPTS_SRC_DIR / "select_segments.py"
+REVIEW_READY_SRC = SCRIPTS_SRC_DIR / "review_ready.py"
+# codex_job.py (the #198 driver) is deliberately NOT in the existence loop
+# below -- like the two TASK templates, its own test asserts its presence and
+# fails loudly naming it, rather than turning a not-yet-built file into a
+# whole-module collection error.
+CODEX_JOB_SRC = SCRIPTS_SRC_DIR / "codex_job.py"
 MASS_TRANSLATE_WF_SRC = TEMPLATES_SRC_DIR / "mass-translate-wf.template.js"
 
 for _p in (
     VALIDATE_DRAFT_SRC, DRAFT_READY_SRC, LEDGER_UPDATE_SRC, FINAL_AUDIT_SRC,
     BOOTSTRAP_NAMES_SRC, DRAFT_SHA1_SRC, REVIEW_ARTIFACT_CHECK_SRC,
+    ASSEMBLE_SRC, LEDGER_MERGE_SRC, SELECT_SEGMENTS_SRC, REVIEW_READY_SRC,
     MASS_TRANSLATE_WF_SRC,
 ):
     assert _p.is_file(), f"expected plugin asset not found: {_p}"
@@ -739,6 +772,11 @@ def _instantiate_and_slice_js(durable_root_str):
         "{{MAX_FIX_ROUNDS}}": "3",
         "{{BATCH_AGENT_CAP}}": "999",
         "{{VERSE_POLICY_INSTRUCTION_BLOCK}}": "Test verse policy instructions.",
+        # 1.4.7 (#198): the driver's codex-companion path, substituted as a JSON
+        # string literal directly into `const COMPANION = {{...}};`. The exact
+        # value is irrelevant to this file's draft_path/review_path assertions;
+        # it only needs to be a valid JS literal so the sliced head parses.
+        "{{CODEX_COMPANION_PATH_JSON}}": json.dumps("/fake/codex-companion.mjs"),
     }
     for token, value in substitutions.items():
         head = head.replace(token, value)
@@ -778,10 +816,13 @@ def run_prompt_probe(tmp_path, durable_root_str, seg, round_num, rev_obj):
         "var __roundLabel = String(__round);\n"
         "var __revObj = " + json.dumps(rev_obj) + ";\n"
         "var __dispatchToken = RUN_ID + \":\" + __seg + \":r\" + __roundLabel;\n"
+        # 1.4.7 (#198): reviewWaitPrompt is now (seg, roundLabel, disp) -- a
+        # per-dispatch DISP nonce keys the wait's fail-fast sentinel.
+        "var __disp = \"abc123def456\";\n"
         "var __out = {\n"
         "  translatePrompt: translatePrompt(__seg),\n"
         "  reviewDispatchPrompt: reviewDispatchPrompt(__seg, __roundLabel),\n"
-        "  reviewWaitPrompt: reviewWaitPrompt(__seg, __dispatchToken),\n"
+        "  reviewWaitPrompt: reviewWaitPrompt(__seg, __roundLabel, __disp),\n"
         "  readReviewPrompt: readReviewPrompt(__seg),\n"
         "  fixPrompt: fixPrompt(__seg, __round, __revObj),\n"
         "  verifyReviewArtifactPrompt: verifyReviewArtifactPrompt(__seg, __revObj),\n"
@@ -1068,6 +1109,177 @@ def test_review_artifact_check_ignores_ru_suffixed_decoy(tmp_path):
     assert canonical in result.stderr, (
         f"review_artifact_check.py must name the canonical path {canonical!r} "
         f"as not found, got stderr:\n{result.stderr}"
+    )
+
+
+# ===========================================================================
+# 1.4.7 (#198) canonical-path derivers -- the four new draft-path sites
+# (assemble.py, ledger_merge.py, select_segments.py, codex_job.py) and the four
+# new review-path sites (review_ready.py, ledger_merge.py,
+# review_TASK.template.md, codex_job.py), recomputing the totals to 12 draft /
+# 10 review. Each proves the REAL shipped path function/attribute resolves to
+# the exact unsuffixed canonical path (and, for the module-fn readers, ignores a
+# legacy `.ru.`-suffixed decoy) -- never a reimplementation of the path.
+# ===========================================================================
+
+def _make_module_probe_root(tmp_path, script_src):
+    """Copy the WHOLE shipped scripts/ tree into an isolated {root}/scripts/,
+    so a self-anchoring deriver whose module-level code sibling-imports other
+    scripts (assemble.py does `import validate_draft as vd`, which itself pulls
+    in `output_resolve`, etc.) resolves the full chain against this fixture --
+    exactly as production does. Each script's Path(__file__)-based DURABLE_ROOT
+    then anchors on this fixture root. Also creates an empty {root}/segments/."""
+    root = tmp_path / "durable_root"
+    scripts_dir = root / "scripts"
+    scripts_dir.mkdir(parents=True)
+    for src in sorted(SCRIPTS_SRC_DIR.glob("*.py")):
+        shutil.copy2(src, scripts_dir / src.name)
+    (root / "segments").mkdir()
+    return root, scripts_dir
+
+
+def _probe_module_path_fn(scripts_dir, script_name, fn_name, seg):
+    """Load the copied script via importlib in a throwaway subprocess (never
+    reimplemented, and never polluting this test process's own sys.modules
+    with a module literally named 'assemble'/'ledger_merge'/etc.) and call its
+    REAL module-level draft_path(seg)/review_path(seg), returning the resolved
+    basename/parent plus whatever is readable there."""
+    code = (
+        "import importlib.util, json\n"
+        "from pathlib import Path\n"
+        f"spec = importlib.util.spec_from_file_location('probe_mod', {str(scripts_dir / script_name)!r})\n"
+        "mod = importlib.util.module_from_spec(spec)\n"
+        "spec.loader.exec_module(mod)\n"
+        f"p = Path(mod.{fn_name}({seg!r}))\n"
+        "out = {'name': p.name, 'parent': p.parent.name, 'is_file': p.is_file()}\n"
+        "if p.is_file():\n"
+        "    out['content'] = p.read_text(encoding='utf-8')\n"
+        "print(json.dumps(out))\n"
+    )
+    result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, (
+        f"probing {script_name}.{fn_name}() failed:\n"
+        f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    )
+    return json.loads(result.stdout.strip().splitlines()[-1])
+
+
+# (label, script_src, fn_name, ext) -- the 1.4.7 module-level path-fn derivers.
+NEW_MODULE_PATH_DERIVERS = [
+    ("assemble.py::draft_path", ASSEMBLE_SRC, "draft_path", "draft"),
+    ("ledger_merge.py::draft_path", LEDGER_MERGE_SRC, "draft_path", "draft"),
+    ("select_segments.py::draft_path", SELECT_SEGMENTS_SRC, "draft_path", "draft"),
+    ("ledger_merge.py::review_path", LEDGER_MERGE_SRC, "review_path", "review"),
+    ("review_ready.py::review_path", REVIEW_READY_SRC, "review_path", "review"),
+]
+_NEW_DERIVER_IDS = [row[0] for row in NEW_MODULE_PATH_DERIVERS]
+
+
+@pytest.mark.parametrize("label,script_src,fn_name,ext", NEW_MODULE_PATH_DERIVERS, ids=_NEW_DERIVER_IDS)
+def test_new_deriver_resolves_and_reads_canonical(tmp_path, label, script_src, fn_name, ext):
+    root, scripts_dir = _make_module_probe_root(tmp_path, script_src)
+    seg = "seg01"
+    content = f"CANONICAL {ext} CONTENT for {label}"
+    (root / "segments" / f"{seg}.{ext}.json").write_text(content, encoding="utf-8")
+
+    out = _probe_module_path_fn(scripts_dir, script_src.name, fn_name, seg)
+    assert out["name"] == f"{seg}.{ext}.json", (
+        f"{label}: {fn_name}(seg) must derive the unsuffixed segments/"
+        f"{{seg}}.{ext}.json path, got {out['name']!r}"
+    )
+    assert out["parent"] == "segments", f"{label}: expected the segments/ prefix"
+    assert out["is_file"] is True, (
+        f"{label}: canonical file placed at the derived path must be readable"
+    )
+    assert out.get("content") == content, (
+        f"{label}: {fn_name}(seg) must read back the exact content at the canonical path"
+    )
+
+
+@pytest.mark.parametrize("label,script_src,fn_name,ext", NEW_MODULE_PATH_DERIVERS, ids=_NEW_DERIVER_IDS)
+def test_new_deriver_ignores_ru_suffixed_decoy(tmp_path, label, script_src, fn_name, ext):
+    root, scripts_dir = _make_module_probe_root(tmp_path, script_src)
+    seg = "seg02"
+    (root / "segments" / f"{seg}.ru.{ext}.json").write_text(
+        "DECOY -- must never be read", encoding="utf-8"
+    )
+
+    out = _probe_module_path_fn(scripts_dir, script_src.name, fn_name, seg)
+    assert out["is_file"] is False, (
+        f"{label}: {fn_name}(seg) must NOT resolve to a file just because a "
+        f"legacy-suffixed {seg}.ru.{ext}.json decoy exists"
+    )
+    assert out["name"] == f"{seg}.{ext}.json", label
+
+
+def _probe_codex_job_canonical(kind, seg="seg01", root="/fixture/durable_root"):
+    """codex_job.py (the #198 driver) exposes a pure, importable
+    canonical_path(root, seg, kind) deriver, added expressly for this
+    path-convention audit. Load the real module and call it in a throwaway
+    subprocess (never polluting this process's sys.modules with a module named
+    'codex_job', never a reimplementation of the path)."""
+    assert CODEX_JOB_SRC.is_file(), (
+        f"required 1.4.7/#198 draft+review-path deriver missing: {CODEX_JOB_SRC} "
+        f"does not exist under assets/scripts/ -- codex_job.py is the shipped "
+        f"driver whose canonical_path(root, seg, kind) derives the canonical "
+        f"segments/{{seg}}.draft.json / segments/{{seg}}.review.json path (see "
+        f"references/engine-loop.md R1)"
+    )
+    code = (
+        "import importlib.util, json\n"
+        "from pathlib import Path\n"
+        f"spec = importlib.util.spec_from_file_location('codex_job_probe', {str(CODEX_JOB_SRC)!r})\n"
+        "mod = importlib.util.module_from_spec(spec)\n"
+        "spec.loader.exec_module(mod)\n"
+        f"p = mod.canonical_path({root!r}, {seg!r}, {kind!r})\n"
+        "pp = Path(p)\n"
+        "print(json.dumps({'path': str(p), 'name': pp.name, 'parent': pp.parent.name}))\n"
+    )
+    result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, (
+        f"calling codex_job.canonical_path(root, seg, {kind!r}) failed:\n"
+        f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    )
+    return seg, json.loads(result.stdout.strip().splitlines()[-1])
+
+
+@pytest.mark.parametrize("kind,ext", [("translate", "draft"), ("review", "review")])
+def test_codex_job_derives_canonical_unsuffixed_path(kind, ext):
+    """draft_path(seg) site 12/12 & review_path(seg) site 10/10 -- codex_job.py
+    (the #198 driver) derives BOTH canonical paths via its pure
+    canonical_path(root, seg, kind): --kind translate ->
+    segments/{seg}.draft.json, --kind review -> segments/{seg}.review.json,
+    both unsuffixed."""
+    seg, out = _probe_codex_job_canonical(kind)
+    assert out["name"] == f"{seg}.{ext}.json", (
+        f"codex_job.canonical_path(root, seg, {kind!r}) must derive the "
+        f"unsuffixed segments/{{seg}}.{ext}.json path, got {out['name']!r}"
+    )
+    assert out["parent"] == "segments", "the canonical path must carry the segments/ prefix"
+    assert f"{seg}.ru.{ext}.json" not in out["path"], (
+        "codex_job.py must never derive a legacy language-suffixed canonical path"
+    )
+
+
+def test_review_task_template_writes_canonical_review_path():
+    """review_path(seg) site 9/10 -- review_TASK.template.md is the codex
+    review-task WRITER: its Output section names the canonical
+    segments/{SEG}.review.json output line and must never reference the legacy
+    language-suffixed review filename."""
+    template_path = TEMPLATES_SRC_DIR / "review_TASK.template.md"
+    assert template_path.is_file(), (
+        f"required review_path(seg) writer site missing: {template_path} does "
+        f"not exist under assets/templates/ -- ledger-and-resumability.md names "
+        f"it as the codex review-task writer of segments/{{SEG}}.review.json"
+    )
+    text = template_path.read_text(encoding="utf-8")
+    assert ".ru.review.json" not in text, (
+        f"{template_path} must never reference the legacy language-suffixed "
+        f"review filename convention"
+    )
+    assert "{SEG}.review.json" in text or "{seg}.review.json" in text, (
+        f"{template_path} must name the canonical review_path output "
+        f"segments/{{SEG}}.review.json (the review-task writer output line)"
     )
 
 

@@ -103,22 +103,28 @@ Both are deliberately unsuffixed, unlike the real source's
 recorded in `profile.yml`, so a suffix would add no information. This is
 load-bearing: every script or template that touches a draft file
 (`validate_draft.py`, `draft_ready.py`, `ledger_update.py`, `final_audit.py`,
-`draft_sha1.py`, `review_TASK.template.md`, `translate_TASK.template.md`,
+`draft_sha1.py`, `assemble.py`, `ledger_merge.py`, `select_segments.py`,
+`codex_job.py`, `review_TASK.template.md`, `translate_TASK.template.md`,
 `mass-translate-wf.template.js`) must use the exact unsuffixed path — a
 ported script hardcoding `.ru.draft.json` is a bug, not a style choice.
 `review_path(seg)` additionally requires the `segments/` prefix (matches the
 real reference exactly — never a top-level `${durable_root}/{seg}.review.json`).
 
-Readers of `review_path(seg)`: `reviewPrompt` (writes it),
-`verifyReviewArtifactPrompt` (reads it), `review_artifact_check.py` (reads
-it), `ledger_update.py` (reads it for the `reviewed_draft_sha1` binding
-check). **`fixPrompt` is deliberately NOT one of these readers** — see §5
-below.
+Writers/readers of `review_path(seg)`: `reviewDispatchPrompt` (the JS review
+task-body writer, was `reviewPrompt`), `review_TASK.template.md` (the codex
+review-task writer output line), and `codex_job.py` (`--kind review` — derives
+and validate-before-promotes it) WRITE it; `readReviewPrompt`,
+`verifyReviewArtifactPrompt`, and — since 1.3.6/#132 option b — `fixPrompt` (it
+READS the on-disk `findings[]`, see §5), plus `review_artifact_check.py`,
+`review_ready.py`, `ledger_merge.py`, and `ledger_update.py` (the last for the
+`reviewed_draft_sha1`/`dispatch_token` binding check) READ it.
 
-`tests/draft_path_convention.test.py` instantiates every one of the eight
-draft-path call sites and the four review-path call sites against a fixture
-and asserts the exact path, failing loudly and naming the offender if any
-one of them drifts.
+`tests/draft_path_convention.test.py` instantiates every one of the **twelve**
+draft-path call sites and the **ten** review-path call sites against a fixture
+and asserts the exact path, failing loudly and naming the offender if any one
+of them drifts. (The regression-lock test counts writer+reader SITES, so its
+review-path site count is larger than the conceptual "readers" list above — that
+is expected, not a contradiction: the test locks every writer site too.)
 
 ## 4. Every copied script self-anchors — never assumes cwd, never takes a flag
 
@@ -147,14 +153,15 @@ documented departure from the real reference script's byte-exact
 2-argument `fixPrompt(seg, round)` shape. Do not "fix" this back to two
 arguments thinking it's a drift error.
 
-Why: `fixPrompt` no longer reads `review_path(seg)` from disk for findings at
-all. It receives `revObj` directly, spliced into its own prompt text via the
-same JS-side deterministic serialization the review-artifact gate's
-`--expected-file` write uses. This closes the review-artifact gate's
-original residual risk (both on-disk artifacts independently stale but
-byte-for-byte agreeing) *structurally* for the fix step, since the fix step
-no longer depends on any disk re-read of the review at all. See §9 below for
-what the gate protects instead, now that this closure exists.
+Why: since 1.3.6 (#132 option b) `fixPrompt` READS `review_path(seg)` from disk
+itself and applies every entry in its on-disk `findings[]` array. `revObj` (the
+3rd argument) is kept for other consumers — the convergence decision and the
+review-artifact gate's own `--expected-file` — but its findings are no longer
+spliced into the fix prompt's text at all, so a transcription slip in the CONSUME
+agent's in-memory copy can no longer reach the fixer. This closes the
+review-artifact gate's residual risk for the fix step via the fixer's own
+independent disk read — a reversal of the earlier round-60 in-memory design (see
+`references/engine-loop.md` R1). See §9 below for what the gate protects instead.
 
 ## 6. `profile.example.yml`'s shipped comments must stay clean
 

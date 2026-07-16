@@ -337,6 +337,11 @@ def instantiate_mass_translate(*, batch_agent_cap: int) -> str:
     text = text.replace("{{MAX_FIX_ROUNDS}}", "2")
     text = text.replace("{{BATCH_AGENT_CAP}}", str(int(batch_agent_cap)))
     text = text.replace("{{VERSE_POLICY_INSTRUCTION_BLOCK}}", "Render literally.")
+    # 1.4.7 (#198): the driver's codex-companion path, spliced into
+    # `const COMPANION = {{...}};` as a JSON string literal. This file's
+    # SEG_ID-guard assertions never read its value; it only needs to be a valid
+    # JS literal so the "no leftover {{...}}" assertion below stays meaningful.
+    text = text.replace("{{CODEX_COMPANION_PATH_JSON}}", '"/fake/codex-companion.mjs"')
     assert "{{" not in text
     return text
 

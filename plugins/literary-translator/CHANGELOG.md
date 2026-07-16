@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.4.7 — 2026-07-16
+
+Fixes #198: W5 mass-translate could not reliably converge because the codex translate/review dispatch was backgrounded by the `codex:codex-rescue` forwarder (which returns a stub and sometimes never launches codex), so no draft artifact appeared and every segment ended in `translate-timeout`, forcing an ad-hoc direct-codex fallback.
+
+### Fixed
+
+- **#198** W5 translate and review are now launched by a shipped stdlib driver, `codex_job.py`, that owns the codex-companion launch deterministically: it runs `codex-companion task --background --write --effort high`, polls `status` to a terminal state, validates the isolated attempt via the gate scripts' new `--candidate-file` mode, and atomically `os.replace`s it into the canonical path (validate-before-promote). A plain-Claude drive agent launches the driver detached (`nohup`) and returns `DISPATCHED <seg> <DISP>`; the Workflow's on-disk `draft_ready.py` + `validate_draft.py` (translate) and `review_ready.py` (review) content re-validation on the current canonical remains the sole acceptance authority. A template SEGS uniqueness guard enforces one dispatch per segment. The glossary-pass codex dispatch is unchanged.
+
 ## 1.4.6 — 2026-07-14
 
 A validator/renderer-consistency patch closing the deferred half of #183. Closes #188.

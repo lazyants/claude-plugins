@@ -71,8 +71,11 @@ hardcodes a different path is a bug, not a faithful port.
   repeating it in every draft filename adds no information. Every
   script/template touching a draft file — `validate_draft.py`,
   `draft_ready.py`, `ledger_update.py`, `final_audit.py`, `draft_sha1.py`,
-  `review_TASK.template.md`, `translate_TASK.template.md`,
-  `mass-translate-wf.template.js` — must use this exact path.
+  `assemble.py`, `ledger_merge.py`, `select_segments.py`, `codex_job.py`
+  (`--kind translate` — derives the same canonical `draft.json` for its
+  validate-before-promote), `review_TASK.template.md`,
+  `translate_TASK.template.md`, `mass-translate-wf.template.js` — must use
+  this exact path (**12** draft-path sites as of 1.4.7).
   `tests/draft_path_convention.test.py` instantiates every one of these
   against a fixture and asserts the exact path, failing loudly and naming
   the offender if any one disagrees. **1.2.0:** the written file also
@@ -85,20 +88,20 @@ hardcodes a different path is a bug, not a faithful port.
 - **`review_path(seg) = segments/{seg}.review.json`** — same no-suffix
   reasoning, and the `segments/` prefix is required (matches the real
   reference project exactly — never a top-level
-  `${durable_root}/{seg}.review.json`). Readers/writers, 1.2.0: writer is
-  `reviewDispatchPrompt` (was `reviewPrompt`); readers are `readReviewPrompt`
-  (new) and `verifyReviewArtifactPrompt` (unchanged name, now called
-  separately after `readReviewPrompt` rather than immediately after the old
-  single `reviewPrompt` call), `scripts/review_artifact_check.py`,
-  `scripts/ledger_update.py` (reads it for the
-  `reviewed_draft_sha1`/`dispatch_token` binding check at convergence).
-  **`fixPrompt` is deliberately not one of this file's readers** — it works
-  from the JS-in-memory `revObj` directly instead.
-  `tests/draft_path_convention.test.py` is extended (not duplicated) to
-  cover all these call sites, repointed from the removed `reviewPrompt` to
-  `reviewDispatchPrompt`/`reviewWaitPrompt`/`readReviewPrompt`, with
-  `verifyReviewArtifactPrompt` kept but now probed as its own separate
-  post-`readReviewPrompt` call site.
+  `${durable_root}/{seg}.review.json`). Readers/writers: the JS writer is
+  `reviewDispatchPrompt` (was `reviewPrompt`, 1.2.0); JS readers are
+  `readReviewPrompt` (new 1.2.0), `verifyReviewArtifactPrompt` (called
+  separately after `readReviewPrompt`), and **`fixPrompt`** (a reader since
+  1.3.6/#132 option b — it READS the on-disk `findings[]` rather than working
+  from the in-memory `revObj`, see `references/engine-loop.md` R1). Script
+  writers/readers: `review_TASK.template.md` (the codex review-task writer
+  output line), `scripts/review_artifact_check.py`, `scripts/review_ready.py`,
+  `scripts/ledger_merge.py`, `scripts/ledger_update.py` (reads it for the
+  `reviewed_draft_sha1`/`dispatch_token` binding check at convergence), and
+  `codex_job.py` (`--kind review` — derives the same canonical `review.json`
+  for its validate-before-promote). `tests/draft_path_convention.test.py` is
+  extended (not duplicated) to cover all these call sites — recomputed to
+  **10** review-path sites for 1.4.7.
   **1.2.0:** the written file also carries `dispatch_token =
   <RUN_ID>:<seg>:r<roundLabel>` (`roundLabel` = the round number or
   `final`) — see below.
@@ -121,9 +124,10 @@ hardcodes a different path is a bug, not a faithful port.
 ## `dispatch_token` and the resume-integrity commit-gate chain (1.2.0)
 
 New in 1.2.0, closing the resumability half of #97/#87's fallout: once
-review became its own fire-and-forget DISPATCH artifact (see
-`references/workflow-schema-validation.md` and
-`references/orchestration-and-batching.md`), `draft.json`/`review.json`
+review became its own DISPATCH artifact — written by a detached codex job
+(as of 1.4.7/#198 the shipped `codex_job.py --kind review` driver, which
+validate-before-promotes it; see `references/workflow-schema-validation.md`
+and `references/orchestration-and-batching.md`) — `draft.json`/`review.json`
 became unscoped, overwritable paths a straggler write from an OLD,
 interrupted run could repopulate *after* a fresh run started — the
 `{{RUN_ID}}`-derived `dispatch_token` is what closes that, and it is
@@ -186,6 +190,51 @@ never a per-segment cache-key comparison. A fix to `ledger_merge.py`'s own
 re-check logic is therefore visible to the resume-integrity gate (forces a
 fresh, no-resume run) but never flips an individual converged segment
 `stale` on its own.
+
+## Run-scratch files, the codex-job wait bound, and what the resume digest excludes (1.4.7, #198)
+
+The W5 `codex_job.py` driver writes several ephemeral **run-scratch** dotfiles
+under `${durable_root}/segments/` (and consumes a per-dispatch task-file). These
+are NOT segment artifacts and NOT convergence/resume inputs — they are excluded
+from every bundle/cache-key hash, from `final_audit.py`/`assemble.py` coverage,
+and from the resume-integrity digest:
+
+- `.codex_task.*.<DISP>` — the per-dispatch codex task-file (the drive agent
+  writes it; the driver is its sole consumer and deletes it),
+- the driver's own final-prompt temp (deleted on every path),
+- `.att.<seg>.<INV>.<draft|review>.json` — the ISOLATED attempt the driver
+  validates before it `os.replace`-promotes it to the canonical
+  `draft_path(seg)`/`review_path(seg)` (deleted if unpromoted),
+- `.codex_job.<seg>.json` — the driver's HYGIENE control state (overwritten per
+  dispatch; read ONLY by the driver, never by the Workflow),
+- `.codex_job.<seg>.lock` — the never-unlinked kernel-`flock` sentinel that
+  serializes a same-seg retry-dispatched driver against a surviving prior one,
+- `.codex_failed.<seg>.<DISP>` — the empty per-dispatch fail sentinel the wait
+  poll's fail-fast reads (its NAME is the whole signal).
+
+(There is deliberately no `.gate.*` snapshot and no `.codex_disp.*` sidecar — the
+per-dispatch `DISP` nonce travels only via the drive agent's `DISPATCHED <seg>
+<DISP>` return line, never a file.)
+
+**Wait bound.** The driver bounds itself to `abs_ceiling = deadline + 150 s`
+(`CODEX_DEADLINE_SEC=2700` poll window + `CODEX_FINALIZE_BUDGET_SEC=150`), and the
+Workflow's own poll adds `CODEX_WAIT_GRACE_SEC=600`, so the total W5
+translate/review wait is bounded at `2700 + 150 + 600 = 3450 s` elapsed plus one
+final finite on-disk gate check — never an unbounded hang (the #198 failure mode).
+A timed-out dispatch leaves the segment `in_progress` and re-dispatches on the NEXT
+W5 run — the ordinary ledger-resume path, no in-loop retry.
+
+**The codex-companion path is NOT in the resume digest.** The absolute
+`codex-companion.mjs` path (resolved per-machine by `resolve_codex_companion.py`
+from the plugin's own install location) is an ENVIRONMENT fact, not project state:
+it varies by machine / CC version and would spuriously force a fresh, no-resume run
+every time a book moved machines or the plugin updated its install path. It is
+therefore never folded into `resume_setup.py`'s resume-integrity digest nor any
+bundle hash, and `resolve_codex_companion.py` itself — like `profile_validate.py` —
+is plugin-anchored and never copied to `durable_root`, so it cannot be a bundle
+member at all. What DOES gate resume for the driver is `codex_job.py`'s own bytes
+(a `plugin_bundle_hash` member), so a driver-logic change still forces the correct
+re-validation.
 
 ## Three ledger schema files
 
@@ -408,7 +457,7 @@ Exact byte-scope per field:
   catches a footnote-apparatus re-extraction change for this segment
   specifically.
 - **`plugin_bundle_hash`** (global) — sha1 of sorted,
-  filename-concatenated bytes of the six generic scripts that directly
+  filename-concatenated bytes of the ten generic scripts that directly
   shape translate/review content (`ledger_update.py` included — its
   `reviewed_draft_sha1` binding-check logic directly determines
   correctness) plus the two workflow templates
@@ -462,13 +511,14 @@ membership.
 
 - **`plugin_bundle_hash`** (global, read from
   `${durable_root}/runs/.plugin_bundle_hash` — a marker file Step 0a writes
-  once per run, not recomputed per segment) — covers exactly **nine
+  once per run, not recomputed per segment) — covers exactly **ten
   scripts** (six pre-1.2.0, plus `review_ready.py` and `resume_setup.py`,
-  new in 1.2.0, and `glossary_batch_plan.py`, new in 1.3.5) plus the two
+  new in 1.2.0, `glossary_batch_plan.py`, new in 1.3.5, and `codex_job.py`,
+  new in 1.4.7) plus the two
   workflow templates: `validate_draft.py`,
   `canon_validate.py`, `cache_key.py`, `draft_sha1.py`,
   `review_artifact_check.py`, `ledger_update.py`, `review_ready.py`,
-  `resume_setup.py`, `glossary_batch_plan.py`, plus
+  `resume_setup.py`, `glossary_batch_plan.py`, `codex_job.py`, plus
   `mass-translate-wf.template.js`/`glossary-pass-wf.template.js`. These are
   scripts that directly shape extraction/translation/review/validation
   content, or determine whether a convergence verdict was correctly
@@ -483,7 +533,12 @@ membership.
   mass segments coarsely, the same as any plugin-bundle member; that is the
   accepted cost of the correct bucket, chosen because — unlike
   `derivation_bundle_hash` — it actually reaches the glossary digest and
-  leaves the canon generation stamp intact). **Part
+  leaves the canon generation stamp intact), and `codex_job.py` (the W5
+  translate/review driver: it launches codex and VALIDATES the isolated
+  attempt before atomically promoting it to canonical, so its bytes directly
+  determine whether a draft/review is correctly produced and accepted — an
+  old buggy driver may have wrongly accepted an artifact, so a driver-only
+  change must re-invalidate converged work). **Part
   of the cache key** (as `plugin_bundle_hash`) — a mismatch flips a segment
   straight to `stale`.
 - **`orchestration_bundle_hash`** (global, sibling marker file
