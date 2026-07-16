@@ -16,16 +16,23 @@
 // uses `locator.filter({ visible: true })`, which was added in Playwright 1.51 (the separate
 // routeWebSocket floor noted below is 1.48 and is unaffected by this higher module-wide minimum).
 
-import type { Browser, BrowserContext, Locator, Page, Route, Request } from '@playwright/test';
+import type { Browser, BrowserContext, JSHandle, Locator, Page, Route, Request } from '@playwright/test';
 // The ordered classifier lives in a pure, browser-agnostic module so its branch ORDER (deny <
 // classify-benign < eventsource < beacon < classify-read < get-head < fail-closed) is unit-testable,
 // not just grep-able. The seven `// [guard:*]` sentinels live in decideRoute. This handler only maps
 // the decision onto abort/continue + recording.
-import { decideRoute, tokenize } from './lib/capture-guard-policy.mjs';
+import { decideRoute } from './lib/capture-guard-policy.mjs';
 import type { GuardRequest } from './lib/capture-guard-policy.mjs';
 // Pure, unit-tested URL-identity matcher (pathname-boundary, not substring) so route/API matching
 // cannot be fooled by '/api/users-old' or a '?next=/settings/users' redirect.
 import { urlMatchesTarget } from './lib/identity-match.mjs';
+// Pure clip-geometry computation for captureRegionClipped (bleed-free oversize-overlay capture) —
+// unit-tested without a browser.
+import { clampClipToViewport } from './lib/viewport-clip.mjs';
+// Pure safe-negative-label gate for dismissModal's fallback cancel control — unit-tested without a
+// browser (mirrors the capture-guard-policy.mjs extraction).
+import { isSafeNegativeLabel } from './lib/dismiss-safe-label-policy.mjs';
+import { writeFile, rename, rm } from 'node:fs/promises';
 
 /** A request as seen by classifyRequest. 'read' admits; 'benign' blocks-uncounted; anything else falls through. */
 export type ClassifiedRequest = GuardRequest;
@@ -352,6 +359,246 @@ export async function captureRegion(
   await locator.screenshot({ path });
 }
 
+/**
+ * Bleed-free capture of an element that may be taller than the viewport — a SINGLE
+ * viewport-clipped `page.screenshot({ clip })` (no scroll-stitching), unlike `captureRegion`'s
+ * element-screenshot path, which scroll-stitches an oversize element and can bleed a
+ * `position:fixed` page-behind at a shifted offset across the seam.
+ *
+ * Contract:
+ *  - `scale: 'css'` keeps the produced image at 1:1 CSS pixels (DPR-neutral), matching
+ *    `captureRegion`'s existing rationale — NOT because clip coordinates "shift" (they stay CSS
+ *    coordinates throughout).
+ *  - The clip is `clampClipToViewport`-ed to the viewport's vertical extent; it THROWS on ANY
+ *    horizontal clipping (`page.screenshot({ clip })` silently crops otherwise, hiding real content
+ *    with no signal) and on an empty vertical intersection. Vertical overflow alone is NOT an
+ *    error — the returned `fitsFullHeight` reports whether the FULL element fit after
+ *    scroll-to-top; `false` means the caller/doc must disclose the truncated remainder in prose
+ *    (the same discipline as `captureRegion`'s `maxHeight` caveats).
+ *  - Stability: Playwright's platform freeze `animations: 'disabled'` (the mechanism
+ *    `toHaveScreenshot` uses) makes the capture INTERVAL deterministic across every same-document
+ *    influencer — sibling reflow, ancestor pseudo-elements, the target's own shadow tree, anything
+ *    that starts mid-shot — by fast-forwarding CSS/Web animations page-wide to their FINISHED state
+ *    for the shot's duration, and it captures the SETTLED overlay (the correct content for a
+ *    documentation screenshot). A best-effort, bounded, FAIL-CLOSED quiescence wait runs first so
+ *    the caller's own open/slide transitions finish before the shot (the measured box then matches
+ *    the frozen surface); a before/after bounding-box equality check plus two byte-identical
+ *    screenshot buffers corroborate no residual motion. Both deadline checks run BEFORE their
+ *    accept branch, so no frame captured past `settleTimeoutMs` (default 1000) can ever be
+ *    committed. THROWS if the target never settles within the budget — pre-settle the overlay or
+ *    raise `settleTimeoutMs`.
+ *  - Publish is atomic and anti-fabrication-safe: the verified buffer is written to a temp file
+ *    then `rename`d onto `path`; on ANY failure (capture OR cleanup) both `path` and the temp file
+ *    are unlinked, so a PNG present at `path` after this call is always trustworthy proof — never a
+ *    rejected/partial/stale frame.
+ *  - Window scroll + every ancestor scroller's offset (crossing open ShadowRoots via `.host`) is
+ *    snapshotted before the scroll-into-view and restored EXACTLY (`behavior: 'instant'`) once the
+ *    capture settles, by identity (the same node references), even if the DOM reparents mid-capture.
+ *
+ * OUT OF SCOPE (documented caveats — the wait fails closed rather than silently serve these):
+ * (a) an animation in a cross-document ancestor/child IFRAME is not in this document's animation
+ * set — pre-settle that page; (b) an INFINITE animation on the region never settles, so this
+ * throws — disable it before capture; (c) a pathological same-document animation whose timing
+ * defeats both Playwright's freeze and the before/after check — pre-settle it; (d) concurrent
+ * captures to the SAME `path` are unsupported.
+ *
+ * @example
+ * // A modal ~120px taller than the viewport: disclose the remainder when it does not fully fit.
+ * const { fitsFullHeight } = await captureRegionClipped(modal, `${OUTPUT_DIR}/tall-modal.png`);
+ * if (!fitsFullHeight) {
+ *   // document.md: "showing the top of the dialog; scroll for the remaining fields."
+ * }
+ *
+ * @example
+ * // An overlay whose ancestor slide-in transition is still running after 1000ms throws — either
+ * // pre-settle the transition or raise settleTimeoutMs for a known-slow ancestor animation:
+ * await captureRegionClipped(modal, path, { settleTimeoutMs: 2500 });
+ */
+export async function captureRegionClipped(
+  locator: Locator,
+  path: string,
+  opts: { settleTimeoutMs?: number } = {},
+): Promise<{ fitsFullHeight: boolean }> {
+  const { settleTimeoutMs = 1000 } = opts;
+  const page = locator.page();
+  const tmp = `${path}.captureRegionClipped.partial`; // pure fn of path → known during cleanup
+  // Nullable handle — the single lifecycle owner for the ancestor-scroll snapshot/restore.
+  let scrollState: JSHandle<{
+    boxes: { node: Element; left: number; top: number }[];
+    winX: number;
+    winY: number;
+  }> | null = null;
+  let result: { fitsFullHeight: boolean } | null = null; // set once the capture is published
+  let primaryError: unknown = null; // first error from ANY phase; cleanup must never replace it
+
+  try {
+    const vp = page.viewportSize();
+    if (vp === null) {
+      throw new Error('captureRegionClipped: no fixed viewport size set on the page — cannot compute a clip.');
+    }
+    await locator.waitFor({ state: 'visible' });
+
+    // Snapshot window + EXACT ancestor scroller node refs (shadow-host-crossing) in a handle so
+    // restore writes to the SAME nodes even if the DOM reparents mid-capture. Cross ShadowRoot via
+    // .host.
+    scrollState = await locator.evaluateHandle((el) => {
+      const boxes: { node: Element; left: number; top: number }[] = [];
+      let n: Element | null =
+        el.parentElement || (el.getRootNode() instanceof ShadowRoot ? (el.getRootNode() as ShadowRoot).host : null);
+      while (n) {
+        boxes.push({ node: n, left: n.scrollLeft, top: n.scrollTop });
+        n = n.parentElement || (n.getRootNode() instanceof ShadowRoot ? (n.getRootNode() as ShadowRoot).host : null);
+      }
+      return { boxes, winX: window.scrollX, winY: window.scrollY };
+    });
+    await locator.evaluate((el) => el.scrollIntoView({ block: 'start', inline: 'nearest', behavior: 'instant' }));
+
+    const deadline = Date.now() + settleTimeoutMs;
+    let clip: { x: number; y: number; width: number; height: number; fitsFullHeight: boolean } | null = null;
+    let committed: Buffer | null = null;
+    let prevBuf: Buffer | null = null;
+
+    for (;;) {
+      // (1) QUIESCENCE (best-effort settle; the SHOT interval is made stable by animations:'disabled'
+      // below). Wait for an EMPTY running/pending set over el + its subtree (getAnimations({subtree:
+      // true}) — ordinary DOM descendants; NOT shadow-including per spec) AND each ANCESTOR's own
+      // animations (an ancestor slide-in is the COMMON modal case). This lets the caller's open/slide
+      // transitions finish so the measured box matches the frozen shot; it is NOT relied on to
+      // enumerate every influencer (siblings/shadow/pseudo) — 'disabled' freezes those page-wide
+      // during the raster. Poll via setTimeout (fires even if a bg tab throttles rAF); fail-closed.
+      await locator.evaluate(
+        (el, endAt) =>
+          new Promise<void>((resolve, reject) => {
+            const relevant = (): Animation[] => {
+              const set = new Set<Animation>(el.getAnimations({ subtree: true })); // el + ordinary DOM descendants (NOT shadow-including)
+              let n: Element | null =
+                el.parentElement ||
+                (el.getRootNode() instanceof ShadowRoot ? (el.getRootNode() as ShadowRoot).host : null);
+              while (n) {
+                for (const a of n.getAnimations()) set.add(a); // each ancestor's OWN animations (slide-in)
+                n = n.parentElement || (n.getRootNode() instanceof ShadowRoot ? (n.getRootNode() as ShadowRoot).host : null);
+              }
+              return [...set];
+            };
+            const tick = (): void => {
+              // Deadline FIRST: never resolve !busy after expiry — reject once the budget is spent.
+              if (Date.now() >= endAt) {
+                reject(
+                  new Error(
+                    'captureRegionClipped: animations affecting the target did not settle within ' +
+                      'settleTimeoutMs — pre-settle the overlay (disable infinite animations) or ' +
+                      'raise settleTimeoutMs.',
+                  ),
+                );
+                return;
+              }
+              // busy = still visually changing. NB: 'pending' is NOT a playState value (the enum is
+              // idle|running|paused|finished) — it is the separate boolean Animation.pending. A
+              // pause-pending animation reports playState 'paused' yet a.pending===true and keeps
+              // moving for one more frame, so it MUST be treated as busy; use a.pending, not a dead
+              // `playState === 'pending'` clause.
+              const busy = relevant().some((a) => a.playState === 'running' || a.pending === true);
+              if (!busy) {
+                resolve();
+                return;
+              }
+              setTimeout(tick, 32);
+            };
+            tick();
+          }),
+        deadline,
+      );
+
+      // (2) measure the now-settled box, clamp, single DETERMINISTIC capture to a BUFFER (no path).
+      // animations:'disabled' = Playwright freezes CSS/Web animations page-wide to their FINISHED
+      // state for the shot's duration (the mechanism toHaveScreenshot uses), so the capture INTERVAL
+      // is stable across every same-document influencer a pre-shot enumeration can't span —
+      // siblings, ancestor pseudo-elements, shadow trees, and anything that starts mid-shot — and it
+      // captures the SETTLED overlay, which is what evidence wants. Quiescence-first means finite
+      // animations already finished, so the fast-forward is a no-op and the frozen surface matches
+      // the measured box.
+      const before = await locator.boundingBox();
+      if (before === null) {
+        throw new Error('captureRegionClipped: element is not visible (boundingBox null) — cannot clip.');
+      }
+      clip = clampClipToViewport(before, vp); // throws on horizontal-clip / empty-intersection
+      const buf = await page.screenshot({
+        clip: { x: clip.x, y: clip.y, width: clip.width, height: clip.height },
+        scale: 'css',
+        animations: 'disabled',
+      });
+      const after = await locator.boundingBox();
+
+      // (3) deadline BEFORE accept (never commit a frame captured past the budget), then
+      // corroborate — box unchanged across the shot (a non-animation JS/setTimeout move) AND two
+      // byte-identical buffers.
+      if (Date.now() >= deadline) {
+        throw new Error(
+          'captureRegionClipped: geometry/pixels did not stabilize within settleTimeoutMs — the ' +
+            'overlay is still changing; pre-settle it or raise settleTimeoutMs.',
+        );
+      }
+      const boxStable =
+        after !== null &&
+        after.x === before.x &&
+        after.y === before.y &&
+        after.width === before.width &&
+        after.height === before.height;
+      if (boxStable && prevBuf !== null && buf.equals(prevBuf)) {
+        committed = buf;
+        break;
+      }
+      prevBuf = boxStable ? buf : null;
+    }
+
+    await writeFile(tmp, committed as Buffer);
+    await rename(tmp, path); // atomic publish of the VERIFIED buffer; nothing hits `path` pre-verification
+    result = { fitsFullHeight: (clip as { fitsFullHeight: boolean }).fitsFullHeight };
+  } catch (err) {
+    primaryError = err;
+  }
+  // ── Cleanup: one owner; cleanup NEVER masks primaryError; cleanup failure is itself terminal ──
+  if (scrollState !== null) {
+    try {
+      await scrollState.evaluate((s) => {
+        for (const b of s.boxes) b.node.scrollTo({ left: b.left, top: b.top, behavior: 'instant' });
+        window.scrollTo({ left: s.winX, top: s.winY, behavior: 'instant' });
+      });
+    } catch (e) {
+      primaryError = primaryError ?? e;
+    }
+    try {
+      await scrollState.dispose();
+    } catch (e) {
+      primaryError = primaryError ?? e;
+    }
+  }
+  if (primaryError !== null) {
+    // fail-closed: no rejected/stale/anomalous PNG may pose as proof. Removal failure is LOUD (not
+    // swallowed).
+    let removalError: unknown = null;
+    try {
+      await rm(path, { force: true });
+    } catch (e) {
+      removalError = e;
+    }
+    try {
+      await rm(tmp, { force: true });
+    } catch (e) {
+      removalError = removalError ?? e;
+    }
+    if (removalError !== null) {
+      const removalMessage = removalError instanceof Error ? removalError.message : String(removalError);
+      throw new Error(
+        `captureRegionClipped: capture failed AND could not remove a possibly-stale artifact at ${path} (${removalMessage})`,
+        { cause: primaryError },
+      );
+    }
+    throw primaryError;
+  }
+  return result as { fitsFullHeight: boolean }; // only after the capture is published AND all cleanup succeeded
+}
+
 /** Viewport screenshot — use for long unpaginated lists where the full element overflows the frame. */
 export async function captureViewport(page: Page, path: string): Promise<void> {
   await page.screenshot({ path });
@@ -384,54 +631,10 @@ export interface DismissOptions {
   safeLabels?: string[];
 }
 
-// Safe-negative dismiss labels are an ALLOWLIST, not a denylist. A denylist of dangerous verbs is
-// the wrong tool here: "Cancel" is simultaneously the most common SAFE negative AND a substring of
-// destructive labels ("Cancel subscription"), so it cannot be classified by verb alone. Instead the
-// caller's cancelLabel must EXACTLY equal one of a small set of known-safe negatives (the default
-// set below, extensible per project via DismissOptions.safeLabels). Anything else — including a
-// label that merely contains a commit/destructive verb — is refused. Tokenize is still used to
-// reject a multi-word label whose first token is a commit/destructive verb even if the author added
-// it to safeLabels by mistake.
-const DEFAULT_SAFE_LABELS = [
-  // EN
-  'Cancel',
-  'No',
-  'Close',
-  'Back',
-  'Go back',
-  'Keep',
-  'Dismiss',
-  'Not now',
-  // DE
-  'Abbrechen',
-  'Nein',
-  'Schließen',
-  'Zurück',
-  'Behalten',
-];
-// Verbs a SAFE negative label must never start with (a primary/commit/destructive action).
-const UNSAFE_LEADING_VERBS = new Set([
-  'delete',
-  'destroy',
-  'remove',
-  'disable',
-  'deactivate',
-  'approve',
-  'send',
-  'finalize',
-  'revoke',
-  'reset',
-  'purge',
-  'wipe',
-  'confirm',
-  'submit',
-  'save',
-  'löschen',
-  'entfernen',
-  'bestätigen',
-  'senden',
-  'speichern',
-]);
+// Safe-negative dismiss labels are an ALLOWLIST, not a denylist — see
+// lib/dismiss-safe-label-policy.mjs (isSafeNegativeLabel) for the full contract, the DE/EN default
+// set, and why an allowlist (not a verb denylist) is the right tool here. Extracted so the
+// allowlist + leading-verb guard is unit-tested without a browser.
 
 /**
  * Dismiss an open modal SAFELY. Assert the dialog's identifying text FIRST (so we dismiss the dialog
@@ -465,9 +668,7 @@ export async function dismissModal(
   // Escape did not close it — use a known-safe negative control from the allowlist, never the
   // primary button.
   if (cancelLabel !== undefined) {
-    const allowed = new Set([...DEFAULT_SAFE_LABELS, ...safeLabels]);
-    const leadingToken = tokenize(cancelLabel)[0];
-    if (!allowed.has(cancelLabel) || (leadingToken !== undefined && UNSAFE_LEADING_VERBS.has(leadingToken))) {
+    if (!isSafeNegativeLabel(cancelLabel, safeLabels)) {
       throw new Error(
         `dismissModal: refusing to dismiss via "${cancelLabel}" — it is not a recognized safe ` +
           'negative label. Pass an exact safe-negative label (Cancel/No/Close/…) or extend ' +

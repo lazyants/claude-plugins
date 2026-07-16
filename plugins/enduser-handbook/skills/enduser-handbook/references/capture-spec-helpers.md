@@ -69,6 +69,19 @@ as-is. The reference doc is normative; the `*.playwright.*` asset is one impleme
   in prose. It is a guard against a layout-bug height balloon (a modal ballooned to ~82,000px), not
   a tall-capture solution; default behavior is unchanged when `maxHeight` is omitted.
 
+- **Bleed-free oversize-overlay capture** — a dedicated helper for an overlay/region **taller than
+  the viewport** takes a **single viewport-clipped** shot (scroll the element to the top, clip to
+  the viewport) instead of `captureRegion`'s element-screenshot path, which scroll-stitches an
+  oversize element together and can bleed a `position:fixed` page-behind at a shifted offset across
+  the seam. The clip **throws on any horizontal clipping** (a silently cropped shot would hide real
+  content) and on an empty vertical intersection; vertical overflow alone is not an error — it
+  reports whether the full element fit **after scroll-to-top**, so the caller/doc **discloses any
+  remainder in prose**, mirroring `maxHeight`'s truncation discipline above. Stability rests on the
+  engine's own animation-freeze mechanism for the shot interval, plus a bounded, **fail-closed**
+  wait for the caller's own open/slide transition to settle first — it **throws** rather than ship
+  a mid-animation frame. Publish is atomic (verified buffer → temp file → rename) so a file at the
+  target path is always trustworthy proof, never a rejected/partial frame.
+
 - **Modal open / dismiss** — assert the dialog's identifying text first, then dismiss via **Escape
   first**, falling back to a named negative/cancel control. **Never** the primary/first button,
   which can be the destructive one.

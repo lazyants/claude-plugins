@@ -22,6 +22,7 @@ import {
   installCaptureGuard,
   assertIdentity,
   captureRegion,
+  captureRegionClipped,
   openModalDialog,
   dismissModal,
   maskAndAssert,
@@ -94,6 +95,22 @@ test('capture: items chapter', async ({ browser }) => {
     // dialog does not produce an unusable image. The cap hides content below maxHeight — paginate or
     // disclose a legitimately long region (see captureRegion's JSDoc).
     await captureRegion(dialog, `${OUTPUT_DIR}/details-dialog.png`, { maxHeight: 4000 });
+
+    // 5d. Step: a legitimately tall modal (not a runaway-height bug) — captureRegionClipped takes a
+    // single viewport-clipped shot (no scroll-stitch seam, so no shifted-offset position:fixed
+    // bleed) instead of captureRegion's element-screenshot path. It scrolls the dialog to the top,
+    // waits for its own open/slide transition to settle, then reports whether the full dialog fit.
+    const { fitsFullHeight } = await captureRegionClipped(dialog, `${OUTPUT_DIR}/details-dialog-tall.png`);
+    if (!fitsFullHeight) {
+      // Disclose the truncation in the chapter prose — the shot shows the top of the dialog after
+      // scroll-to-top, not the whole thing (the same discipline as captureRegion's maxHeight cap).
+      // e.g.: "The screenshot shows the top of the dialog; scroll for the remaining fields."
+    }
+    // A dialog whose OPEN animation runs on a long ancestor transition (a slide-in panel wrapping
+    // the dialog, not the dialog itself) may need a larger settle budget than the 1000ms default —
+    // raise settleTimeoutMs rather than pre-emptively disabling the transition:
+    // await captureRegionClipped(dialog, path, { settleTimeoutMs: 2500 });
+
     await dismissModal(page, { dialog, expectedText: 'Details', cancelLabel: 'Cancel' });
   } finally {
     // 6. In a finally so a delayed beacon/fetch fired during teardown is still drained and asserted

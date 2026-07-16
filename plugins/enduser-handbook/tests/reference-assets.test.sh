@@ -222,7 +222,7 @@ has "capture-guard-policy: matchesDeny scans the request body (postData)" 'req.p
 
 echo "== capture-helpers safe-dismiss + leak-scan hardening =="
 # dismissModal uses a safe-negative ALLOWLIST (not a destructive denylist) and refuses multi-dialog.
-has "capture-helpers: safe-negative allowlist (DEFAULT_SAFE_LABELS)" 'DEFAULT_SAFE_LABELS' "$CH"
+has "dismiss-policy: safe-negative allowlist present" 'DEFAULT_SAFE_LABELS' "$ASSETS/lib/dismiss-safe-label-policy.mjs"
 has "capture-helpers: refuses when more than one dialog is open"     "getByRole('dialog').count" "$CH"
 # maskAndAssert tags masked nodes and EXCLUDES them from the scan (no placeholder string-strip).
 has   "capture-helpers: tags masked nodes (data-handbook-masked)"     'data-handbook-masked' "$CH"
@@ -255,6 +255,17 @@ has   "identity-match: fails closed on a blank target" 'blank target' "$ASSETS/l
 has "capture-helpers: captureRegion has a maxHeight cap option"          'maxHeight' "$CH"
 has "capture-helpers: captureRegion resets scrollTop for the top slice"  'scrollTop' "$CH"
 has "capture-helpers: captureRegion shoots at scale css (DPR-neutral)"   "scale: 'css'" "$CH"
+# v1.4.0 #18: bleed-free oversize-overlay helper — single viewport clip, animations:'disabled', and an
+# atomic fail-closed publish (buffer → temp → rename; the rename guards against a rejected PNG at path).
+has "capture-helpers: bleed-free oversize-overlay helper" 'export async function captureRegionClipped(' "$CH"
+has "capture-helpers: verified-buffer atomic publish"     'await rename(tmp, path);'     "$CH"
+# v1.4.0 #154: dismiss safe-negative gate extracted to a unit-tested lib; the .ts delegates and carries
+# no inline label/verb tables, and both imports are VALUE imports (a type-only import would false-green).
+has   "capture-helpers: dismiss delegates to isSafeNegativeLabel" 'if (!isSafeNegativeLabel(cancelLabel, safeLabels))' "$CH"
+hasnt "capture-helpers: no inline safe-labels array"             'DEFAULT_SAFE_LABELS = ['              "$CH"
+hasnt "capture-helpers: no inline unsafe-verbs set"              'UNSAFE_LEADING_VERBS = new Set'       "$CH"
+has   "capture-helpers: value-imports isSafeNegativeLabel" "import { isSafeNegativeLabel } from './lib/dismiss-safe-label-policy.mjs'" "$CH"
+has   "capture-helpers: value-imports clampClipToViewport" "import { clampClipToViewport } from './lib/viewport-clip.mjs'" "$CH"
 
 echo "== capture.example.spec.ts =="
 SPEC="$ASSETS/capture.example.spec.ts"
@@ -333,6 +344,10 @@ for f in \
   "$REFS/capture-engines.md" \
   "$ASSETS/lib/surface-diff.mjs" \
   "$ASSETS/lib/surface-diff.d.mts" \
+  "$ASSETS/lib/viewport-clip.mjs" \
+  "$ASSETS/lib/viewport-clip.d.mts" \
+  "$ASSETS/lib/dismiss-safe-label-policy.mjs" \
+  "$ASSETS/lib/dismiss-safe-label-policy.d.mts" \
   "$ASSETS/reaudit.example.spec.ts" \
   "$REFS/surface-diff.md"; do
   base="$(basename "$f")"
@@ -349,7 +364,7 @@ fi
 
 echo "== executable unit tests (node --test) =="
 if command -v node >/dev/null 2>&1; then
-  for t in control-inventory.test.mjs capture-guard-policy.test.mjs identity-match.test.mjs graphql-read-classifier.test.mjs profile-version.test.mjs surface-diff.test.mjs; do
+  for t in control-inventory.test.mjs capture-guard-policy.test.mjs identity-match.test.mjs graphql-read-classifier.test.mjs profile-version.test.mjs surface-diff.test.mjs viewport-clip.test.mjs dismiss-safe-label-policy.test.mjs; do
     if node --test "$TEST_DIR/$t" >/dev/null 2>&1; then
       ok "$t passes under node --test"
     else
@@ -380,6 +395,7 @@ fi
 
 echo "== publish-target adapters =="
 SMD="$REFS/publish-targets/static-md.md"
+OMD="$REFS/publish-targets/obsidian-vault.md"
 PROF="$ASSETS/handbook.profile.example.yml"
 
 if [ -f "$SMD" ]; then ok "static-md adapter exists"; else bad "static-md adapter missing"; fi
@@ -453,6 +469,13 @@ hasnt "publish-targets README: no raw adapter path"  '<publish.target>.md' "$PTR
 # Profile honesty: the example must not over-promise a single-adapter ship.
 hasnt "profile: no over-promise" 'only obsidian_vault ships' "$PROF"
 
+echo "== obsidian-vault adapter (#153) =="
+# v1.4.0 #153: chapter image embeds are DERIVED from capture.output_dir (full-target relative form —
+# relative(dirname(chapter_file), join(capture.output_dir, <slug>, <file>))), replacing the hardcoded
+# assets/<chapter-slug>/ prefix, and the link-integrity gate keeps the resolved target inside the vault.
+has "obsidian-vault: embed derived from capture.output_dir" 'relative(dirname(chapter_file), join(capture.output_dir' "$OMD"
+has "obsidian-vault: vault-boundary gate"                   'inside the active Obsidian vault'                          "$OMD"
+
 echo "== Package A/B/D regression sentinels (#49, #50, #51, #52, #71) =="
 hasnt "no non-waiting isVisible after Escape"    'isVisible'                    "$CH"
 has   "bounded hidden-wait after Escape"         "state: 'hidden', timeout:"    "$CH"
@@ -471,7 +494,11 @@ for f in \
   "$ASSETS/lib/identity-match.mjs" \
   "$ASSETS/lib/identity-match.d.mts" \
   "$GQL" \
-  "$ASSETS/lib/graphql-read-classifier.d.mts"; do
+  "$ASSETS/lib/graphql-read-classifier.d.mts" \
+  "$ASSETS/lib/viewport-clip.mjs" \
+  "$ASSETS/lib/viewport-clip.d.mts" \
+  "$ASSETS/lib/dismiss-safe-label-policy.mjs" \
+  "$ASSETS/lib/dismiss-safe-label-policy.d.mts"; do
   hasnt "no residual fork-it wording (banner): $(basename "$f")" 'Fork for other' "$f"
 done
 for f in \

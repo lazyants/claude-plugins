@@ -28,12 +28,13 @@ folder names come from the profile.
 
 ```
 {{publish.chapters_dir}}/
-  {{publish.index_file basename}}      # the section TOC, e.g. INDEX.md
-  <chapter-slug>.md                    # one chapter per feature; slug is English kebab-case
-  assets/<chapter-slug>/NN-*.png       # screenshots captured for this chapter
+  {{publish.index_file basename}}                # the section TOC, e.g. INDEX.md
+  <chapter-slug>.md                              # one chapter per feature; slug is English kebab-case
+{{capture.output_dir}}/<chapter-slug>/NN-*.png   # screenshots captured for this chapter; resolves to
+                                                  # assets/<chapter-slug>/ for the example profile below
 {{publish.glossary_dir}}/
-  index.md                             # canonical glossary page (see glossary-discipline.md)
-{{publish.glossary_seed}}              # vault-wide INDEX that tracks the glossary row
+  index.md                                       # canonical glossary page (see glossary-discipline.md)
+{{publish.glossary_seed}}                        # vault-wide INDEX that tracks the glossary row
 ```
 
 Chapter slugs are **always English kebab-case** even when the prose is in another
@@ -41,10 +42,31 @@ language. The H1 and body render in `language.code`; only the filename and the U
 slug stay English. This keeps the file tree greppable and the wikilink targets stable
 across translations.
 
-Screenshots live under `assets/<chapter-slug>/` next to the chapter and are embedded by
-**relative path**: `![alt](assets/<chapter-slug>/01-overview.png)`. Never absolute paths,
-never `vault/`-rooted paths — Obsidian resolves relative paths and the chapter stays
-portable if the vault is renamed.
+Screenshots are captured into `{{capture.output_dir}}/<chapter-slug>/` and embedded by a
+**full-target relative path** — never a raw `capture.output_dir` value and never a
+partial concatenation of a chapter→output_dir prefix with the slug and filename:
+
+```
+<embed> = relative(dirname(chapter_file), join(capture.output_dir, <chapter-slug>, <file>))
+```
+
+Embed it as `![alt](<embed>)`. Two worked examples:
+
+- `capture.output_dir: vault/handbook/assets`, chapter in `vault/handbook/` →
+  `![alt](assets/<chapter-slug>/01-overview.png)`.
+- **Flat** `capture.output_dir: vault/handbook` (same directory as the chapters), chapter
+  in `vault/handbook/` → `![alt](<chapter-slug>/01-overview.png)` — no leading slash.
+  (The naive `<rel>/<chapter-slug>/<file>` concatenation degenerates here: `<rel>` is
+  empty, so it would wrongly produce a forbidden vault-rooted `/<chapter-slug>/…` path —
+  always derive the embed from the full join above, never by concatenating a separately
+  computed chapter→output_dir relative prefix with the slug and filename.)
+
+The resulting embed must always be a **POSIX forward-slash** relative path — never
+absolute, never `vault/`-rooted. If `relative(...)` on your platform would emit
+backslashes or an absolute/cross-root path, normalize separators to `/` by hand, and keep
+`capture.output_dir` on the same filesystem root as the vault so a relative path always
+exists. Obsidian resolves relative paths and the chapter stays portable if the vault is
+renamed.
 
 ## Frontmatter
 
@@ -155,9 +177,15 @@ English code identifier is a field inside the entry, not the heading.
 Before declaring the chapter published, you verify in this order and halt on the first
 failure:
 
-1. Every `![](…)` resolves to a PNG that actually exists under
-   `{{capture.output_dir}}/<chapter-slug>/` — no orphan embeds, no captures the run did
-   not produce.
+1. Every `![](…)` embed, resolved **relative to the chapter that contains it**, points
+   at a PNG that actually exists under `{{capture.output_dir}}/<chapter-slug>/` — no
+   orphan embeds, no captures the run did not produce. The resolved target must also
+   stay inside the active Obsidian vault — halt if `capture.output_dir` resolves outside
+   the vault root (e.g. `capture.output_dir: screenshots` from a chapter at
+   `vault/handbook/foo.md` resolves to `../../screenshots/…`, outside the vault, so the
+   embed is broken and unportable). Unlike the static-Markdown target,
+   `capture.output_dir` is **not** required to sit under `publish.chapters_dir` — sibling
+   vault subtrees resolve fine as long as the target stays inside the vault.
 2. Every wikilink target (`[[…]]`) resolves to either an existing `.md` file in the
    vault or an existing heading anchor in the glossary. Broken wikilinks render as
    red placeholders in Obsidian and are silent in plain Markdown views.

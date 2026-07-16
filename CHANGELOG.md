@@ -2,6 +2,19 @@
 
 All notable changes to `lazyants/claude-plugins` are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is per-plugin, not repo-wide.
 
+## [enduser-handbook 1.4.0] — 2026-07-16
+
+Hardening plus a portability bugfix for the reference capture assets: a bleed-free capture helper for oversize overlays, an Obsidian embed path that finally derives from `capture.output_dir`, and the last safety gate before a destructive click lifted into a unit-tested library.
+
+### Added
+- `skills/enduser-handbook/assets/capture-helpers.playwright.ts` — `captureRegionClipped`, a bleed-free capture for an overlay taller than the viewport: one viewport-clipped screenshot instead of the scroll-stitched element shot that let a `position:fixed` page-behind re-composite across seams. Uses Playwright's `animations:'disabled'` for a deterministic settled frame, publishes atomically (temp-write + `rename`), and fails closed (unlinks the target on any error) so a PNG at the output path is always trustworthy proof. Pure clip math extracted to `assets/lib/viewport-clip.mjs` (`clampClipToViewport`, unit-tested; throws on any horizontal clip). Closes #18.
+
+### Fixed
+- `skills/enduser-handbook/references/publish-targets/obsidian-vault.md` — chapter image embeds are now DERIVED from `capture.output_dir` (`relative(dirname(chapter_file), join(capture.output_dir, <slug>, <file>))`) instead of a hardcoded `assets/<chapter-slug>/` prefix, so a profile whose `output_dir` is not `<chapters_dir>/assets` no longer produces 404 embeds. Adds an inside-the-vault boundary check plus POSIX-slash / never-absolute portability rules. Closes #153.
+
+### Changed
+- `skills/enduser-handbook/assets/capture-helpers.playwright.ts` — the `dismissModal` safe-negative-label gate is extracted to a unit-tested `assets/lib/dismiss-safe-label-policy.mjs` (`isSafeNegativeLabel` + frozen `DEFAULT_SAFE_LABELS` / `UNSAFE_LEADING_VERBS`), so a regression in the last check before a destructive-button click is caught by tests rather than shipped silently. Behavior unchanged. Closes #154.
+
 ## [ai-cli-optout 1.1.1] — 2026-07-12
 
 Retires the root `KNOWN_ISSUES.md`; its tracked caveats and planned-coverage list now live as GitHub issues. Mostly a documentation move, but the shipped `vendors/anthropic.json` carries two `tradeoff_note` strings that pointed at `KNOWN_ISSUES.md §C2`, so retargeting them ships a patch release.
@@ -38,6 +51,14 @@ Initial release. New plugin — high-fidelity literary book translation over a G
 - `skills/literary-translator/assets/schemas/` + `references/` — JSON Schemas for every machine-checked artifact plus the reference docs (engine loop, canon/glossary, ledger/resumability, verse policy, source-format adapters, false-green gate).
 - `tests/` — pytest suite (`*.test.py`, `--import-mode=importlib`) over synthetic fixtures: 500+ tests across every script, schema-literal drift, and an end-to-end ledger acceptance run. Run with `cd plugins/literary-translator && python3 -m pytest`.
 - Honesty caveats carried from the source project: extraction is proven against Historiettes' 17th-century French specifically (every other language/source is an unverified starter preset gated by a mandatory smoke test), and one of the two source adapters plus the expert custom extractor remain experimental until pilot-proven end-to-end.
+
+## [enduser-handbook 1.3.0] — 2026-07-11
+
+Adds cross-line structural validation to the dependency-free `profile_version` pre-flight scan: mechanism A (unterminated flow collection / quote) and mechanism C (undefined alias, gated on a real-anchor over-approximation), both provably free of false rejects (opacity-first + inline-only lexer) and differentially fuzzed against ruby/Psych. Mechanism B (invalid dedent) deferred (#125); pre-existing tab-indent (#126) and Step-4 column-0 (#127) false-rejects documented as honest residuals. Closes #110.
+
+### Added
+- `skills/enduser-handbook/assets/lib/profile-version.mjs` — mechanisms A + C in the dependency-free pre-flight scan (opacity-first, inline-only lexer), with `profile-version.d.mts` types and `tests/profile-version.test.mjs` + `tests/profile-version.differential.test.mjs` (differential fuzz vs ruby/Psych).
+- `skills/enduser-handbook/references/profile-validation.md` — documents mechanisms A + C and the honest residual false-rejects (#126 / #127).
 
 ## [enduser-handbook 1.2.0] — 2026-07-10
 
