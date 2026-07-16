@@ -62,9 +62,12 @@ function malformedStructural(detail) {
 
 const isSpaceOrTab = (c) => c === ' ' || c === '\t';
 
-// Leading-space count only (not `\s`/tab-inclusive) — by the time scanStructure runs, the caller has
-// already rejected any tab in a line's block-indentation run (see the TAB_INDENT check above), so
-// counting ASCII spaces alone is exact for every line this scan is ever invoked on.
+// Leading-space count only (not `\s`/tab-inclusive). As of the #126 fix the tab-indentation check
+// runs AFTER this scan (it consults this scan's opacity maps), so a line may still hold a tab in its
+// leading run when countIndent sees it. Counting spaces alone then reads a leading tab as a shorter
+// indent, which can only END a block/plain region at or before where a real parser would — the
+// conservative, false-reject-free direction the whole scan is built on. The forbidden bare tab is
+// rejected immediately after this scan returns.
 function countIndent(line) {
   let n = 0;
   while (n < line.length && line[n] === ' ') n += 1;
@@ -312,11 +315,15 @@ export function scanStructure(lines) {
   return structuralScan(lines).verdict;
 }
 
-// The engine behind scanStructure, additionally exposing `opaqueAtStart` — for each line index,
-// was this document already inside an open flow collection or quoted scalar the MOMENT that line
-// began? readProfileVersion's Step 4 shape allowlist needs this: a flow/quote continuation is one of
-// the few YAML shapes allowed to reach column 0 with no indentation at all (block/plain continuations
-// can't — they must be indented past their introducer — so only flow/quote need this exemption).
+// The engine behind scanStructure, additionally exposing two per-line opacity maps. `opaqueAtStart[i]`
+// — was this document already inside an open flow collection or quoted scalar the MOMENT line i began?
+// readProfileVersion's Step 4 shape allowlist needs this: a flow/quote continuation is one of the few
+// YAML shapes allowed to reach column 0 with no indentation at all (block/plain continuations can't —
+// they must be indented past their introducer — so only flow/quote need this exemption).
+// `blockPlainOpaqueAtStart[i]` — was line i inside an open block scalar or plain scalar the moment it
+// began? readProfileVersion's tab-indentation check (#126) needs this: a tab in the leading run is
+// legal only as scalar CONTENT, i.e. inside an opaque region — for a block/plain region that also
+// requires the line to be space-indented into it (see the tab check for the exact rule).
 // scanStructure's own frozen signature stays `(lines) => verdict|null`; this richer shape is internal.
 function structuralScan(lines) {
   // An over-approximation of "the document defines an anchor somewhere", not a literal "&" count: a
@@ -333,11 +340,14 @@ function structuralScan(lines) {
   let block = null;
   let plain = null;
   const opaqueAtStart = new Array(lines.length).fill(false);
-  const aliasFatal = () => ({ verdict: malformedStructural('alias to undefined anchor'), opaqueAtStart });
+  const blockPlainOpaqueAtStart = new Array(lines.length).fill(false);
+  const withMaps = (verdict) => ({ verdict, opaqueAtStart, blockPlainOpaqueAtStart });
+  const aliasFatal = () => withMaps(malformedStructural('alias to undefined anchor'));
 
   let i = 0;
   while (i < lines.length) {
     opaqueAtStart[i] = flowDepth > 0 || quote !== null;
+    blockPlainOpaqueAtStart[i] = block !== null || plain !== null;
     const line = lines[i];
 
     if (quote !== null) {
@@ -397,9 +407,9 @@ function structuralScan(lines) {
     i += 1;
   }
 
-  if (flowDepth > 0) return { verdict: malformedStructural('unterminated flow collection'), opaqueAtStart };
-  if (quote !== null) return { verdict: malformedStructural('unterminated quoted scalar'), opaqueAtStart };
-  return { verdict: null, opaqueAtStart };
+  if (flowDepth > 0) return withMaps(malformedStructural('unterminated flow collection'));
+  if (quote !== null) return withMaps(malformedStructural('unterminated quoted scalar'));
+  return withMaps(null);
 }
 
 /**
@@ -428,62 +438,119 @@ export function readProfileVersion(rawText) {
   }
   const lines = text.split('\n');
 
+  // The cross-line structural scan (mechanisms A + C; #110) runs its full forward pass FIRST — both
+  // Step 4's column-0 shape allowlist and the tab check just below need its per-line opacity maps.
+  // `opaqueAtStart[i]` says whether line i was already inside an open flow collection or quoted scalar
+  // the moment it began. A flow/quote continuation is one of the few YAML shapes allowed to reach
+  // column 0 with NO indentation at all (unlike a block/plain continuation, which must always be
+  // indented past its introducer) — without this, Step 4 false-rejects a valid `key: [1,\n2]`-shaped
+  // document. The VERDICT half of this result is consumed later, at Step 6.5, unchanged from before.
+  const structural = structuralScan(lines);
+
   // YAML forbids a tab anywhere in a line's BLOCK-INDENTATION run — a tab as the colon→value
-  // separator (e.g. `profile_version:\t1`) is legal and must stay unaffected, so this only matches a
-  // tab inside the LEADING whitespace run, never one that follows non-whitespace. Checked over every
-  // line, not just column-0 ones, because the forbidden tab is typically several levels deep (a
-  // nested key under a later top-level key) — well past what the column-0 shape allowlist below
-  // inspects. Without this, a document a real YAML parser cannot load at all (Psych::SyntaxError)
-  // would scan clean if profile_version itself happens to be spelled correctly.
+  // separator (e.g. `profile_version:\t1`) is legal, so TAB_INDENT only matches a tab inside the
+  // LEADING whitespace run, never one that follows non-whitespace. But a tab in that run is legal when
+  // it is scalar CONTENT rather than indentation (#126): inside an open flow/quote region
+  // (`opaqueAtStart`), or inside an open block/plain region on a line that is itself space-indented
+  // into that region (`blockPlainOpaqueAtStart[i] && line[0] === ' '`). Everything else — a bare-tab
+  // line at document level, or a tab-led line that dedents out of a block/plain region — halts,
+  // because a real YAML parser (Psych::SyntaxError) cannot load it. Checked over every line, not just
+  // column-0 ones: the forbidden tab is typically several levels deep, well past what the column-0
+  // shape allowlist below inspects.
   const TAB_INDENT = /^[ \t]*\t/;
-  if (lines.some((line) => TAB_INDENT.test(line))) {
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i];
+    if (!TAB_INDENT.test(line)) continue;
+    if (structural.opaqueAtStart[i]) continue;
+    if (structural.blockPlainOpaqueAtStart[i] && line[0] === ' ') continue;
     return malformed('profile_version scan: tab character used for indentation (YAML forbids tabs in block indentation)');
   }
 
-  // The cross-line structural scan (mechanisms A + C; #110) runs its full forward pass here, BEFORE
-  // Step 4, because Step 4's column-0 shape allowlist needs one piece of its state: `opaqueAtStart`
-  // says whether a given line was already inside an open flow collection or quoted scalar the moment
-  // it began. A flow/quote continuation is one of the few YAML shapes allowed to reach column 0 with
-  // NO indentation at all (unlike a block/plain continuation, which must always be indented past its
-  // introducer) — without this, Step 4 false-rejects a valid `key: [1,\n2]`-shaped document. The
-  // VERDICT half of this result is consumed later, at Step 6.5, unchanged from before.
-  const structural = structuralScan(lines);
-
-  // Step 4 — top-level shape ALLOWLIST. Every column-0 line must be blank, a comment, a snake_case
-  // top-level key, or a flow/quote continuation flush to column 0; anything else halts (naming the
-  // line). No indented non-blank, non-comment line may appear before the first top-level key — an
-  // orphan indent means the document is not a top-level block mapping. This rule (plus the
-  // opaqueAtStart exemption above) is what rejects every counterexample (multi-document markers, flow
-  // mappings, sequences, quoted keys, multi-line scalar continuations reaching column 0 that AREN'T a
-  // genuine flow/quote continuation) without enumerating each shape by name.
+  // Step 4 — top-level shape ALLOWLIST, run as an opacity-first document state machine. Every column-0
+  // line must be blank, a comment, a leading `---` document-start, a `...` document-end, a snake_case
+  // top-level key, an explicit `? snake_case` key (and its `: value` line), or a flow/quote
+  // continuation flush to column 0; anything else halts (naming the line). No indented non-blank,
+  // non-comment line may appear before the first top-level key. The recognizers below run only on
+  // non-opaque lines — an opaque continuation is consumed first — so the interior of a flow/quote/
+  // block/plain region is never mis-read as document structure. `firstKey` (the first top-level or
+  // explicit key name, in document order, skipping opaque continuations) is captured here for Step 6.
+  const DOC_START = /^---(?:[ \t]+#.*)?[ \t]*$/;
+  const DOC_END = /^\.\.\.(?:[ \t]+#.*)?[ \t]*$/;
+  const EXPLICIT_KEY = /^\?[ \t]+([A-Za-z_][A-Za-z0-9_]*)[ \t]*(?:#.*)?$/;
+  const EXPLICIT_VALUE = /^:([ \t]|$)/;
   let seenKey = false;
-  for (let i = 0; i < lines.length; i += 1) {
-    const line = lines[i];
-    if (isBlank(line)) continue;
-    if (isIndented(line)) {
-      if (!seenKey && !isComment(line)) {
-        return malformed(`profile_version scan: line ${i + 1}: indented line before any top-level key`);
-      }
-      continue; // nested structure under an already-seen key, or an indented comment
-    }
-    if (isCol0Comment(line)) continue;
-    if (!TOP_LEVEL_KEY.test(line)) {
-      if (structural.opaqueAtStart[i]) continue; // a flow/quote continuation flush to column 0
-      return malformed(`profile_version scan: line ${i + 1}: not a top-level key`);
-    }
-    seenKey = true;
-  }
-
-  // Step 5 — count column-0 keys named exactly profile_version, and remember the first top-level key
-  // name for step 6's first-key rule.
-  const hits = [];
+  let terminated = false; // a `...` document-end marker has closed the document
+  let sawLeadingStart = false; // a leading `---` document-start has been consumed
+  let pendingExplicitValue = false; // an `? key` line still awaits its `: value` line
   let firstKey = null;
   for (let i = 0; i < lines.length; i += 1) {
     const line = lines[i];
+    if (isBlank(line)) continue;
+    if (isComment(line)) continue; // a comment at any indent, before or after the document
+    if (terminated && !DOC_START.test(line) && !DOC_END.test(line)) {
+      return malformed(`profile_version scan: line ${i + 1}: content after document-end marker`);
+    }
+    if (structural.opaqueAtStart[i]) {
+      if (terminated) {
+        return malformed(`profile_version scan: line ${i + 1}: content after document-end marker`);
+      }
+      continue; // a flow/quote continuation flush to column 0 — its interior is never classified
+    }
+    if (isIndented(line)) {
+      if (!seenKey) {
+        return malformed(`profile_version scan: line ${i + 1}: indented line before any top-level key`);
+      }
+      continue; // nested structure under an already-seen key
+    }
+    if (DOC_START.test(line)) {
+      if (seenKey || sawLeadingStart) {
+        return malformed(`profile_version scan: line ${i + 1}: unexpected '---' document-start marker (multiple documents)`);
+      }
+      sawLeadingStart = true;
+      continue;
+    }
+    if (DOC_END.test(line)) {
+      terminated = true;
+      continue;
+    }
+    const explicitKey = line.match(EXPLICIT_KEY);
+    if (explicitKey !== null) {
+      if (explicitKey[1] === 'profile_version') {
+        return malformed(`profile_version scan: line ${i + 1}: profile_version written as an explicit '? ' key is not supported`);
+      }
+      firstKey ??= explicitKey[1];
+      pendingExplicitValue = true;
+      continue;
+    }
+    if (EXPLICIT_VALUE.test(line)) {
+      if (pendingExplicitValue) {
+        pendingExplicitValue = false;
+        continue; // the `: value` line completing a prior `? key`
+      }
+      return malformed(`profile_version scan: line ${i + 1}: unexpected ':' with no explicit '? ' key`);
+    }
+    const topLevelKey = line.match(TOP_LEVEL_KEY);
+    if (topLevelKey !== null) {
+      firstKey ??= topLevelKey[1];
+      seenKey = true;
+      pendingExplicitValue = false; // a prior `? key` with no `: value` was a null-valued entry (valid)
+      continue;
+    }
+    return malformed(`profile_version scan: line ${i + 1}: not a top-level key`);
+  }
+
+  // Step 5 — count column-0 keys named exactly profile_version. `firstKey` was captured in Step 4's
+  // state machine (which also recognizes an explicit `? key`); this pass only tallies the hits, and
+  // skips any line that began inside an open flow/quote region so a key-shaped continuation is never
+  // miscounted (Step 4 exempts those the same way). Marker/explicit-value lines never match
+  // TOP_LEVEL_KEY, so they fall out here without special-casing.
+  const hits = [];
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i];
     if (isBlank(line) || isIndented(line) || isCol0Comment(line)) continue;
+    if (structural.opaqueAtStart[i]) continue; // a flow/quote continuation — not a real key
     const match = line.match(TOP_LEVEL_KEY);
-    if (match === null) continue; // a flow/quote continuation Step 4 exempted above — not a real key
-    if (firstKey === null) firstKey = match[1];
+    if (match === null) continue;
     if (match[1] === 'profile_version') hits.push(i);
   }
   if (hits.length === 0) {
@@ -537,6 +604,16 @@ export function readProfileVersion(rawText) {
   }
   if (!/^\d+$/.test(value)) {
     return malformed(`profile_version scan: value is not an unquoted integer: ${JSON.stringify(value)}`);
+  }
+  // A YAML 1.1 parser reads a leading-zero integer as OCTAL (`010` → 8) and reads an integer beyond
+  // JavaScript's safe range exactly (whereas Number.parseInt would round it). Either would let the
+  // scan report a version different from what a real parser loads — the one defect this scan must
+  // never commit — so both halt rather than guess. (`0` alone is fine: a real parser also reads 0.)
+  if (value.length > 1 && value[0] === '0') {
+    return malformed(`profile_version scan: ambiguous leading-zero integer (a YAML parser may read it as octal): ${JSON.stringify(value)}`);
+  }
+  if (BigInt(value) > BigInt(Number.MAX_SAFE_INTEGER)) {
+    return malformed(`profile_version scan: integer too large to read exactly: ${JSON.stringify(value)}`);
   }
   const version = Number.parseInt(value, 10);
   if (!SUPPORTED_PROFILE_VERSIONS.includes(version)) {
