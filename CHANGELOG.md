@@ -2,6 +2,19 @@
 
 All notable changes to `lazyants/claude-plugins` are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is per-plugin, not repo-wide.
 
+## [enduser-handbook 1.4.1] — 2026-07-16
+
+Hardening plus a portability bugfix for the reference capture assets: a bleed-free capture helper for oversize overlays, an Obsidian embed path that finally derives from `capture.output_dir`, and the last safety gate before a destructive click lifted into a unit-tested library.
+
+### Added
+- `skills/enduser-handbook/assets/capture-helpers.playwright.ts` — `captureRegionClipped`, a bleed-free capture for an overlay taller than the viewport: one viewport-clipped screenshot instead of the scroll-stitched element shot that let a `position:fixed` page-behind re-composite across seams. Uses Playwright's `animations:'disabled'` for a deterministic settled frame, publishes atomically (temp-write + `rename`), and fails closed (unlinks the target on any error) so a PNG at the output path is always trustworthy proof. Pure clip math extracted to `assets/lib/viewport-clip.mjs` (`clampClipToViewport`, unit-tested; throws on any horizontal clip). Closes #18.
+
+### Fixed
+- `skills/enduser-handbook/references/publish-targets/obsidian-vault.md` — chapter image embeds are now DERIVED from `capture.output_dir` (`relative(dirname(chapter_file), join(capture.output_dir, <slug>, <file>))`) instead of a hardcoded `assets/<chapter-slug>/` prefix, so a profile whose `output_dir` is not `<chapters_dir>/assets` no longer produces 404 embeds. Adds an inside-the-vault boundary check plus POSIX-slash / never-absolute portability rules. Closes #153.
+
+### Changed
+- `skills/enduser-handbook/assets/capture-helpers.playwright.ts` — the `dismissModal` safe-negative-label gate is extracted to a unit-tested `assets/lib/dismiss-safe-label-policy.mjs` (`isSafeNegativeLabel` + frozen `DEFAULT_SAFE_LABELS` / `UNSAFE_LEADING_VERBS`), so a regression in the last check before a destructive-button click is caught by tests rather than shipped silently. Behavior unchanged. Closes #154.
+
 ## [enduser-handbook 1.4.0] — 2026-07-16
 
 A maintenance release removing pre-existing false-rejects and one wrong-version edge in the dependency-free `profile_version` pre-flight scan, and adding one Step-0 cross-field warning — all differential-tested against Ruby/Psych so the scan still never reports a version a real YAML parser reads differently, and never halts a single document a real parser loads. No change to the capture guard.

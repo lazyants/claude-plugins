@@ -153,6 +153,12 @@ representative of what a reader will see.
   the reference engine, the equivalent for your engine, or a reduced-motion /
   `* { transition: none }` override), or wait for the transition to finish; do **not** rely on a
   fixed sleep.
+- **For a bleed-free capture of an overlay taller than the viewport, use
+  `captureRegionClipped`** instead of `captureRegion` — a single viewport-clip (no scroll-stitch
+  seam), so no shifted-offset `position:fixed` bleed. It fits one viewport after scroll-to-top;
+  disclose any remainder in prose. It waits, bounded and fail-closed, for the caller's own
+  open/slide transition to settle — the same settle discipline this bullet asks for — and throws
+  rather than shoot a mid-animation frame. See `capture-spec-helpers.md`.
 - **Scroll lazy / below-the-fold content into view before a full-element capture.** A
   full-element shot of a list or region that lazy-loads images, virtualizes rows
   (`IntersectionObserver`), or renders skeletons until scrolled will ship **blank or
