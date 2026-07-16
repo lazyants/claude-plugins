@@ -82,27 +82,47 @@ mis-parse risk this document warns against elsewhere — an indentation guard, f
 false-reject the *valid* shipped `capture.command: |` block scalar. A properly false-reject-free
 design for B is tracked as a follow-up rather than rushed into this release.
 
-**Honest residual.** These still scan `ok` for a document that is actually invalid YAML: an own-line
-(non-inline) value node reached through a shape the classifier does not enumerate; general and block
-dedent (mechanism B, above); and alias resolution once a document contains any `&` at a legal
-anchor-start position (mechanism C's anchor-gate approximation only protects a document with no such
-`&` at all — see mechanism C above). Separately, and in the other direction, a pre-existing
-false-reject halts a *valid* explicit-indent block scalar whose content happens to be
-tab-indented, tripping the document-wide tab check meant for structural indentation — not new in this
-release, and tracked as its own follow-up. Likewise, a document that uses a YAML **document marker**
-(`---` document-start or `...` document-end) at column 0 — e.g. a profile that simply opens with a
-leading `---`, or ends with a trailing `---`/`...` — **or another unusual column-0 construct, such as
-the explicit-key `?`/`:` block-mapping indicator** — is rejected by the Step-4 top-level-shape
-allowlist ("not a top-level key"), even though a real parser loads such a document and reads
-`profile_version` from it fine. These predate the #110 guard (they live in the Step-4 allowlist, not
-in `scanStructure`) and are deliberately left alone rather than patched here. For the document marker
-specifically, rejecting a `---` *separator* is protective, not just a gap — a genuine multi-document
-stream must still halt rather than risk reading the wrong document's version (a real parser's
-single-document load returns the *first* document — `2`, not `1`, for a stream of `---`,
-`profile_version: 2`, `---`, `profile_version: 1` in that order); a proper fix has to distinguish a
-lone leading/trailing marker from a real multi-document stream first. The explicit-key case carries no
-such tension — it is simply an unimplemented shape, tracked the same way. Each of these is a real,
-acknowledged gap, not silently assumed fixed by the A/C work above.
+**Now accepted — tab in scalar content, leading/trailing document markers, explicit `? snake_case`
+keys.** Three shapes a real parser loads fine, and that earlier releases false-rejected, now scan
+correctly. (1) A tab inside *scalar content* — the text of a plain, quoted, flow, or block-scalar
+value — no longer trips the document-wide indentation-tab halt; only a tab in a line's leading
+block-indentation run still halts (the structural case the tab check exists for, e.g. a bare-`\t`
+document-level line). (2) A document that opens with a lone leading `---` document-start, or ends with
+a trailing `...` document-end, now scans `ok` — the marker is recognized rather than rejected as
+"not a top-level key". (3) An explicit-key block-mapping entry written as `? snake_case` at column 0 is
+now recognized as a top-level key. Three guards stay in force: a `? profile_version` explicit key is
+still rejected (the version must be a plain key); a *trailing bare* `---` (`profile_version: 1` then a
+`---` line) also still halts under the same conservative multi-document guard — a real parser loads it
+(its final document is empty), but the scan cannot cheaply tell an empty trailing document from a real
+second one, so it halts, a safe false-reject that never yields a wrong version; and a genuine
+multi-document stream — a real `---` *separator* between two documents — still halts, because a
+single-document parser reads only the first document's version (`2`, not `1`, for `---`,
+`profile_version: 2`, `---`, `profile_version: 1`) and the scan must never silently pick one.
+
+**Numeric value canonicalization.** The value reader accepts an unquoted integer in canonical form
+only: a non-zero-leading decimal within the exactly-representable range. A leading-zero spelling
+(`01`, `08`, `010`) now halts as `malformed` rather than being read as a decimal — a YAML parser may
+read `010` as octal `8`, so guessing decimal `10` would risk reading the *wrong* version. An integer
+larger than `Number.MAX_SAFE_INTEGER` (2^53 - 1) also halts as `malformed`, because a naive `parseInt`
+would round it and read a different integer than a real parser does. A single `0` is still accepted
+(`unsupported, 0`, matching a real parser). Both halts are deliberate — they close the last two
+spellings where the old reader could have returned a wrong version — and the canonical
+`profile_version: 1` is unaffected. (Signed, underscored, dotted, exponent, and `0x`/`0o` spellings
+were already halted as non-integer; leading-zero and out-of-range were the only two holes.)
+
+**Honest residual.** These still scan `ok` for a document that is actually invalid YAML — the
+reader-not-validator edge: an own-line (non-inline) value node reached through a shape the classifier
+does not enumerate; a block that dedents to a structurally invalid level (mechanism B, above); a
+block-scalar content line that dedents with a leading-space tab below the content indent but above the
+introducer column (`structuralScan` tracks the introducer column, not content-indent — its deliberate
+conservative net); and alias resolution once a document contains any `&` at a legal anchor-start
+position (mechanism C's anchor-gate approximation only protects a document with no such `&` at all —
+see mechanism C above). A non-snake_case mapping key (quoted, hyphenated, or tagged) and its
+block/quote/flow value are likewise not classified — value-opacity tracking follows only snake_case
+top-level keys — so such a document is read by its column-0 shape alone. A YAML **directive**
+(`%YAML`/`%TAG`), and an explicit key outside the `? <snake_case>` form, remain halting residuals
+(unimplemented shapes). Each of these is a real, acknowledged gap, not silently assumed fixed by the
+structural work above.
 
 This is still the deliberate edge of the invariant above — a *reader*, not a validator. It never
 returns the wrong *version* (a real parser does not read a *different* `profile_version` from these
@@ -193,6 +213,11 @@ project, and re-run."*).
    `Missing required profile field '<path>'. See assets/profile.schema.json and assets/handbook.profile.example.yml.`
 7. **Wrong enum or type at a known key** — halt:
    `Invalid value at '<path>': expected <expected>, got <actual>. See assets/profile.schema.json.`
+8. **A `capture.role_flags` key not present in `capture.auth_role_enum`** — warn, continue:
+   `Profile key 'capture.role_flags' names a role '<key>' not present in 'capture.auth_role_enum'. A role_flags key that is not a declared role silently disables its capability gate — likely a typo.`
+   This is a warn-level cross-field check, not a halt: every key in `capture.role_flags` is expected to
+   be a member of `capture.auth_role_enum`, and a typo'd key silently disables the capability gate it
+   was meant to control.
 
 Every halt in this list is **actionable non-interactively** — /loop and scheduled runs get a specific,
 copy-pasteable reason rather than a silent skip or a generic failure.

@@ -281,9 +281,12 @@ test('an explicit key indicator ("? k") halts', () => {
   assert.equal(r.status, 'malformed');
 });
 
-test('a leading document marker ("---") halts', () => {
+test('a single leading document marker ("---") is accepted (#127) — one document, ok', () => {
+  // #127 FLIP: a bare leading `---` opens the single document; the block mapping under it is the
+  // profile. Psych.load reads {profile_version: 1}. // pre-fix: malformed
   const r = readProfileVersion('---\nprofile_version: 1\n');
-  assert.equal(r.status, 'malformed');
+  assert.equal(r.status, 'ok');
+  assert.equal(r.version, 1);
 });
 
 test('a quoted value halts — the plan overrides tolerating quotes (see references doc)', () => {
@@ -369,21 +372,29 @@ test('an astral character used as a key halts (unrelated line, but the shape all
   assert.equal(r.status, 'malformed');
 });
 
-test('a very long (400-digit) value parses as an integer and is reported unsupported', () => {
+test('a very long (400-digit) value now halts as too-large-to-read-exactly (#127 numeric guard)', () => {
+  // #127 numeric guard FLIP: any integer beyond Number.MAX_SAFE_INTEGER cannot be read exactly by a
+  // JS reader (it rounds — this one previously read as Infinity), so it halts. // pre-fix: unsupported (version Infinity)
   const r = readProfileVersion('profile_version: ' + '9'.repeat(400) + '\n');
-  assert.equal(r.status, 'unsupported');
-  assert.equal(typeof r.version, 'number');
+  assert.equal(r.status, 'malformed');
+  assert.match(r.message, /too large/);
 });
 
-test('a huge integer beyond Number.MAX_SAFE_INTEGER is still reported unsupported, not a crash', () => {
+test('a huge integer beyond Number.MAX_SAFE_INTEGER halts as too-large (#127 numeric guard), not a crash', () => {
+  // #127 numeric guard FLIP. // pre-fix: unsupported (version 1e20)
   const r = readProfileVersion('profile_version: 100000000000000000000\n');
-  assert.equal(r.status, 'unsupported');
+  assert.equal(r.status, 'malformed');
+  assert.match(r.message, /too large/);
 });
 
-test('a leading-zero value ("01") is tolerated — agrees with a real YAML parser reading Integer 1', () => {
+test('a leading-zero value ("01") now halts — a YAML parser may read leading-zero as octal (#127 numeric guard)', () => {
+  // #127 numeric guard FLIP: rather than re-deriving YAML-1.1 octal/string-fallback semantics, any
+  // leading-zero integer halts. `01` reads as Integer 1 in Psych, but `010` reads as octal 8 and
+  // `0777` as 511 — the guard closes that wrong-version class wholesale (a trivial false-reject on the
+  // non-canonical `01` spelling is the deliberate price). // pre-fix: ok (version 1)
   const r = readProfileVersion('profile_version: 01\n');
-  assert.equal(r.status, 'ok');
-  assert.equal(r.version, 1);
+  assert.equal(r.status, 'malformed');
+  assert.match(r.message, /leading-zero/);
 });
 
 test('a tab between the key and the colon is tolerated', () => {
@@ -401,6 +412,186 @@ test('a tab after the colon (before the value) is tolerated', () => {
 test('CRLF normalization then a lone CR later halts fail-closed (the safe direction)', () => {
   const r = readProfileVersion('profile_version: 1\r\n# x\rfoo: 2\r\n');
   assert.equal(r.status, 'malformed');
+});
+
+// =================================================================================================
+// PR #125/#126/#127 — tab-in-scalar-content, document markers + `? snake_case`, numeric value guards.
+// Each new must-accept / must-halt below is verified against Ruby/Psych 3.1.0 (see the differential
+// harness). The trailing `pre-fix:` note on each records what the UNFIXED scan returned, so the lead
+// can prove RED-before-green. Assertions are on status + version; messages use a SUBSTRING keyword.
+// =================================================================================================
+
+// ---- #126: a tab INSIDE scalar content (block / quoted / flow / plain) no longer halts ------------
+// The tab-in-block-indentation guard used to fire before anything else, so a tab that is part of a
+// scalar's CONTENT (not its structural block indentation) wrongly halted. The guard now runs after
+// the structural scan and skips a tab line that began inside an open flow/quote region, or inside a
+// block/plain region when the line starts with a space (real content indentation, not a document-
+// level tab). profile_version reads 1 in every case, so each returns ok, 1.
+
+test('#126 block scalar: a later content line whose content begins with a tab no longer halts', () => {
+  // "command: |" body folds to "base\n\tmore\n" — Psych loads {profile_version: 1, command: ...}.
+  const r = readProfileVersion('profile_version: 1\ncommand: |\n  base\n  \tmore\n');
+  assert.equal(r.status, 'ok');
+  assert.equal(r.version, 1); // pre-fix: malformed
+});
+
+test('#126 double-quoted scalar: a folded continuation line beginning with a tab no longer halts', () => {
+  const r = readProfileVersion('profile_version: 1\nname: "abc\n  \tdef"\n');
+  assert.equal(r.status, 'ok');
+  assert.equal(r.version, 1); // pre-fix: malformed
+});
+
+test('#126 flow collection: a wrapped element line beginning with a tab no longer halts', () => {
+  const r = readProfileVersion('profile_version: 1\nroute_globs: [a,\n  \tb]\n');
+  assert.equal(r.status, 'ok');
+  assert.equal(r.version, 1); // pre-fix: malformed
+});
+
+test('#126 plain scalar: a folded continuation line beginning with a tab no longer halts', () => {
+  const r = readProfileVersion('profile_version: 1\nnote: abc\n  \tdef\n');
+  assert.equal(r.status, 'ok');
+  assert.equal(r.version, 1); // pre-fix: malformed
+});
+
+// ---- #127: leading/trailing document markers and a `? snake_case` explicit key are accepted -------
+
+test('#127 a trailing document-end marker ("...") is accepted', () => {
+  const r = readProfileVersion('profile_version: 1\n...\n');
+  assert.equal(r.status, 'ok');
+  assert.equal(r.version, 1); // pre-fix: malformed
+});
+
+test('#127 a trailing bare "---" halts (documented safe residual, never a wrong version)', () => {
+  // Contrast with the trailing "..." above. A bare "---" AFTER a key is a possible multi-document
+  // SEPARATOR, so the scanner conservatively halts on it. This is a documented SAFE residual: Psych
+  // actually LOADS it as {profile_version: 1} (a false-reject on the scan's part), but halting is the
+  // safe direction — the scan never reads a DIFFERENT version. This pin keeps the halt from silently
+  // flipping to ok if the marker handling is ever loosened. // pre-fix: malformed
+  const r = readProfileVersion('profile_version: 1\n---\n');
+  assert.equal(r.status, 'malformed');
+  assert.match(r.message, /multiple documents/);
+});
+
+test('#127 a leading "--- # comment" (whitespace before the hash) is a valid marker', () => {
+  const r = readProfileVersion('--- # comment\nprofile_version: 1\n');
+  assert.equal(r.status, 'ok');
+  assert.equal(r.version, 1); // pre-fix: malformed
+});
+
+test('#127 an explicit "? some_key" / ": value" entry after the version is accepted', () => {
+  const r = readProfileVersion('profile_version: 1\n? some_key\n: value\n');
+  assert.equal(r.status, 'ok');
+  assert.equal(r.version, 1); // pre-fix: malformed
+});
+
+// ---- #127 round-3 tightenings: shapes that must STILL halt ----------------------------------------
+
+test('#127 "---#comment" (no whitespace before the hash) halts — Psych raises on it', () => {
+  const r = readProfileVersion('---#comment\nprofile_version: 1\n');
+  assert.equal(r.status, 'malformed'); // pre-fix: malformed
+});
+
+test('#127 a stray top-level ":" with no pending "? key" halts', () => {
+  const r = readProfileVersion('profile_version: 1\nfoo: bar\n:\n');
+  assert.equal(r.status, 'malformed'); // pre-fix: malformed
+});
+
+test('#127 a repeated document-end ("...\\n...") stays ok,1 — redundant terminators, one document', () => {
+  // The terminated-guard exempts marker lines (DOC_START/DOC_END) per the state-machine contract
+  // ("terminated AND not a marker line -> malformed"), so a second `...` is a redundant terminator,
+  // not "content after document-end". Psych agrees: one meaningful document, {profile_version: 1}.
+  // (Only NON-marker content after a `...` halts — see the "indented content after ..." test below.)
+  const r = readProfileVersion('profile_version: 1\n...\n...\n');
+  assert.equal(r.status, 'ok');
+  assert.equal(r.version, 1); // pre-fix: malformed
+});
+
+test('#127 indented content after a "..." terminator halts', () => {
+  const r = readProfileVersion('profile_version: 1\n...\n  x\n');
+  assert.equal(r.status, 'malformed'); // pre-fix: malformed
+});
+
+// ---- #127 an explicit "? profile_version" key is rejected in every spelling -----------------------
+// Psych actually loads several of these as {profile_version: 1}, but the scan halts rather than trust
+// an explicit-key spelling of the version key — halting is always safe. (The bare `? profile_version`
+// / `: 1` shape is also pinned by the standalone "explicit key indicator" test earlier in this file.)
+for (const [label, doc] of [
+  ['single space', '? profile_version\n: 1\n'],
+  ['two spaces', '?  profile_version\n: 1\n'],
+  ['a tab', '?\tprofile_version\n: 1\n'],
+  ['a trailing comment', '? profile_version # x\n: 1\n'],
+]) {
+  test(`#127 an explicit "? profile_version" key (${label}) is rejected`, () => {
+    const r = readProfileVersion(doc);
+    assert.equal(r.status, 'malformed'); // pre-fix: malformed
+  });
+}
+
+// ---- #127 numeric value guards: leading-zero (octal risk) and unsafe-integer halts ----------------
+// Verified vs Psych 3.1.0. A JS reader that parseInt'd these would report a DIFFERENT version than
+// Psych (or round it), so each now halts. Each tuple carries the value's PRE-FIX verdict so the lead
+// can prove RED-before-green from the test name.
+for (const [value, preFix] of [
+  ['010', 'unsupported/10 (Psych reads octal 8 — WRONG version)'],
+  ['08', 'unsupported/8 (Psych reads String "08")'],
+  ['00', 'unsupported/0'],
+  ['09', 'unsupported/9 (Psych reads String "09")'],
+  ['001', 'ok/1'],
+  ['0777', 'unsupported/777 (Psych reads octal 511 — WRONG version)'],
+]) {
+  test(`#127 leading-zero "${value}" halts (pre-fix: ${preFix})`, () => {
+    const r = readProfileVersion(`profile_version: ${value}\n`);
+    assert.equal(r.status, 'malformed');
+    assert.match(r.message, /leading-zero/);
+  });
+}
+
+for (const [value, preFix] of [
+  ['9007199254740992', 'unsupported/9007199254740992 (2^53, exact but > MAX_SAFE)'],
+  ['9007199254740993', 'unsupported/9007199254740992 (2^53+1 rounded DOWN — WRONG version)'],
+  ['9999999999999999999999', 'unsupported/~1e22 (rounded — WRONG version)'],
+]) {
+  test(`#127 too-large integer "${value}" halts (pre-fix: ${preFix})`, () => {
+    const r = readProfileVersion(`profile_version: ${value}\n`);
+    assert.equal(r.status, 'malformed');
+    assert.match(r.message, /too large/);
+  });
+}
+
+test('#127 the exact Number.MAX_SAFE_INTEGER (9007199254740991) is read exactly, unsupported', () => {
+  // Boundary: NOT > MAX_SAFE, no leading zero → read exactly, matches Psych. // pre-fix: unsupported (version 9007199254740991) — UNCHANGED
+  const r = readProfileVersion('profile_version: 9007199254740991\n');
+  assert.equal(r.status, 'unsupported');
+  assert.equal(r.version, 9007199254740991);
+});
+
+test('#127 a single-digit "0" is read exactly (no leading-zero guard), unsupported', () => {
+  const r = readProfileVersion('profile_version: 0\n');
+  assert.equal(r.status, 'unsupported');
+  assert.equal(r.version, 0); // pre-fix: unsupported (version 0) — UNCHANGED
+});
+
+test('#127 a plain "1" is still the one supported version, ok', () => {
+  const r = readProfileVersion('profile_version: 1\n');
+  assert.equal(r.status, 'ok');
+  assert.equal(r.version, 1); // pre-fix: ok (version 1) — UNCHANGED
+});
+
+// ---- residual pins: never a wrong version (halt, or ok-on-parse-invalid) --------------------------
+
+test('residual: a NON-snake_case (quoted) key carrying a block-tab body still halts', () => {
+  // The #126 relaxation tracks value opacity only for snake_case keys; a quoted key is not tracked, so
+  // its block-tab body stays halting. Psych also raises on this. // pre-fix: malformed
+  const r = readProfileVersion('profile_version: 1\n"key": |\n  \tbody\n');
+  assert.equal(r.status, 'malformed');
+});
+
+test('residual: a mismatched flow collection ("a: [1, 2}") stays ok,1 (reader, not validator)', () => {
+  // Psych RAISES on the mismatched delimiters, but the scan reads no DIFFERENT profile_version, so per
+  // the documented invariant it returns ok,1 rather than re-implementing a full flow parser.
+  const r = readProfileVersion('profile_version: 1\na: [1, 2}\n');
+  assert.equal(r.status, 'ok');
+  assert.equal(r.version, 1); // pre-fix: ok (version 1) — UNCHANGED
 });
 
 // ---- optional CLI (subprocess, exit-code contract) -----------------------------------------------

@@ -2,7 +2,7 @@
 
 All notable changes to `lazyants/claude-plugins` are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is per-plugin, not repo-wide.
 
-## [enduser-handbook 1.4.0] — 2026-07-16
+## [enduser-handbook 1.4.1] — 2026-07-16
 
 Hardening plus a portability bugfix for the reference capture assets: a bleed-free capture helper for oversize overlays, an Obsidian embed path that finally derives from `capture.output_dir`, and the last safety gate before a destructive click lifted into a unit-tested library.
 
@@ -14,6 +14,19 @@ Hardening plus a portability bugfix for the reference capture assets: a bleed-fr
 
 ### Changed
 - `skills/enduser-handbook/assets/capture-helpers.playwright.ts` — the `dismissModal` safe-negative-label gate is extracted to a unit-tested `assets/lib/dismiss-safe-label-policy.mjs` (`isSafeNegativeLabel` + frozen `DEFAULT_SAFE_LABELS` / `UNSAFE_LEADING_VERBS`), so a regression in the last check before a destructive-button click is caught by tests rather than shipped silently. Behavior unchanged. Closes #154.
+
+## [enduser-handbook 1.4.0] — 2026-07-16
+
+A maintenance release removing pre-existing false-rejects and one wrong-version edge in the dependency-free `profile_version` pre-flight scan, and adding one Step-0 cross-field warning — all differential-tested against Ruby/Psych so the scan still never reports a version a real YAML parser reads differently, and never halts a single document a real parser loads. No change to the capture guard.
+
+### Fixed
+- The document-wide tab-in-indentation guard rejected a tab that is legal *content* inside a block / quoted / flow scalar (e.g. a tab-indented line in the shipped-shaped `capture.command: |` block). The guard now runs after the structural scan and consults its opacity tracking, halting only on a tab used as real block indentation. Plain-scalar tab-continuations and a spaces-then-tab blank line remain documented residuals (they halt, never mis-report a version). (#126)
+- A leading `---` document-start marker, a trailing `...` document-end marker, and a plain `? snake_case` explicit mapping key were rejected as "not a top-level key" even though a real parser loads such a single document and reads `profile_version` fine. The Step-4 shape allowlist now accepts a single leading `---`, a trailing `...` marker, and a plain `? snake_case` explicit key, while still halting a genuine multi-document stream (a real parser's single-document load returns the *first* document, so reading a later document's version would be wrong). A *trailing* bare `---` — which opens an empty final document a real parser would ignore — stays a safe documented halt (the scan cannot cheaply tell it from a real second document, so it conservatively halts; never a wrong version). An explicit `? profile_version` in every spelling is rejected — it is a confirmed hidden duplicate that changes the parsed version. Non-snake_case / quoted / tagged explicit keys and `%YAML`/`%TAG` directives remain documented residuals (they halt). (#127)
+- The numeric value reader mis-reported a version on two spellings a real parser reads differently: `profile_version: 010` was read as decimal 10 (Ruby/Psych reads it as octal 8), and an integer above 2⁵³-1 was rounded (e.g. `9007199254740993` → `…992`). Both now halt as `malformed` — a leading-zero integer is ambiguous (a parser may read it as octal) and an integer beyond the exact-representable range cannot be read without a full parser. The canonical form stays a non-zero-leading decimal integer. (surfaced reviewing #125/#126/#127)
+- Mechanism B (an invalid dedent) stays a deliberately documented residual, now backed by expanded differential-fuzz coverage proving block scalars are treated as pure opacity (never flagged): a false-reject-free B detector requires modeling block-scalar content together with general indentation, reintroducing the mini-YAML-parser mis-parse risk that would false-reject the valid shipped `capture.command: |` block. (#125)
+
+### Added
+- Step 0 now emits a warn-level cross-field check: every key of `capture.role_flags` must be a member of `capture.auth_role_enum`. A typo'd role key (e.g. `admn` under `auth_role_enum: [admin]`) previously validated clean while its intended capability gate silently never applied; the check names any orphan key and continues, consistent with the existing unknown-key warning policy. (#155)
 
 ## [ai-cli-optout 1.1.1] — 2026-07-12
 
@@ -54,11 +67,10 @@ Initial release. New plugin — high-fidelity literary book translation over a G
 
 ## [enduser-handbook 1.3.0] — 2026-07-11
 
-Adds cross-line structural validation to the dependency-free `profile_version` pre-flight scan: mechanism A (unterminated flow collection / quote) and mechanism C (undefined alias, gated on a real-anchor over-approximation), both provably free of false rejects (opacity-first + inline-only lexer) and differentially fuzzed against ruby/Psych. Mechanism B (invalid dedent) deferred (#125); pre-existing tab-indent (#126) and Step-4 column-0 (#127) false-rejects documented as honest residuals. Closes #110.
+Cross-line structural coverage for the dependency-free `profile_version` scan. No change to the capture guard. (This entry backfills a changelog gap — 1.3.0 shipped via #128 but was never logged.)
 
 ### Added
-- `skills/enduser-handbook/assets/lib/profile-version.mjs` — mechanisms A + C in the dependency-free pre-flight scan (opacity-first, inline-only lexer), with `profile-version.d.mts` types and `tests/profile-version.test.mjs` + `tests/profile-version.differential.test.mjs` (differential fuzz vs ruby/Psych).
-- `skills/enduser-handbook/references/profile-validation.md` — documents mechanisms A + C and the honest residual false-rejects (#126 / #127).
+- The `profile_version` scan now catches two additional structural error classes, both provably false-reject-free (differential-tested against Ruby's Psych, never halting a document a real YAML parser would load): mechanism A (an unterminated flow collection or quoted scalar anywhere in the document) and mechanism C (an alias to an undefined anchor, in a document with no `&anchor` defined at all). Mechanism B (invalid dedent, including through the block-scalar `capture.command: |` shape) is deliberately deferred and tracked as a follow-up. (#110)
 
 ## [enduser-handbook 1.2.0] — 2026-07-10
 

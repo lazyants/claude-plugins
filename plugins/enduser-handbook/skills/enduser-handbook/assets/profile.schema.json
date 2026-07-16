@@ -111,7 +111,7 @@
         },
         "role_flags": {
           "type": "object",
-          "description": "Optional per-role permission gates beyond plain role assignment.",
+          "description": "Optional per-role permission gates beyond plain role assignment. Each key SHOULD be a member of capture.auth_role_enum; a key that names no declared role silently disables its capability gate and is flagged as a warn-level Step-0 check (see references/profile-validation.md). This stays an open additionalProperties map — the membership check is a prose/procedure note, not a hard schema constraint.",
           "additionalProperties": {
             "type": "array",
             "items": { "type": "string" }
