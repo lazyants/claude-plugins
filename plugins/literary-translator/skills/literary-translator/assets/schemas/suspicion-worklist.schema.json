@@ -1,0 +1,89 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "suspicion-worklist.schema.json",
+  "title": "Suspicion Worklist",
+  "description": "Deterministic, confidence-INDEPENDENT structural-risk worklist emitted by suspicion_scan.py (RFC #215 Phase 2, default path {durable_root}/suspicion_worklist.json). One entry per canon source_form that tripped >=1 structural risk class; the skeptic pass (skeptic_setup.py -> skeptic-pass-wf.template.js) reads ONLY this file to decide who to adversarially re-examine. producer_input_digest binds this worklist to the exact canon.json + manifest.json + resolved LanguageConfig.raw_bytes + resolved scan parameters + the producer code closure (suspicion_scan.py, occ_index.py, bootstrap_names.py, canon_senses.py, skeptic_constants.py) it was built from; skeptic_setup.py recomputes the identical digest and REJECTS a stale worklist fail-closed, so a since-changed canon/manifest/config/scanner can never be silently reprocessed. Strict at every level (additionalProperties:false, full required[]) so a producer bug fails LOUD.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "producer_input_digest", "entries"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "producer_input_digest": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$",
+      "description": "sha256 hex over canon.json + manifest.json + canonically-serialized resolved scan parameters + resolved LanguageConfig.raw_bytes + the bytes of suspicion_scan.py, occ_index.py, bootstrap_names.py, canon_senses.py, skeptic_constants.py. Re-verified by skeptic_setup.py."
+    },
+    "entries": {
+      "type": "array",
+      "description": "One entry per flagged source_form, deterministic order (see suspicion_scan.py). An empty array is the schema-valid 'nothing structurally suspicious' state.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["source_form", "canonical_target_form", "risk_classes", "occurrence_refs"],
+        "properties": {
+          "source_form": {
+            "type": "string",
+            "pattern": "\\S",
+            "description": "The canon.json entry key (NFC surface form)."
+          },
+          "canonical_target_form": {
+            "type": "string",
+            "description": "The entry's canonical_target_form (carried through for the merge-group / rescope context)."
+          },
+          "risk_classes": {
+            "type": "array",
+            "minItems": 1,
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "enum": [
+                "merge_participant",
+                "established_offline",
+                "singleton",
+                "high_dispersion",
+                "all_citation",
+                "near_merge",
+                "sampled"
+              ]
+            }
+          },
+          "occurrence_refs": {
+            "type": "array",
+            "description": "Every occurrence backing the flag. origin='block' refs (offsets into manifest.blocks[block].plain_text) are the CITABLE windows the skeptic feeds and evidences against; origin='verse_embedded' refs (offsets into the verse.store[].plain_text whose placeholder lives in `block`) are LABEL-ONLY -- counted for singleton/dispersion/all_citation precision but NOT citable (evidence_verify authenticates against blocks{} only, so a verse citation coerces to insufficient_window).",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["block", "seg", "char_start", "char_end", "origin"],
+              "properties": {
+                "block": {
+                  "type": "string",
+                  "description": "For origin='block': the manifest block id. For origin='verse_embedded': the carrier parent_block id (a real blocks{} key per validate_extraction.py)."
+                },
+                "seg": { "type": ["string", "null"] },
+                "char_start": { "type": "integer", "minimum": 0 },
+                "char_end": { "type": "integer", "minimum": 0 },
+                "origin": {
+                  "type": "string",
+                  "enum": ["block", "verse_embedded"]
+                },
+                "vid": {
+                  "type": "string",
+                  "description": "verse.store vid; present ONLY for origin='verse_embedded' (identifies the embedded verse node whose plain_text the offsets index into)."
+                }
+              }
+            }
+          },
+          "group_key": {
+            "type": "string",
+            "description": "normalize_form(canonical_target_form) -- present for merge_participant so the skeptic sees the whole over-merged group."
+          },
+          "notes": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Machine annotations (e.g. citation_classification_unavailable, verse_parent_unresolved, no_occurrences, near_pair_budget_truncated). Never a verdict."
+          }
+        }
+      }
+    }
+  }
+}

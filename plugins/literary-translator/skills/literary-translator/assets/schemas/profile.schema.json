@@ -499,6 +499,60 @@
         "min_candidate_freq": {
           "type": "integer",
           "minimum": 1
+        },
+        "skeptic_pass": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "RFC #215 Phase 2 structural-risk triage + adverse-only skeptic pass. OPT-IN and ADVISORY in 1.6.0 (disabled by default; the warn->block flip is deferred to Phase 3). When enabled, the W-step runs suspicion_scan.py -> skeptic_setup.py -> skeptic-pass-wf -> skeptic_report.py; the category-5 audit gate is unchanged and skeptic_report.py is a separate advisory command. This object is OUTSIDE profile_semantics_hash's allowlist, so adding/setting it never re-translates a converged segment. The `default:` values below MIRROR skeptic_constants.py's *_DEFAULT constants (profile_validate.py does not materialize schema defaults, so the constants are the real runtime defaults; a parity test asserts no drift). An enabled profile passes these as explicit CLI overrides via the W-step.",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": false,
+              "description": "Master switch. When false (default) the skeptic W-step is skipped entirely and no existing output changes."
+            },
+            "windows_per_entity": {
+              "type": "integer",
+              "minimum": 1,
+              "default": 8,
+              "description": "Max whole-block citable windows fed to the skeptic per entity; exceeding it sets windows_truncated so the skeptic may honestly return insufficient_window/escalate."
+            },
+            "sample_cap": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 50,
+              "description": "GLOBAL total for the `sampled` risk class (largest-remainder across category x confidence strata), not per-stratum."
+            },
+            "dispersion_threshold": {
+              "type": "integer",
+              "minimum": 1,
+              "default": 12,
+              "description": "`high_dispersion` fires when an entity's distinct-seg occurrence count reaches this."
+            },
+            "near_threshold": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1,
+              "default": 0.15,
+              "description": "`near_merge` keeps pairs with (1 - difflib.SequenceMatcher.ratio()) <= this."
+            },
+            "near_cap": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 40,
+              "description": "`near_merge` emits at most this many top pairs."
+            },
+            "near_pair_budget": {
+              "type": "integer",
+              "minimum": 1,
+              "default": 5000,
+              "description": "`near_merge` pre-enumeration materialization budget; exceeding it truncates deterministically WITH a logged annotation (never silent)."
+            },
+            "citation_block_types": {
+              "type": "array",
+              "items": { "type": "string" },
+              "description": "Override the block `type` tags that count as citation for `all_citation`. Omit to use the per-source.format default (gutenberg_epub/plain_text -> FN,QUOTE; custom/unknown -> all_citation DISABLED fail-safe)."
+            }
+          }
         }
       }
     },

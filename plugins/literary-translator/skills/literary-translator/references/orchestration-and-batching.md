@@ -737,6 +737,10 @@ inside it:
   wait skipped, so a resumed run never re-pays the codex dispatch for a batch
   already done.
 
+## Skeptic pass dispatch (opt-in, RFC #215 Phase 2)
+
+When `glossary.skeptic_pass.enabled` is set, the W-step sequence gains one additional, self-contained leg after the glossary merge: `suspicion_scan.py` (regenerated every enabled run -- never trusts a stale worklist) -> `skeptic_setup.py` (its own `kind="skeptic"` resume domain, deliberately NOT folded into `resume_setup.py`'s `mass`/`glossary` kinds and NOT a `PLUGIN_BUNDLE_MEMBERS`/`ORCHESTRATION_BUNDLE_MEMBERS` entry) -> `skeptic-pass-wf.template.js` (clones the glossary template's dispatch/poll/merge/verify control flow exactly, including its own `batch_agent_cap` preflight) -> `skeptic_report.py`, run last and purely for a human to read. Because this whole leg sits behind an opt-in flag and writes only its own new files, a project that never enables it sees zero change to dispatch shape, batching, or cache-key behavior. `skeptic_report.py` itself is never dispatched as part of any batch -- it takes no part in convergence, retries, or the ledger; it is a single, synchronous, read-only render of whatever `skeptic_triage.json` the pass produced.
+
 ## Ledger writes stay orchestration-adjacent, not orchestration-owned
 
 Every per-segment ledger-fragment write goes through the schema-validated,

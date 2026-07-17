@@ -256,9 +256,10 @@ own destination's absence — never re-copied, never regenerated): `PLAN.templat
 `${durable_root}/glossary_TASK.md`.
 
 Exception within this same copy pass: `mass-translate-wf.template.js` /
-`glossary-pass-wf.template.js` get `scripts/`-style repeatable-overwrite
-treatment (re-instantiated fresh at W5/glossary-pass time), never the
-one-time-seed treatment the other templates get.
+`glossary-pass-wf.template.js` / `skeptic-pass-wf.template.js` get
+`scripts/`-style repeatable-overwrite treatment (re-instantiated fresh at
+W5/glossary-pass/skeptic-pass time respectively), never the one-time-seed
+treatment the other templates get.
 
 Computes/refreshes two marker files: `${durable_root}/runs/.plugin_bundle_hash`
 (read by `cache_key.py` rather than re-hashing the bundle per segment) and
@@ -656,6 +657,87 @@ categories-1-4 gate. On a project whose `canon_senses.json` is absent or
 schema-valid-empty, this call is a no-op pass-through (`gate_passed: true`)
 — run it unconditionally rather than special-casing whether the sidecar
 exists.
+
+**Skeptic pass (RFC #215 Phase 2, opt-in + advisory)** — if
+`glossary.skeptic_pass.enabled` is true in `profile.yml`, run the
+structural-risk triage + adverse-only skeptic pass immediately after the
+mandatory homonym-split gate above and before W3a. Every enabled pass
+re-derives its own worklist fresh (never trusts a stale one):
+`suspicion_scan.py --canon ${durable_root}/canon.json --manifest
+${durable_root}/manifest.json --particle-config <literal value>
+--research-mode <profile's glossary.research_mode> --source-format
+<profile's source.format>` plus the profile's `glossary.skeptic_pass`
+overrides (`--dispersion-threshold` / `--sample-cap` /
+`--windows-per-entity` / `--near-threshold` / `--near-cap` /
+`--near-pair-budget` / `--citation-block-types`, else
+`skeptic_constants.py` defaults), writing
+`${durable_root}/suspicion_worklist.json`. Then `skeptic_setup.py`
+(`kind="skeptic"`, a resume domain fully separate from `resume_setup.py`
+— never edits it, never adds a `kind` to it), invoked with **`--source-lang
+<the SAME source-language label you interpolate into the template's
+`{{SOURCE_LANG}}` placeholder at Step 0a>`** (REQUIRED — folded into the
+skeptic input_digest, so changing the prompt's source-language label forces
+a fresh RUN_ID; NOT reconstructed from `source.language.code`, since the
+glossary/skeptic templates render `{{SOURCE_LANG}}` as a human-readable name,
+not the locale code) plus its resolution flags (`--particle-config`,
+`--research-mode`, `--source-format`, `--batch-agent-cap`, and any
+`glossary.skeptic_pass` tuning overrides — mirror the `suspicion_scan.py`
+values above; run `skeptic_setup.py --help` for the full set), validates
+that worklist's freshness (schema + `producer_input_digest`), resolves the
+skeptic RUN_ID, and atomically writes
+`${durable_root}/skeptic/runs/{RUN_ID}/assignments.json` (aggregate) plus
+one `assignments_{index}.json` per batch — BEFORE any dispatch. Only then
+instantiate `skeptic-pass-wf.template.js` fresh from the plugin's current
+copy (see Step 0a) and run it, passing `args` = the batches grouped from
+`assignments.json`, each entity's `windows[]` enriched with the resolved
+whole-block `text` (`manifest.blocks[window.block].plain_text`) alongside
+the assignment's own fields. The Workflow's own dispatch → bounded-wait →
+`skeptic_ready.py --validate-fragment` per batch, then one serialized
+`skeptic_ready.py --merge-fragments` plus a disk-independent
+`skeptic_ready.py --verify-merged`, produce
+`${durable_root}/skeptic_triage.json`. Finally run `skeptic_report.py` to
+render the findings for a human.
+
+**Agent-trust & tamper-detection (H1):** like the glossary pass, this opt-in
+pass feeds source-text windows to a file-capable `codex:codex-rescue` agent —
+it carries the same pipeline-wide agent-trust, adding NO new filesystem
+privilege and NO new accepted-state write path (the triage schema is
+adverse-only and no freeze/merge reader opens `skeptic_triage.json`). As a best-effort integrity tripwire,
+`skeptic_setup.py` stamps `canon_sha256`/`manifest_sha256` into the aggregate
+and `skeptic_ready.py --verify-merged` re-hashes the on-disk
+`canon.json`/`manifest.json`, failing on any mismatch. This catches
+ACCIDENTAL / non-adversarial mutation of the frozen inputs (a crash, a stray
+process, a buggy well-behaved agent) — it is NOT a hard guarantee: a
+prompt-injected agent with pipeline-wide FS-write can rewrite or delete the
+co-located stamp to match its tampered canon. A sound version (anchoring the
+setup-time hash in a trusted CLI channel) is deferred to Phase 3 alongside
+the warn→block flip; full agent containment is the out-of-scope
+pipeline-wide FS-sandbox concern.
+
+**Exit-code contract:** this block is advisory FOR SKEPTIC FINDINGS — a
+non-zero exit from `suspicion_scan.py` / `skeptic_setup.py`, or a Workflow
+result of `merged:false` for an ordinary skeptic reason (batch-too-large /
+fragment-check-failed / coverage-gap / `verify-failed`), HALTS only the
+skeptic pass for this run; log it and proceed straight to W3a regardless.
+**EXCEPTION — a frozen-input mutation is FATAL to the WHOLE pipeline, NOT
+advisory:** if the Workflow result carries `frozenInputMismatch: true`
+(reason `"frozen-input-mismatch"` — `skeptic_ready.py --verify-merged`
+re-hashed `canon.json`/`manifest.json` and found either changed on disk since
+`skeptic_setup.py` stamped this run), do NOT proceed to W3a. The frozen
+inputs W3a consumes (segpack canon injection, translation) were mutated
+mid-pass, so continuing would bake that mutation into accepted state. HALT
+here (FATAL), surface the mismatch, and require restoring +
+re-freezing/re-validating the trusted `canon.json`/`manifest.json` before any
+re-run. (This is the one non-advisory outcome of the opt-in pass; every
+skeptic *finding* stays advisory.)
+**The cat-5 audit command (`canon_adjudication_audit.py --check`,
+immediately above) is UNCHANGED by any of this** — it never reads
+`skeptic_triage.json` / `suspicion_worklist.json`, and its own summary +
+exit code are byte-identical whether or not this opt-in pass ever ran;
+`skeptic_report.py` is a wholly separate, advisory command a human runs to
+see the skeptic pass's own findings, never itself a gate. When
+`glossary.skeptic_pass.enabled` is false/absent (the default), skip this
+entire block.
 
 **W3a Segpack generation** (runs right after W3, since `segpack.py`'s canon
 injection needs the just-frozen `canon.json`). Run `scripts/segpack.py` for

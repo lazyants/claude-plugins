@@ -1,0 +1,92 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "skeptic-triage.schema.json",
+  "title": "Skeptic Triage",
+  "description": "The ADVERSE-ONLY output of the skeptic pass -- both the run-scoped per-batch fragment (triage_{index}.json) and the single merged artifact (default {durable_root}/skeptic_triage.json, produced by skeptic_ready.py --merge-fragments). SAFETY INVARIANT (round-4 blocker 2, contract-following agent): `verdict` is drawn ONLY from {adverse, propose_split, propose_rescope, insufficient_window} -- there is DELIBERATELY no verdict, field, or flag able to express a confirmation ('this identity is correct'), and additionalProperties:false at every level rejects a smuggled confirmation-shaped field (e.g. confirmed_ok) LOUD. NO freeze/merge reader opens this file; every confirmation still flows through the unchanged human/codex canon_adjudications.json / canon_senses.json paths. skeptic_ready.py re-authenticates every cited evidence record via evidence_verify machinery before accept, and enforces the verdict-specific procedural requirements this schema documents but leaves to code (mirroring canon_senses.py::load_senses): propose_split REQUIRES referents (>=2, each with byte-verified evidence); adverse/propose_rescope REQUIRE a single byte-verified contradicting evidence citation; insufficient_window requires neither. Any citation that will not byte-verify (incl. any embedded-verse-node window) is coerced to insufficient_window (fail-closed).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "run_id", "records"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "run_id": { "type": "string", "pattern": "\\S" },
+    "records": {
+      "type": "array",
+      "description": "One record per examined assignment (a fragment carries its batch's records; the merged file carries all). An empty array is the schema-valid 'no adverse findings' state.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["assignment_id", "source_form", "verdict", "rationale"],
+        "properties": {
+          "assignment_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$",
+            "description": "Joins back to the assignment manifest (coverage check)."
+          },
+          "source_form": { "type": "string", "pattern": "\\S" },
+          "verdict": {
+            "type": "string",
+            "enum": ["adverse", "propose_split", "propose_rescope", "insufficient_window"],
+            "description": "ADVERSE-ONLY. No confirmation value exists by construction."
+          },
+          "rationale": {
+            "type": "string",
+            "description": "Human-readable reason (the contradicting observation / why the window was insufficient)."
+          },
+          "evidence": {
+            "$ref": "#/$defs/evidence",
+            "description": "The single byte-verified contradicting citation. Present for adverse / propose_rescope (procedurally required by skeptic_ready.py); absent for insufficient_window."
+          },
+          "referents": {
+            "type": "array",
+            "description": "Distinct referents for a proposed homonym split. Present ONLY for propose_split, where skeptic_ready.py procedurally requires it; minItems:2 enforces the Phase-1 >=2-senses split shape whenever the property is used.",
+            "minItems": 2,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["disambiguator", "evidence"],
+              "properties": {
+                "disambiguator": {
+                  "type": "string",
+                  "description": "Short gloss distinguishing this referent from its siblings."
+                },
+                "evidence": { "$ref": "#/$defs/evidence" }
+              }
+            }
+          },
+          "evidence_coverage": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["cited", "verified"],
+            "properties": {
+              "cited": { "type": "integer", "minimum": 0 },
+              "verified": { "type": "integer", "minimum": 0 }
+            },
+            "description": "How many cited evidence records byte-verified (verified <= cited). Rendered by skeptic_report.py; partial coverage shown as partial."
+          },
+          "notes": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Machine annotations (never a verdict)."
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["block", "seg", "char_start", "char_end", "context_start", "context_end", "sha256"],
+      "description": "The SAME minimal-verifiable evidence shape canon-senses.schema.json uses (block-anchored, byte-authenticated). occ_index emits context_sha256; skeptic_ready.py remaps it to `sha256` before calling verify_evidence.",
+      "properties": {
+        "block": { "type": "string" },
+        "seg": { "type": ["string", "null"] },
+        "char_start": { "type": "integer", "minimum": 0 },
+        "char_end": { "type": "integer", "minimum": 0 },
+        "context_start": { "type": "integer", "minimum": 0 },
+        "context_end": { "type": "integer", "minimum": 0 },
+        "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+      }
+    }
+  }
+}
