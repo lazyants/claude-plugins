@@ -83,6 +83,18 @@ is the orchestration-level summary of what each stage hands to the next):
 - **W3 Bootstrap** — style bible by hand/interview, plus the mandatory
   language smoke test, plus the codex glossary-pass (its own, smaller
   Workflow pipeline — see below) that freezes `canon.json`.
+- **Mandatory homonym-split evidence gate** — runs after W3's two rejoining
+  branches (the codex glossary-pass and the `no_new_candidates` skip alike),
+  strictly before W3a: `scripts/canon_adjudication_audit.py --check
+  --particle-config <literal value> --advisory` against the resolved
+  `canon_senses.json` sidecar (default path, never overridden here). Not the
+  same invocation as SKILL.md's opt-in categories-1-4 gate documented for
+  Deliver (W7/W8) — this call always runs, and even under `--advisory` it
+  still HALTS before W3a on any unverified, stale, or collapsed split when
+  `canon_senses.json` is non-empty; a project with an absent/empty sidecar
+  passes through as a no-op. See SKILL.md for the exact command and
+  `canon-and-glossary.md`/`canon_adjudication_audit.py` for the
+  evidence-verification mechanics.
 - **W3a Segpack generation** — `segpack.py` over every candidate segment in
   `manifest.json`'s `segments[]`, body and translate-decision `FRONTBACK:{id}`
   elements alike, now that canon exists; a missing/invalid segpack for any

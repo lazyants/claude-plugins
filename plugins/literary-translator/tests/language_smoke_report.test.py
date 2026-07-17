@@ -1185,7 +1185,8 @@ def _load_language_smoke_report_module():
 _lsr = _load_language_smoke_report_module()
 
 
-def make_lang_dict(particles=(), stopwords=(), elision_pattern=None, has_elision=None):
+def make_lang_dict(particles=(), stopwords=(), elision_pattern=None, has_elision=None,
+                    name_inventory=()):
     """Build the same dict shape ``load_particle_config()`` returns, bypassing
     the JSON file entirely, for a pure algorithm-level test."""
     elision_re = re.compile(elision_pattern) if elision_pattern else None
@@ -1198,6 +1199,7 @@ def make_lang_dict(particles=(), stopwords=(), elision_pattern=None, has_elision
         "stopwords": set(stopwords),
         "has_elision": has_elision,
         "elision_re": elision_re,
+        "name_inventory": frozenset(name_inventory),
     }
 
 

@@ -144,7 +144,7 @@ def test_is_particle_false_for_non_particle():
 def test_tokenize_splits_elided_token_into_article_and_name():
     lang_elision_re = re.compile(FR_ELISION_PATTERN)
     tokens = bn.tokenize("le marquis d'Effiat arriva", lang_elision_re)
-    toks_only = [t for t, _ in tokens]
+    toks_only = [t[0] for t in tokens]
     assert "d" in toks_only
     assert "Effiat" in toks_only
     # the fused raw token must never survive as its own token
@@ -152,27 +152,32 @@ def test_tokenize_splits_elided_token_into_article_and_name():
 
 
 def test_tokenize_elided_remainder_preceding_char_is_apostrophe():
+    # (token, preceding_char, start, end) -- start/end are half-open
+    # codepoint offsets into "d'Effiat" ("d"=[0,1), "Effiat"=[2,8), the
+    # apostrophe at index 1 belongs to neither child span).
     lang_elision_re = re.compile(FR_ELISION_PATTERN)
     tokens = bn.tokenize("d'Effiat", lang_elision_re)
-    assert tokens[0] == ("d", ".")  # start-of-text sentence boundary
-    assert tokens[1] == ("Effiat", "'")
+    assert tokens[0] == ("d", ".", 0, 1)  # start-of-text sentence boundary
+    assert tokens[1] == ("Effiat", "'", 2, 8)
+    assert "d'Effiat"[2:8] == "Effiat"
 
 
 def test_tokenize_without_elision_re_leaves_fused_token_intact():
     # No elision config (e.g. German/English/Russian): the fused token is
     # NOT split -- its own first char is what is_upper_initial() will see.
     tokens = bn.tokenize("d'Effiat", None)
-    toks_only = [t for t, _ in tokens]
+    toks_only = [t[0] for t in tokens]
     assert toks_only == ["d'Effiat"]
 
 
 def test_tokenize_sentence_initial_preceding_char():
     lang_elision_re = None
     tokens = bn.tokenize("Paris. Londres attend.", lang_elision_re)
-    # first token of the text is preceded by "." (start-of-text sentinel)
-    assert tokens[0] == ("Paris", ".")
+    # first token of the text is preceded by "." (start-of-text sentinel);
+    # "Paris" spans codepoints [0, 5).
+    assert tokens[0] == ("Paris", ".", 0, 5)
     # "Londres" follows the period -> also preceded by "."
-    names = [t for t, _ in tokens]
+    names = [t[0] for t in tokens]
     idx = names.index("Londres")
     assert tokens[idx][1] == "."
 

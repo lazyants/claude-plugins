@@ -596,7 +596,7 @@ delete, duplicate, or reorder them): they define the `style_contract_hash`
 byte-scope, and `scaffold_validate.py` now enforces exactly one of each, in
 order.
 
-**Canon human-adjudication audit (opt-in rollout gate)** —
+**Canon human-adjudication audit, categories 1-4 (opt-in rollout gate)** —
 `scripts/canon_adjudication_audit.py` enumerates every canon
 name-adjudication a human/codex must sign off (duplicate source forms,
 existing merges, all candidate missed-merge pairs, and un-drained
@@ -612,10 +612,13 @@ now holds only genuinely disputed/unresolvable names. Run before Deliver (W7/W8)
 exit `0` = every required item has a matching `confirmed_ok` (or a valid
 risk-acceptance / the queue is drained), `1` = blocking findings, `2` =
 fatal. Add `--advisory` to report without blocking (preserves the plugin's
-WARN-first name policy). **Status: NEW machinery, not pilot-proven** — it
-is an OPT-IN gate a project enables, not yet wired as a mandatory W-step;
-the script defaults to hard-blocking (exit 1) so a project that wires it in
-gets the full gate. The accuracy calls it audits are authored by a human
+WARN-first name policy). **Status: categories 1-4 remain an OPT-IN gate** a
+project enables for this Deliver-time invocation; the script defaults to
+hard-blocking (exit 1) so a project that wires it in gets the full gate.
+Category 5 (the homonym-split evidence audit) is a SEPARATE, MANDATORY
+W-step — see immediately below — never opt-in, regardless of whether a
+project enables this Deliver-time categories-1-4 gate. The accuracy calls
+it audits are authored by a human
 reviewer or a schema-validated codex workflow — the script never decides
 identity itself. Enable ONLY when a per-person index, per-person bios, or
 enforced cross-document consistency is in scope; on a plain translate+gloss
@@ -623,6 +626,36 @@ job leave it off — the lightweight `review_queue` remains the correct tool
 for genuinely disputed/unresolvable names (a speaking name with a clear
 sense-rendering resolves via `basis:"sense_translated"` instead, so the
 queue's role is narrower than it once was, not eliminated).
+
+**Mandatory homonym-split evidence gate (category 5, always runs)** — unlike
+the categories-1-4 gate above, this invocation of the SAME
+`canon_adjudication_audit.py --check` is never opt-in and never waits for
+Deliver. Run it immediately after **both** W3-rejoin branches above — the
+`{"no_new_candidates": true, "batches": []}` SKIP path and the "Otherwise
+run the codex-glossary-pass" path alike — and strictly before **W3a Segpack
+generation** below, on every project unconditionally:
+
+```
+python3 ${durable_root}/scripts/canon_adjudication_audit.py --check \
+  --particle-config <particle_config's literal value> --advisory
+```
+
+using the profile's `source.language.particle_config` LITERAL value (never
+reconstructed from `source.language.code`, same discipline as the
+`bootstrap_names.py` invocation above); `--senses-path` is left at its
+default, `${durable_root}/canon_senses.json`. **Always pass `--advisory`
+here:** per this script's narrowed `--advisory` contract, `--advisory`
+downgrades ONLY a categories-1-4 finding (those stay governed solely by
+whether a project has separately opted into the Deliver-time gate above) —
+it NEVER masks `homonym_split`'s missing/stale verdict, `collapsed_split`,
+`evidence_unverified`, or `canon_absent_with_senses`. So this W-step still
+exits `1` — HALTING here, before W3a, nothing dispatches past it — whenever
+`canon_senses.json` is non-empty and carries any unverified, stale, or
+collapsed split, even on a project that has never opted into the
+categories-1-4 gate. On a project whose `canon_senses.json` is absent or
+schema-valid-empty, this call is a no-op pass-through (`gate_passed: true`)
+— run it unconditionally rather than special-casing whether the sidecar
+exists.
 
 **W3a Segpack generation** (runs right after W3, since `segpack.py`'s canon
 injection needs the just-frozen `canon.json`). Run `scripts/segpack.py` for

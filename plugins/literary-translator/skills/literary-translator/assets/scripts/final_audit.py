@@ -399,7 +399,7 @@ def warn_glossary_diff(converged):
             warns.append(
                 f"GLOSSARY-DIFF canon.json self-inconsistent: source_form "
                 f"{sf!r} -> {sorted(forms)} -- may reflect an intentional "
-                f"split already accepted in canon_adjudications.json; "
+                f"split already adjudicated in canon_senses.json; "
                 f"reconcile there before treating this as a defect"
             )
 

@@ -4,11 +4,12 @@ the GLOSSARY-DIFF self-inconsistency WARN's adjudication-reconcile note.
 ``final_audit.py``'s ``warn_glossary_diff()`` flags a ``canon.json`` where
 the SAME ``source_form`` resolves to more than one ``canonical_target_form``
 across its own ``entries{}``. A genuine self-inconsistency can also be an
-INTENTIONAL split a human already ratified in ``canon_adjudications.json``
-(see ``canon_adjudication_audit.py``) -- e.g. one source name that
-legitimately renders two different ways in two different contexts. F5 adds a
+INTENTIONAL homonym split a human already adjudicated in the
+``canon_senses.json`` sidecar (see ``canon_senses.py``/
+``canon_adjudication_audit.py``) -- e.g. one source name that legitimately
+renders two different ways in two different contexts. F5 adds a
 one-line reconcile note to that specific WARN so an operator checks
-``canon_adjudications.json`` before treating it as a defect, WITHOUT
+``canon_senses.json`` before treating it as a defect, WITHOUT
 changing the message's existing ``GLOSSARY-DIFF ...`` prefix, which
 ``tests/final_audit.test.py::test_warn_glossary_diff_canon_self_inconsistency``
 already asserts as a substring.
@@ -96,7 +97,7 @@ def test_self_inconsistency_warn_includes_adjudication_reconcile_note(tmp_path):
         "GLOSSARY-DIFF canon.json self-inconsistent: source_form 'Jean' -> "
         "['John', 'Zhan']"
     ), warn
-    assert "canon_adjudications.json" in warn, warn
+    assert "canon_senses.json" in warn, warn
     assert "reconcile" in warn.lower(), warn
 
 

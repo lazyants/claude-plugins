@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "canon-adjudication-audit-summary.schema.json",
   "title": "Canon Adjudication Audit Summary",
-  "description": "Structured stdout of canon_adjudication_audit.py -- exactly ONE JSON line, either shape depending on how the script was invoked. When --check is given (alone or combined with --init, mode 'check'/'init+check'), the CHECK branch below applies: the four required-item categories (duplicate_source_form/existing_merge/candidate_missed_merge_pair/review_queue_unresolved) recomputed fresh from canon.json, cross-checked against canon_adjudications.json. When --init is given WITHOUT --check (mode 'init'), the INIT branch applies instead -- a much smaller shape reporting only whether the empty template was written and what was already on file. The two shapes are mutually exclusive per run (never both printed) and discriminated here by 'mode'.",
+  "description": "Structured stdout of canon_adjudication_audit.py -- exactly ONE JSON line, either shape depending on how the script was invoked. When --check is given (alone or combined with --init, mode 'check'/'init+check'), the CHECK branch below applies: the five required-item categories (duplicate_source_form/existing_merge/candidate_missed_merge_pair/review_queue_unresolved/homonym_split, the last only when canon_senses.json is non-empty) recomputed fresh from canon.json (plus canon_senses.json), cross-checked against canon_adjudications.json. When canon_senses.json is non-empty, two further always-blocking, non-adjudicated checks also run and fold into blocking_count: collapsed_split (a split source_form still present in canon.json as a bare entry) and evidence_unverified (a stored evidence span that fails matcher-authenticated verification) -- neither is ever masked by 'advisory'. A non-empty sidecar with canon.json absent is its own canon_absent_with_senses blocking finding instead of the ordinary canon_present:false green. When --init is given WITHOUT --check (mode 'init'), the INIT branch applies instead -- a much smaller shape reporting only whether the empty template was written and what was already on file. The two shapes are mutually exclusive per run (never both printed) and discriminated here by 'mode'.",
   "oneOf": [
     {
       "title": "Check summary (--check, or --init --check together)",
@@ -15,18 +15,22 @@
         },
         "canon_path": { "type": "string" },
         "adjudications_path": { "type": "string" },
+        "senses_path": {
+          "type": "string",
+          "description": "The resolved canon_senses.json path (default or --senses-path override) -- always present, even when the sidecar is absent/empty."
+        },
         "canon_present": {
           "type": "boolean",
-          "description": "False iff canon.json does not exist -- canon *presence* is canon_validate.py's job, never a silent green; totals are all-zero and gate_passed is true in that case."
+          "description": "False iff canon.json does not exist -- canon *presence* is canon_validate.py's job, never a silent green. When the sidecar is also empty, totals are all-zero and gate_passed is true; when the sidecar is non-empty, this is instead a canon_absent_with_senses blocking finding (totals.canon_absent_with_senses:1, gate_passed:false, never masked by advisory) -- a split cannot be meaningfully reconciled against a canon that does not exist. collapsed_split cannot run in this branch (it needs canon.json's entries{} to reconcile against) and stays 0, but evidence verification AND category 5 (homonym_split)'s own required-item cross-check both depend only on canon_senses.json (never canon.json) and DO still run here, so blocking_count in this case is 1 + totals.evidence_unverified + category 5's own missing_verdict/adverse/invalid_verdict_class, not a flat 1."
         },
         "pair_review_cap": { "type": "integer", "minimum": 0 },
         "advisory": {
           "type": "boolean",
-          "description": "True iff --advisory was given -- forces exit 0 even when gate_passed is false. Never affects a genuine fatal (fatal never reaches stdout at all)."
+          "description": "True iff --advisory was given -- forces exit 0 for a categories-1-4 blocking finding even when gate_passed is false. NEVER forces exit 0 for homonym_split's own missing/stale verdict, collapsed_split, evidence_unverified, or canon_absent_with_senses (never affects gate_passed either way). Never affects a genuine fatal (fatal never reaches stdout at all)."
         },
         "totals": {
           "type": "object",
-          "description": "required_items and by_kind cover all 4 categories. confirmed_ok/missing_verdict/adverse/invalid_verdict_class cover categories 1-3 only (review_queue_unresolved never uses the confirmed_ok/adverse mechanism). cap_notes/cap_overrides_ok/cap_overrides_missing are 0 or 1 (canon is project-global -- exactly one cap scope, '__canon__'). review_queue_items/review_queue_unaccepted are category 4's own counters.",
+          "description": "required_items and by_kind cover all 5 categories. confirmed_ok/missing_verdict/adverse/invalid_verdict_class cover categories 1-3 and 5 (homonym_split) together (review_queue_unresolved never uses the confirmed_ok/adverse mechanism). cap_notes/cap_overrides_ok/cap_overrides_missing are 0 or 1 (canon is project-global -- exactly one cap scope, '__canon__'). review_queue_items/review_queue_unaccepted are category 4's own counters. collapsed_split/evidence_unverified are non-adjudicated, always-blocking counters that only fire when canon_senses.json is non-empty -- never satisfied by any confirmed_ok record.",
           "properties": {
             "required_items": { "type": "integer", "minimum": 0 },
             "confirmed_ok": { "type": "integer", "minimum": 0 },
@@ -43,19 +47,37 @@
               "minimum": 0,
               "description": "Adjudication/cap-override/queue-risk-override records that no longer correspond to any currently-required item. Informational, non-blocking, safe to prune -- never counted in blocking_count."
             },
+            "collapsed_split": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Count of source_forms canon_senses.json marks split (>=2 senses) but that still appear in canon.json's entries{} as a single bare entry (compared via each entry's own authoritative source_form field). Always-blocking, never satisfied by an adjudication record, never masked by --advisory."
+            },
+            "evidence_unverified": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Count of stored canon_senses.json evidence spans that failed matcher-authenticated verification against manifest.json under the resolved --particle-config (evidence_verify.py). Always-blocking, never masked by --advisory."
+            },
+            "canon_absent_with_senses": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 1,
+              "description": "1 iff canon.json is absent AND canon_senses.json is non-empty (see canon_present's own description) -- else 0."
+            },
             "by_kind": {
               "type": "object",
               "properties": {
                 "duplicate_source_form": { "type": "integer", "minimum": 0 },
                 "existing_merge": { "type": "integer", "minimum": 0 },
                 "candidate_missed_merge_pair": { "type": "integer", "minimum": 0 },
-                "review_queue_unresolved": { "type": "integer", "minimum": 0 }
+                "review_queue_unresolved": { "type": "integer", "minimum": 0 },
+                "homonym_split": { "type": "integer", "minimum": 0 }
               },
               "required": [
                 "duplicate_source_form",
                 "existing_merge",
                 "candidate_missed_merge_pair",
-                "review_queue_unresolved"
+                "review_queue_unresolved",
+                "homonym_split"
               ],
               "additionalProperties": false
             }
@@ -72,6 +94,9 @@
             "review_queue_items",
             "review_queue_unaccepted",
             "orphaned_records",
+            "collapsed_split",
+            "evidence_unverified",
+            "canon_absent_with_senses",
             "by_kind"
           ],
           "additionalProperties": false
@@ -79,7 +104,7 @@
         "blocking_count": {
           "type": "integer",
           "minimum": 0,
-          "description": "Rollup invariant (procedurally enforced by the script, not schema-expressible): blocking_count == totals.missing_verdict + totals.adverse + totals.invalid_verdict_class + totals.cap_overrides_missing + totals.review_queue_unaccepted."
+          "description": "Rollup invariant (procedurally enforced by the script, not schema-expressible): blocking_count == totals.missing_verdict + totals.adverse + totals.invalid_verdict_class + totals.cap_overrides_missing + totals.review_queue_unaccepted + totals.collapsed_split + totals.evidence_unverified (canon_absent_with_senses uses its own short-circuited summary, see canon_present's description -- blocking_count there is 1 + totals.evidence_unverified + category 5 (homonym_split)'s own missing_verdict/adverse/invalid_verdict_class, since both evidence verification and homonym_split's required-item cross-check depend only on canon_senses.json and still run without canon.json, but collapsed_split does not)."
         },
         "gate_passed": {
           "type": "boolean",
@@ -97,6 +122,7 @@
         "mode",
         "canon_path",
         "adjudications_path",
+        "senses_path",
         "canon_present",
         "pair_review_cap",
         "advisory",

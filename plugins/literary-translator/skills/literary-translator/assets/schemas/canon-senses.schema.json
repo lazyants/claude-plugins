@@ -1,0 +1,87 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "canon-senses.schema.json",
+  "title": "Canon Senses",
+  "description": "The homonym-split sidecar, sibling of canon.json (default path {durable_root}/canon_senses.json, --senses-path override). Records a source_form that resolves to TWO OR MORE distinct target senses within one project (a split is >=2 senses -- a would-be 1-sense record is rejected outright, never treated as 'not split'). Read exclusively through canon_senses.py::load_senses, which schema-validates against THIS file first and then applies three procedural rejects this schema cannot express: a duplicate sense_id within one entry (uniqueItems sees distinct objects as distinct, so it cannot catch this), a non-NFC entries_by_source_form key, and two keys colliding under the shared normalize_form() comparator (NFC+casefold+whitespace-collapse). Evidence is the MINIMAL VERIFIABLE SET only -- a matcher-authenticated occurrence span plus an enclosing context window and its raw-byte sha256; the derived 'quote'/'context_window' strings are computed from those offsets at READ time (evidence_verify.py / any renderer) and must never be stored here, so this schema deliberately has no properties for them and additionalProperties:false rejects them if present. Strict at every level: additionalProperties:false and a full required[] at every object, so an authoring or codex-workflow bug (a stray stored quote, a 1-sense record, a missing evidence field) fails LOUD at load time rather than silently under-enforcing the mandatory evidence gate (SKILL.md's W-step).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "entries_by_source_form"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "entries_by_source_form": {
+      "type": "object",
+      "description": "Keyed by the entry's own NFC-normalized source_form (enforced procedurally by load_senses, not expressible in JSON Schema). An empty object here is the schema-valid EMPTY state load_senses distinguishes from a genuinely-absent file.",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["senses"],
+        "properties": {
+          "senses": {
+            "type": "array",
+            "description": "A split is >=2 senses -- minItems enforces that a 1-sense record is a hard schema-validation failure, never a silent 'not split'.",
+            "minItems": 2,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["sense_id", "disambiguator", "index_scope", "evidence"],
+              "properties": {
+                "sense_id": {
+                  "type": "string",
+                  "pattern": "\\S",
+                  "description": "Unique within this entry's senses[] -- non-blank, but uniqueItems cannot catch a duplicate sense_id across two otherwise-distinct sense objects, so load_senses additionally rejects duplicates procedurally."
+                },
+                "disambiguator": {
+                  "type": "string",
+                  "description": "Human-readable label distinguishing this sense from its siblings (e.g. the referent's short gloss)."
+                },
+                "index_scope": {
+                  "type": "string",
+                  "enum": ["narrative", "allusion", "citation"]
+                },
+                "evidence": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "block",
+                    "seg",
+                    "char_start",
+                    "char_end",
+                    "context_start",
+                    "context_end",
+                    "sha256"
+                  ],
+                  "properties": {
+                    "block": {
+                      "type": "string",
+                      "description": "Manifest block id this sense's occurrence was found in (e.g. \"PARA:seg02:0001\")."
+                    },
+                    "seg": {
+                      "type": ["string", "null"],
+                      "description": "Owning segment id, or null for a block not (yet) assigned to any segment -- mirrors manifest.schema.json's own blocks{}.seg."
+                    },
+                    "char_start": { "type": "integer", "minimum": 0 },
+                    "char_end": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "description": "Half-open codepoint offset: the occurrence span is [char_start, char_end). Matcher-authenticated by evidence_verify.py against production_occurrences(), never a mere in-bounds substring."
+                    },
+                    "context_start": { "type": "integer", "minimum": 0 },
+                    "context_end": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "description": "Half-open codepoint offset of the enclosing context window, which must contain [char_start, char_end)."
+                    },
+                    "sha256": {
+                      "type": "string",
+                      "description": "sha256 of the exact raw UTF-8 bytes of [context_start, context_end) -- NOT NFC-normalized -- as verified by evidence_verify.py."
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

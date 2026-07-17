@@ -42,8 +42,8 @@ accepted here -- see --verify-merged]
     ONE process, single canon.json load: validates ALL given fragments
     (Pass 1 + offline backstop) FIRST, before merging any of them, so a
     later fragment's failure never leaves an earlier one half-applied.
-    Then threads `acc = _merge_batch(acc, frag)` across every fragment IN
-    THE GIVEN ORDER, stamps generation_hashes fresh, validates the
+    Then threads `acc = _merge_batch(acc, frag, senses)` across every
+    fragment IN THE GIVEN ORDER, stamps generation_hashes fresh, validates the
     in-memory accumulator against canon-file.schema.json (Pass 2) BEFORE
     ever touching disk, performs ONE atomic write, then re-reads the
     JUST-WRITTEN file fresh from disk and Pass-2-validates it AGAIN --
@@ -115,6 +115,7 @@ Usage:
     python3 canon_validate.py --research-mode offline --batch glossary_out.json
     python3 canon_validate.py --research-mode live
     python3 canon_validate.py --research-mode live --canon-path /path/to/canon.json
+    python3 canon_validate.py --research-mode live --merge-batches out_0.json --senses-path /path/to/canon_senses.json
 
 Exit code 0 on success, 1 on failure (for --verify-merged, "success" means
 `verified: true`). Exactly one JSON line is printed to stdout either way --
@@ -144,6 +145,20 @@ except ImportError as e:
     )
     sys.exit(1)
 
+# canon_senses.py is a sibling script under the same durable_root/scripts/
+# (the loader+normalizer LEAF every Phase-1 consumer imports, RFC #215
+# 1a'/1a'') -- its own jsonschema preflight already exits with an
+# actionable message if THAT import fails, so no second try/except is
+# needed here; a missing canon_senses.py module itself is a deployment
+# bug, not a normal user-facing error.
+from canon_senses import (
+    CanonSensesLoadError,
+    SensesResult,
+    is_split,
+    load_senses,
+    normalize_form,
+)
+
 # Self-anchored: this script always lives at
 # ${durable_root}/scripts/canon_validate.py, so parents[1] is the durable
 # root. Never assumes cwd, never takes a --durable-root flag -- see
@@ -154,6 +169,12 @@ SCRIPTS_DIR = _SCRIPT_FILE.parent
 DURABLE_ROOT = _SCRIPT_FILE.parents[1]
 SCHEMAS_DIR = DURABLE_ROOT / "schemas"
 DEFAULT_CANON_PATH = DURABLE_ROOT / "canon.json"
+# Sibling of DEFAULT_CANON_PATH -- self-anchored the same way, never
+# cwd-relative. THE canonical default every Phase-1 consumer of
+# canon_senses.json (this script's recollapse guard,
+# canon_adjudication_audit.py, glossary_batch_plan.py) computes the same
+# way: DURABLE_ROOT / "canon_senses.json".
+DEFAULT_SENSES_PATH = DURABLE_ROOT / "canon_senses.json"
 CACHE_KEY_SCRIPT = SCRIPTS_DIR / "cache_key.py"
 
 RESEARCH_MODES = ("live", "offline")
@@ -515,6 +536,20 @@ def _load_canon(canon_path: Path) -> dict:
     return doc
 
 
+def _load_senses_or_raise(senses_path: Path, allow_absent: bool) -> "SensesResult":
+    """Wraps canon_senses.py's `load_senses`, translating a
+    CanonSensesLoadError into this module's own CanonValidationError so a
+    blocked sidecar load (a schema failure, a typo'd --senses-path, a
+    non-regular path) surfaces through the same {"success": false,
+    "error": ...} JSON failure payload as every other failure this script
+    raises -- never the generic "unexpected error" catch-all in main().
+    """
+    try:
+        return load_senses(senses_path, allow_absent=allow_absent)
+    except CanonSensesLoadError as e:
+        raise CanonValidationError(str(e), offending=e.offending)
+
+
 def _load_batch(batch_path_str: str) -> list:
     batch_path = Path(batch_path_str)
     doc = _read_json_file(batch_path, "batch file")
@@ -710,13 +745,41 @@ def _entry_from_accepted_item(item: dict) -> dict:
     return {k: item[k] for k in CANON_ENTRY_FIELDS if k in item}
 
 
-def _merge_batch(canon: dict, batch: list) -> dict:
+def _matching_senses_entry(senses: "SensesResult", source_form) -> "dict | None":
+    """Returns the canon_senses.json entry matching `source_form` -- via the
+    SAME normalize_form comparison `is_split` uses internally -- or None if
+    none matches. Used only to recover the sense COUNT for the recollapse
+    refusal message below; the split predicate itself is always `is_split`,
+    never re-derived here.
+
+    Uses `senses.normalized_index` for an O(1) lookup when present (built
+    once by `load_senses`, same field `is_split` itself reads); falls back
+    to the original O(n) per-call linear scan only when `senses` was
+    constructed directly without an index -- both paths return the exact
+    same entry."""
+    target = normalize_form(source_form) if isinstance(source_form, str) else source_form
+    if senses.normalized_index is not None:
+        return senses.normalized_index.get(target)
+    for key, entry in senses.entries_by_source_form.items():
+        if normalize_form(key) == target:
+            return entry
+    return None
+
+
+def _merge_batch(canon: dict, batch: list, senses: "SensesResult") -> dict:
     """Merges a Pass-1-validated, offline-backstop-cleared batch into an
     in-memory copy of `canon`. Never mutates `canon` in place, and never
     touches disk -- the caller writes only after this returns successfully.
     Raises CanonValidationError (naming both old and new values) on a
     genuine cross-run collision: two different resolutions claimed for the
     same source_form. An identical re-submission is a silent no-op.
+
+    Refuse-recollapse guard (RFC #215 1d): an ACCEPTED item whose
+    source_form is an adjudicated homonym split in `senses` (>=2 senses,
+    normalized-compared via canon_senses.py's `is_split`) is refused
+    outright, before any existing-entry lookup -- so this covers a
+    brand-new insertion, an overwrite, AND a resubmission alike, never just
+    a collision against a pre-existing bare entry.
     """
     entries = dict(canon.get("entries", {}))
     review_queue = list(canon.get("review_queue", []))
@@ -727,6 +790,15 @@ def _merge_batch(canon: dict, batch: list) -> dict:
         source_form = item.get("source_form")
 
         if disposition == "accepted":
+            if is_split(senses, source_form):
+                split_entry = _matching_senses_entry(senses, source_form)
+                n = len(split_entry.get("senses", [])) if split_entry else 0
+                collisions.append(
+                    f"{source_form!r}: is an adjudicated homonym split "
+                    f"({n} senses in canon_senses.json) -- refusing to merge "
+                    f"as a single bare entry (recollapse)"
+                )
+                continue
             new_entry = _entry_from_accepted_item(item)
             existing = entries.get(source_form)
             if existing is not None and existing != new_entry:
@@ -851,17 +923,25 @@ def _stamp_write_verify(canon_path: Path, merged: dict, registry: "Registry") ->
     return on_disk
 
 
-def run_merge(canon_path: Path, batch_path: str, research_mode: str, registry: "Registry") -> dict:
+def run_merge(
+    canon_path: Path,
+    batch_path: str,
+    research_mode: str,
+    registry: "Registry",
+    senses_path: Path,
+    allow_absent_senses: bool,
+) -> dict:
     """Legacy single-fragment merge path (--batch PATH). Equivalent to
     `run_merge_batches(canon_path, [batch_path], ...)`, kept as its own
     code path because existing tests/callers already invoke it this way.
     """
     batch = _load_batch(batch_path)
     canon = _load_canon(canon_path)
+    senses = _load_senses_or_raise(senses_path, allow_absent_senses)
 
     _validate_batch_items(batch, registry)
     _enforce_offline_backstop(batch, research_mode)
-    merged = _merge_batch(canon, batch)
+    merged = _merge_batch(canon, batch, senses)
 
     on_disk = _stamp_write_verify(canon_path, merged, registry)
 
@@ -881,17 +961,34 @@ def run_merge(canon_path: Path, batch_path: str, research_mode: str, registry: "
 
 
 def run_check_batch(
-    batch_path: str, research_mode: str, manifest_path: "str | None", registry: "Registry"
+    canon_path: Path,
+    batch_path: str,
+    research_mode: str,
+    manifest_path: "str | None",
+    registry: "Registry",
+    senses_path: Path,
+    allow_absent_senses: bool,
 ) -> dict:
     """--check-batch PATH [--expect-source-forms-file M.json]: Pass 1 +
     offline backstop on ONE fragment, NO write. When a manifest is given,
-    additionally asserts exact source_form coverage."""
+    additionally asserts exact source_form coverage. ALSO loads canon.json
+    (read-only -- an absent file is the same fresh skeleton _load_canon
+    always returns; nothing is ever written here) and canon_senses.json,
+    then dry-runs `_merge_batch` (its return value discarded) so the
+    refuse-recollapse guard -- and any ordinary entries{} collision --
+    rejects a doomed fragment at precheck/readiness time (RFC #215 1d),
+    not only at the final --merge-batches call.
+    """
     batch = _load_batch(batch_path)
     _validate_batch_items(batch, registry)
     _enforce_offline_backstop(batch, research_mode)
     if manifest_path is not None:
         expected_forms = _load_source_forms_manifest(manifest_path)
         _assert_exact_source_form_coverage(batch, expected_forms)
+
+    canon = _load_canon(canon_path)
+    senses = _load_senses_or_raise(senses_path, allow_absent_senses)
+    _merge_batch(canon, batch, senses)
 
     return {
         "success": True,
@@ -901,21 +998,28 @@ def run_check_batch(
 
 
 def run_merge_batches(
-    canon_path: Path, batch_paths: list, research_mode: str, registry: "Registry"
+    canon_path: Path,
+    batch_paths: list,
+    research_mode: str,
+    registry: "Registry",
+    senses_path: Path,
+    allow_absent_senses: bool,
 ) -> dict:
     """--merge-batches P1 P2 ...: single process, single canon.json load.
     Validates ALL given fragments (Pass 1 + offline backstop) FIRST, before
-    merging any of them, then threads `acc = _merge_batch(acc, frag)`
-    across every fragment IN THE GIVEN ORDER."""
+    merging any of them, then threads `acc = _merge_batch(acc, frag,
+    senses)` across every fragment IN THE GIVEN ORDER -- ONE senses load,
+    shared across every fragment in this call."""
     batches = [_load_batch(p) for p in batch_paths]
     for batch in batches:
         _validate_batch_items(batch, registry)
         _enforce_offline_backstop(batch, research_mode)
 
     canon = _load_canon(canon_path)
+    senses = _load_senses_or_raise(senses_path, allow_absent_senses)
     acc = canon
     for batch in batches:
-        acc = _merge_batch(acc, batch)
+        acc = _merge_batch(acc, batch, senses)
 
     on_disk = _stamp_write_verify(canon_path, acc, registry)
 
@@ -1107,6 +1211,22 @@ def build_arg_parser() -> argparse.ArgumentParser:
             f"{DEFAULT_CANON_PATH})."
         ),
     )
+    parser.add_argument(
+        "--senses-path",
+        metavar="PATH",
+        default=None,
+        help=(
+            f"Override the canon_senses.json path (default: "
+            f"{DEFAULT_SENSES_PATH}). Consulted by --check-batch, "
+            f"--merge-batches, and legacy --batch to refuse merging any "
+            f"ACCEPTED item whose source_form is an adjudicated homonym "
+            f"split (RFC #215 1d, 'recollapse'). When omitted, an absent "
+            f"default sidecar is treated as empty (no splits yet); an "
+            f"EXPLICIT --senses-path that does not exist is a hard error "
+            f"instead (a typo'd path must never silently bypass the "
+            f"recollapse guard) -- see canon_senses.py::load_senses."
+        ),
+    )
     return parser
 
 
@@ -1115,6 +1235,12 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
 
     canon_path = Path(args.canon_path) if args.canon_path else DEFAULT_CANON_PATH
+    # allow_absent=True ONLY for the genuinely-implicit default -- an
+    # EXPLICIT --senses-path that turns out missing must BLOCK, never
+    # silently read as "no splits yet" (mirrors glossary_batch_plan.py's
+    # own `canon_explicit = args.canon is not None` discipline).
+    senses_path = Path(args.senses_path) if args.senses_path else DEFAULT_SENSES_PATH
+    allow_absent_senses = args.senses_path is None
 
     modes_selected = sum([
         args.check_batch is not None,
@@ -1147,16 +1273,36 @@ def main(argv=None) -> int:
         registry = _build_schema_registry()
         if args.check_batch is not None:
             result = run_check_batch(
-                args.check_batch, args.research_mode, args.expect_source_forms_file, registry
+                canon_path,
+                args.check_batch,
+                args.research_mode,
+                args.expect_source_forms_file,
+                registry,
+                senses_path,
+                allow_absent_senses,
             )
         elif args.merge_batches is not None:
-            result = run_merge_batches(canon_path, args.merge_batches, args.research_mode, registry)
+            result = run_merge_batches(
+                canon_path,
+                args.merge_batches,
+                args.research_mode,
+                registry,
+                senses_path,
+                allow_absent_senses,
+            )
         elif args.verify_merged:
             result = run_verify_merged(
                 canon_path, args.batch, args.expect_source_forms_file, registry
             )
         elif args.batch is not None:
-            result = run_merge(canon_path, args.batch[0], args.research_mode, registry)
+            result = run_merge(
+                canon_path,
+                args.batch[0],
+                args.research_mode,
+                registry,
+                senses_path,
+                allow_absent_senses,
+            )
         else:
             result = run_validate_only(canon_path, args.research_mode, registry)
     except CanonValidationError as e:

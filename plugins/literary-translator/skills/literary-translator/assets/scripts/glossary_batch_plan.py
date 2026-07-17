@@ -24,7 +24,7 @@ resume_setup.py's payload.
 
 Selection, per candidate, in this exact precedence order:
 
-  (1) entries{}/review_queue EXCLUSION always wins first.
+  (1) entries{}/review_queue/split EXCLUSION always wins first.
       - Excluded if `name` matches an `entries{}` key in canon.json.
       - Excluded if `name` matches a `review_queue[].source_form` in
         canon.json -- UNLESS that exact name is listed in --retry (the
@@ -32,6 +32,18 @@ Selection, per candidate, in this exact precedence order:
         request" retry path). A --retry name present in NEITHER
         name_candidates.json NOR review_queue fails loudly (a stale retry
         name from an earlier book must not be silently swallowed).
+      - Excluded, UNCONDITIONALLY (never overridable by --retry), if
+        `name`'s normalized form (canon_senses.py's shared `normalize_form`,
+        via its `is_split` predicate) is an adjudicated homonym split
+        (>=2 senses) in canon_senses.json -- RFC #215 item 1f. A split
+        form is intentionally ABSENT from canon.json's entries{} (that is
+        the whole point of the sidecar), so without this it would survive
+        exclusion (1), get dispatched to the glossary agent, and then be
+        rejected forever by canon_validate.py's recollapse guard --
+        deadlocking the Workflow's readiness wait loop. Unlike the
+        review_queue case, a split is a settled evidence-verified identity
+        decision, not a pending research item, so --retry cannot reinstate
+        it.
 
   (2) Among the survivors of (1): included only if `likely_name` AND
       `freq >= --min-candidate-freq`, EXCEPT the #91 elision bypass:
@@ -96,10 +108,18 @@ from collections import defaultdict
 from pathlib import Path
 from typing import NoReturn
 
+from canon_senses import CanonSensesLoadError, is_split, load_senses
+
 # Self-anchored: ${durable_root}/scripts/glossary_batch_plan.py.
 DURABLE_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_NAME_CANDIDATES = DURABLE_ROOT / "name_candidates.json"
 DEFAULT_CANON = DURABLE_ROOT / "canon.json"
+# Sibling of DEFAULT_CANON, same self-anchoring convention -- computed here
+# rather than imported from canon_validate.py (canon_senses.py's own module
+# docstring: "DEFAULT_SENSES_PATH lives in canon_validate.py ... each
+# consumer computes its own copy the same way it already computes other
+# durable-root-relative defaults").
+DEFAULT_SENSES_PATH = DURABLE_ROOT / "canon_senses.json"
 
 DEFAULT_MIN_CANDIDATE_FREQ = 2
 # CLI-only default -- deliberately NOT a profile-schema key (keeps the
@@ -217,6 +237,19 @@ def load_canon(path: Path, explicit: bool):
     return entry_keys, queued
 
 
+def load_senses_sidecar(path: Path, explicit: bool):
+    """Load canon_senses.json via the shared `canon_senses.load_senses`
+    loader, translating any `CanonSensesLoadError` into this script's own
+    `fail()` convention (stderr note + exit 2) -- mirrors `load_canon`'s
+    absent/explicit split exactly: `allow_absent` is True only for the
+    self-anchored default, so a genuinely-missing default sidecar means "no
+    splits yet" while a missing EXPLICIT --senses-path is a caller error."""
+    try:
+        return load_senses(path, allow_absent=not explicit)
+    except CanonSensesLoadError as exc:
+        fail(str(exc))
+
+
 def parse_retry(retry_args):
     """Flatten the (possibly repeated, comma-separated) --retry flag into a
     set of source forms. Empty pieces are dropped."""
@@ -243,9 +276,14 @@ def _int_field(row, key: str) -> int:
     return value
 
 
-def select_included(rows, entry_keys, queued, retry, min_freq):
+def select_included(rows, entry_keys, queued, retry, min_freq, senses):
     """Apply the two-step precedence and return the ordered list of included
-    candidate rows (input order preserved). Pure -- no I/O."""
+    candidate rows (input order preserved). Pure -- no I/O.
+
+    `senses` is the `SensesResult` from `canon_senses.load_senses` (possibly
+    empty). A row whose normalized `name` is an adjudicated split there is
+    excluded at step (1) UNCONDITIONALLY -- never overridable by --retry
+    (RFC #215 item 1f; see the module docstring)."""
     # Step (1): exclusion always wins first.
     survivors = []
     for row in rows:
@@ -253,6 +291,8 @@ def select_included(rows, entry_keys, queued, retry, min_freq):
         if name in entry_keys:
             continue
         if name in queued and name not in retry:
+            continue
+        if is_split(senses, name):
             continue
         survivors.append(row)
 
@@ -361,7 +401,9 @@ def build_result(batches):
     return {"no_new_candidates": False, "args": args, "batches": batch_projection}
 
 
-def emit_retry_diagnostics(retry, included_names, rows, candidate_names, entry_keys, min_freq):
+def emit_retry_diagnostics(
+    retry, included_names, rows, candidate_names, entry_keys, min_freq, senses
+):
     """Non-fatal stderr diagnostics (never touches stdout or the exit code): a
     --retry name that cleared the neither-input fatal guard but STILL resolved
     to no dispatched candidate is surfaced with the reason it was not
@@ -388,6 +430,14 @@ def emit_retry_diagnostics(retry, included_names, rows, candidate_names, entry_k
                 f"note: --retry name {name!r} is already resolved in canon.json's "
                 "entries{} -- retry overrides only the review_queue exclusion, "
                 "never a resolved entry, so nothing is dispatched for it.\n"
+            )
+        elif is_split(senses, name):
+            # Adjudicated split: retry overrides only the review_queue
+            # exclusion, never a split (RFC #215 item 1f).
+            sys.stderr.write(
+                f"note: --retry name {name!r} is an adjudicated homonym split "
+                "in canon_senses.json -- a split exclusion cannot be overridden "
+                "by --retry, so nothing is dispatched for it.\n"
             )
         else:
             # (b) a current candidate that survived step 1 but step-2 curation
@@ -450,7 +500,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Comma-separated source_form(s) to re-include even though they "
              "sit in canon.json's review_queue (the explicit human retry "
              "path). Repeatable. A name present in neither name_candidates.json "
-             "nor review_queue fails loudly.",
+             "nor review_queue fails loudly. Never overrides a split "
+             "exclusion (see --senses-path).",
+    )
+    parser.add_argument(
+        "--senses-path", metavar="PATH", default=None,
+        help="canon_senses.json homonym-split sidecar (RFC #215). A candidate "
+             "whose normalized name is an adjudicated split (>=2 senses) there "
+             "is excluded unconditionally, even when absent from canon.json's "
+             f"entries{{}} (default: {DEFAULT_SENSES_PATH}; a missing default is "
+             "treated as no splits yet, a missing explicit path is an error).",
     )
     return parser
 
@@ -469,9 +528,12 @@ def main(argv=None) -> int:
     )
     canon_explicit = args.canon is not None
     canon_path = Path(args.canon) if args.canon else DEFAULT_CANON
+    senses_explicit = args.senses_path is not None
+    senses_path = Path(args.senses_path) if args.senses_path else DEFAULT_SENSES_PATH
 
     rows = load_name_candidates(name_candidates_path)
     entry_keys, queued = load_canon(canon_path, canon_explicit)
+    senses = load_senses_sidecar(senses_path, senses_explicit)
     retry = parse_retry(args.retry)
 
     # A stale --retry name (present in neither input) fails loudly.
@@ -486,11 +548,12 @@ def main(argv=None) -> int:
         )
 
     included = select_included(
-        rows, entry_keys, queued, retry, args.min_candidate_freq
+        rows, entry_keys, queued, retry, args.min_candidate_freq, senses
     )
     included_names = {row["name"] for row in included}
     emit_retry_diagnostics(
-        retry, included_names, rows, candidate_names, entry_keys, args.min_candidate_freq
+        retry, included_names, rows, candidate_names, entry_keys,
+        args.min_candidate_freq, senses,
     )
 
     if not included:

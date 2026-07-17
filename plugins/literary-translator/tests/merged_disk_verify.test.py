@@ -65,6 +65,11 @@ from pathlib import Path
 
 import pytest
 
+TESTS_DIR = Path(__file__).resolve().parent
+if str(TESTS_DIR) not in sys.path:
+    sys.path.insert(0, str(TESTS_DIR))
+from _senses_fixture import stage_consumer  # noqa: E402
+
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 ASSETS_DIR = PLUGIN_ROOT / "skills" / "literary-translator" / "assets"
 SCRIPT_SRC = ASSETS_DIR / "scripts" / "canon_validate.py"
@@ -90,14 +95,15 @@ def make_durable_root(tmp_path):
     """Builds an isolated durable_root: copies the REAL canon_validate.py
     into {root}/scripts/ and the REAL three canon-*.schema.json files into
     {root}/schemas/ -- no cache_key.py stub, since --verify-merged never
-    shells out to it (disk-independent read+compare only, no hashing)."""
+    shells out to it (disk-independent read+compare only, no hashing).
+    Also stages the REAL canon_senses.py (canon_validate.py's sibling
+    import, RFC #215 1d) and canon-senses.schema.json via the sanctioned
+    tests/_senses_fixture.py helper, so `from canon_senses import ...`
+    resolves inside this isolated fixture too."""
     root = tmp_path / "durable_root"
-    scripts_dir = root / "scripts"
-    scripts_dir.mkdir(parents=True)
-    shutil.copy2(SCRIPT_SRC, scripts_dir / "canon_validate.py")
+    stage_consumer(root, "canon_validate.py")
 
     schemas_dir = root / "schemas"
-    schemas_dir.mkdir()
     for name in CANON_SCHEMA_FILES:
         shutil.copy2(SCHEMAS_SRC / name, schemas_dir / name)
 

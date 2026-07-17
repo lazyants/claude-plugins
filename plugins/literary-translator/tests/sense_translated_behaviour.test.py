@@ -73,6 +73,22 @@ assert (LANGUAGES_DIR / "fr.json").is_file(), f"fr.json not found under {LANGUAG
 
 SUMMARY_SCHEMA = json.loads(SUMMARY_SCHEMA_PATH.read_text(encoding="utf-8"))
 
+TESTS_DIR = Path(__file__).resolve().parent
+if str(TESTS_DIR) not in sys.path:
+    sys.path.insert(0, str(TESTS_DIR))
+from _senses_fixture import stage_consumer  # noqa: E402
+
+# RFC #215 1c/1e: canon_adjudication_audit.py now imports canon_senses.py (staged by
+# stage_consumer() above, alongside its schema) and -- uniquely among canon_senses.py
+# consumers -- bootstrap_names.py/occ_index.py/evidence_verify.py (the mandatory
+# evidence-verification chain, 1e). make_durable_root() below (the CLI-driven fixture used
+# by the promotion/cap-override tests at the bottom of this file) stages these three
+# separately -- stage_consumer() doesn't know about them (not canon_senses consumers
+# themselves, just this audit script's own extra deps).
+_EXTRA_DEP_SCRIPTS = ("bootstrap_names.py", "occ_index.py", "evidence_verify.py")
+for _dep in _EXTRA_DEP_SCRIPTS:
+    assert (SCRIPTS_DIR / _dep).is_file(), f"{_dep} not found at {SCRIPTS_DIR / _dep}"
+
 
 # ===========================================================================
 # TP-9 -- segpack.py canon injection is basis-blind.
@@ -253,10 +269,15 @@ def cap_override_record(entity_count, pair_count, cap, entity_set_fingerprint, r
 
 
 def make_durable_root(tmp_path):
+    """See the module-level _EXTRA_DEP_SCRIPTS comment: canon_adjudication_audit.py's
+    own `import`s now pull in canon_senses.py + its schema (via stage_consumer()) +
+    the mandatory evidence-verification chain, so this isolated durable_root must
+    stage all of it, not just the audit script itself."""
     root = tmp_path / "durable_root"
+    stage_consumer(root, "canon_adjudication_audit.py")
     scripts_dir = root / "scripts"
-    scripts_dir.mkdir(parents=True)
-    shutil.copy2(ADJUDICATION_SCRIPT, scripts_dir / "canon_adjudication_audit.py")
+    for dep in _EXTRA_DEP_SCRIPTS:
+        shutil.copy2(SCRIPTS_DIR / dep, scripts_dir / dep)
     return root
 
 

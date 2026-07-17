@@ -100,9 +100,25 @@ import pytest
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS_SRC_DIR = PLUGIN_ROOT / "skills" / "literary-translator" / "assets" / "scripts"
 SCHEMAS_SRC_DIR = PLUGIN_ROOT / "skills" / "literary-translator" / "assets" / "schemas"
+LANGUAGES_SRC_DIR = PLUGIN_ROOT / "skills" / "literary-translator" / "assets" / "languages"
 
 SCRIPT_SRC = SCRIPTS_SRC_DIR / "canon_adjudication_audit.py"
 assert SCRIPT_SRC.is_file(), f"canon_adjudication_audit.py not found at {SCRIPT_SRC}"
+
+TESTS_DIR = Path(__file__).resolve().parent
+if str(TESTS_DIR) not in sys.path:
+    sys.path.insert(0, str(TESTS_DIR))
+from _senses_fixture import stage_consumer  # noqa: E402
+
+# RFC #215 1c/1e: canon_adjudication_audit.py now imports canon_senses.py (staged by
+# stage_consumer() above, alongside its schema) and -- uniquely among canon_senses.py
+# consumers -- also bootstrap_names.py/occ_index.py/evidence_verify.py (the mandatory
+# evidence-verification chain, 1e). stage_consumer() does not know about these three (they
+# are not canon_senses consumers themselves, just this audit script's own extra deps), so
+# make_durable_root() below stages them separately.
+_EXTRA_DEP_SCRIPTS = ("bootstrap_names.py", "occ_index.py", "evidence_verify.py")
+for _dep in _EXTRA_DEP_SCRIPTS:
+    assert (SCRIPTS_SRC_DIR / _dep).is_file(), f"{_dep} not found at {SCRIPTS_SRC_DIR / _dep}"
 
 SUMMARY_SCHEMA_PATH = SCHEMAS_SRC_DIR / "canon-adjudication-audit-summary.schema.json"
 ADJUDICATIONS_SCHEMA_PATH = SCHEMAS_SRC_DIR / "canon-adjudications.schema.json"
@@ -256,19 +272,28 @@ def risk_override_record(risk_accepted_by="test-reviewer", reason="fixture-autho
 # ---------------------------------------------------------------------------
 
 
-def make_durable_root(tmp_path):
-    """Builds an isolated durable_root: copies the REAL
-    canon_adjudication_audit.py into {root}/scripts/ (so its self-anchored
-    DURABLE_ROOT = Path(__file__).resolve().parents[1] resolves to THIS
-    fixture root, exactly matching production invocation -- never assumes
-    cwd == durable_root, never takes a --durable-root flag). No canon.json /
-    canon_adjudications.json is written here; call write_canon()/
+def make_durable_root(tmp_path, with_languages=False):
+    """Builds an isolated durable_root: stages the REAL
+    canon_adjudication_audit.py (via stage_consumer(), which also brings
+    canon_senses.py + its schema) into {root}/scripts/ + {root}/schemas/ (so
+    its self-anchored DURABLE_ROOT = Path(__file__).resolve().parents[1]
+    resolves to THIS fixture root, exactly matching production invocation --
+    never assumes cwd == durable_root, never takes a --durable-root flag),
+    PLUS its own extra dependency closure (_EXTRA_DEP_SCRIPTS above --
+    without this, `from bootstrap_names import ...` / `from evidence_verify
+    import verify_senses` raise ModuleNotFoundError before any test
+    assertion runs). No canon.json / canon_adjudications.json /
+    canon_senses.json is written here; call write_canon()/
     write_adjudications() (or leave either absent for the absent-file test
-    cases)."""
+    cases). `with_languages=True` also stages assets/languages/ verbatim,
+    for tests that exercise --particle-config."""
     root = tmp_path / "durable_root"
+    stage_consumer(root, "canon_adjudication_audit.py")
     scripts_dir = root / "scripts"
-    scripts_dir.mkdir(parents=True)
-    shutil.copy2(SCRIPT_SRC, scripts_dir / "canon_adjudication_audit.py")
+    for dep in _EXTRA_DEP_SCRIPTS:
+        shutil.copy2(SCRIPTS_SRC_DIR / dep, scripts_dir / dep)
+    if with_languages:
+        shutil.copytree(LANGUAGES_SRC_DIR, root / "languages")
     return root
 
 
