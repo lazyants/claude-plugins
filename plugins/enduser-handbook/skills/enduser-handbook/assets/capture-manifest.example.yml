@@ -18,7 +18,9 @@
 
   slug: feature-slug                  # English kebab-case. Becomes
                                       # <publish.chapters_dir>/<slug>.md and
-                                      # the screenshot subdirectory name.
+                                      # the screenshot subdirectory name (for a
+                                      # flat entry; grouped entries derive per
+                                      # references/manifest-discipline.md).
                                       # English-only even when the handbook
                                       # is non-English (filesystem hygiene).
 
@@ -68,7 +70,9 @@
       label: "Step caption"           # Caption rendered under the screenshot
                                       # in the handbook's target language.
       screenshot: 01-list.png         # Filename written under
-                                      # `capture.output_dir/<slug>/`.
+                                      # `capture.output_dir/<slug>/` (for a
+                                      # flat entry; grouped entries derive per
+                                      # references/manifest-discipline.md).
 
     - id: 02-action
       label: "Perform an action"
@@ -104,6 +108,20 @@
   # ------------------------------------------------------------------
   # OPTIONAL — engine-agnostic
   # ------------------------------------------------------------------
+
+  # Nests this chapter under a two-level nav group instead of the flat
+  # <publish.chapters_dir>/<slug>.md path (see references/manifest-discipline.md
+  # for the activation rule, review gates, and halt texts). Omit entirely for
+  # a flat entry — this is the shape reference's own default; the fields below
+  # are shown set only to document the grouped shape.
+  group: feature-group                # English kebab-case, one level (no '/').
+  group_title: "Group title"          # REQUIRED whenever `group` is set. The
+                                      # localized nav-container title, in the
+                                      # handbook's target language (like
+                                      # `title` above) — identical across every
+                                      # entry of this group, unique across
+                                      # groups. Never derive it from the
+                                      # English `group` slug.
 
   # State variants beyond the default populated capture, so the human manifest review sees
   # intended coverage before any capture code runs (references/manifest-discipline.md,

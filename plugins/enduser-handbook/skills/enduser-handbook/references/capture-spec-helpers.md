@@ -114,8 +114,10 @@ as-is. The reference doc is normative; the `*.playwright.*` asset is one impleme
 Every chapter capture spec wires the same shape: create the context (service workers blocked,
 seeded auth — never a live login) → install the guard **before** the first page → assert identity →
 optionally run the surface-enumeration pass → per step: assert the element, capture the region or
-open+dismiss the modal, mask where PII appears → assert no dangerous hits at the end. The reference
-spec at `../assets/capture.example.spec.ts` shows this end to end.
+open+dismiss the modal, mask where PII appears → assert no dangerous hits at the end. The output
+dir is derived via `chapterAssetDir` (`../assets/lib/chapter-paths.mjs`), which is group-aware
+(issue #19) — never a hardcoded `output_dir/<slug>` literal. The reference spec at
+`../assets/capture.example.spec.ts` shows this end to end.
 
 ## Surface enumeration
 

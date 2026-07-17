@@ -166,9 +166,10 @@ PII-exposing action; capture the read-only/open state and disclose the rest in p
 [page-identity.md](page-identity.md) by hand: confirm the route matches, the loading state
 is gone, the primary heading is visible (the identity check itself), and any staged
 precondition still holds before the shot. Screenshots still land at
-`capture.output_dir/<slug>/NN-slug.png`, and the operator is responsible for
-`capture.locale` / fresh-profile discipline that a container run would otherwise enforce
-automatically.
+`capture.output_dir/<slug>/NN-slug.png` for a flat entry (grouped entries add a
+`<group>/` segment — see references/manifest-discipline.md), and the operator is
+responsible for `capture.locale` / fresh-profile discipline that a container run
+would otherwise enforce automatically.
 
 ## Sources
 

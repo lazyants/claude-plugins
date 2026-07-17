@@ -364,7 +364,7 @@ fi
 
 echo "== executable unit tests (node --test) =="
 if command -v node >/dev/null 2>&1; then
-  for t in control-inventory.test.mjs capture-guard-policy.test.mjs identity-match.test.mjs graphql-read-classifier.test.mjs profile-version.test.mjs surface-diff.test.mjs viewport-clip.test.mjs dismiss-safe-label-policy.test.mjs; do
+  for t in control-inventory.test.mjs capture-guard-policy.test.mjs identity-match.test.mjs graphql-read-classifier.test.mjs profile-version.test.mjs surface-diff.test.mjs viewport-clip.test.mjs dismiss-safe-label-policy.test.mjs chapter-paths.test.mjs; do
     if node --test "$TEST_DIR/$t" >/dev/null 2>&1; then
       ok "$t passes under node --test"
     else
@@ -473,8 +473,73 @@ echo "== obsidian-vault adapter (#153) =="
 # v1.4.0 #153: chapter image embeds are DERIVED from capture.output_dir (full-target relative form —
 # relative(dirname(chapter_file), join(capture.output_dir, <slug>, <file>))), replacing the hardcoded
 # assets/<chapter-slug>/ prefix, and the link-integrity gate keeps the resolved target inside the vault.
-has "obsidian-vault: embed derived from capture.output_dir" 'relative(dirname(chapter_file), join(capture.output_dir' "$OMD"
+# v1.5.0 #19: the join() innards became chapterAssetDir(entry) (group-aware, D3) — re-picked below.
+has "obsidian-vault: embed derived from capture.output_dir" 'chapterAssetDir(entry) = join(capture.output_dir' "$OMD"
 has "obsidian-vault: vault-boundary gate"                   'inside the active Obsidian vault'                          "$OMD"
+
+echo "== group axis (#19) — chapter path + asset dir + embed formula, both adapters + SKILL.md =="
+# D2: grouped chapter path form, shared across both adapters and SKILL.md W5.
+has "obsidian-vault: grouped chapter-path form"        '/<group>/<slug>.md' "$OMD"
+has "static-md: grouped chapter-path form"             '/<group>/<slug>.md' "$SMD"
+has "skill: grouped chapter-path form (W5)"            '/<group>/<slug>.md' "$SKILL"
+# D3: the ONE canonical embed formula, byte-identical in both adapters — chapterAssetDir(entry) is
+# the group-aware core (R6-F3: static-md switched off its ungrouped partial concatenation).
+EMBED_FORMULA='relative(dirname(chapter_file), join(chapterAssetDir(entry), <file>))'
+has "obsidian-vault: full-target embed formula (D3)" "$EMBED_FORMULA" "$OMD"
+has "static-md: full-target embed formula (D3)"      "$EMBED_FORMULA" "$SMD"
+
+echo "== group axis (#19) — index wiring (D6), both adapters =="
+# R6-F1: step-0 already-wired short-circuit runs BEFORE container classification, so re-runs converge.
+has "obsidian-vault: step-0 already-wired short-circuit" 'wiring is already complete' "$OMD"
+has "static-md: step-0 form-agnostic short-circuit"      'form-agnostic, and it runs BEFORE any container' "$SMD"
+# R7-F1: wrong-container halt — never silently relocate a user-curated index line.
+WRONG_CONTAINER_HALT="Chapter '<slug>' is listed in <index_file> under '<found_title>' instead of '<group_title>'"
+has "obsidian-vault: wrong-container halt" "$WRONG_CONTAINER_HALT" "$OMD"
+has "static-md: wrong-container halt"      "$WRONG_CONTAINER_HALT" "$SMD"
+# R7-F2: step-0's expected link target uses the same index-relative coordinate system as the TOC write.
+has "obsidian-vault: index-relative expected-target formula" 'relative(dirname(index_file), chapter_file)' "$OMD"
+has "static-md: index-relative expected-target formula"      'relative(dirname(index_file), chapter_file)' "$SMD"
+# rev 9: manual-migration halt — establishment wiring never renames/moves/deletes a container or line.
+MANUAL_MIGRATION_HALT='This manifest change requires manual group migration (not automated in 1.5.0):'
+has "obsidian-vault: manual-migration halt" "$MANUAL_MIGRATION_HALT" "$OMD"
+has "static-md: manual-migration halt"      "$MANUAL_MIGRATION_HALT" "$SMD"
+
+echo "== group axis (#19) — obsidian-only: Quartz limitation (D5) + markdown-link gate extension =="
+has "obsidian-vault: Quartz shortest-mode limitation note" "does **not** resolve under Quartz's \`shortest\`" "$OMD"
+has "obsidian-vault: activation-scoped markdown-link gate extension" 'extension**: when `publish.wikilinks: false` and the manifest is `anyGroup`, this item' "$OMD"
+
+echo "== group axis (#19) — static-md-only: gate #1 group-aware + headings-only automation =="
+has "static-md: gate #1 is a resolution check, not a spelling check" 'resolution** check, not a spelling check' "$SMD"
+has "static-md: automated grouped wiring is headings-only" '**Automated grouped wiring works only on a Markdown-headings-form index.**' "$SMD"
+has "static-md: non-heading manual-wiring halt" "Index <index_file> is not a headings-form file — add a '<group_title>' container and the chapter line for '<slug>' manually, then re-run." "$SMD"
+
+echo "== group axis (#19) — manifest-discipline.md =="
+MDISC="$REFS/manifest-discipline.md"
+has "manifest-discipline: activation rule" 'a manifest becomes *grouped* the moment any single entry carries `group`' "$MDISC"
+has "manifest-discipline: duplicate-slug halt (globally unique across all)" 'globally unique across all' "$MDISC"
+has "manifest-discipline: reserved-slug halt" "slug 'assets' is reserved in a grouped manifest" "$MDISC"
+has "manifest-discipline: every-grouped-entry title rule" 'Every grouped entry requires `group_title`' "$MDISC"
+has "manifest-discipline: recapture carve-out for a group-only move" 'the screenshot set is NOT recaptured for a group-only move' "$MDISC"
+
+echo "== group axis (#19) — capture-manifest example + capture spec consumer import =="
+has "capture-manifest example: carries group_title"                    'group_title: "Group title"'      "$ASSETS/capture-manifest.example.yml"
+# NOT the consumer-binding enforcement — that structural pin lives in chapter-paths.test.mjs (A5).
+# has()/hasnt() are fixed-string greps a decoy comment can satisfy; this is only a cheap early signal.
+has "capture.example.spec.ts: imports chapter-paths.mjs (early signal only)" "from './lib/chapter-paths.mjs'" "$SPEC"
+
+echo "== group axis (#19) — revalidation.md manual-migration recipe + convergence checklist =="
+has "revalidation: recipe fixes inbound links from other chapters"  'Fix inbound links from other chapters that referenced the old path' "$REVAL"
+has "revalidation: recipe updates the capture spec output dir(s)"   "Update the project's capture spec output dir(s)" "$REVAL"
+has "revalidation: terminal-state convergence checklist heading"    'Terminal-state convergence checklist' "$REVAL"
+has "revalidation: post-migration handbook-wide link scan"          'Post-migration handbook-wide link scan' "$REVAL"
+has "revalidation: anyGroup-flip write-canon note (not a halt)"     'informational write-canon note in the W6 report' "$REVAL"
+has "revalidation: non-blocking stale-artifact advisory"            'non-blocking stale-artifact advisory' "$REVAL"
+# R17-F3: the normative prose must call the production predicates, not paraphrase ad-hoc checks.
+has "revalidation: invokes specReferencesDir("     'specReferencesDir(' "$REVAL"
+has "revalidation: invokes chapterHasWikilinkTo("  'chapterHasWikilinkTo(' "$REVAL"
+
+echo "== group axis (#19) — publish-targets README =="
+has "publish-targets README: Group handling: support or halt bullet" 'Group handling: support or halt.' "$PTREADME"
 
 echo "== Package A/B/D regression sentinels (#49, #50, #51, #52, #71) =="
 hasnt "no non-waiting isVisible after Escape"    'isVisible'                    "$CH"

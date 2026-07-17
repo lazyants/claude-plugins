@@ -28,6 +28,11 @@ to produce, with — per chapter — the fields a human can audit in under a min
   Every variant is a **real** app state, never a synthesized response. See
   `references/state-variants.md` and the state-coverage checklist in
   `references/completeness-gate.md`.
+- `group` — optional; English kebab-case, one level. Nests the chapter under
+  a two-level nav group instead of the flat path. See "The optional `group`
+  / `group_title` axis" below.
+- `group_title` — required whenever `group` is set; the group's localized
+  nav-container title. See the same section below.
 
 That enumeration is what the user reviews. They can immediately catch: a feature
 you invented, a route that no longer exists, a role that can't actually reach
@@ -74,6 +79,43 @@ A flag granted does NOT mean the role has the underlying data. It means the
 control renders. Whether the page shows real content for that user is a
 separate concern handled by the capture-safety and page-identity references.
 Note the distinction in the manifest review so the user can flag it.
+
+## The optional `group` / `group_title` axis
+
+Two more OPTIONAL, engine-agnostic fields nest a chapter under a two-level
+nav group instead of the flat `publish.chapters_dir/<slug>.md` layout:
+
+- `group` — English kebab-case (`^[a-z0-9]+(-[a-z0-9]+)*$`), one level (the
+  regex forbids `/`). A stable directory-segment identity for the group.
+  Unset ⇒ the entry stays flat.
+- `group_title` — the group's localized display title, in the project's
+  language (from `language.code`). Nav containers are located by title, not
+  by slug — never derive `group_title` from the English `group` slug.
+
+**Every grouped entry requires `group_title`**: identical within a group, unique across groups, and never derived from the English `group` slug.
+
+**Activation rule**: a manifest becomes *grouped* the moment any single entry carries `group`; a manifest with no `group` field anywhere behaves identically to 1.4.1 in every respect, at zero review cost to existing flat manifests.
+
+Manifest review for a grouped manifest gates, and halts verbatim, on:
+
+- **Duplicate slug** — `Duplicate chapter slug '<slug>' — chapter slugs must be globally unique across all groups (wikilinks and Quartz-shortest resolution key on the basename).`
+- **Bad group** — `Invalid group '<value>' — group must be English kebab-case, one level (no '/').`
+- **Reserved group** — `group 'assets' is reserved (co-location follow-up; keeps the tree unambiguous).`
+- **Reserved slug** — `slug 'assets' is reserved in a grouped manifest (co-location follow-up; keeps the tree unambiguous).`
+- **Group/slug collision** — `group '<g>' collides with flat chapter slug '<g>' — a directory and a chapter file cannot share the same path under publish.chapters_dir.`
+- **Missing title** — `Entry '<slug>' in group '<g>' lacks group_title — every grouped entry carries the localized group title (never derived from the English group slug).`
+- **Conflicting titles** — `Group '<g>' carries conflicting group_title values ('<a>' vs '<b>') — align all entries of the group.`
+- **Shared title** — `Groups '<g1>' and '<g2>' share group_title '<t>' — nav containers are located by title; give each group a distinct localized title.`
+
+These same checks are implemented for reuse in
+`../assets/lib/chapter-paths.mjs`'s `validateGroups(entries)` (returns `[]`
+for a group-free manifest); running it during drafting is an optional
+convenience, never a substitute for the human review in step 3 below.
+
+Path derivation, the group-aware asset tree, index wiring, and the
+manual-migration recipe for changing an entry's group live in
+`references/publish-targets/` and `references/revalidation.md` — this
+section governs only the manifest shape and its review-time gates.
 
 ## The discipline: no capture code before review
 
@@ -142,3 +184,5 @@ role, renamed glossary term, route change — goes through the same review loop.
 The screenshot set is regenerated for the affected chapter only. The page
 identity asserts in the capture spec are what make a stale capture fail loudly
 instead of silently producing a wrong chapter.
+
+A `group` or `group_title` change alone is a relocation, not a content change — the screenshot set is NOT recaptured for a group-only move; see the manual migration recipe in `references/revalidation.md`.
