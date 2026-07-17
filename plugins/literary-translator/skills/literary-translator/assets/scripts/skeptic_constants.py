@@ -1,0 +1,102 @@
+#!/usr/bin/env python3
+"""Single source of truth for every default value + shared string constant the
+RFC #215 Phase-2 skeptic pass depends on.
+
+Imported bare (``from skeptic_constants import ...``, via the SCRIPT_DIR-on-
+``sys.path`` importlib loader every sibling script/test uses) by
+``suspicion_scan.py``, ``skeptic_setup.py``, ``skeptic_ready.py``, and
+``skeptic_report.py`` so no default is ever duplicated or "tuned during
+implementation" in more than one place.
+
+The JSON-Schema ``default:`` values under ``profile.schema.json``
+``glossary.skeptic_pass`` MIRROR the ``*_DEFAULT`` constants here; a parity test
+asserts they never drift (``profile_validate.py`` does not itself materialize
+schema defaults, so the constants below are the real runtime defaults; an
+enabled profile passes its values as explicit CLI overrides via the W-step).
+
+This module is NOT a ``PLUGIN_BUNDLE_MEMBER`` (editing it must never re-translate
+a converged segment) but IS hashed into ``producer_input_digest`` and the skeptic
+``input_digest`` -- it governs the closure it belongs to (round-3 blocker 1).
+"""
+
+# --- Deterministic default values (mirrored by profile.schema.json defaults) ---
+DISPERSION_THRESHOLD_DEFAULT = 12   # high_dispersion: distinct-seg count >= this
+WINDOWS_PER_ENTITY_DEFAULT = 8      # max whole-block windows fed to the skeptic per entity
+SAMPLE_CAP_DEFAULT = 50             # GLOBAL total sampled entries (largest-remainder across strata)
+NEAR_THRESHOLD_DEFAULT = 0.15       # near_merge: keep pairs with (1 - SequenceMatcher.ratio()) <= this
+NEAR_CAP_DEFAULT = 40               # near_merge: emit at most this many top pairs
+NEAR_PAIR_BUDGET_DEFAULT = 5000     # near_merge: pre-enumeration materialization budget (logged truncation)
+
+# --- Citation-block classification (all_citation risk class), keyed by source.format ---
+# The set of block `type` tags that count as "citation" for each shipped adapter.
+# custom / any format ABSENT from this map => all_citation DISABLED fail-safe
+# (annotate CITATION_UNAVAILABLE_TAG; never guess a citation label from tag spelling).
+CITATION_BLOCK_TYPES_BY_FORMAT = {
+    "gutenberg_epub": ("FN", "QUOTE"),
+    "plain_text": ("FN", "QUOTE"),
+}
+
+# --- Risk-class names (one canonical spelling each) ---
+RISK_MERGE_PARTICIPANT = "merge_participant"
+RISK_ESTABLISHED_OFFLINE = "established_offline"
+RISK_SINGLETON = "singleton"
+RISK_HIGH_DISPERSION = "high_dispersion"
+RISK_ALL_CITATION = "all_citation"
+RISK_NEAR_MERGE = "near_merge"
+RISK_SAMPLED = "sampled"
+RISK_CLASSES = (
+    RISK_MERGE_PARTICIPANT,
+    RISK_ESTABLISHED_OFFLINE,
+    RISK_SINGLETON,
+    RISK_HIGH_DISPERSION,
+    RISK_ALL_CITATION,
+    RISK_NEAR_MERGE,
+    RISK_SAMPLED,
+)
+
+# --- Triage verdicts (ADVERSE-ONLY; there is deliberately NO confirmation verdict) ---
+TRIAGE_ADVERSE = "adverse"
+TRIAGE_PROPOSE_SPLIT = "propose_split"
+TRIAGE_PROPOSE_RESCOPE = "propose_rescope"
+TRIAGE_INSUFFICIENT_WINDOW = "insufficient_window"
+TRIAGE_VERDICTS = (
+    TRIAGE_ADVERSE,
+    TRIAGE_PROPOSE_SPLIT,
+    TRIAGE_PROPOSE_RESCOPE,
+    TRIAGE_INSUFFICIENT_WINDOW,
+)
+
+# --- Annotation tags (recorded in worklist/triage `notes`, never a verdict) ---
+CITATION_UNAVAILABLE_TAG = "citation_classification_unavailable"
+VERSE_PARENT_UNRESOLVED_TAG = "verse_parent_unresolved"
+ZERO_OCCURRENCE_TAG = "no_occurrences"
+NEAR_BUDGET_TRUNCATED_TAG = "near_pair_budget_truncated"
+
+# --- Deterministic ordering sentinels ---
+# Absent/blank `category` -> a fixed sentinel so the sampled strata ordering is TOTAL.
+NO_CATEGORY_SENTINEL = "\x00__no_category__"
+
+# --- Scope filter ---
+NON_IDENTITY_BASIS = "not_a_name"   # basis value that marks a non-identity-bearing entry
+
+# --- Occurrence-ref origin (Part A worklist; distinguishes block vs embedded-verse) ---
+OCC_ORIGIN_BLOCK = "block"            # offsets index into manifest.blocks[block].plain_text (citable window)
+OCC_ORIGIN_VERSE_EMBEDDED = "verse_embedded"  # offsets index into verse.store[].plain_text (label-only, NOT citable)
+
+# --- Verse mount normalization (shipped tolerant rule; segpack's own convention) ---
+# Exactly "embedded" -> embedded (scan from verse.store); ANYTHING else, incl.
+# absent, -> block-backed (owned by the block scan, NOT re-scanned).
+VERSE_MOUNT_EMBEDDED = "embedded"
+
+# --- Filenames + skeptic resume-domain run-dir layout (under durable_root) ---
+SUSPICION_WORKLIST_FILENAME = "suspicion_worklist.json"        # {durable_root}/suspicion_worklist.json
+SKEPTIC_TRIAGE_FILENAME = "skeptic_triage.json"               # {durable_root}/skeptic_triage.json (merged)
+SKEPTIC_RUNS_SUBDIR = "skeptic/runs"                          # {durable_root}/skeptic/runs/{RUN_ID}/
+SKEPTIC_AGGREGATE_MANIFEST_FILENAME = "assignments.json"      # aggregate assignment manifest in the run dir
+SKEPTIC_INPUT_DIGEST_FILENAME = "input.digest"               # per-run recorded skeptic input_digest
+SKEPTIC_FRAGMENT_PREFIX = "triage_"                          # run-scoped per-batch fragment: triage_{index}.json
+
+# --- Schema filenames (assets/schemas/) ---
+SUSPICION_WORKLIST_SCHEMA = "suspicion-worklist.schema.json"
+SKEPTIC_ASSIGNMENT_SCHEMA = "skeptic-assignment.schema.json"
+SKEPTIC_TRIAGE_SCHEMA = "skeptic-triage.schema.json"
