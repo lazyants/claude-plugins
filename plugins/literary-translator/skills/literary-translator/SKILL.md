@@ -893,6 +893,11 @@ Runs at W7 over every converged segment:
   new `completeness_counts`/`project_complete` fields. `project_complete:
   true` only if every `manifest.json` segment classifies `reusable` — zero
   in every other category.
+- **W7 Final audit (#208):** `final_audit.py`'s exit code is now fail-closed on
+  both axes: `0` only if hard checks are clean AND the completeness gate reports
+  complete; `1` on any hard defect in a converged draft (unchanged, takes
+  priority); `3` (new) when hard checks are clean but the project is not yet
+  fully converged.
 - **Frontback coverage report** (advisory, informational, never
   exit-code-gating on its own): reads `manifest.json`'s `frontback[]`
   inventory directly, emits one line per entry — `translate`-decision
@@ -904,18 +909,35 @@ Runs at W7 over every converged segment:
   not claim this mechanism is "proven" when building or extending it; it is
   carefully-designed but genuinely untested-at-scale.
 - Reads only the canonical `draft_path(seg) = segments/{seg}.draft.json`.
-- Excluded from `plugin_bundle_hash` (runs strictly after every segment is
-  already converged, over data already on disk) — covered by the separate
-  `orchestration_bundle_hash`: non-gating for convergence (never part of the
-  composite cache key) but gating for resume (folded into the
-  resume-integrity digest).
+- **Excluded from every bundle hash** — not a member of `plugin_bundle_hash`
+  (runs strictly after every segment is already converged, over data already
+  on disk) nor of `orchestration_bundle_hash` (whose four members are
+  `draft_ready.py`, `ledger_merge.py`, `language_smoke_report.py`, and
+  `select_segments.py` — see `references/ledger-and-resumability.md`;
+  `final_audit.py` is not one of them). Editing `final_audit.py` on its own
+  never flips a cache key or the resume-integrity digest via either bundle.
+- **Structural-completeness gate (`scripts/validate_assembled.py`, #202):** runs
+  immediately AFTER `final_audit.py` succeeds (default scope, i.e.
+  `output.v1_scope: segment_drafts_and_audit`), over the converged drafts +
+  `manifest.json`, BEFORE W8 Deliver hands off the audit package. Enforces
+  the union structural-completeness invariant over the manifest's declared
+  heading set (`heading_types` ∪ the built-in `HEAD`, #210): every declared
+  heading block must surface as non-empty translated text somewhere in the
+  converged drafts, and every converged draft's on-disk canonical bytes must
+  still match its ledger `reviewed_draft_sha1` (rebinding to the reviewed
+  SHA, mirroring `assemble.py`'s own guard). Exit `1` HARD on either
+  violation; exit `0` with non-gating WARN entries for an undeclared
+  heading-like block. See `references/assembly-and-output.md`.
 
 **W8 Deliver** — report convergence stats, list any `blocked`/
 `non_converged` segments explicitly. Also surface W7's whole-project
 completeness gate's own per-category counts alongside `project_complete` —
 "this batch: N converged, zero hard defects" and "whole project: M of TOTAL
 still incomplete" are two different numbers, never conflated (a batch can
-succeed while the project is still incomplete). Hand off the audit package:
+succeed while the project is still incomplete). Treat ANY nonzero
+`final_audit.py` exit — `1` or `3` — as a stopped gate; do not proceed to
+delivery. `1` means fix the converged draft; `3` means finish
+translating/reviewing the remaining segments. Hand off the audit package:
 converged per-segment drafts, ledger, each draft's own audit trail,
 `final_audit.py`'s summary+WARN list — as `output.v1_scope:
 segment_drafts_and_audit`. When `output.v1_scope: assembled_book` instead,
@@ -941,13 +963,23 @@ convergence gate into the shared NodeStream artifact, then invokes the
 Step-0d-resolved output-target adapter (`render_obsidian` in this
 increment) to render the book under `${durable_root}/out/` (see
 `references/assembly-and-output.md` for the reconstruction algorithm and
-the NodeStream/anchor-map artifacts). Then run
-`scripts/diff_rendered_output.py` as the acceptance gate: it re-renders and
-diffs against the last accepted baseline — exit `0` on an exact match, `1`
+the NodeStream/anchor-map artifacts).
+
+Then run `scripts/validate_assembled.py` — AFTER `assemble.py` writes
+`out/.assembled/nodestream.json`, BEFORE `scripts/diff_rendered_output.py` —
+the same #202 structural-completeness gate, this time checking that every
+declared heading source marker surfaced as a non-empty `kind:"heading"` node
+in the assembled NodeStream. Exit `1` HARD on a dropped/misclassified
+heading; exit `0` with non-gating WARN entries otherwise.
+
+Then run `scripts/diff_rendered_output.py` as the acceptance gate: it
+re-renders and diffs against the last accepted baseline — exit `0` on an exact match, `1`
 on a mismatch or guard refusal, `2` when no baseline exists yet
-(`--accept-baseline` freezes the current render as the new baseline). The
-render+diff comparison IS the acceptance gate — there is no separate
-item-count check alongside it.
+(`--accept-baseline` freezes the current render as the new baseline). For
+rendered-content equality, the render+diff comparison IS the acceptance
+gate — there is no separate item-count check alongside it (structural
+completeness is `validate_assembled.py`'s distinct concern above, checked
+before this step ever runs).
 
 ## Reference docs
 

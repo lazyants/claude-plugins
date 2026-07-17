@@ -270,6 +270,12 @@
       },
       "required": ["source_extraction_hash", "source_input_hash"],
       "additionalProperties": false
+    },
+    "heading_types": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 },
+      "uniqueItems": true,
+      "description": "Adapter-declared block-type tags that are headings (in addition to the always-heading built-in 'HEAD'). A custom extractor lists its own heading tags here (e.g. ['SIMAN','PEREK']); the shipped gutenberg_epub adapter emits 'HEAD' and need not set it."
     }
   },
   "required": ["blocks", "spine", "segments", "footnotes", "frontback", "verse", "source_inputs", "generation_hashes"],

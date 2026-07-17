@@ -64,29 +64,24 @@ Two test layers:
     `select_segments.py` -> `final_audit.py` integration is exercised, not
     a mocked stand-in for it.
 
-IMPORTANT -- a genuine contract mismatch this file's tests surface: the real,
-shipped `select_segments.py` reports each segment's classification as a
-NESTED OBJECT, `{"category": "<one of the six values>", ...extra fields}`
+IMPORTANT -- a contract point these tests lock in as a regression guard: the
+real, shipped `select_segments.py` reports each segment's classification as
+a NESTED OBJECT, `{"category": "<one of the six values>", ...extra fields}`
 (verified directly -- see `select_segments.test.py`'s own
 `test_full_classification_taxonomy_and_report`, e.g.
-`classification["seg01_reusable"] == {"category": "reusable"}`). But
-`final_audit.py`'s own module docstring ("select_segments.py JSON contract")
-documents the OPPOSITE: `"classification": {SEG: CATEGORY, ...}` with CATEGORY
-already a bare string. `build_frontback_coverage()` reads
-`classification_by_seg.get(fb_id)` with no unwrapping, so against the REAL
-`select_segments.py` contract this ships the raw nested object as `status`
-for every resolved `translate`-decision entry -- violating both this
-script's own documented contract AND `final-audit-summary.schema.json`'s
-explicit `"status": {"type": ["string", "null"]}` (with a conditional
-requiring `status` be a STRING specifically when `decision == "translate"`).
-The dedicated tests below that catch this
+`classification["seg01_reusable"] == {"category": "reusable"}`) -- never a
+bare string, contrary to what `final_audit.py`'s own module docstring
+("select_segments.py JSON contract") literally says
+(`"classification": {SEG: CATEGORY, ...}`). `build_frontback_coverage()`
+must extract `classification_by_seg.get(fb_id, {}).get("category")`, not
+store the raw nested dict as `status` -- required both by this script's own
+documented contract and by `final-audit-summary.schema.json`'s explicit
+`"status": {"type": ["string", "null"]}` (with a conditional requiring
+`status` be a STRING specifically when `decision == "translate"`). The
+dedicated tests below
 (`test_unit_translate_status_is_the_plain_classification_category_string`,
 `test_integration_translate_status_is_the_plain_category_string_not_a_raw_object`)
-are EXPECTED to fail against the current script -- this is a genuine defect
-in `build_frontback_coverage()` (it should extract
-`classification_by_seg.get(fb_id, {}).get("category")`, not the whole dict),
-not a defect in these tests. Every other test in this file passes against
-the current script.
+assert exactly this unwrapped-string shape against the real script.
 """
 import hashlib
 import importlib.util
@@ -428,9 +423,9 @@ def test_unit_order_and_multiple_entries_preserved(tmp_path, monkeypatch):
     assert [item["id"] for item in result] == ["A", "B", "C", "D"]
     assert result[1] == {"id": "B", "decision": "regenerate", "status": None}
     assert result[2] == {"id": "C", "decision": "omit", "status": None}
-    # Loose check only (passes regardless of the dict-vs-string defect
-    # documented at module top): a translate entry with a matching
-    # classification is genuinely cross-referenced, not defaulted to null.
+    # A translate entry with a matching classification is genuinely
+    # cross-referenced, not defaulted to null (the exact string shape is
+    # locked in by the dedicated status-shape tests, not re-asserted here).
     assert result[0]["status"] is not None
     assert result[3]["status"] is not None
 
@@ -494,14 +489,9 @@ def test_unit_translate_status_is_the_plain_classification_category_string(tmp_p
     -- see select_segments.test.py's own
     test_full_classification_taxonomy_and_report). That is the exact shape
     final_audit.py's own run_completeness_gate() passes straight through as
-    classification_by_seg.
-
-    EXPECTED TO FAIL against the current final_audit.py: build_frontback_coverage()
-    does `status = classification_by_seg.get(fb_id)` with no unwrapping, so
-    against real production data `status` ends up as the raw
-    {"category": "reusable"} object, not the string "reusable" -- a genuine
-    defect (documented at this file's own module docstring), not a defect in
-    this test.
+    classification_by_seg -- build_frontback_coverage() must unwrap it via
+    .get("category"), never store the raw dict as status (see this file's
+    own module docstring).
     """
     _set_manifest(
         tmp_path,
@@ -601,9 +591,8 @@ def test_integration_frontback_coverage_structure_and_order(tmp_path):
     assert coverage[1] == {"id": REGEN_ID, "decision": "regenerate", "status": None}
     assert coverage[2] == {"id": OMIT_ID, "decision": "omit", "status": None}
 
-    # translate: genuinely cross-referenced (not defaulted to null) -- loose
-    # check, passes regardless of the dict-vs-string defect documented at
-    # this file's module docstring.
+    # translate: genuinely cross-referenced (not defaulted to null); the
+    # exact string shape is locked in by the dedicated status-shape tests.
     assert coverage[0]["status"] is not None
 
     # Human-readable stderr report mirrors the structured summary.
@@ -613,11 +602,11 @@ def test_integration_frontback_coverage_structure_and_order(tmp_path):
 
 
 def test_integration_translate_status_is_the_plain_category_string_not_a_raw_object(tmp_path):
-    """Full end-to-end equivalent of the unit-level bug-catching test above:
-    against a REAL select_segments.py run (not a hand-built dict), the
-    resolved translate-decision status should be the plain string
-    "reusable" per final-audit-summary.schema.json. EXPECTED TO FAIL against
-    the current final_audit.py -- see this file's module docstring."""
+    """Full end-to-end equivalent of the unit-level test above: against a
+    REAL select_segments.py run (not a hand-built dict), the resolved
+    translate-decision status must be the plain string "reusable" per
+    final-audit-summary.schema.json -- see this file's own module
+    docstring."""
     root = setup_mixed_scenario(tmp_path)
     proc = run_final_audit(root)
     payload = parse_stdout(proc)
@@ -652,18 +641,23 @@ def test_integration_frontback_report_never_gates_exit_code_on_unrelated_hard_fa
 def test_integration_frontback_report_never_gates_exit_code_on_its_own_bad_status(tmp_path):
     """The inverse direction of the advisory-only guarantee: a
     translate-decision frontback element that is ITSELF unresolved
-    (human_escalation, via a blocked ledger fragment) must not gate the
-    run -- with every other check clean, hard_failures/exit code stay 0."""
+    (human_escalation, via a blocked ledger fragment) must not gate
+    hard_failures -- with every other check clean, hard_failures stays 0.
+    The whole-project completeness gate (#208) is a SEPARATE concern from
+    the frontback report's own advisory-only guarantee: this project is
+    genuinely incomplete (its one real segment is human_escalation, never
+    reusable), so the exit code must still be 3, not 0 -- final_audit.py's
+    own completeness fail-closed gate has full priority regardless of what
+    the frontback report itself shows."""
     root = make_durable_root(tmp_path)
     seg = "FRONTBACK:front_blocked"
     filler = "seg_filler_not_started"
-    # `filler` (not_started, no fragment at all) exists purely so
-    # select_segments.py's own emitted SEGS is non-empty -- a manifest whose
-    # ONLY segment is human_escalation-classified would otherwise make
-    # select_segments.py itself FATAL ("emitted SEGS is empty -- refusing
-    # to no-op silently"), an unrelated whole-project-completeness-gate
-    # concern out of this file's frontback-coverage scope (see
-    # final_audit.test.py for that gate's own dedicated tests).
+    # `filler` (not_started, no fragment at all) is kept as an inert body
+    # segment alongside the escalated one -- not needed to dodge a
+    # select_segments.py FATAL (final_audit.py already passes
+    # --allow-empty, so an empty emitted SEGS never FATALs), just an
+    # unrelated second not_started segment; the project is incomplete
+    # either way since human_escalation alone already makes it so.
     write_manifest(root, [seg, filler], frontback=[{"id": seg, "decision": "translate"}])
     write_fragment(root, seg, blocked_fragment(reason="review-null"))
     # A `blocked` fragment's own status != "converged", so final_audit.py's
@@ -672,37 +666,34 @@ def test_integration_frontback_report_never_gates_exit_code_on_its_own_bad_statu
     write_fixture_cache_keys(root, {})
 
     proc = run_final_audit(root)
-    assert proc.returncode == 0, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
     payload = parse_stdout(proc)
     assert payload["coverage_failures"] == 0
     assert payload["stale_review_failures"] == 0
     assert payload["hard_failures"] == 0
+    assert proc.returncode == 3, (
+        f"hard checks are clean (asserted above) but the project is "
+        f"genuinely incomplete -- exit code must be 3, not 0:\n"
+        f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    )
 
     assert payload["frontback_coverage"] == [
-        {
-            "id": seg,
-            "decision": "translate",
-            # Loose check only (see module docstring's documented defect):
-            # a human_escalation classification is genuinely non-null.
-            "status": payload["frontback_coverage"][0]["status"],
-        }
+        {"id": seg, "decision": "translate", "status": "human_escalation"}
     ]
-    assert payload["frontback_coverage"][0]["status"] is not None
-    # completeness_counts (a SEPARATE, already-informational gate) does
-    # reflect the escalation -- but that is project_complete's job, never
-    # hard_failures'/the exit code's.
+    # completeness_counts (a SEPARATE, already-informational-shaped field)
+    # reflects the same escalation the frontback report and the exit code
+    # both surface.
     assert payload["completeness_counts"]["human_escalation"] == 1
     assert payload["project_complete"] is False
 
 
 def test_integration_frontback_key_absent_yields_empty_array_unconditionally(tmp_path):
+    # No filler needed: seg alone is converged/reusable, and final_audit.py
+    # already passes --allow-empty to select_segments.py, so a fully-
+    # converged, single-segment project never FATALs on an empty emitted
+    # SEGS -- it correctly reports project_complete=true (exit 0).
     root = make_durable_root(tmp_path)
     seg = "seg_only"
-    filler = "seg_filler_not_started"
-    # `filler` keeps select_segments.py's own default (no --allow-empty) run
-    # from emitting an empty SEGS list, which would otherwise FATAL it --
-    # see the comment in test_integration_frontback_report_never_gates_exit_code_on_its_own_bad_status.
-    write_manifest(root, [seg, filler])  # no frontback key at all
+    write_manifest(root, [seg])  # no frontback key at all
     key = make_cache_key("only")
     sha1 = write_minimal_segment(root, seg)
     write_fragment(root, seg, converged_fragment(dict(key), sha1))
@@ -717,10 +708,10 @@ def test_integration_frontback_key_absent_yields_empty_array_unconditionally(tmp
 
 
 def test_integration_frontback_explicit_empty_array_yields_empty_array(tmp_path):
+    # No filler needed -- see the sibling absent-frontback-key test above.
     root = make_durable_root(tmp_path)
     seg = "seg_only"
-    filler = "seg_filler_not_started"
-    write_manifest(root, [seg, filler], frontback=[])
+    write_manifest(root, [seg], frontback=[])
     key = make_cache_key("only")
     sha1 = write_minimal_segment(root, seg)
     write_fragment(root, seg, converged_fragment(dict(key), sha1))

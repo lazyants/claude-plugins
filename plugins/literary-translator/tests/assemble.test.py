@@ -247,9 +247,15 @@ def _yaml_dump(obj) -> str:
     return yaml.safe_dump(obj, sort_keys=False)
 
 
-def write_manifest(root, blocks, segments, footnotes=None, verse_store=None, frontback=None):
+def write_manifest(root, blocks, segments, footnotes=None, verse_store=None, frontback=None,
+                    heading_types=None):
     """blocks: dict[id -> block dict, WITHOUT 'id' key (filled in here)].
-    segments: list of segment dicts (each already fully shaped)."""
+    segments: list of segment dicts (each already fully shaped).
+    heading_types: optional list of manifest-declared heading block-type
+    tags (#210) -- omitted entirely (not even as an empty list) unless a
+    caller passes one, so the default fixture stays byte-identical to
+    pre-#210 manifests and exercises the schema's back-compat "absent"
+    path."""
     for bid, b in blocks.items():
         b.setdefault("id", bid)
         b.setdefault("sha1", hashlib.sha1(bid.encode()).hexdigest())
@@ -269,6 +275,8 @@ def write_manifest(root, blocks, segments, footnotes=None, verse_store=None, fro
         "source_inputs": ["source.txt"],
         "generation_hashes": {"source_extraction_hash": "x", "source_input_hash": "y"},
     }
+    if heading_types is not None:
+        manifest["heading_types"] = heading_types
     (root / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False), encoding="utf-8")
 
 
@@ -2757,6 +2765,149 @@ def test_footnote_nested_two_levels_deep_in_def_embedded_verses_is_discovered(tm
     )
     all_verse_vids = {v["vid"] for n in ns["nodes"] for v in n["verses"]}
     assert all_verse_vids == {"vA"}, "only the outer rendered verse is a node verse"
+
+
+# ===========================================================================
+# 15. #210 -- manifest-declared heading_types classification.
+#
+# _classify_kind's sole heading test was the literal block type "HEAD"; a
+# custom extractor's own heading tag (never "HEAD") silently classified
+# prose. manifest.heading_types (schema-optional, additive) lets a manifest
+# DECLARE which of its own block types are headings too. Through the REAL
+# classifier via a real assemble.py subprocess -- NOT render_obsidian.
+# test.py's in-process make_node(kind="heading") helper, which hand-builds
+# the property and would mask this exact bug.
+# ===========================================================================
+
+
+def _book_with_custom_heading_block_type(root, heading_types=None):
+    """Two segments, each with one CHAPTER-typed block (the candidate
+    heading) followed by one ordinary PARA block. CHAPTER is never "HEAD" --
+    only `heading_types` (when passed) can make it classify as a heading."""
+    write_manifest(
+        root,
+        blocks={
+            "h1": {"type": "CHAPTER", "seg": "seg01", "order_index": 0,
+                   "plain_text": "Raw Chapter One Heading"},
+            "p1": {"type": "PARA", "seg": "seg01", "order_index": 1,
+                   "plain_text": "Body text one."},
+            "h2": {"type": "CHAPTER", "seg": "seg02", "order_index": 2,
+                   "plain_text": "Raw Chapter Two Heading"},
+            "p2": {"type": "PARA", "seg": "seg02", "order_index": 3,
+                   "plain_text": "Body text two."},
+        },
+        segments=[
+            {"seg": "seg01", "kind": "body", "title_text": "Chapter One",
+             "block_ids": ["h1", "p1"], "word_count": 20},
+            {"seg": "seg02", "kind": "body", "title_text": "Chapter Two",
+             "block_ids": ["h2", "p2"], "word_count": 20},
+        ],
+        heading_types=heading_types,
+    )
+    write_segpack(
+        root, "seg01",
+        blocks=[{"id": "h1", "order_index": 0, "plain_text": "Raw Chapter One Heading"},
+                {"id": "p1", "order_index": 1, "plain_text": "Body text one."}],
+    )
+    write_segpack(
+        root, "seg02",
+        blocks=[{"id": "h2", "order_index": 0, "plain_text": "Raw Chapter Two Heading"},
+                {"id": "p2", "order_index": 1, "plain_text": "Body text two."}],
+    )
+    write_draft(
+        root, "seg01",
+        blocks={"h1": "Translated Chapter One Heading", "p1": "Translated body text one."},
+    )
+    write_draft(
+        root, "seg02",
+        blocks={"h2": "Translated Chapter Two Heading", "p2": "Translated body text two."},
+    )
+    write_ledger(root, {"seg01": {"status": "converged"}, "seg02": {"status": "converged"}})
+
+
+def test_manifest_declared_heading_type_classifies_as_heading_node(tmp_path):
+    """RED pre-#210: raw_type "CHAPTER" is not "HEAD", so _classify_kind
+    returns "prose" even with heading_types declared -- this is the
+    regression lock proving the manifest's declared set is actually wired
+    through build_nodestream into _classify_kind."""
+    root = make_root(tmp_path)
+    _book_with_custom_heading_block_type(root, heading_types=["CHAPTER"])
+
+    result = run_assemble(root)
+    assert result.returncode == 0, f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+
+    ns = read_nodestream(root)
+    by_id = {n["id"]: n for n in ns["nodes"]}
+    assert by_id["h1"]["kind"] == "heading", (
+        "a block whose type is listed in manifest.heading_types must "
+        "classify as a heading, same as the built-in \"HEAD\""
+    )
+    assert by_id["h2"]["kind"] == "heading"
+    # Ordinary PARA blocks are unaffected -- heading_types only ever ADDS
+    # heading matches, it never widens what counts as prose/verse.
+    assert by_id["p1"]["kind"] == "prose"
+    assert by_id["p2"]["kind"] == "prose"
+
+
+def test_custom_type_without_heading_types_declaration_stays_prose_back_compat(tmp_path):
+    """Negative/back-compat: the exact same CHAPTER-typed blocks, but
+    manifest.heading_types is entirely absent (not even an empty list) --
+    must classify prose, byte-identical to pre-#210 behavior. Also proves
+    the render-level fallback: with no heading node, _segment_title falls
+    back to the raw seg id, not the CHAPTER block's text."""
+    root = make_root(tmp_path)
+    _book_with_custom_heading_block_type(root, heading_types=None)
+    manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
+    assert "heading_types" not in manifest, "sanity: the field must be genuinely absent"
+
+    result = run_assemble(root)
+    assert result.returncode == 0, f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+
+    ns = read_nodestream(root)
+    by_id = {n["id"]: n for n in ns["nodes"]}
+    assert by_id["h1"]["kind"] == "prose"
+    assert by_id["h2"]["kind"] == "prose"
+
+    note_path = root / "out" / "001 seg01.md"
+    assert note_path.is_file(), (
+        f"with no heading node, the segment note must fall back to the raw "
+        f"seg id for both title and filename -- files present: "
+        f"{sorted(p.name for p in (root / 'out').glob('*.md'))}"
+    )
+    assert "## Raw Chapter One Heading" not in note_path.read_text(encoding="utf-8")
+
+
+def test_manifest_declared_heading_type_drives_render_title_and_filename(tmp_path):
+    """End-to-end (contract §10, via the real obsidian adapter): a declared
+    heading block's DRAFT text becomes the rendered "## " markdown heading
+    AND drives the segment note's frontmatter title and filename -- not the
+    raw seg id (render_obsidian.py's _segment_title / out-of-the-box
+    filename slug both key off the first kind=="heading" node)."""
+    root = make_root(tmp_path)
+    _book_with_custom_heading_block_type(root, heading_types=["CHAPTER"])
+
+    result = run_assemble(root)
+    assert result.returncode == 0, f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+
+    note_path = root / "out" / "001 Translated Chapter One Heading.md"
+    assert note_path.is_file(), (
+        f"expected the heading text (not the raw seg id) to drive the "
+        f"filename -- files present: "
+        f"{sorted(p.name for p in (root / 'out').glob('*.md'))}"
+    )
+    note_text = note_path.read_text(encoding="utf-8")
+    assert "## Translated Chapter One Heading" in note_text, (
+        "the declared-heading block's draft text must render as a markdown "
+        "heading in the segment note body"
+    )
+    assert "title: Translated Chapter One Heading" in note_text, (
+        "the declared-heading block's draft text must drive the frontmatter "
+        "title, not the raw seg id"
+    )
+    assert "title: seg01" not in note_text, (
+        "the raw seg id must not leak into the frontmatter title once a "
+        "real heading is present"
+    )
 
 
 if __name__ == "__main__":

@@ -15,10 +15,10 @@ file's job is to catch exactly that class of regression, at EVERY call
 site named in the spec, not just in one script.
 
 Call sites this file instantiates against real fixtures, per
-ledger-and-resumability.md's own enumeration (12 draft / 10 review as of
-1.4.7/#198):
+ledger-and-resumability.md's own enumeration (13 draft / 10 review as of
+1.6.0/#202):
 
-  draft_path(seg) (12 sites):
+  draft_path(seg) (13 sites):
     1. scripts/validate_draft.py
     2. scripts/draft_ready.py
     3. scripts/ledger_update.py
@@ -31,6 +31,8 @@ ledger-and-resumability.md's own enumeration (12 draft / 10 review as of
    10. scripts/ledger_merge.py        (1.4.7 -- pre-existing omission, draft_path)
    11. scripts/select_segments.py     (1.4.7 -- pre-existing omission, draft_path)
    12. scripts/codex_job.py           (1.4.7/#198 -- CodexJob.canonical, --kind translate)
+   13. scripts/validate_assembled.py  (1.6.0/#202 -- default-scope reviewed-SHA-rebind
+                                        draft consumer, draft_path deriver)
 
   review_path(seg) (10 sites -- 1.2.0 CONTRACT §8 split the old single
   reviewPrompt writer/`readReview`-in-one call into a DISPATCH-then-READ
@@ -57,13 +59,15 @@ ledger-and-resumability.md's own enumeration (12 draft / 10 review as of
    10. scripts/codex_job.py           (1.4.7/#198 -- CodexJob.canonical, --kind review)
 
 The four 1.4.7 draft derivers (9-12), the four 1.4.7 review derivers (7-10),
-and codex_job.py's dual (draft+review) canonical derivation are exercised by
-the parametrized `test_new_deriver_*`, `test_codex_job_*`, and
-`test_review_task_template_writes_canonical_review_path` tests near the end of
-this file (each proving the real path function/attribute resolves to the exact
-unsuffixed canonical path and ignores a legacy `.ru.`-suffixed decoy). The
-"N/8" / "N/6" section-header comments below label the ORIGINAL 1.2.0-era 8
-draft / 6 review sites; the 1.4.7 additions bring the totals to 12 / 10.
+codex_job.py's dual (draft+review) canonical derivation, and the 1.6.0/#202
+draft deriver (13) are exercised by the parametrized `test_new_deriver_*`,
+`test_codex_job_*`, and `test_review_task_template_writes_canonical_review_path`
+tests near the end of this file (each proving the real path function/attribute
+resolves to the exact unsuffixed canonical path and ignores a legacy
+`.ru.`-suffixed decoy). The "N/8" / "N/6" section-header comments below label
+the ORIGINAL 1.2.0-era 8 draft / 6 review sites; the 1.4.7 additions brought
+the totals to 12 / 10; 1.6.0/#202 brings the draft total to 13 (review stays
+10 -- validate_assembled.py is a draft consumer only, never a review-path one).
 
 Design confirmation, UPDATED for 1.3.6 (#132 option b): `fixPrompt` is now
 DELIBERATELY a review_path(seg) reader (it was NOT, pre-1.3.6 -- see
@@ -151,12 +155,17 @@ REVIEW_READY_SRC = SCRIPTS_SRC_DIR / "review_ready.py"
 # whole-module collection error.
 CODEX_JOB_SRC = SCRIPTS_SRC_DIR / "codex_job.py"
 MASS_TRANSLATE_WF_SRC = TEMPLATES_SRC_DIR / "mass-translate-wf.template.js"
+# 1.6.0 (#202): a 13th draft-path deriver -- validate_assembled.py's own
+# default-scope reviewed-SHA-rebind draft consumer (see that script's own
+# module docstring and references/ledger-and-resumability.md). Draft-only:
+# it never reads/writes review_path(seg), so the review total stays at 10.
+VALIDATE_ASSEMBLED_SRC = SCRIPTS_SRC_DIR / "validate_assembled.py"
 
 for _p in (
     VALIDATE_DRAFT_SRC, DRAFT_READY_SRC, LEDGER_UPDATE_SRC, FINAL_AUDIT_SRC,
     BOOTSTRAP_NAMES_SRC, DRAFT_SHA1_SRC, REVIEW_ARTIFACT_CHECK_SRC,
     ASSEMBLE_SRC, LEDGER_MERGE_SRC, SELECT_SEGMENTS_SRC, REVIEW_READY_SRC,
-    MASS_TRANSLATE_WF_SRC,
+    MASS_TRANSLATE_WF_SRC, VALIDATE_ASSEMBLED_SRC,
 ):
     assert _p.is_file(), f"expected plugin asset not found: {_p}"
 
@@ -1164,13 +1173,15 @@ def _probe_module_path_fn(scripts_dir, script_name, fn_name, seg):
     return json.loads(result.stdout.strip().splitlines()[-1])
 
 
-# (label, script_src, fn_name, ext) -- the 1.4.7 module-level path-fn derivers.
+# (label, script_src, fn_name, ext) -- the 1.4.7 module-level path-fn derivers,
+# plus the 1.6.0/#202 addition (validate_assembled.py::draft_path, site 13/13).
 NEW_MODULE_PATH_DERIVERS = [
     ("assemble.py::draft_path", ASSEMBLE_SRC, "draft_path", "draft"),
     ("ledger_merge.py::draft_path", LEDGER_MERGE_SRC, "draft_path", "draft"),
     ("select_segments.py::draft_path", SELECT_SEGMENTS_SRC, "draft_path", "draft"),
     ("ledger_merge.py::review_path", LEDGER_MERGE_SRC, "review_path", "review"),
     ("review_ready.py::review_path", REVIEW_READY_SRC, "review_path", "review"),
+    ("validate_assembled.py::draft_path", VALIDATE_ASSEMBLED_SRC, "draft_path", "draft"),
 ]
 _NEW_DERIVER_IDS = [row[0] for row in NEW_MODULE_PATH_DERIVERS]
 

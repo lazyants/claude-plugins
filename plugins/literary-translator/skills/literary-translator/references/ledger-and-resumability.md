@@ -74,8 +74,10 @@ hardcodes a different path is a bug, not a faithful port.
   `assemble.py`, `ledger_merge.py`, `select_segments.py`, `codex_job.py`
   (`--kind translate` — derives the same canonical `draft.json` for its
   validate-before-promote), `review_TASK.template.md`,
-  `translate_TASK.template.md`, `mass-translate-wf.template.js` — must use
-  this exact path (**12** draft-path sites as of 1.4.7).
+  `translate_TASK.template.md`, `mass-translate-wf.template.js`,
+  `validate_assembled.py` (1.6.0 — its default scope reads converged drafts
+  for the union structural-completeness gate, see below) — must use
+  this exact path (**13** draft-path sites as of 1.6.0).
   `tests/draft_path_convention.test.py` instantiates every one of these
   against a fixture and asserts the exact path, failing loudly and naming
   the offender if any one disagrees. **1.2.0:** the written file also
@@ -161,14 +163,18 @@ check-vs-use TOCTOU window):
    that step 3 alone would never catch. A mismatch here means
    `success:false` — not complete, even though every individual segment's
    own convergence write already passed.
-5. **Every downstream draft consumer** (assembly, `final_audit.py`) re-checks
+5. **Every downstream draft consumer** (assembly, `final_audit.py`, and
+   — 1.6.0 — `validate_assembled.py`'s default scope) re-checks
    `draft_sha1` against the ledger-recorded value the same way step 3
    already established — unchanged from before 1.2.0, restated here only to
    close the chain: per-segment ledger → batch merge-ledger → assembly is
    the **complete** set of durable commit points, and a consistent
    old-token straggler pair restored at any single moment is rejected at
    the very next gate in this chain, never allowed to accumulate silently
-   past two.
+   past two. `validate_assembled.py` rebinds each draft it reads to the
+   ledger-recorded `reviewed_draft_sha1` before trusting it (same
+   contract as this step), rejecting a hand edit made between the W7
+   review and this later gate.
 
 This chain is what `resume_setup.py`'s resume-integrity digest (see
 `references/orchestration-and-batching.md`) *complements*, not duplicates:

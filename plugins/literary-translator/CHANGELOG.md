@@ -1,5 +1,26 @@
 # Changelog
 
+## 1.7.0 — 2026-07-17
+
+Delivery-gate hardening on the assemble/audit path, closing three real gaps found during the SSK vol.2 he→en remediation. Closes #208, #210, #202.
+
+### Added
+
+- **#202 — `validate_assembled.py`, a new union structural-completeness gate.** A standalone, self-anchored, copied-to-durable-root script (same convention as `final_audit.py`/`validate_draft.py`) that checks every declared-heading source marker `(seg, block_id)` — the union over the manifest's `heading_types` plus the always-heading built-in `HEAD` — actually surfaces as a non-empty heading, using a `Counter` (not a set) so a repeated same-key occurrence can't hide behind its surviving twin. Runs in both scopes: `assembled_book` (against the rendered nodestream, at W9 before `diff_rendered_output.py`) catches a declared heading that produced no heading node; the default `segment_drafts_and_audit` scope (at W7/W8 after `final_audit.py`) catches a source-empty declared heading and gives the cross-segment aggregate view a per-segment gate can't. The default scope also rebinds every draft read to the ledger's `reviewed_draft_sha1` before trusting it, rejecting a hand edit made between W7 review and this gate. A non-gating WARN flags an undeclared block whose type matches a broad heading-like allowlist (`HEADING|TITLE|CHAPTER|SECTION|PART|SIMAN|PEREK|H[1-6]`) — advisory only, never a permanent false-reject. Deliberately declined: a per-block length band (he→en ratios vary too widely to set one) and treating the broad allowlist as a HARD gate (too heuristic; the declared set is the non-heuristic source of truth).
+
+### Fixed
+
+- **#208** `final_audit.py` exited `0` on an incomplete project — the default delivery path had no deterministic completeness gate, only report-only JSON. The exit code is now `0` clean / `1` hard defects in converged drafts (unchanged priority) / `3` project incomplete (`not project_complete`, mirroring `assemble.py`'s own `assert_project_complete` predicate) — so both delivery paths are consistent and a caller can distinguish "incomplete" from "defective."
+- **#210** `assemble.py`'s heading classifier keyed *only* off the literal block type `"HEAD"`, so a custom extractor's own heading tags rendered as flat prose with a raw seg-id title/filename instead of the intended heading text. The manifest gains an optional `heading_types` array (absent → byte-identical to today, since only `HEAD` is a heading); a block whose `type` is `HEAD` **or** listed in `heading_types` now classifies `heading`. Declaring a heading type is opt-in per adapter — the shipped `gutenberg_epub` adapter still emits `HEAD` and needs no change.
+
+### Migration
+
+Three tiers, all real, none of them "zero migration":
+
+1. **Converged-segment caches survive.** Neither `PLUGIN_BUNDLE`/`DERIVATION`/`schema_hash` is touched by this release — a fully-converged project re-runs with zero re-translation.
+2. **Resume-fresh, and — for an interrupted project — in-flight re-translation.** Step 0a copies `manifest.schema.json` into every durable `schemas/` dir, so the edited schema changes the resume-integrity digest and **every interrupted run restarts fresh** on its next Step 0a. Because a fresh run re-selects segments, an interrupted project's **`recoverable`-category** segments (in-flight `in_progress`/`pending` — the only nonterminal statuses `DEFAULT_ELIGIBLE_CATEGORIES` dispatches) **may be redispatched and retranslated**. This does **not** extend to `blocked`/`non_converged` segments — those classify `human_escalation` and stay excluded from default dispatch — nor to already-converged segments, whose caches survive per tier 1. `render_version` is **not** changed.
+3. **Custom `heading_types` adopters re-accept assembled baselines.** Only a custom project that *chooses* to declare `heading_types` in its own extractor sees its already-converged segments go stale (the extractor edit changes `source_extraction_hash`) and, if it has a frozen render baseline, needs `diff_rendered_output.py --accept-baseline --force-accept-baseline` after review — headings now render as headings, changing assembled content. Shipped HEAD-only projects are byte-identical, no re-accept needed.
+
 ## 1.6.0 — 2026-07-17
 
 Implements RFC #215 **Phase 2** (#215): surface the *invisible* failure class — a canon entity confidently mis-identified or over-merged that `review_queue` never flagged — via a deterministic structural-risk scan plus an **opt-in, advisory, adverse-only** source-grounded skeptic pass. Ships **disabled by default**; the warn→block flip is deferred to Phase 3.
