@@ -2,6 +2,21 @@
 
 All notable changes to `lazyants/claude-plugins` are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is per-plugin, not repo-wide.
 
+## [enduser-handbook 1.5.0] — 2026-07-17
+
+An optional second navigation level for the handbook: manifest entries may declare a `group` (kebab-case directory axis) plus a localized `group_title`, and both publish adapters then write chapters to `chapters_dir/<group>/<slug>.md` with grouped asset dirs and two-level nav wiring. Strictly additive — a group-free manifest keeps the shipped flat layout byte-identically. Closes #19.
+
+### Added
+- Manifest fields `group` + `group_title` (`references/manifest-discipline.md`): English kebab-case one-level `group`; `group_title` required for every grouped entry, identical within a group, unique across groups. Validation gates (globally-unique slugs, reserved `assets` group/slug, group/flat-slug collision) halt with exact shared strings. Activation rule: all grouped behavior keys off `anyGroup(manifest)` — group-free manifests never meet a new code path.
+- `skills/enduser-handbook/assets/lib/chapter-paths.mjs` (+ `.d.mts`) — dependency-free path/derivation/validation library (`chapterRelPath`, `chapterAssetDir`, `embedPath`, `staticEmbedPath` mode selector, `validateGroups`, `locateChapterLine`, `findContainer`, `groupChanges`, `manualMigrationChecklist`, `renderManualMigrationHalt`, `specReferencesDir`, `chapterHasWikilinkTo`), unit-tested in `tests/chapter-paths.test.mjs` with red-before-green mutation evidence (28 mutations, a–bb).
+- Manual group-migration boundary (`references/revalidation.md`): retained-entry group/title changes and grouped removals HALT with a structured record (halt-is-the-record — a context-free re-run reconstructs every terminal check from the halt text) plus a manual recipe; per-delta-kind terminal-state convergence facts; capture-spec completion is red-flag + explicit user confirmation (never auto-passed); post-migration handbook-wide link scan; stale-artifact advisory. Automated migration is deliberately descoped to a follow-up issue.
+- Two-level nav wiring in both adapters (`obsidian-vault.md`, `static-md.md`): establishment-only index/container wiring with a per-chapter already-wired short-circuit, wrong-container and ambiguous-container halts, headings-form automation (non-heading index forms get a manual-wiring halt).
+
+### Changed
+- `skills/enduser-handbook/assets/capture.example.spec.ts` — the per-chapter output dir is now derived via `chapterAssetDir` from the manifest entry instead of a hardcoded literal; guarded by a structural consumer-binding pin (binding anchor + sink counts + raw-screenshot-idiom ban) in the unit tests.
+- `references/publish-targets/static-md.md` — under `anyGroup`, embeds use the full-target `relative()` formula (the legacy partial concatenation stays byte-identical for group-free manifests; its degenerate empty-`<rel>` leading-slash quirk is pinned by a mode-divergence test).
+- Quartz `shortest`-resolution limitation for grouped vaults documented in `obsidian-vault.md` (chapter slugs are globally unique, so wikilinks stay unambiguous; `assets_per_group` co-location is a follow-up).
+
 ## [enduser-handbook 1.4.1] — 2026-07-16
 
 Hardening plus a portability bugfix for the reference capture assets: a bleed-free capture helper for oversize overlays, an Obsidian embed path that finally derives from `capture.output_dir`, and the last safety gate before a destructive click lifted into a unit-tested library.

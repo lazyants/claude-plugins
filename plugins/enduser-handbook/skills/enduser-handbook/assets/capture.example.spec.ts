@@ -1,7 +1,12 @@
 // enduser-handbook capture asset — non-normative reference implementation for the Playwright
 // reference case. The normative, engine-agnostic contract lives in
 // references/capture-spec-helpers.md (and capture-safety.md / page-identity.md). Reimplement
-// this driver glue for another engine; the engine-neutral lib/*.mjs helpers are reused as-is.
+// this driver glue for another engine; the engine-neutral `.mjs` helpers in `lib/` are reused
+// as-is.
+//
+// Comment contract: line comments only — never block comments, and never a slash immediately
+// followed by a star (glob spellings included); the consumer-binding pin fails on that byte pair
+// anywhere in this file.
 //
 // capture.example.spec.ts — a skeleton chapter capture spec wiring the canonical, safe flow. Copy
 // it into the project's capture.capture_specs_dir and adapt the route/heading/selectors/labels to
@@ -29,12 +34,19 @@ import {
 } from './capture-helpers.playwright.ts';
 import { auditSurface } from './surface-audit.playwright.ts';
 import { classifyGraphqlRead } from './lib/graphql-read-classifier.mjs';
+import { chapterAssetDir } from './lib/chapter-paths.mjs';
 
 // Project-specific values — replace with the accepted manifest entry's data.
 const ROUTE = '/items';
 const HEADING = 'Items'; // verbatim primary heading for the server-rendered identity path
 const STORAGE_STATE = 'storage/seeded-user.json'; // pre-seeded auth; NEVER a live login
-const OUTPUT_DIR = 'handbook/assets/items';
+// PROFILE/ENTRY stand in for the project's real profile.yml and accepted manifest entry — replace
+// with however this project loads them (a project-specific loader, not part of this skeleton).
+// chapterAssetDir is group-aware (D3, issue #19): flat entries get output_dir/<slug>/ unchanged;
+// an entry carrying `group` gets output_dir/<group>/<slug>/ instead — never hardcode either form.
+const PROFILE = { capture: { output_dir: 'handbook/assets' } };
+const ENTRY = { slug: 'items' };
+const OUTPUT_DIR = chapterAssetDir(PROFILE, ENTRY);
 
 test('capture: items chapter', async ({ browser }) => {
   // 1. Context with service workers blocked (so context.route cannot be bypassed) + seeded auth.

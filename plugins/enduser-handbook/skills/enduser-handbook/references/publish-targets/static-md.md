@@ -32,8 +32,10 @@ names come from the profile.
 
 ```
 {{publish.chapters_dir}}/
-  <chapter-slug>.md                              # one chapter per feature; slug is English kebab-case
-{{capture.output_dir}}/<chapter-slug>/NN-*.png   # screenshots, retained here (NOT copied); MUST resolve under chapters_dir — see Assets
+  <chapter-slug>.md                              # flat entry (no group); slug is English kebab-case
+  <group>/<slug>.md                              # grouped entry; group is English kebab-case, one level
+{{capture.output_dir}}/<chapter-slug>/NN-*.png   # flat entry's screenshots (NOT copied); MUST resolve under chapters_dir
+{{capture.output_dir}}/<group>/<slug>/NN-*.png   # grouped entry's screenshots; same containment rule — see Assets
 {{publish.glossary_dir}}/
   index.md                                       # canonical glossary page (see glossary-discipline.md)
 {{publish.index_file}}                           # the flat table of contents (e.g. SUMMARY.md / README.md)
@@ -43,20 +45,54 @@ Chapter slugs are **always English kebab-case** even when the prose is in anothe
 The H1 and body render in `language.code`; only the filename and the URL-ish slug stay
 English. This keeps the file tree greppable and the link targets stable across translations.
 
+**Chapter path.** `group` set on the manifest entry ⇒ `publish.chapters_dir/<group>/<slug>.md`;
+`group` unset ⇒ `publish.chapters_dir/<slug>.md` — the shipped 1.4.1 form, unchanged. `group` is
+English kebab-case, one level (nested groups like `a/b` are out of scope for 1.5.0). A wholly
+group-free manifest never produces a grouped path anywhere in this adapter — every new branch
+below is gated on `anyGroup(entries)`, pinned by unit test.
+
 ## Assets
 
-Screenshots are captured into `{{capture.output_dir}}/<chapter-slug>/` and **remain there** — the
-base skill does not copy assets into the chapters tree (`capture.output_dir` is the single retained
-location; see `SKILL.md` W5, "Assets remain at `capture.output_dir`"). Embed each by a **relative
-path from the chapter to that retained location**: `![alt](<rel>/<chapter-slug>/01-overview.png)`,
-where `<rel>` is `relative(dirname(chapter_file), capture.output_dir)`. For the example layout
+Screenshots are captured into the entry's asset dir and **remain there** — the base skill does
+not copy assets into the chapters tree (`capture.output_dir` is the single retained location; see
+`SKILL.md` W5, "Assets remain at `capture.output_dir`"). The asset dir is:
+
+```
+chapterAssetDir(entry) = join(capture.output_dir, entry.group?, entry.slug)
+```
+
+— `{{capture.output_dir}}/<chapter-slug>/` for a flat entry, `{{capture.output_dir}}/<group>/<slug>/`
+for a grouped one.
+
+**Group-free manifests keep the shipped 1.4.1 embed form byte-identically**: a partial
+concatenation `![alt](<rel>/<chapter-slug>/01-overview.png)`, where `<rel>` is
+`relative(dirname(chapter_file), capture.output_dir)`. For the example layout
 (`capture.output_dir: vault/handbook/assets`, chapter in `vault/handbook/`) that resolves to
-`![alt](assets/<chapter-slug>/01-overview.png)`. Never absolute, never docs-root-rooted paths.
+`![alt](assets/<chapter-slug>/01-overview.png)`. This spelling is never group-aware and degenerates
+to a forbidden leading-slash path when `dirname(chapter_file) == capture.output_dir` — a known
+quirk kept only for byte-identity (follow-up issue); it is never used once the manifest is
+`anyGroup`.
+
+**Under `anyGroup`, the write canon switches to the full-target formula** — every chapter this
+skill writes, flat entries included, uses it, because it is the one spelling that resolves
+correctly in every layout, degenerate ones included:
+
+```
+<embed> = relative(dirname(chapter_file), join(chapterAssetDir(entry), <file>))
+```
+
+Embed it as `![alt](<embed>)`. Do **not** merely splice a `<group>/` segment into the legacy
+`<rel>/<chapter-slug>/<file>` form — re-derive the whole path from `chapterAssetDir(entry)`.
+Retained chapters keep whatever spelling already resolves — the link-integrity gate verifies
+resolution, never spelling (see "Write-time canon" in `revalidation.md`) — so an `anyGroup` flip
+on its own never triggers a rewrite. Never absolute, never docs-root-rooted paths.
 
 A static renderer serves only files **inside** the published docs tree, so `capture.output_dir`
 MUST resolve under `publish.chapters_dir` (point it at e.g. `<chapters_dir>/assets`) — otherwise the
 embed resolves to a file outside the served tree and the image 404s while the rest of the page
-renders. This is a halt condition (below), and the link-integrity gate re-checks it per embed.
+renders. This is a halt condition (below), which compares normalized resolved paths so it holds
+for `chapterAssetDir(entry)` at any depth — flat or grouped — without change; the link-integrity
+gate re-checks it per embed.
 
 ## Frontmatter
 
@@ -94,7 +130,11 @@ from memory. Two mechanics matter at publish time for this target:
 - **The Related block ends every chapter** and renders as plain Markdown links, the way the
   Obsidian-default template's placeholders are overridden for a static target. Use standard
   Markdown links, not Obsidian wikilinks. Each line is one of three forms:
-  - `- [Title](slug.md)` — a sibling chapter;
+  - a sibling chapter. **Group-free manifests** keep the bare, same-directory spelling
+    byte-identically: `- [Title](slug.md)`. **Under `anyGroup`**, use the general relative-link
+    formula from "Relative links — the general rule" below instead — never the bare `slug.md`
+    spelling, which is wrong the moment the sibling sits in a different group (or one chapter is
+    grouped and the other is flat), e.g. `- [Title](../billing/orders.md)` for a cross-group link;
   - `- [Term](<glossary-rel>/index.md#term)` — a glossary entry (see "Glossary backlink
     discipline" below for `<glossary-rel>`);
   - `- [<index label>](<relative-index-path>)` — the index, e.g. `- [All chapters](../SUMMARY.md)`.
@@ -122,8 +162,16 @@ literal across to a profile with a different layout; re-derive it from the formu
   `glossary_dir: vault/knowledge/glossary`): `[Term](../knowledge/glossary/index.md#term)` —
   one `../` to climb out of `handbook/`, then down into the sibling `knowledge/glossary` subtree.
   The anchor is the lowercased, hyphenated term (GitHub Markdown convention).
-- **Chapter → sibling chapter** (example for this layout): `[Title](other-slug.md)` — both files
-  live in `chapters_dir`, so the link is the bare filename with no `../`.
+- **Chapter → sibling chapter**: apply the same formula above — `target_file` is the sibling's
+  derived chapter path (see "Chapter path" above; flat or grouped), never assumed.
+  - **Group-free manifest, or two siblings in the same group** (example for this layout):
+    `[Title](other-slug.md)` — both files live in the same directory, so the link is the bare
+    filename with no `../`.
+  - **Cross-group siblings** (`anyGroup`, different groups — example: linking from
+    `admin/items.md` to `billing/orders.md`): `[Title](../billing/orders.md)` — climb out of the
+    current group directory, then back down into the target group's. Chapters share a directory
+    only for a group-free manifest or same-group siblings; never assume it once grouping is in
+    play.
 - **Chapter → index** depends on where `index_file` sits relative to the chapter:
   - **vault-root index** (example for this layout, `index_file: vault/SUMMARY.md`, chapter in
     `vault/handbook/`): `[All chapters](../SUMMARY.md)` — one `../`.
@@ -137,15 +185,118 @@ Dataview dashboard, **no** `log.md`, and **no** `CLAUDE.md` vault-map line. Ther
 required writes**, plus one conditional `publish.glossary_seed` reconciliation:
 
 1. **`{{publish.index_file}}`** — the flat table of contents (`SUMMARY.md`, `README.md`, an
-   MkDocs `nav:` list, etc.). Add **one** TOC line linking to the new chapter, computed
-   relative to the index file's own directory. Order alphabetically by display title unless the
-   existing file uses a different order — match what is there. Do not rewrite unrelated rows.
+   MkDocs `nav:` list, etc.). Add **one** TOC line linking to the new chapter, computed relative
+   to the index file's own directory: `relative(dirname(index_file), chapter_file)`. Order
+   alphabetically by display title unless the existing file uses a different order — match what
+   is there. Do not rewrite unrelated rows. **For a grouped entry (`anyGroup` manifests), the
+   line is wired under a `<group_title>` container** instead of directly into the flat list — see
+   "Grouped index wiring" below.
 2. **Glossary entry** — for each new domain term, add or link its entry under
    `{{publish.glossary_dir}}/index.md` (the page is owned by `references/glossary-discipline.md`;
    this adapter only encodes the relative link syntax).
 3. **`{{publish.glossary_seed}}` reconciliation (conditional)** — only when `publish.glossary_seed`
    is set and readable, reconcile its row as that file's convention requires; when it is unset,
    proceed without it — a static docs tree often has no seed index.
+
+### Grouped index wiring (`anyGroup` manifests only)
+
+Both shipped adapters wire the index before their link-integrity gate, so every wiring halt
+below must be convergent on re-run: a first run halts with instructions, the container and
+chapter line get added (by you, or by the user for a non-heading index), and the very next run's
+step 0 finds them and proceeds without re-halting.
+
+**Step 0 — idempotency check, form-agnostic, and it runs BEFORE any container
+classification.** This adapter only ever emits path links — `wikilinks: false` is a hard
+requirement here (see "Halt conditions") — so the expected link target is always the same
+coordinate system item 1 above uses:
+
+`relative(dirname(index_file), chapter_file)`
+
+Locate the chapter's current line by that target via `locateChapterLine(indexLines,
+expectedTarget)` ⇒ `{present, containerTitle, indexForm, multiple}`. `indexForm` is
+`'headings' | 'non-heading'`, computed from the file's own structural shape — NEVER inferred
+from any single line's `containerTitle`. `containerTitle` is the nearest preceding heading; it
+is `null` both when `indexForm` is `'non-heading'` (the file has no headings at all) AND when a
+`'headings'`-form line sits above the first heading (an orphan line, correctly unplaced) — those
+two `null` cases are not the same signal and are handled separately below:
+
+- **Two or more lines match the target** ⇒ never guess which line is canonical; halt with:
+  `Chapter '<slug>' appears multiple times in <index_file> — curate the index manually, then re-run.`
+- **Flat entry, line present** ⇒ membership-only check passes; nothing else to do — no
+  container to verify.
+- **Flat entry, line absent** ⇒ not a step-0 halt — append the flat TOC line per item 1 above,
+  exactly as shipped in 1.4.1, regardless of index form. Only a GROUPED entry's container
+  machinery is headings-form-only.
+- **Grouped entry, line present, `indexForm: 'non-heading'`** ⇒ wiring complete, proceed — a
+  non-heading index has no container concept to verify against, so line presence alone is the
+  whole check. The per-chapter line-presence check is deliberately form-agnostic; container
+  verification below applies only when `indexForm: 'headings'`.
+- **Grouped entry, line present, `indexForm: 'headings'`, and `containerTitleMatches(containerTitle,
+  entry)`** (from `assets/lib/chapter-paths.mjs`; titles compare TRIMMED, not raw `===`) ⇒
+  placement complete, move to the next chapter.
+- **Grouped entry, line present, `indexForm: 'headings'`, `containerTitleMatches` false** ⇒ never
+  silently move a user-curated line. This covers BOTH a line sitting under a different heading
+  AND a line that sits outside every container (`containerTitle: null` — above the first `##`,
+  or under an H1 with no `##` container yet): neither is correctly placed. Halt with:
+  `Chapter '<slug>' is listed in <index_file> under '<found_title>' instead of '<group_title>' — move the line (or curate the index manually), then re-run.`
+  When there is no enclosing container, fill `<found_title>` with a literal description such as
+  `(none)` — the halt string itself never changes, only the substituted value does.
+- **Grouped entry, line absent, headings-form index** ⇒ resolve the container (below).
+- **Grouped entry, line absent, non-heading index form** (a nested list, an MkDocs YAML `nav:`,
+  a bare path row) ⇒ halt with:
+  `Index <index_file> is not a headings-form file — add a '<group_title>' container and the chapter line for '<slug>' manually, then re-run.`
+  This is what makes the manual flow converge: you halt once with instructions, the user adds
+  the container and the chapter line, and the re-run's step 0 finds the line present under the
+  `indexForm: 'non-heading'` branch above and proceeds.
+
+**Container resolution** — reached only for a grouped entry on a headings-form index once step 0
+found no existing line. Locate the container by the entry's **current** `group_title`, which is
+unique across groups (see `manifest-discipline.md`):
+
+- **Zero candidates** ⇒ create a new `## <group_title>` heading matching the file's existing
+  heading depth, then append the chapter line under it.
+- **Exactly one candidate** ⇒ append the chapter line under it — append is always allowed, even
+  under an inhomogeneous, user-curated container.
+- **Multiple candidates** ⇒ halt with:
+  `Found multiple '<group_title>' containers in <index_file> — curate the index manually, then re-run.`
+
+**Automated grouped wiring works only on a Markdown-headings-form index.** For any other static
+index form — a nested `SUMMARY.md` list, an MkDocs YAML `nav:` block — grouped index wiring is
+**fully manual** in 1.5.0: you halt with the non-heading instructions above and stop there;
+first-class non-heading container automation is a follow-up issue.
+
+### Manual group migration
+
+Wiring the index is establishment-only — it never renames, moves, or deletes an existing
+container or chapter line. If a manifest review surfaces a `group` or `group_title` change on a
+retained entry, or the removal of a grouped entry, that is **not** an index-wiring matter — it
+is the manual-migration boundary. Halt with:
+
+`This manifest change requires manual group migration (not automated in 1.5.0):`
+
+followed by the per-entry change record, then:
+
+`Follow the manual migration recipe in references/revalidation.md, then re-run.`
+
+Do not attempt to wire, move, or delete anything yourself for the affected entries — follow the
+recipe and the terminal-state checklist in `references/revalidation.md`, and re-run only once it
+converges. An `anyGroup` flip (the manifest's first grouped entry appearing, or its last one
+disappearing) is ALWAYS informational — see "Write-time canon" in `revalidation.md` — but that
+note never suppresses a migration kind the same delta also carries: kinds always win. A flip with
+ZERO change kinds (e.g. pure new-entry addition — never a migration matter) is note-only, exactly
+as the note promises. Losing the manifest's LAST grouped entry, though, is a grouped-entry
+REMOVAL in its own right — its own migration kind — so it still reaches this halt for cleanup;
+the flip note rides alongside that halt, it does not replace it.
+
+### Stale-artifact advisory (non-halt)
+
+On every `anyGroup` manifest run, before you finish, list chapter files under
+`publish.chapters_dir` and asset dirs under `capture.output_dir` that are **not** derivable from
+the current manifest — i.e. no entry's `chapterRelPath` or `chapterAssetDir` matches them — and
+print them as a warning pointing at the manual migration recipe in `references/revalidation.md`.
+This is never a halt: a foreign, user-owned file is legitimate. But a manifest edited outside the
+normal review flow can leave stale old-grouping artifacts behind with no delta to trigger the
+boundary above, and this advisory is what surfaces them instead of letting them go unnoticed.
 
 ## Glossary backlink discipline
 
@@ -182,7 +333,10 @@ produce a partial tree:
    silently. Halt with: "static_md cannot write the glossary — `publish.glossary_dir`/index.md (or
    `publish.glossary_seed`, when set) is not writable or creatable."
 4. **`capture.output_dir` resolves under `publish.chapters_dir`.** A static renderer serves only
-   files inside the published docs tree, so the retained screenshots must live within it. Halt with:
+   files inside the published docs tree, so the retained screenshots must live within it. This
+   check compares normalized resolved paths, so it holds unchanged for `chapterAssetDir(entry)`
+   at any depth — a grouped entry's deeper `<group>/<slug>/` subdir is still inside `output_dir`
+   and still covered. Halt with:
    "static_md requires `capture.output_dir` to resolve under `publish.chapters_dir` so the rendered
    site can serve screenshots — point it inside the docs tree (e.g. `<chapters_dir>/assets`) and
    re-run."
@@ -202,9 +356,12 @@ produce a partial tree:
 Before declaring the chapter published, you verify in this order and halt on the first failure:
 
 1. Every `![](…)` embed, resolved relative to the chapter, points at a PNG that actually exists
-   under `{{capture.output_dir}}/<chapter-slug>/` (the retained location), AND that location
-   resolves under `{{publish.chapters_dir}}` so the static site can serve it — no orphan embeds, no
-   captures the run did not produce, no embed pointing outside the published tree.
+   under the entry's derived asset dir `chapterAssetDir(entry)` — `{{capture.output_dir}}/<chapter-slug>/`
+   flat, `{{capture.output_dir}}/<group>/<slug>/` grouped, the retained location either way — AND
+   that dir resolves under `{{publish.chapters_dir}}` so the static site can serve it — no orphan
+   embeds, no captures the run did not produce, no embed pointing outside the published tree. This
+   is a **resolution** check, not a spelling check: a retained chapter's older, still-resolving
+   embed spelling stays valid; only an embed that fails to resolve into the derived dir fails here.
 2. Every relative Markdown link resolves to a real file (and, for glossary links, a real heading
    anchor). Compute each from `relative(dirname(chapter_file), target_file)` and confirm the
    target exists. Broken relative links 404 on a static site and are silent in raw views.
@@ -214,7 +371,8 @@ Before declaring the chapter published, you verify in this order and halt on the
 4. The frontmatter `language` (when frontmatter is required) matches `language.code`; the section
    labels match `publish.section_labels.prerequisites` and `publish.section_labels.related`
    verbatim.
-5. `{{publish.index_file}}` lists the chapter with a link that resolves from the index's own
-   directory.
+5. `{{publish.index_file}}` lists the chapter with a link that resolves to it, computed as
+   `relative(dirname(index_file), chapter_file)` from the index's own directory — the same
+   coordinate system "Grouped index wiring" above uses for step 0.
 
 A chapter that fails any of these is unpublished, not "almost done" — fix and re-verify.
