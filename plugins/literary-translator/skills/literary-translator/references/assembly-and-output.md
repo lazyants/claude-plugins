@@ -68,6 +68,21 @@ category for materialized `blocked` or `non_converged` statuses.
 which means every `manifest.json` segment, including translate-decision
 `FRONTBACK:{id}` units, classifies `reusable`.
 
+**#208 — completeness fail-closed gate.** `final_audit.py`'s exit code is no
+longer purely a function of `hard_failures`. It now exits
+`completeness_exit_code(hard_failures, project_complete)`: `0` only when both
+hard checks (coverage, stale-review) are clean AND the whole-project
+completeness gate reports `project_complete: true`; `1` if either hard check
+fails (unchanged priority over incompleteness); `3` if hard checks are clean
+but the project has not fully converged (any of `not_started`/`recoverable`/
+`stale`/`blocked_needs_regeneration`/`human_escalation` segments remain).
+This closes the previous gap where a project with unconverged segments
+silently exited `0` on the default `segment_drafts_and_audit` delivery path,
+giving it no deterministic delivery-refusal gate to match the engine-loop
+HARD rule already enforced on the `assembled_book` path (`assemble.py:405`'s
+`assert_project_complete`). `warnings` and the frontback coverage report
+remain purely informational.
+
 There is one `frontback_coverage` entry per `manifest.json` `frontback[]` item.
 Each entry has `id`, `decision: "translate"|"regenerate"|"omit"`, and
 `status: string|null`. For `decision:"translate"`, `status` is the matching
@@ -142,10 +157,20 @@ in `manifest.json`.
    assembly starts at all.
 3. For each block: translated text comes from `segments/{seg}.draft.json`;
    its manifest type and `source_html` presence decide `medium`
-   (`html`|`plain`). A HEAD-type block is classified `heading` (its text is
-   normally superseded by the segment's own `title_text`); a block that is
-   some verse's `parent_block` with `mount: block` is classified `verse`;
-   everything else is `prose`. `FN:{N}` definition blocks are never rendered
+   (`html`|`plain`). A block whose `type` is `HEAD`, **or is listed in the
+   manifest's `heading_types`**, is classified `heading` (#210).
+   `heading_types` is an optional, additive, manifest-declared array of
+   block-type tags — absent means only `HEAD` is a heading, byte-identical
+   to pre-#210 behavior. The heading's rendered text comes directly from the
+   block's own translated draft text, put into the heading node by assembly
+   itself — it is never superseded by the segment's own `title_text`, which
+   only feeds the segpack `title` field and is never an assembly fallback for
+   an empty or missing heading. A block that is some verse's `parent_block`
+   with `mount: block` is classified `verse` — but the heading test takes
+   precedence over the block-mount-verse test, so a declared-heading block
+   that is also a block-mount verse parent classifies `heading`, exactly like
+   `HEAD` already does today. Everything else is `prose`. `FN:{N}` definition
+   blocks are never rendered
    inline — they live in `manifest.blocks{}` with their own `order_index` but
    are never members of a body segment's `block_ids[]`; they surface only via
    the footnotes table.
@@ -267,7 +292,36 @@ overwrite-guarded — it refuses (exit 1) if a baseline already exists unless
 `--force-accept-baseline` is also passed. The baseline is stamped with a
 render-version/hash so a stale-renderer baseline is detectable. There is no
 separate item-count acceptance check anywhere in this pipeline — the
-render+diff comparison **is** the gate.
+render+diff comparison **is** the gate for rendered-content equality.
+
+#### Structural-completeness gate (`scripts/validate_assembled.py`, #202)
+
+A distinct gate from render+diff above — this one checks that a declared
+heading *surfaced at all*, not whether the rendered bytes exactly match a
+baseline. A NEW, standalone, self-anchored script (same convention as
+`final_audit.py`/`validate_draft.py`) enforcing the UNION
+structural-completeness invariant: every block whose `type` is in the
+manifest's declared heading set (`heading_types` ∪ the built-in `HEAD`,
+#210) must surface, book-wide, as non-empty translated text. Source markers
+are a `Counter` keyed by `(seg, block_id)` over the FULL manifest (not only
+converged segments) — a `Counter`, not a set, because the schema allows the
+same `(seg, block_id)` key to legitimately recur (a repeated id within one
+segment's `block_ids[]`, or two `segments[]` entries sharing a `seg`), and
+only a per-key count catches a dropped occurrence hiding behind its
+surviving twin.
+
+Runs in BOTH output scopes: at W7/W8 (default `segment_drafts_and_audit`)
+checking converged draft text and rebinding to each draft's ledger
+`reviewed_draft_sha1` (mirroring `assemble.py`'s own hand-edit-after-review
+guard, `manifest.json`-gated per §2 above); at W9 (`assembled_book`, after
+`assemble.py` writes `nodestream.json`, before render+diff) checking the
+assembled NodeStream's own `kind:"heading"` nodes instead. A broad
+heading-like type allowlist (`HEADING|TITLE|CHAPTER|SECTION|PART|SIMAN|
+PEREK|H[1-6]`) fires a non-gating WARN for an undeclared block, but never
+gates the HARD exit code — the declared set is the sole non-heuristic
+source of truth. Exit `0` clean / `1` HARD defect / `2` env-usage; one JSON
+line `{"defects":[...], "warnings":[...]}` to stdout. See `SKILL.md` W7/W8/W9
+for the exact invocation points.
 
 ## Why `build_epub.py` hasn't been generalized (why `epub` isn't shipped yet)
 

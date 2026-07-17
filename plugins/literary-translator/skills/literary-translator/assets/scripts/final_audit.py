@@ -55,7 +55,11 @@ with no `--only-segs` restriction, and folds its classification report into
 `completeness_counts`/`project_complete`. This is NOT the same population as
 the two hard checks above: the hard checks only ever look at segments
 ALREADY converged; the completeness gate looks at the whole book, converged
-or not.
+or not. Unlike the four WARN-only checks below, this gate DOES affect the
+exit code -- a project that is not yet complete exits `3` (below `1`
+priority) rather than `0`, so `select_segments.py`'s W5 delivery-refusal
+rule holds on this default path too. See "Reporting" below for the exact
+0/1/3 contract.
 
 Finally, a **frontback coverage report** (advisory, never exit-code-gating)
 reads `manifest.json`'s `frontback[]` inventory directly and reports one
@@ -114,9 +118,16 @@ describes), matching the same house convention `ledger_merge.py`/
 alone. All human-readable diagnostic detail (per-check failures, WARN lines,
 the frontback report) is printed to stderr, for a human running this by hand.
 
-Exit 0 if `hard_failures == 0`, exit 1 otherwise. `project_complete`,
-`warnings`, and the frontback report never affect the exit code -- they are
-informational, per SKILL.md's W7 spec.
+Exit code is fail-closed on both hard defects and project incompleteness:
+`0` if `hard_failures == 0` AND `project_complete` is true; `1` if
+`hard_failures > 0` (hard defects in converged drafts -- takes priority);
+`3` if `hard_failures == 0` but `project_complete` is false (converged
+drafts are clean, but the whole project has not fully converged --
+`not_started`/`recoverable`/`stale`/`blocked_needs_regeneration`/
+`human_escalation` segments remain). `3` is distinct from `1` so callers can
+tell "incomplete" from "defective converged drafts"; either way any
+nonzero exit still gates W8 Deliver. `warnings` and the frontback report
+never affect the exit code -- they remain informational only.
 
 Usage: python3 final_audit.py
 """
@@ -735,6 +746,22 @@ def build_frontback_coverage(classification_by_seg):
     return coverage
 
 
+# ---------------------------------------------------------------------------
+# Exit code -- fail-closed on both hard defects AND project incompleteness.
+# ---------------------------------------------------------------------------
+
+def completeness_exit_code(hard_failures, project_complete):
+    """Pure, unit-testable without a durable root. hard_failures keeps
+    priority over incompleteness: a converged draft with a real coverage/
+    stale-review defect exits 1 even if the wider project is also
+    incomplete -- see #208."""
+    if hard_failures:
+        return 1                     # hard defects in converged drafts
+    if not project_complete:
+        return 3                     # converged drafts clean, project isn't
+    return 0
+
+
 def main():
     if len(sys.argv) != 1:
         print("usage: python3 final_audit.py", file=sys.stderr)
@@ -833,7 +860,7 @@ def main():
     # --- structured stdout: exactly one JSON line ---------------------------
     print(json.dumps(summary, ensure_ascii=False))
 
-    sys.exit(1 if hard_failures else 0)
+    sys.exit(completeness_exit_code(hard_failures, project_complete))
 
 
 if __name__ == "__main__":

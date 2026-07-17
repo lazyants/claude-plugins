@@ -158,6 +158,9 @@ extractor will, once #62 implements it), schema-validated against
 - `generation_hashes.source_input_hash` (required).
 - `frontback: [{id, decision}]` (required array, `minItems: 0`, `id` pattern
   `^FRONTBACK:.+$`, `decision` one of `translate` | `regenerate` | `omit`).
+- `heading_types: [string]` (optional) — see "Declaring heading block types"
+  below. Only relevant if this source's own heading blocks use a `type` tag
+  other than `HEAD`.
 
 **Cross-reference invariant** (checked procedurally by the self-check suite,
 never schema-expressible): every `frontback[]` entry with
@@ -241,6 +244,34 @@ schema is the machine-checkable half of the output contract, the self-check
 suite is the semantic half, neither substitutes for the other. If a custom
 extractor uses a documented equivalent instead of the exact suite, that
 equivalent must cover the same invariants.
+
+### Declaring heading block types (`heading_types`)
+
+`assemble.py`'s `_classify_kind` (the sole block→kind classifier feeding the
+assembled book / rendered notes) treats a block as a heading if, and only
+if, its `type` is the literal string `"HEAD"` **or** it appears in
+`manifest.heading_types` — a top-level, optional array of block-type
+strings (`manifest.schema.json`). There is no content-based heading
+heuristic anywhere in the pipeline; a block's `kind` is entirely determined
+by its declared `type` tag.
+
+This matters specifically for `custom`, because its block-type tags are
+**entirely co-designed** (see "What is a segment, here?" above) — nothing
+requires a custom extractor to call its heading blocks `"HEAD"`. If the
+co-designed extractor emits its own tag for headings (e.g. `"SIMAN"`,
+`"PEREK"`, `"CHAPTER_TITLE"`), that tag **must** be listed in
+`manifest.heading_types`, or every such block silently assembles and
+renders as ordinary prose — no heading markdown (`## `), and the segment
+note's frontmatter `title` / filename fall back to the raw seg id instead
+of the heading text (`assembly-and-output.md`'s algorithm section spells
+out the fallback). This is a silent misclassification, not a validation
+failure — schema validation and the self-check suite both pass on it, since
+`type` is intentionally open-ended (`manifest.schema.json:18`). Declaring
+`heading_types` is the only way to opt a custom tag in.
+
+`heading_types` is optional and empty by default — a `custom` extractor
+whose only heading blocks are tagged `"HEAD"` (matching the shipped
+`gutenberg_epub` convention) does not need to set it at all.
 
 ## `footnotes.apparatus_policy` for `custom`
 

@@ -72,9 +72,24 @@ SCHEMA_PATH = (
     PLUGIN_ROOT
     / "skills" / "literary-translator" / "assets" / "schemas" / "manifest.schema.json"
 )
+# #210's classification precedence (heading_types vs. a block-mount verse
+# claim) lives in assemble.py's _classify_kind, not extract.py.template --
+# imported directly, in place (never copied), for the same reason a bare
+# `import assemble` from the tests dir won't work: it self-anchors
+# SCRIPTS_DIR = Path(__file__).resolve().parent at import time, so loading
+# it from its REAL location means that anchor already resolves to the real
+# assets/scripts/ directory, where its sibling imports (validate_draft.py,
+# output_resolve.py) genuinely live -- no durable_root copy needed, and
+# nothing at module level touches the filesystem (see assemble.py's own
+# DURABLE_ROOT/SCRIPTS_DIR constants, used only inside functions).
+ASSEMBLE_PATH = (
+    PLUGIN_ROOT
+    / "skills" / "literary-translator" / "assets" / "scripts" / "assemble.py"
+)
 
 assert TEMPLATE_PATH.is_file(), f"extract.py.template not found at {TEMPLATE_PATH}"
 assert SCHEMA_PATH.is_file(), f"manifest.schema.json not found at {SCHEMA_PATH}"
+assert ASSEMBLE_PATH.is_file(), f"assemble.py not found at {ASSEMBLE_PATH}"
 
 
 def _load_extract_module(tmp_path: Path):
@@ -98,6 +113,19 @@ def _load_extract_module(tmp_path: Path):
 @pytest.fixture()
 def extract_mod(tmp_path):
     return _load_extract_module(tmp_path)
+
+
+def _load_assemble_module():
+    spec = importlib.util.spec_from_file_location("assemble_under_test", ASSEMBLE_PATH)
+    assert spec is not None and spec.loader is not None, f"could not load spec for {ASSEMBLE_PATH}"
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.fixture()
+def assemble_mod():
+    return _load_assemble_module()
 
 
 def _sha1(s: str) -> str:
@@ -484,3 +512,113 @@ def test_verse_plain_text_nonempty_passes_on_populated_plain_text(extract_mod):
 
     check = _find_check(checks["results"], "verse_plain_text_nonempty")
     assert check["ok"] is True, check["detail"]
+
+
+# ---------------------------------------------------------------------------
+# #210: manifest.heading_types -- schema boundary. Optional top-level array
+# of manifest-declared heading block-type tags; top-level is
+# additionalProperties:false, so it had to be explicitly declared (never
+# added to `required`). Every case below is checked against the REAL,
+# shipped manifest.schema.json (via extract.py.template's own
+# validate_against_schema()) -- never a hand-rolled restatement of the
+# schema's rules.
+# ---------------------------------------------------------------------------
+
+def test_heading_types_absent_is_schema_valid(extract_mod):
+    """Absent entirely (not even an empty list) -- the schema's own
+    back-compat baseline: every pre-#210 manifest, unmodified, must stay
+    schema-valid. (Also exercised implicitly by
+    test_baseline_manifest_is_schema_valid above -- named explicitly here
+    so a future required-ification of heading_types has a dedicated,
+    obviously-named regression lock.)"""
+    manifest = _baseline_manifest()
+    assert "heading_types" not in manifest, "sanity: the baseline fixture must not set it"
+
+    errors = extract_mod.validate_against_schema(manifest)
+
+    assert errors == [], f"an absent heading_types must be schema-valid; got: {errors}"
+
+
+def test_heading_types_valid_unique_string_array_is_schema_valid(extract_mod):
+    manifest = _baseline_manifest()
+    manifest["heading_types"] = ["CHAPTER", "SIMAN"]
+
+    errors = extract_mod.validate_against_schema(manifest)
+
+    assert errors == [], f"a valid non-empty unique string array must be schema-valid; got: {errors}"
+
+
+def test_heading_types_empty_string_item_fails_schema(extract_mod):
+    manifest = _baseline_manifest()
+    manifest["heading_types"] = ["CHAPTER", ""]
+
+    errors = extract_mod.validate_against_schema(manifest)
+
+    assert errors, "an empty-string item must fail the items.minLength:1 constraint"
+    combined = "\n".join(errors)
+    assert "heading_types" in combined, combined
+
+
+def test_heading_types_duplicate_items_fails_schema(extract_mod):
+    manifest = _baseline_manifest()
+    manifest["heading_types"] = ["CHAPTER", "CHAPTER"]
+
+    errors = extract_mod.validate_against_schema(manifest)
+
+    assert errors, "duplicate items must fail the uniqueItems constraint"
+    combined = "\n".join(errors)
+    assert "heading_types" in combined, combined
+    assert "unique" in combined.lower(), combined
+
+
+def test_undeclared_top_level_key_still_rejected(extract_mod):
+    """Adding heading_types as a new top-level property must not have
+    loosened the top-level additionalProperties:false gate for every OTHER
+    key -- a genuinely unrelated, undeclared top-level key must still be
+    rejected."""
+    manifest = _baseline_manifest()
+    manifest["totally_unexpected_key"] = "x"
+
+    errors = extract_mod.validate_against_schema(manifest)
+
+    assert errors, "an undeclared top-level key must still fail schema validation"
+    combined = "\n".join(errors)
+    assert "totally_unexpected_key" in combined, combined
+
+
+# ---------------------------------------------------------------------------
+# #210: declared-heading precedence over a block-mount verse claim.
+# assemble.py's _classify_kind checks heading_types ABOVE the block-mount
+# verse test, so a block that is BOTH a declared heading type AND carries a
+# block-mount verse claim classifies "heading" -- mirroring "HEAD" already
+# winning over a block-mount verse claim today. Unit-level (the pure
+# classify function itself), imported directly from the real assemble.py
+# (see _load_assemble_module above) -- no durable_root fixture needed since
+# _classify_kind touches no filesystem state.
+# ---------------------------------------------------------------------------
+
+def test_declared_heading_type_wins_over_block_mount_verse_claim(assemble_mod):
+    claims = [{"vid": "v1"}]
+    verse_store_by_vid = {"v1": {"mount": "block"}}
+
+    kind = assemble_mod._classify_kind(
+        "CHAPTER", claims, verse_store_by_vid, heading_types=frozenset({"CHAPTER"}),
+    )
+
+    assert kind == "heading", (
+        "a declared-heading-type block that ALSO carries a block-mount "
+        "verse claim must classify heading, not verse"
+    )
+
+
+def test_same_block_mount_verse_claim_classifies_verse_when_type_not_declared_heading(assemble_mod):
+    """Companion regression-lock, isolating heading_types as the sole cause
+    of the override above: the identical block-mount verse claim, with
+    heading_types either absent or simply not naming this block's type,
+    classifies verse -- exactly today's pre-#210 behavior."""
+    claims = [{"vid": "v1"}]
+    verse_store_by_vid = {"v1": {"mount": "block"}}
+
+    kind = assemble_mod._classify_kind("CHAPTER", claims, verse_store_by_vid)
+
+    assert kind == "verse"

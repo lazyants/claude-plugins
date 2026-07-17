@@ -105,7 +105,8 @@ load-bearing: every script or template that touches a draft file
 (`validate_draft.py`, `draft_ready.py`, `ledger_update.py`, `final_audit.py`,
 `draft_sha1.py`, `assemble.py`, `ledger_merge.py`, `select_segments.py`,
 `codex_job.py`, `review_TASK.template.md`, `translate_TASK.template.md`,
-`mass-translate-wf.template.js`) must use the exact unsuffixed path — a
+`mass-translate-wf.template.js`, `validate_assembled.py` (1.6.0, default
+scope only)) must use the exact unsuffixed path — a
 ported script hardcoding `.ru.draft.json` is a bug, not a style choice.
 `review_path(seg)` additionally requires the `segments/` prefix (matches the
 real reference exactly — never a top-level `${durable_root}/{seg}.review.json`).
@@ -119,7 +120,7 @@ READS the on-disk `findings[]`, see §5), plus `review_artifact_check.py`,
 `review_ready.py`, `ledger_merge.py`, and `ledger_update.py` (the last for the
 `reviewed_draft_sha1`/`dispatch_token` binding check) READ it.
 
-`tests/draft_path_convention.test.py` instantiates every one of the **twelve**
+`tests/draft_path_convention.test.py` instantiates every one of the **thirteen**
 draft-path call sites and the **ten** review-path call sites against a fixture
 and asserts the exact path, failing loudly and naming the offender if any one
 of them drifts. (The regression-lock test counts writer+reader SITES, so its

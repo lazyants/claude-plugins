@@ -28,50 +28,53 @@ hand-typed), so a fragment's recorded cache_key is always self-consistent
 with whatever the current durable_root's profile/segpack/scripts actually
 hash to.
 
-## Two known, confirmed integration bugs (see the dedicated tests below)
+## Two integration behaviors locked in by dedicated tests below
 
 Building this fixture chain for real (rather than stubbing select_segments.py)
-surfaced two genuine, confirmed bugs in final_audit.py itself. Per this
-project's own testing discipline (see e.g. schema_literal_drift.test.py /
-prompt_contract_drift.test.py, which exist specifically to catch this class
-of issue), these are reported here as failing, un-weakened assertions of the
-CORRECT documented behavior -- not worked around or hidden.
+originally surfaced two integration bugs in final_audit.py, both since
+fixed in the shipped script; the dedicated tests below now assert the
+CORRECT, fixed behavior directly (not a padded-around workaround), locking
+it in as a regression guard:
 
-1. **The ``--allow-empty`` bug.** final_audit.py's whole-project completeness
-   gate invokes ``select_segments.py`` with NO arguments at all. But
+1. **``--allow-empty``.** final_audit.py's whole-project completeness gate
+   invokes ``select_segments.py`` WITH ``--allow-empty`` specifically because
    ``select_segments.py``'s own documented, BY-DESIGN default behavior (see
    ``select_segments.test.py::test_default_run_fatals_on_empty_segs_unless_allow_empty``)
    is to FATAL (``success: false``, exit 1) whenever its emitted ``SEGS`` list
-   comes up empty, unless ``--allow-empty`` is passed -- a guard against a
-   silently-no-op W5 mass-translate DISPATCH batch. ``SEGS`` is empty
-   precisely when every manifest segment is already classified ``reusable``
-   -- i.e. *exactly* the fully-converged project state W7's completeness
-   gate exists to report as ``project_complete: true``. Because
-   ``final_audit.py`` never passes ``--allow-empty``, that one case crashes
-   at exit 2 (``run_completeness_gate()``'s own ``_fatal()``) before any JSON
-   summary is ever printed -- the exact opposite of the documented contract.
-   Most tests below sidestep this pre-existing bug with an inert, always-
-   ``not_started`` padding segment (see ``PAD_SEG``) so they can exercise the
-   checks they actually target; the dedicated test near the bottom asserts
-   the CORRECT, documented behavior directly (no padding) and is expected to
-   currently FAIL against the real script, with the failure message spelling
-   out the bug and its one-line fix.
+   comes up empty -- a guard against a silently-no-op W5 mass-translate
+   DISPATCH batch. ``SEGS`` is empty precisely when every manifest segment
+   is already classified ``reusable`` -- i.e. *exactly* the fully-converged
+   project state W7's completeness gate exists to report as
+   ``project_complete: true``. Most tests below still pad with an inert,
+   always-``not_started`` segment (see ``PAD_SEG``) purely to isolate the
+   check they actually target from the completeness gate's own exit code
+   (#208, see below) -- not to work around this bug, which no longer exists.
+   The dedicated test near the bottom exercises the fully-converged,
+   no-padding case directly.
 
-2. **The frontback ``status`` shape bug.** ``build_frontback_coverage()``
-   assigns ``status = classification_by_seg.get(fb_id)`` directly for a
-   ``translate``-decision entry. But ``classification_by_seg`` is
-   ``select_segments.py``'s own ``classification`` map, whose per-segment
-   VALUE is itself a dict (e.g. ``{"category": "reusable"}`` or
-   ``{"category": "stale", "stale_reason": [...]}"``), never a bare string --
-   see select_segments.py's own module docstring: ``"classification":
-   {seg: {...}}``. final_audit.py never extracts ``.get("category")`` from
-   it, so ``status`` ends up as the whole nested dict, directly violating
-   final-audit-summary.schema.json's own requirement that
-   ``frontback_coverage[].status`` be a plain string (or null) -- confirmed
-   empirically: ``test_frontback_coverage_translate_vs_regenerate_omit``
-   below currently fails schema validation with ``status`` holding
-   ``{'category': 'reusable'}`` instead of ``'reusable'``. Fix: ``status =
-   classification_by_seg.get(fb_id, {}).get("category")``.
+2. **The frontback ``status`` shape.** ``build_frontback_coverage()`` must
+   unwrap ``classification_by_seg``'s per-segment VALUE -- itself a dict
+   (e.g. ``{"category": "reusable"}``), never a bare string, per
+   select_segments.py's own module docstring: ``"classification": {seg:
+   {...}}`` -- down to the plain classification CATEGORY string via
+   ``.get("category")``, matching final-audit-summary.schema.json's own
+   requirement that ``frontback_coverage[].status`` be a plain string (or
+   null). ``test_frontback_coverage_translate_vs_regenerate_omit`` below
+   locks this in directly.
+
+## #208: whole-project completeness now gates the exit code
+
+``run_completeness_gate()``'s ``project_complete`` used to be purely
+informational -- ``main()`` exited ``1 if hard_failures else 0`` regardless
+of it, so an incomplete project (segments still ``not_started``/
+``recoverable``/``stale``/``blocked_needs_regeneration``/
+``human_escalation``) exited ``0``, the same as a genuinely finished one.
+final_audit.py now exits ``completeness_exit_code(hard_failures,
+project_complete)``: ``0`` only when both hard checks are clean AND the
+project is complete, ``1`` if any hard check fails (unchanged priority),
+``3`` if hard checks are clean but the project is not yet complete. See the
+dedicated tests below (module-docstring section 13 onward) plus the direct
+unit test of ``completeness_exit_code`` itself.
 
 Coverage (per the test's own enumeration):
   - hard check 1 (coverage_failures) via a real re-invocation of
@@ -84,13 +87,17 @@ Coverage (per the test's own enumeration):
     canon.json self-consistency, link-graph sentinel bijection,
     foreign-remainder stopword-density scan, verse-structure per
     verse_policy.mode);
-  - the whole-project completeness gate, both directions (incomplete when a
-    not_started segment exists; the documented-but-currently-broken
-    "complete" case);
+  - the whole-project completeness gate (#208): incomplete via each of its
+    five non-reusable categories (not_started, human_escalation,
+    recoverable, stale, blocked_needs_regeneration) each exiting exactly 3;
+    the fully-converged "complete" case exiting 0; a hard defect on top of
+    an incomplete project still exiting exactly 1 (priority preserved); and
+    a direct unit test of the underlying completeness_exit_code() helper;
   - the frontback coverage report (translate-decision cross-referenced to
     segment classification; regenerate/omit reported by decision alone).
 """
 import hashlib
+import importlib.util
 import json
 import shutil
 import subprocess
@@ -434,13 +441,63 @@ def assert_schema_valid(summary: dict) -> None:
     jsonschema.validate(instance=summary, schema=FINAL_AUDIT_SUMMARY_SCHEMA)
 
 
+def write_bare_ledger_fragment(root: Path, seg: str, status: str, reason: str | None = None) -> None:
+    """Writes a runs/ledger.d/{seg}.json fragment directly, bypassing
+    add_converged_segment()'s segpack/draft/cache_key machinery entirely --
+    for the classify_segment() (select_segments.py) categories that never
+    read a segpack at all: human_escalation (fragment status 'blocked'/
+    'non_converged') and recoverable (any other non-terminal status, e.g.
+    'pending'/'in_progress'). No segments/*.json file is written for `seg`
+    -- these statuses are BY DESIGN never 'converged' on disk, so
+    final_audit.py's own load_converged_fragments() (status == 'converged'
+    only) never picks them up for the two hard checks; they only ever
+    surface through the whole-project completeness gate.
+    """
+    fragment = {"timestamp": "2026-01-01T00:00:00+00:00", "status": status}
+    if reason is not None:
+        fragment["reason"] = reason
+    ledger_d = root / "runs" / "ledger.d"
+    ledger_d.mkdir(parents=True, exist_ok=True)
+    (ledger_d / f"{seg}.json").write_text(json.dumps(fragment, ensure_ascii=False), encoding="utf-8")
+
+
+def corrupt_cache_key_field(root: Path, seg: str, field: str, bogus_value: str = "corrupted-for-test") -> None:
+    """Mutates an existing converged ledger fragment's stored
+    cache_key[field] in place, leaving status/reviewed_draft_sha1/every
+    other field untouched -- the sole mechanism these tests use to force
+    select_segments.py's completeness-gate reclassification (stale /
+    blocked_needs_regeneration) away from 'reusable' without disturbing
+    final_audit.py's own hard checks (which never look at cache_key at
+    all, only at the draft's structural validity and its
+    reviewed_draft_sha1 match)."""
+    frag_path = root / "runs" / "ledger.d" / f"{seg}.json"
+    fragment = json.loads(frag_path.read_text(encoding="utf-8"))
+    fragment["cache_key"][field] = bogus_value
+    frag_path.write_text(json.dumps(fragment, ensure_ascii=False), encoding="utf-8")
+
+
+def load_final_audit_module():
+    """Loads the REAL final_audit.py in-process (never a copy), purely to
+    unit-test its one pure, durable-root-independent helper,
+    completeness_exit_code() -- every other test in this file exercises the
+    full subprocess/self-anchoring path instead (see this file's own
+    docstring). Same importlib.util pattern bootstrap_names.test.py uses
+    for its own standalone (non-package) script under test."""
+    spec = importlib.util.spec_from_file_location("final_audit_under_test", FINAL_AUDIT_SRC)
+    assert spec is not None and spec.loader is not None, f"could not load spec for {FINAL_AUDIT_SRC}"
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
 # ---------------------------------------------------------------------------
 # 1. Clean baseline: hard checks AND all four WARN checks clean.
 # ---------------------------------------------------------------------------
 
 
 def test_clean_project_all_checks_pass(tmp_path):
-    root = make_durable_root(tmp_path, seg_ids=("seg01", PAD_SEG))
+    root = make_durable_root(tmp_path, seg_ids=("seg01",))
     add_converged_segment(root, "seg01", clean_segpack(), clean_draft())
 
     result = run_final_audit(root)
@@ -546,7 +603,7 @@ def test_stale_review_survives_non_canonical_draft_bytes(tmp_path):
     misclassify this as a stale_review_failures hard failure even though
     nothing about the draft actually changed since review.
     """
-    root = make_durable_root(tmp_path, seg_ids=("seg01", PAD_SEG))
+    root = make_durable_root(tmp_path, seg_ids=("seg01",))
     draft = clean_draft()
     raw_draft_bytes = json.dumps(
         {"dispatch_token": "some-run-token:seg01", **draft}, indent=2, ensure_ascii=False
@@ -608,7 +665,7 @@ def test_hard_failures_rollup_equals_sum_across_two_segments(tmp_path):
 
 
 def test_warn_glossary_diff_cross_segment_drift(tmp_path):
-    root = make_durable_root(tmp_path, seg_ids=("seg01", "seg02", PAD_SEG))
+    root = make_durable_root(tmp_path, seg_ids=("seg01", "seg02"))
     add_converged_segment(
         root, "seg01", clean_segpack(seg="seg01"),
         clean_draft(seg="seg01", names=[{"source_form": "Jean", "target_form": "John"}]),
@@ -644,7 +701,7 @@ def test_warn_glossary_diff_canon_self_inconsistency(tmp_path):
             },
         }
     }
-    root = make_durable_root(tmp_path, seg_ids=("seg01", PAD_SEG), canon=canon)
+    root = make_durable_root(tmp_path, seg_ids=("seg01",), canon=canon)
     add_converged_segment(root, "seg01", clean_segpack(), clean_draft())
 
     result = run_final_audit(root)
@@ -670,7 +727,7 @@ def test_warn_glossary_diff_canon_self_inconsistency(tmp_path):
 
 
 def test_warn_link_graph_orphan_footnote(tmp_path):
-    root = make_durable_root(tmp_path, seg_ids=("seg01", PAD_SEG))
+    root = make_durable_root(tmp_path, seg_ids=("seg01",))
     segpack = clean_segpack(extra_footnotes=[{"n": 2, "source_text": "Une autre note."}])
     draft = clean_draft(extra_footnotes={"2": "Another translated note, never anchored."})
     add_converged_segment(root, "seg01", segpack, draft)
@@ -695,7 +752,7 @@ def test_warn_link_graph_orphan_footnote(tmp_path):
 
 
 def test_warn_foreign_remainder_stopword_run(tmp_path):
-    root = make_durable_root(tmp_path, seg_ids=("seg01", PAD_SEG))
+    root = make_durable_root(tmp_path, seg_ids=("seg01",))
     p1_text = f"Some translated prose with a note {FN_PH} attached. Voici de la le texte."
     add_converged_segment(root, "seg01", clean_segpack(), clean_draft(p1_text=p1_text))
 
@@ -713,7 +770,7 @@ def test_warn_foreign_remainder_stopword_run(tmp_path):
 
 
 def test_warn_foreign_remainder_stopword_run_with_punctuation(tmp_path):
-    root = make_durable_root(tmp_path, seg_ids=("seg01", PAD_SEG))
+    root = make_durable_root(tmp_path, seg_ids=("seg01",))
     p1_text = f"Some translated prose with a note {FN_PH} attached. Voici de, la, le texte."
     add_converged_segment(root, "seg01", clean_segpack(), clean_draft(p1_text=p1_text))
 
@@ -733,7 +790,7 @@ def test_warn_foreign_remainder_stopword_run_markdown_emphasis(tmp_path):
     # "_" is a \w word character, so a naive \W-based outer-punctuation strip
     # never unwraps Markdown italic emphasis -- a stopword run adorned with
     # it must still be detected as such.
-    root = make_durable_root(tmp_path, seg_ids=("seg01", PAD_SEG))
+    root = make_durable_root(tmp_path, seg_ids=("seg01",))
     p1_text = f"Some translated prose with a note {FN_PH} attached. _de_ _la_ _le_ texte."
     add_converged_segment(root, "seg01", clean_segpack(), clean_draft(p1_text=p1_text))
 
@@ -759,7 +816,7 @@ def test_warn_foreign_remainder_nfd_combining_mark_not_stripped(tmp_path):
     # base letter so this never produces a false-positive foreign-remnant.
     root = make_durable_root(
         tmp_path,
-        seg_ids=("seg01", PAD_SEG),
+        seg_ids=("seg01",),
         stopwords=DEFAULT_STOPWORDS + ["si"],
     )
     nfd_si = unicodedata.normalize("NFD", "Sí")
@@ -794,7 +851,7 @@ def test_warn_foreign_remainder_nfd_stopword_matches_nfd_document(tmp_path):
     assert len(nfd_stopword) == 3, "fixture assumption: NFD 'sí' decomposes to 3 codepoints"
     root = make_durable_root(
         tmp_path,
-        seg_ids=("seg01", PAD_SEG),
+        seg_ids=("seg01",),
         stopwords=DEFAULT_STOPWORDS + [nfd_stopword],
     )
     nfd_si = unicodedata.normalize("NFD", "Sí")
@@ -835,7 +892,7 @@ def test_warn_foreign_remainder_nfd_document_matches_nfc_stopword(tmp_path):
     assert len(nfc_stopword) == 2, "fixture assumption: NFC 'sí' is 2 codepoints (s + í)"
     root = make_durable_root(
         tmp_path,
-        seg_ids=("seg01", PAD_SEG),
+        seg_ids=("seg01",),
         stopwords=DEFAULT_STOPWORDS + [nfc_stopword],
     )
     nfd_si = unicodedata.normalize("NFD", "Sí")
@@ -868,7 +925,7 @@ def test_warn_foreign_remainder_nfd_document_matches_nfc_stopword(tmp_path):
 
 
 def test_warn_verse_structure_missing_source_text(tmp_path):
-    root = make_durable_root(tmp_path, seg_ids=("seg01", PAD_SEG))
+    root = make_durable_root(tmp_path, seg_ids=("seg01",))
     segpack = clean_segpack(vblockA_source="")  # injected defect: no source text at all
     add_converged_segment(root, "seg01", segpack, clean_draft())
 
@@ -897,7 +954,7 @@ def test_warn_verse_structure_missing_source_text(tmp_path):
 
 
 def test_warn_verse_structure_paste_duplicate_field(tmp_path):
-    root = make_durable_root(tmp_path, seg_ids=("seg01", PAD_SEG), verse_mode="skip")
+    root = make_durable_root(tmp_path, seg_ids=("seg01",), verse_mode="skip")
     segpack = {
         "seg": "seg01",
         "blocks": [{"id": "vblockA", "order_index": 0, "source_html": "Ligne un\nLigne deux"}],
@@ -943,11 +1000,13 @@ def test_warn_verse_structure_paste_duplicate_field(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# 10. Whole-project completeness gate, incomplete direction: a genuinely
-#     not_started segment (no fragment at all) keeps project_complete false,
-#     with completeness_counts naming exactly which category it fell into.
-#     This is the SAME real select_segments.py -> ledger_merge.py ->
-#     cache_key.py chain final_audit.py invokes in production.
+# 10. Whole-project completeness gate, incomplete direction (#208): a
+#     genuinely not_started segment (no fragment at all) keeps
+#     project_complete false, with completeness_counts naming exactly which
+#     category it fell into, and MUST fail-closed at exit code 3 -- distinct
+#     from 0 (complete) and 1 (hard defects in converged drafts). This is the
+#     SAME real select_segments.py -> ledger_merge.py -> cache_key.py chain
+#     final_audit.py invokes in production.
 # ---------------------------------------------------------------------------
 
 
@@ -958,9 +1017,11 @@ def test_completeness_gate_project_incomplete_when_not_started_present(tmp_path)
 
     result = run_final_audit(root)
 
-    assert result.returncode == 0, (
-        f"an incomplete project is not itself a hard failure -- only "
-        f"seg01 (clean) is converged, so hard checks must stay clean:\n{result.stderr}"
+    assert result.returncode == 3, (
+        f"an incomplete project is not itself a hard failure (hard_failures "
+        f"must stay 0 -- only seg01, clean, is converged) but MUST fail-"
+        f"closed with the dedicated incomplete exit code 3, distinct from "
+        f"both 0 (fully complete) and 1 (hard defects):\n{result.stderr}"
     )
     summary = parse_summary(result)
     assert_schema_valid(summary)
@@ -981,16 +1042,11 @@ def test_completeness_gate_project_incomplete_when_not_started_present(tmp_path)
 #     the SAME select_segments.py classification computed for the
 #     completeness gate; regenerate/omit entries are reported by decision
 #     alone (status is always null for them, regardless of any segment
-#     state).
-#
-#     CONFIRMED BUG (see this file's module docstring, bug #2): asserts the
-#     CORRECT, schema-documented shape -- status is the plain classification
-#     CATEGORY STRING ("reusable") for a translate-decision entry. This
-#     currently FAILS: final_audit.py's build_frontback_coverage() stores
-#     select_segments.py's whole per-segment classification DICT
-#     (e.g. {"category": "reusable"}) as status instead of extracting
-#     .get("category"), which both the schema-validation assertion just
-#     above and the literal list-equality assertion below catch.
+#     state). Locks in the plain classification CATEGORY STRING shape (see
+#     this file's module docstring, item 2) -- final_audit.py's
+#     build_frontback_coverage() must unwrap select_segments.py's per-segment
+#     classification DICT down to .get("category"), never store the dict
+#     verbatim (final-audit-summary.schema.json requires a plain string).
 # ---------------------------------------------------------------------------
 
 
@@ -1000,39 +1056,28 @@ def test_frontback_coverage_translate_vs_regenerate_omit(tmp_path):
         {"id": "FRONTBACK:cover", "decision": "regenerate"},
         {"id": "FRONTBACK:toc", "decision": "omit"},
     ]
-    root = make_durable_root(tmp_path, seg_ids=("seg01", PAD_SEG), frontback=frontback)
+    root = make_durable_root(tmp_path, seg_ids=("seg01",), frontback=frontback)
     add_converged_segment(root, "seg01", clean_segpack(), clean_draft())
 
     result = run_final_audit(root)
 
     assert result.returncode == 0
     summary = parse_summary(result)
-    # assert_schema_valid() alone already raises jsonschema.ValidationError
-    # here, naming the offending 'status' value -- see this file's module
-    # docstring (bug #2) and the test's own docstring above for the full
-    # explanation and one-line fix.
     assert_schema_valid(summary)
     assert summary["frontback_coverage"] == [
         {"id": "seg01", "decision": "translate", "status": "reusable"},
         {"id": "FRONTBACK:cover", "decision": "regenerate", "status": None},
         {"id": "FRONTBACK:toc", "decision": "omit", "status": None},
-    ], (
-        "CONFIRMED BUG in final_audit.py's build_frontback_coverage(): "
-        "'status' for a translate-decision entry must be the plain "
-        "classification category STRING (e.g. 'reusable'), per "
-        "final-audit-summary.schema.json -- but the real script stores "
-        "select_segments.py's whole per-segment classification DICT "
-        "verbatim instead of extracting .get('category'). Fix: status = "
-        "classification_by_seg.get(fb_id, {}).get('category').\n"
-        f"actual frontback_coverage: {summary.get('frontback_coverage')!r}"
-    )
+    ]
 
 
 # ---------------------------------------------------------------------------
-# 12. Whole-project completeness gate, COMPLETE direction -- documents a
-#     CONFIRMED, currently-live integration bug (see this file's module
-#     docstring). This asserts the CORRECT, spec-documented behavior and is
-#     expected to presently FAIL against final_audit.py as shipped.
+# 12. Whole-project completeness gate, COMPLETE direction: every manifest
+#     segment converged and fully matching -> select_segments.py classifies
+#     all "reusable" -> its own default emitted SEGS is EMPTY -- the
+#     fully-converged project state the completeness gate exists to report
+#     as project_complete: true, and #208's completeness_exit_code() must
+#     still exit 0 for it (the one case where "incomplete" does NOT apply).
 # ---------------------------------------------------------------------------
 
 
@@ -1048,23 +1093,9 @@ def test_completeness_gate_reports_project_complete_true_when_all_reusable(tmp_p
     result = run_final_audit(root)
 
     assert result.returncode == 0, (
-        "CONFIRMED BUG in final_audit.py's run_completeness_gate(): it "
-        "invokes select_segments.py with NO arguments. select_segments.py's "
-        "own documented, by-design default behavior (see "
-        "select_segments.test.py::"
-        "test_default_run_fatals_on_empty_segs_unless_allow_empty) is to "
-        "FATAL whenever its emitted SEGS list is empty, unless --allow-empty "
-        "is passed -- a guard meant for a silently-no-op W5 DISPATCH batch. "
-        "SEGS is empty precisely when every manifest segment already "
-        "classifies 'reusable' -- i.e. exactly the fully-converged project "
-        "state this gate exists to report as project_complete=true (see "
-        "final-audit-summary.schema.json's own project_complete<->"
-        "completeness_counts invariant). Because final_audit.py never "
-        "passes --allow-empty, that one case crashes at exit 2 "
-        "(run_completeness_gate()'s own _fatal()) before any JSON summary "
-        "is ever printed -- the opposite of the documented contract. Fix: "
-        "pass '--allow-empty' when final_audit.py invokes select_segments.py.\n"
-        f"actual rc={result.returncode}\nstdout={result.stdout!r}\nstderr:\n{result.stderr}"
+        f"a fully-converged project must exit 0 -- hard checks clean AND "
+        f"project_complete=true:\nrc={result.returncode}\n"
+        f"stdout={result.stdout!r}\nstderr:\n{result.stderr}"
     )
     summary = parse_summary(result)
     assert_schema_valid(summary)
@@ -1077,6 +1108,172 @@ def test_completeness_gate_reports_project_complete_true_when_all_reusable(tmp_p
         "blocked_needs_regeneration": 0,
         "human_escalation": 0,
     }
+
+
+# ---------------------------------------------------------------------------
+# 13. #208 fixture A: zero converged / all not_started. Asserts the EXACT
+#     exit code -- exit 2 (fatal; many run_completeness_gate() paths crash
+#     there) would false-satisfy a bare `!= 0` check, so this locks 3
+#     specifically, distinguishing "incomplete" from "environment/usage
+#     error".
+# ---------------------------------------------------------------------------
+
+
+def test_completeness_gate_zero_converged_all_not_started_exits_3(tmp_path):
+    root = make_durable_root(tmp_path, seg_ids=("seg01", "seg02"))
+    # No add_converged_segment call at all -- both segments are genuinely
+    # not_started (no ledger fragment whatsoever).
+
+    result = run_final_audit(root)
+
+    assert result.returncode == 3, (
+        f"zero converged segments (all not_started) must exit exactly 3, "
+        f"never 0 and never the unrelated fatal exit 2:\n"
+        f"rc={result.returncode}\nstdout={result.stdout!r}\nstderr:\n{result.stderr}"
+    )
+    summary = parse_summary(result)
+    assert_schema_valid(summary)
+    assert summary["hard_failures"] == 0
+    assert summary["project_complete"] is False
+    assert summary["completeness_counts"]["not_started"] == 2
+
+
+# ---------------------------------------------------------------------------
+# 14. #208 fixture B: human_escalation among converged. One clean converged
+#     segment plus one 'blocked' (human_escalation) segment -- hard checks
+#     stay clean (a blocked fragment is never in final_audit.py's own
+#     converged set) but the project as a whole is incomplete.
+# ---------------------------------------------------------------------------
+
+
+def test_completeness_gate_human_escalation_among_converged_exits_3(tmp_path):
+    root = make_durable_root(tmp_path, seg_ids=("seg01", "seg02"))
+    add_converged_segment(root, "seg01", clean_segpack(), clean_draft())
+    write_bare_ledger_fragment(root, "seg02", status="blocked", reason="needs human review")
+
+    result = run_final_audit(root)
+
+    assert result.returncode == 3
+    summary = parse_summary(result)
+    assert_schema_valid(summary)
+    assert summary["hard_failures"] == 0
+    assert summary["project_complete"] is False
+    assert summary["completeness_counts"]["human_escalation"] == 1
+
+
+# ---------------------------------------------------------------------------
+# 15-17. #208 fixture C: recoverable / stale / blocked_needs_regeneration
+#     each among an otherwise-clean converged segment -- locks that the
+#     completeness gate is NOT gated on human_escalation alone (the
+#     "not just human_escalation" superset).
+# ---------------------------------------------------------------------------
+
+
+def test_completeness_gate_recoverable_among_converged_exits_3(tmp_path):
+    # classify_segment() treats any non-terminal ledger status (here
+    # 'in_progress') identically to not_started for dispatch purposes, but
+    # as its OWN 'recoverable' category.
+    root = make_durable_root(tmp_path, seg_ids=("seg01", "seg02"))
+    add_converged_segment(root, "seg01", clean_segpack(), clean_draft())
+    write_bare_ledger_fragment(root, "seg02", status="in_progress")
+
+    result = run_final_audit(root)
+
+    assert result.returncode == 3
+    summary = parse_summary(result)
+    assert_schema_valid(summary)
+    assert summary["hard_failures"] == 0
+    assert summary["project_complete"] is False
+    assert summary["completeness_counts"]["recoverable"] == 1
+
+
+def test_completeness_gate_stale_among_converged_exits_3(tmp_path):
+    # seg02 is genuinely 'converged' on disk (final_audit.py's own hard
+    # checks see a fully valid, sha1-matching draft -- hard_failures stays
+    # 0), but its ledger fragment's stored cache_key has drifted on a
+    # NON-derivation field, so select_segments.py's completeness gate
+    # reclassifies it 'stale' at merge time.
+    root = make_durable_root(tmp_path, seg_ids=("seg01", "seg02"))
+    add_converged_segment(root, "seg01", clean_segpack(), clean_draft())
+    add_converged_segment(root, "seg02", clean_segpack(seg="seg02"), clean_draft(seg="seg02"))
+    corrupt_cache_key_field(root, "seg02", "prompt_hash")
+
+    result = run_final_audit(root)
+
+    assert result.returncode == 3
+    summary = parse_summary(result)
+    assert_schema_valid(summary)
+    assert summary["hard_failures"] == 0, (
+        f"a cache_key drift alone must not itself fail either hard check -- "
+        f"the draft on disk is still structurally valid and still matches "
+        f"its own reviewed_draft_sha1:\n{result.stderr}"
+    )
+    assert summary["project_complete"] is False
+    assert summary["completeness_counts"]["stale"] == 1
+
+
+def test_completeness_gate_blocked_needs_regeneration_among_converged_exits_3(tmp_path):
+    # Like the stale case above, but the drifted cache_key field is a
+    # DERIVATION-state field (source_extraction_hash) that the segpack's
+    # own generation_hashes hasn't caught up with -- select_segments.py
+    # reclassifies this 'blocked_needs_regeneration', not plain 'stale'.
+    root = make_durable_root(tmp_path, seg_ids=("seg01", "seg02"))
+    add_converged_segment(root, "seg01", clean_segpack(), clean_draft())
+    add_converged_segment(root, "seg02", clean_segpack(seg="seg02"), clean_draft(seg="seg02"))
+    corrupt_cache_key_field(root, "seg02", "source_extraction_hash")
+
+    result = run_final_audit(root)
+
+    assert result.returncode == 3
+    summary = parse_summary(result)
+    assert_schema_valid(summary)
+    assert summary["hard_failures"] == 0
+    assert summary["project_complete"] is False
+    assert summary["completeness_counts"]["blocked_needs_regeneration"] == 1
+
+
+# ---------------------------------------------------------------------------
+# 18. #208 fixture E: hard_failures keeps priority over incompleteness -- a
+#     converged segment with a genuine coverage defect, alongside a second,
+#     genuinely not_started segment (project incomplete either way), must
+#     still exit exactly 1, never 3.
+# ---------------------------------------------------------------------------
+
+
+def test_completeness_gate_hard_failure_priority_over_incomplete_exits_1(tmp_path):
+    root = make_durable_root(tmp_path, seg_ids=("seg01", "seg02"))
+    draft = clean_draft()
+    draft["footnotes"]["1"] = ""  # injected coverage defect
+    add_converged_segment(root, "seg01", clean_segpack(), draft)
+    # seg02 deliberately gets no fragment at all -> not_started, keeping the
+    # project incomplete on top of the hard defect.
+
+    result = run_final_audit(root)
+
+    assert result.returncode == 1, (
+        f"a hard defect on a converged segment must win over incompleteness "
+        f"-- exit code stays 1, never 3:\nrc={result.returncode}\n"
+        f"stderr:\n{result.stderr}"
+    )
+    summary = parse_summary(result)
+    assert_schema_valid(summary)
+    assert summary["hard_failures"] == 1
+    assert summary["project_complete"] is False
+
+
+# ---------------------------------------------------------------------------
+# 19. Unit test: completeness_exit_code(hard_failures, project_complete) --
+#     the pure helper #208 introduces, over its full priority matrix.
+# ---------------------------------------------------------------------------
+
+
+def test_completeness_exit_code_matrix():
+    fa = load_final_audit_module()
+    assert fa.completeness_exit_code(hard_failures=0, project_complete=True) == 0
+    assert fa.completeness_exit_code(hard_failures=0, project_complete=False) == 3
+    assert fa.completeness_exit_code(hard_failures=1, project_complete=True) == 1
+    assert fa.completeness_exit_code(hard_failures=1, project_complete=False) == 1
+    assert fa.completeness_exit_code(hard_failures=5, project_complete=False) == 1
 
 
 if __name__ == "__main__":

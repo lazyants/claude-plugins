@@ -813,8 +813,12 @@ def _scan_verse_content_fnrefs(content, seg, block_id, vid,
 # ---------------------------------------------------------------------------
 
 
-def _classify_kind(raw_type: str, claims: list, verse_store_by_vid: dict) -> str:
-    if raw_type == "HEAD":
+def _classify_kind(raw_type: str, claims: list, verse_store_by_vid: dict,
+                    heading_types: frozenset = frozenset()) -> str:
+    # Declared-heading precedence (#210): a manifest-declared heading type
+    # wins even over a block-mount verse claim -- mirrors "HEAD" always
+    # winning today. Checked ABOVE the is_block_mount test below.
+    if raw_type == "HEAD" or raw_type in heading_types:
         return "heading"
     is_block_mount = any(
         verse_store_by_vid.get(c["vid"], {}).get("mount") == "block" for c in claims
@@ -872,6 +876,10 @@ def build_nodestream(profile: dict, manifest: dict, converged: dict) -> tuple:
     manifest_footnotes = manifest.get("footnotes") or []
     manifest_frontback = manifest.get("frontback") or []
     manifest_verse_store = (manifest.get("verse") or {}).get("store") or []
+    # #210: manifest-declared block types that classify as headings in
+    # addition to the always-heading built-in "HEAD" (empty by default --
+    # byte-identical to pre-#210 behavior when the manifest omits it).
+    heading_types = frozenset(manifest.get("heading_types") or ())
 
     footnote_entries_by_n = {}
     for fe in manifest_footnotes:
@@ -1013,7 +1021,7 @@ def build_nodestream(profile: dict, manifest: dict, converged: dict) -> tuple:
             medium = "html" if mb.get("source_html") is not None else "plain"
 
             claims = verses_by_parent.get(bid, [])
-            kind = _classify_kind(raw_type, claims, verse_store_by_vid)
+            kind = _classify_kind(raw_type, claims, verse_store_by_vid, heading_types)
 
             fnrefs, referenced_vids, block_nested_ns = _scan_and_validate_sentinels(
                 text,
