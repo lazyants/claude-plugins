@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.8.0 — 2026-07-18
+
+Opt-in source-anchored **appendix backlink integrity** for the Obsidian adapter — a `## Mentions` occurrence-index section in each entity note, derived from the *source* occurrence index instead of scanning translated prose. Closes the appendix defects found in the SSK vol.2 he→en audit: #206 (variant target renderings get no backlink), #207-a (distinct source forms sharing one `canonical_target_form` collapse to one owner). #207-b (one spelling = N referents) is surfaced for adjudication, not silently mis-attributed; the aggregated person-index page + `index_scope` routing are designed but deferred (see follow-ups).
+
+### Added
+
+- **`occurrence_targets.py`** — the source-anchored occurrence engine. `build(...)` returns `{eligible_by_source_form, unresolved_homonyms}`; eligibility (block / embedded-verse / footnote origins, resolved once, verse-renderability keyed on the source block's mount claim not node kind) lives here. Split source forms route to `unresolved_homonyms`; `sense_translated` proper names ARE indexed (source-anchoring links them safely where the inline linker cannot).
+- **`## Mentions` section** in Obsidian entity notes (opt-in `output.adapter_config.obsidian.mentions_section.enabled`, default false), wrapped in reserved `<!-- lt:mentions:begin/end -->` markers. `assemble.py` computes the occurrence data (it holds the manifest) and rides it inside the NodeStream; the 4-arg adapter contract is unchanged. Inline `#207-a` collision de-linking is enabled with the same flag.
+- **`validate_backlinks.py`** — an advisory (non-blocking) W9 gate: Mentions-section coverage (the sole warning source) + a native-inline-backlink diagnostic. Runs after `diff_rendered_output.py`; exit 1 is advisory, exit 2 halts.
+
+### Cache / migration
+
+- **No converged segment re-translates.** Nothing added enters `PLUGIN_BUNDLE_MEMBERS` or the 15-field per-segment cache key, and the new `mentions_section` flag is outside `profile_semantics_hash`.
+- One schema file changes (`profile.schema.json` gains the opt-in flag), so an **in-flight, not-yet-converged** mass/glossary run started before the upgrade resumes under a fresh RUN_ID (converged segments still reused) — cache-reuse is unaffected.
+- The feature is **opt-in and byte-identical when off**: existing projects render exactly as 1.7.0 until they set the flag; a project that enables it re-accepts its durable-local `.baseline`.
+
 ## 1.7.0 — 2026-07-17
 
 Delivery-gate hardening on the assemble/audit path, closing three real gaps found during the SSK vol.2 he→en remediation. Closes #208, #210, #202.

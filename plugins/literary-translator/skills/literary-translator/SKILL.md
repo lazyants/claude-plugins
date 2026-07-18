@@ -981,6 +981,23 @@ gate — there is no separate item-count check alongside it (structural
 completeness is `validate_assembled.py`'s distinct concern above, checked
 before this step ever runs).
 
+Then — ONLY when `output.target: obsidian` AND
+`output.adapter_config.obsidian.mentions_section.enabled: true` — run
+`scripts/validate_backlinks.py` as an **advisory** appendix-integrity gate,
+AFTER `diff_rendered_output.py`. It re-derives the source-anchored occurrence
+universe and checks that every index-eligible entity's `## Mentions` section
+covers its occurrences (metric 1, the sole warning source), plus a
+native-inline-backlink diagnostic and collision/unresolved-homonym reports
+(metric 2, exit-neutral). Unlike the hard gates above, its **exit `1` is
+ADVISORY — log the warnings and CONTINUE W9** (it never blocks assembly);
+only exit `2` (unreadable/malformed input, e.g. a missing
+`out/.assembled/nodestream.json`) halts. When the flag is off or the target
+is not obsidian it short-circuits to `mentions_coverage.status: disabled`,
+exit `0`. The `## Mentions` section is a source-anchored occurrence index
+(mirroring the SSK `build_index.py` model) that supersedes the older
+"native backlinks are the occurrence index" stance for projects that opt in;
+see `references/output-target-adapters/obsidian.md`.
+
 ## Reference docs
 
 - `references/engine-loop.md` — R1, R6

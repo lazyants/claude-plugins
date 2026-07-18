@@ -380,13 +380,23 @@ def test_first_occurrence_per_block_only_the_first_mention_is_wrapped(tmp_path):
 
 def test_shared_canonical_target_form_tiebreak_prefers_shorter_source_form(tmp_path):
     """Documented interpretation call #1 (see module docstring): shortest
-    source_form wins when two entries share one canonical_target_form."""
+    source_form wins when two entries share one canonical_target_form.
+
+    D3 (#207-a, lt-appendix-backlink-integrity): this is the
+    `collision_delink=False` code path -- exercised here under a REAL
+    `output.target: "obsidian"` profile (the shape dispatch_adapter()
+    actually hands this renderer) with `mentions_section` left at its
+    off-by-default state, so a silent tiebreak-winner regression would
+    still be caught even though the Mentions feature itself is inert.
+    Flag-ON collision de-linking (both owners removed, no tiebreak winner)
+    is covered separately in render_obsidian_occindex.test.py."""
     canon = make_canon({
         "Ioann_src": canon_entry("Ioann_src", "Джон"),  # 9 chars
         "Yan_src": canon_entry("Yan_src", "Джон"),       # 7 chars -- shorter
     })
     ns = make_nodestream([make_node("p1", "seg01", "Джон пришёл домой.")])
     profile = make_profile(folders={"person": "people"})
+    profile["output"]["target"] = "obsidian"  # mentions_section left unset -> collision_delink=False (default)
 
     out_dir, manifest = render_into(tmp_path, ns, canon, profile)
     body_matches = find_file_with_content(
