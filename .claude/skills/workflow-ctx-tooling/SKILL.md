@@ -1,6 +1,6 @@
 ---
 name: workflow-ctx-tooling
-description: Traps when authoring or debugging a Workflow script or using the context-mode (ctx) tools — ctx_execute_file/ctx_execute confinement to the project root, the Workflow background-task .output wrapper shape, apostrophes in single-quoted prompt prose breaking the strict pre-run parse, and multi-agent Workflow output you must not trust at face value (schema agents failing to null/placeholder, spread-makes-null-truthy, and investigators reading a stale copy). Read when a Workflow is rejected before agents run, a ctx tool refuses a path, an agent slot comes back empty/garbage, or you are about to bank a Workflow's recommendation.
+description: Traps when authoring or debugging a Workflow script or using the context-mode (ctx) tools — ctx_execute_file/ctx_execute confinement to the project root, the Workflow background-task .output wrapper shape, apostrophes in single-quoted prompt prose breaking the strict pre-run parse, a prompt array passed to agent() without .join making the agent improvise from its schema and return confident garbage, args arriving JSON-encoded so the script dies before dispatch, and multi-agent Workflow output you must not trust at face value (schema agents failing to null/placeholder, spread-makes-null-truthy, and investigators reading a stale copy). Read when a Workflow is rejected before agents run, a ctx tool refuses a path, an agent slot comes back empty/garbage, an agent reports its task message was empty, a synthesis contradicts the data it summarized, or you are about to bank a Workflow's recommendation.
 ---
 
 # Workflow + context-mode (ctx) tooling traps
@@ -54,6 +54,44 @@ Fixes, in order of preference:
 
 This is orthogonal to the confinement trap above: that one is about what a Workflow can READ; this
 one is about the script failing to PARSE at all.
+
+## `agent()` takes a STRING — an array silently becomes `[object Object]`
+
+`agent(prompt, opts)` does not type-check `prompt`. Forget the `.join('\n')` on a
+`[ '...', '...' ]` prompt array and the agent receives the stringified array — no error, no warning,
+the run completes "successfully". Mixed usage in one script is the realistic shape: the helper
+functions that build per-item prompts end in `.join('\n')`, while the hand-written one-off calls
+(the synthesizer, the judge, the critic) get the array literal inline and are easy to miss.
+
+**A promptless agent does NOT fail — it improvises, and schema-shaped output looks legitimate.**
+Given a `schema` but no usable instructions, the agent reconstructs a plausible task from the schema
+field names plus whatever it finds in the working directory, then returns a well-formed object.
+Verified 2026-07-18: a synthesizer whose prompt was `[object Object]` invented its own brief, ran
+real verification against the repo, and returned a confident `close_now: [#202, #210]` that
+**directly contradicted the 93 grounded agent results it was supposed to be summarizing** — results
+it had never seen. Banking that would have retired two live defects.
+
+- **Tell:** the agent says so in its own output — "my task message arrived empty (`[object]`)",
+  "I don't have a task yet", "I reconstructed the brief from the output schema". Read the returned
+  prose, not just the structured fields.
+- **Second tell:** the synthesis contradicts its own inputs. Any consolidating agent whose conclusion
+  disagrees with the per-item data it was fed never saw that data.
+- **Guard:** before launching, grep the script for `], {` — every `agent([...])` call site must be
+  `].join('\n'), {`. Cheaper than the round-trip.
+- **Recovery:** the per-agent results survive in `<transcriptDir>/journal.jsonl` (one
+  `{"type":"result",...}` line each). Reconcile them yourself in plain code rather than re-running,
+  then fix the `.join` and resume with `resumeFromRunId` — unchanged `(prompt, opts)` calls replay
+  from cache, so only the broken tail re-runs.
+
+## `args` can arrive JSON-encoded, not as an object
+
+Passing a JSON object as the tool's `args` may reach the script as a **string**, so `args.foo` is
+`undefined` and the run dies at the first access — instantly, before any agent dispatches. Defend at
+the top of every script that takes args:
+
+```js
+const A = typeof args === 'string' ? JSON.parse(args) : args
+```
 
 ## Don't trust a multi-agent Workflow's output at face value
 
