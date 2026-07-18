@@ -778,5 +778,45 @@ def test_lsr_inventory_scan_shared_prefix_stays_within_generous_bound():
     assert form not in names
 
 
+# ---------------------------------------------------------------------------
+# #225 -- a POINTED (niqqud) name_inventory form now surfaces under the mark-
+# inclusive tokenizer. Pre-#225 the pointed inventory form itself shattered
+# into one token per consonant, so its trie never matched the pointed source
+# and the name was missed entirely (both extractors); the offset span still
+# reconstructs the pointed surface form verbatim (occ_index contract).
+# ---------------------------------------------------------------------------
+POINTED_HEBREW_NAME = "מֹשֶׁה לֵייב"
+POINTED_HEBREW_TEXT = "ראה מֹשֶׁה לֵייב אתמול."
+
+
+def test_bootstrap_caseless_pointed_inventory_surfaces_full_name():
+    lang = bn_lang(name_inventory=[POINTED_HEBREW_NAME])
+    out = bn.extract_candidate_spans(POINTED_HEBREW_TEXT, lang)
+    by_name = {n: (s, e) for n, _m, s, e in out}
+    assert POINTED_HEBREW_NAME in by_name, f"pointed name missing from {sorted(by_name)}"
+    s, e = by_name[POINTED_HEBREW_NAME]
+    assert POINTED_HEBREW_TEXT[s:e] == POINTED_HEBREW_NAME
+
+
+def test_lsr_caseless_pointed_inventory_surfaces_full_name():
+    lang = lsr_lang(name_inventory=[POINTED_HEBREW_NAME])
+    out = lsr.extract_candidate_names(POINTED_HEBREW_TEXT, lang)
+    names = [n for n, _mid in out]
+    assert POINTED_HEBREW_NAME in names, f"pointed name missing from {names}"
+
+
+def test_caseless_pointed_inventory_parity_between_both_extractors():
+    bn_names = {
+        n for n, _m, _s, _e in
+        bn.extract_candidate_spans(POINTED_HEBREW_TEXT, bn_lang(name_inventory=[POINTED_HEBREW_NAME]))
+    }
+    lsr_names = {
+        n for n, _m in
+        lsr.extract_candidate_names(POINTED_HEBREW_TEXT, lsr_lang(name_inventory=[POINTED_HEBREW_NAME]))
+    }
+    assert POINTED_HEBREW_NAME in bn_names
+    assert bn_names == lsr_names
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))

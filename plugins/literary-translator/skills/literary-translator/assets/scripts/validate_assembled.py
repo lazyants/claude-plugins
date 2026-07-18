@@ -855,6 +855,114 @@ def compute_missing_heading_defects(source_counter, output_counter, stale_segs):
 
 
 # ---------------------------------------------------------------------------
+# #201 enforced heading-shape output contract -- a surfaced, NON-EMPTY
+# translated heading must not itself carry a leading markdown heading marker
+# (the renderer supplies the `## `/level). Cache-free: this script is in no
+# bundle/render/schema list (see module docstring), so this check flips no
+# cache/render hash. Reuses the SAME object main() already built for the
+# current scope (no re-parse, no new I/O).
+# ---------------------------------------------------------------------------
+
+# The ONLY banned shape: a leading markdown heading marker, optionally
+# preceded by whitespace the renderer would strip. Deliberately narrow -- a
+# `#` anywhere but the head, a source-language echo, or a bilingual
+# source+target line is all legitimate in some projects and never flagged
+# (false-RED-averse: an ambiguous echo/duplicate-line heuristic would
+# permanently false-reject a legitimate bilingual book).
+_HEADING_LEADING_HASH_RE = re.compile(r"^\s*#")
+
+
+def _heading_text_has_leading_hash(text):
+    """True iff `text` is a present, NON-EMPTY (post-strip) string whose
+    first non-whitespace character is a markdown heading marker `#`. In the
+    default (no-render) scope this alone keeps this check from ever
+    double-firing with compute_missing_heading_defects' own missing_heading
+    for the same key: collect_default_output_markers credits a key's FULL
+    source multiplicity the moment a present, non-empty draft exists,
+    malformed or not, so missing_heading only ever fires there when this
+    check would also skip (draft absent). It is NOT enough in the
+    `assembled_book` scope, where collect_nodestream_output_markers counts
+    per PHYSICAL NODE regardless of content -- a key can be both under-
+    surfaced AND have one of its few surviving nodes be malformed at once
+    (codex review of #201, Low). See collect_heading_shape_defects'
+    `missing_keys` parameter for how that scope's own double-fire is
+    suppressed."""
+    return (
+        isinstance(text, str)
+        and text.strip() != ""
+        and _HEADING_LEADING_HASH_RE.match(text) is not None
+    )
+
+
+def collect_heading_shape_defects(source_counter, trusted_drafts=None, nodestream=None, missing_keys=None):
+    """For every declared-heading (seg, block_id) key `source_counter`
+    already names, emit a `heading_leading_hash` defect when its surfaced,
+    NON-EMPTY translated heading text begins with a markdown heading marker
+    (`^\\s*#`). Scoped strictly to source_counter's own declared heading
+    keys -- never widens the population -- and reuses the SAME object main()
+    already built for the current scope (no re-parse, no new I/O):
+    `trusted_drafts` in default `segment_drafts_and_audit` scope,
+    `nodestream` in `assembled_book` scope.
+
+    Distinct from compute_missing_heading_defects: that gate owns the
+    empty/absent case (`missing_heading`); this one owns the present-but-
+    malformed case. In the default scope the two are naturally mutually
+    exclusive per key (see _heading_text_has_leading_hash's own docstring).
+    In the `assembled_book` scope they are NOT -- a key can be under-
+    surfaced (fewer physical nodes than declared occurrences) while one of
+    its few surviving nodes is also malformed, so both would independently
+    be true (codex review of #201, Low; see
+    tests/validate_assembled.test.py::
+    test_red_assembled_book_duplicate_heading_dropped_node_also_malformed).
+    Both are hard defects (exit 1 either way), so `missing_keys` -- the set
+    of (seg, block_id) keys compute_missing_heading_defects already flagged
+    -- enforces "one defect per key" as an actual invariant rather than an
+    incidental non-collision: the under-surfaced defect is the more
+    fundamental one, and any malformed node sharing that key is by
+    construction one of the SAME under-count's own surfaced subset (a key
+    can never be simultaneously under-surfaced and fully-surfaced), so
+    nothing distinct is lost by not also reporting it. A segment that
+    failed the reviewed-SHA rebind is absent from `trusted_drafts` and is
+    skipped here too (already reported once as stale_review_since_audit;
+    its untrusted bytes are never inspected)."""
+    defects = []
+    missing_keys = missing_keys or set()
+    if nodestream is not None:
+        declared = set(source_counter)
+        flagged = set()
+        nodes = nodestream.get("nodes")
+        for node in nodes if isinstance(nodes, list) else []:
+            if not isinstance(node, dict) or node.get("kind") != "heading":
+                continue
+            node_seg, node_id = node.get("seg"), node.get("id")
+            # A non-str seg/id is never a real declared source key AND is an
+            # unhashable set-membership operand -- skip it, mirroring
+            # collect_nodestream_output_markers' own fail-closed fence (its
+            # own source marker then naturally REDs via missing_heading;
+            # never an uncaught TypeError).
+            if not isinstance(node_seg, str) or not isinstance(node_id, str):
+                continue
+            key = (node_seg, node_id)
+            if key in flagged or key not in declared or key in missing_keys:
+                continue
+            if _heading_text_has_leading_hash(node.get("text")):
+                flagged.add(key)  # one defect per key, even if several nodes share it
+                defects.append({"seg": node_seg, "block_id": node_id, "kind": "heading_leading_hash"})
+    else:
+        drafts = trusted_drafts or {}
+        for seg, bid in source_counter:
+            if (seg, bid) in missing_keys:
+                continue
+            draft = drafts.get(seg)
+            if draft is None:
+                continue
+            # `draft["blocks"]` is guaranteed a dict by _rebind_or_flag_stale.
+            if _heading_text_has_leading_hash(draft["blocks"].get(bid)):
+                defects.append({"seg": seg, "block_id": bid, "kind": "heading_leading_hash"})
+    return defects
+
+
+# ---------------------------------------------------------------------------
 # WARN: undeclared but heading-shaped block types -- advisory, never gating.
 # ---------------------------------------------------------------------------
 
@@ -950,6 +1058,13 @@ def main():
         _fatal(f"profile.yml is missing required field 'output.v1_scope' ({exc})")
 
     stale_segs = set()
+    # Whichever of these the selected scope builds is the object
+    # collect_heading_shape_defects (#201) reuses after the try -- default
+    # scope binds trusted_drafts, assembled_book scope binds nodestream; the
+    # other stays None (a scope that never built it), which that collector
+    # treats as "nothing to check on this side".
+    trusted_drafts = None
+    nodestream = None
     # codex R4: `_validate_manifest_shape()` -- the SINGLE, up-front,
     # gate-scoped shape validator -- runs FIRST, before any collector, so
     # every collector below can TRUST every element shape it reads (see
@@ -1013,7 +1128,20 @@ def main():
     defects = [
         {"seg": seg, "block_id": None, "kind": "stale_review_since_audit"} for seg in sorted(stale_segs)
     ]
-    defects.extend(compute_missing_heading_defects(source_counter, output_counter, stale_segs))
+    missing_heading_defects = compute_missing_heading_defects(source_counter, output_counter, stale_segs)
+    defects.extend(missing_heading_defects)
+    # #201: a surfaced, present heading whose text carries a leading markdown
+    # heading marker -- reuses whichever object the selected scope already
+    # built (trusted_drafts or nodestream), never a re-parse. `missing_keys`
+    # excludes any key compute_missing_heading_defects already flagged (see
+    # collect_heading_shape_defects' own docstring for why the assembled_book
+    # scope needs this and the default scope doesn't).
+    missing_keys = {(d["seg"], d["block_id"]) for d in missing_heading_defects}
+    defects.extend(
+        collect_heading_shape_defects(
+            source_counter, trusted_drafts=trusted_drafts, nodestream=nodestream, missing_keys=missing_keys
+        )
+    )
 
     warnings = collect_undeclared_heading_like_warnings(manifest_blocks, heading_types)
 

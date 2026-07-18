@@ -916,6 +916,60 @@ def test_warn_foreign_remainder_nfd_document_matches_nfc_stopword(tmp_path):
     )
 
 
+def test_warn_foreign_remainder_pointed_hebrew_matches_unpointed_stopword(tmp_path):
+    # #209: the foreign-remainder check must fold Hebrew niqqud (category Mn
+    # in U+0591..U+05C7) on BOTH compare sides, so a POINTED (vocalized) draft
+    # token still matches its UNPOINTED consonantal stopword. A shipped he.json
+    # ships bare consonantal function words; a real Hebrew source draft may
+    # carry those same words fully pointed. Without the fold, NFC(pointed) !=
+    # unpointed -> zero stopword hits -> a genuine untranslated Hebrew run
+    # slips past this gate entirely.
+    #
+    # NIQQUD used (all category Mn, all within the folded range 0x0591..0x05C7):
+    #   U+05B6 SEGOL, U+05B0 SHEVA, U+05B8 QAMATS.
+    SEGOL, SHEVA, QAMATS = "ֶ", "ְ", "ָ"
+    # Bare (unpointed) standalone Hebrew function words -> the stopword list.
+    bare = ["את", "של", "על"]  # 'et', 'shel', 'al'
+    # The SAME three words, each pointed with one interleaved niqqud mark.
+    pointed = [
+        "א" + SEGOL + "ת",   # aleph + segol + tav
+        "ש" + SHEVA + "ל",   # shin  + sheva + lamed
+        "ע" + QAMATS + "ל",  # ayin  + qamats + lamed
+    ]
+    # Fixture sanity (NOT a re-implementation of the fold): each pointed form
+    # must genuinely differ from its bare form and carry only in-range Hebrew
+    # combining marks -- otherwise the test would be vacuous or the marks would
+    # fall outside the Hebrew-scoped fold and prove nothing.
+    for p, b in zip(pointed, bare):
+        assert p != b, "fixture: pointed form must differ from bare (else vacuous)"
+        marks = [ch for ch in p if unicodedata.category(ch) == "Mn"]
+        assert marks, "fixture: pointed form must carry at least one combining mark"
+        assert all(0x0591 <= ord(ch) <= 0x05C7 for ch in marks), (
+            "fixture: every niqqud must sit within the Hebrew fold range"
+        )
+
+    root = make_durable_root(tmp_path, seg_ids=("seg01",), stopwords=bare)
+    p1_text = (
+        f"Some translated prose with a note {FN_PH} attached. "
+        f"{pointed[0]} {pointed[1]} {pointed[2]} more."
+    )
+    add_converged_segment(root, "seg01", clean_segpack(), clean_draft(p1_text=p1_text))
+
+    result = run_final_audit(root)
+
+    assert result.returncode == 0, (
+        f"WARN checks must not gate the exit code:\n{result.stderr}"
+    )
+    summary = parse_summary(result)
+    assert_schema_valid(summary)
+    assert summary["hard_failures"] == 0
+    assert summary["warnings"] >= 1
+    assert (
+        "[seg01] FOREIGN-REMNANT possible untranslated source-language text "
+        "in p1: stopword_hits=3 longest_run=3" in result.stderr
+    )
+
+
 # ---------------------------------------------------------------------------
 # 8. WARN: verse-structure -- a verse's own parent block carries NO source
 #    text at all in the segpack, so a citation of the original would be

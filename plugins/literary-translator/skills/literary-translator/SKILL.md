@@ -237,7 +237,11 @@ never copied; a copied `glossary_preflight.py` would resolve its own
 `__file__`-relative schema lookup against the *durable* schemas and compare
 durable-vs-durable, a vacuous pass that could never detect staleness, and a
 copied `resolve_codex_companion.py` could not glob the plugin's own install
-locations to find the newest installed `codex-companion.mjs`), every shipped
+locations to find the newest installed `codex-companion.mjs`; and, separately,
+`scaffold_setup.py` — Step 0a's own bundle-hash marker writer (#194), which
+likewise runs only from the plugin path: it is invoked below as Step 0a's final
+action and imports the plugin's own `cache_key.py` helpers, and is deliberately
+NOT a bundle member, so it must never land under `scripts/`), every shipped
 file in `assets/languages/`
 (`fr.json`, `de.json`, `es.json`, `it.json`, `README.md`), every file in
 `assets/schemas/*.json` → `${durable_root}/scripts/`,
@@ -261,12 +265,25 @@ Exception within this same copy pass: `mass-translate-wf.template.js` /
 W5/glossary-pass/skeptic-pass time respectively), never the one-time-seed
 treatment the other templates get.
 
-Computes/refreshes two marker files: `${durable_root}/runs/.plugin_bundle_hash`
-(read by `cache_key.py` rather than re-hashing the bundle per segment) and
-`${durable_root}/runs/.orchestration_bundle_hash` (non-gating for
-convergence — never part of the composite cache key — but gating for
-resume: folded into the resume-integrity digest, and also surfaced in W8's
-reporting).
+Final action of Step 0a — computes and writes the two marker files by
+invoking `scaffold_setup.py` (#194) from the plugin path (NOT a durable copy;
+it imports the plugin's own `cache_key.py` helpers), AFTER every bundle member
+has been copied into `${durable_root}/scripts/` and BEFORE any
+`cache_key.py`/`resume_setup.py` call:
+
+```
+python3 {{PLUGIN_ROOT}}/assets/scripts/scaffold_setup.py --durable-root ${durable_root}
+```
+
+It writes `${durable_root}/runs/.plugin_bundle_hash` (sha1 over the sorted
+concatenated bytes of the 13 `PLUGIN_BUNDLE_MEMBERS` under `scripts/` — read by
+`cache_key.py` rather than re-hashing the bundle per segment) and
+`${durable_root}/runs/.orchestration_bundle_hash` (sha1 over the four
+orchestration-only scripts — non-gating for convergence, never part of the
+composite cache key, but gating for resume: folded into the resume-integrity
+digest, and also surfaced in W8's reporting). Both are written atomically
+(sibling temp file + `os.replace`) with a trailing newline; both readers
+`.strip()`.
 
 Last action: the deferred `particle_config` existence check — resolve
 `source.language.particle_config` as `${durable_root}/languages/<value>`

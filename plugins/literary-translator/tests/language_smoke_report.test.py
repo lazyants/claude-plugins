@@ -45,6 +45,7 @@ import re
 import shutil
 import subprocess
 import sys
+import unicodedata
 import uuid
 from pathlib import Path
 
@@ -1222,6 +1223,67 @@ def test_extract_candidate_names_keeps_fixed_capitalized_elision_fused_regressio
     assert "D'Artagnan" in produced
     assert "Artagnan" not in produced
     assert "Effiat" in produced
+
+
+# ---------------------------------------------------------------------------
+# #225 -- offset-safe, mark-inclusive tokenizer. This file's SEPARATE copy of
+# TOKEN_RE must stay byte-identical to bootstrap_names.py's (see
+# extractor_terminators_drift.test.py::test_token_re_identical_across_both_
+# extractors). A pointed/vocalized word is ONE token, and the curated mark
+# class is category-M-pure -- mirroring bootstrap_names.test.py's own backstop.
+# ---------------------------------------------------------------------------
+
+POINTED_HEBREW = "שָׁלוֹם"
+VOCALIZED_ARABIC = "سَلَام"
+NFD_RESUME = unicodedata.normalize("NFD", "résumé")
+
+MARK_SUPER_RANGES = (
+    (0x0300, 0x036F), (0x1AB0, 0x1ACE), (0x1DC0, 0x1DFF), (0xFE20, 0xFE2F),
+    (0x0483, 0x0489), (0x0591, 0x05C7), (0x0610, 0x06ED), (0x0870, 0x08FF),
+)
+
+
+def test_lsr_tokenizer_keeps_pointed_forms_single_token():
+    # Pre-#225 each of these shattered into one token per base letter.
+    assert len(list(_lsr.TOKEN_RE.finditer(POINTED_HEBREW))) == 1
+    assert len(list(_lsr.TOKEN_RE.finditer(VOCALIZED_ARABIC))) == 1
+    assert len(list(_lsr.TOKEN_RE.finditer(NFD_RESUME))) == 1
+
+
+def test_lsr_tokenizer_keeps_arabic_extended_mark_single_token():
+    # #225 follow-up (codex Medium) mirror of bootstrap_names.test.py's own
+    # regression: U+08F0 ARABIC OPEN FATHATAN (Arabic Extended-A/B, curated
+    # sub-ranges pre-fix stopped at U+06ED) must stay fused into its letter's
+    # token here too, since this file's TOKEN_RE is byte-identical.
+    assert _lsr.TOKEN_RE.findall("ا" + "ࣰ" + "ب") == ["اࣰب"]
+
+
+def test_lsr_tokenizer_nfc_latin_and_connectors_unchanged():
+    assert _lsr.TOKEN_RE.findall("Saint-Simon") == ["Saint-Simon"]
+    assert _lsr.TOKEN_RE.findall("aujourd'hui") == ["aujourd'hui"]
+    assert _lsr.TOKEN_RE.findall("Fiona’ George") == ["Fiona", "George"]
+
+
+def test_lsr_mark_class_accepts_only_combining_marks():
+    cls = re.compile("[" + _lsr._MARK_CLASS + "]")
+    non_marks = sorted(
+        (hex(cp), unicodedata.category(chr(cp)))
+        for lo, hi in _lsr._MARK_SUBRANGES
+        for cp in range(lo, hi + 1)
+        if cls.match(chr(cp)) and not unicodedata.category(chr(cp)).startswith("M")
+    )
+    assert non_marks == [], f"mark class accepts non-M codepoints: {non_marks}"
+
+
+def test_lsr_mark_class_omits_no_mark_within_super_ranges():
+    cls = re.compile("[" + _lsr._MARK_CLASS + "]")
+    omitted = sorted(
+        hex(cp)
+        for lo, hi in MARK_SUPER_RANGES
+        for cp in range(lo, hi + 1)
+        if unicodedata.category(chr(cp)).startswith("M") and not cls.match(chr(cp))
+    )
+    assert omitted == [], f"category-M codepoint(s) in a claimed span not covered: {omitted}"
 
 
 if __name__ == "__main__":

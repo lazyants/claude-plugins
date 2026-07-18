@@ -105,17 +105,22 @@ for _name in MANAGED_DIRS:
     )
 
 
-# The four plugin-path scripts Step 0a NEVER copies into
-# ${durable_root}/scripts/ (each runs only from the plugin's own install path)
-# -- so the collision enumeration must not treat any of them as a
-# shipped-into-scripts name. See SKILL.md's Step 0a copy-exclusion list and
-# profile_validate.py's own module docstring. (1.4.7 added
-# resolve_codex_companion.py, the W5 codex-companion path resolver.)
+# The plugin-path scripts Step 0a NEVER copies into ${durable_root}/scripts/
+# (each runs only from the plugin's own install path) -- so the collision
+# enumeration must not treat any of them as a shipped-into-scripts name. See
+# SKILL.md's Step 0a copy-exclusion list and profile_validate.py's own module
+# docstring. Four are the pipeline gate/validator scripts SKILL.md names as the
+# "four plugin-path scripts never copied" (1.4.7 added resolve_codex_companion.py,
+# the W5 codex-companion path resolver). scaffold_setup.py (1.9.0, #194) is a
+# fifth of a distinct category -- Step 0a's own shipped marker-writer, added to
+# SKILL.md's copy-exclusion as a separate clause -- so it is likewise never
+# copied and must be excluded here too.
 NEVER_COPIED_SCRIPTS = frozenset({
     "profile_validate.py",
     "validate_extraction.py",
     "glossary_preflight.py",
     "resolve_codex_companion.py",
+    "scaffold_setup.py",
 })
 
 
