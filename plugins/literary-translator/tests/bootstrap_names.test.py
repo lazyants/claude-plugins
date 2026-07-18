@@ -17,6 +17,7 @@ Module under test lives outside any Python package (a standalone script
 copied to ``${durable_root}/scripts/`` at runtime), so it is loaded here via
 ``importlib`` from its real path rather than imported normally.
 """
+import dataclasses
 import importlib.util
 import json
 import re
@@ -828,6 +829,63 @@ def test_tokenizer_offset_span_reconstructs_pointed_substring():
     spans = [(tok, s, e) for tok, _prec, s, e in bn.tokenize(text, None)]
     s, e = next((s, e) for tok, s, e in spans if tok == POINTED_HEBREW)
     assert text[s:e] == POINTED_HEBREW
+
+
+# ---------------------------------------------------------------------------
+# P1 review finding: Hebrew geresh (U+05F3 ׳) and gershayim (U+05F4 ״) as
+# internal name connectors. Since 1.9.0 makes ``name_inventory`` the ONLY
+# route by which a native Hebrew name surfaces at all (is_upper_initial()
+# can never see a case-less, category-'Lo' script -- see
+# caseless_offset.test.py's #204 pin), TOKEN_RE's connector class carried
+# only the Latin apostrophe/quote/hyphen forms. A geresh/gershayim functions
+# INSIDE a Hebrew name/acronym exactly the way an apostrophe does in Latin
+# (e.g. "ז׳בוטינסקי" -- Jabotinsky, the geresh spelling its "zh" sound), so
+# without it in the connector class the name tokenized as TWO tokens ("ז",
+# "בוטינסקי"). Pass 2's candidate name is built by SPACE-joining the matched
+# tokens (see extract_candidate_spans()'s ``name = " ".join(...)``), not by
+# slicing the raw span, so the altered candidate could never bind back to
+# the name_inventory's own spelling downstream (occ_index.py's
+# production_occurrences() matches spans by exact source_form string).
+# ---------------------------------------------------------------------------
+GERESH_HEBREW_NAME = "ז׳בוטינסקי"  # Jabotinsky -- geresh (U+05F3) mid-name
+GERESH_HEBREW_TEXT = "פגשתי את ז׳בוטינסקי אתמול."
+GERSHAYIM_HEBREW_NAME = "צה״ל"  # Tzahal (IDF) -- gershayim (U+05F4) acronym
+GERSHAYIM_HEBREW_TEXT = "ראיתי את צה״ל אתמול."
+
+
+def load_he_config_with_inventory(name_inventory):
+    """The real shipped he.json with its ``name_inventory`` field overridden
+    -- the optional 5th LanguageConfig field a project supplies per Step 0a
+    (see load_real_fr_config() above for the same shipped-preset pattern;
+    caseless_offset.test.py's synthetic configs exercise name_inventory
+    against a from-scratch fixture instead of a real shipped file)."""
+    lang = bn.load_language_config("he.json", languages_dir=REAL_LANGUAGES_DIR)
+    return dataclasses.replace(lang, name_inventory=frozenset(name_inventory))
+
+
+def test_hebrew_geresh_name_stays_one_token():
+    lang = load_he_config_with_inventory([GERESH_HEBREW_NAME])
+    out = bn.extract_candidate_spans(GERESH_HEBREW_TEXT, lang)
+    by_name = {n: (s, e) for n, _mid, s, e in out}
+    assert GERESH_HEBREW_NAME in by_name, f"{GERESH_HEBREW_NAME!r} missing from {sorted(by_name)}"
+    s, e = by_name[GERESH_HEBREW_NAME]
+    assert GERESH_HEBREW_TEXT[s:e] == GERESH_HEBREW_NAME
+    # must not have split into the two bare halves, nor surface as pass 2's
+    # pre-fix space-joined altered form.
+    assert "ז" not in by_name
+    assert "בוטינסקי" not in by_name
+    assert "ז בוטינסקי" not in by_name
+
+
+def test_hebrew_gershayim_acronym_stays_one_token():
+    lang = load_he_config_with_inventory([GERSHAYIM_HEBREW_NAME])
+    out = bn.extract_candidate_spans(GERSHAYIM_HEBREW_TEXT, lang)
+    by_name = {n: (s, e) for n, _mid, s, e in out}
+    assert GERSHAYIM_HEBREW_NAME in by_name, f"{GERSHAYIM_HEBREW_NAME!r} missing from {sorted(by_name)}"
+    s, e = by_name[GERSHAYIM_HEBREW_NAME]
+    assert GERSHAYIM_HEBREW_TEXT[s:e] == GERSHAYIM_HEBREW_NAME
+    assert "צה" not in by_name
+    assert "ל" not in by_name
 
 
 # --- MARK class completeness / purity backstop -----------------------------

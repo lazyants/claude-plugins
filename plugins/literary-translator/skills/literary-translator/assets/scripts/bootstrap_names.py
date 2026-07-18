@@ -206,7 +206,7 @@ def _build_mark_class():
 _MARK_CLASS = _build_mark_class()
 # LETTER MARK* (CONNECTOR? LETTER MARK*)*  -- see the OFFSET CONTRACT comment.
 TOKEN_RE = re.compile(
-    r"[^\W\d_][" + _MARK_CLASS + r"]*(?:['’‑-]?[^\W\d_][" + _MARK_CLASS + r"]*)*"
+    r"[^\W\d_][" + _MARK_CLASS + r"]*(?:['’‑׳״-]?[^\W\d_][" + _MARK_CLASS + r"]*)*"
 )
 
 APOSTROPHES = "'’"  # ' and the Unicode right single quote

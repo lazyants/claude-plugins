@@ -55,6 +55,7 @@ conflict"):
 """
 import hashlib
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -346,6 +347,38 @@ def test_skill_lists_resolve_codex_companion_as_fourth_plugin_path_script():
     silently drifting back to three when the sweep is next touched."""
     assert "resolve_codex_companion.py" in _SKILL_TEXT
     assert "four plugin-path scripts never copied" in _SKILL_TEXT
+
+
+# A shipped he.json Hebrew preset once went unlisted in this same Step 0a
+# copy-list sentence's `assets/languages/` parenthetical -- silently
+# breaking Step 0a's fresh-scaffold copy of that preset into
+# ${durable_root}/languages/, making it unreachable from the standard
+# scaffold. Drift guard: every *.json actually shipped under
+# assets/languages/ must be named in that parenthetical, checked
+# structurally against SKILL.md's real text (never a hardcoded, could-drift
+# list) so a future preset addition trips this instead of silently
+# reproducing the same gap.
+_LANG_COPY_LIST_RE = re.compile(
+    r"every shipped\s+file in `assets/languages/`\s*\n\(([^)]*)\)"
+)
+
+
+def test_step0a_language_copy_list_names_every_shipped_language_preset():
+    shipped = sorted(p.name for p in (ASSETS_DIR / "languages").glob("*.json"))
+    assert shipped, "expected at least one shipped language preset under assets/languages/"
+
+    match = _LANG_COPY_LIST_RE.search(_SKILL_TEXT)
+    assert match, (
+        "could not locate the Step 0a `assets/languages/` copy-list "
+        "parenthetical in SKILL.md -- has the wording changed?"
+    )
+    copy_list_text = match.group(1)
+
+    missing = [name for name in shipped if f"`{name}`" not in copy_list_text]
+    assert not missing, (
+        f"shipped language preset(s) {missing} are not listed in SKILL.md's "
+        f"Step 0a `assets/languages/` copy-list: {copy_list_text!r}"
+    )
 
 
 def test_fresh_empty_durable_root_passes_and_marks(tmp_path):

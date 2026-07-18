@@ -243,7 +243,7 @@ likewise runs only from the plugin path: it is invoked below as Step 0a's final
 action and imports the plugin's own `cache_key.py` helpers, and is deliberately
 NOT a bundle member, so it must never land under `scripts/`), every shipped
 file in `assets/languages/`
-(`fr.json`, `de.json`, `es.json`, `it.json`, `README.md`), every file in
+(`fr.json`, `de.json`, `es.json`, `he.json`, `it.json`, `README.md`), every file in
 `assets/schemas/*.json` → `${durable_root}/scripts/`,
 `${durable_root}/languages/`, `${durable_root}/schemas/` respectively.
 Touches only the exact shipped filenames — never clobbers a project-local
