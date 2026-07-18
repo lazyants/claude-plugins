@@ -949,6 +949,77 @@ def test_info_bearing_fence_line_never_closes_the_outer_fence(tmp_path):
     )
 
 
+def test_four_space_indented_fence_does_not_open_a_fence(tmp_path):
+    """Bot review P2 finding (round 2): a fence delimiter indented 4+
+    COLUMNS is CommonMark indented code, not a fence -- whether or not a
+    fence happens to be open at that point. RED today: `_fenced_line_mask`
+    matched `_FENCE_DELIM_RE` against `ln.strip()`, which erases ANY amount
+    of leading whitespace, so a 4-space-indented "```" wrongly opened a
+    spurious fence and masked the real marker pair right after it -- bot
+    repro: `_single_marker_pair(['    ```', begin, '[[001 seg01]]', end])
+    is None` (wrongly). Real marker pair right after the indented "```"
+    (never closed -- it must never have opened) must still be found."""
+    root = _one_expected_setup(tmp_path)
+    body = [
+        "    ```",  # 4-space indent -- indented CODE, not a fence opener
+        *mentions_block(["001 seg01"]),
+    ]
+    write_note(root, "other/Ivan.md", raw_entity_note(body_lines=body))
+
+    proc = run_gate(root)
+    assert proc.returncode == 0, proc.stderr
+    report = report_of(proc)
+    assert report["mentions_coverage"]["missing"] == [], (
+        "a 4-space-indented ``` line must never open a spurious fence and "
+        "mask a real Mentions marker pair right after it"
+    )
+
+
+@pytest.mark.parametrize("spaces", [0, 1, 2, 3])
+def test_zero_to_three_space_indented_fence_still_opens_a_fence(tmp_path, spaces):
+    """The boundary companion to the test above: at 0-3 columns of
+    indentation a ``` line IS still a genuine fence opener (CommonMark's
+    own <=3-column tolerance). Left deliberately unclosed here, so the
+    real marker pair right after it stays masked as fence content and is
+    reported MISSING -- pins the boundary at exactly 3 vs 4, not just
+    proving one side of it."""
+    root = _one_expected_setup(tmp_path)
+    body = [
+        " " * spaces + "```",
+        *mentions_block(["001 seg01"]),
+    ]
+    write_note(root, "other/Ivan.md", raw_entity_note(body_lines=body))
+
+    proc = run_gate(root)
+    assert proc.returncode == 1, proc.stderr
+    report = report_of(proc)
+    assert report["mentions_coverage"]["missing"] == [{"source_form": "Ivan", "seg": "seg01"}], (
+        f"a {spaces}-space-indented ``` line must still open a real fence "
+        f"(<=3 columns of indentation is within CommonMark's tolerance)"
+    )
+
+
+def test_tab_indented_fence_does_not_open_a_fence(tmp_path):
+    """A single leading tab expands to column 4 (CommonMark's tab-stop
+    rule, never a flat width) -- same "indented code, not a fence"
+    treatment as 4 literal spaces above, not 1 character's worth of
+    indent."""
+    root = _one_expected_setup(tmp_path)
+    body = [
+        "\t```",
+        *mentions_block(["001 seg01"]),
+    ]
+    write_note(root, "other/Ivan.md", raw_entity_note(body_lines=body))
+
+    proc = run_gate(root)
+    assert proc.returncode == 0, proc.stderr
+    report = report_of(proc)
+    assert report["mentions_coverage"]["missing"] == [], (
+        "a tab-indented (column 4) ``` line must never open a spurious "
+        "fence either"
+    )
+
+
 def test_inline_code_wikilink_not_counted_as_coverage(tmp_path):
     """B13: a Mentions region whose only wikilink is a BACKTICK-QUOTED
     `` `[[001 real]]` `` -- an author showing the link syntax as literal

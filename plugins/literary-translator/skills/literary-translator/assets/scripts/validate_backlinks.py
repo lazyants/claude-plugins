@@ -374,6 +374,23 @@ def _strip_frontmatter(text):
     return ""
 
 
+def _leading_indent_columns(line):
+    """CommonMark leading-indent width in COLUMNS (not characters), up to
+    the first non-whitespace character (or end of line): a space is 1
+    column; a tab advances to the next multiple-of-4 column stop (never a
+    flat 4 -- CommonMark's own tab-expansion rule). Any whitespace after
+    the first non-whitespace character is irrelevant and never counted."""
+    columns = 0
+    for ch in line:
+        if ch == " ":
+            columns += 1
+        elif ch == "\t":
+            columns += 4 - (columns % 4)
+        else:
+            break
+    return columns
+
+
 def _fenced_line_mask(lines):
     """Returns a list of bool, same length as `lines`: True iff that line
     sits STRICTLY INSIDE an open ``` / ~~~ fenced code block (the fence
@@ -396,12 +413,24 @@ def _fenced_line_mask(lines):
     "```python" appearing while a fence is open would wrongly close it
     (same char, run length >= open), un-masking everything after it --
     including a real marker pair the author only meant to ILLUSTRATE inside
-    the still-open outer fence."""
+    the still-open outer fence.
+
+    The leading-indent gate matters too (bot review P2 finding, round 2):
+    CommonMark allows a fence delimiter at MOST 3 columns of indentation --
+    at 4+ columns the line is INDENTED CODE, not a fence, whether or not a
+    fence happens to be open at that point. A naive `ln.strip()` before the
+    regex match erases that distinction entirely (it strips ANY amount of
+    leading whitespace), so a 4-space-indented "```" would wrongly OPEN a
+    spurious fence outside one, or wrongly stay unmasked-as-a-delimiter
+    (rather than as ordinary masked content) inside one -- either way
+    corrupting the mask a real marker pair depends on. Measured against the
+    ORIGINAL (unstripped) line, since `.strip()` is exactly the information
+    this gate needs."""
     mask = []
     open_char = None
     open_len = 0
     for ln in lines:
-        m = _FENCE_DELIM_RE.match(ln.strip())
+        m = _FENCE_DELIM_RE.match(ln.strip()) if _leading_indent_columns(ln) < 4 else None
         if m:
             token, rest = m.group(1), m.group(2)
             char, length = token[0], len(token)
