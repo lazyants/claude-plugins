@@ -142,6 +142,73 @@ class TestSegpackSchemaDescriptionSourceHonesty:
             "footnotes.apparatus_policy as what actually drives inclusion"
         )
 
+    def test_n_line_description_names_segpack_py_and_the_fallback_condition(self):
+        """#192b -- positive companion, mirroring
+        test_order_index_and_footnotes_descriptions_name_the_real_actor: the
+        n_line description must name segpack.py (the real actor for the
+        LEGACY fallback path) AND state the missing-or-0 condition that
+        triggers it -- a reword that merely deletes 'legacy-only' without
+        naming the real mechanism still fails here (the #185 lesson: a
+        ban-the-token test alone false-greens)."""
+        schema = _load_segpack_schema()
+        n_line_description = schema["properties"]["verses"]["items"]["properties"][
+            "n_line"
+        ]["description"]
+        assert "segpack.py" in n_line_description, (
+            "segpack.schema.json's n_line description no longer credits "
+            "segpack.py with the fallback line-count it actually computes"
+        )
+        assert "missing or 0" in n_line_description, (
+            "segpack.schema.json's n_line description no longer states the "
+            "missing-or-0 fallback condition"
+        )
+
+
+class TestSegpackPySourceCommentHonesty:
+    """#190: segpack.py's own SOURCE comments (not the schema) mention
+    `extract.py.template` twice -- both must be scoped to `gutenberg_epub`,
+    the only adapter that actually ships that extractor, extending the
+    schema-level check above to segpack.py's source text."""
+
+    def _comment_blocks(self):
+        """Contiguous runs of `#`-prefixed lines in segpack.py's source --
+        the unit a reader actually reads as ONE comment."""
+        text = (SCRIPTS_DIR / "segpack.py").read_text(encoding="utf-8")
+        blocks = []
+        current = []
+        for line in text.splitlines():
+            if line.strip().startswith("#"):
+                current.append(line)
+            elif current:
+                blocks.append("\n".join(current))
+                current = []
+        if current:
+            blocks.append("\n".join(current))
+        return blocks
+
+    def test_every_extract_py_template_mention_in_segpack_source_is_gutenberg_epub_scoped(self):
+        offenders = [
+            b for b in self._comment_blocks()
+            if "extract.py.template" in b and "gutenberg_epub" not in b
+        ]
+        assert not offenders, (
+            "segpack.py has a source comment mentioning extract.py.template "
+            "without scoping it to gutenberg_epub:\n"
+            + "\n---\n".join(offenders)
+        )
+
+    def test_at_least_two_extract_py_template_mentions_survive_scoped(self):
+        """Guards against the predicate above passing vacuously (e.g. both
+        mentions accidentally deleted instead of reworded)."""
+        scoped = [
+            b for b in self._comment_blocks()
+            if "extract.py.template" in b and "gutenberg_epub" in b
+        ]
+        assert len(scoped) >= 2, (
+            f"expected >=2 gutenberg_epub-scoped extract.py.template comment "
+            f"blocks in segpack.py, found {len(scoped)}"
+        )
+
 
 class TestExpandedSourceHonestySitesAbsence:
     """Regression-locks the two #185 sites beyond segpack.schema.json that

@@ -547,7 +547,17 @@ On an uncased-script source (Hebrew/Yiddish/Arabic — no `Lu` uppercase
 letters), `pass:true` here certifies only what `bootstrap_names.py`'s
 `Lu`-gated candidate detector could reach, never native-script name
 coverage — see the uncased-script caveat in
-`references/language-pair-parameterization.md` before trusting it.
+`references/language-pair-parameterization.md` before trusting it. Since
+1.10.0, `name_inventory` matching (both extractors) is mark- and
+connector-insensitive (issues #238/#241): an unpointed, space-joined
+inventory entry also matches a pointed and/or maqaf/geresh/gershayim-joined
+occurrence in the source text, and vice versa — but the CANDIDATE that gets
+recorded and reaches `canon.json`'s own key is always the raw surface form
+exactly as the source spells it at that occurrence, never the folded or
+inventory-canonical spelling. See
+`references/language-pair-parameterization.md`'s "Uncased-script
+`.local.json` + `name_inventory` example" for a generic worked walkthrough
+of setting up a project-local override.
 
 Then run `bootstrap_names.py` (configured from
 `${durable_root}/languages/<particle_config's literal value>` — never
@@ -998,9 +1008,9 @@ gate — there is no separate item-count check alongside it (structural
 completeness is `validate_assembled.py`'s distinct concern above, checked
 before this step ever runs).
 
-Then — ONLY when `output.target: obsidian` AND
-`output.adapter_config.obsidian.mentions_section.enabled: true` — run
-`scripts/validate_backlinks.py` as an **advisory** appendix-integrity gate,
+Then — for `output.target: obsidian`, ON BY DEFAULT unless explicitly
+disabled (`output.adapter_config.obsidian.mentions_section.enabled: false`) —
+run `scripts/validate_backlinks.py` as an **advisory** appendix-integrity gate,
 AFTER `diff_rendered_output.py`. It re-derives the source-anchored occurrence
 universe and checks that every index-eligible entity's `## Mentions` section
 covers its occurrences (metric 1, the sole warning source), plus a
@@ -1008,12 +1018,13 @@ native-inline-backlink diagnostic and collision/unresolved-homonym reports
 (metric 2, exit-neutral). Unlike the hard gates above, its **exit `1` is
 ADVISORY — log the warnings and CONTINUE W9** (it never blocks assembly);
 only exit `2` (unreadable/malformed input, e.g. a missing
-`out/.assembled/nodestream.json`) halts. When the flag is off or the target
-is not obsidian it short-circuits to `mentions_coverage.status: disabled`,
-exit `0`. The `## Mentions` section is a source-anchored occurrence index
-(mirroring the SSK `build_index.py` model) that supersedes the older
-"native backlinks are the occurrence index" stance for projects that opt in;
-see `references/output-target-adapters/obsidian.md`.
+`out/.assembled/nodestream.json`) halts. When the target is not obsidian, or
+the flag is explicitly disabled, it short-circuits to
+`mentions_coverage.status: disabled`, exit `0`. The `## Mentions` section is
+a source-anchored occurrence index (mirroring the SSK `build_index.py`
+model) that supersedes the older "native backlinks are the occurrence index"
+stance for `output.target: obsidian` projects; see
+`references/output-target-adapters/obsidian.md`.
 
 ## Reference docs
 

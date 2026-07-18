@@ -409,6 +409,61 @@ uncased-script source a `pass:true` certifies only what the `Lu`-gated
 detector could reach, not native-script name coverage; inventory those
 names by hand before trusting it.
 
+### Uncased-script `.local.json` + `name_inventory` example (generic)
+
+A worked example of the override pattern above, specifically for the
+uncased-script case (Hebrew/Yiddish/Arabic-family scripts, `Lo`, never `Lu`)
+where the shipped preset alone surfaces zero native-script candidates (see
+the fifth key, above, and "Sample selection"'s uncased-script trap). This is
+generic guidance, not a description of any specific project's data.
+
+1. Copy the shipped preset to a project-local override inside the *same*
+   `${durable_root}/languages/` directory, e.g. `he.json` ->
+   `he.local.json`. Set `source.language.particle_config` to the bare
+   filename `"he.local.json"`.
+2. Add a `name_inventory` array of the book's own full native-script name
+   forms (multi-token allowed), e.g.:
+
+   ```json
+   {
+     "PARTICLES": [],
+     "STOPWORDS": ["...", "..."],
+     "has_elision": false,
+     "ELISION_RE": null,
+     "name_inventory": ["<Given Family>", "<Given>", "<Family>"]
+   }
+   ```
+
+   Each entry is matched as a COMPLETE form by both extraction
+   implementations' inventory-driven caseless route (0a) -- never assembled
+   from a token run the way the particle algorithm builds Latin-script
+   candidates.
+
+3. Since 1.9.x, matching against `name_inventory` is mark- and
+   connector-insensitive (issues #238/#241): an unpointed, space-joined
+   `name_inventory` entry matches a pointed and/or maqaf/geresh/gershayim-
+   joined occurrence in the source text, and vice versa -- so
+   `"name_inventory": ["<Given Family>"]` also surfaces `"<Given>־<Family>"`
+   (maqaf-joined) and a fully-pointed spelling of either, without listing
+   every mark/connector variant by hand. This fold is applied ONLY to the
+   MATCHING (which occurrences are found); the CANDIDATE that gets recorded,
+   surfaced to the glossary pass, and written into `canon.json`'s own key is
+   always the RAW surface form exactly as the source text spells it at that
+   occurrence -- never the folded or inventory-canonical spelling. A
+   `name_inventory` entry itself is still matched as ONE exact form; listing
+   `"<Given Family>"` does not also surface a bare `"<Given>"` or `"<Family>"`
+   occurrence on its own (add those separately if the book's own usage
+   requires it -- see the "REFUSE sub-token matches" rule below).
+4. The match stays TOKEN-ALIGNED even under the fold: a `name_inventory`
+   entry matching only PART of a longer connector-joined text token (e.g.
+   inventory `"<Given>"` against text `"<Given>־<Family>"`) is refused, not
+   surfaced as a partial match. List the full compound form in
+   `name_inventory` if the book's own usage requires the compound to be
+   indexed too.
+5. Re-run the mandatory smoke test (above) against the SAME sample after
+   editing the `.local.json` override -- never skip it because "only
+   `name_inventory` changed."
+
 **`particle_config_hash` (the ledger cache-key field) is what guarantees an
 already-converged segment can never silently keep reflecting the pre-fix
 config** — the moment the fix lands, it flips every affected segment to

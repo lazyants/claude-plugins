@@ -23,10 +23,47 @@ happens to spell the name.
 
     build(manifest, canon, senses_result, language_config, nodestream) -> {
         "eligible_by_source_form": { source_form: [ Record, ... ] },
-        "unresolved_homonyms":     { source_form: {"count": int, "segs": [seg, ...]} },
+        "unresolved_homonyms":     { source_form: {"count": int, "segs": [seg, ...],
+                                                     "reason": "is_split" | "fold_match_key_collision"} },
     }
     Record = { source_form, seg, origin ∈ {"block", "embedded_verse", "footnote"},
                source_block, vid?, footnote_n? }
+
+`source_form` above -- both as an `eligible_by_source_form`/`unresolved_
+homonyms` dict KEY and as a `Record`'s own `source_form` field -- is always
+the LITERAL, UNFOLDED `canon['entries']` key, exactly as `canon.json` spells
+it. The MATCHING itself (issues #238/#241: Hebrew niqqud/cantillation +
+maqaf/geresh/gershayim folding) is applied ONLY inside `_spans_by_name`'s own
+grouping key and this module's `.get(fold_match_key(source_form), ())`
+lookups (`bootstrap_names.fold_match_key`) -- never to either of the KEYS
+above. A pointed/maqaf-joined Hebrew source occurrence and its unpointed/
+space-joined `canon.json` entry are matched via the SAME folded key, but the
+Record that results is always filed under the canon entry's own RAW key --
+never a folded one. Do not "fix" this asymmetry; it is exactly what lets B's
+three canon-derived lookups (`render_obsidian.py`'s `mentions_by_source_form`,
+`validate_backlinks.py`'s `relpath_by_source_form`/`note_identity_by_
+source_form`) keep finding this module's output by the same unfolded canon
+key they already use (Contract 3). `occ_index.production_occurrences`'s own
+`name == source_form` comparison remains mark/connector-SENSITIVE after this
+train (deliberately -- A-C6 -- see `occ_index.py`'s own module docstring).
+
+**The fold NEWLY introduces a cross-entry collision the exact-match keys
+never had**: two DISTINCT eligible `canon['entries']` keys can legally fold
+to the SAME `fold_match_key` (e.g. a pointed `משה לייב` entry and a
+separately-canonized maqaf-joined `משה־לייב` entry -- both legal, distinct
+map keys). Before the fold, two exact keys never collided in
+`_spans_by_name`'s bucket; after it, both entries' lookups
+(`.get(fold_match_key(source_form), ())`) retrieve the IDENTICAL bucket for
+the SAME physical occurrence, so an unguarded build would double-file that
+occurrence under both source_forms. `build()` below detects this (over the
+ELIGIBLE set, before any lookup) and routes every source_form in a
+colliding group to `unresolved_homonyms` -- never `eligible_by_source_form`
+-- with `reason: "fold_match_key_collision"`, distinguishing it from the
+pre-existing `reason: "is_split"` route. Neither entry gets the shared
+occurrences until the operator disambiguates (renames one canon entry, or
+merges them). Warn-only (stderr), mirroring
+`bootstrap_names._warn_inventory_match_key_collisions`'s own style -- never
+fatal (Contract 3's no-new-raise rule).
 
 `manifest`/`canon`/`nodestream` are already-parsed dicts (the exact shapes
 `assemble.py` itself builds/loads before `dispatch_adapter`); `senses_result`
@@ -69,9 +106,16 @@ universe.
 `is_split(senses_result, source_form)` source_forms (canon_senses.json
 homonym splits, >=2 senses) are held out of `eligible_by_source_form`
 entirely -- every one of their (render-eligible) occurrences instead
-accumulates in `unresolved_homonyms` (count + segs), since there is no
-per-sense note to route an individual occurrence to (#207-b, gate-report-
-only in 1.8.0).
+accumulates in `unresolved_homonyms` (count + segs, `reason: "is_split"`),
+since there is no per-sense note to route an individual occurrence to
+(#207-b, gate-report-only in 1.8.0).
+
+A source_form that is BOTH a fold-key collision member AND `is_split` routes
+under `reason: "fold_match_key_collision"` -- the collision is checked
+first, since it is a data-INTEGRITY question (which canon entry, if any, the
+records even belong to) that must be resolved before a sense-adjudication
+question (which sense of a KNOWN-correct entry an occurrence belongs to) can
+even be asked. See `build()`'s own comment at the collision-detection site.
 
 ## Verse eligibility -- the exact renderer rule, imported not reimplemented
 
@@ -111,7 +155,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 DURABLE_ROOT = SCRIPT_DIR.parent
 
 try:
-    from bootstrap_names import extract_candidate_spans
+    from bootstrap_names import extract_candidate_spans, fold_match_key
 except ImportError as exc:
     sys.exit(
         f"occurrence_targets.py: cannot import bootstrap_names.py from {SCRIPT_DIR} ({exc}).\n"
@@ -119,11 +163,15 @@ except ImportError as exc:
         "${durable_root}/scripts/ -- it supplies extract_candidate_spans(), the "
         "offset-preserving production tokenizer/matcher this module reuses (never "
         "reimplements) -- the SAME entry point occ_index.production_occurrences() "
-        "itself calls (occ_index.py's own _run_spans). Called directly (rather than "
-        "via production_occurrences) so ONE extraction pass over a given text can "
-        "be grouped by name and shared across every canon source_form looked up "
-        "against it, instead of re-tokenizing the same text once per source_form. "
-        "Re-run Step 0a, or verify the plugin install is not corrupted."
+        "itself calls (occ_index.py's own _run_spans) -- and fold_match_key(), the "
+        "#238/#241 Hebrew mark/connector MATCH KEY this module applies at lookup "
+        "time to both the matcher's own grouping key and the canon source_form it "
+        "looks up, never to either side's own emitted string (Contract 5/3). Called "
+        "directly (rather than via production_occurrences) so ONE extraction pass "
+        "over a given text can be grouped by match key and shared across every "
+        "canon source_form looked up against it, instead of re-tokenizing the same "
+        "text once per source_form. Re-run Step 0a, or verify the plugin install is "
+        "not corrupted."
     )
 
 try:
@@ -162,15 +210,20 @@ except ImportError as exc:
 # ---------------------------------------------------------------------------
 
 def _spans_by_name(text: str, language_config) -> dict:
-    """Every matcher-emitted run in `text`, grouped by `name` -- built from
-    exactly ONE call to `extract_candidate_spans()` (the same entry point
+    """Every matcher-emitted run in `text`, grouped by its #238/#241 FOLDED
+    match key (`fold_match_key`) -- built from exactly ONE call to
+    `extract_candidate_spans()` (the same entry point
     `occ_index.production_occurrences()` itself wraps), regardless of how
-    many source_forms are subsequently looked up against the result. Each
-    name's own spans stay in `char_start` order (`extract_candidate_spans`
-    already returns its full list sorted that way)."""
+    many source_forms are subsequently looked up against the result. A
+    pointed/maqaf-joined occurrence and its unpointed/space-joined canon
+    counterpart fold to the SAME key here even though the matcher's own
+    emitted `name` differs (Contract 5 keeps that raw) -- see the module
+    docstring's own note on the unfolded-key/folded-matching asymmetry.
+    Each key's own spans stay in `char_start` order (`extract_candidate_
+    spans` already returns its full list sorted that way)."""
     grouped = defaultdict(list)
     for name, _mid_sentence, char_start, char_end in extract_candidate_spans(text, language_config):
-        grouped[name].append((char_start, char_end))
+        grouped[fold_match_key(name)].append((char_start, char_end))
     return grouped
 
 
@@ -323,7 +376,7 @@ def _block_records(source_forms, manifest: dict, language_config, render_index: 
         seg = render_index["node_by_block_id"][block_id].get("seg")
         spans_by_name = _spans_by_name(text, language_config)
         for source_form in source_forms:
-            for _ in spans_by_name.get(source_form, ()):
+            for _ in spans_by_name.get(fold_match_key(source_form), ()):
                 records.append({
                     "source_form": source_form,
                     "seg": seg,
@@ -353,7 +406,7 @@ def _embedded_verse_records(source_forms, manifest: dict, language_config, rende
         seg = carrier_node.get("seg")
         spans_by_name = _spans_by_name(plain_text, language_config)
         for source_form in source_forms:
-            for _ in spans_by_name.get(source_form, ()):
+            for _ in spans_by_name.get(fold_match_key(source_form), ()):
                 records.append({
                     "source_form": source_form,
                     "seg": seg,
@@ -389,7 +442,7 @@ def _footnote_records(source_forms, manifest: dict, language_config, render_inde
         anchor_seg = fn_entry.get("anchor_seg")
         spans_by_name = _spans_by_name(block_text, language_config)
         for source_form in source_forms:
-            for _ in spans_by_name.get(source_form, ()):
+            for _ in spans_by_name.get(fold_match_key(source_form), ()):
                 records.append({
                     "source_form": source_form,
                     "seg": anchor_seg,
@@ -404,6 +457,40 @@ def _footnote_records(source_forms, manifest: dict, language_config, render_inde
 # build() -- the single entry point.
 # ---------------------------------------------------------------------------
 
+def _colliding_source_forms(source_forms) -> set:
+    """The #238/#241 fold-key collision set (module docstring, "The fold
+    NEWLY introduces...") -- every ELIGIBLE source_form that shares its
+    `fold_match_key` with at least one OTHER eligible source_form. Computed
+    over `source_forms` alone (canon-entry eligibility only), before any
+    text is scanned or any span looked up -- a collision is a property of
+    the CANON, not of any particular occurrence. Warns to stderr (never
+    raises -- Contract 3's no-new-raise rule; `validate_backlinks.py:627-631`
+    would turn any new exception into a hard gate FATAL) once per colliding
+    group, naming every member and the shared key, mirroring
+    `bootstrap_names._warn_inventory_match_key_collisions`'s own style.
+    """
+    fold_key_groups = defaultdict(list)
+    for source_form in source_forms:
+        fold_key_groups[fold_match_key(source_form)].append(source_form)
+
+    colliding = set()
+    for key in sorted(fold_key_groups):
+        group = fold_key_groups[key]
+        if len(group) > 1:
+            colliding.update(group)
+            print(
+                f"WARN occurrence_targets.py: canon source_forms {sorted(group)!r} "
+                f"all fold to the same #238/#241 match key {key!r} -- every "
+                "physical source occurrence they would BOTH claim is routed to "
+                "unresolved_homonyms (reason: fold_match_key_collision) instead "
+                "of being double-filed under both entries; neither gets it "
+                "until the operator disambiguates (rename or merge the "
+                "colliding canon entries).",
+                file=sys.stderr,
+            )
+    return colliding
+
+
 def build(manifest: dict, canon: dict, senses_result, language_config, nodestream: dict) -> dict:
     entries = (canon or {}).get("entries") or {}
     render_index = build_render_index(manifest, nodestream)
@@ -413,6 +500,14 @@ def build(manifest: dict, canon: dict, senses_result, language_config, nodestrea
         for source_form, entry in entries.items()
         if isinstance(entry, dict) and entry_is_index_eligible(entry)
     ]
+
+    # MAJOR 1 (this train, #238/#241): detect fold-key collisions BEFORE any
+    # lookup happens -- see _colliding_source_forms()'s own docstring and the
+    # module docstring's "The fold NEWLY introduces..." paragraph. Every
+    # colliding source_form is routed to unresolved_homonyms below, never
+    # eligible_by_source_form, regardless of what its own lookup would have
+    # returned.
+    colliding_source_forms = _colliding_source_forms(source_forms)
 
     records_by_source_form = defaultdict(list)
     for rec in _block_records(source_forms, manifest, language_config, render_index):
@@ -428,10 +523,23 @@ def build(manifest: dict, canon: dict, senses_result, language_config, nodestrea
         records = records_by_source_form.get(source_form) or []
         if not records:
             continue  # zero source occurrences -- nothing to route anywhere
-        if is_split(senses_result, source_form):
+        if source_form in colliding_source_forms:
+            # Checked BEFORE is_split (precedence, module docstring): a
+            # fold-key collision is a data-integrity question -- which canon
+            # entry, if any, these records even belong to -- that must be
+            # resolved before a sense-adjudication question can even be
+            # asked. A source_form that is BOTH colliding and is_split still
+            # routes here, under the collision reason.
             unresolved_homonyms[source_form] = {
                 "count": len(records),
                 "segs": [rec["seg"] for rec in records],
+                "reason": "fold_match_key_collision",
+            }
+        elif is_split(senses_result, source_form):
+            unresolved_homonyms[source_form] = {
+                "count": len(records),
+                "segs": [rec["seg"] for rec in records],
+                "reason": "is_split",
             }
         else:
             eligible_by_source_form[source_form] = records

@@ -355,17 +355,20 @@ non-shipped historiettes-t3 provenance project referenced above.
   layout is a plausible later addition, but only once the `epub` target
   itself exists.
 - **No standalone occurrence index page.** `output.index.enabled` (the
-  aggregated person-index *page*) stays OPT-IN, gated, and a later phase. **New
-  in 1.8.0:** the `obsidian` target additionally supports an opt-in
-  *per-entity* source-anchored `## Mentions` occurrence index
-  (`output.adapter_config.obsidian.mentions_section.enabled`, default false),
-  which fixes the completeness/collapse gaps in native backlinks (#206/#207-a).
-  When enabled (and `output.target: obsidian`), `assemble.py` computes the
-  occurrence data (it holds the manifest) and attaches it as an **optional
-  `mentions` field on the NodeStream** — `{source_form: [{seg, origin, …}]}` —
-  which the obsidian adapter renders; the 4-argument `render(nodestream, canon,
-  profile, out_dir)` contract is unchanged (the data rides inside `nodestream`).
-  Default-off is byte-identical to 1.7.0. See
+  aggregated person-index *page*) stays OPT-IN, gated, and a later phase.
+  **New in 1.8.0, ON BY DEFAULT since 1.10.0:** the `obsidian` target
+  additionally supports a *per-entity* source-anchored `## Mentions`
+  occurrence index
+  (`output.adapter_config.obsidian.mentions_section.enabled` — an absent
+  block/key or `enabled: null` resolve to enabled; `enabled: false` opts
+  out), which fixes the completeness/collapse gaps in native backlinks
+  (#206/#207-a). When effective-enabled (and `output.target: obsidian`),
+  `assemble.py` computes the occurrence data (it holds the manifest) and
+  attaches it as an **optional `mentions` field on the NodeStream** —
+  `{source_form: [{seg, origin, …}]}` — which the obsidian adapter renders;
+  the 4-argument `render(nodestream, canon, profile, out_dir)` contract is
+  unchanged (the data rides inside `nodestream`). An explicit
+  `enabled: false` is byte-identical to pre-1.10.0 output. See
   `references/output-target-adapters/obsidian.md`.
 - **No generic renderer-plugin framework above the three fixed presets**
   (`obsidian`/`epub`/`custom`) — see

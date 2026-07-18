@@ -818,5 +818,321 @@ def test_caseless_pointed_inventory_parity_between_both_extractors():
     assert bn_names == lsr_names
 
 
+# ---------------------------------------------------------------------------
+# #238/#241 -- match-key fold (Hebrew niqqud/cantillation + maqaf/geresh/
+# gershayim connectors), applied ONLY at trie-descent/lookup time. The
+# emitted `name` at BOTH extract_candidate_spans() emit sites (pass 1's
+# `:632`, pass 2's `:694`) stays the RAW surface reconstruction -- Contract
+# 5 -- so every test below asserts the emitted name is byte-identical to
+# `text[s:e]`, never a folded/canonical spelling.
+# ---------------------------------------------------------------------------
+
+UNPOINTED_NAME = "משה לייב"          # space-joined, unpointed
+MAQAF_TEXT = "ראה משה־לייב אתמול."     # maqaf-joined, unpointed
+POINTED_NAME_VARIANT = "מֹשֶׁה לַיִיב"   # space-joined, pointed (distinct pointing from POINTED_HEBREW_NAME above)
+UNPOINTED_TEXT = "ראה משה לייב אתמול."
+POINTED_MAQAF_TEXT = "ראה מֹשֶׁה־לַיִיב אתמול."  # pointed AND maqaf-joined -- the combined axis
+
+
+def _first_span(out, name):
+    for n, mid, s, e in out:
+        if n == name:
+            return mid, s, e
+    return None
+
+
+# ---- #241: connector fold, both directions ----
+
+def test_241_bootstrap_unpointed_space_inventory_matches_maqaf_joined_text():
+    lang = bn_lang(name_inventory=[UNPOINTED_NAME])
+    out = bn.extract_candidate_spans(MAQAF_TEXT, lang)
+    hit = _first_span(out, "משה־לייב")
+    assert hit is not None, f"maqaf-joined surface not found in {out}"
+    _mid, s, e = hit
+    assert MAQAF_TEXT[s:e] == "משה־לייב"  # RAW surface, Contract 5
+
+
+def test_241_lsr_unpointed_space_inventory_matches_maqaf_joined_text():
+    lang = lsr_lang(name_inventory=[UNPOINTED_NAME])
+    out = lsr.extract_candidate_names(MAQAF_TEXT, lang)
+    assert "משה־לייב" in [n for n, _mid in out]
+
+
+def test_241_bootstrap_maqaf_joined_inventory_matches_unpointed_space_text():
+    lang = bn_lang(name_inventory=["משה־לייב"])
+    out = bn.extract_candidate_spans(UNPOINTED_TEXT, lang)
+    hit = _first_span(out, UNPOINTED_NAME)
+    assert hit is not None, f"space-joined surface not found in {out}"
+    _mid, s, e = hit
+    assert UNPOINTED_TEXT[s:e] == UNPOINTED_NAME
+
+
+def test_241_lsr_maqaf_joined_inventory_matches_unpointed_space_text():
+    lang = lsr_lang(name_inventory=["משה־לייב"])
+    out = lsr.extract_candidate_names(UNPOINTED_TEXT, lang)
+    assert UNPOINTED_NAME in [n for n, _mid in out]
+
+
+def test_241_control_mutation_dropping_maqaf_from_connectors_breaks_the_match():
+    """Red-before-green control: without maqaf in NAME_CONNECTORS (and the
+    compiled split regex it feeds), the space-joined inventory entry must
+    NOT match the maqaf-joined text."""
+    lang = bn_lang(name_inventory=[UNPOINTED_NAME])
+    original_connectors = bn.NAME_CONNECTORS
+    original_re = bn._NAME_CONNECTOR_SPLIT_RE
+    try:
+        bn.NAME_CONNECTORS = bn.NAME_CONNECTORS.replace("־", "")
+        bn._NAME_CONNECTOR_SPLIT_RE = re.compile("[" + bn.NAME_CONNECTORS + "]")
+        bn.match_units.cache_clear()
+        bn.fold_match_key.cache_clear()
+        bn._compiled_inventory_trie.cache_clear()
+        out = bn.extract_candidate_spans(MAQAF_TEXT, lang)
+        assert _first_span(out, "משה־לייב") is None
+    finally:
+        bn.NAME_CONNECTORS = original_connectors
+        bn._NAME_CONNECTOR_SPLIT_RE = original_re
+        bn.match_units.cache_clear()
+        bn.fold_match_key.cache_clear()
+        bn._compiled_inventory_trie.cache_clear()
+
+
+# ---- #238: mark (niqqud/cantillation) fold, both directions + combined ----
+
+def test_238_bootstrap_unpointed_inventory_matches_pointed_text():
+    lang = bn_lang(name_inventory=[UNPOINTED_NAME])
+    text = "ראה מֹשֶׁה לַיִיב אתמול."
+    out = bn.extract_candidate_spans(text, lang)
+    hit = _first_span(out, "מֹשֶׁה לַיִיב")
+    assert hit is not None, f"pointed surface not found in {out}"
+    _mid, s, e = hit
+    assert text[s:e] == "מֹשֶׁה לַיִיב"
+
+
+def test_238_bootstrap_pointed_inventory_matches_unpointed_text():
+    lang = bn_lang(name_inventory=[POINTED_NAME_VARIANT])
+    out = bn.extract_candidate_spans(UNPOINTED_TEXT, lang)
+    hit = _first_span(out, UNPOINTED_NAME)
+    assert hit is not None, f"unpointed surface not found in {out}"
+    _mid, s, e = hit
+    assert UNPOINTED_TEXT[s:e] == UNPOINTED_NAME
+
+
+def test_238_bootstrap_combined_unpointed_space_inventory_matches_pointed_maqaf_text():
+    """The combined axis (session-a §7 test 2): neither the mark fold alone
+    nor the connector fold alone covers this -- both must apply together."""
+    lang = bn_lang(name_inventory=[UNPOINTED_NAME])
+    out = bn.extract_candidate_spans(POINTED_MAQAF_TEXT, lang)
+    hit = _first_span(out, "מֹשֶׁה־לַיִיב")
+    assert hit is not None, f"pointed+maqaf surface not found in {out}"
+    _mid, s, e = hit
+    assert POINTED_MAQAF_TEXT[s:e] == "מֹשֶׁה־לַיִיב"
+
+
+def test_238_lsr_combined_unpointed_space_inventory_matches_pointed_maqaf_text():
+    lang = lsr_lang(name_inventory=[UNPOINTED_NAME])
+    out = lsr.extract_candidate_names(POINTED_MAQAF_TEXT, lang)
+    assert "מֹשֶׁה־לַיִיב" in [n for n, _mid in out]
+
+
+def test_238_control_mutation_removing_mark_drop_breaks_the_match():
+    """Red-before-green control: without the Hebrew-Mn drop, the unpointed
+    inventory entry must NOT match the pointed text."""
+    lang = bn_lang(name_inventory=[UNPOINTED_NAME])
+    text = "ראה מֹשֶׁה לַיִיב אתמול."
+    real_fold = bn._fold_match_marks
+    try:
+        bn._fold_match_marks = lambda s: s  # identity -- no mark drop at all
+        bn.match_units.cache_clear()
+        bn.fold_match_key.cache_clear()
+        bn._compiled_inventory_trie.cache_clear()
+        out = bn.extract_candidate_spans(text, lang)
+        assert _first_span(out, "מֹשֶׁה לַיִיב") is None
+    finally:
+        bn._fold_match_marks = real_fold
+        bn.match_units.cache_clear()
+        bn.fold_match_key.cache_clear()
+        bn._compiled_inventory_trie.cache_clear()
+
+
+# ---- Contract 5 -- emitted `name` stays raw at BOTH emit sites ----
+
+def test_contract5_pass2_emitted_name_is_raw_not_folded_or_canonical():
+    """Mutation A (an earlier draft's design): emit the canonical inventory
+    form instead of the raw surface -- this is exactly what Contract 5
+    forbids. Assert the emitted name is the pointed+maqaf-joined RAW surface,
+    never the unpointed space-joined inventory spelling."""
+    lang = bn_lang(name_inventory=[UNPOINTED_NAME])
+    out = bn.extract_candidate_spans(POINTED_MAQAF_TEXT, lang)
+    names = {n for n, _m, _s, _e in out}
+    assert "מֹשֶׁה־לַיִיב" in names  # raw surface
+    assert UNPOINTED_NAME not in names  # NOT the folded/canonical inventory spelling
+
+
+def test_contract5_pass1_emitted_name_also_stays_raw():
+    """Pass 1 (the capitalized-run algorithm) is untouched by this train's
+    fold -- covered here only as an explicit Contract-5 pin (session-a §5.2:
+    'untouched' describes the algorithm, not the test coverage)."""
+    lang = bn_lang()
+    text = "Jean marchait vers Paris."
+    out = bn.extract_candidate_spans(text, lang)
+    for name, _mid, s, e in out:
+        assert text[s:e] == name
+
+
+def test_contract5_extract_candidates_and_collect_candidates_stay_unfolded():
+    """extract_candidates()/collect_candidates() -- the thin wrappers that
+    feed name_candidates.json/canon.json -- must carry the SAME unfolded raw
+    name, never the inventory-canonical spelling."""
+    lang = bn_lang(name_inventory=[UNPOINTED_NAME])
+    pairs = bn.extract_candidates(POINTED_MAQAF_TEXT, lang)
+    names = {n for n, _mid in pairs}
+    assert "מֹשֶׁה־לַיִיב" in names
+    result = bn.collect_candidates([(None, POINTED_MAQAF_TEXT)], lang)
+    row_names = {r["name"] for r in result["candidates"]}
+    assert "מֹשֶׁה־לַיִיב" in row_names
+    assert UNPOINTED_NAME not in row_names
+
+
+# ---- Byte-identity regression -- the guard the cheap-migration claim rests on ----
+
+def test_byte_identity_regression_exact_spelled_hebrew_cases_unchanged():
+    """Every existing exact-spelled (no fold needed) Hebrew inventory case
+    must still emit the SAME (name, start, end) triple post-fix."""
+    lang = bn_lang(name_inventory=[HEBREW_NAME])
+    out = bn.extract_candidate_spans(HEBREW_TEXT_MATCH, lang)
+    hit = _first_span(out, HEBREW_NAME)
+    assert hit is not None
+    _mid, s, e = hit
+    assert (s, e) == (4, 12)
+    assert HEBREW_TEXT_MATCH[s:e] == HEBREW_NAME
+
+    pointed_lang = bn_lang(name_inventory=[POINTED_HEBREW_NAME])
+    pointed_out = bn.extract_candidate_spans(POINTED_HEBREW_TEXT, pointed_lang)
+    phit = _first_span(pointed_out, POINTED_HEBREW_NAME)
+    assert phit is not None
+    _mid, ps, pe = phit
+    assert POINTED_HEBREW_TEXT[ps:pe] == POINTED_HEBREW_NAME
+
+
+# ---- Latin non-regression ----
+
+def test_latin_non_regression_hyphen_and_apostrophe_stay_unfolded_connectors():
+    # isolate pass 2 (caseless route) with lowercase text -- pass 1 always
+    # joins two ADJACENT capitalized tokens regardless of name_inventory.
+    lang_hyphen = bn_lang(name_inventory=["jean-baptiste"])
+    assert bn.extract_candidate_spans("il vit jean baptiste hier.", lang_hyphen) == []
+
+    lang_apos = bn_lang(name_inventory=["o'brien"])
+    assert bn.extract_candidate_spans("il vit o brien hier.", lang_apos) == []
+
+
+def test_latin_non_regression_angstrom_sign_emits_byte_identical_name():
+    """U+212B ANGSTROM SIGN's NFD->NFC round-trip is NOT identity (it
+    recomposes to U+00C5, a DIFFERENT codepoint) -- the emitted name must
+    stay byte-identical to the raw surface regardless, since the fold is
+    NEVER applied to what gets emitted (Contract 5)."""
+    name = "Ångstrom"
+    lang = bn_lang(name_inventory=[name])
+    text = f"il vit {name} hier."
+    out = bn.extract_candidate_spans(text, lang)
+    hit = _first_span(out, name)
+    assert hit is not None
+    _mid, s, e = hit
+    assert text[s:e] == name
+    assert ord(text[s]) == 0x212B
+
+
+# ---- Terminator boundary still refused across the new axes ----
+
+def test_terminator_boundary_refused_across_mark_and_connector_fold():
+    lang = bn_lang(name_inventory=[UNPOINTED_NAME])
+    # pointed text with a sentence break between the two would-be units
+    text = "ראה מֹשֶׁה. לַיִיב אתמול."
+    out = bn.extract_candidate_spans(text, lang)
+    names = {n for n, _m, _s, _e in out}
+    assert "מֹשֶׁה לַיִיב" not in names
+    assert "מֹשֶׁה־לַיִיב" not in names
+
+
+def test_terminator_boundary_control_mutation_would_bridge_it():
+    """Red-before-green control mirroring the existing terminator check --
+    moving the `j >= 1` TERMINATORS check to AFTER the unit descent would
+    wrongly bridge the boundary."""
+    lang = bn_lang(name_inventory=[UNPOINTED_NAME])
+    text = "ראה משה. לייב אתמול."
+    # Sanity: the terminator check as shipped refuses this bridge already.
+    out = bn.extract_candidate_spans(text, lang)
+    assert UNPOINTED_NAME not in {n for n, _m, _s, _e in out}
+
+
+# ---- match_units() memoization (session-a §7 test 9) ----
+
+def test_match_units_memoized_per_token_not_recomputed_at_every_trie_depth(monkeypatch):
+    lang = bn_lang(name_inventory=["Jean Cohen Valjean", "Jean"])
+    bn.match_units.cache_clear()
+    bn._compiled_inventory_trie.cache_clear()
+    call_count = {"n": 0}
+    real_fold = bn._fold_token_to_units
+
+    def counting_fold(token):
+        call_count["n"] += 1
+        return real_fold(token)
+
+    monkeypatch.setattr(bn, "_fold_token_to_units", counting_fold)
+    bn.extract_candidate_spans("Jean Cohen Valjean marchait vers Jean Cohen encore.", lang)
+    # Distinct tokens actually visited by the trie walk: "Jean" (x2 in text),
+    # "Cohen" (x2), "Valjean", plus the inventory forms' own tokenization
+    # ("Jean","Cohen","Valjean" again -- already cached from the trie build).
+    # The point is NOT the exact count but that it is small/bounded -- not
+    # O(positions x L) (mutation below proves the distinction).
+    memoized_count = call_count["n"]
+
+    bn.match_units.cache_clear()
+    call_count["n"] = 0
+    monkeypatch.setattr(bn, "match_units", lambda s: bn._fold_token_to_units(s))
+    bn._compiled_inventory_trie.cache_clear()
+    bn.extract_candidate_spans("Jean Cohen Valjean marchait vers Jean Cohen encore.", lang)
+    unmemoized_count = call_count["n"]
+
+    assert unmemoized_count > memoized_count, (
+        f"memoized={memoized_count} unmemoized={unmemoized_count} -- "
+        "match_units() must be memoized per token, or recomputing at every "
+        "trie-walk position would cost strictly more _fold_token_to_units "
+        "calls than the memoized version"
+    )
+
+
+# ---- A-C1: inventory match-key collision warns, never raises ----
+
+def test_A_C1_inventory_match_key_collision_warns_never_raises(tmp_path, capsys):
+    languages_dir = tmp_path / "languages"
+    languages_dir.mkdir()
+    _write_json(languages_dir / "he.json", {
+        "PARTICLES": [], "STOPWORDS": [], "has_elision": False, "ELISION_RE": None,
+        "name_inventory": [UNPOINTED_NAME, "משה־לייב"],
+    })
+    lang = bn.load_language_config("he.json", languages_dir=languages_dir)  # must NOT raise
+    captured = capsys.readouterr()
+    assert "WARN" in captured.err
+    assert "משה לייב" in captured.err  # the folded match key named in the message
+    # both colliding forms still match identically -- nothing dropped.
+    out_space = bn.extract_candidate_spans(UNPOINTED_TEXT, lang)
+    assert UNPOINTED_NAME in {n for n, _m, _s, _e in out_space}
+    out_maqaf = bn.extract_candidate_spans(MAQAF_TEXT, lang)
+    assert "משה־לייב" in {n for n, _m, _s, _e in out_maqaf}
+
+
+def test_A_C1_no_collision_no_warning(tmp_path, capsys):
+    languages_dir = tmp_path / "languages"
+    languages_dir.mkdir()
+    _write_json(languages_dir / "he.json", {
+        "PARTICLES": [], "STOPWORDS": [], "has_elision": False, "ELISION_RE": None,
+        "name_inventory": [UNPOINTED_NAME],
+    })
+    bn.load_language_config("he.json", languages_dir=languages_dir)
+    captured = capsys.readouterr()
+    assert "WARN" not in captured.err
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))

@@ -108,6 +108,26 @@ def test_verse_line_count_negative_n_line_falls_back():
     assert SEGPACK_MODULE._verse_line_count(v) == 2
 
 
+def test_verse_line_count_u2028_joined_plain_text_counts_one_line_not_two():
+    """#192: str.splitlines() treats U+2028 LINE SEPARATOR (and the other
+    exotic Unicode line boundaries) as a line break; _split_lf_lines() must
+    NOT -- a manifest's own plain_text may legitimately carry a real U+2028
+    (e.g. a verse-payload sentinel join) that is not a source line break at
+    all. n_line absent/0 forces the LEGACY plain_text fallback path this
+    guards. Built from an explicit \\u2028 ESCAPE (never a literal
+    invisible character in this source file, per project convention)."""
+    v = {"n_line": 0, "plain_text": "one line\u2028still one line"}
+    assert SEGPACK_MODULE._verse_line_count(v) == 1
+
+
+def test_verse_line_count_real_lf_still_counts_correctly_alongside_u2028():
+    """Control: a REAL newline elsewhere in the SAME string must still
+    count as its own boundary -- _split_lf_lines only ignores U+2028
+    itself, it does not swallow a genuine LF sitting next to one."""
+    v = {"n_line": 0, "plain_text": "one line\u2028still one line\nline two"}
+    assert SEGPACK_MODULE._verse_line_count(v) == 2
+
+
 # ---------------------------------------------------------------------------
 # Shared manifest/canon fixture helpers for build_pack() tests below.
 # ---------------------------------------------------------------------------
@@ -552,6 +572,78 @@ def test_validate_segpack_rejects_missing_n_line():
 def test_validate_segpack_rejects_invalid_n_line(bad_n_line):
     errors = SEGPACK_MODULE.validate_segpack(_pack_with_one_verse({"n_line": bad_n_line}))
     assert any("must be a non-negative integer" in e for e in errors), errors
+
+
+# ---------------------------------------------------------------------------
+# #226 -- build_pack() no longer collapses a multi-character sentinel to a
+# single space before calling extract_candidates(). SENTINEL_RE.sub(" ",
+# raw_text) shifted every subsequent character's offset by
+# len(sentinel) - 1; extract_candidates()'s own bootstrap_names.
+# mask_sentinels() already performs the SAME masking internally with a
+# length-preserving space run, so the local pre-pass was redundant and the
+# one place in this script that could have corrupted a future span-based
+# caller's offsets.
+# ---------------------------------------------------------------------------
+
+def test_226_build_pack_passes_raw_block_text_uncollapsed_to_extract_candidates(monkeypatch):
+    """Pins the ARGUMENT build_pack() actually passes to extract_candidates()
+    -- the multi-character ⟦FNREF_12⟧ sentinel (9 chars) must still be
+    present in that argument, byte-identical to the manifest block's own raw
+    plain_text. A reinstated collapsing pre-pass would hand extract_
+    candidates() a DIFFERENT, shorter string instead."""
+    raw_text = "Jean parla ⟦FNREF_12⟧ Cohen arriva."
+    manifest = {
+        "segments": [{
+            "seg": "seg01", "title_text": "T", "kind": "body", "word_count": 6,
+            "block_ids": ["p1"],
+        }],
+        "blocks": {"p1": {"id": "p1", "order_index": 0, "plain_text": raw_text}},
+        "footnotes": [],
+        "verse": {"store": []},
+        "generation_hashes": _base_generation_hashes(),
+    }
+    canon = _minimal_canon()
+
+    seen_texts = []
+    real_extract = SEGPACK_MODULE.extract_candidates
+
+    def spy(text, lang_config):
+        seen_texts.append(text)
+        return real_extract(text, lang_config)
+
+    monkeypatch.setattr(SEGPACK_MODULE, "extract_candidates", spy)
+    SEGPACK_MODULE.build_pack("seg01", manifest, canon, LANG_CONFIG, "omit_apparatus")
+
+    assert raw_text in seen_texts, (
+        f"build_pack() never called extract_candidates() with the RAW, "
+        f"uncollapsed block text -- got {seen_texts!r}"
+    )
+
+
+def test_226_names_found_correctly_on_both_sides_of_a_multichar_sentinel():
+    """Control: the names either side of the sentinel are still correctly
+    surfaced (freq/mid-sentence unaffected by dropping the collapsing
+    pre-pass) -- extract_candidates()'s own internal same-length masking is
+    sufficient."""
+    raw_text = "Jean parla ⟦FNREF_12⟧ Cohen arriva."
+    manifest = {
+        "segments": [{
+            "seg": "seg01", "title_text": "T", "kind": "body", "word_count": 6,
+            "block_ids": ["p1"],
+        }],
+        "blocks": {"p1": {"id": "p1", "order_index": 0, "plain_text": raw_text}},
+        "footnotes": [],
+        "verse": {"store": []},
+        "generation_hashes": _base_generation_hashes(),
+    }
+    canon = _minimal_canon()
+    pack = SEGPACK_MODULE.build_pack("seg01", manifest, canon, LANG_CONFIG, "omit_apparatus")
+    # "Jean" is sentence-initial and single-word -- correctly filtered from
+    # the STRONG-name list by build_pack()'s own likely_name-style heuristic
+    # (unrelated to #226). "Cohen" sits immediately after the sentinel and is
+    # genuinely mid-sentence -- it must be surfaced, uncorrupted by the
+    # sentinel's own multi-character length.
+    assert pack["names"] == ["Cohen"]
 
 
 if __name__ == "__main__":

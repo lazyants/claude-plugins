@@ -55,7 +55,8 @@ occ = _load_module("occ_index_under_test", OCC_INDEX_SCRIPT, SCRIPTS_DIR)
 # Helpers
 # ---------------------------------------------------------------------------
 
-def make_lang(particles=(), stopwords=(), elision_pattern=None, has_elision=None):
+def make_lang(particles=(), stopwords=(), elision_pattern=None, has_elision=None,
+              name_inventory=()):
     """Builds a ``LanguageConfig`` directly -- mirrors
     tests/bootstrap_names.test.py's own ``make_lang`` helper exactly, so
     fixtures stay comparable across both suites.
@@ -70,6 +71,7 @@ def make_lang(particles=(), stopwords=(), elision_pattern=None, has_elision=None
         elision_re=elision_re,
         has_elision=has_elision,
         raw_bytes=b"{}",
+        name_inventory=frozenset(name_inventory),
     )
 
 
@@ -458,6 +460,45 @@ def test_index_manifest_matches_per_form_build_occurrence_records_output(tmp_pat
             )
 
     assert fast == expected
+
+
+# ---------------------------------------------------------------------------
+# A-C6 (this train, #238/#241) -- production_occurrences() stays mark/
+# connector-SENSITIVE, deliberately. Pins the honest, documented residual
+# rather than a wished-for behavior: occurrence_targets.py now correctly
+# indexes a pointed/maqaf-joined occurrence in the ## Mentions appendix (see
+# tests/occurrence_targets.test.py's own #238 SCOPE test), but THIS module
+# does not -- see occ_index.py's own module docstring for the rationale
+# (A-C6 = NO, lead-decisions.md) and the deferred-follow-up issue.
+# ---------------------------------------------------------------------------
+
+def test_A_C6_production_occurrences_finds_the_raw_emitted_occurrence():
+    lang = make_lang(name_inventory=["משה לייב"])
+    text = "ראה מֹשֶׁה־לַיִיב אתמול."
+    # the production matcher DOES find the occurrence -- under its own raw,
+    # unfolded emitted name (Contract 5).
+    spans = occ.production_occurrences("מֹשֶׁה־לַיִיב", text, lang)
+    assert len(spans) == 1
+    s, e = spans[0]
+    assert text[s:e] == "מֹשֶׁה־לַיִיב"
+
+
+def test_A_C6_production_occurrences_misses_the_unfolded_canon_source_form():
+    """The documented residual: an exact lookup by the canon's own unfolded
+    source_form finds NOTHING for a pointed/maqaf-joined occurrence -- this
+    is what A-C6 = NO leaves unresolved this train, deliberately.
+
+    HONESTY NOTE (not independently red-before-green): this assertion is
+    ALSO true on pre-#238/#241 code, but for an unrelated reason (the
+    matcher found nothing at all pre-fix, vs. found-under-a-different-name
+    post-fix). It only documents the intended residual when read alongside
+    test_A_C6_production_occurrences_finds_the_raw_emitted_occurrence
+    (which IS red-before-green) -- that companion test is what proves the
+    matcher actually recalls the occurrence now; THIS test proves the
+    unfolded lookup still can't find it under its own canon key."""
+    lang = make_lang(name_inventory=["משה לייב"])
+    text = "ראה מֹשֶׁה־לַיִיב אתמול."
+    assert occ.production_occurrences("משה לייב", text, lang) == []
 
 
 if __name__ == "__main__":

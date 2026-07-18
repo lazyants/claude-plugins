@@ -366,3 +366,9 @@ EXPECTED_COLLISION_OWNERS = ["Pavlo", "Petro"]
 # 1.7.0 tiebreak (shortest source_form, then lexicographic) -- both
 # "Petro"/"Pavlo" are 5 chars, so lexicographic order alone decides.
 EXPECTED_COLLISION_TIEBREAK_WINNER = "Pavlo"
+# #240 gate half: both owners are ordinary transliterated entries (neither
+# is basis: sense_translated) sharing one canonical_target_form, same case
+# -- render_obsidian.build_entity_index DOES de-link this target under
+# collision_delink=True (flag on). See validate_backlinks.py's
+# `_renderer_delinked_targets`/`_compute_collisions`.
+EXPECTED_COLLISION_DELINKED = True

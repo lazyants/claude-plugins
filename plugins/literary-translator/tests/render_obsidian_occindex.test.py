@@ -344,6 +344,115 @@ def test_collision_delink_false_keeps_tiebreak_winner_link(tmp_path):
 
 
 # ===========================================================================
+# 3b. #240/#207-a: a sense_translated entry STILL CONTRIBUTES to the
+#     collision tally, even though it can never win the inline-link
+#     tiebreak or become the sole survivor of an all-sense_translated
+#     target. Before the fix, `build_entity_index` skipped sense_translated
+#     entries BEFORE the owners_by_target tally -- so a sense_translated
+#     entry sharing a canonical_target_form with a narrative entry never
+#     registered as a real >=2-owner collision, and the narrative entry
+#     silently won as if it had no competition at all.
+# ===========================================================================
+
+
+def test_sense_translated_collision_delinks_both(tmp_path):
+    """RED against pre-#240 code: the `:428` skip erased the collision
+    before the tally ever saw it, so "Hope" (basis: transliterated) won the
+    tiebreak and linked, even under collision_delink=True. This is the
+    #240 renderer-half proof -- nothing else in this suite covers a
+    sense_translated entry sharing a target with a non-sense_translated
+    one."""
+    canon = make_canon({
+        "Nadezhda_src": canon_entry(
+            "Nadezhda_src", "Hope", basis="sense_translated",
+        ),
+        "Hope_src": canon_entry("Hope_src", "Hope", basis="transliterated"),
+    })
+    ns = make_nodestream([make_node("n1", "seg01", "Hope walked into the room.")])
+    profile = make_profile(folders={"person": "people"}, mentions_enabled=True)
+
+    out_dir, manifest = render_into(tmp_path, ns, canon, profile)
+
+    body_matches = find_file_with_content(
+        all_written_paths(out_dir, manifest), lambda t: "walked into the room" in t
+    )
+    assert len(body_matches) == 1
+    body_text = body_matches[0].read_text(encoding="utf-8")
+    assert "[[" not in body_text, (
+        f"a sense_translated entry sharing a target with a narrative entry "
+        f"must count as a real >=2-owner collision and de-link BOTH under "
+        f"collision_delink=True -- got:\n{body_text}"
+    )
+
+
+def test_all_sense_translated_owners_drop_the_target(tmp_path):
+    """TWO sense_translated entries sharing one canonical_target_form must
+    never crash (`min()` over an empty survivor sequence) and must never
+    let either owner win an inline link -- the target is dropped from
+    `by_target` entirely. Exercised under BOTH collision_delink values,
+    since the empty-survivor-set branch fires regardless of that flag.
+    HONEST NOTE: this end-to-end outcome is unchanged from pre-#240 code
+    (which excluded sense_translated entries before the tally, so an
+    all-sense_translated target never entered owners_by_target either) --
+    it is not RED against the shipped pre-fix behavior. What it DOES prove
+    RED is the new "if not survivors: continue" guard itself: removing
+    that one guard line reproduces `ValueError: min() iterable argument is
+    empty` on this exact fixture (verified while writing this test)."""
+    canon = make_canon({
+        "A_src": canon_entry("A_src", "Норов", basis="sense_translated"),
+        "B_src": canon_entry("B_src", "Норов", basis="sense_translated"),
+    })
+    text = "Норов вошёл в комнату."
+    for mentions_enabled in (False, True):
+        canon_copy = make_canon({
+            "A_src": canon_entry("A_src", "Норов", basis="sense_translated"),
+            "B_src": canon_entry("B_src", "Норов", basis="sense_translated"),
+        })
+        ns = make_nodestream([make_node("n1", "seg01", text)])
+        profile = make_profile(folders={"person": "people"}, mentions_enabled=mentions_enabled)
+
+        out_dir, manifest = render_into(tmp_path / f"delink_{mentions_enabled}", ns, canon_copy, profile)
+        body_matches = find_file_with_content(
+            all_written_paths(out_dir, manifest), lambda t: "вошёл в комнату" in t
+        )
+        assert len(body_matches) == 1
+        body_text = body_matches[0].read_text(encoding="utf-8")
+        assert "[[" not in body_text, (
+            f"an all-sense_translated collision (collision_delink="
+            f"{mentions_enabled}) must never produce an inline link -- "
+            f"got:\n{body_text}"
+        )
+
+
+def test_explicit_flag_off_preserves_tiebreak_link(tmp_path):
+    """The SAME sense_translated + normal collision as
+    test_sense_translated_collision_delinks_both above, but with
+    mentions_section.enabled written EXPLICITLY false -- pairs with the
+    existing pin at test_collision_delink_false_keeps_tiebreak_winner_link:
+    the pre-fix tiebreak-winner inline link (the non-sense_translated
+    entry, since a sense_translated entry can never win the tiebreak
+    either way) must still be emitted, unconditional on collision_delink's
+    own value."""
+    canon = make_canon({
+        "Nadezhda_src": canon_entry("Nadezhda_src", "Hope", basis="sense_translated"),
+        "Hope_src": canon_entry("Hope_src", "Hope", basis="transliterated"),
+    })
+    ns = make_nodestream([make_node("n1", "seg01", "Hope walked into the room.")])
+    profile = make_profile(folders={"person": "people"}, mentions_enabled=False)
+
+    out_dir, manifest = render_into(tmp_path, ns, canon, profile)
+    body_matches = find_file_with_content(
+        all_written_paths(out_dir, manifest), lambda t: "walked into the room" in t
+    )
+    body_text = body_matches[0].read_text(encoding="utf-8")
+    identity = entity_note_identity(out_dir, manifest, "Hope_src")
+    assert f"[[{identity}|Hope]]" in body_text, (
+        f"the non-sense_translated entry must still win the tiebreak with "
+        f"the flag off -- got:\n{body_text}"
+    )
+
+
+# ===========================================================================
 # 4. Marker-forgery rejections (codex R5/R6): reserved token in any field
 #    that reaches raw Markdown, and a line-break char in the two fields
 #    that can become a heading.

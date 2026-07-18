@@ -59,6 +59,18 @@ scope filter or not.
      item, emitted REGARDLESS of whether the records' target forms agree --
      *the same source name (modulo case/whitespace/NFC) exists as 2+
      separate canon entries; same entity, or two people sharing a spelling?*
+     **SCOPE LIMIT (#205), stated plainly rather than silently: this
+     category can only ever detect a NORMALIZATION-VARIANT duplicate
+     (e.g. `'Nachman'` vs `'nachman '`), never a genuine byte-identical
+     one.** `canon_validate.py:810`'s own write pattern
+     (`entries[source_form] = new_entry`) makes `map_key == source_form` by
+     construction, so two records sharing an IDENTICAL surface can never
+     coexist in `entries{}` in the first place -- there is nothing left
+     for N(source_form) grouping to catch beyond a normalization variant.
+     `compute_cat1_items` emits an unconditional warning stating this scope
+     limit on every `--check` run (never gated on whether any group was
+     actually found), so an operator reading the summary is never left
+     assuming broader coverage than the check actually has.
   2. `existing_merge` -- group proper-name entry records by
      N(canonical_target_form). Any group spanning 2+ DISTINCT normalized
      source forms is a required item -- *genuinely different source
@@ -719,7 +731,25 @@ def group_by_normalized(records: list, field: str) -> dict:
 def compute_cat1_items(records: list, key_to_identity: dict, warnings: list) -> list:
     """Category 1, duplicate_source_form: group proper-name entry records by
     N(source_form); any group of 2+ records is a required item, regardless
-    of target agreement (counts RECORDS, not distinct field values)."""
+    of target agreement (counts RECORDS, not distinct field values).
+
+    #205 (Option A -- docstring honesty + an unconditional scope warning,
+    never a schema change): this category structurally CANNOT detect a
+    byte-identical duplicate source_form, only a normalization variant --
+    `canon_validate.py:810` writes `entries[source_form] = new_entry`, so
+    `map_key == source_form` by construction and two records with an
+    identical surface can never coexist in `entries{}` to begin with. The
+    warning below fires every `--check` run, unconditionally (never gated
+    on whether a group was actually found), so an operator never assumes
+    this category's coverage is broader than it structurally can be."""
+    warnings.append(
+        "category 1 (duplicate_source_form) scope: it can only ever detect "
+        "a NORMALIZATION-VARIANT duplicate source_form (e.g. 'Nachman' vs "
+        "'nachman '), never a genuine byte-identical one -- canon.json's "
+        "own map-key-equals-source_form write pattern (canon_validate.py) "
+        "structurally prevents two entries{} records from ever sharing an "
+        "identical surface. This is a scope limit of the check, not a bug."
+    )
     groups = group_by_normalized(records, "source_form")
     items = []
     for ns in sorted(groups):

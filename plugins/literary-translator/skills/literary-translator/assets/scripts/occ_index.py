@@ -37,6 +37,27 @@ Offsets throughout are half-open, Unicode-**codepoint** intervals into the
 raw block ``plain_text`` -- CPython's ``str`` is already a codepoint
 sequence (PEP 393), so plain ``str`` slicing/indexing is exactly the right
 unit; no UTF-16-surrogate-pair handling is needed for non-BMP characters.
+
+## A-C6 (this train, #238/#241) -- this module stays mark/connector-SENSITIVE
+
+``occurrence_targets.py`` (the ``## Mentions`` appendix's own occurrence
+engine) now folds Hebrew niqqud/cantillation marks and maqaf/geresh/
+gershayim connectors at LOOKUP time (``bootstrap_names.fold_match_key``), so
+an unpointed/space-joined canon entry finds a pointed/maqaf-joined source
+occurrence and vice versa. **This module deliberately does NOT.**
+``production_occurrences()``'s ``name == source_form`` comparison below stays
+an EXACT, unfolded string comparison on purpose (A-C6 = NO this train,
+lead-decisions.md) -- folding it would change ``evidence_verify.py``'s and
+``canon_adjudication_audit.py``'s evidence matrix with zero code change on
+their side, exactly the fail-silent, cross-session hazard
+``bootstrap_names.extract_candidate_spans``'s Contract 5 exists to prevent.
+So ``production_occurrences``/``evidence_verify.py``/``suspicion_scan.py``/
+``canon_adjudication_audit.py`` remain mark/connector-SENSITIVE after this
+train: a pointed or maqaf-joined occurrence that ``occurrence_targets.py``
+now correctly lists in the ``## Mentions`` appendix may still be invisible to
+this module's own evidence-matching. This is a known, deliberate residual,
+not an oversight -- a coordinated fold of this comparison is a candidate
+follow-up, not in scope here.
 """
 import argparse
 import hashlib
@@ -88,6 +109,12 @@ def production_occurrences(source_form: str, block_text: str, language_config) -
     this with an unresolved/default config; a project's RESOLVED
     ``LanguageConfig`` (carrying its real ``elision_re``/particle set) is
     required and load-bearing.
+
+    ``name == source_form`` is an EXACT, unfolded string comparison,
+    deliberately NOT #238/#241 mark/connector-folded (A-C6 = NO this train --
+    see this module's own docstring). A pointed/maqaf-joined ``source_form``
+    occurrence that ``occurrence_targets.py`` now correctly indexes may still
+    be invisible here.
     """
     return [
         (char_start, char_end)

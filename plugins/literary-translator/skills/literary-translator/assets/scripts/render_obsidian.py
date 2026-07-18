@@ -166,21 +166,25 @@ def _effective_mentions_enabled(profile):
     """The ONE predicate D1 (this file), D3 (collision de-link), and D4
     (`validate_backlinks.py`, computed independently there) all gate on --
     `output.target` must be EXACTLY "obsidian" AND
-    `output.adapter_config.obsidian.mentions_section.enabled` must be
-    boolean `True`. Computed fresh from render()'s own `profile` argument
-    every call, never cached/inherited -- this is what keeps the
-    standalone CLI (`main()` below, whose profile can carry a dormant
-    `obsidian` sub-block while `--out-dir`/`output.target` actually point
-    somewhere else, e.g. `target: "custom"`) from ever activating the
-    Mentions section, collision de-linking, or the reserved-field
-    rejections: those must fire only when this adapter is genuinely the
-    one in effect for real assembly."""
+    `output.adapter_config.obsidian.mentions_section.enabled` must not be
+    boolean `False`. ON BY DEFAULT (1.10.0+): an absent `mentions_section`
+    block, an absent `enabled` key, or `enabled: null` all resolve to
+    enabled -- an explicit `enabled: false` is the only way to opt out.
+    Computed fresh from render()'s own `profile` argument every call, never
+    cached/inherited -- this is what keeps the standalone CLI (`main()`
+    below, whose profile can carry a dormant `obsidian` sub-block while
+    `--out-dir`/`output.target` actually point somewhere else, e.g.
+    `target: "custom"`) from ever activating the Mentions section,
+    collision de-linking, or the reserved-field rejections: those must
+    fire only when this adapter is genuinely the one in effect for real
+    assembly -- the `target != "obsidian"` short-circuit below is what
+    guarantees that regardless of the flag's own value."""
     output_cfg = (profile or {}).get("output") or {}
     if output_cfg.get("target") != "obsidian":
         return False
     obsidian_cfg = (output_cfg.get("adapter_config") or {}).get("obsidian") or {}
     mentions_cfg = obsidian_cfg.get("mentions_section") or {}
-    return mentions_cfg.get("enabled") is True
+    return mentions_cfg.get("enabled") is not False
 
 
 class RenderError(Exception):
@@ -399,15 +403,27 @@ def build_entity_index(entries, note_identity_by_source_form, collision_delink=F
     otherwise a blank/whitespace target would become a matcher that wraps
     the first space (or nothing) in every block (review round 1 finding).
 
-    `basis: "sense_translated"` entries (#138) are ALSO skipped here --
-    deliberately, and unlike every other basis. A sense-rendering is an
-    ordinary word BY CONSTRUCTION ("Hope", "Wolf"), so the unanchored,
-    no-word-boundary alternation below would otherwise wikilink every
-    incidental occurrence of that word in the prose, not just the entity's
-    own mentions. The entity note itself is still emitted and still carries
-    its `basis` in frontmatter (`_render_entity_note` never branches on
-    `basis`) -- only the body auto-linking is suppressed, erring toward the
-    recoverable failure (a missing auto-link) over a false-link flood.
+    `basis: "sense_translated"` entries (#138) never WIN the tiebreak and
+    never get an inline auto-link -- deliberately, and unlike every other
+    basis. A sense-rendering is an ordinary word BY CONSTRUCTION ("Hope",
+    "Wolf"), so the unanchored, no-word-boundary alternation below would
+    otherwise wikilink every incidental occurrence of that word in the
+    prose, not just the entity's own mentions. The entity note itself is
+    still emitted and still carries its `basis` in frontmatter
+    (`_render_entity_note` never branches on `basis`) -- only the body
+    auto-linking is suppressed, erring toward the recoverable failure (a
+    missing auto-link) over a false-link flood.
+
+    A `sense_translated` entry STILL CONTRIBUTES to the collision tally,
+    though (#240/#207-a): it is filtered out only at the tiebreak-selection
+    step below, AFTER `owners_by_target` has already counted it as an
+    owner. A sense_translated entry sharing a `canonical_target_form` with
+    a narrative entry is therefore still a real >=2-owner collision under
+    `collision_delink=True` -- both entries are de-linked, not just the
+    narrative one silently winning as if the sense_translated owner never
+    existed. If EVERY owner of a target turns out to be sense_translated,
+    there is no eligible winner at all and the target is dropped from
+    `by_target` entirely (never `min()` over an empty sequence).
 
     The compiled pattern alternates every distinct target string, LONGEST
     FIRST, so a shorter name can never shadow a longer one that contains it
@@ -425,8 +441,6 @@ def build_entity_index(entries, note_identity_by_source_form, collision_delink=F
         target = entry.get("canonical_target_form")
         if not target or not target.strip():
             continue
-        if entry.get("basis") == "sense_translated":
-            continue
         # NFC-normalize so a canon entry stored in decomposed (NFD) form
         # collapses onto the same target as an NFC one, and so the pattern
         # built below matches consistently against `_Linker.link`'s own
@@ -434,13 +448,22 @@ def build_entity_index(entries, note_identity_by_source_form, collision_delink=F
         # spliced in from different upstream sources).
         target = unicodedata.normalize("NFC", target)
         key = (len(source_form), source_form)
-        owners_by_target[target].append((key, source_form))
+        # `basis` carried alongside (#240) so the sense_translated exclusion
+        # can be applied AFTER the collision tally below, not before it --
+        # see this function's own docstring.
+        owners_by_target[target].append((key, source_form, entry.get("basis")))
 
     by_target = {}
     for target, owners in owners_by_target.items():
         if collision_delink and len(owners) >= 2:
-            continue  # >=2 owners, delinked entirely -- no inline link for this string at all
-        _, winner_source_form = min(owners)  # shortest source_form, then lexicographic
+            continue  # >=2 owners of ANY basis, delinked entirely -- no inline link for this string at all
+        survivors = [
+            (key, source_form) for key, source_form, basis in owners
+            if basis != "sense_translated"
+        ]
+        if not survivors:
+            continue  # every owner is sense_translated -- never auto-linked, drop the target entirely
+        _, winner_source_form = min(survivors)  # shortest source_form, then lexicographic, sense_translated excluded
         by_target[target] = winner_source_form
 
     if not by_target:

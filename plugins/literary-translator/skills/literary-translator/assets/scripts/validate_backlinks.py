@@ -10,31 +10,36 @@ error -- unreadable/malformed input) halts.
 
 ## What this gate is, and is not
 
-The obsidian adapter's opt-in `mentions_section` flag
-(`output.adapter_config.obsidian.mentions_section.enabled`) makes
+The obsidian adapter's `mentions_section` block
+(`output.adapter_config.obsidian.mentions_section`) makes
 `render_obsidian.py` emit a source-anchored `## Mentions` occurrence-index
 section in each entity note, wrapped in reserved
-`<!-- lt:mentions:begin/end -->` boundary markers (D1). This script does
-NOT trust that render produced a complete section -- it independently
-RE-DERIVES the expected occurrence universe (via `occurrence_targets.build`,
-fresh, from the same manifest/canon/canon_senses/language_config/persisted-
-NodeStream inputs assembly used) and compares it against what actually
-survives in the rendered vault, so a renderer bug can never "self-hide" by
-also being wrong in the report.
+`<!-- lt:mentions:begin/end -->` boundary markers (D1). ON BY DEFAULT for
+`output.target: obsidian` -- an absent `mentions_section` block, an absent
+`enabled` key, or `enabled: null` all resolve to enabled; an explicit
+`enabled: false` is the only way to opt out. This script does NOT trust
+that render produced a complete section -- it independently RE-DERIVES the
+expected occurrence universe (via `occurrence_targets.build`, fresh, from
+the same manifest/canon/canon_senses/language_config/persisted-NodeStream
+inputs assembly used) and compares it against what actually survives in
+the rendered vault, so a renderer bug can never "self-hide" by also being
+wrong in the report.
 
 ## The effective-enabled predicate (codex R8 b1 / R9 b1)
 
 `output.target == "obsidian"` AND
-`output.adapter_config.obsidian.mentions_section.enabled is True` -- the
-SAME condition `assemble.py` uses to attach `nodestream["mentions"]` and
-`render()` uses to gate D1's rendering behavior. Evaluated FIRST, before
-loading ANY metric input (manifest/canon/canon_senses/nodestream/vault): a
-dormant `obsidian` sub-block whose flag is still `true` under a different
-`output.target` (e.g. `custom`) must never make this gate parse a
-non-Obsidian vault. When not effective-enabled: `mentions_coverage.status`
-is `"disabled"`, no metric is computed (collisions/unresolved_homonyms/
-inline_advisory are all empty too -- nothing below this point is loaded),
-`warnings=0`, exit 0.
+`output.adapter_config.obsidian.mentions_section.enabled is not False` --
+the SAME condition `assemble.py` uses to attach `nodestream["mentions"]`
+and `render()` uses to gate D1's rendering behavior. Evaluated FIRST,
+before loading ANY metric input (manifest/canon/canon_senses/nodestream/
+vault): a dormant `obsidian` sub-block that is not explicitly `enabled:
+false` under a different `output.target` (e.g. `custom`) must never make
+this gate parse a non-Obsidian vault -- the `target != "obsidian"`
+short-circuit is unchanged and evaluated first for exactly that reason.
+When not effective-enabled (only ever via `target != "obsidian"` or an
+explicit `enabled: false`): `mentions_coverage.status` is `"disabled"`, no
+metric is computed (collisions/unresolved_homonyms/inline_advisory are all
+empty too -- nothing below this point is loaded), `warnings=0`, exit 0.
 
 ## The two metrics + two exit-neutral diagnostics (D4)
 
@@ -63,7 +68,15 @@ inline_advisory are all empty too -- nothing below this point is loaded),
      Contributes nothing to `warnings`/exit.
   - **Collisions** (exit-neutral): canon entries grouped by
     `canon_senses.normalize_form(canonical_target_form)`, >=2 owners --
-    independent of the rendered vault.
+    independent of the rendered vault. Each row also carries
+    `renderer_delinked: bool` (#240 gate half): whether
+    `render_obsidian.build_entity_index` actually removes this target from
+    its link map once collision de-linking engages -- computed by CALLING
+    the renderer twice (never re-implementing its rule), so it surfaces
+    rather than eliminates the residual disagreement between this gate's
+    casefold grouping key and the renderer's own NFC-only,
+    sense_translated-aware one. Never routed into `warnings`/exit -- see
+    below.
   - **`unresolved_homonyms`** (exit-neutral): `occurrence_targets.build`'s
     own split-form accounting, surfaced verbatim.
 
@@ -73,7 +86,8 @@ inline_advisory are all empty too -- nothing below this point is loaded),
                               "checked_entities": int,
                               "missing": [ {"source_form", "seg"}, ... ] },
       "unresolved_homonyms": [ {"source_form", "count", "segs": [...]}, ... ],
-      "collisions":          [ {"canonical_target_form", "owners": [...]}, ... ],
+      "collisions":          [ {"canonical_target_form", "owners": [...],
+                                 "renderer_delinked": bool}, ... ],
       "inline_advisory":     { "thin_coverage": [
           {"source_form", "inline_links", "source_occurrences"}, ... ] },
       "warnings": int }
@@ -84,10 +98,14 @@ inline_advisory are all empty too -- nothing below this point is loaded),
   1 = `warnings > 0` (advisory -- does NOT halt W9; logged as WARN).
   2 = hard error: unreadable/malformed manifest.json, canon.json (when
       present -- an ABSENT canon.json is tolerated as zero entries, exactly
-      like `assemble.py`'s own default), canon_senses.json, profile.yml,
-      the resolved language_config, or the persisted assembled NodeStream
+      like `assemble.py`'s own default; a PRESENT `entries` that is not an
+      object is still fatal, #236), canon_senses.json, profile.yml, the
+      resolved language_config, the persisted assembled NodeStream
       (`${DURABLE_ROOT}/out/.assembled/nodestream.json`, independent of
-      `output.destination`/`--vault`).
+      `output.destination`/`--vault`) -- including a malformed `book`/
+      `seg_order`/`nodes` shape within it (#236, promoted from an uncaught
+      exit-1 traceback to a clean, reason-carrying exit 2) -- or
+      `occurrence_targets.build()` itself raising.
 
 Usage: python3 validate_backlinks.py [--vault DIR]
 """
@@ -95,6 +113,7 @@ import argparse
 import json
 import re
 import sys
+import unicodedata
 from collections import Counter, defaultdict
 from pathlib import Path
 from typing import NoReturn
@@ -203,6 +222,19 @@ _MENTIONS_END_LINE = "<!-- lt:mentions:end -->"
 # text can't itself contain "[", "]", or "|".
 _WIKILINK_RE = re.compile(r"\[\[([^\[\]|]+)(?:\|[^\[\]]*)?\]\]")
 
+# #236 fence-awareness -- a ``` / ~~~ fenced code block delimiter line
+# (leading/trailing whitespace tolerated, matching common Markdown
+# renderers). Used to keep a marker line or a wikilink that only exists
+# INSIDE an author's own illustrative code fence from ever forging gate
+# signal (a fake begin/end pair, or a fake counted-as-coverage link).
+_FENCE_DELIM_RE = re.compile(r"^(```+|~~~+)")
+
+# An inline code span: backtick-delimited, no embedded backtick or
+# newline. Stripped before `_WIKILINK_RE` runs so `` `[[001 real]]` `` --
+# a wikilink an author is merely QUOTING as literal text, not emitting --
+# is never counted as coverage (#236).
+_INLINE_CODE_RE = re.compile(r"`[^`\n]*`")
+
 
 def _fatal(msg) -> NoReturn:
     print(f"ERROR: {msg}", file=sys.stderr)
@@ -258,7 +290,7 @@ def _effective_enabled(profile):
     mentions_cfg = (
         (output_cfg.get("adapter_config") or {}).get("obsidian") or {}
     ).get("mentions_section") or {}
-    return mentions_cfg.get("enabled") is True
+    return mentions_cfg.get("enabled") is not False
 
 
 def _disabled_report():
@@ -294,14 +326,52 @@ def _strip_frontmatter(text):
     return ""
 
 
+def _fenced_line_mask(lines):
+    """Returns a list of bool, same length as `lines`: True iff that line
+    sits STRICTLY INSIDE an open ``` / ~~~ fenced code block (the fence
+    delimiter lines themselves are False, matching CommonMark's own
+    "fence lines are not part of the code block's content" rule). A fence
+    is closed by a later delimiter line using the SAME fence character
+    (backtick vs tilde) with a run length >= the opening one -- close
+    enough to CommonMark's real nesting rule for this defensive purpose;
+    exact fenced-code-block semantics are not the point, only "don't let a
+    marker/wikilink hiding inside an author's own example fence forge gate
+    signal" (#236)."""
+    mask = []
+    open_char = None
+    open_len = 0
+    for ln in lines:
+        m = _FENCE_DELIM_RE.match(ln.strip())
+        if m:
+            token = m.group(1)
+            char, length = token[0], len(token)
+            if open_char is None:
+                open_char = char
+                open_len = length
+                mask.append(False)  # the opening delimiter itself
+            elif char == open_char and length >= open_len:
+                open_char = None
+                open_len = 0
+                mask.append(False)  # the closing delimiter itself
+            else:
+                mask.append(True)  # a differently-fenced delimiter-shaped line, still inside the open fence
+            continue
+        mask.append(open_char is not None)
+    return mask
+
+
 def _single_marker_pair(lines):
     """(begin_index, end_index) of the SINGLE well-formed lt:mentions
     marker pair in `lines`, or None if zero, multiple, nested, or
     otherwise malformed marker structure is present -- "trust the first
     match" is never done here (codex R7: multiple/malformed marker pairs
-    must be rejected outright, not silently resolved to the first)."""
-    begins = [i for i, ln in enumerate(lines) if ln == _MENTIONS_BEGIN_LINE]
-    ends = [i for i, ln in enumerate(lines) if ln == _MENTIONS_END_LINE]
+    must be rejected outright, not silently resolved to the first). A
+    marker line that sits INSIDE a ``` / ~~~ fenced code block is never
+    counted as a real marker (#236: a forged example fence must not spoof
+    a begin/end pair)."""
+    mask = _fenced_line_mask(lines)
+    begins = [i for i, ln in enumerate(lines) if ln == _MENTIONS_BEGIN_LINE and not mask[i]]
+    ends = [i for i, ln in enumerate(lines) if ln == _MENTIONS_END_LINE and not mask[i]]
     if len(begins) != 1 or len(ends) != 1:
         return None
     b, e = begins[0], ends[0]
@@ -326,7 +396,11 @@ def _mentions_region_lines(body_text):
 def _wikilink_targets(lines):
     targets = set()
     for ln in lines:
-        for m in _WIKILINK_RE.finditer(ln):
+        # #236: an inline-code-quoted wikilink (e.g. `` `[[001 real]]` ``)
+        # is literal text an author is QUOTING, not a real link -- strip
+        # inline code spans before matching so it can never count as
+        # coverage.
+        for m in _WIKILINK_RE.finditer(_INLINE_CODE_RE.sub("", ln)):
             targets.add(m.group(1))
     return frozenset(targets)
 
@@ -377,8 +451,15 @@ def _seg_filename_map(nodestream):
     sorted-extra-segs fallback, same _segment_title/
     sanitize_filename_component/_stable_fallback_name calls) -- so this
     map is byte-identical to what render() actually wrote."""
+    nodes = nodestream.get("nodes")
+    if nodes is not None and not isinstance(nodes, list):
+        # #236: promoted from an uncaught downstream error to a clean,
+        # named exit 2 -- see this function's own callers' docstrings for
+        # why exit 1 (advisory) is never acceptable for a structurally
+        # malformed persisted artifact.
+        _fatal(f"assembled nodestream: 'nodes' must be a list, got {type(nodes).__name__}")
     nodes_by_seg = {}
-    for node in nodestream.get("nodes") or []:
+    for node in nodes or []:
         # A malformed node (not an object, no string "seg", no int
         # "order_index") must be a clean exit-2 hard error, never an
         # uncaught KeyError escaping as exit 1 with a raw traceback --
@@ -393,7 +474,21 @@ def _seg_filename_map(nodestream):
         if not isinstance(order_index, int) or isinstance(order_index, bool):
             _fatal(f"assembled nodestream: node {seg!r} is missing an int 'order_index' field, got {order_index!r}")
         nodes_by_seg.setdefault(seg, []).append(node)
-    seg_order = (nodestream.get("book") or {}).get("seg_order") or []
+
+    book = nodestream.get("book")
+    if book is not None and not isinstance(book, dict):
+        # #236: `book = ["x"]` previously reached `.get("seg_order")` on a
+        # list a few lines below and raised an uncaught AttributeError
+        # (exit 1, advisory -- W9 would silently walk past it).
+        _fatal(f"assembled nodestream: 'book' must be an object, got {type(book).__name__}")
+    seg_order = (book or {}).get("seg_order") or []
+    if not isinstance(seg_order, list) or not all(isinstance(s, str) for s in seg_order):
+        # #236: a non-list (e.g. the string "abc") previously iterated as
+        # CHARACTERS with no error at all -- a silently wrong answer, not
+        # a crash; a list with a non-string element (e.g. `[1, 2]`)
+        # previously reached a downstream `.encode()` call and raised an
+        # uncaught AttributeError. Both are now this one named exit 2.
+        _fatal(f"assembled nodestream: book.seg_order must be a list of strings, got {seg_order!r}")
     extra_segs = sorted(set(nodes_by_seg) - set(seg_order))
     full_order = list(seg_order) + extra_segs
     mapping = {}
@@ -474,7 +569,10 @@ def _compute_inline_advisory(aggregate, note_identity_by_source_form, seg_filena
             continue
         body = _body_excluding_mentions_region(text)
         for ln in body.split("\n"):
-            for m in _WIKILINK_RE.finditer(ln):
+            # #236: same inline-code-stripping discipline as metric 1's
+            # `_wikilink_targets` -- a quoted `` `[[...]]` `` must not
+            # count toward this metric either.
+            for m in _WIKILINK_RE.finditer(_INLINE_CODE_RE.sub("", ln)):
                 sf = identity_to_source_form.get(m.group(1))
                 if sf is not None:
                     inline_counts[sf] += 1
@@ -499,7 +597,41 @@ def _compute_inline_advisory(aggregate, note_identity_by_source_form, seg_filena
 # Collisions + unresolved_homonyms (exit-neutral diagnostics).
 # ---------------------------------------------------------------------------
 
-def _compute_collisions(entries):
+def _renderer_delinked_targets(entries, note_identity_by_source_form):
+    """#240 gate half: the set of NFC-normalized, case-SENSITIVE target
+    strings `render_obsidian.build_entity_index` actually removes from its
+    link map once collision de-linking engages -- i.e. present in the
+    `collision_delink=False` map but ABSENT from the `collision_delink=True`
+    one. Calls the renderer's OWN function twice rather than
+    re-implementing its collision rule, so this can never drift from
+    `render()`'s real behavior.
+
+    `build_entity_index` returns a 2-TUPLE `(pattern, target_to_entity)` --
+    a bare `set(build_entity_index(...))` would iterate that tuple and
+    raise `TypeError: unhashable type: 'dict'`; take `[1]` (the
+    target->entity dict) explicitly. Its KEYS are NFC-normalized
+    (render_obsidian.py's own NFC-normalize step), case-SENSITIVE target
+    strings.
+
+    ⚠️ Correctness precondition, verified true against `render_obsidian.py`
+    at time of writing: this set-diff is correct ONLY while a de-linked
+    target is fully ABSENT from `target_to_entity` (never left present
+    under some sentinel). If `build_entity_index` ever changes to signal
+    de-linking a different way, this silently degrades to "nothing was
+    de-linked" rather than erroring -- both files are gate-owned, so this
+    is a note-to-self, not a cross-session negotiation, but it is written
+    down here so a future edit to one side cannot break the other
+    invisibly."""
+    _, no_delink = render_obsidian.build_entity_index(
+        entries, note_identity_by_source_form, collision_delink=False
+    )
+    _, delinked = render_obsidian.build_entity_index(
+        entries, note_identity_by_source_form, collision_delink=True
+    )
+    return set(no_delink) - set(delinked)
+
+
+def _compute_collisions(entries, renderer_delinked_targets):
     """Groups canon entries by `canon_senses.normalize_form
     (canonical_target_form)`, reporting every group with >=2 owners.
     Independent of the rendered vault -- computed from canon alone. The
@@ -507,7 +639,23 @@ def _compute_collisions(entries):
     reported `canonical_target_form` is the ORIGINAL (display) value of
     the first owner in sorted-source_form order -- membership key folded,
     display stays original, mirroring `_dedupe_path`'s own discipline in
-    render_obsidian.py."""
+    render_obsidian.py.
+
+    Each row also carries `renderer_delinked: bool` (#240 gate half):
+    whether `render_obsidian.build_entity_index` actually de-links THIS
+    collision's target under `collision_delink=True` -- surfacing, rather
+    than eliminating, the residual disagreement between this gate's own
+    casefold+whitespace-collapse grouping key and the renderer's NFC-only,
+    case-SENSITIVE, sense_translated-aware one (lead-decision B-C2; a
+    case-variant pair is a real canon data-quality problem even though the
+    renderer treats the two strings as distinct targets). The membership
+    check NFC-normalizes the DISPLAY value before comparing against
+    `renderer_delinked_targets` -- which holds NFC-normalized keys -- since
+    this function's own `display` map deliberately keeps the ORIGINAL
+    (possibly NFD) form; skipping that normalization would silently report
+    `renderer_delinked: False` for any collision stored in decomposed
+    form. NFC-exact, never casefolded here -- the casefold-vs-NFC
+    disagreement is exactly the thing being surfaced, not reconciled."""
     groups = defaultdict(list)
     display = {}
     for sf in sorted(entries):
@@ -520,11 +668,19 @@ def _compute_collisions(entries):
         key = canon_senses.normalize_form(target)
         groups[key].append(sf)
         display.setdefault(key, target)
-    collisions = [
-        {"canonical_target_form": display[key], "owners": sorted(owners)}
-        for key, owners in groups.items()
-        if len(owners) >= 2
-    ]
+    collisions = []
+    for key, owners in groups.items():
+        if len(owners) < 2:
+            continue
+        canonical_target_form = display[key]
+        renderer_delinked = (
+            unicodedata.normalize("NFC", canonical_target_form) in renderer_delinked_targets
+        )
+        collisions.append({
+            "canonical_target_form": canonical_target_form,
+            "owners": sorted(owners),
+            "renderer_delinked": renderer_delinked,
+        })
     return sorted(collisions, key=lambda d: d["canonical_target_form"])
 
 
@@ -601,6 +757,15 @@ def main():
         canon = _require_json(CANON_PATH, "canon.json")
         if not isinstance(canon, dict):
             _fatal(f"canon.json at {CANON_PATH} did not parse to an object")
+    if "entries" in canon and not isinstance(canon["entries"], dict):
+        # #236: previously silently absorbed by render_obsidian._canon_entries
+        # (tolerant by design for the RENDERER, since it accepts either the
+        # whole canon.json OR a bare entries{} mapping) -- but that same
+        # tolerance let this GATE fall back to zero entities checked and
+        # exit 0, a green-but-vacuous report. The gate is stricter than the
+        # renderer on purpose here: a malformed 'entries' is a real defect
+        # worth a clean exit 2, never a silent "nothing to check".
+        _fatal(f"canon.json at {CANON_PATH}: 'entries' is present but not an object")
 
     try:
         senses_result = canon_senses.load_senses(CANON_SENSES_PATH, allow_absent=True)
@@ -643,7 +808,8 @@ def main():
 
     missing, checked_entities = _compute_missing(aggregate, seg_map, relpath_by_source_form, out_dir)
     thin_coverage = _compute_inline_advisory(aggregate, note_identity_by_source_form, seg_map, out_dir)
-    collisions = _compute_collisions(entries)
+    renderer_delinked_targets = _renderer_delinked_targets(entries, note_identity_by_source_form)
+    collisions = _compute_collisions(entries, renderer_delinked_targets)
     unresolved = _unresolved_homonyms_list(aggregate)
 
     report = {

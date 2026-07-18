@@ -627,8 +627,8 @@
                   "properties": {
                     "enabled": {
                       "type": "boolean",
-                      "default": false,
-                      "description": "Opt-in (default false = byte-identical 1.7.0 output). When true AND output.target == 'obsidian', the obsidian adapter emits a source-anchored '## Mentions' occurrence-index section (wrapped in reserved <!-- lt:mentions:begin/end --> markers) in each entity note, and the advisory validate_backlinks.py W9 gate runs. Outside profile_semantics_hash -- enabling it does NOT re-translate any converged segment. See references/output-target-adapters/obsidian.md."
+                      "default": true,
+                      "description": "ON BY DEFAULT for output.target == 'obsidian' (an absent enabled key, or this whole mentions_section block absent/null, both resolve to enabled -- this 'default' annotation is documentation only, see the three runtime predicates in render_obsidian.py/assemble.py/validate_backlinks.py for the actual mechanism). When effective-enabled, the obsidian adapter emits a source-anchored '## Mentions' occurrence-index section (wrapped in reserved <!-- lt:mentions:begin/end --> markers) in each entity note, engages collision de-linking, and the advisory validate_backlinks.py W9 gate runs. Set to false explicitly to opt out. Outside profile_semantics_hash -- flipping it does NOT re-translate any converged segment, but DOES flip render_version (a rendered vault with an accepted baseline needs one operator --accept-baseline re-accept). See references/output-target-adapters/obsidian.md."
                     }
                   }
                 }

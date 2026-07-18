@@ -210,6 +210,66 @@ _APOSTROPHES = "'’"
 # TERMINATORS so they keep acting as boundaries.
 _WRAPPERS = frozenset("()[]{}'’‘“«")
 
+# ---------------------------------------------------------------------------
+# #238/#241 MATCH KEY -- Hebrew niqqud/cantillation fold + connector fold,
+# applied ONLY at trie-descent time (this script's own extract_candidate_
+# names() emit site stays the raw surface reconstruction, mirroring
+# bootstrap_names.py's Contract 5 -- see that script's own comment block on
+# this same section for the full rationale). This is a SEPARATE, independent
+# copy of bootstrap_names.py's match-key fold (A-C4 -- no shared import,
+# same reason TOKEN_RE/TERMINATORS/_WRAPPERS above are independently copied
+# here too). tests/extractor_terminators_drift.test.py's drift guard asserts
+# this copy agrees with bootstrap_names.py's and with the pre-existing
+# final_audit._fold_source_marks (final_audit.py:548).
+# ---------------------------------------------------------------------------
+
+# NAME_CONNECTORS -- byte-identical to bootstrap_names.py's own (maqaf
+# U+05BE, geresh U+05F3, gershayim U+05F4 ONLY -- see that file's comment for
+# why the apostrophes/hyphens TOKEN_RE also allows are deliberately excluded).
+# MUST stay identical across both files (drift guard enforces it) -- edit BOTH.
+NAME_CONNECTORS = "־׳״"
+_NAME_CONNECTOR_SPLIT_RE = re.compile("[" + NAME_CONNECTORS + "]")
+
+
+def _fold_match_marks(s):
+    """Fold Hebrew niqqud/cantillation for the #238 MATCH KEY ONLY -- mirrors
+    bootstrap_names.py's own ``_fold_match_marks`` (itself a mirror of
+    ``final_audit._fold_source_marks``, ``final_audit.py:548``) byte-for-byte:
+    NFD-decompose, drop every combining mark (Unicode category ``Mn``) in the
+    Hebrew block range U+0591-U+05C7, then re-NFC. NEVER applied to an
+    EMITTED name -- this script's own Contract-5-equivalent emit site in
+    ``extract_candidate_names()`` stays raw regardless."""
+    decomposed = unicodedata.normalize("NFD", s)
+    stripped = "".join(
+        c
+        for c in decomposed
+        if not (unicodedata.category(c) == "Mn" and 0x0591 <= ord(c) <= 0x05C7)
+    )
+    return unicodedata.normalize("NFC", stripped)
+
+
+def _fold_token_to_units(token):
+    """Uncached #238 mark-fold + #241 connector-split for ONE raw token
+    string -- mirrors bootstrap_names.py's own ``_fold_token_to_units``.
+    Wrapped by ``match_units()``'s per-string cache below."""
+    folded = _fold_match_marks(token)
+    return tuple(u for u in _NAME_CONNECTOR_SPLIT_RE.split(folded) if u)
+
+
+@lru_cache(maxsize=None)
+def match_units(s):
+    """The #238/#241 match units TOKEN_RE itself would carve out of ``s``,
+    each mark-folded then connector-split -- mirrors bootstrap_names.py's own
+    ``match_units()`` (see its docstring for the full rationale, including
+    why this works identically for a single token or a whole multi-token
+    string). Memoized per distinct ``s`` for the process lifetime."""
+    return tuple(
+        u
+        for m in TOKEN_RE.finditer(s)
+        for u in _fold_token_to_units(m.group(0))
+    )
+
+
 # The exact five keys a particle_config file may contain (four required +
 # the optional name_inventory) -- mirrors bootstrap_names.py's own
 # PARTICLE_CONFIG_ALLOWED_KEYS exactly. Any OTHER top-level key is rejected
@@ -386,6 +446,33 @@ def resolve_report_path(cli_value, profile_path):
     return DURABLE_ROOT / value
 
 
+def _warn_inventory_match_key_collisions(name_inventory, path):
+    """A-C1 (#238/#241): warn -- NEVER fatal -- when two distinct
+    name_inventory surface forms fold to the SAME #238/#241 match key.
+    Mirrors bootstrap_names.py's own ``_warn_inventory_match_key_collisions``
+    (see its docstring for the full rationale): structurally harmless for
+    matching (the trie inserts the same flattened path for every colliding
+    form), so nothing is dropped -- purely an operator-visibility warning.
+    Deterministic message ordering (sorted keys, shortest-then-lexicographic
+    "canonical" form) so it never depends on frozenset iteration order."""
+    groups = {}
+    for form in name_inventory:
+        key = " ".join(match_units(form))
+        groups.setdefault(key, []).append(form)
+    for key in sorted(groups):
+        forms = groups[key]
+        if len(forms) > 1:
+            forms_sorted = sorted(forms, key=lambda f: (len(f), f))
+            print(
+                f"WARN {path}: name_inventory forms {forms_sorted!r} all fold "
+                f"to the same #238/#241 match key {key!r} -- every form still "
+                f"matches identically (none is dropped); treating "
+                f"{forms_sorted[0]!r} as canonical in any message that must "
+                "name one.",
+                file=sys.stderr,
+            )
+
+
 # ---------------------------------------------------------------------------
 # particle_config loading + validation (the four required fields, plus the
 # optional fifth name_inventory)
@@ -451,6 +538,8 @@ def load_particle_config(path):
         )
     else:
         name_inventory = frozenset(name_inventory_raw)
+
+    _warn_inventory_match_key_collisions(name_inventory, path)
 
     return {
         "raw_bytes": raw_bytes,
@@ -543,9 +632,13 @@ def _compiled_inventory_trie(name_inventory: frozenset, has_elision: bool, elisi
     ``has_elision`` and ``elision_re`` together, not on ``elision_re`` alone.
     The trie is read-only after construction, so sharing it across every
     block/call is safe.
+
+    Keyed on #238/#241 MATCH UNITS (``match_units()``), not raw tokens --
+    mirrors bootstrap_names.py's own ``_compiled_inventory_trie()`` exactly
+    (parity is a hard requirement here too).
     """
     inventory_forms = (
-        tuple(t for t, _p in _tokenize(form, has_elision, elision_re))
+        tuple(u for t, _p in _tokenize(form, has_elision, elision_re) for u in match_units(t))
         for form in name_inventory
     )
     return _build_inventory_trie(f for f in inventory_forms if f)
@@ -672,10 +765,22 @@ def extract_candidate_names(text, lang):
             while idx + j < n:
                 if j >= 1 and tokens[idx + j][1] in TERMINATORS:
                     break
-                nxt = node.get(tokens[idx + j][0])
-                if nxt is None:
+                # #238/#241: descend the CURRENT token's own match units one
+                # at a time -- mirrors bootstrap_names.py's own pass-2 walk
+                # exactly (parity is a hard requirement here too). `None in
+                # node` is only checked once the WHOLE token's units are
+                # consumed, so a terminal found mid-token is never recorded
+                # (token-aligned only, never a sub-token match).
+                units = match_units(tokens[idx + j][0])
+                matched_token = True
+                for u in units:
+                    nxt = node.get(u)
+                    if nxt is None:
+                        matched_token = False
+                        break
+                    node = nxt
+                if not matched_token:
                     break
-                node = nxt
                 j += 1
                 if None in node:
                     match_lens.append(j)

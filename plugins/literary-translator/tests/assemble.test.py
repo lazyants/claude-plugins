@@ -146,7 +146,25 @@ DUMMY_CACHE_KEY = {
 # ---------------------------------------------------------------------------
 
 
-def default_profile(verse_mode="full_rhymed_plus_literal", output_target="obsidian", custom_renderer_path=None):
+def default_profile(verse_mode="full_rhymed_plus_literal", output_target="obsidian", custom_renderer_path=None,
+                     mentions_enabled: "bool | None" = False):
+    """`mentions_enabled`: three-state, mirroring the real
+    `output.adapter_config.obsidian.mentions_section` shape a profile.yml
+    can take -- `False` (the default here) writes an EXPLICIT
+    `enabled: false`, so the ~60 tests in this file that assemble a book
+    and have nothing to do with the Mentions feature stay unaffected by
+    the 1.10.0 default-on flip (make_root()'s scripts/ dir deliberately
+    under-provisions bootstrap_names.py/canon_senses.py/
+    occurrence_targets.py, §3.8 -- an IMPLIED/explicit-true mentions flag
+    on that root now fails closed, unconditionally, per the fail-closed-
+    always fix; a test that isn't actually exercising that must not
+    silently inherit it). `True` writes an explicit `enabled: true`.
+    `None` OMITS the `mentions_section` key entirely -- the genuinely
+    IMPLIED shape, used only by the dedicated fail-closed tests below that
+    need to prove the implied case specifically."""
+    obsidian_cfg = {"folders": {}}
+    if mentions_enabled is not None:
+        obsidian_cfg["mentions_section"] = {"enabled": mentions_enabled}
     return {
         "profile_version": 1,
         "project": {
@@ -194,7 +212,7 @@ def default_profile(verse_mode="full_rhymed_plus_literal", output_target="obsidi
             "name_display": {"parenthetical_originals": "never"},
             "index": {"enabled": False, "person_grouping": False},
             "adapter_config": {
-                "obsidian": {"folders": {}}, "epub": None,
+                "obsidian": obsidian_cfg, "epub": None,
                 "custom": {"renderer_path": custom_renderer_path} if custom_renderer_path else None,
             },
         },
@@ -203,12 +221,20 @@ def default_profile(verse_mode="full_rhymed_plus_literal", output_target="obsidi
 
 def make_root(
     tmp_path, verse_mode="full_rhymed_plus_literal", output_target="obsidian", custom_renderer_path=None,
+    mentions_enabled: "bool | None" = False,
 ) -> Path:
     """A bare durable_root: real copies of assemble.py + its two sibling
     scripts, profile.yml + ownership marker, an empty canon.json. Manifest /
     segpack / draft / ledger content is written per-test by the helpers
     below -- this mirrors final_audit.test.py's split between a bare
-    make_durable_root() and per-segment add_converged_segment()."""
+    make_durable_root() and per-segment add_converged_segment().
+    `mentions_enabled`: forwarded to `default_profile()` -- see its own
+    docstring for the three-state (False/True/None) shape. Defaults to
+    explicit `False` here too, for the same reason: this fixture's
+    scripts/ dir deliberately never copies bootstrap_names.py/
+    canon_senses.py/occurrence_targets.py (§3.8), so an implied or
+    explicit-true Mentions flag now fails closed unconditionally -- most
+    callers of make_root() have nothing to do with that feature."""
     root = tmp_path / "durable_root"
     scripts_dir = root / "scripts"
     scripts_dir.mkdir(parents=True)
@@ -217,6 +243,7 @@ def make_root(
 
     profile = default_profile(
         verse_mode=verse_mode, output_target=output_target, custom_renderer_path=custom_renderer_path,
+        mentions_enabled=mentions_enabled,
     )
     profile["project"]["durable_root"] = str(root)
     profile["output"]["destination"] = str(root / "out")
@@ -2907,6 +2934,80 @@ def test_manifest_declared_heading_type_drives_render_title_and_filename(tmp_pat
     assert "title: seg01" not in note_text, (
         "the raw seg id must not leak into the frontmatter title once a "
         "real heading is present"
+    )
+
+
+# ===========================================================================
+# N. Default-on mentions_section: FAIL-CLOSED, ALWAYS.
+#
+# make_root()'s default profile targets "obsidian" and writes NO
+# mentions_section block at all -- under the 1.10.0 default-on flip that
+# makes the flag effective-enabled but only IMPLIED (never explicit
+# `enabled: true`). make_root() also deliberately copies only
+# assemble.py/output_resolve.py/render_obsidian.py/validate_draft.py into
+# scripts/ (§3.8's "under-provisioned durable_root" shape -- the real shape
+# a hand-scaffolded root takes), so bootstrap_names.py/canon_senses.py/
+# occurrence_targets.py are NOT importable there.
+#
+# An earlier revision here gave an IMPLIED flag an advisory skip-with-
+# warning instead of a hard failure (§O2a). Codex review (MAJOR-2,
+# user-ratified) found that posture didn't actually hold end to end:
+# validate_backlinks.py -- the LAST step of the same W9 chain, gated on the
+# SAME default-on predicate -- has no implied-vs-explicit distinction and
+# unconditionally `_fatal`s (exit 2) on an identical broken dependency. So
+# the "never brick at W9" goal wasn't achieved; it just moved the brick one
+# step later. The fix: match validate_backlinks.py's existing fail-closed
+# posture. Both tests below now assert the SAME failure mode regardless of
+# implied vs. explicit -- that symmetry is the point.
+# ===========================================================================
+
+
+def test_implied_flag_also_fails_closed(tmp_path):
+    """mentions_section only IMPLIED (`mentions_enabled=None` -- the key is
+    OMITTED entirely, target: obsidian) on an under-provisioned root (no
+    bootstrap_names.py/canon_senses.py/occurrence_targets.py under
+    scripts/) must fail closed -- exactly like an explicit `enabled: true`
+    on the same root (see the paired test below). RED against the prior
+    graceful-degrade code: it asserted returncode == 0 with an advisory
+    WARNING and no 'mentions' key; this fixture is otherwise
+    byte-identical to that prior test."""
+    root = make_root(tmp_path, mentions_enabled=None)
+    build_clean_two_segment_book(root)
+    write_ledger(root, {"seg01": {"status": "converged"}, "seg02": {"status": "converged"}})
+
+    result = run_assemble(root)
+    assert result.returncode == 2, (
+        f"an IMPLIED mentions_section flag must fail closed on an "
+        f"under-provisioned root, same as an explicit one:\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    )
+    payload = parse_one_json_line(result)
+    assert payload.get("reason") == "dependency_precondition", payload
+    assert not (root / "out" / ".assembled" / "nodestream.json").is_file(), (
+        "a fail-closed precondition must halt BEFORE nodestream.json is "
+        "persisted"
+    )
+
+
+def test_explicit_flag_also_fails_closed(tmp_path):
+    """The mirror of the test above: the IDENTICAL under-provisioned root,
+    but mentions_section.enabled: true written EXPLICITLY
+    (`mentions_enabled=True`). Both this and the implied case above must
+    produce the SAME failure -- there is no longer a behavioral
+    distinction between them."""
+    root = make_root(tmp_path, mentions_enabled=True)
+    build_clean_two_segment_book(root)
+    write_ledger(root, {"seg01": {"status": "converged"}, "seg02": {"status": "converged"}})
+
+    result = run_assemble(root)
+    assert result.returncode == 2, (
+        f"an EXPLICIT mentions_section.enabled: true must fail closed on an "
+        f"under-provisioned root:\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    )
+    payload = parse_one_json_line(result)
+    assert payload.get("reason") == "dependency_precondition", payload
+    assert not (root / "out" / ".assembled" / "nodestream.json").is_file(), (
+        "a fail-closed precondition must halt BEFORE nodestream.json is "
+        "persisted"
     )
 
 
