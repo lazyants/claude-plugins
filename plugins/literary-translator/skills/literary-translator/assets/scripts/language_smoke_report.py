@@ -188,7 +188,7 @@ def _build_mark_class():
 _MARK_CLASS = _build_mark_class()
 # LETTER MARK* (CONNECTOR? LETTER MARK*)*  -- byte-identical to bootstrap_names.py.
 TOKEN_RE = re.compile(
-    r"[^\W\d_][" + _MARK_CLASS + r"]*(?:['’‑׳״-]?[^\W\d_][" + _MARK_CLASS + r"]*)*"
+    r"[^\W\d_][" + _MARK_CLASS + r"]*(?:['’‑׳״־-]?[^\W\d_][" + _MARK_CLASS + r"]*)*"
 )
 # Sentinels this plugin bakes into plain_text (footnote refs, verse
 # placeholders -- see manifest.schema.json's FNREF_N / VERSE_{vid}_{shortsha}

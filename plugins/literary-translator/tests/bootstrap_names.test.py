@@ -888,6 +888,35 @@ def test_hebrew_gershayim_acronym_stays_one_token():
     assert "ל" not in by_name
 
 
+# ---------------------------------------------------------------------------
+# P1 review finding (round 2): Hebrew maqaf (U+05BE, the Hebrew hyphen) as an
+# internal name connector. Maqaf is the Hebrew-script equivalent of the Latin
+# hyphen already in TOKEN_RE's connector class (Saint-Simon stays one token
+# via the ASCII "-"), so a maqaf-joined compound name (e.g. "בן־גוריון" --
+# Ben-Gurion) must stay one token too. The maqaf is isolated as its own
+# string segment (rather than embedded mid-literal) so its codepoint is easy
+# to spot-check in isolation and can't be silently swapped for a lookalike
+# hyphen/dash variant (see test_curated_subranges_name_no_assigned_non_mark's
+# own U+05BE-adjacent guard below).
+# ---------------------------------------------------------------------------
+MAQAF_HEBREW_NAME = "בן" + "־" + "גוריון"  # Ben-Gurion -- maqaf mid-name
+MAQAF_HEBREW_TEXT = f"פגשתי את {MAQAF_HEBREW_NAME} אתמול."
+
+
+def test_hebrew_maqaf_name_stays_one_token():
+    lang = load_he_config_with_inventory([MAQAF_HEBREW_NAME])
+    out = bn.extract_candidate_spans(MAQAF_HEBREW_TEXT, lang)
+    by_name = {n: (s, e) for n, _mid, s, e in out}
+    assert MAQAF_HEBREW_NAME in by_name, f"{MAQAF_HEBREW_NAME!r} missing from {sorted(by_name)}"
+    s, e = by_name[MAQAF_HEBREW_NAME]
+    assert MAQAF_HEBREW_TEXT[s:e] == MAQAF_HEBREW_NAME
+    # must not have split into the two bare halves, nor surface as pass 2's
+    # pre-fix space-joined altered form.
+    assert "בן" not in by_name
+    assert "גוריון" not in by_name
+    assert "בן גוריון" not in by_name
+
+
 # --- MARK class completeness / purity backstop -----------------------------
 # The spans the curated sub-ranges claim to cover COMPLETELY. Bounded at the
 # curated upper edge (U+1ACE) rather than the whole 1AB0-1AFF block so a FUTURE
