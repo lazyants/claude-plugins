@@ -360,8 +360,12 @@ non-shipped historiettes-t3 provenance project referenced above.
   additionally supports a *per-entity* source-anchored `## Mentions`
   occurrence index
   (`output.adapter_config.obsidian.mentions_section.enabled` — an absent
-  block/key or `enabled: null` resolve to enabled; `enabled: false` opts
-  out), which fixes the completeness/collapse gaps in native backlinks
+  `mentions_section` block, or an absent `enabled` key within a present
+  block, resolves to enabled; `enabled` must be a boolean when present —
+  a literal `enabled: null` is schema-invalid and rejected by
+  `profile_validate.py`, so it is never a reachable way to spell the
+  default-on behavior; `enabled: false` opts out), which fixes the
+  completeness/collapse gaps in native backlinks
   (#206/#207-a). When effective-enabled (and `output.target: obsidian`),
   `assemble.py` computes the occurrence data (it holds the manifest) and
   attaches it as an **optional `mentions` field on the NodeStream** —

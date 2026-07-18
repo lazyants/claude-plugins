@@ -803,6 +803,79 @@ def test_custom_extractor_path_key_omitted_fails_schema():
     assert any("extractor_path" in e and "required" in e for e in errors)
 
 
+# ---------------------------------------------------------------------------
+# output.adapter_config.obsidian.mentions_section SCHEMA-half cases
+# (bot review P1 finding 1): the predicate's `is not False` check tolerates
+# a `None` value defensively, but that does NOT mean a schema-valid profile
+# can actually carry `enabled: null` or `mentions_section: null` -- both
+# subschemas declare a single non-nullable `type`, unlike
+# `adapter_config.obsidian` itself, which explicitly allows `["object",
+# "null"]`. These tests close the doc/schema contradiction the bot flagged:
+# the CHANGELOG + reference docs must never claim `null` reaches the
+# predicate through the normal, schema-validated Step 0 path.
+# ---------------------------------------------------------------------------
+
+
+def _obsidian_profile(adapter_config_obsidian):
+    profile = make_base_profile()
+    profile["output"]["target"] = "obsidian"
+    profile["output"]["adapter_config"] = {"obsidian": adapter_config_obsidian}
+    return profile
+
+
+def test_mentions_section_enabled_null_is_schema_invalid():
+    """RED-proof-worthy claim: `enabled: null` must be REJECTED, never
+    silently accepted as a spelling of the default-on behavior -- the
+    runtime predicates' own `None is not False` tolerance is a defensive
+    fallback, not evidence this shape survives Step 0 validation."""
+    profile = _obsidian_profile({"mentions_section": {"enabled": None}})
+    errors = schema_errors(profile)
+    assert errors != [], (
+        "enabled: null must be rejected by profile_validate.py -- if this "
+        "starts passing, every doc/CHANGELOG claim that 'null resolves to "
+        "enabled' needs re-litigating, not silently trusting"
+    )
+    assert any("enabled" in e and "boolean" in e for e in errors), errors
+
+
+def test_mentions_section_null_is_schema_invalid():
+    """The second, easy-to-miss unreachable shape (bot review follow-up):
+    `mentions_section: null` is ALSO rejected -- its subschema is
+    `"type": "object"` only, with no `"null"` alternative (unlike
+    `adapter_config.obsidian`'s own `["object", "null"]`, see the paired
+    VALID test below)."""
+    profile = _obsidian_profile({"mentions_section": None})
+    errors = schema_errors(profile)
+    assert errors != [], (
+        "mentions_section: null must be rejected by profile_validate.py"
+    )
+    assert any("mentions_section" in e and "object" in e for e in errors), errors
+
+
+def test_adapter_config_obsidian_null_is_schema_valid():
+    """The ONE null shape that genuinely IS schema-valid (B-O1) --
+    `adapter_config.obsidian`'s own subschema explicitly allows
+    `["object", "null"]`, unlike `mentions_section`/`enabled` above. A
+    project with `target: obsidian` and no explicit `obsidian:` sub-block
+    at all reaches the default-on predicate through a real, valid
+    profile."""
+    profile = _obsidian_profile(None)
+    assert schema_errors(profile) == []
+
+
+def test_mentions_section_absent_is_schema_valid():
+    """The actually-reachable, supported way to get the default-on
+    behavior: omit `mentions_section` entirely (not `null` it)."""
+    profile = _obsidian_profile({"folders": {}})
+    assert schema_errors(profile) == []
+
+
+def test_mentions_section_enabled_boolean_values_are_schema_valid():
+    for value in (True, False):
+        profile = _obsidian_profile({"mentions_section": {"enabled": value}})
+        assert schema_errors(profile) == [], (value, schema_errors(profile))
+
+
 if __name__ == "__main__":
     import sys
 

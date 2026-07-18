@@ -159,14 +159,24 @@ sharing a `canonical_target_form` with a narrative entry now correctly
 contributes to that target's collision count even though it can never win the
 inline-link tiebreak itself — see "Collision de-linking" below.
 
-**ON BY DEFAULT (1.10.0+):** an absent `mentions_section` block, an absent
-`enabled` key, or `enabled: null` all resolve to enabled for
+**ON BY DEFAULT (1.10.0+):** an absent `mentions_section` block, or an
+absent `enabled` key within a present block, resolves to enabled for
 `output.target: obsidian`; set `enabled: false` explicitly to opt out
-(byte-identical to pre-1.10.0 output). Through 1.9.x this was opt-in
-(default false) — see the CHANGELOG for the migration note (a rendered vault
-holding an accepted `diff_rendered_output.py` baseline needs one operator
-`--accept-baseline` re-accept once this lands, since `render_obsidian.py`'s
-own bytes changed; converged segments are never re-translated by this flip).
+(byte-identical to pre-1.10.0 output). `enabled` must be a **boolean**
+when present — a literal `enabled: null` (or `mentions_section: null`) is
+schema-invalid (`profile.schema.json` declares both as non-nullable) and
+is **rejected by `profile_validate.py`** before it ever reaches the
+runtime predicate. Omit the key (or the whole block) to get the
+default-on behavior through the normal, schema-valid path — `null` is not
+a supported way to spell it. (The three runtime predicates' own `is not
+False` check tolerates `None` defensively, purely as a fallback for a
+profile dict constructed outside the normal Step 0 validation path; it is
+not evidence that a schema-valid profile can carry `enabled: null`.)
+Through 1.9.x this was opt-in (default false) — see the CHANGELOG for the
+migration note (a rendered vault holding an accepted
+`diff_rendered_output.py` baseline needs one operator `--accept-baseline`
+re-accept once this lands, since `render_obsidian.py`'s own bytes changed;
+converged segments are never re-translated by this flip).
 The advisory `validate_backlinks.py` W9 gate (non-blocking) reports coverage;
 the aggregated `output.index` person-index page + `index_scope` routing
 remain a later phase.

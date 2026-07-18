@@ -130,6 +130,16 @@ TRUTH_TABLE = [
         True,
     ),
     (
+        # Verified (bot review, P1 finding 1): `mentions_section: null` is
+        # ALSO schema-invalid -- `profile.schema.json`'s own
+        # `mentions_section` subschema is `"type": "object"` (no "null"
+        # alternative, unlike `adapter_config.obsidian`'s `["object",
+        # "null"]` above), so `profile_validate.py` rejects this shape too
+        # (see `tests/profile_validate.test.py::
+        # test_mentions_section_null_is_schema_invalid`). Same footnote as
+        # "enabled: null" below: the predicate's own `or {}` fallback
+        # tolerates `None` defensively, but this is not a reachable
+        # profile-authoring shape via the normal Step 0 validation path.
         "mentions_section: null",
         {
             "output": {

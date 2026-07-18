@@ -916,6 +916,39 @@ def test_fenced_marker_does_not_break_a_real_region(tmp_path):
     assert report["mentions_coverage"]["missing"] == []
 
 
+def test_info_bearing_fence_line_never_closes_the_outer_fence(tmp_path):
+    """Bot review P1 finding 2: a line shaped like an OPENING fence with an
+    info string (e.g. "```python") must NEVER be mistaken for a CLOSING
+    fence while an outer fence is still open -- CommonMark reserves an
+    info string for opening fences only; a real closer carries nothing but
+    optional trailing whitespace after the delimiter run. RED today: the
+    prior `_FENCE_DELIM_RE` was prefix-only (captured just the backtick
+    run, ignored "python"), so `char == open_char and length >= open_len`
+    fired on "```python" exactly as it would on a bare "```", wrongly
+    closing the outer fence and un-masking everything after it -- bot
+    repro: `_single_marker_pair(['```', '```python', begin, link, end,
+    '```']) == (2, 4)` (the inner marker pair wrongly counted as real)."""
+    root = _one_expected_setup(tmp_path)
+    body = [
+        "An outer fence containing an inner, illustrative fenced example:",
+        "",
+        "```",
+        "```python",
+        *mentions_block(["001 seg01"]),
+        "```",
+    ]
+    write_note(root, "other/Ivan.md", raw_entity_note(body_lines=body))
+
+    proc = run_gate(root)
+    assert proc.returncode == 1, proc.stderr
+    report = report_of(proc)
+    assert report["mentions_coverage"]["missing"] == [{"source_form": "Ivan", "seg": "seg01"}], (
+        "a marker pair living inside a fence that an info-bearing "
+        "delimiter line wrongly appeared to close must still be treated "
+        "as entirely inside that fence, never a real Mentions region"
+    )
+
+
 def test_inline_code_wikilink_not_counted_as_coverage(tmp_path):
     """B13: a Mentions region whose only wikilink is a BACKTICK-QUOTED
     `` `[[001 real]]` `` -- an author showing the link syntax as literal
@@ -936,6 +969,37 @@ def test_inline_code_wikilink_not_counted_as_coverage(tmp_path):
     report = report_of(proc)
     assert report["mentions_coverage"]["missing"] == [{"source_form": "Ivan", "seg": "seg01"}], (
         "a backtick-quoted wikilink must never count as real coverage"
+    )
+
+
+def test_double_backtick_quoted_wikilink_not_counted_as_coverage(tmp_path):
+    """Bot review P1 finding 3: a Mentions region whose only wikilink is
+    wrapped in a DOUBLE-backtick span (`` ``[[001 real]]`` ``, the
+    CommonMark idiom for quoting text that itself contains a single
+    backtick, or just an author's stylistic choice) -- must be stripped
+    exactly like the single-backtick case above. RED today: the prior
+    `_INLINE_CODE_RE = r"`[^`\\n]*`"` only ever matched a SINGLE-backtick
+    span -- against "``[[001 seg01]]``" it "closed" on the very next
+    (adjacent) backtick, consuming an EMPTY single-backtick pair at each
+    end and leaving the wikilink in the middle fully exposed to
+    `_WIKILINK_RE` (probe-confirmed: `parse_mentions_region` returned
+    `frozenset({'001 seg01'})`) -- the exact false-GREEN #236 exists to
+    prevent."""
+    root = _one_expected_setup(tmp_path)
+    body = [
+        "<!-- lt:mentions:begin -->",
+        "## Mentions",
+        "",
+        "See the syntax: ``[[001 seg01]]`` (not a real link, just an example).",
+        "<!-- lt:mentions:end -->",
+    ]
+    write_note(root, "other/Ivan.md", raw_entity_note(body_lines=body))
+
+    proc = run_gate(root)
+    assert proc.returncode == 1, proc.stderr
+    report = report_of(proc)
+    assert report["mentions_coverage"]["missing"] == [{"source_form": "Ivan", "seg": "seg01"}], (
+        "a double-backtick-quoted wikilink must never count as real coverage"
     )
 
 

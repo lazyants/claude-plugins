@@ -224,16 +224,64 @@ _WIKILINK_RE = re.compile(r"\[\[([^\[\]|]+)(?:\|[^\[\]]*)?\]\]")
 
 # #236 fence-awareness -- a ``` / ~~~ fenced code block delimiter line
 # (leading/trailing whitespace tolerated, matching common Markdown
-# renderers). Used to keep a marker line or a wikilink that only exists
+# renderers). Group 2 captures whatever follows the delimiter run (an
+# OPENING fence's optional info string, e.g. "python" in "```python"; a
+# CLOSING fence may carry nothing but trailing whitespace there -- see
+# `_fenced_line_mask`, which is the only thing that actually enforces that
+# distinction). Used to keep a marker line or a wikilink that only exists
 # INSIDE an author's own illustrative code fence from ever forging gate
 # signal (a fake begin/end pair, or a fake counted-as-coverage link).
-_FENCE_DELIM_RE = re.compile(r"^(```+|~~~+)")
+_FENCE_DELIM_RE = re.compile(r"^(```+|~~~+)(.*)$")
 
-# An inline code span: backtick-delimited, no embedded backtick or
-# newline. Stripped before `_WIKILINK_RE` runs so `` `[[001 real]]` `` --
-# a wikilink an author is merely QUOTING as literal text, not emitting --
-# is never counted as coverage (#236).
-_INLINE_CODE_RE = re.compile(r"`[^`\n]*`")
+# A run of one or more backticks -- the CommonMark inline-code-span
+# delimiter unit `_strip_inline_code` scans with, below.
+_BACKTICK_RUN_RE = re.compile(r"`+")
+
+
+def _strip_inline_code(line):
+    """Removes every CommonMark-style inline code span from `line`: a run
+    of N backticks OPENS a span, and the NEXT run of EXACTLY N backticks
+    (never merely >= N, never merely a single backtick regardless of N)
+    CLOSES it -- content between them, however many single/shorter-run
+    backticks it contains, is consumed as code and dropped whole, never
+    scanned for a wikilink. This is what keeps `` ``[[001 real]]`` `` --
+    a wikilink an author is merely QUOTING as literal text via a
+    DOUBLE-backtick span, not emitting -- from ever counting as coverage
+    (#236, bot review P1 finding 3). A run with no matching same-length
+    closer anywhere later in the line is not a code span at all (CommonMark:
+    an unmatched backtick run is literal text) and is left untouched.
+
+    A pure regex can't express "the next run of exactly N backticks"
+    cleanly for unbounded N (a fixed-N pattern only ever handles one N),
+    so this is a small left-to-right scan instead -- mirrors
+    `_fenced_line_mask`'s own "small scan, not a regex, for a rule regex
+    can't express" precedent just above."""
+    out = []
+    i, n = 0, len(line)
+    while i < n:
+        m = _BACKTICK_RUN_RE.match(line, i)
+        if not m:
+            out.append(line[i])
+            i += 1
+            continue
+        run_len = len(m.group(0))
+        j = m.end()
+        close_end = None
+        while j < n:
+            m2 = _BACKTICK_RUN_RE.match(line, j)
+            if not m2:
+                j += 1
+                continue
+            if len(m2.group(0)) == run_len:
+                close_end = m2.end()
+                break
+            j = m2.end()  # a different-length run is literal CODE CONTENT, keep scanning for the real closer
+        if close_end is None:
+            out.append(m.group(0))  # unmatched run -- literal text, not a code-span opener
+            i = m.end()
+        else:
+            i = close_end  # whole span (opener + content + closer) dropped -- never re-scanned for a wikilink
+    return "".join(out)
 
 
 def _fatal(msg) -> NoReturn:
@@ -332,29 +380,47 @@ def _fenced_line_mask(lines):
     delimiter lines themselves are False, matching CommonMark's own
     "fence lines are not part of the code block's content" rule). A fence
     is closed by a later delimiter line using the SAME fence character
-    (backtick vs tilde) with a run length >= the opening one -- close
-    enough to CommonMark's real nesting rule for this defensive purpose;
-    exact fenced-code-block semantics are not the point, only "don't let a
+    (backtick vs tilde), a run length >= the opening one, AND NOTHING
+    AFTER THE RUN but optional trailing whitespace -- close enough to
+    CommonMark's real nesting rule for this defensive purpose; exact
+    fenced-code-block semantics are not the point, only "don't let a
     marker/wikilink hiding inside an author's own example fence forge gate
-    signal" (#236)."""
+    signal" (#236).
+
+    The "nothing but trailing whitespace" clause matters (bot review P1
+    finding 2): an INFO-BEARING delimiter line (e.g. "```python", opening a
+    NESTED illustrative fence inside the outer example) must never be
+    mistaken for the outer fence's closer while that outer fence is still
+    open -- CommonMark reserves an info string for OPENING fences only; a
+    closing fence carries no info string. Without this check, a line like
+    "```python" appearing while a fence is open would wrongly close it
+    (same char, run length >= open), un-masking everything after it --
+    including a real marker pair the author only meant to ILLUSTRATE inside
+    the still-open outer fence."""
     mask = []
     open_char = None
     open_len = 0
     for ln in lines:
         m = _FENCE_DELIM_RE.match(ln.strip())
         if m:
-            token = m.group(1)
+            token, rest = m.group(1), m.group(2)
             char, length = token[0], len(token)
             if open_char is None:
+                # Opening fence -- an info string (`rest`) is allowed here,
+                # CommonMark-style, and never inspected.
                 open_char = char
                 open_len = length
                 mask.append(False)  # the opening delimiter itself
-            elif char == open_char and length >= open_len:
+            elif char == open_char and length >= open_len and not rest.strip():
                 open_char = None
                 open_len = 0
                 mask.append(False)  # the closing delimiter itself
             else:
-                mask.append(True)  # a differently-fenced delimiter-shaped line, still inside the open fence
+                # Either a shorter/differently-fenced delimiter-shaped line,
+                # or a same-char run >= open_len that carries trailing
+                # content (an info string) -- neither closes the fence;
+                # both are ordinary content strictly inside it.
+                mask.append(True)
             continue
         mask.append(open_char is not None)
     return mask
@@ -396,11 +462,11 @@ def _mentions_region_lines(body_text):
 def _wikilink_targets(lines):
     targets = set()
     for ln in lines:
-        # #236: an inline-code-quoted wikilink (e.g. `` `[[001 real]]` ``)
-        # is literal text an author is QUOTING, not a real link -- strip
-        # inline code spans before matching so it can never count as
-        # coverage.
-        for m in _WIKILINK_RE.finditer(_INLINE_CODE_RE.sub("", ln)):
+        # #236: an inline-code-quoted wikilink (e.g. `` `[[001 real]]` `` or
+        # `` ``[[001 real]]`` ``) is literal text an author is QUOTING, not
+        # a real link -- strip inline code spans of EVERY backtick-run
+        # length before matching so it can never count as coverage.
+        for m in _WIKILINK_RE.finditer(_strip_inline_code(ln)):
             targets.add(m.group(1))
     return frozenset(targets)
 
@@ -570,9 +636,9 @@ def _compute_inline_advisory(aggregate, note_identity_by_source_form, seg_filena
         body = _body_excluding_mentions_region(text)
         for ln in body.split("\n"):
             # #236: same inline-code-stripping discipline as metric 1's
-            # `_wikilink_targets` -- a quoted `` `[[...]]` `` must not
-            # count toward this metric either.
-            for m in _WIKILINK_RE.finditer(_INLINE_CODE_RE.sub("", ln)):
+            # `_wikilink_targets` -- a quoted `` `[[...]]` `` or
+            # `` ``[[...]]`` `` must not count toward this metric either.
+            for m in _WIKILINK_RE.finditer(_strip_inline_code(ln)):
                 sf = identity_to_source_form.get(m.group(1))
                 if sf is not None:
                     inline_counts[sf] += 1
