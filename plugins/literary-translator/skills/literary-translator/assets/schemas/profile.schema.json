@@ -620,6 +620,17 @@
                   "type": "object",
                   "additionalProperties": { "type": "string" },
                   "description": "Optional category -> folder catalog (e.g. {\"person\": \"people\", \"place\": \"places\"}) for the obsidian adapter's vault/<folder>/ note placement -- OPEN, per-project vocabulary (no enum): a category absent from this map routes to an 'other' folder, never a hard failure. See references/output-target-adapters/obsidian.md for documented preset examples."
+                },
+                "mentions_section": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "enabled": {
+                      "type": "boolean",
+                      "default": false,
+                      "description": "Opt-in (default false = byte-identical 1.7.0 output). When true AND output.target == 'obsidian', the obsidian adapter emits a source-anchored '## Mentions' occurrence-index section (wrapped in reserved <!-- lt:mentions:begin/end --> markers) in each entity note, and the advisory validate_backlinks.py W9 gate runs. Outside profile_semantics_hash -- enabling it does NOT re-translate any converged segment. See references/output-target-adapters/obsidian.md."
+                    }
+                  }
                 }
               }
             },

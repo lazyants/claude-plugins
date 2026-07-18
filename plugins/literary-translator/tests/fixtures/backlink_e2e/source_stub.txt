@@ -1,0 +1,5 @@
+This file exists only so profile.yml's `source.path` resolves to a real,
+readable file for profile_validate.py's own existence check
+(check_source_path) -- assemble.py itself never reads this file. The whole
+fixture is staged directly at the manifest/segpack/draft layer (see
+case_spec.py), bypassing extraction entirely.

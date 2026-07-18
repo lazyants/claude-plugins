@@ -155,6 +155,7 @@ SEGMENTS_DIR = DURABLE_ROOT / "segments"
 RUNS_DIR = DURABLE_ROOT / "runs"
 MANIFEST_PATH = DURABLE_ROOT / "manifest.json"
 CANON_PATH = DURABLE_ROOT / "canon.json"
+CANON_SENSES_PATH = DURABLE_ROOT / "canon_senses.json"
 LEDGER_PATH = RUNS_DIR / "ledger.json"
 ASSEMBLED_DIR = DURABLE_ROOT / "out" / ".assembled"
 
@@ -1284,6 +1285,96 @@ def _system_exit_detail(exc: SystemExit) -> str:
     return "see this run's stderr for the specific reason it halted"
 
 
+# ---------------------------------------------------------------------------
+# Mentions-section source data (D1, opt-in -- RFC lt-appendix-backlink-
+# integrity). Attaches nodestream["mentions"] BEFORE nodestream.json is
+# persisted and BEFORE dispatch_adapter runs, so both the on-disk artifact
+# and the in-process render() call carry it -- the adapter contract itself
+# (4 positional args) never changes; this data simply rides inside arg 1.
+# ---------------------------------------------------------------------------
+
+
+def _effective_mentions_enabled(profile: dict) -> bool:
+    """Mirrors render_obsidian.py's own `_effective_mentions_enabled` and
+    validate_backlinks.py's identical predicate -- computed independently
+    in each file from the SAME two profile fields (never imported from one
+    another), so a dormant `obsidian` sub-block under a different
+    `output.target` can never activate this feature anywhere it's gated.
+    `output.target` must be EXACTLY "obsidian" AND
+    `output.adapter_config.obsidian.mentions_section.enabled` must be
+    boolean `True`."""
+    output_cfg = (profile or {}).get("output") or {}
+    if output_cfg.get("target") != "obsidian":
+        return False
+    obsidian_cfg = (output_cfg.get("adapter_config") or {}).get("obsidian") or {}
+    mentions_cfg = obsidian_cfg.get("mentions_section") or {}
+    return mentions_cfg.get("enabled") is True
+
+
+def _attach_mentions(nodestream: dict, profile: dict, manifest: dict, canon: dict) -> None:
+    """D1: when `_effective_mentions_enabled(profile)` holds, resolve this
+    project's `language_config` + `canon_senses.json` sidecar, derive the
+    source-anchored occurrence aggregate via `occurrence_targets.build`
+    (the pinned contract -- see the plan's "Contract" section), and attach
+    `nodestream["mentions"] = aggregate["eligible_by_source_form"]` so
+    `dispatch_adapter`'s render_obsidian.py sees it. Mutates `nodestream`
+    in place; the caller is expected to have already checked
+    `_effective_mentions_enabled` (kept a caller precondition, not
+    re-checked here, so this function's own unit tests can exercise it
+    directly without needing a full effective-enabled profile).
+
+    `bootstrap_names`/`canon_senses`/`occurrence_targets` are imported
+    LAZILY, here, rather than at module level: this is the ONLY code path
+    that ever needs them, and a flag-off (the default) project must incur
+    ZERO new dependency surface -- `canon_senses.py` alone requires
+    `jsonschema`, which assemble.py has otherwise never needed
+    (`validate_draft.py`'s own profile loader is deliberately hand-rolled,
+    jsonschema-free)."""
+    particle_config = _profile_get(profile, "source.language.particle_config")
+
+    sys.path.insert(0, str(SCRIPTS_DIR))
+    try:
+        import bootstrap_names
+        import canon_senses
+        import occurrence_targets
+    except ImportError as exc:
+        raise AssemblePrecondition(
+            "dependency_precondition",
+            "mentions_section.enabled is true but bootstrap_names.py/"
+            f"canon_senses.py/occurrence_targets.py could not be imported "
+            f"from {SCRIPTS_DIR}: {exc}",
+        ) from exc
+    except SystemExit as exc:
+        raise AssemblePrecondition(
+            "dependency_precondition",
+            "mentions_section.enabled is true but a dependency "
+            "(bootstrap_names.py/canon_senses.py/occurrence_targets.py) "
+            f"halted during its own module-level dependency preflight -- "
+            f"{_system_exit_detail(exc)}",
+        ) from exc
+
+    try:
+        language_config = bootstrap_names.load_language_config(particle_config)
+    except bootstrap_names.BootstrapNamesError as exc:
+        raise AssembleError(
+            f"mentions_section.enabled is true but the language config "
+            f"failed to load: {exc}",
+            reason="mentions_language_config_invalid",
+        ) from exc
+
+    try:
+        senses_result = canon_senses.load_senses(CANON_SENSES_PATH, allow_absent=True)
+    except canon_senses.CanonSensesLoadError as exc:
+        raise AssembleError(
+            f"mentions_section.enabled is true but canon_senses.json "
+            f"failed to load: {exc}",
+            reason="mentions_canon_senses_invalid",
+        ) from exc
+
+    aggregate = occurrence_targets.build(manifest, canon, senses_result, language_config, nodestream)
+    nodestream["mentions"] = aggregate["eligible_by_source_form"]
+
+
 def dispatch_adapter(nodestream: dict, canon: dict, profile: dict, out_dir: Path) -> dict:
     try:
         adapter = output_resolve.resolve_output_adapter(profile, DURABLE_ROOT)
@@ -1420,6 +1511,15 @@ def main() -> int:
             canon = read_json(CANON_PATH, "canon.json")
 
         nodestream, anchor_map = build_nodestream(profile, manifest, converged)
+
+        # D1 (opt-in, lt-appendix-backlink-integrity): attach the
+        # source-anchored Mentions data BEFORE nodestream.json is
+        # persisted below -- the e2e three-view parity test reads this
+        # exact "persisted mentions" view back off disk. Flag off (the
+        # default) or any other output.target: attaches nothing, touches
+        # no new dependency, byte-identical to 1.7.0.
+        if _effective_mentions_enabled(profile):
+            _attach_mentions(nodestream, profile, manifest, canon)
 
         if ASSEMBLED_DIR.parent.is_symlink():
             # The vector isn't just `.assembled/` itself -- its PARENT

@@ -1,0 +1,73 @@
+# Committed profile.yml template for the backlink_e2e fixture (see
+# tests/backlink_integrity_e2e.test.py's stage_fixture()). `project.
+# durable_root` and `output.destination` are literal placeholders --
+# stage_fixture() loads this file, overwrites those two fields with the
+# real, absolute tmp_path-derived durable_root before writing it into the
+# staged project, and toggles output.adapter_config.obsidian.
+# mentions_section.enabled per run (flag-on vs flag-off). Every other
+# field is used exactly as committed here, unmodified.
+profile_version: 1
+project:
+  title: Backlink E2E Fixture
+  durable_root: PLACEHOLDER_DURABLE_ROOT
+  pipeline_version: v1
+  max_segment_words: 15000
+source:
+  format: plain_text
+  path: PLACEHOLDER_SOURCE_PATH
+  gutenberg_id: null
+  language:
+    code: fr
+    particle_config: backlink_e2e.json
+    smoke_test:
+      report_path: null
+  adapter_config:
+    gutenberg_epub: null
+    plain_text:
+      segmentation:
+        method: blank_line_run
+        blank_line_threshold: 2
+        heading_regex: null
+      verse_detection: none_confirmed
+      verse_regex: null
+      footnotes: none_confirmed
+      footnote_anchor_regex: null
+      footnote_def_regex: null
+    custom:
+      extractor_path: null
+target:
+  language:
+    code: en
+    register_notes: informal
+verse_policy:
+  mode: full_rhymed_plus_literal
+  threshold_lines: null
+engine:
+  effort: high
+  max_fix_rounds: 4
+  batch_agent_cap: 1000
+footnotes:
+  apparatus_policy: translate_all
+glossary:
+  research_mode: live
+validation:
+  untranslated_sentinel: "[TODO-UNTRANSLATED]"
+output:
+  v1_scope: assembled_book
+  destination: PLACEHOLDER_DESTINATION
+  target: obsidian
+  name_display:
+    parenthetical_originals: never
+  index:
+    enabled: false
+    person_grouping: false
+  adapter_config:
+    obsidian:
+      folders:
+        person: People
+        other: Other
+      mentions_section:
+        enabled: false
+    epub: null
+    custom:
+      renderer_path: null

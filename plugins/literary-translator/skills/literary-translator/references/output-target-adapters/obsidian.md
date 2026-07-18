@@ -141,6 +141,25 @@ adapter's own occurrence tracking. A depth-1 MOC (map-of-content) stub
 listing every category folder is a reasonable, proportional addition; a
 deeper generated index is explicitly out of scope here.
 
+### 1.8.0 — opt-in source-anchored `## Mentions` section (supersedes the above for opted-in projects)
+
+Native backlinks are only as complete as the **inline linker**, which matches
+one `canonical_target_form` string against translated prose — so a variant
+target rendering gets no backlink (#206) and two source forms sharing a target
+collapse to one owner (#207-a). The **opt-in**
+`output.adapter_config.obsidian.mentions_section.enabled` flag (default false)
+adds an authoritative **source-anchored** occurrence index: a `## Mentions`
+section in each entity note, wrapped in reserved `<!-- lt:mentions:begin/end -->`
+markers, listing the segment notes where the entity's *source* forms occur (per
+`occ_index`), independent of how the target surface varies. This is the
+`build_name_manifest.py` model ported at last, and for opted-in projects it
+supersedes "native backlinks are the occurrence index." `sense_translated`
+proper names — which the inline linker deliberately never auto-links — DO get
+Mentions here (source anchoring links them safely). Default-off output is
+byte-identical to 1.7.0. The advisory `validate_backlinks.py` W9 gate
+(non-blocking) reports coverage; the aggregated `output.index` person-index page
++ `index_scope` routing remain a later phase.
+
 ## Category→folder catalog — presets are EXAMPLES, not an enum
 
 `category` is genuinely **open vocabulary** — `canon-entry.schema.json`

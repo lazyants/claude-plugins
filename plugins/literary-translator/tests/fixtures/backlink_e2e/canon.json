@@ -1,0 +1,107 @@
+{
+  "entries": {
+    "Aldric": {
+      "source_form": "Aldric",
+      "is_proper_name": true,
+      "canonical_target_form": "Aldric",
+      "basis": "established",
+      "source": "https://example.org/backlink-e2e-fixture/aldric",
+      "confidence": "high",
+      "category": "person"
+    },
+    "Petro": {
+      "source_form": "Petro",
+      "is_proper_name": true,
+      "canonical_target_form": "Peter",
+      "basis": "transliterated",
+      "confidence": "medium",
+      "category": "person"
+    },
+    "Pavlo": {
+      "source_form": "Pavlo",
+      "is_proper_name": true,
+      "canonical_target_form": "Peter",
+      "basis": "transliterated",
+      "confidence": "medium",
+      "category": "person"
+    },
+    "Marek": {
+      "source_form": "Marek",
+      "is_proper_name": true,
+      "canonical_target_form": "Marek",
+      "basis": "transliterated",
+      "confidence": "medium",
+      "category": "person"
+    },
+    "Lucky": {
+      "source_form": "Lucky",
+      "is_proper_name": true,
+      "canonical_target_form": "Lucky",
+      "basis": "sense_translated",
+      "note": "A speaking epithet kept in English by editorial choice.",
+      "confidence": "medium",
+      "category": "person"
+    },
+    "Almanac": {
+      "source_form": "Almanac",
+      "is_proper_name": false,
+      "canonical_target_form": "",
+      "basis": "not_a_name",
+      "confidence": "low",
+      "category": "other"
+    },
+    "Ysolde": {
+      "source_form": "Ysolde",
+      "is_proper_name": true,
+      "canonical_target_form": "Ysolde",
+      "basis": "transliterated",
+      "confidence": "medium",
+      "category": "person"
+    },
+    "Corentin": {
+      "source_form": "Corentin",
+      "is_proper_name": true,
+      "canonical_target_form": "Corentin",
+      "basis": "transliterated",
+      "confidence": "medium",
+      "category": "person"
+    },
+    "Thibaut": {
+      "source_form": "Thibaut",
+      "is_proper_name": true,
+      "canonical_target_form": "Thibaut",
+      "basis": "transliterated",
+      "confidence": "medium",
+      "category": "person"
+    },
+    "Ozias": {
+      "source_form": "Ozias",
+      "is_proper_name": true,
+      "canonical_target_form": "Ozias",
+      "basis": "transliterated",
+      "confidence": "medium",
+      "category": "person"
+    },
+    "Cassian": {
+      "source_form": "Cassian",
+      "is_proper_name": true,
+      "canonical_target_form": "Cassian",
+      "basis": "transliterated",
+      "confidence": "medium",
+      "category": "person"
+    },
+    "Domnall": {
+      "source_form": "Domnall",
+      "is_proper_name": true,
+      "canonical_target_form": "Domnall",
+      "basis": "transliterated",
+      "confidence": "medium",
+      "category": "person"
+    }
+  },
+  "review_queue": [],
+  "generation_hashes": {
+    "particle_config_hash": "backlink-e2e-fixed-particle-hash",
+    "derivation_bundle_hash": "backlink-e2e-fixed-bundle-hash"
+  }
+}

@@ -67,6 +67,7 @@ import shutil
 import sys
 import tempfile
 import unicodedata
+from collections import defaultdict
 from pathlib import Path
 
 try:
@@ -140,6 +141,46 @@ DEFAULT_FOLDER = "other"
 # directory that happens to already have content" (refuse to touch). A
 # dotfile so the existing dot-preserving clean keeps it across re-renders.
 VAULT_MARKER_FILENAME = ".literary-translator-vault.json"
+
+# D1/D3/D4 opt-in Mentions-section feature (RFC lt-appendix-backlink-
+# integrity): the reserved boundary-comment markers render() wraps a
+# generated "## Mentions" section in, and the token a canon field is
+# forbidden from containing once the feature is active -- see
+# `_effective_mentions_enabled`/`_validate_mentions_safe_canon` below.
+# HTML comments so they stay invisible in Obsidian's rendered preview.
+MENTIONS_SECTION_MARKER_BEGIN = "<!-- lt:mentions:begin -->"
+MENTIONS_SECTION_MARKER_END = "<!-- lt:mentions:end -->"
+_MENTIONS_RESERVED_TOKEN = "lt:mentions:"
+
+# The full str.splitlines() line-boundary codepoint set (see
+# `_split_lf_lines`'s own docstring above) -- a canon `source_form`/
+# `canonical_target_form` containing any of these could inject a forged
+# extra line (e.g. a spoofed marker) into the raw Markdown heading it
+# renders into.
+_MENTIONS_LINE_BREAK_CHARS = frozenset(
+    "\n\r\v\f\x1c\x1d\x1e\x85" + chr(0x2028) + chr(0x2029)
+)
+
+
+def _effective_mentions_enabled(profile):
+    """The ONE predicate D1 (this file), D3 (collision de-link), and D4
+    (`validate_backlinks.py`, computed independently there) all gate on --
+    `output.target` must be EXACTLY "obsidian" AND
+    `output.adapter_config.obsidian.mentions_section.enabled` must be
+    boolean `True`. Computed fresh from render()'s own `profile` argument
+    every call, never cached/inherited -- this is what keeps the
+    standalone CLI (`main()` below, whose profile can carry a dormant
+    `obsidian` sub-block while `--out-dir`/`output.target` actually point
+    somewhere else, e.g. `target: "custom"`) from ever activating the
+    Mentions section, collision de-linking, or the reserved-field
+    rejections: those must fire only when this adapter is genuinely the
+    one in effect for real assembly."""
+    output_cfg = (profile or {}).get("output") or {}
+    if output_cfg.get("target") != "obsidian":
+        return False
+    obsidian_cfg = (output_cfg.get("adapter_config") or {}).get("obsidian") or {}
+    mentions_cfg = obsidian_cfg.get("mentions_section") or {}
+    return mentions_cfg.get("enabled") is True
 
 
 class RenderError(Exception):
@@ -252,12 +293,69 @@ def _canon_entries(canon):
     return {}
 
 
-def build_entity_index(entries, note_identity_by_source_form):
-    """Returns (compiled_pattern, target_to_entity) for every canon entry
-    carrying a non-degenerate `canonical_target_form` -- the substring that
-    actually appears in TRANSLATED body text (obsidian.md's asymmetry:
-    never `source_form`, which is the original-script identity, not what
-    shows up in the rendered prose).
+def _reject_reserved_mentions_token(value, field_label, source_form):
+    if isinstance(value, str) and _MENTIONS_RESERVED_TOKEN in value:
+        raise RenderError(
+            "mentions_reserved_token_in_canon_field",
+            f"canon entry {source_form!r}'s {field_label} contains the "
+            f"reserved Mentions-marker token {_MENTIONS_RESERVED_TOKEN!r} -- "
+            f"once mentions_section.enabled is true this field can reach raw "
+            f"rendered Markdown and could forge a fake '## Mentions' section "
+            f"boundary, spoofing validate_backlinks.py's coverage gate. "
+            f"Rename it in canon.json.",
+        )
+
+
+def _reject_line_break_in_mentions_field(value, field_label, source_form):
+    if isinstance(value, str) and any(ch in _MENTIONS_LINE_BREAK_CHARS for ch in value):
+        raise RenderError(
+            "mentions_field_line_break",
+            f"canon entry {source_form!r}'s {field_label} contains a "
+            f"line-break character -- once mentions_section.enabled is true "
+            f"this field can become a raw Markdown heading, and a newline "
+            f"there could inject a forged extra line (e.g. a spoofed "
+            f"Mentions marker) disguised as a fresh heading. Rename it in "
+            f"canon.json.",
+        )
+
+
+def _validate_mentions_safe_canon(entries):
+    """Called by `render()` ONLY when `_effective_mentions_enabled(profile)`
+    holds (D1). No canon field that can reach raw rendered Markdown --
+    `canonical_target_form`, the `source_form` heading fallback (both feed
+    `_render_entity_note`'s `# {heading}` line and `_Linker`'s emitted
+    `[[note|target]]`/`(source_form)` inline text), and `note` -- may
+    contain the reserved boundary-marker token `_MENTIONS_RESERVED_TOKEN`
+    (codex R5/R6: an authored value containing it could forge a fake `##
+    Mentions` region and spoof `validate_backlinks.py`, which trusts ONLY
+    the exact marker pair `render()` itself emits). `source_form`/
+    `canonical_target_form` are ALSO rejected if they contain any
+    line-break character (codex R6: the newline-injected-heading forgery
+    -- a newline there could inject an entirely new forged line disguised
+    as a fresh Markdown heading; `note` is exempted from this second check
+    since it is free-form authored prose, not itself renderable as a
+    heading). Iterates `sorted(entries)` for a deterministic
+    first-violation report; raises `RenderError` and halts before any note
+    is written -- fail-closed, never a partial/best-effort render."""
+    for source_form in sorted(entries):
+        entry = entries[source_form]
+        if not isinstance(entry, dict):
+            continue
+        target = entry.get("canonical_target_form") or ""
+        note = entry.get("note") or ""
+        _reject_reserved_mentions_token(target, "canonical_target_form", source_form)
+        _reject_reserved_mentions_token(source_form, "source_form", source_form)
+        _reject_reserved_mentions_token(note, "note", source_form)
+        _reject_line_break_in_mentions_field(target, "canonical_target_form", source_form)
+        _reject_line_break_in_mentions_field(source_form, "source_form", source_form)
+
+
+def build_entity_index(entries, note_identity_by_source_form, collision_delink=False):
+    """Returns (compiled_pattern, target_to_entity) for every
+    canon entry carrying a non-degenerate `canonical_target_form` -- the
+    substring that actually appears in TRANSLATED body text (obsidian.md's
+    asymmetry: never `source_form`, which is the original-script identity,
+    not what shows up in the rendered prose).
 
     `target_to_entity[target] = (note_identity, source_form)`:
       - `note_identity` is the SANITIZED, already collision-deduped,
@@ -277,9 +375,26 @@ def build_entity_index(entries, note_identity_by_source_form):
         legitimately wants the raw original-script text rather than a
         sanitized filename stem.
 
-    `canonical_target_form` is not guaranteed unique across entries -- the
-    documented, fixed tiebreak: prefer the entry with the shortest
-    `source_form`, then break ties lexicographically by `source_form`.
+    `canonical_target_form` is not guaranteed unique across entries.
+    Default (`collision_delink=False`, unchanged from 1.7.0): the
+    documented, fixed tiebreak -- prefer the entry with the shortest
+    `source_form`, then break ties lexicographically by `source_form` --
+    silently picks ONE winner and the rest simply never get an inline
+    link. `collision_delink=True` (D3, #207-a -- set by `render()` ONLY
+    when `_effective_mentions_enabled(profile)` holds, never by the flag
+    alone: see that predicate's own docstring for why): a target with >=2
+    owners is instead REMOVED from the map entirely -- no owner gets an
+    inline link for that string, closing the silent "wrong entity's page"
+    misattribution the tiebreak otherwise causes -- and the compiled
+    pattern is built from the map AFTER that removal, so `_Linker`'s
+    mandatory `target_to_entity[matched]` lookup can never `KeyError` on a
+    delinked target. Source-anchored `## Mentions` (D1) is the
+    collapse-free, authoritative index regardless of this parameter --
+    inline auto-linking is a reading affordance, never the sole source of
+    truth. (The set of colliding targets is used only to drive that
+    removal; the operator-facing collision diagnostic is surfaced
+    independently by `validate_backlinks.py`'s own report, computed there
+    from canon directly, so this function does not also return it.)
     Degenerate values (empty or whitespace-only) are skipped entirely --
     otherwise a blank/whitespace target would become a matcher that wraps
     the first space (or nothing) in every block (review round 1 finding).
@@ -300,7 +415,10 @@ def build_entity_index(entries, note_identity_by_source_form):
     at a given start position, so ordering longest-first is what makes that
     guarantee hold.
     """
-    by_target = {}
+    # Every owner of each normalized target, UNREDUCED -- order within a
+    # list follows `entries` iteration order (immaterial: both the
+    # tiebreak and the delink check below are order-independent).
+    owners_by_target = defaultdict(list)
     for source_form, entry in (entries or {}).items():
         if not isinstance(entry, dict):
             continue
@@ -316,9 +434,14 @@ def build_entity_index(entries, note_identity_by_source_form):
         # spliced in from different upstream sources).
         target = unicodedata.normalize("NFC", target)
         key = (len(source_form), source_form)
-        current = by_target.get(target)
-        if current is None or key < current[0]:
-            by_target[target] = (key, source_form)
+        owners_by_target[target].append((key, source_form))
+
+    by_target = {}
+    for target, owners in owners_by_target.items():
+        if collision_delink and len(owners) >= 2:
+            continue  # >=2 owners, delinked entirely -- no inline link for this string at all
+        _, winner_source_form = min(owners)  # shortest source_form, then lexicographic
+        by_target[target] = winner_source_form
 
     if not by_target:
         return None, {}
@@ -326,7 +449,7 @@ def build_entity_index(entries, note_identity_by_source_form):
     targets_sorted = sorted(by_target, key=lambda t: (-len(t), t))
     target_to_entity = {}
     for t in targets_sorted:
-        _, source_form = by_target[t]
+        source_form = by_target[t]
         note_identity = note_identity_by_source_form.get(source_form, source_form)
         target_to_entity[t] = (note_identity, source_form)
     pattern = re.compile("|".join(re.escape(t) for t in targets_sorted))
@@ -897,7 +1020,48 @@ def _resolve_entity_notes(entries, folders_map):
     return relpath_by_source_form
 
 
-def _render_entity_note(source_form, entry, is_rtl):
+def _mentions_note_identities(mention_records, segment_note_by_seg, seg_position):
+    """D1: one entity's `nodestream["mentions"][source_form]` list (each a
+    `{source_form, seg, origin, ...}` Record per the occurrence_targets.py
+    contract -- only `seg` matters here, the renderer is origin-agnostic)
+    reduced to the ordered, DEDUPED list of note identities its `##
+    Mentions` section links to. Deduped per note (a seg contributing
+    multiple Records collapses to one link, via the `set` below) and
+    sorted into READING order (`seg_position`, this render's own
+    `full_order` index -- NOT the Record list's own, unspecified, order).
+    A `seg` absent from `segment_note_by_seg` (no rendered segment note --
+    should not happen for a `build()`-derived aggregate, since eligibility
+    is keyed off the very same NodeStream, but defensive rather than a
+    KeyError on a malformed/hand-authored `nodestream["mentions"]`) is
+    silently skipped, never a phantom link."""
+    segs = {
+        r.get("seg") for r in (mention_records or [])
+        if isinstance(r, dict) and r.get("seg") in segment_note_by_seg
+    }
+    ordered_segs = sorted(segs, key=lambda seg: seg_position.get(seg, len(seg_position)))
+    identities = []
+    for seg in ordered_segs:
+        rel_path = segment_note_by_seg[seg]
+        identity = rel_path[: -len(".md")] if rel_path.endswith(".md") else rel_path
+        identities.append(identity)
+    return identities
+
+
+def _render_mentions_section(note_identities):
+    """D1: the opt-in, source-anchored occurrence index -- a `## Mentions`
+    heading listing every rendered segment note this entity was found in,
+    wrapped in the reserved boundary markers `validate_backlinks.py`
+    parses to find ONLY this generated region (never an authored `note`
+    body, however similar it looks -- codex R5/R6/R7's spoof-resistance
+    chain, see `_validate_mentions_safe_canon`)."""
+    lines = [MENTIONS_SECTION_MARKER_BEGIN, "", "## Mentions", ""]
+    for identity in note_identities:
+        lines.append(f"- [[{identity}]]")
+    lines.append(MENTIONS_SECTION_MARKER_END)
+    return "\n".join(lines)
+
+
+def _render_entity_note(source_form, entry, is_rtl, mentions_section=None):
     """Frontmatter mirrors canon-entry.schema.json exactly, in the field
     order obsidian.md documents, plus two adapter-computed fields:
     `aliases` (the raw `source_form`, so a reader/search can still find
@@ -907,7 +1071,15 @@ def _render_entity_note(source_form, entry, is_rtl):
     canon-entry.schema.json's own field name, not a pluralized `notes`
     list. Entries with `basis: not_a_name` / `is_proper_name: false`
     (realia, not names) get the identical treatment -- this frontmatter
-    never branches on `is_proper_name`."""
+    never branches on `is_proper_name`.
+
+    `mentions_section` (D1, optional -- `None` unless
+    `_effective_mentions_enabled(profile)` holds AND this entity has >=1
+    eligible mention): a pre-rendered `_render_mentions_section(...)`
+    string appended after any authored `note` body. `None` (the default,
+    and the ONLY value ever passed when the feature is not
+    effective-enabled) means this function's output is byte-identical to
+    every 1.7.0 render -- no section, no marker, nothing new."""
     frontmatter = {
         "aliases": [source_form],
         "source_form": source_form,
@@ -928,6 +1100,9 @@ def _render_entity_note(source_form, entry, is_rtl):
     if note_text:
         lines.append("")
         lines.append(note_text)
+    if mentions_section:
+        lines.append("")
+        lines.append(mentions_section)
     return "\n".join(lines) + "\n"
 
 
@@ -1142,7 +1317,20 @@ def render(nodestream: dict, canon: dict, profile: dict, out_dir: Path) -> dict:
     parenthetical_mode = (output_cfg.get("name_display") or {}).get("parenthetical_originals") or "never"
     folders_map = ((output_cfg.get("adapter_config") or {}).get("obsidian") or {}).get("folders") or {}
 
+    # D1/D3/D4: computed ONCE, fresh, from this call's own `profile` --
+    # gates the Mentions section, collision de-linking, and the canon
+    # reserved-field rejections below. See `_effective_mentions_enabled`'s
+    # own docstring for why this is the profile-derived predicate and not
+    # simply "the flag", so the standalone CLI's `target: "custom"` path
+    # (`main()` below) can never activate any of this.
+    mentions_enabled = _effective_mentions_enabled(profile)
+
     entries = _canon_entries(canon)
+    if mentions_enabled:
+        # Fail-closed, before any note is written: no canon field may
+        # already carry the reserved marker token or an unsafe line-break
+        # (D1, codex R5/R6 -- see the function's own docstring).
+        _validate_mentions_safe_canon(entries)
     # Resolve every entity note's actual (collision-deduped) filename UP
     # FRONT, so the wikilinker below points at the SAME identity the
     # entity-note-writing loop later emits as a filename -- never the raw
@@ -1162,7 +1350,12 @@ def render(nodestream: dict, canon: dict, profile: dict, out_dir: Path) -> dict:
         source_form: relpath[: -len(".md")] if relpath.endswith(".md") else relpath
         for source_form, relpath in relpath_by_source_form.items()
     }
-    pattern, target_to_entity = build_entity_index(entries, note_identity_by_source_form)
+    # D3 (#207-a): collision de-linking is gated on the SAME
+    # effective-enabled predicate as the Mentions section itself, never on
+    # a bare flag read -- see build_entity_index's own docstring.
+    pattern, target_to_entity = build_entity_index(
+        entries, note_identity_by_source_form, collision_delink=mentions_enabled
+    )
     linker = _Linker(pattern, target_to_entity, parenthetical_mode)
 
     footnote_text_by_n = {fn["n"]: fn.get("text", "") for fn in (nodestream.get("footnotes") or [])}
@@ -1178,19 +1371,47 @@ def render(nodestream: dict, canon: dict, profile: dict, out_dir: Path) -> dict:
     # silently dropped.
     extra_segs = sorted(set(nodes_by_seg) - set(seg_order))
     full_order = list(seg_order) + extra_segs
+    # D1: this book's own reading-order position for every seg -- the
+    # ordering a Mentions section's `[[NNN slug]]` links follow, NOT
+    # whatever order occurrence_targets.build's Record list happens to
+    # carry them in.
+    seg_position = {seg: i for i, seg in enumerate(full_order)}
 
+    # D1: seg -> the rendered segment note's OWN relpath, built here (never
+    # existed before this feature -- previously `rel_path` was a loop-local
+    # discarded every iteration) so the entity loop below can resolve each
+    # Mentions link to the exact filename identity the segment-writing loop
+    # just emitted, the same "resolve-then-reuse" discipline
+    # `_resolve_entity_notes`/`relpath_by_source_form` already establishes
+    # for entity notes.
+    segment_note_by_seg = {}
     for idx, seg in enumerate(full_order, start=1):
         seg_nodes = sorted(nodes_by_seg.get(seg, []), key=lambda n: n["order_index"])
         title = _segment_title(seg_nodes, seg)
         slug = sanitize_filename_component(title, _stable_fallback_name(seg or str(idx), "segment"))
         rel_path = f"{idx:03d} {slug}.md"
+        segment_note_by_seg[seg] = rel_path
         note_text = _render_segment_note(seg, seg_nodes, footnote_text_by_n, linker, is_rtl)
         _write_note(out_dir, rel_path, note_text)
         written.append(rel_path)
 
+    # D1: only ever read when effective-enabled -- `nodestream.get(
+    # "mentions")` is ignored entirely otherwise, even if a caller left
+    # stale/malformed data there (e.g. the standalone CLI's `target:
+    # "custom"` path), so a dormant/foreign "mentions" key can never leak
+    # a Mentions section into a non-effective-enabled render.
+    mentions_by_source_form = (nodestream.get("mentions") or {}) if mentions_enabled else {}
+
     for source_form, rel_path in relpath_by_source_form.items():
         entry = entries[source_form]
-        note_text = _render_entity_note(source_form, entry, is_rtl)
+        mentions_section = None
+        if mentions_enabled:
+            note_identities = _mentions_note_identities(
+                mentions_by_source_form.get(source_form), segment_note_by_seg, seg_position
+            )
+            if note_identities:
+                mentions_section = _render_mentions_section(note_identities)
+        note_text = _render_entity_note(source_form, entry, is_rtl, mentions_section=mentions_section)
         _write_note(out_dir, rel_path, note_text)
         written.append(rel_path)
 

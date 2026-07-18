@@ -1,0 +1,37 @@
+{
+  "schema_version": 1,
+  "entries_by_source_form": {
+    "Marek": {
+      "senses": [
+        {
+          "sense_id": "marek-elder",
+          "disambiguator": "Marek the village elder",
+          "index_scope": "narrative",
+          "evidence": {
+            "block": "p5",
+            "seg": "seg02",
+            "char_start": 0,
+            "char_end": 5,
+            "context_start": 0,
+            "context_end": 34,
+            "sha256": "43386bd0e0127ea0ae26da59de894ac62c1829c10bb6cc0a14784bba342f5ce6"
+          }
+        },
+        {
+          "sense_id": "marek-stranger",
+          "disambiguator": "a different Marek, a traveling stranger never otherwise named",
+          "index_scope": "narrative",
+          "evidence": {
+            "block": "p5",
+            "seg": "seg02",
+            "char_start": 0,
+            "char_end": 5,
+            "context_start": 0,
+            "context_end": 34,
+            "sha256": "43386bd0e0127ea0ae26da59de894ac62c1829c10bb6cc0a14784bba342f5ce6"
+          }
+        }
+      ]
+    }
+  }
+}

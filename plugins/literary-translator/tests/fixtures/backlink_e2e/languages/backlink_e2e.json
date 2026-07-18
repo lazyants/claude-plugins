@@ -1,0 +1,9 @@
+{
+  "PARTICLES": [],
+  "STOPWORDS": [
+    "The", "A", "An", "In", "On", "At", "He", "She", "They", "We", "It",
+    "This", "That", "These", "Those", "But", "And", "Or", "So", "Chapter"
+  ],
+  "has_elision": false,
+  "ELISION_RE": null
+}

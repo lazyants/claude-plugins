@@ -354,10 +354,19 @@ non-shipped historiettes-t3 provenance project referenced above.
 - **No bilingual-output layout logic.** A bilingual EPUB or other bilingual
   layout is a plausible later addition, but only once the `epub` target
   itself exists.
-- **No standalone occurrence index.** `output.index.enabled` stays OPT-IN and
-  gated; the `obsidian` target gets an occurrence index for free via native
-  backlinks (see `references/output-target-adapters/obsidian.md`) — a
-  separate, generated index page is a later phase.
+- **No standalone occurrence index page.** `output.index.enabled` (the
+  aggregated person-index *page*) stays OPT-IN, gated, and a later phase. **New
+  in 1.8.0:** the `obsidian` target additionally supports an opt-in
+  *per-entity* source-anchored `## Mentions` occurrence index
+  (`output.adapter_config.obsidian.mentions_section.enabled`, default false),
+  which fixes the completeness/collapse gaps in native backlinks (#206/#207-a).
+  When enabled (and `output.target: obsidian`), `assemble.py` computes the
+  occurrence data (it holds the manifest) and attaches it as an **optional
+  `mentions` field on the NodeStream** — `{source_form: [{seg, origin, …}]}` —
+  which the obsidian adapter renders; the 4-argument `render(nodestream, canon,
+  profile, out_dir)` contract is unchanged (the data rides inside `nodestream`).
+  Default-off is byte-identical to 1.7.0. See
+  `references/output-target-adapters/obsidian.md`.
 - **No generic renderer-plugin framework above the three fixed presets**
   (`obsidian`/`epub`/`custom`) — see
   `references/output-target-adapters/README.md`'s "why only three" section
