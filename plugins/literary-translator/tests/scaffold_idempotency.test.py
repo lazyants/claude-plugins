@@ -29,15 +29,18 @@ re-invoke across a project's whole lifetime:
       individually guarded on its own destination's absence -- never
       re-copied, never regenerated, once a project has hand-adapted them.
 
-      IMPORTANT: unlike (A), Step 0a has NO standalone shipped script under
-      ``assets/scripts/`` -- SKILL.md names exactly FOUR plugin-path script
-      invocations in the whole document (``profile_validate.py`` at Step 0,
+      IMPORTANT: unlike (A), Step 0a's one-time TEMPLATE-COPY logic (half B,
+      this suite's subject) has no standalone shipped script -- it is
+      orchestrating-session prose the Claude session itself executes at
+      scaffold time, not an importable/subprocess-able module. (As of 1.9.0 /
+      #194, Step 0a's OTHER half -- writing the ``.plugin_bundle_hash`` /
+      ``.orchestration_bundle_hash`` markers -- IS a shipped script,
+      ``scaffold_setup.py``; but the one-time template copy this suite locks
+      stays prose.) The pipeline gate scripts SKILL.md names as the "four
+      plugin-path scripts never copied" (``profile_validate.py`` at Step 0,
       ``validate_extraction.py`` at W2, ``glossary_preflight.py`` at W3
-      (1.4.0), and ``resolve_codex_companion.py`` at W5 (1.4.7)), none of
-      which is Step 0a's own copy logic. Step
-      0a's copy logic is orchestrating-session prose the Claude session
-      itself executes at scaffold time, not an importable/subprocess-able
-      module. So this half of the suite (1) transcribes the documented
+      (1.4.0), ``resolve_codex_companion.py`` at W5 (1.4.7)) are likewise not
+      Step 0a's copy logic. So this half of the suite (1) transcribes the documented
       guard literally, as a small reference implementation using the exact
       same "copy iff destination absent" idiom as
       ``profile_validate.ensure_profile_exists`` (see

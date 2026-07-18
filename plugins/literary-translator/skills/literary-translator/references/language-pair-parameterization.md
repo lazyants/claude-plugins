@@ -82,6 +82,7 @@ A language config file contains four required keys, plus an optional fifth:
 |---|---|
 | `fr.json` | Fully populated, extracted directly from the proven `bootstrap_names.py` — the one real, battle-tested config. Proven against Historiettes' own 17th-century French text specifically (~143k real words of that book), **not** against French prose in general. |
 | `de.json`, `es.json`, `it.json` | Thinner starter stubs — particle lists from general knowledge, stopword lists intentionally minimal. `assets/languages/README.md` states explicitly: unverified starting points, expected to grow, exactly like `fr.json`'s own history. |
+| `he.json` | The concrete **uncased-script** preset. Hebrew letters are category `Lo`, so the `Lu`-gated capitalization run never fires: `PARTICLES` is `[]` by design and the preset alone surfaces zero native-script candidates (a project must add a `name_inventory` override — see the fifth key above and the uncased-script trap in "Sample selection"). `STOPWORDS` lists standalone, whitespace-delimited Hebrew function words only — never single-letter proclitics (`ה`/`ב`/`כ`/`ל`/`מ`/`ש`/`ו`), which fuse onto the next word and so never appear as a whitespace token in `final_audit.warn_foreign_remainder`'s remnant scan. `has_elision: false`. Unverified starting point, not smoke-tested against a real book. |
 
 Character-class detection (is this token's first letter uppercase) uses
 Unicode-category (`unicodedata.category(ch) == 'Lu'`) as the primary check,

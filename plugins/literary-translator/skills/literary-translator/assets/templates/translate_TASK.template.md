@@ -131,6 +131,33 @@ rename, never a partial file visible mid-write.
 `blocks`/`footnotes`/`verses` keys must be EXACTLY the ids/n/vids present in
 the input segpack -- 1:1, nothing skipped, nothing invented.
 
+## Output format (per block)
+
+Each block's value is the **finished target-language text of that block and
+nothing else**. The assembled book's structure -- headings, numbering,
+placement -- comes from the manifest and the renderer, never from markup you
+add by hand.
+
+For any **heading block** (whichever `type`s this project treats as
+headings -- see its own block-id model and `style_bible.md`; hand-adapt
+`[PLACEHOLDER]` here to name them if that helps), write the bare heading
+**text** only:
+
+- **No leading markdown heading marker.** Never start the text with `#`
+  (nor `##`, `###`, ...). The renderer supplies the heading level itself,
+  so a leading `#` double-marks the heading -- it is rejected downstream by
+  the assembled-output gate (`validate_assembled.py`).
+- **Target text alone by default** -- no source-language echo and no
+  duplicated source+target line, unless `style_bible.md` for THIS project
+  explicitly calls for a bilingual heading.
+- **No hand-formatted number/section ornament** -- no manual section
+  numbering, leading dashes, or surrounding rules; the renderer derives
+  numbering and placement from the manifest.
+
+The same "bare finished text, no structural markup" rule holds for every
+other block value; carry the placeholder sentinels through exactly as
+delivered (see above).
+
 Self-check before returning (direct/fallback use only -- under the W5 driver
 the generated dispatch prompt supersedes this step, because the driver's own
 validate-before-promote plus the Workflow's on-disk gate are the acceptance

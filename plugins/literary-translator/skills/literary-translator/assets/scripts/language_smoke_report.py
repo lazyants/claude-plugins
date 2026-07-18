@@ -73,6 +73,7 @@ import json
 import os
 import re
 import sys
+import unicodedata
 from functools import lru_cache
 from pathlib import Path
 from typing import NoReturn
@@ -109,17 +110,86 @@ THIS_SCRIPT_PATH = Path(__file__).resolve()
 SAMPLE_WORD_CAP = 750
 LOW_NAME_DENSITY_FLOOR = 10
 
-# Generalized tokenizer: first char = any Unicode letter (not digit/underscore),
-# then zero or more (optional internal apostrophe/right-single-quote/hyphen
-# connector + another letter) units -- so every token both STARTS and ENDS in a
-# letter and a connector is only matched BETWEEN two letters. A trailing
-# connector is deliberately left UNCONSUMED (a stray apostrophe after a name,
-# e.g. "Fiona’ George", is not fused into the token -- see plugin issue #82).
-# Makes no assumption about which alphabet the source language uses (Latin-
-# accented, Cyrillic, Greek, ...). Whether a given alphabet actually WORKS is
-# exactly what this smoke test exists to establish -- this regex only makes it
-# plausible (see references/language-pair-parameterization.md).
-TOKEN_RE = re.compile(r"[^\W\d_](?:['’‑-]?[^\W\d_])*")
+# Generalized, offset-safe, MARK-inclusive tokenizer (issue #225): a token =
+# one Unicode LETTER, its own trailing combining MARKs, then zero or more
+# (optional internal apostrophe/right-single-quote/hyphen CONNECTOR + another
+# LETTER + its MARKs) units -- so every token both STARTS and ENDS in a
+# letter(+marks) run and a connector is only matched BETWEEN two letters. A
+# trailing connector is deliberately left UNCONSUMED (a stray apostrophe after
+# a name, e.g. "Fiona’ George", is not fused into the token -- see plugin issue
+# #82). Makes no assumption about which alphabet the source language uses
+# (Latin-accented, Cyrillic, Hebrew, Arabic, ...); whether a given alphabet
+# actually WORKS is exactly what this smoke test exists to establish -- this
+# regex only makes it plausible (see references/language-pair-parameterization.
+# md). Combining marks (Hebrew niqqud/cantillation, Arabic harakat, Latin NFD
+# accents) are absorbed INSIDE the token, preserving raw-codepoint offsets --
+# this file emits no spans of its own, but its TOKEN_RE MUST stay byte-identical
+# to bootstrap_names.py's (the offset-span consumer; see that file's OFFSET
+# CONTRACT comment) or one extractor carves tokens differently from the other
+# (tests/extractor_terminators_drift.test.py::
+# test_token_re_identical_across_both_extractors enforces it) -- edit BOTH.
+#
+# MARK class: stdlib `re` has no \p{M}, so the ranges are a curated, commented
+# list of sub-ranges over the four target scripts, category-filtered against
+# `unicodedata` at import so an unassigned (Cn) codepoint inside a named range
+# on an older interpreter's Unicode version is dropped automatically (keeps the
+# class pure category-M on every interpreter). LETTER matches no category-M
+# codepoint, so LETTER/MARK/CONNECTOR are disjoint -> linear, unambiguous parse.
+_MARK_SUBRANGES = (
+    # Latin / general combining diacritics
+    (0x0300, 0x036F), (0x1AB0, 0x1ACE), (0x1DC0, 0x1DFF), (0xFE20, 0xFE2F),
+    # Cyrillic combining
+    (0x0483, 0x0489),
+    # Hebrew points + cantillation. The punctuation in this span
+    # (05BE maqaf/Pd, 05C0 paseq, 05C3 sof pasuq, 05C6 nun hafukha/Po) is NOT
+    # category M, so the sub-ranges skip it -- the category filter drops it too.
+    (0x0591, 0x05BD), (0x05BF, 0x05BF), (0x05C1, 0x05C2), (0x05C4, 0x05C5),
+    (0x05C7, 0x05C7),
+    # Arabic harakat + Quranic annotation marks
+    (0x0610, 0x061A), (0x064B, 0x065F), (0x0670, 0x0670), (0x06D6, 0x06DC),
+    (0x06DF, 0x06E4), (0x06E7, 0x06E8), (0x06EA, 0x06ED),
+    # Arabic Extended-A/B (Quranic annotation + historic-manuscript marks);
+    # the whole block is Arabic-script, so the category filter alone keeps
+    # only its marks (e.g. 08F0 ARABIC OPEN FATHATAN) and drops its letters.
+    (0x0870, 0x08FF),
+)
+
+
+def _build_mark_class():
+    """Return the character-class body (escaped, compressed to runs) of every
+    category-M codepoint inside ``_MARK_SUBRANGES`` on the running interpreter.
+
+    Category-filtered against ``unicodedata`` so the class can never carry an
+    unassigned (Cn) codepoint regardless of the interpreter's Unicode version;
+    identical build code + one interpreter per process means both extractors
+    compute a byte-identical ``TOKEN_RE`` (the drift guard enforces it).
+    """
+    kept = [
+        cp
+        for lo, hi in _MARK_SUBRANGES
+        for cp in range(lo, hi + 1)
+        if unicodedata.category(chr(cp)).startswith("M")
+    ]
+    parts = []
+    i = 0
+    while i < len(kept):
+        j = i
+        while j + 1 < len(kept) and kept[j + 1] == kept[j] + 1:
+            j += 1
+        parts.append(
+            "\\u%04x" % kept[i]
+            if kept[i] == kept[j]
+            else "\\u%04x-\\u%04x" % (kept[i], kept[j])
+        )
+        i = j + 1
+    return "".join(parts)
+
+
+_MARK_CLASS = _build_mark_class()
+# LETTER MARK* (CONNECTOR? LETTER MARK*)*  -- byte-identical to bootstrap_names.py.
+TOKEN_RE = re.compile(
+    r"[^\W\d_][" + _MARK_CLASS + r"]*(?:['’‑׳״־-]?[^\W\d_][" + _MARK_CLASS + r"]*)*"
+)
 # Sentinels this plugin bakes into plain_text (footnote refs, verse
 # placeholders -- see manifest.schema.json's FNREF_N / VERSE_{vid}_{shortsha}
 # descriptions). Matched generically as any ⟦...⟧ bracketed token, mirroring

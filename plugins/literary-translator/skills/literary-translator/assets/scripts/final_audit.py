@@ -545,6 +545,32 @@ def _strip_outer_punct(token):
     return token[start:end]
 
 
+def _fold_source_marks(s):
+    """Fold Hebrew niqqud (vowel points / cantillation) for the
+    foreign-remainder comparison ONLY: NFD-decompose, drop every combining
+    mark (Unicode category Mn) in the Hebrew block range U+0591..U+05C7, then
+    re-NFC. A pointed (vocalized) Hebrew draft token thus matches its
+    unpointed consonantal stopword -- a shipped he.json carries bare
+    consonantal function words, but a real Hebrew source draft may spell the
+    same words fully pointed (#209).
+
+    Scoped strictly to the Hebrew mark range, NOT a blanket Mn strip: a
+    Latin/Cyrillic/etc. combining mark (e.g. the U+0301 COMBINING ACUTE in
+    Spanish "Sí") is category Mn but out of range, so it is preserved --
+    dropping it would collapse "Sí" into an unrelated-language "si". This is
+    applied SYMMETRICALLY on both compare sides (the document-token side in
+    warn_foreign_remainder() and the stopword side in main()); for NFC Latin
+    text carrying no in-range marks it is exactly equivalent to the plain NFC
+    normalization it replaces."""
+    decomposed = unicodedata.normalize("NFD", s)
+    stripped = "".join(
+        c
+        for c in decomposed
+        if not (unicodedata.category(c) == "Mn" and 0x0591 <= ord(c) <= 0x05C7)
+    )
+    return unicodedata.normalize("NFC", stripped)
+
+
 def warn_foreign_remainder(seg, stopwords_lower):
     warns = []
     if not stopwords_lower:
@@ -559,7 +585,7 @@ def warn_foreign_remainder(seg, stopwords_lower):
         clean = SENTINEL_RE.sub(" ", txt)
         tokens_ws = clean.split()
         low_tokens = [
-            unicodedata.normalize("NFC", _strip_outer_punct(t)).lower() for t in tokens_ws
+            _fold_source_marks(_strip_outer_punct(t)).lower() for t in tokens_ws
         ]
         stop_hits = sum(1 for t in low_tokens if t in stopwords_lower)
         run = maxrun = 0
@@ -792,7 +818,7 @@ def main():
         particle_config = profile["source"]["language"]["particle_config"]
         lang = bn.load_language_config(particle_config)
         stopwords_lower = frozenset(
-            unicodedata.normalize("NFC", w).lower() for w in lang.stopwords
+            _fold_source_marks(w).lower() for w in lang.stopwords
         )
     except (bn.BootstrapNamesError, KeyError, TypeError) as exc:
         print(

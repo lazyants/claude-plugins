@@ -119,16 +119,95 @@ TERMINATORS = frozenset(".!?:;»\"”…—―")
 # what keeps is_upper_initial() (and this whole script) fully generic.
 _ASCII_UPPER = frozenset(chr(c) for c in range(ord("A"), ord("Z") + 1))
 
-# A token = one Unicode letter, then zero or more (optional internal
-# apostrophe/hyphen connector + another letter) units -- so every token both
-# STARTS and ENDS in a letter and a connector is only ever matched BETWEEN two
-# letters (covers "d'Artagnan", "Saint-Simon", accented names in any script).
-# A trailing connector is deliberately left UNCONSUMED: a stray apostrophe
-# after a name (e.g. "Fiona’ George") is no longer fused into the token -- see
-# plugin issue #82. `[^\W\d_]` is the standard "any Unicode letter" idiom:
-# Python's `\w` is Unicode-aware by default for `str` patterns, and subtracting
-# `\d` and `_` from it leaves exactly the letter categories.
-TOKEN_RE = re.compile(r"[^\W\d_](?:['’‑-]?[^\W\d_])*")
+# A token = one Unicode LETTER, its own trailing combining MARKs, then zero or
+# more (optional internal apostrophe/hyphen CONNECTOR + another LETTER + its
+# MARKs) units -- so every token both STARTS and ENDS in a letter(+marks) run
+# and a connector is only ever matched BETWEEN two letters (covers
+# "d'Artagnan", "Saint-Simon", accented names in any script). A trailing
+# connector is deliberately left UNCONSUMED: a stray apostrophe after a name
+# (e.g. "Fiona’ George") is not fused into the token -- see plugin issue #82.
+# `[^\W\d_]` is the standard "any Unicode letter" idiom: Python's `\w` is
+# Unicode-aware by default for `str` patterns, and subtracting `\d` and `_`
+# from it leaves exactly the letter categories (it matches NO combining mark).
+#
+# OFFSET CONTRACT (issue #225; CROSS-SESSION -- Session 1's #206 occ_index gate
+# is the consumer): combining marks -- Hebrew niqqud/cantillation, Arabic
+# harakat, Latin NFD accents -- are absorbed INSIDE the token (a MARK* after
+# every letter), never split off. The raw Unicode-codepoint offsets into the
+# scanned plain_text are preserved verbatim: tokenize()/extract_candidate_
+# spans() emit (start, end) with text[start:end] reconstructing the pointed
+# surface form character-for-character, exactly as occ_index.py's
+# production_occurrences() / evidence_verify.py bind stored evidence spans
+# (RFC #215 Phase 0c). An NFD-drop-before-tokenize normalization is therefore
+# FORBIDDEN here: dropping marks before scanning would shift every later
+# codepoint offset and silently corrupt those spans.
+#
+# MARK class: stdlib `re` has no \p{M}, so the combining-mark ranges are a
+# curated, commented list of sub-ranges over LT's four target scripts
+# (Latin/general, Cyrillic, Hebrew, Arabic), category-filtered against
+# `unicodedata` at import -- any unassigned (Cn) codepoint inside a named range
+# on an older interpreter's Unicode version (e.g. the U+1AB0-1ACE tail is only
+# fully assigned from Unicode 14) is dropped automatically, so the class stays
+# pure category-M on every interpreter. tests/bootstrap_names.test.py's
+# completeness test is the empirical backstop. bootstrap_names.py and
+# language_smoke_report.py MUST keep TOKEN_RE byte-identical
+# (tests/extractor_terminators_drift.test.py::
+# test_token_re_identical_across_both_extractors enforces it) -- edit BOTH.
+_MARK_SUBRANGES = (
+    # Latin / general combining diacritics
+    (0x0300, 0x036F), (0x1AB0, 0x1ACE), (0x1DC0, 0x1DFF), (0xFE20, 0xFE2F),
+    # Cyrillic combining
+    (0x0483, 0x0489),
+    # Hebrew points + cantillation. The punctuation in this span
+    # (05BE maqaf/Pd, 05C0 paseq, 05C3 sof pasuq, 05C6 nun hafukha/Po) is NOT
+    # category M, so the sub-ranges skip it -- the category filter drops it too.
+    (0x0591, 0x05BD), (0x05BF, 0x05BF), (0x05C1, 0x05C2), (0x05C4, 0x05C5),
+    (0x05C7, 0x05C7),
+    # Arabic harakat + Quranic annotation marks
+    (0x0610, 0x061A), (0x064B, 0x065F), (0x0670, 0x0670), (0x06D6, 0x06DC),
+    (0x06DF, 0x06E4), (0x06E7, 0x06E8), (0x06EA, 0x06ED),
+    # Arabic Extended-A/B (Quranic annotation + historic-manuscript marks);
+    # the whole block is Arabic-script, so the category filter alone keeps
+    # only its marks (e.g. 08F0 ARABIC OPEN FATHATAN) and drops its letters.
+    (0x0870, 0x08FF),
+)
+
+
+def _build_mark_class():
+    """Return the character-class body (escaped, compressed to runs) of every
+    category-M codepoint inside ``_MARK_SUBRANGES`` on the running interpreter.
+
+    Category-filtered against ``unicodedata`` so the class can never carry an
+    unassigned (Cn) codepoint regardless of the interpreter's Unicode version;
+    identical build code + one interpreter per process means both extractors
+    compute a byte-identical ``TOKEN_RE`` (the drift guard enforces it).
+    """
+    kept = [
+        cp
+        for lo, hi in _MARK_SUBRANGES
+        for cp in range(lo, hi + 1)
+        if unicodedata.category(chr(cp)).startswith("M")
+    ]
+    parts = []
+    i = 0
+    while i < len(kept):
+        j = i
+        while j + 1 < len(kept) and kept[j + 1] == kept[j] + 1:
+            j += 1
+        parts.append(
+            "\\u%04x" % kept[i]
+            if kept[i] == kept[j]
+            else "\\u%04x-\\u%04x" % (kept[i], kept[j])
+        )
+        i = j + 1
+    return "".join(parts)
+
+
+_MARK_CLASS = _build_mark_class()
+# LETTER MARK* (CONNECTOR? LETTER MARK*)*  -- see the OFFSET CONTRACT comment.
+TOKEN_RE = re.compile(
+    r"[^\W\d_][" + _MARK_CLASS + r"]*(?:['’‑׳״־-]?[^\W\d_][" + _MARK_CLASS + r"]*)*"
+)
 
 APOSTROPHES = "'’"  # ' and the Unicode right single quote
 

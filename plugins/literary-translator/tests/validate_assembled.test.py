@@ -1917,5 +1917,184 @@ def test_major1_rebind_reads_draft_bytes_exactly_once(tmp_path, monkeypatch):
     )
 
 
+# ===========================================================================
+# #201 -- enforced heading-shape output contract: a surfaced, NON-EMPTY
+# translated heading whose text begins with a markdown heading marker
+# (`^\s*#`) must FAIL. The renderer supplies the `## `/level itself, so a
+# leading `#` in the block text double-marks the heading in the delivered
+# book. Hard-bans ONLY the unambiguous leading `#` -- a source-language echo
+# or a bilingual source+target line is legitimate in some projects and is
+# never flagged (false-RED-averse).
+# ===========================================================================
+
+
+def test_validate_assembled_rejects_leading_hash_in_heading(tmp_path):
+    """#201 (default scope): a converged heading whose translated text
+    begins with a markdown heading marker (`# ...`) must FAIL. RED pre-fix:
+    validate_assembled only checked heading PRESENCE, so a present,
+    non-empty `#`-prefixed heading passed GREEN. Named mutation: prefix the
+    HEAD block's own draft text with `# `. This can NEVER double-fire with
+    missing_heading (that gate's territory is empty/absent text; this text
+    is present and non-empty)."""
+    root = make_root(tmp_path)
+    blocks = {"HEAD:seg01": make_block("HEAD", plain_text="Chapter One")}
+    segments = [{"seg": "seg01", "kind": "body", "block_ids": ["HEAD:seg01"], "word_count": 2}]
+    write_manifest(root, blocks, segments)
+
+    write_draft(root, "seg01", {"HEAD:seg01": "# Glava Odna"})  # leading '#' -- the defect
+    write_ledger(root, {"seg01": {"status": "converged"}})
+
+    proc = run_validate_assembled(root)
+    assert proc.returncode == 1, (
+        "a converged heading whose translated text begins with a markdown "
+        "heading marker '#' must FAIL -- the renderer supplies the heading "
+        "level itself, so a leading '#' double-marks it\n" + proc.stdout + proc.stderr
+    )
+    payload = parse_stdout_json(proc)
+    assert {"seg": "seg01", "block_id": "HEAD:seg01", "kind": "heading_leading_hash"} in payload["defects"], payload
+    # The two gates are distinct: this key is present+non-empty, so it is
+    # NEVER also reported as a missing_heading.
+    assert not any(
+        d["kind"] == "missing_heading" and d["seg"] == "seg01" and d["block_id"] == "HEAD:seg01"
+        for d in payload["defects"]
+    ), payload
+
+
+def test_validate_assembled_rejects_leading_hash_whitespace_prefixed(tmp_path):
+    """#201: a leading `#` preceded only by whitespace (`   # ...`) is still
+    the same double-marking defect -- the ban is `^\\s*#`, not a strict
+    first-byte `#`. The renderer strips leading whitespace, so this would
+    still land a `#` at the head of the rendered heading."""
+    root = make_root(tmp_path)
+    blocks = {"HEAD:seg01": make_block("HEAD", plain_text="Chapter One")}
+    segments = [{"seg": "seg01", "kind": "body", "block_ids": ["HEAD:seg01"], "word_count": 2}]
+    write_manifest(root, blocks, segments)
+
+    write_draft(root, "seg01", {"HEAD:seg01": "   # Glava Odna"})  # whitespace then '#' -- still the defect
+    write_ledger(root, {"seg01": {"status": "converged"}})
+
+    proc = run_validate_assembled(root)
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    payload = parse_stdout_json(proc)
+    assert {"seg": "seg01", "block_id": "HEAD:seg01", "kind": "heading_leading_hash"} in payload["defects"], payload
+
+
+def test_validate_assembled_rejects_leading_hash_in_heading_assembled_book_scope(tmp_path):
+    """#201 (assembled_book scope): the leading-`#` ban applies to the
+    assembled nodestream's own heading-node text too (assemble.py copies the
+    draft block text into the heading node), so a `#`-prefixed heading is
+    caught at final W9 delivery, not only at W7/W8. RED pre-fix:
+    assembled_book scope only counted heading-node presence."""
+    root = make_root(tmp_path, v1_scope="assembled_book")
+    blocks = {"HEAD:seg01": make_block("HEAD", plain_text="Chapter One")}
+    segments = [{"seg": "seg01", "kind": "body", "block_ids": ["HEAD:seg01"], "word_count": 2}]
+    write_manifest(root, blocks, segments)
+
+    write_nodestream(root, {
+        "book": {"seg_order": ["seg01"], "title": "Test"},
+        "nodes": [
+            {"id": "HEAD:seg01", "seg": "seg01", "kind": "heading", "text": "# Glava Odna"},  # leading '#' -- the defect
+        ],
+        "footnotes": [],
+        "meta": {},
+    })
+
+    proc = run_validate_assembled(root)
+    assert proc.returncode == 1, (
+        "a '#'-prefixed assembled heading node must FAIL in assembled_book "
+        "scope too\n" + proc.stdout + proc.stderr
+    )
+    payload = parse_stdout_json(proc)
+    assert {"seg": "seg01", "block_id": "HEAD:seg01", "kind": "heading_leading_hash"} in payload["defects"], payload
+
+
+def test_red_assembled_book_duplicate_heading_dropped_node_also_malformed(tmp_path):
+    """codex review of #201 (Low): a heading declared TWICE (occurrence-level
+    multiplicity, ped-ant PR#230 [P1] -- see
+    test_red_assembled_book_duplicate_heading_occurrence_dropped_node) but
+    assembled with only ONE surviving node, where that ONE surviving node is
+    ALSO '#'-prefixed. compute_missing_heading_defects (source_count=2 vs
+    output_count=1) and collect_heading_shape_defects (the one surviving
+    node is present, non-empty, and malformed) are then independently TRUE
+    for the SAME key -- breaking the two gates' old claim of being
+    "structurally incapable of double-firing" on one key, a claim that only
+    held when source and output multiplicity matched.
+    collect_nodestream_output_markers counts one increment per PHYSICAL
+    NODE regardless of content, so an under-count and a malformed-but-
+    present occurrence can coexist on the same key in THIS scope (unlike
+    the default scope, where collect_default_output_markers credits the
+    full source multiplicity to any key with a present, non-empty draft --
+    malformed or not -- so missing_heading never fires there for a key
+    heading_leading_hash also flags). Both defects are hard (exit 1 either
+    way), so the fix is a "one defect per key" invariant, not a verdict
+    change: once a key is already reported missing_heading -- the more
+    fundamental, under-surfaced defect -- its own heading_leading_hash is
+    suppressed rather than double-reported."""
+    root = make_root(tmp_path, v1_scope="assembled_book")
+    blocks = {"HEAD:seg01": make_block("HEAD", plain_text="Chapter One")}
+    segments = [{"seg": "seg01", "kind": "body", "block_ids": ["HEAD:seg01", "HEAD:seg01"], "word_count": 2}]
+    write_manifest(root, blocks, segments)
+
+    # Declared TWICE, only ONE surviving node -- AND that node is malformed.
+    write_nodestream(root, {
+        "book": {"seg_order": ["seg01"], "title": "Test"},
+        "nodes": [
+            {"id": "HEAD:seg01", "seg": "seg01", "kind": "heading", "text": "# Bad"},
+        ],
+        "footnotes": [],
+        "meta": {},
+    })
+
+    proc = run_validate_assembled(root)
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    payload = parse_stdout_json(proc)
+    assert {"seg": "seg01", "block_id": "HEAD:seg01", "kind": "missing_heading"} in payload["defects"], payload
+    # One defect per key: the under-surfaced defect already covers this
+    # key, so heading_leading_hash must NOT also fire for it.
+    assert not any(
+        d["kind"] == "heading_leading_hash" and d["seg"] == "seg01" and d["block_id"] == "HEAD:seg01"
+        for d in payload["defects"]
+    ), payload
+
+
+def test_validate_assembled_plain_and_bilingual_heading_no_false_red(tmp_path):
+    """#201 no-false-RED control: a legitimate heading whose translated text
+    does NOT begin with `#` is clean -- including a BILINGUAL heading that
+    echoes the source form alongside the target (a legitimate choice in some
+    projects). The gate hard-bans ONLY the unambiguous leading `#`; it never
+    heuristically flags a source echo or a duplicate source+target line. A
+    `#` that appears MID-text (not at the head) is likewise not flagged."""
+    root = make_root(tmp_path)
+    blocks = {
+        "HEAD:seg01": make_block("HEAD", plain_text="Chapter One"),
+        "HEAD:seg02": make_block("HEAD", plain_text="Chapter Two", order_index=1),
+        "HEAD:seg03": make_block("HEAD", plain_text="Chapter Three", order_index=2),
+    }
+    segments = [
+        {"seg": "seg01", "kind": "body", "block_ids": ["HEAD:seg01"], "word_count": 2},
+        {"seg": "seg02", "kind": "body", "block_ids": ["HEAD:seg02"], "word_count": 2},
+        {"seg": "seg03", "kind": "body", "block_ids": ["HEAD:seg03"], "word_count": 2},
+    ]
+    write_manifest(root, blocks, segments)
+
+    write_draft(root, "seg01", {"HEAD:seg01": "Glava Odna"})              # plain target heading
+    write_draft(root, "seg02", {"HEAD:seg02": "פרק ב — Chapter Two"})  # bilingual source echo + target, no leading '#'
+    write_draft(root, "seg03", {"HEAD:seg03": "Chapter #3"})              # a '#' MID-text, not at the head -- not a defect
+    write_ledger(root, {
+        "seg01": {"status": "converged"},
+        "seg02": {"status": "converged"},
+        "seg03": {"status": "converged"},
+    })
+
+    proc = run_validate_assembled(root)
+    assert proc.returncode == 0, (
+        "a plain target heading, a bilingual (source-echo) heading, and a "
+        "mid-text '#' must all be clean -- only a leading '#' is banned\n"
+        + proc.stdout + proc.stderr
+    )
+    payload = parse_stdout_json(proc)
+    assert payload["defects"] == [], payload
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))

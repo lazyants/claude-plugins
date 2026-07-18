@@ -17,10 +17,12 @@ Module under test lives outside any Python package (a standalone script
 copied to ``${durable_root}/scripts/`` at runtime), so it is loaded here via
 ``importlib`` from its real path rather than imported normally.
 """
+import dataclasses
 import importlib.util
 import json
 import re
 import sys
+import unicodedata
 from pathlib import Path
 
 import pytest
@@ -757,6 +759,248 @@ def test_elision_ambiguous_generalizes_to_it_config_laquila_pair():
     assert "Aquila" in rows
     assert rows["L'Aquila"]["elision_ambiguous"] is True
     assert rows["L'Aquila"]["elision_stripped_form"] == "Aquila"
+
+
+# ---------------------------------------------------------------------------
+# #225 -- offset-safe, mark-inclusive tokenizer. TOKEN_RE now absorbs a
+# letter's combining marks (Hebrew niqqud/cantillation, Arabic harakat, Latin
+# NFD accents) INSIDE the token instead of ending a run at the first mark,
+# while preserving the raw Unicode-codepoint offsets occ_index.py's evidence
+# spans bind to (RFC #215 Phase 0c). The mark class is built from a curated,
+# category-filtered sub-range list (_MARK_SUBRANGES); the completeness tests
+# below are the empirical backstop for that list.
+# ---------------------------------------------------------------------------
+
+POINTED_HEBREW = "שָׁלוֹם"                            # niqqud between every consonant
+VOCALIZED_ARABIC = "سَلَام"                            # Arabic harakat (fatha) marks
+NFD_RESUME = unicodedata.normalize("NFD", "résumé")  # base letter + U+0301, twice
+
+
+def test_tokenizer_keeps_pointed_hebrew_single_token():
+    # Pre-#225 the niqqud ended each run early -> one token per consonant (3);
+    # now the whole pointed word is ONE token.
+    assert len(list(bn.TOKEN_RE.finditer(POINTED_HEBREW))) == 1
+
+
+def test_tokenizer_keeps_vocalized_arabic_single_token():
+    # Vocalized Arabic harakat behave identically (pre-#225: 3 tokens).
+    assert len(list(bn.TOKEN_RE.finditer(VOCALIZED_ARABIC))) == 1
+
+
+def test_tokenizer_keeps_arabic_extended_mark_single_token():
+    # #225 follow-up (codex Medium): the curated Arabic sub-ranges stopped at
+    # U+06ED, omitting the Arabic Extended-A/B combining marks (~U+0870-08FF)
+    # used by vocalized Extended-Arabic names/manuscripts -- e.g. U+08F0
+    # ARABIC OPEN FATHATAN. Pre-fix this split into 2 tokens (mark ended the
+    # run early), silently altering the name and breaking production_
+    # occurrences()'s offset-span authentication (RFC #215 Phase 0c).
+    text = "ا" + "ࣰ" + "ب"
+    spans = [(tok, s, e) for tok, _prec, s, e in bn.tokenize(text, None)]
+    assert len(spans) == 1
+    tok, s, e = spans[0]
+    assert tok == text
+    assert text[s:e] == text
+
+
+def test_tokenizer_keeps_nfd_combining_accent_inside_token():
+    # An NFD Latin word (base + combining acute, twice) is ONE token
+    # (pre-#225: 2 tokens, split at each combining accent); the NFC form was
+    # already one token and must stay one (no regression).
+    assert len(list(bn.TOKEN_RE.finditer(NFD_RESUME))) == 1
+    assert len(list(bn.TOKEN_RE.finditer(unicodedata.normalize("NFC", "résumé")))) == 1
+
+
+def test_tokenizer_nfc_latin_and_connectors_unchanged():
+    # The mark class only ever ABSORBS marks; connector/letter handling for the
+    # plugin's existing NFC Latin corpus is unchanged (guards against a silent
+    # behavior shift, incl. the issue #82 trailing-connector rule).
+    assert bn.TOKEN_RE.findall("Saint-Simon") == ["Saint-Simon"]
+    assert bn.TOKEN_RE.findall("aujourd'hui") == ["aujourd'hui"]
+    assert bn.TOKEN_RE.findall("aujourd’hui") == ["aujourd’hui"]
+    assert bn.TOKEN_RE.findall("Fiona’ George") == ["Fiona", "George"]
+
+
+def test_tokenizer_offset_span_reconstructs_pointed_substring():
+    # THE occ_index invariant (#206 / RFC #215 Phase 0c): the emitted
+    # (start, end) span reconstructs the pointed word -- marks included --
+    # verbatim from the raw text. Pre-#225 no single token spanned the whole
+    # pointed word, so next() below raised StopIteration.
+    text = f"ראה {POINTED_HEBREW} אתמול."
+    spans = [(tok, s, e) for tok, _prec, s, e in bn.tokenize(text, None)]
+    s, e = next((s, e) for tok, s, e in spans if tok == POINTED_HEBREW)
+    assert text[s:e] == POINTED_HEBREW
+
+
+# ---------------------------------------------------------------------------
+# P1 review finding: Hebrew geresh (U+05F3 ׳) and gershayim (U+05F4 ״) as
+# internal name connectors. Since 1.9.0 makes ``name_inventory`` the ONLY
+# route by which a native Hebrew name surfaces at all (is_upper_initial()
+# can never see a case-less, category-'Lo' script -- see
+# caseless_offset.test.py's #204 pin), TOKEN_RE's connector class carried
+# only the Latin apostrophe/quote/hyphen forms. A geresh/gershayim functions
+# INSIDE a Hebrew name/acronym exactly the way an apostrophe does in Latin
+# (e.g. "ז׳בוטינסקי" -- Jabotinsky, the geresh spelling its "zh" sound), so
+# without it in the connector class the name tokenized as TWO tokens ("ז",
+# "בוטינסקי"). Pass 2's candidate name is built by SPACE-joining the matched
+# tokens (see extract_candidate_spans()'s ``name = " ".join(...)``), not by
+# slicing the raw span, so the altered candidate could never bind back to
+# the name_inventory's own spelling downstream (occ_index.py's
+# production_occurrences() matches spans by exact source_form string).
+# ---------------------------------------------------------------------------
+GERESH_HEBREW_NAME = "ז׳בוטינסקי"  # Jabotinsky -- geresh (U+05F3) mid-name
+GERESH_HEBREW_TEXT = "פגשתי את ז׳בוטינסקי אתמול."
+GERSHAYIM_HEBREW_NAME = "צה״ל"  # Tzahal (IDF) -- gershayim (U+05F4) acronym
+GERSHAYIM_HEBREW_TEXT = "ראיתי את צה״ל אתמול."
+
+
+def load_he_config_with_inventory(name_inventory):
+    """The real shipped he.json with its ``name_inventory`` field overridden
+    -- the optional 5th LanguageConfig field a project supplies per Step 0a
+    (see load_real_fr_config() above for the same shipped-preset pattern;
+    caseless_offset.test.py's synthetic configs exercise name_inventory
+    against a from-scratch fixture instead of a real shipped file)."""
+    lang = bn.load_language_config("he.json", languages_dir=REAL_LANGUAGES_DIR)
+    return dataclasses.replace(lang, name_inventory=frozenset(name_inventory))
+
+
+def test_hebrew_geresh_name_stays_one_token():
+    lang = load_he_config_with_inventory([GERESH_HEBREW_NAME])
+    out = bn.extract_candidate_spans(GERESH_HEBREW_TEXT, lang)
+    by_name = {n: (s, e) for n, _mid, s, e in out}
+    assert GERESH_HEBREW_NAME in by_name, f"{GERESH_HEBREW_NAME!r} missing from {sorted(by_name)}"
+    s, e = by_name[GERESH_HEBREW_NAME]
+    assert GERESH_HEBREW_TEXT[s:e] == GERESH_HEBREW_NAME
+    # must not have split into the two bare halves, nor surface as pass 2's
+    # pre-fix space-joined altered form.
+    assert "ז" not in by_name
+    assert "בוטינסקי" not in by_name
+    assert "ז בוטינסקי" not in by_name
+
+
+def test_hebrew_gershayim_acronym_stays_one_token():
+    lang = load_he_config_with_inventory([GERSHAYIM_HEBREW_NAME])
+    out = bn.extract_candidate_spans(GERSHAYIM_HEBREW_TEXT, lang)
+    by_name = {n: (s, e) for n, _mid, s, e in out}
+    assert GERSHAYIM_HEBREW_NAME in by_name, f"{GERSHAYIM_HEBREW_NAME!r} missing from {sorted(by_name)}"
+    s, e = by_name[GERSHAYIM_HEBREW_NAME]
+    assert GERSHAYIM_HEBREW_TEXT[s:e] == GERSHAYIM_HEBREW_NAME
+    assert "צה" not in by_name
+    assert "ל" not in by_name
+
+
+# ---------------------------------------------------------------------------
+# P1 review finding (round 2): Hebrew maqaf (U+05BE, the Hebrew hyphen) as an
+# internal name connector. Maqaf is the Hebrew-script equivalent of the Latin
+# hyphen already in TOKEN_RE's connector class (Saint-Simon stays one token
+# via the ASCII "-"), so a maqaf-joined compound name (e.g. "בן־גוריון" --
+# Ben-Gurion) must stay one token too. The maqaf is isolated as its own
+# string segment (rather than embedded mid-literal) so its codepoint is easy
+# to spot-check in isolation and can't be silently swapped for a lookalike
+# hyphen/dash variant (see test_curated_subranges_name_no_assigned_non_mark's
+# own U+05BE-adjacent guard below).
+# ---------------------------------------------------------------------------
+MAQAF_HEBREW_NAME = "בן" + "־" + "גוריון"  # Ben-Gurion -- maqaf mid-name
+MAQAF_HEBREW_TEXT = f"פגשתי את {MAQAF_HEBREW_NAME} אתמול."
+
+
+def test_hebrew_maqaf_name_stays_one_token():
+    lang = load_he_config_with_inventory([MAQAF_HEBREW_NAME])
+    out = bn.extract_candidate_spans(MAQAF_HEBREW_TEXT, lang)
+    by_name = {n: (s, e) for n, _mid, s, e in out}
+    assert MAQAF_HEBREW_NAME in by_name, f"{MAQAF_HEBREW_NAME!r} missing from {sorted(by_name)}"
+    s, e = by_name[MAQAF_HEBREW_NAME]
+    assert MAQAF_HEBREW_TEXT[s:e] == MAQAF_HEBREW_NAME
+    # must not have split into the two bare halves, nor surface as pass 2's
+    # pre-fix space-joined altered form.
+    assert "בן" not in by_name
+    assert "גוריון" not in by_name
+    assert "בן גוריון" not in by_name
+
+
+# --- MARK class completeness / purity backstop -----------------------------
+# The spans the curated sub-ranges claim to cover COMPLETELY. Bounded at the
+# curated upper edge (U+1ACE) rather than the whole 1AB0-1AFF block so a FUTURE
+# Unicode assignment past 1ACE cannot spuriously RED this on a newer
+# interpreter; the Hebrew (0591-05C7) and Arabic (0610-06ED) spans deliberately
+# CONTAIN non-mark punctuation the sub-ranges skip, making the omission check a
+# real test rather than a tautology. The Arabic Extended-A/B span (0870-08FF)
+# is curated as the whole block (see _MARK_SUBRANGES), so it CONTAINS assigned
+# non-mark letters the category filter -- not the sub-range -- drops; still a
+# real regression guard against a future narrowing of that sub-range.
+MARK_SUPER_RANGES = (
+    (0x0300, 0x036F), (0x1AB0, 0x1ACE), (0x1DC0, 0x1DFF), (0xFE20, 0xFE2F),
+    (0x0483, 0x0489), (0x0591, 0x05C7), (0x0610, 0x06ED), (0x0870, 0x08FF),
+)
+
+
+def _mark_class_pattern():
+    return re.compile("[" + bn._MARK_CLASS + "]")
+
+
+def test_mark_class_accepts_only_combining_marks():
+    # PURITY: every codepoint TOKEN_RE's mark class matches is category M*.
+    cls = _mark_class_pattern()
+    non_marks = sorted(
+        (hex(cp), unicodedata.category(chr(cp)))
+        for lo, hi in bn._MARK_SUBRANGES
+        for cp in range(lo, hi + 1)
+        if cls.match(chr(cp)) and not unicodedata.category(chr(cp)).startswith("M")
+    )
+    assert non_marks == [], f"mark class accepts non-M codepoints: {non_marks}"
+
+
+# The Arabic Extended-A/B sub-range (0870-08FF) is curated as the WHOLE
+# block rather than a tight mark-only enumeration like every other Arabic
+# sub-range -- the block interleaves marks with genuine Arabic letters, and
+# the category filter (not hand-curation) is relied on to drop them. Exempt
+# from the typo guard below so it keeps checking every OTHER, still
+# tightly-curated sub-range for a stray non-mark codepoint.
+_WHOLE_BLOCK_SUBRANGES = {(0x0870, 0x08FF)}
+
+
+def test_curated_subranges_name_no_assigned_non_mark():
+    # A curated sub-range codepoint must be category M* OR unassigned (Cn) --
+    # never an assigned letter/digit/punct. Catches a typo (e.g. sweeping in
+    # 05BE maqaf/Pd) while tolerating a Unicode-version Cn gap the category
+    # filter harmlessly drops.
+    strays = sorted(
+        (hex(cp), unicodedata.category(chr(cp)))
+        for lo, hi in bn._MARK_SUBRANGES
+        if (lo, hi) not in _WHOLE_BLOCK_SUBRANGES
+        for cp in range(lo, hi + 1)
+        if unicodedata.category(chr(cp)) != "Cn"
+        and not unicodedata.category(chr(cp)).startswith("M")
+    )
+    assert strays == [], f"curated sub-range names an assigned non-mark: {strays}"
+
+
+def test_mark_class_omits_no_mark_within_super_ranges():
+    # COMPLETENESS: within each span the curated list claims to cover fully,
+    # every category-M codepoint is accepted by the mark class. Catches a
+    # sub-range that silently drops a real mark (e.g. 05C4 alone instead of
+    # 05C4-05C5, or a forgotten Hebrew cantillation accent).
+    cls = _mark_class_pattern()
+    omitted = sorted(
+        (hex(cp), unicodedata.name(chr(cp), "?"))
+        for lo, hi in MARK_SUPER_RANGES
+        for cp in range(lo, hi + 1)
+        if unicodedata.category(chr(cp)).startswith("M") and not cls.match(chr(cp))
+    )
+    assert omitted == [], f"category-M codepoint(s) in a claimed span not covered: {omitted}"
+
+
+def test_letter_class_disjoint_from_mark_class():
+    # DISJOINTNESS keeps the LETTER/MARK/CONNECTOR parse linear + deterministic:
+    # LETTER ([^\W\d_]) must match none of the curated marks.
+    letter = re.compile(r"[^\W\d_]")
+    cls = _mark_class_pattern()
+    overlap = sorted(
+        hex(cp)
+        for lo, hi in bn._MARK_SUBRANGES
+        for cp in range(lo, hi + 1)
+        if cls.match(chr(cp)) and letter.match(chr(cp))
+    )
+    assert overlap == []
 
 
 if __name__ == "__main__":
