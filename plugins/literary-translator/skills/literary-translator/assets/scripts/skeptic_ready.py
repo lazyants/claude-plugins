@@ -23,7 +23,7 @@ must actually fix its own file) -- see the module-level distinction between
 "reject" (schema/token/coverage failures, raised) and "coerce" (evidence/
 procedural gaps, silently downgraded and written back).
 
-Three deterministic CLI modes, mutually exclusive:
+Four deterministic CLI modes, mutually exclusive:
 
   --validate-fragment FRAGMENT --manifest-path M --particle-config NAME
       [--languages-dir DIR] [--expect-assignments-file PATH]
@@ -145,6 +145,24 @@ Three deterministic CLI modes, mutually exclusive:
     ``missing[]``, so ``verified`` stays False either way -- this field only
     adds the ability to distinguish WHICH kind of failure occurred).
 
+  --check-frozen-inputs AGGREGATE_MANIFEST [--canon PATH] [--senses-path PATH]
+      [--manifest-path PATH]
+    (codex round 2) Standalone H1 tripwire ONLY -- the SAME
+    canon.json/manifest.json/canon_senses.json re-hash-and-compare
+    --verify-merged applies internally (``frozen_input_check()``, shared by
+    both), exposed as its own mode so the calling Workflow can run it at a
+    SECOND decision point --verify-merged never reaches: when every batch's
+    own fragment fails to become ready, the pipeline gives up with an
+    ordinary advisory outcome and never calls --verify-merged at all, so a
+    sidecar tampered sometime after ``skeptic_setup.py`` stamped this run
+    but before any batch's fragment ever validated would otherwise go
+    completely unreported as the FATAL tamper it is. AGGREGATE_MANIFEST is
+    read with a MINIMAL, tolerant raw JSON parse (never full schema
+    validation, never crashes on a missing/malformed file -- degrades to
+    ``frozen_input_mismatch: false``, nothing to compare against). Prints
+    ``{"frozen_input_mismatch": bool, "missing": [...]}``. Exit 1 iff
+    ``frozen_input_mismatch`` is true, 0 otherwise.
+
 Evidence adapter (RFC #215 Phase 2 contract): for each cited evidence record
 ``{block, seg, char_start, char_end, context_start, context_end, sha256}``,
 this script calls ``evidence_verify.verify_evidence(source_form,
@@ -245,6 +263,18 @@ except ImportError as exc:
         "(#243), the shared ambiguity-competitors projection every evidence "
         "re-verification below needs. Re-run Step 0a, or verify the plugin install "
         "is not corrupted."
+    )
+
+try:
+    from suspicion_scan import compute_frozen_input_hash
+except ImportError as exc:
+    sys.exit(
+        f"skeptic_ready.py: cannot import suspicion_scan.py from {SCRIPT_DIR} ({exc}).\n"
+        "suspicion_scan.py must be installed alongside skeptic_ready.py under "
+        "${durable_root}/scripts/ -- it supplies the shared H1 frozen-input hash "
+        "algorithm (compute_frozen_input_hash) skeptic_setup.py stamps with (never a "
+        "second, independently-drifting implementation). Re-run Step 0a, or verify "
+        "the plugin install is not corrupted."
     )
 
 
@@ -389,8 +419,8 @@ def _resolve_competitors(canon_path: Path, senses_path: Path):
     Both `canon_path` and `senses_path` are read UNCONDITIONALLY tolerant of
     absence (`_load_canon_entries`, and `load_senses(..., allow_absent=True)`
     here) -- mirrors `--canon`'s own pre-existing unconditional tolerance in
-    this file (`_read_bytes_tolerant`, used regardless of whether `--canon`
-    was explicitly passed). This is a deliberate DEPARTURE from
+    this file (`compute_frozen_input_hash`, used regardless of whether
+    `--canon` was explicitly passed). This is a deliberate DEPARTURE from
     `canon_adjudication_audit.py`'s explicit-path-must-exist convention
     (codex round: `skeptic-pass-wf.template.js` ALWAYS passes
     `--senses-path ${ROOT}/canon_senses.json` explicitly, unconditionally,
@@ -688,19 +718,12 @@ def run_merge_fragments(run_dir, out_path, schemas_dir=None) -> dict:
 # --verify-merged helpers
 # ---------------------------------------------------------------------------
 
-def _read_bytes_tolerant(path: Path) -> bytes:
-    """Mirrors skeptic_setup.py's own canon.json tolerance exactly: an
-    ABSENT file hashes as ``b""`` (never a read error) -- a project may
-    genuinely have no canon.json yet, and skeptic_setup.py's own stamped
-    canon_sha256 is computed the same tolerant way, so the two must agree
-    byte-for-byte to ever match."""
-    path = Path(path)
-    return path.read_bytes() if path.is_file() else b""
-
-
 def _frozen_input_tamper_reason(label: str, path: Path, stamped_sha256) -> "str | None":
-    """H1 mitigation (verifier half): re-hashes ``path`` (tolerant of
-    absence, see ``_read_bytes_tolerant``) and compares it against
+    """H1 mitigation (verifier half): re-hashes ``path`` via the shared
+    ``compute_frozen_input_hash`` (imported from ``suspicion_scan.py`` --
+    the SAME algorithm ``skeptic_setup.py`` stamps with, never a second,
+    independently-drifting copy; state-tagged, so absent/regular-empty/
+    irregular paths hash DIFFERENTLY, codex round 2) and compares it against
     ``stamped_sha256`` -- the aggregate manifest's own ``canon_sha256``/
     ``manifest_sha256``/``senses_sha256`` (#243), stamped by
     skeptic_setup.py at setup time. Returns
@@ -719,13 +742,101 @@ def _frozen_input_tamper_reason(label: str, path: Path, stamped_sha256) -> "str 
     cannot reach) is deferred to Phase 3; never a filesystem sandbox."""
     if not isinstance(stamped_sha256, str):
         return None
-    actual = hashlib.sha256(_read_bytes_tolerant(path)).hexdigest()
+    actual = compute_frozen_input_hash(path)
     if actual == stamped_sha256:
         return None
     return (
         f"{label} at {path} has changed since skeptic_setup.py stamped this run "
         f"(sha256 {actual} != stamped {stamped_sha256}) -- possible tamper of the frozen input, HALTING"
     )
+
+
+def frozen_input_check(aggregate: dict, canon_path: Path, manifest_path: Path, senses_path: Path) -> tuple:
+    """THE one shared H1 tripwire check (codex round 2): every one of
+    ``canon.json``/``manifest.json``/``canon_senses.json`` against
+    AGGREGATE's own ``canon_sha256``/``manifest_sha256``/``senses_sha256``
+    stamps, via ``_frozen_input_tamper_reason`` (RAW BYTE comparison only --
+    never requires any of the three to successfully PARSE, so a deleted or
+    schema-malformed frozen input still produces an answer here). Returns
+    ``(frozen_input_mismatch: bool, reasons: list[str])``.
+
+    Used by BOTH ``run_verify_merged`` (called AFTER schema-validating
+    AGGREGATE, before anything downstream ever attempts to PARSE
+    canon.json/canon_senses.json) and the standalone ``--check-frozen-inputs``
+    CLI mode below -- the latter exists so the calling Workflow can run this
+    exact check at a SECOND decision point the merged-verification path
+    never reaches: when every batch's own fragment fails to become ready
+    (``skeptic-pass-wf.template.js``'s ``notReadyBatches.length > 0``
+    branch), the pipeline today gives up with an ORDINARY advisory
+    ``fragment-check-failed`` and never calls ``--verify-merged`` at all --
+    so a sidecar tampered sometime after ``skeptic_setup.py`` stamped this
+    run but before any batch's fragment ever validated would previously go
+    completely unreported as the FATAL tamper it is. Deliberately NOT folded
+    into ``run_validate_fragment`` itself (which has no visibility into
+    AGGREGATE at all -- the per-batch check only ever receives that batch's
+    own bare assignment_id array) -- see the module docstring's own note on
+    why this lives at the ORCHESTRATION decision point instead."""
+    reasons = []
+    frozen_input_mismatch = False
+    for label, path, stamped in (
+        ("canon.json", canon_path, aggregate.get("canon_sha256")),
+        ("manifest.json", manifest_path, aggregate.get("manifest_sha256")),
+        ("canon_senses.json", senses_path, aggregate.get("senses_sha256")),
+    ):
+        reason = _frozen_input_tamper_reason(label, path, stamped)
+        if reason:
+            reasons.append(reason)
+            frozen_input_mismatch = True
+    return frozen_input_mismatch, reasons
+
+
+# ---------------------------------------------------------------------------
+# --check-frozen-inputs (codex round 2)
+# ---------------------------------------------------------------------------
+
+def run_check_frozen_inputs(aggregate_manifest_path, canon_path=None, manifest_path=None,
+                             senses_path=None) -> dict:
+    """Standalone entry point for the SAME H1 tripwire `run_verify_merged`
+    applies internally (`frozen_input_check()`) -- exists so the calling
+    Workflow can run this exact check at a decision point
+    `--verify-merged` never reaches: when every batch's own fragment fails
+    to become ready (`skeptic-pass-wf.template.js`'s own
+    `notReadyBatches.length > 0` branch), the pipeline today gives up with
+    an ordinary advisory `fragment-check-failed` and never calls
+    `--verify-merged` at all -- so a sidecar tampered sometime after
+    `skeptic_setup.py` stamped this run but before any batch's fragment
+    ever validated would previously go completely unreported as the FATAL
+    tamper it is (codex round 2). This mode is the fix: call it
+    UNCONDITIONALLY at that decision point too, not just after a successful
+    merge.
+
+    Reads AGGREGATE_MANIFEST with a MINIMAL, tolerant raw JSON parse --
+    deliberately NOT full `skeptic-assignment.schema.json` validation --
+    because this mode's entire reason to exist is to answer "did the frozen
+    inputs change" even when something else has already gone wrong; a
+    missing/unreadable/malformed AGGREGATE_MANIFEST degrades to
+    `frozen_input_mismatch=False` (nothing to compare against, exactly the
+    `_frozen_input_tamper_reason`'s own "stamped hash absent -> skip" rule,
+    now applied one level up), never a crash. `canon_path`/`manifest_path`/
+    `senses_path` are read via `frozen_input_check()` -- raw bytes plus path
+    state (codex round-2 path-state fix), never JSON-parsed here either, so
+    a deleted or schema-malformed frozen input still produces a definitive
+    answer."""
+    aggregate_manifest_path = Path(aggregate_manifest_path)
+    canon_path = Path(canon_path) if canon_path else DEFAULT_CANON_PATH
+    manifest_path = Path(manifest_path) if manifest_path else DEFAULT_MANIFEST_PATH
+    senses_path = Path(senses_path) if senses_path else DEFAULT_SENSES_PATH
+
+    aggregate: dict = {}
+    try:
+        doc = json.loads(aggregate_manifest_path.read_text(encoding="utf-8"))
+        if isinstance(doc, dict):
+            aggregate = doc
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        pass
+
+    frozen_input_mismatch, reasons = frozen_input_check(aggregate, canon_path, manifest_path, senses_path)
+    return {"frozen_input_mismatch": frozen_input_mismatch, "missing": reasons}
 
 
 def _iter_record_evidence(record: dict):
@@ -826,25 +937,22 @@ def run_verify_merged(
             # _resolve_competitors() below) to project the ambiguity-
             # competitors universe -- untampered-canon/manifest alone no
             # longer suffices once a stale/tampered sidecar can silently
-            # change which forms this run treats as colliding. This is a
-            # RAW BYTE comparison (`_read_bytes_tolerant`), so it runs and
-            # correctly flags a deleted OR schema-malformed sidecar even
-            # though neither can be successfully PARSED -- deliberately
-            # ordered BEFORE the parse-and-project step further down (round
-            # after codex review): parsing first would let a malformed/
-            # deleted sidecar raise out of this function before
-            # frozen_input_mismatch is ever computed, silently downgrading a
-            # genuine post-setup tamper into an ordinary advisory failure
-            # the caller cannot distinguish from a plain coverage gap.
-            for label, path, stamped in (
-                ("canon.json", canon_path, aggregate.get("canon_sha256")),
-                ("manifest.json", Path(manifest_path), aggregate.get("manifest_sha256")),
-                ("canon_senses.json", resolved_senses_path, aggregate.get("senses_sha256")),
-            ):
-                reason = _frozen_input_tamper_reason(label, path, stamped)
-                if reason:
-                    missing.append(reason)
-                    frozen_input_mismatch = True
+            # change which forms this run treats as colliding.
+            # frozen_input_check() is a RAW BYTE comparison (never parses
+            # canon/manifest/senses as JSON), so it runs and correctly flags
+            # a deleted OR schema-malformed frozen input even though neither
+            # can be successfully PARSED -- deliberately called BEFORE the
+            # parse-and-project step further down (round after codex
+            # review): parsing first would let a malformed/deleted sidecar
+            # raise out of this function before frozen_input_mismatch is
+            # ever computed, silently downgrading a genuine post-setup
+            # tamper into an ordinary advisory failure the caller cannot
+            # distinguish from a plain coverage gap.
+            mismatch, reasons = frozen_input_check(
+                aggregate, canon_path, Path(manifest_path), resolved_senses_path
+            )
+            missing.extend(reasons)
+            frozen_input_mismatch = frozen_input_mismatch or mismatch
 
     # #243: project the ambiguity-competitors universe -- AFTER the H1
     # byte-level tamper checks above, never before (see their own comment).
@@ -1006,6 +1114,22 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Fresh-read, disk-independent verification of a merged skeptic_triage.json "
              "against the assignment manifest that gates its coverage.",
     )
+    group.add_argument(
+        "--check-frozen-inputs", metavar="AGGREGATE_MANIFEST", default=None,
+        help="(codex round 2) Standalone H1 tripwire check ONLY -- the SAME "
+             "canon.json/manifest.json/canon_senses.json re-hash-and-compare "
+             "--verify-merged applies internally, exposed as its own mode so the "
+             "calling Workflow can run it at a SECOND decision point --verify-merged "
+             "never reaches: when every batch's own fragment failed to become ready, "
+             "the pipeline previously gave up with an ordinary advisory outcome and "
+             "never checked the frozen inputs at all. AGGREGATE_MANIFEST is read with "
+             "a minimal, tolerant raw JSON parse (never full schema validation, and "
+             "never crashes on a missing/malformed file -- degrades to "
+             "frozen_input_mismatch:false, nothing to compare against). Prints "
+             "{\"frozen_input_mismatch\": bool, \"missing\": [...]}. Uses the same "
+             "--canon/--senses-path/--manifest-path flags (and defaults) as the other "
+             "two modes.",
+    )
     parser.add_argument(
         "--manifest-path", metavar="PATH", default=None,
         help=f"Path to manifest.json (default: {DEFAULT_MANIFEST_PATH}). Required by "
@@ -1085,7 +1209,7 @@ def main(argv=None) -> int:
         elif args.merge_fragments is not None:
             out_path = Path(args.out) if args.out else DURABLE_ROOT / SKEPTIC_TRIAGE_FILENAME
             result = run_merge_fragments(Path(args.merge_fragments), out_path, schemas_dir=args.schemas_dir)
-        else:
+        elif args.verify_merged is not None:
             if not args.particle_config:
                 parser.error("--verify-merged requires --particle-config")
             triage_arg, aggregate_arg = args.verify_merged
@@ -1097,6 +1221,14 @@ def main(argv=None) -> int:
                 languages_dir=args.languages_dir,
                 schemas_dir=args.schemas_dir,
                 canon_path=args.canon,
+                senses_path=args.senses_path,
+            )
+        else:
+            assert args.check_frozen_inputs is not None  # guaranteed by the required mutex group
+            result = run_check_frozen_inputs(
+                Path(args.check_frozen_inputs),
+                canon_path=args.canon,
+                manifest_path=manifest_path,
                 senses_path=args.senses_path,
             )
     except SkepticReadyError as exc:
@@ -1112,6 +1244,8 @@ def main(argv=None) -> int:
     print(json.dumps(result, ensure_ascii=False))
     if args.verify_merged is not None:
         return 0 if result.get("verified") else 1
+    if args.check_frozen_inputs is not None:
+        return 1 if result.get("frozen_input_mismatch") else 0
     return 0
 
 

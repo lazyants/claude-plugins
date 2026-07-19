@@ -185,6 +185,7 @@ except ImportError as exc:
 try:
     from suspicion_scan import (
         compute_producer_input_digest,
+        compute_frozen_input_hash,
         resolved_scan_params,
         resolve_citation_block_types,
         PRODUCER_CODE_CLOSURE,
@@ -670,16 +671,23 @@ def run(args) -> dict:
         "run_id": run_id,
         "input_digest": skeptic_input_digest,
         "producer_input_digest": recomputed_producer_digest,
-        # Fix H1 (writer half): the frozen canon/manifest/senses bytes' own
-        # sha256, so --verify-merged (skeptic_ready.py) can re-hash the
-        # on-disk files and HALT the pass if a skeptic agent tampered any of
-        # them after this setup ran (source-text prompt injection). #243:
-        # canon_senses.json joined canon.json/manifest.json as a THIRD
-        # frozen input the moment --verify-merged started parsing it to
-        # project the ambiguity-competitors universe.
-        "canon_sha256": hashlib.sha256(canon_bytes).hexdigest(),
-        "manifest_sha256": hashlib.sha256(manifest_bytes).hexdigest(),
-        "senses_sha256": hashlib.sha256(senses_bytes).hexdigest(),
+        # Fix H1 (writer half): the frozen canon/manifest/senses inputs' own
+        # state-tagged hash (compute_frozen_input_hash -- codex round 2:
+        # hashing raw bytes alone made absent/regular-empty/irregular
+        # indistinguishable; folding in the path state closes that), so
+        # --verify-merged/--check-frozen-inputs (skeptic_ready.py) can
+        # re-hash the on-disk files and HALT the pass if a skeptic agent
+        # tampered any of them after this setup ran (source-text prompt
+        # injection). #243: canon_senses.json joined canon.json/manifest.json
+        # as a THIRD frozen input the moment the verifier started parsing it
+        # to project the ambiguity-competitors universe. Re-hashed from
+        # `canon_path`/`manifest_path`/`senses_path` directly (never from the
+        # `*_bytes` already read above) so the state tag is computed fresh,
+        # consistent with compute_frozen_input_hash's own self-contained
+        # path-state read.
+        "canon_sha256": compute_frozen_input_hash(canon_path),
+        "manifest_sha256": compute_frozen_input_hash(manifest_path),
+        "senses_sha256": compute_frozen_input_hash(senses_path),
         "batch_count": batch_count,
         "assignments": assignments,
     }

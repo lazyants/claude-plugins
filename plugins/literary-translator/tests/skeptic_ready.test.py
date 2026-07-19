@@ -903,7 +903,7 @@ def test_verify_merged_fails_on_canon_tamper(tmp_path):
 
     canon_path = tmp_path / "canon.json"
     canon_path.write_text(json.dumps({"entries": {}}), encoding="utf-8")
-    canon_sha256 = hashlib.sha256(canon_path.read_bytes()).hexdigest()
+    canon_sha256 = sr.compute_frozen_input_hash(canon_path)
 
     rec = insufficient_record("Jean")
     triage_path = tmp_path / "skeptic_triage.json"
@@ -948,7 +948,7 @@ def test_verify_merged_fails_on_senses_tamper(tmp_path):
 
     senses_path = tmp_path / "canon_senses.json"
     senses_path.write_text(json.dumps({"schema_version": 1, "entries_by_source_form": {}}), encoding="utf-8")
-    senses_sha256 = hashlib.sha256(senses_path.read_bytes()).hexdigest()
+    senses_sha256 = sr.compute_frozen_input_hash(senses_path)
 
     rec = insufficient_record("Jean")
     triage_path = tmp_path / "skeptic_triage.json"
@@ -1010,7 +1010,7 @@ def test_verify_merged_fails_on_senses_deletion_after_stamping(tmp_path):
 
     senses_path = tmp_path / "canon_senses.json"
     senses_path.write_text(json.dumps({"schema_version": 1, "entries_by_source_form": {}}), encoding="utf-8")
-    senses_sha256 = hashlib.sha256(senses_path.read_bytes()).hexdigest()
+    senses_sha256 = sr.compute_frozen_input_hash(senses_path)
 
     rec = insufficient_record("Jean")
     triage_path = tmp_path / "skeptic_triage.json"
@@ -1064,7 +1064,7 @@ def test_verify_merged_fails_on_senses_malformed_after_stamping_still_reports_sh
 
     senses_path = tmp_path / "canon_senses.json"
     senses_path.write_text(json.dumps({"schema_version": 1, "entries_by_source_form": {}}), encoding="utf-8")
-    senses_sha256 = hashlib.sha256(senses_path.read_bytes()).hexdigest()
+    senses_sha256 = sr.compute_frozen_input_hash(senses_path)
 
     rec = insufficient_record("Jean")
     triage_path = tmp_path / "skeptic_triage.json"
@@ -1105,6 +1105,131 @@ def test_verify_merged_fails_on_senses_malformed_after_stamping_still_reports_sh
     # distinct message from the tamper one above) -- never silently
     # swallowed, just never allowed to crash the whole function.
     assert any("canon_senses.json error" in m for m in result["missing"])
+
+
+# ---------------------------------------------------------------------------
+# --check-frozen-inputs (codex round 2): the standalone H1 tripwire, exposed
+# so the calling Workflow can run it at the "batches never became ready"
+# decision point too -- --verify-merged never reaches that point at all.
+# ---------------------------------------------------------------------------
+
+def test_check_frozen_inputs_clean_reports_no_mismatch(tmp_path):
+    canon_path = tmp_path / "canon.json"
+    canon_path.write_text(json.dumps({"entries": {}}), encoding="utf-8")
+    manifest_path = tmp_path / "manifest.json"
+    write_json(manifest_path, make_manifest())
+    senses_path = tmp_path / "canon_senses.json"
+    senses_path.write_text(json.dumps({"schema_version": 1, "entries_by_source_form": {}}), encoding="utf-8")
+
+    aggregate_path = tmp_path / "assignments.json"
+    write_json(aggregate_path, {
+        **make_aggregate_manifest("run-1", []),
+        "canon_sha256": sr.compute_frozen_input_hash(canon_path),
+        "manifest_sha256": sr.compute_frozen_input_hash(manifest_path),
+        "senses_sha256": sr.compute_frozen_input_hash(senses_path),
+    })
+
+    result = sr.run_check_frozen_inputs(
+        aggregate_path, canon_path=canon_path, manifest_path=manifest_path, senses_path=senses_path,
+    )
+    assert result == {"frozen_input_mismatch": False, "missing": []}
+
+
+def test_check_frozen_inputs_detects_tamper_the_verify_merged_path_never_reaches(tmp_path):
+    """The exact codex round-2 scenario: the sidecar becomes malformed
+    AFTER stamping but BEFORE fragment validation -- a point
+    run_verify_merged is never even called from, since the pipeline gives
+    up on notReadyBatches before ever attempting merge+verify. This is what
+    that decision point now calls instead of silently doing nothing."""
+    canon_path = tmp_path / "canon.json"
+    canon_path.write_text(json.dumps({"entries": {}}), encoding="utf-8")
+    manifest_path = tmp_path / "manifest.json"
+    write_json(manifest_path, make_manifest())
+    senses_path = tmp_path / "canon_senses.json"
+    senses_path.write_text(json.dumps({"schema_version": 1, "entries_by_source_form": {}}), encoding="utf-8")
+
+    aggregate_path = tmp_path / "assignments.json"
+    write_json(aggregate_path, {
+        **make_aggregate_manifest("run-1", []),
+        "canon_sha256": sr.compute_frozen_input_hash(canon_path),
+        "manifest_sha256": sr.compute_frozen_input_hash(manifest_path),
+        "senses_sha256": sr.compute_frozen_input_hash(senses_path),
+    })
+
+    # Tamper: sidecar overwritten with SCHEMA-INVALID content (never even
+    # gets to "deleted" -- codex's own scenario framing), simulating a
+    # skeptic-agent injection that happened before any fragment validated.
+    senses_path.write_text(json.dumps({
+        "schema_version": 1,
+        "entries_by_source_form": {"Injected": {"senses": [
+            {"sense_id": "s1", "disambiguator": "only one", "index_scope": "narrative",
+             "evidence": {"block": "b1", "seg": "seg01", "char_start": 0, "char_end": 4,
+                          "context_start": 0, "context_end": 20, "sha256": "a" * 64}},
+        ]}},
+    }), encoding="utf-8")
+
+    result = sr.run_check_frozen_inputs(
+        aggregate_path, canon_path=canon_path, manifest_path=manifest_path, senses_path=senses_path,
+    )
+    assert result["frozen_input_mismatch"] is True
+    assert any("canon_senses.json" in m and "tamper" in m for m in result["missing"])
+
+
+def test_check_frozen_inputs_tolerates_missing_aggregate_manifest(tmp_path):
+    """Nothing to compare against -- degrades to no-mismatch, never a
+    crash, exactly like _frozen_input_tamper_reason's own "stamped hash
+    absent -> skip" rule applied one level up (this mode's whole point is
+    to keep answering even when something else is already broken)."""
+    canon_path = tmp_path / "canon.json"
+    manifest_path = tmp_path / "manifest.json"
+    write_json(manifest_path, make_manifest())
+    senses_path = tmp_path / "canon_senses.json"
+    missing_aggregate_path = tmp_path / "assignments.json"
+    assert not missing_aggregate_path.is_file()
+
+    result = sr.run_check_frozen_inputs(
+        missing_aggregate_path, canon_path=canon_path, manifest_path=manifest_path, senses_path=senses_path,
+    )
+    assert result == {"frozen_input_mismatch": False, "missing": []}
+
+
+def test_check_frozen_inputs_tolerates_malformed_aggregate_manifest(tmp_path):
+    canon_path = tmp_path / "canon.json"
+    manifest_path = tmp_path / "manifest.json"
+    write_json(manifest_path, make_manifest())
+    senses_path = tmp_path / "canon_senses.json"
+    aggregate_path = tmp_path / "assignments.json"
+    aggregate_path.write_text("{not valid json", encoding="utf-8")
+
+    result = sr.run_check_frozen_inputs(
+        aggregate_path, canon_path=canon_path, manifest_path=manifest_path, senses_path=senses_path,
+    )
+    assert result == {"frozen_input_mismatch": False, "missing": []}
+
+
+def test_check_frozen_inputs_cli_exit_code_reflects_mismatch(tmp_path):
+    canon_path = tmp_path / "canon.json"
+    canon_path.write_text(json.dumps({"entries": {}}), encoding="utf-8")
+    manifest_path = tmp_path / "manifest.json"
+    write_json(manifest_path, make_manifest())
+    senses_path = tmp_path / "canon_senses.json"
+
+    aggregate_path = tmp_path / "assignments.json"
+    write_json(aggregate_path, {
+        **make_aggregate_manifest("run-1", []),
+        "canon_sha256": sr.compute_frozen_input_hash(canon_path),
+        "manifest_sha256": sr.compute_frozen_input_hash(manifest_path),
+        "senses_sha256": sr.compute_frozen_input_hash(senses_path),
+    })
+
+    argv_clean = [
+        "--check-frozen-inputs", str(aggregate_path),
+        "--canon", str(canon_path), "--manifest-path", str(manifest_path), "--senses-path", str(senses_path),
+    ]
+    assert sr.main(argv_clean) == 0
+
+    canon_path.write_text(json.dumps({"entries": {"INJECTED": {}}}), encoding="utf-8")
+    assert sr.main(argv_clean) == 1, "exit code must reflect frozen_input_mismatch, not just succeed unconditionally"
 
 
 # ---------------------------------------------------------------------------
@@ -1221,7 +1346,7 @@ def test_verify_merged_fails_on_manifest_tamper(tmp_path):
     block_id, blk = block(text)
     manifest_path = tmp_path / "manifest.json"
     write_json(manifest_path, make_manifest((block_id, blk)))
-    manifest_sha256 = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+    manifest_sha256 = sr.compute_frozen_input_hash(manifest_path)
 
     rec = insufficient_record("Jean")
     triage_path = tmp_path / "skeptic_triage.json"

@@ -34,6 +34,22 @@ SKEPTIC_PASS_TEMPLATE = TEMPLATES_DIR / "skeptic-pass-wf.template.js"
 SKEPTIC_READY_SCRIPT = SCRIPTS_DIR / "skeptic_ready.py"
 OCC_INDEX_SCRIPT = SCRIPTS_DIR / "occ_index.py"
 BOOTSTRAP_NAMES_SCRIPT = SCRIPTS_DIR / "bootstrap_names.py"
+# codex round 2: the "skeptic:frozen-check" real-subprocess harness branch
+# needs skeptic_ready.py's own FULL import closure staged under
+# ${durable_root}/scripts/ (never just skeptic_ready.py alone) -- every
+# other test in this file never actually executes a real subprocess against
+# ROOT/scripts/*, so this closure was never needed here before.
+SKEPTIC_READY_DEPS = (
+    "skeptic_ready.py", "skeptic_constants.py", "bootstrap_names.py",
+    "evidence_verify.py", "canon_senses.py", "occ_index.py", "suspicion_scan.py",
+)
+
+
+def stage_skeptic_ready_scripts(durable_root: Path) -> None:
+    scripts_dir = durable_root / "scripts"
+    scripts_dir.mkdir(parents=True, exist_ok=True)
+    for name in SKEPTIC_READY_DEPS:
+        shutil.copy2(SCRIPTS_DIR / name, scripts_dir / name)
 
 assert SKEPTIC_PASS_TEMPLATE.is_file(), f"skeptic-pass-wf.template.js not found at {SKEPTIC_PASS_TEMPLATE}"
 assert SKEPTIC_READY_SCRIPT.is_file(), f"skeptic_ready.py not found at {SKEPTIC_READY_SCRIPT}"
@@ -266,6 +282,31 @@ async function agent(promptText, opts) {
 
   if (label === "skeptic:merge") return "MERGED (mock)";
   if (label === "skeptic:verify") return (PLAN.verify !== undefined) ? PLAN.verify : { verified: true };
+  if (label === "skeptic:frozen-check") {
+    if (PLAN.frozenCheck !== undefined) return PLAN.frozenCheck;
+    // codex round 2: deliberately NOT canned, unlike skeptic:merge/
+    // skeptic:verify above -- this is the exact "an EXECUTING template
+    // regression" codex asked for: the REAL skeptic_ready.py
+    // --check-frozen-inputs subprocess, run against REAL on-disk files
+    // (never a mock), proving the JS's own frozen-input branch (below,
+    // guarding the notReadyBatches return) reacts correctly to what
+    // production would actually compute -- not a synthetic stand-in.
+    const cp = require('child_process');
+    const cmdArgs = [
+      ROOT + "/scripts/skeptic_ready.py", "--check-frozen-inputs", RUN_DIR + "/assignments.json",
+      "--canon", ROOT + "/canon.json", "--senses-path", ROOT + "/canon_senses.json",
+      "--manifest-path", ROOT + "/manifest.json",
+    ];
+    let out;
+    try {
+      out = cp.execFileSync("python3", cmdArgs, { encoding: "utf8" });
+    } catch (err) {
+      // --check-frozen-inputs exits 1 when frozen_input_mismatch is true --
+      // still a valid JSON line on stdout, never a harness failure.
+      out = err.stdout;
+    }
+    return JSON.parse(out);
+  }
 
   const parts = label.split(":");
   const kind = parts[1];
@@ -486,6 +527,10 @@ def test_e2e_batch_never_ready_short_circuits_before_merge(tmp_path):
     plan = {
         "0": {"precheck": "ABSENT 0", "dispatchWrite": dispatch_doc_0, "wait": "READY 0"},
         "1": {"precheck": "ABSENT 1", "wait": "TIMEOUT 1"},  # batch 1's fragment never becomes ready
+        # This test is about the not-ready-batches short-circuit itself, not
+        # the frozen-input check -- canned clean, mirrors skeptic:verify's
+        # own optional-override convention.
+        "frozenCheck": {"frozen_input_mismatch": False},
     }
 
     out = run_skeptic_workflow(
@@ -498,6 +543,133 @@ def test_e2e_batch_never_ready_short_circuits_before_merge(tmp_path):
     labels = [c["label"] for c in out["calls"]]
     assert "skeptic:merge" not in labels
     assert "skeptic:verify" not in labels
+
+
+def test_e2e_frozen_input_mismatch_from_not_ready_batches_real_check(tmp_path):
+    """codex round 2's own ask: an EXECUTING template regression where the
+    sidecar becomes malformed AFTER stamping but BEFORE fragment
+    validation -- asserting frozenInputMismatch:true rather than
+    fragment-check-failed. Unlike test_e2e_frozen_input_mismatch_surfaces_
+    distinct_signal (which drives the EXISTING verify-merged path via a
+    canned PLAN.verify), this batch NEVER becomes ready at all
+    (precheck=ABSENT, wait=TIMEOUT, mirroring
+    test_e2e_batch_never_ready_short_circuits_before_merge exactly) -- the
+    pre-fix pipeline would reach `fragment-check-failed` here and never
+    even attempt merge+verify, so the H1 tripwire there would never fire.
+    The "skeptic:frozen-check" mock label is DELIBERATELY NOT canned (see
+    the harness's own agent() implementation) -- it runs the REAL
+    skeptic_ready.py --check-frozen-inputs subprocess against REAL,
+    genuinely-tampered on-disk files, proving both the JS's own branch
+    logic AND the Python CLI's real answer, not a synthetic stand-in for
+    either."""
+    stage_skeptic_ready_scripts(tmp_path)
+    durable_root = str(tmp_path)
+    lang_dir = tmp_path / "languages"
+    particle_config = write_particle_config(lang_dir)
+    text = "Jean walked home alone."
+    block_id, blk = block(text)
+    manifest_path = tmp_path / "manifest.json"
+    write_json(manifest_path, make_manifest((block_id, blk)))
+
+    canon_path = tmp_path / "canon.json"
+    canon_path.write_text(json.dumps({"entries": {}}), encoding="utf-8")
+    senses_path = tmp_path / "canon_senses.json"
+    senses_path.write_text(
+        json.dumps({"schema_version": 1, "entries_by_source_form": {}}), encoding="utf-8"
+    )
+
+    run_id = "e2e-run-frozen-not-ready"
+    run_dir = tmp_path / "skeptic" / "runs" / run_id
+    write_json(run_dir / "assignments_0.json", [aid("Jean")])
+    # Stamped BEFORE the tamper below -- the aggregate manifest records the
+    # frozen inputs' state AT SETUP TIME, exactly as skeptic_setup.py would.
+    write_json(run_dir / "assignments.json", {
+        **make_aggregate_manifest(run_id, [make_assignment_for_manifest("Jean", [])]),
+        "canon_sha256": sr.compute_frozen_input_hash(canon_path),
+        "manifest_sha256": sr.compute_frozen_input_hash(manifest_path),
+        "senses_sha256": sr.compute_frozen_input_hash(senses_path),
+    })
+
+    # Tamper: overwrite canon_senses.json with SCHEMA-INVALID content
+    # (codex's own "becomes malformed" framing) AFTER stamping, BEFORE this
+    # run's fragment ever validates.
+    senses_path.write_text(json.dumps({
+        "schema_version": 1,
+        "entries_by_source_form": {"Injected": {"senses": [
+            {"sense_id": "s1", "disambiguator": "only one", "index_scope": "narrative",
+             "evidence": {"block": "b1", "seg": "seg01", "char_start": 0, "char_end": 4,
+                          "context_start": 0, "context_end": 20, "sha256": "a" * 64}},
+        ]}},
+    }), encoding="utf-8")
+
+    batches = [{"index": 0, "assignments": [make_assignment_for_args("Jean", [])]}]
+    plan = {
+        "0": {"precheck": "ABSENT 0", "wait": "TIMEOUT 0"},  # never becomes ready
+    }
+
+    out = run_skeptic_workflow(
+        tmp_path=tmp_path, durable_root=durable_root, particle_config=particle_config,
+        run_id=run_id, batch_agent_cap=10_000, batches=batches, plan=plan,
+    )
+    # Mutation: if the notReadyBatches branch never called
+    # frozenInputCheckPrompt() at all (the pre-fix shape), this would read
+    # merged:false, reason:"fragment-check-failed" instead -- the exact
+    # silent-downgrade codex round 2 found.
+    assert out["result"]["merged"] is False
+    assert out["result"]["reason"] == "frozen-input-mismatch"
+    assert out["result"]["frozenInputMismatch"] is True
+    labels = [c["label"] for c in out["calls"]]
+    assert "skeptic:frozen-check" in labels
+    assert "skeptic:merge" not in labels
+    assert "skeptic:verify" not in labels
+
+
+def test_e2e_not_ready_batches_without_tamper_still_reports_ordinary_failure(tmp_path):
+    """Positive control for the fix above, mirrored on the REAL (not
+    canned) --check-frozen-inputs path: when nothing was actually tampered,
+    the notReadyBatches branch must still report the ordinary
+    "fragment-check-failed" outcome, never the fatal one -- the new check
+    must not turn every merely-slow/never-finished batch into a false
+    FATAL HALT."""
+    stage_skeptic_ready_scripts(tmp_path)
+    durable_root = str(tmp_path)
+    lang_dir = tmp_path / "languages"
+    particle_config = write_particle_config(lang_dir)
+    text = "Jean walked home alone."
+    block_id, blk = block(text)
+    manifest_path = tmp_path / "manifest.json"
+    write_json(manifest_path, make_manifest((block_id, blk)))
+
+    canon_path = tmp_path / "canon.json"
+    canon_path.write_text(json.dumps({"entries": {}}), encoding="utf-8")
+    senses_path = tmp_path / "canon_senses.json"
+    senses_path.write_text(
+        json.dumps({"schema_version": 1, "entries_by_source_form": {}}), encoding="utf-8"
+    )
+
+    run_id = "e2e-run-not-ready-clean"
+    run_dir = tmp_path / "skeptic" / "runs" / run_id
+    write_json(run_dir / "assignments_0.json", [aid("Jean")])
+    write_json(run_dir / "assignments.json", {
+        **make_aggregate_manifest(run_id, [make_assignment_for_manifest("Jean", [])]),
+        "canon_sha256": sr.compute_frozen_input_hash(canon_path),
+        "manifest_sha256": sr.compute_frozen_input_hash(manifest_path),
+        "senses_sha256": sr.compute_frozen_input_hash(senses_path),
+    })
+    # No tamper this time.
+
+    batches = [{"index": 0, "assignments": [make_assignment_for_args("Jean", [])]}]
+    plan = {"0": {"precheck": "ABSENT 0", "wait": "TIMEOUT 0"}}
+
+    out = run_skeptic_workflow(
+        tmp_path=tmp_path, durable_root=durable_root, particle_config=particle_config,
+        run_id=run_id, batch_agent_cap=10_000, batches=batches, plan=plan,
+    )
+    assert out["result"]["merged"] is False
+    assert out["result"]["reason"] == "fragment-check-failed"
+    assert "frozenInputMismatch" not in out["result"]
+    labels = [c["label"] for c in out["calls"]]
+    assert "skeptic:frozen-check" in labels
 
 
 def test_e2e_escalates_to_insufficient_window_when_windows_truncated(tmp_path):
@@ -698,10 +870,15 @@ def test_e2e_wait_substring_collision_reports_not_ready(tmp_path):
 
     batches = [{"index": 0, "assignments": [make_assignment_for_args("Jean", [window_with_text(jean_evidence, text)])]}]
     dispatch_doc = {"schema_version": 1, "run_id": run_id, "records": [adverse_record("Jean", jean_evidence)]}
-    plan = {"0": {
-        "precheck": "ABSENT 0", "dispatchWrite": dispatch_doc,
-        "wait": "TIMEOUT 0 (not READY)",
-    }}
+    plan = {
+        "0": {
+            "precheck": "ABSENT 0", "dispatchWrite": dispatch_doc,
+            "wait": "TIMEOUT 0 (not READY)",
+        },
+        # This test is about the sentinel substring-collision fix, not the
+        # frozen-input check -- canned clean.
+        "frozenCheck": {"frozen_input_mismatch": False},
+    }
 
     out = run_skeptic_workflow(
         tmp_path=tmp_path, durable_root=durable_root, particle_config=particle_config,

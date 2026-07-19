@@ -110,6 +110,15 @@ def _load_module(name: str, path: Path, extra_sys_path: Path):
         sys.path.remove(str(extra_sys_path))
 
 
+# Loaded once, module-level: compute_frozen_input_hash is a pure function
+# (os/hashlib/Path only, no project-specific state), so the REAL, shipped
+# implementation can be reused directly by every fixture below that needs to
+# independently compute an EXPECTED canon_sha256/manifest_sha256/
+# senses_sha256 -- never a second, hand-rolled reimplementation of the same
+# state-tagged hash formula that could silently drift from production.
+ss = _load_module("suspicion_scan_for_frozen_hash", SUSPICION_SCAN_SRC, SCRIPTS_DIR)
+
+
 def make_skeptic_root(tmp_path) -> Path:
     """An isolated durable_root with real copies of every shipped script/
     template skeptic_setup.py's code closure depends on (including owner
@@ -365,16 +374,17 @@ def test_success_writes_schema_valid_aggregate_and_batch_manifests(tmp_path):
     assert aggregate["input_digest"] == parsed["input_digest"]
     assert aggregate["producer_input_digest"] == parsed["producer_input_digest"]
 
-    # Fix H1 (writer half): the frozen canon/manifest bytes' own sha256 are
+    # Fix H1 (writer half): the frozen canon/manifest inputs' own
+    # state-tagged hash (compute_frozen_input_hash, codex round 2) are
     # stamped so --verify-merged (A3) can re-hash the on-disk files and
     # detect a post-setup tamper.
-    assert aggregate["canon_sha256"] == hashlib.sha256((root / "canon.json").read_bytes()).hexdigest(), (
+    assert aggregate["canon_sha256"] == ss.compute_frozen_input_hash(root / "canon.json"), (
         "MUTATION CAUGHT: the aggregate manifest must stamp canon_sha256 == "
-        "sha256 of the ACTUAL canon.json bytes this run was set up against"
+        "compute_frozen_input_hash() of the ACTUAL canon.json this run was set up against"
     )
-    assert aggregate["manifest_sha256"] == hashlib.sha256((root / "manifest.json").read_bytes()).hexdigest(), (
+    assert aggregate["manifest_sha256"] == ss.compute_frozen_input_hash(root / "manifest.json"), (
         "MUTATION CAUGHT: the aggregate manifest must stamp manifest_sha256 == "
-        "sha256 of the ACTUAL manifest.json bytes this run was set up against"
+        "compute_frozen_input_hash() of the ACTUAL manifest.json this run was set up against"
     )
 
     # Independent re-validation against the REAL schema file -- never trust
@@ -420,18 +430,20 @@ def test_aggregate_stamps_senses_sha256_of_actual_sidecar_bytes(tmp_path):
     assert proc.returncode == 0, f"stdout={proc.stdout}\nstderr={proc.stderr}"
     run_dir = Path(parsed["run_dir"])
     aggregate = json.loads((run_dir / "assignments.json").read_text(encoding="utf-8"))
-    assert aggregate["senses_sha256"] == hashlib.sha256((root / "canon_senses.json").read_bytes()).hexdigest(), (
+    assert aggregate["senses_sha256"] == ss.compute_frozen_input_hash(root / "canon_senses.json"), (
         "MUTATION CAUGHT: the aggregate manifest must stamp senses_sha256 == "
-        "sha256 of the ACTUAL canon_senses.json bytes this run was set up against"
+        "compute_frozen_input_hash() of the ACTUAL canon_senses.json this run was set up against"
     )
 
 
-def test_aggregate_stamps_senses_sha256_of_empty_bytes_when_sidecar_absent(tmp_path):
+def test_aggregate_stamps_senses_sha256_of_absent_state_when_sidecar_absent(tmp_path):
     """The default fixture (make_skeptic_root) never writes canon_senses.json
-    -- senses_sha256 must still be present, stamping sha256(b"") (the SAME
-    tolerant-absent convention canon_sha256 already uses), never omitted or
-    null, so an aggregate manifest is always comparable byte-for-byte
-    against a fresh re-hash regardless of whether the sidecar exists."""
+    -- senses_sha256 must still be present, stamping the "absent"-state hash
+    (compute_frozen_input_hash's own state tag, codex round 2 -- NOT bare
+    sha256(b"") any more, which would collide with a regular-but-empty file
+    or a directory), never omitted or null, so an aggregate manifest is
+    always comparable byte-for-byte against a fresh re-hash regardless of
+    whether the sidecar exists."""
     root = make_skeptic_root(tmp_path)
     assert not (root / "canon_senses.json").is_file()
     entry = make_worklist_entry("Jean", occurrence_refs=[make_occurrence_ref("b1", "seg01", 0, 4)])
@@ -442,7 +454,12 @@ def test_aggregate_stamps_senses_sha256_of_empty_bytes_when_sidecar_absent(tmp_p
     assert proc.returncode == 0, f"stdout={proc.stdout}\nstderr={proc.stderr}"
     run_dir = Path(parsed["run_dir"])
     aggregate = json.loads((run_dir / "assignments.json").read_text(encoding="utf-8"))
-    assert aggregate["senses_sha256"] == hashlib.sha256(b"").hexdigest()
+    assert aggregate["senses_sha256"] == ss.compute_frozen_input_hash(root / "canon_senses.json")
+    # Mutation: reverting to bare sha256(b"") would make this equal a
+    # regular, genuinely-empty file's hash too -- pin the DISTINCTION
+    # directly, not just "some hash was stamped".
+    (root / "canon_senses.json").write_bytes(b"")
+    assert aggregate["senses_sha256"] != hashlib.sha256(b"").hexdigest()
 
 
 def test_windows_capped_truncated_flag_and_verse_embedded_excluded(tmp_path):

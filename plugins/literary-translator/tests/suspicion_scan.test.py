@@ -1085,6 +1085,50 @@ def test_producer_input_digest_separator_prevents_boundary_collision(tmp_path):
     assert d_ab_c != d_a_bc
 
 
+# ---------------------------------------------------------------------------
+# compute_frozen_input_hash -- H1's shared producer/verifier hash (codex
+# round 2: absent/regular-empty/irregular must never collide)
+# ---------------------------------------------------------------------------
+
+def test_frozen_input_hash_absent_regular_empty_and_irregular_all_differ(tmp_path):
+    absent_path = tmp_path / "absent.json"
+    assert not absent_path.exists()
+
+    regular_empty_path = tmp_path / "regular_empty.json"
+    regular_empty_path.write_bytes(b"")
+
+    irregular_path = tmp_path / "irregular_dir"
+    irregular_path.mkdir()
+
+    h_absent = ss.compute_frozen_input_hash(absent_path)
+    h_regular_empty = ss.compute_frozen_input_hash(regular_empty_path)
+    h_irregular = ss.compute_frozen_input_hash(irregular_path)
+
+    # Mutation: hashing raw content bytes alone (the pre-fix scheme, bare
+    # `sha256(path.read_bytes() if path.is_file() else b"")`) makes all
+    # three of these collapse to the SAME sha256(b"") -- replacing a
+    # stamped non-empty frozen input with an empty regular file, or with a
+    # directory, would then silently NOT trip the H1 tamper tripwire.
+    assert len({h_absent, h_regular_empty, h_irregular}) == 3, (
+        f"expected 3 distinct hashes, got absent={h_absent!r} "
+        f"regular_empty={h_regular_empty!r} irregular={h_irregular!r}"
+    )
+    # None of them accidentally regress to the bare pre-fix formula either.
+    assert h_absent != hashlib.sha256(b"").hexdigest()
+    assert h_regular_empty != hashlib.sha256(b"").hexdigest()
+    assert h_irregular != hashlib.sha256(b"").hexdigest()
+
+
+def test_frozen_input_hash_regular_content_still_content_sensitive(tmp_path):
+    path_a = tmp_path / "a.json"
+    path_a.write_bytes(b"one")
+    path_b = tmp_path / "b.json"
+    path_b.write_bytes(b"two")
+    assert ss.compute_frozen_input_hash(path_a) != ss.compute_frozen_input_hash(path_b)
+    # Same content, re-hashed -- deterministic.
+    assert ss.compute_frozen_input_hash(path_a) == ss.compute_frozen_input_hash(path_a)
+
+
 def test_resolved_scan_params_uses_actual_resolved_citation_types():
     params = ss.resolved_scan_params(
         dispersion_threshold=12, sample_cap=50, windows_per_entity=8,

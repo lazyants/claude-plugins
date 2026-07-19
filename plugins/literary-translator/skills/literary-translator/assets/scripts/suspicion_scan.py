@@ -145,6 +145,7 @@ import difflib
 import hashlib
 import itertools
 import json
+import os
 import sys
 from collections import defaultdict
 from pathlib import Path
@@ -887,6 +888,59 @@ def compute_producer_input_digest(canon_bytes: bytes, manifest_bytes: bytes,
     for part in parts:
         hasher.update(part)
         hasher.update(b"\x00")
+    return hasher.hexdigest()
+
+
+# ---------------------------------------------------------------------------
+# H1 frozen-input tamper hashing -- the ONE shared algorithm skeptic_setup.py
+# (stamps canon_sha256/manifest_sha256/senses_sha256 at setup time) and
+# skeptic_ready.py (re-hashes and compares at --verify-merged /
+# --check-frozen-inputs time) both import, mirroring
+# compute_producer_input_digest's own "one algorithm, never two independently
+# -drifting copies" discipline immediately above -- H1 is exactly the same
+# class of problem: a producer stamp and a verifier re-hash that must always
+# agree on the identical bytes for the identical on-disk state.
+# ---------------------------------------------------------------------------
+
+def _frozen_input_path_state(path: Path) -> str:
+    """Classifies `path` as "absent" / "regular" / "irregular" -- a small,
+    deliberate LOCAL duplicate of `canon_senses.py`'s own private
+    `_path_state` (never imported across the module boundary; mirrors this
+    plugin's existing "duplicate a tiny primitive rather than import a
+    sibling module's private name" convention, e.g. `skeptic_setup.py`'s own
+    `RUN_ID_RE`). Presence is detected via `os.path.lexists` (never
+    `Path.exists`, which follows symlinks and would misreport a dangling
+    symlink as absent); a present path only counts as "regular" if
+    `Path.is_file()` is also true."""
+    if not os.path.lexists(path):
+        return "absent"
+    if path.is_file():
+        return "regular"
+    return "irregular"
+
+
+def compute_frozen_input_hash(path: Path) -> str:
+    """H1's own tamper-detection hash for ONE frozen input file (canon.json
+    / manifest.json / canon_senses.json): sha256 hex over the path's own
+    STATE TAG ("absent"/"regular"/"irregular") plus its content bytes
+    (`b""` for anything but "regular" -- an irregular path's bytes are never
+    attempted to be read at all), separated by a single NUL byte.
+
+    Codex round-2 finding: hashing raw content bytes ALONE (the pre-fix
+    scheme) makes an absent file, a genuinely-empty regular file, and a
+    directory/dangling-symlink all hash IDENTICALLY to `sha256(b"")` --
+    replacing a stamped non-empty sidecar with an empty regular file, or
+    with a directory, would silently NOT trip the tamper tripwire. Folding
+    the state tag in makes all three states produce DIFFERENT hashes,
+    closing that hole for every H1-covered input, not just the one codex
+    happened to probe.
+    """
+    state = _frozen_input_path_state(path)
+    content = path.read_bytes() if state == "regular" else b""
+    hasher = hashlib.sha256()
+    hasher.update(state.encode("ascii"))
+    hasher.update(b"\x00")
+    hasher.update(content)
     return hasher.hexdigest()
 
 

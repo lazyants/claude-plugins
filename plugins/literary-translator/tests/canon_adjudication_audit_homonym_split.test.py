@@ -72,6 +72,7 @@ def _load_module(name: str, path: Path, extra_sys_path: Path):
     sys.path.insert(0, str(extra_sys_path))
     try:
         spec = importlib.util.spec_from_file_location(name, path)
+        assert spec is not None and spec.loader is not None, f"could not load spec for {path}"
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
         return module
@@ -472,7 +473,7 @@ def test_canon_absent_with_senses_also_reports_evidence_unverified(tmp_path):
     dimension (evidence_unverified isolation) stays uncontaminated by cat5's
     own missing-verdict blocker."""
     root = make_durable_root(tmp_path)
-    block_text, senses = two_jean_senses()
+    _block_text, senses = two_jean_senses()  # block_text unused -- see the comment below
     # Deliberately do NOT write manifest.json -- every sense's evidence fails to verify
     # (mirrors _read_manifest_for_evidence's own tolerant "missing manifest -> per-sense
     # failure" contract, see canon_adjudication_audit_evidence_matrix.test.py).
@@ -789,6 +790,17 @@ def test_243_canon_present_branch_widens_competitor_universe_to_canon_entries(tm
     # canon_senses.json, so it is invisible to a senses-only competitor
     # universe. It fold-collides with FOLD_FORM_A_HE.
     write_canon(root, [entry(FOLD_FORM_B_HE, "Target")])
+    # codex round 2: confirmed_ok the homonym_split identity itself so
+    # missing_verdict (category 5, its OWN independent -- and already
+    # separately tested -- advisory-immune blocker) contributes NOTHING to
+    # blocking_count here. Without this, blocking_count/gate_passed/
+    # --advisory staying non-zero/False would be confounded: they would
+    # pass for the unadjudicated-split reason alone even if evidence_
+    # unverified's own contribution (and its own advisory-immunity) were
+    # broken, since compute_collapsed_split_findings/verify_senses are
+    # never gated by any adjudication verdict either way -- this pins the
+    # count to evidence_unverified specifically, nothing else.
+    write_adjudications(root, {split_key(FOLD_FORM_A_HE, senses): adjudication_record("confirmed_ok")})
 
     proc = run_audit(root, "--check", "--particle-config", "he.json")
     summary = parse_stdout(proc)
@@ -801,7 +813,11 @@ def test_243_canon_present_branch_widens_competitor_universe_to_canon_entries(tm
         f"canon-only sibling {FOLD_FORM_B_HE!r} must poison BOTH of "
         f"{FOLD_FORM_A_HE!r}'s senses' evidence verification -- got summary={summary}"
     )
-    assert summary["blocking_count"] >= 2 and summary["gate_passed"] is False
+    assert summary["totals"]["missing_verdict"] == 0 and summary["totals"]["confirmed_ok"] == 1, (
+        "the split itself is confirmed_ok -- blocking_count below must come "
+        "from evidence_unverified alone, not a second, unrelated source"
+    )
+    assert summary["blocking_count"] == 2 and summary["gate_passed"] is False
     # evidence_unverified is a hard blocker, never masked by --advisory.
     proc_advisory = run_audit(root, "--check", "--particle-config", "he.json", "--advisory")
     summary_advisory = parse_stdout(proc_advisory)
