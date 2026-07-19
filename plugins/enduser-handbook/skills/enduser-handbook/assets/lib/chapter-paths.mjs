@@ -14,7 +14,10 @@
 //
 // A group-free manifest (no entry carries `group`) must behave byte-identically to the shipped
 // 1.4.1 flat layout in every function here — the activation rule (D1): every new gate/branch is
-// gated on `anyGroup`.
+// gated on `anyGroup` — WITH TWO 1.6.0 EXCEPTIONS that are group-free-aware by design and no
+// longer consult this gate: staticEmbedPath (#220 — always writes the full-target embed formula,
+// no mode branch) and validateGroups (#221 — a group-free manifest's duplicate flat slug now
+// halts unconditionally). Every other function here still follows the activation rule unmodified.
 
 // ---------------------------------------------------------------------------------------------
 // Path algebra — private. POSIX-only by construction: segments are split on '/' AND '\\' (so a
@@ -131,9 +134,11 @@ function normalizeLinkTarget(target) {
 // ---------------------------------------------------------------------------------------------
 
 /**
- * True iff at least one entry carries `group`. The single activation gate every new D1-D6
- * branch/behavior is conditioned on — a group-free manifest (anyGroup === false) behaves
- * identically to 1.4.1 everywhere in this module.
+ * True iff at least one entry carries `group`. The activation gate every D1-D6 branch/behavior is
+ * conditioned on — WITH TWO 1.6.0 EXCEPTIONS that no longer consult this gate: staticEmbedPath
+ * (#220 — always the full-target embed formula) and validateGroups (#221 — a group-free
+ * manifest's duplicate flat slug now halts unconditionally). Every other function here still
+ * behaves identically to 1.4.1 when anyGroup(entries) === false.
  *
  * @param {Array<{group?: string}>} entries
  * @returns {boolean}
@@ -213,11 +218,12 @@ export function embedPath(chapterFile, assetDir, filename) {
 }
 
 /**
- * The shipped 1.4.1 static-md partial concatenation, quirk included: `<rel>/<slug>/<file>` where
- * `<rel> = relative(dirname(chapterFile), outputDir)`. Degenerates to a LEADING SLASH
- * (`/<slug>/<file>`) when `dirname(chapterFile) === outputDir` (rel === '') — this is the
- * preserved 1.4.1 quirk, not a bug to silently fix: group-free manifests keep this byte-
- * identically (D3 activation rule). NEVER used for a grouped entry — see staticEmbedPath.
+ * The superseded 1.4.1 spelling, retained for exported-API compatibility [1.6.0]: the partial
+ * concatenation `<rel>/<slug>/<file>` where `<rel> = relative(dirname(chapterFile), outputDir)`,
+ * quirk included — degenerates to a LEADING SLASH (`/<slug>/<file>`) when
+ * `dirname(chapterFile) === outputDir` (rel === ''). staticEmbedPath no longer calls this
+ * function — #220 dropped the anyGroup branch that used to select between the two spellings — it
+ * stays exported only because it is public API with zero in-repo callers (F8).
  *
  * @param {string} chapterFile
  * @param {string} outputDir  profileLike.capture.output_dir
@@ -231,14 +237,18 @@ export function legacyStaticEmbedPath(chapterFile, outputDir, slug, file) {
 }
 
 /**
- * static-md's mode selector [R7-F4]: anyGroup(entries) ? the full-target formula : the legacy
- * partial concatenation. This is the EXECUTABLE activation pin — a group-free manifest's
- * degenerate embed keeps the leading-slash quirk; an anyGroup manifest's degenerate embed (even
- * for a FLAT entry within it) switches to the full-target form and drops the leading slash. The
- * two results are intentionally different in the degenerate case (see
- * tests/chapter-paths.test.mjs's "Degenerate mode-divergence pin").
+ * #220 write-time canon [1.6.0]: ALWAYS the full-target formula (embedPath), regardless of
+ * anyGroup — the mode branch that shipped in 1.5.0 (group-free kept the legacy leading-slash
+ * quirk, anyGroup switched to the full-target form) is dropped (F1a: one of the two 1.6.0
+ * exceptions to the activation rule, D1). This governs NEW writes only — an already-written
+ * group-free chapter that predates 1.6.0 keeps whatever spelling it already has; there is no
+ * automatic retroactive repair (see references/publish-targets/static-md.md's "Write-time canon"
+ * section).
  *
- * @param {Array<{group?: string}>} entries
+ * `entries` is RETAINED for exported-API compatibility (F8: zero in-repo callers, but it is
+ * public API) — it is NO LONGER CONSULTED; the anyGroup(entries) branch it used to feed is gone.
+ *
+ * @param {Array<{group?: string}>} entries  retained for exported-API compatibility; no longer consulted
  * @param {string} chapterFile
  * @param {{capture: {output_dir: string}}} profileLike
  * @param {{slug: string, group?: string}} entry
@@ -246,10 +256,7 @@ export function legacyStaticEmbedPath(chapterFile, outputDir, slug, file) {
  * @returns {string}
  */
 export function staticEmbedPath(entries, chapterFile, profileLike, entry, file) {
-  if (anyGroup(entries)) {
-    return embedPath(chapterFile, chapterAssetDir(profileLike, entry), file);
-  }
-  return legacyStaticEmbedPath(chapterFile, profileLike.capture.output_dir, entry.slug, file);
+  return embedPath(chapterFile, chapterAssetDir(profileLike, entry), file);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -289,16 +296,48 @@ export function containerTitleMatches(containerTitle, entry) {
 }
 
 /**
+ * #221 [1.6.0]: the duplicate-flat-slug halt, extracted from validateGroups' gate 3 so the SAME
+ * gate (frozen halt-text and Map-insertion/first-seen order) runs both inside the grouped gate
+ * sequence (`groupFree: false` — unchanged 1.5.0 literal/position) AND, new in 1.6.0,
+ * unconditionally for a group-free manifest (`groupFree: true` — F1a: the other of the two
+ * 1.6.0 activation-rule exceptions, alongside staticEmbedPath). The two literals differ because a
+ * group-free duplicate has no group axis to describe — see the halt-text contract on each branch.
+ *
+ * @param {Array<{slug: string}>} entries
+ * @param {{groupFree: boolean}} options
+ * @returns {string[]}
+ */
+function duplicateSlugHalts(entries, { groupFree }) {
+  const halts = [];
+  const slugCounts = new Map();
+  for (const entry of entries) {
+    slugCounts.set(entry.slug, (slugCounts.get(entry.slug) ?? 0) + 1);
+  }
+  for (const [slug, count] of slugCounts) {
+    if (count > 1) {
+      halts.push(
+        groupFree
+          ? `Duplicate chapter slug '${slug}' — chapter slugs must be unique; a duplicate silently overwrites the chapter file and its asset dir.`
+          : `Duplicate chapter slug '${slug}' — chapter slugs must be globally unique across all groups (wikilinks and Quartz-shortest resolution key on the basename).`,
+      );
+    }
+  }
+  return halts;
+}
+
+/**
  * All D1 manifest-review gates, in one pass. Returns an array of exact halt-text strings (the D6
- * "Halt texts" contract) — empty when the manifest is clean. Group-free manifests (activation
- * rule) ALWAYS return [] — including one with a duplicated flat slug, which stays the shipped
- * 1.4.1 silent-overwrite behavior (a follow-up issue, not a 1.5.0 gate).
+ * "Halt texts" contract) — empty when the manifest is clean. Group-free manifests [1.6.0, #221]
+ * now run exactly one gate — duplicateSlugHalts — and HALT unconditionally on a duplicate flat
+ * slug; the shipped 1.4.1 silent-overwrite behavior for that case is gone (F1a: the other of the
+ * two 1.6.0 activation-rule exceptions, alongside staticEmbedPath). Gates 1, 2, 4, 5, and 6 below
+ * still run only when anyGroup(entries) is true.
  *
  * @param {Array<{slug: string, group?: string, group_title?: string}>} entries
  * @returns {string[]}
  */
 export function validateGroups(entries) {
-  if (!anyGroup(entries)) return [];
+  if (!anyGroup(entries)) return duplicateSlugHalts(entries, { groupFree: true });
   const halts = [];
 
   // 1. group regex/one-level + reserved group name. The type check runs BEFORE the regex — a
@@ -325,20 +364,11 @@ export function validateGroups(entries) {
     }
   }
 
-  // 3. slug uniqueness, GLOBAL across all entries (grouped manifests only — the activation pin;
-  // a group-free manifest's duplicate-slug behavior is unchanged/out of scope, see the early
-  // return above).
-  const slugCounts = new Map();
-  for (const entry of entries) {
-    slugCounts.set(entry.slug, (slugCounts.get(entry.slug) ?? 0) + 1);
-  }
-  for (const [slug, count] of slugCounts) {
-    if (count > 1) {
-      halts.push(
-        `Duplicate chapter slug '${slug}' — chapter slugs must be globally unique across all groups (wikilinks and Quartz-shortest resolution key on the basename).`,
-      );
-    }
-  }
+  // 3. slug uniqueness, GLOBAL across all entries. #221 [1.6.0]: extracted into
+  // duplicateSlugHalts so the SAME gate also runs unconditionally for a group-free manifest via
+  // the early return above — this gate is no longer grouped-only, but its position and literal
+  // here (groupFree: false) are byte-unchanged from 1.5.0.
+  halts.push(...duplicateSlugHalts(entries, { groupFree: false }));
 
   // 4. group-vs-flat-slug collision — a directory (group) and a chapter file (flat slug) cannot
   // share the same path segment under publish.chapters_dir.

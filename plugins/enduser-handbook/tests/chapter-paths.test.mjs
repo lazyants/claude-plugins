@@ -80,7 +80,10 @@ test('embedPath reproduces the shipped degenerate flat worked example (no leadin
   assert.equal(embedPath(chapterFile, assetDir, '01-overview.png'), 'items/01-overview.png');
 });
 
-test('Degenerate mode-divergence pin [R6-F3][R7-F4]: staticEmbedPath differs between group-free and anyGroup manifests', () => {
+test('Mode-convergence pin [1.6.0, #220]: staticEmbedPath returns the SAME full-target canon regardless of anyGroup', () => {
+  // Inverts the pre-1.6.0 "Degenerate mode-divergence pin" — #220 drops the anyGroup branch
+  // entirely, so a group-free manifest's degenerate embed no longer keeps the leading-slash
+  // legacy quirk; it converges on the exact same result an anyGroup manifest already got.
   const degenerate = profile({ capture: { output_dir: 'vault/handbook' } });
   const chapterFile = 'vault/handbook/items.md';
   const flatOnly = [entry()];
@@ -88,14 +91,59 @@ test('Degenerate mode-divergence pin [R6-F3][R7-F4]: staticEmbedPath differs bet
 
   assert.equal(
     staticEmbedPath(flatOnly, chapterFile, degenerate, entry(), '01-overview.png'),
-    '/items/01-overview.png',
-    'group-free manifest must keep the leading-slash legacy quirk',
+    'items/01-overview.png',
+    'group-free manifest must now use the full-target formula, no leading-slash quirk',
   );
   assert.equal(
     staticEmbedPath(grouped, chapterFile, degenerate, entry(), '01-overview.png'),
     'items/01-overview.png',
-    'anyGroup manifest must switch to the full-target form, even for a flat entry within it',
+    'anyGroup manifest is unaffected — still the full-target form',
   );
+});
+
+test('staticEmbedPath new-write table [1.6.0, #220]: full-target canon across all three chapter/output_dir layouts', () => {
+  // F2's three-row divergence table. Only the sibling layout is byte-unchanged from 1.4.1/1.5.0;
+  // the degenerate and parent layouts both CHANGE — do not assert "byte-unchanged for every
+  // non-degenerate layout", that claim is false (the parent row proves it).
+  const flatOnly = [entry()];
+  const cases = [
+    {
+      label: 'sibling (output_dir strictly below chapters_dir — the common worked example)',
+      profileLike: profile(),
+      chapterFile: 'vault/handbook/items.md',
+      legacy: 'assets/items/01.png',
+      canon: 'assets/items/01.png', // SAME
+    },
+    {
+      label: 'degenerate (chapter dir === output_dir)',
+      profileLike: profile({ capture: { output_dir: 'vault/handbook' } }),
+      chapterFile: 'vault/handbook/items.md',
+      legacy: '/items/01.png',
+      canon: 'items/01.png', // CHANGES
+    },
+    {
+      label: 'parent (output_dir strictly above chapters_dir)',
+      profileLike: profile({
+        capture: { output_dir: 'vault/handbook' },
+        publish: { chapters_dir: 'vault/handbook/items' },
+      }),
+      chapterFile: 'vault/handbook/items/items.md',
+      legacy: '../items/01.png',
+      canon: '01.png', // CHANGES
+    },
+  ];
+  for (const { label, profileLike, chapterFile, legacy, canon } of cases) {
+    assert.equal(
+      legacyStaticEmbedPath(chapterFile, profileLike.capture.output_dir, entry().slug, '01.png'),
+      legacy,
+      `${label}: legacyStaticEmbedPath (retained spelling) must be unchanged`,
+    );
+    assert.equal(
+      staticEmbedPath(flatOnly, chapterFile, profileLike, entry(), '01.png'),
+      canon,
+      `${label}: staticEmbedPath always writes the full-target canon now`,
+    );
+  }
 });
 
 test('chapterRelPath: flat and grouped forms', () => {
@@ -682,9 +730,47 @@ test('validateGroups: a clean grouped manifest => []', () => {
   assert.deepEqual(halts, []);
 });
 
-test('activation pin: a group-free manifest with a duplicated flat slug => [] (unchanged 1.4.1 behavior)', () => {
+test('#221 activation pin [1.6.0]: a group-free manifest with a duplicated flat slug now HALTS unconditionally', () => {
+  // Inverts the pre-1.6.0 "[] (unchanged 1.4.1 behavior)" pin — #221 removes the profile opt-out;
+  // a group-free duplicate flat slug is no longer the silent-overwrite 1.4.1 behavior.
   const halts = validateGroups([entry({ slug: 'x' }), entry({ slug: 'x' })]);
+  assert.deepEqual(halts, [
+    `Duplicate chapter slug 'x' — chapter slugs must be unique; a duplicate silently overwrites the chapter file and its asset dir.`,
+  ]);
+});
+
+test('#221: a clean group-free manifest still returns []', () => {
+  const halts = validateGroups([entry({ slug: 'a' }), entry({ slug: 'b' })]);
   assert.deepEqual(halts, []);
+});
+
+test('#221: multiple group-free duplicate slugs halt in first-seen (Map insertion) order', () => {
+  const halts = validateGroups([
+    entry({ slug: 'b' }),
+    entry({ slug: 'a' }),
+    entry({ slug: 'b' }),
+    entry({ slug: 'a' }),
+  ]);
+  assert.deepEqual(halts, [
+    `Duplicate chapter slug 'b' — chapter slugs must be unique; a duplicate silently overwrites the chapter file and its asset dir.`,
+    `Duplicate chapter slug 'a' — chapter slugs must be unique; a duplicate silently overwrites the chapter file and its asset dir.`,
+  ]);
+});
+
+test('#221: grouped halt set AND emission order stay byte-unchanged from 1.5.0 (gates 1,2,duplicate,4,5,6)', () => {
+  // A single call that trips gate 2 (reserved slug), gate 3/duplicate, and gate 6 (cross-group
+  // title) simultaneously — proves the duplicateSlugHalts extraction did not move gate 3 relative
+  // to its neighbors, and that the grouped literal (not the new group-free one) is still used.
+  const halts = validateGroups([
+    entry({ slug: 'assets', group: 'g1', group_title: 'G1' }),
+    entry({ slug: 'x', group: 'g2', group_title: 'Same' }),
+    entry({ slug: 'x', group: 'g3', group_title: 'Same' }),
+  ]);
+  assert.deepEqual(halts, [
+    `slug 'assets' is reserved in a grouped manifest (co-location follow-up; keeps the tree unambiguous).`,
+    `Duplicate chapter slug 'x' — chapter slugs must be globally unique across all groups (wikilinks and Quartz-shortest resolution key on the basename).`,
+    `Groups 'g2' and 'g3' share group_title 'Same' — nav containers are located by title; give each group a distinct localized title.`,
+  ]);
 });
 
 test('F1: non-string / non-kebab group values (null, false, 0, 123, "") all halt as Invalid group', () => {
