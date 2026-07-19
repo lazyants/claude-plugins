@@ -62,6 +62,30 @@ re-derived surface is provably identical to what was already blessed. Any
 deviation that a reviewer would want to see is, by definition, a material delta
 that emits a delta manifest and halts.
 
+## Write-time canon
+
+Every new chapter, and every chapter W6 re-authors for its own reasons, is
+written with the full-target embed and link formulas — the same formula in
+both publish-target adapters (`static-md.md`, `obsidian-vault.md`), whether
+the manifest is grouped or group-free. Both adapters cite this heading as
+"Write-time canon" wherever they state that rule.
+
+The gates this canon feeds are **resolution** checks, not spelling checks:
+they verify that a link or embed target *resolves* on disk, not that it is
+spelled the one canonical way. A retained chapter that W6 does not touch
+keeps whatever spelling already resolves, byte for byte — the gate is
+satisfied either way, so there is nothing to rewrite.
+
+**The narrow claim, stated precisely:** 1.6.0 performs **no automatic
+retroactive #220 repair**, and never rewrites a chapter *solely* because of
+an upgrade or an `anyGroup` flip. An `anyGroup` flip alone is always
+informational only (see the note under "Boundary triggers" below) — it
+never by itself triggers a rewrite of an untouched chapter. A chapter *is*
+legitimately rewritten when something else causes it: an ordinary W6
+accepted-diff or material re-author ("The flow" above), or the manual
+group-migration recipe below. Neither of those is new in 1.6.0, and neither
+is what an `anyGroup` flip alone would do.
+
 ## Manual-migration boundary (the group axis)
 
 1.5.0 adds an optional `group`/`group_title` pair to manifest entries (see [manifest-discipline.md](manifest-discipline.md)). Moving an entry between groups, renaming a group's title, or removing a grouped entry all require moving files on disk — the chapter file, its asset directory, and its index-file line and container — and that relocation is **not automated in 1.5.0**. Instead of moving anything itself, the skill halts and hands you a recipe: no automated relocation, no in-place rewrite of chapters the delta did not touch, no journal or rollback machinery, no container rename/delete, no inbound-link rewriter, no capture-spec updater. You are the transaction engine; the halt text below tells you exactly what to move and edit.

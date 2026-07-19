@@ -94,9 +94,16 @@ nav group instead of the flat `publish.chapters_dir/<slug>.md` layout:
 
 **Every grouped entry requires `group_title`**: identical within a group, unique across groups, and never derived from the English `group` slug.
 
-**Activation rule**: a manifest becomes *grouped* the moment any single entry carries `group`; a manifest with no `group` field anywhere behaves identically to 1.4.1 in every respect, at zero review cost to existing flat manifests.
+**Activation rule**: a manifest becomes *grouped* the moment any single entry carries `group`; a manifest with no `group` field anywhere behaves identically to 1.4.1 in every respect, at zero review cost to existing flat manifests — **except two 1.6.0 group-free exceptions**: `staticEmbedPath` now always writes the full-target embed formula (the legacy `anyGroup` branch is gone — see `references/revalidation.md`'s "Write-time canon"), and `validateGroups(entries)` now runs its duplicate-slug gate unconditionally instead of short-circuiting to `[]`. Every other check below stays grouped-only.
 
-Manifest review for a grouped manifest gates, and halts verbatim, on:
+### Manifest review — grouped and group-free halts
+
+A grouped manifest (at least one entry carries `group`) and a group-free
+manifest (no entry carries `group`) run different halt sets against
+`validateGroups(entries)` in `../assets/lib/chapter-paths.mjs`; both sets
+are verbatim and both are blocking.
+
+**Grouped manifest** halts, verbatim, on:
 
 - **Duplicate slug** — `Duplicate chapter slug '<slug>' — chapter slugs must be globally unique across all groups (wikilinks and Quartz-shortest resolution key on the basename).`
 - **Bad group** — `Invalid group '<value>' — group must be English kebab-case, one level (no '/').`
@@ -107,10 +114,17 @@ Manifest review for a grouped manifest gates, and halts verbatim, on:
 - **Conflicting titles** — `Group '<g>' carries conflicting group_title values ('<a>' vs '<b>') — align all entries of the group.`
 - **Shared title** — `Groups '<g1>' and '<g2>' share group_title '<t>' — nav containers are located by title; give each group a distinct localized title.`
 
-These same checks are implemented for reuse in
-`../assets/lib/chapter-paths.mjs`'s `validateGroups(entries)` (returns `[]`
-for a group-free manifest); running it during drafting is an optional
-convenience, never a substitute for the human review in step 3 below.
+**Group-free manifest** halts, verbatim, on:
+
+- **Duplicate slug** — `Duplicate chapter slug '<slug>' — chapter slugs must be unique; a duplicate silently overwrites the chapter file and its asset dir.`
+
+This group-free check is new in 1.6.0 (the second F1a exception above):
+`validateGroups(entries)` used to short-circuit to `[]` for any group-free
+manifest, so a group-free duplicate slug was never caught; it now runs the
+duplicate-slug gate unconditionally, and the halt above is what surfaces it.
+Invoking `validateGroups(entries)` is never an optional convenience — see
+"The discipline: no capture code before review" below, where it is a
+mandatory, blocking pre-write step for every manifest shape.
 
 Path derivation, the group-aware asset tree, index wiring, and the
 manual-migration recipe for changing an entry's group live in
@@ -126,13 +140,20 @@ The order is fixed:
    `references/running-ui-source.md`).
 2. You draft the manifest: every chapter, every step, every role, every
    glossary term, in the shape above.
-3. You present the manifest to the user and halt for review.
-4. The user accepts, edits, or rejects entries. You revise until accepted.
-5. *Only then* you write capture specs against the accepted manifest, into the
+3. You MUST run validateGroups(entries) against the drafted manifest and
+   halt on every returned message before doing anything else in this
+   list — this is a mandatory, blocking pre-write step, never an
+   optional convenience; a duplicate slug that reaches step 6 undetected
+   silently overwrites a chapter file and its asset dir.
+4. You present the manifest to the user and halt for review.
+5. The user accepts, edits, or rejects entries. You revise until
+   accepted, re-running step 3 after every edit that touches a slug or
+   a group.
+6. *Only then* you write capture specs against the accepted manifest, into the
    directory at `capture.capture_specs_dir` (alongside the manifest at
    `capture.manifest_path`).
 
-If you find yourself writing capture code before step 4 closes, stop. The cost
+If you find yourself writing capture code before step 5 closes, stop. The cost
 of throwing away wrong capture code dwarfs the cost of one extra review round.
 
 ## What the manifest is not
