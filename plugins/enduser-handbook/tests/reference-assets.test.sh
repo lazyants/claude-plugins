@@ -714,6 +714,18 @@ hasnt "obsidian-vault: gate no longer scoped to \`anyGroup\` only" \
 has_in_section "obsidian-vault: link integrity gate states its chapter-scope limit (no handbook-wide sweep)" \
   "$OMD" '## Link integrity gate before you publish' \
   'does not sweep untouched chapters'
+# Boundary of this whole pin cluster (rounds 5-8, through the >=2-link halt below): every
+# assertion here is a POSITIVE has_in_section — it proves the canon IS STATED in the right
+# section. It cannot prove that no CONTRADICTING statement is stated elsewhere, because catching
+# an addition would need a casualty per possible contradicting phrasing, and that space is
+# unbounded (the same receding-target shape as the PII per-field suppression problem already
+# documented for this plugin — the convergence move there was to stop enumerating and document
+# the boundary instead). Confirmed empirically: appending "Glossary linking, however, is skipped
+# entirely when wikilinks are off." right after the fallback bullet leaves every pin here green.
+# The defense against a newly-added contradiction is adversarial review, not more greps — that is
+# what actually caught both the round-7 and round-8 defects. When review finds the next one, the
+# right response is a targeted casualty for THAT wording, not an attempt to enumerate
+# contradictions in advance.
 # round-5: the wikilinks-off Internal-chapter-link bullet had a surviving two-branch
 # group-free/anyGroup conditional — a missed site of the #220 fix itself. A4 merged it to one
 # all-manifest form. Section-scoped so a whole-file grep can't confuse this with the glossary
@@ -728,17 +740,44 @@ hasnt "obsidian-vault: no longer special-cases the group-free internal-link spel
 # unsatisfiable when wikilinks are off, and contradicting the very canon #220 exists to ship. A4
 # rewrote both sites to be link-format-neutral. The earlier assertions above only covered the
 # section that round's edit touched, so this same contradiction sat unpinned for six more rounds.
+#
+# round-8 [mutation testing]: this assertion's LABEL always claimed "Related block + glossary",
+# but its needle only named the Related block — a mutation that dropped just the glossary clause
+# ("...still applies, but glossary linking is skipped") sailed through green. Widened the needle
+# to carry the glossary clause the label always claimed, closing the gap between what it says and
+# what it proves, rather than adding a second assertion that would only restate the same claim.
 has_in_section "obsidian-vault: wikilinks-off fallback still covers Related block + glossary" \
   "$OMD" '## What "Obsidian vault" implies' \
-  'and the Related block below all still apply'
+  'glossary links, and the Related block below all still apply'
+# round-8 [mutation testing]: A4's cross-reference to "Wikilinks vs Markdown links" is unpinned
+# text — nothing caught a mutation that broke it to a nonexistent heading name, silently stranding
+# a reader. Pinned at both sites that cite it (this bullet, and the Related-block rule below).
+has_in_section "obsidian-vault: fallback bullet's cross-reference to Wikilinks vs Markdown links is intact" \
+  "$OMD" '## What "Obsidian vault" implies' \
+  '("Wikilinks vs Markdown links" below)'
 has_in_section "obsidian-vault: Related-block link form is profile-driven, not wikilink-only" \
   "$OMD" '## Chapter structure (Obsidian-flavoured)' \
   'in whichever form the profile dictates'
+has_in_section "obsidian-vault: Related-block rule's cross-reference to Wikilinks vs Markdown links is intact" \
+  "$OMD" '## Chapter structure (Obsidian-flavoured)' \
+  'Markdown-link formula from "Wikilinks vs Markdown links" below when it is'
 # Distinct claim from the one above — a future edit could make the rule format-neutral and still
 # silently drop the >=2-link halt, so this is pinned separately rather than folded in.
 has_in_section "obsidian-vault: the >=2-link Related-block halt survives the format-neutral rewording" \
   "$OMD" '## Chapter structure (Obsidian-flavoured)' \
   'Either way, you halt the publish step until at'
+# A4 renamed this checklist item's parenthetical from "(graph-island check)" to
+# "(outbound-link floor)" (obsidian-vault.md:325) — the old name reasserted a wikilinks-on
+# rationale for a rule that is mode-neutral (the same ≥2-link floor also gates wikilinks-off).
+# Named mutation this catches: the label drifting/reverting back to a wikilinks-on-flavored
+# name — the exact defect CLASS rounds 7 and 8 fixed, recurring at a third site. Not a collision
+# risk against the legitimate "a graph island" phrase a few lines above (different sentence, no
+# parens, describes the Obsidian graph view specifically, which really is wikilinks-only).
+has_in_section "obsidian-vault: link-integrity gate's >=2-link item uses the mode-neutral label" \
+  "$OMD" '## Link integrity gate before you publish' \
+  '(outbound-link floor)'
+hasnt "obsidian-vault: no longer labels the >=2-link item with a wikilinks-on-only rationale" \
+  '(graph-island check)' "$OMD"
 # The full retired phrase ("skip the wikilink-specific steps below (Related block, glossary
 # linking syntax)") wraps across two physical lines in the pre-edit source (~90-col hard wrap,
 # right after "wikilink-specific") — a fixed-string whole-file grep can never match a needle that

@@ -322,7 +322,7 @@ failure:
    classifies the chapter unchanged and never runs this gate. It does not sweep untouched chapters
    — an already-published chapter with a stale link stays broken until a publish, or a touching
    revalidation, next runs against it.
-3. The chapter has ≥2 outbound links in its Related block (graph-island check).
+3. The chapter has ≥2 outbound links in its Related block (outbound-link floor).
 4. The frontmatter `language` matches `language.code`; the section labels match
    `publish.section_labels.*` verbatim.
 5. `{{publish.index_file}}` lists the chapter — under its `group_title` container, for a
