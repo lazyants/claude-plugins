@@ -51,10 +51,24 @@ absolute paths, no `..` segment -- same path-safety discipline as
     span and an EPUB element to compare it against.
   - `allowed_omissions_path` (optional) -- `{"line_patterns": [...],
     "ranges": [{"start","end"}, ...]}`: regexes matched per LINE (running
-    heads, page-number-only lines) and byte RANGES (front matter never
-    meant to be wrapped at all) that the coverage-gap check tolerates as
-    legitimately un-provenanced. Absent -> both empty, the strictest
-    default (everything in the baseline must be provenance-covered).
+    heads, page-number-only lines) and half-open CHARACTER-offset ranges
+    (front matter never meant to be wrapped at all) that the coverage-gap
+    check tolerates as legitimately un-provenanced. Absent -> both empty,
+    the strictest default (everything in the baseline must be
+    provenance-covered).
+
+  **Every offset in this script -- both `provenance_path`'s spans and
+  `allowed_omissions_path`'s ranges -- is a Unicode CODE POINT (character)
+  offset into `baseline_path`, read as a Python `str`, NEVER a UTF-8 byte
+  offset.** They share one coordinate system on purpose: both feed the same
+  `_subtract_ranges()` arithmetic in `check_coverage_gaps()`, so a byte-based
+  range mixed with character-based spans would silently corrupt gap
+  boundaries for any non-ASCII baseline, not just the omission itself. A
+  tool that reports BYTE offsets (`wc -c`, `grep -b`, a raw UTF-8 byte
+  count) will silently miscompute an offset for any baseline containing a
+  multi-byte character (Hebrew, Cyrillic, accented Latin, ...) -- always
+  compute offsets by counting Python `str` characters
+  (`len(text[:n])`/`str.index`), never encoded bytes.
 
 No dedicated `*.schema.json` for the provenance/omissions artifacts --
 hand-rolled shape validation instead, mirroring `assemble.py`'s own
@@ -68,7 +82,7 @@ mode is a documented SKIP (prints a NOTE, exits 0) -- the same "opt-out via
 absent config, never a forced-on hard gate" shape as
 `validate_extraction.py`'s custom-format region-pin skip.
 
-## Four checks, `wrapper-conservation` mode, all HARD (exit 1)
+## Five checks, `wrapper-conservation` mode, all HARD (exit 1)
 
   - `dangling_provenance_block_ref` -- a span cites a `block_id` absent from
     `manifest.blocks{}`.
@@ -76,8 +90,9 @@ absent config, never a forced-on hard gate" shape as
     the "duplicated span" failure: the same baseline content attributed to
     two different blocks (or twice to one), a red flag that the provenance
     map itself is wrong even before any content is compared.
-  - `content_dropped_during_wrap` -- a byte range of the baseline covered by
-    NO provenance span, and not fully consumed by an allowed omission, still
+  - `content_dropped_during_wrap` -- a character range of the baseline
+    covered by NO provenance span, and not fully consumed by an allowed
+    omission, still
     has non-whitespace content after `allowed_omissions`' line/range
     stripping -- content that never made it into the wrap at all (#196).
   - `hollowed_or_truncated_block` -- for a `block_id`, the COMBINED
@@ -90,6 +105,18 @@ absent config, never a forced-on hard gate" shape as
     (e.g. straddling a running head); checking spans independently risks a
     false PASS from crediting one span's words against a sibling span's own
     portion of the same block.
+  - `reading_order_reversal` -- a block's earliest baseline anchor position
+    (`min` of its own spans' starts) is out of step with its manifest
+    `order_index`, relative to an order_index-adjacent neighbor. Distinct
+    from `hollowed_or_truncated_block`: a block can be internally
+    content-complete (nothing hollowed, nothing dropped) while the WRAP
+    still physically shuffled it relative to its neighbors -- pages or
+    paragraphs swapped, each individually faithful. None of the other four
+    checks can see this (no dangling ref, no overlap, no gap, and the
+    per-block word-multiset still matches its own correctly-assigned span);
+    this is the one check that looks at ORDER rather than content. See
+    `check_reading_order`'s own docstring for the adjacent-pair
+    sufficiency argument.
 
 Normalization is deliberately narrow: NFC + whitespace-run collapse only
 (`normalize_words`), no case-folding, no punctuation stripping -- matching
@@ -286,9 +313,12 @@ def _strip_omission_lines(text, line_patterns):
 
 def load_allowed_omissions(path):
     """Returns (line_patterns: list[re.Pattern], ranges: list[(start, end)]).
-    `path is None` (the field was absent from profile.yml) -> both empty --
-    the strictest, safest default: nothing is tolerated as an omission, so
-    every byte of the baseline must be provenance-covered."""
+    `ranges` are CHARACTER (code point) offsets, the same coordinate system
+    `load_provenance()`'s spans use -- see the module docstring's "Every
+    offset in this script..." note. `path is None` (the field was absent
+    from profile.yml) -> both empty -- the strictest, safest default:
+    nothing is tolerated as an omission, so every character of the baseline
+    must be provenance-covered."""
     if path is None:
         return [], []
     try:
@@ -336,10 +366,10 @@ def load_allowed_omissions(path):
 
 
 def _subtract_ranges(span, omit_ranges):
-    """span=(start, end); returns the list of sub-spans of `span` remaining
-    after removing every overlap with `omit_ranges` -- shrinks a provenance
-    gap by the declared front-matter/omitted byte ranges before the
-    emptiness check."""
+    """span=(start, end), CHARACTER offsets (see module docstring); returns
+    the list of sub-spans of `span` remaining after removing every overlap
+    with `omit_ranges` -- shrinks a provenance gap by the declared
+    front-matter/omitted character ranges before the emptiness check."""
     start, end = span
     pieces = [(start, end)]
     for (os_, oe) in omit_ranges:
@@ -363,8 +393,12 @@ def _subtract_ranges(span, omit_ranges):
 
 def load_provenance(path, baseline_len):
     """Returns a list of (block_id, start, end) triples, sorted by
-    (start, end). Hand-rolled shape validation -- see module docstring on
-    why there is no dedicated schema.json for this artifact."""
+    (start, end). `start`/`end` are CHARACTER (code point) offsets into
+    `baseline_path`, NEVER UTF-8 bytes -- see the module docstring's "Every
+    offset in this script..." note; `baseline_len` is `len()` of the
+    already-decoded baseline `str` for the same reason. Hand-rolled shape
+    validation -- see module docstring on why there is no dedicated
+    schema.json for this artifact."""
     try:
         text = path.read_text(encoding="utf-8")
     except OSError as exc:
@@ -411,7 +445,7 @@ def load_provenance(path, baseline_len):
 
 
 # ---------------------------------------------------------------------------
-# wrapper-conservation: the four checks
+# wrapper-conservation: the five checks
 # ---------------------------------------------------------------------------
 
 
@@ -429,8 +463,8 @@ def check_dangling_block_refs(spans, manifest_blocks):
 
 def check_overlaps(spans):
     """Pairwise-ADJACENT overlap check over spans already sorted by start --
-    catches a baseline byte range double-mapped to two block_ids (or twice
-    to one), i.e. the 'duplicated span' failure mode. Sufficient because any
+    catches a baseline character range double-mapped to two block_ids (or
+    twice to one), i.e. the 'duplicated span' failure mode. Sufficient because any
     overlap among N sorted-by-start spans manifests as an adjacent-pair
     overlap for at least one pair."""
     defects = []
@@ -452,7 +486,7 @@ def check_overlaps(spans):
 
 
 def check_coverage_gaps(spans, baseline_text, omit_ranges, omit_line_patterns):
-    """Every byte of `baseline_text` not covered by any provenance span
+    """Every character of `baseline_text` not covered by any provenance span
     must, after subtracting the declared omission ranges and stripping
     omission-matched lines, contain no remaining non-whitespace -- otherwise
     real baseline content was silently dropped during the hand-wrap (#196)."""
@@ -523,6 +557,68 @@ def check_hollowed_or_truncated(live_spans, baseline_text, manifest_blocks, omit
     return defects
 
 
+def check_reading_order(live_spans, manifest_blocks):
+    """A block can survive `check_hollowed_or_truncated` with every one of
+    its own words intact and STILL have been physically shuffled by the
+    hand-wrap -- pages or paragraphs swapped, each one internally faithful.
+    None of the other three checks can see that: no dangling ref, no
+    overlap, no coverage gap, and the per-block word-multiset still matches
+    its OWN correctly-assigned span. This check is the one that looks at
+    ORDER, not content.
+
+    For each block_id with at least one live (non-dangling) span, takes its
+    EARLIEST baseline position (`min` of that block's own span starts) as an
+    anchor, then walks every anchored block in its own manifest
+    `order_index` order (the single global reading-order axis every other
+    manifest-derivable check in this plugin already keys off of --
+    validate_extraction.py's `spine_order_preserved`, `assemble.py`'s own
+    monotonicity WARN) and asserts the anchor positions are non-decreasing
+    along that walk. A decrease between two order_index-adjacent blocks
+    means the wrap placed the LATER (by manifest order) block's content
+    BEFORE the earlier one's in the baseline -- a reading-order reversal.
+
+    Only ADJACENT-in-order_index pairs are checked (mirrors
+    `check_overlaps`'s own sufficiency argument): any inversion in a
+    sequence surfaces as a decrease between at least one adjacent pair once
+    the sequence is sorted by order_index, so a full pairwise scan is
+    unnecessary. A block whose own `order_index` is missing or not a
+    (non-bool) int is skipped here -- manifest.schema.json already requires
+    `order_index` to be a real integer on every block; a manifest that
+    violates that is a schema-shape defect for `validate_extraction.py` to
+    catch, not this check's concern."""
+    anchor = {}
+    for block_id, start, _end in live_spans:
+        if block_id not in anchor or start < anchor[block_id]:
+            anchor[block_id] = start
+
+    ordered = []
+    for block_id, pos in anchor.items():
+        oi = manifest_blocks[block_id].get("order_index")
+        if not isinstance(oi, int) or isinstance(oi, bool):
+            continue
+        ordered.append((oi, block_id, pos))
+    ordered.sort(key=lambda t: (t[0], t[1]))
+
+    defects = []
+    for i in range(1, len(ordered)):
+        prev_oi, prev_id, prev_pos = ordered[i - 1]
+        cur_oi, cur_id, cur_pos = ordered[i]
+        if cur_pos < prev_pos:
+            defects.append(
+                {
+                    "kind": "reading_order_reversal",
+                    "block_ids": [prev_id, cur_id],
+                    "detail": (
+                        f"manifest order_index places {prev_id!r} ({prev_oi}) before "
+                        f"{cur_id!r} ({cur_oi}), but their own provenance spans anchor "
+                        f"them in the OPPOSITE order in the baseline (positions "
+                        f"{prev_pos} then {cur_pos})"
+                    ),
+                }
+            )
+    return defects
+
+
 def run_wrapper_conservation(manifest):
     """Returns True (clean) / False (HARD defects) -- raises
     ConservationError on any env/usage precondition."""
@@ -574,6 +670,7 @@ def run_wrapper_conservation(manifest):
     defects.extend(check_overlaps(spans))
     defects.extend(check_coverage_gaps(spans, baseline_text, omit_ranges, line_patterns))
     defects.extend(check_hollowed_or_truncated(live_spans, baseline_text, manifest_blocks, line_patterns))
+    defects.extend(check_reading_order(live_spans, manifest_blocks))
 
     print("=" * 70, file=sys.stderr)
     print(f"WRAPPER CONSERVATION -- baseline={baseline_path}", file=sys.stderr)

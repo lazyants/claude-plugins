@@ -94,7 +94,7 @@
               "minLength": 1
             },
             "allowed_omissions_path": {
-              "description": "Optional JSON file of line-regexes and byte-ranges (front matter, running heads, page numbers) the coverage-gap check tolerates as legitimately un-provenanced. Absent -- everything in the baseline must be provenance-covered.",
+              "description": "Optional JSON file of line-regexes and half-open CHARACTER-offset (Unicode code point, never UTF-8 byte) ranges (front matter, running heads, page numbers) the coverage-gap check tolerates as legitimately un-provenanced. Same coordinate system as provenance_path's baseline_start/baseline_end -- do not compute these with a byte-counting tool (wc -c, grep -b) for a non-ASCII baseline. Absent -- everything in the baseline must be provenance-covered.",
               "type": ["string", "null"]
             }
           }

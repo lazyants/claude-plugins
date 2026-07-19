@@ -1505,7 +1505,12 @@ def run_check(canon_path: Path, adjudications_path: Path, senses_path: Path,
     if not senses.is_empty:
         collapsed_split_findings = compute_collapsed_split_findings(canon, senses)
         manifest = _read_manifest_for_evidence(manifest_path)
-        evidence_failures = verify_senses(senses, manifest, language_config)
+        # #243: canon IS available in this branch (canon_present -- unlike the
+        # canon-ABSENT branch above, which correctly omits it because there is
+        # nothing to pass) -- must be threaded through so a split-only sense
+        # colliding with a canon-only sibling (never itself in canon_senses.json)
+        # is caught, not silently invisible to the competitor universe.
+        evidence_failures = verify_senses(senses, manifest, language_config, canon=canon)
 
     collapsed_split_count = len(collapsed_split_findings)
     evidence_unverified_count = len(evidence_failures)

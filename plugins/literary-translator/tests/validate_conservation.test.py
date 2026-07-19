@@ -395,13 +395,18 @@ def test_wrapper_conservation_red_hollowed_block(tmp_path):
     assert "hollowed_or_truncated_block" in kinds
 
 
-def test_wrapper_conservation_red_reordered_span(tmp_path):
-    """Two spans with genuinely distinct content, but the provenance map
-    assigns each span's block_id to the OTHER block -- both blocks'
-    plain_text is unrelated to what its assigned span actually says, so
-    both must be flagged hollowed_or_truncated_block (a swap can never
-    accidentally look like a legitimate submultiset match here since the two
-    chunks share no content words)."""
+def test_wrapper_conservation_red_swapped_block_assignment(tmp_path):
+    """NOT a reading-order test (see test_wrapper_conservation_red_reading_order_reversal
+    below for that) -- this is a content-mismatch case: two spans with
+    genuinely distinct content, but the provenance map assigns each span's
+    block_id to the OTHER block. Both blocks' plain_text is unrelated to
+    what its assigned span actually says, so both must be flagged
+    hollowed_or_truncated_block (a swap can never accidentally look like a
+    legitimate submultiset match here since the two chunks share no content
+    words). Caught by the word-multiset check, not by order_index -- codex
+    review flagged an earlier version of this test for being MISLABELED as
+    a reordering test when it actually proves the multiset check works, not
+    that ordering is verified."""
     root = make_root(tmp_path)
     baseline, offsets = build_baseline([
         ("alpha", "Alpha chunk about foxes and forests.\n"),
@@ -423,6 +428,123 @@ def test_wrapper_conservation_red_reordered_span(tmp_path):
     doc = parse_stdout_json(proc)
     flagged_ids = {bid for d in doc["defects"] if d["kind"] == "hollowed_or_truncated_block" for bid in d["block_ids"]}
     assert flagged_ids == {"PARA:seg01:0001", "PARA:seg01:0002"}
+
+
+def test_wrapper_conservation_red_reading_order_reversal(tmp_path):
+    """The genuine reordering case codex's review probed for: each span is
+    assigned to its OWN CORRECT block (content matches perfectly, so
+    hollowed_or_truncated_block never fires), but the block with the HIGHER
+    manifest order_index physically appears FIRST in the baseline -- the
+    wrap shuffled reading order even though each block's own content
+    survived intact. None of the other four checks can see this (no
+    dangling ref, no overlap, no gap, no content mismatch)."""
+    root = make_root(tmp_path)
+    baseline, offsets = build_baseline([
+        ("second_by_manifest", "This physically comes first in the baseline.\n"),
+        ("first_by_manifest", "This physically comes second in the baseline.\n"),
+    ])
+    write_baseline(root, baseline)
+    write_provenance(root, [
+        ("PARA:seg01:0002", *offsets["second_by_manifest"]),  # order_index=1, but physically FIRST
+        ("PARA:seg01:0001", *offsets["first_by_manifest"]),   # order_index=0, but physically SECOND
+    ])
+    write_profile(root, conservation={"baseline_path": "baseline.txt", "provenance_path": "provenance_map.json"})
+    write_manifest(root, {
+        "PARA:seg01:0001": make_block("PARA", "This physically comes second in the baseline.", order_index=0),
+        "PARA:seg01:0002": make_block("PARA", "This physically comes first in the baseline.", order_index=1),
+    }, [{"seg": "seg01", "kind": "body", "block_ids": ["PARA:seg01:0001", "PARA:seg01:0002"], "word_count": 14}])
+
+    proc = run_validate_conservation(root, "wrapper-conservation")
+    assert proc.returncode == 1, proc.stderr
+    doc = parse_stdout_json(proc)
+    kinds = {d["kind"] for d in doc["defects"]}
+    assert "reading_order_reversal" in kinds
+    # And it is NOT the multiset check firing for the wrong reason -- each
+    # block's own content is fully intact.
+    assert "hollowed_or_truncated_block" not in kinds
+
+
+def test_wrapper_conservation_green_correct_reading_order(tmp_path):
+    """Companion GREEN to the reversal test above -- same two blocks, same
+    content, but physically in manifest order_index order -- must NOT flag
+    reading_order_reversal."""
+    root = make_root(tmp_path)
+    baseline, offsets = build_baseline([
+        ("first_by_manifest", "This physically comes first in the baseline.\n"),
+        ("second_by_manifest", "This physically comes second in the baseline.\n"),
+    ])
+    write_baseline(root, baseline)
+    write_provenance(root, [
+        ("PARA:seg01:0001", *offsets["first_by_manifest"]),
+        ("PARA:seg01:0002", *offsets["second_by_manifest"]),
+    ])
+    write_profile(root, conservation={"baseline_path": "baseline.txt", "provenance_path": "provenance_map.json"})
+    write_manifest(root, {
+        "PARA:seg01:0001": make_block("PARA", "This physically comes first in the baseline.", order_index=0),
+        "PARA:seg01:0002": make_block("PARA", "This physically comes second in the baseline.", order_index=1),
+    }, [{"seg": "seg01", "kind": "body", "block_ids": ["PARA:seg01:0001", "PARA:seg01:0002"], "word_count": 14}])
+
+    proc = run_validate_conservation(root, "wrapper-conservation")
+    assert proc.returncode == 0, proc.stderr
+    doc = parse_stdout_json(proc)
+    assert doc["defects"] == []
+
+
+def test_wrapper_conservation_omission_range_is_characters_not_bytes(tmp_path):
+    """Codex review probe (IMPORTANT finding): profile.schema.json documents
+    allowed_omissions ranges as covering the baseline, and this script reads
+    the baseline as a Python str, so an offset MUST be a Unicode code point
+    (character) offset, never a UTF-8 byte offset -- 'א' (U+05D0) is ONE
+    character but TWO UTF-8 bytes, so the two interpretations disagree for
+    any non-ASCII baseline. An ASCII-only test cannot distinguish them (byte
+    offset == character offset for ASCII), which is exactly how the original
+    version of this gate shipped without this test and without the bug
+    surfacing.
+
+    baseline = 'א' + 'X' + real body text. The omission range [0, 1) is
+    declared to cover EXACTLY the one Hebrew character. Correct
+    (character-offset) semantics consumes ONLY 'א', so the un-provenanced
+    remainder still contains 'X' and must RED as content_dropped_during_wrap
+    -- proving the omission did not also silently swallow the adjacent
+    real character (which is what a byte-offset misinterpretation of the
+    SAME declared range would have done: codex's own probe showed a
+    documented-as-'byte' range [0, 2) consuming both 'א' and 'X' as two
+    CHARACTERS, silently dropping 'X' with no defect at all)."""
+    root = make_root(tmp_path)
+    baseline, offsets = build_baseline([
+        ("hebrew_char", "א"),
+        ("dropped_char", "X"),
+        ("body", " real body text that must not be silently dropped.\n"),
+    ])
+    write_baseline(root, baseline)
+    # Only the body has a provenance span -- "א" + "X" are left as an
+    # un-provenanced gap at the very start of the baseline, exactly the
+    # region the omission range below is meant to (partially) excuse.
+    write_provenance(root, [("PARA:seg01:0001", *offsets["body"])])
+    write_allowed_omissions(root, ranges=[(0, 1)])  # exactly the 1 character 'א'
+    write_profile(root, conservation={
+        "baseline_path": "baseline.txt",
+        "provenance_path": "provenance_map.json",
+        "allowed_omissions_path": "allowed_omissions.json",
+    })
+    write_manifest(root, {
+        "PARA:seg01:0001": make_block("PARA", "real body text that must not be silently dropped."),
+    }, [{"seg": "seg01", "kind": "body", "block_ids": ["PARA:seg01:0001"], "word_count": 8}])
+
+    proc = run_validate_conservation(root, "wrapper-conservation")
+    assert proc.returncode == 1, proc.stderr
+    doc = parse_stdout_json(proc)
+    kinds = {d["kind"] for d in doc["defects"]}
+    assert "content_dropped_during_wrap" in kinds
+    # And the flagged remainder is 'X' itself, not the Hebrew character --
+    # confirms the omission consumed exactly 1 CHARACTER, not 1 byte (which
+    # would have left a dangling half of 'א' behind) and not 2 characters
+    # (which would have silently swallowed 'X' too, per codex's probe).
+    dropped_detail = " ".join(
+        d["detail"] for d in doc["defects"] if d["kind"] == "content_dropped_during_wrap"
+    )
+    assert "X" in dropped_detail
+    assert "א" not in dropped_detail
 
 
 # ===========================================================================

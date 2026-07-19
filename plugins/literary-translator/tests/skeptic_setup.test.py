@@ -1121,3 +1121,28 @@ def test_assignment_batch_prefix_matches_template_js_convention():
         "ASSIGNMENT_BATCH_PREFIX has drifted from the template's "
         "assignmentsBatchPath() convention"
     )
+
+
+def test_template_always_passes_canon_and_senses_path_flags_unconditionally():
+    """#243 (codex review): the template's checkCommand() (batch precheck/
+    dispatch-self-check/wait-poll) and verifyMergedPrompt() must BOTH pass
+    --canon/--senses-path UNCONDITIONALLY -- deliberately, even for a
+    project with no canon_senses.json yet -- because skeptic_ready.py's own
+    --senses-path is UNCONDITIONALLY absence-tolerant (see
+    _resolve_competitors' own docstring), not gated on whether the flag was
+    explicitly given. This is a regression lock on the DESIGN DECISION
+    itself: if a future edit made the template conditionally OMIT the flag
+    when the file doesn't exist (the other fix codex offered), it would also
+    need to revert skeptic_ready.py's own tolerance back to the
+    explicit-path-must-exist convention -- the two must move together, never
+    drift independently."""
+    template_text = SKEPTIC_TEMPLATE_SRC.read_text(encoding="utf-8")
+    check_command_src = template_text[
+        template_text.index("function checkCommand"):template_text.index("function batchPrecheckPrompt")
+    ]
+    verify_prompt_src = template_text[
+        template_text.index("function verifyMergedPrompt"):
+    ]
+    for label, src in (("checkCommand", check_command_src), ("verifyMergedPrompt", verify_prompt_src)):
+        assert "--canon" in src and "CANON_PATH" in src, f"{label} must pass --canon"
+        assert "--senses-path" in src and "SENSES_PATH" in src, f"{label} must pass --senses-path"

@@ -512,6 +512,76 @@ def test_merge_fragments_empty_run_dir_produces_schema_valid_empty_triage(tmp_pa
 # --verify-merged
 # ---------------------------------------------------------------------------
 
+def test_validate_fragment_tolerates_explicit_but_absent_senses_path(tmp_path):
+    """IMPORTANT regression (codex review): skeptic-pass-wf.template.js's
+    checkCommand() ALWAYS passes --canon/--senses-path explicitly, pointing
+    at the project's canonical paths, for EVERY project regardless of
+    whether it ever adopted homonym-split senses -- a documented normal
+    'no sidecar yet' state. Genuinely nonexistent, real `Path` objects here
+    (never a canned mock) -- this must succeed exactly like the implicit-
+    default-absent case, not hard-error the way an EXPLICIT missing
+    --senses-path does in canon_adjudication_audit.py's own (human-facing,
+    typo-protecting) CLI."""
+    lang_dir = tmp_path / "languages"
+    particle_config = write_particle_config(lang_dir)
+    lang = bn.load_language_config(particle_config, languages_dir=lang_dir)
+    text = "Jean walked home."
+    block_id, blk = block(text)
+    manifest_path = tmp_path / "manifest.json"
+    write_json(manifest_path, make_manifest((block_id, blk)))
+
+    jean_evidence = evidence_for("Jean", block_id, "seg01", text, lang)
+    fragment_path = tmp_path / "triage_0.json"
+    write_json(fragment_path, {
+        "schema_version": 1, "run_id": "run-1",
+        "records": [adverse_record("Jean", jean_evidence)],
+    })
+
+    missing_canon_path = tmp_path / "canon.json"
+    missing_senses_path = tmp_path / "canon_senses.json"
+    assert not missing_canon_path.is_file() and not missing_senses_path.is_file()
+
+    result = sr.run_validate_fragment(
+        fragment_path, manifest_path, particle_config, languages_dir=lang_dir,
+        canon_path=missing_canon_path, senses_path=missing_senses_path,
+    )
+    # Mutation: reinstating allow_absent_senses=(senses_path is None) (an
+    # EXPLICIT but absent path is a hard error) would raise SkepticReadyError
+    # here instead of returning success.
+    assert result["success"] is True
+
+
+def test_verify_merged_tolerates_explicit_but_absent_senses_path(tmp_path):
+    """Same regression, --verify-merged side -- verifyMergedPrompt() also
+    always passes both flags explicitly. A hard error here is worse than
+    --validate-fragment's: it makes skeptic_ready.py print the generic
+    {"success": false, "error": ...} shape instead of the
+    {"verified", "missing", "frozen_input_mismatch"} shape
+    SKEPTIC_VERIFY_SCHEMA requires, breaking the relay contract entirely."""
+    lang_dir = tmp_path / "languages"
+    particle_config = write_particle_config(lang_dir)
+    text = "Jean walked home."
+    block_id, blk = block(text)
+    manifest_path = tmp_path / "manifest.json"
+    write_json(manifest_path, make_manifest((block_id, blk)))
+
+    rec = insufficient_record("Jean")
+    triage_path = tmp_path / "skeptic_triage.json"
+    write_json(triage_path, {"schema_version": 1, "run_id": "run-1", "records": [rec]})
+    aggregate_path = tmp_path / "assignments.json"
+    write_json(aggregate_path, make_aggregate_manifest("run-1", [make_assignment("Jean", [])]))
+
+    missing_canon_path = tmp_path / "canon.json"
+    missing_senses_path = tmp_path / "canon_senses.json"
+    assert not missing_canon_path.is_file() and not missing_senses_path.is_file()
+
+    result = sr.run_verify_merged(
+        triage_path, aggregate_path, manifest_path, particle_config, languages_dir=lang_dir,
+        canon_path=missing_canon_path, senses_path=missing_senses_path,
+    )
+    assert result == {"verified": True, "missing": [], "frozen_input_mismatch": False}
+
+
 def test_verify_merged_succeeds_on_clean_chain(tmp_path):
     lang_dir = tmp_path / "languages"
     particle_config = write_particle_config(lang_dir)
@@ -923,6 +993,118 @@ def test_verify_merged_fails_on_senses_tamper(tmp_path):
         "completely undetected"
     )
     assert result["frozen_input_mismatch"] is True
+
+
+def test_verify_merged_fails_on_senses_deletion_after_stamping(tmp_path):
+    """IMPORTANT regression (codex review): the H1 byte-level tamper checks
+    must run BEFORE the parse-and-project step, so a DELETED sidecar (which
+    can never be successfully parsed) still surfaces via
+    frozen_input_mismatch -- not merely an ordinary advisory failure the
+    template would treat as non-fatal (verify-failed) instead of HALT."""
+    lang_dir = tmp_path / "languages"
+    particle_config = write_particle_config(lang_dir)
+    text = "Jean walked home."
+    block_id, blk = block(text)
+    manifest_path = tmp_path / "manifest.json"
+    write_json(manifest_path, make_manifest((block_id, blk)))
+
+    senses_path = tmp_path / "canon_senses.json"
+    senses_path.write_text(json.dumps({"schema_version": 1, "entries_by_source_form": {}}), encoding="utf-8")
+    senses_sha256 = hashlib.sha256(senses_path.read_bytes()).hexdigest()
+
+    rec = insufficient_record("Jean")
+    triage_path = tmp_path / "skeptic_triage.json"
+    write_json(triage_path, {"schema_version": 1, "run_id": "run-1", "records": [rec]})
+    aggregate_path = tmp_path / "assignments.json"
+    write_json(aggregate_path, {
+        **make_aggregate_manifest("run-1", [make_assignment("Jean", [])]),
+        "senses_sha256": senses_sha256,
+    })
+
+    # Unmutated: passes clean.
+    result = sr.run_verify_merged(
+        triage_path, aggregate_path, manifest_path, particle_config,
+        languages_dir=lang_dir, senses_path=senses_path,
+    )
+    assert result == {"verified": True, "missing": [], "frozen_input_mismatch": False}
+
+    # Tamper: DELETE the sidecar entirely (simulated skeptic-agent
+    # injection) -- distinct from the mutation case above, which stays a
+    # regular (parseable) file throughout.
+    senses_path.unlink()
+    result = sr.run_verify_merged(
+        triage_path, aggregate_path, manifest_path, particle_config,
+        languages_dir=lang_dir, senses_path=senses_path,
+    )
+    # Mutation: resolving competitors BEFORE the H1 byte-comparison loop
+    # (the pre-fix ordering) would have this deletion tolerated silently by
+    # _resolve_competitors' own absence-tolerance (finding 2's fix) and
+    # never reach the byte comparison that would have caught it.
+    assert result["verified"] is False
+    assert any("canon_senses.json" in m and "tamper" in m for m in result["missing"])
+    assert result["frozen_input_mismatch"] is True
+
+
+def test_verify_merged_fails_on_senses_malformed_after_stamping_still_reports_shape(tmp_path):
+    """IMPORTANT regression (codex review): tampering the sidecar into
+    SCHEMA-INVALID form (never merely deleting or validly editing it) must
+    ALSO surface via frozen_input_mismatch (a raw byte comparison, which
+    does not care whether the bytes parse) -- and, either way, the function
+    must still return the well-formed {"verified", "missing",
+    "frozen_input_mismatch"} shape, never raise SkepticReadyError out of
+    run_verify_merged entirely (which would make the caller's `except
+    SkepticReadyError` branch print the DIFFERENT {"success": false,
+    "error": ...} shape SKEPTIC_VERIFY_SCHEMA cannot accept)."""
+    lang_dir = tmp_path / "languages"
+    particle_config = write_particle_config(lang_dir)
+    text = "Jean walked home."
+    block_id, blk = block(text)
+    manifest_path = tmp_path / "manifest.json"
+    write_json(manifest_path, make_manifest((block_id, blk)))
+
+    senses_path = tmp_path / "canon_senses.json"
+    senses_path.write_text(json.dumps({"schema_version": 1, "entries_by_source_form": {}}), encoding="utf-8")
+    senses_sha256 = hashlib.sha256(senses_path.read_bytes()).hexdigest()
+
+    rec = insufficient_record("Jean")
+    triage_path = tmp_path / "skeptic_triage.json"
+    write_json(triage_path, {"schema_version": 1, "run_id": "run-1", "records": [rec]})
+    aggregate_path = tmp_path / "assignments.json"
+    write_json(aggregate_path, {
+        **make_aggregate_manifest("run-1", [make_assignment("Jean", [])]),
+        "senses_sha256": senses_sha256,
+    })
+
+    # Tamper: overwrite with SCHEMA-INVALID content (a 1-sense record,
+    # minItems:2 -- load_senses hard-rejects this at parse time).
+    senses_path.write_text(json.dumps({
+        "schema_version": 1,
+        "entries_by_source_form": {"Injected": {"senses": [
+            {"sense_id": "s1", "disambiguator": "only one", "index_scope": "narrative",
+             "evidence": {"block": "b1", "seg": "seg01", "char_start": 0, "char_end": 4,
+                          "context_start": 0, "context_end": 20, "sha256": "a" * 64}},
+        ]}},
+    }), encoding="utf-8")
+
+    result = sr.run_verify_merged(
+        triage_path, aggregate_path, manifest_path, particle_config,
+        languages_dir=lang_dir, senses_path=senses_path,
+    )
+    # Mutation: letting _resolve_competitors' CanonSensesLoadError propagate
+    # unguarded (never caught by run_verify_merged itself) would raise
+    # SkepticReadyError straight through this call instead of returning a
+    # dict -- this assertion would then error on `result["verified"]` with
+    # an uncaught exception rather than a clean assertion failure.
+    assert result["verified"] is False
+    assert any("canon_senses.json" in m and "tamper" in m for m in result["missing"]), (
+        "the byte-level H1 comparison must still fire even though the "
+        "malformed content can never successfully parse"
+    )
+    assert result["frozen_input_mismatch"] is True
+    # The parse failure itself is ALSO reported (belt-and-suspenders,
+    # distinct message from the tamper one above) -- never silently
+    # swallowed, just never allowed to crash the whole function.
+    assert any("canon_senses.json error" in m for m in result["missing"])
 
 
 # ---------------------------------------------------------------------------

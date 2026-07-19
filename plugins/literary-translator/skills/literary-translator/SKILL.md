@@ -538,10 +538,12 @@ When declared, it is HARD: it compares the preserved baseline against
 `manifest.json` via the wrap-time provenance map, at word-multiset
 granularity (never byte-exact — legitimate reflow, e.g. the same
 layout-whitespace collapse `source_html` → `plain_text` already performs,
-must never false-RED), catching both a hand-wrap that silently dropped
-baseline content (#196) and a block that reached the wrap but was
-truncated/hollowed when written (the #202 case `validate_assembled.py`
-declines at assembly time). Exit `1` HARD on any defect — the pipeline
+must never false-RED), catching a hand-wrap that silently dropped baseline
+content (#196), a block that reached the wrap but was truncated/hollowed
+when written (the #202 case `validate_assembled.py` declines at assembly
+time), and a block that was physically shuffled relative to its neighbors
+even though its own content survived intact (`reading_order_reversal`,
+checked against manifest `order_index`). Exit `1` HARD on any defect — the pipeline
 advances to W3 ONLY on exit `0`. See `validate_conservation.py`'s own module
 docstring for the full check spec and the three-artifact contract.
 
