@@ -725,8 +725,12 @@ def run_merge_fragments(run_dir, out_path, schemas_dir=None) -> dict:
 def _frozen_input_tamper_reason(label: str, path: Path, stamped_sha256) -> "str | None":
     """H1 mitigation (verifier half): re-hashes ``path`` via the shared
     ``compute_frozen_input_hash`` (imported from ``suspicion_scan.py`` --
-    the SAME algorithm ``skeptic_setup.py`` stamps with, never a second,
-    independently-drifting copy; state-tagged, so absent/regular-empty/
+    this VERIFIER's fresh-read tool; ``skeptic_setup.py`` stamps with
+    ``compute_frozen_input_hash_from_state`` instead, over a captured
+    (state, bytes) snapshot rather than a re-read -- see that function's
+    own docstring for why the stamper and verifier need opposite freshness
+    semantics from the SAME underlying hash formula, never two
+    independently-drifting copies; state-tagged, so absent/regular-empty/
     irregular paths hash DIFFERENTLY, codex round 2) and compares it against
     ``stamped_sha256`` -- the aggregate manifest's own ``canon_sha256``/
     ``manifest_sha256``/``senses_sha256`` (#243), stamped by
