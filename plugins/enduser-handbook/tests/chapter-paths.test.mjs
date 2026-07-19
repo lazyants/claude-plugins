@@ -146,6 +146,29 @@ test('staticEmbedPath new-write table [1.6.0, #220]: full-target canon across al
   }
 });
 
+test('legacyStaticEmbedPath: slug and file pin [round-13 audit]: each param is genuinely consulted, not hardcoded', () => {
+  // Round-13 audit finding: `legacyStaticEmbedPath` has exactly two call sites in this whole
+  // file, and both pass `entry().slug` ('items') and the literal '01.png' — `slug` and `file`
+  // never vary. A mutant hardcoding either inside the function body (e.g. always 'items', or
+  // always '01.png') would pass every existing assertion unchanged. Retained-but-uncalled by
+  // design (#220 dropped staticEmbedPath's call to it) — it stays exported as the reference
+  // spelling the deferred #246 repair engine will read, so a silent bug here would be inherited
+  // by that future work. Vary slug and file ONE AT A TIME, each against the other held at its
+  // usual constant, so each parameter independently proves it is not a hardcoded literal.
+  const chapterFile1 = 'vault/handbook/orders.md';
+  assert.equal(
+    legacyStaticEmbedPath(chapterFile1, 'vault/handbook/assets', 'orders', '01.png'),
+    'assets/orders/01.png',
+    'slug alone must select the resulting path — not silently "items"',
+  );
+  const chapterFile2 = 'vault/handbook/items.md';
+  assert.equal(
+    legacyStaticEmbedPath(chapterFile2, 'vault/handbook/assets', 'items', 'diagram.svg'),
+    'assets/items/diagram.svg',
+    'file alone must select the resulting path — not silently "01.png"',
+  );
+});
+
 test('staticEmbedPath positional-argument pin [round-10]: uses the CURRENT entry, not entries[0]', () => {
   // Round-10 finding: every prior staticEmbedPath test passed `entry()` as BOTH the `entries`
   // array's sole/first member AND the standalone `entry` argument, so `entry` and `entries[0]`
@@ -352,6 +375,16 @@ test('F1: a depth-1 heading never anchors a containerTitle (document title, neve
   assert.equal(result.containerTitle, null, 'a lone depth-1 heading must not be reported as a container');
 });
 
+// Round-13 audit — DELIBERATELY UNTESTED, not a gap: collectContainerHeadings/locateChapterLine's
+// container-anchoring check is `heading[1].length >= 2` (chapter-paths.mjs:814,:875), so nothing
+// in this file distinguishes it from a narrower `=== 2`. No fixture anywhere uses a depth-3 (###)
+// heading. Left unpinned on purpose: the module's own docstring (chapter-paths.mjs:864-865, D6
+// convention) states a group container is ALWAYS `##`, so `>= 2`'s extra permissiveness beyond
+// exactly-2 is not something the design currently depends on — pinning a `###` container would
+// assert a behavior nobody has decided to support, not close a real gap. If a future round wants
+// `###` containers to be first-class, that is a design decision, not a test-coverage fix — raise
+// it separately rather than re-flagging this as an audit finding.
+
 test('F1: findContainer classifies a mkdocs.yml-shaped YAML comment as non-heading (manual-wiring), never headings-form', () => {
   // A single '#'-prefixed comment line, exactly as a real mkdocs.yml nav: block would carry —
   // must not be mistaken for evidence of a Markdown headings-form index.
@@ -409,6 +442,17 @@ test('R3-F1: containerTitleMatches correctly reports a mismatch for a genuinely 
   const paddedEntry = entry({ group: 'admin', group_title: '  Admin  ' });
   assert.equal(containerTitleMatches('Billing', paddedEntry), false);
   assert.equal(containerTitleMatches(null, paddedEntry), false, 'a null containerTitle never matches');
+});
+
+test('containerTitleMatches: entry pin [round-13 audit] — a genuinely different real title matches ITSELF, not a hardcoded "Admin"', () => {
+  // Round-13 audit finding: every containerTitleMatches call in the file reuses the SAME
+  // paddedEntry (group_title '  Admin  ', trimming to 'Admin'), so a mutant replacing
+  // `trimmedTitle(entry)` with the hardcoded literal 'Admin' would pass every existing
+  // assertion. An entry with a genuinely DIFFERENT title proves the entry's own group_title is
+  // read, not a constant — checked both ways (matches its own title, does not match 'Admin').
+  const opsEntry = entry({ slug: 'x', group: 'ops', group_title: '  Ops  ' });
+  assert.equal(containerTitleMatches('Ops', opsEntry), true, "must match the entry's own (trimmed) title");
+  assert.equal(containerTitleMatches('Admin', opsEntry), false, "must not match 'Admin' for an Ops entry");
 });
 
 test('R3-F2(a): a commented-out YAML nav row must not report present:true (false completion)', () => {
@@ -586,6 +630,20 @@ test('locateChapterLine: the same target on two lines => multiple (duplicate-lin
   assert.equal(result.multiple, true);
 });
 
+test('locateChapterLine: THREE duplicate index lines still report multiple:true [round-13 audit]', () => {
+  // Round-13 audit finding: both existing duplicate-line fixtures (here and R14-F3 below) use
+  // exactly 2 occurrences, so `matches.length > 1` was indistinguishable from `=== 2`. A third
+  // identical line proves the ambiguous-duplicate-line halt path still fires.
+  const indexLines = [
+    '- [Items](handbook/items.md)',
+    '- [Items](handbook/items.md)',
+    '- [Items](handbook/items.md)',
+  ];
+  const result = locateChapterLine(indexLines, 'handbook/items.md');
+  assert.equal(result.multiple, true);
+  assert.equal(result.matches.length, 3);
+});
+
 test('locateChapterLine does not match a different chapter or a same-basename chapter in another group', () => {
   const indexLines = ['- [Items](handbook/admin/items.md)'];
   assert.equal(locateChapterLine(indexLines, 'handbook/items.md').present, false);
@@ -638,6 +696,18 @@ test('findContainer: multiple matching headings => container-ambiguous', () => {
   const result = findContainer(['## Admin', '- x', '## Admin', '- y'], 'Admin');
   assert.equal(result.kind, 'multiple');
   assert.equal(result.matches.length, 2);
+});
+
+test('findContainer: THREE matching headings still classify as multiple, not "zero" [round-13 audit]', () => {
+  // Round-13 audit finding: the ONLY multiple-heading fixture in the file uses exactly 2 matches,
+  // so `matches.length > 1` was indistinguishable from `matches.length === 2`. Under that
+  // narrowing, a THIRD matching heading falls through BOTH the `multiple` and `single` checks to
+  // the `zero` branch — the worst outcome of any boundary in this audit: not a missed flag, but a
+  // wrong classification telling the caller to CREATE a new section when three real ambiguous
+  // candidates already exist.
+  const result = findContainer(['## Admin', '- x', '## Admin', '- y', '## Admin', '- z'], 'Admin');
+  assert.equal(result.kind, 'multiple');
+  assert.equal(result.matches.length, 3);
 });
 
 // Round-5 F2: findContainer must run on the SAME sanitized view locateChapterLine uses — a
@@ -724,6 +794,22 @@ test('validateGroups: duplicate slug across groups (global uniqueness)', () => {
   ]);
 });
 
+test('validateGroups: THREE-occurrence duplicate slug still halts exactly ONCE [round-12]', () => {
+  // Round-12 finding: every duplicate fixture in the suite (this one included, until now) used
+  // exactly two occurrences, so `duplicateSlugHalts`'s `count > 1` boundary was indistinguishable
+  // from `count === 2` — a mutant narrowing to `=== 2` restores #221's silent overwrite for any
+  // manifest with a TRIPLICATED slug, in both manifest kinds. A triplicate additionally proves the
+  // Map-keyed gate emits exactly ONE halt per distinct slug, not one per extra occurrence.
+  const halts = validateGroups([
+    entry({ slug: 'x', group: 'a', group_title: 'A' }),
+    entry({ slug: 'x', group: 'b', group_title: 'B' }),
+    entry({ slug: 'x', group: 'c', group_title: 'C' }),
+  ]);
+  assert.deepEqual(halts, [
+    `Duplicate chapter slug 'x' — chapter slugs must be globally unique across all groups (wikilinks and Quartz-shortest resolution key on the basename).`,
+  ]);
+});
+
 test('validateGroups: group-vs-flat-slug collision', () => {
   const halts = validateGroups([entry({ slug: 'a', group: 'g', group_title: 'G' }), entry({ slug: 'g' })]);
   assert.deepEqual(halts, [
@@ -742,6 +828,24 @@ test('validateGroups: intra-group conflicting group_title', () => {
   const halts = validateGroups([
     entry({ slug: 'a', group: 'g', group_title: 'Alpha' }),
     entry({ slug: 'b', group: 'g', group_title: 'Beta' }),
+  ]);
+  assert.deepEqual(halts, [
+    `Group 'g' carries conflicting group_title values ('Alpha' vs 'Beta') — align all entries of the group.`,
+  ]);
+});
+
+test('validateGroups: THREE distinct group_titles in one group still halts, not silently accepted [round-13 audit]', () => {
+  // Round-13 audit finding: the only conflicting-title fixture uses exactly 2 distinct titles,
+  // so `distinctTitles.length > 1` was indistinguishable from `=== 2`. A third distinct title
+  // proves the halt still fires (a `=== 2` mutant would silently accept a 3-way-inconsistent
+  // group). NOTE — pinning EXISTING behavior, not endorsing it: the halt text itself only ever
+  // names distinctTitles[0]/[1] ('Alpha' vs 'Beta') — the third title 'Gamma' is silently absent
+  // from the message even though the halt correctly fires. That truncation is a real, PRE-
+  // EXISTING production defect, written up separately (not fixed here — out of #220/#221 scope).
+  const halts = validateGroups([
+    entry({ slug: 'a', group: 'g', group_title: 'Alpha' }),
+    entry({ slug: 'b', group: 'g', group_title: 'Beta' }),
+    entry({ slug: 'c', group: 'g', group_title: 'Gamma' }),
   ]);
   assert.deepEqual(halts, [
     `Group 'g' carries conflicting group_title values ('Alpha' vs 'Beta') — align all entries of the group.`,
@@ -808,6 +912,16 @@ test('#221 activation pin [1.6.0]: a group-free manifest with a duplicated flat 
   // Inverts the pre-1.6.0 "[] (unchanged 1.4.1 behavior)" pin — #221 removes the profile opt-out;
   // a group-free duplicate flat slug is no longer the silent-overwrite 1.4.1 behavior.
   const halts = validateGroups([entry({ slug: 'x' }), entry({ slug: 'x' })]);
+  assert.deepEqual(halts, [
+    `Duplicate chapter slug 'x' — chapter slugs must be unique; a duplicate silently overwrites the chapter file and its asset dir.`,
+  ]);
+});
+
+test('#221: THREE-occurrence duplicate flat slug still halts exactly ONCE [round-12]', () => {
+  // Companion to the grouped triplicate pin above — the group-free branch of duplicateSlugHalts
+  // shares the SAME `count > 1` boundary, so it is equally vulnerable to the `=== 2` narrowing
+  // under a 3-occurrence manifest, restoring the silent overwrite this whole issue exists to fix.
+  const halts = validateGroups([entry({ slug: 'x' }), entry({ slug: 'x' }), entry({ slug: 'x' })]);
   assert.deepEqual(halts, [
     `Duplicate chapter slug 'x' — chapter slugs must be unique; a duplicate silently overwrites the chapter file and its asset dir.`,
   ]);
@@ -904,6 +1018,17 @@ test('F1: anyGroup/derivation consistency — a present-but-invalid group is nev
   // anyGroup and validateGroups both use `!== undefined` as "present"; chapterRelPath/
   // chapterAssetDir must use the SAME predicate (not truthiness), so a falsy-but-present group
   // (0, false, null) can never disagree with anyGroup's verdict and silently derive a flat path.
+  //
+  // Round-13 audit — DOCUMENTED ASYMMETRY, not a gap: this is the ONLY direct `anyGroup(...)`
+  // call in the file, and it only ever asserts the `true` branch (a present-but-falsy group).
+  // No direct call anywhere asserts `anyGroup(...) === false`. Traced both a hardcode-always-true
+  // and a hardcode-always-false mutation of `anyGroup`'s own body: both are caught, but only
+  // TRANSITIVELY — through `validateGroups`'s early-return branch selection and its resulting
+  // halt literal (a hardcoded-true `anyGroup` makes a clean group-free manifest take the grouped
+  // gate path; a hardcoded-false one makes a genuinely grouped manifest silently skip gates
+  // 1/2/4/5/6 entirely). Left as-is deliberately — see the audit report for the full trace. If
+  // `anyGroup` ever grows a caller that does NOT route through `validateGroups`, that caller
+  // needs its own direct true/false coverage; this comment is the flag for that day.
   for (const bad of [null, false, 0]) {
     const e = entry({ group: bad, slug: 'x' });
     assert.equal(anyGroup([e]), true, `anyGroup must treat group=${JSON.stringify(bad)} as present`);
@@ -1246,6 +1371,28 @@ test('chapterHasWikilinkTo: a different note / different extension / no occurren
   assert.equal(chapterHasWikilinkTo('no wikilinks here at all', 'orders', OLD_CHAPTER_REL_PATH), false);
 });
 
+test('chapterHasWikilinkTo: slug pin [round-13 audit] — a genuinely different slug is consulted, not hardcoded to "orders"', () => {
+  // Round-13 audit finding: every one of the ~24 chapterHasWikilinkTo calls in this file passes
+  // the literal 'orders' for slug — this is the removal-safety predicate that gates whether a
+  // manual-migration removal may proceed, so a mutant hardcoding `wantedSlug = 'orders'` inside
+  // the function (ignoring the param) would silently break the check for every real removed
+  // chapter except one whose slug happens to be 'orders', while every existing test stayed
+  // green. Checked both directions so the slug's actual VALUE is what decides the result, not
+  // just its presence: a wikilink to the real removed slug is forbidden; a wikilink to the OLD
+  // constant 'orders' is NOT forbidden once we are checking for a different slug.
+  const invoicesOldPath = 'vault/handbook/admin/invoices.md';
+  assert.equal(
+    chapterHasWikilinkTo('[[invoices]]', 'invoices', invoicesOldPath),
+    true,
+    "a wikilink to the removed chapter's OWN slug must be forbidden",
+  );
+  assert.equal(
+    chapterHasWikilinkTo('[[orders]]', 'invoices', invoicesOldPath),
+    false,
+    "a wikilink to the UNRELATED 'orders' slug must not be forbidden when removing 'invoices'",
+  );
+});
+
 test('chapterHasWikilinkTo: resolution-independent — a stale unqualified link is forbidden even if it resolves to a foreign note', () => {
   // The gate accepts any resolving wikilink; this predicate does not check resolution, only
   // target classification — a same-basename foreign note ("archive/orders.md") would make
@@ -1487,6 +1634,24 @@ test('context-free reconstruction (c): the scan-failure re-embed preserves the o
     text,
     /re-verify the terminal facts above, repeat the handbook-wide link scan, and re-run the touched-chapter gates, in that order/,
   );
+});
+
+test('renderManualMigrationHalt: an EMPTY scanFailures array uses the normal format, not the scan-failure format [round-13 audit]', () => {
+  // Round-13 audit finding: every existing call either OMITS scanFailures (undefined) or passes
+  // a non-empty array — the `.length > 0` half of `if (scanFailures && scanFailures.length > 0)`
+  // is never independently exercised. A caller that runs the post-migration scan and finds
+  // nothing may legitimately pass `[]` (truthy, but empty) rather than omitting the argument. A
+  // mutant simplifying the guard to `if (scanFailures)` would treat that as "has failures" and
+  // render the wrong (scan-failed) format for a clean migration.
+  const p = profile();
+  const old = entry({ slug: 'orders', group: 'admin', group_title: 'Admin' });
+  const next = entry({ slug: 'orders' });
+  const change = { kind: 'group-change', slug: 'orders', oldEntry: old, newEntry: next };
+  const facts = manualMigrationChecklist(p, old, next);
+
+  const text = renderManualMigrationHalt([change], [facts], []);
+  assert.match(text, /^This manifest change requires manual group migration/);
+  assert.ok(!text.startsWith('Post-migration link scan failed'), 'an empty scanFailures array must not trigger the scan-failure format');
 });
 
 test('R10-F4 mixed-domain fixture: a retained change + a grouped removal + a new-only addition (no early return)', () => {
