@@ -2,6 +2,30 @@
 
 All notable changes to `lazyants/claude-plugins` are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is per-plugin, not repo-wide.
 
+## [enduser-handbook 1.6.0] — 2026-07-19
+
+Group-free manifests get the same link canon as grouped ones, and a duplicate flat slug now halts instead of silently overwriting a chapter. Closes #220. Closes #221.
+
+### Fixed
+- **Obsidian group-free glossary links 404'd** (`references/publish-targets/obsidian-vault.md`) — with `publish.wikilinks: false` and a group-free manifest, the adapter wrote the raw profile-key path `{{publish.glossary_dir}}/index.md#term`, which the renderer resolves *relative to the chapter*. For the shipped example layout a chapter at `vault/handbook/items.md` produced `vault/handbook/vault/knowledge/glossary/index.md` — every glossary backlink dead. The group-free and `anyGroup` bullets are merged into one rule using the full-target `relative()` formula.
+- **The link-integrity gate that should have caught it was itself activation-scoped** — its standard-Markdown-link resolution check ran only when `publish.wikilinks: false` **and** the manifest was `anyGroup`, so a group-free vault never resolution-checked its Markdown links at all. Now covers every `wikilinks: false` chapter. The gate is **chapter-scoped**: it fires on publish, or on a revalidation that *touches* the chapter (accepted-diff or material re-author). A no-op revalidation does not run it, so an untouched chapter with a stale link stays broken.
+- **A duplicate flat slug silently overwrote a chapter file and its asset dir** (#221) — `validateGroups` short-circuited to `[]` for group-free manifests, so its duplicate-slug gate never ran. The gate is extracted into a module-internal `duplicateSlugHalts` and now runs unconditionally. `validateGroups` also had **no production caller** and was documented as "an optional convenience"; it is now a mandatory, blocking pre-write step at all three write paths — W1 before assets are captured, W6 before accepted-diff re-capture and re-authoring, and as a numbered step in the manifest discipline's fixed order, ahead of the halt-for-review step.
+
+### Changed
+- **`staticEmbedPath` write canon is unconditional** (#220) — the `anyGroup` branch is gone; flat entries and group-free manifests alike use `relative(dirname(chapter_file), join(chapterAssetDir(entry), <file>))`. The superseded 1.4.1 partial concatenation degenerated to a forbidden leading-slash path when `dirname(chapter_file) == capture.output_dir`, and to a non-minimal parent path otherwise. `legacyStaticEmbedPath` is retained and exported for API compatibility but is no longer called.
+- **Write-time only — no automatic retroactive repair.** Already-written chapters are not rewritten, and no chapter is rewritten *solely* because of an upgrade or an `anyGroup` flip. A pre-existing broken link is surfaced by the link-integrity gate when its chapter is next published or touched, not repaired in place. The repair engine is deferred to #246.
+- **The group-free exception inventory is scoped to the helper module.** `assets/lib/chapter-paths.mjs` has exactly two 1.6.0 exceptions (`staticEmbedPath`, `validateGroups`); an adapter may carry its own group-free behaviour changes on top — the Obsidian adapter's glossary formula and link gate both changed here — so `anyGroup` gating must not be assumed to cover everything.
+- `references/revalidation.md` gains the `## Write-time canon` heading that two `static-md.md` citations were already pointing at.
+
+### Testing
+- `tests/reference-assets.test.sh` gains `has_in_section`, bounding a fixed-string assertion to one Markdown section (heading to the next same-or-shallower heading). Whole-file greps could not distinguish a group-free branch from its already-correct grouped sibling — the existing embed-formula needle passed while the group-free glossary branch was still wrong. It follows CommonMark fence rules, treats fence content as opaque before comment handling, span-strips comments rather than discarding lines, and hard-fails on an absent heading.
+- The grouped halt-order pin now fires all six gates and asserts the full array by `deepEqual`; the previous fixture triggered only three, so relocating the duplicate gate would have gone undetected.
+- 152 unit tests, 321 documentation assertions.
+
+### Known limitations
+- `posixRelative` misresolves profile paths whose operands carry **unequal unresolved leading `../` climbs** (it compares leading `..` segments as if they were the same directory). Pre-existing and unchanged by this release: the superseded concatenation and the full-target canon return byte-identical wrong output there, verified across 600 generated layouts. Tracked in #246.
+- The wikilinks-**ON** glossary spelling contradiction (#247) and the unspecified flat/group-free INDEX target formula (#248) are pre-existing and deliberately out of scope here.
+
 ## [enduser-handbook 1.5.0] — 2026-07-17
 
 An optional second navigation level for the handbook: manifest entries may declare a `group` (kebab-case directory axis) plus a localized `group_title`, and both publish adapters then write chapters to `chapters_dir/<group>/<slug>.md` with grouped asset dirs and two-level nav wiring. Strictly additive — a group-free manifest keeps the shipped flat layout byte-identically. Closes #19.
