@@ -699,6 +699,11 @@ hasnt "static-md: no longer keeps the byte-identical 1.4.1 embed form for group-
 has_in_section "obsidian-vault: glossary backlink discipline covers any manifest, wikilinks off" \
   "$OMD" '## Glossary backlink discipline' \
   'Wikilinks off, any manifest'
+# The `Wikilinks off, ` prefix disambiguates against a preserved bullet the bare phrase also
+# matched; that bullet is gone after A4's merge, so the prefix isn't load-bearing today, and this
+# needle is now a strict subset of the broader internal-link-bullet casualty added below — kept
+# anyway because the two assert distinct claims (glossary vs internal-link bullet), and a future
+# rewording could un-subsume it.
 hasnt "obsidian-vault: no longer scopes the glossary backlink fix to group-free only" \
   'Wikilinks off, group-free manifest (shipped 1.4.1 form, unchanged)' "$OMD"
 has_in_section "obsidian-vault: link integrity gate covers group-free manifests too" \
@@ -709,6 +714,15 @@ hasnt "obsidian-vault: gate no longer scoped to \`anyGroup\` only" \
 has_in_section "obsidian-vault: link integrity gate states its chapter-scope limit (no handbook-wide sweep)" \
   "$OMD" '## Link integrity gate before you publish' \
   'does not sweep untouched chapters'
+# round-5: the wikilinks-off Internal-chapter-link bullet had a surviving two-branch
+# group-free/anyGroup conditional — a missed site of the #220 fix itself. A4 merged it to one
+# all-manifest form. Section-scoped so a whole-file grep can't confuse this with the glossary
+# bullet's own, separately-asserted "any manifest" wording a few lines below.
+has_in_section "obsidian-vault: wikilinks-off internal chapter link is one all-manifest form" \
+  "$OMD" '## Wikilinks vs Markdown links' \
+  'Internal chapter link, any manifest'
+hasnt "obsidian-vault: no longer special-cases the group-free internal-link spelling" \
+  'group-free manifest (shipped 1.4.1 form, unchanged)' "$OMD"
 
 echo "== Package A/B/D regression sentinels (#49, #50, #51, #52, #71) =="
 hasnt "no non-waiting isVisible after Escape"    'isVisible'                    "$CH"

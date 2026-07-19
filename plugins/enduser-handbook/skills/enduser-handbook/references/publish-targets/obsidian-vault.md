@@ -258,14 +258,14 @@ chapter. Skip any of them and the chapter exists but no reader will find it.
 
 `publish.wikilinks: false`:
 
-- Internal chapter link, group-free manifest (shipped 1.4.1 form, unchanged):
-  `[Display title](<chapter-slug>.md)`.
-- Internal chapter link, `anyGroup` manifest — every chapter the skill WRITES (new
-  chapters, and chapters a manual-migration rewrite touches) uses the full-target formula
-  instead of the bare-filename form above, because the linking and target chapters can now
-  sit in different groups (write-time canon; retained chapters keep whatever spelling they
-  already have — the link-integrity gate below checks that the target resolves, not that
-  the spelling matches this formula): `[Display title](relative(dirname(chapter_file), <target-chapter-file>))`.
+- Internal chapter link, any manifest — every chapter the skill WRITES (new chapters, and
+  chapters a manual-migration rewrite touches) uses the full-target formula (write-time
+  canon; retained chapters keep whatever spelling they already have — the link-integrity
+  gate below checks that the target resolves, not that the spelling matches this formula):
+  `[Display title](relative(dirname(chapter_file), <target-chapter-file>))`. For a
+  group-free manifest, linking and target chapters share one directory, so this formula
+  naturally evaluates to `<chapter-slug>.md` — the same spelling as the shipped 1.4.1
+  form, not a special case.
 - Glossary link: see "Glossary backlink discipline" below.
 - Skip Dataview blocks; they require Obsidian to render.
 
