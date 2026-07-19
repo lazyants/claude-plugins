@@ -58,19 +58,22 @@ has_ci() {
 # `grep -q` — the script runs under `set -o pipefail` (:20) and an early `grep -q` exit would
 # surface as a false SIGPIPE failure here.
 #
-# Inert Markdown does NOT count as proof: an HTML comment (`<!-- ... -->`, single-line or spanning
-# multiple lines) or a fenced code block (``` or ~~~) can contain the needle text without it being
-# live prose — that is the documentation equivalent of the EMBED_FORMULA false-green this test file
-# exists to kill, so both are skipped as content. Two principles, in this order:
-#   1. FENCE STATE WINS FIRST. Inside a fence, nothing is a comment opener and nothing is a heading
-#      — fence content is entirely opaque, checked before comment state. A fence opener is <=3
-#      leading spaces (4+ is an indented code block, not a fence — CommonMark) then a run of 3+ of
-#      the SAME character (` or ~); the matching closer must use that same character and be at
-#      least as long, so a short `~~~` never closes a `~~~~` fence and vice versa. Char + length
-#      are tracked, not a bare on/off flag.
-#   2. COMMENTS ARE SPAN-STRIPPED, NOT LINE-DISCARDED. A line that is entirely a comment (or lies
-#      inside a multi-line one) contributes nothing. A line with live text AND an inline trailing
-#      comment (`LIVE <!-- note -->`) keeps its live text — only the `<!-- ... -->` span is cut.
+# Inert Markdown does NOT count as proof: a fenced code block (``` or ~~~) can contain the needle
+# text without it being live prose — that is the documentation equivalent of the EMBED_FORMULA
+# false-green this test file exists to kill, so fence content is skipped. A fence opener is <=3
+# leading spaces (4+ is an indented code block, not a fence — CommonMark) then a run of 3+ of the
+# SAME character (` or ~); the matching closer must use that same character and be at least as
+# long, so a short `~~~` never closes a `~~~~` fence and vice versa. Char + length are tracked, not
+# a bare on/off flag. CRLF line endings are normalized before both the heading compare and the
+# needle scan. An empty needle is a hard failure, never a silent pass.
+#
+# Residual, deliberately not handled: HTML comments are NOT tracked, so a needle that appears only
+# inside a `<!-- ... -->` (in or out of a fence) still counts as found, and a needle sitting inside
+# a 4-space-indented code block is treated as live text. Every current caller's needle sits in plain
+# prose, so neither gap bites today. A prior revision tracked comments too; two rounds of codex
+# review found real regressions in that state machine (a fence opener inside an open comment, a
+# second comment span on one line) faster than they could be fixed soundly. If a caller ever needs
+# comment-awareness, reach for a real Markdown parser instead of extending this awk state machine.
 has_in_section() {
   local msg="$1" file="$2" heading="$3" needle="$4"
   if [ ! -f "$file" ]; then bad "$msg (file not found: $(basename "$file"))"; return; fi
@@ -95,11 +98,12 @@ has_in_section() {
        }
        {
          raw = $0
+         sub(/\r$/, "", raw)
          indent = leading_spaces(raw)
          rest = substr(raw, indent + 1)
          fc = substr(rest, 1, 1)
 
-         # (1) fence state, evaluated before anything else — a fence is opaque, full stop.
+         # fence state, evaluated before anything else — a fence is opaque, full stop.
          if (in_fence) {
            is_close = 0
            if (indent <= 3 && fc == fence_char) {
@@ -114,26 +118,7 @@ has_in_section() {
            if (run >= 3) { in_fence = 1; fence_char = fc; fence_len = run; next }
          }
 
-         # (2) HTML comments — strip the comment span(s), keep any live text on the line.
          line = raw
-         if (in_comment) {
-           p = index(line, "-->")
-           if (p == 0) next
-           line = substr(line, p + 3)
-           in_comment = 0
-         }
-         p = index(line, "<!--")
-         if (p > 0) {
-           after_open = substr(line, p + 4)
-           q = index(after_open, "-->")
-           if (q > 0) {
-             line = substr(line, 1, p - 1) substr(after_open, q + 3)
-           } else {
-             line = substr(line, 1, p - 1)
-             in_comment = 1
-           }
-         }
-
          n2 = match(line, /^#+/)
          hlevel = (n2 == 1) ? RLENGTH : 0
 
@@ -143,7 +128,7 @@ has_in_section() {
          if (in_section && hlevel > 0 && hlevel <= level) { in_section = 0 }
          if (in_section && index(line, needle) > 0) { found_needle = 1 }
        }
-       END { exit (found_heading && found_needle) ? 0 : 1 }
+       END { exit (needle != "" && found_heading && found_needle) ? 0 : 1 }
      ' "$file"; then
     ok "$msg"
   else

@@ -202,9 +202,11 @@ export function chapterAssetDir(profileLike, entry) {
 }
 
 /**
- * The ONE canonical write-time-canon embed formula (D6): full-target relative(). Valid in every
- * mode (group-free, flat-under-anyGroup, grouped) — the legacy partial concatenation below is
- * only the byte-identity default for UNTOUCHED group-free static-md authoring.
+ * The ONE canonical write-time-canon embed formula (D6): full-target relative(). staticEmbedPath
+ * uses this for every new or re-authored write, in every mode (group-free, flat-under-anyGroup,
+ * grouped) — it has no mode branch. A pre-1.6.0 group-free chapter that already used the legacy
+ * partial-concatenation spelling (legacyStaticEmbedPath) keeps that existing spelling; nothing
+ * rewrites it retroactively (the deferred repair is #246).
  *
  * embedPath(chapterFile, assetDir, filename) = relative(dirname(chapterFile), join(assetDir, filename))
  *
