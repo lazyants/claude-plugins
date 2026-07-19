@@ -185,7 +185,8 @@ except ImportError as exc:
 try:
     from suspicion_scan import (
         compute_producer_input_digest,
-        compute_frozen_input_hash,
+        compute_frozen_input_hash_from_state,
+        read_frozen_input_snapshot,
         resolved_scan_params,
         resolve_citation_block_types,
         PRODUCER_CODE_CLOSURE,
@@ -488,25 +489,35 @@ def run(args) -> dict:
     senses_path = Path(args.senses_path) if args.senses_path else DEFAULT_SENSES_PATH
     worklist_path = Path(args.worklist) if args.worklist else DEFAULT_WORKLIST_PATH
 
-    # canon.json absence is TOLERATED -- mirrors suspicion_scan.py's own
-    # main() exactly (an empty/absent canon is "nothing to scan", not an
-    # error), so the two scripts' canon_bytes agree byte-for-byte
-    # (b"" both times) and the recomputed producer_input_digest can match.
-    canon_bytes = canon_path.read_bytes() if canon_path.is_file() else b""
-    # #243: canon_senses.json's own raw bytes, re-read HERE off disk (never
-    # trusted from a caller, same discipline canon_bytes/manifest_bytes
-    # already follow) -- mirrors suspicion_scan.py's own tolerant read
-    # exactly, so the two scripts' senses_bytes agree byte-for-byte and the
-    # recomputed producer_input_digest below can match.
-    senses_bytes = senses_path.read_bytes() if senses_path.is_file() else b""
-    if not manifest_path.is_file():
+    # codex round 3: canon.json/manifest.json/canon_senses.json are each
+    # read EXACTLY ONCE here, as a (state, bytes) SNAPSHOT via
+    # read_frozen_input_snapshot() -- before any freshness/worklist
+    # validation below ever consults them, and well before the H1 stamp is
+    # written far below. The stamp hashes THIS captured snapshot directly
+    # (compute_frozen_input_hash_from_state), never re-touching these paths
+    # -- re-reading fresh at stamp time (the pre-fix shape) would let a
+    # mutation land in the window between this read and that write and get
+    # silently ADOPTED as "the true state": the stamp would then describe
+    # the MUTATED file while the worklist-freshness check and the
+    # assignments this run just built both still describe the ORIGINAL one
+    # -- a real, disk-level instance of the exact trust-the-caller class H1
+    # exists to close, just moved to a different boundary. canon.json
+    # absence is TOLERATED (mirrors suspicion_scan.py's own main() exactly
+    # -- an empty/absent canon is "nothing to scan", not an error) --
+    # canon_bytes/senses_bytes are b"" for anything but "regular" state,
+    # matching suspicion_scan.py's own tolerant convention so the two
+    # scripts' bytes agree byte-for-byte and the recomputed
+    # producer_input_digest can match.
+    canon_state, canon_bytes = read_frozen_input_snapshot(canon_path)
+    senses_state, senses_bytes = read_frozen_input_snapshot(senses_path)
+    manifest_state, manifest_bytes = read_frozen_input_snapshot(manifest_path)
+    if manifest_state != "regular":
         raise SkepticSetupError(f"manifest.json not found: {manifest_path}")
     if not worklist_path.is_file():
         raise SkepticSetupError(
             f"suspicion_worklist.json not found: {worklist_path} -- run suspicion_scan.py first"
         )
 
-    manifest_bytes = manifest_path.read_bytes()
     worklist_bytes = worklist_path.read_bytes()
 
     try:
@@ -672,22 +683,26 @@ def run(args) -> dict:
         "input_digest": skeptic_input_digest,
         "producer_input_digest": recomputed_producer_digest,
         # Fix H1 (writer half): the frozen canon/manifest/senses inputs' own
-        # state-tagged hash (compute_frozen_input_hash -- codex round 2:
-        # hashing raw bytes alone made absent/regular-empty/irregular
-        # indistinguishable; folding in the path state closes that), so
-        # --verify-merged/--check-frozen-inputs (skeptic_ready.py) can
-        # re-hash the on-disk files and HALT the pass if a skeptic agent
+        # state-tagged hash (compute_frozen_input_hash_from_state -- codex
+        # round 2: hashing raw bytes alone made absent/regular-empty/
+        # irregular indistinguishable; folding in the path state closes
+        # that), so --verify-merged/--check-frozen-inputs (skeptic_ready.py)
+        # can re-hash the on-disk files and HALT the pass if a skeptic agent
         # tampered any of them after this setup ran (source-text prompt
         # injection). #243: canon_senses.json joined canon.json/manifest.json
         # as a THIRD frozen input the moment the verifier started parsing it
-        # to project the ambiguity-competitors universe. Re-hashed from
-        # `canon_path`/`manifest_path`/`senses_path` directly (never from the
-        # `*_bytes` already read above) so the state tag is computed fresh,
-        # consistent with compute_frozen_input_hash's own self-contained
-        # path-state read.
-        "canon_sha256": compute_frozen_input_hash(canon_path),
-        "manifest_sha256": compute_frozen_input_hash(manifest_path),
-        "senses_sha256": compute_frozen_input_hash(senses_path),
+        # to project the ambiguity-competitors universe. Hashed from
+        # `canon_state`/`manifest_state`/`senses_state` (and their matching
+        # `*_bytes`) captured ONCE at the top of this function -- codex
+        # round 3: NEVER re-read `canon_path`/`manifest_path`/`senses_path`
+        # here. A fresh re-read at this point would hash whatever is on
+        # disk NOW rather than the snapshot the freshness check and the
+        # assignments above were actually derived from, silently adopting
+        # any mutation that landed in between as "the true state" (see the
+        # long comment where these were captured, top of this function).
+        "canon_sha256": compute_frozen_input_hash_from_state(canon_state, canon_bytes),
+        "manifest_sha256": compute_frozen_input_hash_from_state(manifest_state, manifest_bytes),
+        "senses_sha256": compute_frozen_input_hash_from_state(senses_state, senses_bytes),
         "batch_count": batch_count,
         "assignments": assignments,
     }

@@ -908,9 +908,14 @@ def _frozen_input_path_state(path: Path) -> str:
     `_path_state` (never imported across the module boundary; mirrors this
     plugin's existing "duplicate a tiny primitive rather than import a
     sibling module's private name" convention, e.g. `skeptic_setup.py`'s own
-    `RUN_ID_RE`). Presence is detected via `os.path.lexists` (never
-    `Path.exists`, which follows symlinks and would misreport a dangling
-    symlink as absent); a present path only counts as "regular" if
+    `RUN_ID_RE`; pinned by `tests/frozen_input_path_state_parity.test.py`,
+    which asserts the two classifiers never disagree). Stays PRIVATE to
+    this module -- `skeptic_setup.py` (codex round 3) reaches
+    `read_frozen_input_snapshot()` below instead of this raw classifier
+    directly, so this function's own name/signature is free to change
+    without touching that caller. Presence is detected via `os.path.lexists`
+    (never `Path.exists`, which follows symlinks and would misreport a
+    dangling symlink as absent); a present path only counts as "regular" if
     `Path.is_file()` is also true."""
     if not os.path.lexists(path):
         return "absent"
@@ -919,29 +924,74 @@ def _frozen_input_path_state(path: Path) -> str:
     return "irregular"
 
 
-def compute_frozen_input_hash(path: Path) -> str:
-    """H1's own tamper-detection hash for ONE frozen input file (canon.json
-    / manifest.json / canon_senses.json): sha256 hex over the path's own
-    STATE TAG ("absent"/"regular"/"irregular") plus its content bytes
-    (`b""` for anything but "regular" -- an irregular path's bytes are never
-    attempted to be read at all), separated by a single NUL byte.
+def compute_frozen_input_hash_from_state(state: str, content: bytes) -> str:
+    """H1's own tamper-detection hash CORE: sha256 hex over `state`
+    ("absent"/"regular"/"irregular", see `_frozen_input_path_state`) plus
+    `content` (the caller's own responsibility to have resolved
+    consistently with `state` -- `b""` for anything but "regular"),
+    separated by a single NUL byte. Pure -- no I/O of any kind.
 
-    Codex round-2 finding: hashing raw content bytes ALONE (the pre-fix
-    scheme) makes an absent file, a genuinely-empty regular file, and a
-    directory/dangling-symlink all hash IDENTICALLY to `sha256(b"")` --
-    replacing a stamped non-empty sidecar with an empty regular file, or
-    with a directory, would silently NOT trip the tamper tripwire. Folding
-    the state tag in makes all three states produce DIFFERENT hashes,
-    closing that hole for every H1-covered input, not just the one codex
-    happened to probe.
+    Codex round 3: this is deliberately SEPARATE from any path-reading --
+    `skeptic_setup.py` (the STAMPER) must hash the EXACT (state, content)
+    snapshot it already captured at derivation-read time (before the
+    freshness/worklist validation that snapshot fed, via
+    `read_frozen_input_snapshot()` below), never a fresh re-read of the path
+    moments later when it publishes the aggregate. A path-based re-read at
+    stamp time launders any mutation that happens in that window: the stamp
+    would describe the MUTATED state while everything else this run derived
+    (the worklist check, the assignments, `input_digest`) still describes
+    the ORIGINAL one -- a real, disk-level instance of the trust-the-caller
+    class this whole H1 mechanism exists to close, just moved to a
+    different boundary. `compute_frozen_input_hash` below (path-based,
+    re-reads) remains correct for a VERIFIER (`skeptic_ready.py`), whose
+    entire job IS to re-read fresh and compare against what was stamped --
+    the STAMPER and the VERIFIER need opposite freshness semantics from the
+    same hash formula, which is exactly why the formula itself is split out
+    here as its own pure function.
     """
-    state = _frozen_input_path_state(path)
-    content = path.read_bytes() if state == "regular" else b""
     hasher = hashlib.sha256()
     hasher.update(state.encode("ascii"))
     hasher.update(b"\x00")
     hasher.update(content)
     return hasher.hexdigest()
+
+
+def read_frozen_input_snapshot(path: Path) -> tuple:
+    """Reads `path` EXACTLY ONCE, returning `(state, content)` -- the
+    snapshot `compute_frozen_input_hash_from_state()` needs. This is what a
+    STAMPER (`skeptic_setup.py`, codex round 3) calls at derivation-read
+    time: it captures the tuple once, uses it for whatever validation
+    follows (the freshness/worklist check), and later hashes THAT SAME
+    captured tuple for the H1 stamp -- never touching `path` again in
+    between. `compute_frozen_input_hash()` below (which calls this and
+    hashes immediately) is the read-fresh-and-hash-NOW convenience a
+    VERIFIER wants instead."""
+    state = _frozen_input_path_state(path)
+    content = path.read_bytes() if state == "regular" else b""
+    return state, content
+
+
+def compute_frozen_input_hash(path: Path) -> str:
+    """H1's own tamper-detection hash for ONE frozen input file (canon.json
+    / manifest.json / canon_senses.json), READ FRESH off `path` -- correct
+    for a VERIFIER re-hashing "what's on disk right now" to compare against
+    a stamp (`skeptic_ready.py`'s own `_frozen_input_tamper_reason`/
+    `run_check_frozen_inputs`). A STAMPER must NOT call this -- see
+    `compute_frozen_input_hash_from_state`'s own docstring (codex round 3)
+    for why re-reading at stamp time is dangerous specifically for a
+    stamper, and never for a verifier.
+
+    Codex round-2 finding this formula itself closes: hashing raw content
+    bytes ALONE (the pre-round-2 scheme) makes an absent file, a
+    genuinely-empty regular file, and a directory/dangling-symlink all hash
+    IDENTICALLY to `sha256(b"")` -- replacing a stamped non-empty sidecar
+    with an empty regular file, or with a directory, would silently NOT
+    trip the tamper tripwire. Folding the state tag in makes all three
+    states produce DIFFERENT hashes, closing that hole for every
+    H1-covered input, not just the one codex happened to probe.
+    """
+    state, content = read_frozen_input_snapshot(path)
+    return compute_frozen_input_hash_from_state(state, content)
 
 
 # ---------------------------------------------------------------------------

@@ -89,15 +89,15 @@
 
 export const meta = {
   name: "literary-translator-skeptic-pass",
-  description: "Adversarially re-examine structurally-suspicious canon entries (RFC #215 Phase 2) against bounded, whole-block source windows via a fire-and-forget codex-rescue call per batch, writing a run-scoped triage fragment per batch, then one serialized deterministic merge into skeptic_triage.json plus a disk-independent coverage/evidence verify. Opt-in, advisory, adverse-only -- never touches canon.json; every ordinary skeptic-pass failure is non-blocking, EXCEPT a frozen-input hash mismatch (canon.json/manifest.json changed since setup), which the orchestrator gates as FATAL/HALT.",
+  description: "Adversarially re-examine structurally-suspicious canon entries (RFC #215 Phase 2) against bounded, whole-block source windows via a fire-and-forget codex-rescue call per batch, writing a run-scoped triage fragment per batch, then one serialized deterministic merge into skeptic_triage.json plus a disk-independent coverage/evidence verify. Opt-in, advisory, adverse-only -- never touches canon.json; every ordinary skeptic-pass failure is non-blocking, EXCEPT a frozen-input hash mismatch (canon.json/manifest.json/canon_senses.json changed since setup), which the orchestrator gates as FATAL/HALT.",
   phases: [
     {
       title: "SkepticPass",
-      detail: "codex adversarially examines each batch of assigned entities against their bounded source windows, resolving each to adverse/propose_split/propose_rescope/insufficient_window, and writes its own run-scoped fragment atomically, self-validated (shape + token/coverage + evidence re-auth, with any unverifiable citation silently coerced to insufficient_window) via skeptic_ready.py --validate-fragment -- never a shared file, so concurrent batches never race",
+      detail: "codex adversarially examines each batch of assigned entities against their bounded source windows, resolving each to adverse/propose_split/propose_rescope/insufficient_window, and writes its own run-scoped fragment atomically, self-validated (shape + token/coverage + evidence re-auth, with any unverifiable citation silently coerced to insufficient_window) via skeptic_ready.py --validate-fragment -- never a shared file, so concurrent batches never race; the same run's own frozen-input tripwire is also checked directly if no batch ever becomes ready, so a tamper is never missed just because dispatch itself failed",
     },
     {
       title: "Merge",
-      detail: "one serialized skeptic_ready.py --merge-fragments call folds every ready batch's fragment into skeptic_triage.json in a fully deterministic order, then a disk-independent skeptic_ready.py --verify-merged call re-checks coverage, multiplicity, token/source_form/window-scoping consistency, every cited evidence record, and (when stamped) a best-effort frozen canon.json/manifest.json integrity tripwire, straight off disk, before this run reports merged:true -- a tripwire mismatch is surfaced as a distinct frozen-input-mismatch signal, not an ordinary advisory failure",
+      detail: "one serialized skeptic_ready.py --merge-fragments call folds every ready batch's fragment into skeptic_triage.json in a fully deterministic order, then a disk-independent skeptic_ready.py --verify-merged call re-checks coverage, multiplicity, token/source_form/window-scoping consistency, every cited evidence record, and (when stamped) a best-effort frozen canon.json/manifest.json/canon_senses.json integrity tripwire, straight off disk, before this run reports merged:true -- a tripwire mismatch is surfaced as a distinct frozen-input-mismatch signal, not an ordinary advisory failure",
     },
   ],
 }
@@ -493,15 +493,15 @@ const verified = await agent(verifyMergedPrompt(), {
 if (!isVerifiedResult(verified)) {
   const missingDetail = verified && Array.isArray(verified.missing) ? verified.missing : null
   // P1 fix (review-bot #227): a frozen-input hash mismatch (canon.json/
-  // manifest.json changed since skeptic_setup.py stamped this run) must be
-  // surfaced as a DISTINCT reason/flag, never folded into the generic
-  // "verify-failed" bucket every other skeptic-pass failure (batch-too-
+  // manifest.json/canon_senses.json changed since skeptic_setup.py stamped
+  // this run) must be surfaced as a DISTINCT reason/flag, never folded into
+  // the generic "verify-failed" bucket every other skeptic-pass failure (batch-too-
   // large / fragment-check-failed / an ordinary coverage gap or unverified
   // citation) shares -- SKILL.md's exit-contract gates FATAL/HALT on this
   // signal specifically, keeping every other skeptic-pass failure advisory.
   if (verified && verified.frozen_input_mismatch === true) {
     log(
-      "Skeptic pass: FROZEN-INPUT MISMATCH -- canon.json/manifest.json changed since " +
+      "Skeptic pass: FROZEN-INPUT MISMATCH -- canon.json/manifest.json/canon_senses.json changed since " +
       "skeptic_setup.py stamped this run's hashes" +
       (missingDetail && missingDetail.length ? " -- " + missingDetail.join(", ") : "") + "."
     )
