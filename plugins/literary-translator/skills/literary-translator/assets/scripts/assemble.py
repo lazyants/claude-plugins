@@ -1301,14 +1301,16 @@ def _effective_mentions_enabled(profile: dict) -> bool:
     another), so a dormant `obsidian` sub-block under a different
     `output.target` can never activate this feature anywhere it's gated.
     `output.target` must be EXACTLY "obsidian" AND
-    `output.adapter_config.obsidian.mentions_section.enabled` must be
-    boolean `True`."""
+    `output.adapter_config.obsidian.mentions_section.enabled` must not be
+    boolean `False`. ON BY DEFAULT (1.10.0+): an absent `mentions_section`
+    block, an absent `enabled` key, or `enabled: null` all resolve to
+    enabled -- an explicit `enabled: false` is the only way to opt out."""
     output_cfg = (profile or {}).get("output") or {}
     if output_cfg.get("target") != "obsidian":
         return False
     obsidian_cfg = (output_cfg.get("adapter_config") or {}).get("obsidian") or {}
     mentions_cfg = obsidian_cfg.get("mentions_section") or {}
-    return mentions_cfg.get("enabled") is True
+    return mentions_cfg.get("enabled") is not False
 
 
 def _attach_mentions(nodestream: dict, profile: dict, manifest: dict, canon: dict) -> None:
@@ -1325,11 +1327,25 @@ def _attach_mentions(nodestream: dict, profile: dict, manifest: dict, canon: dic
 
     `bootstrap_names`/`canon_senses`/`occurrence_targets` are imported
     LAZILY, here, rather than at module level: this is the ONLY code path
-    that ever needs them, and a flag-off (the default) project must incur
-    ZERO new dependency surface -- `canon_senses.py` alone requires
-    `jsonschema`, which assemble.py has otherwise never needed
-    (`validate_draft.py`'s own profile loader is deliberately hand-rolled,
-    jsonschema-free)."""
+    that ever needs them, and a flag-off project must incur ZERO new
+    dependency surface -- `canon_senses.py` alone requires `jsonschema`,
+    which assemble.py has otherwise never needed (`validate_draft.py`'s
+    own profile loader is deliberately hand-rolled, jsonschema-free).
+
+    FAIL-CLOSED, ALWAYS (codex review MAJOR-2, user-ratified): every
+    failure point below -- dependency import, language-config resolution,
+    canon_senses load, and `occurrence_targets.build()` itself -- raises
+    unconditionally, regardless of whether `enabled` was written
+    explicitly or only implied by an absent/null key. An earlier revision
+    tried an implied-vs-explicit advisory-skip posture here (§O2a), but
+    that posture wasn't actually achieved end to end:
+    `validate_backlinks.py` (the LAST step of the same W9 chain, on the
+    same default-on predicate) has no such distinction and unconditionally
+    `_fatal`s (exit 2) on an identical broken dependency -- so a broken
+    Mentions setup that this function let through with a warning still
+    bricked the pipeline one step later. Matching `validate_backlinks.py`'s
+    existing fail-closed posture here is what actually holds end to end,
+    and it is simpler than the two-posture version it replaces."""
     particle_config = _profile_get(profile, "source.language.particle_config")
 
     sys.path.insert(0, str(SCRIPTS_DIR))
@@ -1371,7 +1387,18 @@ def _attach_mentions(nodestream: dict, profile: dict, manifest: dict, canon: dic
             reason="mentions_canon_senses_invalid",
         ) from exc
 
-    aggregate = occurrence_targets.build(manifest, canon, senses_result, language_config, nodestream)
+    # §O2b: unwrapped no longer -- a raise here previously surfaced only as
+    # the generic "unexpected error" exit 1 catch-all (main()'s outermost
+    # `except Exception`), with no `reason` field. Always fail-closed, same
+    # as every other precondition in this function now.
+    try:
+        aggregate = occurrence_targets.build(manifest, canon, senses_result, language_config, nodestream)
+    except Exception as exc:
+        raise AssembleError(
+            f"mentions_section.enabled is true but occurrence_targets.build() "
+            f"failed: {type(exc).__name__}: {exc}",
+            reason="mentions_occurrence_targets_failed",
+        ) from exc
     nodestream["mentions"] = aggregate["eligible_by_source_form"]
 
 
@@ -1512,12 +1539,13 @@ def main() -> int:
 
         nodestream, anchor_map = build_nodestream(profile, manifest, converged)
 
-        # D1 (opt-in, lt-appendix-backlink-integrity): attach the
-        # source-anchored Mentions data BEFORE nodestream.json is
-        # persisted below -- the e2e three-view parity test reads this
-        # exact "persisted mentions" view back off disk. Flag off (the
-        # default) or any other output.target: attaches nothing, touches
-        # no new dependency, byte-identical to 1.7.0.
+        # D1 (lt-appendix-backlink-integrity, ON BY DEFAULT for
+        # output.target: obsidian -- see _effective_mentions_enabled):
+        # attach the source-anchored Mentions data BEFORE nodestream.json
+        # is persisted below -- the e2e three-view parity test reads this
+        # exact "persisted mentions" view back off disk. An explicit
+        # `enabled: false`, or any other output.target: attaches nothing,
+        # touches no new dependency, byte-identical to 1.7.0.
         if _effective_mentions_enabled(profile):
             _attach_mentions(nodestream, profile, manifest, canon)
 

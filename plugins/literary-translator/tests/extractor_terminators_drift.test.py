@@ -22,10 +22,13 @@ import importlib.util
 import sys
 from pathlib import Path
 
+import pytest
+
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS_DIR = PLUGIN_ROOT / "skills" / "literary-translator" / "assets" / "scripts"
 BOOTSTRAP_PATH = SCRIPTS_DIR / "bootstrap_names.py"
 SMOKE_PATH = SCRIPTS_DIR / "language_smoke_report.py"
+FINAL_AUDIT_PATH = SCRIPTS_DIR / "final_audit.py"
 
 
 def _load_module(name, path):
@@ -39,6 +42,11 @@ def _load_module(name, path):
 
 bn = _load_module("bootstrap_names_drift_under_test", BOOTSTRAP_PATH)
 lsr = _load_module("language_smoke_report_drift_under_test", SMOKE_PATH)
+# final_audit.py is FROZEN this train (read/import only, A-C4) -- loaded here
+# purely so this drift guard can assert bootstrap_names.py's/
+# language_smoke_report.py's own #238 fold agrees with the pre-existing
+# _fold_source_marks it mirrors, never to modify it.
+fa = _load_module("final_audit_drift_under_test", FINAL_AUDIT_PATH)
 
 
 def test_terminators_identical_across_both_extractors():
@@ -68,3 +76,73 @@ def test_wrappers_disjoint_from_terminators():
     # a wrapper both stop and not-stop a run. Enforce disjointness in both.
     assert not (bn.WRAPPERS & bn.TERMINATORS)
     assert not (lsr._WRAPPERS & lsr.TERMINATORS)
+
+
+# ---------------------------------------------------------------------------
+# #238/#241 (A-C4) -- THREE independent copies of the same Hebrew mark/
+# connector match-key fold exist this train: bootstrap_names.py,
+# language_smoke_report.py, and the pre-existing final_audit.py
+# (_fold_source_marks, final_audit.py:548). No shared import between any of
+# them (final_audit.py is frozen; language_smoke_report.py runs as an
+# isolated subprocess) -- this is the minimum drift guard asserting all
+# three still agree.
+# ---------------------------------------------------------------------------
+
+def test_name_connectors_identical_across_both_extractors():
+    assert bn.NAME_CONNECTORS == lsr.NAME_CONNECTORS
+
+
+def test_name_connectors_are_a_strict_subset_of_token_re_connector_class():
+    # #241: maqaf/geresh/gershayim ONLY -- never the apostrophes/hyphens
+    # TOKEN_RE's own connector class also allows (widening this set breaks
+    # Latin non-regression -- tests/caseless_offset.test.py). The literal
+    # class body below is copied from TOKEN_RE.pattern itself (see
+    # test_token_re_identical_across_both_extractors above for why it is
+    # safe to hardcode: any future change there would first break THAT
+    # test).
+    token_re_connector_class = "'’‑׳״־-"
+    assert set(bn.NAME_CONNECTORS) <= set(token_re_connector_class)
+    assert not (set(bn.NAME_CONNECTORS) & set("'’‑-"))  # never an apostrophe/hyphen
+
+
+@pytest.mark.parametrize("s", [
+    "משה",
+    "משה־לייב",
+    "מֹשֶׁה",
+    "מֹשֶׁה־לַיִיב",
+    "Jean-Baptiste",
+    "O'Brien",
+    "Ångstrom",
+])
+def test_match_units_identical_across_both_extractors(s):
+    assert bn.match_units(s) == lsr.match_units(s)
+
+
+@pytest.mark.parametrize("s", [
+    "משה",
+    "מֹשֶׁה",
+    "מֹשֶׁה־לַיִיב",
+])
+def test_match_units_mark_fold_agrees_with_final_audit_fold_source_marks(s):
+    # bootstrap_names.match_units()/language_smoke_report.match_units() both
+    # connector-split AFTER folding; final_audit._fold_source_marks() only
+    # folds (no connector concept there at all -- it operates on whole
+    # whitespace-split draft tokens). Compare the FOLD step alone -- joining
+    # match_units() back with no separator reproduces the same folded string
+    # for an input with no NAME_CONNECTORS character (all three parametrized
+    # cases here are single #241-connector-free words or the ONE compound,
+    # verified separately for its own two units).
+    has_connector = any(c in s for c in bn.NAME_CONNECTORS)
+    if has_connector:
+        units = bn.match_units(s)
+        # each unit, folded, must equal what final_audit's own fold produces
+        # for that SAME substring in isolation.
+        for u in units:
+            assert u == fa._fold_source_marks(u)
+    else:
+        assert "".join(bn.match_units(s)) == fa._fold_source_marks(s)
+
+
+def test_bootstrap_fold_match_marks_agrees_with_final_audit_fold_source_marks():
+    for s in ("משה", "מֹשֶׁה", "מֹשֶׁה־לַיִיב", "Sí", "Ångstrom"):
+        assert bn._fold_match_marks(s) == fa._fold_source_marks(s)

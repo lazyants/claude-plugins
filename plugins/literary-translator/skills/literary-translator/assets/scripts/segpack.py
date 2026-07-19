@@ -28,10 +28,6 @@ flag and no reliance on cwd.
 CONTRACT with bootstrap_names.py (sibling script, same scripts/ directory --
 also copied to ${durable_root}/scripts/ by Step 0a, and part of the same
 derivation_bundle_hash pairing as this script):
-    SENTINEL_RE
-        Compiled regex matching the FNREF_N / VERSE_Vxxx sentinel placeholders
-        -- stripped out of any text before it is handed to extract_candidates,
-        so a sentinel token is never itself mistaken for a proper-noun run.
     load_language_config(particle_config_filename: str, languages_dir: Path) -> LanguageConfig
         Reads ${languages_dir}/{particle_config_filename} (a BARE filename,
         resolved exactly like bootstrap_names.py's own CLI resolution logic --
@@ -42,6 +38,13 @@ derivation_bundle_hash pairing as this script):
         `text`, using the tokenizer / run-building / frequency-and-mid-sentence
         scoring algorithm, parameterized entirely by `lang_config` (never
         hardcoded per-language data -- that is bootstrap_names.py's own job).
+        Sentinel masking (FNREF_N / VERSE_Vxxx placeholders) happens INSIDE
+        this call now (#226) -- a same-length substitution
+        (bootstrap_names.mask_sentinels) that never shifts a token's own
+        offset, unlike the collapsing single-space substitution this script
+        used to apply to raw text BEFORE calling extract_candidates. segpack.py
+        passes raw block/footnote text straight through; it never pre-strips
+        sentinels itself.
 
 Usage:
     python3 segpack.py SEG --particle-config fr.json --apparatus-policy translate_all
@@ -62,16 +65,16 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 DURABLE_ROOT = SCRIPT_DIR.parent
 
 try:
-    from bootstrap_names import SENTINEL_RE, load_language_config, extract_candidates
+    from bootstrap_names import load_language_config, extract_candidates
 except ImportError as exc:
     sys.exit(
         f"segpack.py: cannot import bootstrap_names.py from {SCRIPT_DIR} ({exc}).\n"
         "bootstrap_names.py must be installed alongside segpack.py under "
         "${durable_root}/scripts/ -- Step 0a copies both scripts together as a "
         "pair (they share the derivation_bundle_hash). It supplies "
-        "SENTINEL_RE / load_language_config / extract_candidates, the shared "
-        "name-candidate extraction primitives segpack.py reuses per segment. "
-        "Re-run Step 0a, or verify the plugin install is not corrupted."
+        "load_language_config / extract_candidates, the shared name-candidate "
+        "extraction primitives segpack.py reuses per segment. Re-run Step 0a, "
+        "or verify the plugin install is not corrupted."
     )
 
 # Canonical segment-id safety contract. A seg id is either an ordinary body
@@ -105,8 +108,10 @@ FOOTNOTE_CARRYING_POLICIES = ("translate_all", "preserve_source")
 # Cross-check only: FNREF sentinel occurrences found directly in block text,
 # compared against the manifest's own per-block fnrefs[] list as a cheap
 # "does the recorded data agree with the text" sanity signal (WARN, not FATAL
-# -- a real mismatch here is a manifest/extract.py.template bug worth
-# surfacing loudly, but not this script's job to adjudicate).
+# -- a real mismatch here is a manifest bug (e.g. in the gutenberg_epub
+# adapter's own extract.py.template extraction pass, or the equivalent
+# producer for whichever adapter built this manifest) worth surfacing
+# loudly, but not this script's job to adjudicate).
 FNREF_RE = re.compile(r"⟦FNREF_(\d+)⟧")
 
 # Fallback literal-marker detector for apparatus_policy: body_refs_only, matching
@@ -120,6 +125,24 @@ LITERAL_MARKER_RE = re.compile(r"\[\d+\]")
 _TAG_RE = re.compile(r"<[^>]+>")
 
 
+def _split_lf_lines(s):
+    r"""Line-split on LF ONLY -- NOT str.splitlines(), which also breaks on
+    the exotic Unicode boundaries U+2028/U+2029/U+0085/U+000B/U+000C/
+    U+001C-U+001E. Mirrors validate_draft.py's own _split_lf_lines (#188) so
+    this script's LEGACY-manifest fallback (below) counts lines the SAME way
+    the validator will -- a manifest's own plain_text may legitimately carry
+    a real U+2028 (e.g. a verse-payload sentinel join) that str.splitlines()
+    would wrongly count as a second line (#192). DUPLICATED, not imported --
+    segpack.py has no dependency on validate_draft.py and this train's
+    convention (A-C4) is independent copies over a shared import for a
+    small, stable helper. Preserves splitlines()'s own "a single trailing
+    line terminator yields no empty trailing element"."""
+    lines = (s or "").replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    if lines and lines[-1] == "":
+        lines.pop()
+    return lines
+
+
 def _verse_line_count(v):
     """Source line count for one manifest verse.store node -- feeds
     validate_draft.py check 5's per-verse line policy (mixed_by_length; the
@@ -130,22 +153,24 @@ def _verse_line_count(v):
     BEFORE normalize_text collapses newlines, so a manifest n_line is
     correct for both `.line`-marked and bare-<p> poems. A missing/non-
     positive n_line means a LEGACY manifest (pre-#92 extractor); fall back
-    to plain_text / source_html non-blank line counts as best-effort -- but
-    note plain_text has ALREADY been newline-collapsed by normalize_text
-    for a legacy bare-<p> stanza, so that fallback under-counts it
-    (source_html tag boundaries recover it more faithfully). For all NEW
-    manifests the fallback is never reached."""
+    to plain_text / source_html non-blank line counts as best-effort, LF-only
+    (`_split_lf_lines`, #192 -- NOT str.splitlines(), which also breaks on
+    U+2028 and the other exotic Unicode line boundaries a real plain_text may
+    legitimately contain) -- but note plain_text has ALREADY been
+    newline-collapsed by normalize_text for a legacy bare-<p> stanza, so that
+    fallback under-counts it (source_html tag boundaries recover it more
+    faithfully). For all NEW manifests the fallback is never reached."""
     n = v.get("n_line")
     if isinstance(n, int) and not isinstance(n, bool) and n > 0:
         return n
     text = v.get("plain_text")
     if isinstance(text, str) and text.strip():
-        c = len([ln for ln in text.splitlines() if ln.strip()])
+        c = len([ln for ln in _split_lf_lines(text) if ln.strip()])
         if c > 0:
             return c
     html = v.get("source_html")
     if isinstance(html, str) and html:
-        c = len([ln for ln in _TAG_RE.sub("\n", html).splitlines() if ln.strip()])
+        c = len([ln for ln in _split_lf_lines(_TAG_RE.sub("\n", html)) if ln.strip()])
         if c > 0:
             return c
     return 0
@@ -382,11 +407,13 @@ def build_pack(seg_id, manifest, canon, lang_config, apparatus_policy):
                     f"segment {seg_id!r}: verse.store entry for parent_block "
                     f"{parent!r} missing required field {key!r}"
                 )
-        # mount is the EXTRACTOR's authoritative classification
-        # (extract.py.template's mounting pass), normalized TOLERANTLY onto
-        # segpack's own {block,embedded} output enum: exactly "embedded" ->
-        # "embedded"; anything else (missing, "block", or an unknown adapter
-        # value) -> "block". Do NOT re-derive from parent-kind -- a verse
+        # mount is the EXTRACTOR's authoritative classification (the
+        # gutenberg_epub adapter's extract.py.template mounting pass, or the
+        # equivalent pass of whichever adapter produced this manifest),
+        # normalized TOLERANTLY onto segpack's own {block,embedded} output
+        # enum: exactly "embedded" -> "embedded"; anything else (missing,
+        # "block", or an unknown adapter value) -> "block". Do NOT re-derive
+        # from parent-kind -- a verse
         # embedded inside a PARA/QUOTE/translated-FRONTBACK block has its
         # parent IN seg_block_ids yet is authoritatively "embedded".
         verses_out.append({
@@ -399,13 +426,21 @@ def build_pack(seg_id, manifest, canon, lang_config, apparatus_policy):
 
     # ---- proper-noun candidates: scan this segment's own blocks + whatever
     #      footnote definitions it carries, reusing bootstrap_names.py's own
-    #      tokenizer/scoring algorithm (no per-project adapt point here). ----
+    #      tokenizer/scoring algorithm (no per-project adapt point here).
+    #      #226: raw_text is handed to extract_candidates UNSTRIPPED --
+    #      no local SENTINEL_RE.sub(" ", raw_text) pre-pass. That collapsing
+    #      substitution replaced a multi-character sentinel (e.g.
+    #      "⟦FNREF_12⟧") with a SINGLE space, shifting every
+    #      subsequent character's offset by len(sentinel) - 1; extract_
+    #      candidates' own bootstrap_names.mask_sentinels() already performs
+    #      the SAME masking internally with a length-preserving space run, so
+    #      the extra pre-pass here was redundant AND the one place in this
+    #      script that could have silently corrupted a span-based caller. ----
     name_stats = {}
     scan_texts = [_scan_text(entry) for entry in blocks_out]
     scan_texts += [fo["source_text"] for fo in footnotes_out]
     for raw_text in scan_texts:
-        text = SENTINEL_RE.sub(" ", raw_text)
-        for name, mid_sentence in extract_candidates(text, lang_config):
+        for name, mid_sentence in extract_candidates(raw_text, lang_config):
             d = name_stats.setdefault(name, {"freq": 0, "mid": 0, "multiword": len(name.split()) > 1})
             d["freq"] += 1
             d["mid"] += int(mid_sentence)

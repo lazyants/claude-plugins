@@ -606,6 +606,59 @@ def test_cat1_record_count_rule_two_map_keys_same_field(tmp_path):
 
 
 # ===========================================================================
+# 6b. #205 (Option A): cat-1 scope honesty -- an unconditional warning
+#     naming the identical-surface blind spot, and a regression pin proving
+#     the honesty fix does not gut cat-1's one genuinely live behavior.
+# ===========================================================================
+
+
+def test_cat1_scope_warning_present_when_canon_present(tmp_path):
+    """B14: category 1 (duplicate_source_form) can only ever detect a
+    NORMALIZATION-VARIANT duplicate, never a byte-identical one --
+    `canon_validate.py`'s own map-key-equals-source_form write pattern
+    structurally prevents two records from ever sharing an identical
+    surface. `compute_cat1_items` must emit an unconditional warning
+    stating this scope limit on every --check run where canon is present,
+    REGARDLESS of whether any duplicate group was actually found -- RED
+    today: no such warning is ever emitted."""
+    root = make_durable_root(tmp_path)
+    write_canon(root, [entry("Solo", "Solo")])  # zero cat1 items -- the warning must fire anyway
+
+    proc = run_audit(root, "--check")
+    summary = parse_stdout(proc)
+    assert_summary_schema_valid(summary)
+    assert summary["totals"]["by_kind"]["duplicate_source_form"] == 0
+    assert any(
+        "byte-identical" in w and "duplicate_source_form" in w
+        for w in summary["warnings"]
+    ), f"expected an unconditional cat-1 scope warning, got: {summary['warnings']}"
+
+
+def test_cat1_still_fires_on_normalization_variant(tmp_path):
+    """B15: HONEST NOTE -- this is a regression PIN, not a red-first test
+    (it is GREEN today, same as after the #205 fix: `normalize_form`
+    already casefolds/collapses whitespace, so a normalization-variant
+    duplicate was always detected). It exists to prove the #205 docstring/
+    warning-only fix does not accidentally gut cat-1's one genuinely live
+    behavior -- never present this as proof the fix WORKS, only that it
+    didn't regress the one thing cat-1 can do."""
+    root = make_durable_root(tmp_path)
+    write_canon(root, [
+        entry("Nachman", "Nakhman"),
+        entry("nachman ", "Nakhman"),
+    ])
+
+    proc = run_audit(root, "--check")
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    summary = parse_stdout(proc)
+    assert_summary_schema_valid(summary)
+    assert summary["totals"]["by_kind"]["duplicate_source_form"] == 1, (
+        "a normalization-variant duplicate (case/whitespace difference) "
+        "must still be detected after the #205 honesty fix"
+    )
+
+
+# ===========================================================================
 # 7 (plan case 7). Cat 2 existing_merge + verdict lifecycle.
 # ===========================================================================
 

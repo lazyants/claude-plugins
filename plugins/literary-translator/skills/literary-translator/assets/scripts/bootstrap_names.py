@@ -220,6 +220,148 @@ APOSTROPHES = "'’"  # ' and the Unicode right single quote
 WRAPPERS = frozenset("()[]{}'’‘“«")
 
 
+# ---------------------------------------------------------------------------
+# #238/#241 MATCH KEY -- Hebrew niqqud/cantillation fold + connector fold,
+# applied ONLY at trie-descent/lookup time (Contract 5 freezes the EMITTED
+# `name` at both extract_candidate_spans() emit sites -- :632 and :694 below
+# -- as the raw surface reconstruction; nothing in this section is ever used
+# to build that string). Three independent copies exist this train (A-C4):
+# this one, language_smoke_report.py's own mirror, and the pre-existing
+# final_audit._fold_source_marks (final_audit.py:548, read-only to this
+# script -- final_audit.py is frozen this train). No shared import between
+# any of the three -- language_smoke_report.py runs as an isolated
+# subprocess with no sibling-module dependency, the same reason TOKEN_RE/
+# TERMINATORS/WRAPPERS above are independently copied there too.
+# tests/extractor_terminators_drift.test.py's drift guard asserts all three
+# agree.
+# ---------------------------------------------------------------------------
+
+# NAME_CONNECTORS (issue #241) -- a STRICT SUBSET of TOKEN_RE's own connector
+# class (see its comment above): maqaf U+05BE, geresh U+05F3, gershayim
+# U+05F4 ONLY -- never the apostrophes (U+0027/U+2019) or the ASCII/non-
+# breaking hyphens TOKEN_RE's class also allows. Those three widen the fold
+# to Latin "d'Artagnan"/"Jean-Baptiste"/"O'Brien" and break Latin
+# non-regression (see tests/caseless_offset.test.py); the Hebrew three are
+# punctuation (category Pd/Po), never a combining mark, so
+# _fold_match_marks() below can never move a connector boundary regardless
+# of fold-then-split vs split-then-fold order. bootstrap_names.py and
+# language_smoke_report.py MUST keep this constant identical
+# (tests/extractor_terminators_drift.test.py enforces it) -- edit BOTH.
+NAME_CONNECTORS = "־׳״"
+_NAME_CONNECTOR_SPLIT_RE = re.compile("[" + NAME_CONNECTORS + "]")
+
+
+def _fold_match_marks(s: str) -> str:
+    """Fold Hebrew niqqud/cantillation for the #238 MATCH KEY ONLY -- mirrors
+    ``final_audit._fold_source_marks`` (``final_audit.py:548``) byte-for-byte:
+    NFD-decompose, drop every combining mark (Unicode category ``Mn``) in the
+    Hebrew block range U+0591-U+05C7, then re-NFC. NEVER applied to an
+    EMITTED ``name`` (Contract 5) -- this fold lives ONLY in
+    ``match_units()``/``fold_match_key()`` below, which
+    ``occurrence_targets.py`` applies at lookup time to both the matcher's
+    grouping key and the canon ``source_form`` it looks up, never to what
+    either side actually emits.
+    """
+    decomposed = unicodedata.normalize("NFD", s)
+    stripped = "".join(
+        c
+        for c in decomposed
+        if not (unicodedata.category(c) == "Mn" and 0x0591 <= ord(c) <= 0x05C7)
+    )
+    return unicodedata.normalize("NFC", stripped)
+
+
+def _fold_token_to_units(token: str) -> tuple:
+    """Uncached #238 mark-fold + #241 connector-split for ONE raw token
+    string, dropping any empty unit (a leading/trailing/doubled connector --
+    unreachable in practice since every TOKEN_RE token starts and ends in a
+    letter, but dropped defensively rather than assumed). Split-after-fold is
+    safe because no ``NAME_CONNECTORS`` member is ever category ``Mn`` (see
+    that constant's own comment) -- the fold can never consume or move a
+    connector boundary. Wrapped by ``match_units()``'s per-string cache below;
+    a test's counting monkeypatch wraps THIS function (mirrors
+    ``_build_inventory_trie``/``_compiled_inventory_trie``'s own split) to
+    assert a token's units are computed once, not once per trie-walk position
+    that visits it.
+    """
+    folded = _fold_match_marks(token)
+    return tuple(u for u in _NAME_CONNECTOR_SPLIT_RE.split(folded) if u)
+
+
+@lru_cache(maxsize=None)
+def match_units(s: str) -> tuple:
+    """The #238/#241 match units TOKEN_RE itself would carve out of ``s``,
+    each mark-folded then connector-split. Works identically whether ``s`` is
+    a single already-tokenized token (as the inventory trie's pass-2 walk
+    calls it, one token at a time) or a whole multi-token name/source_form
+    string (as ``fold_match_key()`` below calls it) -- ``TOKEN_RE.finditer``
+    re-derives the same token boundaries either way, so a maqaf-joined single
+    text token and its space-joined canon-key equivalent flatten to the
+    IDENTICAL unit sequence. Memoized per distinct ``s`` for the process
+    lifetime: pass 2's trie walk restarts at EVERY token position, so the
+    same token would otherwise be re-folded once per position that looks up
+    to L tokens ahead of it (see ``extract_candidate_spans``'s own pass-2
+    docstring) -- see the memoization test in
+    ``tests/caseless_offset.test.py``. NEVER used to build the EMITTED
+    ``name`` (Contract 5) -- exported purely for the trie descent and
+    ``fold_match_key()``'s scalar form.
+    """
+    return tuple(
+        u
+        for m in TOKEN_RE.finditer(s)
+        for u in _fold_token_to_units(m.group(0))
+    )
+
+
+@lru_cache(maxsize=None)
+def fold_match_key(s: str) -> str:
+    """The single #238/#241 MATCH KEY construction (A-C2) -- one exported
+    scalar helper, ``" ".join(match_units(s))``. ``occurrence_targets.py``
+    applies this identically to BOTH the matcher's ``_spans_by_name``
+    grouping key and every ``.get(source_form)`` lookup -- never to the
+    emitted ``name`` (Contract 5, both emit sites) or the emitted
+    ``eligible_by_source_form``/``unresolved_homonyms`` dict key (Contract 3,
+    the literal unfolded canon key). Cached like ``match_units()`` -- this is
+    called once per ``(block, source_form)`` pair on the hot path (see this
+    module's own docstring on why ``occurrence_targets.py`` is now hot-path
+    code), so a repeated ``source_form`` across many blocks costs one real
+    fold, not one per block.
+    """
+    return " ".join(match_units(s))
+
+
+def _warn_inventory_match_key_collisions(name_inventory: frozenset, path: Path) -> None:
+    """A-C1 (#238/#241): warn -- NEVER raise -- when two distinct
+    ``name_inventory`` surface forms fold to the SAME #238/#241 match key
+    (e.g. ``משה לייב`` and ``משה־לייב`` both ``fold_match_key`` to
+    ``משה לייב``). Contract 2's no-new-fatal rule forbids turning this into a
+    :class:`BootstrapNamesError` -- nine importers, and ``segpack.py:663-668``
+    turns ANY exception into a FATAL -- so a ``name_inventory`` that was VALID
+    at 6fb80ba must stay valid. Structurally harmless for MATCHING:
+    ``_compiled_inventory_trie()`` inserts the SAME flattened path for every
+    colliding form, so nothing is dropped from ``name_inventory`` and every
+    colliding surface still matches identically -- this is purely an
+    operator-visibility warning. Picks the shortest-then-lexicographic form as
+    the one named "canonical" in the message, deterministically, so the
+    message text itself never depends on frozenset iteration order.
+    """
+    groups = defaultdict(list)
+    for form in name_inventory:
+        groups[fold_match_key(form)].append(form)
+    for key in sorted(groups):
+        forms = groups[key]
+        if len(forms) > 1:
+            forms_sorted = sorted(forms, key=lambda f: (len(f), f))
+            print(
+                f"WARN {path}: name_inventory forms {forms_sorted!r} all fold "
+                f"to the same #238/#241 match key {key!r} -- every form still "
+                f"matches identically (none is dropped); treating "
+                f"{forms_sorted[0]!r} as canonical in any message that must "
+                "name one.",
+                file=sys.stderr,
+            )
+
+
 class BootstrapNamesError(Exception):
     """Raised for a config/IO problem this script cannot recover from."""
 
@@ -417,6 +559,8 @@ def load_language_config(particle_config_filename: str,
     else:
         name_inventory = frozenset(name_inventory_raw)
 
+    _warn_inventory_match_key_collisions(name_inventory, path)
+
     return LanguageConfig(
         path=path,
         particles=particles,
@@ -514,9 +658,19 @@ def _compiled_inventory_trie(name_inventory: frozenset, elision_re: Optional["re
     first. The trie is read-only after construction -- the pass-2 walk below
     only ever reads ``node.get(...)``/``None in node`` -- so sharing the same
     dict object across every block/call is safe.
+
+    Keyed on #238/#241 MATCH UNITS (``match_units()``), not raw tokens --
+    each inventory form's own tokens are individually folded/connector-split
+    and the resulting units flattened into ONE path per form, so a form
+    written ``משה לייב`` (space-joined, 2 tokens) and one written
+    ``משה־לייב`` (maqaf-joined, 1 token) insert the SAME trie path. This is
+    the #238 scope correction (session-a §5.1): the fold reaches the trie
+    DESCENT here; the emitted ``name`` two call frames up in
+    ``extract_candidate_spans`` stays the raw surface reconstruction
+    regardless (Contract 5).
     """
     inventory_forms = (
-        tuple(t for t, _p, _s, _e in tokenize(form, elision_re))
+        tuple(u for t, _p, _s, _e in tokenize(form, elision_re) for u in match_units(t))
         for form in name_inventory
     )
     return _build_inventory_trie(f for f in inventory_forms if f)
@@ -549,18 +703,27 @@ def extract_candidate_spans(text: str, lang: LanguageConfig):
        gated on ``is_upper_initial()``/``STOPWORDS``/particle continuation.
     2. An inventory-driven CASELESS route (issue #204): for each of
        ``lang.name_inventory``'s literal multiword forms, scan EVERY token
-       position for an EXACT token-sequence match -- bypassing
-       ``is_upper_initial()`` entirely, which is what lets a script with no
-       case distinction at all (e.g. Hebrew, Unicode category ``Lo``)
-       surface a candidate at all. At a given start position, forms are
-       tried longest-first and the first one that both token-matches AND
-       is not an exact duplicate (see INVARIANT) wins -- so the longest
-       form wins whenever it is fresh; only when the longest match at a
-       position turns out to be a duplicate does a shorter, still-fresh
-       match at that SAME position get a chance. A match is refused if it
-       would bridge a ``TERMINATORS`` boundary between any two of its own
-       tokens -- the same rule pass 1 enforces -- e.g. a ``name_inventory``
-       entry "משה לייב" must NOT match text "משה. לייב".
+       position for a MATCH-UNIT-sequence match (issues #238/#241 -- see
+       ``match_units()``'s own docstring) -- bypassing ``is_upper_initial()``
+       entirely, which is what lets a script with no case distinction at all
+       (e.g. Hebrew, Unicode category ``Lo``) surface a candidate at all. The
+       trie descent is FOLDED (Hebrew niqqud/cantillation dropped, maqaf/
+       geresh/gershayim treated as unit separators) so an unpointed
+       space-joined inventory entry matches a pointed and/or maqaf-joined
+       text surface and vice versa -- but the match stays TOKEN-ALIGNED (a
+       match starts and ends on a token boundary; a sub-token match is
+       refused, A-C3) and the emitted ``name`` below is always the RAW,
+       unfolded surface reconstruction (Contract 5) -- the fold is never
+       visible in this function's own output, only in which spans it finds.
+       At a given start position, forms are tried longest-first and the
+       first one that both token-matches AND is not an exact duplicate (see
+       INVARIANT) wins -- so the longest form wins whenever it is fresh;
+       only when the longest match at a position turns out to be a
+       duplicate does a shorter, still-fresh match at that SAME position get
+       a chance. A match is refused if it would bridge a ``TERMINATORS``
+       boundary between any two of its own tokens -- the same rule pass 1
+       enforces -- e.g. a ``name_inventory`` entry "משה לייב" must NOT match
+       text "משה. לייב".
 
     INVARIANT (do not re-introduce a per-token "claimed" bitmap -- three
     rounds of adversarial review each found a different case it breaks):
@@ -676,10 +839,25 @@ def extract_candidate_spans(text: str, lang: LanguageConfig):
             while idx + j < n:
                 if j >= 1 and tokens[idx + j][1] in TERMINATORS:
                     break
-                nxt = node.get(tokens[idx + j][0])
-                if nxt is None:
+                # #238/#241: descend the CURRENT token's own match units one
+                # at a time (a maqaf-joined text token contributes more than
+                # one unit here -- see match_units()'s own docstring) --
+                # never checking `None in node` until the WHOLE token's units
+                # are consumed, so a terminal found mid-token is never
+                # recorded (A-C3: token-aligned only, never a sub-token
+                # match). `units` is never empty for a real TOKEN_RE token
+                # (every token starts and ends in a letter; connector-split
+                # can only peel connectors from the middle).
+                units = match_units(tokens[idx + j][0])
+                matched_token = True
+                for u in units:
+                    nxt = node.get(u)
+                    if nxt is None:
+                        matched_token = False
+                        break
+                    node = nxt
+                if not matched_token:
                     break
-                node = nxt
                 j += 1
                 if None in node:
                     match_lens.append(j)

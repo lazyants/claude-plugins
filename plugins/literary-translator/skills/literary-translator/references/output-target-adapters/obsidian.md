@@ -141,24 +141,52 @@ adapter's own occurrence tracking. A depth-1 MOC (map-of-content) stub
 listing every category folder is a reasonable, proportional addition; a
 deeper generated index is explicitly out of scope here.
 
-### 1.8.0 — opt-in source-anchored `## Mentions` section (supersedes the above for opted-in projects)
+### 1.8.0+ — source-anchored `## Mentions` section, ON BY DEFAULT since 1.10.0
 
 Native backlinks are only as complete as the **inline linker**, which matches
 one `canonical_target_form` string against translated prose — so a variant
 target rendering gets no backlink (#206) and two source forms sharing a target
-collapse to one owner (#207-a). The **opt-in**
-`output.adapter_config.obsidian.mentions_section.enabled` flag (default false)
+collapse to one owner (#207-a). `output.adapter_config.obsidian.mentions_section.enabled`
 adds an authoritative **source-anchored** occurrence index: a `## Mentions`
 section in each entity note, wrapped in reserved `<!-- lt:mentions:begin/end -->`
 markers, listing the segment notes where the entity's *source* forms occur (per
 `occ_index`), independent of how the target surface varies. This is the
-`build_name_manifest.py` model ported at last, and for opted-in projects it
-supersedes "native backlinks are the occurrence index." `sense_translated`
-proper names — which the inline linker deliberately never auto-links — DO get
-Mentions here (source anchoring links them safely). Default-off output is
-byte-identical to 1.7.0. The advisory `validate_backlinks.py` W9 gate
-(non-blocking) reports coverage; the aggregated `output.index` person-index page
-+ `index_scope` routing remain a later phase.
+`build_name_manifest.py` model ported at last, and it supersedes "native
+backlinks are the occurrence index." `sense_translated` proper names — which
+the inline linker deliberately never auto-links — DO get Mentions here (source
+anchoring links them safely), and (1.10.0, #240) a `sense_translated` entry
+sharing a `canonical_target_form` with a narrative entry now correctly
+contributes to that target's collision count even though it can never win the
+inline-link tiebreak itself — see "Collision de-linking" below.
+
+**ON BY DEFAULT (1.10.0+):** an absent `mentions_section` block, or an
+absent `enabled` key within a present block, resolves to enabled for
+`output.target: obsidian`; set `enabled: false` explicitly to opt out
+(byte-identical to pre-1.10.0 output). `enabled` must be a **boolean**
+when present — a literal `enabled: null` (or `mentions_section: null`) is
+schema-invalid (`profile.schema.json` declares both as non-nullable) and
+is **rejected by `profile_validate.py`** before it ever reaches the
+runtime predicate. Omit the key (or the whole block) to get the
+default-on behavior through the normal, schema-valid path — `null` is not
+a supported way to spell it. (The three runtime predicates' own `is not
+False` check tolerates `None` defensively, purely as a fallback for a
+profile dict constructed outside the normal Step 0 validation path; it is
+not evidence that a schema-valid profile can carry `enabled: null`.)
+Through 1.9.x this was opt-in (default false) — see the CHANGELOG for the
+migration note (a rendered vault holding an accepted
+`diff_rendered_output.py` baseline needs one operator `--accept-baseline`
+re-accept once this lands, since `render_obsidian.py`'s own bytes changed;
+converged segments are never re-translated by this flip).
+The advisory `validate_backlinks.py` W9 gate (non-blocking) reports coverage;
+the aggregated `output.index` person-index page + `index_scope` routing
+remain a later phase.
+
+**Collision de-linking is part of the same effective-enabled predicate.**
+When two canon entries share one `canonical_target_form`, the inline linker's
+own shortest-source-form tiebreak (documented above) silently drops the
+losing entry's inline link; with Mentions section active, BOTH entries are
+de-linked instead — the `## Mentions` section is what makes either entity's
+occurrences discoverable once the ambiguous inline link is removed.
 
 ## Category→folder catalog — presets are EXAMPLES, not an enum
 

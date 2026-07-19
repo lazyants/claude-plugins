@@ -570,7 +570,11 @@ def test_flag_on_end_to_end_matches_expected_vault_and_gate_report(tmp_path):
     assert report["warnings"] == 0
 
     assert report["collisions"] == [
-        {"canonical_target_form": case_spec.EXPECTED_COLLISION_TARGET, "owners": case_spec.EXPECTED_COLLISION_OWNERS}
+        {
+            "canonical_target_form": case_spec.EXPECTED_COLLISION_TARGET,
+            "owners": case_spec.EXPECTED_COLLISION_OWNERS,
+            "renderer_delinked": case_spec.EXPECTED_COLLISION_DELINKED,
+        }
     ]
     assert report["unresolved_homonyms"] == [
         {

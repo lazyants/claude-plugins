@@ -67,7 +67,8 @@ SensesResult = _canon_senses_module.SensesResult
 # LanguageConfig fixture builder (mirrors tests/occ_index.test.py exactly)
 # ---------------------------------------------------------------------------
 
-def make_lang(particles=(), stopwords=(), elision_pattern=None, has_elision=None):
+def make_lang(particles=(), stopwords=(), elision_pattern=None, has_elision=None,
+              name_inventory=()):
     import re
     from bootstrap_names import LanguageConfig
     elision_re = re.compile(elision_pattern) if elision_pattern else None
@@ -80,6 +81,7 @@ def make_lang(particles=(), stopwords=(), elision_pattern=None, has_elision=None
         elision_re=elision_re,
         has_elision=has_elision,
         raw_bytes=b"{}",
+        name_inventory=frozenset(name_inventory),
     )
 
 
@@ -530,7 +532,9 @@ def test_split_form_goes_to_unresolved_homonyms_not_eligible():
 
     result = ot.build(manifest, canon, split_senses("Ivan"), PLAIN_LANG, nodestream)
     assert "Ivan" not in result["eligible_by_source_form"]
-    assert result["unresolved_homonyms"]["Ivan"] == {"count": 2, "segs": ["seg01", "seg01"]}
+    assert result["unresolved_homonyms"]["Ivan"] == {
+        "count": 2, "segs": ["seg01", "seg01"], "reason": "is_split",
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -648,3 +652,165 @@ def test_tokenizer_called_once_per_text_not_once_per_source_form(monkeypatch):
     assert len(result["eligible_by_source_form"]["Piotr"]) == 2
     assert len(result["eligible_by_source_form"]["Pavel"]) == 1
     assert "Ivan" not in result["eligible_by_source_form"]
+
+
+# ---------------------------------------------------------------------------
+# #238 SCOPE test (session-a §7 test 3) -- the fold must reach the LOOKUP
+# KEY, not just the trie descent, and the emitted eligible_by_source_form
+# dict key must stay the UNFOLDED canon key (Contract 3).
+# ---------------------------------------------------------------------------
+
+def test_238_fold_reaches_lookup_key_record_filed_under_unfolded_canon_key():
+    """canon source_form is the space-joined, UNPOINTED spelling; the source
+    text spells the SAME name pointed AND maqaf-joined. The #238/#241 fold
+    must let the matcher's grouping key and this lookup agree (trie descent
+    alone is not enough -- see occurrence_targets.py's own module docstring)
+    while the emitted Record stays filed under the literal unfolded canon
+    key "משה לייב", never a folded one (a folded key would be invisible to
+    every one of B's three canon-derived lookups -- Contract 3)."""
+    unfolded_source_form = "משה לייב"
+    pointed_maqaf_text = "ראה מֹשֶׁה־לַיִיב אתמול."
+    lang = make_lang(name_inventory=[unfolded_source_form])
+
+    manifest = make_manifest(blocks={"b1": make_block(pointed_maqaf_text, seg="seg01")})
+    nodestream = make_nodestream(nodes=[make_node("b1", "seg01")])
+    canon = make_canon({unfolded_source_form: make_entry()})
+
+    result = ot.build(manifest, canon, EMPTY_SENSES, lang, nodestream)
+
+    assert unfolded_source_form in result["eligible_by_source_form"], (
+        f"lookup missed -- got keys {sorted(result['eligible_by_source_form'])} "
+        "(if the trie found the match but the lookup key stayed unfolded, "
+        "this dict would be empty even though a Record was matcher-found)"
+    )
+    records = result["eligible_by_source_form"][unfolded_source_form]
+    assert len(records) == 1
+    assert records[0]["source_form"] == unfolded_source_form  # UNFOLDED, Contract 3
+    assert records[0]["seg"] == "seg01"
+    # a folded dict key (the mutation Contract 3 forbids) would be some
+    # other string -- assert it is genuinely absent, not just that the
+    # unfolded key happens to also be present.
+    assert set(result["eligible_by_source_form"]) == {unfolded_source_form}
+
+
+def test_238_scope_mutation_a_documented_an_unfolded_grouping_key_would_miss():
+    """Documents mutation (a) from session-a §7 test 3: if _spans_by_name's
+    grouping key stayed UNFOLDED while only the trie descent were folded,
+    the matcher would still find the maqaf-joined+pointed surface (folded
+    descent lets the trie reach it) but the RAW emitted name would group it
+    under itself, and an unfolded `.get(unfolded_source_form)` lookup
+    against the canon key would miss -- reproduced directly against
+    bootstrap_names.py (bypassing occurrence_targets.py's own already-fixed
+    lookup) to pin the failure mode the fold in _spans_by_name prevents."""
+    from bootstrap_names import extract_candidate_spans
+    unfolded_source_form = "משה לייב"
+    pointed_maqaf_text = "ראה מֹשֶׁה־לַיִיב אתמול."
+    lang = make_lang(name_inventory=[unfolded_source_form])
+
+    spans_by_name_unfolded = {}
+    for name, _mid, s, e in extract_candidate_spans(pointed_maqaf_text, lang):
+        spans_by_name_unfolded.setdefault(name, []).append((s, e))
+
+    # the trie found the match (emitted under its own raw name)...
+    assert "מֹשֶׁה־לַיִיב" in spans_by_name_unfolded
+    # ...but an UNFOLDED lookup against the canon key finds nothing.
+    assert spans_by_name_unfolded.get(unfolded_source_form, ()) == ()
+
+
+# ---------------------------------------------------------------------------
+# MAJOR 1 (post-merge codex finding) -- #238/#241 fold-key COLLISION: two
+# DISTINCT eligible canon.json source_forms that fold to the SAME match key
+# (e.g. a pointed entry and a separately-canonized maqaf-joined entry) must
+# NOT both retrieve -- and both get credited with -- the SAME physical
+# occurrence. Routed to unresolved_homonyms with reason:
+# "fold_match_key_collision", never double-filed into eligible_by_source_form.
+# ---------------------------------------------------------------------------
+
+def test_major1_fold_key_collision_routes_to_unresolved_homonyms_not_double_filed():
+    """Two eligible canon entries, "משה לייב" (space-joined) and "משה־לייב"
+    (maqaf-joined), fold to the SAME #238/#241 match key. ONE physical
+    occurrence in the source text ("משה־לייב") is what BOTH entries' own
+    lookups would retrieve. Neither may appear in eligible_by_source_form;
+    both must land in unresolved_homonyms with the collision reason."""
+    space_form = "משה לייב"
+    maqaf_form = "משה־לייב"
+    text = "ראה משה־לייב אתמול."
+    lang = make_lang(name_inventory=[space_form])
+
+    manifest = make_manifest(blocks={"b1": make_block(text, seg="seg01")})
+    nodestream = make_nodestream(nodes=[make_node("b1", "seg01")])
+    canon = make_canon({
+        space_form: make_entry(),
+        maqaf_form: make_entry(),
+    })
+
+    result = ot.build(manifest, canon, EMPTY_SENSES, lang, nodestream)
+
+    # NOT double-filed (or filed at all) into eligible_by_source_form.
+    assert space_form not in result["eligible_by_source_form"]
+    assert maqaf_form not in result["eligible_by_source_form"]
+
+    # Both members of the collision group land in unresolved_homonyms with
+    # the distinct collision reason (distinguishable from is_split).
+    assert result["unresolved_homonyms"][space_form]["reason"] == "fold_match_key_collision"
+    assert result["unresolved_homonyms"][maqaf_form]["reason"] == "fold_match_key_collision"
+    assert result["unresolved_homonyms"][space_form]["count"] == 1
+    assert result["unresolved_homonyms"][maqaf_form]["count"] == 1
+    assert result["unresolved_homonyms"][space_form]["segs"] == ["seg01"]
+    assert result["unresolved_homonyms"][maqaf_form]["segs"] == ["seg01"]
+
+
+def test_major1_fold_key_collision_warns_to_stderr(capsys):
+    space_form = "משה לייב"
+    maqaf_form = "משה־לייב"
+    text = "ראה משה־לייב אתמול."
+    lang = make_lang(name_inventory=[space_form])
+
+    manifest = make_manifest(blocks={"b1": make_block(text, seg="seg01")})
+    nodestream = make_nodestream(nodes=[make_node("b1", "seg01")])
+    canon = make_canon({space_form: make_entry(), maqaf_form: make_entry()})
+
+    ot.build(manifest, canon, EMPTY_SENSES, lang, nodestream)
+    captured = capsys.readouterr()
+    assert "WARN" in captured.err
+    assert "fold_match_key_collision" in captured.err
+    assert space_form in captured.err and maqaf_form in captured.err
+
+
+def test_major1_no_collision_no_warning_and_normal_eligible_routing():
+    """Control: a single, non-colliding canon entry must NOT be swept into
+    the collision route -- proves the detection is scoped to genuine
+    multi-entry collisions, not vacuously firing on every build()."""
+    manifest = make_manifest(blocks={"b1": make_block("Ivan spoke.", seg="seg01")})
+    nodestream = make_nodestream(nodes=[make_node("b1", "seg01")])
+    canon = make_canon({"Ivan": make_entry()})
+
+    import io
+    buf = io.StringIO()
+    real_stderr = sys.stderr
+    sys.stderr = buf
+    try:
+        result = ot.build(manifest, canon, EMPTY_SENSES, PLAIN_LANG, nodestream)
+    finally:
+        sys.stderr = real_stderr
+
+    assert "Ivan" in result["eligible_by_source_form"]
+    assert "Ivan" not in result["unresolved_homonyms"]
+    assert "WARN" not in buf.getvalue()
+
+
+def test_major1_collision_takes_precedence_over_is_split():
+    """A source_form that is BOTH a fold-key collision member AND is_split
+    must route under reason: "fold_match_key_collision", not "is_split" --
+    the documented precedence (module docstring + build()'s own comment)."""
+    space_form = "משה לייב"
+    maqaf_form = "משה־לייב"
+    text = "ראה משה־לייב אתמול."
+    lang = make_lang(name_inventory=[space_form])
+
+    manifest = make_manifest(blocks={"b1": make_block(text, seg="seg01")})
+    nodestream = make_nodestream(nodes=[make_node("b1", "seg01")])
+    canon = make_canon({space_form: make_entry(), maqaf_form: make_entry()})
+
+    result = ot.build(manifest, canon, split_senses(space_form), lang, nodestream)
+    assert result["unresolved_homonyms"][space_form]["reason"] == "fold_match_key_collision"

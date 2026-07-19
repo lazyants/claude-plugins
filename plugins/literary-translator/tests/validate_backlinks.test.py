@@ -546,6 +546,61 @@ def test_collision_is_exit_neutral(tmp_path):
     assert report["warnings"] == 0
     assert len(report["collisions"]) == 1
     assert sorted(report["collisions"][0]["owners"]) == ["IVANOV", "Ivan"]
+    # B5 (#240 gate half): this gate's own grouping key folds case + collapses
+    # whitespace ("Ivan" == "IVAN " under normalize_form), but
+    # render_obsidian.build_entity_index groups NFC-only, case-SENSITIVELY --
+    # "Ivan" and "IVAN " are two entirely distinct target strings there, each
+    # with exactly one owner, so the renderer NEVER de-links this pair. The
+    # gate reports a collision the renderer will never act on -- RED today:
+    # the field does not exist at all (KeyError).
+    assert report["collisions"][0]["renderer_delinked"] is False
+
+
+def test_collision_renderer_delinked_true_for_same_case_pair(tmp_path):
+    """B4: two entries sharing an IDENTICAL (same-case) canonical_target_form
+    -- render_obsidian.build_entity_index groups by NFC-exact, so this pair
+    collides there too and IS de-linked. RED today: the field does not exist
+    (KeyError); probe-confirmed the renderer removes this target from its
+    link map under collision_delink=True."""
+    root = make_root(tmp_path)
+    write_canon(root, {
+        "Petro": canon_entry("Petro", "Peter"),
+        "Pavlo": canon_entry("Pavlo", "Peter"),
+    })
+    write_nodestream(root, [])
+    set_aggregate(root, {"eligible_by_source_form": {}, "unresolved_homonyms": {}})
+
+    proc = run_gate(root)
+    assert proc.returncode == 0, proc.stderr
+    report = report_of(proc)
+    assert len(report["collisions"]) == 1
+    assert report["collisions"][0]["canonical_target_form"] == "Peter"
+    assert report["collisions"][0]["renderer_delinked"] is True
+
+
+def test_collision_sense_translated_pair_is_delinked_after_240(tmp_path):
+    """B6: a sense_translated entry sharing a target with an ordinary
+    transliterated entry -- POST-#240 semantics: the renderer's collision
+    tally now counts the sense_translated owner too, so this IS de-linked.
+    RED today twice over (pre-#240 render_obsidian.py): the field does not
+    exist at all, AND -- even once added naively -- the target would survive
+    both the collision_delink=False and collision_delink=True maps (the old
+    `:428` skip erased the sense_translated owner from the tally entirely,
+    so the narrative entry looked like the sole, uncontested owner)."""
+    root = make_root(tmp_path)
+    write_canon(root, {
+        "Nadezhda": canon_entry("Nadezhda", "Hope", basis="sense_translated"),
+        "Hope_src": canon_entry("Hope_src", "Hope", basis="transliterated"),
+    })
+    write_nodestream(root, [])
+    set_aggregate(root, {"eligible_by_source_form": {}, "unresolved_homonyms": {}})
+
+    proc = run_gate(root)
+    assert proc.returncode == 0, proc.stderr
+    report = report_of(proc)
+    assert len(report["collisions"]) == 1
+    assert report["collisions"][0]["canonical_target_form"] == "Hope"
+    assert report["collisions"][0]["renderer_delinked"] is True
 
 
 def test_unresolved_homonym_is_not_a_coverage_warning(tmp_path):
@@ -728,6 +783,295 @@ def test_malformed_nodestream_node_is_a_clean_hard_error_not_a_traceback(tmp_pat
     assert proc.returncode == 2, proc.stdout
     assert "Traceback" not in proc.stderr
     assert "nodestream" in proc.stderr
+
+
+def _write_raw_nodestream(root: Path, doc: dict) -> None:
+    assembled_dir = root / "out" / ".assembled"
+    assembled_dir.mkdir(parents=True, exist_ok=True)
+    (assembled_dir / "nodestream.json").write_text(json.dumps(doc, ensure_ascii=False), encoding="utf-8")
+
+
+def test_seg_order_non_list_is_clean_exit_2(tmp_path):
+    """B7 (#236): `book.seg_order` a bare string ("abc") is not a list --
+    RED today: no type check at all, so the gate iterates it as CHARACTERS
+    and returns a bogus seg map ({'a', 'b', 'c'}) -- a silently WRONG
+    answer, not a crash. Must be a clean, reason-carrying exit 2."""
+    root = make_root(tmp_path)
+    write_canon(root, {})
+    _write_raw_nodestream(root, {"book": {"seg_order": "abc"}, "nodes": []})
+
+    proc = run_gate(root)
+    assert proc.returncode == 2, proc.stdout
+    assert "Traceback" not in proc.stderr
+    assert "seg_order" in proc.stderr
+
+
+def test_seg_order_non_string_element_is_clean_exit_2(tmp_path):
+    """B8 (#236): `seg_order = [1, 2]` -- RED today: uncaught AttributeError
+    ('int' object has no attribute 'encode') escapes as exit 1 plus a raw
+    traceback, and exit 1 is ADVISORY -- W9 would silently continue past a
+    gate that crashed."""
+    root = make_root(tmp_path)
+    write_canon(root, {})
+    _write_raw_nodestream(root, {"book": {"seg_order": [1, 2]}, "nodes": []})
+
+    proc = run_gate(root)
+    assert proc.returncode == 2, proc.stdout
+    assert "Traceback" not in proc.stderr
+    assert "seg_order" in proc.stderr
+
+
+def test_book_not_an_object_is_clean_exit_2(tmp_path):
+    """B9 (#236): `book = ["x"]` (non-empty, so it survives the `or {}`
+    fallback that only catches falsy values). RED today: uncaught
+    AttributeError ('list' object has no attribute 'get') when
+    `_seg_filename_map` calls `.get("seg_order")` on a list."""
+    root = make_root(tmp_path)
+    write_canon(root, {})
+    _write_raw_nodestream(root, {"book": ["x"], "nodes": []})
+
+    proc = run_gate(root)
+    assert proc.returncode == 2, proc.stdout
+    assert "Traceback" not in proc.stderr
+    assert "book" in proc.stderr
+
+
+def test_canon_entries_present_but_not_object_is_clean_exit_2(tmp_path):
+    """B10 (#236): canon.json `{"entries": []}` -- RED today:
+    render_obsidian._canon_entries tolerantly returns {} for this shape
+    (correct FOR THE RENDERER, which also accepts a bare entries{} mapping
+    as its whole `canon` argument), so the gate silently checked ZERO
+    entities and exited 0 -- green but vacuous. The gate is stricter than
+    the renderer on purpose here."""
+    root = make_root(tmp_path)
+    (root / "canon.json").write_text(json.dumps({"entries": []}), encoding="utf-8")
+    write_nodestream(root, [])
+
+    proc = run_gate(root)
+    assert proc.returncode == 2, proc.stdout
+    assert "Traceback" not in proc.stderr
+    assert "entries" in proc.stderr
+
+
+# ===========================================================================
+# #236 fence-awareness + inline-code stripping
+# ===========================================================================
+
+
+def test_fenced_mentions_region_is_not_a_region(tmp_path):
+    """B11: an entity note whose ONLY <!-- lt:mentions:begin/end --> marker
+    pair sits inside a ``` fence enclosing an EXAMPLE that happens to name
+    the real expected link -- the dangerous direction, a false GREEN. RED
+    today: `parse_mentions_region` treats the fenced pair as the real
+    region regardless of the fence (probe-confirmed), so the example's
+    "001 seg01" link would satisfy real coverage even though there is no
+    genuine Mentions region in the note at all."""
+    root = _one_expected_setup(tmp_path)
+    body = [
+        "Some prose before the example.",
+        "",
+        "Here is what a real Mentions section would look like:",
+        "",
+        "```",
+        *mentions_block(["001 seg01"]),
+        "```",
+        "",
+        "More prose after -- no REAL marker pair anywhere in this note.",
+    ]
+    write_note(root, "other/Ivan.md", raw_entity_note(body_lines=body))
+
+    proc = run_gate(root)
+    assert proc.returncode == 1, proc.stderr
+    report = report_of(proc)
+    assert report["mentions_coverage"]["missing"] == [{"source_form": "Ivan", "seg": "seg01"}], (
+        "a marker pair living inside a fenced code block must never count "
+        "as a real Mentions region"
+    )
+
+
+def test_fenced_marker_does_not_break_a_real_region(tmp_path):
+    """B12: the INVERSE-direction guard, so the fence fix cannot become a
+    one-way ratchet -- a REAL Mentions region plus a SEPARATE fenced
+    example block (also containing marker-shaped lines) must still parse
+    the real region normally. RED under a naive "reject the whole note on
+    ANY marker duplicate" fix: two begin/end pairs total (one real, one
+    fenced) would make `_single_marker_pair` see len(begins) != 1 and
+    return None, false-RED-ing every expected seg as missing."""
+    root = _one_expected_setup(tmp_path)
+    body = [
+        *mentions_block(["001 seg01"]),
+        "",
+        "Here is an example of the marker syntax:",
+        "",
+        "```",
+        *mentions_block(["999 FORGED SEGMENT"]),
+        "```",
+    ]
+    write_note(root, "other/Ivan.md", raw_entity_note(body_lines=body))
+
+    proc = run_gate(root)
+    assert proc.returncode == 0, proc.stderr
+    report = report_of(proc)
+    assert report["warnings"] == 0
+    assert report["mentions_coverage"]["missing"] == []
+
+
+def test_info_bearing_fence_line_never_closes_the_outer_fence(tmp_path):
+    """Bot review P1 finding 2: a line shaped like an OPENING fence with an
+    info string (e.g. "```python") must NEVER be mistaken for a CLOSING
+    fence while an outer fence is still open -- CommonMark reserves an
+    info string for opening fences only; a real closer carries nothing but
+    optional trailing whitespace after the delimiter run. RED today: the
+    prior `_FENCE_DELIM_RE` was prefix-only (captured just the backtick
+    run, ignored "python"), so `char == open_char and length >= open_len`
+    fired on "```python" exactly as it would on a bare "```", wrongly
+    closing the outer fence and un-masking everything after it -- bot
+    repro: `_single_marker_pair(['```', '```python', begin, link, end,
+    '```']) == (2, 4)` (the inner marker pair wrongly counted as real)."""
+    root = _one_expected_setup(tmp_path)
+    body = [
+        "An outer fence containing an inner, illustrative fenced example:",
+        "",
+        "```",
+        "```python",
+        *mentions_block(["001 seg01"]),
+        "```",
+    ]
+    write_note(root, "other/Ivan.md", raw_entity_note(body_lines=body))
+
+    proc = run_gate(root)
+    assert proc.returncode == 1, proc.stderr
+    report = report_of(proc)
+    assert report["mentions_coverage"]["missing"] == [{"source_form": "Ivan", "seg": "seg01"}], (
+        "a marker pair living inside a fence that an info-bearing "
+        "delimiter line wrongly appeared to close must still be treated "
+        "as entirely inside that fence, never a real Mentions region"
+    )
+
+
+def test_four_space_indented_fence_does_not_open_a_fence(tmp_path):
+    """Bot review P2 finding (round 2): a fence delimiter indented 4+
+    COLUMNS is CommonMark indented code, not a fence -- whether or not a
+    fence happens to be open at that point. RED today: `_fenced_line_mask`
+    matched `_FENCE_DELIM_RE` against `ln.strip()`, which erases ANY amount
+    of leading whitespace, so a 4-space-indented "```" wrongly opened a
+    spurious fence and masked the real marker pair right after it -- bot
+    repro: `_single_marker_pair(['    ```', begin, '[[001 seg01]]', end])
+    is None` (wrongly). Real marker pair right after the indented "```"
+    (never closed -- it must never have opened) must still be found."""
+    root = _one_expected_setup(tmp_path)
+    body = [
+        "    ```",  # 4-space indent -- indented CODE, not a fence opener
+        *mentions_block(["001 seg01"]),
+    ]
+    write_note(root, "other/Ivan.md", raw_entity_note(body_lines=body))
+
+    proc = run_gate(root)
+    assert proc.returncode == 0, proc.stderr
+    report = report_of(proc)
+    assert report["mentions_coverage"]["missing"] == [], (
+        "a 4-space-indented ``` line must never open a spurious fence and "
+        "mask a real Mentions marker pair right after it"
+    )
+
+
+@pytest.mark.parametrize("spaces", [0, 1, 2, 3])
+def test_zero_to_three_space_indented_fence_still_opens_a_fence(tmp_path, spaces):
+    """The boundary companion to the test above: at 0-3 columns of
+    indentation a ``` line IS still a genuine fence opener (CommonMark's
+    own <=3-column tolerance). Left deliberately unclosed here, so the
+    real marker pair right after it stays masked as fence content and is
+    reported MISSING -- pins the boundary at exactly 3 vs 4, not just
+    proving one side of it."""
+    root = _one_expected_setup(tmp_path)
+    body = [
+        " " * spaces + "```",
+        *mentions_block(["001 seg01"]),
+    ]
+    write_note(root, "other/Ivan.md", raw_entity_note(body_lines=body))
+
+    proc = run_gate(root)
+    assert proc.returncode == 1, proc.stderr
+    report = report_of(proc)
+    assert report["mentions_coverage"]["missing"] == [{"source_form": "Ivan", "seg": "seg01"}], (
+        f"a {spaces}-space-indented ``` line must still open a real fence "
+        f"(<=3 columns of indentation is within CommonMark's tolerance)"
+    )
+
+
+def test_tab_indented_fence_does_not_open_a_fence(tmp_path):
+    """A single leading tab expands to column 4 (CommonMark's tab-stop
+    rule, never a flat width) -- same "indented code, not a fence"
+    treatment as 4 literal spaces above, not 1 character's worth of
+    indent."""
+    root = _one_expected_setup(tmp_path)
+    body = [
+        "\t```",
+        *mentions_block(["001 seg01"]),
+    ]
+    write_note(root, "other/Ivan.md", raw_entity_note(body_lines=body))
+
+    proc = run_gate(root)
+    assert proc.returncode == 0, proc.stderr
+    report = report_of(proc)
+    assert report["mentions_coverage"]["missing"] == [], (
+        "a tab-indented (column 4) ``` line must never open a spurious "
+        "fence either"
+    )
+
+
+def test_inline_code_wikilink_not_counted_as_coverage(tmp_path):
+    """B13: a Mentions region whose only wikilink is a BACKTICK-QUOTED
+    `` `[[001 real]]` `` -- an author showing the link syntax as literal
+    text, not emitting a real link. RED today: counted as real coverage
+    (probe-confirmed: `frozenset({'001 real'})`)."""
+    root = _one_expected_setup(tmp_path)
+    body = [
+        "<!-- lt:mentions:begin -->",
+        "## Mentions",
+        "",
+        "See the syntax: `[[001 seg01]]` (not a real link, just an example).",
+        "<!-- lt:mentions:end -->",
+    ]
+    write_note(root, "other/Ivan.md", raw_entity_note(body_lines=body))
+
+    proc = run_gate(root)
+    assert proc.returncode == 1, proc.stderr
+    report = report_of(proc)
+    assert report["mentions_coverage"]["missing"] == [{"source_form": "Ivan", "seg": "seg01"}], (
+        "a backtick-quoted wikilink must never count as real coverage"
+    )
+
+
+def test_double_backtick_quoted_wikilink_not_counted_as_coverage(tmp_path):
+    """Bot review P1 finding 3: a Mentions region whose only wikilink is
+    wrapped in a DOUBLE-backtick span (`` ``[[001 real]]`` ``, the
+    CommonMark idiom for quoting text that itself contains a single
+    backtick, or just an author's stylistic choice) -- must be stripped
+    exactly like the single-backtick case above. RED today: the prior
+    `_INLINE_CODE_RE = r"`[^`\\n]*`"` only ever matched a SINGLE-backtick
+    span -- against "``[[001 seg01]]``" it "closed" on the very next
+    (adjacent) backtick, consuming an EMPTY single-backtick pair at each
+    end and leaving the wikilink in the middle fully exposed to
+    `_WIKILINK_RE` (probe-confirmed: `parse_mentions_region` returned
+    `frozenset({'001 seg01'})`) -- the exact false-GREEN #236 exists to
+    prevent."""
+    root = _one_expected_setup(tmp_path)
+    body = [
+        "<!-- lt:mentions:begin -->",
+        "## Mentions",
+        "",
+        "See the syntax: ``[[001 seg01]]`` (not a real link, just an example).",
+        "<!-- lt:mentions:end -->",
+    ]
+    write_note(root, "other/Ivan.md", raw_entity_note(body_lines=body))
+
+    proc = run_gate(root)
+    assert proc.returncode == 1, proc.stderr
+    report = report_of(proc)
+    assert report["mentions_coverage"]["missing"] == [{"source_form": "Ivan", "seg": "seg01"}], (
+        "a double-backtick-quoted wikilink must never count as real coverage"
+    )
 
 
 # ===========================================================================

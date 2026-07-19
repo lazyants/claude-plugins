@@ -241,6 +241,14 @@ output:
         # hardcoded schema enum (see references/output-target-adapters/obsidian.md for preset examples
         # to copy from). A category absent from this map (or left {} entirely, as here) routes to an
         # "other" folder -- never a hard failure.
+      mentions_section:
+        enabled: true
+          # ON BY DEFAULT (an absent mentions_section block, or an absent/null enabled key, all resolve
+          # to enabled too -- this explicit block just keeps the shipped example self-documenting rather
+          # than activating the feature by absence). Emits a source-anchored "## Mentions" occurrence
+          # index in each entity note and engages collision de-linking; the advisory validate_backlinks.py
+          # W9 gate also runs. Set to false to opt out (byte-identical to pre-1.10.0 output). See
+          # references/output-target-adapters/obsidian.md.
     epub: null
     custom:
       renderer_path: null
