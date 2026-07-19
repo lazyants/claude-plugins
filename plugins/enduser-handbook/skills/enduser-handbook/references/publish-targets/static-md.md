@@ -52,10 +52,13 @@ English kebab-case, one level (nested groups like `a/b` are out of scope for 1.5
 **Activation rule.** This adapter's group-aware machinery — the grouped branch of the chapter
 path above, and the grouped index-wiring container logic further down — is gated on
 `anyGroup(entries)`, pinned by unit test: a wholly group-free manifest never produces a grouped
-path or a container line anywhere in this adapter. **Two exceptions acquire group-free behavior
-in 1.6.0 and are not gated this way** — they apply identically whether or not the manifest has
-any groups: the embed-path formula (`staticEmbedPath`, see "Assets" below) and the duplicate-slug
-halt (`validateGroups`, see `manifest-discipline.md`).
+path or a container line anywhere in this adapter. `assets/lib/chapter-paths.mjs`'s own activation
+rule has **two 1.6.0 exceptions that are group-free-aware by design and no longer consult
+`anyGroup`: `staticEmbedPath` (see "Assets" below) and `validateGroups` (see
+`manifest-discipline.md`)**. That count is a property of the **helper module**, not a ceiling on
+adapter behavior — an individual publish-target adapter (this one, or another) may carry its own
+group-free behavior changes on top of it, so `anyGroup` gating must never be assumed to cover
+everything an adapter does.
 
 ## Assets
 
@@ -97,8 +100,15 @@ three layouts that matter:
 | parent     | `../items/01.png`        | `01.png`           | CHANGES  |
 
 `chapterAssetDir(entry)` resolves correctly in every layout whose operands share a common anchor,
-degenerate ones included — the three rows above are exhaustive over that class, pinned by unit
-test. Profile paths with unequal unresolved leading `../` climbs (e.g. `chapter_file` and
+degenerate ones included — the three rows above are **representative** of that class, pinned by
+unit test, not an exhaustive enumeration of every possible directory topology. A **cousin**
+topology, where `capture.output_dir` and the chapter's directory branch apart below a shared
+ancestor rather than one nesting inside the other (e.g. `chapter_file: vault/docs/handbook/items.md`,
+`capture.output_dir: vault/assets`), is not one of the three rows above but still agrees between
+spellings — both resolve to `../../assets/items/01.png` (verified by running `embedPath` and
+`legacyStaticEmbedPath` against those exact inputs). Divergence tracks the degenerate and parent
+cases above specifically, not directory topology in general. Profile paths with unequal unresolved
+leading `../` climbs (e.g. `chapter_file` and
 `capture.output_dir` both expressed relative to a project root, but climbing out of it by a
 different number of segments) are a known limitation of the shared `relative()` path helper in
 `assets/lib/chapter-paths.mjs` (see issue) — pre-existing, not introduced or worsened by 1.6.0. It
@@ -183,9 +193,12 @@ So compute every link relative to the chapter that contains it:
 relative(dirname(chapter_file), target_file)
 ```
 
-The nesting depth of `chapters_dir` varies the number of `../` segments, and the formula always
-yields the right path. The literal paths below are **examples for this layout** — never copy a
-literal across to a profile with a different layout; re-derive it from the formula.
+The nesting depth of `chapters_dir` varies the number of `../` segments, and the formula yields
+the right path whenever `chapter_file` and `target_file` share a common anchor. It is the same
+`relative()` helper the embed formula uses (see "Assets" above), so it carries the same known
+limitation on profile paths with unequal unresolved leading `../` climbs. The literal paths below
+are **examples for this layout** — never copy a literal across to a profile with a different
+layout; re-derive it from the formula.
 
 - **Chapter → glossary** (example for this layout, with `chapters_dir: vault/handbook` and
   `glossary_dir: vault/knowledge/glossary`): `[Term](../knowledge/glossary/index.md#term)` —

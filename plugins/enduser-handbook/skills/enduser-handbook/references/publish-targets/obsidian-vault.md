@@ -45,13 +45,15 @@ across translations.
 
 `group` is an optional field on a manifest entry (`references/manifest-discipline.md`),
 also always English kebab-case, one level (no `/`). A manifest where no entry sets it —
-the 1.4.1 shipped default — produces only the flat form above. As of 1.6.0 this adapter
-no longer behaves identically to 1.4.1 in every section below: two behaviors now apply
-to every manifest regardless of grouping — the asset-embed path formula ("Layout you
-produce" below) always uses the full-target join, and the duplicate-slug halt
-(`validateGroups`, `references/manifest-discipline.md`) always runs. Every other section
-below keeps the 1.4.1 group-free behavior unchanged. Flat and grouped entries coexist in
-one manifest. Canonical chapter path (D2, shared with `static-md.md` and `SKILL.md`):
+the 1.4.1 shipped default — produces only the flat form above. As of 1.6.0, the two
+exceptions are in `assets/lib/chapter-paths.mjs` — `staticEmbedPath` (the asset-embed
+path formula, "Layout you produce" below, now always the full-target join) and
+`validateGroups` (the duplicate-slug halt, always runs). In `publish.wikilinks: false`
+mode this adapter ALSO applies the full-target glossary formula and runs the Markdown-link
+integrity gate for group-free manifests (see "Glossary backlink discipline" and "Link
+integrity gate before you publish" below). Every other section keeps the 1.4.1 group-free
+behavior unchanged. Flat and grouped entries coexist in one manifest. Canonical chapter
+path (D2, shared with `static-md.md` and `SKILL.md`):
 
 ```
 grouped: {{publish.chapters_dir}}/<group>/<slug>.md

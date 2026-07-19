@@ -61,40 +61,88 @@ has_ci() {
 # Inert Markdown does NOT count as proof: an HTML comment (`<!-- ... -->`, single-line or spanning
 # multiple lines) or a fenced code block (``` or ~~~) can contain the needle text without it being
 # live prose — that is the documentation equivalent of the EMBED_FORMULA false-green this test file
-# exists to kill, so both are skipped as content. Because fence contents are skipped, a `#` line
-# INSIDE a fence is also never treated as a heading boundary (skipping fence lines for content but
-# still treating `## Heading` inside a fence as a real boundary would truncate a section early and
-# false-RED instead — same fix, both directions).
+# exists to kill, so both are skipped as content. Two principles, in this order:
+#   1. FENCE STATE WINS FIRST. Inside a fence, nothing is a comment opener and nothing is a heading
+#      — fence content is entirely opaque, checked before comment state. A fence opener is <=3
+#      leading spaces (4+ is an indented code block, not a fence — CommonMark) then a run of 3+ of
+#      the SAME character (` or ~); the matching closer must use that same character and be at
+#      least as long, so a short `~~~` never closes a `~~~~` fence and vice versa. Char + length
+#      are tracked, not a bare on/off flag.
+#   2. COMMENTS ARE SPAN-STRIPPED, NOT LINE-DISCARDED. A line that is entirely a comment (or lies
+#      inside a multi-line one) contributes nothing. A line with live text AND an inline trailing
+#      comment (`LIVE <!-- note -->`) keeps its live text — only the `<!-- ... -->` span is cut.
 has_in_section() {
   local msg="$1" file="$2" heading="$3" needle="$4"
   if [ ! -f "$file" ]; then bad "$msg (file not found: $(basename "$file"))"; return; fi
   if awk -v heading="$heading" -v needle="$needle" '
-       # multi-line HTML comment: once opened, every line is inert until one closes it.
-       in_comment {
-         if ($0 ~ /-->/) { in_comment = 0 }
-         next
+       function leading_spaces(s,    i, n) {
+         n = length(s); i = 1
+         while (i <= n && substr(s, i, 1) == " ") i++
+         return i - 1
        }
-       # a line that opens a comment is inert; it also opens multi-line state unless it closes here too.
-       /<!--/ {
-         if ($0 !~ /-->/) { in_comment = 1 }
-         next
+       function count_run(s, ch,   i, n) {
+         n = length(s); i = 1
+         while (i <= n && substr(s, i, 1) == ch) i++
+         return i - 1
        }
-       # fenced code block delimiter: toggle state, the marker line itself is inert.
-       /^[ \t]*(```+|~~~+)/ {
-         in_fence = !in_fence
-         next
+       function blank_from(s, from,   i, n, c) {
+         n = length(s)
+         for (i = from; i <= n; i++) {
+           c = substr(s, i, 1)
+           if (c != " " && c != "\t") return 0
+         }
+         return 1
        }
-       # any line strictly inside a fence is inert — including one that looks like a heading.
-       in_fence { next }
        {
-         n = match($0, /^#+/)
-         hlevel = (n == 1) ? RLENGTH : 0
+         raw = $0
+         indent = leading_spaces(raw)
+         rest = substr(raw, indent + 1)
+         fc = substr(rest, 1, 1)
+
+         # (1) fence state, evaluated before anything else — a fence is opaque, full stop.
+         if (in_fence) {
+           is_close = 0
+           if (indent <= 3 && fc == fence_char) {
+             run = count_run(rest, fence_char)
+             if (run >= fence_len && blank_from(rest, run + 1)) is_close = 1
+           }
+           if (is_close) { in_fence = 0 }
+           next
+         }
+         if (indent <= 3 && (fc == "`" || fc == "~")) {
+           run = count_run(rest, fc)
+           if (run >= 3) { in_fence = 1; fence_char = fc; fence_len = run; next }
+         }
+
+         # (2) HTML comments — strip the comment span(s), keep any live text on the line.
+         line = raw
+         if (in_comment) {
+           p = index(line, "-->")
+           if (p == 0) next
+           line = substr(line, p + 3)
+           in_comment = 0
+         }
+         p = index(line, "<!--")
+         if (p > 0) {
+           after_open = substr(line, p + 4)
+           q = index(after_open, "-->")
+           if (q > 0) {
+             line = substr(line, 1, p - 1) substr(after_open, q + 3)
+           } else {
+             line = substr(line, 1, p - 1)
+             in_comment = 1
+           }
+         }
+
+         n2 = match(line, /^#+/)
+         hlevel = (n2 == 1) ? RLENGTH : 0
+
+         if (hlevel > 0 && line == heading && found_heading == 0) {
+           in_section = 1; found_heading = 1; level = hlevel; next
+         }
+         if (in_section && hlevel > 0 && hlevel <= level) { in_section = 0 }
+         if (in_section && index(line, needle) > 0) { found_needle = 1 }
        }
-       hlevel > 0 && $0 == heading && found_heading == 0 {
-         in_section = 1; found_heading = 1; level = hlevel; next
-       }
-       in_section && hlevel > 0 && hlevel <= level { in_section = 0 }
-       in_section && index($0, needle) > 0 { found_needle = 1 }
        END { exit (found_heading && found_needle) ? 0 : 1 }
      ' "$file"; then
     ok "$msg"
