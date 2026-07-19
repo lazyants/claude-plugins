@@ -824,6 +824,23 @@ has_in_section "SKILL.md W1: pins the actual validateGroups(entries) call, not j
 has_in_section "SKILL.md W6: pins the actual validateGroups(entries) call, not just its prose" \
   "$SKILL" '### W6 — Revalidation / audit mode (existing chapters)' \
   'MUST run `validateGroups(entries)`'
+# round-14 [IMPORTANT]: the pin above proves the CALL exists, but not what it's called WITH. The
+# original wording — "against the current manifest (delta or unchanged)" — read naturally as "the
+# delta manifest". validateGroups only counts duplicates within the array it receives, so
+# validating an accepted delta alone against an unchanged retained entry of the same slug returns
+# `[]`, silently permitting the exact overwrite #221 exists to prevent. A4 replaced it with an
+# explicit merged-manifest requirement PLUS the mechanism, so a future re-compression has to
+# actively delete a stated reason rather than merely miss an implication. Two needles, not one:
+# the requirement (what) and the mechanism (why) are independently corruptible — losing the why
+# alone reopens the exact editorial pressure that created this bug (an editor tightens the prose,
+# drops the "unnecessary" explanation, and a later edit erodes the requirement itself since nobody
+# left evidence of why it mattered).
+has_in_section "SKILL.md W6: validateGroups runs against the MERGED manifest, never the delta alone" \
+  "$SKILL" '### W6 — Revalidation / audit mode (existing chapters)' \
+  'every retained entry plus the accepted delta, merged into one array, never the delta alone'
+has_in_section "SKILL.md W6: states WHY the delta alone is insufficient (validateGroups' array-scoped duplicate check)" \
+  "$SKILL" '### W6 — Revalidation / audit mode (existing chapters)' \
+  'only sees duplicates within the array you hand it'
 has_in_section "manifest-discipline: MUST run validateGroups(entries) (mandatory, not optional)" \
   "$MDISC" '## The discipline: no capture code before review' \
   'MUST run validateGroups(entries)'
