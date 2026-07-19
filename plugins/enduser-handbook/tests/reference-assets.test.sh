@@ -64,8 +64,11 @@ has_ci() {
 # leading spaces (4+ is an indented code block, not a fence — CommonMark) then a run of 3+ of the
 # SAME character (` or ~); the matching closer must use that same character and be at least as
 # long, so a short `~~~` never closes a `~~~~` fence and vice versa. Char + length are tracked, not
-# a bare on/off flag. CRLF line endings are normalized before both the heading compare and the
-# needle scan. An empty needle is a hard failure, never a silent pass.
+# a bare on/off flag. A backtick fence's info string may not itself contain a backtick (CommonMark)
+# — a line like ```` ```lang`x ```` is ordinary text, not an opener; tildes carry no such rule, so a
+# clean info string like ```` ```js ```` still opens normally. CRLF line endings are normalized
+# before both the heading compare and the needle scan. An empty needle is a hard failure, never a
+# silent pass.
 #
 # Residual, deliberately not handled: HTML comments are NOT tracked, so a needle that appears only
 # inside a `<!-- ... -->` (in or out of a fence) still counts as found, and a needle sitting inside
@@ -115,7 +118,14 @@ has_in_section() {
          }
          if (indent <= 3 && (fc == "`" || fc == "~")) {
            run = count_run(rest, fc)
-           if (run >= 3) { in_fence = 1; fence_char = fc; fence_len = run; next }
+           if (run >= 3) {
+             info = substr(rest, run + 1)
+             # CommonMark: a backtick fence info string may not itself contain a backtick
+             # (tildes have no such rule) — otherwise this is ordinary text, not an opener.
+             if (fc != "`" || index(info, "`") == 0) {
+               in_fence = 1; fence_char = fc; fence_len = run; next
+             }
+           }
          }
 
          line = raw
@@ -151,6 +161,42 @@ count_fixed() {
 line_of() {
   grep -nF -- "$1" "$2" 2>/dev/null | head -n1 | cut -d: -f1
 }
+
+echo "== has_in_section self-test: backtick-fence info-string boundary (round-4 regression) =="
+# Permanent boundary cases for the fence-opener fix above — synthetic fixtures, not project docs.
+# Both are phrased as plain has_in_section (positive, "must be found") calls via a heading-boundary
+# reformulation, so no extra assertion helper is needed: the bug under test is really about whether
+# a REAL heading gets recognized as a section boundary, and that is directly, positively provable.
+SELFTEST_DIR="$(mktemp -d)"
+trap 'rm -rf "$SELFTEST_DIR"' EXIT
+
+# codex's counterexample: a backtick run whose info string itself contains a backtick must NOT be
+# treated as a fence opener — it is ordinary text. If it were wrongly treated as an opener, the
+# fence would never close (no matching info-string-free closer follows), so it would swallow
+# `## Other` as fence content instead of recognizing it as a real heading, and NEEDLE below would
+# never be found under it either.
+cat > "$SELFTEST_DIR/backtick-info-string.md" <<'EOF'
+## Target
+```lang`x
+## Other
+NEEDLE
+EOF
+has_in_section "self-test: backtick-in-info-string line is text, '## Other' is a real boundary" \
+  "$SELFTEST_DIR/backtick-info-string.md" '## Other' 'NEEDLE'
+
+# Positive companion — the fix must not over-correct: a clean info string (no embedded backtick)
+# must still open a real fence, so a heading-lookalike INSIDE it does not steal the section from
+# the needle that legitimately follows once the fence closes.
+cat > "$SELFTEST_DIR/clean-info-string.md" <<'EOF'
+## Assets
+```js
+## Not A Real Section
+```
+NEEDLE
+## Next
+EOF
+has_in_section "self-test: a clean-info-string fence still opens, hides a fenced pseudo-heading" \
+  "$SELFTEST_DIR/clean-info-string.md" '## Assets' 'NEEDLE'
 
 echo "== surface-audit.playwright.ts =="
 SA="$ASSETS/surface-audit.playwright.ts"
