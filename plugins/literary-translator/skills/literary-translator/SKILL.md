@@ -761,9 +761,19 @@ best-effort integrity tripwire, `skeptic_setup.py` stamps a THREE-way hash
 triplet — `canon_sha256`/`manifest_sha256`/`senses_sha256` (#243 made
 `canon_senses.json` a third authoritative frozen input this release, so it
 is stamped and checked alongside the other two) — into the aggregate
-manifest, via the same `compute_frozen_input_hash` (`suspicion_scan.py`)
-both the stamper and every verifier call; no second, independently-drifting
-copy exists to fall out of sync.
+manifest. Both the stamper and every verifier ultimately bottom out in the
+same `compute_frozen_input_hash_from_state` (`suspicion_scan.py`) — no
+second, independently-drifting copy of the hash formula exists to fall out
+of sync — but they reach it differently, and the difference is load-bearing.
+A verifier calls `compute_frozen_input_hash(path)`, a thin wrapper that
+reads `path` FRESH and hashes it: that is exactly right for a verifier,
+whose job is comparing "what's on disk right now" against the stamp. The
+stamper must NOT call that wrapper: it hashes the `(state, content)` pair
+it already captured ONCE at derivation-read time, before the
+freshness/worklist check that same snapshot fed — a fresh re-read at
+stamp-write time would instead record whatever is on disk at THAT later
+moment, silently adopting any mutation that landed in the window between
+derivation and stamping as if it had been there from the start.
 
 Detection now fires at **two** decision points, not one. The first is
 `skeptic_ready.py --verify-merged`'s own internal check, which runs after a

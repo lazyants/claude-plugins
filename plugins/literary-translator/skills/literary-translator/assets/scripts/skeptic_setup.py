@@ -379,28 +379,48 @@ def _build_entity_windows(entry: dict, windows_per_entity: int):
 
 
 def compute_skeptic_input_digest(
-    *, canon_bytes: bytes, manifest_bytes: bytes, worklist_bytes: bytes,
+    *, canon_state: str, canon_bytes: bytes, manifest_state: str, manifest_bytes: bytes,
+    senses_state: str, senses_bytes: bytes, worklist_bytes: bytes,
     assignments: list, config_values: dict, language_config_raw_bytes: bytes,
     schemas_dir_hash_hex: str, script_dir: Path, template_bytes: bytes,
 ) -> str:
-    """sha256 hex over, concatenated in this FIXED order: canon.json bytes +
-    manifest.json bytes + the worklist's own raw bytes + canonical-JSON of
-    the fully-resolved per-entity windows/batch assignment + canonical-JSON
-    of every CLI/config value (the producer's own scan parameters plus the
-    two skeptic-only ones) + the resolved LanguageConfig.raw_bytes + the
-    schemas-dir hash + the full skeptic code closure's bytes (sorted) + the
-    skeptic template's own bytes. Any single-byte change to any one of these
-    inputs changes this digest -- see this module's docstring for the full
-    member list and rationale. Every member is separated by a single NUL
-    byte (mirrors suspicion_scan.compute_producer_input_digest()'s own
-    framing exactly) so two adjacent variable-length members -- most
-    notably two adjacent closure script files -- can never collide by
-    boundary concatenation (e.g. "AB"+"C" vs "A"+"BC" hashing identically
-    with no separator)."""
+    """sha256 hex over, concatenated in this FIXED order: canon.json state +
+    canon.json bytes + manifest.json state + manifest.json bytes +
+    canon_senses.json state + canon_senses.json bytes + the worklist's own
+    raw bytes + canonical-JSON of the fully-resolved per-entity windows/
+    batch assignment + canonical-JSON of every CLI/config value (the
+    producer's own scan parameters plus the two skeptic-only ones) + the
+    resolved LanguageConfig.raw_bytes + the schemas-dir hash + the full
+    skeptic code closure's bytes (sorted) + the skeptic template's own
+    bytes. Any single-byte change to any one of these inputs changes this
+    digest -- see this module's docstring for the full member list and
+    rationale. Every member is separated by a single NUL byte (mirrors
+    suspicion_scan.compute_producer_input_digest()'s own framing exactly)
+    so two adjacent variable-length members -- most notably two adjacent
+    closure script files -- can never collide by boundary concatenation
+    (e.g. "AB"+"C" vs "A"+"BC" hashing identically with no separator).
+
+    Codex round 4: `canon_state`/`manifest_state`/`senses_state` (each
+    "absent"/"regular"/"irregular") are new -- this is the SKEPTIC RESUME
+    digest (`resolve_skeptic_run()` decides fresh-vs-resume purely by
+    comparing this value against a prior run's own stamped `input.digest`),
+    and it previously carried NO senses input at all and no state
+    information for canon/manifest either. A state-only mutation of any of
+    the three frozen inputs (an absent sidecar replaced by a genuinely-empty
+    regular file, or by a directory -- content unchanged either way) was
+    therefore invisible to it: `resolve_skeptic_run()` would wrongly resume
+    the existing run and `run()` would go on to REWRITE that run's
+    `assignments.json`, overwriting its H1 stamps with the new state and
+    silently laundering the very mutation H1 exists to catch. Callers pass
+    the SAME `(state, bytes)` snapshot `read_frozen_input_snapshot()`
+    captured once at derivation-read time -- never a fresh re-read here
+    either, for the identical reason round 3's stamping fix does not
+    re-read."""
     h = hashlib.sha256()
     parts = [
-        canon_bytes,
-        manifest_bytes,
+        canon_state.encode("ascii"), canon_bytes,
+        manifest_state.encode("ascii"), manifest_bytes,
+        senses_state.encode("ascii"), senses_bytes,
         worklist_bytes,
         _canonical_json_bytes(assignments),
         _canonical_json_bytes(config_values),
@@ -569,7 +589,8 @@ def run(args) -> dict:
     #    reject fail-closed on any mismatch (stale canon/manifest/params/
     #    language-config/producer-code).
     recomputed_producer_digest = compute_producer_input_digest(
-        canon_bytes, manifest_bytes, senses_bytes, resolved_params, lang.raw_bytes, SCRIPT_DIR,
+        canon_state, canon_bytes, manifest_state, manifest_bytes, senses_state, senses_bytes,
+        resolved_params, lang.raw_bytes, SCRIPT_DIR,
     )
     stamped_producer_digest = worklist.get("producer_input_digest")
     if recomputed_producer_digest != stamped_producer_digest:
@@ -647,7 +668,10 @@ def run(args) -> dict:
     template_bytes = template_path.read_bytes()
 
     skeptic_input_digest = compute_skeptic_input_digest(
-        canon_bytes=canon_bytes, manifest_bytes=manifest_bytes, worklist_bytes=worklist_bytes,
+        canon_state=canon_state, canon_bytes=canon_bytes,
+        manifest_state=manifest_state, manifest_bytes=manifest_bytes,
+        senses_state=senses_state, senses_bytes=senses_bytes,
+        worklist_bytes=worklist_bytes,
         assignments=assignments, config_values=config_values,
         language_config_raw_bytes=lang.raw_bytes, schemas_dir_hash_hex=schemas_dir_hash_hex,
         script_dir=SCRIPT_DIR, template_bytes=template_bytes,
@@ -677,6 +701,18 @@ def run(args) -> dict:
     #    digest-hashed worklist+config (a MATCH-resume rebuild is always
     #    byte-identical to what's already on disk), mirroring
     #    resume_setup.py's own glossary-manifest-rewrite-on-resume rationale.
+    #    Codex round 4: this claim depends on `skeptic_input_digest` (the
+    #    resume gate above) actually covering EVERYTHING this dict derives
+    #    from, INCLUDING canon_state/manifest_state/senses_state -- before
+    #    that fix, a MATCH-resume could still rewrite this dict's H1 stamps
+    #    with a DIFFERENT state than the original run captured (the digest
+    #    was blind to state, so "MATCH" didn't actually mean "same inputs").
+    #    Now that compute_skeptic_input_digest() hashes state directly, a
+    #    MATCH really does mean canon_state/canon_bytes/manifest_state/
+    #    manifest_bytes/senses_state/senses_bytes are ALL identical to the
+    #    original run's, so the rewrite (H1 stamps included) really is
+    #    byte-identical -- this comment's claim is what codex round 4 is
+    #    the fix FOR, not a pre-existing invariant it merely restates.
     aggregate = {
         "schema_version": 1,
         "run_id": run_id,
@@ -745,9 +781,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--senses-path", metavar="PATH", default=None,
                          help=f"Path to canon_senses.json (default: {DEFAULT_SENSES_PATH}). "
                               "MUST be the same sidecar suspicion_scan.py resolved this "
-                              "worklist against -- re-read fresh off disk here (never trusted "
-                              "from a caller) to recompute producer_input_digest (#243) and "
-                              "to stamp senses_sha256 into the aggregate manifest (H1).")
+                              "worklist against -- read ONCE here (never trusted from a "
+                              "caller), as a (state, bytes) snapshot, to recompute "
+                              "producer_input_digest AND the skeptic resume digest (#243), "
+                              "and to stamp senses_sha256 into the aggregate manifest (H1) "
+                              "from that SAME captured snapshot -- never a second, later "
+                              "re-read (codex round 3/4: a stamp-time re-read would let a "
+                              "mutation land in the gap and get silently adopted as trusted).")
     parser.add_argument("--worklist", metavar="PATH", default=None,
                          help=f"Path to suspicion_worklist.json (default: {DEFAULT_WORKLIST_PATH}).")
     parser.add_argument("--particle-config", required=True, metavar="FILENAME",

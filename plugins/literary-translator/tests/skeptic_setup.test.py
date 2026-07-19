@@ -33,6 +33,8 @@ import time
 import unicodedata
 from pathlib import Path
 
+import pytest
+
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 ASSETS_DIR = PLUGIN_ROOT / "skills" / "literary-translator" / "assets"
 SCRIPTS_DIR = ASSETS_DIR / "scripts"
@@ -174,15 +176,15 @@ def compute_expected_producer_digest(root: Path, scan_params: dict,
     ss = _load_module("suspicion_scan_for_test", scripts_dir / "suspicion_scan.py", scripts_dir)
     bn = _load_module("bootstrap_names_for_test", scripts_dir / "bootstrap_names.py", scripts_dir)
     lang = bn.load_language_config(particle_config_filename, languages_dir)
-    canon_path = root / "canon.json"
-    canon_bytes = canon_path.read_bytes() if canon_path.is_file() else b""
-    manifest_bytes = (root / "manifest.json").read_bytes()
-    # #243: canon_senses.json's own raw bytes, tolerant-read exactly like
-    # canon_bytes -- make_skeptic_root() never writes a sidecar by default,
-    # so this is b"" (absent) unless a test writes one itself before calling
-    # write_worklist()/this helper.
-    senses_path = root / "canon_senses.json"
-    senses_bytes = senses_path.read_bytes() if senses_path.is_file() else b""
+    # codex round 4: (state, bytes) via the REAL read_frozen_input_snapshot()
+    # -- never a hand-rolled tolerant read here -- so this helper's own
+    # classification can never independently drift from what main() itself
+    # calls. make_skeptic_root() never writes a canon_senses.json sidecar by
+    # default, so senses_state is "absent" unless a test writes one itself
+    # before calling write_worklist()/this helper.
+    canon_state, canon_bytes = ss.read_frozen_input_snapshot(root / "canon.json")
+    manifest_state, manifest_bytes = ss.read_frozen_input_snapshot(root / "manifest.json")
+    senses_state, senses_bytes = ss.read_frozen_input_snapshot(root / "canon_senses.json")
 
     resolved_citation_types = ss.resolve_citation_block_types(scan_params["source_format"], citation_override)
     resolved_params = ss.resolved_scan_params(
@@ -197,7 +199,8 @@ def compute_expected_producer_digest(root: Path, scan_params: dict,
         resolved_citation_types=resolved_citation_types,
     )
     return ss.compute_producer_input_digest(
-        canon_bytes, manifest_bytes, senses_bytes, resolved_params, lang.raw_bytes, scripts_dir,
+        canon_state, canon_bytes, manifest_state, manifest_bytes, senses_state, senses_bytes,
+        resolved_params, lang.raw_bytes, scripts_dir,
     )
 
 
@@ -462,58 +465,76 @@ def test_aggregate_stamps_senses_sha256_of_absent_state_when_sidecar_absent(tmp_
     assert aggregate["senses_sha256"] != hashlib.sha256(b"").hexdigest()
 
 
-def test_h1_stamp_snapshots_derivation_time_state_not_a_later_reread(tmp_path):
-    """codex round 3 BLOCKER: skeptic_setup.py reads canon/manifest/senses
-    ONCE early (driving the freshness check + assignments this run
-    builds), but the H1 stamp was previously computed by RE-READING the
-    paths later, right before writing assignments.json. A mutation landing
-    in that window was silently ADOPTED as "the true state" instead of
-    being caught -- the published stamp would describe the MUTATED file
-    while the worklist-freshness check and the assignments this run just
-    built both still describe the ORIGINAL one.
+@pytest.mark.parametrize("slot", ["canon", "manifest", "senses"])
+def test_h1_stamp_snapshots_derivation_time_state_not_a_later_reread(tmp_path, slot):
+    """codex round 3 BLOCKER, round-4-corrected: skeptic_setup.py reads
+    canon/manifest/senses ONCE early (driving the freshness check +
+    assignments this run builds), but the H1 stamp was previously computed
+    by RE-READING the paths later, right before writing assignments.json. A
+    mutation landing in that window was silently ADOPTED as "the true
+    state" instead of being caught -- the published stamp would describe
+    the MUTATED file while the worklist-freshness check and the
+    assignments this run just built both still describe the ORIGINAL one.
+
+    Parameterized over all THREE (slot, stamp-field) pairs -- codex round 4:
+    the original version of this test only ever mutated canon_senses.json
+    and only ever asserted `senses_sha256`, so regressing ONLY
+    `canon_sha256` or ONLY `manifest_sha256` would have stayed green. A
+    "RED-prove all three at once" pass over that version only demonstrated
+    the test catches a TOTAL regression (all three stamps reverted
+    simultaneously), never a PER-STAMP one -- re-proving RED here means
+    reverting exactly the ONE stamp this parametrization targets, one at a
+    time.
 
     Injects a mutation at the exact boundary via a monkeypatch on
     `_schemas_dir_hash()` -- called well after the derivation reads (top of
     `run()`) and well before the aggregate dict (with its H1 stamps) is
     built, the same real ordering this bug lived in -- and asserts the
-    STAMP reflects the ORIGINAL snapshot, never the mutated one. This is
-    NOT "no mutation is ever missed": the whole point of H1 is that the
-    NEXT --verify-merged/--check-frozen-inputs re-read catches this by
-    comparing the (correctly-original) stamp against what's ACTUALLY on
-    disk now (mutated) -- a re-read stamp would instead make the stamp
-    agree with the mutation, and nothing downstream would ever see a
-    mismatch at all."""
+    TARGETED slot's stamp reflects the ORIGINAL snapshot, never the mutated
+    one. This is NOT "no mutation is ever missed": the whole point of H1 is
+    that the NEXT --verify-merged/--check-frozen-inputs re-read catches
+    this by comparing the (correctly-original) stamp against what's
+    ACTUALLY on disk now (mutated) -- a re-read stamp would instead make
+    the stamp agree with the mutation, and nothing downstream would ever
+    see a mismatch at all. skeptic_setup.py itself never JSON-parses
+    canon.json/manifest.json/canon_senses.json (only suspicion_scan.py/
+    skeptic_ready.py do, for their own different purposes), so an
+    arbitrary byte-suffix mutation is safe for all three slots here --
+    never needs to stay schema-valid."""
     root = make_skeptic_root(tmp_path)
     mod = _load_module(
         "skeptic_setup_for_snapshot_race_test", root / "scripts" / "skeptic_setup.py", root / "scripts"
     )
-    senses_path = root / "canon_senses.json"
-    original_senses_bytes = json.dumps(
-        {"schema_version": 1, "entries_by_source_form": {}}
-    ).encode("utf-8")
-    senses_path.write_bytes(original_senses_bytes)
-    original_senses_hash = mod.compute_frozen_input_hash_from_state("regular", original_senses_bytes)
+    filenames = {"canon": "canon.json", "manifest": "manifest.json", "senses": "canon_senses.json"}
+    stamp_fields = {"canon": "canon_sha256", "manifest": "manifest_sha256", "senses": "senses_sha256"}
+    target_path = root / filenames[slot]
+    if slot == "senses":
+        # canon_senses.json isn't written by make_skeptic_root() by default
+        # -- canon.json/manifest.json already are.
+        target_path.write_bytes(
+            json.dumps({"schema_version": 1, "entries_by_source_form": {}}).encode("utf-8")
+        )
+    original_bytes = target_path.read_bytes()
+    original_hash = mod.compute_frozen_input_hash_from_state("regular", original_bytes)
 
     entry = make_worklist_entry("Jean", occurrence_refs=[make_occurrence_ref("b1", "seg01", 0, 4)])
     write_worklist(root, [entry])
 
-    mutated_senses_bytes = json.dumps(
-        {"schema_version": 1, "entries_by_source_form": {"Injected": {"senses": []}}}
-    ).encode("utf-8")
+    mutated_bytes = original_bytes + b"  // mutated mid-run"
 
     real_schemas_dir_hash = mod._schemas_dir_hash
 
-    def _mutate_senses_then_hash_schemas():
+    def _mutate_then_hash_schemas():
         # Simulates a skeptic-agent tamper (or any other mid-run mutation)
         # landing in the window between this run's derivation reads and its
         # H1 stamp -- _schemas_dir_hash() is a real, unrelated call this
         # function makes at exactly that point, never touching canon/
         # manifest/senses itself, which is what makes it a clean injection
         # site rather than interfering with anything else in the flow.
-        senses_path.write_bytes(mutated_senses_bytes)
+        target_path.write_bytes(mutated_bytes)
         return real_schemas_dir_hash()
 
-    mod._schemas_dir_hash = _mutate_senses_then_hash_schemas
+    mod._schemas_dir_hash = _mutate_then_hash_schemas
 
     sp = DEFAULT_SCAN_PARAMS
     argv = [
@@ -534,20 +555,20 @@ def test_h1_stamp_snapshots_derivation_time_state_not_a_later_reread(tmp_path):
 
     run_dir = Path(result["run_dir"])
     aggregate = json.loads((run_dir / "assignments.json").read_text(encoding="utf-8"))
-    # Mutation this test guards: a stamp computed by RE-READING
-    # canon_senses.json at stamp time (the pre-fix shape) would hash the
-    # MUTATED bytes instead, making this assertion fail.
-    assert aggregate["senses_sha256"] == original_senses_hash, (
-        "MUTATION CAUGHT: the H1 stamp must describe the snapshot this run "
-        "actually derived its worklist-freshness check and assignments "
-        "from -- re-reading canon_senses.json fresh at stamp time instead "
-        "laundered the mid-run mutation into the published stamp"
+    # Mutation this test guards: a stamp computed by RE-READING the target
+    # path at stamp time (the pre-fix shape) would hash the MUTATED bytes
+    # instead, making this assertion fail.
+    assert aggregate[stamp_fields[slot]] == original_hash, (
+        f"MUTATION CAUGHT ({slot}): the H1 stamp must describe the snapshot "
+        "this run actually derived its worklist-freshness check and "
+        f"assignments from -- re-reading {filenames[slot]} fresh at stamp "
+        "time instead laundered the mid-run mutation into the published stamp"
     )
     # The on-disk file genuinely IS mutated now -- confirms the NEXT
     # --verify-merged/--check-frozen-inputs re-read will correctly catch
     # this as a tamper (stamped-original != actually-on-disk-mutated),
     # which is the property this whole test protects.
-    assert senses_path.read_bytes() == mutated_senses_bytes
+    assert target_path.read_bytes() == mutated_bytes
 
 
 def test_windows_capped_truncated_flag_and_verse_embedded_excluded(tmp_path):
@@ -736,6 +757,8 @@ def test_skeptic_input_digest_frames_members_no_boundary_collision(tmp_path):
     )
     scripts_dir = root / "scripts"
     common = dict(
+        canon_state="regular", manifest_state="regular",
+        senses_state="regular", senses_bytes=b"",
         worklist_bytes=b"{}",
         assignments=[],
         config_values={},

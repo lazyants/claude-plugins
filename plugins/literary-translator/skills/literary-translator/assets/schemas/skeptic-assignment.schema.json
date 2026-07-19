@@ -36,7 +36,7 @@
     "senses_sha256": {
       "type": "string",
       "pattern": "^[0-9a-f]{64}$",
-      "description": "Optional (#243). Same `compute_frozen_input_hash_from_state` state-tagged formula and derivation-time-snapshot semantics as canon_sha256 (see its own description) -- an absent sidecar hashes DISTINCTLY from a genuinely-empty regular one (never collapsing to the same value the way a plain content-only hash would), computed for the canon_senses.json sidecar this run was set up against. The sidecar became a THIRD frozen input once both verification modes started parsing it to project the ambiguity-competitors universe, so it carries the same tamper tripwire as canon_sha256/manifest_sha256."
+      "description": "Optional (#243). Same `compute_frozen_input_hash_from_state` state-tagged formula and derivation-time-snapshot semantics as canon_sha256 (see its own description) -- an absent sidecar hashes DISTINCTLY from a genuinely-empty regular one (never collapsing to the same value the way a plain content-only hash would), computed for the canon_senses.json sidecar this run was set up against. The sidecar became a THIRD frozen input once `--verify-merged` started PARSING it to project the ambiguity-competitors universe, so it needs the same tamper tripwire as canon_sha256/manifest_sha256 -- but `--check-frozen-inputs` never parses any of the three (canon.json/manifest.json/canon_senses.json alike): it re-hashes raw bytes plus path state ONLY, deliberately, so it can still answer even when a frozen input is malformed or absent, which is the whole reason that mode exists."
     },
     "batch_count": { "type": "integer", "minimum": 0 },
     "assignments": {

@@ -854,17 +854,20 @@ def resolved_scan_params(*, dispersion_threshold: int, sample_cap: int, windows_
     }
 
 
-def compute_producer_input_digest(canon_bytes: bytes, manifest_bytes: bytes,
-                                   senses_bytes: bytes, resolved_params: dict,
+def compute_producer_input_digest(canon_state: str, canon_bytes: bytes,
+                                   manifest_state: str, manifest_bytes: bytes,
+                                   senses_state: str, senses_bytes: bytes,
+                                   resolved_params: dict,
                                    language_config_raw_bytes: bytes,
                                    script_dir: Path) -> str:
     """THE one shared producer_input_digest algorithm: sha256 hex over --
-    in this fixed order -- `canon_bytes`, `manifest_bytes`, `senses_bytes`
-    (#243: the `canon_senses.json` sidecar's own raw bytes -- an absent
-    sidecar is `b""`, tolerant-read the SAME way `canon_bytes` already is,
-    NEVER via `canon_senses.load_senses()`, which exposes no raw bytes and
-    would make an absent sidecar indistinguishable from a schema-valid
-    logically-empty one), the canonically-serialized `resolved_params` (see
+    in this fixed order -- `canon_state`, `canon_bytes`, `manifest_state`,
+    `manifest_bytes`, `senses_state`, `senses_bytes` (#243: the
+    `canon_senses.json` sidecar's own raw bytes -- an absent sidecar is
+    `b""`, tolerant-read the SAME way `canon_bytes` already is, NEVER via
+    `canon_senses.load_senses()`, which exposes no raw bytes and would make
+    an absent sidecar indistinguishable from a schema-valid logically-empty
+    one), the canonically-serialized `resolved_params` (see
     `resolved_scan_params()`), `language_config_raw_bytes` (the resolved
     particle-config FILE's own exact bytes --
     `bootstrap_names.LanguageConfig.raw_bytes`), then the raw bytes of every
@@ -874,6 +877,23 @@ def compute_producer_input_digest(canon_bytes: bytes, manifest_bytes: bytes,
     concatenation (e.g. `"AB"+"C"` vs `"A"+"BC"` hashing identically with no
     separator).
 
+    Codex round 4: `canon_state`/`manifest_state`/`senses_state` (each
+    "absent"/"regular"/"irregular", see `_frozen_input_path_state`) are
+    hashed ALONGSIDE their matching bytes, never folded into the bytes
+    themselves (a caller elsewhere -- `main()`'s own `json.loads(canon_bytes)`
+    -- still needs `canon_bytes` to be the LITERAL file content). Without
+    this, a purely STATE-only change (an absent sidecar replaced by a
+    genuinely-empty regular file, or by a directory -- content `b""` either
+    way) is invisible to this digest: the worklist-freshness check this
+    digest drives would then treat a project whose frozen inputs changed
+    STATE as still-fresh, and (transitively, since `skeptic_setup.py`'s own
+    resume digest hashes the worklist's raw bytes) could let `skeptic_setup.py`
+    silently RESUME an existing run and overwrite its H1 stamps with the new
+    state, laundering the very state-only mutation H1 (round 2/3) exists to
+    catch. Caller's responsibility to resolve each `*_state` the SAME way
+    `compute_frozen_input_hash`/`read_frozen_input_snapshot` would (never a
+    second, independently-drifting classification).
+
     `suspicion_scan.py` calls this to STAMP a freshly-produced worklist;
     `skeptic_setup.py` (Part B) imports this EXACT function to RECOMPUTE
     and compare against a worklist's stored `producer_input_digest` before
@@ -881,7 +901,9 @@ def compute_producer_input_digest(canon_bytes: bytes, manifest_bytes: bytes,
     algorithms that could disagree on the same inputs.
     """
     hasher = hashlib.sha256()
-    parts = [canon_bytes, manifest_bytes, senses_bytes,
+    parts = [canon_state.encode("ascii"), canon_bytes,
+             manifest_state.encode("ascii"), manifest_bytes,
+             senses_state.encode("ascii"), senses_bytes,
              _canonical_json_bytes(resolved_params), language_config_raw_bytes]
     for member in PRODUCER_CODE_CLOSURE:
         parts.append((script_dir / member).read_bytes())
@@ -1117,7 +1139,12 @@ def main(argv=None) -> int:
     # canon_adjudication_audit.py's own convention exactly).
     allow_absent_senses = args.senses_path is None
 
-    canon_bytes = canon_path.read_bytes() if canon_path.is_file() else b""
+    # codex round 4: canon/manifest/senses are each captured as a (state,
+    # bytes) SNAPSHOT via read_frozen_input_snapshot() -- both feed
+    # compute_producer_input_digest() below, state ALONGSIDE bytes (see that
+    # function's own docstring for why a state-only change must move this
+    # digest too, not just H1's own stamp).
+    canon_state, canon_bytes = read_frozen_input_snapshot(canon_path)
     canon_entries = {}
     if canon_bytes:
         try:
@@ -1128,10 +1155,10 @@ def main(argv=None) -> int:
         if isinstance(canon_doc, dict) and isinstance(canon_doc.get("entries"), dict):
             canon_entries = canon_doc["entries"]
 
-    if not manifest_path.is_file():
+    manifest_state, manifest_bytes = read_frozen_input_snapshot(manifest_path)
+    if manifest_state != "regular":
         print(f"error: manifest not found: {manifest_path}", file=sys.stderr)
         return 1
-    manifest_bytes = manifest_path.read_bytes()
     try:
         manifest = json.loads(manifest_bytes.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -1150,7 +1177,7 @@ def main(argv=None) -> int:
     # the #243 ambiguity-competitors universe (class 8, fold_collision) via
     # canon_senses.fold_collision_map(). Both derive from the SAME on-disk
     # sidecar, read once.
-    senses_bytes = senses_path.read_bytes() if senses_path.is_file() else b""
+    senses_state, senses_bytes = read_frozen_input_snapshot(senses_path)
     try:
         senses_result = load_senses(senses_path, allow_absent=allow_absent_senses)
     except CanonSensesLoadError as exc:
@@ -1190,7 +1217,8 @@ def main(argv=None) -> int:
         resolved_citation_types=resolved_citation_types,
     )
     digest = compute_producer_input_digest(
-        canon_bytes, manifest_bytes, senses_bytes, resolved_params, lang.raw_bytes, SCRIPT_DIR
+        canon_state, canon_bytes, manifest_state, manifest_bytes, senses_state, senses_bytes,
+        resolved_params, lang.raw_bytes, SCRIPT_DIR,
     )
 
     worklist = {"schema_version": 1, "producer_input_digest": digest, "entries": entries_out}

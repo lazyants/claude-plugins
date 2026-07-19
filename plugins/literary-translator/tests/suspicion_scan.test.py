@@ -995,8 +995,12 @@ def test_producer_input_digest_deterministic_across_two_calls(tmp_path):
     contents = {name: f"content-{name}".encode() for name in ss.PRODUCER_CODE_CLOSURE}
     _write_closure_files(tmp_path, contents)
     params = {"dispersion_threshold": 12}
-    d1 = ss.compute_producer_input_digest(b"canon", b"manifest", b"senses", params, b"lang", tmp_path)
-    d2 = ss.compute_producer_input_digest(b"canon", b"manifest", b"senses", params, b"lang", tmp_path)
+    d1 = ss.compute_producer_input_digest(
+        "regular", b"canon", "regular", b"manifest", "regular", b"senses", params, b"lang", tmp_path
+    )
+    d2 = ss.compute_producer_input_digest(
+        "regular", b"canon", "regular", b"manifest", "regular", b"senses", params, b"lang", tmp_path
+    )
     # Mutation: hashing a non-canonical (e.g. insertion-order-dependent)
     # serialization of `resolved_params` would make this flaky across dict
     # construction orders even for byte-identical inputs.
@@ -1010,13 +1014,17 @@ def test_producer_input_digest_changes_with_each_closure_member(tmp_path, closur
     contents = {name: f"content-{name}".encode() for name in names}
     _write_closure_files(tmp_path, contents)
     params = {"dispersion_threshold": 12}
-    baseline = ss.compute_producer_input_digest(b"canon", b"manifest", b"senses", params, b"lang", tmp_path)
+    baseline = ss.compute_producer_input_digest(
+        "regular", b"canon", "regular", b"manifest", "regular", b"senses", params, b"lang", tmp_path
+    )
 
     mutated = dict(contents)
     target = names[closure_index]
     mutated[target] = contents[target] + b"-mutated"
     _write_closure_files(tmp_path, mutated)
-    changed = ss.compute_producer_input_digest(b"canon", b"manifest", b"senses", params, b"lang", tmp_path)
+    changed = ss.compute_producer_input_digest(
+        "regular", b"canon", "regular", b"manifest", "regular", b"senses", params, b"lang", tmp_path
+    )
     # Mutation: omitting `target` from PRODUCER_CODE_CLOSURE (or reading a
     # cached/stale copy of its bytes) would make a change to that ONE file
     # invisible to the digest, letting a stale worklist silently pass
@@ -1028,29 +1036,40 @@ def test_producer_input_digest_changes_with_canon_manifest_params_and_lang_bytes
     contents = {name: f"content-{name}".encode() for name in ss.PRODUCER_CODE_CLOSURE}
     _write_closure_files(tmp_path, contents)
     base_params = {"dispersion_threshold": 12}
-    baseline = ss.compute_producer_input_digest(b"canon-A", b"manifest-A", b"senses-A", base_params,
-                                                 b"lang-A", tmp_path)
+    baseline = ss.compute_producer_input_digest(
+        "regular", b"canon-A", "regular", b"manifest-A", "regular", b"senses-A",
+        base_params, b"lang-A", tmp_path,
+    )
 
-    assert ss.compute_producer_input_digest(b"canon-B", b"manifest-A", b"senses-A", base_params,
-                                             b"lang-A", tmp_path) != baseline
-    assert ss.compute_producer_input_digest(b"canon-A", b"manifest-B", b"senses-A", base_params,
-                                             b"lang-A", tmp_path) != baseline
-    assert ss.compute_producer_input_digest(b"canon-A", b"manifest-A", b"senses-A",
-                                             {"dispersion_threshold": 13},
-                                             b"lang-A", tmp_path) != baseline
+    assert ss.compute_producer_input_digest(
+        "regular", b"canon-B", "regular", b"manifest-A", "regular", b"senses-A",
+        base_params, b"lang-A", tmp_path,
+    ) != baseline
+    assert ss.compute_producer_input_digest(
+        "regular", b"canon-A", "regular", b"manifest-B", "regular", b"senses-A",
+        base_params, b"lang-A", tmp_path,
+    ) != baseline
+    assert ss.compute_producer_input_digest(
+        "regular", b"canon-A", "regular", b"manifest-A", "regular", b"senses-A",
+        {"dispersion_threshold": 13}, b"lang-A", tmp_path,
+    ) != baseline
     # Mutation: forgetting to fold language_config_raw_bytes into the
     # digest (e.g. dropping it from the `parts` list) would make this last
     # comparison equal to baseline even though the particle-config file
     # content differs.
-    assert ss.compute_producer_input_digest(b"canon-A", b"manifest-A", b"senses-A", base_params,
-                                             b"lang-B", tmp_path) != baseline
+    assert ss.compute_producer_input_digest(
+        "regular", b"canon-A", "regular", b"manifest-A", "regular", b"senses-A",
+        base_params, b"lang-B", tmp_path,
+    ) != baseline
     # #243: senses_bytes itself must be folded into the digest -- a curator
     # editing canon_senses.json (e.g. adding/removing a split-only form)
     # with canon/manifest/params/lang all held constant must still change
     # the stamped digest, or a stale worklist computed against the OLD
     # competitors universe would pass skeptic_setup.py's freshness check.
-    assert ss.compute_producer_input_digest(b"canon-A", b"manifest-A", b"senses-B", base_params,
-                                             b"lang-A", tmp_path) != baseline
+    assert ss.compute_producer_input_digest(
+        "regular", b"canon-A", "regular", b"manifest-A", "regular", b"senses-B",
+        base_params, b"lang-A", tmp_path,
+    ) != baseline
 
 
 def test_producer_input_digest_absent_senses_differs_from_logically_empty_senses(tmp_path):
@@ -1058,14 +1077,22 @@ def test_producer_input_digest_absent_senses_differs_from_logically_empty_senses
     # tolerant-read convention -- see compute_producer_input_digest's own
     # docstring) must hash DIFFERENTLY from a schema-valid but logically
     # empty document's real bytes -- otherwise deleting the sidecar between
-    # scans would be invisible to the digest.
+    # scans would be invisible to the digest. Both hashed with state
+    # "regular" here deliberately -- this test isolates the CONTENT
+    # distinction (absent bytes vs logically-empty bytes); the STATE
+    # distinction (this same senses_bytes==b"" under "absent" vs "regular"
+    # states) is covered separately, see
+    # test_producer_input_digest_state_only_change_moves_digest below.
     contents = {name: f"content-{name}".encode() for name in ss.PRODUCER_CODE_CLOSURE}
     _write_closure_files(tmp_path, contents)
     params = {"dispersion_threshold": 12}
-    absent = ss.compute_producer_input_digest(b"canon", b"manifest", b"", params, b"lang", tmp_path)
+    absent = ss.compute_producer_input_digest(
+        "regular", b"canon", "regular", b"manifest", "regular", b"", params, b"lang", tmp_path
+    )
     logically_empty_bytes = b'{"schema_version":1,"entries_by_source_form":{}}'
     logically_empty = ss.compute_producer_input_digest(
-        b"canon", b"manifest", logically_empty_bytes, params, b"lang", tmp_path
+        "regular", b"canon", "regular", b"manifest", "regular", logically_empty_bytes,
+        params, b"lang", tmp_path,
     )
     # Mutation: normalizing/short-circuiting an absent sidecar's bytes to
     # match a "logically empty" canonical form (instead of hashing the raw
@@ -1073,12 +1100,44 @@ def test_producer_input_digest_absent_senses_differs_from_logically_empty_senses
     assert absent != logically_empty
 
 
+@pytest.mark.parametrize("slot", ["canon", "manifest", "senses"])
+def test_producer_input_digest_state_only_change_moves_digest(tmp_path, slot):
+    """codex round 4: a STATE-only change (content held constant at b"" --
+    "absent" vs a genuinely-empty "regular" file, both read as b"") must
+    move this digest too, not just H1's own stamp -- otherwise
+    skeptic_setup.py's freshness check (which recomputes this SAME digest)
+    cannot tell a project whose frozen input's STATE changed since the
+    worklist was stamped from one that is genuinely still fresh, and
+    (transitively, since compute_skeptic_input_digest hashes worklist_bytes)
+    the skeptic RESUME digest would stay blind to it too."""
+    contents = {name: f"content-{name}".encode() for name in ss.PRODUCER_CODE_CLOSURE}
+    _write_closure_files(tmp_path, contents)
+    params = {"dispersion_threshold": 12}
+    states = {"canon": "regular", "manifest": "regular", "senses": "regular"}
+    states[slot] = "absent"
+    absent_variant = ss.compute_producer_input_digest(
+        states["canon"], b"", states["manifest"], b"", states["senses"], b"",
+        params, b"lang", tmp_path,
+    )
+    regular_variant = ss.compute_producer_input_digest(
+        "regular", b"", "regular", b"", "regular", b"", params, b"lang", tmp_path
+    )
+    assert absent_variant != regular_variant, (
+        f"MUTATION CAUGHT: a state-only change on {slot!r} (content b\"\" either way) "
+        "must move the digest -- state args are not actually being hashed"
+    )
+
+
 def test_producer_input_digest_separator_prevents_boundary_collision(tmp_path):
     contents = {name: b"x" for name in ss.PRODUCER_CODE_CLOSURE}
     _write_closure_files(tmp_path, contents)
     params = {}
-    d_ab_c = ss.compute_producer_input_digest(b"AB", b"C", b"", params, b"", tmp_path)
-    d_a_bc = ss.compute_producer_input_digest(b"A", b"BC", b"", params, b"", tmp_path)
+    d_ab_c = ss.compute_producer_input_digest(
+        "regular", b"AB", "regular", b"C", "regular", b"", params, b"", tmp_path
+    )
+    d_a_bc = ss.compute_producer_input_digest(
+        "regular", b"A", "regular", b"BC", "regular", b"", params, b"", tmp_path
+    )
     # Mutation: removing the `hasher.update(b"\\x00")` separator between
     # concatenated parts would make these two genuinely different inputs
     # ("AB"+"C" vs "A"+"BC") hash identically.
@@ -1257,7 +1316,8 @@ def test_main_end_to_end_produces_schema_valid_worklist_with_matching_digest(tmp
         resolved_citation_types=ss.resolve_citation_block_types("plain_text", None),
     )
     expected_digest = ss.compute_producer_input_digest(
-        canon_path.read_bytes(), manifest_path.read_bytes(), b"",  # no canon_senses.json in this fixture
+        "regular", canon_path.read_bytes(), "regular", manifest_path.read_bytes(),
+        "absent", b"",  # no canon_senses.json in this fixture
         resolved_params, lang.raw_bytes, ss.SCRIPT_DIR,
     )
     # Mutation: hashing the WRONG resolved parameters (e.g. CLI defaults

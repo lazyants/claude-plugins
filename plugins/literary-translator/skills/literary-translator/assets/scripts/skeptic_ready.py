@@ -271,10 +271,14 @@ except ImportError as exc:
     sys.exit(
         f"skeptic_ready.py: cannot import suspicion_scan.py from {SCRIPT_DIR} ({exc}).\n"
         "suspicion_scan.py must be installed alongside skeptic_ready.py under "
-        "${durable_root}/scripts/ -- it supplies the shared H1 frozen-input hash "
-        "algorithm (compute_frozen_input_hash) skeptic_setup.py stamps with (never a "
-        "second, independently-drifting implementation). Re-run Step 0a, or verify "
-        "the plugin install is not corrupted."
+        "${durable_root}/scripts/ -- it supplies compute_frozen_input_hash(), the "
+        "fresh-read H1 hash this VERIFIER re-hashes on-disk canon/manifest/senses "
+        "with to compare against skeptic_setup.py's own stamps (which are computed "
+        "from a captured snapshot via compute_frozen_input_hash_from_state(), never "
+        "via this fresh-read wrapper -- see that function's own docstring for why "
+        "the stamper and verifier need opposite freshness semantics from the same "
+        "hash formula). Re-run Step 0a, or verify the plugin install is not "
+        "corrupted."
     )
 
 
