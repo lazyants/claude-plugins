@@ -50,6 +50,34 @@ has_ci() {
   if grep -qiF -- "$needle" "$file" 2>/dev/null; then ok "$msg"; else bad "$msg ('$needle' not in $(basename "$file"))"; fi
 }
 
+# Assert a fixed string IS present within one Markdown section (the exact heading line up to,
+# but not including, the next heading of the same or shallower level). `has`/`hasnt` above are
+# whole-file greps and cannot prove a claim is section-bound; this can. One-pass awk, fixed-string
+# index() matching (not a regex), so a needle containing regex metacharacters still matches
+# literally. An absent heading is a hard failure, never a silent pass. Do NOT pipe awk into
+# `grep -q` — the script runs under `set -o pipefail` (:20) and an early `grep -q` exit would
+# surface as a false SIGPIPE failure here.
+has_in_section() {
+  local msg="$1" file="$2" heading="$3" needle="$4"
+  if [ ! -f "$file" ]; then bad "$msg (file not found: $(basename "$file"))"; return; fi
+  if awk -v heading="$heading" -v needle="$needle" '
+       {
+         n = match($0, /^#+/)
+         hlevel = (n == 1) ? RLENGTH : 0
+       }
+       hlevel > 0 && $0 == heading && found_heading == 0 {
+         in_section = 1; found_heading = 1; level = hlevel; next
+       }
+       in_section && hlevel > 0 && hlevel <= level { in_section = 0 }
+       in_section && index($0, needle) > 0 { found_needle = 1 }
+       END { exit (found_heading && found_needle) ? 0 : 1 }
+     ' "$file"; then
+    ok "$msg"
+  else
+    bad "$msg ('$needle' not found under heading '$heading' in $(basename "$file"))"
+  fi
+}
+
 # Count exact occurrences of a fixed string in a file (line-based). grep exits 1 (not just non-zero
 # from a real error) when the needle is simply ABSENT — the common, expected case for a not-yet-fixed
 # sentinel — so the `|| true` here is load-bearing: without it, a plain assignment's exit status
@@ -506,7 +534,9 @@ has "static-md: manual-migration halt"      "$MANUAL_MIGRATION_HALT" "$SMD"
 
 echo "== group axis (#19) — obsidian-only: Quartz limitation (D5) + markdown-link gate extension =="
 has "obsidian-vault: Quartz shortest-mode limitation note" "does **not** resolve under Quartz's \`shortest\`" "$OMD"
-has "obsidian-vault: activation-scoped markdown-link gate extension" 'extension**: when `publish.wikilinks: false` and the manifest is `anyGroup`, this item' "$OMD"
+# #220 Task J widens this gate off the `anyGroup` scope (was: 'and the manifest is `anyGroup`, this
+# item'); re-pointed at the post-edit wording (also asserted section-scoped below in the Task H block).
+has "obsidian-vault: markdown-link gate extension covers group-free" 'group-free manifests included' "$OMD"
 
 echo "== group axis (#19) — static-md-only: gate #1 group-aware + headings-only automation =="
 has "static-md: gate #1 is a resolution check, not a spelling check" 'resolution** check, not a spelling check' "$SMD"
@@ -540,6 +570,41 @@ has "revalidation: invokes chapterHasWikilinkTo("  'chapterHasWikilinkTo(' "$REV
 
 echo "== group axis (#19) — publish-targets README =="
 has "publish-targets README: Group handling: support or halt bullet" 'Group handling: support or halt.' "$PTREADME"
+
+echo "== #220/#221 write-canon + mandatory validateGroups wiring (Task H) =="
+# Section-bound (has_in_section), not whole-file: a whole-file grep cannot prove a claim is made
+# in the RIGHT step's own prose (round-5 blocker 6). These remain doc-consistency checks — they
+# cannot prove any runtime step imperatively CALLS validateGroups; that is a human-reviewed
+# contract (F1), not something greps enforce.
+has_in_section "SKILL.md W1: halts before any capture asset on a returned message" \
+  "$SKILL" '### W1 — Discover the feature surface' \
+  'halt on every returned message before any capture asset'
+has_in_section "SKILL.md W6: MUST run validation before re-capture/re-authoring" \
+  "$SKILL" '### W6 — Revalidation / audit mode (existing chapters)' \
+  'Before any re-capture or re-authoring, you MUST run'
+has_in_section "manifest-discipline: MUST run validateGroups(entries) (mandatory, not optional)" \
+  "$MDISC" '## The discipline: no capture code before review' \
+  'MUST run validateGroups(entries)'
+hasnt "manifest-discipline: no longer frames validateGroups as an optional convenience" \
+  'running it during drafting is an optional' "$MDISC"
+has_in_section "static-md: Assets section covers flat entries and group-free manifests alike" \
+  "$SMD" '## Assets' \
+  'flat entries and group-free manifests alike'
+hasnt "static-md: no longer keeps the byte-identical 1.4.1 embed form for group-free" \
+  'keep the shipped 1.4.1 embed form' "$SMD"
+has_in_section "obsidian-vault: glossary backlink discipline covers any manifest, wikilinks off" \
+  "$OMD" '## Glossary backlink discipline' \
+  'Wikilinks off, any manifest'
+hasnt "obsidian-vault: no longer scopes the glossary backlink fix to group-free only" \
+  'Wikilinks off, group-free manifest (shipped 1.4.1 form, unchanged)' "$OMD"
+has_in_section "obsidian-vault: link integrity gate covers group-free manifests too" \
+  "$OMD" '## Link integrity gate before you publish' \
+  'group-free manifests included'
+hasnt "obsidian-vault: gate no longer scoped to \`anyGroup\` only" \
+  'and the manifest is `anyGroup`, this item' "$OMD"
+has_in_section "obsidian-vault: link integrity gate states its chapter-scope limit (no handbook-wide sweep)" \
+  "$OMD" '## Link integrity gate before you publish' \
+  'does not sweep untouched chapters'
 
 echo "== Package A/B/D regression sentinels (#49, #50, #51, #52, #71) =="
 hasnt "no non-waiting isVisible after Escape"    'isVisible'                    "$CH"
