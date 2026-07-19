@@ -8,6 +8,7 @@
 - [Source-completeness before trusting a rebuild](#source-completeness)
 - [Cross-check your own artifacts](#cross-check-your-own-artifacts)
 - [Reproduce the gate's clean env](#reproduce-the-gates-clean-env)
+- [A staged RED gate must be SATISFIABLE by its owner](#a-staged-red-gate-must-be-satisfiable)
 
 ## Cover the DOMAIN, not the ticket's example
 
@@ -46,3 +47,29 @@ A green LOCAL test run is not proof of shippability — a CI/review gate under d
 - Fresh venv, declared reqs only: `python3 -m venv V && V/bin/pip install -r requirements.txt` — a venv excludes user-site, stripping ambient extras. Confirm the suspected extra is ABSENT: `V/bin/python -c 'import rfc3987'` → ModuleNotFoundError.
 - Force Linux-like tmp: `TMPDIR=/tmp V/bin/python -m pytest` — on macOS `/tmp` → `/private/tmp`, which DOES contain a `tmp` component, so tmp/path-sensitive guards fire exactly as on CI.
 - Run the FULL suite that way; green ⇒ shippable. A single knob (`TMPDIR=/tmp`) can reproduce the bulk of the failures instantly; the clean venv reproduces the dep-masked remainder.
+
+## A staged RED gate must be satisfiable
+
+When you stage a failing assertion BEFORE the fix (red-before-green across a team, where one owner
+writes the gate and a different owner writes the prose/code that turns it green), the gate must be
+satisfiable **by edits that owner is actually permitted to make**. Check this at authoring time, not
+when the owner reports failure.
+
+The failure shape: a `hasnt`-style casualty needle whose text ALSO matches a line the plan explicitly
+tells that owner to PRESERVE. The gate can then only go green by violating the plan, so a teammate
+doing exactly the right thing still fails. Verified 2026-07-19: a casualty
+`group-free manifest (shipped 1.4.1 form, unchanged)` was intended to bind one bullet but also
+matched a second, preserved bullet elsewhere in the same file; fixed by prefixing the discriminating
+words that made it unique. A needle punishing correct work is worse than no needle — it teaches the
+owner to distrust the gate.
+
+Cheap authoring checks, all `grep`, before handing the gate over:
+- **casualty uniqueness** — `grep -nF <casualty> <file>` must return EXACTLY the line(s) that owner
+  is supposed to change; if it also hits a preserved line, discriminate it further;
+- **post-edit needle is genuinely RED now** — zero matches inside the bounded section AND whole-file;
+- **the owner's allowed file set contains every line the gate implicates.**
+
+Related: distinguish **replacement** rows (a casualty exists; the paired `hasnt` proves the old
+wording is gone) from **addition-only** rows (new prose where none existed; `hasnt` is legitimately
+absent). Asserting a universal pairing you do not have invites someone to invent a casualty for an
+addition-only row, which manufactures exactly the unsatisfiable gate above.

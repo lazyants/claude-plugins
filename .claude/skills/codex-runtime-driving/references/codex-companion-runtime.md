@@ -71,6 +71,32 @@ job-log/rollout mtime is useless — watch the **bash output file growing** and 
 `Turn completed`. A positional `"$(cat …)"` needs a **BACKTICK-FREE** prompt (backticks inside
 `"$(…)"` trigger command substitution) — use `--prompt-file <p>` for arbitrary prompts.
 
+**NEVER pipe the launcher through `tail`/`head`** — `node "$CC" task … | tail -80` buffers until
+exit, so the bash output file sits at **0 bytes for the whole run**. That looks identical to "the
+job never started", and acting on it costs more than the pipe ever saved. Verified 2026-07-19: a
+`--prompt-file` review that was working perfectly read as dead, which triggered a kill + relaunch
++ a fabricated root cause (see the misdiagnosis warning below). Let it stream.
+
+**Verify the prompt ACTUALLY ARRIVED — the launcher reports success either way.** Immediately after
+launching, read the stored prompt back:
+```
+jq -r '.summary[0:120]' <job>.json     # must open with your real prompt text
+```
+Three distinct delivery bugs in one session all printed a cheerful "Codex Task started": an escaped
+`"\$(cat …)"` (codex received the literal string `$(cat /path)`), an unquoted heredoc whose
+backticks command-substituted (loud parse error — the benign case), and a prompt built in a shell
+whose cwd had drifted. Only the summary read-back catches all three. "Job started" proves nothing
+about what the job is reviewing.
+
+**Misdiagnosis warning — do not infer a flag is unsupported from surface behavior.** `--prompt-file`
+IS supported (`codex-companion.mjs:644`, `readTaskPrompt`; it is in `valueOptions` at `:764` and
+takes precedence over positionals). `task --help` does NOT print help — `help` is not a known flag,
+so it is dropped and codex runs with an empty prompt and answers with a generic capabilities blurb.
+That is easily misread as "`--help` was treated as the prompt, therefore unknown flags become the
+prompt, therefore `--prompt-file` isn't real". All three inferences are wrong. When runtime behavior
+seems to contradict this reference, `grep` the companion source before rewriting either one — the
+source is 30 seconds away and settles it.
+
 **B. `--background` + poll — for long/parallel work you drive yourself.**
 ```
 node "$CC" task --background --fresh --write --cwd <repo> --prompt-file <p> --json   # parse jobId
@@ -149,7 +175,7 @@ reports a PHANTOM exit-0 "success" with no verdict file.
 - **Fabricated wait-state:** the forwarder can report "waiting for a background job" (or name a
   plausible-but-nonexistent job id) with NOTHING actually dispatched. Never trust a bare "waiting for
   background job" — resume it to actually poll/verify, and independently check `status --all` for a job
-  whose STATE-DIR path matches your repo slug.
+  whose STATE-DIR path matches your repo slug **or the basename of whatever cwd you launched from**.
 - **Arg-misparse launch failure:** a prompt containing parenthesized code (e.g. `` (`python3 -m pytest`) ``)
   can make the forwarder build `--model "pytest),"` → codex 400 `… model is not supported`; `status <id>`
   shows `failed` in ~9 s. Fix = drive directly with `--prompt-file`.
@@ -183,7 +209,12 @@ reports a PHANTOM exit-0 "success" with no verdict file.
 
 ## Finding a lost job / "No job found"
 When the forwarder's prose "job ID" matches nothing under `status --all`:
-- The job is filed under the **repo slug** state dir, not the worktree name. Recover it by session id
+- The job is filed under a state dir keyed on the **launching shell's cwd BASENAME** — so a job
+  launched from a worktree files under the WORKTREE name, not the repo slug. Search every candidate
+  dir, not just the repo one. Note the Bash tool's cwd PERSISTS between calls, so an earlier `cd`
+  into a worktree silently redirects later launches (verified 2026-07-19: consecutive reviews in one
+  session landed in `claude-plugins-*` and `eh-220-221-*` purely from a leftover `cd`).
+  Recover it by session id
   (a UUID that appears in the forwarder's own Bash tool-call transcript even when the prose id is bogus):
   ```
   grep -rl "<codex-session-id>" ~/.claude/plugins/data/codex-openai-codex/state/

@@ -35,6 +35,15 @@ That single rule is referenced in spots that **drift independently** — fix one
 - A variant may be **capitalized** and sit in a file that also carries a real hit — a case-sensitive sweep misses it, and a careless in-file reword can clobber the benign mention.
 - Asset-file banner comments wrap the same claim differently (`.mjs`/`.d.mts`/`.ts` headers) — invisible to a prose needle.
 
+**The wrap trap bites your own VERIFICATION too, not just test needles.** When checking whether a
+teammate/reviewer actually wrote a required phrase, a plain `grep` for that phrase silently returns
+nothing if it straddles a wrap — and the natural reading is "they didn't write it", i.e. you accuse
+correct work of being missing. Verified 2026-07-19 four separate times in one session (twice by a
+teammate mid-edit, once by the lead auditing a teammate's output, once as a false-RED in a staged
+gate). For a VERIFICATION grep, join lines first: `tr '\n' ' ' < FILE | grep -o '<phrase>'`, or match
+a short fragment guaranteed to sit on one physical line. Reserve single-line needles for gates you
+control the wording of; use wrap-tolerant matching whenever you are reading someone else's prose.
+
 **Sweep discipline that holds:** run **several** short, wrap-surviving needles case-insensitively over the WHOLE repo, e.g.
 ```
 grep -rIn -i "other engines"
