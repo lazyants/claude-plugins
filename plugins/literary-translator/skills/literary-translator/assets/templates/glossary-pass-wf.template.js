@@ -352,7 +352,14 @@ async function batchStep(batch) {
   const precheck = await agent(batchPrecheckPrompt(batch), {
     effort: "low", phase: "GlossaryPass", label: "glossary:precheck:" + batch.index,
   })
-  if (precheck && precheck.indexOf("PRESENT") !== -1) {
+  // EXACT match, never substring (content-matching-sentinel-fragility, #228):
+  // a failure reply like "ABSENT 0 (fragment missing; not PRESENT)" contains
+  // the literal substring "PRESENT" and would falsely resume-skip under a
+  // `.indexOf(...) !== -1` check -- the sentinel and this check must agree
+  // on the WHOLE trimmed line, batch index included (batchPrecheckPrompt
+  // instructs the agent to return exactly "PRESENT <index>"/"ABSENT
+  // <index>"). Mirrors skeptic-pass-wf.template.js's own batchStep precheck.
+  if (String(precheck).trim() === "PRESENT " + batch.index) {
     log("batch " + batch.index + ": resume-skip -- existing fragment already passed --check-batch, not re-dispatching")
     return { batchIndex: batch.index, fragmentPath: fragmentPath(batch.index), ready: true }
   }
@@ -367,7 +374,12 @@ async function batchStep(batch) {
   const ready = await agent(batchWaitPrompt(batch), {
     effort: "low", phase: "GlossaryPass", label: "glossary:wait:" + batch.index,
   })
-  if (!ready || ready.indexOf("READY") === -1) {
+  // Same EXACT-match discipline as the precheck above (#228): a timeout
+  // reply like "TIMEOUT 0 (not READY)" contains the literal substring
+  // "READY" and would falsely pass a `.indexOf("READY") === -1` check
+  // (batchWaitPrompt instructs the agent to return exactly "READY
+  // <index>"/"TIMEOUT <index>").
+  if (String(ready).trim() !== "READY " + batch.index) {
     log("batch " + batch.index + ": fragment never became ready")
     return { batchIndex: batch.index, fragmentPath: fragmentPath(batch.index), ready: false, reason: "glossary-pass-null" }
   }

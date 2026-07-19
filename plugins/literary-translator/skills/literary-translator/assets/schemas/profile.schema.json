@@ -77,6 +77,28 @@
             }
           }
         },
+        "conservation": {
+          "description": "Opt-in (#196/#202 content-conservation gate, validate_conservation.py). Absent -- the common case, most projects are not a hand-wrap -- means the wrapper-conservation check is a documented SKIP, never a forced-on hard gate. Only declare this for a source hand-wrapped into this project's format from some other pre-wrap form (e.g. pdftotext -layout output split into an EPUB by hand), where the exact pre-wrap text has been preserved as an immutable baseline. All three paths are durable-root-relative (no absolute path, no '..' segment -- path-traversal safety, checked procedurally by validate_conservation.py, not this schema).",
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "required": ["baseline_path", "provenance_path"],
+          "properties": {
+            "baseline_path": {
+              "description": "The exact pre-wrap source text the wrap was made from, preserved verbatim.",
+              "type": "string",
+              "minLength": 1
+            },
+            "provenance_path": {
+              "description": "JSON map, built at wrap time, of baseline character spans -> manifest block_id -- see validate_conservation.py's own module docstring for the exact shape.",
+              "type": "string",
+              "minLength": 1
+            },
+            "allowed_omissions_path": {
+              "description": "Optional JSON file of line-regexes and byte-ranges (front matter, running heads, page numbers) the coverage-gap check tolerates as legitimately un-provenanced. Absent -- everything in the baseline must be provenance-covered.",
+              "type": ["string", "null"]
+            }
+          }
+        },
         "adapter_config": {
           "type": "object",
           "additionalProperties": false,
@@ -564,6 +586,21 @@
         "untranslated_sentinel": {
           "type": "string",
           "minLength": 1
+        },
+        "conservation_hollow_floor": {
+          "description": "Optional thresholds for validate_conservation.py's output-coverage v1 floor (#202, WARN-only): a block is flagged hollowed_output_block when its source word count is >= min_source_words AND its output word count is <= max_output_words. Absent -- both default (1, 0), i.e. 'non-empty source, empty output'. Absolute word counts, deliberately not a ratio -- see validate_assembled.py's own docstring on why a length-band is unsound across language pairs; a real calibrated band is deferred to v2.",
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "properties": {
+            "min_source_words": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "max_output_words": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
         }
       }
     },

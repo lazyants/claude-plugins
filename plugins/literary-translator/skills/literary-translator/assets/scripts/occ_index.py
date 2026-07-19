@@ -38,26 +38,44 @@ raw block ``plain_text`` -- CPython's ``str`` is already a codepoint
 sequence (PEP 393), so plain ``str`` slicing/indexing is exactly the right
 unit; no UTF-16-surrogate-pair handling is needed for non-BMP characters.
 
-## A-C6 (this train, #238/#241) -- this module stays mark/connector-SENSITIVE
+## #243 -- this module is now mark/connector-FOLD-AWARE (supersedes A-C6)
 
-``occurrence_targets.py`` (the ``## Mentions`` appendix's own occurrence
-engine) now folds Hebrew niqqud/cantillation marks and maqaf/geresh/
-gershayim connectors at LOOKUP time (``bootstrap_names.fold_match_key``), so
-an unpointed/space-joined canon entry finds a pointed/maqaf-joined source
-occurrence and vice versa. **This module deliberately does NOT.**
-``production_occurrences()``'s ``name == source_form`` comparison below stays
-an EXACT, unfolded string comparison on purpose (A-C6 = NO this train,
-lead-decisions.md) -- folding it would change ``evidence_verify.py``'s and
-``canon_adjudication_audit.py``'s evidence matrix with zero code change on
-their side, exactly the fail-silent, cross-session hazard
-``bootstrap_names.extract_candidate_spans``'s Contract 5 exists to prevent.
-So ``production_occurrences``/``evidence_verify.py``/``suspicion_scan.py``/
-``canon_adjudication_audit.py`` remain mark/connector-SENSITIVE after this
-train: a pointed or maqaf-joined occurrence that ``occurrence_targets.py``
-now correctly lists in the ``## Mentions`` appendix may still be invisible to
-this module's own evidence-matching. This is a known, deliberate residual,
-not an oversight -- a coordinated fold of this comparison is a candidate
-follow-up, not in scope here.
+A-C6 (#238/#241) had left this module's own comparison deliberately
+unfolded (A-C6 = NO that train, lead-decisions.md), tracked as a known
+residual: ``occurrence_targets.py`` (the ``## Mentions`` appendix's own
+occurrence engine) folded Hebrew niqqud/cantillation marks and maqaf/
+geresh/gershayim connectors at LOOKUP time (``bootstrap_names.
+fold_match_key``), so an unpointed/space-joined canon entry found a
+pointed/maqaf-joined source occurrence there, while this module's own
+``production_occurrences()`` -- the SAME evidence-matching authority
+``evidence_verify.py``/``suspicion_scan.py``/``canon_adjudication_audit.py``
+all bind against -- did not, silently diverging from the appendix path.
+
+**#243 closes that residual.** ``production_occurrences()``'s comparison
+below is now ``fold_match_key(name) == fold_match_key(source_form)``, never
+a raw, unfolded ``==`` -- so a pointed/maqaf-joined production occurrence IS
+found under an unpointed/space-joined canon ``source_form``, on every path
+that ultimately calls ``production_occurrences()``
+(``evidence_verify.py``, ``suspicion_scan.py``, this module's own
+``index_manifest()``). Two consequences that must not be conflated:
+
+- **Folding is comparison-only, never emission.** The EMITTED ``source_form``
+  and ``quote`` fields (``_build_record()``, below) stay the caller's own raw,
+  unfolded strings -- exactly as before -- so a byte-for-byte evidence check
+  against the raw source text is unaffected. Folding only widens which
+  production spans a given ``source_form`` is compared against.
+- **Fold KEYS can collide many-to-one** (e.g. a pointed and a maqaf-joined
+  form of the same name both fold to one key) -- a fact ``production_
+  occurrences()`` itself, a single-``source_form`` primitive, has no way to
+  detect (it cannot see whether some OTHER canon ``source_form`` shares its
+  fold key). Every caller that iterates more than one ``source_form`` at once
+  (``index_manifest()`` below, ``evidence_verify.py``'s
+  ``_group_production_spans_by_name()``, ``suspicion_scan.py``'s
+  ``build_worklist()``) is responsible for its own fail-closed collision
+  guard, built from ``canon_senses.fold_collision_map()`` -- crediting one
+  physical occurrence to more than one colliding ``source_form``, or
+  silently overwriting one with another, is exactly the bug that guard
+  exists to prevent (see ``index_manifest()``'s own docstring below).
 """
 import argparse
 import hashlib
@@ -65,6 +83,7 @@ import json
 import sys
 from collections import defaultdict
 from pathlib import Path
+from typing import Optional
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 DURABLE_ROOT = SCRIPT_DIR.parent
@@ -74,15 +93,32 @@ DEFAULT_NAME_CANDIDATES_PATH = DURABLE_ROOT / "name_candidates.json"
 DEFAULT_OUT_PATH = DURABLE_ROOT / "occurrence_index.json"
 
 try:
-    from bootstrap_names import extract_candidate_spans, load_language_config, BootstrapNamesError
+    from bootstrap_names import (
+        extract_candidate_spans, fold_match_key, load_language_config, BootstrapNamesError,
+    )
 except ImportError as exc:
     sys.exit(
         f"occ_index.py: cannot import bootstrap_names.py from {SCRIPT_DIR} ({exc}).\n"
         "bootstrap_names.py must be installed alongside occ_index.py under "
         "${durable_root}/scripts/ -- Step 0a copies the whole scripts/ set together. "
         "It supplies extract_candidate_spans(), the offset-preserving production "
-        "tokenizer/matcher this module reuses (never reimplements). Re-run Step 0a, "
-        "or verify the plugin install is not corrupted."
+        "tokenizer/matcher this module reuses (never reimplements), and "
+        "fold_match_key(), the #238/#241 Hebrew mark/connector MATCH KEY #243 uses "
+        "to compare production_occurrences()'s emitted name against source_form. "
+        "Re-run Step 0a, or verify the plugin install is not corrupted."
+    )
+
+try:
+    from canon_senses import fold_collision_map, FoldCollisionMap
+except ImportError as exc:
+    sys.exit(
+        f"occ_index.py: cannot import canon_senses.py from {SCRIPT_DIR} ({exc}).\n"
+        "canon_senses.py must be installed alongside occ_index.py under "
+        "${durable_root}/scripts/ -- it supplies fold_collision_map(), the shared "
+        "#238/#241 fold-key collision detector index_manifest() uses to fail-closed "
+        "a many-to-one match rather than silently crediting one physical occurrence "
+        "to more than one source_form (or overwriting one with another). Re-run Step "
+        "0a, or verify the plugin install is not corrupted."
     )
 
 
@@ -110,16 +146,21 @@ def production_occurrences(source_form: str, block_text: str, language_config) -
     ``LanguageConfig`` (carrying its real ``elision_re``/particle set) is
     required and load-bearing.
 
-    ``name == source_form`` is an EXACT, unfolded string comparison,
-    deliberately NOT #238/#241 mark/connector-folded (A-C6 = NO this train --
-    see this module's own docstring). A pointed/maqaf-joined ``source_form``
-    occurrence that ``occurrence_targets.py`` now correctly indexes may still
-    be invisible here.
+    ``fold_match_key(name) == fold_match_key(source_form)`` (#243, supersedes
+    A-C6's deliberate unfolded comparison -- see this module's own
+    docstring): a pointed/maqaf-joined production occurrence IS found under
+    an unpointed/space-joined ``source_form``, matching ``occurrence_targets.
+    py``'s own lookup semantics. This is a single-``source_form`` primitive
+    with no notion of a fold-key COLLISION among several other
+    ``source_form``s -- a caller comparing more than one ``source_form`` at
+    once must apply its own fail-closed guard (``canon_senses.
+    fold_collision_map()``); see ``index_manifest()``'s docstring below.
     """
+    key = fold_match_key(source_form)
     return [
         (char_start, char_end)
         for name, _mid_sentence, char_start, char_end in _run_spans(block_text, language_config)
-        if name == source_form
+        if fold_match_key(name) == key
     ]
 
 
@@ -188,44 +229,155 @@ def iter_manifest_blocks(manifest_path):
             yield block_id, block.get("seg"), text
 
 
-def index_manifest(manifest_path, source_forms, language_config) -> list:
-    """Every occurrence record, of every form in ``source_forms``, across
-    every block of ``manifest_path`` -- a flat list, in manifest block order
-    then ``source_forms`` order.
+def _warn_fold_collisions(fold_groups: dict, colliding: set) -> None:
+    """stderr WARN, unconditional whenever ``colliding`` is non-empty --
+    mirrors ``occurrence_targets._colliding_source_forms()``'s own warn
+    style. A LOCAL group (>=2 members within this call's own
+    ``source_forms``) gets one combined line naming every member and their
+    shared key; a form excluded ONLY because the caller's own
+    ``competitors`` map flagged it (no sibling visible within this call's
+    own ``source_forms``) gets its own line, since there is no local group
+    here to name."""
+    reported = set()
+    for key in sorted(fold_groups):
+        group = fold_groups[key]
+        if len(group) >= 2:
+            reported.update(group)
+            print(
+                f"WARN occ_index.py: source_forms {sorted(group)!r} all fold to the "
+                f"same #238/#241 match key {key!r} in index_manifest() -- excluded "
+                "from the occurrence index entirely (fail-closed); neither is "
+                "credited any occurrence until the operator disambiguates (rename "
+                "or merge the colliding canon entries).",
+                file=sys.stderr,
+            )
+    for name in sorted(colliding - reported):
+        print(
+            f"WARN occ_index.py: source_form {name!r} folds to the same #238/#241 "
+            "match key as another competitor outside this call's own source_forms "
+            "-- excluded from the occurrence index entirely (fail-closed).",
+            file=sys.stderr,
+        )
+
+
+def index_manifest(manifest_path, source_forms, language_config, *,
+                    collisions_out: Optional[list] = None,
+                    competitors: Optional["FoldCollisionMap"] = None) -> list:
+    """Every occurrence record, of every non-colliding form in
+    ``source_forms``, across every block of ``manifest_path`` -- a flat
+    list, in manifest block order then ``source_forms`` order. Return shape
+    is unchanged by #243 (still a flat list): ``suspicion_scan.py`` iterates
+    it directly and several tests call this function positionally with
+    exactly 3 args -- ``collisions_out``/``competitors`` are keyword-only
+    additions, never repositioning an existing parameter.
 
     Calls ``_run_spans()`` (the expensive tokenizer/run-building pass) exactly
     ONCE per block -- never once per ``(block, source_form)`` pair, which
     would re-run the full extraction ``len(source_forms)`` times over the
-    same text. The single pass's spans are grouped by ``name`` (preserving
-    each name's own start-order, since ``_run_spans()`` already returns spans
-    sorted by ``char_start``), then records are emitted per ``source_form``
-    in ``source_forms`` order by looking up that form's spans from the
-    grouped map -- identical output to calling ``build_occurrence_records()``
-    per form, just without re-triggering the extraction primitive per form.
+    same text. The single pass's spans are grouped by
+    ``bootstrap_names.fold_match_key(name)`` (#243 -- previously grouped by
+    raw ``name``; preserving each key's own start-order, since ``_run_spans()``
+    already returns spans sorted by ``char_start`` and grouping-by-filtering a
+    sorted sequence preserves that order even when several distinct raw
+    ``name``s share one folded key), then records are emitted per
+    ``source_form`` in ``source_forms`` order by looking up that form's own
+    fold key from the grouped map -- identical output to calling
+    ``build_occurrence_records()`` per form (also #243 fold-aware, via
+    ``production_occurrences()``), just without re-triggering the extraction
+    primitive per form.
 
     ``source_forms`` itself is iterated exactly ONCE overall (building
-    ``rank``, below), never once per block: a manifest with many blocks and
-    a large ``source_forms`` list would otherwise probe EVERY form on EVERY
-    block regardless of whether it ever occurs there -- O(blocks x forms) --
-    even though most forms don't occur in most blocks (finding 8, RFC #215
-    Phase 0 review round 4). Per block, only the names this block's own
-    extraction pass actually matched (``spans_by_name``) are considered, so
-    the per-block cost scales with that block's matched-name count, not with
-    ``len(source_forms)``.
+    ``rank``/the fold grouping together, below), never once per block: a
+    manifest with many blocks and a large ``source_forms`` list would
+    otherwise probe EVERY form on EVERY block regardless of whether it ever
+    occurs there -- O(blocks x forms) -- even though most forms don't occur
+    in most blocks (finding 8, RFC #215 Phase 0 review round 4). Per block,
+    only the fold keys this block's own extraction pass actually matched are
+    considered, so the per-block cost scales with that block's matched-key
+    count, not with ``len(source_forms)``.
+
+    **#243 fold-key collisions, fail-closed.** Folding is many-to-one: two
+    DISTINCT raw forms in ``source_forms`` (e.g. a maqaf-joined and a
+    space-joined spelling of the same Hebrew name) can legally share one
+    fold key. A naive folded ``dict`` keyed by fold key would silently keep
+    only the LAST such form (the exact silent-overwrite bug this guards
+    against) -- so collisions are detected BEFORE any span is matched, in
+    the SAME single ``enumerate(source_forms)`` pass that builds ``rank``
+    (never a second pass over ``source_forms`` -- that would fail the
+    iterate-once invariant above): every name is also grouped by its own
+    fold key (``fold_groups``), and any key whose group has >= 2 members is
+    fail-closed excluded from ``rank`` entirely, by a POST-FILTER after the
+    single pass completes. Colliding spans are emitted to NEITHER form --
+    never double-filed, never silently assigned to whichever form happened
+    to be seen last.
+
+    ``competitors``, when given, is a ``canon_senses.FoldCollisionMap``
+    already built over the full COMPETITOR universe (union of every
+    ``canon.json`` entry and every ``canon_senses.json`` form, split-only
+    included -- see ``canon_senses.fold_collision_map()``'s own docstring on
+    why this must be the broader universe, never just this call's own
+    ``source_forms``): a form unique within THIS call's ``source_forms`` can
+    still collide against a sibling that lives only in that broader universe
+    (e.g. a split-only form, or a sibling that landed in a different scope
+    projection) -- ``competitors.is_colliding()`` catches exactly that case,
+    on top of (never instead of) the local ``fold_groups`` check. Omitted
+    (``None``, the default), only the local collision check runs -- every
+    existing caller and the 5 tests that call this positionally with 3 args
+    keep today's exact behavior plus the #243 fold.
+
+    Excluded forms are reported two ways: an unconditional stderr WARN
+    (``_warn_fold_collisions``, above -- never gated by ``collisions_out``),
+    and, when ``collisions_out`` is given (default ``None``, so no existing
+    caller is forced to change), one ``{"source_form", "fold_key"}`` dict per
+    excluded form -- never one per group, so a caller can always recover
+    exactly which individual forms were dropped. The return value's own
+    shape (a flat list) never carries collision information itself -- this
+    is a side-channel via the caller-owned receiver, not a second return
+    value.
     """
-    rank = {name: i for i, name in enumerate(source_forms)}
+    rank = {}
+    fold_key_of = {}
+    fold_groups = defaultdict(list)
+    for i, name in enumerate(source_forms):
+        rank[name] = i
+        key = fold_match_key(name)
+        fold_key_of[name] = key
+        fold_groups[key].append(name)
+
+    colliding = {
+        name
+        for group in fold_groups.values() if len(group) >= 2
+        for name in group
+    }
+    if competitors is not None:
+        colliding |= {name for name in rank if competitors.is_colliding(name)}
+
+    if colliding:
+        _warn_fold_collisions(fold_groups, colliding)
+        if collisions_out is not None:
+            for name in sorted(colliding, key=rank.__getitem__):
+                collisions_out.append({"source_form": name, "fold_key": fold_key_of[name]})
+        for name in colliding:
+            del rank[name]
+
+    fold_to_name = {fold_key_of[name]: name for name in rank}
+
     records = []
     for block_id, seg, text in iter_manifest_blocks(manifest_path):
-        spans_by_name = defaultdict(list)
+        folded_spans_by_key = defaultdict(list)
         for name, _mid_sentence, char_start, char_end in _run_spans(text, language_config):
-            spans_by_name[name].append((char_start, char_end))
+            folded_spans_by_key[fold_match_key(name)].append((char_start, char_end))
         context_start, context_end = _context_window(text)
         context_sha256 = hashlib.sha256(
             text[context_start:context_end].encode("utf-8")
         ).hexdigest()
-        present_forms = sorted(spans_by_name.keys() & rank.keys(), key=rank.__getitem__)
-        for source_form in present_forms:
-            for char_start, char_end in spans_by_name[source_form]:
+        present_keys = sorted(
+            folded_spans_by_key.keys() & fold_to_name.keys(),
+            key=lambda k: rank[fold_to_name[k]],
+        )
+        for key in present_keys:
+            source_form = fold_to_name[key]
+            for char_start, char_end in folded_spans_by_key[key]:
                 records.append(
                     _build_record(source_form, block_id, seg, text, char_start, char_end,
                                   context_start, context_end, context_sha256)

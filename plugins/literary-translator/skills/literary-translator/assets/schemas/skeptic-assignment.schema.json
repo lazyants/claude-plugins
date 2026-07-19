@@ -33,6 +33,11 @@
       "pattern": "^[0-9a-f]{64}$",
       "description": "Optional. sha256 of the manifest.json this run was set up against; --verify-merged re-hashes it with the same BEST-EFFORT tripwire semantics as canon_sha256 (catches accidental mutation; not sound against a determined injected agent that can rewrite this co-located stamp)."
     },
+    "senses_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$",
+      "description": "Optional (#243). sha256 of the canon_senses.json sidecar this run was set up against (absent sidecar hashes as empty bytes) -- the sidecar became a THIRD frozen input once --verify-merged started parsing it to project the ambiguity-competitors universe, so it needs the same tamper tripwire as canon_sha256/manifest_sha256: --verify-merged re-hashes it and fails on mismatch (BEST-EFFORT only, same caveats as the other two -- not sound against a prompt-injected agent that can rewrite this co-located stamp)."
+    },
     "batch_count": { "type": "integer", "minimum": 0 },
     "assignments": {
       "type": "array",

@@ -51,8 +51,26 @@ order):
   7. sampled -- a globally-capped, deterministic stratified sample of the
      remaining accepted high/medium-confidence entries (a spot-check safety
      net over everything the first six classes did not already catch).
+  8. fold_collision (#243) -- this scope_in source_form's
+     `bootstrap_names.fold_match_key` collides with ANOTHER scope_in
+     source_form's (`canon_senses.fold_collision_map()`, computed over the
+     UNION of every `canon.json` entry and every `canon_senses.json` form,
+     split-only included -- the same "competitors" universe every #243
+     consumer shares -- then re-checked against THIS scope: a collision with
+     an out-of-scope or split-only-only competitor never fires this).
+     ALWAYS flagged, and NEVER combined with classes 3/4/5/6's ordinary
+     occurrence-count computation for the same entry: `verse_occurrences()`
+     is called per-form, fold-collision-unaware, so two colliding forms
+     sharing one physical verse span would otherwise double-file that span
+     to BOTH while their block-origin counts are independently zeroed by
+     `occ_index.py`'s own fail-closed collision handling -- the two paths
+     disagreeing in opposite directions makes singleton/high_dispersion/
+     near_merge meaningless for these forms. Skipping that computation
+     entirely and flagging unconditionally guarantees a colliding entry can
+     never end up with zero risk classes and silently never reach the
+     skeptic pass (this script's own promise, one paragraph up).
 
-Scope filter (classes 1, 3, 4, 5, 6, 7 -- every class except
+Scope filter (classes 1, 3, 4, 5, 6, 7, 8 -- every class except
 established_offline, which is a provenance signal, not an identity one):
 entries with `is_proper_name: false` or `basis: "not_a_name"` are excluded
 -- mirrors the shipped audit's own entity-merge filter
@@ -83,22 +101,37 @@ changes.
 
 `producer_input_digest`: this script stamps every worklist it writes with a
 sha256 hex digest over its own ENTIRE behavior-determining closure --
-`canon.json` + `manifest.json` + the canonically-serialized resolved scan
-parameters + the resolved `LanguageConfig.raw_bytes` + the raw bytes of
-every file in `PRODUCER_CODE_CLOSURE` below. `skeptic_setup.py` (the
-skeptic resume-domain owner, Part B) imports `compute_producer_input_digest`
-from this module and recomputes the IDENTICAL value to reject a stale
-worklist fail-closed -- see that function's own docstring for the exact
-algorithm. `skeptic_constants.py` is itself a closure member (governs every
-default this script uses), never a `PLUGIN_BUNDLE_MEMBER` -- editing it must
-never re-translate a converged segment, but it DOES invalidate a worklist's
-freshness, same as editing this script itself.
+`canon.json` + `manifest.json` + `canon_senses.json` (#243, raw sidecar
+bytes -- an absent sidecar hashes as `b""`, distinct from a schema-valid
+logically-empty document; see `--senses-path` below) + the
+canonically-serialized resolved scan parameters + the resolved
+`LanguageConfig.raw_bytes` + the raw bytes of every file in
+`PRODUCER_CODE_CLOSURE` below. `skeptic_setup.py` (the skeptic resume-domain
+owner, Part B) imports `compute_producer_input_digest` from this module and
+recomputes the IDENTICAL value to reject a stale worklist fail-closed --
+see that function's own docstring for the exact algorithm. `skeptic_constants.py`
+is itself a closure member (governs every default this script uses), never
+a `PLUGIN_BUNDLE_MEMBER` -- editing it must never re-translate a converged
+segment, but it DOES invalidate a worklist's freshness, same as editing this
+script itself.
+
+Ambiguity competitors (#243): class 8 (`fold_collision`, see above) needs the
+same "competitors" universe every #243 consumer shares -- the union of every
+`canon.json` entry and every `canon_senses.json` form (split-only included).
+`--senses-path` (mirrors `canon_adjudication_audit.py`'s own
+`--senses-path`/`DEFAULT_SENSES_PATH`/`allow_absent` convention exactly: an
+implicit default sidecar that is genuinely absent is tolerated as empty; an
+EXPLICIT `--senses-path` that does not exist is a hard error) is parsed via
+`canon_senses.load_senses()` to build that universe, then
+`canon_senses.fold_collision_map()` computes the collision groups passed
+into `build_worklist()`.
 
 CLI:
 
     python3 suspicion_scan.py --particle-config fr.json \\
         --research-mode offline --source-format gutenberg_epub \\
-        [--canon PATH] [--manifest PATH] [--languages-dir PATH] \\
+        [--canon PATH] [--manifest PATH] [--senses-path PATH] \\
+        [--languages-dir PATH] \\
         [--dispersion-threshold N] [--sample-cap N] [--near-threshold F] \\
         [--near-cap N] [--near-pair-budget N] [--windows-per-entity N] \\
         [--citation-block-types TYPE [TYPE ...]] [--out PATH]
@@ -122,6 +155,11 @@ SCHEMAS_DIR = DURABLE_ROOT / "schemas"
 
 DEFAULT_CANON_PATH = DURABLE_ROOT / "canon.json"
 DEFAULT_MANIFEST_PATH = DURABLE_ROOT / "manifest.json"
+# Sibling of DEFAULT_CANON_PATH, self-anchored the same way -- NOT imported
+# from canon_adjudication_audit.py/canon_validate.py, each consumer computes
+# its own copy (see canon_senses.py's own module docstring on why
+# DEFAULT_SENSES_PATH is deliberately not defined there).
+DEFAULT_SENSES_PATH = DURABLE_ROOT / "canon_senses.json"
 
 try:
     import jsonschema
@@ -160,15 +198,16 @@ except ImportError as exc:
     )
 
 try:
-    from canon_senses import normalize_form
+    from canon_senses import normalize_form, fold_collision_map, load_senses, CanonSensesLoadError
 except ImportError as exc:
     sys.exit(
         f"suspicion_scan.py: cannot import canon_senses.py from {SCRIPT_DIR} ({exc}).\n"
         "canon_senses.py must be installed alongside suspicion_scan.py under "
         "${durable_root}/scripts/ -- it supplies normalize_form(), the shared "
         "NFC+casefold+whitespace-collapse comparator every grouping/matching key in "
-        "this script is computed from. Re-run Step 0a, or verify the plugin install "
-        "is not corrupted."
+        "this script is computed from, plus load_senses()/fold_collision_map() (#243), "
+        "the shared ambiguity-competitors projection class 8 (fold_collision) needs. "
+        "Re-run Step 0a, or verify the plugin install is not corrupted."
     )
 
 try:
@@ -178,9 +217,11 @@ try:
         CITATION_BLOCK_TYPES_BY_FORMAT,
         RISK_MERGE_PARTICIPANT, RISK_ESTABLISHED_OFFLINE, RISK_SINGLETON,
         RISK_HIGH_DISPERSION, RISK_ALL_CITATION, RISK_NEAR_MERGE, RISK_SAMPLED,
+        RISK_FOLD_COLLISION,
         RISK_CLASSES,
         CITATION_UNAVAILABLE_TAG, VERSE_PARENT_UNRESOLVED_TAG, ZERO_OCCURRENCE_TAG,
-        NEAR_BUDGET_TRUNCATED_TAG, NO_CATEGORY_SENTINEL, NON_IDENTITY_BASIS,
+        NEAR_BUDGET_TRUNCATED_TAG, FOLD_COLLISION_OCCURRENCES_SUPPRESSED_TAG,
+        NO_CATEGORY_SENTINEL, NON_IDENTITY_BASIS,
         OCC_ORIGIN_BLOCK, OCC_ORIGIN_VERSE_EMBEDDED, VERSE_MOUNT_EMBEDDED,
         SUSPICION_WORKLIST_FILENAME, SUSPICION_WORKLIST_SCHEMA,
     )
@@ -323,6 +364,47 @@ def verse_occurrences(source_form: str, manifest: dict, language_config) -> list
                 "malformed": malformed,
             })
     return results
+
+
+# ---------------------------------------------------------------------------
+# Class 8: fold_collision (#243) -- ALWAYS flagged, gates classes 3/4/5 off
+# ---------------------------------------------------------------------------
+
+def _fold_colliding_forms(scope_in_forms: list, competitors) -> set:
+    """Every `scope_in_forms` member that shares its `fold_match_key` group
+    (`competitors`, a `canon_senses.FoldCollisionMap` built by the caller
+    over the shared #243 "competitors" universe -- every `canon.json` entry
+    UNION every `canon_senses.json` form, split-only included, per this
+    module's own docstring) with >=1 OTHER `scope_in_forms` member.
+
+    Re-projects each collision group down to THIS consumer's own
+    `scope_in_forms` -- a group that includes a competitor OUTSIDE
+    `scope_in_forms` (an `is_proper_name:false`/`not_a_name` canon entry, or
+    a split-only-only `canon_senses.json` form that never became a canon
+    entry at all) does NOT, by itself, make its scope_in sibling collide:
+    only another scope_in_forms member sharing the SAME group does. This is
+    what keeps "a form colliding only with an out-of-scope entry keeps its
+    ordinary counters" true while still sharing ONE global collision
+    computation with every other #243 consumer.
+
+    `competitors=None` (no `canon_senses.json` resolution -- see
+    `build_worklist`'s own `competitors` parameter) means "nothing collides":
+    returns the empty set, i.e. today's pre-#243 behavior."""
+    if competitors is None:
+        return set()
+    scope_in_set = set(scope_in_forms)
+    member_to_group = {}
+    for group in competitors.groups.values():
+        for member in group:
+            member_to_group[member] = group
+    colliding = set()
+    for sf in scope_in_forms:
+        group = member_to_group.get(sf)
+        if group is None:
+            continue
+        if any(other != sf and other in scope_in_set for other in group):
+            colliding.add(sf)
+    return colliding
 
 
 # ---------------------------------------------------------------------------
@@ -623,8 +705,8 @@ def _to_occurrence_ref(c: dict) -> dict:
 def build_worklist(canon_entries: dict, manifest: dict, manifest_path, language_config, *,
                     research_mode: str, citation_types, dispersion_threshold: int,
                     sample_cap: int, near_threshold: float, near_cap: int,
-                    near_pair_budget: int) -> tuple:
-    """Runs all seven risk classes over `canon_entries` (canon.json's own
+                    near_pair_budget: int, competitors=None) -> tuple:
+    """Runs all eight risk classes over `canon_entries` (canon.json's own
     `entries{}`, keyed by source_form) + `manifest` (already-parsed
     manifest.json) and returns `(entries: list[dict], warnings: list[str])`
     -- `entries` is exactly `suspicion-worklist.schema.json`'s `entries[]`
@@ -633,6 +715,15 @@ def build_worklist(canon_entries: dict, manifest: dict, manifest_path, language_
     the schema-valid nothing-suspicious state" contract). `warnings` are
     human-facing lines (e.g. near_pair_budget truncation) the CLI prints to
     stderr; they never affect the worklist's own bytes.
+
+    `competitors` (#243): a `canon_senses.FoldCollisionMap` built by the
+    caller over the shared "competitors" universe (this module's own
+    docstring, class 8) -- resolved OUTSIDE this function (via
+    `canon_senses.load_senses()` + `canon_senses.fold_collision_map()`) the
+    same way `citation_types` is already resolved outside and passed in.
+    `None` (the default) disables class 8 entirely -- today's pre-#243
+    behavior -- so every existing caller that never resolves a senses
+    sidecar keeps working unchanged.
     """
     warnings = []
     scope_in = {sf: e for sf, e in canon_entries.items() if _in_scope(e)}
@@ -649,9 +740,28 @@ def build_worklist(canon_entries: dict, manifest: dict, manifest_path, language_
         per_entry_group_key[sf] = key
 
     scope_in_forms = sorted(scope_in.keys())
+
+    # Class 8 FIRST, before any occurrence is ever collected for these forms
+    # -- a colliding form's block/verse occurrences are never trusted (see
+    # this module's own docstring), so `_combined_occurrences` (the side
+    # door verse_occurrences() call included) must never even run for one.
+    fold_colliding = _fold_colliding_forms(scope_in_forms, competitors)
+    for sf in fold_colliding:
+        per_entry_risk[sf].add(RISK_FOLD_COLLISION)
+        per_entry_notes[sf].add(FOLD_COLLISION_OCCURRENCES_SUPPRESSED_TAG)
+
     block_by_form = _block_occurrences_by_form(manifest_path, scope_in_forms, language_config)
     combined_by_form = {}
     for sf in scope_in_forms:
+        if sf in fold_colliding:
+            # Never combined with classes 3/4/5's occurrence counting --
+            # occ_index.py's own site-2 collision handling already zeroes
+            # this form's block-origin records, but the verse-embedded side
+            # door (verse_occurrences(), called per-form, collision-unaware)
+            # is not similarly protected; skipping the call entirely (rather
+            # than trusting its output) is what actually closes it.
+            combined_by_form[sf] = []
+            continue
         combined = _combined_occurrences(sf, block_by_form.get(sf, []), manifest, language_config)
         combined_by_form[sf] = combined
         risk, notes, dispersion_units = _classify_occurrences(combined, citation_types)
@@ -744,18 +854,24 @@ def resolved_scan_params(*, dispersion_threshold: int, sample_cap: int, windows_
 
 
 def compute_producer_input_digest(canon_bytes: bytes, manifest_bytes: bytes,
-                                   resolved_params: dict, language_config_raw_bytes: bytes,
+                                   senses_bytes: bytes, resolved_params: dict,
+                                   language_config_raw_bytes: bytes,
                                    script_dir: Path) -> str:
     """THE one shared producer_input_digest algorithm: sha256 hex over --
-    in this fixed order -- `canon_bytes`, `manifest_bytes`, the
-    canonically-serialized `resolved_params` (see `resolved_scan_params()`),
-    `language_config_raw_bytes` (the resolved particle-config FILE's own
-    exact bytes -- `bootstrap_names.LanguageConfig.raw_bytes`), then the
-    raw bytes of every file named in `PRODUCER_CODE_CLOSURE`, read FRESH
-    off `script_dir` (never cached, never trusted from a caller). Each part
-    is separated by a single NUL byte so two adjacent parts can never
-    collide by boundary concatenation (e.g. `"AB"+"C"` vs `"A"+"BC"`
-    hashing identically with no separator).
+    in this fixed order -- `canon_bytes`, `manifest_bytes`, `senses_bytes`
+    (#243: the `canon_senses.json` sidecar's own raw bytes -- an absent
+    sidecar is `b""`, tolerant-read the SAME way `canon_bytes` already is,
+    NEVER via `canon_senses.load_senses()`, which exposes no raw bytes and
+    would make an absent sidecar indistinguishable from a schema-valid
+    logically-empty one), the canonically-serialized `resolved_params` (see
+    `resolved_scan_params()`), `language_config_raw_bytes` (the resolved
+    particle-config FILE's own exact bytes --
+    `bootstrap_names.LanguageConfig.raw_bytes`), then the raw bytes of every
+    file named in `PRODUCER_CODE_CLOSURE`, read FRESH off `script_dir`
+    (never cached, never trusted from a caller). Each part is separated by
+    a single NUL byte so two adjacent parts can never collide by boundary
+    concatenation (e.g. `"AB"+"C"` vs `"A"+"BC"` hashing identically with no
+    separator).
 
     `suspicion_scan.py` calls this to STAMP a freshly-produced worklist;
     `skeptic_setup.py` (Part B) imports this EXACT function to RECOMPUTE
@@ -764,8 +880,8 @@ def compute_producer_input_digest(canon_bytes: bytes, manifest_bytes: bytes,
     algorithms that could disagree on the same inputs.
     """
     hasher = hashlib.sha256()
-    parts = [canon_bytes, manifest_bytes, _canonical_json_bytes(resolved_params),
-             language_config_raw_bytes]
+    parts = [canon_bytes, manifest_bytes, senses_bytes,
+             _canonical_json_bytes(resolved_params), language_config_raw_bytes]
     for member in PRODUCER_CODE_CLOSURE:
         parts.append((script_dir / member).read_bytes())
     for part in parts:
@@ -827,6 +943,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help=f"Path to manifest.json (default: {DEFAULT_MANIFEST_PATH}).",
     )
     p.add_argument(
+        "--senses-path", metavar="PATH", default=None,
+        help=f"Override the canon_senses.json path (default: {DEFAULT_SENSES_PATH}). "
+             "Parsed to build the #243 ambiguity-competitors universe (union of every "
+             "canon.json entry and every canon_senses.json form, split-only included) "
+             "that drives class 8 (fold_collision) -- mirrors "
+             "canon_adjudication_audit.py's own --senses-path/allow_absent convention: "
+             "an implicit default sidecar that is genuinely absent is tolerated as "
+             "empty; an EXPLICIT --senses-path that does not exist is a hard error "
+             "instead (a typo'd path must never silently disable class 8).",
+    )
+    p.add_argument(
         "--particle-config", required=True, metavar="FILENAME",
         help="Bare filename under ${durable_root}/languages/ -- the profile's own "
              "source.language.particle_config LITERAL value.",
@@ -880,6 +1007,11 @@ def main(argv=None) -> int:
     manifest_path = Path(args.manifest) if args.manifest else DEFAULT_MANIFEST_PATH
     languages_dir = Path(args.languages_dir) if args.languages_dir else DEFAULT_LANGUAGES_DIR
     out_path = Path(args.out) if args.out else DEFAULT_OUT_PATH
+    senses_path = Path(args.senses_path) if args.senses_path else DEFAULT_SENSES_PATH
+    # allow_absent=True ONLY for the genuinely-implicit default -- an EXPLICIT
+    # --senses-path that turns out missing must BLOCK (mirrors
+    # canon_adjudication_audit.py's own convention exactly).
+    allow_absent_senses = args.senses_path is None
 
     canon_bytes = canon_path.read_bytes() if canon_path.is_file() else b""
     canon_entries = {}
@@ -908,6 +1040,21 @@ def main(argv=None) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 1
 
+    # #243: senses_bytes feeds producer_input_digest directly (tolerant raw
+    # read, mirrors canon_bytes -- see compute_producer_input_digest's own
+    # docstring on why NOT via load_senses()); the PARSED senses entries feed
+    # the #243 ambiguity-competitors universe (class 8, fold_collision) via
+    # canon_senses.fold_collision_map(). Both derive from the SAME on-disk
+    # sidecar, read once.
+    senses_bytes = senses_path.read_bytes() if senses_path.is_file() else b""
+    try:
+        senses_result = load_senses(senses_path, allow_absent=allow_absent_senses)
+    except CanonSensesLoadError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    competitor_forms = set(canon_entries.keys()) | set(senses_result.entries_by_source_form.keys())
+    competitors = fold_collision_map(competitor_forms)
+
     citation_override = (
         tuple(args.citation_block_types) if args.citation_block_types is not None else None
     )
@@ -922,6 +1069,7 @@ def main(argv=None) -> int:
         near_threshold=args.near_threshold,
         near_cap=args.near_cap,
         near_pair_budget=args.near_pair_budget,
+        competitors=competitors,
     )
     for w in warnings:
         print(f"warning: {w}", file=sys.stderr)
@@ -938,7 +1086,7 @@ def main(argv=None) -> int:
         resolved_citation_types=resolved_citation_types,
     )
     digest = compute_producer_input_digest(
-        canon_bytes, manifest_bytes, resolved_params, lang.raw_bytes, SCRIPT_DIR
+        canon_bytes, manifest_bytes, senses_bytes, resolved_params, lang.raw_bytes, SCRIPT_DIR
     )
 
     worklist = {"schema_version": 1, "producer_input_digest": digest, "entries": entries_out}

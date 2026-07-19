@@ -9,9 +9,10 @@ is >=2 senses). Its shape is fully specified by
 ``canon-senses.schema.json`` -- read that file's own description before
 changing anything here.
 
-This module is a **project-dependency LEAF**: it imports NOTHING
-first-party (no ``canon_adjudication_audit``, ``canon_validate``, or
-``glossary_batch_plan``), so there is no import cycle even though the
+This module is a **project-dependency LEAF w.r.t. every OTHER first-party
+module that could cycle back to it**: it imports nothing from
+``canon_adjudication_audit``, ``canon_validate``, or
+``glossary_batch_plan``, so there is no import cycle even though the
 audit script itself needs ``load_senses``. ``normalize_form`` was
 relocated here from ``canon_adjudication_audit.py`` for the same reason --
 leaving it in the audit module would force every OTHER consumer
@@ -20,6 +21,35 @@ split-form exclusion) to import the audit module just for one helper,
 which would make the audit module a transitive dependency of the two
 plugin-bundle members (``cache_key.py``'s ``PLUGIN_BUNDLE_MEMBERS``) that
 import them -- silently invisible to the bundle hash.
+
+**#243 exception, LAZY.** ``fold_collision_map()`` (below) needs
+``bootstrap_names.fold_match_key`` -- but importing it at MODULE level, the
+way every other first-party dependency in this plugin is guarded, would
+break the leaf property above for every context that imports
+``normalize_form``/``load_senses`` without ``bootstrap_names.py``
+installed alongside (this shipped once and broke 81 tests in
+``tests/merged_disk_verify.test.py``, which import this module in
+isolation). So the import happens INSIDE ``fold_collision_map()`` itself
+-- the only place that needs it -- materializing the dependency only when
+that one function is actually called, never merely by importing this
+module. A missing ``bootstrap_names.py`` at call time RAISES (never
+``sys.exit()`` -- a library function must not kill its host process; that
+pattern stays reserved for the module-level ``jsonschema`` guard below, a
+genuine unconditional dependency of every consumer). This does not reopen
+an import cycle -- ``bootstrap_names.py`` itself imports no first-party
+module, so it is a leaf in the same sense this module is -- and it does
+not need a new freshness-closure entry: ``bootstrap_names.py`` is
+already, independently, a member of every closure ``canon_senses.py``
+itself is a member of (``suspicion_scan.PRODUCER_CODE_CLOSURE``,
+``skeptic_setup``'s closure union), so a change to ``fold_match_key``
+already invalidates them both today. ``bootstrap_names.py`` was itself
+REJECTED as ``fold_collision_map()``'s home for the opposite reason: it is
+a ``cache_key.DERIVATION_BUNDLE_MEMBERS`` member, and putting a
+worklist/skeptic-facing helper there would move the derivation-bundle
+hash on a code change that has nothing to do with derivation (the #193
+dead-end). This module is a ``PLUGIN_BUNDLE_MEMBERS`` member instead
+(already paid for), and is not a derivation-bundle member -- the cheaper,
+correct home.
 
 "Leaf" means dependency-DIRECTION, not stdlib-only: this module DOES
 import ``jsonschema`` (``requirements.txt`` pins ``jsonschema>=4.26.0``)
@@ -50,7 +80,7 @@ import sys
 import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Optional, Union
+from typing import Any, Iterable, Optional, Union
 
 try:
     import jsonschema
@@ -194,6 +224,121 @@ def is_split(result: SensesResult, source_form: str) -> bool:
         if normalize_form(key) == target:
             return len(entry.get("senses", [])) >= 2
     return False
+
+
+# ---------------------------------------------------------------------------
+# fold_collision_map() -- the shared #238/#241 fold-key collision detector
+# (#243). Home chosen on freshness-closure cost, not taste -- see this
+# module's own docstring, "#243 exception, deliberate".
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class FoldCollisionMap:
+    """The return type of `fold_collision_map()`.
+
+    `groups` is `bootstrap_names.fold_match_key(form) -> (raw forms sharing
+    that key,)`, insertion-ordered (a form's position is its first
+    occurrence in the `source_forms` `fold_collision_map()` was built from;
+    a repeated identical raw form is deduplicated within its group, never
+    counted twice). A key whose group has exactly one member never
+    collided; `len(group) >= 2` is what "collides" means throughout this
+    plugin (occurrence_targets.py's `_colliding_source_forms`,
+    bootstrap_names.py's `_warn_inventory_match_key_collisions`) -- this
+    dataclass generalizes that same many-to-one check into one reusable,
+    importable result any consumer can hold onto and query repeatedly,
+    instead of re-deriving its own `defaultdict(list)` pass.
+
+    `colliding` is the flattened `frozenset` of every raw form belonging to
+    a group of size >= 2 -- exactly `is_colliding()`'s backing set, exposed
+    directly for a caller that wants to test membership against many forms
+    at once (e.g. a set intersection) rather than one call per form.
+    """
+
+    groups: dict
+    colliding: frozenset
+
+    def is_colliding(self, form: str) -> bool:
+        """True iff `form` -- compared by RAW identity, never re-folded --
+        is a member of a fold-key group of size >= 2. A `form` that was
+        never part of the `source_forms` this map was built from is never
+        `is_colliding` (there is nothing to compare it against); this is
+        why every caller builds its `FoldCollisionMap` over the full
+        COMPETITOR universe (this module's own docstring on that
+        distinction), not just its own local, eligible-for-output
+        projection -- a form absent from the competitor universe can never
+        be detected as colliding here, by construction."""
+        return form in self.colliding
+
+
+def fold_collision_map(source_forms: Iterable[str]) -> FoldCollisionMap:
+    """Groups `source_forms` by `bootstrap_names.fold_match_key` and reports
+    every many-to-one (size >= 2) group as `.colliding` -- the single
+    shared collision-detection ALGORITHM every #243 fold site (`occ_index.
+    py`'s `index_manifest()`, `evidence_verify.py`'s
+    `_group_production_spans_by_name()`, and, upstream of both, whichever
+    caller assembles the COMPETITOR universe those two consult) uses,
+    rather than each re-implementing its own copy of
+    `occurrence_targets.py`'s pre-existing `_colliding_source_forms()`
+    pattern.
+
+    Two distinct concepts a caller must not conflate (do not skip this if
+    you are about to call this function):
+
+    - **Competitors** -- who PARTICIPATES in collision detection. This is
+      the union of every `canon.json` `entries` key AND every
+      `canon_senses.json` `entries_by_source_form` key (split-only forms
+      INCLUDED -- a split-only form is deliberately excluded from
+      `canon.json` itself, `glossary_batch_plan.py`'s split-form
+      exclusion, but it still occupies a real fold key and must still
+      poison an ambiguous match). The competitor set is the SAME for
+      every consumer in one audit run -- build `fold_collision_map()` once
+      over it, not once per consumer.
+    - **Eligible-for-output** -- who actually gets an index record / a
+      worklist row / a verified-evidence credit. This is each consumer's
+      own local, already-scoped projection (`index_manifest()`'s own
+      `source_forms` argument, `build_worklist()`'s `scope_in`) -- NEVER
+      the full competitor set. A split-only form is a competitor (it can
+      still poison another form's match) but is never itself eligible for
+      output.
+
+    Passing a consumer's local projection instead of the full competitor
+    set here would silently miss a real collision whenever the two
+    colliding forms land in DIFFERENT local projections (e.g. one form
+    filtered out of scope, or a split-only form that never appears in
+    `canon.json` at all) -- exactly the class of bug this plugin's #243
+    fail-closed collision semantics exist to prevent (see
+    `occurrence_targets.py`'s own module docstring, "The fold NEWLY
+    introduces...", for the reference case this generalizes).
+
+    LAZY import (C1-AMENDMENT): `bootstrap_names.fold_match_key` is
+    imported HERE, not at module level -- see this module's own docstring,
+    "#243 exception, LAZY", for why. RAISES `RuntimeError` (never
+    `sys.exit()`) if `bootstrap_names.py` is not installed alongside this
+    module -- a library function must not kill its caller's process.
+    """
+    try:
+        from bootstrap_names import fold_match_key
+    except ImportError as exc:
+        raise RuntimeError(
+            f"canon_senses.fold_collision_map(): cannot import bootstrap_names.py from "
+            f"{SCRIPTS_DIR} ({exc}). bootstrap_names.py must be installed alongside "
+            "canon_senses.py under ${durable_root}/scripts/ -- it supplies "
+            "fold_match_key(), the #238/#241 Hebrew mark/connector MATCH KEY this "
+            "function groups source forms by. Re-run Step 0a, or verify the plugin "
+            "install is not corrupted."
+        ) from exc
+
+    order: dict = {}
+    for form in source_forms:
+        key = fold_match_key(form)
+        members = order.setdefault(key, [])
+        if form not in members:
+            members.append(form)
+    groups = {key: tuple(members) for key, members in order.items()}
+    colliding = frozenset(
+        form for members in groups.values() if len(members) >= 2 for form in members
+    )
+    return FoldCollisionMap(groups=groups, colliding=colliding)
 
 
 def _path_state(path: Path) -> str:

@@ -27,7 +27,7 @@ Three deterministic CLI modes, mutually exclusive:
 
   --validate-fragment FRAGMENT --manifest-path M --particle-config NAME
       [--languages-dir DIR] [--expect-assignments-file PATH]
-      [--schemas-dir DIR]
+      [--schemas-dir DIR] [--canon PATH] [--senses-path PATH]
     One run-scoped triage fragment (``triage_{index}.json``, one per
     dispatched batch): schema-validate against ``skeptic-triage.schema.json``
     (real ``jsonschema.Draft202012Validator``); reject a fragment whose
@@ -38,7 +38,14 @@ Three deterministic CLI modes, mutually exclusive:
     Otherwise re-authenticates every cited evidence record via the evidence
     adapter below, coerces whatever fails down to ``insufficient_window``,
     and ATOMICALLY rewrites the (possibly-coerced) fragment back to
-    FRAGMENT.
+    FRAGMENT. ``--canon``/``--senses-path`` (#243) project the shared
+    ambiguity-competitors universe (``canon_senses.fold_collision_map``,
+    the SAME universe ``suspicion_scan.py``'s ``build_worklist()`` uses) --
+    a source_form that fold-collides with another competitor fails
+    evidence re-verification unconditionally, since a byte-verified
+    citation can no longer be trusted to belong to THIS entity rather than
+    a colliding sibling (site 1's own "side door" fix, see
+    ``_evidence_failure_reason``'s own docstring).
 
   --merge-fragments RUN_DIR [--out PATH] [--schemas-dir DIR]
     The SINGLE serialized, disk-independent merge: every
@@ -55,7 +62,7 @@ Three deterministic CLI modes, mutually exclusive:
 
   --verify-merged TRIAGE AGGREGATE_MANIFEST --manifest-path M
       --particle-config NAME [--languages-dir DIR] [--schemas-dir DIR]
-      [--canon PATH]
+      [--canon PATH] [--senses-path PATH]
     Fresh-read, disk-INDEPENDENT verification, at the SAME rigor
     ``--validate-fragment`` applies (never weaker -- every one of that
     mode's checks is redone here too, plus merge-specific ones only
@@ -97,28 +104,39 @@ Three deterministic CLI modes, mutually exclusive:
         verdict-delta alone, guarantee every individual citation;
       - frozen-input integrity tripwire (H1 mitigation, BEST-EFFORT only):
         whenever AGGREGATE_MANIFEST stamps ``canon_sha256``/
-        ``manifest_sha256`` (see ``skeptic-assignment.schema.json``), the
-        on-disk ``--canon`` file (default ``{durable_root}/canon.json``) /
-        ``manifest.json`` is re-hashed and must still match. This catches
-        ACCIDENTAL/non-adversarial mutation (a crash mid-write, a stray
-        process, a well-behaved but buggy agent) -- it is NOT sound against
-        a prompt-injected adversarial agent, which has pipeline-wide
-        filesystem write access and can rewrite or simply delete this same
-        co-located stamp to match its own tampered canon/manifest (the
-        stamp lives in ``assignments.json``, inside the very run_dir such an
-        agent can already write to); a sound version (anchoring the
-        setup-time hash in a channel the agent cannot reach) is deferred to
-        Phase 3. Absent stamp -> the corresponding check is skipped (an
-        older/hand-built aggregate manifest, backward-compatible; also the
-        only way a determined adversary defeats this cheaply). A mismatch
-        here is surfaced DISTINCTLY from every other failure above via the
-        ``frozen_input_mismatch`` output field (see below) -- this is what
-        lets a caller HALT the pipeline outright on "canon/manifest changed
-        since setup" instead of treating it as just another advisory
-        skeptic-pass failure like a coverage gap or an unverified citation.
+        ``manifest_sha256``/``senses_sha256`` (see
+        ``skeptic-assignment.schema.json`` -- #243 added ``senses_sha256``
+        as a THIRD stamp once this mode started parsing ``canon_senses.json``
+        to project the ambiguity-competitors universe below), the on-disk
+        ``--canon`` file (default ``{durable_root}/canon.json``) /
+        ``manifest.json`` / ``--senses-path`` file (default
+        ``{durable_root}/canon_senses.json``) is re-hashed and must still
+        match. This catches ACCIDENTAL/non-adversarial mutation (a crash
+        mid-write, a stray process, a well-behaved but buggy agent) -- it is
+        NOT sound against a prompt-injected adversarial agent, which has
+        pipeline-wide filesystem write access and can rewrite or simply
+        delete this same co-located stamp to match its own tampered
+        canon/manifest/senses (the stamp lives in ``assignments.json``,
+        inside the very run_dir such an agent can already write to); a sound
+        version (anchoring the setup-time hash in a channel the agent cannot
+        reach) is deferred to Phase 3. Absent stamp -> the corresponding
+        check is skipped (an older/hand-built aggregate manifest,
+        backward-compatible; also the only way a determined adversary
+        defeats this cheaply). A mismatch here is surfaced DISTINCTLY from
+        every other failure above via the ``frozen_input_mismatch`` output
+        field (see below) -- this is what lets a caller HALT the pipeline
+        outright on "canon/manifest/senses changed since setup" instead of
+        treating it as just another advisory skeptic-pass failure like a
+        coverage gap or an unverified citation;
+      - ambiguity-competitors projection (#243): ``--canon``/``--senses-path``
+        are ALSO parsed (independently of the H1 stamps above, which only
+        gate tamper-detection) to build the SAME ``fold_collision_map``
+        universe ``--validate-fragment`` uses, so a source_form re-verified
+        here that fold-collides with another competitor fails
+        unconditionally -- see ``_evidence_failure_reason``'s own docstring.
     Never trusts anything this run itself, or --validate-fragment, already
-    claimed -- every check here is redone from the two files on disk plus a
-    fresh read of ``manifest.json``/``canon.json``. Prints
+    claimed -- every check here is redone from the files on disk plus a
+    fresh read of ``manifest.json``/``canon.json``/``canon_senses.json``. Prints
     ``{"verified": bool, "missing": [...], "frozen_input_mismatch": bool}``
     -- the base two fields are the same relay shape ``canon_validate.py
     --verify-merged``/``CANON_VERIFY_SCHEMA`` use; ``frozen_input_mismatch``
@@ -160,6 +178,10 @@ SCHEMAS_DIR_DEFAULT = DURABLE_ROOT / "schemas"
 LANGUAGES_DIR_DEFAULT = DURABLE_ROOT / "languages"
 DEFAULT_MANIFEST_PATH = DURABLE_ROOT / "manifest.json"
 DEFAULT_CANON_PATH = DURABLE_ROOT / "canon.json"
+# Sibling of DEFAULT_CANON_PATH, self-anchored the same way -- each consumer
+# computes its own copy (see canon_senses.py's own module docstring on why
+# DEFAULT_SENSES_PATH is deliberately not defined there). #243.
+DEFAULT_SENSES_PATH = DURABLE_ROOT / "canon_senses.json"
 
 try:
     import jsonschema
@@ -211,6 +233,18 @@ except ImportError as exc:
         "${durable_root}/scripts/ -- it supplies verify_evidence(), the shared "
         "matcher-authentication authority every cited evidence record is bound "
         "against. Re-run Step 0a, or verify the plugin install is not corrupted."
+    )
+
+try:
+    from canon_senses import fold_collision_map, load_senses, CanonSensesLoadError
+except ImportError as exc:
+    sys.exit(
+        f"skeptic_ready.py: cannot import canon_senses.py from {SCRIPT_DIR} ({exc}).\n"
+        "canon_senses.py must be installed alongside skeptic_ready.py under "
+        "${durable_root}/scripts/ -- it supplies load_senses()/fold_collision_map() "
+        "(#243), the shared ambiguity-competitors projection every evidence "
+        "re-verification below needs. Re-run Step 0a, or verify the plugin install "
+        "is not corrupted."
     )
 
 
@@ -321,6 +355,46 @@ def _load_expected_ids(path: Path) -> list:
 
 
 # ---------------------------------------------------------------------------
+# #243 ambiguity-competitors projection -- shared by --validate-fragment and
+# --verify-merged, so the two modes can never disagree about which forms
+# collide.
+# ---------------------------------------------------------------------------
+
+def _load_canon_entries(canon_path: Path) -> dict:
+    """Tolerant canon.json read -- mirrors suspicion_scan.py's own main()
+    exactly: an absent/unparseable/shapeless canon is "nothing to compare",
+    never an error (this is a projection input for evidence-integrity
+    checks, not the authoritative canon-freeze gate itself)."""
+    if not canon_path.is_file():
+        return {}
+    try:
+        doc = json.loads(canon_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return {}
+    if isinstance(doc, dict) and isinstance(doc.get("entries"), dict):
+        return doc["entries"]
+    return {}
+
+
+def _resolve_competitors(canon_path: Path, senses_path: Path, allow_absent_senses: bool):
+    """Builds the #243 ambiguity-competitors `FoldCollisionMap` -- the union
+    of every `canon.json` entry and every `canon_senses.json` form
+    (split-only included), the SAME universe `suspicion_scan.py`'s
+    `build_worklist()` projects -- so a source_form this script re-verifies
+    is judged against the identical collision groups the worklist that
+    flagged it in the first place used. Raises `SkepticReadyError` (never a
+    raw `CanonSensesLoadError`) on a blocked sidecar load, matching every
+    other precondition failure in this module."""
+    canon_entries = _load_canon_entries(canon_path)
+    try:
+        senses_result = load_senses(senses_path, allow_absent=allow_absent_senses)
+    except CanonSensesLoadError as exc:
+        raise SkepticReadyError(f"canon_senses.json error: {exc}")
+    competitor_forms = set(canon_entries.keys()) | set(senses_result.entries_by_source_form.keys())
+    return fold_collision_map(competitor_forms)
+
+
+# ---------------------------------------------------------------------------
 # Evidence adapter (RFC #215 Phase 2 contract).
 # ---------------------------------------------------------------------------
 
@@ -340,7 +414,8 @@ def _map_evidence_record(evidence: dict) -> dict:
     return mapped
 
 
-def _evidence_failure_reason(source_form, evidence, manifest, language_config) -> "str | None":
+def _evidence_failure_reason(source_form, evidence, manifest, language_config, *,
+                              competitors=None) -> "str | None":
     """Calls ``verify_evidence(source_form, {"sense_id": None, "evidence":
     mapped}, manifest, language_config)`` and returns its failure reason, or
     None when the citation byte-verifies (checks (i)-(iv) of
@@ -349,13 +424,34 @@ def _evidence_failure_reason(source_form, evidence, manifest, language_config) -
     fails here too -- ``evidence_verify`` authenticates only against
     ``manifest.blocks{}``, never ``verse.store[]`` -- which is exactly how
     an embedded-verse citation ends up coerced to ``insufficient_window``
-    below, with no special-case code needed."""
+    below, with no special-case code needed.
+
+    ``competitors`` (#243): a ``canon_senses.FoldCollisionMap`` over the
+    shared ambiguity-competitors universe (``_resolve_competitors()``). This
+    is site 1's own "side door" fix -- ``production_occurrences()`` (which
+    ``verify_evidence()`` is ultimately built on) has, and can have, NO
+    notion of collision groups; it matches on a single ``source_form`` in
+    isolation. Once its own comparison folds ``fold_match_key`` (#243, A2a),
+    a byte-verified citation for a fold-colliding ``source_form`` can no
+    longer be trusted to belong to THIS entity rather than a colliding
+    sibling competitor -- so a colliding ``source_form`` fails here
+    UNCONDITIONALLY, before ``verify_evidence()`` is even called, regardless
+    of what it would have reported. ``competitors=None`` (caller resolved no
+    senses/canon projection) disables this check -- pre-#243 behavior."""
+    if competitors is not None and competitors.is_colliding(source_form):
+        return (
+            f"source_form {source_form!r} fold-collides with another #243 "
+            "ambiguity competitor (canon_senses.fold_collision_map) -- a "
+            "byte-verified citation cannot be trusted to belong to THIS "
+            "entity rather than a colliding sibling, so it is treated as "
+            "unverifiable regardless of evidence_verify's own result"
+        )
     mapped = _map_evidence_record(evidence)
     failure = verify_evidence(source_form, {"sense_id": None, "evidence": mapped}, manifest, language_config)
     return None if failure is None else failure.reason
 
 
-def _coerce_record(record: dict, manifest: dict, language_config) -> dict:
+def _coerce_record(record: dict, manifest: dict, language_config, *, competitors=None) -> dict:
     """Enforces the verdict-specific PROCEDURAL requirements
     ``skeptic-triage.schema.json`` documents but leaves to code:
     ``propose_split`` needs >=2 referents each byte-verified;
@@ -368,7 +464,12 @@ def _coerce_record(record: dict, manifest: dict, language_config) -> dict:
     verified referents remain -- the failed ones are dropped and
     ``evidence_coverage`` records the partial count (rendered by
     ``skeptic_report.py``). Never mutates ``record``; always returns a NEW,
-    schema-conformant record."""
+    schema-conformant record.
+
+    ``competitors`` (#243): threaded straight through to every
+    ``_evidence_failure_reason()`` call below -- see that function's own
+    docstring. ``competitors=None`` disables the fold-collision check
+    entirely (pre-#243 behavior)."""
     verdict = record.get("verdict")
     source_form = record.get("source_form")
 
@@ -391,7 +492,7 @@ def _coerce_record(record: dict, manifest: dict, language_config) -> dict:
         for ref in referents:
             evidence = ref.get("evidence") if isinstance(ref, dict) else None
             if isinstance(evidence, dict) and _evidence_failure_reason(
-                source_form, evidence, manifest, language_config
+                source_form, evidence, manifest, language_config, competitors=competitors
             ) is None:
                 verified_referents.append(ref)
         if len(verified_referents) < 2:
@@ -405,7 +506,9 @@ def _coerce_record(record: dict, manifest: dict, language_config) -> dict:
         evidence = record.get("evidence")
         if not isinstance(evidence, dict):
             return _downgrade("missing_evidence")
-        if _evidence_failure_reason(source_form, evidence, manifest, language_config) is not None:
+        if _evidence_failure_reason(
+            source_form, evidence, manifest, language_config, competitors=competitors
+        ) is not None:
             return _downgrade("evidence_unverified")
         new_record = dict(record)
         new_record["evidence_coverage"] = {"cited": 1, "verified": 1}
@@ -430,9 +533,20 @@ def run_validate_fragment(
     languages_dir=None,
     expect_assignments_file=None,
     schemas_dir=None,
+    canon_path=None,
+    senses_path=None,
 ) -> dict:
     fragment_path = Path(fragment_path)
     schemas_dir = Path(schemas_dir) if schemas_dir else SCHEMAS_DIR_DEFAULT
+    # #243: same --canon/--senses-path convention as --verify-merged (see
+    # build_arg_parser()'s own help) -- an implicit default sidecar that is
+    # genuinely absent is tolerated as empty; an EXPLICIT --senses-path that
+    # does not exist is a hard error.
+    resolved_canon_path = Path(canon_path) if canon_path else DEFAULT_CANON_PATH
+    resolved_senses_path = Path(senses_path) if senses_path else DEFAULT_SENSES_PATH
+    competitors = _resolve_competitors(
+        resolved_canon_path, resolved_senses_path, allow_absent_senses=senses_path is None
+    )
 
     doc = _read_json(fragment_path, "triage fragment")
 
@@ -474,7 +588,9 @@ def run_validate_fragment(
     except BootstrapNamesError as exc:
         raise SkepticReadyError(f"particle config error: {exc}")
 
-    coerced_records = [_coerce_record(rec, manifest, language_config) for rec in records]
+    coerced_records = [
+        _coerce_record(rec, manifest, language_config, competitors=competitors) for rec in records
+    ]
     coerced_count = sum(
         1 for orig, new in zip(records, coerced_records) if orig.get("verdict") != new.get("verdict")
     )
@@ -567,7 +683,8 @@ def _frozen_input_tamper_reason(label: str, path: Path, stamped_sha256) -> "str 
     """H1 mitigation (verifier half): re-hashes ``path`` (tolerant of
     absence, see ``_read_bytes_tolerant``) and compares it against
     ``stamped_sha256`` -- the aggregate manifest's own ``canon_sha256``/
-    ``manifest_sha256``, stamped by skeptic_setup.py at setup time. Returns
+    ``manifest_sha256``/``senses_sha256`` (#243), stamped by
+    skeptic_setup.py at setup time. Returns
     None when ``stamped_sha256`` itself is absent (an older/hand-built
     aggregate manifest predating this check -- skipped, not a failure) or
     when the hashes agree; otherwise a human-readable mismatch reason.
@@ -617,11 +734,24 @@ def run_verify_merged(
     languages_dir=None,
     schemas_dir=None,
     canon_path=None,
+    senses_path=None,
 ) -> dict:
     triage_path = Path(triage_path)
     aggregate_manifest_path = Path(aggregate_manifest_path)
     schemas_dir = Path(schemas_dir) if schemas_dir else SCHEMAS_DIR_DEFAULT
     canon_path = Path(canon_path) if canon_path else DEFAULT_CANON_PATH
+    # #243: same --senses-path convention as --validate-fragment -- an
+    # implicit default sidecar that is genuinely absent is tolerated as
+    # empty; an EXPLICIT --senses-path that does not exist is a hard error.
+    resolved_senses_path = Path(senses_path) if senses_path else DEFAULT_SENSES_PATH
+    # PROJECT canon_path/senses_path into the #243 ambiguity-competitors
+    # universe -- accepting canon_path without projecting it (it was
+    # previously used ONLY for the frozen-input hash check below) is the
+    # most likely way to make this look done without actually closing site 1
+    # for the merged-verification path.
+    competitors = _resolve_competitors(
+        canon_path, resolved_senses_path, allow_absent_senses=senses_path is None
+    )
 
     if not triage_path.is_file():
         raise SkepticReadyError(f"{triage_path} not found (nothing to verify)")
@@ -677,10 +807,17 @@ def run_verify_merged(
             # only -- see _frozen_input_tamper_reason's own docstring for
             # why it cannot be sound against an adversarial agent), only
             # meaningful once the aggregate itself is schema-valid enough to
-            # trust its own canon_sha256/manifest_sha256 stamps.
+            # trust its own canon_sha256/manifest_sha256/senses_sha256
+            # stamps. #243: canon_senses.json joined canon.json/manifest.json
+            # as a THIRD frozen input the moment this function started
+            # parsing it (via _resolve_competitors above) to project the
+            # ambiguity-competitors universe -- untampered-canon/manifest
+            # alone no longer suffices once a stale/tampered sidecar can
+            # silently change which forms this run treats as colliding.
             for label, path, stamped in (
                 ("canon.json", canon_path, aggregate.get("canon_sha256")),
                 ("manifest.json", Path(manifest_path), aggregate.get("manifest_sha256")),
+                ("canon_senses.json", resolved_senses_path, aggregate.get("senses_sha256")),
             ):
                 reason = _frozen_input_tamper_reason(label, path, stamped)
                 if reason:
@@ -704,11 +841,12 @@ def run_verify_merged(
     id_counts = Counter(r.get("assignment_id") for r in records if isinstance(r, dict))
     covered_ids = set(id_counts)
     missing.extend(
-        f"assignment {aid} has no triage record (coverage gap)" for aid in sorted(assigned_ids - covered_ids)
+        f"assignment {aid} has no triage record (coverage gap)"
+        for aid in sorted(assigned_ids - covered_ids, key=lambda aid: aid or "")
     )
     missing.extend(
         f"triage record {aid} references an assignment_id absent from the aggregate manifest"
-        for aid in sorted(covered_ids - assigned_ids)
+        for aid in sorted(covered_ids - assigned_ids, key=lambda aid: aid or "")
     )
     missing.extend(
         f"assignment_id {aid} has {count} triage records (expected exactly 1)"
@@ -770,7 +908,9 @@ def run_verify_merged(
                         f"not among this assignment's own windows "
                         f"{sorted(b for b in allowed_blocks if b is not None)}"
                     )
-                reason = _evidence_failure_reason(rec.get("source_form"), evidence, manifest, language_config)
+                reason = _evidence_failure_reason(
+                    rec.get("source_form"), evidence, manifest, language_config, competitors=competitors
+                )
                 if reason is not None:
                     missing.append(f"{rec_aid}: {label} no longer byte-verifies ({reason})")
 
@@ -783,7 +923,7 @@ def run_verify_merged(
         # above does not itself name (it flags each bad citation, never the
         # verdict as a whole). Belt-and-suspenders with that loop, not a
         # substitute for it -- see this function's own docstring.
-        coerced = _coerce_record(rec, manifest, language_config)
+        coerced = _coerce_record(rec, manifest, language_config, competitors=competitors)
         if coerced.get("verdict") != rec.get("verdict"):
             detail = "; ".join(str(n) for n in (coerced.get("notes") or []))
             missing.append(
@@ -846,12 +986,24 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--canon", metavar="PATH", default=None,
-        help=f"--verify-merged only: path to canon.json (default: {DEFAULT_CANON_PATH}). Used ONLY "
-             "when the aggregate manifest stamps canon_sha256 -- re-hashed and compared as a "
+        help=f"Path to canon.json (default: {DEFAULT_CANON_PATH}). Used by BOTH modes (#243) to "
+             "project the ambiguity-competitors universe (fold-collision detection, see "
+             "canon_senses.fold_collision_map) every cited evidence record is re-verified against. "
+             "--verify-merged ALSO uses it, when the aggregate manifest stamps canon_sha256, for a "
              "BEST-EFFORT integrity tripwire (fail-closed on mismatch), not a sound tamper-proof "
              "guarantee against an adversarial agent (see _frozen_input_tamper_reason's own "
-             "docstring); the check is skipped entirely when the aggregate manifest carries no "
+             "docstring); that check is skipped entirely when the aggregate manifest carries no "
              "such stamp, e.g. an older/hand-built one.",
+    )
+    parser.add_argument(
+        "--senses-path", metavar="PATH", default=None,
+        help=f"Path to canon_senses.json (default: {DEFAULT_SENSES_PATH}). Used by BOTH modes "
+             "(#243), together with --canon, to project the ambiguity-competitors universe -- "
+             "mirrors canon_adjudication_audit.py's own --senses-path/allow_absent convention: an "
+             "implicit default sidecar that is genuinely absent is tolerated as empty; an EXPLICIT "
+             "--senses-path that does not exist is a hard error. --verify-merged ALSO uses it, when "
+             "the aggregate manifest stamps senses_sha256, for the same BEST-EFFORT tamper tripwire "
+             "as --canon/canon_sha256.",
     )
     parser.add_argument(
         "--expect-assignments-file", metavar="PATH", default=None,
@@ -884,6 +1036,8 @@ def main(argv=None) -> int:
                 languages_dir=args.languages_dir,
                 expect_assignments_file=args.expect_assignments_file,
                 schemas_dir=args.schemas_dir,
+                canon_path=args.canon,
+                senses_path=args.senses_path,
             )
         elif args.merge_fragments is not None:
             out_path = Path(args.out) if args.out else DURABLE_ROOT / SKEPTIC_TRIAGE_FILENAME
@@ -900,6 +1054,7 @@ def main(argv=None) -> int:
                 languages_dir=args.languages_dir,
                 schemas_dir=args.schemas_dir,
                 canon_path=args.canon,
+                senses_path=args.senses_path,
             )
     except SkepticReadyError as exc:
         payload = {"success": False, "error": str(exc)}

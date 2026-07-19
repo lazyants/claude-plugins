@@ -863,6 +863,172 @@ def test_verify_merged_fails_on_canon_tamper(tmp_path):
     assert result["frozen_input_mismatch"] is True
 
 
+def test_verify_merged_fails_on_senses_tamper(tmp_path):
+    """#243 H1 (third stamp): canon_senses.json joined canon.json/
+    manifest.json as a THIRD frozen input once --verify-merged started
+    parsing it to project the ambiguity-competitors universe -- the SAME
+    tamper-tripwire mechanism as canon_sha256/manifest_sha256, mutated
+    mid-pass must trip it exactly the same way."""
+    lang_dir = tmp_path / "languages"
+    particle_config = write_particle_config(lang_dir)
+    text = "Jean walked home."
+    block_id, blk = block(text)
+    manifest_path = tmp_path / "manifest.json"
+    write_json(manifest_path, make_manifest((block_id, blk)))
+
+    senses_path = tmp_path / "canon_senses.json"
+    senses_path.write_text(json.dumps({"schema_version": 1, "entries_by_source_form": {}}), encoding="utf-8")
+    senses_sha256 = hashlib.sha256(senses_path.read_bytes()).hexdigest()
+
+    rec = insufficient_record("Jean")
+    triage_path = tmp_path / "skeptic_triage.json"
+    write_json(triage_path, {"schema_version": 1, "run_id": "run-1", "records": [rec]})
+    aggregate_path = tmp_path / "assignments.json"
+    write_json(aggregate_path, {
+        **make_aggregate_manifest("run-1", [make_assignment("Jean", [])]),
+        "senses_sha256": senses_sha256,
+    })
+
+    # Unmutated: passes clean.
+    result = sr.run_verify_merged(
+        triage_path, aggregate_path, manifest_path, particle_config,
+        languages_dir=lang_dir, senses_path=senses_path,
+    )
+    assert result == {"verified": True, "missing": [], "frozen_input_mismatch": False}
+
+    # Tamper: mutate canon_senses.json on disk (simulated skeptic-agent
+    # injection, same threat model as canon.json/manifest.json) -- a
+    # schema-VALID addition, so this exercises the H1 hash-tamper tripwire
+    # itself, never the separate (also-fatal, but different) schema
+    # validation path a malformed sidecar would hit instead.
+    injected_evidence = {
+        "block": "b1", "seg": "seg01", "char_start": 0, "char_end": 4,
+        "context_start": 0, "context_end": 20, "sha256": "a" * 64,
+    }
+    injected_sense = lambda sid: {  # noqa: E731 -- local test-only shorthand
+        "sense_id": sid, "disambiguator": sid, "index_scope": "narrative", "evidence": injected_evidence,
+    }
+    senses_path.write_text(json.dumps({
+        "schema_version": 1,
+        "entries_by_source_form": {"Injected": {"senses": [injected_sense("s1"), injected_sense("s2")]}},
+    }), encoding="utf-8")
+    result = sr.run_verify_merged(
+        triage_path, aggregate_path, manifest_path, particle_config,
+        languages_dir=lang_dir, senses_path=senses_path,
+    )
+    assert result["verified"] is False
+    assert any("canon_senses.json" in m and "tamper" in m for m in result["missing"]), (
+        "MUTATION CAUGHT: if senses_sha256 were not re-hashed/compared like "
+        "canon_sha256/manifest_sha256, this sidecar tamper would go "
+        "completely undetected"
+    )
+    assert result["frozen_input_mismatch"] is True
+
+
+# ---------------------------------------------------------------------------
+# #243 site 1 fix: a fold-colliding source_form's citation can no longer be
+# trusted to belong to THIS entity rather than a colliding sibling, so
+# _evidence_failure_reason/_coerce_record must fail it unconditionally --
+# derived from the FULL --canon/--senses-path files, never anything local to
+# one batch's own triage/assignment data (the whole reason a batch-local
+# derivation would miss a cross-batch collision).
+# ---------------------------------------------------------------------------
+
+FOLD_FORM_A = "משה לייב"
+FOLD_FORM_B = "מֹשֶׁה־לַיִיב"
+
+
+def test_verify_merged_fails_closed_on_cross_batch_fold_collision(tmp_path):
+    lang_dir = tmp_path / "languages"
+    particle_config = write_particle_config(lang_dir, name_inventory=[FOLD_FORM_A])
+    lang = bn.load_language_config(particle_config, languages_dir=lang_dir)
+    text = f"ראה {FOLD_FORM_A} אתמול."
+    block_id, blk = block(text)
+    manifest_path = tmp_path / "manifest.json"
+    write_json(manifest_path, make_manifest((block_id, blk)))
+
+    form_a_evidence = evidence_for(FOLD_FORM_A, block_id, "seg01", text, lang)
+
+    # This record/assignment is built as though it were its OWN solo batch
+    # -- it carries zero local knowledge of FOLD_FORM_B. canon.json is the
+    # only place both forms appear together.
+    triage_path = tmp_path / "skeptic_triage.json"
+    write_json(triage_path, {
+        "schema_version": 1, "run_id": "run-1",
+        "records": [adverse_record(FOLD_FORM_A, form_a_evidence)],
+    })
+    aggregate_path = tmp_path / "assignments.json"
+    write_json(aggregate_path, make_aggregate_manifest(
+        "run-1", [make_assignment(FOLD_FORM_A, [window_for(form_a_evidence)])]
+    ))
+
+    # Sanity: with NO --canon passed (default, empty competitors universe --
+    # see _resolve_competitors' own tolerant-absent reading), this
+    # byte-verified adverse record verifies cleanly -- proving the failure
+    # below comes from the collision check, not a fixture bug.
+    baseline = sr.run_verify_merged(
+        triage_path, aggregate_path, manifest_path, particle_config, languages_dir=lang_dir
+    )
+    assert baseline["verified"] is True
+
+    canon_path = tmp_path / "canon.json"
+    write_json(canon_path, {"entries": {
+        FOLD_FORM_A: {"canonical_target_form": "Target", "is_proper_name": True,
+                      "basis": "transliterated", "confidence": "high"},
+        FOLD_FORM_B: {"canonical_target_form": "Target", "is_proper_name": True,
+                      "basis": "transliterated", "confidence": "high"},
+    }})
+
+    result = sr.run_verify_merged(
+        triage_path, aggregate_path, manifest_path, particle_config,
+        languages_dir=lang_dir, canon_path=canon_path,
+    )
+    # Mutation: deriving the collision check from anything local to this
+    # batch's own triage/assignment records (instead of re-reading the FULL
+    # canon.json this call was given) would never see FOLD_FORM_B at all and
+    # wrongly keep this verified.
+    assert result["verified"] is False
+    assert any("does not survive fresh re-verification" in m for m in result["missing"])
+
+
+def test_validate_fragment_fails_closed_on_fold_collision(tmp_path):
+    """Same site-1 fix, --validate-fragment side (per-batch precheck/
+    dispatch self-check) -- must fail the SAME way as --verify-merged."""
+    lang_dir = tmp_path / "languages"
+    particle_config = write_particle_config(lang_dir, name_inventory=[FOLD_FORM_A])
+    lang = bn.load_language_config(particle_config, languages_dir=lang_dir)
+    text = f"ראה {FOLD_FORM_A} אתמול."
+    block_id, blk = block(text)
+    manifest_path = tmp_path / "manifest.json"
+    write_json(manifest_path, make_manifest((block_id, blk)))
+
+    form_a_evidence = evidence_for(FOLD_FORM_A, block_id, "seg01", text, lang)
+    fragment_path = tmp_path / "triage_0.json"
+    write_json(fragment_path, {
+        "schema_version": 1, "run_id": "run-1",
+        "records": [adverse_record(FOLD_FORM_A, form_a_evidence)],
+    })
+
+    canon_path = tmp_path / "canon.json"
+    write_json(canon_path, {"entries": {
+        FOLD_FORM_A: {"canonical_target_form": "Target", "is_proper_name": True,
+                      "basis": "transliterated", "confidence": "high"},
+        FOLD_FORM_B: {"canonical_target_form": "Target", "is_proper_name": True,
+                      "basis": "transliterated", "confidence": "high"},
+    }})
+
+    result = sr.run_validate_fragment(
+        fragment_path, manifest_path, particle_config, languages_dir=lang_dir, canon_path=canon_path,
+    )
+    assert result["success"] is True  # --validate-fragment COERCES, never rejects, a bad citation
+    coerced = json.loads(fragment_path.read_text(encoding="utf-8"))
+    assert coerced["records"][0]["verdict"] == "insufficient_window", (
+        "MUTATION CAUGHT: --validate-fragment's own _coerce_record call must "
+        "also receive the collision-aware competitors map -- omitting it "
+        "here would leave this byte-verified adverse record uncoerced"
+    )
+
+
 def test_verify_merged_fails_on_manifest_tamper(tmp_path):
     """Same H1 mitigation mechanism as canon.json, for manifest_sha256 --
     skeptic-assignment.schema.json documents the identical rationale for

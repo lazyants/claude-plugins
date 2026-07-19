@@ -51,6 +51,7 @@ CLI:
         --particle-config FILENAME --research-mode {live,offline}
         --source-format FORMAT
         --batch-agent-cap N --source-lang LANG
+        [--senses-path PATH]
         [--languages-dir PATH] [--dispersion-threshold N] [--sample-cap N]
         [--windows-per-entity N] [--near-threshold F] [--near-cap N]
         [--near-pair-budget N] [--citation-block-types [TYPE ...]]
@@ -86,9 +87,10 @@ Self-anchored: this script always lives at
 durable root. Never assumes cwd, never takes a ``--durable-root`` flag.
 
 skeptic ``input_digest`` (see ``compute_skeptic_input_digest()`` below):
-the producer set (canon.json, manifest.json, the resolved scan parameters,
-the resolved ``LanguageConfig.raw_bytes``, and the producer's own code
-closure -- reused verbatim via ``suspicion_scan.compute_producer_input_digest``)
+the producer set (canon.json, manifest.json, canon_senses.json's own raw
+bytes (#243), the resolved scan parameters, the resolved
+``LanguageConfig.raw_bytes``, and the producer's own code closure -- reused
+verbatim via ``suspicion_scan.compute_producer_input_digest``)
 PLUS: the worklist's own raw bytes, the fully-resolved per-entity windows +
 batch assignment (so even a bug in THIS script's own derivation algorithm is
 covered, belt-and-suspenders, on top of this script's own bytes already
@@ -199,6 +201,11 @@ except ImportError as exc:
 
 DEFAULT_CANON_PATH = DURABLE_ROOT / "canon.json"
 DEFAULT_MANIFEST_PATH = DURABLE_ROOT / "manifest.json"
+# Sibling of DEFAULT_CANON_PATH, self-anchored the same way -- each consumer
+# computes its own copy (see canon_senses.py's own module docstring on why
+# DEFAULT_SENSES_PATH is deliberately not defined there). #243: the sidecar
+# became a THIRD frozen producer input this script recomputes/re-stamps.
+DEFAULT_SENSES_PATH = DURABLE_ROOT / "canon_senses.json"
 DEFAULT_WORKLIST_PATH = DURABLE_ROOT / SUSPICION_WORKLIST_FILENAME
 SKEPTIC_RUNS_DIR = DURABLE_ROOT / SKEPTIC_RUNS_SUBDIR
 
@@ -477,6 +484,7 @@ def resolve_skeptic_run(input_digest: str, resume_from_run_id):
 def run(args) -> dict:
     canon_path = Path(args.canon) if args.canon else DEFAULT_CANON_PATH
     manifest_path = Path(args.manifest) if args.manifest else DEFAULT_MANIFEST_PATH
+    senses_path = Path(args.senses_path) if args.senses_path else DEFAULT_SENSES_PATH
     worklist_path = Path(args.worklist) if args.worklist else DEFAULT_WORKLIST_PATH
 
     # canon.json absence is TOLERATED -- mirrors suspicion_scan.py's own
@@ -484,6 +492,12 @@ def run(args) -> dict:
     # error), so the two scripts' canon_bytes agree byte-for-byte
     # (b"" both times) and the recomputed producer_input_digest can match.
     canon_bytes = canon_path.read_bytes() if canon_path.is_file() else b""
+    # #243: canon_senses.json's own raw bytes, re-read HERE off disk (never
+    # trusted from a caller, same discipline canon_bytes/manifest_bytes
+    # already follow) -- mirrors suspicion_scan.py's own tolerant read
+    # exactly, so the two scripts' senses_bytes agree byte-for-byte and the
+    # recomputed producer_input_digest below can match.
+    senses_bytes = senses_path.read_bytes() if senses_path.is_file() else b""
     if not manifest_path.is_file():
         raise SkepticSetupError(f"manifest.json not found: {manifest_path}")
     if not worklist_path.is_file():
@@ -543,7 +557,7 @@ def run(args) -> dict:
     #    reject fail-closed on any mismatch (stale canon/manifest/params/
     #    language-config/producer-code).
     recomputed_producer_digest = compute_producer_input_digest(
-        canon_bytes, manifest_bytes, resolved_params, lang.raw_bytes, SCRIPT_DIR,
+        canon_bytes, manifest_bytes, senses_bytes, resolved_params, lang.raw_bytes, SCRIPT_DIR,
     )
     stamped_producer_digest = worklist.get("producer_input_digest")
     if recomputed_producer_digest != stamped_producer_digest:
@@ -656,12 +670,16 @@ def run(args) -> dict:
         "run_id": run_id,
         "input_digest": skeptic_input_digest,
         "producer_input_digest": recomputed_producer_digest,
-        # Fix H1 (writer half): the frozen canon/manifest bytes' own sha256,
-        # so --verify-merged (skeptic_ready.py, owner A3) can re-hash the
-        # on-disk files and HALT the pass if a skeptic agent tampered either
-        # one after this setup ran (source-text prompt injection).
+        # Fix H1 (writer half): the frozen canon/manifest/senses bytes' own
+        # sha256, so --verify-merged (skeptic_ready.py) can re-hash the
+        # on-disk files and HALT the pass if a skeptic agent tampered any of
+        # them after this setup ran (source-text prompt injection). #243:
+        # canon_senses.json joined canon.json/manifest.json as a THIRD
+        # frozen input the moment --verify-merged started parsing it to
+        # project the ambiguity-competitors universe.
         "canon_sha256": hashlib.sha256(canon_bytes).hexdigest(),
         "manifest_sha256": hashlib.sha256(manifest_bytes).hexdigest(),
+        "senses_sha256": hashlib.sha256(senses_bytes).hexdigest(),
         "batch_count": batch_count,
         "assignments": assignments,
     }
@@ -701,6 +719,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
                          help=f"Path to canon.json (default: {DEFAULT_CANON_PATH}).")
     parser.add_argument("--manifest", metavar="PATH", default=None,
                          help=f"Path to manifest.json (default: {DEFAULT_MANIFEST_PATH}).")
+    parser.add_argument("--senses-path", metavar="PATH", default=None,
+                         help=f"Path to canon_senses.json (default: {DEFAULT_SENSES_PATH}). "
+                              "MUST be the same sidecar suspicion_scan.py resolved this "
+                              "worklist against -- re-read fresh off disk here (never trusted "
+                              "from a caller) to recompute producer_input_digest (#243) and "
+                              "to stamp senses_sha256 into the aggregate manifest (H1).")
     parser.add_argument("--worklist", metavar="PATH", default=None,
                          help=f"Path to suspicion_worklist.json (default: {DEFAULT_WORKLIST_PATH}).")
     parser.add_argument("--particle-config", required=True, metavar="FILENAME",

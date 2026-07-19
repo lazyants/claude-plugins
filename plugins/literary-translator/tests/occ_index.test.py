@@ -463,42 +463,148 @@ def test_index_manifest_matches_per_form_build_occurrence_records_output(tmp_pat
 
 
 # ---------------------------------------------------------------------------
-# A-C6 (this train, #238/#241) -- production_occurrences() stays mark/
-# connector-SENSITIVE, deliberately. Pins the honest, documented residual
-# rather than a wished-for behavior: occurrence_targets.py now correctly
-# indexes a pointed/maqaf-joined occurrence in the ## Mentions appendix (see
-# tests/occurrence_targets.test.py's own #238 SCOPE test), but THIS module
-# does not -- see occ_index.py's own module docstring for the rationale
-# (A-C6 = NO, lead-decisions.md) and the deferred-follow-up issue.
+# #243 fold-key collisions in index_manifest() -- fail-closed, never a
+# silent dict-overwrite and never a double-file. Real Baal Shem Tov
+# pointed/unpointed maqaf/space variants (whoswho.final.json:87-98).
+# ---------------------------------------------------------------------------
+
+BST_MAQAF_UNPOINTED = "הבעל־שם־טוב"
+BST_SPACE_UNPOINTED = "הבעל שם טוב"
+BST_MAQAF_POINTED_OCCURRENCE = "הַבַּעַל־שֵׁם־טוֹב"
+
+
+def test_243_index_manifest_fold_collision_real_hebrew_forms_excludes_both(tmp_path):
+    """Two DISTINCT canon source_forms -- a maqaf-joined and a space-joined
+    spelling of "the Baal Shem Tov", both unpointed -- fold to the SAME
+    #238/#241 match key. A single physical occurrence, spelled pointed AND
+    maqaf-joined in the source text, must be excluded from index_manifest()'s
+    output entirely -- never double-filed under both, and never silently
+    kept under whichever of the two a naive folded dict comprehension
+    happened to see last (the exact bug this guard exists to prevent)."""
+    lang = make_lang(name_inventory=[BST_MAQAF_UNPOINTED, BST_SPACE_UNPOINTED])
+    blocks = {
+        "PARA:seg01:0001": {
+            "id": "PARA:seg01:0001", "type": "PARA", "seg": "seg01",
+            "order_index": 0, "source_file": "x.txt",
+            "plain_text": f"ראה {BST_MAQAF_POINTED_OCCURRENCE} אתמול.", "sha1": "a",
+        },
+    }
+    manifest_path = _write_manifest(tmp_path, blocks)
+    records = occ.index_manifest(
+        manifest_path, [BST_MAQAF_UNPOINTED, BST_SPACE_UNPOINTED], lang
+    )
+    assert records == []
+
+
+def test_243_index_manifest_fold_collision_reported_on_stderr_and_side_channel(tmp_path, capsys):
+    lang = make_lang(name_inventory=[BST_MAQAF_UNPOINTED, BST_SPACE_UNPOINTED])
+    blocks = {
+        "PARA:seg01:0001": {
+            "id": "PARA:seg01:0001", "type": "PARA", "seg": "seg01",
+            "order_index": 0, "source_file": "x.txt",
+            "plain_text": f"ראה {BST_MAQAF_POINTED_OCCURRENCE} אתמול.", "sha1": "a",
+        },
+    }
+    manifest_path = _write_manifest(tmp_path, blocks)
+    collisions_out = []
+    occ.index_manifest(
+        manifest_path, [BST_MAQAF_UNPOINTED, BST_SPACE_UNPOINTED], lang,
+        collisions_out=collisions_out,
+    )
+    reported = {c["source_form"] for c in collisions_out}
+    assert reported == {BST_MAQAF_UNPOINTED, BST_SPACE_UNPOINTED}
+    assert len({c["fold_key"] for c in collisions_out}) == 1
+    captured = capsys.readouterr()
+    assert BST_MAQAF_UNPOINTED in captured.err and BST_SPACE_UNPOINTED in captured.err
+
+
+def test_243_index_manifest_collisions_out_defaults_to_none_no_existing_caller_touched():
+    # collisions_out omitted entirely -- the 5 pre-#243 positional-3-arg call
+    # sites must keep working unchanged.
+    import inspect
+    sig = inspect.signature(occ.index_manifest)
+    params = list(sig.parameters.values())
+    assert [p.name for p in params[:3]] == ["manifest_path", "source_forms", "language_config"]
+    assert sig.parameters["collisions_out"].default is None
+    assert sig.parameters["competitors"].default is None
+
+
+def test_243_index_manifest_competitors_flags_a_locally_unique_form_too(tmp_path):
+    """A form that is UNIQUE within this call's own source_forms can still
+    collide against a sibling that lives only in the broader competitor
+    universe (e.g. a split-only canon_senses form never passed as a
+    source_form here). ``competitors`` must catch that case too -- not just
+    a locally-visible group of >= 2."""
+    # occ_index.py itself already imports fold_collision_map from
+    # canon_senses at module level -- reuse that binding rather than a bare
+    # top-level `import canon_senses`, which a static checker cannot resolve
+    # from this test file's own location (canon_senses.py is loaded onto
+    # sys.path only transiently, around _load_module()'s calls above; a
+    # plain `import canon_senses` here only works at runtime because that
+    # earlier load already cached it in sys.modules under its real name --
+    # true, but not something a type checker can see).
+    lang = make_lang(name_inventory=[BST_MAQAF_UNPOINTED])
+    blocks = {
+        "PARA:seg01:0001": {
+            "id": "PARA:seg01:0001", "type": "PARA", "seg": "seg01",
+            "order_index": 0, "source_file": "x.txt",
+            "plain_text": f"ראה {BST_MAQAF_POINTED_OCCURRENCE} אתמול.", "sha1": "a",
+        },
+    }
+    manifest_path = _write_manifest(tmp_path, blocks)
+
+    # Without competitors: BST_MAQAF_UNPOINTED is alone in source_forms (no
+    # local collision), so it is indexed normally.
+    alone = occ.index_manifest(manifest_path, [BST_MAQAF_UNPOINTED], lang)
+    assert len(alone) == 1
+
+    # The broader competitor universe knows about a sibling (e.g. a
+    # split-only canon_senses form) sharing the same fold key.
+    competitors = occ.fold_collision_map([BST_MAQAF_UNPOINTED, BST_SPACE_UNPOINTED])
+    guarded = occ.index_manifest(
+        manifest_path, [BST_MAQAF_UNPOINTED], lang, competitors=competitors
+    )
+    assert guarded == []
+
+
+# ---------------------------------------------------------------------------
+# A-C6 (#238/#241) is SUPERSEDED by #243: production_occurrences() now folds
+# BOTH sides of its comparison via bootstrap_names.fold_match_key, closing
+# the residual this train's A-C6 = NO deliberately left open (see occ_index.
+# py's own module docstring, rewritten for #243). occurrence_targets.py's
+# ## Mentions appendix and this module's matcher-authentication now agree: a
+# pointed/maqaf-joined occurrence is found under an unpointed/space-joined
+# canon source_form on both paths.
 # ---------------------------------------------------------------------------
 
 def test_A_C6_production_occurrences_finds_the_raw_emitted_occurrence():
     lang = make_lang(name_inventory=["משה לייב"])
     text = "ראה מֹשֶׁה־לַיִיב אתמול."
     # the production matcher DOES find the occurrence -- under its own raw,
-    # unfolded emitted name (Contract 5).
+    # unfolded emitted name (Contract 5) -- an exact-string lookup is a
+    # trivial case of a fold-aware one (a string always folds to itself).
     spans = occ.production_occurrences("מֹשֶׁה־לַיִיב", text, lang)
     assert len(spans) == 1
     s, e = spans[0]
     assert text[s:e] == "מֹשֶׁה־לַיִיב"
 
 
-def test_A_C6_production_occurrences_misses_the_unfolded_canon_source_form():
-    """The documented residual: an exact lookup by the canon's own unfolded
-    source_form finds NOTHING for a pointed/maqaf-joined occurrence -- this
-    is what A-C6 = NO leaves unresolved this train, deliberately.
-
-    HONESTY NOTE (not independently red-before-green): this assertion is
-    ALSO true on pre-#238/#241 code, but for an unrelated reason (the
-    matcher found nothing at all pre-fix, vs. found-under-a-different-name
-    post-fix). It only documents the intended residual when read alongside
-    test_A_C6_production_occurrences_finds_the_raw_emitted_occurrence
-    (which IS red-before-green) -- that companion test is what proves the
-    matcher actually recalls the occurrence now; THIS test proves the
-    unfolded lookup still can't find it under its own canon key."""
+def test_243_production_occurrences_fold_aware_matches_the_unfolded_canon_source_form():
+    """#243 closes the A-C6 residual: a lookup by the canon's own unfolded,
+    unpointed, space-joined source_form now DOES find a pointed/maqaf-joined
+    production occurrence, because production_occurrences() compares
+    fold_match_key(name) == fold_match_key(source_form), never the raw
+    strings directly. This is the exact inversion of what this test asserted
+    before #243 (test_A_C6_production_occurrences_misses_the_unfolded_
+    canon_source_form) -- red-before-green: reverting only this module's
+    fold_match_key comparison back to a raw `==` reproduces the old
+    empty-list result and fails this assertion."""
     lang = make_lang(name_inventory=["משה לייב"])
     text = "ראה מֹשֶׁה־לַיִיב אתמול."
-    assert occ.production_occurrences("משה לייב", text, lang) == []
+    spans = occ.production_occurrences("משה לייב", text, lang)
+    assert len(spans) == 1
+    s, e = spans[0]
+    assert text[s:e] == "מֹשֶׁה־לַיִיב"
 
 
 if __name__ == "__main__":

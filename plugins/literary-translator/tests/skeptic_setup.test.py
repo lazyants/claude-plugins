@@ -168,6 +168,12 @@ def compute_expected_producer_digest(root: Path, scan_params: dict,
     canon_path = root / "canon.json"
     canon_bytes = canon_path.read_bytes() if canon_path.is_file() else b""
     manifest_bytes = (root / "manifest.json").read_bytes()
+    # #243: canon_senses.json's own raw bytes, tolerant-read exactly like
+    # canon_bytes -- make_skeptic_root() never writes a sidecar by default,
+    # so this is b"" (absent) unless a test writes one itself before calling
+    # write_worklist()/this helper.
+    senses_path = root / "canon_senses.json"
+    senses_bytes = senses_path.read_bytes() if senses_path.is_file() else b""
 
     resolved_citation_types = ss.resolve_citation_block_types(scan_params["source_format"], citation_override)
     resolved_params = ss.resolved_scan_params(
@@ -182,7 +188,7 @@ def compute_expected_producer_digest(root: Path, scan_params: dict,
         resolved_citation_types=resolved_citation_types,
     )
     return ss.compute_producer_input_digest(
-        canon_bytes, manifest_bytes, resolved_params, lang.raw_bytes, scripts_dir,
+        canon_bytes, manifest_bytes, senses_bytes, resolved_params, lang.raw_bytes, scripts_dir,
     )
 
 
@@ -395,6 +401,48 @@ def test_success_writes_schema_valid_aggregate_and_batch_manifests(tmp_path):
     assert isinstance(batch1_ids, list) and len(batch1_ids) == 1
     aggregate_ids_by_form = {a["source_form"]: a["assignment_id"] for a in aggregate["assignments"]}
     assert {batch0_ids[0], batch1_ids[0]} == set(aggregate_ids_by_form.values())
+
+
+def test_aggregate_stamps_senses_sha256_of_actual_sidecar_bytes(tmp_path):
+    """#243 H1 (writer half): canon_senses.json joined canon.json/
+    manifest.json as a THIRD frozen input this script must stamp, so
+    --verify-merged can re-hash it and detect a post-setup tamper the same
+    way it already does for canon_sha256/manifest_sha256."""
+    root = make_skeptic_root(tmp_path)
+    (root / "canon_senses.json").write_text(
+        json.dumps({"schema_version": 1, "entries_by_source_form": {}}), encoding="utf-8"
+    )
+    entry = make_worklist_entry("Jean", occurrence_refs=[make_occurrence_ref("b1", "seg01", 0, 4)])
+    write_worklist(root, [entry])
+
+    proc, parsed = run_skeptic_setup(root)
+
+    assert proc.returncode == 0, f"stdout={proc.stdout}\nstderr={proc.stderr}"
+    run_dir = Path(parsed["run_dir"])
+    aggregate = json.loads((run_dir / "assignments.json").read_text(encoding="utf-8"))
+    assert aggregate["senses_sha256"] == hashlib.sha256((root / "canon_senses.json").read_bytes()).hexdigest(), (
+        "MUTATION CAUGHT: the aggregate manifest must stamp senses_sha256 == "
+        "sha256 of the ACTUAL canon_senses.json bytes this run was set up against"
+    )
+
+
+def test_aggregate_stamps_senses_sha256_of_empty_bytes_when_sidecar_absent(tmp_path):
+    """The default fixture (make_skeptic_root) never writes canon_senses.json
+    -- senses_sha256 must still be present, stamping sha256(b"") (the SAME
+    tolerant-absent convention canon_sha256 already uses), never omitted or
+    null, so an aggregate manifest is always comparable byte-for-byte
+    against a fresh re-hash regardless of whether the sidecar exists."""
+    root = make_skeptic_root(tmp_path)
+    assert not (root / "canon_senses.json").is_file()
+    entry = make_worklist_entry("Jean", occurrence_refs=[make_occurrence_ref("b1", "seg01", 0, 4)])
+    write_worklist(root, [entry])
+
+    proc, parsed = run_skeptic_setup(root)
+
+    assert proc.returncode == 0, f"stdout={proc.stdout}\nstderr={proc.stderr}"
+    run_dir = Path(parsed["run_dir"])
+    aggregate = json.loads((run_dir / "assignments.json").read_text(encoding="utf-8"))
+    assert aggregate["senses_sha256"] == hashlib.sha256(b"").hexdigest()
 
 
 def test_windows_capped_truncated_flag_and_verse_embedded_excluded(tmp_path):
@@ -693,6 +741,69 @@ def test_particle_config_one_byte_edit_forces_new_run_id(tmp_path):
         "invisible and the run would wrongly RESUME run_id_1"
     )
     assert parsed2["effectiveRunId"] != run_id_1
+
+
+def test_senses_sidecar_edit_forces_new_run_id(tmp_path):
+    """#243: canon_senses.json's own raw bytes joined the producer/skeptic
+    digest closures -- a curator editing the sidecar (adding a split-only
+    form, say) with canon/manifest/particle-config/params all held constant
+    must be indistinguishable from any other invalidating change, exactly
+    like the particle-config one-byte-edit case above."""
+    root = make_skeptic_root(tmp_path)
+    (root / "canon_senses.json").write_text(
+        json.dumps({"schema_version": 1, "entries_by_source_form": {}}), encoding="utf-8"
+    )
+    entry = make_worklist_entry("Jean", occurrence_refs=[make_occurrence_ref("b1", "seg01", 0, 4)])
+    write_worklist(root, [entry])
+
+    proc1, parsed1 = run_skeptic_setup(root)
+    assert proc1.returncode == 0, f"stdout={proc1.stdout}\nstderr={proc1.stderr}"
+    run_id_1 = parsed1["effectiveRunId"]
+
+    senses_path = root / "canon_senses.json"
+    senses_path.write_bytes(senses_path.read_bytes() + b" ")
+
+    # A real re-run of suspicion_scan.py would re-stamp the worklist with a
+    # digest over the NEW sidecar bytes -- do that here too, so the mismatch
+    # this test targets is the RUN_ID property, not a masking "stale
+    # worklist" rejection (see test_stale_producer_input_digest_rejected...
+    # for that half).
+    write_worklist(root, [entry])
+
+    proc2, parsed2 = run_skeptic_setup(root, resume_from_run_id=run_id_1)
+    assert proc2.returncode == 0, f"stdout={proc2.stdout}\nstderr={proc2.stderr}"
+    assert parsed2["resume"] is False, (
+        "MUTATION CAUGHT: if senses_bytes were left out of the producer/"
+        "skeptic input digests, this one-byte canon_senses.json edit would "
+        "be invisible and the run would wrongly RESUME run_id_1"
+    )
+    assert parsed2["effectiveRunId"] != run_id_1
+
+
+def test_stale_worklist_rejected_when_senses_sidecar_changes_after_stamping(tmp_path):
+    """The freshness half of the same guarantee: editing canon_senses.json
+    AFTER a worklist was stamped (never re-running suspicion_scan.py) must
+    be rejected fail-closed, exactly like editing canon.json after stamping
+    already is (test_stale_producer_input_digest_rejected_fail_closed)."""
+    root = make_skeptic_root(tmp_path)
+    entry = make_worklist_entry("Jean", occurrence_refs=[make_occurrence_ref("b1", "seg01", 0, 4)])
+    write_worklist(root, [entry])  # stamped against an ABSENT canon_senses.json (senses_bytes == b"")
+
+    (root / "canon_senses.json").write_text(
+        json.dumps({"schema_version": 1, "entries_by_source_form": {}}), encoding="utf-8"
+    )
+
+    proc, parsed = run_skeptic_setup(root)
+
+    assert proc.returncode == 1
+    assert parsed is not None and parsed["success"] is False
+    assert "stale" in parsed["error"].lower(), (
+        "MUTATION CAUGHT: if senses_bytes were left out of the recomputed "
+        "producer_input_digest, a canon_senses.json edit made AFTER the "
+        "worklist was stamped would go undetected and this run would "
+        "wrongly succeed against a stale competitors universe"
+    )
+    assert existing_skeptic_run_dirs(root) == []
 
 
 def test_source_lang_change_forces_new_run_id(tmp_path):

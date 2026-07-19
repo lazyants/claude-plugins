@@ -1,5 +1,44 @@
 # Changelog
 
+## 1.11.0 — 2026-07-19
+
+Closes the A-C6 residual 1.10.0 shipped knowingly: the evidence/adjudication chain is now mark/connector-insensitive too, so the `## Mentions` appendix and the evidence chain finally agree on what counts as the same Hebrew name. Alongside it: exact-match sentinel comparison across the two remaining workflow templates, a new content-conservation gate, and a required style-contract slot for embedded third-language text. Closes #243, #228, #196, #202 (output-coverage half), #203.
+
+### Fixed — fold-aware evidence chain (#243)
+
+- `occ_index.production_occurrences()` and `occ_index.index_manifest()` now compare `bootstrap_names.fold_match_key()` on BOTH sides, as `occurrence_targets.py` has since 1.10.0. `evidence_verify._group_production_spans_by_name()` — an independent second copy of the same grouping, and the hot path production actually takes — was folded in the same change; its docstring's "so the two never drift" promise is now enforced by a parity test rather than by convention.
+- **Fail-closed on ambiguity, never double-filing.** Folding is many-to-one: distinct raw canon forms (pointed/unpointed, maqaf/space) can share one match key. A span whose folded key covers two or more distinct canon source forms is credited to NEITHER, mirroring `occurrence_targets.build()`'s `unresolved_homonyms` route. Emitted values stay unfolded — the raw `source_form` and the raw pointed `quote` are untouched; folding is a lookup key only.
+- **Two distinct universes, deliberately.** *Competitors* (who participates in ambiguity detection) is the union of `canon.json` entries and ALL `canon_senses.json` forms, split-only included — a split-only form is a competitor but never an output row. *Eligible-for-output* stays each consumer's own projection. Collisions are computed AFTER that projection, so a form colliding only with an out-of-scope entry keeps its ordinary counters.
+- **New risk class `fold_collision`** (`skeptic_constants.py`, `suspicion-worklist.schema.json` enum — eight classes now). `suspicion_scan.build_worklist()` no longer silently combines a colliding form's block-origin and verse-origin occurrence counts (which disagreed in opposite directions: block occurrences zeroed, one physical verse span double-filed to both siblings); colliding forms skip occurrence collection entirely and route to an always-flagged bucket. One row per `source_form` — two colliding forms produce two rows.
+- `skeptic_ready.py`'s `_evidence_failure_reason()`/`_coerce_record()` — the mandatory triage-coercion path, which reached `verify_evidence()` through its collision-unaware `production_spans_by_form is None` fallback — now fail a colliding form unconditionally. `run_verify_merged()` and `run_validate_fragment()` both PROJECT the competitor universe via a shared `_resolve_competitors()` rather than merely accepting a canon path; `--canon` is now actually passed by the validate-fragment branch, and both modes accept `--senses-path` (same `DEFAULT_SENSES_PATH`/`allow_absent` convention as `canon_adjudication_audit.py`). This is what makes a collision detectable when the two sibling forms land in DIFFERENT batches.
+- **Freshness:** `compute_producer_input_digest()` gains `senses_bytes` (third, after `manifest_bytes`). `canon_senses.json` became an authoritative data input with this release, and without folding its bytes into the digest a curator editing a split-only form between scans would leave the digest unchanged and a stale competitor universe would be certified fresh. An absent sidecar (`b""`) and a schema-valid logically-empty one hash differently.
+- **Tamper:** the H1 frozen-input tripwire gains a third stamp, `senses_sha256` (`skeptic-assignment.schema.json`, optional — older aggregates still validate). A sidecar mutated between `skeptic_setup.py` and `--verify-merged` now HALTs exactly as a mutated `canon.json` does.
+- `canon_senses.py` hosts the shared `fold_collision_map()` helper — chosen because it already sits in both freshness closures and the plugin bundle, and is NOT a derivation-bundle member. Its `bootstrap_names` import is **lazy, inside the function**, so the module keeps its long-standing project-dependency-LEAF property: `normalize_form`/`load_senses` stay importable from any context, and the helper raises (never `sys.exit`) when `bootstrap_names.py` is absent.
+
+### Fixed — sentinel exact-match (#228)
+
+- Five remaining substring sentinel checks across `glossary-pass-wf.template.js` (precheck, wait) and `mass-translate-wf.template.js` (review-wait, fix-call, translate-wait) now compare the full discriminated reply exactly (`String(x).trim() === "READY " + seg`), as `skeptic-pass-wf.template.js` has since #227. A reply containing `NOT_READY` — or a `READY` line about a DIFFERENT segment, which these sites could not distinguish at all — no longer passes. Prompts unchanged; they already required the discriminated form.
+- The fix-call site deliberately keeps its `!fx ||` disjunct: a falsy reply and `DRAFT_MISSING` are both routed to the #131 draft probe, and collapsing them would let a dead fix call read as an ordinary review round.
+- `glossary-pass-wf.template.js` gains its first executing test harness (`tests/glossary_pipeline_e2e.test.py`) — every prior test of that template parsed its source as text, which is the blind spot that let #228 survive.
+
+### Added — content conservation (#196, #202 output-coverage half)
+
+- New `scripts/validate_conservation.py`, two subcommands. `wrapper-conservation` (HARD, after W2) checks a hand-wrapped source against a preserved pre-wrap baseline via an operator-declared provenance map, catching dropped, duplicated, reordered and hollowed spans; opt-in through `source.conservation` and a documented SKIP when unconfigured. `output-coverage` (WARN-only, W7/W9) flags hollowed output blocks against a non-empty source.
+- v1 is an absolute FLOOR, not a length band. `validate_assembled.py`'s own docstring rejects per-block length bands because source/target ratios vary too wildly across language pairs; a calibrated band is deferred until a measured distribution exists. Population is `segments[].block_ids[]` only — matching `collect_source_markers()`, which naturally excludes frontback `omit` blocks and is safe for `regenerate` ones.
+
+### Added — required third-language convention (#203)
+
+- `style_bible.template.md` section E gains a required `embedded-third-language-convention` fill slot: romanize or translate, gloss format, how the kept original is set off. A project can no longer start with the convention undefined.
+
+### Migration
+
+Four independent invalidations, all free on a fresh run, all requiring action on an existing project:
+
+- **Full re-translation.** Both `mass-translate-wf.template.js` and `glossary-pass-wf.template.js` are `PLUGIN_BUNDLE_MEMBERS`, and `plugin_bundle_hash` is a `CACHE_KEY_FIELD_ORDER` field — every converged segment's cache key moves.
+- **Re-run the suspicion scan, the skeptic pass, and re-accept the canon audit.** `occ_index.py`/`evidence_verify.py`/`canon_senses.py` sit in the producer and skeptic code closures, and `senses_bytes` changes `producer_input_digest` directly. Note the audit verdict can change WITHOUT any hash moving: folding turns previously-unverifiable evidence into passes and newly surfaces genuine homonyms.
+- **`style_contract_hash` moves** — the new required slot lives inside the `STYLE_CONTRACT_BEGIN/END` span. Note the slot does NOT reach an existing project by re-scaffolding: `style_bible.md` is copied only when absent and never refreshed, so the marker block must be inserted by hand.
+- **Resume digest moves** — `profile.schema.json`, `suspicion-worklist.schema.json` and `skeptic-assignment.schema.json` all changed, and both `resume_setup._schemas_dir_hash()` and `skeptic_setup.py`'s own independent glob hash every `*.schema.json`. `cache_key.compute_schema_hash()` is unaffected (draft/review/segpack only).
+
 ## 1.10.0 — 2026-07-18
 
 Two coordinated tracks landed together: (1) renderer/gate hardening for the source-anchored `## Mentions` appendix, flipping `output.adapter_config.obsidian.mentions_section.enabled` from opt-in (default false, 1.8.0–1.9.x) to **ON BY DEFAULT** for `output.target: obsidian` — the opt-in design existed only to protect legacy projects, and none exist; and (2) Hebrew mark/connector-insensitive `name_inventory` matching for the appendix, plus three scaffold/robustness fixes on the extractor path. Closes #240 (both halves), #238, #241, #236, #226, #205, #192, #190.

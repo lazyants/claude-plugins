@@ -44,6 +44,21 @@ RISK_HIGH_DISPERSION = "high_dispersion"
 RISK_ALL_CITATION = "all_citation"
 RISK_NEAR_MERGE = "near_merge"
 RISK_SAMPLED = "sampled"
+# #243 (A2): a scope_in source_form whose fold_match_key collides with
+# another scope_in source_form's (canon_senses.fold_collision_map(), computed
+# over the UNION of canon.json entries + all canon_senses.json forms --
+# split-only included -- then re-checked against this consumer's own
+# scope_in so a collision with an out-of-scope/split-only-only competitor
+# never fires this). suspicion_scan.py's own verse-occurrence side door
+# (verse_occurrences() called per-form, fold-collision-unaware) can
+# double-file ONE physical span to BOTH colliding forms while their
+# block-origin counts get zeroed by occ_index.py's own fail-closed
+# collision handling -- the two paths disagree in opposite directions,
+# making singleton/high_dispersion/near_merge meaningless for these forms.
+# ALWAYS flagged (never combined with the ordinary occurrence-count
+# classes) so a colliding entry can never reach zero risk classes and
+# silently never reach the skeptic.
+RISK_FOLD_COLLISION = "fold_collision"
 RISK_CLASSES = (
     RISK_MERGE_PARTICIPANT,
     RISK_ESTABLISHED_OFFLINE,
@@ -52,6 +67,7 @@ RISK_CLASSES = (
     RISK_ALL_CITATION,
     RISK_NEAR_MERGE,
     RISK_SAMPLED,
+    RISK_FOLD_COLLISION,
 )
 
 # --- Triage verdicts (ADVERSE-ONLY; there is deliberately NO confirmation verdict) ---
@@ -71,6 +87,11 @@ CITATION_UNAVAILABLE_TAG = "citation_classification_unavailable"
 VERSE_PARENT_UNRESOLVED_TAG = "verse_parent_unresolved"
 ZERO_OCCURRENCE_TAG = "no_occurrences"
 NEAR_BUDGET_TRUNCATED_TAG = "near_pair_budget_truncated"
+# #243: stamped on every RISK_FOLD_COLLISION entry -- occurrence counting is
+# skipped entirely for a fold-colliding form (never merely combined with the
+# other classes' numbers), so a human reading the worklist sees WHY
+# occurrence_refs is empty despite the entry appearing at all.
+FOLD_COLLISION_OCCURRENCES_SUPPRESSED_TAG = "fold_collision_occurrences_suppressed"
 
 # --- Deterministic ordering sentinels ---
 # Absent/blank `category` -> a fixed sentinel so the sampled strata ordering is TOTAL.

@@ -520,6 +520,31 @@ produced. See `references/source-format-adapters/custom.md` and
 `references/false-green-gate.md` for the full reconciliation. The pipeline
 advances to W3 ONLY on its exit `0` (see R2 / `references/false-green-gate.md`).
 
+Then, immediately after `validate_extraction.py` passes, run the
+**wrapper-conservation gate (#196)** — a normal bundle-copied durable-root
+script (unlike `validate_extraction.py` above), so run the durable copy:
+
+```
+python3 ${durable_root}/scripts/validate_conservation.py wrapper-conservation
+```
+
+This is **opt-in**: it is a no-op (prints a NOTE, exits `0`) unless
+`profile.yml` declares `source.conservation` (`baseline_path` +
+`provenance_path`, optionally `allowed_omissions_path`) — only relevant when
+this project's source was hand-wrapped into its current format from some
+other pre-wrap form (e.g. hand-split `pdftotext -layout` output turned into
+an EPUB) and the exact pre-wrap text was preserved as an immutable baseline.
+When declared, it is HARD: it compares the preserved baseline against
+`manifest.json` via the wrap-time provenance map, at word-multiset
+granularity (never byte-exact — legitimate reflow, e.g. the same
+layout-whitespace collapse `source_html` → `plain_text` already performs,
+must never false-RED), catching both a hand-wrap that silently dropped
+baseline content (#196) and a block that reached the wrap but was
+truncated/hollowed when written (the #202 case `validate_assembled.py`
+declines at assembly time). Exit `1` HARD on any defect — the pipeline
+advances to W3 ONLY on exit `0`. See `validate_conservation.py`'s own module
+docstring for the full check spec and the three-artifact contract.
+
 **W3 Bootstrap style bible + language smoke test.** After W2 produces
 `manifest.json`, W3's own procedural code (never `profile.schema.json`)
 computes three hashes: the resolved `particle_config` file's content hash, a
@@ -955,6 +980,16 @@ Runs at W7 over every converged segment:
   SHA, mirroring `assemble.py`'s own guard). Exit `1` HARD on either
   violation; exit `0` with non-gating WARN entries for an undeclared
   heading-like block. See `references/assembly-and-output.md`.
+- **Output-coverage v1 floor (`scripts/validate_conservation.py
+  output-coverage`, the #202 half `validate_assembled.py` declines):** runs
+  immediately after the structural-completeness gate above, same scope. **WARN-only
+  — never gates, exit `0` always** (barring an env/usage precondition, exit
+  `2`): flags `hollowed_output_block` when a `segments[].block_ids[]`-cited
+  block's source text is non-trivial but its current converged-draft text is
+  empty/near-empty (an absolute word-count floor, not a length band — see
+  that script's own module docstring for why a band is deliberately not
+  built here). Read the WARN list; it is diagnostic input for W8's report,
+  not a stop condition.
 
 **W8 Deliver** — report convergence stats, list any `blocked`/
 `non_converged` segments explicitly. Also surface W7's whole-project
@@ -998,6 +1033,11 @@ the same #202 structural-completeness gate, this time checking that every
 declared heading source marker surfaced as a non-empty `kind:"heading"` node
 in the assembled NodeStream. Exit `1` HARD on a dropped/misclassified
 heading; exit `0` with non-gating WARN entries otherwise.
+
+Then run `scripts/validate_conservation.py output-coverage` — same
+WARN-only #202 floor as W7, this time reading `out/.assembled/
+nodestream.json` (`output.v1_scope: assembled_book`) instead of converged
+drafts. Never gates; exit `0` always barring an env/usage precondition.
 
 Then run `scripts/diff_rendered_output.py` as the acceptance gate: it
 re-renders and diffs against the last accepted baseline — exit `0` on an exact match, `1`

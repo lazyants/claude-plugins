@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "suspicion-worklist.schema.json",
   "title": "Suspicion Worklist",
-  "description": "Deterministic, confidence-INDEPENDENT structural-risk worklist emitted by suspicion_scan.py (RFC #215 Phase 2, default path {durable_root}/suspicion_worklist.json). One entry per canon source_form that tripped >=1 structural risk class; the skeptic pass (skeptic_setup.py -> skeptic-pass-wf.template.js) reads ONLY this file to decide who to adversarially re-examine. producer_input_digest binds this worklist to the exact canon.json + manifest.json + resolved LanguageConfig.raw_bytes + resolved scan parameters + the producer code closure (suspicion_scan.py, occ_index.py, bootstrap_names.py, canon_senses.py, skeptic_constants.py) it was built from; skeptic_setup.py recomputes the identical digest and REJECTS a stale worklist fail-closed, so a since-changed canon/manifest/config/scanner can never be silently reprocessed. Strict at every level (additionalProperties:false, full required[]) so a producer bug fails LOUD.",
+  "description": "Deterministic, confidence-INDEPENDENT structural-risk worklist emitted by suspicion_scan.py (RFC #215 Phase 2, default path {durable_root}/suspicion_worklist.json). One entry per canon source_form that tripped >=1 structural risk class; the skeptic pass (skeptic_setup.py -> skeptic-pass-wf.template.js) reads ONLY this file to decide who to adversarially re-examine. producer_input_digest binds this worklist to the exact canon.json + manifest.json + canon_senses.json (raw bytes, #243) + resolved LanguageConfig.raw_bytes + resolved scan parameters + the producer code closure (suspicion_scan.py, occ_index.py, bootstrap_names.py, canon_senses.py, skeptic_constants.py) it was built from; skeptic_setup.py recomputes the identical digest and REJECTS a stale worklist fail-closed, so a since-changed canon/manifest/senses-sidecar/config/scanner can never be silently reprocessed. Strict at every level (additionalProperties:false, full required[]) so a producer bug fails LOUD.",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema_version", "producer_input_digest", "entries"],
@@ -11,7 +11,7 @@
     "producer_input_digest": {
       "type": "string",
       "pattern": "^[0-9a-f]{64}$",
-      "description": "sha256 hex over canon.json + manifest.json + canonically-serialized resolved scan parameters + resolved LanguageConfig.raw_bytes + the bytes of suspicion_scan.py, occ_index.py, bootstrap_names.py, canon_senses.py, skeptic_constants.py. Re-verified by skeptic_setup.py."
+      "description": "sha256 hex over canon.json + manifest.json + canon_senses.json (raw bytes, #243 -- absent sidecar hashes as empty bytes, distinct from a schema-valid logically-empty document) + canonically-serialized resolved scan parameters + resolved LanguageConfig.raw_bytes + the bytes of suspicion_scan.py, occ_index.py, bootstrap_names.py, canon_senses.py, skeptic_constants.py. Re-verified by skeptic_setup.py."
     },
     "entries": {
       "type": "array",
@@ -43,7 +43,8 @@
                 "high_dispersion",
                 "all_citation",
                 "near_merge",
-                "sampled"
+                "sampled",
+                "fold_collision"
               ]
             }
           },

@@ -208,11 +208,20 @@ const AGGREGATE_ASSIGNMENTS_PATH = RUN_DIR + "/assignments.json"
 const SKEPTIC_TRIAGE_PATH = ROOT + "/skeptic_triage.json"
 const MANIFEST_PATH = ROOT + "/manifest.json"
 const CANON_PATH = ROOT + "/canon.json"
+const SENSES_PATH = ROOT + "/canon_senses.json"
 
+// #243: --canon/--senses-path project the shared ambiguity-competitors
+// universe (canon_senses.fold_collision_map) every cited evidence record is
+// re-verified against -- see skeptic_ready.py's own module docstring. Both
+// inputs feed --validate-fragment (this batch check, reused by precheck,
+// dispatch's own self-check, and the wait poll below) the SAME way
+// --verify-merged already needs --canon (and, as of #243, --senses-path
+// too, see verifyMergedPrompt() below).
 function checkCommand(batch) {
   return PY + " " + ROOT + "/scripts/skeptic_ready.py --validate-fragment " + fragmentPath(batch.index) +
     " --particle-config " + PARTICLE_CONFIG +
-    " --expect-assignments-file " + assignmentsBatchPath(batch.index)
+    " --expect-assignments-file " + assignmentsBatchPath(batch.index) +
+    " --canon " + CANON_PATH + " --senses-path " + SENSES_PATH
 }
 
 // ---------------------------------------------------------------------------
@@ -327,7 +336,12 @@ function verifyMergedPrompt() {
   const lines = []
   lines.push("Effort: low. Mechanical disk-independent merge verification only -- do not judge the comparison yourself.")
   lines.push("Durable root: " + ROOT + ".")
-  const cmd = PY + " " + ROOT + "/scripts/skeptic_ready.py --verify-merged " + SKEPTIC_TRIAGE_PATH + " " + AGGREGATE_ASSIGNMENTS_PATH + " --particle-config " + PARTICLE_CONFIG + " --manifest-path " + MANIFEST_PATH + " --canon " + CANON_PATH
+  // #243: --senses-path joins the already-present --canon -- merged
+  // verification projects the SAME ambiguity-competitors universe
+  // --validate-fragment's per-batch check does, and also re-hashes the
+  // sidecar (when the aggregate manifest stamps senses_sha256) as a third
+  // H1 tamper tripwire alongside canon.json/manifest.json.
+  const cmd = PY + " " + ROOT + "/scripts/skeptic_ready.py --verify-merged " + SKEPTIC_TRIAGE_PATH + " " + AGGREGATE_ASSIGNMENTS_PATH + " --particle-config " + PARTICLE_CONFIG + " --manifest-path " + MANIFEST_PATH + " --canon " + CANON_PATH + " --senses-path " + SENSES_PATH
   lines.push("Run exactly this command and read its one line of JSON output: " + cmd)
   lines.push("Return a structured result with exactly these fields: verified (the command's own verified value), frozen_input_mismatch (the command's own frozen_input_mismatch value, copied verbatim -- it is always present in the command's output), and, only when the command's own output actually includes it, missing (the command's own missing array, copied verbatim). Do not add, omit, or alter any value the command printed.")
   return lines.join("\n")
