@@ -146,6 +146,46 @@ test('staticEmbedPath new-write table [1.6.0, #220]: full-target canon across al
   }
 });
 
+test('staticEmbedPath positional-argument pin [round-10]: uses the CURRENT entry, not entries[0]', () => {
+  // Round-10 finding: every prior staticEmbedPath test passed `entry()` as BOTH the `entries`
+  // array's sole/first member AND the standalone `entry` argument, so `entry` and `entries[0]`
+  // were always the same object — a mutant that swaps `entry` for `entries[0]` inside the
+  // function stayed fully green. `entries = [intro, admin/items]` with `admin/items` (index 1,
+  // NOT entries[0]) as the current entry exercises the argument that actually selects the asset
+  // directory.
+  const p = profile();
+  const entries = [entry({ slug: 'intro' }), entry({ slug: 'items', group: 'admin', group_title: 'Admin' })];
+  const current = entries[1];
+  const chapterFile = join(p.publish.chapters_dir, chapterRelPath(current));
+  assert.equal(
+    staticEmbedPath(entries, chapterFile, p, current, '01.png'),
+    '../assets/admin/items/01.png',
+    "must derive the CURRENT entry's ('admin/items') asset dir",
+  );
+  assert.notEqual(
+    staticEmbedPath(entries, chapterFile, p, current, '01.png'),
+    '../assets/intro/01.png',
+    "must not silently resolve to entries[0]'s ('intro') asset dir",
+  );
+});
+
+test('staticEmbedPath positional-argument family-kill [round-10]: current entry is neither first nor last', () => {
+  // The single two-entry case above only rules out `entries[0]` — in a 2-entry array `entries[1]`
+  // IS `entries[entries.length - 1]`, so a mutant swapping `entry` for the LAST entry instead of
+  // the first would still pass it undetected. A 3-entry manifest with the current entry in the
+  // MIDDLE (neither index 0 nor index length-1) kills that whole family of positional-pick
+  // mutants at once.
+  const p = profile();
+  const entries = [
+    entry({ slug: 'first', group: 'a', group_title: 'A' }),
+    entry({ slug: 'second', group: 'b', group_title: 'B' }),
+    entry({ slug: 'third', group: 'c', group_title: 'C' }),
+  ];
+  const current = entries[1];
+  const chapterFile = join(p.publish.chapters_dir, chapterRelPath(current));
+  assert.equal(staticEmbedPath(entries, chapterFile, p, current, '01.png'), '../assets/b/second/01.png');
+});
+
 test('chapterRelPath: flat and grouped forms', () => {
   assert.equal(chapterRelPath(entry()), 'items.md');
   assert.equal(chapterRelPath(entry({ group: 'admin', group_title: 'Admin' })), 'admin/items.md');

@@ -547,7 +547,32 @@ has_ci "static-md: adapter documents halt conditions" 'halt' "$SMD"
 # Relative-link mandate: pins the general formula AND both worked path examples.
 has "static-md: cross-subtree relative example" '](../'    "$SMD"
 has "static-md: teaches the relative rule"       'relative' "$SMD"
+# round-10 exhaustive sweep / round-11: this formula has TWO independent sites — the general-rule
+# definition (:193) and the link-integrity gate's item 2 restatement (:408). Only ONE of the two is
+# provable BY SECTION: :193's formula sits inside a FENCED code block (``` ... ```), and
+# has_in_section deliberately treats fence content as opaque — that is the exact mechanism rounds
+# 2-4 built to stop a fenced EXAMPLE from false-greening a needle, and it applies here even though
+# this particular fence is load-bearing formatting, not an illustrative snippet. Reopening
+# fence-visibility to fix this one site would reintroduce the false-green class those rounds closed,
+# so :408 gets its own section-bounded per-site pin below and :193 does not.
+#
+# :193 is NOT left uncovered, though — count_fixed (:154) is a whole-file, fence-BLIND `grep -cF`,
+# so it sees both lines regardless of the fence. The formula appears on exactly TWO physical lines
+# in the real file (:193, :408); asserting the count is 2 catches a :193-only mutation (count drops
+# to 1) with no change to fence handling. Narrower guarantee, stated honestly: this proves two
+# lines carry the formula, not that the RIGHT two lines do — a mutation that corrupted :193 while
+# introducing a third, unrelated copy elsewhere would hold the count at 2 and slip through. Smaller
+# hole than "nothing catches :193 at all," but not zero.
 has "static-md: pins the relative-path formula"  'relative(dirname(chapter_file), target_file)' "$SMD"
+REL_CHAPTER_TARGET_COUNT="$(count_fixed 'relative(dirname(chapter_file), target_file)' "$SMD")"
+if [ "$REL_CHAPTER_TARGET_COUNT" -eq 2 ]; then
+  ok "static-md: relative-path formula appears on exactly 2 lines (:193 fenced def + :408 gate check)"
+else
+  bad "static-md: relative-path formula line-count drifted from 2 (found $REL_CHAPTER_TARGET_COUNT) — a fenced-site (:193) or gate-site (:408) mutation, or a legitimate new/removed occurrence needing this count updated"
+fi
+has_in_section "static-md: link-integrity gate item 2 uses the same relative-path formula" \
+  "$SMD" '## Link-integrity gate before you publish' \
+  'relative(dirname(chapter_file), target_file)'
 has "static-md: documents vault-root index example" 'vault-root' "$SMD"
 has "static-md: documents repo-root index example"  'repo-root'  "$SMD"
 has "static-md: vault-root index path (one ../)"   '](../SUMMARY.md)'    "$SMD"
@@ -576,6 +601,12 @@ has "static-md: capture.output_dir-under-tree halt"   'resolve under `publish.ch
 # equals relative(dirname(chapter), glossary_dir), so `../<glossary-rel>` over-climbs by one segment.
 hasnt "static-md: no double-prefixed glossary link" '](../<glossary-rel>'        "$SMD"
 has   "static-md: corrected glossary link template" '](<glossary-rel>/index.md'  "$SMD"
+# round-10 exhaustive sweep, finding 3: static-md.md's own glossary-link relative() formula was
+# completely unpinned — not even bare-name — the counterpart to the obsidian-vault.md glossary
+# formula pinned this round under Finding 2. Pinned the same way: full call+args, section-bound.
+has_in_section "static-md: glossary-link formula defines <glossary-rel> via relative(dirname(chapter_file), ...)" \
+  "$SMD" '## Glossary backlink discipline' \
+  '`relative(dirname(chapter_file), publish.glossary_dir)`'
 # glossary_terms is an authoring/manifest field, never emitted into the minimal published frontmatter.
 has "static-md: glossary_terms authoring-only" 'authoring-time only' "$SMD"
 # Index wiring is two required writes PLUS a conditional glossary_seed reconciliation (not "exactly two").
@@ -635,13 +666,70 @@ has "static-md: step-0 form-agnostic short-circuit"      'form-agnostic, and it 
 has_in_section "obsidian-vault: step-0 idempotency check calls containerTitleMatches with its real args" \
   "$OMD" '## INDEX wiring (do all of these on every chapter create/update)' \
   'containerTitleMatches(containerTitle, entry)'
+# round-10 [mutation testing]: static-md.md's own step-0 idempotency check has the SAME two calls
+# (locateChapterLine, containerTitleMatches), still pinned only by surrounding prose before this
+# round. Codex's named mutations: locateChapterLine called with entry.slug instead of
+# expectedTarget (permits a duplicate TOC insertion); containerTitleMatches comparing
+# entry.group_title against itself (accepts a wrong container). Both left every existing pin green.
+#
+# BOTH calls wrap mid-argument in this file (`### Grouped index wiring` is hard-wrapped, unlike the
+# sections pinned earlier this round) — `locateChapterLine(indexLines,` ends one line and
+# `expectedTarget)` starts the next; `containerTitleMatches(containerTitle,` ends one line and
+# `entry)` starts the next. Neither full signature fits a single fixed-string needle. What's pinned
+# instead: two needles per call, one per physical line, each covering one argument independently —
+# so a mutation to EITHER argument is still caught, just not by one needle proving the whole
+# signature at once. What this does NOT prove: that the two half-needles are adjacent lines of the
+# SAME call (an adversarial rewrite that separated them further apart, keeping both halves
+# individually true, would not be caught) — a narrower gap than round-9's SKILL.md pins, which each
+# cover a complete signature in one shot.
+has_in_section "static-md: step-0 idempotency check calls locateChapterLine, first arg indexLines" \
+  "$SMD" '### Grouped index wiring (`anyGroup` manifests only)' \
+  'locateChapterLine(indexLines,'
+has_in_section "static-md: step-0 idempotency check's locateChapterLine, second arg expectedTarget" \
+  "$SMD" '### Grouped index wiring (`anyGroup` manifests only)' \
+  'expectedTarget)`'
+has_in_section "static-md: step-0 idempotency check calls containerTitleMatches, first arg containerTitle" \
+  "$SMD" '### Grouped index wiring (`anyGroup` manifests only)' \
+  'containerTitleMatches(containerTitle,'
+has_in_section "static-md: step-0 idempotency check's containerTitleMatches, second arg entry (trimmed compare)" \
+  "$SMD" '### Grouped index wiring (`anyGroup` manifests only)' \
+  'entry)`** (from `assets/lib/chapter-paths.mjs`; titles compare TRIMMED, not raw `===`)'
 # R7-F1: wrong-container halt — never silently relocate a user-curated index line.
 WRONG_CONTAINER_HALT="Chapter '<slug>' is listed in <index_file> under '<found_title>' instead of '<group_title>'"
 has "obsidian-vault: wrong-container halt" "$WRONG_CONTAINER_HALT" "$OMD"
 has "static-md: wrong-container halt"      "$WRONG_CONTAINER_HALT" "$SMD"
 # R7-F2: step-0's expected link target uses the same index-relative coordinate system as the TOC write.
+# obsidian-vault.md has exactly ONE site for this formula (INDEX wiring), so the whole-file `has`
+# below is a complete proof there — no per-site pin needed for that file.
 has "obsidian-vault: index-relative expected-target formula" 'relative(dirname(index_file), chapter_file)' "$OMD"
+# round-10 exhaustive sweep / round-11: static-md.md has THREE independent sites for this SAME
+# formula, not the two originally flagged — the flat TOC-write (:231, "## Index wiring"), the
+# grouped step-0 idempotency check's expected target (:255, "### Grouped index wiring", which
+# explicitly reuses "the same coordinate system item 1 above uses" rather than an unrelated
+# computation, but is still its own independent call site that must not drift from :231's write
+# path or re-runs stop converging), and the link-integrity gate's item 5 (:417). This whole-file
+# `has` is now SUBSUMED by the three per-site pins below — kept deliberately as a cheap early
+# signal, not duplicate coverage to be "simplified" away; a mutation corrupting only one of the
+# three sites would leave this needle green since the other two copies still match.
 has "static-md: index-relative expected-target formula"      'relative(dirname(index_file), chapter_file)' "$SMD"
+# Section nesting caught in mutation-testing: "## Index wiring" (:223) CONTAINS "### Grouped index
+# wiring" (:243) as a subsection — has_in_section stops only at the same-or-shallower level, so a
+# needle scoped to the H2 legitimately also scans everything inside its H3 subsection. The bare
+# formula string alone can't tell :231's copy from :255's copy once both sit inside that scanned
+# range, so a mutation touching ONLY :231 would have been invisible (255's untouched copy still
+# satisfies the H2-scoped needle) — the exact cross-site-independence failure this round exists to
+# prevent, just one level removed. Fixed by extending :231's needle with its own unique trailing
+# context ("`. Order") that :255's differently-worded sentence does not share, so the two pins are
+# now genuinely independent even though their sections nest.
+has_in_section "static-md: flat TOC-write uses the index-relative expected-target formula" \
+  "$SMD" '## Index wiring (do this on every chapter create/update)' \
+  'relative(dirname(index_file), chapter_file)`. Order'
+has_in_section "static-md: grouped step-0 idempotency check uses the same expected-target formula" \
+  "$SMD" '### Grouped index wiring (`anyGroup` manifests only)' \
+  'relative(dirname(index_file), chapter_file)'
+has_in_section "static-md: link-integrity gate item 5 uses the same expected-target formula" \
+  "$SMD" '## Link-integrity gate before you publish' \
+  'relative(dirname(index_file), chapter_file)'
 # rev 9: manual-migration halt — establishment wiring never renames/moves/deletes a container or line.
 MANUAL_MIGRATION_HALT='This manifest change requires manual group migration (not automated in 1.5.0):'
 has "obsidian-vault: manual-migration halt" "$MANUAL_MIGRATION_HALT" "$OMD"
@@ -785,6 +873,18 @@ has_in_section "obsidian-vault: wikilinks-off internal chapter link is one all-m
   'Internal chapter link, any manifest'
 hasnt "obsidian-vault: no longer special-cases the group-free internal-link spelling" \
   'group-free manifest (shipped 1.4.1 form, unchanged)' "$OMD"
+# round-10 [mutation testing, same class as round-9]: the two pins above (and their static-md.md/
+# SKILL.md siblings) assert only APPLICABILITY ("any manifest"/"Wikilinks off, any manifest") —
+# never the relative() formula's own arguments. A mutation changing BOTH bases from
+# dirname(chapter_file) to dirname(index_file) leaves every applicability pin green while writing
+# links in the wrong coordinate system. Pinned independently — a single shared needle would pass a
+# mutation that corrupts only one of the two formulas.
+has_in_section "obsidian-vault: wikilinks-off internal-link formula uses dirname(chapter_file)" \
+  "$OMD" '## Wikilinks vs Markdown links' \
+  '`[Display title](relative(dirname(chapter_file), <target-chapter-file>))`'
+has_in_section "obsidian-vault: wikilinks-off glossary-link formula uses dirname(chapter_file)" \
+  "$OMD" '## Glossary backlink discipline' \
+  '`[TermHeading](relative(dirname(chapter_file), {{publish.glossary_dir}}/index.md)#termheading)`'
 # round-7: the wikilinks-off fallback told authors to skip the Related block and glossary linking
 # entirely, while a separate rule required every Related block to hold >=2 wikilinks with a halt —
 # unsatisfiable when wikilinks are off, and contradicting the very canon #220 exists to ship. A4
