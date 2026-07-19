@@ -624,6 +624,17 @@ echo "== group axis (#19) — index wiring (D6), both adapters =="
 # R6-F1: step-0 already-wired short-circuit runs BEFORE container classification, so re-runs converge.
 has "obsidian-vault: step-0 already-wired short-circuit" 'wiring is already complete' "$OMD"
 has "static-md: step-0 form-agnostic short-circuit"      'form-agnostic, and it runs BEFORE any container' "$SMD"
+# round-9 [mutation testing]: the step-0 already-wired short-circuit's container-title comparison
+# had ZERO coverage — not even a bare function-name grep. Pinned with its real args (containerTitle,
+# entry) so a mutation that compares against a stale entry (e.g. oldEntry) instead of the current
+# one, silently breaking the "already wired, skip re-wiring" short-circuit, goes red. This
+# subsection IS hard-wrapped (~85-95 cols, unlike the sections pinned earlier in this cluster) —
+# the call sits entirely on one physical line, verified before wiring; a longer needle reaching for
+# the trailing "(titles compare TRIMMED...)" parenthetical would have wrapped and silently never
+# matched, so it is deliberately left out.
+has_in_section "obsidian-vault: step-0 idempotency check calls containerTitleMatches with its real args" \
+  "$OMD" '## INDEX wiring (do all of these on every chapter create/update)' \
+  'containerTitleMatches(containerTitle, entry)'
 # R7-F1: wrong-container halt — never silently relocate a user-curated index line.
 WRONG_CONTAINER_HALT="Chapter '<slug>' is listed in <index_file> under '<found_title>' instead of '<group_title>'"
 has "obsidian-vault: wrong-container halt" "$WRONG_CONTAINER_HALT" "$OMD"
@@ -671,6 +682,31 @@ has "revalidation: non-blocking stale-artifact advisory"            'non-blockin
 # R17-F3: the normative prose must call the production predicates, not paraphrase ad-hoc checks.
 has "revalidation: invokes specReferencesDir("     'specReferencesDir(' "$REVAL"
 has "revalidation: invokes chapterHasWikilinkTo("  'chapterHasWikilinkTo(' "$REVAL"
+# round-9 [mutation testing, same class as the SKILL.md validateGroups gap]: the two bare-name pins
+# above only prove the function NAME appears somewhere in the file — they don't touch the ARGUMENTS,
+# so a mutation that swaps or drops an argument (e.g. checking the wrong dir, or the removed
+# entry's NEW path instead of its old one) sails through green while silently weakening a
+# manual-migration convergence fact. specReferencesDir has TWO independent call sites here (the
+# retained-entry-group-changed fact, and the grouped-entry-removed fact) — each pinned by its own
+# call+args needle, split from the "twice, with two different dir spellings" requirement into a
+# second needle per site so a mutation that drops just the second required call is independently
+# caught, without needing a fragile apostrophe-escaped single needle (this paragraph is one long
+# unwrapped physical line per bullet, so no ~95-col wrap risk here — verified before wiring).
+has_in_section "revalidation: retained-entry-group-changed fact calls specReferencesDir(specText, dir)" \
+  "$REVAL" '### Terminal-state convergence checklist' \
+  'call `specReferencesDir(specText, dir)` once with the old asset dir'
+has_in_section "revalidation: retained-entry-group-changed fact requires the SECOND dir-spelling call" \
+  "$REVAL" '### Terminal-state convergence checklist' \
+  'and once with its `output_dir`-relative tail'
+has_in_section "revalidation: grouped-entry-removed fact calls specReferencesDir(specText, dir)" \
+  "$REVAL" '### Terminal-state convergence checklist' \
+  'call `specReferencesDir(specText, dir)` against the removed entry'
+has_in_section "revalidation: grouped-entry-removed fact requires both dir spellings, not one" \
+  "$REVAL" '### Terminal-state convergence checklist' \
+  'old dir, both spellings'
+has_in_section "revalidation: wikilink-reference fact calls chapterHasWikilinkTo with its real args" \
+  "$REVAL" '### Terminal-state convergence checklist' \
+  'chapterHasWikilinkTo(chapterText, slug, oldChapterRelPath)'
 
 echo "== group axis (#19) — publish-targets README =="
 has "publish-targets README: Group handling: support or halt bullet" 'Group handling: support or halt.' "$PTREADME"
@@ -686,6 +722,20 @@ has_in_section "SKILL.md W1: halts before any capture asset on a returned messag
 has_in_section "SKILL.md W6: MUST run validation before re-capture/re-authoring" \
   "$SKILL" '### W6 — Revalidation / audit mode (existing chapters)' \
   'Before any re-capture or re-authoring, you MUST run'
+# round-9 [mutation testing, IMPORTANT]: the two assertions above pin only the surrounding
+# sequencing language ("halt on every returned message...", "Before any re-capture..."), never the
+# CALL itself. A mutation that changes `validateGroups(entries)` to `validateGroups([])` at either
+# site validates an empty array instead of the manifest — silently re-inerting #221's whole halt and
+# restoring full production reachability for a duplicate slug — while every doc gate above, and the
+# unit tests (the helper itself is unchanged), stay green. Pinned independently per workflow: the
+# needle is identical at both W1 (:94) and W6 (:138), so only section-bounding tells them apart, and
+# a single shared gate would pass a mutation that disables just one of the two call sites.
+has_in_section "SKILL.md W1: pins the actual validateGroups(entries) call, not just its prose" \
+  "$SKILL" '### W1 — Discover the feature surface' \
+  'MUST run `validateGroups(entries)`'
+has_in_section "SKILL.md W6: pins the actual validateGroups(entries) call, not just its prose" \
+  "$SKILL" '### W6 — Revalidation / audit mode (existing chapters)' \
+  'MUST run `validateGroups(entries)`'
 has_in_section "manifest-discipline: MUST run validateGroups(entries) (mandatory, not optional)" \
   "$MDISC" '## The discipline: no capture code before review' \
   'MUST run validateGroups(entries)'

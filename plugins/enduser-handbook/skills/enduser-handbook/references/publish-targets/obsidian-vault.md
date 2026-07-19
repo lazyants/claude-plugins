@@ -47,15 +47,18 @@ across translations.
 
 `group` is an optional field on a manifest entry (`references/manifest-discipline.md`),
 also always English kebab-case, one level (no `/`). A manifest where no entry sets it —
-the 1.4.1 shipped default — produces only the flat form above. As of 1.6.0, the two
-exceptions are in `assets/lib/chapter-paths.mjs` — `staticEmbedPath` (the asset-embed
-path formula, "Layout you produce" below, now always the full-target join) and
-`validateGroups` (the duplicate-slug halt, always runs). In `publish.wikilinks: false`
-mode this adapter ALSO applies the full-target glossary formula and runs the Markdown-link
-integrity gate for group-free manifests (see "Glossary backlink discipline" and "Link
-integrity gate before you publish" below). Every other section keeps the 1.4.1 group-free
-behavior unchanged. Flat and grouped entries coexist in one manifest. Canonical chapter
-path (D2, shared with `static-md.md` and `SKILL.md`):
+the 1.4.1 shipped default — produces only the flat form above. As of 1.6.0, in
+`assets/lib/chapter-paths.mjs`, `staticEmbedPath` (the asset-embed path formula, "Layout
+you produce" below, now always the full-target join) and `validateGroups` (the
+duplicate-slug halt, always runs) both now apply to group-free manifests. In
+`publish.wikilinks: false` mode this adapter also changes group-free behavior further:
+the full-target glossary formula and the Markdown-link integrity gate both now cover
+group-free manifests (see "Glossary backlink discipline" and "Link integrity gate before
+you publish" below), and the Related block's sibling/glossary links — including the ≥2
+floor — are required in Markdown form, not skipped (see "Wikilinks vs Markdown links" and
+"Chapter structure" below). This list names the group-free changes we are aware of; it is
+not a claim that every other section is unchanged. Flat and grouped entries coexist in one
+manifest. Canonical chapter path (D2, shared with `static-md.md` and `SKILL.md`):
 
 ```
 grouped: {{publish.chapters_dir}}/<group>/<slug>.md
