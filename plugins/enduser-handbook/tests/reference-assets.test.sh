@@ -57,10 +57,35 @@ has_ci() {
 # literally. An absent heading is a hard failure, never a silent pass. Do NOT pipe awk into
 # `grep -q` — the script runs under `set -o pipefail` (:20) and an early `grep -q` exit would
 # surface as a false SIGPIPE failure here.
+#
+# Inert Markdown does NOT count as proof: an HTML comment (`<!-- ... -->`, single-line or spanning
+# multiple lines) or a fenced code block (``` or ~~~) can contain the needle text without it being
+# live prose — that is the documentation equivalent of the EMBED_FORMULA false-green this test file
+# exists to kill, so both are skipped as content. Because fence contents are skipped, a `#` line
+# INSIDE a fence is also never treated as a heading boundary (skipping fence lines for content but
+# still treating `## Heading` inside a fence as a real boundary would truncate a section early and
+# false-RED instead — same fix, both directions).
 has_in_section() {
   local msg="$1" file="$2" heading="$3" needle="$4"
   if [ ! -f "$file" ]; then bad "$msg (file not found: $(basename "$file"))"; return; fi
   if awk -v heading="$heading" -v needle="$needle" '
+       # multi-line HTML comment: once opened, every line is inert until one closes it.
+       in_comment {
+         if ($0 ~ /-->/) { in_comment = 0 }
+         next
+       }
+       # a line that opens a comment is inert; it also opens multi-line state unless it closes here too.
+       /<!--/ {
+         if ($0 !~ /-->/) { in_comment = 1 }
+         next
+       }
+       # fenced code block delimiter: toggle state, the marker line itself is inert.
+       /^[ \t]*(```+|~~~+)/ {
+         in_fence = !in_fence
+         next
+       }
+       # any line strictly inside a fence is inert — including one that looks like a heading.
+       in_fence { next }
        {
          n = match($0, /^#+/)
          hlevel = (n == 1) ? RLENGTH : 0

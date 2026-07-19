@@ -310,8 +310,11 @@ failure:
    is exactly as broken as a dangling wikilink and must be caught here too.
    **This gate is chapter-scoped**: it fires here, before declaring the chapter
    published, so it catches a legacy broken link only when that chapter is next
-   published or revalidated. It does not sweep untouched chapters — an already-published
-   chapter with a stale link stays broken until its own next publish or revalidation.
+   published, or revalidated in a way that **touches** it — an accepted-diff refresh
+   or a material re-author (`references/revalidation.md`). A **no-op** revalidation
+   classifies the chapter unchanged and never runs this gate. It does not sweep untouched chapters
+   — an already-published chapter with a stale link stays broken until a publish, or a touching
+   revalidation, next runs against it.
 3. The chapter has ≥2 outbound links in its Related block (graph-island check).
 4. The frontmatter `language` matches `language.code`; the section labels match
    `publish.section_labels.*` verbatim.

@@ -96,6 +96,15 @@ three layouts that matter:
 | degenerate | `/items/01.png`          | `items/01.png`     | CHANGES  |
 | parent     | `../items/01.png`        | `01.png`           | CHANGES  |
 
+`chapterAssetDir(entry)` resolves correctly in every layout whose operands share a common anchor,
+degenerate ones included — the three rows above are exhaustive over that class, pinned by unit
+test. Profile paths with unequal unresolved leading `../` climbs (e.g. `chapter_file` and
+`capture.output_dir` both expressed relative to a project root, but climbing out of it by a
+different number of segments) are a known limitation of the shared `relative()` path helper in
+`assets/lib/chapter-paths.mjs` (see issue) — pre-existing, not introduced or worsened by 1.6.0. It
+produces the identical wrong result under both the superseded concatenation and the full-target
+canon there, so neither spelling is more broken than the other on that class of profile path.
+
 The superseded concatenation (`legacyStaticEmbedPath`) is retained in `assets/lib/chapter-paths.mjs`
 only for exported-API compatibility — this adapter no longer calls it for any manifest, flat or
 grouped.

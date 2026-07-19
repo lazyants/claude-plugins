@@ -757,19 +757,34 @@ test('#221: multiple group-free duplicate slugs halt in first-seen (Map insertio
   ]);
 });
 
-test('#221: grouped halt set AND emission order stay byte-unchanged from 1.5.0 (gates 1,2,duplicate,4,5,6)', () => {
-  // A single call that trips gate 2 (reserved slug), gate 3/duplicate, and gate 6 (cross-group
-  // title) simultaneously — proves the duplicateSlugHalts extraction did not move gate 3 relative
-  // to its neighbors, and that the grouped literal (not the new group-free one) is still used.
+test('#221: grouped halt set AND emission order stay byte-unchanged from 1.5.0 (gates 1,2,duplicate,4,5,6, ALL SIX AT ONCE)', () => {
+  // One manifest, one violation per gate, none overlapping — proves the duplicateSlugHalts
+  // extraction did not move gate 3 relative to ANY of its five neighbors (a weaker fixture
+  // hitting only gates 2/3/6 could not detect the duplicate gate sliding across gates 1, 4, or 5).
+  //   1 'Bad Group'      -> invalid group (kebab violation)
+  //   2 slug 'assets'    -> reserved slug in a grouped manifest
+  //   3 slug 'dup-slug'  -> duplicate across groups g-dup-a/g-dup-b
+  //   4 group 'flatclash'-> collides with a flat entry of the same slug
+  //   5 group 'g-missing-title' -> entry with no group_title
+  //   6 groups 'g-shared-1'/'g-shared-2' -> share group_title 'SharedTitle'
   const halts = validateGroups([
-    entry({ slug: 'assets', group: 'g1', group_title: 'G1' }),
-    entry({ slug: 'x', group: 'g2', group_title: 'Same' }),
-    entry({ slug: 'x', group: 'g3', group_title: 'Same' }),
+    entry({ slug: 'e1', group: 'Bad Group', group_title: 'T1' }),
+    entry({ slug: 'assets', group: 'g-reserved-slug', group_title: 'T2' }),
+    entry({ slug: 'dup-slug', group: 'g-dup-a', group_title: 'T3a' }),
+    entry({ slug: 'dup-slug', group: 'g-dup-b', group_title: 'T3b' }),
+    entry({ slug: 'e4', group: 'flatclash', group_title: 'T4' }),
+    entry({ slug: 'flatclash' }),
+    entry({ slug: 'e5', group: 'g-missing-title' }),
+    entry({ slug: 'e6a', group: 'g-shared-1', group_title: 'SharedTitle' }),
+    entry({ slug: 'e6b', group: 'g-shared-2', group_title: 'SharedTitle' }),
   ]);
   assert.deepEqual(halts, [
+    `Invalid group 'Bad Group' — group must be English kebab-case, one level (no '/').`,
     `slug 'assets' is reserved in a grouped manifest (co-location follow-up; keeps the tree unambiguous).`,
-    `Duplicate chapter slug 'x' — chapter slugs must be globally unique across all groups (wikilinks and Quartz-shortest resolution key on the basename).`,
-    `Groups 'g2' and 'g3' share group_title 'Same' — nav containers are located by title; give each group a distinct localized title.`,
+    `Duplicate chapter slug 'dup-slug' — chapter slugs must be globally unique across all groups (wikilinks and Quartz-shortest resolution key on the basename).`,
+    `group 'flatclash' collides with flat chapter slug 'flatclash' — a directory and a chapter file cannot share the same path under publish.chapters_dir.`,
+    `Entry 'e5' in group 'g-missing-title' lacks group_title — every grouped entry carries the localized group title (never derived from the English group slug).`,
+    `Groups 'g-shared-1' and 'g-shared-2' share group_title 'SharedTitle' — nav containers are located by title; give each group a distinct localized title.`,
   ]);
 });
 
