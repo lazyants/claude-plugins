@@ -723,6 +723,31 @@ has_in_section "obsidian-vault: wikilinks-off internal chapter link is one all-m
   'Internal chapter link, any manifest'
 hasnt "obsidian-vault: no longer special-cases the group-free internal-link spelling" \
   'group-free manifest (shipped 1.4.1 form, unchanged)' "$OMD"
+# round-7: the wikilinks-off fallback told authors to skip the Related block and glossary linking
+# entirely, while a separate rule required every Related block to hold >=2 wikilinks with a halt —
+# unsatisfiable when wikilinks are off, and contradicting the very canon #220 exists to ship. A4
+# rewrote both sites to be link-format-neutral. The earlier assertions above only covered the
+# section that round's edit touched, so this same contradiction sat unpinned for six more rounds.
+has_in_section "obsidian-vault: wikilinks-off fallback still covers Related block + glossary" \
+  "$OMD" '## What "Obsidian vault" implies' \
+  'and the Related block below all still apply'
+has_in_section "obsidian-vault: Related-block link form is profile-driven, not wikilink-only" \
+  "$OMD" '## Chapter structure (Obsidian-flavoured)' \
+  'in whichever form the profile dictates'
+# Distinct claim from the one above — a future edit could make the rule format-neutral and still
+# silently drop the >=2-link halt, so this is pinned separately rather than folded in.
+has_in_section "obsidian-vault: the >=2-link Related-block halt survives the format-neutral rewording" \
+  "$OMD" '## Chapter structure (Obsidian-flavoured)' \
+  'Either way, you halt the publish step until at'
+# The full retired phrase ("skip the wikilink-specific steps below (Related block, glossary
+# linking syntax)") wraps across two physical lines in the pre-edit source (~90-col hard wrap,
+# right after "wikilink-specific") — a fixed-string whole-file grep can never match a needle that
+# spans a line break, so that exact phrase would never have gone red even pre-edit. Pinned on the
+# single-line-safe back half instead — self-documenting (names the actual retired instruction:
+# skipping the Related block and glossary linking entirely) and verified to discriminate both
+# directions against the real pre-edit and post-edit text.
+hasnt "obsidian-vault: no longer tells authors to skip wikilink-specific steps when wikilinks are off" \
+  'steps below (Related block, glossary linking syntax)' "$OMD"
 
 echo "== Package A/B/D regression sentinels (#49, #50, #51, #52, #71) =="
 hasnt "no non-waiting isVisible after Escape"    'isVisible'                    "$CH"

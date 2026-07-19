@@ -11,8 +11,10 @@ The publish destination is a folder tree of plain Markdown files inside an Obsid
 You can rely on three Obsidian-specific features:
 
 - **Wikilinks** — `[[path/to/note|display text]]`. Enabled when `publish.wikilinks: true`.
-  When `false`, fall back to standard Markdown links and skip the wikilink-specific
-  steps below (Related block, glossary linking syntax).
+  When `false`, fall back to standard Markdown links for every link this adapter writes —
+  internal chapter links, glossary links, and the Related block below all still apply,
+  just in the standard-Markdown form ("Wikilinks vs Markdown links" below) instead of
+  wikilink syntax.
 - **Dataview** — code-fenced ` ```dataview ` queries that render as live tables/lists.
   Only emit Dataview if the vault already uses it; do not introduce it unprompted.
 - **INDEX.md convention** — each top-level vault section has an `INDEX.md` that tracks
@@ -144,10 +146,13 @@ mechanics matter at publish time:
   H2s render as `## {{publish.section_labels.prerequisites}}` and
   `## {{publish.section_labels.related}}` — literal strings the user wrote in their
   language. Do not translate them yourself.
-- **The Related block ends every chapter** and contains ≥2 wikilinks to sibling chapters
-  or glossary entries: `- [[<chapter-slug>|Display text]]`. This is what makes the
-  Obsidian graph view useful; a chapter with no outbound wikilinks is a graph island
-  and you halt the publish step until at least two exist.
+- **The Related block ends every chapter** and contains ≥2 links to sibling chapters or
+  glossary entries, in whichever form the profile dictates — wikilinks
+  (`- [[<chapter-slug>|Display text]]`) when `publish.wikilinks: true`, the full-target
+  Markdown-link formula from "Wikilinks vs Markdown links" below when it is `false`. With
+  wikilinks on, this is also what makes the Obsidian graph view useful — a chapter with no
+  outbound wikilinks is a graph island. Either way, you halt the publish step until at
+  least two outbound Related-block links exist.
 
 Start from `assets/chapter-template.md` and substitute the placeholders — never
 hand-rewrite the skeleton from memory.
