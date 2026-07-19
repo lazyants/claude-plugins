@@ -45,9 +45,13 @@ across translations.
 
 `group` is an optional field on a manifest entry (`references/manifest-discipline.md`),
 also always English kebab-case, one level (no `/`). A manifest where no entry sets it —
-the 1.4.1 shipped default — produces only the flat form above and this adapter behaves
-identically to 1.4.1 in every section below. Flat and grouped entries coexist in one
-manifest. Canonical chapter path (D2, shared with `static-md.md` and `SKILL.md`):
+the 1.4.1 shipped default — produces only the flat form above. As of 1.6.0 this adapter
+no longer behaves identically to 1.4.1 in every section below: two behaviors now apply
+to every manifest regardless of grouping — the asset-embed path formula ("Layout you
+produce" below) always uses the full-target join, and the duplicate-slug halt
+(`validateGroups`, `references/manifest-discipline.md`) always runs. Every other section
+below keeps the 1.4.1 group-free behavior unchanged. Flat and grouped entries coexist in
+one manifest. Canonical chapter path (D2, shared with `static-md.md` and `SKILL.md`):
 
 ```
 grouped: {{publish.chapters_dir}}/<group>/<slug>.md
@@ -272,11 +276,9 @@ glossary itself lives at `{{publish.glossary_dir}}/index.md` and is owned by
 `references/glossary-discipline.md` — this adapter only encodes the linking syntax:
 
 - Wikilinks on: `[[{{publish.glossary_dir basename}}/index#TermHeading|TermHeading]]`
-- Wikilinks off, group-free manifest (shipped 1.4.1 form, unchanged):
-  `[TermHeading]({{publish.glossary_dir}}/index.md#termheading)`.
-- Wikilinks off, `anyGroup` manifest — every chapter the skill WRITES uses the full-target
-  formula instead of the raw profile-key path above (write-time canon; retained chapters
-  keep whatever spelling they already have, per the link-integrity gate below):
+- Wikilinks off, any manifest — every chapter the skill WRITES uses the full-target
+  formula (write-time canon; retained chapters keep whatever spelling they already have,
+  per the link-integrity gate below):
   `[TermHeading](relative(dirname(chapter_file), {{publish.glossary_dir}}/index.md)#termheading)`.
 
 The glossary entry heading is the term in `glossary.canonical_term_language`; the
@@ -301,11 +303,15 @@ failure:
    sibling vault subtrees resolve fine as long as the target stays inside the vault.
 2. Every wikilink target (`[[…]]`) resolves to either an existing `.md` file in the
    vault or an existing heading anchor in the glossary. Broken wikilinks render as
-   red placeholders in Obsidian and are silent in plain Markdown views. **Activation-scoped
-   extension**: when `publish.wikilinks: false` and the manifest is `anyGroup`, this item
-   also verifies every standard Markdown link (`[text](target)`) resolves the same way —
-   grouped chapters can sit at different depths, so a stale or hand-edited relative link is
-   exactly as broken as a dangling wikilink and must be caught here too.
+   red placeholders in Obsidian and are silent in plain Markdown views. When
+   `publish.wikilinks: false`, this item also verifies every standard Markdown link
+   (`[text](target)`) resolves the same way — every manifest, group-free manifests included:
+   grouped chapters can sit at different depths, so a stale or hand-edited relative link
+   is exactly as broken as a dangling wikilink and must be caught here too.
+   **This gate is chapter-scoped**: it fires here, before declaring the chapter
+   published, so it catches a legacy broken link only when that chapter is next
+   published or revalidated. It does not sweep untouched chapters — an already-published
+   chapter with a stale link stays broken until its own next publish or revalidation.
 3. The chapter has ≥2 outbound links in its Related block (graph-island check).
 4. The frontmatter `language` matches `language.code`; the section labels match
    `publish.section_labels.*` verbatim.
