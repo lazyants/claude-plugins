@@ -634,12 +634,19 @@ test('locateChapterLine: THREE duplicate index lines still report multiple:true 
   // Round-13 audit finding: both existing duplicate-line fixtures (here and R14-F3 below) use
   // exactly 2 occurrences, so `matches.length > 1` was indistinguishable from `=== 2`. A third
   // identical line proves the ambiguous-duplicate-line halt path still fires.
+  //
+  // Also asserts `present` (round-13 review finding 4, this fixture's own gap): `present:
+  // matches.length > 0` is a SEPARATE boundary from `multiple: matches.length > 1` on the same
+  // `matches` array — narrowing `present` to `=== 1` survives if only `multiple`/`matches.length`
+  // are checked, returning the self-contradictory `{present: false, multiple: true}` a
+  // present-first caller could misread as "insert, don't halt."
   const indexLines = [
     '- [Items](handbook/items.md)',
     '- [Items](handbook/items.md)',
     '- [Items](handbook/items.md)',
   ];
   const result = locateChapterLine(indexLines, 'handbook/items.md');
+  assert.equal(result.present, true);
   assert.equal(result.multiple, true);
   assert.equal(result.matches.length, 3);
 });
