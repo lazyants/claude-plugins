@@ -186,6 +186,40 @@ test('staticEmbedPath positional-argument family-kill [round-10]: current entry 
   assert.equal(staticEmbedPath(entries, chapterFile, p, current, '01.png'), '../assets/b/second/01.png');
 });
 
+test('staticEmbedPath chapterFile pin [round-11]: a capture-only profileLike (no `publish` key) is honored, never thrown on', () => {
+  // Round-11 finding: every prior fixture supplied a full profile AND a chapterFile derivable
+  // from that profile plus the entry, so a mutant that ignores the chapterFile argument and
+  // silently recomputes it as `profileLike.publish.chapters_dir + chapterRelPath(entry)` stayed
+  // green. `chapter-paths.d.mts:16` states profileLike is the CAPTURE-ONLY subset staticEmbedPath
+  // actually reads at runtime (never `publish`) — a real capture spec legitimately never
+  // constructs `publish.*`. A capture-only profileLike (literally no `publish` key) with a
+  // chapterFile deliberately off the chapters_dir tree entirely (there is no chapters_dir to be
+  // on) proves both halves of the contract at once: the mutant would THROW reading
+  // `profileLike.publish.chapters_dir` off `undefined`, while the real helper never touches
+  // `publish` and correctly derives the answer from the given chapterFile.
+  const captureOnly = { capture: { output_dir: 'vault/handbook/assets' } };
+  const chapterFile = 'somewhere/else/chapter.md'; // unrelated to output_dir; no chapters_dir exists to derive it from
+  assert.equal(
+    staticEmbedPath([entry()], chapterFile, captureOnly, entry(), '01.png'),
+    '../../vault/handbook/assets/items/01.png',
+  );
+});
+
+test('staticEmbedPath chapterFile pin [round-11]: an off-tree chapterFile is honored even when publish.chapters_dir IS present', () => {
+  // Companion to the capture-only case above: here `publish.chapters_dir` exists, so the
+  // ignore-chapterFile mutant would NOT throw — it would silently recompute a wrong chapterFile
+  // from the profile and entry instead, and mis-resolve rather than error. chapterFile is chosen
+  // to sit off the chapters_dir tree entirely (not `chapters_dir + chapterRelPath(entry)`) so a
+  // real vs. recomputed chapterFile produce PROVABLY DIFFERENT results, catching the mutation by
+  // wrong-value rather than by throw.
+  const p = profile(); // publish.chapters_dir = 'vault/handbook'
+  const chapterFile = 'somewhere-else/chapter.md'; // deliberately NOT chapters_dir + chapterRelPath(entry)
+  assert.equal(
+    staticEmbedPath([entry()], chapterFile, p, entry(), '01.png'),
+    '../vault/handbook/assets/items/01.png',
+  );
+});
+
 test('chapterRelPath: flat and grouped forms', () => {
   assert.equal(chapterRelPath(entry()), 'items.md');
   assert.equal(chapterRelPath(entry({ group: 'admin', group_title: 'Admin' })), 'admin/items.md');
@@ -782,6 +816,29 @@ test('#221 activation pin [1.6.0]: a group-free manifest with a duplicated flat 
 test('#221: a clean group-free manifest still returns []', () => {
   const halts = validateGroups([entry({ slug: 'a' }), entry({ slug: 'b' })]);
   assert.deepEqual(halts, []);
+});
+
+test('#221 single-gate boundary pin [round-11]: a group-free {slug: "assets"} must NOT trip the grouped reserved-slug gate', () => {
+  // Round-11 finding: `validateGroups` early-returns `duplicateSlugHalts(entries, {groupFree:
+  // true})` for a group-free manifest — gates 1, 2, 4, 5, 6 run only inside the `anyGroup`
+  // branch. Every existing group-free fixture uses ordinary slugs, so a refactor that
+  // accumulates ALL gates unconditionally (computing `groupFree` only to pick the duplicate
+  // literal) stays fully green. That refactor would wrongly reject a LEGITIMATE group-free
+  // manifest containing a chapter slugged 'assets' through gate 2's grouped-only reserved-slug
+  // check — a false halt on valid input, exactly the direction users would actually hit it.
+  const halts = validateGroups([{ slug: 'assets' }]);
+  assert.deepEqual(halts, []);
+});
+
+test('#221 single-gate boundary pin [round-11]: duplicate "assets" in a group-free manifest emits ONLY the group-free duplicate literal', () => {
+  // Companion to the clean-manifest case above: pins the OTHER half of the same boundary. Here a
+  // halt IS expected (the slug really is duplicated), so this proves the grouped-only gate 2
+  // still does not leak in ALONGSIDE the correct group-free duplicate halt — not just that it
+  // stays silent on a fully clean manifest.
+  const halts = validateGroups([{ slug: 'assets' }, { slug: 'assets' }]);
+  assert.deepEqual(halts, [
+    `Duplicate chapter slug 'assets' — chapter slugs must be unique; a duplicate silently overwrites the chapter file and its asset dir.`,
+  ]);
 });
 
 test('#221: multiple group-free duplicate slugs halt in first-seen (Map insertion) order', () => {
