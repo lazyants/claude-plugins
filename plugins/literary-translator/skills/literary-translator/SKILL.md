@@ -756,17 +756,43 @@ render the findings for a human.
 pass feeds source-text windows to a file-capable `codex:codex-rescue` agent —
 it carries the same pipeline-wide agent-trust, adding NO new filesystem
 privilege and NO new accepted-state write path (the triage schema is
-adverse-only and no freeze/merge reader opens `skeptic_triage.json`). As a best-effort integrity tripwire,
-`skeptic_setup.py` stamps `canon_sha256`/`manifest_sha256` into the aggregate
-and `skeptic_ready.py --verify-merged` re-hashes the on-disk
-`canon.json`/`manifest.json`, failing on any mismatch. This catches
-ACCIDENTAL / non-adversarial mutation of the frozen inputs (a crash, a stray
-process, a buggy well-behaved agent) — it is NOT a hard guarantee: a
-prompt-injected agent with pipeline-wide FS-write can rewrite or delete the
-co-located stamp to match its tampered canon. A sound version (anchoring the
-setup-time hash in a trusted CLI channel) is deferred to Phase 3 alongside
-the warn→block flip; full agent containment is the out-of-scope
-pipeline-wide FS-sandbox concern.
+adverse-only and no freeze/merge reader opens `skeptic_triage.json`). As a
+best-effort integrity tripwire, `skeptic_setup.py` stamps a THREE-way hash
+triplet — `canon_sha256`/`manifest_sha256`/`senses_sha256` (#243 made
+`canon_senses.json` a third authoritative frozen input this release, so it
+is stamped and checked alongside the other two) — into the aggregate
+manifest, via the same `compute_frozen_input_hash` (`suspicion_scan.py`)
+both the stamper and every verifier call; no second, independently-drifting
+copy exists to fall out of sync.
+
+Detection now fires at **two** decision points, not one. The first is
+`skeptic_ready.py --verify-merged`'s own internal check, which runs after a
+successful merge, as before. The second is new this release and is the
+substantive part of the fix, not a footnote: `skeptic_ready.py
+--check-frozen-inputs` — a standalone CLI mode built from the exact same
+shared `frozen_input_check()` function `--verify-merged` calls internally,
+so the two can never disagree — is now called UNCONDITIONALLY from the
+Workflow's `notReadyBatches` branch, before it concludes that a batch never
+becoming ready is merely an ordinary advisory outcome. Previously, that
+branch gave up with a bare `fragment-check-failed` and never called
+`--verify-merged` at all, so a frozen input tampered sometime after
+`skeptic_setup.py` stamped this run but before any batch's fragment ever
+validated would go completely unreported as the FATAL tamper it is — the
+not-ready path is exactly where a run ENDS when something has already gone
+wrong, so it is also exactly where a tampered input was most likely to go
+unnoticed: the old behavior reported the most alarming possible state
+(a frozen input changed mid-pass) as the blandest possible outcome (an
+ordinary "some batches didn't finish" advisory). Either decision point
+re-hashes the on-disk `canon.json`/`manifest.json`/`canon_senses.json` and
+fails on any mismatch.
+
+This catches ACCIDENTAL / non-adversarial mutation of the frozen inputs (a
+crash, a stray process, a buggy well-behaved agent) — it is NOT a hard
+guarantee: a prompt-injected agent with pipeline-wide FS-write can rewrite
+or delete the co-located stamp to match its tampered canon. A sound version
+(anchoring the setup-time hash in a trusted CLI channel) is deferred to
+Phase 3 alongside the warn→block flip; full agent containment is the
+out-of-scope pipeline-wide FS-sandbox concern.
 
 **Exit-code contract:** this block is advisory FOR SKEPTIC FINDINGS — a
 non-zero exit from `suspicion_scan.py` / `skeptic_setup.py`, or a Workflow
@@ -775,15 +801,19 @@ fragment-check-failed / coverage-gap / `verify-failed`), HALTS only the
 skeptic pass for this run; log it and proceed straight to W3a regardless.
 **EXCEPTION — a frozen-input mutation is FATAL to the WHOLE pipeline, NOT
 advisory:** if the Workflow result carries `frozenInputMismatch: true`
-(reason `"frozen-input-mismatch"` — `skeptic_ready.py --verify-merged`
-re-hashed `canon.json`/`manifest.json` and found either changed on disk since
-`skeptic_setup.py` stamped this run), do NOT proceed to W3a. The frozen
-inputs W3a consumes (segpack canon injection, translation) were mutated
-mid-pass, so continuing would bake that mutation into accepted state. HALT
-here (FATAL), surface the mismatch, and require restoring +
-re-freezing/re-validating the trusted `canon.json`/`manifest.json` before any
-re-run. (This is the one non-advisory outcome of the opt-in pass; every
-skeptic *finding* stays advisory.)
+(reason `"frozen-input-mismatch"` — either `skeptic_ready.py
+--verify-merged` after a successful merge, OR `skeptic_ready.py
+--check-frozen-inputs` from the `notReadyBatches` branch when a batch never
+became ready, re-hashed `canon.json`/`manifest.json`/`canon_senses.json`
+and found one changed on disk since `skeptic_setup.py` stamped this run —
+see the H1 paragraph above for why both decision points exist), do NOT
+proceed to W3a. The frozen inputs W3a consumes (segpack canon injection,
+translation) were mutated mid-pass, so continuing would bake that mutation
+into accepted state. HALT here (FATAL), surface the mismatch, and require
+restoring + re-freezing/re-validating the trusted `canon.json`/
+`manifest.json`/`canon_senses.json` before any re-run. (This is the one
+non-advisory outcome of the opt-in pass; every skeptic *finding* stays
+advisory.)
 **The cat-5 audit command (`canon_adjudication_audit.py --check`,
 immediately above) is UNCHANGED by any of this** — it never reads
 `skeptic_triage.json` / `suspicion_worklist.json`, and its own summary +
