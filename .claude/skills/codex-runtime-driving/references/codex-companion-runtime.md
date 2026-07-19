@@ -24,9 +24,17 @@ standing guardrail — this file is the plumbing only.)
   `/Users/moi/.claude-bm/plugins/cache/openai-codex/codex/<ver>/scripts/codex-companion.mjs`
   (also under `~/.claude/plugins/cache/...`). Resolve it with
   `find ~/.claude/plugins -iname "codex-companion.mjs"`.
-- Job state dir keys to the **REPO's own slug/hash, NOT the worktree name**:
-  `~/.claude/plugins/data/codex-openai-codex/state/<repo-slug>-<hash>/jobs/<task-id>.json` (+ `.log`).
+- Job state dir keys to the **basename of the cwd the job ran in** — so a main-checkout run files
+  under the repo dir name, and a **worktree run files under the WORKTREE dir name**:
+  `~/.claude/plugins/data/codex-openai-codex/state/<cwd-basename>-<hash>/jobs/<task-id>.json` (+ `.log`).
   (Bake-off / other-profile variant: `~/.claude3/plugins/data/codex-openai-codex/state/<ws-hash>/jobs/<id>.json`.)
+  **When a verdict goes missing, search BOTH** — an earlier version of this line claimed the dir
+  never keys to the worktree, which sends you to the wrong directory on exactly the runs most likely
+  to lose a verdict. Verified 2026-07-19: a review dispatched with the plan file inside
+  `.claude/worktrees/eh-220-221` filed under `state/eh-220-221-<hash>/`, while same-session runs from
+  the main checkout filed under `state/claude-plugins-<hash>/`; neighbouring dirs are likewise branch
+  slugs (`645-A1-…`, `572-per-kit-tri-count-…`). Don't grep one dir and conclude the job never
+  existed — `find ~/.claude*/plugins/data/codex-openai-codex/state -name '*.json' -mmin -120`.
 - Codex config: `~/.codex/config.toml` (`model` default, `model_reasoning_effort`, `sandbox_mode`).
 - Codex rollout transcript: `~/.codex/sessions/YYYY/MM/DD/rollout-<ISO>-<uuid>.jsonl`;
   `session_index.jsonl` lists thread names.
@@ -85,6 +93,23 @@ codex exec -s read-only -C <that-root> --skip-git-repo-check \
 verdict (clean); `-C <root>` sets the readable root; `--skip-git-repo-check` allows a non-repo root.
 Inline the plan text into the prompt (scratchpad may be outside `-C`). Read only the `-o` verdict
 file, NOT the verbose log (session-memory noise there can trip a false prompt-injection warning).
+
+**Reviewing a file that lives in the SCRATCHPAD — stage it into the repo/worktree first.** This bites
+the rescue Agent too, not just `codex exec`: a fresh (non-resumed) codex session cannot see
+`/private/tmp/claude-501/…/scratchpad/`, and it reports back that it "could not locate the file",
+then reviews **whatever it can infer from your prompt text instead** — a review that reads as
+authoritative but was never grounded in the artifact (verified 2026-07-19: a plan-review round
+silently degraded this way and had to be re-run). Fix — copy it in and git-exclude it:
+```
+/bin/cp -f <scratchpad>/plan.md <worktree>/PLAN-REVIEW-SCRATCH.md
+echo "PLAN-REVIEW-SCRATCH.md" >> "$(git rev-parse --git-path info/exclude)"   # NOT .git/info/exclude
+git status --short          # must be empty — proves it is excluded, not staged
+```
+Two traps in those three lines: **(a)** in a worktree `.git` is a FILE, not a directory, so a literal
+`.git/info/exclude` redirect fails with `not a directory` — always resolve it via
+`git rev-parse --git-path info/exclude`; **(b)** `cp` is aliased to `cp -i` in this shell and will sit
+on an interactive overwrite prompt even with `-f`, so call `/bin/cp -f`. Delete the staged copy before
+committing, and re-sync it on every plan revision or codex reviews a stale draft.
 Smoke-test first: `printf 'reply PONG' | codex exec -s read-only -C <root> --skip-git-repo-check -o /tmp/o -`
 should print `PONG`. For a broad working-tree review, SPLIT into N tightly-bounded parallel
 `codex exec` runs (`run_in_background`), each with its own `-o`, rather than one broad Agent that backgrounds.
