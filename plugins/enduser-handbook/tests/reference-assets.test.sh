@@ -998,14 +998,33 @@ has_in_section "obsidian-vault: fallback bullet's cross-reference to Wikilinks v
 has_in_section "obsidian-vault: Related-block link form is profile-driven, not wikilink-only" \
   "$OMD" '## Chapter structure (Obsidian-flavoured)' \
   'in whichever form the profile dictates'
-has_in_section "obsidian-vault: Related-block rule's cross-reference to Wikilinks vs Markdown links is intact" \
+# round-18: the old asymmetric citation ('...the full-target Markdown-link formula from
+# "Wikilinks vs Markdown links" below when it is `false`...') pinned a rule that INLINED the
+# chapter-form wikilink example ('- [[<chapter-slug>|Display text]]') as representative of a
+# category that also holds glossary targets — fourth instance of the category-collapse shape (see
+# the round-17 step-4 fix). A reader pattern-matching that example for a glossary line would write
+# `[[Term|Term]]`, a link to a nonexistent note. A4 dropped the inline example entirely and cites
+# "Wikilinks vs Markdown links" symmetrically for BOTH modes — that section resolves the syntax BY
+# TARGET TYPE, so no single example stands in for the category. The needle below pins that
+# property (by-target-type resolution, not one inlined instance), same reasoning as round 17's
+# "the two target types use different formulas" pin.
+has_in_section "obsidian-vault: Related-block link syntax resolved by target type, not one inlined example" \
   "$OMD" '## Chapter structure (Obsidian-flavoured)' \
-  'Markdown-link formula from "Wikilinks vs Markdown links" below when it is'
+  'below for the exact syntax, by target type, in each `publish.wikilinks` mode'
 # Distinct claim from the one above — a future edit could make the rule format-neutral and still
 # silently drop the >=2-link halt, so this is pinned separately rather than folded in.
+#
+# round-18 [the wrap trap hitting a pin, not a grep]: this needle broke not because the claim
+# changed but because A4's shorter paragraph reflowed the wrap — 'Either way, you halt the publish
+# step' and 'until at least two...' used to share one physical line and no longer do. The guarantee
+# itself never moved. A needle chosen to sit on one physical line is only stable while the
+# surrounding prose keeps its line breaks; any edit ABOVE it in the same paragraph can reflow the
+# tail. Re-pinned on the trailing clause alone, which stays intact regardless of where the
+# preceding sentence wraps — smaller and more self-contained than the original, not a guarantee
+# against every future reflow, just a narrower target for one to land on.
 has_in_section "obsidian-vault: the >=2-link Related-block halt survives the format-neutral rewording" \
   "$OMD" '## Chapter structure (Obsidian-flavoured)' \
-  'Either way, you halt the publish step until at'
+  'until at least two outbound Related-block links exist'
 # A4 renamed this checklist item's parenthetical from "(graph-island check)" to
 # "(outbound-link floor)" (obsidian-vault.md:325) — the old name reasserted a wikilinks-on
 # rationale for a rule that is mode-neutral (the same ≥2-link floor also gates wikilinks-off).

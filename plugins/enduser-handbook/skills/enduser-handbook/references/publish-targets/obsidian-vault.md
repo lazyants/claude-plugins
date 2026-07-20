@@ -150,12 +150,11 @@ mechanics matter at publish time:
   `## {{publish.section_labels.related}}` — literal strings the user wrote in their
   language. Do not translate them yourself.
 - **The Related block ends every chapter** and contains ≥2 links to sibling chapters or
-  glossary entries, in whichever form the profile dictates — wikilinks
-  (`- [[<chapter-slug>|Display text]]`) when `publish.wikilinks: true`, the full-target
-  Markdown-link formula from "Wikilinks vs Markdown links" below when it is `false`. With
-  wikilinks on, this is also what makes the Obsidian graph view useful — a chapter with no
-  outbound wikilinks is a graph island. Either way, you halt the publish step until at
-  least two outbound Related-block links exist.
+  glossary entries, in whichever form the profile dictates — see "Wikilinks vs Markdown
+  links" below for the exact syntax, by target type, in each `publish.wikilinks` mode.
+  With wikilinks on, this is also what makes the Obsidian graph view useful — a chapter
+  with no outbound wikilinks is a graph island. Either way, you halt the publish step
+  until at least two outbound Related-block links exist.
 
 Start from `assets/chapter-template.md` and substitute the placeholders — never
 hand-rewrite the skeleton from memory. Under `publish.wikilinks: false`, override the
