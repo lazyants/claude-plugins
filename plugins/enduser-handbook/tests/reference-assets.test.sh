@@ -198,6 +198,41 @@ EOF
 has_in_section "self-test: a clean-info-string fence still opens, hides a fenced pseudo-heading" \
   "$SELFTEST_DIR/clean-info-string.md" '## Assets' 'NEEDLE'
 
+# round-20: the closer rule (run >= fence_len, same fence_char) was proven correct in round 3's
+# manual probes ("3-tilde does not close 4-tilde fence") — but that probe lived in a scratch
+# harness and evaporated once the round ended. Every later round inherited a rule whose proof was
+# gone, and both permanent self-tests above are backtick-only, three-backtick throughout, so
+# neither exercises a length or char mismatch at the closer. Two fixtures, same positive
+# heading-boundary form as the two above (a needle placed AFTER the real closer, so it is only
+# live if the fence closed at the RIGHT line — no negative helper needed): one per axis, because
+# each is independently droppable and neither fixture below exercises the other's axis (verified:
+# the length fixture stays green under a char-check-dropped mutant and vice versa).
+#
+# Length axis: a same-char run shorter than the opener (``` closing ````) must NOT close it.
+cat > "$SELFTEST_DIR/fence-length-mismatch.md" <<'EOF'
+## Target
+````
+```
+````
+NEEDLE
+## Next
+EOF
+has_in_section "self-test: a shorter same-char run does not close a longer fence (length axis)" \
+  "$SELFTEST_DIR/fence-length-mismatch.md" '## Target' 'NEEDLE'
+
+# Char axis: a run of the WRONG fence character, even at matching or greater length, must NOT
+# close it (~~~~ closing ````).
+cat > "$SELFTEST_DIR/fence-char-mismatch.md" <<'EOF'
+## Target
+````
+~~~~
+````
+NEEDLE
+## Next
+EOF
+has_in_section "self-test: a wrong-character run does not close a fence, regardless of length (char axis)" \
+  "$SELFTEST_DIR/fence-char-mismatch.md" '## Target' 'NEEDLE'
+
 echo "== surface-audit.playwright.ts =="
 SA="$ASSETS/surface-audit.playwright.ts"
 hasnt "surface-audit: does NOT use \$\$eval (extraction stays unit-testable)" '$$eval' "$SA"
