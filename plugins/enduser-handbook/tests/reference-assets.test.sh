@@ -77,10 +77,20 @@ has_ci() {
 # review found real regressions in that state machine (a fence opener inside an open comment, a
 # second comment span on one line) faster than they could be fixed soundly. If a caller ever needs
 # comment-awareness, reach for a real Markdown parser instead of extending this awk state machine.
-has_in_section() {
-  local msg="$1" file="$2" heading="$3" needle="$4"
-  if [ ! -f "$file" ]; then bad "$msg (file not found: $(basename "$file"))"; return; fi
-  if awk -v heading="$heading" -v needle="$needle" '
+#
+# Internal: exit 0 iff `needle` is found within `heading`'s section of `file`, exit 1 otherwise (no
+# ok/bad side effects). Shared by has_in_section and hasnt_in_section below, so the fence/CRLF/
+# empty-needle engine lives in exactly one place rather than as two copies that could drift.
+# Round 4 built this exact split (`_section_contains` + both callers) and reverted it — not because
+# the split was wrong, but because there was no real caller for hasnt_in_section yet and it landed
+# mid-round at a convergence point that didn't want the extra surface; the write-up explicitly
+# named "the next time a real assertion needs the narrower claim" as the adoption condition. This
+# is that caller — the section-boundary self-tests below are inherently negative claims ("must NOT
+# be found"), and the engine is now large enough (fence char + length + backtick-info-string +
+# CRLF) that a hand-duplicated second copy is a real drift risk, not just a style preference.
+_section_contains() {
+  local file="$1" heading="$2" needle="$3"
+  awk -v heading="$heading" -v needle="$needle" '
        function leading_spaces(s,    i, n) {
          n = length(s); i = 1
          while (i <= n && substr(s, i, 1) == " ") i++
@@ -139,10 +149,34 @@ has_in_section() {
          if (in_section && index(line, needle) > 0) { found_needle = 1 }
        }
        END { exit (needle != "" && found_heading && found_needle) ? 0 : 1 }
-     ' "$file"; then
+     ' "$file"
+}
+
+has_in_section() {
+  local msg="$1" file="$2" heading="$3" needle="$4"
+  if [ ! -f "$file" ]; then bad "$msg (file not found: $(basename "$file"))"; return; fi
+  if _section_contains "$file" "$heading" "$needle"; then
     ok "$msg"
   else
     bad "$msg ('$needle' not found under heading '$heading' in $(basename "$file"))"
+  fi
+}
+
+# Assert a fixed string is NOT present within one Markdown section — the boundary-proving
+# counterpart to has_in_section (mirrors has/hasnt above), same shared engine. Exists specifically
+# to prove the section-boundary mechanism itself (round 21): has_in_section's four prior self-tests
+# all place their needle INSIDE the section under test, so none of them can catch a broken or
+# deleted boundary — a boundary that never closes only WIDENS what has_in_section finds, so every
+# existing positive assertion stays green regardless. Proving "this must not leak past a real
+# boundary" needs a genuine negative claim; see the self-tests below for the one caller this exists
+# for.
+hasnt_in_section() {
+  local msg="$1" file="$2" heading="$3" needle="$4"
+  if [ ! -f "$file" ]; then bad "$msg (file not found: $(basename "$file"))"; return; fi
+  if _section_contains "$file" "$heading" "$needle"; then
+    bad "$msg ('$needle' unexpectedly found under heading '$heading' in $(basename "$file"))"
+  else
+    ok "$msg"
   fi
 }
 
@@ -164,9 +198,11 @@ line_of() {
 
 echo "== has_in_section self-test: backtick-fence info-string boundary (round-4 regression) =="
 # Permanent boundary cases for the fence-opener fix above — synthetic fixtures, not project docs.
-# Both are phrased as plain has_in_section (positive, "must be found") calls via a heading-boundary
-# reformulation, so no extra assertion helper is needed: the bug under test is really about whether
-# a REAL heading gets recognized as a section boundary, and that is directly, positively provable.
+# These two are phrased as plain has_in_section (positive, "must be found") calls via a
+# heading-boundary reformulation, so no hasnt_in_section call is needed for THIS pair specifically:
+# the bug under test is really about whether a REAL heading gets recognized as a section boundary,
+# and that is directly, positively provable. The section-boundary self-tests further below (round
+# 21) test a genuinely different claim and DO need hasnt_in_section — see there for why.
 SELFTEST_DIR="$(mktemp -d)"
 trap 'rm -rf "$SELFTEST_DIR"' EXIT
 
@@ -232,6 +268,49 @@ NEEDLE
 EOF
 has_in_section "self-test: a wrong-character run does not close a fence, regardless of length (char axis)" \
   "$SELFTEST_DIR/fence-char-mismatch.md" '## Target' 'NEEDLE'
+
+# round-21 [IMPORTANT, zero prior coverage]: the section-boundary rule itself — `hlevel <= level`
+# closes a section — had NO permanent casualty. All four self-tests above place their needle
+# INSIDE the section under test, and every real call site is a positive assertion, so deleting the
+# boundary check only WIDENS what gets scanned: every existing green assertion stays green. This
+# is exactly what makes it dangerous — the W1/W6 validateGroups pins (round 9) use the IDENTICAL
+# needle at both headings and rely ENTIRELY on section termination for their independence; if the
+# boundary regresses, W6's copy silently satisfies the W1 pin too and that independence evaporates
+# without any other gate noticing. Verified real-engine RED / boundary-deleted mutant GREEN before
+# wiring, same as every other round this session.
+#
+# `<=` has two components (`==` and `<`), and — same lesson as round 20's fence axes, checked
+# rather than assumed — one fixture cannot prove both: a same-level-only fixture doesn't
+# discriminate a mutant that keeps `<` but drops `==`, and a shallower-only fixture doesn't
+# discriminate the mirror mutant that keeps `==` but drops `<`. Confirmed against a reference
+# engine before wiring; two fixtures, not one.
+#
+# Both are genuinely negative claims ("must NOT be found") — has_in_section's positive
+# heading-boundary trick does not reformulate here, because the whole point is that removing the
+# boundary check ONLY adds false positives, never removes a true one, so there is no positive fact
+# whose presence depends on the boundary holding. This is hasnt_in_section's one caller (see its
+# definition above for why it was reintroduced).
+#
+# Same-level case: a needle that exists ONLY under a FOLLOWING heading of the SAME level must not
+# be found under the current one.
+cat > "$SELFTEST_DIR/boundary-same-level.md" <<'EOF'
+## Target
+## Next
+NEEDLE
+EOF
+hasnt_in_section "self-test: a same-level heading closes the section, later content does not leak in" \
+  "$SELFTEST_DIR/boundary-same-level.md" '## Target' 'NEEDLE'
+
+# Shallower-level case: a needle that exists ONLY after a SHALLOWER heading closes a deeper
+# section must not be found under that deeper heading.
+cat > "$SELFTEST_DIR/boundary-shallower-level.md" <<'EOF'
+## Target
+### Sub
+## Next
+NEEDLE
+EOF
+hasnt_in_section "self-test: a shallower heading closes a deeper section, later content does not leak in" \
+  "$SELFTEST_DIR/boundary-shallower-level.md" '### Sub' 'NEEDLE'
 
 echo "== surface-audit.playwright.ts =="
 SA="$ASSETS/surface-audit.playwright.ts"
