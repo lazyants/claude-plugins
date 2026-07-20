@@ -480,6 +480,74 @@ has_in_section "self-test: a REAL heading, not a mid-line '#', is what closes a 
 # exit code with and without the term. No fixture is added because none can discriminate it — that
 # absence is now evidence, not assumption.
 
+# round-24: two more mutants survived — both STATEMENT deletions (control flow / state reset), not
+# condition weakenings. Every row above catalogues a RULE this engine implements; `next` and
+# `is_close = 0` are load-bearing but aren't "rules" in that frame, so a complete enumeration of
+# rules was still an incomplete enumeration of mutants. That's the reason this round is where the
+# hardening stops — see the boundary note after the second fixture below.
+
+# `is_close` has file-lifetime scope in awk (no local declaration), so `is_close = 0` at the top of
+# the in_fence branch is a per-line RESET, not a one-time initialization. Delete it, and a `1` a
+# real closer wrote for one fenced block survives — stale — into the very next fenced block's first
+# content line, where it is misread as if that line were already a valid closer, closing the second
+# block one line early. That over-early-close line is itself still swallowed (the in_fence branch's
+# `next` is unconditional), so a needle sitting on the second fence's OWN first line stays hidden
+# either way — the fixture needs the needle on the second fence's second-or-later line, where the
+# premature close has already flipped scanning back to live-prose mode. Two consecutive fenced
+# blocks are required to observe this at all: a single fence never diverges, since is_close's
+# implicit awk default (0) already matches what the reset would produce the first time through.
+cat > "$SELFTEST_DIR/is-close-reset.md" <<'EOF'
+## Target
+```
+alpha
+```
+```
+first
+NEEDLE
+```
+## Next
+EOF
+hasnt_in_section "self-test: closing one fence does not leave stale state that closes the very next fence early (is_close reset)" \
+  "$SELFTEST_DIR/is-close-reset.md" '## Target' 'NEEDLE'
+
+# The opener's `next` is what makes the rest of ITS OWN line — including the fence's info string —
+# opaque, the same as everything between the markers. Delete it, and the opener line falls through
+# to the heading/needle scan on the same pass, so a needle written INSIDE the info string (not
+# separately fenced content — the very line that opens the fence) is counted as live prose instead
+# of being swallowed as part of the marker line that starts the fence.
+cat > "$SELFTEST_DIR/opener-next.md" <<'EOF'
+## Target
+```NEEDLE
+opaque
+```
+## Next
+EOF
+hasnt_in_section "self-test: a needle inside the fence opener's own info string is swallowed, not scanned as prose (opener next)" \
+  "$SELFTEST_DIR/opener-next.md" '## Target' 'NEEDLE'
+
+# --- Boundary: this hardening stops here, deliberately — not because the surface is exhausted ----
+#
+# _section_contains has now been hardened along two axes: the 18 rules enumerated in round 22 and
+# closed under round 23's "measured, not reasoned" criterion (every row names the mutant run and the
+# fixture that caught it), plus these two round-24 statement-level cases — a state reset and a
+# control-flow `next` — that aren't "rules" in the round-22 frame, which is exactly why a complete
+# enumeration of rules still missed them.
+#
+# This is NOT a claim of mutation-completeness. The mutant space for a single-point edit to a
+# sixty-line awk program — every statement, condition, operator, initialization, and evaluation
+# order — is strictly larger than any list of guarantees a human enumeration can produce. Five
+# adversarial review rounds (20-24) each found a real, previously-undetected survivor by attacking
+# this one function specifically; there is no reason to expect a sixth round would come back empty.
+# The residual is accepted deliberately here, not overlooked: continuing to hunt the next surviving
+# mutant on the theory that eventually none will be found mistakes "no mutant found yet" for "no
+# mutant exists" — those are different claims, and only the first one is true of this function.
+#
+# What a future round should do instead: if a SPECIFIC mutant is demonstrated to survive — someone
+# writes it and watches it pass when it should fail — add its fixture, the same way this round and
+# the four before it did. Do not re-open a general audit of this function on the theory that the
+# closure claim might still be incomplete; it is incomplete, structurally, and chasing that
+# completeness is the same receding target rounds 20-24 already walked into once.
+
 echo "== surface-audit.playwright.ts =="
 SA="$ASSETS/surface-audit.playwright.ts"
 hasnt "surface-audit: does NOT use \$\$eval (extraction stays unit-testable)" '$$eval' "$SA"
