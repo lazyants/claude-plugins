@@ -768,90 +768,173 @@ def test_frozen_input_specs_keys_are_unique(skeptic_constants_module):
 # so it can't be blamed for silently reattaching one string to a totally
 # different piece of code once the two drift apart lexically.
 #
-# Fixed by switching from regex to a real AST walk (codex's own framing:
-# "encoding the four semantic obligations is stronger and more honest than
-# a scalar count"). This module parses each scanned file, tracks which
-# named function most closely encloses each `if`, and -- this is the part
-# that specifically closes the hoist hole above -- resolves what the `if`
-# actually TESTS rather than trusting its literal one-line shape: a bare
-# name (`if _keys_mismatch:`) is followed back to its nearest preceding
-# in-scope assignment, so a hoisted `_flag = set(X) != set(Y)` is still
-# correctly seen as a `set(...)` comparison and fails the shape check,
-# while a hoisted `_flag = sorted(X) != sorted(Y)` is still correctly
-# accepted. The hoisted FORM itself is deliberately not forbidden -- only
-# a weakened comparison, wherever it's hidden, is. `EXPECTED_GUARD_SITES`
-# now names the exact four (file, function) pairs a guard must resolve to
-# -- not just a count -- so a guard's `if` relocating into some OTHER
-# function in the same file (or a fifth site appearing anywhere) is caught
-# by identity, not just arithmetic. The file SET being scanned is still
-# DERIVED (every `*.py` directly under `SCRIPTS_DIR`, non-recursive) for
-# the same round-12 reason: a hand-typed file list is the restatement
-# shape this section exists to avoid. Non-recursive is a real, currently-
-# harmless boundary: no shipped script lives in a nested subdirectory of
-# `SCRIPTS_DIR` today, so `glob("*.py")` sees every real guard; if a
-# future script were ever nested there, this scan (like the round-12 one
-# before it) would need to switch to `rglob("*.py")` to keep seeing it --
-# left non-recursive here rather than pre-emptively widened, since a
-# recursive glob over a directory that may one day gain non-shipped
-# scratch subdirectories has its own false-positive risk this codebase
-# doesn't need yet.
+# Fixed (round 13, first pass) by switching from regex to a real AST walk:
+# this module parses each scanned file, tracks which named function most
+# closely encloses each `if`, and binds `EXPECTED_GUARD_SITES` to exact
+# (file, function) identities rather than a scalar count. That first pass
+# also tried to RESOLVE a hoisted `_flag = <expr>; if _flag:` back to
+# `<expr>` (one level, via "nearest preceding in-scope assignment"), on
+# the reasoning that hoisting itself isn't unsafe -- only a weakened
+# comparison hidden behind it would be.
 #
-# `run()`'s copy (skeptic_setup.py) and `frozen_input_check()`'s copy
-# (skeptic_ready.py) are NOT independently runtime-testable the way the
-# two digest functions are: `run()`'s guard sits behind
+# Round 13 (codex round-13 review, second pass): that resolver was itself
+# unsound. Its candidate list came from `_statements_in_scope()`'s
+# traversal order (breadth-first, via a stack), not source-line order, so
+# "nearest preceding" picked the last-TRAVERSED assignment, not the last
+# assignment before the `if` in program order -- an earlier assignment
+# inside a conditional branch could out-rank a later, unconditional one,
+# and the resolver had no notion of reachability or scope-exit: a guard
+# placed after a `return`, or relocated into a nested class body, resolved
+# and passed exactly as if it still guarded its intended access. A SOUND
+# version needs real reaching-definition analysis, not a line-number
+# heuristic over an unordered candidate list -- disproportionate for what
+# this test protects (four guards, all of which are already written as
+# direct comparisons).
+#
+# So this version REJECTS hoisting outright instead: `if_node.test` must
+# itself be the `sorted(X) != sorted(Y)` comparison, found directly at the
+# guard. A bare-name test (`if _flag:`) is treated as an unsupported form
+# -- not resolved, not silently passed -- and its failure message says so
+# plainly ("hoisted form ... is not supported ... write the comparison
+# directly at the guard") rather than implying the guard is malformed.
+# Nothing real is lost: all four shipped guards are, and have always been,
+# direct comparisons -- the round-13 hoist was never a legitimate shape
+# this codebase needed, only the attack that broke the prior regex-based
+# locator.
+#
+# Finding 1 (codex round 13, same review): the shape check itself only
+# confirmed both `sorted()` callees were named `sorted` -- it never
+# inspected their arguments, so `sorted(set(X)) != sorted(set(Y))`
+# (duplicate-collapse is back), `sorted(X) != sorted(X)` (never fires),
+# and `sorted([]) != sorted([1])` (always fires) all passed. Fixed by
+# requiring each `sorted()` call take exactly one bare-Name positional
+# argument (no nested call, no literal, no starred/keyword arg) AND by
+# binding `EXPECTED_GUARD_SITES` to each site's own specific two operand
+# names (order-insensitive, since `!=` is symmetric), not just "any two
+# sorted() calls" -- a guard with the right shape but the WRONG pair of
+# names (e.g. copy-pasted from a sibling site without updating one
+# operand) is exactly as real a defect as a weakened comparison operator.
+#
+# The file SET being scanned is still DERIVED (every `*.py` directly under
+# `SCRIPTS_DIR`, non-recursive) for the same round-12 reason: a hand-typed
+# file list is the restatement shape this section exists to avoid.
+# Non-recursive is a real, currently-harmless boundary: no shipped script
+# lives in a nested subdirectory of `SCRIPTS_DIR` today, so `glob("*.py")`
+# sees every real guard; if a future script were ever nested there, this
+# scan (like the round-12 one before it) would need to switch to
+# `rglob("*.py")` to keep seeing it -- left non-recursive here rather than
+# pre-emptively widened, since a recursive glob over a directory that may
+# one day gain non-shipped scratch subdirectories has its own
+# false-positive risk this codebase doesn't need yet.
+#
+# Behavioral (runtime, call-driven) coverage of these four guards is
+# UNEVEN, and this file states exactly where the line falls rather than
+# implying an even coat: `suspicion_scan.test.py`'s own
+# `test_producer_input_digest_fails_closed_on_frozen_input_specs_key_mismatch`
+# and `skeptic_setup.test.py`'s own
+# `test_skeptic_input_digest_fails_closed_on_frozen_input_specs_key_mismatch`
+# each drive `compute_producer_input_digest()`/`compute_skeptic_input_digest()`
+# directly, parametrized over `duplicate_key_entry`/`same_count_key_swap`,
+# and prove those two guards fire on a real mismatch.
+# `skeptic_ready.test.py`'s
+# `test_check_frozen_inputs_fails_closed_on_frozen_input_specs_key_mismatch`
+# does the same for `frozen_input_check()`, driving it through
+# `skeptic_ready.py`'s real `--verify-merged`/`--check-frozen-inputs` CLI
+# path -- this file does not re-describe that test, only relies on its
+# existence rather than claiming (as an earlier round wrongly did) that no
+# such runtime test is possible.
+#
+# `run()`'s own copy (skeptic_setup.py) has NO behavioral test anywhere in
+# this suite -- confirmed by grep, not assumed: no test references `run(`
+# or `_frozen_input_snapshots_by_key` at all. `run()`'s guard follows
 # `compute_producer_input_digest()`/`compute_skeptic_input_digest()`,
 # called earlier in the SAME `run()` invocation against the SAME
-# `FROZEN_INPUT_SPECS` and the SAME captured canon/manifest/senses
-# state -- nothing reassigns either in between, so by the time control
-# reaches `run()`'s own guard, the identical boolean already evaluated
-# False twice. `frozen_input_check()`'s guard is likewise the FIRST thing
-# in its own function body, but that function is itself only reachable
-# through `skeptic_ready.py`'s `--verify-merged`/`--check-frozen-inputs`
-# CLI paths, which independently validate the aggregate's stamps against
-# `FROZEN_INPUT_SPECS`-derived expectations before ever constructing the
-# `paths` dict this guard checks -- reaching a genuine mismatch here would
-# require the SAME upstream stamping (already guarded, already tested) to
-# have first produced an aggregate whose stamp fields don't already prove
-# the mismatch. A test that reached either guard through its real call
-# path would need to first neutralize whatever makes it unreachable there,
-# at which point it would no longer be exercising that function's real
-# path at all -- only a harness's own artificial bypass, which can never
-# validate a scenario that doesn't otherwise exist. Building that harness
-# was considered and declined for exactly this reason: it would
-# re-verify the identical comparison algorithm yet again through a
-# heavier, more contrived route, and its only way to "fail red" pre-fix
-# would be to construct the very bypass that makes the test meaningless
-# post-fix too.
+# `FROZEN_INPUT_SPECS` and the SAME captured canon/manifest/senses state,
+# so BY CONSTRUCTION the identical boolean already evaluated False twice
+# before control reaches it -- but that is an argument about the shape of
+# the code, not a runtime test, and it says nothing about whether `run()`'s
+# own guard is reachable or fires correctly if that upstream argument ever
+# stops holding (a future reordering, a second caller, ...). For `run()`
+# specifically, this static AST check IS the only guard-related coverage
+# that exists.
 #
-# What IS honestly testable, and actually targets these guards' real risk
-# (a hand-duplicated fix silently drifting -- or being silently
+# What IS additionally provided here, and actually targets these guards'
+# real risk (a hand-duplicated fix silently drifting -- or being silently
 # MISATTRIBUTED, per round 13 -- in exactly one of its four copies): a
 # STATIC, AST-driven check that all four (file, function) obligations
-# still carry a guard that resolves, through at most one level of hoist,
-# to the identical non-deduplicated sorted-list shape. This does not
-# prove any one site is reachable or correct at runtime -- the
-# runtime-reachable sites already have that proof elsewhere -- it proves
-# the four sites have not diverged from each other, or from their own
-# owning function.
+# still carry a guard whose `if` test IS, directly, the identical
+# non-deduplicated sorted-list shape over that site's own two operands,
+# attributed to the correct owning function -- or, for a guard relocated
+# into a nested class body, correctly reported as no longer owned by its
+# former function at all. `_find_guard_ifs` resets ownership to `None` at
+# every `ClassDef`, closing the second half of codex's finding 2: without
+# that reset, a guard moved into a class nested inside its owning
+# function (verified on disk before this fix) stayed misattributed to
+# that function, so the relocation was invisible here.
+#
+# What this file does NOT prove, and does not claim to: that a guard's
+# `if` DOMINATES the protected access at runtime. A guard of the exact
+# required shape, in the exact expected function, sitting immediately
+# after an unconditional `return` (or any other control-flow path that
+# skips it) passes every check here while never executing -- codex's
+# finding 2 named this half explicitly too, and it is still open.
+# A sound fix needs real reaching-definition/dominance analysis, the same
+# class of disproportionate machinery this file already declined to build
+# for the hoist resolver above, for the same reason: none of the four
+# shipped guards needs it today. A partial positional heuristic ("the
+# `if` appears before the first use of the protected mapping") was
+# considered and rejected -- it would not catch the return-before-guard
+# case at all, while reading as if it did, which is worse than not
+# checking. Left undone deliberately: this static check proves shape,
+# operands, and ownership identity, for all four sites equally -- it does
+# not, and cannot, prove reachability, for any of them, equally. The three
+# sites with a behavioral test (named above) additionally have empirical
+# proof that their guard fires under the SPECIFIC mismatches those tests
+# construct -- not a general reachability proof, but real evidence beyond
+# what this file provides. `run()` has neither: no behavioral test AND no
+# reachability proof, so a guard placed after a `return` (or any other
+# dead-code relocation) in `run()` specifically would be caught by
+# NOTHING in this suite.
 
 
 ANCHOR_PHRASE = "FROZEN_INPUT_SPECS contains a duplicate key"
 
 # The four (file, function) semantic obligations codex asked this test to
 # bind to directly, by AST location, rather than trusting a scalar count.
-# This is deliberately still a literal, hand-maintained set -- exactly like
-# section 1's literal `4` -- because there is no honest way to derive
+# This is deliberately still a literal, hand-maintained mapping -- exactly
+# like section 1's literal `4` -- because there is no honest way to derive
 # "which four functions SHOULD own a guard" from the source itself; a
 # guard silently vanishing, or reappearing somewhere else, must fail LOUD
 # via an identity mismatch below, not be absorbed by an unbounded count.
-EXPECTED_GUARD_SITES = frozenset(
-    {
-        ("suspicion_scan.py", "compute_producer_input_digest"),
-        ("skeptic_setup.py", "compute_skeptic_input_digest"),
-        ("skeptic_setup.py", "run"),
-        ("skeptic_ready.py", "frozen_input_check"),
-    }
-)
+#
+# Each site also maps to its own two hand-typed operand names
+# (order-insensitive -- `!=` is symmetric, and nothing about this check
+# depends on which side a given site happens to write first): the
+# snapshot-keys/paths-dict name on one side, the FROZEN_INPUT_SPECS-derived
+# key-list name on the other. Finding 1 (codex round 13): a guard that
+# resolves to `sorted(X) != sorted(Y)` syntactically but with the WRONG
+# pair of names -- e.g. copy-pasted from a sibling site without updating
+# one operand -- is exactly as real a defect as a `set(...)`-based guard,
+# so the shape check below is bound to this site-specific pair, not just
+# to "some two sorted() calls".
+EXPECTED_GUARD_SITES = {
+    ("suspicion_scan.py", "compute_producer_input_digest"): (
+        "frozen_input_snapshots",
+        "spec_keys",
+    ),
+    ("skeptic_setup.py", "compute_skeptic_input_digest"): (
+        "frozen_input_snapshots",
+        "spec_keys",
+    ),
+    ("skeptic_setup.py", "run"): (
+        "_frozen_input_snapshots_by_key",
+        "_spec_keys",
+    ),
+    ("skeptic_ready.py", "frozen_input_check"): (
+        "paths",
+        "_spec_keys",
+    ),
+}
 
 
 def _site_sort_key(site: tuple) -> tuple:
@@ -893,132 +976,111 @@ def _find_guard_ifs(node: ast.AST, current_func, hits: list) -> None:
     guard that moved OUT of its owning function into a sibling function,
     the exact drift shape this test must still catch). Appends
     `(current_func, if_node)` for every `If` whose body
-    `_if_carries_anchor_raise`."""
+    `_if_carries_anchor_raise`.
+
+    A `ClassDef` also resets `current_func` to `None`, the same as
+    module level: codex round 13's finding 2 named this as a second,
+    separate ownership defect from the hoist -- without this reset, a
+    guard relocated directly into a class body nested inside its owning
+    function (executed at class-definition time, not as part of the
+    function's own control flow) stayed attributed to that outer
+    function, so the relocation was invisible to `found_sites` below.
+    Verified on disk before this fix: a guard moved into
+    `class _Inner:` nested inside `run()` was reported as owned by
+    `run` itself. A `FunctionDef`/`AsyncFunctionDef` nested inside that
+    class still correctly re-establishes its OWN name on the next
+    recursion, same as any other nested def -- only a guard sitting
+    directly in the class body, in no method at all, is affected."""
     for child in ast.iter_child_nodes(node):
-        next_func = (
-            child if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)) else current_func
-        )
+        if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            next_func = child
+        elif isinstance(child, ast.ClassDef):
+            next_func = None
+        else:
+            next_func = current_func
         if isinstance(child, ast.If) and _if_carries_anchor_raise(child):
             hits.append((current_func, child))
         _find_guard_ifs(child, next_func, hits)
 
 
-def _statements_in_scope(func_node) -> "list[ast.stmt]":
-    """Yields every statement that lexically shares `func_node`'s own local
-    scope: its direct body, plus everything nested inside `if`/`for`/
-    `while`/`with`/`try` blocks (Python has no block scoping, so an
-    assignment inside an `if` is visible to sibling code in the same
-    function) -- including a `try`'s `except` handler bodies. Does NOT
-    descend into a nested function/async-function/class def's own body,
-    which opens a separate scope of its own. Known limitation, accepted as
-    out of scope here: none of the four shipped guards sit inside a `try`,
-    so `except`-handler coverage is exercised by nothing today; it is
-    included anyway because leaving it out would silently narrow what
-    "same scope" means the moment a guard's hoisted assignment ever did
-    move into one."""
-    stack: list = list(func_node.body)
-    found: list = []
-    while stack:
-        stmt = stack.pop(0)
-        found.append(stmt)
-        if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            continue
-        for _field, value in ast.iter_fields(stmt):
-            if isinstance(value, list):
-                for item in value:
-                    if isinstance(item, ast.stmt):
-                        stack.append(item)
-                    elif isinstance(item, ast.ExceptHandler):
-                        # UNEXERCISED today (verified round 13, #243): none
-                        # of the four shipped guard `if`s sits inside a
-                        # `try`/`except` in suspicion_scan.py/
-                        # skeptic_setup.py/skeptic_ready.py, so this branch
-                        # has never actually run -- no matrix case above
-                        # reaches it either. Kept anyway as future-proofing:
-                        # if a guard's hoisted assignment (or the guard
-                        # itself) ever moves inside an `except` block, THIS
-                        # is what keeps `_resolve_hoisted_test` able to find
-                        # it -- and that first real use is also this
-                        # branch's first real test. Do not read its
-                        # presence here as proof it works.
-                        stack.extend(item.body)
-            elif isinstance(value, ast.stmt):
-                stack.append(value)
-    return found
+def _bare_name_sorted_call(node) -> "ast.Name | None":
+    """Returns the argument `Name` node iff `node` is exactly
+    `sorted(<bare name>)` -- a `Call` to a bare `sorted` with exactly one
+    positional argument, no keyword arguments (rules out `sorted(x,
+    key=...)`/`sorted(x, reverse=...)`), and that one argument itself a
+    bare `Name` (rules out a nested call like `sorted(set(x))`, a literal
+    like `sorted([1])`, and a starred arg like `sorted(*x)` -- `ast.Starred`
+    is not an `ast.Name`, so it is excluded by the same isinstance check
+    with no special-casing needed). Returns `None` for anything else.
 
-
-def _resolve_hoisted_test(test_expr: ast.expr, owner_func, if_lineno: int):
-    """Returns the AST expression a guard's `if` actually tests. A direct
-    comparison (`if sorted(X) != sorted(Y):`) is returned unchanged. A
-    single-level hoist (`_flag = <expr>; if _flag:`) is followed to
-    `<expr>` by finding the NEAREST preceding assignment to that name
-    within `owner_func`'s own scope (`_statements_in_scope`) -- this is
-    what makes a guard's real comparison shape visible even after the
-    exact attack that broke this test's round-12 regex version
-    (skeptic_setup.py round 13: hoisting `sorted(...) != sorted(...)` into
-    a `_keys_mismatch` local before the `if` no longer matched a
-    condition-shape regex at all).
-
-    Deliberately does NOT forbid the hoisted form outright: nothing about
-    `if _flag:` is unsafe by itself, only a weakened comparison hidden
-    behind an unresolved name would be -- and resolving that name is this
-    function's entire job. A `_flag` assigned to `set(...) != set(...)`
-    (or `len(...) != len(...)`, or anything else) still correctly reaches
-    the shape check below and fails it once resolved; only a `_flag` with
-    NO discoverable in-scope assignment (or an `if` sitting at module
-    level, with no owning function at all) is treated as an outright
-    resolution failure -- returns `None`, which the shape check treats as
-    non-conforming rather than crashing."""
-    if not isinstance(test_expr, ast.Name):
-        return test_expr
-    if owner_func is None:
+    Finding 1 (codex round 13): the prior version of this check only
+    confirmed the callee was named `sorted` and never looked at the
+    argument at all, so `sorted(set(X)) != sorted(set(Y))` -- the exact
+    duplicate-collapse defect round 11 fixed -- passed it silently. This
+    is what closes that gap."""
+    if not (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "sorted"
+    ):
         return None
-    candidates = [
-        stmt
-        for stmt in _statements_in_scope(owner_func)
-        if isinstance(stmt, ast.Assign)
-        and stmt.lineno < if_lineno
-        and any(isinstance(t, ast.Name) and t.id == test_expr.id for t in stmt.targets)
-    ]
-    if not candidates:
+    if len(node.args) != 1 or node.keywords:
         return None
-    return candidates[-1].value
+    arg = node.args[0]
+    return arg if isinstance(arg, ast.Name) else None
 
 
-def _is_sorted_list_mismatch_shape(expr) -> bool:
-    """True iff `expr` is exactly `sorted(X) != sorted(Y)` -- a `Compare`
-    node with a single `!=` operator and both sides a bare `sorted(...)`
-    call. Anything else (`None` from an unresolved hoist, a `set(...)`/
-    `len(...)` comparison, a boolean flag with no comparison at all, ...)
+def _is_sorted_list_mismatch_shape(expr, expected_names: "tuple[str, str]") -> bool:
+    """True iff `expr` is exactly `sorted(X) != sorted(Y)` where `{X, Y}`
+    (order-insensitive, since `!=` is symmetric) equals `set(expected_names)`
+    -- a `Compare` node with a single `!=` operator and both sides a bare
+    `sorted(<Name>)` call (see `_bare_name_sorted_call`) over this
+    particular site's own two operands. Anything else (`None` from an
+    unsupported hoisted form, a `set(...)`/`len(...)` comparison, a
+    self-comparison `sorted(X) != sorted(X)`, a comparison against the
+    wrong-but-real name, a boolean flag with no comparison at all, ...)
     returns `False` rather than raising -- a guard that no longer even
-    LOOKS like the required comparison is exactly the drift this exists to
-    catch, not a reason to crash the test with an unrelated `AttributeError`."""
+    LOOKS like the required, site-specific comparison is exactly the drift
+    this exists to catch, not a reason to crash the test with an unrelated
+    `AttributeError`.
 
-    def _is_sorted_call(node) -> bool:
-        return (
-            isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Name)
-            and node.func.id == "sorted"
-        )
-
+    Binding to `expected_names` (not just "any two sorted() calls") is
+    Finding 1's second half: a guard with the right shape but the WRONG
+    pair of operand names -- e.g. copy-pasted from a sibling site without
+    updating one side -- is exactly as real a defect as a `set(...)`-based
+    guard, and a bare shape check blind to WHICH names are compared would
+    stay green through it."""
     if expr is None or not isinstance(expr, ast.Compare):
         return False
     if len(expr.ops) != 1 or not isinstance(expr.ops[0], ast.NotEq):
         return False
     if len(expr.comparators) != 1:
         return False
-    return _is_sorted_call(expr.left) and _is_sorted_call(expr.comparators[0])
+    left = _bare_name_sorted_call(expr.left)
+    right = _bare_name_sorted_call(expr.comparators[0])
+    if left is None or right is None:
+        return False
+    return {left.id, right.id} == set(expected_names)
 
 
 def _guard_hits_in_file(path: Path) -> list:
     """Returns one dict per FROZEN_INPUT_SPECS key-mismatch guard found
     anywhere in `path`, each shaped `{"file": <name relative to
     SCRIPTS_DIR>, "function": <enclosing def name, or None>,
-    "resolved_expr": <AST expr actually tested, or None if unresolved>,
-    "display": <ast.unparse of the resolved expr, or a fallback string
-    naming the unresolved bare name>}` -- the `display` string is what a
-    failing assertion below quotes, so a test failure names the exact
-    shape actually observed, not just that something didn't match."""
+    "resolved_expr": <the guard's own `if` test, or None if it is a bare
+    name (a hoisted flag)>, "display": <ast.unparse of the test, or a
+    fallback string explaining why the hoisted form is unsupported>}` --
+    the `display` string is what a failing assertion below quotes, so a
+    test failure names the exact shape actually observed, not just that
+    something didn't match.
+
+    Deliberately does NOT attempt to resolve a hoisted `_flag = <expr>; if
+    _flag:` back to `<expr>` -- see this section's own round-13 comment
+    block above for why a one-level resolver turned out to be unsound (its
+    "nearest preceding assignment" heuristic ran over an unordered,
+    breadth-first traversal, not program order). `if_node.test` is used
+    exactly as written; a bare-name test is reported as unsupported rather
+    than guessed at."""
     source_text = path.read_text(encoding="utf-8")
     tree = ast.parse(source_text, filename=str(path))
     raw_hits: list = []
@@ -1026,17 +1088,17 @@ def _guard_hits_in_file(path: Path) -> list:
 
     results = []
     for owner_func, if_node in raw_hits:
-        resolved = _resolve_hoisted_test(if_node.test, owner_func, if_node.lineno)
-        if resolved is not None:
-            display = ast.unparse(resolved)
-        else:
-            # _resolve_hoisted_test only returns None when if_node.test is
-            # itself an ast.Name (see its own docstring) -- so .id is safe.
+        test_expr = if_node.test
+        if isinstance(test_expr, ast.Name):
+            resolved = None
             display = (
-                f"<unresolved bare name {if_node.test.id!r}: no in-scope "
-                "assignment found before the `if`, or the `if` sits "
-                "outside any named function>"
+                f"<hoisted form `if {test_expr.id}:` is not supported; "
+                "write the sorted(X) != sorted(Y) comparison directly at "
+                "the guard, not behind an intermediate flag variable>"
             )
+        else:
+            resolved = test_expr
+            display = ast.unparse(resolved)
         results.append(
             {
                 "file": str(path.relative_to(SCRIPTS_DIR)),
@@ -1051,23 +1113,25 @@ def _guard_hits_in_file(path: Path) -> list:
 def test_frozen_input_key_mismatch_guards_bind_to_owning_function_via_ast():
     """AST-driven sibling-consistency check across every FROZEN_INPUT_SPECS
     key-mismatch guard shipped anywhere under `SCRIPTS_DIR`. See this
-    section's own comment block above for the round-13 story: a prior,
-    purely REGEX-based version of this test located a guard by its
+    section's own comment block above for the full round-13 story: a
+    prior, purely REGEX-based version of this test located a guard by its
     exception-message anchor phrase alone, with no binding to the actual
-    `if`/function it lived in -- a hoisted condition
-    (`_flag = sorted(X) != sorted(Y); if _flag:`) broke the condition-shape
-    regex entirely, silently rebinding the anchor to an unrelated sibling
-    guard and staying GREEN through a weakened, shipped `set(...)`-based
-    comparison.
+    `if`/function it lived in, and a later AST version's one-level hoist
+    RESOLVER turned out to be unsound (a breadth-first candidate order
+    masquerading as "nearest preceding"). This version does neither: it
+    requires the guard's `if` test to BE, directly, the required
+    comparison, and rejects a hoisted `if _flag:` outright as an
+    unsupported form rather than guessing at what `_flag` might resolve
+    to.
 
-    This version proves something stronger than a scalar count: each of
-    the four (file, function) semantic obligations named in
-    `EXPECTED_GUARD_SITES` -- `compute_producer_input_digest()`
-    (suspicion_scan.py), `compute_skeptic_input_digest()` and `run()`
-    (both skeptic_setup.py), `frozen_input_check()` (skeptic_ready.py) --
-    independently carries a guard whose ACTUAL tested expression (resolved
-    through at most one level of hoist, never trusting a bare `if <name>:`
-    at face value) is the exact `sorted(X) != sorted(Y)` shape.
+    This proves something stronger than a scalar count: each of the four
+    (file, function) semantic obligations named in `EXPECTED_GUARD_SITES`
+    -- `compute_producer_input_digest()` (suspicion_scan.py),
+    `compute_skeptic_input_digest()` and `run()` (both skeptic_setup.py),
+    `frozen_input_check()` (skeptic_ready.py) -- independently carries a
+    guard whose `if` test is exactly `sorted(X) != sorted(Y)` over THAT
+    site's own two operand names (bare-Name arguments only, order-
+    insensitive), found directly at the guard.
 
     The file SET scanned is still DERIVED (every `*.py` directly under
     `SCRIPTS_DIR`, non-recursive) rather than hand-typed -- see the
@@ -1077,35 +1141,52 @@ def test_frozen_input_key_mismatch_guards_bind_to_owning_function_via_ast():
     `EXPECTED_GUARD_SITES` itself: a guard's `if` relocating into some
     OTHER function in the same file (or a fifth guard landing anywhere)
     changes `found_sites` below and is caught by identity, not just by a
-    count staying accidentally correct."""
+    count staying accidentally correct -- including a relocation into a
+    nested class body, which `_find_guard_ifs` now attributes to `None`
+    rather than to the class's enclosing function (see its own docstring).
+
+    LIMIT, stated plainly rather than left implicit: this proves shape,
+    operands, and ownership identity for all four guards. It does NOT
+    prove reachability -- a guard of the exact required shape sitting
+    after an unconditional `return` (or any other dead-code path) still
+    passes every assertion below. See this section's closing comment
+    block above for why that is a deliberate, documented gap rather than
+    an oversight."""
     all_hits = []
     for script_path in sorted(SCRIPTS_DIR.glob("*.py")):
         all_hits.extend(_guard_hits_in_file(script_path))
 
     found_sites = {(hit["file"], hit["function"]) for hit in all_hits}
+    expected_sites = frozenset(EXPECTED_GUARD_SITES)
 
     assert len(all_hits) == 4, (
         "expected exactly 4 FROZEN_INPUT_SPECS key-mismatch guards across "
         f"every *.py file under {SCRIPTS_DIR}, found {len(all_hits)}:\n"
         + "\n".join(f"  {hit['file']}::{hit['function']}: {hit['display']}" for hit in all_hits)
     )
-    assert found_sites == EXPECTED_GUARD_SITES, (
+    assert found_sites == expected_sites, (
         "FROZEN_INPUT_SPECS key-mismatch guards were not found at exactly "
         "the expected (file, function) locations -- a guard's `if` may "
         "have relocated out of its owning function, or a new one landed "
         "somewhere unexpected:\n"
-        f"  missing:    {sorted(EXPECTED_GUARD_SITES - found_sites, key=_site_sort_key)}\n"
-        f"  unexpected: {sorted(found_sites - EXPECTED_GUARD_SITES, key=_site_sort_key)}"
+        f"  missing:    {sorted(expected_sites - found_sites, key=_site_sort_key)}\n"
+        f"  unexpected: {sorted(found_sites - expected_sites, key=_site_sort_key)}"
     )
 
     for hit in all_hits:
-        assert _is_sorted_list_mismatch_shape(hit["resolved_expr"]), (
+        site = (hit["file"], hit["function"])
+        assert hit["resolved_expr"] is not None, f"{hit['file']}::{hit['function']}: {hit['display']}"
+        expected_names = EXPECTED_GUARD_SITES[site]
+        assert _is_sorted_list_mismatch_shape(hit["resolved_expr"], expected_names), (
             f"{hit['file']}::{hit['function']}: a FROZEN_INPUT_SPECS "
             f"key-mismatch guard's `if` resolves to {hit['display']!r}, not "
-            "the required `sorted(X) != sorted(Y)` shape -- a `set(...)` "
-            "comparison collapses duplicate keys, a bare `len(...)` "
-            "comparison misses a same-count divergent-key-name swap, and "
-            "an unresolved hoisted name can't be proven safe at all; only "
-            "`sorted(X) != sorted(Y)`, found directly or through one level "
-            "of hoist, catches every case."
+            f"the required `sorted({expected_names[0]}) != "
+            f"sorted({expected_names[1]})` shape (order-insensitive) -- a "
+            "`set(...)` comparison collapses duplicate keys, a bare "
+            "`len(...)` comparison misses a same-count divergent-key-name "
+            "swap, a literal or nested-call argument to sorted() can hide "
+            "an unrelated comparison, and a wrong-but-real operand name "
+            "silently compares the wrong data; only `sorted(X) != "
+            "sorted(Y)` with bare-Name arguments matching this site's own "
+            "two operands catches every case."
         )

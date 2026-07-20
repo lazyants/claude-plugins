@@ -1523,7 +1523,7 @@ def test_check_frozen_inputs_fails_closed_on_frozen_input_specs_key_mismatch(tmp
     CARDINALITY, so alone they cannot distinguish this genuinely
     `sorted`-list guard from a weaker `set`-based or `len`-based one.
     `duplicate_key_entry` (a fourth entry reusing the existing `"canon"`
-    key) reduces to the SAME two-element key set as `paths`
+    key) reduces to the SAME three-element key set as `paths`
     (`{"canon","manifest","senses"}`) despite being a real THREE-vs-FOUR
     cardinality mismatch on the list -- a `set(...)` comparison would miss
     it. `same_count_key_swap` (`"senses"` renamed to `"sessens"`,

@@ -854,25 +854,89 @@ All four such maps now carry the same fail-closed
 `run()` block (round 11), plus `skeptic_ready.py`'s `paths` map in
 `frozen_input_check()` (round 12) — and a static, AST-driven
 sibling-consistency test parses every top-level `*.py` file directly under
-`SCRIPTS_DIR` and binds each guard to its owning function, resolving one
-level of hoisting (`_flag = sorted(X) != sorted(Y); if _flag:`) back to the
-assignment it actually tests rather than trusting the `if`'s own literal
-shape (round 13, #243: a regex-based predecessor of this test located a
-guard by that round-11 exception phrase alone, with no binding to the
-actual `if`/function it lived in — hoisting one copy's comparison into a
-named local broke the regex's condition-shape match entirely and silently
+`SCRIPTS_DIR` and binds each guard to its owning function. Round 13's
+first pass (#243) tried to resolve one level of hoisting (`_flag =
+sorted(X) != sorted(Y); if _flag:`) back to the assignment it actually
+tested, on the theory that hoisting itself isn't unsafe — only a weakened
+comparison hidden behind it would be. A regex-based predecessor of this
+test had already been shown unsound the same round: it located a guard by
+the round-11 exception phrase alone, with no binding to the actual
+`if`/function it lived in, so hoisting one copy's comparison into a named
+local broke the regex's condition-shape match entirely and silently
 rebound the phrase to an unrelated sibling guard, staying green through a
-weakened `set(...)`-based comparison shipped live in `run()`). A guard is
-still located only by that same exact-phrase anchor — a copy whose raised
-message drops the phrase, or that lands in a nested subdirectory the scan
-doesn't recurse into, is still invisible to it. What the AST rewrite
-changes is HOW a fifth or relocated guard gets caught: not by an
-open-ended count, but by breaking an equality check against
-`EXPECTED_GUARD_SITES`, a hand-maintained set of the four (file, function)
-pairs a guard must resolve to — a new or moved guard fails that comparison
-and is reported, but only because a human already enumerated the sites it
-is being compared against, not because the test derives on its own which
-functions should own one.
+weakened `set(...)`-based comparison shipped live in `run()`.
+
+The hoist-resolving AST version that replaced the regex turned out to be
+unsound too, on a second codex pass the same round: its candidate list
+came from a breadth-first scope walk, not source-line order, so "nearest
+preceding" could pick an earlier assignment from a conditional branch over
+a later, unconditional one, with no notion of reachability or scope-exit
+at all — a guard placed after a `return`, or relocated into a nested class
+body, resolved and passed exactly as if it still guarded its intended
+access. The shipped version REJECTS hoisting outright instead of resolving
+it: `if_node.test` must itself be the `sorted(X) != sorted(Y)` comparison,
+found directly at the guard; a bare-name test (`if _flag:`) fails with a
+message saying the hoisted form is unsupported rather than being resolved
+or silently passed. All four shipped guards are, and always were, written
+as direct comparisons, so nothing real is lost.
+
+The same round-13 review found the shape check itself too permissive two
+further ways, both now closed. First, it only confirmed both `sorted()`
+callees were named `sorted` and never inspected their arguments, so
+`sorted(set(X)) != sorted(set(Y))` (duplicate-collapse restored),
+`sorted(X) != sorted(X)` (never fires), and a comparison against literal
+or nested-call arguments all passed silently — fixed by requiring each
+`sorted()` call take exactly one bare-Name positional argument (no nested
+call, no literal, no starred/keyword arg). Second, it accepted "any two
+`sorted()` calls" at a site, so a guard copy-pasted from a sibling site
+without updating one operand name still passed — fixed by binding
+`EXPECTED_GUARD_SITES` to each site's own specific two operand names
+(order-insensitive, since `!=` is symmetric): it is now a hand-maintained
+mapping from each of the four (file, function) obligations a guard must
+resolve to, to that site's own required operand-name pair, not just a set
+of (file, function) pairs. A third fix, same review: a guard relocated
+into a class nested inside its owning function was still attributed to
+that outer function, because the ownership walk had no reset on
+`ClassDef`; fixed by resetting the tracked owning function to `None` at
+every `ClassDef`, so such a relocation now reports as unowned instead of
+staying invisibly attached to its former function.
+
+A guard is still located only by the same exact-phrase anchor — a copy
+whose raised message drops the phrase, or that lands in a nested
+subdirectory the scan doesn't recurse into, is still invisible to it. What
+the AST rewrite changes is HOW a fifth or relocated guard gets caught: not
+by an open-ended count, but by breaking an equality check against
+`EXPECTED_GUARD_SITES` — a new or moved guard fails that comparison and is
+reported, but only because a human already enumerated the sites (and their
+required operand names) it is being compared against, not because the
+test derives on its own which functions should own one.
+
+What none of this proves, and does not claim to: that a guard's `if`
+DOMINATES the protected access at runtime. A guard of the exact required
+shape, in the exact expected function, sitting after an unconditional
+`return` (or any other control-flow path that skips it) passes every
+static check here while never executing. This is not just argued but
+verified experimentally: relocating a guard to dead code placed after its
+own function's `return` (function otherwise intact) leaves the static AST
+check blind at every one of the four sites, as expected — but the
+BEHAVIORAL suite's coverage of that same relocation is uneven, not
+absent, and not universal either. At
+`suspicion_scan.py::compute_producer_input_digest`, the relocation was
+still caught: its behavioral test file failed (4 failing tests) even
+though the static check stayed blind. At `skeptic_setup.py::run`, nothing
+caught it — the static check stayed blind AND the plugin's entire test
+suite stayed green (2799 passed, 1 skipped, 2 xfailed). That one site —
+`run()`'s own copy of this guard — has no behavioral fail-closed test
+anywhere in this repository (confirmed by grep, not assumed: no test
+references `run(` or `_frozen_input_snapshots_by_key`), so a dead or
+never-firing guard there is caught by nothing currently shipped. The other
+three sites' behavioral tests (`suspicion_scan.test.py`'s and
+`skeptic_setup.test.py`'s own `duplicate_key_entry`/`same_count_key_swap`
+cases for the two digest functions, `skeptic_ready.test.py`'s
+`--verify-merged`/`--check-frozen-inputs` case for `frozen_input_check()`)
+close this reachability gap for their own sites, not because they were
+built to prove reachability, but because driving the guard through a real
+key mismatch necessarily also proves it executes.
 `FROZEN_INPUT_SPECS` does NOT bind the earlier
 `read_frozen_input_snapshot()` capture in `skeptic_setup.py`, and its
 SIGNATURE does not bind `compute_producer_input_digest()`/
