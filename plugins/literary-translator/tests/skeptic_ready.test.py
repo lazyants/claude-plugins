@@ -1175,6 +1175,109 @@ def test_check_frozen_inputs_detects_tamper_the_verify_merged_path_never_reaches
     assert any("canon_senses.json" in m and "tamper" in m for m in result["missing"])
 
 
+def test_check_frozen_inputs_tolerates_a_read_failure(tmp_path, monkeypatch):
+    """Codex round 6 BLOCKER: frozen_input_check() used to read
+    canon.json/canon_senses.json UNCONDITIONALLY, even though
+    run_check_frozen_inputs discards both returned snapshots and has no
+    downstream parser that could ever consume them. A transient read
+    failure (a real I/O error, not absence -- codex's own repro forced
+    one) therefore propagated raw out of run_check_frozen_inputs, breaking
+    its own documented "never a crash" contract.
+    test_check_frozen_inputs_tolerates_missing_aggregate_manifest/
+    ..._malformed_aggregate_manifest above prove the AGGREGATE-unreadable
+    half of that contract; this proves the canon/senses-unreadable half,
+    which frozen_input_check()'s round-5 refactor accidentally regressed.
+
+    Forces the failure via a monkeypatch on read_frozen_input_snapshot
+    (rather than chmod, which is unreliable when tests run as root or in
+    sandboxes that ignore permission bits) targeting canon_path
+    specifically -- a genuine canon_sha256 stamp IS present (matches the
+    real content), so the read is genuinely attempted, not skipped via the
+    "no stamp -> no read" gate this same round also added to
+    frozen_input_check()."""
+    canon_path = tmp_path / "canon.json"
+    canon_path.write_text(json.dumps({"entries": {}}), encoding="utf-8")
+    manifest_path = tmp_path / "manifest.json"
+    write_json(manifest_path, make_manifest())
+    senses_path = tmp_path / "canon_senses.json"
+    senses_path.write_text(json.dumps({"schema_version": 1, "entries_by_source_form": {}}), encoding="utf-8")
+
+    aggregate_path = tmp_path / "assignments.json"
+    write_json(aggregate_path, {
+        **make_aggregate_manifest("run-1", []),
+        "canon_sha256": sr.compute_frozen_input_hash(canon_path),
+        "manifest_sha256": sr.compute_frozen_input_hash(manifest_path),
+        "senses_sha256": sr.compute_frozen_input_hash(senses_path),
+    })
+
+    real_read_frozen_input_snapshot = sr.read_frozen_input_snapshot
+
+    def _fail_on_canon(path):
+        if Path(path) == canon_path:
+            raise OSError("simulated transient read failure")
+        return real_read_frozen_input_snapshot(path)
+
+    monkeypatch.setattr(sr, "read_frozen_input_snapshot", _fail_on_canon)
+
+    # MUTATION CAUGHT if this raises instead of returning: --check-frozen-inputs
+    # exists specifically to keep answering when something else has already
+    # gone wrong, and this mode never consumes canon/senses beyond the hash
+    # comparison itself, so a read failure here should degrade this ONE
+    # check, never crash the whole call.
+    result = sr.run_check_frozen_inputs(
+        aggregate_path, canon_path=canon_path, manifest_path=manifest_path, senses_path=senses_path,
+    )
+    assert result == {"frozen_input_mismatch": False, "missing": []}
+
+
+def test_verify_merged_still_raises_on_the_same_read_failure(tmp_path, monkeypatch):
+    """The mirror-image assertion for the OTHER caller of
+    frozen_input_check(): run_verify_merged must NOT swallow the identical
+    read failure the test above tolerates. Its own competitors universe is
+    parsed from the SAME snapshot the H1 check reads -- degrading canon to
+    an empty snapshot there would silently empty the competitors universe
+    and let every ambiguous form sail through unflagged (fail-OPEN on the
+    exact property this release makes fail-closed), so this caller passes
+    tolerant_reads=False and the failure must propagate. Unlike the test
+    above, this one was never broken by the round-5/6 refactors -- included
+    to make the "same code, two callers, opposite correct answers" property
+    an explicit, checked fact rather than an implicit one."""
+    lang_dir = tmp_path / "languages"
+    particle_config = write_particle_config(lang_dir)
+    text = "Jean walked home."
+    block_id, blk = block(text)
+    manifest_path = tmp_path / "manifest.json"
+    write_json(manifest_path, make_manifest((block_id, blk)))
+
+    canon_path = tmp_path / "canon.json"
+    canon_path.write_text(json.dumps({"entries": {}}), encoding="utf-8")
+    canon_sha256 = sr.compute_frozen_input_hash(canon_path)
+
+    rec = insufficient_record("Jean")
+    triage_path = tmp_path / "skeptic_triage.json"
+    write_json(triage_path, {"schema_version": 1, "run_id": "run-1", "records": [rec]})
+    aggregate_path = tmp_path / "assignments.json"
+    write_json(aggregate_path, {
+        **make_aggregate_manifest("run-1", [make_assignment("Jean", [])]),
+        "canon_sha256": canon_sha256,
+    })
+
+    real_read_frozen_input_snapshot = sr.read_frozen_input_snapshot
+
+    def _fail_on_canon(path):
+        if Path(path) == canon_path:
+            raise OSError("simulated transient read failure")
+        return real_read_frozen_input_snapshot(path)
+
+    monkeypatch.setattr(sr, "read_frozen_input_snapshot", _fail_on_canon)
+
+    with pytest.raises(OSError):
+        sr.run_verify_merged(
+            triage_path, aggregate_path, manifest_path, particle_config,
+            languages_dir=lang_dir, canon_path=canon_path,
+        )
+
+
 def test_check_frozen_inputs_tolerates_missing_aggregate_manifest(tmp_path):
     """Nothing to compare against -- degrades to no-mismatch, never a
     crash, exactly like _frozen_input_tamper_reason's own "stamped hash
@@ -1324,9 +1427,9 @@ def test_verify_merged_resolve_competitors_consumes_h1s_own_snapshot(tmp_path, m
     and wrongly fail this record closed, while frozen_input_mismatch
     stayed False throughout -- silently hiding that the run's OWN
     collision check disagreed with what its OWN H1 check just certified.
-    In the fixed code (_resolve_competitors_from_snapshot() parses the SAME
-    snapshot H1 hashed, never a second read), this record must still
-    verify."""
+    In the fixed code (_resolve_competitors()'s own canon_snapshot reuse
+    parses the SAME snapshot H1 hashed, never a second read), this record
+    must still verify."""
     lang_dir = tmp_path / "languages"
     particle_config = write_particle_config(lang_dir, name_inventory=[FOLD_FORM_A])
     lang = bn.load_language_config(particle_config, languages_dir=lang_dir)

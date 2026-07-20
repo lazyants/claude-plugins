@@ -484,13 +484,20 @@ def _parse_utf8_json_with_depth_guard(content: bytes, describe: str) -> Any:
 
 
 def _read_utf8_json_with_depth_guard(path: Path, describe: str) -> Any:
-    """Shared read/parse/depth-preflight body of ``_read_json_file`` and
-    ``_load_schema_document``. Thin path-reading wrapper around
+    """Read/parse/depth-preflight body of ``_load_schema_document`` (its
+    only caller). Thin path-reading wrapper around
     ``_parse_utf8_json_with_depth_guard`` (codex round 5) -- for callers
     that want a fresh read, never for a caller that already has a
-    captured snapshot to parse instead. ``describe`` is the human label
-    opening every ``CanonSensesLoadError`` this raises (e.g.
-    ``"canon_senses.json at <path>"`` or ``"schema at <path>"``).
+    captured snapshot to parse instead (``_parse_json_from_bytes`` below
+    is that byte-based sibling, for ``canon_senses.json`` specifically --
+    ``_load_schema_document`` never has a captured snapshot to reuse,
+    since the schema file itself is never part of any H1/digest
+    snapshot). ``describe`` is the human label opening every
+    ``CanonSensesLoadError`` this raises -- always ``"schema at <path>"``
+    from this function's own sole caller today, but kept as a caller
+    argument rather than hardcoded since the pure core below
+    (``_parse_utf8_json_with_depth_guard``) shares the same parameter for
+    its OWN callers' different labels.
 
     ``read_bytes`` raises ``OSError`` (can't open) -- caught here, outside
     the pure core, since a caller with bytes already in hand (the core's
@@ -504,10 +511,14 @@ def _read_utf8_json_with_depth_guard(path: Path, describe: str) -> Any:
 
 
 def _parse_json_from_bytes(content: bytes, senses_path: Path) -> Any:
-    """Byte-based twin of ``_read_json_file`` -- parses an ALREADY-CAPTURED
-    snapshot instead of reading ``senses_path`` itself. ``senses_path`` is
-    used for error-message labeling only, matching ``_read_json_file``'s
-    own messages exactly."""
+    """Parses ``canon_senses.json``'s own ALREADY-CAPTURED snapshot
+    (``content``) instead of reading ``senses_path`` itself -- the
+    ``_reject_unencodable_strings`` counterpart to
+    ``_read_utf8_json_with_depth_guard``'s own path-based read/parse/
+    depth-preflight, called by ``load_senses_from_snapshot`` below.
+    ``senses_path`` is used for error-message labeling only, matching the
+    ``describe`` messages ``_parse_utf8_json_with_depth_guard`` itself
+    already produces from it."""
     doc = _parse_utf8_json_with_depth_guard(content, f"canon_senses.json at {senses_path}")
     _reject_unencodable_strings(doc, senses_path)
     return doc
@@ -529,8 +540,13 @@ def _schema_validate(doc: Any, schema_path: Path, senses_path: Path) -> None:
     no registry -- unlike canon_validate.py's cross-file canon-*.schema.json
     set.
 
-    `doc` is already bounded to `MAX_NESTING_DEPTH` by `_read_json_file`'s
-    depth preflight before this is ever called, so the RecursionError
+    `doc` is already bounded to `MAX_NESTING_DEPTH` by
+    `_parse_utf8_json_with_depth_guard`'s depth preflight -- `doc`'s only
+    producer is `_parse_json_from_bytes` (this module's sole caller of
+    `_schema_validate`, `load_senses_from_snapshot`, parses the sidecar
+    that way regardless of whether the caller arrived via the path-based
+    `load_senses` wrapper or `load_senses_from_snapshot` directly) --
+    before this is ever called, so the RecursionError
     guard below should be unreachable in practice -- it stays as a
     backstop, not the primary defense. It exists because a top-level
     `type` mismatch (`doc` is a list, not the required object) fails

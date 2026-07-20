@@ -443,52 +443,10 @@ def _parse_canon_entries_from_bytes(state: str, content: bytes) -> dict:
     return {}
 
 
-def _resolve_competitors_from_snapshot(
-    canon_state: str, canon_bytes: bytes,
-    senses_path: Path, senses_state: str, senses_bytes: bytes,
+def _resolve_competitors(
+    canon_path: Path, senses_path: Path,
+    *, canon_snapshot=None, senses_snapshot=None,
 ):
-    """Byte-based twin of `_resolve_competitors` -- projects the #243
-    ambiguity-competitors universe from ALREADY-CAPTURED `(state, bytes)`
-    snapshots (e.g. `frozen_input_check()`'s own H1 reads) instead of
-    re-reading canon.json/`senses_path` a second time. No `canon_path`
-    parameter (codex round 5 nit): `_parse_canon_entries_from_bytes` is
-    UNCONDITIONALLY tolerant -- like `_load_canon_entries`, it degrades to
-    `{}` on any issue rather than raising, so it has no error message a
-    path could ever label; `senses_path` stays because
-    `load_senses_from_snapshot` DOES raise `CanonSensesLoadError` with a
-    path-labeled message on a genuine failure (a non-regular/schema-
-    invalid sidecar). Giving canon a path parameter it can never use would
-    read as symmetry with senses_path and wrongly imply dropping it
-    degrades an error message -- it doesn't; adding one would be a
-    tolerant-degradation behavior change, not a cleanup.
-
-    Codex round 5 BLOCKER: `run_verify_merged` previously hashed canon/
-    senses for the H1 tamper check, then called the plain path-based
-    `_resolve_competitors()` afterward, which independently re-read both
-    paths to PARSE them. A mutation landing between those two reads let H1
-    approve snapshot A while this projection silently consumed snapshot B
-    -- `frozen_input_mismatch` could report `False` even though the
-    competitors universe this run actually verified against was NOT the
-    one H1 just certified. This function closes that: `run_verify_merged`
-    feeds it the EXACT snapshot `frozen_input_check()` already captured
-    and hashed, so the tamper comparison and the parse can never disagree.
-
-    `_resolve_competitors()` below stays the plain fresh-read entry point
-    for `run_validate_fragment`, which has no H1 check (and no AGGREGATE
-    visibility at all) to reuse a snapshot from -- a single ordinary read
-    is genuinely correct there, not an instance of this race."""
-    canon_entries = _parse_canon_entries_from_bytes(canon_state, canon_bytes)
-    try:
-        senses_result = load_senses_from_snapshot(
-            senses_path, senses_state, senses_bytes, allow_absent=True
-        )
-    except CanonSensesLoadError as exc:
-        raise SkepticReadyError(f"canon_senses.json error: {exc}")
-    competitor_forms = set(canon_entries.keys()) | set(senses_result.entries_by_source_form.keys())
-    return fold_collision_map(competitor_forms)
-
-
-def _resolve_competitors(canon_path: Path, senses_path: Path):
     """Builds the #243 ambiguity-competitors `FoldCollisionMap` -- the union
     of every `canon.json` entry and every `canon_senses.json` form
     (split-only included), the SAME universe `suspicion_scan.py`'s
@@ -498,17 +456,45 @@ def _resolve_competitors(canon_path: Path, senses_path: Path):
     raw `CanonSensesLoadError`) on a blocked sidecar load, matching every
     other precondition failure in this module.
 
-    Plain fresh-read entry point, correct for `run_validate_fragment` (no
-    H1 check, no AGGREGATE visibility to reuse a snapshot from -- a single
-    ordinary read here is genuinely correct, not an instance of the codex
-    round 5 race). `run_verify_merged` uses `_resolve_competitors_from_snapshot`
-    above instead, feeding it the snapshot its own H1 check already
-    captured -- see that function's docstring.
+    `canon_snapshot`/`senses_snapshot` (codex round 5, reshaped round 6):
+    an already-captured `(state, bytes)` pair to REUSE instead of a fresh
+    read of the matching path -- e.g. `frozen_input_check()`'s own H1
+    reads. Each defaults to `None` (a fresh read for THAT input) and is
+    considered INDEPENDENTLY of the other -- never both-or-nothing.
+    `run_validate_fragment` passes neither (no H1 check, no AGGREGATE
+    visibility at all -- a single ordinary read for both is genuinely
+    correct there, not an instance of the round-5 race).
+    `run_verify_merged` passes whatever `frozen_input_check()` actually
+    captured, which (codex round 6) may be `None` for either input
+    independently -- an absent `canon_sha256`/`senses_sha256` stamp means
+    that ONE input was never read at all (see `frozen_input_check()`'s own
+    "no stamp -> no read" fix), not that both must fall back together. A
+    round-6 regression this exact shape closes: treating "canon_snapshot
+    is not None and senses_snapshot is not None" as one all-or-nothing
+    gate at the CALL site discarded a perfectly good, already H1-approved
+    canon_snapshot the moment senses_sha256 happened to be absent (a
+    realistic case -- an older aggregate manifest, or a project that never
+    stamped a senses hash) -- silently re-reading canon.json fresh instead,
+    which could disagree with what H1 just certified. Resolving each
+    snapshot independently, right here, is what makes that impossible: a
+    caller with an H1-approved canon_snapshot but no senses_snapshot still
+    gets canon parsed from that EXACT snapshot, only senses falls back to
+    a fresh read.
 
-    Both `canon_path` and `senses_path` are read UNCONDITIONALLY tolerant of
-    absence (`_load_canon_entries`, and `load_senses(..., allow_absent=True)`
-    here) -- mirrors `--canon`'s own pre-existing unconditional tolerance in
-    this file (`compute_frozen_input_hash`, used regardless of whether
+    Codex round 5 BLOCKER (original motivation): `run_verify_merged`
+    previously hashed canon/senses for the H1 tamper check, then called
+    this function with NO snapshot at all, which independently re-read
+    both paths to PARSE them. A mutation landing between those two reads
+    let H1 approve snapshot A while this projection silently consumed
+    snapshot B -- `frozen_input_mismatch` could report `False` even though
+    the competitors universe this run actually verified against was NOT
+    the one H1 just certified.
+
+    Both inputs are read UNCONDITIONALLY tolerant of absence
+    (`_load_canon_entries`/`_parse_canon_entries_from_bytes`, and
+    `load_senses`/`load_senses_from_snapshot(..., allow_absent=True)`
+    here) -- mirrors `--canon`'s own pre-existing unconditional tolerance
+    in this file (`compute_frozen_input_hash`, used regardless of whether
     `--canon` was explicitly passed). This is a deliberate DEPARTURE from
     `canon_adjudication_audit.py`'s explicit-path-must-exist convention
     (codex round: `skeptic-pass-wf.template.js` ALWAYS passes
@@ -523,11 +509,19 @@ def _resolve_competitors(canon_path: Path, senses_path: Path):
     verify-merged call into a fatal crash for the (extremely common) case of
     a project with no `canon_senses.json` at all, rather than the documented
     normal "nothing to project" state -- a schema-invalid or non-regular
-    sidecar still raises via `load_senses` itself, only genuine absence is
-    tolerated."""
-    canon_entries = _load_canon_entries(canon_path)
+    sidecar still raises via `load_senses`/`load_senses_from_snapshot`
+    itself, only genuine absence is tolerated."""
+    if canon_snapshot is not None:
+        canon_entries = _parse_canon_entries_from_bytes(canon_snapshot[0], canon_snapshot[1])
+    else:
+        canon_entries = _load_canon_entries(canon_path)
     try:
-        senses_result = load_senses(senses_path, allow_absent=True)
+        if senses_snapshot is not None:
+            senses_result = load_senses_from_snapshot(
+                senses_path, senses_snapshot[0], senses_snapshot[1], allow_absent=True
+            )
+        else:
+            senses_result = load_senses(senses_path, allow_absent=True)
     except CanonSensesLoadError as exc:
         raise SkepticReadyError(f"canon_senses.json error: {exc}")
     competitor_forms = set(canon_entries.keys()) | set(senses_result.entries_by_source_form.keys())
@@ -852,10 +846,11 @@ def _frozen_input_tamper_reason_from_snapshot(
     `compute_frozen_input_hash_from_state` instead of re-reading `path`.
 
     Codex round 5: used for canon.json/canon_senses.json, whose captured
-    snapshot ALSO feeds a downstream parse (`_resolve_competitors_from_snapshot`)
-    -- so the tamper comparison and the parse can never independently
-    disagree about which on-disk version of the file they each describe.
-    manifest.json has no such downstream parser in this module, so
+    snapshot ALSO feeds a downstream parse (`_resolve_competitors`'s own
+    `canon_snapshot`/`senses_snapshot` reuse) -- so the tamper comparison
+    and the parse can never independently disagree about which on-disk
+    version of the file they each describe. manifest.json has no such
+    downstream parser in this module, so
     `frozen_input_check()` keeps using the plain `_frozen_input_tamper_reason`
     for it -- a fresh hash-and-discard read is genuinely correct there,
     not an instance of this race. Same BEST-EFFORT caveat as the path-based
@@ -871,7 +866,10 @@ def _frozen_input_tamper_reason_from_snapshot(
     )
 
 
-def frozen_input_check(aggregate: dict, canon_path: Path, manifest_path: Path, senses_path: Path) -> tuple:
+def frozen_input_check(
+    aggregate: dict, canon_path: Path, manifest_path: Path, senses_path: Path,
+    *, tolerant_reads: bool = False,
+) -> tuple:
     """THE one shared H1 tripwire check (codex round 2): every one of
     ``canon.json``/``manifest.json``/``canon_senses.json`` against
     AGGREGATE's own ``canon_sha256``/``manifest_sha256``/``senses_sha256``
@@ -879,21 +877,50 @@ def frozen_input_check(aggregate: dict, canon_path: Path, manifest_path: Path, s
     the three to successfully PARSE, so a deleted or schema-malformed
     frozen input still produces an answer here). Returns
     ``(frozen_input_mismatch: bool, reasons: list[str], canon_snapshot:
-    tuple[str, bytes], senses_snapshot: tuple[str, bytes])``.
+    tuple[str, bytes] | None, senses_snapshot: tuple[str, bytes] | None)``.
+    A snapshot is ``None`` whenever there was no stamp to compare it
+    against (see below) OR (``tolerant_reads=True`` only) the read itself
+    failed.
 
     Codex round 5: canon.json and canon_senses.json are each read via
-    ``read_frozen_input_snapshot()`` ONCE here and hashed from that
-    captured ``(state, bytes)`` tuple via
-    ``_frozen_input_tamper_reason_from_snapshot`` -- the snapshot is
-    RETURNED (not just hashed-and-discarded, the pre-round-5 shape) so a
-    caller that also needs to PARSE canon/senses downstream
-    (``run_verify_merged``'s ``_resolve_competitors_from_snapshot`` call)
-    can reuse this EXACT snapshot instead of re-reading the path a second
-    time -- closing the race where H1 approves one on-disk version while a
-    later independent read silently consumes another.
+    ``read_frozen_input_snapshot()`` and hashed from that captured
+    ``(state, bytes)`` tuple via ``_frozen_input_tamper_reason_from_snapshot``
+    -- the snapshot is RETURNED (not just hashed-and-discarded, the
+    pre-round-5 shape) so a caller that also needs to PARSE canon/senses
+    downstream (``run_verify_merged``'s own ``_resolve_competitors`` call,
+    via its ``canon_snapshot``/``senses_snapshot`` kwargs) can reuse this
+    EXACT snapshot instead of re-reading the path a second time -- closing
+    the race where H1 approves one on-disk version while a later
+    independent read silently consumes another.
     manifest.json has no such downstream parser in this module, so it
     keeps using the plain path-based ``_frozen_input_tamper_reason``
     (fresh hash-and-discard, genuinely correct there).
+
+    Codex round 6 BLOCKER: canon.json/canon_senses.json used to be read
+    UNCONDITIONALLY, even when AGGREGATE had no stamp at all for that
+    input -- there was nothing to compare the read against, so the read
+    bought nothing, yet a transient failure on it (a forced I/O error,
+    codex's own repro) still propagated raw. manifest.json never had this
+    bug: ``_frozen_input_tamper_reason`` has always checked
+    ``isinstance(stamped_sha256, str)`` BEFORE calling
+    ``compute_frozen_input_hash``, so "no stamp" already meant "no read"
+    for it. Canon/senses now match that same shape -- the stamp is
+    checked FIRST, and the read is skipped entirely (snapshot stays
+    ``None``) when it's absent, regardless of ``tolerant_reads``.
+
+    ``tolerant_reads`` (codex round 6) governs the SEPARATE case where a
+    stamp genuinely IS present but the read itself fails (``OSError``):
+    ``False`` (default, ``run_verify_merged``'s choice) lets it raise RAW
+    -- fail-closed, matching the reasoning already established for that
+    caller (degrading canon to ``{}`` downstream would silently empty the
+    competitors universe and let every ambiguous form sail through
+    unflagged, fail-OPEN on the exact property this release makes
+    fail-closed). ``True`` (``run_check_frozen_inputs``'s choice) catches
+    it and leaves that snapshot ``None`` instead -- that caller discards
+    BOTH returned snapshots unconditionally (no downstream parse to keep
+    consistent with anything), so raising there buys nothing but breaks
+    its own documented "never a crash" contract; a read failure degrades
+    that one check the same way an absent stamp already does.
 
     Used by BOTH ``run_verify_merged`` (called AFTER schema-validating
     AGGREGATE, before anything downstream ever attempts to PARSE
@@ -916,13 +943,25 @@ def frozen_input_check(aggregate: dict, canon_path: Path, manifest_path: Path, s
     reasons = []
     frozen_input_mismatch = False
 
-    canon_state, canon_bytes = read_frozen_input_snapshot(canon_path)
-    canon_reason = _frozen_input_tamper_reason_from_snapshot(
-        "canon.json", canon_path, canon_state, canon_bytes, aggregate.get("canon_sha256")
-    )
-    if canon_reason:
-        reasons.append(canon_reason)
-        frozen_input_mismatch = True
+    def _snapshot_or_none(path: Path):
+        if not tolerant_reads:
+            return read_frozen_input_snapshot(path)
+        try:
+            return read_frozen_input_snapshot(path)
+        except OSError:
+            return None
+
+    canon_snapshot = None
+    canon_stamp = aggregate.get("canon_sha256")
+    if isinstance(canon_stamp, str):
+        canon_snapshot = _snapshot_or_none(canon_path)
+        if canon_snapshot is not None:
+            canon_reason = _frozen_input_tamper_reason_from_snapshot(
+                "canon.json", canon_path, canon_snapshot[0], canon_snapshot[1], canon_stamp
+            )
+            if canon_reason:
+                reasons.append(canon_reason)
+                frozen_input_mismatch = True
 
     manifest_reason = _frozen_input_tamper_reason(
         "manifest.json", manifest_path, aggregate.get("manifest_sha256")
@@ -931,15 +970,19 @@ def frozen_input_check(aggregate: dict, canon_path: Path, manifest_path: Path, s
         reasons.append(manifest_reason)
         frozen_input_mismatch = True
 
-    senses_state, senses_bytes = read_frozen_input_snapshot(senses_path)
-    senses_reason = _frozen_input_tamper_reason_from_snapshot(
-        "canon_senses.json", senses_path, senses_state, senses_bytes, aggregate.get("senses_sha256")
-    )
-    if senses_reason:
-        reasons.append(senses_reason)
-        frozen_input_mismatch = True
+    senses_snapshot = None
+    senses_stamp = aggregate.get("senses_sha256")
+    if isinstance(senses_stamp, str):
+        senses_snapshot = _snapshot_or_none(senses_path)
+        if senses_snapshot is not None:
+            senses_reason = _frozen_input_tamper_reason_from_snapshot(
+                "canon_senses.json", senses_path, senses_snapshot[0], senses_snapshot[1], senses_stamp
+            )
+            if senses_reason:
+                reasons.append(senses_reason)
+                frozen_input_mismatch = True
 
-    return frozen_input_mismatch, reasons, (canon_state, canon_bytes), (senses_state, senses_bytes)
+    return frozen_input_mismatch, reasons, canon_snapshot, senses_snapshot
 
 
 # ---------------------------------------------------------------------------
@@ -989,9 +1032,13 @@ def run_check_frozen_inputs(aggregate_manifest_path, canon_path=None, manifest_p
 
     # This mode has no downstream parser of canon/senses to feed -- discard
     # the two returned snapshots (codex round 5 added them for
-    # run_verify_merged's _resolve_competitors_from_snapshot() reuse).
+    # run_verify_merged's own _resolve_competitors() reuse).
+    # tolerant_reads=True (codex round 6 BLOCKER): this mode is documented
+    # as "never a crash", but a read failure on canon/senses used to raise
+    # RAW regardless -- since nothing here ever consumes the snapshot,
+    # there is nothing a tolerant degradation could put at risk.
     frozen_input_mismatch, reasons, _canon_snapshot, _senses_snapshot = frozen_input_check(
-        aggregate, canon_path, manifest_path, senses_path
+        aggregate, canon_path, manifest_path, senses_path, tolerant_reads=True
     )
     return {"frozen_input_mismatch": frozen_input_mismatch, "missing": reasons}
 
@@ -1060,9 +1107,11 @@ def run_verify_merged(
     # docstring's own note on ``frozen_input_mismatch``.
     frozen_input_mismatch = False
     # Populated by frozen_input_check() below when AGGREGATE is schema-valid
-    # enough to run it; stay None otherwise, in which case the
-    # _resolve_competitors() fallback further down does its own fresh read
-    # (codex round 5 -- see _resolve_competitors_from_snapshot's docstring).
+    # enough to run it, and independently per-input even then (codex round
+    # 6: an absent canon_sha256/senses_sha256 stamp means that ONE stays
+    # None). _resolve_competitors() further down resolves each
+    # independently -- None falls back to a fresh read for THAT input only
+    # (see its own docstring).
     canon_snapshot = None
     senses_snapshot = None
 
@@ -1113,10 +1162,20 @@ def run_verify_merged(
             # the caller cannot distinguish from a plain coverage gap.
             # Codex round 5: also captures canon_snapshot/senses_snapshot --
             # the SAME (state, bytes) frozen_input_check() just hashed --
-            # for _resolve_competitors_from_snapshot() to parse further
-            # down, instead of that independently re-reading both paths.
+            # for _resolve_competitors() to parse further down (via its
+            # own canon_snapshot/senses_snapshot kwargs), instead of that
+            # independently re-reading both paths.
+            # tolerant_reads=False (codex round 6, explicit -- this is the
+            # default, but stated here so the fail-closed choice is visible
+            # at the call site, not just in frozen_input_check()'s own
+            # docstring): a read failure here must raise RAW. Degrading
+            # canon to {} instead would silently empty the competitors
+            # universe downstream and let every ambiguous form sail through
+            # unflagged -- fail-OPEN on the exact property this release
+            # makes fail-closed.
             mismatch, reasons, canon_snapshot, senses_snapshot = frozen_input_check(
-                aggregate, canon_path, Path(manifest_path), resolved_senses_path
+                aggregate, canon_path, Path(manifest_path), resolved_senses_path,
+                tolerant_reads=False,
             )
             missing.extend(reasons)
             frozen_input_mismatch = frozen_input_mismatch or mismatch
@@ -1134,25 +1193,31 @@ def run_verify_merged(
     # entirely and losing every other check this function would otherwise
     # still report.
     #
-    # Codex round 5: when frozen_input_check() above ran and captured
-    # canon_snapshot/senses_snapshot, project from THOSE SAME bytes
-    # (_resolve_competitors_from_snapshot) rather than re-reading both
-    # paths independently -- a mutation landing between an independent
-    # re-read and the H1 check could otherwise let H1 approve one on-disk
-    # version while this projection silently consumed another, with
-    # frozen_input_mismatch still reporting False. When AGGREGATE never
-    # schema-validated (canon_snapshot/senses_snapshot still None,
-    # frozen_input_check() never ran), fall back to the plain fresh-read
-    # _resolve_competitors() -- there is no H1 result here for a re-read to
-    # possibly disagree with.
+    # Codex round 5: when frozen_input_check() above captured
+    # canon_snapshot/senses_snapshot, project from THOSE SAME bytes rather
+    # than re-reading independently -- a mutation landing between an
+    # independent re-read and the H1 check could otherwise let H1 approve
+    # one on-disk version while this projection silently consumed another,
+    # with frozen_input_mismatch still reporting False.
+    #
+    # Codex round 6: each snapshot is passed INDEPENDENTLY, never gated as
+    # a pair -- frozen_input_check() may now capture only one of the two
+    # (an absent canon_sha256/senses_sha256 stamp means that ONE input was
+    # never read at all, see its own "no stamp -> no read" fix). An
+    # all-or-nothing "both or neither" gate here was the round-6
+    # regression: it discarded a perfectly good, already H1-approved
+    # canon_snapshot the moment senses_sha256 happened to be absent (a
+    # realistic case, not a corrupted-AGGREGATE edge), silently re-reading
+    # canon.json fresh instead -- which could disagree with what H1 just
+    # certified. _resolve_competitors() itself now resolves each
+    # independently (`canon_snapshot=None`/`senses_snapshot=None` each
+    # falls back to a fresh read for THAT input only), so passing both
+    # here -- whichever is None or not -- is always correct.
     try:
-        if canon_snapshot is not None and senses_snapshot is not None:
-            competitors = _resolve_competitors_from_snapshot(
-                canon_snapshot[0], canon_snapshot[1],
-                resolved_senses_path, senses_snapshot[0], senses_snapshot[1],
-            )
-        else:
-            competitors = _resolve_competitors(canon_path, resolved_senses_path)
+        competitors = _resolve_competitors(
+            canon_path, resolved_senses_path,
+            canon_snapshot=canon_snapshot, senses_snapshot=senses_snapshot,
+        )
     except SkepticReadyError as exc:
         missing.append(str(exc))
         competitors = None
