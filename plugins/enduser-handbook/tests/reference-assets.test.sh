@@ -50,6 +50,136 @@ has_ci() {
   if grep -qiF -- "$needle" "$file" 2>/dev/null; then ok "$msg"; else bad "$msg ('$needle' not in $(basename "$file"))"; fi
 }
 
+# Assert a fixed string IS present within one Markdown section (the exact heading line up to,
+# but not including, the next heading of the same or shallower level). `has`/`hasnt` above are
+# whole-file greps and cannot prove a claim is section-bound; this can. One-pass awk, fixed-string
+# index() matching (not a regex), so a needle containing regex metacharacters still matches
+# literally. An absent heading is a hard failure, never a silent pass. Do NOT pipe awk into
+# `grep -q` — the script runs under `set -o pipefail` (:20) and an early `grep -q` exit would
+# surface as a false SIGPIPE failure here.
+#
+# Inert Markdown does NOT count as proof: a fenced code block (``` or ~~~) can contain the needle
+# text without it being live prose — that is the documentation equivalent of the EMBED_FORMULA
+# false-green this test file exists to kill, so fence content is skipped. A fence opener is <=3
+# leading spaces (4+ is an indented code block, not a fence — CommonMark) then a run of 3+ of the
+# SAME character (` or ~); the matching closer must use that same character and be at least as
+# long, so a short `~~~` never closes a `~~~~` fence and vice versa. Char + length are tracked, not
+# a bare on/off flag. A backtick fence's info string may not itself contain a backtick (CommonMark)
+# — a line like ```` ```lang`x ```` is ordinary text, not an opener; tildes carry no such rule, so a
+# clean info string like ```` ```js ```` still opens normally. CRLF line endings are normalized
+# before both the heading compare and the needle scan. An empty needle is a hard failure, never a
+# silent pass.
+#
+# Residual, deliberately not handled: HTML comments are NOT tracked, so a needle that appears only
+# inside a `<!-- ... -->` (in or out of a fence) still counts as found, and a needle sitting inside
+# a 4-space-indented code block is treated as live text. Every current caller's needle sits in plain
+# prose, so neither gap bites today. A prior revision tracked comments too; two rounds of codex
+# review found real regressions in that state machine (a fence opener inside an open comment, a
+# second comment span on one line) faster than they could be fixed soundly. If a caller ever needs
+# comment-awareness, reach for a real Markdown parser instead of extending this awk state machine.
+#
+# Internal: exit 0 iff `needle` is found within `heading`'s section of `file`, exit 1 otherwise (no
+# ok/bad side effects). Shared by has_in_section and hasnt_in_section below, so the fence/CRLF/
+# empty-needle engine lives in exactly one place rather than as two copies that could drift.
+# Round 4 built this exact split (`_section_contains` + both callers) and reverted it — not because
+# the split was wrong, but because there was no real caller for hasnt_in_section yet and it landed
+# mid-round at a convergence point that didn't want the extra surface; the write-up explicitly
+# named "the next time a real assertion needs the narrower claim" as the adoption condition. This
+# is that caller — the section-boundary self-tests below are inherently negative claims ("must NOT
+# be found"), and the engine is now large enough (fence char + length + backtick-info-string +
+# CRLF) that a hand-duplicated second copy is a real drift risk, not just a style preference.
+_section_contains() {
+  local file="$1" heading="$2" needle="$3"
+  awk -v heading="$heading" -v needle="$needle" '
+       function leading_spaces(s,    i, n) {
+         n = length(s); i = 1
+         while (i <= n && substr(s, i, 1) == " ") i++
+         return i - 1
+       }
+       function count_run(s, ch,   i, n) {
+         n = length(s); i = 1
+         while (i <= n && substr(s, i, 1) == ch) i++
+         return i - 1
+       }
+       function blank_from(s, from,   i, n, c) {
+         n = length(s)
+         for (i = from; i <= n; i++) {
+           c = substr(s, i, 1)
+           if (c != " " && c != "\t") return 0
+         }
+         return 1
+       }
+       {
+         raw = $0
+         sub(/\r$/, "", raw)
+         indent = leading_spaces(raw)
+         rest = substr(raw, indent + 1)
+         fc = substr(rest, 1, 1)
+
+         # fence state, evaluated before anything else — a fence is opaque, full stop.
+         if (in_fence) {
+           is_close = 0
+           if (indent <= 3 && fc == fence_char) {
+             run = count_run(rest, fence_char)
+             if (run >= fence_len && blank_from(rest, run + 1)) is_close = 1
+           }
+           if (is_close) { in_fence = 0 }
+           next
+         }
+         if (indent <= 3 && (fc == "`" || fc == "~")) {
+           run = count_run(rest, fc)
+           if (run >= 3) {
+             info = substr(rest, run + 1)
+             # CommonMark: a backtick fence info string may not itself contain a backtick
+             # (tildes have no such rule) — otherwise this is ordinary text, not an opener.
+             if (fc != "`" || index(info, "`") == 0) {
+               in_fence = 1; fence_char = fc; fence_len = run; next
+             }
+           }
+         }
+
+         line = raw
+         n2 = match(line, /^#+/)
+         hlevel = (n2 == 1) ? RLENGTH : 0
+
+         if (hlevel > 0 && line == heading && found_heading == 0) {
+           in_section = 1; found_heading = 1; level = hlevel; next
+         }
+         if (in_section && hlevel > 0 && hlevel <= level) { in_section = 0 }
+         if (in_section && index(line, needle) > 0) { found_needle = 1 }
+       }
+       END { exit (needle != "" && found_heading && found_needle) ? 0 : 1 }
+     ' "$file"
+}
+
+has_in_section() {
+  local msg="$1" file="$2" heading="$3" needle="$4"
+  if [ ! -f "$file" ]; then bad "$msg (file not found: $(basename "$file"))"; return; fi
+  if _section_contains "$file" "$heading" "$needle"; then
+    ok "$msg"
+  else
+    bad "$msg ('$needle' not found under heading '$heading' in $(basename "$file"))"
+  fi
+}
+
+# Assert a fixed string is NOT present within one Markdown section — the boundary-proving
+# counterpart to has_in_section (mirrors has/hasnt above), same shared engine. Exists specifically
+# to prove the section-boundary mechanism itself (round 21): has_in_section's four prior self-tests
+# all place their needle INSIDE the section under test, so none of them can catch a broken or
+# deleted boundary — a boundary that never closes only WIDENS what has_in_section finds, so every
+# existing positive assertion stays green regardless. Proving "this must not leak past a real
+# boundary" needs a genuine negative claim; see the self-tests below for the one caller this exists
+# for.
+hasnt_in_section() {
+  local msg="$1" file="$2" heading="$3" needle="$4"
+  if [ ! -f "$file" ]; then bad "$msg (file not found: $(basename "$file"))"; return; fi
+  if _section_contains "$file" "$heading" "$needle"; then
+    bad "$msg ('$needle' unexpectedly found under heading '$heading' in $(basename "$file"))"
+  else
+    ok "$msg"
+  fi
+}
+
 # Count exact occurrences of a fixed string in a file (line-based). grep exits 1 (not just non-zero
 # from a real error) when the needle is simply ABSENT — the common, expected case for a not-yet-fixed
 # sentinel — so the `|| true` here is load-bearing: without it, a plain assignment's exit status
@@ -65,6 +195,358 @@ count_fixed() {
 line_of() {
   grep -nF -- "$1" "$2" 2>/dev/null | head -n1 | cut -d: -f1
 }
+
+echo "== has_in_section self-test: backtick-fence info-string boundary (round-4 regression) =="
+# Permanent boundary cases for the fence-opener fix above — synthetic fixtures, not project docs.
+# These two are phrased as plain has_in_section (positive, "must be found") calls via a
+# heading-boundary reformulation, so no hasnt_in_section call is needed for THIS pair specifically:
+# the bug under test is really about whether a REAL heading gets recognized as a section boundary,
+# and that is directly, positively provable. The section-boundary self-tests further below (round
+# 21) test a genuinely different claim and DO need hasnt_in_section — see there for why.
+SELFTEST_DIR="$(mktemp -d)"
+trap 'rm -rf "$SELFTEST_DIR"' EXIT
+
+# codex's counterexample: a backtick run whose info string itself contains a backtick must NOT be
+# treated as a fence opener — it is ordinary text. If it were wrongly treated as an opener, the
+# fence would never close (no matching info-string-free closer follows), so it would swallow
+# `## Other` as fence content instead of recognizing it as a real heading, and NEEDLE below would
+# never be found under it either.
+cat > "$SELFTEST_DIR/backtick-info-string.md" <<'EOF'
+## Target
+```lang`x
+## Other
+NEEDLE
+EOF
+has_in_section "self-test: backtick-in-info-string line is text, '## Other' is a real boundary" \
+  "$SELFTEST_DIR/backtick-info-string.md" '## Other' 'NEEDLE'
+
+# Positive companion — the fix must not over-correct: a clean info string (no embedded backtick)
+# must still open a real fence, so a heading-lookalike INSIDE it does not steal the section from
+# the needle that legitimately follows once the fence closes.
+cat > "$SELFTEST_DIR/clean-info-string.md" <<'EOF'
+## Assets
+```js
+## Not A Real Section
+```
+NEEDLE
+## Next
+EOF
+has_in_section "self-test: a clean-info-string fence still opens, hides a fenced pseudo-heading" \
+  "$SELFTEST_DIR/clean-info-string.md" '## Assets' 'NEEDLE'
+
+# round-20: the closer rule (run >= fence_len, same fence_char) was proven correct in round 3's
+# manual probes ("3-tilde does not close 4-tilde fence") — but that probe lived in a scratch
+# harness and evaporated once the round ended. Every later round inherited a rule whose proof was
+# gone, and both permanent self-tests above are backtick-only, three-backtick throughout, so
+# neither exercises a length or char mismatch at the closer. Two fixtures, same positive
+# heading-boundary form as the two above (a needle placed AFTER the real closer, so it is only
+# live if the fence closed at the RIGHT line — no negative helper needed): one per axis, because
+# each is independently droppable and neither fixture below exercises the other's axis (verified:
+# the length fixture stays green under a char-check-dropped mutant and vice versa).
+#
+# Length axis: a same-char run shorter than the opener (``` closing ````) must NOT close it.
+cat > "$SELFTEST_DIR/fence-length-mismatch.md" <<'EOF'
+## Target
+````
+```
+````
+NEEDLE
+## Next
+EOF
+has_in_section "self-test: a shorter same-char run does not close a longer fence (length axis)" \
+  "$SELFTEST_DIR/fence-length-mismatch.md" '## Target' 'NEEDLE'
+
+# Char axis: a run of the WRONG fence character, even at matching or greater length, must NOT
+# close it (~~~~ closing ````).
+cat > "$SELFTEST_DIR/fence-char-mismatch.md" <<'EOF'
+## Target
+````
+~~~~
+````
+NEEDLE
+## Next
+EOF
+has_in_section "self-test: a wrong-character run does not close a fence, regardless of length (char axis)" \
+  "$SELFTEST_DIR/fence-char-mismatch.md" '## Target' 'NEEDLE'
+
+# round-21 [IMPORTANT, zero prior coverage]: the section-boundary rule itself — `hlevel <= level`
+# closes a section — had NO permanent casualty. All four self-tests above place their needle
+# INSIDE the section under test, and every real call site is a positive assertion, so deleting the
+# boundary check only WIDENS what gets scanned: every existing green assertion stays green. This
+# is exactly what makes it dangerous — the W1/W6 validateGroups pins (round 9) use the IDENTICAL
+# needle at both headings and rely ENTIRELY on section termination for their independence; if the
+# boundary regresses, W6's copy silently satisfies the W1 pin too and that independence evaporates
+# without any other gate noticing. Verified real-engine RED / boundary-deleted mutant GREEN before
+# wiring, same as every other round this session.
+#
+# `<=` has two components (`==` and `<`), and — same lesson as round 20's fence axes, checked
+# rather than assumed — one fixture cannot prove both: a same-level-only fixture doesn't
+# discriminate a mutant that keeps `<` but drops `==`, and a shallower-only fixture doesn't
+# discriminate the mirror mutant that keeps `==` but drops `<`. Confirmed against a reference
+# engine before wiring; two fixtures, not one.
+#
+# Both are genuinely negative claims ("must NOT be found") — has_in_section's positive
+# heading-boundary trick does not reformulate here, because the whole point is that removing the
+# boundary check ONLY adds false positives, never removes a true one, so there is no positive fact
+# whose presence depends on the boundary holding. This is hasnt_in_section's one caller (see its
+# definition above for why it was reintroduced).
+#
+# Same-level case: a needle that exists ONLY under a FOLLOWING heading of the SAME level must not
+# be found under the current one.
+cat > "$SELFTEST_DIR/boundary-same-level.md" <<'EOF'
+## Target
+## Next
+NEEDLE
+EOF
+hasnt_in_section "self-test: a same-level heading closes the section, later content does not leak in" \
+  "$SELFTEST_DIR/boundary-same-level.md" '## Target' 'NEEDLE'
+
+# Shallower-level case: a needle that exists ONLY after a SHALLOWER heading closes a deeper
+# section must not be found under that deeper heading.
+cat > "$SELFTEST_DIR/boundary-shallower-level.md" <<'EOF'
+## Target
+### Sub
+## Next
+NEEDLE
+EOF
+hasnt_in_section "self-test: a shallower heading closes a deeper section, later content does not leak in" \
+  "$SELFTEST_DIR/boundary-shallower-level.md" '### Sub' 'NEEDLE'
+
+# round-22: rounds 20-21 each found a member of one class — a rule this engine implements whose
+# LOSS no permanent fixture would catch. The candidate list (four rules named by the reviewer, four
+# more found walking the function line by line) turned out to close the class rather than sample
+# it: every remaining branch/condition in _section_contains is now either fixture-guarded or
+# provably unfalsifiable (documented inline at the two such cases below, and in the enumeration
+# table in this round's report — not restated here). Each fixture below was verified against a
+# reference engine — correct behaviour vs. its OWN targeted single-rule mutant, AND cross-checked
+# against every OTHER new fixture's mutant — before being wired, so isolation is measured, not
+# assumed (the fence-axis and boundary-`<=`-half lessons both came from assuming wrong).
+
+# CRLF normalization (:114): a CRLF-terminated file must match identically to its LF counterpart —
+# without stripping \r, `line == heading` never matches (trailing \r makes every line compare
+# unequal to the LF-only heading param), so the heading is never found at all.
+printf '## Target\r\nNEEDLE\r\n## Next\r\n' > "$SELFTEST_DIR/crlf.md"
+has_in_section "self-test: a CRLF-terminated file matches the same as LF (CRLF normalization)" \
+  "$SELFTEST_DIR/crlf.md" '## Target' 'NEEDLE'
+
+# Fence-close indent gate (<=3 spaces, independent site from the opener's own gate below): a
+# same-char, same-length run indented 4+ spaces is CommonMark indented-code, not a fence marker,
+# and must not close an open fence.
+printf '## Target\n```\n    ```\n```\nNEEDLE\n## Next\n' > "$SELFTEST_DIR/close-indent.md"
+has_in_section "self-test: a 4-space-indented closer does not close a column-0 fence (close-indent gate)" \
+  "$SELFTEST_DIR/close-indent.md" '## Target' 'NEEDLE'
+
+# Fence-close no-trailing-content rule (blank_from): CommonMark requires a closing fence line to
+# contain ONLY the fence marker, optionally followed by whitespace — trailing non-whitespace
+# content after the run means the line is not a valid closer.
+printf '## Target\n```\n``` extra\n```\nNEEDLE\n## Next\n' > "$SELFTEST_DIR/close-blank.md"
+has_in_section "self-test: a closer run followed by non-whitespace text does not close the fence" \
+  "$SELFTEST_DIR/close-blank.md" '## Target' 'NEEDLE'
+
+# Fence-open indent gate (<=3 spaces, independent from the closer's own gate above — verified,
+# neither fixture's mutant trips the other): a 4-space-indented backtick/tilde run is indented
+# code, not a fence opener, so it must not swallow the content that follows it.
+printf '## Target\n    ```\nNEEDLE\n## Next\n' > "$SELFTEST_DIR/open-indent.md"
+has_in_section "self-test: a 4-space-indented run does not open a fence (open-indent gate)" \
+  "$SELFTEST_DIR/open-indent.md" '## Target' 'NEEDLE'
+
+# Fence-open minimum-length-3 rule: CommonMark requires at least 3 of the same character to open a
+# fence — a run of 2 is ordinary text and must not swallow subsequent content.
+printf '## Target\n``\nNEEDLE\n## Next\n' > "$SELFTEST_DIR/open-minlen.md"
+has_in_section "self-test: a 2-character run does not open a fence (open-minimum-length rule)" \
+  "$SELFTEST_DIR/open-minlen.md" '## Target' 'NEEDLE'
+
+# First-occurrence-only heading binding (found_heading == 0): if the exact heading text appears a
+# SECOND time later in the file, that second occurrence must not re-open (or extend) the section —
+# it is a duplicate heading line, and by itself already closes the FIRST occurrence's section as an
+# ordinary same-level boundary. Content between the second occurrence and the next heading must NOT
+# be attributed to the first occurrence's section.
+printf '## Target\nNEEDLE_FIRST\n## Target\nNEEDLE_SECOND\n## Next\n' > "$SELFTEST_DIR/rebind.md"
+hasnt_in_section "self-test: a repeated identical heading does not re-open or extend the first section" \
+  "$SELFTEST_DIR/rebind.md" '## Target' 'NEEDLE_SECOND'
+
+# Empty-needle rejection (:151, needle != "") is orthogonal to file content, so it reuses the
+# rebind fixture above rather than a dedicated file — the claim under test is about the NEEDLE
+# argument, not anything in the markdown.
+hasnt_in_section "self-test: an empty needle is always rejected, never a silent pass" \
+  "$SELFTEST_DIR/rebind.md" '## Target' ''
+
+# Needle matched as a literal fixed string (index()), never as a regex: 'a.b' as a regex matches
+# ANY-character-between-a-and-b (so it would wrongly match "axb"); as a literal substring it must
+# not, since "axb" contains no literal dot.
+printf '## Target\naxb\n## Next\n' > "$SELFTEST_DIR/literal-needle.md"
+hasnt_in_section "self-test: a needle containing regex metacharacters is matched literally, not as a pattern" \
+  "$SELFTEST_DIR/literal-needle.md" '## Target' 'a.b'
+
+# round-23 [IMPORTANT — the closure claim itself failed]: two rows of the round-22 enumeration were
+# marked "guarded" on REASONING rather than a mutant actually run — round 23 wrote both mutants and
+# both survived. "Transitively covered" and "every fixture depends on it" are themselves claims,
+# and they need the same evidence as the rule they're about; asserting coverage is not
+# demonstrating it. Closure criterion from here on: a row counts as guarded only when a specific
+# mutant was run against a specific fixture and watched go red. The two rows below, plus two rules
+# missed entirely by the round-22 walk, get that treatment now.
+
+# Tilde as a valid fence-OPENER character (not just closer — the existing tilde fixture only ever
+# exercises tildes as a CLOSER for a backtick fence). Backtick-info-string content ("lang`x") is
+# included per the reviewer's suggestion: the info-string rejection rule is backtick-only by
+# design, so this also proves that rule doesn't accidentally reject a valid tilde opener.
+cat > "$SELFTEST_DIR/tilde-open.md" <<'EOF'
+## Target
+~~~lang`x
+NEEDLE
+~~~
+## Next
+EOF
+hasnt_in_section "self-test: a tilde run opens a fence just like a backtick run (tilde-opener rule)" \
+  "$SELFTEST_DIR/tilde-open.md" '## Target' 'NEEDLE'
+
+# Heading level = length of the leading `#` run: a DEEPER heading (H3 under H2) must NOT close its
+# shallower parent's section. Round 22 marked this "transitively covered by the boundary fixtures"
+# — wrong: both boundary fixtures (round 21) only ever exercise the CLOSING direction (a same-level
+# or shallower heading correctly closing); neither proves a heading that's genuinely DEEPER stays
+# inside. A mutant that hardcodes the level to a constant survives both of round 21's fixtures
+# (the relative ordering it depends on happens to be preserved for THOSE two cases) and only fails
+# here, where H3's real level (3) must be compared against H2's real level (2) and found greater.
+cat > "$SELFTEST_DIR/h2-h3-nested.md" <<'EOF'
+## Target
+### Sub
+NEEDLE
+## Next
+EOF
+has_in_section "self-test: a deeper (H3) heading does not close its shallower (H2) parent section" \
+  "$SELFTEST_DIR/h2-h3-nested.md" '## Target' 'NEEDLE'
+
+# Heading match must be EXACT text equality, not a prefix match. Round 22 marked this "guarded —
+# every fixture depends on it" — true and irrelevant: every existing fixture's heading and file
+# both happen to match exactly, so a prefix-match mutant satisfies every one of them too. A decoy
+# heading that only SHARES A PREFIX with the query proves the distinction: under exact match it
+# never opens (the query heading is genuinely absent from this file); under prefix match it opens
+# on the decoy and leaks needles that were never meant to be in this section.
+cat > "$SELFTEST_DIR/decoy-heading.md" <<'EOF'
+## Target extra
+NEEDLE
+## Next
+EOF
+hasnt_in_section "self-test: a heading that only shares a prefix with the query does not bind (exact-match rule)" \
+  "$SELFTEST_DIR/decoy-heading.md" '## Target' 'NEEDLE'
+
+# The closer's tail rule (blank_from) has two directions, and the earlier fixture (above) only
+# proved the rejecting one — trailing non-whitespace text does not close. This proves the
+# accepting direction the same code path also has to get right: trailing WHITESPACE (spaces after
+# the fence-character run, nothing else) still closes the fence, per CommonMark. A mutant requiring
+# the run to end the line with nothing else at all — not even legal trailing whitespace — survives
+# the earlier rejecting-direction fixture (a run followed by real text is still correctly rejected)
+# and only fails here.
+# printf, not a heredoc — a heredoc's trailing whitespace on the closer line is exactly the kind
+# of thing an editor or a future hand-edit silently strips, which would quietly turn this back into
+# a duplicate of the plain-closer case above and stop testing the whitespace-suffix direction at
+# all. printf keeps the trailing spaces explicit in the source.
+printf '## Target\n```\n```   \nNEEDLE\n## Next\n' > "$SELFTEST_DIR/close-whitespace.md"
+has_in_section "self-test: a closer run followed only by trailing whitespace still closes the fence" \
+  "$SELFTEST_DIR/close-whitespace.md" '## Target' 'NEEDLE'
+
+# Two rules remain unfixtured — but this time backed by an ACTUAL mutant run against an adversarial
+# fixture, not merely reasoned about (the standard round 23 raised the bar to). Fixture: a heading
+# opens a section, then a line of ordinary prose contains a `#` NOT at its start, then NEEDLE.
+cat > "$SELFTEST_DIR/midline-hash.md" <<'EOF'
+## Target
+prose with a # mid-line marker
+NEEDLE
+## Next
+EOF
+# Removing the `/^#+/` anchor ALONE (regex becomes `/#+/`, still gated by `n2 == 1`): the match
+# position for a mid-line `#` is never 1, so `n2 == 1` still correctly rejects it — hlevel stays 0,
+# NEEDLE is unaffected. Confirmed by running this exact single-point mutant: undetected, matching
+# the prediction.
+#
+# Removing the `n2 == 1` check ALONE (condition becomes `n2 > 0`, anchor `^` still in the regex):
+# the anchored regex simply never matches a mid-line `#` at all, so `n2` is 0 either way — `n2 > 0`
+# is exactly as false as `n2 == 1` was. Also confirmed undetected.
+#
+# Removing BOTH together (regex `/#+/`, condition `n2 > 0`): the mid-line `#` now matches, hlevel
+# becomes non-zero, and the prose line is wrongly read as a same-level heading that closes the
+# section early — NEEDLE is lost. This is the one combination that IS observable, confirming the
+# other two are genuinely redundant rather than merely believed to be:
+has_in_section "self-test: a REAL heading, not a mid-line '#', is what closes a section (anchor+match-position rule)" \
+  "$SELFTEST_DIR/midline-hash.md" '## Target' 'NEEDLE'
+
+# The `found_heading` term in the END exit expression (`needle != "" && found_heading &&
+# found_needle`) has no dedicated fixture, for the same reason as before — but this time the claim
+# was checked, not just argued: `found_needle` can only be set to 1 inside the `in_section`-gated
+# branch, and `in_section` can only become 1 in the SAME statement that sets `found_heading = 1`,
+# so `found_needle == 1` structurally implies `found_heading == 1` already. Ran a mutant dropping
+# `found_heading` from the END check against every fixture above (thirteen files, including one
+# querying a heading absent from its file entirely) and every single one produced the identical
+# exit code with and without the term. No fixture is added because none can discriminate it — that
+# absence is now evidence, not assumption.
+
+# round-24: two more mutants survived — both STATEMENT deletions (control flow / state reset), not
+# condition weakenings. Every row above catalogues a RULE this engine implements; `next` and
+# `is_close = 0` are load-bearing but aren't "rules" in that frame, so a complete enumeration of
+# rules was still an incomplete enumeration of mutants. That's the reason this round is where the
+# hardening stops — see the boundary note after the second fixture below.
+
+# `is_close` has file-lifetime scope in awk (no local declaration), so `is_close = 0` at the top of
+# the in_fence branch is a per-line RESET, not a one-time initialization. Delete it, and a `1` a
+# real closer wrote for one fenced block survives — stale — into the very next fenced block's first
+# content line, where it is misread as if that line were already a valid closer, closing the second
+# block one line early. That over-early-close line is itself still swallowed (the in_fence branch's
+# `next` is unconditional), so a needle sitting on the second fence's OWN first line stays hidden
+# either way — the fixture needs the needle on the second fence's second-or-later line, where the
+# premature close has already flipped scanning back to live-prose mode. Two consecutive fenced
+# blocks are required to observe this at all: a single fence never diverges, since is_close's
+# implicit awk default (0) already matches what the reset would produce the first time through.
+cat > "$SELFTEST_DIR/is-close-reset.md" <<'EOF'
+## Target
+```
+alpha
+```
+```
+first
+NEEDLE
+```
+## Next
+EOF
+hasnt_in_section "self-test: closing one fence does not leave stale state that closes the very next fence early (is_close reset)" \
+  "$SELFTEST_DIR/is-close-reset.md" '## Target' 'NEEDLE'
+
+# The opener's `next` is what makes the rest of ITS OWN line — including the fence's info string —
+# opaque, the same as everything between the markers. Delete it, and the opener line falls through
+# to the heading/needle scan on the same pass, so a needle written INSIDE the info string (not
+# separately fenced content — the very line that opens the fence) is counted as live prose instead
+# of being swallowed as part of the marker line that starts the fence.
+cat > "$SELFTEST_DIR/opener-next.md" <<'EOF'
+## Target
+```NEEDLE
+opaque
+```
+## Next
+EOF
+hasnt_in_section "self-test: a needle inside the fence opener's own info string is swallowed, not scanned as prose (opener next)" \
+  "$SELFTEST_DIR/opener-next.md" '## Target' 'NEEDLE'
+
+# --- Boundary: this hardening stops here, deliberately — not because the surface is exhausted ----
+#
+# _section_contains has now been hardened along two axes: the 18 rules enumerated in round 22 and
+# closed under round 23's "measured, not reasoned" criterion (every row names the mutant run and the
+# fixture that caught it), plus these two round-24 statement-level cases — a state reset and a
+# control-flow `next` — that aren't "rules" in the round-22 frame, which is exactly why a complete
+# enumeration of rules still missed them.
+#
+# This is NOT a claim of mutation-completeness. The mutant space for a single-point edit to a
+# sixty-line awk program — every statement, condition, operator, initialization, and evaluation
+# order — is strictly larger than any list of guarantees a human enumeration can produce. Five
+# adversarial review rounds (20-24) each found a real, previously-undetected survivor by attacking
+# this one function specifically; there is no reason to expect a sixth round would come back empty.
+# The residual is accepted deliberately here, not overlooked: continuing to hunt the next surviving
+# mutant on the theory that eventually none will be found mistakes "no mutant found yet" for "no
+# mutant exists" — those are different claims, and only the first one is true of this function.
+#
+# What a future round should do instead: if a SPECIFIC mutant is demonstrated to survive — someone
+# writes it and watches it pass when it should fail — add its fixture, the same way this round and
+# the four before it did. Do not re-open a general audit of this function on the theory that the
+# closure claim might still be incomplete; it is incomplete, structurally, and chasing that
+# completeness is the same receding target rounds 20-24 already walked into once.
 
 echo "== surface-audit.playwright.ts =="
 SA="$ASSETS/surface-audit.playwright.ts"
@@ -415,7 +897,32 @@ has_ci "static-md: adapter documents halt conditions" 'halt' "$SMD"
 # Relative-link mandate: pins the general formula AND both worked path examples.
 has "static-md: cross-subtree relative example" '](../'    "$SMD"
 has "static-md: teaches the relative rule"       'relative' "$SMD"
+# round-10 exhaustive sweep / round-11: this formula has TWO independent sites — the general-rule
+# definition (:193) and the link-integrity gate's item 2 restatement (:408). Only ONE of the two is
+# provable BY SECTION: :193's formula sits inside a FENCED code block (``` ... ```), and
+# has_in_section deliberately treats fence content as opaque — that is the exact mechanism rounds
+# 2-4 built to stop a fenced EXAMPLE from false-greening a needle, and it applies here even though
+# this particular fence is load-bearing formatting, not an illustrative snippet. Reopening
+# fence-visibility to fix this one site would reintroduce the false-green class those rounds closed,
+# so :408 gets its own section-bounded per-site pin below and :193 does not.
+#
+# :193 is NOT left uncovered, though — count_fixed (:154) is a whole-file, fence-BLIND `grep -cF`,
+# so it sees both lines regardless of the fence. The formula appears on exactly TWO physical lines
+# in the real file (:193, :408); asserting the count is 2 catches a :193-only mutation (count drops
+# to 1) with no change to fence handling. Narrower guarantee, stated honestly: this proves two
+# lines carry the formula, not that the RIGHT two lines do — a mutation that corrupted :193 while
+# introducing a third, unrelated copy elsewhere would hold the count at 2 and slip through. Smaller
+# hole than "nothing catches :193 at all," but not zero.
 has "static-md: pins the relative-path formula"  'relative(dirname(chapter_file), target_file)' "$SMD"
+REL_CHAPTER_TARGET_COUNT="$(count_fixed 'relative(dirname(chapter_file), target_file)' "$SMD")"
+if [ "$REL_CHAPTER_TARGET_COUNT" -eq 2 ]; then
+  ok "static-md: relative-path formula appears on exactly 2 lines (:193 fenced def + :408 gate check)"
+else
+  bad "static-md: relative-path formula line-count drifted from 2 (found $REL_CHAPTER_TARGET_COUNT) — a fenced-site (:193) or gate-site (:408) mutation, or a legitimate new/removed occurrence needing this count updated"
+fi
+has_in_section "static-md: link-integrity gate item 2 uses the same relative-path formula" \
+  "$SMD" '## Link-integrity gate before you publish' \
+  'relative(dirname(chapter_file), target_file)'
 has "static-md: documents vault-root index example" 'vault-root' "$SMD"
 has "static-md: documents repo-root index example"  'repo-root'  "$SMD"
 has "static-md: vault-root index path (one ../)"   '](../SUMMARY.md)'    "$SMD"
@@ -444,6 +951,12 @@ has "static-md: capture.output_dir-under-tree halt"   'resolve under `publish.ch
 # equals relative(dirname(chapter), glossary_dir), so `../<glossary-rel>` over-climbs by one segment.
 hasnt "static-md: no double-prefixed glossary link" '](../<glossary-rel>'        "$SMD"
 has   "static-md: corrected glossary link template" '](<glossary-rel>/index.md'  "$SMD"
+# round-10 exhaustive sweep, finding 3: static-md.md's own glossary-link relative() formula was
+# completely unpinned — not even bare-name — the counterpart to the obsidian-vault.md glossary
+# formula pinned this round under Finding 2. Pinned the same way: full call+args, section-bound.
+has_in_section "static-md: glossary-link formula defines <glossary-rel> via relative(dirname(chapter_file), ...)" \
+  "$SMD" '## Glossary backlink discipline' \
+  '`relative(dirname(chapter_file), publish.glossary_dir)`'
 # glossary_terms is an authoring/manifest field, never emitted into the minimal published frontmatter.
 has "static-md: glossary_terms authoring-only" 'authoring-time only' "$SMD"
 # Index wiring is two required writes PLUS a conditional glossary_seed reconciliation (not "exactly two").
@@ -492,13 +1005,81 @@ echo "== group axis (#19) — index wiring (D6), both adapters =="
 # R6-F1: step-0 already-wired short-circuit runs BEFORE container classification, so re-runs converge.
 has "obsidian-vault: step-0 already-wired short-circuit" 'wiring is already complete' "$OMD"
 has "static-md: step-0 form-agnostic short-circuit"      'form-agnostic, and it runs BEFORE any container' "$SMD"
+# round-9 [mutation testing]: the step-0 already-wired short-circuit's container-title comparison
+# had ZERO coverage — not even a bare function-name grep. Pinned with its real args (containerTitle,
+# entry) so a mutation that compares against a stale entry (e.g. oldEntry) instead of the current
+# one, silently breaking the "already wired, skip re-wiring" short-circuit, goes red. This
+# subsection IS hard-wrapped (~85-95 cols, unlike the sections pinned earlier in this cluster) —
+# the call sits entirely on one physical line, verified before wiring; a longer needle reaching for
+# the trailing "(titles compare TRIMMED...)" parenthetical would have wrapped and silently never
+# matched, so it is deliberately left out.
+has_in_section "obsidian-vault: step-0 idempotency check calls containerTitleMatches with its real args" \
+  "$OMD" '## INDEX wiring (do all of these on every chapter create/update)' \
+  'containerTitleMatches(containerTitle, entry)'
+# round-10 [mutation testing]: static-md.md's own step-0 idempotency check has the SAME two calls
+# (locateChapterLine, containerTitleMatches), still pinned only by surrounding prose before this
+# round. Codex's named mutations: locateChapterLine called with entry.slug instead of
+# expectedTarget (permits a duplicate TOC insertion); containerTitleMatches comparing
+# entry.group_title against itself (accepts a wrong container). Both left every existing pin green.
+#
+# BOTH calls wrap mid-argument in this file (`### Grouped index wiring` is hard-wrapped, unlike the
+# sections pinned earlier this round) — `locateChapterLine(indexLines,` ends one line and
+# `expectedTarget)` starts the next; `containerTitleMatches(containerTitle,` ends one line and
+# `entry)` starts the next. Neither full signature fits a single fixed-string needle. What's pinned
+# instead: two needles per call, one per physical line, each covering one argument independently —
+# so a mutation to EITHER argument is still caught, just not by one needle proving the whole
+# signature at once. What this does NOT prove: that the two half-needles are adjacent lines of the
+# SAME call (an adversarial rewrite that separated them further apart, keeping both halves
+# individually true, would not be caught) — a narrower gap than round-9's SKILL.md pins, which each
+# cover a complete signature in one shot.
+has_in_section "static-md: step-0 idempotency check calls locateChapterLine, first arg indexLines" \
+  "$SMD" '### Grouped index wiring (`anyGroup` manifests only)' \
+  'locateChapterLine(indexLines,'
+has_in_section "static-md: step-0 idempotency check's locateChapterLine, second arg expectedTarget" \
+  "$SMD" '### Grouped index wiring (`anyGroup` manifests only)' \
+  'expectedTarget)`'
+has_in_section "static-md: step-0 idempotency check calls containerTitleMatches, first arg containerTitle" \
+  "$SMD" '### Grouped index wiring (`anyGroup` manifests only)' \
+  'containerTitleMatches(containerTitle,'
+has_in_section "static-md: step-0 idempotency check's containerTitleMatches, second arg entry (trimmed compare)" \
+  "$SMD" '### Grouped index wiring (`anyGroup` manifests only)' \
+  'entry)`** (from `assets/lib/chapter-paths.mjs`; titles compare TRIMMED, not raw `===`)'
 # R7-F1: wrong-container halt — never silently relocate a user-curated index line.
 WRONG_CONTAINER_HALT="Chapter '<slug>' is listed in <index_file> under '<found_title>' instead of '<group_title>'"
 has "obsidian-vault: wrong-container halt" "$WRONG_CONTAINER_HALT" "$OMD"
 has "static-md: wrong-container halt"      "$WRONG_CONTAINER_HALT" "$SMD"
 # R7-F2: step-0's expected link target uses the same index-relative coordinate system as the TOC write.
+# obsidian-vault.md has exactly ONE site for this formula (INDEX wiring), so the whole-file `has`
+# below is a complete proof there — no per-site pin needed for that file.
 has "obsidian-vault: index-relative expected-target formula" 'relative(dirname(index_file), chapter_file)' "$OMD"
+# round-10 exhaustive sweep / round-11: static-md.md has THREE independent sites for this SAME
+# formula, not the two originally flagged — the flat TOC-write (:231, "## Index wiring"), the
+# grouped step-0 idempotency check's expected target (:255, "### Grouped index wiring", which
+# explicitly reuses "the same coordinate system item 1 above uses" rather than an unrelated
+# computation, but is still its own independent call site that must not drift from :231's write
+# path or re-runs stop converging), and the link-integrity gate's item 5 (:417). This whole-file
+# `has` is now SUBSUMED by the three per-site pins below — kept deliberately as a cheap early
+# signal, not duplicate coverage to be "simplified" away; a mutation corrupting only one of the
+# three sites would leave this needle green since the other two copies still match.
 has "static-md: index-relative expected-target formula"      'relative(dirname(index_file), chapter_file)' "$SMD"
+# Section nesting caught in mutation-testing: "## Index wiring" (:223) CONTAINS "### Grouped index
+# wiring" (:243) as a subsection — has_in_section stops only at the same-or-shallower level, so a
+# needle scoped to the H2 legitimately also scans everything inside its H3 subsection. The bare
+# formula string alone can't tell :231's copy from :255's copy once both sit inside that scanned
+# range, so a mutation touching ONLY :231 would have been invisible (255's untouched copy still
+# satisfies the H2-scoped needle) — the exact cross-site-independence failure this round exists to
+# prevent, just one level removed. Fixed by extending :231's needle with its own unique trailing
+# context ("`. Order") that :255's differently-worded sentence does not share, so the two pins are
+# now genuinely independent even though their sections nest.
+has_in_section "static-md: flat TOC-write uses the index-relative expected-target formula" \
+  "$SMD" '## Index wiring (do this on every chapter create/update)' \
+  'relative(dirname(index_file), chapter_file)`. Order'
+has_in_section "static-md: grouped step-0 idempotency check uses the same expected-target formula" \
+  "$SMD" '### Grouped index wiring (`anyGroup` manifests only)' \
+  'relative(dirname(index_file), chapter_file)'
+has_in_section "static-md: link-integrity gate item 5 uses the same expected-target formula" \
+  "$SMD" '## Link-integrity gate before you publish' \
+  'relative(dirname(index_file), chapter_file)'
 # rev 9: manual-migration halt — establishment wiring never renames/moves/deletes a container or line.
 MANUAL_MIGRATION_HALT='This manifest change requires manual group migration (not automated in 1.5.0):'
 has "obsidian-vault: manual-migration halt" "$MANUAL_MIGRATION_HALT" "$OMD"
@@ -506,7 +1087,9 @@ has "static-md: manual-migration halt"      "$MANUAL_MIGRATION_HALT" "$SMD"
 
 echo "== group axis (#19) — obsidian-only: Quartz limitation (D5) + markdown-link gate extension =="
 has "obsidian-vault: Quartz shortest-mode limitation note" "does **not** resolve under Quartz's \`shortest\`" "$OMD"
-has "obsidian-vault: activation-scoped markdown-link gate extension" 'extension**: when `publish.wikilinks: false` and the manifest is `anyGroup`, this item' "$OMD"
+# #220 Task J widens this gate off the `anyGroup` scope (was: 'and the manifest is `anyGroup`, this
+# item'); re-pointed at the post-edit wording (also asserted section-scoped below in the Task H block).
+has "obsidian-vault: markdown-link gate extension covers group-free" 'group-free manifests included' "$OMD"
 
 echo "== group axis (#19) — static-md-only: gate #1 group-aware + headings-only automation =="
 has "static-md: gate #1 is a resolution check, not a spelling check" 'resolution** check, not a spelling check' "$SMD"
@@ -528,6 +1111,73 @@ has "capture-manifest example: carries group_title"                    'group_ti
 has "capture.example.spec.ts: imports chapter-paths.mjs (early signal only)" "from './lib/chapter-paths.mjs'" "$SPEC"
 
 echo "== group axis (#19) — revalidation.md manual-migration recipe + convergence checklist =="
+# round-15 [adversarial reading]: "## Write-time canon" originally claimed the full-target embed
+# AND link formulas are "the same formula in both adapters" — true for embeds, false for links:
+# obsidian-vault.md under publish.wikilinks: true uses bare [[<chapter-slug>|Display title]] with
+# no path math, so a W6 rewrite in that mode got two contradictory normative instructions (this
+# canon's link formula vs the wikilinks-on bare-link rule). Now split: the embed paragraph stays
+# unconditional (both adapters, either manifest shape); the link paragraph is NOT uniform — pinned
+# on its explicit "only under wikilinks: false" scoping, the negation of the embed paragraph's
+# unconditional claim.
+has_in_section "revalidation: write-time-canon embed formula is unconditional, both adapters" \
+  "$REVAL" '## Write-time canon' \
+  'the full-target **embed** formula — the same formula in both'
+has_in_section "revalidation: write-time-canon link formula is scoped, NOT uniform like the embed" \
+  "$REVAL" '## Write-time canon' \
+  'uses it only under `publish.wikilinks: false`'
+# round-16 [what our own change newly exposed, not ambiguity or a stale citation]: round 15 fixed
+# the "## Write-time canon" paragraph above, but the manual-migration recipe's own step 4 — which
+# routes readers past that very paragraph — still said rewrite "embeds and glossary/Related links
+# using the full-target formulas — ALWAYS", scoped only to flat-vs-grouped and silent on wikilinks
+# mode. Under `publish.wikilinks: true` that directly contradicts the canon's bare-wikilink case. A4
+# split embed (still unconditional) from link (adapter/mode-scoped, with the wikilinks-on bare-form
+# spelled out) so the recipe can no longer be followed literally into the same contradiction.
+#
+# round-17 correction [the pin itself cemented a defect — a pin is only as good as the claim it
+# points at, pinning is not review]: round 16's link fix, exactly as briefed and pinned above, still
+# collapsed CHAPTER-target links and GLOSSARY-target links into one "wikilinks-on bare-form" rule.
+# The Related block legitimately holds both target types, and the glossary form
+# (`[[{{glossary_dir basename}}/index#TermHeading|TermHeading]]`) is not the chapter form
+# (`[[<slug>|Display title]]`) — following the round-16 wording literally would have rewritten valid
+# glossary links into links to nonexistent notes. A4 re-split step 4 by TARGET TYPE instead of by
+# formula: chapter-target links use each adapter's chapter-link canon (unchanged from round 16);
+# glossary-target links use each adapter's SEPARATE glossary canon, explicitly never the chapter
+# formula even in the same mode. The stale needle above ('as a bare `[[<slug>|Display title]]`
+# wikilink under `publish.wikilinks: true`') no longer exists in the file and must not be re-added —
+# it was pinning the exact collapsed wording this round retracted. Replaced with ONE needle carrying
+# the load-bearing claim itself (that the two target types take different formulas), not either
+# formula individually — a mutation re-collapsing them back into one rule is what this needs to
+# catch, and that mutation is precisely what round 16's own wording was.
+has_in_section "revalidation: recipe step 4 embed rewrite is unconditional (all adapters, all modes)" \
+  "$REVAL" '### The manual group-migration recipe' \
+  'regardless of adapter or `publish.wikilinks` mode'
+has_in_section "revalidation: recipe step 4 chapter-target and glossary-target links use DIFFERENT formulas, never conflated" \
+  "$REVAL" '### The manual group-migration recipe' \
+  'never the chapter-link formula, even within the same mode — the two target types use different formulas'
+# round-19 [fifth instance of the category-collapse shape, second self-inflicted]: step 4's
+# chapter/glossary split (above) still omitted a THIRD target type static-md.md's Related block
+# requires — the mandatory index-target link its own navigability check (Link-integrity gate item
+# 3) enforces. Following the two-category recipe exactly on a moved chapter leaves that link at the
+# OLD depth, pointing at a file that no longer exists there; the migration cannot converge. Two
+# needles: the third category's EXISTENCE (a mandatory index-target link, on top of chapter and
+# glossary), and its OWN anti-collapse clause — a distinct sentence from the chapter/glossary pin
+# above, not a restatement of it. Either alone is the property that would fail if someone
+# re-collapsed three cases back to two, which is exactly how both prior collapses (round 16, round
+# 17) happened.
+#
+# The obsidian-vault.md NEGATIVE half of A4's clause ("no equivalent mandatory index-target link...
+# so this case does not apply there") is deliberately left unpinned. It's a verified fact today,
+# but A4 flagged it as tied to a filed, tracked gap (group-H's Related-block enumeration) — if that
+# gap is ever legitimately closed by giving Obsidian's Related block an index member, this exact
+# clause is the line that SHOULD change. Pinning it would fight that future correct edit rather than
+# catch a regression; the asymmetry is stated in prose (static-md.md:15-16's "no backlinks panel"
+# rationale) rather than gated in a test.
+has_in_section "revalidation: recipe step 4 names a THIRD target type — static-md.md's mandatory index-target link" \
+  "$REVAL" '### The manual group-migration recipe' \
+  'also has a mandatory **index-target link** back to `{{publish.index_file}}`'
+has_in_section "revalidation: recipe step 4's index-target case is never the chapter or glossary formula" \
+  "$REVAL" '### The manual group-migration recipe' \
+  'never the chapter-link or glossary-link formula'
 has "revalidation: recipe fixes inbound links from other chapters"  'Fix inbound links from other chapters that referenced the old path' "$REVAL"
 has "revalidation: recipe updates the capture spec output dir(s)"   "Update the project's capture spec output dir(s)" "$REVAL"
 has "revalidation: terminal-state convergence checklist heading"    'Terminal-state convergence checklist' "$REVAL"
@@ -537,9 +1187,257 @@ has "revalidation: non-blocking stale-artifact advisory"            'non-blockin
 # R17-F3: the normative prose must call the production predicates, not paraphrase ad-hoc checks.
 has "revalidation: invokes specReferencesDir("     'specReferencesDir(' "$REVAL"
 has "revalidation: invokes chapterHasWikilinkTo("  'chapterHasWikilinkTo(' "$REVAL"
+# round-9 [mutation testing, same class as the SKILL.md validateGroups gap]: the two bare-name pins
+# above only prove the function NAME appears somewhere in the file — they don't touch the ARGUMENTS,
+# so a mutation that swaps or drops an argument (e.g. checking the wrong dir, or the removed
+# entry's NEW path instead of its old one) sails through green while silently weakening a
+# manual-migration convergence fact. specReferencesDir has TWO independent call sites here (the
+# retained-entry-group-changed fact, and the grouped-entry-removed fact) — each pinned by its own
+# call+args needle, split from the "twice, with two different dir spellings" requirement into a
+# second needle per site so a mutation that drops just the second required call is independently
+# caught, without needing a fragile apostrophe-escaped single needle (this paragraph is one long
+# unwrapped physical line per bullet, so no ~95-col wrap risk here — verified before wiring).
+has_in_section "revalidation: retained-entry-group-changed fact calls specReferencesDir(specText, dir)" \
+  "$REVAL" '### Terminal-state convergence checklist' \
+  'call `specReferencesDir(specText, dir)` once with the old asset dir'
+has_in_section "revalidation: retained-entry-group-changed fact requires the SECOND dir-spelling call" \
+  "$REVAL" '### Terminal-state convergence checklist' \
+  'and once with its `output_dir`-relative tail'
+has_in_section "revalidation: grouped-entry-removed fact calls specReferencesDir(specText, dir)" \
+  "$REVAL" '### Terminal-state convergence checklist' \
+  'call `specReferencesDir(specText, dir)` against the removed entry'
+has_in_section "revalidation: grouped-entry-removed fact requires both dir spellings, not one" \
+  "$REVAL" '### Terminal-state convergence checklist' \
+  'old dir, both spellings'
+has_in_section "revalidation: wikilink-reference fact calls chapterHasWikilinkTo with its real args" \
+  "$REVAL" '### Terminal-state convergence checklist' \
+  'chapterHasWikilinkTo(chapterText, slug, oldChapterRelPath)'
 
 echo "== group axis (#19) — publish-targets README =="
 has "publish-targets README: Group handling: support or halt bullet" 'Group handling: support or halt.' "$PTREADME"
+
+echo "== #220/#221 write-canon + mandatory validateGroups wiring (Task H) =="
+# Section-bound (has_in_section), not whole-file: a whole-file grep cannot prove a claim is made
+# in the RIGHT step's own prose (round-5 blocker 6). These remain doc-consistency checks — they
+# cannot prove any runtime step imperatively CALLS validateGroups; that is a human-reviewed
+# contract (F1), not something greps enforce.
+has_in_section "SKILL.md W1: halts before any capture asset on a returned message" \
+  "$SKILL" '### W1 — Discover the feature surface' \
+  'halt on every returned message before any capture asset'
+has_in_section "SKILL.md W6: MUST run validation before re-capture/re-authoring" \
+  "$SKILL" '### W6 — Revalidation / audit mode (existing chapters)' \
+  'Before any re-capture or re-authoring, you MUST run'
+# round-9 [mutation testing, IMPORTANT]: the two assertions above pin only the surrounding
+# sequencing language ("halt on every returned message...", "Before any re-capture..."), never the
+# CALL itself. A mutation that changes `validateGroups(entries)` to `validateGroups([])` at either
+# site validates an empty array instead of the manifest — silently re-inerting #221's whole halt and
+# restoring full production reachability for a duplicate slug — while every doc gate above, and the
+# unit tests (the helper itself is unchanged), stay green. Pinned independently per workflow: the
+# needle is identical at both W1 (:94) and W6 (:138), so only section-bounding tells them apart, and
+# a single shared gate would pass a mutation that disables just one of the two call sites.
+has_in_section "SKILL.md W1: pins the actual validateGroups(entries) call, not just its prose" \
+  "$SKILL" '### W1 — Discover the feature surface' \
+  'MUST run `validateGroups(entries)`'
+has_in_section "SKILL.md W6: pins the actual validateGroups(entries) call, not just its prose" \
+  "$SKILL" '### W6 — Revalidation / audit mode (existing chapters)' \
+  'MUST run `validateGroups(entries)`'
+# round-14 [IMPORTANT]: the pin above proves the CALL exists, but not what it's called WITH. The
+# original wording — "against the current manifest (delta or unchanged)" — read naturally as "the
+# delta manifest". validateGroups only counts duplicates within the array it receives, so
+# validating an accepted delta alone against an unchanged retained entry of the same slug returns
+# `[]`, silently permitting the exact overwrite #221 exists to prevent. A4 replaced it with an
+# explicit merged-manifest requirement PLUS the mechanism, so a future re-compression has to
+# actively delete a stated reason rather than merely miss an implication. Two needles, not one:
+# the requirement (what) and the mechanism (why) are independently corruptible — losing the why
+# alone reopens the exact editorial pressure that created this bug (an editor tightens the prose,
+# drops the "unnecessary" explanation, and a later edit erodes the requirement itself since nobody
+# left evidence of why it mattered).
+has_in_section "SKILL.md W6: validateGroups runs against the MERGED manifest, never the delta alone" \
+  "$SKILL" '### W6 — Revalidation / audit mode (existing chapters)' \
+  'every retained entry plus the accepted delta, merged into one array, never the delta alone'
+has_in_section "SKILL.md W6: states WHY the delta alone is insufficient (validateGroups' array-scoped duplicate check)" \
+  "$SKILL" '### W6 — Revalidation / audit mode (existing chapters)' \
+  'only sees duplicates within the array you hand it'
+has_in_section "manifest-discipline: MUST run validateGroups(entries) (mandatory, not optional)" \
+  "$MDISC" '## The discipline: no capture code before review' \
+  'MUST run validateGroups(entries)'
+hasnt "manifest-discipline: no longer frames validateGroups as an optional convenience" \
+  'running it during drafting is an optional' "$MDISC"
+# round-15 [adversarial reading, not mutation testing — the prior wording meant a requirement
+# without requiring it]: step 5 said re-run validation "after every edit that touches a slug or a
+# group", so a group_title-only edit (two groups converging on one title — containers are located
+# BY TITLE, obsidian-vault.md:207) let a reader skip the only detector for that collision, silently
+# merging two groups under one nav container. Now keyed to the GENERAL RULE (any field
+# validateGroups inspects), with the slug/group/group_title list explicitly illustrative. Two
+# needles: the general rule governing (not narrowed to slug/group), and the group_title-only
+# scenario that caused the bug specifically.
+has_in_section "manifest-discipline: step 5 re-run rule is NOT narrowed to slug/group only" \
+  "$MDISC" '## The discipline: no capture code before review' \
+  'never only an edit that touches `slug` or `group`'
+has_in_section "manifest-discipline: step 5 names the group_title-only collision scenario" \
+  "$MDISC" '## The discipline: no capture code before review' \
+  'a `group_title`-only change (e.g. two groups converging on'
+has_in_section "static-md: Assets section covers flat entries and group-free manifests alike" \
+  "$SMD" '## Assets' \
+  'flat entries and group-free manifests alike'
+hasnt "static-md: no longer keeps the byte-identical 1.4.1 embed form for group-free" \
+  'keep the shipped 1.4.1 embed form' "$SMD"
+has_in_section "obsidian-vault: glossary backlink discipline covers any manifest, wikilinks off" \
+  "$OMD" '## Glossary backlink discipline' \
+  'Wikilinks off, any manifest'
+# The `Wikilinks off, ` prefix disambiguates against a preserved bullet the bare phrase also
+# matched; that bullet is gone after A4's merge, so the prefix isn't load-bearing today, and this
+# needle is now a strict subset of the broader internal-link-bullet casualty added below — kept
+# anyway because the two assert distinct claims (glossary vs internal-link bullet), and a future
+# rewording could un-subsume it.
+hasnt "obsidian-vault: no longer scopes the glossary backlink fix to group-free only" \
+  'Wikilinks off, group-free manifest (shipped 1.4.1 form, unchanged)' "$OMD"
+has_in_section "obsidian-vault: link integrity gate covers group-free manifests too" \
+  "$OMD" '## Link integrity gate before you publish' \
+  'group-free manifests included'
+hasnt "obsidian-vault: gate no longer scoped to \`anyGroup\` only" \
+  'and the manifest is `anyGroup`, this item' "$OMD"
+has_in_section "obsidian-vault: link integrity gate states its chapter-scope limit (no handbook-wide sweep)" \
+  "$OMD" '## Link integrity gate before you publish' \
+  'does not sweep untouched chapters'
+# round-16 [what our own change newly exposed]: widening item 2 to group-free manifests inherited
+# an existing overbreadth we didn't create but did newly expose — it demanded EVERY standard
+# Markdown link resolve like an internal .md/glossary target, so a compliant chapter with
+# `[Support](mailto:...)`, an external `https://` link, or a bare `#fragment` would FALSE-HALT.
+# Three needles, one per the three concrete false-halt cases named in the finding: the **relative**
+# scoping is the actual fix (matches static-md.md:407's own wording); the bare-fragment rule and
+# the non-relative exemption class are the two other named cases it was previously silent on.
+has_in_section "obsidian-vault: link-integrity item 2 scoped to RELATIVE links only (not every link)" \
+  "$OMD" '## Link integrity gate before you publish' \
+  'this item also verifies every **relative** standard'
+has_in_section "obsidian-vault: link-integrity item 2 checks a bare fragment against the chapter's own headings" \
+  "$OMD" '## Link integrity gate before you publish' \
+  "no path component) is checked against the **current chapter's own headings**, not"
+has_in_section "obsidian-vault: link-integrity item 2 exempts non-relative targets (mailto/http/URI-scheme)" \
+  "$OMD" '## Link integrity gate before you publish' \
+  '**exempt** — this item verifies vault-internal resolution, not that an external'
+# Boundary of this whole pin cluster (rounds 5-8, through the >=2-link halt below): every
+# assertion here is a POSITIVE has_in_section — it proves the canon IS STATED in the right
+# section. It cannot prove that no CONTRADICTING statement is stated elsewhere, because catching
+# an addition would need a casualty per possible contradicting phrasing, and that space is
+# unbounded (the same receding-target shape as the PII per-field suppression problem already
+# documented for this plugin — the convergence move there was to stop enumerating and document
+# the boundary instead). Confirmed empirically: appending "Glossary linking, however, is skipped
+# entirely when wikilinks are off." right after the fallback bullet leaves every pin here green.
+# The defense against a newly-added contradiction is adversarial review, not more greps — that is
+# what actually caught both the round-7 and round-8 defects. When review finds the next one, the
+# right response is a targeted casualty for THAT wording, not an attempt to enumerate
+# contradictions in advance.
+# round-5: the wikilinks-off Internal-chapter-link bullet had a surviving two-branch
+# group-free/anyGroup conditional — a missed site of the #220 fix itself. A4 merged it to one
+# all-manifest form. Section-scoped so a whole-file grep can't confuse this with the glossary
+# bullet's own, separately-asserted "any manifest" wording a few lines below.
+has_in_section "obsidian-vault: wikilinks-off internal chapter link is one all-manifest form" \
+  "$OMD" '## Wikilinks vs Markdown links' \
+  'Internal chapter link, any manifest'
+hasnt "obsidian-vault: no longer special-cases the group-free internal-link spelling" \
+  'group-free manifest (shipped 1.4.1 form, unchanged)' "$OMD"
+# round-10 [mutation testing, same class as round-9]: the two pins above (and their static-md.md/
+# SKILL.md siblings) assert only APPLICABILITY ("any manifest"/"Wikilinks off, any manifest") —
+# never the relative() formula's own arguments. A mutation changing BOTH bases from
+# dirname(chapter_file) to dirname(index_file) leaves every applicability pin green while writing
+# links in the wrong coordinate system. Pinned independently — a single shared needle would pass a
+# mutation that corrupts only one of the two formulas.
+has_in_section "obsidian-vault: wikilinks-off internal-link formula uses dirname(chapter_file)" \
+  "$OMD" '## Wikilinks vs Markdown links' \
+  '`[Display title](relative(dirname(chapter_file), <target-chapter-file>))`'
+has_in_section "obsidian-vault: wikilinks-off glossary-link formula uses dirname(chapter_file)" \
+  "$OMD" '## Glossary backlink discipline' \
+  '`[TermHeading](relative(dirname(chapter_file), {{publish.glossary_dir}}/index.md)#termheading)`'
+# round-7: the wikilinks-off fallback told authors to skip the Related block and glossary linking
+# entirely, while a separate rule required every Related block to hold >=2 wikilinks with a halt —
+# unsatisfiable when wikilinks are off, and contradicting the very canon #220 exists to ship. A4
+# rewrote both sites to be link-format-neutral. The earlier assertions above only covered the
+# section that round's edit touched, so this same contradiction sat unpinned for six more rounds.
+#
+# round-8 [mutation testing]: this assertion's LABEL always claimed "Related block + glossary",
+# but its needle only named the Related block — a mutation that dropped just the glossary clause
+# ("...still applies, but glossary linking is skipped") sailed through green. Widened the needle
+# to carry the glossary clause the label always claimed, closing the gap between what it says and
+# what it proves, rather than adding a second assertion that would only restate the same claim.
+has_in_section "obsidian-vault: wikilinks-off fallback still covers Related block + glossary" \
+  "$OMD" '## What "Obsidian vault" implies' \
+  'glossary links, and the Related block below all still apply'
+# round-8 [mutation testing]: A4's cross-reference to "Wikilinks vs Markdown links" is unpinned
+# text — nothing caught a mutation that broke it to a nonexistent heading name, silently stranding
+# a reader. Pinned at both sites that cite it (this bullet, and the Related-block rule below).
+has_in_section "obsidian-vault: fallback bullet's cross-reference to Wikilinks vs Markdown links is intact" \
+  "$OMD" '## What "Obsidian vault" implies' \
+  '("Wikilinks vs Markdown links" below)'
+has_in_section "obsidian-vault: Related-block link form is profile-driven, not wikilink-only" \
+  "$OMD" '## Chapter structure (Obsidian-flavoured)' \
+  'in whichever form the profile dictates'
+# round-18: the old asymmetric citation ('...the full-target Markdown-link formula from
+# "Wikilinks vs Markdown links" below when it is `false`...') pinned a rule that INLINED the
+# chapter-form wikilink example ('- [[<chapter-slug>|Display text]]') as representative of a
+# category that also holds glossary targets — fourth instance of the category-collapse shape (see
+# the round-17 step-4 fix). A reader pattern-matching that example for a glossary line would write
+# `[[Term|Term]]`, a link to a nonexistent note. A4 dropped the inline example entirely and cites
+# "Wikilinks vs Markdown links" symmetrically for BOTH modes — that section resolves the syntax BY
+# TARGET TYPE, so no single example stands in for the category. The needle below pins that
+# property (by-target-type resolution, not one inlined instance), same reasoning as round 17's
+# "the two target types use different formulas" pin.
+has_in_section "obsidian-vault: Related-block link syntax resolved by target type, not one inlined example" \
+  "$OMD" '## Chapter structure (Obsidian-flavoured)' \
+  'below for the exact syntax, by target type, in each `publish.wikilinks` mode'
+# Distinct claim from the one above — a future edit could make the rule format-neutral and still
+# silently drop the >=2-link halt, so this is pinned separately rather than folded in.
+#
+# round-18 [the wrap trap hitting a pin, not a grep]: this needle broke not because the claim
+# changed but because A4's shorter paragraph reflowed the wrap — 'Either way, you halt the publish
+# step' and 'until at least two...' used to share one physical line and no longer do. The guarantee
+# itself never moved. A needle chosen to sit on one physical line is only stable while the
+# surrounding prose keeps its line breaks; any edit ABOVE it in the same paragraph can reflow the
+# tail. Re-pinned on the trailing clause alone, which stays intact regardless of where the
+# preceding sentence wraps — smaller and more self-contained than the original, not a guarantee
+# against every future reflow, just a narrower target for one to land on.
+has_in_section "obsidian-vault: the >=2-link Related-block halt survives the format-neutral rewording" \
+  "$OMD" '## Chapter structure (Obsidian-flavoured)' \
+  'until at least two outbound Related-block links exist'
+# round-19 [IMPORTANT, zero prior coverage]: round 17's template-override fix had NO pin at all —
+# confirmed by the reviewer directly: delete this instruction, restoring the exact prior paragraph,
+# and the doc suite stayed green. That reintroduces the defect the commit closed: a wikilinks-off
+# Obsidian author starts from `assets/chapter-template.md`, whose Related section is `[[…]]`-shaped
+# unconditionally, and substitutes placeholders literally — shipping wikilink-syntax links in a
+# Markdown-link chapter. Nothing downstream catches it: link-integrity item 2 verifies wikilink
+# RESOLUTION, never syntax-against-mode. The load-bearing claim is the CONJUNCTION — under
+# `publish.wikilinks: false` the template's placeholders must be overridden — not either half
+# alone (a needle with only the mode, or only "override the placeholders", is satisfiable by a
+# weaker sentence). The conjunction spans a wrap ('override the' ends one line, "template's
+# `[[…]]` Related-block placeholders" starts the next — the same class of trap round 18 hit), so
+# two needles, one per physical line, jointly proving what one could not without crossing it.
+has_in_section "obsidian-vault: under wikilinks:false, the template's placeholders MUST be overridden (mode+verb half)" \
+  "$OMD" '## Chapter structure (Obsidian-flavoured)' \
+  'Under `publish.wikilinks: false`, override the'
+has_in_section "obsidian-vault: ...specifically the template's [[…]] Related-block placeholders (object+form half)" \
+  "$OMD" '## Chapter structure (Obsidian-flavoured)' \
+  "template's \`[[…]]\` Related-block placeholders with the standard Markdown-link form from"
+# A4 renamed this checklist item's parenthetical from "(graph-island check)" to
+# "(outbound-link floor)" (obsidian-vault.md:325) — the old name reasserted a wikilinks-on
+# rationale for a rule that is mode-neutral (the same ≥2-link floor also gates wikilinks-off).
+# Named mutation this catches: the label drifting/reverting back to a wikilinks-on-flavored
+# name — the exact defect CLASS rounds 7 and 8 fixed, recurring at a third site. Not a collision
+# risk against the legitimate "a graph island" phrase a few lines above (different sentence, no
+# parens, describes the Obsidian graph view specifically, which really is wikilinks-only).
+has_in_section "obsidian-vault: link-integrity gate's >=2-link item uses the mode-neutral label" \
+  "$OMD" '## Link integrity gate before you publish' \
+  '(outbound-link floor)'
+hasnt "obsidian-vault: no longer labels the >=2-link item with a wikilinks-on-only rationale" \
+  '(graph-island check)' "$OMD"
+# The full retired phrase ("skip the wikilink-specific steps below (Related block, glossary
+# linking syntax)") wraps across two physical lines in the pre-edit source (~90-col hard wrap,
+# right after "wikilink-specific") — a fixed-string whole-file grep can never match a needle that
+# spans a line break, so that exact phrase would never have gone red even pre-edit. Pinned on the
+# single-line-safe back half instead — self-documenting (names the actual retired instruction:
+# skipping the Related block and glossary linking entirely) and verified to discriminate both
+# directions against the real pre-edit and post-edit text.
+hasnt "obsidian-vault: no longer tells authors to skip wikilink-specific steps when wikilinks are off" \
+  'steps below (Related block, glossary linking syntax)' "$OMD"
 
 echo "== Package A/B/D regression sentinels (#49, #50, #51, #52, #71) =="
 hasnt "no non-waiting isVisible after Escape"    'isVisible'                    "$CH"

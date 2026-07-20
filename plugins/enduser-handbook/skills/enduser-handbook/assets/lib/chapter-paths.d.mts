@@ -98,10 +98,10 @@ export function chapterAssetDir(profileLike: CaptureProfileLike, entry: ChapterE
 /** See chapter-paths.mjs: the canonical full-target embed formula. */
 export function embedPath(chapterFile: string, assetDir: string, filename: string): string;
 
-/** See chapter-paths.mjs: the shipped 1.4.1 static-md partial-concatenation embed, quirk included. */
+/** See chapter-paths.mjs: the superseded 1.4.1 static-md partial-concatenation embed, quirk included — retained for exported-API compatibility, no longer called by staticEmbedPath [1.6.0]. */
 export function legacyStaticEmbedPath(chapterFile: string, outputDir: string, slug: string, file: string): string;
 
-/** See chapter-paths.mjs: static-md's mode selector between the two embed forms above. */
+/** See chapter-paths.mjs: #220 [1.6.0] the write-time canon — always the full-target embed formula, regardless of anyGroup; `entries` is retained for exported-API compatibility but no longer consulted. */
 export function staticEmbedPath(
   entries: ChapterEntry[],
   chapterFile: string,
@@ -110,7 +110,7 @@ export function staticEmbedPath(
   file: string,
 ): string;
 
-/** See chapter-paths.mjs: all D1 manifest-review gates; [] for a group-free manifest. */
+/** See chapter-paths.mjs: all D1 manifest-review gates; [1.6.0, #221] a group-free manifest now halts unconditionally on a duplicate flat slug instead of always returning []. */
 export function validateGroups(entries: ChapterEntry[]): string[];
 
 /** See chapter-paths.mjs: the D6 step-0 index-line idempotency check. */

@@ -11,8 +11,10 @@ The publish destination is a folder tree of plain Markdown files inside an Obsid
 You can rely on three Obsidian-specific features:
 
 - **Wikilinks** — `[[path/to/note|display text]]`. Enabled when `publish.wikilinks: true`.
-  When `false`, fall back to standard Markdown links and skip the wikilink-specific
-  steps below (Related block, glossary linking syntax).
+  When `false`, fall back to standard Markdown links for every link this adapter writes —
+  internal chapter links, glossary links, and the Related block below all still apply,
+  just in the standard-Markdown form ("Wikilinks vs Markdown links" below) instead of
+  wikilink syntax.
 - **Dataview** — code-fenced ` ```dataview ` queries that render as live tables/lists.
   Only emit Dataview if the vault already uses it; do not introduce it unprompted.
 - **INDEX.md convention** — each top-level vault section has an `INDEX.md` that tracks
@@ -45,8 +47,17 @@ across translations.
 
 `group` is an optional field on a manifest entry (`references/manifest-discipline.md`),
 also always English kebab-case, one level (no `/`). A manifest where no entry sets it —
-the 1.4.1 shipped default — produces only the flat form above and this adapter behaves
-identically to 1.4.1 in every section below. Flat and grouped entries coexist in one
+the 1.4.1 shipped default — produces only the flat form above. As of 1.6.0, in
+`assets/lib/chapter-paths.mjs`, `staticEmbedPath` (the asset-embed path formula, "Layout
+you produce" below, now always the full-target join) and `validateGroups` (the
+duplicate-slug halt, always runs) both now apply to group-free manifests. In
+`publish.wikilinks: false` mode this adapter also changes group-free behavior further:
+the full-target glossary formula and the Markdown-link integrity gate both now cover
+group-free manifests (see "Glossary backlink discipline" and "Link integrity gate before
+you publish" below), and the Related block's sibling/glossary links — including the ≥2
+floor — are required in Markdown form, not skipped (see "Wikilinks vs Markdown links" and
+"Chapter structure" below). This list names the group-free changes we are aware of; it is
+not a claim that every other section is unchanged. Flat and grouped entries coexist in one
 manifest. Canonical chapter path (D2, shared with `static-md.md` and `SKILL.md`):
 
 ```
@@ -138,13 +149,18 @@ mechanics matter at publish time:
   H2s render as `## {{publish.section_labels.prerequisites}}` and
   `## {{publish.section_labels.related}}` — literal strings the user wrote in their
   language. Do not translate them yourself.
-- **The Related block ends every chapter** and contains ≥2 wikilinks to sibling chapters
-  or glossary entries: `- [[<chapter-slug>|Display text]]`. This is what makes the
-  Obsidian graph view useful; a chapter with no outbound wikilinks is a graph island
-  and you halt the publish step until at least two exist.
+- **The Related block ends every chapter** and contains ≥2 links to sibling chapters or
+  glossary entries, in whichever form the profile dictates — see "Wikilinks vs Markdown
+  links" below for the exact syntax, by target type, in each `publish.wikilinks` mode.
+  With wikilinks on, this is also what makes the Obsidian graph view useful — a chapter
+  with no outbound wikilinks is a graph island. Either way, you halt the publish step
+  until at least two outbound Related-block links exist.
 
 Start from `assets/chapter-template.md` and substitute the placeholders — never
-hand-rewrite the skeleton from memory.
+hand-rewrite the skeleton from memory. Under `publish.wikilinks: false`, override the
+template's `[[…]]` Related-block placeholders with the standard Markdown-link form from
+"Wikilinks vs Markdown links" below — the template's Related section is written for the
+wikilinks-on case only.
 
 ## INDEX wiring (do all of these on every chapter create/update)
 
@@ -252,14 +268,14 @@ chapter. Skip any of them and the chapter exists but no reader will find it.
 
 `publish.wikilinks: false`:
 
-- Internal chapter link, group-free manifest (shipped 1.4.1 form, unchanged):
-  `[Display title](<chapter-slug>.md)`.
-- Internal chapter link, `anyGroup` manifest — every chapter the skill WRITES (new
-  chapters, and chapters a manual-migration rewrite touches) uses the full-target formula
-  instead of the bare-filename form above, because the linking and target chapters can now
-  sit in different groups (write-time canon; retained chapters keep whatever spelling they
-  already have — the link-integrity gate below checks that the target resolves, not that
-  the spelling matches this formula): `[Display title](relative(dirname(chapter_file), <target-chapter-file>))`.
+- Internal chapter link, any manifest — every chapter the skill WRITES (new chapters, and
+  chapters a manual-migration rewrite touches) uses the full-target formula (write-time
+  canon; retained chapters keep whatever spelling they already have — the link-integrity
+  gate below checks that the target resolves, not that the spelling matches this formula):
+  `[Display title](relative(dirname(chapter_file), <target-chapter-file>))`. For a
+  group-free manifest, linking and target chapters share one directory, so this formula
+  naturally evaluates to `<chapter-slug>.md` — the same spelling as the shipped 1.4.1
+  form, not a special case.
 - Glossary link: see "Glossary backlink discipline" below.
 - Skip Dataview blocks; they require Obsidian to render.
 
@@ -272,11 +288,9 @@ glossary itself lives at `{{publish.glossary_dir}}/index.md` and is owned by
 `references/glossary-discipline.md` — this adapter only encodes the linking syntax:
 
 - Wikilinks on: `[[{{publish.glossary_dir basename}}/index#TermHeading|TermHeading]]`
-- Wikilinks off, group-free manifest (shipped 1.4.1 form, unchanged):
-  `[TermHeading]({{publish.glossary_dir}}/index.md#termheading)`.
-- Wikilinks off, `anyGroup` manifest — every chapter the skill WRITES uses the full-target
-  formula instead of the raw profile-key path above (write-time canon; retained chapters
-  keep whatever spelling they already have, per the link-integrity gate below):
+- Wikilinks off, any manifest — every chapter the skill WRITES uses the full-target
+  formula (write-time canon; retained chapters keep whatever spelling they already have,
+  per the link-integrity gate below):
   `[TermHeading](relative(dirname(chapter_file), {{publish.glossary_dir}}/index.md)#termheading)`.
 
 The glossary entry heading is the term in `glossary.canonical_term_language`; the
@@ -301,12 +315,25 @@ failure:
    sibling vault subtrees resolve fine as long as the target stays inside the vault.
 2. Every wikilink target (`[[…]]`) resolves to either an existing `.md` file in the
    vault or an existing heading anchor in the glossary. Broken wikilinks render as
-   red placeholders in Obsidian and are silent in plain Markdown views. **Activation-scoped
-   extension**: when `publish.wikilinks: false` and the manifest is `anyGroup`, this item
-   also verifies every standard Markdown link (`[text](target)`) resolves the same way —
-   grouped chapters can sit at different depths, so a stale or hand-edited relative link is
-   exactly as broken as a dangling wikilink and must be caught here too.
-3. The chapter has ≥2 outbound links in its Related block (graph-island check).
+   red placeholders in Obsidian and are silent in plain Markdown views. When
+   `publish.wikilinks: false`, this item also verifies every **relative** standard
+   Markdown link (`[text](target)`) resolves to a real file the same way — every
+   manifest, group-free manifests included: grouped chapters can sit at different
+   depths, so a stale or hand-edited relative link is exactly as broken as a dangling
+   wikilink and must be caught here too. A bare-fragment target (`[text](#heading)`,
+   no path component) is checked against the **current chapter's own headings**, not
+   the vault or the glossary. A `mailto:` link, an `http://`/`https://` link, or any
+   other non-relative target (a URI scheme, or a vault-rooted/absolute path) is
+   **exempt** — this item verifies vault-internal resolution, not that an external
+   link is reachable.
+   **This gate is chapter-scoped**: it fires here, before declaring the chapter
+   published, so it catches a legacy broken link only when that chapter is next
+   published, or revalidated in a way that **touches** it — an accepted-diff refresh
+   or a material re-author (`references/revalidation.md`). A **no-op** revalidation
+   classifies the chapter unchanged and never runs this gate. It does not sweep untouched chapters
+   — an already-published chapter with a stale link stays broken until a publish, or a touching
+   revalidation, next runs against it.
+3. The chapter has ≥2 outbound links in its Related block (outbound-link floor).
 4. The frontmatter `language` matches `language.code`; the section labels match
    `publish.section_labels.*` verbatim.
 5. `{{publish.index_file}}` lists the chapter — under its `group_title` container, for a

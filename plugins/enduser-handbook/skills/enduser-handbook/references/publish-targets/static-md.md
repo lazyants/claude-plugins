@@ -47,9 +47,18 @@ English. This keeps the file tree greppable and the link targets stable across t
 
 **Chapter path.** `group` set on the manifest entry ⇒ `publish.chapters_dir/<group>/<slug>.md`;
 `group` unset ⇒ `publish.chapters_dir/<slug>.md` — the shipped 1.4.1 form, unchanged. `group` is
-English kebab-case, one level (nested groups like `a/b` are out of scope for 1.5.0). A wholly
-group-free manifest never produces a grouped path anywhere in this adapter — every new branch
-below is gated on `anyGroup(entries)`, pinned by unit test.
+English kebab-case, one level (nested groups like `a/b` are out of scope for 1.5.0).
+
+**Activation rule.** This adapter's group-aware machinery — the grouped branch of the chapter
+path above, and the grouped index-wiring container logic further down — is gated on
+`anyGroup(entries)`, pinned by unit test: a wholly group-free manifest never produces a grouped
+path or a container line anywhere in this adapter. `assets/lib/chapter-paths.mjs`'s own activation
+rule has **two 1.6.0 exceptions that are group-free-aware by design and no longer consult
+`anyGroup`: `staticEmbedPath` (see "Assets" below) and `validateGroups` (see
+`manifest-discipline.md`)**. That count is a property of the **helper module**, not a ceiling on
+adapter behavior — an individual publish-target adapter (this one, or another) may carry its own
+group-free behavior changes on top of it, so `anyGroup` gating must never be assumed to cover
+everything an adapter does.
 
 ## Assets
 
@@ -64,28 +73,57 @@ chapterAssetDir(entry) = join(capture.output_dir, entry.group?, entry.slug)
 — `{{capture.output_dir}}/<chapter-slug>/` for a flat entry, `{{capture.output_dir}}/<group>/<slug>/`
 for a grouped one.
 
-**Group-free manifests keep the shipped 1.4.1 embed form byte-identically**: a partial
-concatenation `![alt](<rel>/<chapter-slug>/01-overview.png)`, where `<rel>` is
-`relative(dirname(chapter_file), capture.output_dir)`. For the example layout
-(`capture.output_dir: vault/handbook/assets`, chapter in `vault/handbook/`) that resolves to
-`![alt](assets/<chapter-slug>/01-overview.png)`. This spelling is never group-aware and degenerates
-to a forbidden leading-slash path when `dirname(chapter_file) == capture.output_dir` — a known
-quirk kept only for byte-identity (follow-up issue); it is never used once the manifest is
-`anyGroup`.
-
-**Under `anyGroup`, the write canon switches to the full-target formula** — every chapter this
-skill writes, flat entries included, uses it, because it is the one spelling that resolves
-correctly in every layout, degenerate ones included:
+**The write canon is unconditional: flat entries and group-free manifests alike use the same
+full-target embed formula as grouped ones** — there is no group-free branch left in this adapter's
+embed spelling. Every chapter this skill writes computes:
 
 ```
 <embed> = relative(dirname(chapter_file), join(chapterAssetDir(entry), <file>))
 ```
 
-Embed it as `![alt](<embed>)`. Do **not** merely splice a `<group>/` segment into the legacy
-`<rel>/<chapter-slug>/<file>` form — re-derive the whole path from `chapterAssetDir(entry)`.
+Embed it as `![alt](<embed>)`. Do **not** merely splice a `<group>/` segment into the superseded
+`<rel>/<chapter-slug>/<file>` concatenation (`<rel>` = `relative(dirname(chapter_file),
+capture.output_dir)`) — re-derive the whole path from `chapterAssetDir(entry)`. That superseded
+concatenation and the full-target canon diverge outside the simplest layout — verified across the
+three layouts that matter:
+
+- **sibling** — `capture.output_dir` sits strictly below `publish.chapters_dir` (the common worked
+  example above);
+- **degenerate** — the chapter's own directory equals `capture.output_dir`;
+- **parent** — `capture.output_dir` sits strictly above `publish.chapters_dir`, i.e. the chapter
+  lives nested inside it.
+
+| Layout     | Superseded concatenation | Full-target canon | Changes? |
+|---|---|---|---|
+| sibling    | `assets/items/01.png`    | same               | SAME     |
+| degenerate | `/items/01.png`          | `items/01.png`     | CHANGES  |
+| parent     | `../items/01.png`        | `01.png`           | CHANGES  |
+
+`chapterAssetDir(entry)` resolves correctly in every layout whose operands share a common anchor,
+degenerate ones included — the three rows above are **representative** of that class, pinned by
+unit test, not an exhaustive enumeration of every possible directory topology. A **cousin**
+topology, where `capture.output_dir` and the chapter's directory branch apart below a shared
+ancestor rather than one nesting inside the other (e.g. `chapter_file: vault/docs/handbook/items.md`,
+`capture.output_dir: vault/assets`), is not one of the three rows above but still agrees between
+spellings — both resolve to `../../assets/items/01.png` (verified by running `embedPath` and
+`legacyStaticEmbedPath` against those exact inputs). Divergence tracks the degenerate and parent
+cases above specifically, not directory topology in general. Profile paths with unequal unresolved
+leading `../` climbs (e.g. `chapter_file` and
+`capture.output_dir` both expressed relative to a project root, but climbing out of it by a
+different number of segments) are a known limitation of the shared `relative()` path helper in
+`assets/lib/chapter-paths.mjs` (see #246) — pre-existing, not introduced or worsened by 1.6.0. It
+produces the identical wrong result under both the superseded concatenation and the full-target
+canon there, so neither spelling is more broken than the other on that class of profile path.
+
+The superseded concatenation (`legacyStaticEmbedPath`) is retained in `assets/lib/chapter-paths.mjs`
+only for exported-API compatibility — this adapter no longer calls it for any manifest, flat or
+grouped.
+
 Retained chapters keep whatever spelling already resolves — the link-integrity gate verifies
-resolution, never spelling (see "Write-time canon" in `revalidation.md`) — so an `anyGroup` flip
-on its own never triggers a rewrite. Never absolute, never docs-root-rooted paths.
+resolution, never spelling (see "Write-time canon" in `revalidation.md`) — so neither an `anyGroup`
+flip nor this write-canon change, on its own, ever triggers a rewrite. 1.6.0 performs no automatic
+retroactive repair of this change: a chapter is never rewritten *solely* because of an upgrade or
+an `anyGroup` flip. Never absolute, never docs-root-rooted paths.
 
 A static renderer serves only files **inside** the published docs tree, so `capture.output_dir`
 MUST resolve under `publish.chapters_dir` (point it at e.g. `<chapters_dir>/assets`) — otherwise the
@@ -130,11 +168,12 @@ from memory. Two mechanics matter at publish time for this target:
 - **The Related block ends every chapter** and renders as plain Markdown links, the way the
   Obsidian-default template's placeholders are overridden for a static target. Use standard
   Markdown links, not Obsidian wikilinks. Each line is one of three forms:
-  - a sibling chapter. **Group-free manifests** keep the bare, same-directory spelling
-    byte-identically: `- [Title](slug.md)`. **Under `anyGroup`**, use the general relative-link
-    formula from "Relative links — the general rule" below instead — never the bare `slug.md`
-    spelling, which is wrong the moment the sibling sits in a different group (or one chapter is
-    grouped and the other is flat), e.g. `- [Title](../billing/orders.md)` for a cross-group link;
+  - a sibling chapter, computed with the general relative-link formula from "Relative links — the
+    general rule" below. **Group-free manifests, or two siblings in the same group**, produce the
+    bare, same-directory spelling `- [Title](slug.md)` — this is what the formula naturally yields
+    when both files share a directory, not a hardcoded special case — while **cross-group
+    siblings** (`anyGroup`, different groups, or one chapter grouped and the other flat) never
+    simplify that way, e.g. `- [Title](../billing/orders.md)`;
   - `- [Term](<glossary-rel>/index.md#term)` — a glossary entry (see "Glossary backlink
     discipline" below for `<glossary-rel>`);
   - `- [<index label>](<relative-index-path>)` — the index, e.g. `- [All chapters](../SUMMARY.md)`.
@@ -154,9 +193,12 @@ So compute every link relative to the chapter that contains it:
 relative(dirname(chapter_file), target_file)
 ```
 
-The nesting depth of `chapters_dir` varies the number of `../` segments, and the formula always
-yields the right path. The literal paths below are **examples for this layout** — never copy a
-literal across to a profile with a different layout; re-derive it from the formula.
+The nesting depth of `chapters_dir` varies the number of `../` segments, and the formula yields
+the right path whenever `chapter_file` and `target_file` share a common anchor. It is the same
+`relative()` helper the embed formula uses (see "Assets" above), so it carries the same known
+limitation on profile paths with unequal unresolved leading `../` climbs. The literal paths below
+are **examples for this layout** — never copy a literal across to a profile with a different
+layout; re-derive it from the formula.
 
 - **Chapter → glossary** (example for this layout, with `chapters_dir: vault/handbook` and
   `glossary_dir: vault/knowledge/glossary`): `[Term](../knowledge/glossary/index.md#term)` —

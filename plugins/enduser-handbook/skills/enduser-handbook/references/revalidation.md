@@ -62,6 +62,39 @@ re-derived surface is provably identical to what was already blessed. Any
 deviation that a reviewer would want to see is, by definition, a material delta
 that emits a delta manifest and halts.
 
+## Write-time canon
+
+Every new chapter, and every chapter W6 re-authors for its own reasons, is
+written with the full-target **embed** formula — the same formula in both
+publish-target adapters (`static-md.md`, `obsidian-vault.md`), whether the
+manifest is grouped or group-free.
+
+The full-target **link** formula is not as uniform. `static-md.md` always
+uses it. `obsidian-vault.md` uses it only under `publish.wikilinks: false`
+— with wikilinks on, an Obsidian chapter links by bare
+`[[<chapter-slug>|Display title]]`, basename resolution with no
+relative-path math needed (`obsidian-vault.md`'s "Wikilinks vs Markdown
+links"). That is a different link syntax entirely, not an exception to
+this canon: a wikilinks-on chapter was never a candidate for the
+full-target link formula, so there is nothing here for the canon to
+override.
+
+The gates this canon feeds are **resolution** checks, not spelling checks:
+they verify that a link or embed target *resolves* on disk, not that it is
+spelled the one canonical way. A retained chapter that W6 does not touch
+keeps whatever spelling already resolves, byte for byte — the gate is
+satisfied either way, so there is nothing to rewrite.
+
+**The narrow claim, stated precisely:** 1.6.0 performs **no automatic
+retroactive #220 repair**, and never rewrites a chapter *solely* because of
+an upgrade or an `anyGroup` flip. An `anyGroup` flip alone is always
+informational only (see the note under "Boundary triggers" below) — it
+never by itself triggers a rewrite of an untouched chapter. A chapter *is*
+legitimately rewritten when something else causes it: an ordinary W6
+accepted-diff or material re-author ("The flow" above), or the manual
+group-migration recipe below. Neither of those is new in 1.6.0, and neither
+is what an `anyGroup` flip alone would do.
+
 ## Manual-migration boundary (the group axis)
 
 1.5.0 adds an optional `group`/`group_title` pair to manifest entries (see [manifest-discipline.md](manifest-discipline.md)). Moving an entry between groups, renaming a group's title, or removing a grouped entry all require moving files on disk — the chapter file, its asset directory, and its index-file line and container — and that relocation is **not automated in 1.5.0**. Instead of moving anything itself, the skill halts and hands you a recipe: no automated relocation, no in-place rewrite of chapters the delta did not touch, no journal or rollback machinery, no container rename/delete, no inbound-link rewriter, no capture-spec updater. You are the transaction engine; the halt text below tells you exactly what to move and edit.
@@ -83,7 +116,7 @@ Shared by both publish-target adapters — follow it exactly regardless of which
 1. Move the chapter file from its old path to its current derived path — `publish.chapters_dir/<slug>.md` flat, `publish.chapters_dir/<group>/<slug>.md` grouped.
 2. Move the asset directory from its old path to its current derived path — `capture.output_dir/<slug>/` flat, `capture.output_dir/<group>/<slug>/` grouped. Do NOT re-run capture for this move: a group-only relocation is not a feature change, so the existing screenshots are still correct — see the recapture carve-out in `manifest-discipline.md`.
 3. Update the index file: retarget or remove the old line, then wire the current line under the correct container, creating the container heading first if it does not exist yet — the same container-resolution wiring the adapter uses when establishing a brand-new grouped chapter.
-4. Rewrite the moved chapter's own embeds and glossary/Related links using the full-target formulas — ALWAYS, regardless of whether the entry's destination is flat or grouped. The full-target spelling resolves in every mode; a flat-only spelling can permanently fail to resolve for a chapter whose destination sits directly under `capture.output_dir`.
+4. Rewrite the moved chapter's own **embeds** using the full-target formula — ALWAYS, regardless of whether the entry's destination is flat or grouped, and regardless of adapter or `publish.wikilinks` mode. The full-target spelling resolves in every mode; a flat-only spelling can permanently fail to resolve for a chapter whose destination sits directly under `capture.output_dir`. Rewrite its **chapter-target links** — sibling-chapter links, wherever they appear (Related block or elsewhere) — using each adapter's own chapter-link canon: the full-target relative formula for `static-md.md` always and for `obsidian-vault.md` under `publish.wikilinks: false`, or `obsidian-vault.md`'s bare `[[<slug>|Display title]]` wikilink under `publish.wikilinks: true`. Rewrite its **glossary-target links** — Related-block glossary links and first-occurrence glossary links alike — using each adapter's separate **glossary** canon instead, per its own "Glossary backlink discipline" section: never the chapter-link formula, even within the same mode — the two target types use different formulas. `static-md.md` also has a mandatory **index-target link** back to `{{publish.index_file}}` (its navigability check, "Link-integrity gate before you publish") — rewrite it the same depth-sensitive way, per "Relative links — the general rule"'s index case, never the chapter-link or glossary-link formula. `obsidian-vault.md` has no equivalent mandatory index-target link in its Related block, so this case does not apply there.
 5. Fix inbound links from other chapters that referenced the old path.
 6. Update the project's capture spec output dir(s) so future captures write to the current derived asset dir.
 7. For a removed entry: delete its chapter file, its asset directory, and its index line. Removing the now-possibly-empty container is optional — your call, not the skill's.
