@@ -32,3 +32,25 @@ This shell aliases `cp` to `cp -i`. `cp backup.py real.py` (intending a plain ov
 
 - Never trust a `cp`/`mv`/`rm` restore from exit code alone in an unfamiliar shell — verify the target file's content directly afterward (`grep` your expected symbols / diff).
 - For a guaranteed-non-interactive restore, bypass the alias entirely: `/bin/cp -f`, or `python3 -c "open(a,'wb').write(open(b,'rb').read())"` (no shell alias can intercept a stdlib call).
+
+## `git -C <dir>` does NOT scope a redirect — the path it prints may be relative
+
+`git -C <worktree> rev-parse --git-path info/exclude` prints an ABSOLUTE path in a linked
+worktree and a RELATIVE one (`.git/info/exclude`) in an ordinary checkout. `-C` changes git's
+working directory, not the shell's, so a `>>` redirect on that output resolves in the CALLER's
+cwd — the write escapes the worktree you carefully scoped the command to.
+
+Fix: `git -C <dir> rev-parse --path-format=absolute --git-path info/exclude`. Same for any
+`rev-parse` output you feed to a shell redirect, `cd`, or another tool.
+
+**The dangerous part is the asymmetry, not the flag.** The relative form appears only in an
+ordinary checkout, so a test run from a linked worktree passes and hides it — which is exactly
+how a reviewer-requested fix for this shipped still-broken (2026-07-20, #263: `-C` was added to
+both calls, verified in a worktree, and the ordinary-checkout case was never exercised until the
+bot ran both). Generalizes past git: **when two environments differ in the property under test,
+the one you happen to be standing in is the one that proves nothing.** Pick the discriminating
+case deliberately, or run both.
+
+Verify exclusion with `git -C <dir> check-ignore -q <path>` rather than `git status --short` —
+status cannot be empty on an already-dirty tree, so it proves nothing where it is most likely
+to be used.
