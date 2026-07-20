@@ -280,17 +280,20 @@ except ImportError as exc:
     sys.exit(
         f"skeptic_ready.py: cannot import suspicion_scan.py from {SCRIPT_DIR} ({exc}).\n"
         "suspicion_scan.py must be installed alongside skeptic_ready.py under "
-        "${durable_root}/scripts/ -- it supplies compute_frozen_input_hash(), the "
-        "fresh-read H1 hash this VERIFIER re-hashes on-disk canon/manifest/senses "
-        "with to compare against skeptic_setup.py's own stamps (which are computed "
-        "from a captured snapshot via compute_frozen_input_hash_from_state(), never "
-        "via this fresh-read wrapper -- see that function's own docstring for why "
-        "the stamper and verifier need opposite freshness semantics from the same "
-        "hash formula); it also supplies read_frozen_input_snapshot() and "
-        "compute_frozen_input_hash_from_state() directly, which frozen_input_check() "
-        "uses for canon/senses (codex round 5) so the H1 comparison and the "
-        "downstream competitor-resolution parse consume the SAME captured snapshot, "
-        "never two independent re-reads that could silently disagree. Re-run "
+        "${durable_root}/scripts/ -- it supplies read_frozen_input_snapshot() and "
+        "compute_frozen_input_hash_from_state(), which frozen_input_check() uses "
+        "for canon/manifest/senses alike (codex round 5 canon/senses, round 7 "
+        "manifest) so the H1 comparison and any downstream competitor-resolution "
+        "parse consume the SAME captured snapshot, never two independent re-reads "
+        "that could silently disagree; skeptic_setup.py's own stamps are computed "
+        "from that same captured-snapshot formula via "
+        "compute_frozen_input_hash_from_state() -- see that function's own "
+        "docstring for why the stamper and verifier need opposite freshness "
+        "semantics from the same hash formula. compute_frozen_input_hash() (the "
+        "fresh-read, path-based wrapper around the same two) is imported here too, "
+        "purely so this module's own test suite can stamp fixtures with it -- "
+        "nothing in this module's production code calls it directly any more "
+        "(codex round 7 closed the last such call site). Re-run "
         "Step 0a, or verify the plugin install is not corrupted."
     )
 
@@ -494,8 +497,9 @@ def _resolve_competitors(
     (`_load_canon_entries`/`_parse_canon_entries_from_bytes`, and
     `load_senses`/`load_senses_from_snapshot(..., allow_absent=True)`
     here) -- mirrors `--canon`'s own pre-existing unconditional tolerance
-    in this file (`compute_frozen_input_hash`, used regardless of whether
-    `--canon` was explicitly passed). This is a deliberate DEPARTURE from
+    in this file (`frozen_input_check()`'s own per-input table, used
+    regardless of whether `--canon` was explicitly passed). This is a
+    deliberate DEPARTURE from
     `canon_adjudication_audit.py`'s explicit-path-must-exist convention
     (codex round: `skeptic-pass-wf.template.js` ALWAYS passes
     `--senses-path ${ROOT}/canon_senses.json` explicitly, unconditionally,
@@ -801,22 +805,44 @@ def run_merge_fragments(run_dir, out_path, schemas_dir=None) -> dict:
 # --verify-merged helpers
 # ---------------------------------------------------------------------------
 
-def _frozen_input_tamper_reason(label: str, path: Path, stamped_sha256) -> "str | None":
-    """H1 mitigation (verifier half): re-hashes ``path`` via the shared
-    ``compute_frozen_input_hash`` (imported from ``suspicion_scan.py`` --
-    this VERIFIER's fresh-read tool; ``skeptic_setup.py`` stamps with
-    ``compute_frozen_input_hash_from_state`` instead, over a captured
-    (state, bytes) snapshot rather than a re-read -- see that function's
-    own docstring for why the stamper and verifier need opposite freshness
-    semantics from the SAME underlying hash formula, never two
-    independently-drifting copies; state-tagged, so absent/regular-empty/
-    irregular paths hash DIFFERENTLY, codex round 2) and compares it against
-    ``stamped_sha256`` -- the aggregate manifest's own ``canon_sha256``/
-    ``manifest_sha256``/``senses_sha256`` (#243), stamped by
-    skeptic_setup.py at setup time. Returns
-    None when ``stamped_sha256`` itself is absent (an older/hand-built
-    aggregate manifest predating this check -- skipped, not a failure) or
-    when the hashes agree; otherwise a human-readable mismatch reason.
+def _frozen_input_tamper_reason(
+    label: str, path: Path, state: str, content: bytes, stamped_sha256
+) -> "str | None":
+    """H1 mitigation (verifier half): hashes an ALREADY-CAPTURED
+    ``(state, content)`` snapshot via ``compute_frozen_input_hash_from_state``
+    (imported from ``suspicion_scan.py``; ``skeptic_setup.py`` stamps with
+    the SAME function, over its own captured snapshot at derivation-read
+    time -- see that function's own docstring for why the stamper and
+    verifier need opposite freshness semantics from the same underlying
+    hash formula, never two independently-drifting copies; state-tagged, so
+    absent/regular-empty/irregular paths hash DIFFERENTLY, codex round 2)
+    and compares it against ``stamped_sha256`` -- the aggregate manifest's
+    own ``canon_sha256``/``manifest_sha256``/``senses_sha256`` (#243),
+    stamped by skeptic_setup.py at setup time. Returns None when
+    ``stamped_sha256`` itself is absent (an older/hand-built aggregate
+    manifest predating this check -- skipped, not a failure) or when the
+    hashes agree; otherwise a human-readable mismatch reason.
+
+    Codex round 7: this is the ONLY tamper-reason comparator
+    ``frozen_input_check()`` uses now, for canon.json/manifest.json/
+    canon_senses.json alike -- it used to have a path-based twin (re-reading
+    ``path`` itself via ``compute_frozen_input_hash()``) that
+    ``frozen_input_check()`` called for manifest.json specifically, on the
+    reasoning that manifest.json has no downstream parser in this module to
+    keep consistent with a REUSED snapshot the way canon/senses do. That
+    reasoning was true but answered the wrong question: whether a read can
+    fail without crashing the caller (``tolerant_reads``) is about SNAPSHOT
+    CAPTURE, not about snapshot reuse. The path-based twin captured its own
+    snapshot via ``compute_frozen_input_hash()``'s un-gated
+    ``read_frozen_input_snapshot()`` call -- a second capture path
+    ``tolerant_reads`` never saw -- so a stamped manifest.json OSError
+    escaped ``run_check_frozen_inputs`` raw even with ``tolerant_reads=True``,
+    despite that caller's whole contract being "never a crash". Every
+    frozen input this check covers now goes through the SAME gated capture
+    (``frozen_input_check()``'s own table + ``_snapshot_or_none()``) before
+    ever reaching this function, so nothing in this module calls
+    ``compute_frozen_input_hash()`` any more (the test suite still imports
+    it directly to stamp fixtures -- see the top-of-file import comment).
 
     BEST-EFFORT integrity tripwire only, NOT a sound tamper-detection
     guarantee: it reliably catches ACCIDENTAL/non-adversarial mutation (a
@@ -827,34 +853,6 @@ def _frozen_input_tamper_reason(label: str, path: Path, stamped_sha256) -> "str 
     whatever it tampered, defeating this check without needing to evade it.
     A sound version (anchoring the setup-time hash somewhere such an agent
     cannot reach) is deferred to Phase 3; never a filesystem sandbox."""
-    if not isinstance(stamped_sha256, str):
-        return None
-    actual = compute_frozen_input_hash(path)
-    if actual == stamped_sha256:
-        return None
-    return (
-        f"{label} at {path} has changed since skeptic_setup.py stamped this run "
-        f"(sha256 {actual} != stamped {stamped_sha256}) -- possible tamper of the frozen input, HALTING"
-    )
-
-
-def _frozen_input_tamper_reason_from_snapshot(
-    label: str, path: Path, state: str, content: bytes, stamped_sha256
-) -> "str | None":
-    """Byte-based twin of `_frozen_input_tamper_reason` -- hashes an
-    ALREADY-CAPTURED `(state, content)` snapshot via
-    `compute_frozen_input_hash_from_state` instead of re-reading `path`.
-
-    Codex round 5: used for canon.json/canon_senses.json, whose captured
-    snapshot ALSO feeds a downstream parse (`_resolve_competitors`'s own
-    `canon_snapshot`/`senses_snapshot` reuse) -- so the tamper comparison
-    and the parse can never independently disagree about which on-disk
-    version of the file they each describe. manifest.json has no such
-    downstream parser in this module, so
-    `frozen_input_check()` keeps using the plain `_frozen_input_tamper_reason`
-    for it -- a fresh hash-and-discard read is genuinely correct there,
-    not an instance of this race. Same BEST-EFFORT caveat as the path-based
-    version (see its own docstring)."""
     if not isinstance(stamped_sha256, str):
         return None
     actual = compute_frozen_input_hash_from_state(state, content)
@@ -882,29 +880,46 @@ def frozen_input_check(
     against (see below) OR (``tolerant_reads=True`` only) the read itself
     failed.
 
-    Codex round 5: canon.json and canon_senses.json are each read via
-    ``read_frozen_input_snapshot()`` and hashed from that captured
-    ``(state, bytes)`` tuple via ``_frozen_input_tamper_reason_from_snapshot``
-    -- the snapshot is RETURNED (not just hashed-and-discarded, the
-    pre-round-5 shape) so a caller that also needs to PARSE canon/senses
-    downstream (``run_verify_merged``'s own ``_resolve_competitors`` call,
-    via its ``canon_snapshot``/``senses_snapshot`` kwargs) can reuse this
-    EXACT snapshot instead of re-reading the path a second time -- closing
-    the race where H1 approves one on-disk version while a later
-    independent read silently consumes another.
-    manifest.json has no such downstream parser in this module, so it
-    keeps using the plain path-based ``_frozen_input_tamper_reason``
-    (fresh hash-and-discard, genuinely correct there).
+    All three inputs are driven off ONE table (codex round 7, see the loop
+    below) -- each entry supplies its own label/stamp-key/path, and every
+    entry, with no exception, is captured via ``_snapshot_or_none()`` (the
+    ``tolerant_reads`` gate) and compared via ``_frozen_input_tamper_reason()``.
+    This is what makes the round-7 bug structurally unrepeatable rather
+    than just fixed once: manifest.json used to be wired in as a
+    hand-written call straight to a path-based twin of
+    ``_frozen_input_tamper_reason`` (re-reading manifest_path itself via
+    ``compute_frozen_input_hash()``, a SEPARATE capture path that never
+    passed through ``_snapshot_or_none``/``tolerant_reads`` at all) -- a
+    stamped manifest.json ``OSError`` therefore escaped
+    ``run_check_frozen_inputs`` raw even with ``tolerant_reads=True``,
+    despite that caller's whole contract being "never a crash". Folding
+    manifest.json into the same table/loop as canon and senses closes that
+    specific gap and removes the capacity for a future fourth frozen input
+    to reintroduce it by the same route: the ONLY way to wire one in is to
+    append an entry to the table, and the table has no room for a call
+    site that skips the gate.
+
+    Codex round 5: canon.json and canon_senses.json are each hashed from
+    their captured ``(state, bytes)`` snapshot -- the snapshot is RETURNED
+    (not just hashed-and-discarded, the pre-round-5 shape) so a caller that
+    also needs to PARSE canon/senses downstream (``run_verify_merged``'s
+    own ``_resolve_competitors`` call, via its ``canon_snapshot``/
+    ``senses_snapshot`` kwargs) can reuse this EXACT snapshot instead of
+    re-reading the path a second time -- closing the race where H1
+    approves one on-disk version while a later independent read silently
+    consumes another. manifest.json has no such downstream parser in this
+    module, so its snapshot is captured through the SAME table/loop (codex
+    round 7) but not part of the return tuple -- only its tamper
+    comparison feeds ``reasons``/``frozen_input_mismatch``.
 
     Codex round 6 BLOCKER: canon.json/canon_senses.json used to be read
     UNCONDITIONALLY, even when AGGREGATE had no stamp at all for that
     input -- there was nothing to compare the read against, so the read
     bought nothing, yet a transient failure on it (a forced I/O error,
     codex's own repro) still propagated raw. manifest.json never had this
-    bug: ``_frozen_input_tamper_reason`` has always checked
-    ``isinstance(stamped_sha256, str)`` BEFORE calling
-    ``compute_frozen_input_hash``, so "no stamp" already meant "no read"
-    for it. Canon/senses now match that same shape -- the stamp is
+    particular bug (the stamp was always checked before the read), but it
+    had the OSError-tolerance one above instead -- both are now the same
+    guard, shared by all three entries in the round-7 table: the stamp is
     checked FIRST, and the read is skipped entirely (snapshot stays
     ``None``) when it's absent, regardless of ``tolerant_reads``.
 
@@ -917,10 +932,13 @@ def frozen_input_check(
     unflagged, fail-OPEN on the exact property this release makes
     fail-closed). ``True`` (``run_check_frozen_inputs``'s choice) catches
     it and leaves that snapshot ``None`` instead -- that caller discards
-    BOTH returned snapshots unconditionally (no downstream parse to keep
-    consistent with anything), so raising there buys nothing but breaks
-    its own documented "never a crash" contract; a read failure degrades
-    that one check the same way an absent stamp already does.
+    ALL THREE captured snapshots unconditionally (no downstream parse to
+    keep consistent with anything), so raising there buys nothing but
+    breaks its own documented "never a crash" contract; a read failure
+    degrades that one check the same way an absent stamp already does.
+    Codex round 7: this now genuinely covers manifest.json too, closing
+    the gap the round-6 fix itself left open by leaving manifest on its
+    own ungated path.
 
     Used by BOTH ``run_verify_merged`` (called AFTER schema-validating
     AGGREGATE, before anything downstream ever attempts to PARSE
@@ -934,7 +952,7 @@ def frozen_input_check(
     so a sidecar tampered sometime after ``skeptic_setup.py`` stamped this
     run but before any batch's fragment ever validated would previously go
     completely unreported as the FATAL tamper it is. That CLI mode has no
-    downstream parser either -- it discards the two returned snapshots.
+    downstream parser either -- it discards all three captured snapshots.
     Deliberately NOT folded into ``run_validate_fragment`` itself (which
     has no visibility into AGGREGATE at all -- the per-batch check only
     ever receives that batch's own bare assignment_id array) -- see the
@@ -951,38 +969,38 @@ def frozen_input_check(
         except OSError:
             return None
 
-    canon_snapshot = None
-    canon_stamp = aggregate.get("canon_sha256")
-    if isinstance(canon_stamp, str):
-        canon_snapshot = _snapshot_or_none(canon_path)
-        if canon_snapshot is not None:
-            canon_reason = _frozen_input_tamper_reason_from_snapshot(
-                "canon.json", canon_path, canon_snapshot[0], canon_snapshot[1], canon_stamp
-            )
-            if canon_reason:
-                reasons.append(canon_reason)
-                frozen_input_mismatch = True
-
-    manifest_reason = _frozen_input_tamper_reason(
-        "manifest.json", manifest_path, aggregate.get("manifest_sha256")
+    # Codex round 7: the table itself is the fix -- every frozen input this
+    # check covers is an entry here, and the loop below is the ONLY place
+    # that reads one, so a future fourth input (or a rewrite of this
+    # function) cannot wire a read in without going through
+    # _snapshot_or_none. manifest.json joining canon/senses here (it used
+    # to be a separate hand-written call to a path-based, ungated
+    # comparator) is the round-7 fix itself -- see _frozen_input_tamper_reason's
+    # own docstring for the bug that call site reintroduced.
+    specs = (
+        ("canon", "canon.json", "canon_sha256", canon_path),
+        ("manifest", "manifest.json", "manifest_sha256", manifest_path),
+        ("senses", "canon_senses.json", "senses_sha256", senses_path),
     )
-    if manifest_reason:
-        reasons.append(manifest_reason)
-        frozen_input_mismatch = True
+    snapshots = {}
+    for key, label, stamp_key, path in specs:
+        snapshot = None
+        stamp = aggregate.get(stamp_key)
+        if isinstance(stamp, str):
+            snapshot = _snapshot_or_none(path)
+            if snapshot is not None:
+                reason = _frozen_input_tamper_reason(label, path, snapshot[0], snapshot[1], stamp)
+                if reason:
+                    reasons.append(reason)
+                    frozen_input_mismatch = True
+        snapshots[key] = snapshot
 
-    senses_snapshot = None
-    senses_stamp = aggregate.get("senses_sha256")
-    if isinstance(senses_stamp, str):
-        senses_snapshot = _snapshot_or_none(senses_path)
-        if senses_snapshot is not None:
-            senses_reason = _frozen_input_tamper_reason_from_snapshot(
-                "canon_senses.json", senses_path, senses_snapshot[0], senses_snapshot[1], senses_stamp
-            )
-            if senses_reason:
-                reasons.append(senses_reason)
-                frozen_input_mismatch = True
-
-    return frozen_input_mismatch, reasons, canon_snapshot, senses_snapshot
+    # manifest_snapshot is captured through the exact same gated loop above
+    # (that parity is the whole point of this round's fix) but was never
+    # part of this function's return contract -- manifest.json has no
+    # downstream parser in this module to hand it to (unlike canon/senses,
+    # see _resolve_competitors' own canon_snapshot/senses_snapshot reuse).
+    return frozen_input_mismatch, reasons, snapshots["canon"], snapshots["senses"]
 
 
 # ---------------------------------------------------------------------------
@@ -1036,7 +1054,12 @@ def run_check_frozen_inputs(aggregate_manifest_path, canon_path=None, manifest_p
     # tolerant_reads=True (codex round 6 BLOCKER): this mode is documented
     # as "never a crash", but a read failure on canon/senses used to raise
     # RAW regardless -- since nothing here ever consumes the snapshot,
-    # there is nothing a tolerant degradation could put at risk.
+    # there is nothing a tolerant degradation could put at risk. Codex
+    # round 7: this flag now genuinely reaches manifest.json's read too --
+    # it never did before, because manifest.json bypassed
+    # frozen_input_check()'s own tolerance gate entirely via a
+    # hand-written call site, so a manifest read failure escaped raw even
+    # though this exact tolerant_reads=True was already being passed.
     frozen_input_mismatch, reasons, _canon_snapshot, _senses_snapshot = frozen_input_check(
         aggregate, canon_path, manifest_path, senses_path, tolerant_reads=True
     )
@@ -1345,7 +1368,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         description=(
             "Validate/coerce, deterministically merge, and fresh-read verify "
             "skeptic_triage.json (RFC #215 Phase 2) -- see this file's own "
-            "module docstring for the full three-mode contract."
+            "module docstring for the full four-mode contract."
         )
     )
     group = parser.add_mutually_exclusive_group(required=True)

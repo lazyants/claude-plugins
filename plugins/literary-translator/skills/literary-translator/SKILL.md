@@ -761,40 +761,72 @@ best-effort integrity tripwire, `skeptic_setup.py` stamps a THREE-way hash
 triplet — `canon_sha256`/`manifest_sha256`/`senses_sha256` (#243 made
 `canon_senses.json` a third authoritative frozen input this release, so it
 is stamped and checked alongside the other two) — into the aggregate
-manifest. Both the stamper and every verifier ultimately bottom out in the
+manifest. Both the stamper and every verifier ultimately reduce to the
 same `compute_frozen_input_hash_from_state` (`suspicion_scan.py`) — no
 second, independently-drifting copy of the hash formula exists to fall out
-of sync — but they reach it differently, and the difference is load-bearing.
-A verifier calls `compute_frozen_input_hash(path)`, a thin wrapper that
-reads `path` FRESH and hashes it: that is exactly right for a verifier,
-whose job is comparing "what's on disk right now" against the stamp. The
-stamper must NOT call that wrapper: it hashes the `(state, content)` pair
-it already captured ONCE at derivation-read time, before the
+of sync — but WHEN and HOW each side reads the bytes it hashes differs, and
+the difference is load-bearing. The stamper always hashes a `(state,
+content)` pair it already captured ONCE at derivation-read time, before the
 freshness/worklist check that same snapshot fed — a fresh re-read at
 stamp-write time would instead record whatever is on disk at THAT later
 moment, silently adopting any mutation that landed in the window between
-derivation and stamping as if it had been there from the start.
+derivation and stamping as if it had been there from the start. Verifiers
+are not uniform either: `canon.json` and `canon_senses.json` are hashed
+from a captured snapshot too — the SAME one a downstream parse of the
+competitors universe (#243) goes on to reuse — so the tamper comparison and
+that parse can never independently disagree about which on-disk version
+each one describes.
+
+All three frozen inputs — `canon.json`, `manifest.json`, `canon_senses.json`
+— now go through that one gated capture step alike, with no exception:
+`frozen_input_check()` drives all three off a single table, and the loop
+over that table is the only place in this module that reads a frozen
+input's bytes. `manifest.json` used to be wired in separately, as a
+hand-written call that captured its own snapshot outside that gate — which
+is exactly how a stamped `manifest.json` read failure could escape the
+standalone check raw, despite that mode's own documented "never crashes"
+contract. Folding it into the same table doesn't just fix that one gap, it
+removes the capacity for a future fourth frozen input to reopen it the same
+way: the only way to wire one in is to add a table entry, and there is no
+longer a code shape that reaches a frozen input's bytes any other route.
+`manifest.json`'s snapshot is captured through that same gate but, having
+no downstream parser in this module the way canon/senses do, is discarded
+once its own tamper comparison is done.
 
 Detection now fires at **two** decision points, not one. The first is
 `skeptic_ready.py --verify-merged`'s own internal check, which runs after a
 successful merge, as before. The second is new this release and is the
 substantive part of the fix, not a footnote: `skeptic_ready.py
 --check-frozen-inputs` — a standalone CLI mode built from the exact same
-shared `frozen_input_check()` function `--verify-merged` calls internally,
-so the two can never disagree — is now called UNCONDITIONALLY from the
-Workflow's `notReadyBatches` branch, before it concludes that a batch never
-becoming ready is merely an ordinary advisory outcome. Previously, that
-branch gave up with a bare `fragment-check-failed` and never called
-`--verify-merged` at all, so a frozen input tampered sometime after
-`skeptic_setup.py` stamped this run but before any batch's fragment ever
-validated would go completely unreported as the FATAL tamper it is — the
-not-ready path is exactly where a run ENDS when something has already gone
-wrong, so it is also exactly where a tampered input was most likely to go
-unnoticed: the old behavior reported the most alarming possible state
-(a frozen input changed mid-pass) as the blandest possible outcome (an
-ordinary "some batches didn't finish" advisory). Either decision point
-re-hashes the on-disk `canon.json`/`manifest.json`/`canon_senses.json` and
-fails on any mismatch.
+shared `frozen_input_check()` function `--verify-merged` calls internally —
+is now called UNCONDITIONALLY from the Workflow's `notReadyBatches` branch,
+before it concludes that a batch never becoming ready is merely an ordinary
+advisory outcome. Previously, that branch gave up with a bare
+`fragment-check-failed` and never called `--verify-merged` at all, so a
+frozen input tampered sometime after `skeptic_setup.py` stamped this run
+but before any batch's fragment ever validated would go completely
+unreported as the FATAL tamper it is — the not-ready path is exactly where
+a run ENDS when something has already gone wrong, so it is also exactly
+where a tampered input was most likely to go unnoticed: the old behavior
+reported the most alarming possible state (a frozen input changed
+mid-pass) as the blandest possible outcome (an ordinary "some batches
+didn't finish" advisory).
+
+Sharing that one function does NOT mean the two modes always agree, and the
+divergence is deliberate, not a bug: they answer differently on a READ
+failure for a frozen input, as opposed to a hash MISMATCH, which both
+always treat as fatal. `--verify-merged` fails CLOSED on a read error — it
+raises raw — because degrading a frozen input it still needs to parse (the
+#243 competitors universe projects from `canon.json`/`canon_senses.json`)
+would silently empty that universe and let every ambiguous form sail
+through unflagged, exactly the fail-OPEN failure mode this release closes
+elsewhere. `--check-frozen-inputs` tolerates the same read error and
+degrades instead, because it never parses anything downstream — it only
+ever answers "did a frozen input change," and raising there would trade its
+own documented "never crashes" contract for a check that buys nothing in
+return. Read the two modes as applying different, equally deliberate rules
+for an unreadable input, not as two implementations of one rule that happen
+to disagree.
 
 This catches ACCIDENTAL / non-adversarial mutation of the frozen inputs (a
 crash, a stray process, a buggy well-behaved agent) — it is NOT a hard

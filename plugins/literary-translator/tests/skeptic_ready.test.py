@@ -1175,32 +1175,57 @@ def test_check_frozen_inputs_detects_tamper_the_verify_merged_path_never_reaches
     assert any("canon_senses.json" in m and "tamper" in m for m in result["missing"])
 
 
-def test_check_frozen_inputs_tolerates_a_read_failure(tmp_path, monkeypatch):
-    """Codex round 6 BLOCKER: frozen_input_check() used to read
-    canon.json/canon_senses.json UNCONDITIONALLY, even though
-    run_check_frozen_inputs discards both returned snapshots and has no
-    downstream parser that could ever consume them. A transient read
-    failure (a real I/O error, not absence -- codex's own repro forced
-    one) therefore propagated raw out of run_check_frozen_inputs, breaking
-    its own documented "never a crash" contract.
+@pytest.mark.parametrize("frozen_input", ["canon", "manifest", "senses"])
+def test_check_frozen_inputs_tolerates_a_read_failure(tmp_path, monkeypatch, frozen_input):
+    """Codex round 6 BLOCKER (canon/senses) + codex round 7 BLOCKER
+    (manifest): frozen_input_check() must route EVERY frozen input's read
+    through the tolerant_reads gate, not just canon/senses --
+    run_check_frozen_inputs discards all three captured snapshots and has
+    no downstream parser that could ever consume them, so a transient read
+    failure (a real I/O error, not absence -- codex's own repro forced one)
+    on ANY ONE of the three should degrade that one check, never crash the
+    whole call, breaking its own documented "never a crash" contract.
     test_check_frozen_inputs_tolerates_missing_aggregate_manifest/
     ..._malformed_aggregate_manifest above prove the AGGREGATE-unreadable
-    half of that contract; this proves the canon/senses-unreadable half,
-    which frozen_input_check()'s round-5 refactor accidentally regressed.
+    half of that contract; this proves the per-input-unreadable half.
+
+    Parameterized over canon/manifest/senses (codex round 7): this test
+    used to target canon only (round 6's own repro), so it could not have
+    caught manifest.json's bypass -- manifest.json was wired to a
+    hand-written call straight to a path-based, ungated tamper-reason
+    helper, never reaching frozen_input_check()'s own _snapshot_or_none()
+    at all, regardless of tolerant_reads. The parametrization is itself
+    part of the fix: every frozen input this check covers now shares the
+    exact same code path, so a single test body proves the gate holds for
+    all three instead of trusting canon's coverage to generalize (see
+    frozen_input_check()'s own docstring for the full story).
 
     Forces the failure via a monkeypatch on read_frozen_input_snapshot
     (rather than chmod, which is unreliable when tests run as root or in
-    sandboxes that ignore permission bits) targeting canon_path
-    specifically -- a genuine canon_sha256 stamp IS present (matches the
-    real content), so the read is genuinely attempted, not skipped via the
-    "no stamp -> no read" gate this same round also added to
-    frozen_input_check()."""
+    sandboxes that ignore permission bits) targeting ONE path at a time --
+    a genuine stamp IS present for it (matches the real content), so the
+    read is genuinely attempted, not skipped via the "no stamp -> no read"
+    gate. Patched in TWO places, not one: skeptic_ready.py's own
+    `read_frozen_input_snapshot` name (what the fixed frozen_input_check()
+    calls for all three inputs today) AND suspicion_scan.py's own module
+    attribute of the same name (what the round-7 BUG's manifest.json path
+    called -- compute_frozen_input_hash() is defined in suspicion_scan.py
+    and its internal `read_frozen_input_snapshot(path)` call resolves via
+    THAT module's globals, a separate binding `monkeypatch.setattr(sr, ...)`
+    alone never reaches). Patching only the first would make this
+    parametrization blind to a regression back to the exact bypass this
+    round fixes -- the [manifest] case would silently pass again even if
+    frozen_input_check() were reverted to call compute_frozen_input_hash()
+    for manifest.json directly, since the injected failure would never
+    reach that call chain."""
     canon_path = tmp_path / "canon.json"
     canon_path.write_text(json.dumps({"entries": {}}), encoding="utf-8")
     manifest_path = tmp_path / "manifest.json"
     write_json(manifest_path, make_manifest())
     senses_path = tmp_path / "canon_senses.json"
     senses_path.write_text(json.dumps({"schema_version": 1, "entries_by_source_form": {}}), encoding="utf-8")
+
+    failing_path = {"canon": canon_path, "manifest": manifest_path, "senses": senses_path}[frozen_input]
 
     aggregate_path = tmp_path / "assignments.json"
     write_json(aggregate_path, {
@@ -1210,20 +1235,35 @@ def test_check_frozen_inputs_tolerates_a_read_failure(tmp_path, monkeypatch):
         "senses_sha256": sr.compute_frozen_input_hash(senses_path),
     })
 
-    real_read_frozen_input_snapshot = sr.read_frozen_input_snapshot
+    suspicion_scan_module = sys.modules.get("suspicion_scan")
+    assert suspicion_scan_module is not None, (
+        "suspicion_scan must already be a real, cached import (triggered by "
+        "skeptic_ready.py's own top-level `from suspicion_scan import ...`) "
+        "-- if this ever stops holding, the second monkeypatch below would "
+        "silently become a no-op instead of failing loud"
+    )
 
-    def _fail_on_canon(path):
-        if Path(path) == canon_path:
-            raise OSError("simulated transient read failure")
-        return real_read_frozen_input_snapshot(path)
+    def _make_failing(real):
+        def _fail_on_target(path):
+            if Path(path) == failing_path:
+                raise OSError("simulated transient read failure")
+            return real(path)
+        return _fail_on_target
 
-    monkeypatch.setattr(sr, "read_frozen_input_snapshot", _fail_on_canon)
+    monkeypatch.setattr(sr, "read_frozen_input_snapshot", _make_failing(sr.read_frozen_input_snapshot))
+    monkeypatch.setattr(
+        suspicion_scan_module, "read_frozen_input_snapshot",
+        _make_failing(suspicion_scan_module.read_frozen_input_snapshot),
+    )
 
     # MUTATION CAUGHT if this raises instead of returning: --check-frozen-inputs
     # exists specifically to keep answering when something else has already
-    # gone wrong, and this mode never consumes canon/senses beyond the hash
-    # comparison itself, so a read failure here should degrade this ONE
-    # check, never crash the whole call.
+    # gone wrong, and this mode never consumes any of the three frozen
+    # inputs beyond the hash comparison itself, so a read failure on ANY
+    # ONE of them should degrade this ONE check, never crash the whole
+    # call. Before the round-7 fix, this raised for frozen_input="manifest"
+    # specifically -- manifest.json bypassed the tolerant_reads gate
+    # entirely via its own hand-written call site.
     result = sr.run_check_frozen_inputs(
         aggregate_path, canon_path=canon_path, manifest_path=manifest_path, senses_path=senses_path,
     )

@@ -976,11 +976,20 @@ def compute_frozen_input_hash_from_state(state: str, content: bytes) -> str:
     the ORIGINAL one -- a real, disk-level instance of the trust-the-caller
     class this whole H1 mechanism exists to close, just moved to a
     different boundary. `compute_frozen_input_hash` below (path-based,
-    re-reads) remains correct for a VERIFIER (`skeptic_ready.py`), whose
-    entire job IS to re-read fresh and compare against what was stamped --
-    the STAMPER and the VERIFIER need opposite freshness semantics from the
-    same hash formula, which is exactly why the formula itself is split out
-    here as its own pure function.
+    re-reads) remains correct for a VERIFIER that has no reason to keep the
+    read around, whose entire job IS to re-read fresh and compare against
+    what was stamped -- the STAMPER and the VERIFIER need opposite
+    freshness semantics from the same hash formula, which is exactly why
+    the formula itself is split out here as its own pure function.
+    `skeptic_ready.py` (this codebase's own VERIFIER) is NOT that caller,
+    though: since codex round 7 it calls `read_frozen_input_snapshot()`
+    plus THIS function directly for canon.json/manifest.json/
+    canon_senses.json alike -- the STAMPER's own shape, not
+    `compute_frozen_input_hash`'s -- because two of the three snapshots
+    also feed a downstream parse it needs to stay byte-consistent with
+    (see `skeptic_ready.py`'s own `frozen_input_check()` docstring). Its
+    test suite remains the one caller left that still wants the
+    read-fresh-and-hash-NOW convenience, to stamp fixtures.
     """
     hasher = hashlib.sha256()
     hasher.update(state.encode("ascii"))
@@ -1008,11 +1017,17 @@ def compute_frozen_input_hash(path: Path) -> str:
     """H1's own tamper-detection hash for ONE frozen input file (canon.json
     / manifest.json / canon_senses.json), READ FRESH off `path` -- correct
     for a VERIFIER re-hashing "what's on disk right now" to compare against
-    a stamp (`skeptic_ready.py`'s own `_frozen_input_tamper_reason`/
-    `run_check_frozen_inputs`). A STAMPER must NOT call this -- see
-    `compute_frozen_input_hash_from_state`'s own docstring (codex round 3)
-    for why re-reading at stamp time is dangerous specifically for a
-    stamper, and never for a verifier.
+    a stamp, PROVIDED it has no reason to keep the read around afterward
+    (see `compute_frozen_input_hash_from_state`'s own docstring, codex
+    round 7, for why `skeptic_ready.py` -- this codebase's own VERIFIER --
+    is no longer such a caller in production: it needs the captured
+    snapshot itself, not just this function's hash, so it calls
+    `read_frozen_input_snapshot()` + `compute_frozen_input_hash_from_state()`
+    directly instead). `skeptic_ready.py`'s own test suite still imports
+    this one, purely to stamp fixtures conveniently. A STAMPER must NOT
+    call this -- see `compute_frozen_input_hash_from_state`'s own docstring
+    (codex round 3) for why re-reading at stamp time is dangerous
+    specifically for a stamper, and never for a verifier.
 
     Codex round-2 finding this formula itself closes: hashing raw content
     bytes ALONE (the pre-round-2 scheme) makes an absent file, a
