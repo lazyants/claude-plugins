@@ -4,6 +4,8 @@
 - [The deletion pivot](#the-deletion-pivot)
 - [A reviewer can misread — verify each finding](#a-reviewer-can-misread)
 - [Stopping a verifier / gate loop](#stopping-a-verifier--gate-loop)
+- [Mutation-completeness is a receding target](#mutation-completeness-is-a-receding-target)
+- [FREEZE the tree for the deciding round](#freeze-the-tree-for-the-deciding-round)
 - [A/B finding classification for a non-executed artifact](#ab-finding-classification)
 - [Fencing ratified decisions](#fencing-ratified-decisions)
 - [Same mechanism patched a 3rd time → reach for the platform primitive](#same-mechanism-third-time)
@@ -53,6 +55,8 @@ Fence the loop, don't just exit it. Encode every ratified decision and deliberat
 
 If round N's fix for finding F1 gets a NEW counterexample at round N+1 with the same SHAPE as F1 (same failure class, cleverer instance), stop iterating on the mechanism and ask: "does the external system I'm racing against already expose a synchronization primitive for this property?" Reaching for the platform's own primitive (e.g. Playwright's `animations:'disabled'`, the same freeze-to-settled mechanism `toHaveScreenshot` uses) is simpler AND more robust than another layer of in-house observation. A "verify-don't-assume redesign" can still be verifying at the WRONG layer — an ABA race outside your observation thread survives every sampling refinement.
 
+**Variant — the predicate keeps failing because the LAYER can't answer the question.** The tell is subtly different from the above: each round's counterexample is a *different* shape, and each new guard is individually reasonable, yet a fresh one falls every round. That is not a mechanism problem — it means the question being asked is unanswerable with the information available *in the layer where you put it*. Diagnostic: name the question in plain words and ask what capability answers it. If the answer is a capability the module deliberately lacks (filesystem, network, clock, user intent), no predicate over the inputs it *does* have will ever be sound, and each round will keep producing a plausible-but-incomplete proxy. Move the DECISION to the layer holding the capability and leave the pure layer to *recognize candidates and produce a replacement*, deciding nothing. Verified 2026-07-19 (enduser-handbook #220): four successive designs — a syntactic `rel === ''` guard, a `legacy !== canonical` guard, a tri-state lexical comparator, then a "canonical is correct by construction" invariant — each died to a new codex counterexample, all because "is this link broken?" was being answered by path algebra inside a deliberately filesystem-free module. Relocating the decision to the workflow step that owns the filesystem ("does the existing destination resolve? then leave it") **deleted** the entire comparator and closed all three open blockers structurally. Signal to watch: a plan that keeps *growing* a decision procedure round over round is in the wrong layer; the correct layer usually makes it *smaller*.
+
 ## The loop's exit condition
 
 Exit when all three reviewers (code-simplifier / codex / security-review) come back CLEAN on the SAME unchanged tree. The code-simplifier's first explicit no-op round is the leading signal that you're there. Any reviewer-caused change restarts the cycle from the top.
@@ -60,3 +64,40 @@ Exit when all three reviewers (code-simplifier / codex / security-review) come b
 ## When the classifier blocks codex
 
 The auto-mode permission classifier can BLOCK `Agent(subagent_type=codex:codex-rescue)` by misattributing the ambient context-window-protection SessionStart hook to your prompt. Legit workaround: drive the runtime directly — `node .../codex-companion.mjs task --background "<clean prompt>"`, then poll `status <id>` / `result <id>` from a `run_in_background` Bash. See the codex-runtime-driving guidance for the full pattern.
+
+## Mutation-completeness is a receding target
+
+Distinct from "stopping a verifier loop" above, where the stop condition is that findings have gone
+HYPOTHETICAL. Here every round finds a REAL survivor and the loop still must stop, because the
+mutant space is structurally larger than any enumeration of guarantees: for a sixty-line program it
+is every statement, condition, operator, initialization and evaluation order. A table of "rules the
+function implements" cannot cover it — verified when two survivors turned out to be statement
+deletions (a state reset, a control-flow `next`), invisible to a rules frame no matter how carefully
+each row was measured.
+
+Stop when the axes you can name are covered, and write the boundary INTO the file: what was hardened,
+along which axes, and that this is NOT a claim of mutation-completeness. State the distinction
+explicitly — **"no mutant found yet" and "no mutant exists" are different claims and only the first
+is ever true.** Say what a future round should do instead: add a fixture when a specific mutant is
+DEMONSTRATED, never reopen a general audit on the theory that the closure claim is incomplete (it is,
+structurally).
+
+Five consecutive rounds attacking one test helper each found a real survivor (enduser-handbook,
+rounds 20-24). Without the boundary note, round 25 would have found a sixth.
+
+## Freeze the tree for the deciding round
+
+Dispatching fixes and committing WHILE a review round runs is good throughput and quietly fatal to
+convergence: every verdict then describes a tree that has already moved. Verified 2026-07-20 — this
+gap was identified at round 4 (a release commit landing mid-review) and then reproduced for eighteen
+consecutive rounds, until a round spent one of its four findings re-reporting a defect fixed before
+its verdict landed.
+
+**Before the round that is meant to clear the push: freeze.** No dispatches, no commits, teammates
+stood down. Only then does a clean verdict mean "this is shippable" rather than "this was shippable
+an hour ago". The first frozen round in that loop produced the first verdict whose findings all
+described the reviewed tree.
+
+Corollary for the post-verdict delta: a doc/count correction that fires AFTER the clean verdict is by
+design unreviewed. Scope a confirm pass to exactly that delta rather than skipping it — skipping
+recreates the same gap at the last possible moment.

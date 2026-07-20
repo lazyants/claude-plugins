@@ -3,6 +3,7 @@
 When an adversarial reviewer returns ~1 finding/round that is a new INSTANCE of the SAME root cause each time, stop patching locations. The tell: finding scope narrows but the root cause is identical every round. This is still a healthy (narrowing) loop, but generalizing at round 3 instead of round 9 saves the rounds in between.
 
 - [Enumerate the set + state the invariant](#enumerate-the-set--state-the-invariant)
+- […but enumerate INPUTS, never OUTCOMES of independent conditions](#enumerate-inputs-never-outcomes)
 - [Format / serialization migrations: enumerate by the shared value](#format--serialization-migrations)
 - [Prose-scattered set → a completeness-GREP gate](#prose-scattered-set--a-completeness-grep-gate)
 - [Verify the gate itself — it's code](#verify-the-gate-itself)
@@ -53,3 +54,25 @@ ANY core-structure swap (bitmap→set, linear-scan→trie, list→heap) can sile
 ## Symbolic refs, not line numbers
 
 Any fix that inserts/removes lines staleizes every doc line-number reference below it, and a green suite never catches it (line-refs live in prose). Don't chase the number (it re-shifts on the next edit) — make the ref SYMBOLIC ("its format gate", no line number). That eliminates the drift CLASS, not the instance. Prefer symbolic/anchor refs over line numbers in any prose that points into an edited file.
+
+## Enumerate inputs, never outcomes
+
+The enumerate-the-set move above applies to the INSTANCE set (every call site, every artifact,
+every gate). It does NOT apply to the OUTCOME set of two or more independent conditions — there,
+enumerating is the failure mode, because the outcomes multiply while the generating rule does not.
+
+Tell: a list you keep having to extend, where each extension is discovered by someone hitting a
+combination nobody listed.
+
+Verified 2026-07-20 (enduser-handbook CHANGELOG, four revisions of ONE line): a test-count claim
+went stale number → machine-specific number → mechanism *plus* a three-item totals list → mechanism
+only. The increments (`377 unconditional, +9 when node is on PATH, +1 when esbuild is reachable`)
+were correct from the third revision and never changed. Only the totals list kept breaking, because
+two independent gates yield four combinations and the list named three. Deleting the list — not
+extending it to four — made the claim correct by construction and let any reader derive their own.
+
+Same shape recurred four other ways in that branch: a category named with fewer members than it has
+("glossary/Related links" spans two target types with different formulas), a hardcoded test-file
+list one behind the directory it mirrors, and a rules table blind to statement-level mutants.
+**Enumerations of outcomes are fragile; mechanisms generate.** When the set is generated, ship the
+generator and state that the conditions are independent.
