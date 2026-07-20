@@ -314,10 +314,16 @@ failure:
 2. Every wikilink target (`[[…]]`) resolves to either an existing `.md` file in the
    vault or an existing heading anchor in the glossary. Broken wikilinks render as
    red placeholders in Obsidian and are silent in plain Markdown views. When
-   `publish.wikilinks: false`, this item also verifies every standard Markdown link
-   (`[text](target)`) resolves the same way — every manifest, group-free manifests included:
-   grouped chapters can sit at different depths, so a stale or hand-edited relative link
-   is exactly as broken as a dangling wikilink and must be caught here too.
+   `publish.wikilinks: false`, this item also verifies every **relative** standard
+   Markdown link (`[text](target)`) resolves to a real file the same way — every
+   manifest, group-free manifests included: grouped chapters can sit at different
+   depths, so a stale or hand-edited relative link is exactly as broken as a dangling
+   wikilink and must be caught here too. A bare-fragment target (`[text](#heading)`,
+   no path component) is checked against the **current chapter's own headings**, not
+   the vault or the glossary. A `mailto:` link, an `http://`/`https://` link, or any
+   other non-relative target (a URI scheme, or a vault-rooted/absolute path) is
+   **exempt** — this item verifies vault-internal resolution, not that an external
+   link is reachable.
    **This gate is chapter-scoped**: it fires here, before declaring the chapter
    published, so it catches a legacy broken link only when that chapter is next
    published, or revalidated in a way that **touches** it — an accepted-diff refresh

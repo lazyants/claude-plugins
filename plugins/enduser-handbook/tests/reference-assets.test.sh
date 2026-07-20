@@ -775,6 +775,19 @@ has_in_section "revalidation: write-time-canon embed formula is unconditional, b
 has_in_section "revalidation: write-time-canon link formula is scoped, NOT uniform like the embed" \
   "$REVAL" '## Write-time canon' \
   'uses it only under `publish.wikilinks: false`'
+# round-16 [what our own change newly exposed, not ambiguity or a stale citation]: round 15 fixed
+# the "## Write-time canon" paragraph above, but the manual-migration recipe's own step 4 — which
+# routes readers past that very paragraph — still said rewrite "embeds and glossary/Related links
+# using the full-target formulas — ALWAYS", scoped only to flat-vs-grouped and silent on wikilinks
+# mode. Under `publish.wikilinks: true` that directly contradicts the canon's bare-wikilink case. A4
+# split embed (still unconditional) from link (adapter/mode-scoped, with the wikilinks-on bare-form
+# spelled out) so the recipe can no longer be followed literally into the same contradiction.
+has_in_section "revalidation: recipe step 4 embed rewrite is unconditional (all adapters, all modes)" \
+  "$REVAL" '### The manual group-migration recipe' \
+  'regardless of adapter or `publish.wikilinks` mode'
+has_in_section "revalidation: recipe step 4 link rewrite states the wikilinks-on bare-link case" \
+  "$REVAL" '### The manual group-migration recipe' \
+  'as a bare `[[<slug>|Display title]]` wikilink under `publish.wikilinks: true`'
 has "revalidation: recipe fixes inbound links from other chapters"  'Fix inbound links from other chapters that referenced the old path' "$REVAL"
 has "revalidation: recipe updates the capture spec output dir(s)"   "Update the project's capture spec output dir(s)" "$REVAL"
 has "revalidation: terminal-state convergence checklist heading"    'Terminal-state convergence checklist' "$REVAL"
@@ -897,6 +910,22 @@ hasnt "obsidian-vault: gate no longer scoped to \`anyGroup\` only" \
 has_in_section "obsidian-vault: link integrity gate states its chapter-scope limit (no handbook-wide sweep)" \
   "$OMD" '## Link integrity gate before you publish' \
   'does not sweep untouched chapters'
+# round-16 [what our own change newly exposed]: widening item 2 to group-free manifests inherited
+# an existing overbreadth we didn't create but did newly expose — it demanded EVERY standard
+# Markdown link resolve like an internal .md/glossary target, so a compliant chapter with
+# `[Support](mailto:...)`, an external `https://` link, or a bare `#fragment` would FALSE-HALT.
+# Three needles, one per the three concrete false-halt cases named in the finding: the **relative**
+# scoping is the actual fix (matches static-md.md:407's own wording); the bare-fragment rule and
+# the non-relative exemption class are the two other named cases it was previously silent on.
+has_in_section "obsidian-vault: link-integrity item 2 scoped to RELATIVE links only (not every link)" \
+  "$OMD" '## Link integrity gate before you publish' \
+  'this item also verifies every **relative** standard'
+has_in_section "obsidian-vault: link-integrity item 2 checks a bare fragment against the chapter's own headings" \
+  "$OMD" '## Link integrity gate before you publish' \
+  "no path component) is checked against the **current chapter's own headings**, not"
+has_in_section "obsidian-vault: link-integrity item 2 exempts non-relative targets (mailto/http/URI-scheme)" \
+  "$OMD" '## Link integrity gate before you publish' \
+  '**exempt** — this item verifies vault-internal resolution, not that an external'
 # Boundary of this whole pin cluster (rounds 5-8, through the >=2-link halt below): every
 # assertion here is a POSITIVE has_in_section — it proves the canon IS STATED in the right
 # section. It cannot prove that no CONTRADICTING statement is stated elsewhere, because catching
