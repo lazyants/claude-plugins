@@ -147,8 +147,11 @@ The order is fixed:
    silently overwrites a chapter file and its asset dir.
 4. You present the manifest to the user and halt for review.
 5. The user accepts, edits, or rejects entries. You revise until
-   accepted, re-running step 3 after every edit that touches a slug or
-   a group.
+   accepted, re-running step 3 after every edit to any field
+   `validateGroups(entries)` inspects — today `slug`, `group`, and
+   `group_title` — never only an edit that touches `slug` or `group`
+   narrowly: a `group_title`-only change (e.g. two groups converging on
+   the same title) is exactly as re-run-worthy.
 6. *Only then* you write capture specs against the accepted manifest, into the
    directory at `capture.capture_specs_dir` (alongside the manifest at
    `capture.manifest_path`).

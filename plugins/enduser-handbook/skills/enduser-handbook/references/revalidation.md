@@ -65,10 +65,19 @@ that emits a delta manifest and halts.
 ## Write-time canon
 
 Every new chapter, and every chapter W6 re-authors for its own reasons, is
-written with the full-target embed and link formulas — the same formula in
-both publish-target adapters (`static-md.md`, `obsidian-vault.md`), whether
-the manifest is grouped or group-free. Both adapters cite this heading as
-"Write-time canon" wherever they state that rule.
+written with the full-target **embed** formula — the same formula in both
+publish-target adapters (`static-md.md`, `obsidian-vault.md`), whether the
+manifest is grouped or group-free.
+
+The full-target **link** formula is not as uniform. `static-md.md` always
+uses it. `obsidian-vault.md` uses it only under `publish.wikilinks: false`
+— with wikilinks on, an Obsidian chapter links by bare
+`[[<chapter-slug>|Display title]]`, basename resolution with no
+relative-path math needed (`obsidian-vault.md`'s "Wikilinks vs Markdown
+links"). That is a different link syntax entirely, not an exception to
+this canon: a wikilinks-on chapter was never a candidate for the
+full-target link formula, so there is nothing here for the canon to
+override.
 
 The gates this canon feeds are **resolution** checks, not spelling checks:
 they verify that a link or embed target *resolves* on disk, not that it is

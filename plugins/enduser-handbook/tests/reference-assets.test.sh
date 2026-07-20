@@ -761,6 +761,20 @@ has "capture-manifest example: carries group_title"                    'group_ti
 has "capture.example.spec.ts: imports chapter-paths.mjs (early signal only)" "from './lib/chapter-paths.mjs'" "$SPEC"
 
 echo "== group axis (#19) — revalidation.md manual-migration recipe + convergence checklist =="
+# round-15 [adversarial reading]: "## Write-time canon" originally claimed the full-target embed
+# AND link formulas are "the same formula in both adapters" — true for embeds, false for links:
+# obsidian-vault.md under publish.wikilinks: true uses bare [[<chapter-slug>|Display title]] with
+# no path math, so a W6 rewrite in that mode got two contradictory normative instructions (this
+# canon's link formula vs the wikilinks-on bare-link rule). Now split: the embed paragraph stays
+# unconditional (both adapters, either manifest shape); the link paragraph is NOT uniform — pinned
+# on its explicit "only under wikilinks: false" scoping, the negation of the embed paragraph's
+# unconditional claim.
+has_in_section "revalidation: write-time-canon embed formula is unconditional, both adapters" \
+  "$REVAL" '## Write-time canon' \
+  'the full-target **embed** formula — the same formula in both'
+has_in_section "revalidation: write-time-canon link formula is scoped, NOT uniform like the embed" \
+  "$REVAL" '## Write-time canon' \
+  'uses it only under `publish.wikilinks: false`'
 has "revalidation: recipe fixes inbound links from other chapters"  'Fix inbound links from other chapters that referenced the old path' "$REVAL"
 has "revalidation: recipe updates the capture spec output dir(s)"   "Update the project's capture spec output dir(s)" "$REVAL"
 has "revalidation: terminal-state convergence checklist heading"    'Terminal-state convergence checklist' "$REVAL"
@@ -846,6 +860,20 @@ has_in_section "manifest-discipline: MUST run validateGroups(entries) (mandatory
   'MUST run validateGroups(entries)'
 hasnt "manifest-discipline: no longer frames validateGroups as an optional convenience" \
   'running it during drafting is an optional' "$MDISC"
+# round-15 [adversarial reading, not mutation testing — the prior wording meant a requirement
+# without requiring it]: step 5 said re-run validation "after every edit that touches a slug or a
+# group", so a group_title-only edit (two groups converging on one title — containers are located
+# BY TITLE, obsidian-vault.md:207) let a reader skip the only detector for that collision, silently
+# merging two groups under one nav container. Now keyed to the GENERAL RULE (any field
+# validateGroups inspects), with the slug/group/group_title list explicitly illustrative. Two
+# needles: the general rule governing (not narrowed to slug/group), and the group_title-only
+# scenario that caused the bug specifically.
+has_in_section "manifest-discipline: step 5 re-run rule is NOT narrowed to slug/group only" \
+  "$MDISC" '## The discipline: no capture code before review' \
+  'never only an edit that touches `slug` or `group`'
+has_in_section "manifest-discipline: step 5 names the group_title-only collision scenario" \
+  "$MDISC" '## The discipline: no capture code before review' \
+  'a `group_title`-only change (e.g. two groups converging on'
 has_in_section "static-md: Assets section covers flat entries and group-free manifests alike" \
   "$SMD" '## Assets' \
   'flat entries and group-free manifests alike'
