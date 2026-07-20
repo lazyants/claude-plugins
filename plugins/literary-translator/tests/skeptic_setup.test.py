@@ -874,6 +874,87 @@ def test_skeptic_input_digest_state_membership_pinned(tmp_path, slot):
     )
 
 
+@pytest.mark.parametrize("direction", ["extra_tuple_entry", "missing_tuple_entry"])
+def test_skeptic_input_digest_fails_closed_on_frozen_input_specs_key_mismatch(tmp_path, monkeypatch, direction):
+    """Round 10 (#243, codex overrule of the prior round's refusal): mirrors
+    tests/suspicion_scan.test.py's own
+    ``test_producer_input_digest_fails_closed_on_frozen_input_specs_key_mismatch``
+    -- `compute_skeptic_input_digest()` is the SKEPTIC-side sibling of
+    `compute_producer_input_digest()`, a SEPARATE hand-maintained
+    ``{"canon","manifest","senses"}`` enumeration (skeptic_constants.py's
+    own "what FROZEN_INPUT_SPECS does NOT cover" comment is explicit that
+    the two digest functions are independent gaps -- fixing one says
+    nothing about the other), so it needs its OWN fail-closed proof, not a
+    shared one. Its signature stays the fixed keyword enumeration round 9
+    left it as, but the body now builds a `{key: (state, bytes)}` map from
+    its own canon/manifest/senses kwargs and asserts that map's key set
+    equals `FROZEN_INPUT_SPECS`' key set before hashing.
+
+    RED-before-green (verified manually against HEAD 681d19d's
+    pre-round-10 `compute_skeptic_input_digest()`, not re-asserted here
+    every run): loading HEAD's version and mutating its already-imported
+    `FROZEN_INPUT_SPECS` to append a fourth entry left the digest
+    BYTE-IDENTICAL to the unmutated baseline
+    (`f5990202...f0a2486bbf9` both times) and raised nothing. Against the
+    CURRENT (fixed) function below, the identical mutation raises
+    `AssertionError` instead -- this test fails pre-fix ("DID NOT RAISE")
+    and passes post-fix.
+
+    Loads a FRESH `skeptic_setup.py` off a `make_skeptic_root(tmp_path)`
+    mirrored tree (this file's own established pattern, mirrors
+    `test_skeptic_input_digest_state_membership_pinned` immediately
+    above), then mutates the loaded module's OWN `FROZEN_INPUT_SPECS`
+    binding via `monkeypatch` -- in memory, restored after the test, never
+    touching `skeptic_constants.py` on disk (a peer owner's file).
+
+    Parametrized over both mismatch directions the exact-key-set check
+    must catch: ``extra_tuple_entry`` appends a fourth entry (a tuple key
+    with no matching snapshot-map entry); ``missing_tuple_entry`` drops
+    the existing ``"senses"`` entry (a snapshot-map entry -- still
+    hard-coded regardless of the tuple -- with no matching tuple key)."""
+    root = make_skeptic_root(tmp_path)
+    mod = _load_module(
+        "skeptic_setup_for_digest_fail_closed_test", root / "scripts" / "skeptic_setup.py", root / "scripts"
+    )
+    scripts_dir = root / "scripts"
+    common = dict(
+        canon_state="regular", canon_bytes=b"canon-fixture",
+        manifest_state="regular", manifest_bytes=b"manifest-fixture",
+        senses_state="regular", senses_bytes=b"senses-fixture",
+        worklist_bytes=b"{}",
+        assignments=[],
+        config_values={},
+        language_config_raw_bytes=b"",
+        schemas_dir_hash_hex="deadbeef",
+        script_dir=scripts_dir,
+        template_bytes=b"",
+    )
+
+    if direction == "extra_tuple_entry":
+        mutated_specs = mod.FROZEN_INPUT_SPECS + (
+            ("mystery_fourth", "mystery_fourth.json", "mystery_fourth_sha256"),
+        )
+    else:
+        mutated_specs = tuple(spec for spec in mod.FROZEN_INPUT_SPECS if spec[0] != "senses")
+    monkeypatch.setattr(mod, "FROZEN_INPUT_SPECS", mutated_specs)
+
+    with pytest.raises(AssertionError) as exc_info:
+        mod.compute_skeptic_input_digest(**common)
+
+    # Assert on the actual key-SET mismatch the exception must name, not
+    # merely that "something raised" -- a test satisfied by any exception
+    # would pass even if the guard crashed for an unrelated reason.
+    msg = str(exc_info.value)
+    expected_snapshot_keys = repr(sorted(["canon", "manifest", "senses"]))
+    expected_spec_keys = repr(sorted(spec[0] for spec in mutated_specs))
+    assert expected_snapshot_keys in msg and expected_spec_keys in msg, (
+        f"MUTATION CAUGHT ({direction}): the raised exception must name "
+        f"BOTH the fixed {{'canon','manifest','senses'}} snapshot key set "
+        f"({expected_snapshot_keys}) and the mutated FROZEN_INPUT_SPECS "
+        f"key set ({expected_spec_keys}) -- got: {msg!r}"
+    )
+
+
 def test_fresh_run_id_is_collision_free_without_sleeping(tmp_path):
     """Hardening: fresh_run_id() must be collision-free ON ITS OWN
     (microsecond timestamp + random hex suffix), not merely "usually fine,

@@ -825,33 +825,59 @@ tuple) — a parity test asserts the schema's declared **top-level property
 names ending in `_sha256`** equal the stamp-field set `FROZEN_INPUT_SPECS`
 derives, so a `_sha256`-suffixed schema property added without a matching
 tuple entry (or the reverse) fails that test rather than going unnoticed.
-That suffix filter is the test's actual coverage boundary, not a
-simplification: a schema property that stamps a frozen input WITHOUT a
-`_sha256` name (or one nested below the top level, like
-`assignments[].evidence.sha256`) stays invisible to this parity check
-entirely.
+That suffix filter applies to the SCHEMA side of the comparison only —
+`FROZEN_INPUT_SPECS`'s own stamp-field set is never filtered by it — so a
+schema property that stamps a frozen input WITHOUT a `_sha256` name (or
+one nested below the top level, like `assignments[].evidence.sha256`)
+stays invisible to this parity check only when it exists on the schema
+side ALONE, with no matching `FROZEN_INPUT_SPECS` entry. If the same
+non-suffix field is ALSO present in `FROZEN_INPUT_SPECS` (a tuple entry
+whose `stamp_field` happens not to end in `_sha256`), the equality DOES
+fail: that field appears in the tuple's unfiltered stamp-field set with
+nothing on the filtered schema side to match it.
 
 `FROZEN_INPUT_SPECS` binds the stamper and the verifier's tamper check —
 that is its whole, and only, guarantee. It does NOT bind the earlier
-`read_frozen_input_snapshot()` capture in `skeptic_setup.py`, and it does
-NOT bind `compute_producer_input_digest()`/`compute_skeptic_input_digest()`
-— both still take a fixed positional/keyword canon+manifest+senses
-signature, unrelated to this tuple. A fourth frozen input added ONLY to
-`FROZEN_INPUT_SPECS` (plus the schema) would be captured, stamped and
-H1-tamper-checked correctly, yet invisible to both freshness digests: a
-mutation to it BEFORE `skeptic_setup.py` runs would leave a stale
-worklist's `producer_input_digest` unchanged, so the stale worklist would
-still read as fresh and get (re)certified against the new state — the same
-stale-certified-as-fresh failure mode this release closes for
-`canon_senses.json`, just re-opened at a boundary this tuple doesn't
-reach. `skeptic_constants.py`'s own comment next to `FROZEN_INPUT_SPECS`
-lists every site a new frozen input still needs by hand. Generalizing the
-two digest functions so this tuple could drive them too was evaluated
-(#243 round 9) and deferred: both are direct-called by fixed parameter
-name/position from dozens of sites in `tests/skeptic_setup.test.py` and
+`read_frozen_input_snapshot()` capture in `skeptic_setup.py`, and its
+SIGNATURE does not bind `compute_producer_input_digest()`/
+`compute_skeptic_input_digest()` either — both still take a fixed
+positional/keyword canon+manifest+senses signature, unrelated to this
+tuple; a fourth frozen input still needs its own hand-added parameter (and
+a matching update at every call site) before either digest can hash it at
+all. Round 9 shipped with that gap silent: a fourth frozen input added
+ONLY to `FROZEN_INPUT_SPECS` (plus the schema, plus a matching signature
+parameter with no corresponding hand-added tuple-key entry, or vice versa)
+would be captured, stamped, and H1-tamper-checked correctly, yet invisible
+to both freshness digests — a mutation to it BEFORE `skeptic_setup.py` ran
+would leave a stale worklist's `producer_input_digest` unchanged, so the
+stale worklist would still read as fresh and get (re)certified against the
+new state, the same stale-certified-as-fresh failure mode this release
+closes for `canon_senses.json`, just re-opened at a boundary this tuple
+didn't reach.
+
+Round 10 (#243) closed that silent half WITHOUT touching either
+signature or any call site: each function body now builds its own
+`{key: (state, bytes)}` map from the parameters it already receives and
+asserts that map's key set equals `FROZEN_INPUT_SPECS`'s key set BEFORE
+hashing anything. A parameter added to the signature with no matching
+`FROZEN_INPUT_SPECS` entry (or a `FROZEN_INPUT_SPECS` entry with no
+matching parameter/map entry) now raises `AssertionError` the first time
+the function runs, instead of the digest silently omitting the new input
+forever. Both digest functions were re-derived this way against
+`FROZEN_INPUT_SPECS`'s current 3-entry order and verified byte-identical
+to the pre-round-10 formula on a fixed fixture — this is a hardening of
+what already-shipped projects hash, not a digest-compatibility break.
+`skeptic_constants.py`'s own comment next to `FROZEN_INPUT_SPECS` lists
+every site a new frozen input still needs by hand, and which of them now
+fail loud versus which (the raw capture calls only) still don't.
+Generalizing the two digest functions' SIGNATURE so this tuple could drive
+parameter names too was evaluated (#243 round 9) and deferred again in
+round 10: both are direct-called by fixed parameter name/position from
+dozens of sites in `tests/skeptic_setup.test.py` and
 `tests/suspicion_scan.test.py`, several of which pin the exact NUL-byte
 framing between two specific adjacent parameters — a cross-file
-test-authoring change, not a same-file mechanical one.
+test-authoring change, not a same-file mechanical one. Round 10 fixed the
+silent-omission risk by hardening the function BODIES instead.
 
 Detection now fires at **two** decision points, not one. The first is
 `skeptic_ready.py --verify-merged`'s own internal check, which runs after a

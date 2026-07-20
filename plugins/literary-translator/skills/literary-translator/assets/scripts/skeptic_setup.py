@@ -416,18 +416,58 @@ def compute_skeptic_input_digest(
     the SAME `(state, bytes)` snapshot `read_frozen_input_snapshot()`
     captured once at derivation-read time -- never a fresh re-read here
     either, for the identical reason round 3's stamping fix does not
-    re-read."""
+    re-read.
+
+    Round 9 (#243): like `suspicion_scan.compute_producer_input_digest()`,
+    this signature is a fixed positional/keyword enumeration of
+    canon/manifest/senses, NOT derived from `skeptic_constants.FROZEN_INPUT_SPECS`
+    -- see that tuple's own "what FROZEN_INPUT_SPECS does NOT cover"
+    comment. Generalizing this SIGNATURE was deferred for the same
+    dozens-of-call-sites/pinned-NUL-framing reason given there.
+
+    Round 10 (#243): the signature and every call site stay exactly as
+    round 9 left them -- but the BODY below no longer hard-codes which
+    three `(state, bytes)` pairs get hashed. It builds a
+    `{key: (state, bytes)}` map and flattens it in `FROZEN_INPUT_SPECS`
+    order, asserting the map's key set equals the tuple's key set first.
+    A fourth `FROZEN_INPUT_SPECS` entry still needs its own hand-added
+    parameter here (the signature is unchanged), but omitting one now
+    raises `AssertionError` the first time this function runs after the
+    tuple grows, instead of silently resuming a run whose new input
+    changed underneath it. `FROZEN_INPUT_SPECS` is enumerated
+    `("canon", "manifest", "senses")` today, so this flattening reproduces
+    the exact `canon_state, canon_bytes, manifest_state, manifest_bytes,
+    senses_state, senses_bytes` byte order round 9 hashed -- the digest of
+    any existing project is unchanged."""
     h = hashlib.sha256()
-    parts = [
-        canon_state.encode("ascii"), canon_bytes,
-        manifest_state.encode("ascii"), manifest_bytes,
-        senses_state.encode("ascii"), senses_bytes,
+    frozen_input_snapshots = {
+        "canon": (canon_state, canon_bytes),
+        "manifest": (manifest_state, manifest_bytes),
+        "senses": (senses_state, senses_bytes),
+    }
+    spec_keys = {spec[0] for spec in FROZEN_INPUT_SPECS}
+    if set(frozen_input_snapshots) != spec_keys:
+        raise AssertionError(
+            "compute_skeptic_input_digest(): frozen_input_snapshots keys "
+            f"{sorted(frozen_input_snapshots)} != FROZEN_INPUT_SPECS keys "
+            f"{sorted(spec_keys)} -- a frozen input was added to "
+            "skeptic_constants.FROZEN_INPUT_SPECS without a matching "
+            "hand-added parameter/snapshot entry here (or vice versa); see "
+            "skeptic_constants.py's \"what FROZEN_INPUT_SPECS does NOT "
+            "cover\" comment."
+        )
+    parts = []
+    for key, _label, _stamp_field in FROZEN_INPUT_SPECS:
+        state, snapshot_bytes = frozen_input_snapshots[key]
+        parts.append(state.encode("ascii"))
+        parts.append(snapshot_bytes)
+    parts.extend([
         worklist_bytes,
         _canonical_json_bytes(assignments),
         _canonical_json_bytes(config_values),
         language_config_raw_bytes,
         schemas_dir_hash_hex.encode("utf-8"),
-    ]
+    ])
     for name in SKEPTIC_CLOSURE_SCRIPT_FILENAMES:
         parts.append((script_dir / name).read_bytes())
     parts.append(template_bytes)

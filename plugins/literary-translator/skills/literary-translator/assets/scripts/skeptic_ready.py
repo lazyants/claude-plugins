@@ -1010,7 +1010,25 @@ def frozen_input_check(
     # Round 9 (#243): this dict, and the digest functions in
     # skeptic_setup.py/suspicion_scan.py, are the other hand-maintained
     # sites FROZEN_INPUT_SPECS does NOT drive -- see that tuple's own
-    # comment in skeptic_constants.py for the full list.
+    # comment in skeptic_constants.py for the full list. That was true of
+    # all three in the same way at the time: each is a fixed-shape
+    # signature/literal that a new frozen input still needs a hand-added
+    # entry in.
+    #
+    # Round 10 (#243): the two digest functions no longer belong in quite
+    # the same bucket as this `paths` dict. Their SIGNATURES are still
+    # hand-maintained exactly as before (unchanged this round, still not
+    # derived from FROZEN_INPUT_SPECS) -- but each function BODY now
+    # builds its own `{key: (state, bytes)}` map from the parameters it
+    # already receives and asserts that map's key set equals
+    # FROZEN_INPUT_SPECS's key set before hashing anything, the same
+    # fail-loud discipline this `paths` dict already had (`KeyError` here,
+    # `AssertionError` there). A frozen input added to the tuple with no
+    # matching hand-added parameter now fails CLOSED in both digest
+    # functions too, instead of the digest silently omitting it forever --
+    # see skeptic_constants.py's own comment for the current, re-derived
+    # list of what still needs a hand-added entry versus what now fails
+    # loud automatically.
     paths = {"canon": canon_path, "manifest": manifest_path, "senses": senses_path}
     specs = tuple((key, label, stamp_key, paths[key]) for key, label, stamp_key in FROZEN_INPUT_SPECS)
     snapshots = {}

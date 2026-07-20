@@ -234,6 +234,7 @@ try:
         NO_CATEGORY_SENTINEL, NON_IDENTITY_BASIS,
         OCC_ORIGIN_BLOCK, OCC_ORIGIN_VERSE_EMBEDDED, VERSE_MOUNT_EMBEDDED,
         SUSPICION_WORKLIST_FILENAME, SUSPICION_WORKLIST_SCHEMA,
+        FROZEN_INPUT_SPECS,
     )
 except ImportError as exc:
     sys.exit(
@@ -916,19 +917,53 @@ def compute_producer_input_digest(canon_state: str, canon_bytes: bytes,
     -- a frozen input added to that tuple is stamped and H1-tamper-checked
     automatically, but does NOT gain freshness coverage here without a
     matching hand-added parameter (see that tuple's own "what
-    FROZEN_INPUT_SPECS does NOT cover" comment). Generalizing this to an
-    ordered/keyed collection was considered and deferred: this function is
-    direct-called from dozens of sites in `tests/suspicion_scan.test.py`
-    and `tests/skeptic_setup.test.py`, including ones asserting the exact
-    NUL-byte framing between two specific adjacent positional arguments --
-    a signature change here is a cross-file test-authoring change, not a
-    same-file refactor.
+    FROZEN_INPUT_SPECS does NOT cover" comment). Generalizing this
+    SIGNATURE to an ordered/keyed collection was considered and deferred:
+    this function is direct-called from dozens of sites in
+    `tests/suspicion_scan.test.py` and `tests/skeptic_setup.test.py`,
+    including ones asserting the exact NUL-byte framing between two
+    specific adjacent positional arguments -- a signature change here is a
+    cross-file test-authoring change, not a same-file refactor.
+
+    Round 10 (#243): the signature and every call site above stay exactly
+    as round 9 left them -- but the BODY below no longer hard-codes which
+    three `(state, bytes)` pairs get hashed. It builds a
+    `{key: (state, bytes)}` map and flattens it in `FROZEN_INPUT_SPECS`
+    order, asserting the map's key set equals the tuple's key set first.
+    This closes the silent half of round 9's gap: a fourth `FROZEN_INPUT_SPECS`
+    entry still needs its own hand-added parameter here (the signature is
+    unchanged), but now failing to add one raises `AssertionError` the
+    first time this function runs after the tuple grows, rather than
+    quietly hashing only the original three forever. `FROZEN_INPUT_SPECS`
+    is enumerated `("canon", "manifest", "senses")` today, so this
+    flattening reproduces the exact `canon_state, canon_bytes,
+    manifest_state, manifest_bytes, senses_state, senses_bytes` byte order
+    round 9 hashed -- the digest of any existing project is unchanged.
     """
     hasher = hashlib.sha256()
-    parts = [canon_state.encode("ascii"), canon_bytes,
-             manifest_state.encode("ascii"), manifest_bytes,
-             senses_state.encode("ascii"), senses_bytes,
-             _canonical_json_bytes(resolved_params), language_config_raw_bytes]
+    frozen_input_snapshots = {
+        "canon": (canon_state, canon_bytes),
+        "manifest": (manifest_state, manifest_bytes),
+        "senses": (senses_state, senses_bytes),
+    }
+    spec_keys = {spec[0] for spec in FROZEN_INPUT_SPECS}
+    if set(frozen_input_snapshots) != spec_keys:
+        raise AssertionError(
+            "compute_producer_input_digest(): frozen_input_snapshots keys "
+            f"{sorted(frozen_input_snapshots)} != FROZEN_INPUT_SPECS keys "
+            f"{sorted(spec_keys)} -- a frozen input was added to "
+            "skeptic_constants.FROZEN_INPUT_SPECS without a matching "
+            "hand-added parameter/snapshot entry here (or vice versa); see "
+            "skeptic_constants.py's \"what FROZEN_INPUT_SPECS does NOT "
+            "cover\" comment."
+        )
+    parts = []
+    for key, _label, _stamp_field in FROZEN_INPUT_SPECS:
+        state, snapshot_bytes = frozen_input_snapshots[key]
+        parts.append(state.encode("ascii"))
+        parts.append(snapshot_bytes)
+    parts.append(_canonical_json_bytes(resolved_params))
+    parts.append(language_config_raw_bytes)
     for member in PRODUCER_CODE_CLOSURE:
         parts.append((script_dir / member).read_bytes())
     for part in parts:

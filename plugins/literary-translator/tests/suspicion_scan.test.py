@@ -1144,6 +1144,83 @@ def test_producer_input_digest_separator_prevents_boundary_collision(tmp_path):
     assert d_ab_c != d_a_bc
 
 
+@pytest.mark.parametrize("direction", ["extra_tuple_entry", "missing_tuple_entry"])
+def test_producer_input_digest_fails_closed_on_frozen_input_specs_key_mismatch(tmp_path, monkeypatch, direction):
+    """Round 10 (#243, codex overrule of the prior round's refusal):
+    `compute_producer_input_digest()`'s signature is still the fixed
+    positional enumeration (canon/manifest/senses) round 9 left it as --
+    generalizing it was deliberately deferred again -- but the function
+    BODY now builds its own `{"canon": (state, bytes), "manifest": ...,
+    "senses": ...}` map and asserts that map's key set equals
+    `skeptic_constants.FROZEN_INPUT_SPECS`' own key set BEFORE hashing
+    anything. A `FROZEN_INPUT_SPECS` entry added (or removed) without a
+    matching hand-added parameter/snapshot-map entry here must now raise,
+    naming the mismatched key sets, instead of the digest silently
+    omitting -- forever -- whatever the tuple grew to include.
+
+    RED-before-green (verified manually against HEAD 681d19d's pre-round-10
+    `compute_producer_input_digest()`, not re-asserted here every run since
+    that would require carrying a stale git-show'd copy in the permanent
+    suite): loading HEAD's version and mutating the real, already-imported
+    `skeptic_constants.FROZEN_INPUT_SPECS` module attribute to append a
+    fourth entry left the digest BYTE-IDENTICAL to the unmutated baseline
+    (`91fa9493...c48b64a` both times) and raised nothing -- exactly the
+    silent-omission bug this test now guards against. Against the CURRENT
+    (fixed) function below, the identical mutation raises `AssertionError`
+    instead. This test therefore fails pre-fix (`pytest.raises` sees no
+    exception -- "DID NOT RAISE") and passes post-fix.
+
+    Mutates `ss.FROZEN_INPUT_SPECS` -- the name the ALREADY-LOADED `ss`
+    module (this file's own module-level import) bound at import time --
+    in memory via `monkeypatch`, auto-restored after the test; never
+    touches `skeptic_constants.py` on disk (that file belongs to a peer
+    owner). `compute_producer_input_digest()` looks up the bare name
+    `FROZEN_INPUT_SPECS` from its own module globals at CALL time (a
+    plain global reference, not a default-argument snapshot taken at def
+    time), so rebinding `ss.FROZEN_INPUT_SPECS` is indistinguishable, from
+    the function's own point of view, from a real edit landing in
+    `skeptic_constants.py`.
+
+    Parametrized over BOTH mismatch directions the exact-key-set check
+    must catch (the finding's own point: a `len()`-only check would miss
+    a same-count divergent-name swap) -- ``extra_tuple_entry`` appends a
+    fourth ``FROZEN_INPUT_SPECS`` entry (a tuple key with no matching
+    snapshot-map entry); ``missing_tuple_entry`` drops the existing
+    ``"senses"`` entry (the reverse: a snapshot-map entry -- ``"senses"``
+    is still hard-coded into the map regardless of the tuple -- with no
+    matching tuple key)."""
+    contents = {name: f"content-{name}".encode() for name in ss.PRODUCER_CODE_CLOSURE}
+    _write_closure_files(tmp_path, contents)
+    params = {"dispersion_threshold": 12}
+
+    if direction == "extra_tuple_entry":
+        mutated_specs = ss.FROZEN_INPUT_SPECS + (
+            ("mystery_fourth", "mystery_fourth.json", "mystery_fourth_sha256"),
+        )
+    else:
+        mutated_specs = tuple(spec for spec in ss.FROZEN_INPUT_SPECS if spec[0] != "senses")
+    monkeypatch.setattr(ss, "FROZEN_INPUT_SPECS", mutated_specs)
+
+    with pytest.raises(AssertionError) as exc_info:
+        ss.compute_producer_input_digest(
+            "regular", b"canon", "regular", b"manifest", "regular", b"senses",
+            params, b"lang", tmp_path,
+        )
+
+    # Assert on the actual key-SET mismatch the exception must name, not
+    # merely that "something raised" -- a test satisfied by any exception
+    # would pass even if the guard crashed for an unrelated reason.
+    msg = str(exc_info.value)
+    expected_snapshot_keys = repr(sorted(["canon", "manifest", "senses"]))
+    expected_spec_keys = repr(sorted(spec[0] for spec in mutated_specs))
+    assert expected_snapshot_keys in msg and expected_spec_keys in msg, (
+        f"MUTATION CAUGHT ({direction}): the raised exception must name "
+        f"BOTH the fixed {{'canon','manifest','senses'}} snapshot key set "
+        f"({expected_snapshot_keys}) and the mutated FROZEN_INPUT_SPECS "
+        f"key set ({expected_spec_keys}) -- got: {msg!r}"
+    )
+
+
 # ---------------------------------------------------------------------------
 # compute_frozen_input_hash -- H1's shared producer/verifier hash (codex
 # round 2: absent/regular-empty/irregular must never collide)
