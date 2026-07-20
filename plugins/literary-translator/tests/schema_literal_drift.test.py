@@ -895,12 +895,96 @@ def test_frozen_input_specs_keys_are_unique(skeptic_constants_module):
 # reachability proof, so a guard placed after a `return` (or any other
 # dead-code relocation) in `run()` specifically would be caught by
 # NOTHING in this suite.
+#
+# Round 14 (#243, codex round-14 review): three further false-green holes,
+# all demonstrated against the actual checker as it stood after round 13.
+#
+# Finding 1 -- operand and callee bindings were unchecked. The shape check
+# above (`_is_sorted_list_mismatch_shape`) confirms the guard's `if` test
+# IS `sorted(X) != sorted(Y)` over the right two operand SPELLINGS -- but a
+# spelling is not a binding. Two mutations stayed green through it:
+#   (a) rebinding one operand name to alias the other's value BEFORE the
+#       guard, e.g. `_spec_keys = list(_frozen_input_snapshots_by_key)` in
+#       `run()` -- the comparison becomes tautological (can never fire)
+#       while both expected names are still textually present at the
+#       guard itself;
+#   (b) shadowing the builtin `sorted` with a local (or module-level)
+#       `sorted = set` -- duplicate-key collapse, the exact defect round
+#       11 fixed, is restored while the accepted AST shape is untouched.
+# General dataflow/aliasing analysis (proving WHAT a rebind's right-hand
+# side evaluates to, or whether it happens to alias the other operand) is
+# the same class of disproportionate machinery this file has already
+# declined to build twice (the round-13 hoist-resolver story above, and
+# the reachability/dominance gap still left open above) -- but every guard
+# this codebase actually ships binds each of its own two operand names,
+# and the name `sorted`, in a fixed, narrow shape: each operand name
+# exactly ONCE, `sorted` not at all, within the guard's own owning scope
+# (verified directly against all four shipped sites via a throwaway AST
+# count before writing the check below: 1/1/0, at every site, in both
+# files). So `_store_name_counts_in_scope`/`_rebind_violations` below are a
+# purely SYNTACTIC count of bare-Name Store bindings in that scope, not
+# aliasing analysis -- a count outside that fixed shape is already,
+# unambiguously, a real defect here, cheap and sound rather than a
+# heuristic that could plausibly misfire on legitimate code shaped like
+# what's shipped today. What this does NOT catch, stated plainly:
+# rebinding via anything other than a bare Name Store in the guard's own
+# scope -- `import builtins; builtins.sorted = set`, `globals()["sorted"]
+# = set`, a rebind reached only through a closure two scopes up, or any
+# genuine alias-through-a-third-name dataflow chain. Those remain exactly
+# the kind of general analysis this file continues to decline to build.
+#
+# Finding 2 -- ownership was tracked by bare function NAME only
+# (`owner_func.name`), not by qualified lexical position, even though the
+# round-13 `ClassDef` reset already existed to null out ownership across a
+# class boundary. A guard relocated from module-level `run()` into
+#     class _RelocatedGuard:
+#         def run(self):
+#             ...
+# reset ownership to `None` entering the class, same as before -- but then
+# re-established it as bare `"run"` re-entering the method `def run`,
+# indistinguishable from the real module-level function of the same name.
+# Fixed by qualifying a method's owner as `"<ClassName>.<method>"` (using
+# the immediately-enclosing class, tracked via a second `immediate_parent`
+# scope-kind marker threaded alongside `current_owner`) whenever a
+# `FunctionDef`/`AsyncFunctionDef`'s own immediate lexical parent is a
+# `ClassDef`, and leaving a genuine module-level (or nested-in-a-plain-
+# function) def as its bare name, exactly as before. `EXPECTED_GUARD_SITES`
+# is keyed on these qualified names below, so `"run"` now means,
+# specifically, a def named `run` whose own immediate parent scope is NOT a
+# class -- `_RelocatedGuard.run` is a different key entirely, and fails the
+# identity-match assertion below as a missing expected site plus an
+# unexpected one, exactly the drift this exists to catch.
+#
+# Finding 3 -- the anchor phrase and the `Raise` were found independently,
+# each via `ast.walk` over the guard's ENTIRE body subtree, with no
+# requirement that the matched `Raise` be the thing that actually executes
+# unconditionally, or that the anchor phrase live inside THAT `Raise`'s own
+# exception value. Two shapes stayed green:
+#   - `if sorted(X) != sorted(Y): \n    while False:\n        raise
+#     AssertionError("...anchor phrase...")` -- a `Raise` that can never
+#     execute, nested inside an unrelated compound statement;
+#   - a bare no-op string carrying the anchor phrase as a dead expression
+#     statement, followed by an unrelated `raise SomethingElse(...)`.
+# Fixed WITHOUT dominance/reachability analysis, per codex's own framing of
+# this as narrower than the acknowledged "guard after return" gap left
+# open above: `_if_carries_anchor_raise` now requires a `Raise` DIRECTLY in
+# `if_node.body` (not nested inside any further compound statement the
+# direct body contains), and requires the anchor phrase to be found
+# specifically within THAT `Raise` node's own subtree -- not anywhere else
+# in the guard body. A `Raise` reachable only through a nested
+# loop/conditional is no longer treated as the guard's raise at all; an
+# anchor phrase sitting beside, rather than inside, the real raise no
+# longer counts either.
 
 
 ANCHOR_PHRASE = "FROZEN_INPUT_SPECS contains a duplicate key"
 
 # The four (file, function) semantic obligations codex asked this test to
 # bind to directly, by AST location, rather than trusting a scalar count.
+# Round 14 (Finding 2): each function key is now a QUALIFIED name -- see
+# the round-14 Finding 2 comment above -- so a guard relocated into a
+# same-named class method (`_RelocatedGuard.run`) no longer collides with
+# its real module-level namesake (`run`).
 # This is deliberately still a literal, hand-maintained mapping -- exactly
 # like section 1's literal `4` -- because there is no honest way to derive
 # "which four functions SHOULD own a guard" from the source itself; a
@@ -948,59 +1032,103 @@ def _site_sort_key(site: tuple) -> tuple:
 
 
 def _if_carries_anchor_raise(if_node: ast.If) -> bool:
-    """True if `if_node`'s own body (not its `elif`/`else`) both raises
-    AND carries the round-11 anchor phrase somewhere in a string literal
-    within that raise -- checked as two independent facts over the whole
-    body subtree, not "the Raise's first argument is this exact Constant",
-    so a message built via an intermediate variable, or split across an
-    f-string's own literal pieces (skeptic_ready.py's copy runs the phrase
-    inline after "...or " within a longer string, not on its own line),
-    is still found. `ast.walk` already descends into an f-string's
-    `JoinedStr.values`, so no separate f-string-specific handling is
-    needed here -- every literal piece surfaces as its own `Constant`."""
-    body_nodes = [n for stmt in if_node.body for n in ast.walk(stmt)]
-    has_raise = any(isinstance(n, ast.Raise) for n in body_nodes)
-    has_anchor = any(
-        isinstance(n, ast.Constant) and isinstance(n.value, str) and ANCHOR_PHRASE in n.value
-        for n in body_nodes
-    )
-    return has_raise and has_anchor
+    """True if `if_node`'s own body (not its `elif`/`else`) contains a
+    `Raise` DIRECTLY (a top-level statement of the `if`'s body, not nested
+    inside a further loop/conditional/with/try the body contains) whose
+    OWN exception-value subtree carries the round-11 anchor phrase
+    somewhere in a string literal -- not "the Raise's first argument is
+    this exact Constant", so a message built via an intermediate variable,
+    or split across an f-string's own literal pieces (skeptic_ready.py's
+    copy runs the phrase inline after "...or " within a longer string, not
+    on its own line), is still found. `ast.walk` (scoped to just that one
+    `Raise` node, not the whole `if` body) already descends into an
+    f-string's `JoinedStr.values`, so no separate f-string-specific
+    handling is needed here -- every literal piece surfaces as its own
+    `Constant`.
+
+    Round 14 (Finding 3, codex round-14 review): the prior version found
+    a `Raise` and the anchor phrase INDEPENDENTLY, each via `ast.walk`
+    over the entire body subtree, with no requirement that they be the
+    SAME raise or that the raise be reachable at all. Two shapes passed
+    silently: a `Raise` nested inside `while False:` (dead code, never
+    executes, but still found by an unscoped `ast.walk`), and a bare
+    no-op string literal carrying the anchor phrase as its own dead
+    expression statement, sitting beside an unrelated `raise
+    SomethingElse(...)`. Requiring the `Raise` to be a direct body
+    statement (not further nested) and the anchor to live inside THAT
+    `Raise`'s own subtree closes both without needing dominance/
+    reachability analysis -- narrower, and cheaper, than the acknowledged
+    "guard after an unconditional `return`" gap this file still leaves
+    open (see the closing comment above `ANCHOR_PHRASE`)."""
+    for stmt in if_node.body:
+        if not isinstance(stmt, ast.Raise):
+            continue
+        if any(
+            isinstance(n, ast.Constant) and isinstance(n.value, str) and ANCHOR_PHRASE in n.value
+            for n in ast.walk(stmt)
+        ):
+            return True
+    return False
 
 
-def _find_guard_ifs(node: ast.AST, current_func, hits: list) -> None:
+def _find_guard_ifs(node: ast.AST, current_owner, immediate_parent, hits: list) -> None:
     """Recursively walks `node`'s children, tracking which named
-    `FunctionDef`/`AsyncFunctionDef` (module-level `None` if none) most
-    closely encloses each `If` -- deliberately NOT a blind `ast.walk`,
-    which has no notion of "current enclosing function" and would
-    misattribute a nested def's own guard to its outer function (or a
-    guard that moved OUT of its owning function into a sibling function,
-    the exact drift shape this test must still catch). Appends
-    `(current_func, if_node)` for every `If` whose body
-    `_if_carries_anchor_raise`.
+    `FunctionDef`/`AsyncFunctionDef` most closely encloses each `If` --
+    deliberately NOT a blind `ast.walk`, which has no notion of "current
+    enclosing function" and would misattribute a nested def's own guard to
+    its outer function (or a guard that moved OUT of its owning function
+    into a sibling function, the exact drift shape this test must still
+    catch). Appends `(current_owner, if_node)` for every `If` whose body
+    `_if_carries_anchor_raise`, where `current_owner` is either `None`
+    (module level, or a `ClassDef` body outside any method) or a
+    `(qualified_name, function_node)` pair.
 
-    A `ClassDef` also resets `current_func` to `None`, the same as
-    module level: codex round 13's finding 2 named this as a second,
-    separate ownership defect from the hoist -- without this reset, a
-    guard relocated directly into a class body nested inside its owning
-    function (executed at class-definition time, not as part of the
-    function's own control flow) stayed attributed to that outer
-    function, so the relocation was invisible to `found_sites` below.
-    Verified on disk before this fix: a guard moved into
-    `class _Inner:` nested inside `run()` was reported as owned by
-    `run` itself. A `FunctionDef`/`AsyncFunctionDef` nested inside that
-    class still correctly re-establishes its OWN name on the next
-    recursion, same as any other nested def -- only a guard sitting
-    directly in the class body, in no method at all, is affected."""
+    `immediate_parent` is threaded alongside `current_owner` and holds
+    only `("class", name)` or `("function", name)` for whichever scope is
+    the DIRECT lexical parent of the next def/class encountered -- used
+    solely to decide how to qualify that next def's own name (see Finding
+    2 below); it is not itself the attribution `current_owner` records.
+
+    A `ClassDef` resets `current_owner` to `None`, the same as module
+    level: codex round 13's finding 2 named this as a second, separate
+    ownership defect from the hoist -- without this reset, a guard
+    relocated directly into a class body nested inside its owning function
+    (executed at class-definition time, not as part of the function's own
+    control flow) stayed attributed to that outer function, so the
+    relocation was invisible to `found_sites` below. Verified on disk
+    before that fix: a guard moved into `class _Inner:` nested inside
+    `run()` was reported as owned by `run` itself.
+
+    Round 14 (Finding 2, codex round-14 review): resetting ownership on
+    `ClassDef` entry was not enough on its own -- a `FunctionDef` nested
+    directly inside that class RE-established ownership as its own bare
+    `.name` on the next recursion, indistinguishable from a genuine
+    module-level function of the same name. A guard moved from
+    module-level `run()` into `class _RelocatedGuard: def run(self): ...`
+    was reported as owned by plain `"run"`, exactly like the real
+    function it replaced. Fixed by qualifying a def's owner as
+    `"<ClassName>.<def_name>"` whenever `immediate_parent` shows its own
+    direct lexical parent IS a `ClassDef`, and leaving it as a bare
+    `.name` otherwise (module level, or nested inside another plain
+    function/class-free scope) -- exactly the previous, correct behavior
+    for every def that isn't a method."""
     for child in ast.iter_child_nodes(node):
         if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            next_func = child
+            if immediate_parent is not None and immediate_parent[0] == "class":
+                qualified_name = f"{immediate_parent[1]}.{child.name}"
+            else:
+                qualified_name = child.name
+            next_owner = (qualified_name, child)
+            next_parent = ("function", child.name)
         elif isinstance(child, ast.ClassDef):
-            next_func = None
+            next_owner = None
+            next_parent = ("class", child.name)
         else:
-            next_func = current_func
+            next_owner = current_owner
+            next_parent = immediate_parent
         if isinstance(child, ast.If) and _if_carries_anchor_raise(child):
-            hits.append((current_func, child))
-        _find_guard_ifs(child, next_func, hits)
+            hits.append((current_owner, child))
+        _find_guard_ifs(child, next_owner, next_parent, hits)
 
 
 def _bare_name_sorted_call(node) -> "ast.Name | None":
@@ -1030,11 +1158,39 @@ def _bare_name_sorted_call(node) -> "ast.Name | None":
     return arg if isinstance(arg, ast.Name) else None
 
 
+def _resolved_generic_sorted_operands(expr) -> "tuple[str, str] | None":
+    """If `expr` is exactly `sorted(X) != sorted(Y)` for ANY two bare-Name
+    operands -- a `Compare` node with a single `!=` operator and both
+    sides a bare `sorted(<Name>)` call (see `_bare_name_sorted_call`) --
+    returns `(X.id, Y.id)` in the order written. Returns `None` for
+    anything else (an unsupported hoisted form, a `set(...)`/`len(...)`
+    comparison, a nested-call or literal argument to `sorted()`, ...),
+    without regard to which SPECIFIC two names are used -- that
+    site-specific binding is `_is_sorted_list_mismatch_shape`'s job below,
+    which is written in terms of this helper so the two never drift apart.
+
+    Round 14 (Finding 1): also the entry point `_rebind_violations` uses
+    to recover a guard's own actual operand names, independent of whether
+    they turn out to match the expected pair -- the rebind checks below
+    need to know WHICH two names to count Store-bindings for even before
+    the site-specific identity check runs."""
+    if expr is None or not isinstance(expr, ast.Compare):
+        return None
+    if len(expr.ops) != 1 or not isinstance(expr.ops[0], ast.NotEq):
+        return None
+    if len(expr.comparators) != 1:
+        return None
+    left = _bare_name_sorted_call(expr.left)
+    right = _bare_name_sorted_call(expr.comparators[0])
+    if left is None or right is None:
+        return None
+    return (left.id, right.id)
+
+
 def _is_sorted_list_mismatch_shape(expr, expected_names: "tuple[str, str]") -> bool:
     """True iff `expr` is exactly `sorted(X) != sorted(Y)` where `{X, Y}`
     (order-insensitive, since `!=` is symmetric) equals `set(expected_names)`
-    -- a `Compare` node with a single `!=` operator and both sides a bare
-    `sorted(<Name>)` call (see `_bare_name_sorted_call`) over this
+    -- built on `_resolved_generic_sorted_operands` above, narrowed to this
     particular site's own two operands. Anything else (`None` from an
     unsupported hoisted form, a `set(...)`/`len(...)` comparison, a
     self-comparison `sorted(X) != sorted(X)`, a comparison against the
@@ -1050,29 +1206,134 @@ def _is_sorted_list_mismatch_shape(expr, expected_names: "tuple[str, str]") -> b
     updating one side -- is exactly as real a defect as a `set(...)`-based
     guard, and a bare shape check blind to WHICH names are compared would
     stay green through it."""
-    if expr is None or not isinstance(expr, ast.Compare):
+    operands = _resolved_generic_sorted_operands(expr)
+    if operands is None:
         return False
-    if len(expr.ops) != 1 or not isinstance(expr.ops[0], ast.NotEq):
-        return False
-    if len(expr.comparators) != 1:
-        return False
-    left = _bare_name_sorted_call(expr.left)
-    right = _bare_name_sorted_call(expr.comparators[0])
-    if left is None or right is None:
-        return False
-    return {left.id, right.id} == set(expected_names)
+    return set(operands) == set(expected_names)
+
+
+def _store_name_counts_in_scope(scope_body: "list[ast.stmt]") -> "dict[str, int]":
+    """Counts every bare-Name Store-context binding (`Assign`/`AugAssign`/
+    `AnnAssign`/`For`/`With` targets, walrus `:=`, ...) reachable DIRECTLY
+    within `scope_body`'s own statements, WITHOUT descending into a nested
+    function/class/lambda/comprehension body -- each of those introduces
+    its own independent scope in real Python, so a name bound there does
+    not shadow or rebind a name in the enclosing scope this function is
+    asked about.
+
+    Round 14 (Finding 1): this is deliberately a purely SYNTACTIC count,
+    not dataflow/aliasing analysis -- it answers "how many times is this
+    bare name assigned to, directly in this scope", nothing about what
+    value flows into it or whether that value happens to alias another
+    name. See the round-14 Finding 1 comment above `ANCHOR_PHRASE` for why
+    that's the deliberately cheap, sound substitute for general aliasing
+    analysis here: every guard this codebase ships binds each of its own
+    operand names, and the name `sorted`, in a fixed, verified shape (1/1/0
+    at all four real sites), so any count outside that shape is already an
+    unambiguous defect, not a judgment call."""
+    counts: "dict[str, int]" = {}
+
+    class _StoreNameCounter(ast.NodeVisitor):
+        def visit_FunctionDef(self, node: ast.AST) -> None:
+            return  # separate scope -- do not descend
+
+        def visit_AsyncFunctionDef(self, node: ast.AST) -> None:
+            return
+
+        def visit_ClassDef(self, node: ast.AST) -> None:
+            return
+
+        def visit_Lambda(self, node: ast.AST) -> None:
+            return
+
+        def visit_ListComp(self, node: ast.AST) -> None:
+            return  # comprehensions are their own scope in Python 3
+
+        def visit_SetComp(self, node: ast.AST) -> None:
+            return
+
+        def visit_DictComp(self, node: ast.AST) -> None:
+            return
+
+        def visit_GeneratorExp(self, node: ast.AST) -> None:
+            return
+
+        def visit_Name(self, node: ast.Name) -> None:
+            if isinstance(node.ctx, ast.Store):
+                counts[node.id] = counts.get(node.id, 0) + 1
+
+    visitor = _StoreNameCounter()
+    for stmt in scope_body:
+        visitor.visit(stmt)
+    return counts
+
+
+def _rebind_violations(
+    operand_names: "tuple[str, str]",
+    owner_func: "ast.FunctionDef | ast.AsyncFunctionDef | None",
+    module_tree: ast.Module,
+) -> "list[str]":
+    """Round 14 (Finding 1): cheap, sound, narrowly-scoped defense against
+    a rebind of either operand name, or of the builtin name `sorted`
+    itself, that defeats the guard while leaving its AST shape and operand
+    spelling untouched. Returns a list of human-readable violation strings
+    (empty if none found).
+
+    Deliberately NOT dataflow/aliasing analysis: this does not ask what a
+    rebind's right-hand side evaluates to, or whether it happens to alias
+    the other operand -- only whether the name is bound (Store context)
+    more than the single time every guard this codebase actually ships
+    binds it. Full aliasing analysis was already rejected twice as
+    disproportionate for this file (see the round-13 hoist-resolver story
+    above); this count is proportionate because every real guard's own two
+    operand names are each bound EXACTLY ONCE, and the name `sorted` ZERO
+    times, in scope -- any count outside that is already, unambiguously, a
+    real defect here."""
+    owner_scope_body = owner_func.body if owner_func is not None else module_tree.body
+    owner_counts = _store_name_counts_in_scope(owner_scope_body)
+
+    violations = []
+    for name in operand_names:
+        count = owner_counts.get(name, 0)
+        if count != 1:
+            violations.append(
+                f"operand name {name!r} is bound {count} time(s) in its guard's "
+                "own owning scope (expected exactly 1) -- a second rebind (e.g. "
+                "aliasing it to the OTHER operand's value) makes the comparison "
+                "tautological while leaving both expected names present"
+            )
+    if owner_counts.get("sorted", 0) > 0:
+        violations.append(
+            "the builtin name `sorted` is locally rebound within the guard's "
+            "own owning scope -- e.g. `sorted = set` restores duplicate-key "
+            "collapse while leaving the accepted `sorted(X) != sorted(Y)` AST "
+            "shape untouched"
+        )
+    if owner_func is not None:
+        module_counts = _store_name_counts_in_scope(module_tree.body)
+        if module_counts.get("sorted", 0) > 0:
+            violations.append(
+                "the builtin name `sorted` is rebound at module level in this "
+                "file -- this shadows `sorted` for every function in the "
+                "module, including the guard's own owning scope"
+            )
+    return violations
 
 
 def _guard_hits_in_file(path: Path) -> list:
     """Returns one dict per FROZEN_INPUT_SPECS key-mismatch guard found
     anywhere in `path`, each shaped `{"file": <name relative to
-    SCRIPTS_DIR>, "function": <enclosing def name, or None>,
+    SCRIPTS_DIR>, "function": <qualified owner name, or None>,
     "resolved_expr": <the guard's own `if` test, or None if it is a bare
     name (a hoisted flag)>, "display": <ast.unparse of the test, or a
-    fallback string explaining why the hoisted form is unsupported>}` --
-    the `display` string is what a failing assertion below quotes, so a
-    test failure names the exact shape actually observed, not just that
-    something didn't match.
+    fallback string explaining why the hoisted form is unsupported>,
+    "rebind_violations": <list of round-14 Finding 1 violation strings,
+    always empty when `resolved_expr` is None>}` -- the `display` string is
+    what a failing assertion below quotes, so a test failure names the
+    exact shape actually observed, not just that something didn't match.
+    `function` is now a QUALIFIED name (see `_find_guard_ifs`'s own
+    docstring, round-14 Finding 2) -- a method's owner is
+    `"<ClassName>.<def_name>"`, not just `<def_name>`.
 
     Deliberately does NOT attempt to resolve a hoisted `_flag = <expr>; if
     _flag:` back to `<expr>` -- see this section's own round-13 comment
@@ -1084,10 +1345,12 @@ def _guard_hits_in_file(path: Path) -> list:
     source_text = path.read_text(encoding="utf-8")
     tree = ast.parse(source_text, filename=str(path))
     raw_hits: list = []
-    _find_guard_ifs(tree, None, raw_hits)
+    _find_guard_ifs(tree, None, None, raw_hits)
 
     results = []
-    for owner_func, if_node in raw_hits:
+    for owner, if_node in raw_hits:
+        owner_name = owner[0] if owner is not None else None
+        owner_node = owner[1] if owner is not None else None
         test_expr = if_node.test
         if isinstance(test_expr, ast.Name):
             resolved = None
@@ -1096,15 +1359,21 @@ def _guard_hits_in_file(path: Path) -> list:
                 "write the sorted(X) != sorted(Y) comparison directly at "
                 "the guard, not behind an intermediate flag variable>"
             )
+            rebind_violations: list = []
         else:
             resolved = test_expr
             display = ast.unparse(resolved)
+            operands = _resolved_generic_sorted_operands(resolved)
+            rebind_violations = (
+                _rebind_violations(operands, owner_node, tree) if operands is not None else []
+            )
         results.append(
             {
                 "file": str(path.relative_to(SCRIPTS_DIR)),
-                "function": owner_func.name if owner_func is not None else None,
+                "function": owner_name,
                 "resolved_expr": resolved,
                 "display": display,
+                "rebind_violations": rebind_violations,
             }
         )
     return results
@@ -1113,16 +1382,25 @@ def _guard_hits_in_file(path: Path) -> list:
 def test_frozen_input_key_mismatch_guards_bind_to_owning_function_via_ast():
     """AST-driven sibling-consistency check across every FROZEN_INPUT_SPECS
     key-mismatch guard shipped anywhere under `SCRIPTS_DIR`. See this
-    section's own comment block above for the full round-13 story: a
-    prior, purely REGEX-based version of this test located a guard by its
-    exception-message anchor phrase alone, with no binding to the actual
-    `if`/function it lived in, and a later AST version's one-level hoist
-    RESOLVER turned out to be unsound (a breadth-first candidate order
-    masquerading as "nearest preceding"). This version does neither: it
+    section's own comment block above for the full round-13 and round-14
+    story: a prior, purely REGEX-based version of this test located a
+    guard by its exception-message anchor phrase alone, with no binding to
+    the actual `if`/function it lived in; a later AST version's one-level
+    hoist RESOLVER turned out to be unsound (a breadth-first candidate
+    order masquerading as "nearest preceding"); and round 14 closed three
+    further false-green holes in the AST version that replaced it (operand/
+    `sorted` rebinding, same-named-method ownership collision, and an
+    anchor/raise found independently of each other and of reachability --
+    see the round-14 comment block above `ANCHOR_PHRASE`). This version
     requires the guard's `if` test to BE, directly, the required
-    comparison, and rejects a hoisted `if _flag:` outright as an
-    unsupported form rather than guessing at what `_flag` might resolve
-    to.
+    comparison; rejects a hoisted `if _flag:` outright as an unsupported
+    form rather than guessing at what `_flag` might resolve to; requires
+    the guard's operand names and the builtin `sorted` to each be bound in
+    its owning scope exactly as many times as every real guard binds them;
+    qualifies a method's ownership by its enclosing class so it cannot be
+    confused with a same-named module-level function; and requires the
+    anchor-carrying `Raise` to be a direct, unconditionally-reached
+    statement of the guard's own body.
 
     This proves something stronger than a scalar count: each of the four
     (file, function) semantic obligations named in `EXPECTED_GUARD_SITES`
@@ -1131,7 +1409,8 @@ def test_frozen_input_key_mismatch_guards_bind_to_owning_function_via_ast():
     `frozen_input_check()` (skeptic_ready.py) -- independently carries a
     guard whose `if` test is exactly `sorted(X) != sorted(Y)` over THAT
     site's own two operand names (bare-Name arguments only, order-
-    insensitive), found directly at the guard.
+    insensitive), found directly at the guard, with neither operand name
+    nor `sorted` itself rebound anywhere in the guard's own owning scope.
 
     The file SET scanned is still DERIVED (every `*.py` directly under
     `SCRIPTS_DIR`, non-recursive) rather than hand-typed -- see the
@@ -1142,16 +1421,21 @@ def test_frozen_input_key_mismatch_guards_bind_to_owning_function_via_ast():
     OTHER function in the same file (or a fifth guard landing anywhere)
     changes `found_sites` below and is caught by identity, not just by a
     count staying accidentally correct -- including a relocation into a
-    nested class body, which `_find_guard_ifs` now attributes to `None`
-    rather than to the class's enclosing function (see its own docstring).
+    nested class body (attributed to `None`) or into a same-named method
+    of a class (attributed to a distinct qualified name), per
+    `_find_guard_ifs`'s own docstring.
 
-    LIMIT, stated plainly rather than left implicit: this proves shape,
-    operands, and ownership identity for all four guards. It does NOT
-    prove reachability -- a guard of the exact required shape sitting
-    after an unconditional `return` (or any other dead-code path) still
-    passes every assertion below. See this section's closing comment
-    block above for why that is a deliberate, documented gap rather than
-    an oversight."""
+    LIMITS, stated plainly rather than left implicit:
+      - This does NOT prove reachability -- a guard of the exact required
+        shape sitting after an unconditional `return` (or any other
+        dead-code path) still passes every assertion below. See this
+        section's closing comment block above for why that is a
+        deliberate, documented gap rather than an oversight.
+      - The round-14 rebind checks are a SYNTACTIC Store-name count, not
+        dataflow/aliasing analysis -- a rebind reached via
+        `builtins.sorted = ...`, `globals()[...]`, or any alias-through-a-
+        third-name chain is invisible to it. See the round-14 Finding 1
+        comment above for why that's the deliberate boundary."""
     all_hits = []
     for script_path in sorted(SCRIPTS_DIR.glob("*.py")):
         all_hits.extend(_guard_hits_in_file(script_path))
@@ -1189,4 +1473,9 @@ def test_frozen_input_key_mismatch_guards_bind_to_owning_function_via_ast():
             "silently compares the wrong data; only `sorted(X) != "
             "sorted(Y)` with bare-Name arguments matching this site's own "
             "two operands catches every case."
+        )
+        assert not hit["rebind_violations"], (
+            f"{hit['file']}::{hit['function']}: guard passes the shape/"
+            "operand-name check but fails a round-14 Finding 1 rebind "
+            "check:\n" + "\n".join(f"  - {v}" for v in hit["rebind_violations"])
         )

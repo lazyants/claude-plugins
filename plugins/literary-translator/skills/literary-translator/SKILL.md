@@ -878,7 +878,9 @@ it: `if_node.test` must itself be the `sorted(X) != sorted(Y)` comparison,
 found directly at the guard; a bare-name test (`if _flag:`) fails with a
 message saying the hoisted form is unsupported rather than being resolved
 or silently passed. All four shipped guards are, and always were, written
-as direct comparisons, so nothing real is lost.
+as direct comparisons, so no currently shipped guard is affected — the
+constraint does still bind how any future guard may be written, a real
+cost the rejection accepts rather than one it avoids.
 
 The same round-13 review found the shape check itself too permissive two
 further ways, both now closed. First, it only confirmed both `sorted()`
@@ -925,14 +927,24 @@ absent, and not universal either. At
 still caught: its behavioral test file failed (4 failing tests) even
 though the static check stayed blind. At `skeptic_setup.py::run`, nothing
 caught it — the static check stayed blind AND the plugin's entire test
-suite stayed green (2799 passed, 1 skipped, 2 xfailed). That one site —
-`run()`'s own copy of this guard — has no behavioral fail-closed test
-anywhere in this repository (confirmed by grep, not assumed: no test
-references `run(` or `_frozen_input_snapshots_by_key`), so a dead or
-never-firing guard there is caught by nothing currently shipped. The other
-three sites' behavioral tests (`suspicion_scan.test.py`'s and
-`skeptic_setup.test.py`'s own `duplicate_key_entry`/`same_count_key_swap`
-cases for the two digest functions, `skeptic_ready.test.py`'s
+suite stayed green (2799 passed, 1 skipped, 2 xfailed). That measurement
+established that `run()`'s own copy of this guard was, at the time, the
+one site among the four with no mismatch-driven behavioral test of its
+own. Round 14 (#243) closed it: `skeptic_setup.test.py`'s
+`test_run_fails_closed_on_frozen_input_specs_key_mismatch_after_upstream_digests`
+wraps the real `resolve_skeptic_run()` so a duplicate-key
+`FROZEN_INPUT_SPECS` mutation is injected only after both upstream digest
+guards have already run against unmutated state, then asserts `run()`'s
+own guard raises and names both sorted key lists — verified red the same
+way, against the guard relocated to the same dead code. That test's own
+docstring records a residual gap: weakening the guard to a bare LENGTH
+comparison still passes green against this duplicate-key mutation (only a
+same-count divergent-key swap would slip past it), a gap
+`compute_skeptic_input_digest()`'s own round-11 parametrized test already
+covers directly. The other three sites' behavioral tests
+(`suspicion_scan.test.py`'s and `skeptic_setup.test.py`'s own
+`duplicate_key_entry`/`same_count_key_swap` cases for the two digest
+functions, `skeptic_ready.test.py`'s
 `--verify-merged`/`--check-frozen-inputs` case for `frozen_input_check()`)
 close this reachability gap for their own sites, not because they were
 built to prove reachability, but because driving the guard through a real

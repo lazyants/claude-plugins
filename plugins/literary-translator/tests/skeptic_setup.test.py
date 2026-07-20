@@ -1001,6 +1001,130 @@ def test_skeptic_input_digest_fails_closed_on_frozen_input_specs_key_mismatch(tm
     )
 
 
+def test_run_fails_closed_on_frozen_input_specs_key_mismatch_after_upstream_digests(tmp_path, monkeypatch):
+    """Round 14 (#243, codex review): `run()`'s OWN
+    `_frozen_input_snapshots_by_key` vs `FROZEN_INPUT_SPECS` guard
+    (skeptic_setup.py:831, defense-in-depth against a future reordering
+    ahead of the H1-stamp comprehension right below it -- see that guard's
+    own comment) was the ONLY one of the four FROZEN_INPUT_SPECS-key-
+    mismatch guards in this file's code closure (suspicion_scan's own
+    `compute_producer_input_digest()`, this module's `compute_skeptic_input_digest()`
+    immediately above via `test_skeptic_input_digest_fails_closed_on_frozen_input_specs_key_mismatch`,
+    and this one) with no mismatch-driven behavioral test. Relocating it
+    into dead code after `run()`'s `return` left the full suite green --
+    nothing here previously caught a dead or never-firing guard at this
+    specific site.
+
+    The trap a naive version of this test falls into: `run()` calls
+    `compute_producer_input_digest()` (freshness check, step 3) and this
+    module's own `compute_skeptic_input_digest()` (step 6) BEFORE
+    resolving the RUN_ID (step 7, `resolve_skeptic_run()` call at
+    skeptic_setup.py:743) -- and `compute_skeptic_input_digest()` carries
+    the IDENTICAL key-mismatch guard against the SAME module-level
+    `FROZEN_INPUT_SPECS` global the test above this one exercises directly.
+    Mutating `mod.FROZEN_INPUT_SPECS` before calling `mod.run(args)` at
+    all would trip THAT guard first and never reach line 831 -- proving
+    nothing about the guard this test targets.
+
+    The fix: wrap the REAL `resolve_skeptic_run()` (confirmed above,
+    against the current source, to execute strictly AFTER both upstream
+    digest checks and strictly BEFORE the target guard) so the mismatch is
+    injected only AFTER it returns. Both upstream checks run normally,
+    against unmutated state, before anything is disturbed -- nothing on
+    the path under test is stubbed or neutralized. Appends a duplicate
+    `("canon", "canon.json", "canon_sha256")` entry, reusing the real
+    "canon" stamp field rather than inventing a new one, so a downstream
+    schema failure could never accidentally satisfy the assertion for the
+    wrong reason (moot here since the assertion fires before any further
+    write, but kept for the same reason the sibling test above does).
+
+    RED-proven manually against this file, one mutation at a time,
+    restored immediately after each (not re-asserted every run):
+    (1) weakening the target guard to a SET comparison (`set(...) !=
+    set(...)`) let the duplicate "canon" key collapse into the unmutated
+    `{"canon","manifest","senses"}` set on both sides -- this test went
+    red ("Failed: DID NOT RAISE AssertionError"); (2) weakening to a bare
+    LENGTH comparison (`len(...) != len(...)`) stayed GREEN for this
+    specific mutation -- `_frozen_input_snapshots_by_key` is a dict (always
+    3 keys, duplicates can't exist in it), but `_spec_keys` is a LIST built
+    from the mutated 4-entry `FROZEN_INPUT_SPECS`, so `3 != 4` still trips
+    a length-only guard; this duplicate-key case is exactly the one a
+    length check does NOT miss (only a same-count divergent-key swap
+    would slip past it, which line 831's guard was never trying to catch
+    on its own -- that gap belongs to `compute_skeptic_input_digest()`'s
+    own round-11 parametrized test above, which already covers it
+    directly). The load-bearing probe is (3): relocating the guard to dead
+    code after `run()`'s `return` -- the exact scenario nothing else in
+    this suite catches -- went red the same way as (1)
+    ("DID NOT RAISE"). All three restored via `git show HEAD:<path>` +
+    `command cp -f`, confirmed with `git diff HEAD --
+    skills/literary-translator/assets/scripts/` empty afterward."""
+    root = make_skeptic_root(tmp_path)
+    mod = _load_module(
+        "skeptic_setup_for_run_frozen_specs_mismatch_test", root / "scripts" / "skeptic_setup.py", root / "scripts"
+    )
+    entry = make_worklist_entry("Jean", occurrence_refs=[make_occurrence_ref("b1", "seg01", 0, 4)])
+    write_worklist(root, [entry])
+
+    real_resolve_skeptic_run = mod.resolve_skeptic_run
+    mutated_specs = mod.FROZEN_INPUT_SPECS + (("canon", "canon.json", "canon_sha256"),)
+
+    def _resolve_then_inject_duplicate_key(input_digest, resume_from_run_id):
+        # The REAL resolve_skeptic_run(), called FIRST, against the REAL
+        # (still-unmutated) FROZEN_INPUT_SPECS -- by the time control
+        # reaches here, both upstream digest checks (compute_producer_input_digest
+        # at the freshness check, compute_skeptic_input_digest just above
+        # this call inside run()) have already executed normally.
+        result = real_resolve_skeptic_run(input_digest, resume_from_run_id)
+        monkeypatch.setattr(mod, "FROZEN_INPUT_SPECS", mutated_specs)
+        # Confirm the mutation actually landed on the SAME module binding
+        # run() itself reads a few lines further down, rather than trusting
+        # a green result -- `run` is DEFINED in this module, so its
+        # unqualified `FROZEN_INPUT_SPECS` reference resolves through
+        # `mod.__dict__`, the exact attribute just set above.
+        assert mod.FROZEN_INPUT_SPECS == mutated_specs, (
+            "setup bug: mutating mod.FROZEN_INPUT_SPECS did not stick "
+            "before run() reads it"
+        )
+        return result
+
+    monkeypatch.setattr(mod, "resolve_skeptic_run", _resolve_then_inject_duplicate_key)
+
+    sp = DEFAULT_SCAN_PARAMS
+    argv = [
+        "--particle-config", "test.json",
+        "--research-mode", sp["research_mode"],
+        "--source-format", sp["source_format"],
+        "--dispersion-threshold", str(sp["dispersion_threshold"]),
+        "--sample-cap", str(sp["sample_cap"]),
+        "--windows-per-entity", str(sp["windows_per_entity"]),
+        "--near-threshold", str(sp["near_threshold"]),
+        "--near-cap", str(sp["near_cap"]),
+        "--near-pair-budget", str(sp["near_pair_budget"]),
+        "--entities-per-batch", "5", "--batch-agent-cap", "100",
+        "--source-lang", "fr",
+    ]
+    args = mod.build_arg_parser().parse_args(argv)
+
+    with pytest.raises(AssertionError) as exc_info:
+        mod.run(args)
+
+    msg = str(exc_info.value)
+    expected_snapshot_keys = repr(sorted(["canon", "manifest", "senses"]))
+    expected_spec_keys = repr(sorted(spec[0] for spec in mutated_specs))
+    assert "_frozen_input_snapshots_by_key" in msg, (
+        "raised AssertionError must be run()'s OWN guard (skeptic_setup.py:831, "
+        "which names its local `_frozen_input_snapshots_by_key`), not "
+        f"compute_skeptic_input_digest()'s sibling guard -- got: {msg!r}"
+    )
+    assert expected_snapshot_keys in msg and expected_spec_keys in msg, (
+        "MUTATION CAUGHT: the raised exception must name BOTH the fixed "
+        f"{{'canon','manifest','senses'}} snapshot key set ({expected_snapshot_keys}) "
+        f"and the mutated FROZEN_INPUT_SPECS key set ({expected_spec_keys}) "
+        f"-- got: {msg!r}"
+    )
+
+
 def test_fresh_run_id_is_collision_free_without_sleeping(tmp_path):
     """Hardening: fresh_run_id() must be collision-free ON ITS OWN
     (microsecond timestamp + random hex suffix), not merely "usually fine,
