@@ -128,15 +128,18 @@ authoritative but was never grounded in the artifact (verified 2026-07-19: a pla
 silently degraded this way and had to be re-run). Fix — copy it in and git-exclude it:
 ```
 /bin/cp -f <scratchpad>/plan.md <worktree>/PLAN-REVIEW-SCRATCH.md
-echo "PLAN-REVIEW-SCRATCH.md" >> "$(git -C <worktree> rev-parse --git-path info/exclude)"
+echo "PLAN-REVIEW-SCRATCH.md" >> "$(git -C <worktree> rev-parse --path-format=absolute --git-path info/exclude)"
 git -C <worktree> check-ignore -q PLAN-REVIEW-SCRATCH.md && echo excluded   # proves it, on any tree
 ```
 Three traps in those three lines: **(a)** in a worktree `.git` is a FILE, not a directory, so a literal
 `.git/info/exclude` redirect fails with `not a directory` — always resolve it via
 `git rev-parse --git-path info/exclude`; **(b)** `cp` is aliased to `cp -i` in this shell and will sit
 on an interactive overwrite prompt even with `-f`, so call `/bin/cp -f`; **(c)** `git -C <worktree>` on
-BOTH git calls — bare `git` uses the shell's cwd, which this same file documents as prone to drift, so
-an unscoped `rev-parse` writes the exclude into whatever repo you happen to be standing in. Verify with
+BOTH git calls, AND `--path-format=absolute` on the `rev-parse` — bare `git` uses the shell's cwd,
+which this same file documents as prone to drift. `-C` alone is not enough: in an ordinary checkout
+`rev-parse --git-path` prints the RELATIVE `.git/info/exclude`, and the shell resolves the `>>`
+redirect in ITS cwd, not the worktree's — so the exclude still lands in whatever repo you are standing
+in (verified: a worktree returns an absolute path, an ordinary checkout does not). Verify with
 `check-ignore` on the one path, not `git status --short` — status cannot be empty on an
 already-dirty tree, so it proves nothing there. Delete the staged copy before
 committing, and re-sync it on every plan revision or codex reviews a stale draft.
