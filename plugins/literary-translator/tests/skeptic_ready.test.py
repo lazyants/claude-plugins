@@ -1484,6 +1484,144 @@ def test_check_frozen_inputs_cli_exit_code_reflects_mismatch(tmp_path):
     assert sr.main(argv_clean) == 1, "exit code must reflect frozen_input_mismatch, not just succeed unconditionally"
 
 
+@pytest.mark.parametrize("direction", [
+    "extra_tuple_entry", "missing_tuple_entry",
+    "duplicate_key_entry", "same_count_key_swap",
+])
+def test_check_frozen_inputs_fails_closed_on_frozen_input_specs_key_mismatch(tmp_path, monkeypatch, direction):
+    """Round 12 (#243): `frozen_input_check()`'s own `paths` dict
+    (skeptic_ready.py:1051) is a FIXED, three-key `{"canon", "manifest",
+    "senses"}` literal -- unlike the two digest functions'
+    `{key: (state, bytes)}` maps (built fresh from their own kwargs every
+    call, see tests/suspicion_scan.test.py's/tests/skeptic_setup.test.py's
+    own `..._fails_closed_on_frozen_input_specs_key_mismatch` siblings),
+    this dict never changes shape at runtime -- so a `FROZEN_INPUT_SPECS`
+    entry that diverges from it (a fourth spec with no matching `paths`
+    key, a spec dropped while `paths` keeps its old key, or a spec that
+    silently REUSES an existing key) has to be caught by comparing that
+    fixed literal against the tuple itself, at skeptic_ready.py:1053
+    (``if sorted(paths) != sorted(_spec_keys): raise AssertionError``).
+
+    A prior round declined to test this guard, on the premise that
+    `frozen_input_check()` is only reachable via `--verify-merged`, which
+    (so the argument went) validates the aggregate's stamps against
+    `FROZEN_INPUT_SPECS`-derived expectations before `paths` is ever
+    built, making any reaching test a fabricated bypass. That premise is
+    false: `run_check_frozen_inputs()` (skeptic_ready.py:1089, the
+    standalone `--check-frozen-inputs` CLI mode wired in `main()`) calls
+    `frozen_input_check(aggregate, canon_path, manifest_path, senses_path,
+    tolerant_reads=True)` DIRECTLY (skeptic_ready.py:1142) with no upstream
+    stamp-validation gate on that path -- the guard is reached through its
+    own real, undoctored call chain, exactly like the CLEAN/tamper cases
+    already covered above by
+    test_check_frozen_inputs_clean_reports_no_mismatch et al.
+
+    Same four mutation directions as the two digest-function siblings, for
+    the same reason those needed all four (this repo's own round-11
+    lesson on `FROZEN_INPUT_SPECS`, re-derived here rather than assumed to
+    generalize): `extra_tuple_entry`/`missing_tuple_entry` change
+    CARDINALITY, so alone they cannot distinguish this genuinely
+    `sorted`-list guard from a weaker `set`-based or `len`-based one.
+    `duplicate_key_entry` (a fourth entry reusing the existing `"canon"`
+    key) reduces to the SAME two-element key set as `paths`
+    (`{"canon","manifest","senses"}`) despite being a real THREE-vs-FOUR
+    cardinality mismatch on the list -- a `set(...)` comparison would miss
+    it. `same_count_key_swap` (`"senses"` renamed to `"sessens"`,
+    cardinality unchanged at 3) is exactly what a bare `len(...)`
+    comparison would miss. Manually verified RED against both weakenings
+    (each restored immediately after, via `command cp -f` to sidestep this
+    shell's `cp -i` alias):
+      - guard weakened to `if set(paths) != set(_spec_keys):` --
+        `duplicate_key_entry` failed with "DID NOT RAISE <class
+        'AssertionError'>" (the other three directions still raised).
+      - guard weakened to `if len(paths) != len(_spec_keys):` --
+        `same_count_key_swap` failed with "DID NOT RAISE <class
+        'AssertionError'>" (raised `KeyError('sessens')` instead once the
+        (broken) guard let it fall through to the hashing loop below,
+        which `pytest.raises(AssertionError)` does not catch; the other
+        three directions still raised `AssertionError` under this
+        weakening too).
+    Against the CURRENT (round-11, sorted non-deduplicated key-LIST)
+    guard, all four directions raise `AssertionError` naming both key
+    lists, as asserted below.
+
+    Patches `sr.FROZEN_INPUT_SPECS` directly -- `sr` is the single
+    already-loaded module this whole test file shares (loaded once at
+    import time via `_load_module()` up top), and `skeptic_ready.py`
+    resolves `FROZEN_INPUT_SPECS` from its OWN globals at call time (its
+    own top-level `from skeptic_constants import (..., FROZEN_INPUT_SPECS,
+    ...)`, skeptic_ready.py:223-232, bound the name into `sr`'s globals,
+    not `skeptic_constants`'s) -- patching `skeptic_constants`'s copy
+    instead would leave `sr.frozen_input_check()`'s own `_spec_keys` lookup
+    unaffected and this test would silently exercise nothing.
+    `monkeypatch.setattr` auto-reverts after the test, so no explicit
+    restore is needed for the patch itself (unlike the temporary
+    skeptic_ready.py source edits used only for the RED-evidence probes
+    above, which are not part of this test and are never committed)."""
+    # Prove the patch actually takes effect from inside the module under
+    # test before trusting anything downstream of it (per this round's own
+    # brief: a monkeypatch that silently doesn't bind is worse than no test).
+    original_specs = sr.FROZEN_INPUT_SPECS
+    assert {spec[0] for spec in original_specs} == {"canon", "manifest", "senses"}, (
+        f"unexpected baseline sr.FROZEN_INPUT_SPECS shape: {original_specs!r} -- "
+        "the mutation directions below assume exactly these three keys"
+    )
+
+    if direction == "extra_tuple_entry":
+        mutated_specs = original_specs + (
+            ("mystery_fourth", "mystery_fourth.json", "mystery_fourth_sha256"),
+        )
+    elif direction == "missing_tuple_entry":
+        mutated_specs = tuple(spec for spec in original_specs if spec[0] != "senses")
+    elif direction == "duplicate_key_entry":
+        mutated_specs = original_specs + (
+            ("canon", "fourth.json", "fourth_sha256"),
+        )
+    else:  # same_count_key_swap
+        mutated_specs = tuple(
+            ("sessens", spec[1], spec[2]) if spec[0] == "senses" else spec
+            for spec in original_specs
+        )
+    monkeypatch.setattr(sr, "FROZEN_INPUT_SPECS", mutated_specs)
+    assert sr.FROZEN_INPUT_SPECS is mutated_specs, (
+        "monkeypatch of sr.FROZEN_INPUT_SPECS did not take -- frozen_input_check() "
+        "would still read the ORIGINAL tuple and this test would prove nothing"
+    )
+
+    canon_path = tmp_path / "canon.json"
+    canon_path.write_text(json.dumps({"entries": {}}), encoding="utf-8")
+    manifest_path = tmp_path / "manifest.json"
+    write_json(manifest_path, make_manifest())
+    senses_path = tmp_path / "canon_senses.json"
+    senses_path.write_text(json.dumps({"schema_version": 1, "entries_by_source_form": {}}), encoding="utf-8")
+    # The guard fires before `aggregate` is ever consulted (it is the very
+    # first thing frozen_input_check() does after initializing its two
+    # return accumulators) -- a missing aggregate is enough to prove that,
+    # and doubles as evidence the guard does not depend on a stamped run.
+    missing_aggregate_path = tmp_path / "assignments.json"
+    assert not missing_aggregate_path.is_file()
+
+    with pytest.raises(AssertionError) as exc_info:
+        sr.run_check_frozen_inputs(
+            missing_aggregate_path, canon_path=canon_path, manifest_path=manifest_path, senses_path=senses_path,
+        )
+
+    # Assert on the actual key-LIST mismatch the exception must name, not
+    # merely that "something raised" -- satisfied-by-any-exception would
+    # pass even if the guard crashed for an unrelated reason (e.g. the
+    # missing aggregate itself, which run_check_frozen_inputs must
+    # otherwise tolerate per test_check_frozen_inputs_tolerates_missing_
+    # aggregate_manifest above).
+    msg = str(exc_info.value)
+    expected_paths_keys = repr(sorted(["canon", "manifest", "senses"]))
+    expected_spec_keys = repr(sorted(spec[0] for spec in mutated_specs))
+    assert expected_paths_keys in msg and expected_spec_keys in msg, (
+        f"MUTATION CAUGHT ({direction}): the raised exception must name BOTH "
+        f"the fixed paths dict's key set ({expected_paths_keys}) and the "
+        f"mutated FROZEN_INPUT_SPECS key set ({expected_spec_keys}) -- got: {msg!r}"
+    )
+
+
 # ---------------------------------------------------------------------------
 # #243 site 1 fix: a fold-colliding source_form's citation can no longer be
 # trusted to belong to THIS entity rather than a colliding sibling, so

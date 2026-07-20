@@ -43,6 +43,7 @@ of the restatement sites above and cross-checked against the others.
 """
 from __future__ import annotations
 
+import ast
 import importlib.util
 import json
 import re
@@ -747,13 +748,53 @@ def test_frozen_input_specs_keys_are_unique(skeptic_constants_module):
 # by deriving the file SET to scan (every `*.py` directly under
 # `SCRIPTS_DIR` -- the real shipped script directory, not a restated
 # subset of it) rather than naming files one at a time; a fifth guard
-# landing in a fifth script is now found automatically. What is still a
-# literal, hand-maintained number is the total COUNT (4) the derived scan
-# must produce -- deliberately kept restated rather than derived, because
-# there is no honest way to derive "how many guards SHOULD exist" from
-# the source itself; a silent drop (a guard deleted, or its message
-# reworded so the anchor phrase no longer matches) must fail LOUD via a
-# count mismatch, not be absorbed by an unbounded "at least one" check.
+# landing in a fifth script is now found automatically.
+#
+# Round 13 (#243): the round-12 version located a guard purely by REGEX --
+# find the literal anchor phrase "FROZEN_INPUT_SPECS contains a duplicate
+# key" in the exception prose, then associate it with the NEAREST
+# PRECEDING `if sorted|set|len(...):` line ANYWHERE EARLIER IN THE FILE,
+# with no binding to the same `if`, block, or function. skeptic_setup.py's
+# `run()` guard was hoisted to
+#     _keys_mismatch = set(_frozen_input_snapshots_by_key) != set(_spec_keys)
+#     if _keys_mismatch:
+# -- `if _keys_mismatch:` no longer matched the condition-shape regex at
+# all, so the anchor silently rebound to `compute_skeptic_input_digest()`'s
+# OWN unrelated guard earlier in the same file. The count stayed 4, every
+# reported shape stayed `sorted(...) != sorted(...)`, and the test stayed
+# GREEN with a weakened `set(...)`-based guard live in `run()`. The
+# literal `4` was counting anchor-phrase MESSAGES, not distinct protected
+# `if` sites -- a regex has no notion of "which `if` does this belong to",
+# so it can't be blamed for silently reattaching one string to a totally
+# different piece of code once the two drift apart lexically.
+#
+# Fixed by switching from regex to a real AST walk (codex's own framing:
+# "encoding the four semantic obligations is stronger and more honest than
+# a scalar count"). This module parses each scanned file, tracks which
+# named function most closely encloses each `if`, and -- this is the part
+# that specifically closes the hoist hole above -- resolves what the `if`
+# actually TESTS rather than trusting its literal one-line shape: a bare
+# name (`if _keys_mismatch:`) is followed back to its nearest preceding
+# in-scope assignment, so a hoisted `_flag = set(X) != set(Y)` is still
+# correctly seen as a `set(...)` comparison and fails the shape check,
+# while a hoisted `_flag = sorted(X) != sorted(Y)` is still correctly
+# accepted. The hoisted FORM itself is deliberately not forbidden -- only
+# a weakened comparison, wherever it's hidden, is. `EXPECTED_GUARD_SITES`
+# now names the exact four (file, function) pairs a guard must resolve to
+# -- not just a count -- so a guard's `if` relocating into some OTHER
+# function in the same file (or a fifth site appearing anywhere) is caught
+# by identity, not just arithmetic. The file SET being scanned is still
+# DERIVED (every `*.py` directly under `SCRIPTS_DIR`, non-recursive) for
+# the same round-12 reason: a hand-typed file list is the restatement
+# shape this section exists to avoid. Non-recursive is a real, currently-
+# harmless boundary: no shipped script lives in a nested subdirectory of
+# `SCRIPTS_DIR` today, so `glob("*.py")` sees every real guard; if a
+# future script were ever nested there, this scan (like the round-12 one
+# before it) would need to switch to `rglob("*.py")` to keep seeing it --
+# left non-recursive here rather than pre-emptively widened, since a
+# recursive glob over a directory that may one day gain non-shipped
+# scratch subdirectories has its own false-positive risk this codebase
+# doesn't need yet.
 #
 # `run()`'s copy (skeptic_setup.py) and `frozen_input_check()`'s copy
 # (skeptic_ready.py) are NOT independently runtime-testable the way the
@@ -783,108 +824,288 @@ def test_frozen_input_specs_keys_are_unique(skeptic_constants_module):
 # post-fix too.
 #
 # What IS honestly testable, and actually targets these guards' real risk
-# (a hand-duplicated fix silently drifting in exactly one of its four
-# copies -- e.g. someone "simplifies" one copy back to a `set(...)`
-# comparison without touching its siblings, unnoticed because nothing
-# ever exercises that specific line): a STATIC source-text check that all
-# four copies still share the identical, non-deduplicated sorted-list
-# shape. This does not prove any one site is reachable or correct at
-# runtime -- the runtime-reachable sites already have that proof
-# elsewhere -- it proves the four copies have not diverged from each
-# other.
+# (a hand-duplicated fix silently drifting -- or being silently
+# MISATTRIBUTED, per round 13 -- in exactly one of its four copies): a
+# STATIC, AST-driven check that all four (file, function) obligations
+# still carry a guard that resolves, through at most one level of hoist,
+# to the identical non-deduplicated sorted-list shape. This does not
+# prove any one site is reachable or correct at runtime -- the
+# runtime-reachable sites already have that proof elsewhere -- it proves
+# the four sites have not diverged from each other, or from their own
+# owning function.
 
 
-def _guard_conditions_in_file(path: Path) -> list:
-    """Every `if sorted(...)/set(...)/len(...) != ...:` condition line
-    that most closely PRECEDES a round-11 "FROZEN_INPUT_SPECS contains a
-    duplicate key" message in the file at `path` -- the exact phrase
-    A2f's round-11 fix added to every one of these guards' exception
-    messages, used here purely as an anchor to locate a FROZEN_INPUT_SPECS
-    key-mismatch guard specifically (not any other `if`/comparison
-    anywhere in these scripts), so this stays correct regardless of what
-    a given call site names its local snapshot-dict/spec-keys variables.
-    A broad condition-shape regex (matching `sorted`/`set`/`len` alike)
-    means a future regression to any weaker shape is still located and
-    reported, not silently skipped by a pattern that only recognizes the
-    shape it expects. Returns `(path, condition_text)` pairs so a failing
-    assertion can name which FILE a drifted or missing guard is in."""
-    source_text = path.read_text(encoding="utf-8")
-    condition_re = re.compile(
-        r"^[ \t]*if (?:sorted|set|len)\([\w.]+\)[^\n:]*:[ \t]*$", re.MULTILINE
+ANCHOR_PHRASE = "FROZEN_INPUT_SPECS contains a duplicate key"
+
+# The four (file, function) semantic obligations codex asked this test to
+# bind to directly, by AST location, rather than trusting a scalar count.
+# This is deliberately still a literal, hand-maintained set -- exactly like
+# section 1's literal `4` -- because there is no honest way to derive
+# "which four functions SHOULD own a guard" from the source itself; a
+# guard silently vanishing, or reappearing somewhere else, must fail LOUD
+# via an identity mismatch below, not be absorbed by an unbounded count.
+EXPECTED_GUARD_SITES = frozenset(
+    {
+        ("suspicion_scan.py", "compute_producer_input_digest"),
+        ("skeptic_setup.py", "compute_skeptic_input_digest"),
+        ("skeptic_setup.py", "run"),
+        ("skeptic_ready.py", "frozen_input_check"),
+    }
+)
+
+
+def _site_sort_key(site: tuple) -> tuple:
+    """Sort key for a `(file, function)` site tuple whose `function` may be
+    `None` (a guard found outside any named function) -- plain `sorted()`
+    would raise `TypeError` comparing `None` to `str` the moment such a
+    site shows up in a failure message, which is exactly the moment a
+    readable message matters most."""
+    file_name, function_name = site
+    return (file_name, function_name if function_name is not None else "")
+
+
+def _if_carries_anchor_raise(if_node: ast.If) -> bool:
+    """True if `if_node`'s own body (not its `elif`/`else`) both raises
+    AND carries the round-11 anchor phrase somewhere in a string literal
+    within that raise -- checked as two independent facts over the whole
+    body subtree, not "the Raise's first argument is this exact Constant",
+    so a message built via an intermediate variable, or split across an
+    f-string's own literal pieces (skeptic_ready.py's copy runs the phrase
+    inline after "...or " within a longer string, not on its own line),
+    is still found. `ast.walk` already descends into an f-string's
+    `JoinedStr.values`, so no separate f-string-specific handling is
+    needed here -- every literal piece surfaces as its own `Constant`."""
+    body_nodes = [n for stmt in if_node.body for n in ast.walk(stmt)]
+    has_raise = any(isinstance(n, ast.Raise) for n in body_nodes)
+    has_anchor = any(
+        isinstance(n, ast.Constant) and isinstance(n.value, str) and ANCHOR_PHRASE in n.value
+        for n in body_nodes
     )
-    conditions = [(m.start(), m.group(0).strip()) for m in condition_re.finditer(source_text)]
-    # NOT anchored to a leading `"` -- suspicion_scan.py's and
-    # skeptic_setup.py's two copies happen to give this phrase its own
-    # source line (so it starts right after an opening quote), but
-    # skeptic_ready.py's copy runs it on inline after "...or " within a
-    # longer string literal. Matching the bare phrase, independent of
-    # its surrounding quoting/line-wrapping, is what makes this anchor
-    # actually portable across all three files' own independent prose.
-    anchor_re = re.compile(re.escape("FROZEN_INPUT_SPECS contains a duplicate key"))
-    found = []
-    for anchor_match in anchor_re.finditer(source_text):
-        preceding = [c for c in conditions if c[0] < anchor_match.start()]
-        assert preceding, (
-            f"{path}: found a round-11 duplicate-key exception message "
-            "with no `if sorted/set/len(...) != ...:` guard condition "
-            f"anywhere before it in the source (anchor at offset {anchor_match.start()})"
+    return has_raise and has_anchor
+
+
+def _find_guard_ifs(node: ast.AST, current_func, hits: list) -> None:
+    """Recursively walks `node`'s children, tracking which named
+    `FunctionDef`/`AsyncFunctionDef` (module-level `None` if none) most
+    closely encloses each `If` -- deliberately NOT a blind `ast.walk`,
+    which has no notion of "current enclosing function" and would
+    misattribute a nested def's own guard to its outer function (or a
+    guard that moved OUT of its owning function into a sibling function,
+    the exact drift shape this test must still catch). Appends
+    `(current_func, if_node)` for every `If` whose body
+    `_if_carries_anchor_raise`."""
+    for child in ast.iter_child_nodes(node):
+        next_func = (
+            child if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)) else current_func
         )
-        found.append((path, preceding[-1][1]))
+        if isinstance(child, ast.If) and _if_carries_anchor_raise(child):
+            hits.append((current_func, child))
+        _find_guard_ifs(child, next_func, hits)
+
+
+def _statements_in_scope(func_node) -> "list[ast.stmt]":
+    """Yields every statement that lexically shares `func_node`'s own local
+    scope: its direct body, plus everything nested inside `if`/`for`/
+    `while`/`with`/`try` blocks (Python has no block scoping, so an
+    assignment inside an `if` is visible to sibling code in the same
+    function) -- including a `try`'s `except` handler bodies. Does NOT
+    descend into a nested function/async-function/class def's own body,
+    which opens a separate scope of its own. Known limitation, accepted as
+    out of scope here: none of the four shipped guards sit inside a `try`,
+    so `except`-handler coverage is exercised by nothing today; it is
+    included anyway because leaving it out would silently narrow what
+    "same scope" means the moment a guard's hoisted assignment ever did
+    move into one."""
+    stack: list = list(func_node.body)
+    found: list = []
+    while stack:
+        stmt = stack.pop(0)
+        found.append(stmt)
+        if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            continue
+        for _field, value in ast.iter_fields(stmt):
+            if isinstance(value, list):
+                for item in value:
+                    if isinstance(item, ast.stmt):
+                        stack.append(item)
+                    elif isinstance(item, ast.ExceptHandler):
+                        # UNEXERCISED today (verified round 13, #243): none
+                        # of the four shipped guard `if`s sits inside a
+                        # `try`/`except` in suspicion_scan.py/
+                        # skeptic_setup.py/skeptic_ready.py, so this branch
+                        # has never actually run -- no matrix case above
+                        # reaches it either. Kept anyway as future-proofing:
+                        # if a guard's hoisted assignment (or the guard
+                        # itself) ever moves inside an `except` block, THIS
+                        # is what keeps `_resolve_hoisted_test` able to find
+                        # it -- and that first real use is also this
+                        # branch's first real test. Do not read its
+                        # presence here as proof it works.
+                        stack.extend(item.body)
+            elif isinstance(value, ast.stmt):
+                stack.append(value)
     return found
 
 
-def test_frozen_input_key_mismatch_guards_share_the_same_sorted_list_shape():
-    """Static sibling-consistency check across every FROZEN_INPUT_SPECS
-    key-mismatch guard shipped anywhere under `SCRIPTS_DIR` -- currently
-    `compute_producer_input_digest()` (suspicion_scan.py),
-    `compute_skeptic_input_digest()` and `run()` (both skeptic_setup.py),
-    and `frozen_input_check()` (skeptic_ready.py). See this section's own
-    comment block above for why this is a STATIC text check rather than a
-    runtime one for the two sites that aren't independently reachable
-    through their own real call paths.
+def _resolve_hoisted_test(test_expr: ast.expr, owner_func, if_lineno: int):
+    """Returns the AST expression a guard's `if` actually tests. A direct
+    comparison (`if sorted(X) != sorted(Y):`) is returned unchanged. A
+    single-level hoist (`_flag = <expr>; if _flag:`) is followed to
+    `<expr>` by finding the NEAREST preceding assignment to that name
+    within `owner_func`'s own scope (`_statements_in_scope`) -- this is
+    what makes a guard's real comparison shape visible even after the
+    exact attack that broke this test's round-12 regex version
+    (skeptic_setup.py round 13: hoisting `sorted(...) != sorted(...)` into
+    a `_keys_mismatch` local before the `if` no longer matched a
+    condition-shape regex at all).
 
-    The file SET scanned is DERIVED (every `*.py` directly under
-    `SCRIPTS_DIR`), not a hand-typed list of the files known to carry a
-    guard today -- see the round-12 comment above for why: a hard-coded
-    file list is exactly the restatement shape this test exists to avoid,
-    and it is what let this test's own first version miss
-    skeptic_ready.py's guard, landing in the same round, entirely.
+    Deliberately does NOT forbid the hoisted form outright: nothing about
+    `if _flag:` is unsafe by itself, only a weakened comparison hidden
+    behind an unresolved name would be -- and resolving that name is this
+    function's entire job. A `_flag` assigned to `set(...) != set(...)`
+    (or `len(...) != len(...)`, or anything else) still correctly reaches
+    the shape check below and fails it once resolved; only a `_flag` with
+    NO discoverable in-scope assignment (or an `if` sitting at module
+    level, with no owning function at all) is treated as an outright
+    resolution failure -- returns `None`, which the shape check treats as
+    non-conforming rather than crashing."""
+    if not isinstance(test_expr, ast.Name):
+        return test_expr
+    if owner_func is None:
+        return None
+    candidates = [
+        stmt
+        for stmt in _statements_in_scope(owner_func)
+        if isinstance(stmt, ast.Assign)
+        and stmt.lineno < if_lineno
+        and any(isinstance(t, ast.Name) and t.id == test_expr.id for t in stmt.targets)
+    ]
+    if not candidates:
+        return None
+    return candidates[-1].value
 
-    Two things must hold: exactly FOUR such guards exist across the whole
-    scanned directory (a regression that silently drops one of the four
-    duplicated copies -- e.g. `run()`'s or `frozen_input_check()`'s
-    defense-in-depth block being deleted in a future edit -- is itself a
-    real loss of coverage this test names, and a fifth guard landing in a
-    fifth script bumps this count too, forcing a deliberate update rather
-    than silent inclusion); and every one of them uses the exact
-    `sorted(<name>) != sorted(<name>):` shape -- never `set(...)` (round
-    10's real, shipped, SET-based guard, which collapses duplicate keys --
-    see tests/suspicion_scan.test.py's and tests/skeptic_setup.test.py's
-    own `duplicate_key_entry` cases for the call-driven proof this shape
-    is unsafe) and never a bare `len(...)` comparison (which misses a
-    same-count divergent-key-name swap -- see those same tests'
-    `same_count_key_swap` cases)."""
-    conditions = []
+
+def _is_sorted_list_mismatch_shape(expr) -> bool:
+    """True iff `expr` is exactly `sorted(X) != sorted(Y)` -- a `Compare`
+    node with a single `!=` operator and both sides a bare `sorted(...)`
+    call. Anything else (`None` from an unresolved hoist, a `set(...)`/
+    `len(...)` comparison, a boolean flag with no comparison at all, ...)
+    returns `False` rather than raising -- a guard that no longer even
+    LOOKS like the required comparison is exactly the drift this exists to
+    catch, not a reason to crash the test with an unrelated `AttributeError`."""
+
+    def _is_sorted_call(node) -> bool:
+        return (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "sorted"
+        )
+
+    if expr is None or not isinstance(expr, ast.Compare):
+        return False
+    if len(expr.ops) != 1 or not isinstance(expr.ops[0], ast.NotEq):
+        return False
+    if len(expr.comparators) != 1:
+        return False
+    return _is_sorted_call(expr.left) and _is_sorted_call(expr.comparators[0])
+
+
+def _guard_hits_in_file(path: Path) -> list:
+    """Returns one dict per FROZEN_INPUT_SPECS key-mismatch guard found
+    anywhere in `path`, each shaped `{"file": <name relative to
+    SCRIPTS_DIR>, "function": <enclosing def name, or None>,
+    "resolved_expr": <AST expr actually tested, or None if unresolved>,
+    "display": <ast.unparse of the resolved expr, or a fallback string
+    naming the unresolved bare name>}` -- the `display` string is what a
+    failing assertion below quotes, so a test failure names the exact
+    shape actually observed, not just that something didn't match."""
+    source_text = path.read_text(encoding="utf-8")
+    tree = ast.parse(source_text, filename=str(path))
+    raw_hits: list = []
+    _find_guard_ifs(tree, None, raw_hits)
+
+    results = []
+    for owner_func, if_node in raw_hits:
+        resolved = _resolve_hoisted_test(if_node.test, owner_func, if_node.lineno)
+        if resolved is not None:
+            display = ast.unparse(resolved)
+        else:
+            # _resolve_hoisted_test only returns None when if_node.test is
+            # itself an ast.Name (see its own docstring) -- so .id is safe.
+            display = (
+                f"<unresolved bare name {if_node.test.id!r}: no in-scope "
+                "assignment found before the `if`, or the `if` sits "
+                "outside any named function>"
+            )
+        results.append(
+            {
+                "file": str(path.relative_to(SCRIPTS_DIR)),
+                "function": owner_func.name if owner_func is not None else None,
+                "resolved_expr": resolved,
+                "display": display,
+            }
+        )
+    return results
+
+
+def test_frozen_input_key_mismatch_guards_bind_to_owning_function_via_ast():
+    """AST-driven sibling-consistency check across every FROZEN_INPUT_SPECS
+    key-mismatch guard shipped anywhere under `SCRIPTS_DIR`. See this
+    section's own comment block above for the round-13 story: a prior,
+    purely REGEX-based version of this test located a guard by its
+    exception-message anchor phrase alone, with no binding to the actual
+    `if`/function it lived in -- a hoisted condition
+    (`_flag = sorted(X) != sorted(Y); if _flag:`) broke the condition-shape
+    regex entirely, silently rebinding the anchor to an unrelated sibling
+    guard and staying GREEN through a weakened, shipped `set(...)`-based
+    comparison.
+
+    This version proves something stronger than a scalar count: each of
+    the four (file, function) semantic obligations named in
+    `EXPECTED_GUARD_SITES` -- `compute_producer_input_digest()`
+    (suspicion_scan.py), `compute_skeptic_input_digest()` and `run()`
+    (both skeptic_setup.py), `frozen_input_check()` (skeptic_ready.py) --
+    independently carries a guard whose ACTUAL tested expression (resolved
+    through at most one level of hoist, never trusting a bare `if <name>:`
+    at face value) is the exact `sorted(X) != sorted(Y)` shape.
+
+    The file SET scanned is still DERIVED (every `*.py` directly under
+    `SCRIPTS_DIR`, non-recursive) rather than hand-typed -- see the
+    round-12 comment above for why: it's what let this test's own first
+    version miss skeptic_ready.py's guard, landing in the same round,
+    entirely. What IS still hand-maintained, deliberately, is
+    `EXPECTED_GUARD_SITES` itself: a guard's `if` relocating into some
+    OTHER function in the same file (or a fifth guard landing anywhere)
+    changes `found_sites` below and is caught by identity, not just by a
+    count staying accidentally correct."""
+    all_hits = []
     for script_path in sorted(SCRIPTS_DIR.glob("*.py")):
-        conditions.extend(_guard_conditions_in_file(script_path))
-    found_summary = [(str(p.relative_to(SCRIPTS_DIR)), c) for p, c in conditions]
-    assert len(conditions) == 4, (
+        all_hits.extend(_guard_hits_in_file(script_path))
+
+    found_sites = {(hit["file"], hit["function"]) for hit in all_hits}
+
+    assert len(all_hits) == 4, (
         "expected exactly 4 FROZEN_INPUT_SPECS key-mismatch guards across "
-        f"every *.py file under {SCRIPTS_DIR} -- "
-        "compute_producer_input_digest() (suspicion_scan.py), "
-        "compute_skeptic_input_digest() and run()'s own "
-        "_frozen_input_snapshots_by_key block (both skeptic_setup.py), and "
-        "frozen_input_check()'s own paths dict (skeptic_ready.py) -- "
-        f"found {len(conditions)}: {found_summary!r}"
+        f"every *.py file under {SCRIPTS_DIR}, found {len(all_hits)}:\n"
+        + "\n".join(f"  {hit['file']}::{hit['function']}: {hit['display']}" for hit in all_hits)
+    )
+    assert found_sites == EXPECTED_GUARD_SITES, (
+        "FROZEN_INPUT_SPECS key-mismatch guards were not found at exactly "
+        "the expected (file, function) locations -- a guard's `if` may "
+        "have relocated out of its owning function, or a new one landed "
+        "somewhere unexpected:\n"
+        f"  missing:    {sorted(EXPECTED_GUARD_SITES - found_sites, key=_site_sort_key)}\n"
+        f"  unexpected: {sorted(found_sites - EXPECTED_GUARD_SITES, key=_site_sort_key)}"
     )
 
-    sorted_list_shape = re.compile(r"^if sorted\(\w+\) != sorted\(\w+\):$")
-    for script_path, condition in conditions:
-        assert sorted_list_shape.fullmatch(condition), (
-            f"{script_path}: a FROZEN_INPUT_SPECS key-mismatch guard has "
-            f"drifted off the sorted non-deduplicated key-LIST comparison "
-            f"shape: {condition!r} -- a `set(...)` comparison collapses "
-            "duplicate keys, a bare `len(...)` comparison misses a "
-            "same-count divergent-key-name swap; only "
-            "`sorted(X) != sorted(Y)` catches both."
+    for hit in all_hits:
+        assert _is_sorted_list_mismatch_shape(hit["resolved_expr"]), (
+            f"{hit['file']}::{hit['function']}: a FROZEN_INPUT_SPECS "
+            f"key-mismatch guard's `if` resolves to {hit['display']!r}, not "
+            "the required `sorted(X) != sorted(Y)` shape -- a `set(...)` "
+            "comparison collapses duplicate keys, a bare `len(...)` "
+            "comparison misses a same-count divergent-key-name swap, and "
+            "an unresolved hoisted name can't be proven safe at all; only "
+            "`sorted(X) != sorted(Y)`, found directly or through one level "
+            "of hoist, catches every case."
         )

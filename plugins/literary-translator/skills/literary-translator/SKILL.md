@@ -797,11 +797,18 @@ standalone check raw, despite that mode's own documented "never crashes"
 contract. Folding it into the same table doesn't just fix that one gap, it
 removes the capacity for a future fourth frozen input to reopen it the same
 way *inside `skeptic_ready.py` itself*: the only way to wire a read into
-this module's own verifier is to add a table entry, and there is no longer
-a code shape in `skeptic_ready.py` that reaches a frozen input's bytes any
-other route. `manifest.json`'s snapshot is captured through that same gate
-but, having no downstream parser in this module the way canon/senses do, is
-discarded once its own tamper comparison is done.
+this module's own H1 tamper-comparison path is to add a table entry, and
+there is no longer a code shape in `skeptic_ready.py`'s
+`frozen_input_check()` that reaches a frozen input's bytes for that
+comparison any other route. That is narrower than "any read of a frozen
+input's bytes at all" — `_resolve_competitors()`'s fallback reads
+(described two paragraphs above) stay exactly as un-gated as before; they
+were never the gap this table closes, since they answer a different
+question (what is the competitor universe) than the one the table's H1
+comparison answers (did this frozen input change). `manifest.json`'s
+snapshot is captured through that same gate but, having no downstream
+parser in this module the way canon/senses do, is discarded once its own
+tamper comparison is done.
 
 That table (round 7) closed the read-side gap inside the verifier, but it
 was still, by itself, only ONE of three independent enumerations of the
@@ -845,9 +852,27 @@ All four such maps now carry the same fail-closed
 `sorted(<keys>) != sorted(<spec keys>)` guard — `suspicion_scan.py`'s and
 `skeptic_setup.py`'s two digest functions and `skeptic_setup.py`'s own
 `run()` block (round 11), plus `skeptic_ready.py`'s `paths` map in
-`frozen_input_check()` (round 12) — and a static sibling-consistency test
-derives the file set it scans, so a fifth copy landing in a fifth script
-is found rather than silently excluded).
+`frozen_input_check()` (round 12) — and a static, AST-driven
+sibling-consistency test parses every top-level `*.py` file directly under
+`SCRIPTS_DIR` and binds each guard to its owning function, resolving one
+level of hoisting (`_flag = sorted(X) != sorted(Y); if _flag:`) back to the
+assignment it actually tests rather than trusting the `if`'s own literal
+shape (round 13, #243: a regex-based predecessor of this test located a
+guard by that round-11 exception phrase alone, with no binding to the
+actual `if`/function it lived in — hoisting one copy's comparison into a
+named local broke the regex's condition-shape match entirely and silently
+rebound the phrase to an unrelated sibling guard, staying green through a
+weakened `set(...)`-based comparison shipped live in `run()`). A guard is
+still located only by that same exact-phrase anchor — a copy whose raised
+message drops the phrase, or that lands in a nested subdirectory the scan
+doesn't recurse into, is still invisible to it. What the AST rewrite
+changes is HOW a fifth or relocated guard gets caught: not by an
+open-ended count, but by breaking an equality check against
+`EXPECTED_GUARD_SITES`, a hand-maintained set of the four (file, function)
+pairs a guard must resolve to — a new or moved guard fails that comparison
+and is reported, but only because a human already enumerated the sites it
+is being compared against, not because the test derives on its own which
+functions should own one.
 `FROZEN_INPUT_SPECS` does NOT bind the earlier
 `read_frozen_input_snapshot()` capture in `skeptic_setup.py`, and its
 SIGNATURE does not bind `compute_producer_input_digest()`/
