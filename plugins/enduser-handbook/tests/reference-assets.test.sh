@@ -782,12 +782,28 @@ has_in_section "revalidation: write-time-canon link formula is scoped, NOT unifo
 # mode. Under `publish.wikilinks: true` that directly contradicts the canon's bare-wikilink case. A4
 # split embed (still unconditional) from link (adapter/mode-scoped, with the wikilinks-on bare-form
 # spelled out) so the recipe can no longer be followed literally into the same contradiction.
+#
+# round-17 correction [the pin itself cemented a defect — a pin is only as good as the claim it
+# points at, pinning is not review]: round 16's link fix, exactly as briefed and pinned above, still
+# collapsed CHAPTER-target links and GLOSSARY-target links into one "wikilinks-on bare-form" rule.
+# The Related block legitimately holds both target types, and the glossary form
+# (`[[{{glossary_dir basename}}/index#TermHeading|TermHeading]]`) is not the chapter form
+# (`[[<slug>|Display title]]`) — following the round-16 wording literally would have rewritten valid
+# glossary links into links to nonexistent notes. A4 re-split step 4 by TARGET TYPE instead of by
+# formula: chapter-target links use each adapter's chapter-link canon (unchanged from round 16);
+# glossary-target links use each adapter's SEPARATE glossary canon, explicitly never the chapter
+# formula even in the same mode. The stale needle above ('as a bare `[[<slug>|Display title]]`
+# wikilink under `publish.wikilinks: true`') no longer exists in the file and must not be re-added —
+# it was pinning the exact collapsed wording this round retracted. Replaced with ONE needle carrying
+# the load-bearing claim itself (that the two target types take different formulas), not either
+# formula individually — a mutation re-collapsing them back into one rule is what this needs to
+# catch, and that mutation is precisely what round 16's own wording was.
 has_in_section "revalidation: recipe step 4 embed rewrite is unconditional (all adapters, all modes)" \
   "$REVAL" '### The manual group-migration recipe' \
   'regardless of adapter or `publish.wikilinks` mode'
-has_in_section "revalidation: recipe step 4 link rewrite states the wikilinks-on bare-link case" \
+has_in_section "revalidation: recipe step 4 chapter-target and glossary-target links use DIFFERENT formulas, never conflated" \
   "$REVAL" '### The manual group-migration recipe' \
-  'as a bare `[[<slug>|Display title]]` wikilink under `publish.wikilinks: true`'
+  'never the chapter-link formula, even within the same mode — the two target types use different formulas'
 has "revalidation: recipe fixes inbound links from other chapters"  'Fix inbound links from other chapters that referenced the old path' "$REVAL"
 has "revalidation: recipe updates the capture spec output dir(s)"   "Update the project's capture spec output dir(s)" "$REVAL"
 has "revalidation: terminal-state convergence checklist heading"    'Terminal-state convergence checklist' "$REVAL"
