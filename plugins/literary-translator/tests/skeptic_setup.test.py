@@ -780,6 +780,60 @@ def test_skeptic_input_digest_frames_members_no_boundary_collision(tmp_path):
     )
 
 
+@pytest.mark.parametrize("slot", ["canon", "manifest", "senses"])
+def test_skeptic_input_digest_state_membership_pinned(tmp_path, slot):
+    """Codex round 5: a pure pin that `compute_skeptic_input_digest()`
+    actually HASHES `canon_state`/`manifest_state`/`senses_state` (not just
+    ACCEPTS them as parameters). The round-4 blocker fix added these three
+    kwargs specifically so a state-only mutation (an absent sidecar
+    replaced by a genuinely-empty regular file, content unchanged) moves
+    the skeptic resume digest -- but nothing in the existing suite would
+    catch a future edit that keeps the kwarg in the signature while
+    dropping its `.encode('ascii')` line from `parts` (a "looks done, does
+    nothing" regression: the function still ACCEPTS `canon_state`, just
+    stops actually folding it in). Calls compute_skeptic_input_digest()
+    directly (a pure function, no subprocess/mod.run()) with every OTHER
+    argument -- including the targeted slot's own BYTES -- held
+    byte-identical across two calls that differ ONLY in that one slot's
+    `_state` value, and asserts the digests differ. Parameterized over all
+    three slots independently, mirroring the same per-slot isolation
+    `test_h1_stamp_snapshots_derivation_time_state_not_a_later_reread`
+    above already established for the H1 stamps -- a single "change all
+    three states at once" version would only prove the digest reacts to
+    SOME state change, not that THIS slot's state is actually a member."""
+    root = make_skeptic_root(tmp_path)
+    mod = _load_module(
+        "skeptic_setup_for_digest_state_membership_test", root / "scripts" / "skeptic_setup.py", root / "scripts"
+    )
+    scripts_dir = root / "scripts"
+    common = dict(
+        canon_state="regular", canon_bytes=b"canon-fixture",
+        manifest_state="regular", manifest_bytes=b"manifest-fixture",
+        senses_state="regular", senses_bytes=b"senses-fixture",
+        worklist_bytes=b"{}",
+        assignments=[],
+        config_values={},
+        language_config_raw_bytes=b"",
+        schemas_dir_hash_hex="deadbeef",
+        script_dir=scripts_dir,
+        template_bytes=b"",
+    )
+    state_kwarg = f"{slot}_state"
+    common.pop(state_kwarg)
+
+    digest_regular = mod.compute_skeptic_input_digest(**common, **{state_kwarg: "regular"})
+    digest_absent = mod.compute_skeptic_input_digest(**common, **{state_kwarg: "absent"})
+
+    assert digest_regular != digest_absent, (
+        f"MUTATION CAUGHT ({slot}): compute_skeptic_input_digest() must "
+        f"hash {state_kwarg}, not just accept it as a parameter -- with "
+        f"{slot}_bytes held byte-identical across both calls, only "
+        f"{state_kwarg} differing ('regular' vs 'absent') failed to move "
+        "the digest, meaning that state argument is dead weight the "
+        "function silently ignores"
+    )
+
+
 def test_fresh_run_id_is_collision_free_without_sleeping(tmp_path):
     """Hardening: fresh_run_id() must be collision-free ON ITS OWN
     (microsecond timestamp + random hex suffix), not merely "usually fine,

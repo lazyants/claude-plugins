@@ -1426,3 +1426,96 @@ def test_main_explicit_senses_path_missing_is_hard_error(tmp_path):
     # --senses-path was explicitly given) would silently treat this typo'd
     # path as "no splits" instead of a hard error.
     assert rc == 1
+
+
+def test_main_senses_parse_consumes_the_same_snapshot_the_digest_hashed(tmp_path, monkeypatch):
+    """Codex round 5 BLOCKER: main() used to capture
+    (senses_state, senses_bytes) via read_frozen_input_snapshot() for
+    producer_input_digest, then call load_senses() -- a SEPARATE,
+    independent re-read of senses_path -- to get the entries that feed the
+    #243 ambiguity-competitors universe. A mutation landing in the window
+    between those two reads let the digest describe the ORIGINAL sidecar
+    while the worklist's own parse of it silently reflected the MUTATED
+    one -- the "approved snapshot is not always the consumed snapshot" bug,
+    at this script's own trust boundary.
+
+    Proves there is now only ONE read: monkeypatches `read_frozen_input_snapshot`
+    (the ONLY function call between the frozen-input capture and any
+    would-be second read of senses_path -- see suspicion_scan.py main()'s
+    own comment on this) to capture the ORIGINAL bytes via the real
+    implementation, then mutate canon_senses.json on disk immediately
+    after, then RETURN the ORIGINAL captured tuple -- exactly the "mutation
+    lands in the gap" shape the round-3/4 H1 tests already use for
+    skeptic_setup.py, applied here to the OTHER trust boundary codex round
+    5 found.
+
+    Deliberately does NOT use a fold_collision scenario as the observable
+    signal (an earlier draft of this test tried that and was wrong): a
+    split-only canon_senses.json form -- present ONLY in the sidecar, never
+    in canon.json -- can NEVER by itself flip a canon-only sibling's
+    RISK_FOLD_COLLISION flag (`_fold_colliding_forms` requires >=1 OTHER
+    SCOPE_IN member in the same group, and scope_in comes exclusively from
+    canon.json; see `test_fold_collision_sibling_outside_scope_in_keeps_ordinary_counters`'s
+    own docstring), so that signal cannot distinguish original from
+    mutated content here. Uses schema-validity instead: the ORIGINAL
+    sidecar is genuinely SCHEMA-INVALID (parsing it must fail-closed); the
+    mutation rewrites it to be schema-valid on disk. In the pre-fix code
+    (load_senses(senses_path, ...), its own independent read), main()
+    would SUCCEED -- the second read sees the now-valid mutated file,
+    silently laundering the fact that the snapshot actually captured (and
+    hashed into producer_input_digest) was invalid. In the fixed code
+    (load_senses_from_snapshot() parses the SAME captured senses_bytes
+    directly, no second read), main() MUST still fail: the worklist this
+    run would produce and the digest it would be stamped with can never
+    describe two different sidecar versions."""
+    languages_dir = tmp_path / "languages"
+    write_particle_config(languages_dir, "en.json")
+
+    canon_path = tmp_path / "canon.json"
+    canon_path.write_text(json.dumps({
+        "entries": {FORM_A: make_entry("Target", confidence="high")},
+    }, ensure_ascii=False), encoding="utf-8")
+
+    # Genuinely schema-invalid: missing the required entries_by_source_form
+    # key entirely (canon-senses.schema.json requires it).
+    original_senses_bytes = json.dumps({"schema_version": 1}, ensure_ascii=False).encode("utf-8")
+    senses_path = tmp_path / "canon_senses.json"
+    senses_path.write_bytes(original_senses_bytes)
+
+    mutated_senses_bytes = json.dumps(
+        {"schema_version": 1, "entries_by_source_form": {}}, ensure_ascii=False
+    ).encode("utf-8")
+
+    blocks = {"PARA:1": make_block("PARA:1", "Lone occurrence here.", seg="seg01")}
+    manifest_path, _manifest = write_manifest(tmp_path, blocks)
+    out_path = tmp_path / "suspicion_worklist.json"
+
+    real_read_frozen_input_snapshot = ss.read_frozen_input_snapshot
+
+    def _capture_then_mutate_senses(path):
+        result = real_read_frozen_input_snapshot(path)
+        if Path(path) == senses_path:
+            senses_path.write_bytes(mutated_senses_bytes)
+        return result
+
+    monkeypatch.setattr(ss, "read_frozen_input_snapshot", _capture_then_mutate_senses)
+
+    rc = ss.main([
+        "--canon", str(canon_path), "--manifest", str(manifest_path),
+        "--senses-path", str(senses_path),
+        "--particle-config", "en.json", "--languages-dir", str(languages_dir),
+        "--research-mode", "live", "--source-format", "plain_text",
+        "--out", str(out_path),
+    ])
+    assert rc == 1, (
+        "MUTATION CAUGHT: main() succeeded, meaning it re-read "
+        "canon_senses.json AFTER producer_input_digest's own senses_bytes "
+        "was already captured -- a second, independent read that silently "
+        "consumed the on-disk file this run's snapshot never actually "
+        "described, laundering the fact that the captured snapshot was "
+        "schema-invalid"
+    )
+    assert not out_path.is_file(), "a fail-closed run must not still write a worklist"
+    # The on-disk file genuinely IS mutated now -- confirms this is a real
+    # injected mutation, not a no-op.
+    assert senses_path.read_bytes() == mutated_senses_bytes

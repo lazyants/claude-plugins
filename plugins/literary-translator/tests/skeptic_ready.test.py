@@ -1298,6 +1298,103 @@ def test_verify_merged_fails_closed_on_cross_batch_fold_collision(tmp_path):
     assert any("does not survive fresh re-verification" in m for m in result["missing"])
 
 
+def test_verify_merged_resolve_competitors_consumes_h1s_own_snapshot(tmp_path, monkeypatch):
+    """Codex round 5 BLOCKER: run_verify_merged() used to hash canon.json
+    for the H1 tamper check (frozen_input_check()), then call
+    _resolve_competitors() -- a SEPARATE, independent re-read of
+    canon.json -- to build the #243 ambiguity-competitors universe. A
+    mutation landing in the window between those two reads let H1 approve
+    the ORIGINAL snapshot (frozen_input_mismatch: False) while the
+    collision check silently verified against the MUTATED one -- the same
+    canon-widening mechanism as
+    test_verify_merged_fails_closed_on_cross_batch_fold_collision above,
+    but arriving as a TAMPER between two reads of the SAME call rather than
+    a legitimate wider --canon input.
+
+    Proves there is now only ONE read: monkeypatches
+    read_frozen_input_snapshot (frozen_input_check()'s own capture point)
+    to return the ORIGINAL bytes it just captured via the real
+    implementation, then mutate canon.json on disk immediately after --
+    injecting FOLD_FORM_B, which was NOT present in the canon.json this
+    run's own H1 stamp describes. canon_sha256 is stamped from the
+    ORIGINAL (FOLD_FORM_A-only) content, so H1 must still report
+    frozen_input_mismatch=False (the captured snapshot IS what the stamp
+    describes) -- but in the pre-fix code, _resolve_competitors()'s own
+    independent second read would see the mutated (FOLD_FORM_B-added) file
+    and wrongly fail this record closed, while frozen_input_mismatch
+    stayed False throughout -- silently hiding that the run's OWN
+    collision check disagreed with what its OWN H1 check just certified.
+    In the fixed code (_resolve_competitors_from_snapshot() parses the SAME
+    snapshot H1 hashed, never a second read), this record must still
+    verify."""
+    lang_dir = tmp_path / "languages"
+    particle_config = write_particle_config(lang_dir, name_inventory=[FOLD_FORM_A])
+    lang = bn.load_language_config(particle_config, languages_dir=lang_dir)
+    text = f"ראה {FOLD_FORM_A} אתמול."
+    block_id, blk = block(text)
+    manifest_path = tmp_path / "manifest.json"
+    write_json(manifest_path, make_manifest((block_id, blk)))
+
+    form_a_evidence = evidence_for(FOLD_FORM_A, block_id, "seg01", text, lang)
+
+    triage_path = tmp_path / "skeptic_triage.json"
+    write_json(triage_path, {
+        "schema_version": 1, "run_id": "run-1",
+        "records": [adverse_record(FOLD_FORM_A, form_a_evidence)],
+    })
+
+    canon_path = tmp_path / "canon.json"
+    canon_path.write_text(json.dumps({"entries": {
+        FOLD_FORM_A: {"canonical_target_form": "Target", "is_proper_name": True,
+                      "basis": "transliterated", "confidence": "high"},
+    }}), encoding="utf-8")
+    canon_sha256 = sr.compute_frozen_input_hash(canon_path)
+
+    aggregate_path = tmp_path / "assignments.json"
+    write_json(aggregate_path, {
+        **make_aggregate_manifest("run-1", [make_assignment(FOLD_FORM_A, [window_for(form_a_evidence)])]),
+        "canon_sha256": canon_sha256,
+    })
+
+    mutated_canon_bytes = json.dumps({"entries": {
+        FOLD_FORM_A: {"canonical_target_form": "Target", "is_proper_name": True,
+                      "basis": "transliterated", "confidence": "high"},
+        FOLD_FORM_B: {"canonical_target_form": "Target", "is_proper_name": True,
+                      "basis": "transliterated", "confidence": "high"},
+    }}).encode("utf-8")
+
+    real_read_frozen_input_snapshot = sr.read_frozen_input_snapshot
+
+    def _capture_then_mutate_canon(path):
+        result = real_read_frozen_input_snapshot(path)
+        if Path(path) == canon_path:
+            canon_path.write_bytes(mutated_canon_bytes)
+        return result
+
+    monkeypatch.setattr(sr, "read_frozen_input_snapshot", _capture_then_mutate_canon)
+
+    result = sr.run_verify_merged(
+        triage_path, aggregate_path, manifest_path, particle_config,
+        languages_dir=lang_dir, canon_path=canon_path,
+    )
+    assert result["frozen_input_mismatch"] is False, (
+        "the H1 stamp describes the ORIGINAL (FOLD_FORM_A-only) canon.json "
+        "-- the captured snapshot this run actually hashed -- so it must "
+        "still match regardless of the later on-disk mutation"
+    )
+    assert result["verified"] is True, (
+        "MUTATION CAUGHT: this record was rejected, meaning the "
+        "competitors universe was built from the MUTATED canon.json (now "
+        "containing FOLD_FORM_B) -- a second, independent re-read after "
+        "frozen_input_check() already hashed and approved the ORIGINAL "
+        "snapshot, letting the collision check and the H1 result silently "
+        "describe two different canon.json versions"
+    )
+    # The on-disk file genuinely IS mutated now -- confirms this is a real
+    # injected mutation, not a no-op.
+    assert canon_path.read_bytes() == mutated_canon_bytes
+
+
 def test_validate_fragment_fails_closed_on_fold_collision(tmp_path):
     """Same site-1 fix, --validate-fragment side (per-batch precheck/
     dispatch self-check) -- must fail the SAME way as --verify-merged."""

@@ -426,22 +426,31 @@ def _reject_unencodable_strings(doc: Any, source_path: Path) -> None:
             _check("value", current, loc)
 
 
-def _read_utf8_json_with_depth_guard(path: Path, describe: str) -> Any:
-    """Shared read/parse/depth-preflight body of ``_read_json_file`` and
-    ``_load_schema_document``. ``describe`` is the human label opening every
-    ``CanonSensesLoadError`` this raises (e.g. ``"canon_senses.json at
-    <path>"`` or ``"schema at <path>"``), so the same guards produce
-    caller-specific messages without either caller re-deriving them.
+def _parse_utf8_json_with_depth_guard(content: bytes, describe: str) -> Any:
+    """Pure decode/parse/depth-preflight core of
+    ``_read_utf8_json_with_depth_guard`` -- operates on ALREADY-READ bytes,
+    no I/O of any kind, so there is no OSError branch here: a caller with
+    bytes already in hand has nothing left that can fail to open/read.
+    ``describe`` is the human label opening every ``CanonSensesLoadError``
+    this raises (e.g. ``"canon_senses.json at <path>"``), so callers get
+    caller-specific messages without re-deriving them.
 
-    Layers preserved verbatim from the pre-extraction pair -- do not merge
-    these into a single try/except (see the layered-exception design note
-    in load_senses's docstring):
+    Codex round 5: split out of ``_read_utf8_json_with_depth_guard`` so a
+    caller that already captured a ``(state, content)`` snapshot (e.g. via
+    ``suspicion_scan.read_frozen_input_snapshot()``) for a trust decision
+    -- a producer/skeptic digest, an H1 stamp -- can parse THOSE SAME
+    bytes instead of re-reading the path a second time for a second,
+    potentially-disagreeing decision. See ``load_senses_from_snapshot``'s
+    own docstring.
 
-      1. ``read_text`` raises ``OSError`` (can't open) or the
-         ``ValueError``-subclass ``UnicodeDecodeError`` (bytes aren't
-         UTF-8) -- caught SEPARATELY so the decode failure never escapes
-         as a raw traceback past load_senses's ``CanonSensesLoadError``-only
-         contract.
+    Layers preserved verbatim from the pre-extraction function (do not
+    merge these into a single try/except -- see the layered-exception
+    design note in load_senses's docstring):
+
+      1. ``.decode("utf-8")`` raises the ``ValueError``-subclass
+         ``UnicodeDecodeError`` (bytes aren't UTF-8) -- caught so the
+         decode failure never escapes as a raw traceback past
+         load_senses's ``CanonSensesLoadError``-only contract.
       2. ``json.loads`` raises ``JSONDecodeError`` or, on a pathologically
          deep-nested document, ``RecursionError`` before ``JSONDecodeError``
          can even fire. The RecursionError branch stays as a BACKSTOP even
@@ -456,9 +465,7 @@ def _read_utf8_json_with_depth_guard(path: Path, describe: str) -> Any:
          the RecursionError trigger point is interpreter-dependent).
     """
     try:
-        raw = path.read_text(encoding="utf-8")
-    except OSError as e:
-        raise CanonSensesLoadError(f"could not read {describe}: {e}")
+        raw = content.decode("utf-8")
     except UnicodeDecodeError as e:
         raise CanonSensesLoadError(f"{describe} is not valid UTF-8: {e}")
     try:
@@ -476,9 +483,33 @@ def _read_utf8_json_with_depth_guard(path: Path, describe: str) -> Any:
     return doc
 
 
-def _read_json_file(path: Path) -> Any:
-    doc = _read_utf8_json_with_depth_guard(path, f"canon_senses.json at {path}")
-    _reject_unencodable_strings(doc, path)
+def _read_utf8_json_with_depth_guard(path: Path, describe: str) -> Any:
+    """Shared read/parse/depth-preflight body of ``_read_json_file`` and
+    ``_load_schema_document``. Thin path-reading wrapper around
+    ``_parse_utf8_json_with_depth_guard`` (codex round 5) -- for callers
+    that want a fresh read, never for a caller that already has a
+    captured snapshot to parse instead. ``describe`` is the human label
+    opening every ``CanonSensesLoadError`` this raises (e.g.
+    ``"canon_senses.json at <path>"`` or ``"schema at <path>"``).
+
+    ``read_bytes`` raises ``OSError`` (can't open) -- caught here, outside
+    the pure core, since a caller with bytes already in hand (the core's
+    other entry point) has no read left to fail.
+    """
+    try:
+        content = path.read_bytes()
+    except OSError as e:
+        raise CanonSensesLoadError(f"could not read {describe}: {e}")
+    return _parse_utf8_json_with_depth_guard(content, describe)
+
+
+def _parse_json_from_bytes(content: bytes, senses_path: Path) -> Any:
+    """Byte-based twin of ``_read_json_file`` -- parses an ALREADY-CAPTURED
+    snapshot instead of reading ``senses_path`` itself. ``senses_path`` is
+    used for error-message labeling only, matching ``_read_json_file``'s
+    own messages exactly."""
+    doc = _parse_utf8_json_with_depth_guard(content, f"canon_senses.json at {senses_path}")
+    _reject_unencodable_strings(doc, senses_path)
     return doc
 
 
@@ -561,14 +592,34 @@ def _procedural_checks(doc: dict, senses_path: Path) -> None:
             seen_sense_ids.add(sense_id)
 
 
-def load_senses(
+def load_senses_from_snapshot(
     path: Union[str, Path],
+    state: str,
+    content: bytes,
     *,
     allow_absent: bool,
     schema_path: Path = DEFAULT_SCHEMA_PATH,
 ) -> SensesResult:
-    """THE single runtime-validating loader for canon_senses.json -- every
-    consumer uses this; none re-reads the sidecar itself.
+    """Byte-based CORE of the runtime-validating loader -- parses/validates
+    an ALREADY-CAPTURED ``(state, content)`` snapshot (e.g. from
+    ``suspicion_scan.read_frozen_input_snapshot()``) instead of deriving
+    one via a fresh read of ``path``. ``path`` is used for error-message
+    labeling ONLY, never for I/O.
+
+    Codex round 5: a caller making a trust decision off bytes it already
+    holds -- a producer/skeptic input digest, an H1 tamper stamp -- must
+    parse THOSE SAME bytes here, never re-read ``path`` a second time for
+    a second, potentially-disagreeing decision (the approved snapshot
+    silently ceasing to be the consumed snapshot). ``load_senses()`` below
+    is the thin, path-reading wrapper for callers with no snapshot of
+    their own to hand in -- as of round 5 that's every ordinary caller
+    (``canon_adjudication_audit.py``, ``canon_validate.py``,
+    ``glossary_batch_plan.py``, ``assemble.py``, ``validate_backlinks.py``):
+    none of them makes a separate trust decision off independently-read
+    bytes of the same file, so a single fresh read is genuinely correct
+    for all five. ``suspicion_scan.py``'s ``main()`` and
+    ``skeptic_ready.py``'s frozen-input-check-then-resolve-competitors
+    path are the two exceptions that call this function directly.
 
     1. Path-state policy: `allow_absent=True` tolerates ONLY a genuinely
        absent path (an implicit default that was never written yet). An
@@ -589,7 +640,6 @@ def load_senses(
        `entries_by_source_form` is `{}`.
     """
     senses_path = Path(path)
-    state = _path_state(senses_path)
 
     if state == "irregular":
         raise CanonSensesLoadError(
@@ -602,7 +652,7 @@ def load_senses(
             )
         raise CanonSensesLoadError(f"canon_senses.json not found at {senses_path}")
 
-    doc = _read_json_file(senses_path)
+    doc = _parse_json_from_bytes(content, senses_path)
     _schema_validate(doc, Path(schema_path), senses_path)
     _procedural_checks(doc, senses_path)
 
@@ -611,4 +661,28 @@ def load_senses(
         is_empty=(len(entries) == 0),
         entries_by_source_form=entries,
         normalized_index=_build_normalized_index(entries),
+    )
+
+
+def load_senses(
+    path: Union[str, Path],
+    *,
+    allow_absent: bool,
+    schema_path: Path = DEFAULT_SCHEMA_PATH,
+) -> SensesResult:
+    """THE loader for callers with no already-captured snapshot of their
+    own: classifies `path`, reads it fresh, and delegates to
+    `load_senses_from_snapshot` for parsing/validation -- codex round 5
+    split this into a thin path-reading wrapper around that byte-based
+    core; see its docstring for which of the two a given caller should
+    use and why. Every existing caller of THIS function keeps its exact
+    prior behavior unchanged (same messages, same fresh-read semantics)."""
+    senses_path = Path(path)
+    state = _path_state(senses_path)
+    try:
+        content = senses_path.read_bytes() if state == "regular" else b""
+    except OSError as e:
+        raise CanonSensesLoadError(f"could not read canon_senses.json at {senses_path}: {e}")
+    return load_senses_from_snapshot(
+        senses_path, state, content, allow_absent=allow_absent, schema_path=schema_path
     )

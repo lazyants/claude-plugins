@@ -101,9 +101,11 @@ changes.
 
 `producer_input_digest`: this script stamps every worklist it writes with a
 sha256 hex digest over its own ENTIRE behavior-determining closure --
-`canon.json` + `manifest.json` + `canon_senses.json` (#243, raw sidecar
-bytes -- an absent sidecar hashes as `b""`, distinct from a schema-valid
-logically-empty document; see `--senses-path` below) + the
+`canon.json` + `manifest.json` + `canon_senses.json` (#243, each a
+state-tagged `(state, bytes)` pair, codex round 4 -- an absent sidecar is
+state `"absent"`/bytes `b""`, distinct from a schema-valid logically-empty
+document, which is state `"regular"`/non-empty-schema bytes; see
+`--senses-path` below) + the
 canonically-serialized resolved scan parameters + the resolved
 `LanguageConfig.raw_bytes` + the raw bytes of every file in
 `PRODUCER_CODE_CLOSURE` below. `skeptic_setup.py` (the skeptic resume-domain
@@ -122,9 +124,10 @@ same "competitors" universe every #243 consumer shares -- the union of every
 `--senses-path`/`DEFAULT_SENSES_PATH`/`allow_absent` convention exactly: an
 implicit default sidecar that is genuinely absent is tolerated as empty; an
 EXPLICIT `--senses-path` that does not exist is a hard error) is parsed via
-`canon_senses.load_senses()` to build that universe, then
-`canon_senses.fold_collision_map()` computes the collision groups passed
-into `build_worklist()`.
+`canon_senses.load_senses_from_snapshot()` (codex round 5: from THIS
+script's own already-captured snapshot, never a second independent read)
+to build that universe, then `canon_senses.fold_collision_map()` computes
+the collision groups passed into `build_worklist()`.
 
 CLI:
 
@@ -199,16 +202,22 @@ except ImportError as exc:
     )
 
 try:
-    from canon_senses import normalize_form, fold_collision_map, load_senses, CanonSensesLoadError
+    from canon_senses import (
+        normalize_form,
+        fold_collision_map,
+        load_senses_from_snapshot,
+        CanonSensesLoadError,
+    )
 except ImportError as exc:
     sys.exit(
         f"suspicion_scan.py: cannot import canon_senses.py from {SCRIPT_DIR} ({exc}).\n"
         "canon_senses.py must be installed alongside suspicion_scan.py under "
         "${durable_root}/scripts/ -- it supplies normalize_form(), the shared "
         "NFC+casefold+whitespace-collapse comparator every grouping/matching key in "
-        "this script is computed from, plus load_senses()/fold_collision_map() (#243), "
-        "the shared ambiguity-competitors projection class 8 (fold_collision) needs. "
-        "Re-run Step 0a, or verify the plugin install is not corrupted."
+        "this script is computed from, plus load_senses_from_snapshot()/"
+        "fold_collision_map() (#243), the shared ambiguity-competitors projection "
+        "class 8 (fold_collision) needs. Re-run Step 0a, or verify the plugin "
+        "install is not corrupted."
     )
 
 try:
@@ -720,8 +729,9 @@ def build_worklist(canon_entries: dict, manifest: dict, manifest_path, language_
     `competitors` (#243): a `canon_senses.FoldCollisionMap` built by the
     caller over the shared "competitors" universe (this module's own
     docstring, class 8) -- resolved OUTSIDE this function (via
-    `canon_senses.load_senses()` + `canon_senses.fold_collision_map()`) the
-    same way `citation_types` is already resolved outside and passed in.
+    `canon_senses.load_senses_from_snapshot()` +
+    `canon_senses.fold_collision_map()`) the same way `citation_types` is
+    already resolved outside and passed in.
     `None` (the default) disables class 8 entirely -- today's pre-#243
     behavior -- so every existing caller that never resolves a senses
     sidecar keeps working unchanged.
@@ -865,8 +875,9 @@ def compute_producer_input_digest(canon_state: str, canon_bytes: bytes,
     `manifest_bytes`, `senses_state`, `senses_bytes` (#243: the
     `canon_senses.json` sidecar's own raw bytes -- an absent sidecar is
     `b""`, tolerant-read the SAME way `canon_bytes` already is, NEVER via
-    `canon_senses.load_senses()`, which exposes no raw bytes and would make
-    an absent sidecar indistinguishable from a schema-valid logically-empty
+    `canon_senses.load_senses_from_snapshot()`, which exposes no raw bytes
+    and would make an absent sidecar indistinguishable from a schema-valid
+    logically-empty
     one), the canonically-serialized `resolved_params` (see
     `resolved_scan_params()`), `language_config_raw_bytes` (the resolved
     particle-config FILE's own exact bytes --
@@ -1173,13 +1184,19 @@ def main(argv=None) -> int:
 
     # #243: senses_bytes feeds producer_input_digest directly (tolerant raw
     # read, mirrors canon_bytes -- see compute_producer_input_digest's own
-    # docstring on why NOT via load_senses()); the PARSED senses entries feed
-    # the #243 ambiguity-competitors universe (class 8, fold_collision) via
-    # canon_senses.fold_collision_map(). Both derive from the SAME on-disk
-    # sidecar, read once.
+    # docstring on why NOT via a parsed load); the PARSED senses entries
+    # feed the #243 ambiguity-competitors universe (class 8, fold_collision)
+    # via canon_senses.fold_collision_map(). Both genuinely derive from the
+    # SAME captured (state, bytes) snapshot, read once -- codex round 5:
+    # load_senses_from_snapshot() parses THIS snapshot directly, never a
+    # second, independent read of senses_path (the pre-fix shape let the
+    # digest and the parsed entries silently disagree about which on-disk
+    # version of the sidecar they each described).
     senses_state, senses_bytes = read_frozen_input_snapshot(senses_path)
     try:
-        senses_result = load_senses(senses_path, allow_absent=allow_absent_senses)
+        senses_result = load_senses_from_snapshot(
+            senses_path, senses_state, senses_bytes, allow_absent=allow_absent_senses
+        )
     except CanonSensesLoadError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
