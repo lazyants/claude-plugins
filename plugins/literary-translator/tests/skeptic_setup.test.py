@@ -1015,28 +1015,52 @@ def test_run_fails_closed_on_frozen_input_specs_key_mismatch_after_upstream_dige
     nothing here previously caught a dead or never-firing guard at this
     specific site.
 
-    The trap a naive version of this test falls into: `run()` calls
-    `compute_producer_input_digest()` (freshness check, step 3) and this
-    module's own `compute_skeptic_input_digest()` (step 6) BEFORE
-    resolving the RUN_ID (step 7, `resolve_skeptic_run()` call at
-    skeptic_setup.py:743) -- and `compute_skeptic_input_digest()` carries
-    the IDENTICAL key-mismatch guard against the SAME module-level
-    `FROZEN_INPUT_SPECS` global the test above this one exercises directly.
-    Mutating `mod.FROZEN_INPUT_SPECS` before calling `mod.run(args)` at
-    all would trip THAT guard first and never reach line 831 -- proving
-    nothing about the guard this test targets.
+    The trap a naive version of this test falls into: `compute_skeptic_input_digest()`
+    is DEFINED in this module (skeptic_setup.py:382) and reads the SAME
+    module-level `FROZEN_INPUT_SPECS` global the target guard at line 831
+    reads (its own guard is at skeptic_setup.py:456-467). `run()` calls it
+    at step 6 (skeptic_setup.py:731), before resolving the RUN_ID at step 7
+    (`resolve_skeptic_run()`, skeptic_setup.py:743). Mutating
+    `mod.FROZEN_INPUT_SPECS` before calling `mod.run(args)` at all would
+    trip THAT function's own guard first and never reach line 831 --
+    proving nothing about the guard this test targets. `compute_producer_input_digest()`
+    (step 3, skeptic_setup.py:650) is NOT part of this trap and this test
+    says nothing about it either way: it's imported from `suspicion_scan`
+    (skeptic_setup.py:187-188), is DEFINED there (suspicion_scan.py:868),
+    and its own `FROZEN_INPUT_SPECS` name lookup (suspicion_scan.py:966)
+    resolves through a Python function's `__globals__`, which is bound to
+    the module it was DEFINED in -- so it reads `suspicion_scan`'s own
+    `FROZEN_INPUT_SPECS` binding, never this module's `mod.FROZEN_INPUT_SPECS`.
+    Mutating `mod.FROZEN_INPUT_SPECS` can never reach it, regardless of
+    when the mutation happens relative to its call -- this test's
+    injection timing is chosen entirely around `compute_skeptic_input_digest()`'s
+    guard, and proves nothing about `compute_producer_input_digest()`'s.
 
-    The fix: wrap the REAL `resolve_skeptic_run()` (confirmed above,
-    against the current source, to execute strictly AFTER both upstream
-    digest checks and strictly BEFORE the target guard) so the mismatch is
-    injected only AFTER it returns. Both upstream checks run normally,
-    against unmutated state, before anything is disturbed -- nothing on
-    the path under test is stubbed or neutralized. Appends a duplicate
-    `("canon", "canon.json", "canon_sha256")` entry, reusing the real
-    "canon" stamp field rather than inventing a new one, so a downstream
-    schema failure could never accidentally satisfy the assertion for the
-    wrong reason (moot here since the assertion fires before any further
-    write, but kept for the same reason the sibling test above does).
+    The fix: wrap the REAL `resolve_skeptic_run()` so the mismatch is
+    injected only AFTER it returns -- i.e. after step 6's call to
+    `compute_skeptic_input_digest()` has already run against unmutated
+    `mod.FROZEN_INPUT_SPECS` and, sharing that same guard, necessarily not
+    raised. That's what makes control reach line 831 at all. The call
+    order this relies on -- both digest checks (steps 3 and 6) before
+    `resolve_skeptic_run()` (step 7) before the target guard (line 831) --
+    reflects the CURRENT source as read at the time this test was written
+    (skeptic_setup.py:650, :731, :743, :831); nothing in this test enforces
+    that order as an invariant. A future edit moving `resolve_skeptic_run()`
+    ahead of step 6's call would land the injected mutation before
+    `compute_skeptic_input_digest()` runs, tripping ITS guard instead of
+    the target one -- this test's own assertion on `"_frozen_input_snapshots_by_key"
+    in msg` (the line-831 guard's exception text, not
+    `compute_skeptic_input_digest()`'s) would catch that as a failure
+    rather than silently accept it. A reorder that still leaves
+    `compute_skeptic_input_digest()` running before the injection point
+    (e.g. `resolve_skeptic_run()` moving later, or the target guard moving
+    earlier) is NOT something this test can distinguish from today's
+    arrangement. Appends a duplicate `("canon", "canon.json",
+    "canon_sha256")` entry, reusing the real "canon" stamp field rather
+    than inventing a new one, so a downstream schema failure could never
+    accidentally satisfy the assertion for the wrong reason (moot here
+    since the assertion fires before any further write, but kept for the
+    same reason the sibling test above does).
 
     RED-proven manually against this file, one mutation at a time,
     restored immediately after each (not re-asserted every run):
@@ -1052,10 +1076,14 @@ def test_run_fails_closed_on_frozen_input_specs_key_mismatch_after_upstream_dige
     length check does NOT miss (only a same-count divergent-key swap
     would slip past it, which line 831's guard was never trying to catch
     on its own -- that gap belongs to `compute_skeptic_input_digest()`'s
-    own round-11 parametrized test above, which already covers it
-    directly). The load-bearing probe is (3): relocating the guard to dead
-    code after `run()`'s `return` -- the exact scenario nothing else in
-    this suite catches -- went red the same way as (1)
+    OWN round-11 parametrized test above
+    (`test_skeptic_input_digest_fails_closed_on_frozen_input_specs_key_mismatch`,
+    `same_count_key_swap` direction, skeptic_setup.test.py:877-881), which
+    proves THAT function's own guard catches it -- not run()'s line-831
+    guard, which has no same-count-key-swap coverage of its own beyond the
+    length-argument above). The load-bearing probe is (3): relocating the
+    guard to dead code after `run()`'s `return` -- the exact scenario
+    nothing else in this suite catches -- went red the same way as (1)
     ("DID NOT RAISE"). All three restored via `git show HEAD:<path>` +
     `command cp -f`, confirmed with `git diff HEAD --
     skills/literary-translator/assets/scripts/` empty afterward."""

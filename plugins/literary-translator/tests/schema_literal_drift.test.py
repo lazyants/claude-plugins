@@ -844,19 +844,25 @@ def test_frozen_input_specs_keys_are_unique(skeptic_constants_module):
 # existence rather than claiming (as an earlier round wrongly did) that no
 # such runtime test is possible.
 #
-# `run()`'s own copy (skeptic_setup.py) has NO behavioral test anywhere in
-# this suite -- confirmed by grep, not assumed: no test references `run(`
-# or `_frozen_input_snapshots_by_key` at all. `run()`'s guard follows
-# `compute_producer_input_digest()`/`compute_skeptic_input_digest()`,
-# called earlier in the SAME `run()` invocation against the SAME
-# `FROZEN_INPUT_SPECS` and the SAME captured canon/manifest/senses state,
-# so BY CONSTRUCTION the identical boolean already evaluated False twice
-# before control reaches it -- but that is an argument about the shape of
-# the code, not a runtime test, and it says nothing about whether `run()`'s
-# own guard is reachable or fires correctly if that upstream argument ever
-# stops holding (a future reordering, a second caller, ...). For `run()`
-# specifically, this static AST check IS the only guard-related coverage
-# that exists.
+# `run()`'s own copy (skeptic_setup.py) NOW HAS a behavioral test, landed
+# alongside round 15's fixes below:
+# `skeptic_setup.test.py`'s own
+# `test_run_fails_closed_on_frozen_input_specs_key_mismatch_after_upstream_digests`.
+# It drives `run()` end-to-end, injecting a duplicate-key
+# `FROZEN_INPUT_SPECS` mutation only AFTER `compute_skeptic_input_digest()`
+# has already run against the real, unmutated tuple (so control genuinely
+# reaches line 831's guard rather than tripping an earlier one), and its
+# own RED-proof confirms the guard fires both on that duplicate-key
+# mismatch and on relocation to dead code after `run()`'s `return`. Stated
+# exactly as that test's own docstring records it, not oversold: RED-proof
+# point (2) there also shows a bare LENGTH-comparison weakening of this
+# SAME guard stays GREEN against that duplicate-key mutation (the mutated
+# `_spec_keys` list is longer than the unmutated `_frozen_input_snapshots_by_key`
+# dict, so a length check trips on THIS mismatch shape incidentally, by
+# size, not because it validates cardinality-with-kind) -- so that
+# behavioral test complements this file's static AST check below, it does
+# not supersede it; a length-only regression at this specific guard would
+# still slip past the behavioral test alone.
 #
 # What IS additionally provided here, and actually targets these guards'
 # real risk (a hand-duplicated fix silently drifting -- or being silently
@@ -887,14 +893,18 @@ def test_frozen_input_specs_keys_are_unique(skeptic_constants_module):
 # case at all, while reading as if it did, which is worse than not
 # checking. Left undone deliberately: this static check proves shape,
 # operands, and ownership identity, for all four sites equally -- it does
-# not, and cannot, prove reachability, for any of them, equally. The three
-# sites with a behavioral test (named above) additionally have empirical
-# proof that their guard fires under the SPECIFIC mismatches those tests
-# construct -- not a general reachability proof, but real evidence beyond
-# what this file provides. `run()` has neither: no behavioral test AND no
-# reachability proof, so a guard placed after a `return` (or any other
-# dead-code relocation) in `run()` specifically would be caught by
-# NOTHING in this suite.
+# not, and cannot, prove reachability, for any of them, equally. All four
+# sites now have a behavioral test (named above, `run()`'s landed with
+# round 15) with empirical proof that their guard fires under the
+# SPECIFIC mismatches those tests construct -- not a general reachability
+# proof, but real evidence beyond what this file provides. `run()`'s own
+# behavioral test does cover a return-relocation mutation specifically
+# (see its own RED-proof point (3) above) -- but a reachability gap of a
+# DIFFERENT shape (any other control-flow path that skips the guard
+# without literally following `return`, e.g. an early `continue`/`break`
+# inside an enclosing loop this file has no such loop today, or a second
+# caller that never reaches this code path at all) is still open for all
+# four sites, this static check included.
 #
 # Round 14 (#243, codex round-14 review): three further false-green holes,
 # all demonstrated against the actual checker as it stood after round 13.
@@ -975,6 +985,130 @@ def test_frozen_input_specs_keys_are_unique(skeptic_constants_module):
 # loop/conditional is no longer treated as the guard's raise at all; an
 # anchor phrase sitting beside, rather than inside, the real raise no
 # longer counts either.
+#
+# Round 15 (#243, codex round-15 review): three more false-green holes,
+# each arriving through the exact remedy the round-14 review itself
+# prescribed -- the recurring shape this file's own history keeps
+# demonstrating: a check that keys on a data structure discarding the very
+# thing the next attack varies.
+#
+# Finding 1 -- round 14's `_store_name_counts_in_scope`/`_rebind_violations`
+# validate CARDINALITY (an operand name bound exactly once, `sorted` bound
+# zero times) but neither the BINDING KIND nor the accepted INITIALIZER.
+# Three mutations stayed green through it, each keeping the count itself
+# exactly right: (a) replacing `_spec_keys`'s SOLE initializer with
+# `list(_frozen_input_snapshots_by_key)` -- still exactly one Assign to
+# `_spec_keys`, but now a bare alias of the OTHER operand's value, making
+# the comparison tautological; (b) rebinding `_spec_keys` via a walrus
+# inside a comprehension -- PEP 572 binds a comprehension's own `:=` to
+# the CONTAINING scope, but the round-14 visitor's `visit_ListComp`/etc.
+# return unconditionally, skipping the comprehension body entirely, so the
+# second binding was never counted; (c) adding `sorted=set` as a DEFAULT
+# PARAMETER of the guard's owning function -- a parameter is an `ast.arg`,
+# never a Store-context `ast.Name`, so it was structurally invisible to a
+# checker that only ever visits `Name` nodes. `global`/`nonlocal` are a
+# related, still-open gap of the same shape: a name so declared is not
+# actually bound in the scope this walk inspects at all (its real target
+# is an outer scope this file has no reason to walk generally), so a local
+# count for it can't be trusted either way -- treated below as an
+# unconditional violation rather than chased into the outer scope, the
+# same "reject the unsupported form outright" discipline round 13 already
+# established for a hoisted `if _flag:`.
+#
+# Fixed by replacing the pure count with `_scope_binding_info()`, which
+# additionally tracks, per bound name: every binding kind a bare
+# `ast.Name`-Store walk cannot see on its own (`except ... as`/
+# `ast.ExceptHandler.name`, `import ... as`/`alias.asname`, and a walrus
+# specifically scoped inside a comprehension via a targeted subtree search
+# rather than a blanket descent -- everything else a comprehension binds,
+# its own `for` targets and element expression, stays correctly out of
+# scope); every `global`/`nonlocal` declaration; and, for a name bound by
+# exactly one plain `name = <value>` Assign to a bare Name, that Assign's
+# own `.value` node, so its shape can be inspected rather than merely
+# counted. `_rebind_violations` now requires each operand name's sole
+# binding to actually BE that plain-Assign form (a binding of any other
+# kind -- `AnnAssign`, parameter, `with ... as`, ... -- is rejected even at
+# count 1, since this check can no longer verify what such a binding's
+# value is), requires that Assign's value to not reference the OTHER
+# operand's name anywhere in its subtree (closes bypass (a), and its
+# mirror image, symmetrically, without needing to know in advance which of
+# the pair is "the real" initializer), and requires the FROZEN_INPUT_SPECS-
+# derived operand specifically (identified structurally, by its name
+# ending in `spec_keys` -- true of `spec_keys`/`_spec_keys` at all four
+# real sites, verified against every shipped guard before writing this
+# check) to reference `FROZEN_INPUT_SPECS` itself somewhere in that value.
+# `sorted` additionally may not appear as a parameter name (closes (c)) or
+# in a `global`/`nonlocal` declaration, on top of round 14's existing
+# zero-Store-bindings check (which, extended to see into a comprehension's
+# walrus target, now also closes (b)). Deliberately still NOT dataflow/
+# aliasing analysis in the general sense: this does not evaluate what an
+# arbitrary expression aliases, only (i) whether a name is bound more than
+# once by any binding form this walk can see, (ii) whether the one
+# accepted binding is the right KIND, and (iii) whether that binding's own
+# value textually references a specific, named upstream identifier -- the
+# same proportionality argument round 14 already made for its own
+# syntactic count, extended to cover the shapes that count alone left
+# open. What remains open, stated plainly: a rebind reached through
+# `builtins.sorted = ...`, `globals()[...]`, an alias built through a
+# third name this file never checks against `FROZEN_INPUT_SPECS` or the
+# other operand, or a `global`/`nonlocal`-declared name whose true owning
+# (outer) scope this file does not itself validate.
+#
+# Finding 2 -- `_find_guard_ifs` qualified a method's owner using only its
+# SINGLE immediate lexical parent (`f"{immediate_parent[1]}.{child.name}"`
+# when that parent is a class, else the bare name) -- not the FULL lexical
+# path. Two shapes collided under it, both measured directly against the
+# round-14 checker before this fix: a `def run()` nested inside another
+# function reported as bare `"run"`, identical to (and colliding with) the
+# real module-level `EXPECTED_GUARD_SITES` key `("skeptic_setup.py",
+# "run")`; and two DIFFERENT outer classes each containing their own
+# `class Inner: def run(self): ...` both reported as `"Inner.run"`, since
+# `immediate_parent` only ever remembered the nearest one class/function
+# name, overwritten at every new nesting level rather than accumulated.
+# Fixed by threading a `path_stack` -- every enclosing function AND class
+# name, outermost first, appended to (never overwritten) at each level --
+# and qualifying a new def's owner as the full dotted join of that stack
+# plus its own name. A bare module-level function's path stack is empty,
+# so its qualified name is still just its own bare name, unchanged from
+# round 14 -- none of the four real shipped sites are nested inside
+# anything, so `EXPECTED_GUARD_SITES` itself needs no changes for this
+# fix; only synthetic, deliberately-nested mutations exercise the new
+# behavior. `current_owner` still means exactly what round 13 established
+# (the nearest enclosing FUNCTION only; a `ClassDef`'s own body outside
+# any method still resets it to `None`) -- only the STRING used to name
+# that owner changed.
+#
+# Finding 3 -- `_if_carries_anchor_raise`'s own docstring (round 14)
+# claimed "a message built via an intermediate variable ... is still
+# found", but the implementation only ever called `ast.walk` on the
+# `Raise` statement's OWN subtree -- a `message = "...anchor..."` Assign
+# in a PRECEDING sibling statement is not part of that subtree at all, so
+# the documented claim was false: `if sorted(paths) != sorted(_spec_keys):
+# message = "...anchor phrase..."; raise AssertionError(message)` --
+# itself a perfectly correct, fail-closed guard -- was rejected by this
+# checker. Fixed by resolving ONE level: when the `Raise`'s exception
+# value is a bare Name, or a single-argument call whose one positional
+# argument is a bare Name, search backwards from the `Raise` for the
+# NEAREST preceding statement in `if_node.body` that assigns that same
+# name, and check that assignment's own value for the anchor phrase
+# instead. This is deliberately NOT the round-13 hoist-resolver's mistake:
+# that walked an unordered, breadth-first scope-body candidate list with
+# no notion of program order; here the candidate list is `if_node.body`
+# itself, a single flat list already in source order, so "nearest
+# preceding" is sound to compute directly, no reaching-definition analysis
+# needed. Resolution stops at one level (it does not chase a message
+# variable that itself references a further variable) and is scoped only
+# to `if_node.body`'s own statements (a decoy anchor-carrying assignment
+# to an unrelated name, or one that lives outside the `if` entirely, still
+# does not resolve) -- both deliberate, narrow boundaries matching every
+# other proportionality call this file has already made. The two existing
+# mandatory-RED shapes this fix must not regress -- `while False: raise
+# ...` (the `Raise` is nested inside a `While`, never a direct `if_node.body`
+# statement, so it is never reached at all) and a decoy anchor string
+# sitting beside an unrelated raise (the resolver only ever looks at the
+# SPECIFIC name the `Raise` itself references) -- stay rejected under this
+# fix for the same structural reasons round 14 already established, not
+# because of anything new added here.
 
 
 ANCHOR_PHRASE = "FROZEN_INPUT_SPECS contains a duplicate key"
@@ -1031,20 +1165,69 @@ def _site_sort_key(site: tuple) -> tuple:
     return (file_name, function_name if function_name is not None else "")
 
 
+def _sole_bare_name_argument(exc: "ast.AST | None") -> "str | None":
+    """If `exc` (a `Raise` node's own `.exc`) is either a bare `Name`
+    (`raise some_exception_instance`) or a `Call` with exactly one
+    positional argument, itself a bare `Name`, and no keyword arguments
+    (`raise AssertionError(message)`), returns that Name's `.id`. Returns
+    `None` for anything else -- a literal message built inline, a
+    multi-argument call, a keyword argument, ... -- so the round-15
+    intermediate-variable resolution below only ever fires for the exact
+    narrow shape it is meant to close, not a general "find any Name
+    anywhere in the raise" heuristic."""
+    if isinstance(exc, ast.Name):
+        return exc.id
+    if isinstance(exc, ast.Call) and len(exc.args) == 1 and not exc.keywords:
+        arg = exc.args[0]
+        if isinstance(arg, ast.Name):
+            return arg.id
+    return None
+
+
+def _preceding_sibling_assigns_anchor_string(
+    body: "list[ast.stmt]", raise_index: int, name: str
+) -> bool:
+    """Searches `body[:raise_index]` BACKWARDS (nearest first) for a plain
+    `name = <value>` `Assign` to the bare Name `name`, and returns whether
+    THAT assignment's own `.value` subtree carries `ANCHOR_PHRASE` in a
+    string literal. Stops at the first (nearest) such assignment found --
+    resolution is deliberately exactly one level, matching the narrow scope
+    `_if_carries_anchor_raise` itself declines to widen beyond.
+
+    `body` is `if_node.body` -- a single flat, already-program-ordered
+    statement list -- so "nearest preceding" is sound to compute by a plain
+    backwards scan. This is NOT the round-13 hoist-resolver's mistake: that
+    resolver's candidate list came from a breadth-first, unordered `stack`-
+    based scope-body traversal with no notion of source order at all;
+    there is no such ordering hazard over a single list already in source
+    order."""
+    for stmt in reversed(body[:raise_index]):
+        if (
+            isinstance(stmt, ast.Assign)
+            and len(stmt.targets) == 1
+            and isinstance(stmt.targets[0], ast.Name)
+            and stmt.targets[0].id == name
+        ):
+            return any(
+                isinstance(n, ast.Constant) and isinstance(n.value, str) and ANCHOR_PHRASE in n.value
+                for n in ast.walk(stmt.value)
+            )
+    return False
+
+
 def _if_carries_anchor_raise(if_node: ast.If) -> bool:
     """True if `if_node`'s own body (not its `elif`/`else`) contains a
     `Raise` DIRECTLY (a top-level statement of the `if`'s body, not nested
     inside a further loop/conditional/with/try the body contains) whose
     OWN exception-value subtree carries the round-11 anchor phrase
     somewhere in a string literal -- not "the Raise's first argument is
-    this exact Constant", so a message built via an intermediate variable,
-    or split across an f-string's own literal pieces (skeptic_ready.py's
-    copy runs the phrase inline after "...or " within a longer string, not
-    on its own line), is still found. `ast.walk` (scoped to just that one
-    `Raise` node, not the whole `if` body) already descends into an
-    f-string's `JoinedStr.values`, so no separate f-string-specific
-    handling is needed here -- every literal piece surfaces as its own
-    `Constant`.
+    this exact Constant", so a message split across an f-string's own
+    literal pieces (skeptic_ready.py's copy runs the phrase inline after
+    "...or " within a longer string, not on its own line) is still found.
+    `ast.walk` (scoped to just that one `Raise` node, not the whole `if`
+    body) already descends into an f-string's `JoinedStr.values`, so no
+    separate f-string-specific handling is needed here -- every literal
+    piece surfaces as its own `Constant`.
 
     Round 14 (Finding 3, codex round-14 review): the prior version found
     a `Raise` and the anchor phrase INDEPENDENTLY, each via `ast.walk`
@@ -1059,8 +1242,28 @@ def _if_carries_anchor_raise(if_node: ast.If) -> bool:
     `Raise`'s own subtree closes both without needing dominance/
     reachability analysis -- narrower, and cheaper, than the acknowledged
     "guard after an unconditional `return`" gap this file still leaves
-    open (see the closing comment above `ANCHOR_PHRASE`)."""
-    for stmt in if_node.body:
+    open (see the closing comment above `ANCHOR_PHRASE`).
+
+    Round 15 (Finding 3, codex round-15 review): round 14's own docstring
+    (previous paragraph, before this fix) claimed a message built via an
+    intermediate variable was "still found" -- false: the direct
+    `ast.walk(stmt)` below only ever sees the `Raise` node's OWN subtree,
+    and `message = "...anchor..."; raise AssertionError(message)` puts the
+    literal in a PRECEDING sibling statement's `Assign.value`, never inside
+    the `Raise` at all, so that perfectly correct, fail-closed guard shape
+    was rejected. Fixed by resolving one level: if the direct check finds
+    nothing and the `Raise`'s exception value is a bare Name, or a
+    single-arg call whose one positional argument is a bare Name (see
+    `_sole_bare_name_argument`), search backwards through this SAME `if`
+    body for the nearest preceding assignment to that name and check IT
+    instead (see `_preceding_sibling_assigns_anchor_string`). The two
+    existing mandatory-RED shapes are unaffected: `while False: raise ...`
+    still never reaches the `isinstance(stmt, ast.Raise)` check at all (the
+    direct body statement is the `While`, not the `Raise` nested inside
+    it), and a decoy anchor-carrying assignment to an unrelated name is
+    never consulted, because resolution only ever looks up the SPECIFIC
+    name the `Raise` itself references."""
+    for index, stmt in enumerate(if_node.body):
         if not isinstance(stmt, ast.Raise):
             continue
         if any(
@@ -1068,10 +1271,15 @@ def _if_carries_anchor_raise(if_node: ast.If) -> bool:
             for n in ast.walk(stmt)
         ):
             return True
+        message_name = _sole_bare_name_argument(stmt.exc)
+        if message_name is not None and _preceding_sibling_assigns_anchor_string(
+            if_node.body, index, message_name
+        ):
+            return True
     return False
 
 
-def _find_guard_ifs(node: ast.AST, current_owner, immediate_parent, hits: list) -> None:
+def _find_guard_ifs(node: ast.AST, current_owner, path_stack: list, hits: list) -> None:
     """Recursively walks `node`'s children, tracking which named
     `FunctionDef`/`AsyncFunctionDef` most closely encloses each `If` --
     deliberately NOT a blind `ast.walk`, which has no notion of "current
@@ -1083,11 +1291,11 @@ def _find_guard_ifs(node: ast.AST, current_owner, immediate_parent, hits: list) 
     (module level, or a `ClassDef` body outside any method) or a
     `(qualified_name, function_node)` pair.
 
-    `immediate_parent` is threaded alongside `current_owner` and holds
-    only `("class", name)` or `("function", name)` for whichever scope is
-    the DIRECT lexical parent of the next def/class encountered -- used
-    solely to decide how to qualify that next def's own name (see Finding
-    2 below); it is not itself the attribution `current_owner` records.
+    `path_stack` is threaded alongside `current_owner` and holds every
+    enclosing function AND class name -- outermost first -- for whichever
+    scope directly contains `node`; used solely to build the FULL dotted
+    qualified name of the next def encountered (see round 15's Finding 2
+    below), never itself the attribution `current_owner` records.
 
     A `ClassDef` resets `current_owner` to `None`, the same as module
     level: codex round 13's finding 2 named this as a second, separate
@@ -1106,29 +1314,49 @@ def _find_guard_ifs(node: ast.AST, current_owner, immediate_parent, hits: list) 
     module-level function of the same name. A guard moved from
     module-level `run()` into `class _RelocatedGuard: def run(self): ...`
     was reported as owned by plain `"run"`, exactly like the real
-    function it replaced. Fixed by qualifying a def's owner as
-    `"<ClassName>.<def_name>"` whenever `immediate_parent` shows its own
-    direct lexical parent IS a `ClassDef`, and leaving it as a bare
-    `.name` otherwise (module level, or nested inside another plain
-    function/class-free scope) -- exactly the previous, correct behavior
-    for every def that isn't a method."""
+    function it replaced. The round-14 fix qualified a def's owner as
+    `"<ClassName>.<def_name>"` whenever its SINGLE immediate lexical parent
+    was a `ClassDef`, and left it bare otherwise.
+
+    Round 15 (Finding 2, codex round-15 review): a single immediate parent
+    is not a full lexical path, and two more collisions stayed green
+    through the round-14 version, both measured directly against it before
+    this fix: a `def run()` nested inside another plain FUNCTION (not a
+    class) still qualified as bare `"run"` (its immediate parent is a
+    function, not a class, so round 14's own qualification branch never
+    triggered at all) -- colliding with the real module-level
+    `("skeptic_setup.py", "run")` site; and two DIFFERENT outer classes
+    each containing their own `class Inner: def run(self): ...` both
+    qualified as `"Inner.run"`, since `immediate_parent` only ever
+    remembered the SINGLE nearest class/function name, overwritten (not
+    accumulated) at every new nesting level -- `OuterA.Inner.run` and
+    `OuterB.Inner.run` were indistinguishable. Fixed by replacing the
+    single `immediate_parent` with `path_stack`, an accumulating list of
+    every enclosing function AND class name in lexical order, and
+    qualifying a new def as the full dotted join of that stack plus its
+    own name (`".".join(name for _kind, name in path_stack + [own name])`)
+    -- a bare module-level function's stack is empty, so its qualified name
+    is still just its own bare name, unchanged from round 14. None of the
+    four real shipped guard sites are nested inside anything, so
+    `EXPECTED_GUARD_SITES` needs no changes for this fix; only a
+    deliberately-nested synthetic mutation exercises the new path-stack
+    behavior. `current_owner`'s own meaning is unchanged from round 13 --
+    the nearest enclosing FUNCTION only, reset to `None` entering a
+    `ClassDef` -- only the STRING used to qualify that owner changed."""
     for child in ast.iter_child_nodes(node):
         if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            if immediate_parent is not None and immediate_parent[0] == "class":
-                qualified_name = f"{immediate_parent[1]}.{child.name}"
-            else:
-                qualified_name = child.name
+            qualified_name = ".".join([name for _kind, name in path_stack] + [child.name])
             next_owner = (qualified_name, child)
-            next_parent = ("function", child.name)
+            next_stack = path_stack + [("function", child.name)]
         elif isinstance(child, ast.ClassDef):
             next_owner = None
-            next_parent = ("class", child.name)
+            next_stack = path_stack + [("class", child.name)]
         else:
             next_owner = current_owner
-            next_parent = immediate_parent
+            next_stack = path_stack
         if isinstance(child, ast.If) and _if_carries_anchor_raise(child):
             hits.append((current_owner, child))
-        _find_guard_ifs(child, next_owner, next_parent, hits)
+        _find_guard_ifs(child, next_owner, next_stack, hits)
 
 
 def _bare_name_sorted_call(node) -> "ast.Name | None":
@@ -1212,28 +1440,59 @@ def _is_sorted_list_mismatch_shape(expr, expected_names: "tuple[str, str]") -> b
     return set(operands) == set(expected_names)
 
 
-def _store_name_counts_in_scope(scope_body: "list[ast.stmt]") -> "dict[str, int]":
-    """Counts every bare-Name Store-context binding (`Assign`/`AugAssign`/
-    `AnnAssign`/`For`/`With` targets, walrus `:=`, ...) reachable DIRECTLY
-    within `scope_body`'s own statements, WITHOUT descending into a nested
-    function/class/lambda/comprehension body -- each of those introduces
-    its own independent scope in real Python, so a name bound there does
-    not shadow or rebind a name in the enclosing scope this function is
-    asked about.
+def _scope_binding_info(
+    scope_body: "list[ast.stmt]",
+) -> "tuple[dict[str, int], dict[str, ast.AST | None], set[str]]":
+    """Returns `(counts, sole_assign_values, global_or_nonlocal_names)` for
+    every bare-name binding reachable DIRECTLY within `scope_body`'s own
+    statements -- not descending into a nested function/class/lambda body
+    (each is its own scope), and only descending into a comprehension body
+    far enough to find a `NamedExpr` (walrus) target, since PEP 572 binds a
+    walrus inside a comprehension to the comprehension's CONTAINING scope,
+    while everything else a comprehension binds (its own `for` targets, its
+    element expression) stays local to the comprehension itself.
 
-    Round 14 (Finding 1): this is deliberately a purely SYNTACTIC count,
-    not dataflow/aliasing analysis -- it answers "how many times is this
-    bare name assigned to, directly in this scope", nothing about what
-    value flows into it or whether that value happens to alias another
-    name. See the round-14 Finding 1 comment above `ANCHOR_PHRASE` for why
-    that's the deliberately cheap, sound substitute for general aliasing
-    analysis here: every guard this codebase ships binds each of its own
-    operand names, and the name `sorted`, in a fixed, verified shape (1/1/0
-    at all four real sites), so any count outside that shape is already an
-    unambiguous defect, not a judgment call."""
+    `counts` mirrors round 14's `_store_name_counts_in_scope` (every
+    bare-Name Store-context binding: `Assign`/`AugAssign`/`AnnAssign`/`For`/
+    `With` targets, walrus, ...) plus two binding shapes round 14 could not
+    see at all because they are not `ast.Name` nodes: `except ... as name`
+    (an `ExceptHandler.name` string) and `import ... as name`/
+    `from ... import x as name` (an `alias.asname`/`alias.name` string).
+
+    `sole_assign_values` maps a name to the `.value` expression of its OWN
+    single plain `Assign` (a bare-Name target, not a tuple/starred unpack)
+    -- used by `_rebind_violations` to check the accepted INITIALIZER
+    shape, not just that a binding occurred. Only ever consulted by the
+    caller when `counts[name] == 1`; a name bound more than once, or bound
+    by any non-`Assign` kind, is already a violation before this map is
+    read at all.
+
+    `global_or_nonlocal_names` is every name declared by a `global`/
+    `nonlocal` statement anywhere in `scope_body` -- a name so declared is
+    not actually owned by this scope (its real assignment target is an
+    outer scope this walk never visits), so a caller must treat it as an
+    unconditional violation rather than trust a local count for it.
+
+    Round 15 (Finding 1): the round-14 pure count validated CARDINALITY
+    only -- it could not see a parameter (an `ast.arg`, never a Store-
+    context `ast.Name`), could not see a walrus bound inside a
+    comprehension (the round-14 version returned unconditionally on every
+    comprehension node, before ever looking for one), and had no notion of
+    an initializer's own shape. See the round-15 Finding 1 comment above
+    `ANCHOR_PHRASE` for the three concrete bypasses this closes and the
+    proportionality argument for why this stays a SYNTACTIC walk, not
+    dataflow/aliasing analysis -- it still does not ask what an arbitrary
+    expression evaluates to, only whether a name is bound more than the
+    fixed number of times (and by the fixed kind) every guard this
+    codebase actually ships binds it."""
     counts: "dict[str, int]" = {}
+    sole_assign_values: "dict[str, ast.AST | None]" = {}
+    global_or_nonlocal: "set[str]" = set()
 
-    class _StoreNameCounter(ast.NodeVisitor):
+    def _record(name: str) -> None:
+        counts[name] = counts.get(name, 0) + 1
+
+    class _ScopeBindingVisitor(ast.NodeVisitor):
         def visit_FunctionDef(self, node: ast.AST) -> None:
             return  # separate scope -- do not descend
 
@@ -1246,26 +1505,102 @@ def _store_name_counts_in_scope(scope_body: "list[ast.stmt]") -> "dict[str, int]
         def visit_Lambda(self, node: ast.AST) -> None:
             return
 
+        def _walrus_targets_only(self, node: ast.AST) -> None:
+            # A comprehension is its own scope in Python 3 for everything
+            # EXCEPT a walrus, which PEP 572 binds to the comprehension's
+            # containing scope -- so this looks for `NamedExpr` targets
+            # only, and deliberately does not otherwise descend (the
+            # comprehension's own `for` targets and element expression stay
+            # local to it, invisible to the enclosing scope this function
+            # is asked about).
+            for n in ast.walk(node):
+                if isinstance(n, ast.NamedExpr) and isinstance(n.target, ast.Name):
+                    _record(n.target.id)
+
         def visit_ListComp(self, node: ast.AST) -> None:
-            return  # comprehensions are their own scope in Python 3
+            self._walrus_targets_only(node)
 
         def visit_SetComp(self, node: ast.AST) -> None:
-            return
+            self._walrus_targets_only(node)
 
         def visit_DictComp(self, node: ast.AST) -> None:
-            return
+            self._walrus_targets_only(node)
 
         def visit_GeneratorExp(self, node: ast.AST) -> None:
-            return
+            self._walrus_targets_only(node)
+
+        def visit_Assign(self, node: ast.Assign) -> None:
+            if len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
+                name = node.targets[0].id
+                # More than one plain Assign to the same bare name is
+                # itself already a count>1 violation the caller will catch
+                # via `counts`; recording `None` here just avoids handing
+                # back an arbitrary ONE of several conflicting values.
+                sole_assign_values[name] = (
+                    node.value if name not in sole_assign_values else None
+                )
+            self.generic_visit(node)  # still counts the target + walks the value
+
+        def visit_ExceptHandler(self, node: ast.ExceptHandler) -> None:
+            if node.name:
+                _record(node.name)
+            self.generic_visit(node)
+
+        def visit_Import(self, node: ast.Import) -> None:
+            for alias in node.names:
+                _record(alias.asname or alias.name.split(".")[0])
+
+        def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
+            for alias in node.names:
+                _record(alias.asname or alias.name)
+
+        def visit_Global(self, node: ast.Global) -> None:
+            global_or_nonlocal.update(node.names)
+
+        def visit_Nonlocal(self, node: ast.Nonlocal) -> None:
+            global_or_nonlocal.update(node.names)
 
         def visit_Name(self, node: ast.Name) -> None:
             if isinstance(node.ctx, ast.Store):
-                counts[node.id] = counts.get(node.id, 0) + 1
+                _record(node.id)
 
-    visitor = _StoreNameCounter()
+    visitor = _ScopeBindingVisitor()
     for stmt in scope_body:
         visitor.visit(stmt)
-    return counts
+    return counts, sole_assign_values, global_or_nonlocal
+
+
+def _param_names(func_node: "ast.FunctionDef | ast.AsyncFunctionDef") -> "set[str]":
+    """Every parameter name `func_node`'s own signature introduces directly
+    into its local scope -- positional-only, positional-or-keyword,
+    keyword-only, `*args`, `**kwargs` -- regardless of whether any of them
+    carries a default value. A parameter binds its name exactly like an
+    assignment would, but `ast.arg` is never an `ast.Name` node, so no
+    Store-context Name walk (round 14's or round 15's `_scope_binding_info`
+    alike) can ever see it; this is why `sorted=set` as a default parameter
+    value (round 15, Finding 1) was invisible to the round-14 check."""
+    args = func_node.args
+    names = {arg.arg for arg in (*args.posonlyargs, *args.args, *args.kwonlyargs)}
+    if args.vararg is not None:
+        names.add(args.vararg.arg)
+    if args.kwarg is not None:
+        names.add(args.kwarg.arg)
+    return names
+
+
+def _references_name(node: "ast.AST | None", name: str) -> bool:
+    """True if `name` appears anywhere in `node`'s own subtree as a bare
+    `ast.Name` (any context) -- used to check that an operand's initializer
+    actually references a specific upstream name (`FROZEN_INPUT_SPECS`, or
+    the OTHER operand) rather than merely having a plausible-looking shape.
+    `node` may be `None` (no initializer resolved), which is never a
+    reference to anything."""
+    if node is None:
+        return False
+    return any(isinstance(n, ast.Name) and n.id == name for n in ast.walk(node))
+
+
+_SPEC_KEYS_OPERAND_SUFFIX = "spec_keys"
 
 
 def _rebind_violations(
@@ -1279,21 +1614,71 @@ def _rebind_violations(
     spelling untouched. Returns a list of human-readable violation strings
     (empty if none found).
 
-    Deliberately NOT dataflow/aliasing analysis: this does not ask what a
-    rebind's right-hand side evaluates to, or whether it happens to alias
-    the other operand -- only whether the name is bound (Store context)
-    more than the single time every guard this codebase actually ships
-    binds it. Full aliasing analysis was already rejected twice as
+    Round 15 (Finding 1, codex round-15 review): the round-14 version above
+    validated CARDINALITY only (a name bound exactly once, `sorted` bound
+    zero times) -- not the BINDING KIND, nor the accepted INITIALIZER. This
+    version additionally requires: each operand name's sole binding to
+    actually be a plain `name = <value>` `Assign` to a bare Name (any other
+    binding KIND -- `AnnAssign`, a parameter, `with ... as`, ... -- is
+    rejected even at count 1, since this check can no longer verify what
+    such a binding's value even is); that Assign's own value to NOT
+    reference the OTHER operand's name anywhere in its subtree (closes
+    `_spec_keys = list(_frozen_input_snapshots_by_key)` -- and its mirror
+    image, symmetrically, without needing to know in advance which operand
+    is "the real" one); the FROZEN_INPUT_SPECS-derived operand specifically
+    (identified structurally, by its name ending in `spec_keys` -- true of
+    `spec_keys`/`_spec_keys` at all four real sites, verified against every
+    shipped guard before writing this check) to reference
+    `FROZEN_INPUT_SPECS` itself somewhere in its value; and `sorted`
+    additionally to never appear as a parameter name or in a `global`/
+    `nonlocal` declaration, on top of the existing zero-Store-bindings
+    check (now also seeing a walrus bound inside a comprehension, via
+    `_scope_binding_info`'s own round-15 extension).
+
+    Still deliberately NOT general dataflow/aliasing analysis: this does
+    not evaluate what an arbitrary expression evaluates to, only (a)
+    whether a name is bound more than once by any binding form this walk
+    can see, (b) whether the one accepted binding is the right KIND, and
+    (c) whether that binding's own value textually references a specific,
+    named identifier. Full aliasing analysis was already rejected twice as
     disproportionate for this file (see the round-13 hoist-resolver story
-    above); this count is proportionate because every real guard's own two
-    operand names are each bound EXACTLY ONCE, and the name `sorted` ZERO
-    times, in scope -- any count outside that is already, unambiguously, a
-    real defect here."""
+    above); this remains proportionate for the same reason round 14 gave --
+    every real guard's own two operand names are each bound EXACTLY ONCE,
+    by a plain Assign built from the expected upstream name, and the name
+    `sorted` ZERO times, in scope (verified against all four shipped sites
+    before writing this check) -- any deviation from that fixed shape is
+    already, unambiguously, a real defect here, not a judgment call. What
+    remains open, stated plainly: a rebind reached through
+    `builtins.sorted = ...`, `globals()[...]`, an alias built through a
+    third name never checked against `FROZEN_INPUT_SPECS` or the other
+    operand, or a `global`/`nonlocal`-declared name whose true owning
+    (outer) scope this file does not itself validate -- flagged below as an
+    unconditional violation rather than silently trusted, but not chased
+    into that outer scope."""
     owner_scope_body = owner_func.body if owner_func is not None else module_tree.body
-    owner_counts = _store_name_counts_in_scope(owner_scope_body)
+    owner_counts, owner_assign_values, owner_global_nonlocal = _scope_binding_info(
+        owner_scope_body
+    )
+    owner_param_names = _param_names(owner_func) if owner_func is not None else set()
 
     violations = []
-    for name in operand_names:
+    for index, name in enumerate(operand_names):
+        other_name = operand_names[1 - index]
+        if name in owner_global_nonlocal:
+            violations.append(
+                f"operand name {name!r} is declared global/nonlocal in the "
+                "guard's own owning scope -- its real binding lives in an "
+                "outer scope this check does not follow, so a local rebind "
+                "count cannot be trusted for it at all"
+            )
+            continue
+        if name in owner_param_names:
+            violations.append(
+                f"operand name {name!r} is also a parameter name of the "
+                "guard's own owning function -- this check requires it to "
+                "be bound by exactly one plain assignment, not a parameter"
+            )
+            continue
         count = owner_counts.get(name, 0)
         if count != 1:
             violations.append(
@@ -1302,6 +1687,48 @@ def _rebind_violations(
                 "aliasing it to the OTHER operand's value) makes the comparison "
                 "tautological while leaving both expected names present"
             )
+            continue
+        value = owner_assign_values.get(name)
+        if value is None:
+            violations.append(
+                f"operand name {name!r} is bound exactly once in its guard's "
+                "own owning scope, but not by a plain `name = <value>` "
+                "assignment to a bare name -- this check cannot verify the "
+                "accepted initializer shape for any other binding form"
+            )
+            continue
+        if _references_name(value, other_name):
+            violations.append(
+                f"operand name {name!r} is initialized from an expression "
+                f"that itself references the OTHER operand name "
+                f"{other_name!r} -- this makes the guard's comparison "
+                "tautological (it can never fire) while leaving both "
+                "expected names textually present at the guard"
+            )
+        if name.endswith(_SPEC_KEYS_OPERAND_SUFFIX) and not _references_name(
+            value, "FROZEN_INPUT_SPECS"
+        ):
+            violations.append(
+                f"operand name {name!r} is bound exactly once by a plain "
+                "assignment, but its initializer does not reference "
+                "FROZEN_INPUT_SPECS anywhere -- the FROZEN_INPUT_SPECS-"
+                "derived operand must actually be built from that tuple, "
+                "not from an arbitrary expression that happens to have the "
+                "right name"
+            )
+
+    if "sorted" in owner_global_nonlocal:
+        violations.append(
+            "the builtin name `sorted` is declared global/nonlocal in the "
+            "guard's own owning scope"
+        )
+    if "sorted" in owner_param_names:
+        violations.append(
+            "the builtin name `sorted` is a parameter name of the guard's "
+            "own owning function (e.g. a default parameter `sorted=set`) -- "
+            "this shadows the builtin for the whole function even though it "
+            "is never assigned to as a statement"
+        )
     if owner_counts.get("sorted", 0) > 0:
         violations.append(
             "the builtin name `sorted` is locally rebound within the guard's "
@@ -1310,7 +1737,9 @@ def _rebind_violations(
             "shape untouched"
         )
     if owner_func is not None:
-        module_counts = _store_name_counts_in_scope(module_tree.body)
+        module_counts, _module_assign_values, _module_global_nonlocal = _scope_binding_info(
+            module_tree.body
+        )
         if module_counts.get("sorted", 0) > 0:
             violations.append(
                 "the builtin name `sorted` is rebound at module level in this "
@@ -1345,7 +1774,7 @@ def _guard_hits_in_file(path: Path) -> list:
     source_text = path.read_text(encoding="utf-8")
     tree = ast.parse(source_text, filename=str(path))
     raw_hits: list = []
-    _find_guard_ifs(tree, None, None, raw_hits)
+    _find_guard_ifs(tree, None, [], raw_hits)
 
     results = []
     for owner, if_node in raw_hits:
