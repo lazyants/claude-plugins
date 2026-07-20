@@ -780,8 +780,17 @@ each one describes.
 All three frozen inputs — `canon.json`, `manifest.json`, `canon_senses.json`
 — now go through that one gated capture step alike, with no exception:
 `frozen_input_check()` drives all three off a single table, and the loop
-over that table is the only place in `skeptic_ready.py` that reads a frozen
-input's bytes. `manifest.json` used to be wired in separately, as a
+over that table is the only place `frozen_input_check()` itself reads a
+frozen input's bytes for the H1 tamper comparison. It is not the only place
+in `skeptic_ready.py` that reads canon/senses bytes at all —
+`_resolve_competitors()` deliberately falls back to a plain fresh read of
+`canon.json`/`canon_senses.json` when the caller has no H1-approved
+snapshot to reuse for that particular input (`run_validate_fragment`, which
+never calls `frozen_input_check()` at all; and `run_verify_merged` for
+whichever of the two inputs happened to have no stamp to compare against).
+That fallback is intentional, not a gap this round closed — see
+`_resolve_competitors()`'s own docstring. `manifest.json` used to be wired
+in separately, as a
 hand-written call that captured its own snapshot outside that gate — which
 is exactly how a stamped `manifest.json` read failure could escape the
 standalone check raw, despite that mode's own documented "never crashes"
@@ -812,10 +821,37 @@ the verifier, because there is no longer a place in EITHER script's own
 code to add one without touching that shared tuple first. The schema's
 `canon_sha256`/`manifest_sha256`/`senses_sha256` properties are still
 separately-declared static data (JSON Schema cannot derive from a Python
-tuple) — a parity test asserts the schema's declared stamp-field set equals
-the one `FROZEN_INPUT_SPECS` derives, so a schema property added without a
-matching tuple entry (or the reverse) fails that test rather than going
-unnoticed.
+tuple) — a parity test asserts the schema's declared **top-level property
+names ending in `_sha256`** equal the stamp-field set `FROZEN_INPUT_SPECS`
+derives, so a `_sha256`-suffixed schema property added without a matching
+tuple entry (or the reverse) fails that test rather than going unnoticed.
+That suffix filter is the test's actual coverage boundary, not a
+simplification: a schema property that stamps a frozen input WITHOUT a
+`_sha256` name (or one nested below the top level, like
+`assignments[].evidence.sha256`) stays invisible to this parity check
+entirely.
+
+`FROZEN_INPUT_SPECS` binds the stamper and the verifier's tamper check —
+that is its whole, and only, guarantee. It does NOT bind the earlier
+`read_frozen_input_snapshot()` capture in `skeptic_setup.py`, and it does
+NOT bind `compute_producer_input_digest()`/`compute_skeptic_input_digest()`
+— both still take a fixed positional/keyword canon+manifest+senses
+signature, unrelated to this tuple. A fourth frozen input added ONLY to
+`FROZEN_INPUT_SPECS` (plus the schema) would be captured, stamped and
+H1-tamper-checked correctly, yet invisible to both freshness digests: a
+mutation to it BEFORE `skeptic_setup.py` runs would leave a stale
+worklist's `producer_input_digest` unchanged, so the stale worklist would
+still read as fresh and get (re)certified against the new state — the same
+stale-certified-as-fresh failure mode this release closes for
+`canon_senses.json`, just re-opened at a boundary this tuple doesn't
+reach. `skeptic_constants.py`'s own comment next to `FROZEN_INPUT_SPECS`
+lists every site a new frozen input still needs by hand. Generalizing the
+two digest functions so this tuple could drive them too was evaluated
+(#243 round 9) and deferred: both are direct-called by fixed parameter
+name/position from dozens of sites in `tests/skeptic_setup.test.py` and
+`tests/suspicion_scan.test.py`, several of which pin the exact NUL-byte
+framing between two specific adjacent parameters — a cross-file
+test-authoring change, not a same-file mechanical one.
 
 Detection now fires at **two** decision points, not one. The first is
 `skeptic_ready.py --verify-merged`'s own internal check, which runs after a

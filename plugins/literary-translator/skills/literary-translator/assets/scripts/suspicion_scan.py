@@ -910,6 +910,19 @@ def compute_producer_input_digest(canon_state: str, canon_bytes: bytes,
     and compare against a worklist's stored `producer_input_digest` before
     trusting it -- the two must never drift into two independent
     algorithms that could disagree on the same inputs.
+
+    Round 9 (#243): this signature is a fixed positional enumeration of
+    canon/manifest/senses, NOT derived from `skeptic_constants.FROZEN_INPUT_SPECS`
+    -- a frozen input added to that tuple is stamped and H1-tamper-checked
+    automatically, but does NOT gain freshness coverage here without a
+    matching hand-added parameter (see that tuple's own "what
+    FROZEN_INPUT_SPECS does NOT cover" comment). Generalizing this to an
+    ordered/keyed collection was considered and deferred: this function is
+    direct-called from dozens of sites in `tests/suspicion_scan.test.py`
+    and `tests/skeptic_setup.test.py`, including ones asserting the exact
+    NUL-byte framing between two specific adjacent positional arguments --
+    a signature change here is a cross-file test-authoring change, not a
+    same-file refactor.
     """
     hasher = hashlib.sha256()
     parts = [canon_state.encode("ascii"), canon_bytes,

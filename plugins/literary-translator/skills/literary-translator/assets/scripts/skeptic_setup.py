@@ -529,6 +529,10 @@ def run(args) -> dict:
     # matching suspicion_scan.py's own tolerant convention so the two
     # scripts' bytes agree byte-for-byte and the recomputed
     # producer_input_digest can match.
+    # Round 9 (#243): this capture is NOT driven by FROZEN_INPUT_SPECS --
+    # see skeptic_constants.py's own "what FROZEN_INPUT_SPECS does NOT
+    # cover" comment next to that tuple for the full list of sites (this
+    # one included) a new frozen input must still be added to by hand.
     canon_state, canon_bytes = read_frozen_input_snapshot(canon_path)
     senses_state, senses_bytes = read_frozen_input_snapshot(senses_path)
     manifest_state, manifest_bytes = read_frozen_input_snapshot(manifest_path)
@@ -589,6 +593,11 @@ def run(args) -> dict:
     #    helper suspicion_scan.py itself stamped the worklist with, and
     #    reject fail-closed on any mismatch (stale canon/manifest/params/
     #    language-config/producer-code).
+    # Round 9 (#243): fixed positional args, not FROZEN_INPUT_SPECS-driven
+    # -- see that tuple's own "what it does NOT cover" comment in
+    # skeptic_constants.py. A frozen input added to the tuple still needs
+    # a hand-added positional arg here (and in compute_producer_input_digest
+    # itself) before a change to it can invalidate a stale worklist.
     recomputed_producer_digest = compute_producer_input_digest(
         canon_state, canon_bytes, manifest_state, manifest_bytes, senses_state, senses_bytes,
         resolved_params, lang.raw_bytes, SCRIPT_DIR,
@@ -668,6 +677,8 @@ def run(args) -> dict:
         raise SkepticSetupError(f"skeptic template not found: {template_path}")
     template_bytes = template_path.read_bytes()
 
+    # Round 9 (#243): same caveat as the compute_producer_input_digest call
+    # above -- fixed keyword args, not FROZEN_INPUT_SPECS-driven.
     skeptic_input_digest = compute_skeptic_input_digest(
         canon_state=canon_state, canon_bytes=canon_bytes,
         manifest_state=manifest_state, manifest_bytes=manifest_bytes,
@@ -746,6 +757,11 @@ def run(args) -> dict:
     # line left to add a stamp without adding a `FROZEN_INPUT_SPECS` entry
     # first, and any entry appended there is automatically both stamped here
     # and checked by the verifier the next time each side reads it.
+    # This dict IS keyed off FROZEN_INPUT_SPECS' own keys below -- unlike
+    # the capture above and the two digest calls above it, this stamp step
+    # (and frozen_input_check()'s verifier-side check table) really is
+    # fully tuple-driven; see skeptic_constants.py's "what FROZEN_INPUT_SPECS
+    # does NOT cover" comment for the contrast.
     _frozen_input_snapshots_by_key = {
         "canon": (canon_state, canon_bytes),
         "manifest": (manifest_state, manifest_bytes),

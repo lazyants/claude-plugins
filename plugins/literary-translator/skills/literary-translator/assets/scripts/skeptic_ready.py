@@ -1007,6 +1007,10 @@ def frozen_input_check(
     # here too (this function's own signature has no room for a path it was
     # never told about), which fails loudly (``KeyError``) rather than
     # silently, unlike the pre-round-8 gap this closes.
+    # Round 9 (#243): this dict, and the digest functions in
+    # skeptic_setup.py/suspicion_scan.py, are the other hand-maintained
+    # sites FROZEN_INPUT_SPECS does NOT drive -- see that tuple's own
+    # comment in skeptic_constants.py for the full list.
     paths = {"canon": canon_path, "manifest": manifest_path, "senses": senses_path}
     specs = tuple((key, label, stamp_key, paths[key]) for key, label, stamp_key in FROZEN_INPUT_SPECS)
     snapshots = {}

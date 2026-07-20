@@ -1184,8 +1184,13 @@ def test_check_frozen_inputs_detects_tamper_the_verify_merged_path_never_reaches
     assert any("canon_senses.json" in m and "tamper" in m for m in result["missing"])
 
 
+# Codex round 9: `(frozen_input, label)` used to be a hand-typed second
+# restatement of `sr.FROZEN_INPUT_SPECS` (the SAME tuple `frozen_input_check()`
+# itself iterates, round 8) -- deriving it here means a fourth frozen input
+# added to that tuple automatically grows this parametrization into a
+# fourth case, instead of the suite staying green with no test for it.
 @pytest.mark.parametrize("frozen_input, label", [
-    ("canon", "canon.json"), ("manifest", "manifest.json"), ("senses", "canon_senses.json"),
+    (key, label) for key, label, _stamp_field in sr.FROZEN_INPUT_SPECS
 ])
 def test_check_frozen_inputs_detects_tamper_per_frozen_input(tmp_path, frozen_input, label):
     """Codex round 8 (finding 1c, point 2): the two existing standalone
@@ -1233,7 +1238,12 @@ def test_check_frozen_inputs_detects_tamper_per_frozen_input(tmp_path, frozen_in
     assert any(label in m and "tamper" in m for m in result["missing"]), f"[{frozen_input}] {result['missing']}"
 
 
-@pytest.mark.parametrize("frozen_input", ["canon", "manifest", "senses"])
+# Codex round 9: same fix as test_check_frozen_inputs_detects_tamper_per_frozen_input
+# above -- `frozen_input` now comes from `sr.FROZEN_INPUT_SPECS` itself
+# rather than a second hand-typed `["canon", "manifest", "senses"]` list, so
+# a fourth frozen input added to that tuple is automatically exercised here
+# too.
+@pytest.mark.parametrize("frozen_input", [key for key, _label, _stamp_field in sr.FROZEN_INPUT_SPECS])
 def test_check_frozen_inputs_tolerates_a_read_failure(tmp_path, monkeypatch, frozen_input):
     """Codex round 6 BLOCKER (canon/senses) + codex round 7 BLOCKER
     (manifest): frozen_input_check() must route EVERY frozen input's read

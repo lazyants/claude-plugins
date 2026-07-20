@@ -150,3 +150,49 @@ FROZEN_INPUT_SPECS = (
     ("manifest", "manifest.json", "manifest_sha256"),
     ("senses", "canon_senses.json", "senses_sha256"),
 )
+
+# --- What FROZEN_INPUT_SPECS does NOT cover (#243 round 9) ---
+# This tuple is the single source of truth for exactly two things: the
+# stamp fields skeptic_setup.py writes into assignments.json, and the
+# check table skeptic_ready.py's frozen_input_check() builds. Adding an
+# entry here wires a frozen input into BOTH of those automatically -- but
+# it wires it into nothing else. A new frozen input still needs its own
+# hand-added line at every one of these separate sites, none of which
+# reads this tuple:
+#   - skeptic_setup.py's own three read_frozen_input_snapshot() calls at
+#     the top of run() -- the actual (state, bytes) CAPTURE of
+#     canon.json/manifest.json/canon_senses.json this tuple's stamps and
+#     checks are computed FROM.
+#   - suspicion_scan.compute_producer_input_digest() -- a fixed positional
+#     signature (canon_state, canon_bytes, manifest_state, manifest_bytes,
+#     senses_state, senses_bytes, plus resolved_params/
+#     language_config_raw_bytes/script_dir) hashed into the worklist's
+#     producer_input_digest freshness gate.
+#   - skeptic_setup.compute_skeptic_input_digest() -- the same fixed
+#     3-input shape, hashed into the skeptic resume digest
+#     (resolve_skeptic_run()'s fresh-vs-resume decision).
+#   - the `paths` dict inside skeptic_ready.py's frozen_input_check() that
+#     maps this tuple's `key` to an actual filesystem Path (fails loudly
+#     with KeyError if missed -- NOT silently).
+#
+# The consequence of missing one of these is asymmetric. Missing the
+# `paths` entry fails LOUD (KeyError) the first time frozen_input_check()
+# runs against the new key. Missing either digest function is SILENT and
+# is the more dangerous half: the new input gets captured, stamped, and
+# H1-tamper-checked correctly, but a change to it BEFORE setup runs
+# doesn't move producer_input_digest or the skeptic resume digest -- a
+# stale worklist/run still reads as fresh and gets (re)certified against
+# the new state, exactly the stale-certified-as-fresh class this release
+# exists to close, just moved to a boundary this tuple doesn't reach.
+#
+# Collapsing the two digest functions' fixed positional shape into
+# something this tuple could also drive was evaluated and deliberately
+# deferred (#243 round 9): both are called by fixed parameter name/
+# position from dozens of sites across tests/skeptic_setup.test.py and
+# tests/suspicion_scan.test.py, including tests that pin the exact
+# NUL-byte framing between two specific adjacent parameters
+# (tests/skeptic_setup.test.py's own canon_bytes=b"A"/manifest_bytes=b"BC"
+# vs canon_bytes=b"AB"/manifest_bytes=b"C" boundary-collision pair) --
+# generalizing the signature is a cross-file test-authoring change, not a
+# same-file mechanical refactor, and was left out of this round rather
+# than folded in under time pressure.

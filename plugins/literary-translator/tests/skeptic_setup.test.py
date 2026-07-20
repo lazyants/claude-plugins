@@ -120,6 +120,22 @@ def _load_module(name: str, path: Path, extra_sys_path: Path):
 # state-tagged hash formula that could silently drift from production.
 ss = _load_module("suspicion_scan_for_frozen_hash", SUSPICION_SCAN_SRC, SCRIPTS_DIR)
 
+# Codex round 9: the per-slot H1 tests below used to hard-code their own
+# ("canon"/"manifest"/"senses", ...) parametrization rows -- a literal
+# restatement of skeptic_constants.FROZEN_INPUT_SPECS (the single
+# authoritative table skeptic_setup.py's stamper and skeptic_ready.py's
+# verifier now both derive from, round 8) that could silently drift from
+# it: a fourth frozen input added to the tuple would get NO test case here
+# at all, and the suite would stay green while reporting full per-slot
+# coverage. Loaded once, module-level (collection-time, mirrors `ss` above)
+# so `pytest.mark.parametrize` below reads the SAME tuple production reads
+# -- a new FROZEN_INPUT_SPECS entry therefore grows this parametrization
+# automatically, with no line here to remember to touch.
+_frozen_input_specs_module = _load_module(
+    "skeptic_constants_for_frozen_specs", SKEPTIC_CONSTANTS_SRC, SCRIPTS_DIR
+)
+FROZEN_INPUT_SPECS = _frozen_input_specs_module.FROZEN_INPUT_SPECS
+
 
 def make_skeptic_root(tmp_path) -> Path:
     """An isolated durable_root with real copies of every shipped script/
@@ -465,7 +481,7 @@ def test_aggregate_stamps_senses_sha256_of_absent_state_when_sidecar_absent(tmp_
     assert aggregate["senses_sha256"] != hashlib.sha256(b"").hexdigest()
 
 
-@pytest.mark.parametrize("slot", ["canon", "manifest", "senses"])
+@pytest.mark.parametrize("slot", [key for key, _label, _stamp_field in FROZEN_INPUT_SPECS])
 def test_h1_stamp_snapshots_derivation_time_state_not_a_later_reread(tmp_path, slot):
     """codex round 3 BLOCKER, round-4-corrected: skeptic_setup.py reads
     canon/manifest/senses ONCE early (driving the freshness check +
@@ -486,6 +502,13 @@ def test_h1_stamp_snapshots_derivation_time_state_not_a_later_reread(tmp_path, s
     reverting exactly the ONE stamp this parametrization targets, one at a
     time.
 
+    Codex round 9: `slot` is parametrized straight off
+    `FROZEN_INPUT_SPECS` (module-level, see the load near `ss` above), not
+    a second hand-typed `["canon", "manifest", "senses"]` list -- a fourth
+    frozen input added to that tuple now automatically grows this
+    parametrization into a fourth case instead of staying invisibly
+    uncovered.
+
     Injects a mutation at the exact boundary via a monkeypatch on
     `_schemas_dir_hash()` -- called well after the derivation reads (top of
     `run()`) and well before the aggregate dict (with its H1 stamps) is
@@ -505,15 +528,32 @@ def test_h1_stamp_snapshots_derivation_time_state_not_a_later_reread(tmp_path, s
     mod = _load_module(
         "skeptic_setup_for_snapshot_race_test", root / "scripts" / "skeptic_setup.py", root / "scripts"
     )
-    filenames = {"canon": "canon.json", "manifest": "manifest.json", "senses": "canon_senses.json"}
-    stamp_fields = {"canon": "canon_sha256", "manifest": "manifest_sha256", "senses": "senses_sha256"}
+    # Derived straight from FROZEN_INPUT_SPECS (not a hand-copied second
+    # restatement) -- structurally cannot omit an entry `slot` was
+    # parametrized over, since both come from the same tuple.
+    filenames = {key: label for key, label, _stamp_field in FROZEN_INPUT_SPECS}
+    stamp_fields = {key: stamp_field for key, _label, stamp_field in FROZEN_INPUT_SPECS}
     target_path = root / filenames[slot]
-    if slot == "senses":
-        # canon_senses.json isn't written by make_skeptic_root() by default
-        # -- canon.json/manifest.json already are.
-        target_path.write_bytes(
-            json.dumps({"schema_version": 1, "entries_by_source_form": {}}).encode("utf-8")
+    if not target_path.is_file():
+        # make_skeptic_root() only pre-writes canon.json/manifest.json --
+        # any OTHER frozen input (canon_senses.json today, or a future
+        # addition to FROZEN_INPUT_SPECS) starts absent and needs seed
+        # bytes here before this test can mutate it. Keyed explicitly by
+        # `slot` (never a generic "write empty JSON for whatever's
+        # missing") so a genuinely new frozen input fails LOUDLY with a
+        # clear diagnosis instead of silently seeding content that may not
+        # suit it.
+        seed_bytes_by_slot = {
+            "senses": json.dumps({"schema_version": 1, "entries_by_source_form": {}}).encode("utf-8"),
+        }
+        assert slot in seed_bytes_by_slot, (
+            f"FROZEN_INPUT_SPECS grew a new slot {slot!r} that neither "
+            "make_skeptic_root() nor this test's seed_bytes_by_slot knows "
+            "how to bring into existence -- add fixture seed bytes for it "
+            "here (and/or have make_skeptic_root() pre-write it) before "
+            "this test can exercise it"
         )
+        target_path.write_bytes(seed_bytes_by_slot[slot])
     original_bytes = target_path.read_bytes()
     original_hash = mod.compute_frozen_input_hash_from_state("regular", original_bytes)
 
