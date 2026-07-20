@@ -817,6 +817,30 @@ test('validateGroups: THREE-occurrence duplicate slug still halts exactly ONCE [
   ]);
 });
 
+test('validateGroups: duplicate-slug gate sees the FULL entry list in an anyGroup manifest — flat-vs-flat AND grouped-vs-flat pairs [round-18]', () => {
+  // Round-18 finding: `validateGroups`'s grouped branch calls `duplicateSlugHalts(entries, ...)`
+  // on the FULL entry list (chapter-paths.mjs:373) — every existing duplicate-in-a-grouped-
+  // manifest fixture used ONLY grouped entries for the duplicated slug, so a mutant filtering to
+  // `entries.filter(e => e.group !== undefined)` before the call stayed fully green. That mutant
+  // silently stops checking flat entries in an anyGroup manifest: a grouped-vs-flat slug
+  // collision (the exact case "globally unique across all groups" exists to catch) AND a
+  // flat-vs-flat collision (neither party grouped) both go undetected. One fixture with 'p'
+  // (flat-vs-flat) and 'r' (one grouped occurrence + one flat occurrence) proves both categories
+  // at once — filtering out flat entries removes ALL of 'p's occurrences and one of 'r's two,
+  // leaving neither above the duplicate threshold.
+  const halts = validateGroups([
+    entry({ slug: 'q', group: 'g1', group_title: 'G1' }), // grouped anchor, keeps anyGroup true
+    entry({ slug: 'p' }), // flat #1 — flat-vs-flat pair
+    entry({ slug: 'p' }), // flat #2 — flat-vs-flat pair
+    entry({ slug: 'r', group: 'g2', group_title: 'G2' }), // grouped
+    entry({ slug: 'r' }), // flat — grouped-vs-flat pair (same slug 'r')
+  ]);
+  assert.deepEqual(halts, [
+    `Duplicate chapter slug 'p' — chapter slugs must be globally unique across all groups (wikilinks and Quartz-shortest resolution key on the basename).`,
+    `Duplicate chapter slug 'r' — chapter slugs must be globally unique across all groups (wikilinks and Quartz-shortest resolution key on the basename).`,
+  ]);
+});
+
 test('validateGroups: group-vs-flat-slug collision', () => {
   const halts = validateGroups([entry({ slug: 'a', group: 'g', group_title: 'G' }), entry({ slug: 'g' })]);
   assert.deepEqual(halts, [

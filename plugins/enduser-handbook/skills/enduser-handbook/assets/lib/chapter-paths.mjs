@@ -244,8 +244,7 @@ export function legacyStaticEmbedPath(chapterFile, outputDir, slug, file) {
  * quirk, anyGroup switched to the full-target form) is dropped (F1a: one of the two 1.6.0
  * exceptions to the activation rule, D1). This governs NEW writes only — an already-written
  * group-free chapter that predates 1.6.0 keeps whatever spelling it already has; there is no
- * automatic retroactive repair (see references/publish-targets/static-md.md's "Write-time canon"
- * section).
+ * automatic retroactive repair (see references/revalidation.md's "Write-time canon" section).
  *
  * `entries` is RETAINED for exported-API compatibility (F8: zero in-repo callers, but it is
  * public API) — it is NO LONGER CONSULTED; the anyGroup(entries) branch it used to feed is gone.

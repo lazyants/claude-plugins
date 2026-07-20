@@ -1025,6 +1025,24 @@ has_in_section "obsidian-vault: Related-block link syntax resolved by target typ
 has_in_section "obsidian-vault: the >=2-link Related-block halt survives the format-neutral rewording" \
   "$OMD" '## Chapter structure (Obsidian-flavoured)' \
   'until at least two outbound Related-block links exist'
+# round-19 [IMPORTANT, zero prior coverage]: round 17's template-override fix had NO pin at all —
+# confirmed by the reviewer directly: delete this instruction, restoring the exact prior paragraph,
+# and the doc suite stayed green. That reintroduces the defect the commit closed: a wikilinks-off
+# Obsidian author starts from `assets/chapter-template.md`, whose Related section is `[[…]]`-shaped
+# unconditionally, and substitutes placeholders literally — shipping wikilink-syntax links in a
+# Markdown-link chapter. Nothing downstream catches it: link-integrity item 2 verifies wikilink
+# RESOLUTION, never syntax-against-mode. The load-bearing claim is the CONJUNCTION — under
+# `publish.wikilinks: false` the template's placeholders must be overridden — not either half
+# alone (a needle with only the mode, or only "override the placeholders", is satisfiable by a
+# weaker sentence). The conjunction spans a wrap ('override the' ends one line, "template's
+# `[[…]]` Related-block placeholders" starts the next — the same class of trap round 18 hit), so
+# two needles, one per physical line, jointly proving what one could not without crossing it.
+has_in_section "obsidian-vault: under wikilinks:false, the template's placeholders MUST be overridden (mode+verb half)" \
+  "$OMD" '## Chapter structure (Obsidian-flavoured)' \
+  'Under `publish.wikilinks: false`, override the'
+has_in_section "obsidian-vault: ...specifically the template's [[…]] Related-block placeholders (object+form half)" \
+  "$OMD" '## Chapter structure (Obsidian-flavoured)' \
+  "template's \`[[…]]\` Related-block placeholders with the standard Markdown-link form from"
 # A4 renamed this checklist item's parenthetical from "(graph-island check)" to
 # "(outbound-link floor)" (obsidian-vault.md:325) — the old name reasserted a wikilinks-on
 # rationale for a rule that is mode-neutral (the same ≥2-link floor also gates wikilinks-off).
