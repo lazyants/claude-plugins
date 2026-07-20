@@ -4,6 +4,8 @@
 - [The deletion pivot](#the-deletion-pivot)
 - [A reviewer can misread — verify each finding](#a-reviewer-can-misread)
 - [Stopping a verifier / gate loop](#stopping-a-verifier--gate-loop)
+- [Mutation-completeness is a receding target](#mutation-completeness-is-a-receding-target)
+- [FREEZE the tree for the deciding round](#freeze-the-tree-for-the-deciding-round)
 - [A/B finding classification for a non-executed artifact](#ab-finding-classification)
 - [Fencing ratified decisions](#fencing-ratified-decisions)
 - [Same mechanism patched a 3rd time → reach for the platform primitive](#same-mechanism-third-time)
@@ -62,3 +64,40 @@ Exit when all three reviewers (code-simplifier / codex / security-review) come b
 ## When the classifier blocks codex
 
 The auto-mode permission classifier can BLOCK `Agent(subagent_type=codex:codex-rescue)` by misattributing the ambient context-window-protection SessionStart hook to your prompt. Legit workaround: drive the runtime directly — `node .../codex-companion.mjs task --background "<clean prompt>"`, then poll `status <id>` / `result <id>` from a `run_in_background` Bash. See the codex-runtime-driving guidance for the full pattern.
+
+## Mutation-completeness is a receding target
+
+Distinct from "stopping a verifier loop" above, where the stop condition is that findings have gone
+HYPOTHETICAL. Here every round finds a REAL survivor and the loop still must stop, because the
+mutant space is structurally larger than any enumeration of guarantees: for a sixty-line program it
+is every statement, condition, operator, initialization and evaluation order. A table of "rules the
+function implements" cannot cover it — verified when two survivors turned out to be statement
+deletions (a state reset, a control-flow `next`), invisible to a rules frame no matter how carefully
+each row was measured.
+
+Stop when the axes you can name are covered, and write the boundary INTO the file: what was hardened,
+along which axes, and that this is NOT a claim of mutation-completeness. State the distinction
+explicitly — **"no mutant found yet" and "no mutant exists" are different claims and only the first
+is ever true.** Say what a future round should do instead: add a fixture when a specific mutant is
+DEMONSTRATED, never reopen a general audit on the theory that the closure claim is incomplete (it is,
+structurally).
+
+Five consecutive rounds attacking one test helper each found a real survivor (enduser-handbook,
+rounds 20-24). Without the boundary note, round 25 would have found a sixth.
+
+## Freeze the tree for the deciding round
+
+Dispatching fixes and committing WHILE a review round runs is good throughput and quietly fatal to
+convergence: every verdict then describes a tree that has already moved. Verified 2026-07-20 — this
+gap was identified at round 4 (a release commit landing mid-review) and then reproduced for eighteen
+consecutive rounds, until a round spent one of its four findings re-reporting a defect fixed before
+its verdict landed.
+
+**Before the round that is meant to clear the push: freeze.** No dispatches, no commits, teammates
+stood down. Only then does a clean verdict mean "this is shippable" rather than "this was shippable
+an hour ago". The first frozen round in that loop produced the first verdict whose findings all
+described the reviewed tree.
+
+Corollary for the post-verdict delta: a doc/count correction that fires AFTER the clean verdict is by
+design unreviewed. Scope a confirm pass to exactly that delta rather than skipping it — skipping
+recreates the same gap at the last possible moment.

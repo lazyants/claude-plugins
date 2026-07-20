@@ -9,6 +9,9 @@
 - [Cross-check your own artifacts](#cross-check-your-own-artifacts)
 - [Reproduce the gate's clean env](#reproduce-the-gates-clean-env)
 - [A staged RED gate must be SATISFIABLE by its owner](#a-staged-red-gate-must-be-satisfiable)
+- [A coverage claim needs the same evidence as the thing it covers](#a-coverage-claim-needs-the-same-evidence)
+- [A pin can CEMENT a wrong claim — pinning is not review](#a-pin-can-cement-a-wrong-claim)
+- [Ask which correct behaviours have NO gate at all](#ask-which-correct-behaviours-have-no-gate)
 
 ## Cover the DOMAIN, not the ticket's example
 
@@ -73,3 +76,57 @@ Related: distinguish **replacement** rows (a casualty exists; the paired `hasnt`
 wording is gone) from **addition-only** rows (new prose where none existed; `hasnt` is legitimately
 absent). Asserting a universal pairing you do not have invites someone to invent a casualty for an
 addition-only row, which manufactures exactly the unsatisfiable gate above.
+
+## A coverage claim needs the same evidence
+
+When you build a table of "which rules are guarded", a row justified by REASONING is not
+verified — only a row where you ran a specific mutant and watched a specific fixture go red is.
+The two failure phrasings to distrust in your own table: **"transitively covered by the other
+fixtures"** and **"every fixture depends on it"**. Both sound conclusive and neither is a
+measurement.
+
+Verified 2026-07-20 (enduser-handbook, 18-rule scanner enumeration): six rows verified by
+running a mutant all held; the two rows justified by inference were both wrong. "Transitively
+covered" failed because the cited fixtures exercised only the *closing* direction, so nothing
+proved a deeper heading stays inside. "Every fixture depends on it" was true and irrelevant —
+prefix matching still matches exact strings, so every fixture passed while an extended heading
+wrongly bound.
+
+Closure criterion: a rule counts as guarded ONLY if a mutant was run and a fixture went red. No
+transitive arguments; no "no realistic mutation exists" unless one was attempted and its
+impossibility can be stated. The claim that something is covered is itself a claim.
+
+## A pin can cement a wrong claim
+
+A pin locks in whatever it points at. If the underlying claim is wrong, the pin does not catch
+the defect — it entrenches it, and makes the eventual fix noisier by turning a prose correction
+into a test failure. **Do not treat an assertion's existence as evidence its claim is correct**;
+check the claim against whatever owns the behaviour.
+
+Happened twice in one loop (enduser-handbook 1.6.0), both times pinning text a brief had
+specified: a recipe step prescribing one link form for a category with two target types, and a
+Related-block rule inlining one example as representative of both. In each case the reviewer's
+next round had to break the pin before the prose could be fixed.
+
+Corollary for scope: do NOT pin a claim a legitimate future fix would need to change (e.g. a
+verified negative like "adapter X has no equivalent requirement" when a filed follow-up may add
+one). A pin that opposes a correct future edit is the same failure as one that cements a wrong
+claim — it imposes test-scaffolding cost on work that isn't a regression.
+
+## Ask which correct behaviours have no gate
+
+Every audit lens above asks whether a GATE proves its claim. None asks the inverse: **which
+correct behaviours have no gate pointing at them at all?** That class is invisible to mutation
+testing (nothing is missing or wrong), to argument-variation analysis (the parameter is fine),
+and to reading (the code is right).
+
+The generator is: a behaviour proved correct by a scratch probe during development, never
+converted into a permanent fixture. The proof happened and then evaporated.
+
+Verified 2026-07-20: a fence-length rule was probed correct in one round, and the permanent
+self-tests added the next round covered a different axis — sixteen rounds then inherited a
+correct rule whose guard did not exist. The following round found the same shape one level up:
+the section boundary that made two other pins *independent* was itself unguarded, so removing
+the call one pin protected would have left both green.
+
+A manual probe shows the code is correct now; only a permanent fixture shows it stays correct.
