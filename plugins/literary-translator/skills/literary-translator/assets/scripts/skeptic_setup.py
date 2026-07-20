@@ -163,6 +163,7 @@ try:
         SKEPTIC_INPUT_DIGEST_FILENAME,
         SUSPICION_WORKLIST_SCHEMA,
         SKEPTIC_ASSIGNMENT_SCHEMA,
+        FROZEN_INPUT_SPECS,
     )
 except ImportError as exc:
     sys.exit(
@@ -713,32 +714,54 @@ def run(args) -> dict:
     #    original run's, so the rewrite (H1 stamps included) really is
     #    byte-identical -- this comment's claim is what codex round 4 is
     #    the fix FOR, not a pre-existing invariant it merely restates.
+    # Fix H1 (writer half): the frozen canon/manifest/senses inputs' own
+    # state-tagged hash (compute_frozen_input_hash_from_state -- codex round
+    # 2: hashing raw bytes alone made absent/regular-empty/irregular
+    # indistinguishable; folding in the path state closes that), so
+    # --verify-merged/--check-frozen-inputs (skeptic_ready.py) can re-hash
+    # the on-disk files and HALT the pass if a skeptic agent tampered any of
+    # them after this setup ran (source-text prompt injection). #243:
+    # canon_senses.json joined canon.json/manifest.json as a THIRD frozen
+    # input the moment the verifier started parsing it to project the
+    # ambiguity-competitors universe. Hashed from `canon_state`/
+    # `manifest_state`/`senses_state` (and their matching `*_bytes`)
+    # captured ONCE at the top of this function -- codex round 3: NEVER
+    # re-read `canon_path`/`manifest_path`/`senses_path` here. A fresh
+    # re-read at this point would hash whatever is on disk NOW rather than
+    # the snapshot the freshness check and the assignments above were
+    # actually derived from, silently adopting any mutation that landed in
+    # between as "the true state" (see the long comment where these were
+    # captured, top of this function).
+    #
+    # Round 8 (#243 codex follow-up): the three stamp fields below are built
+    # from `FROZEN_INPUT_SPECS` (skeptic_constants.py) -- the SAME table
+    # `skeptic_ready.py`'s `frozen_input_check()` verifier reads to build its
+    # own check table -- rather than three hand-written `"..._sha256": ...`
+    # lines. Before this, the frozen-input set was enumerated independently
+    # here and in the verifier, so a fourth frozen input could be stamped
+    # here (and declared in the schema) while never being wired into the
+    # verifier's own separate table -- nothing would fail, it just wouldn't
+    # be checked. This dict comprehension is now the ONLY place a stamp
+    # field is written into `aggregate`: there is no hand-maintained literal
+    # line left to add a stamp without adding a `FROZEN_INPUT_SPECS` entry
+    # first, and any entry appended there is automatically both stamped here
+    # and checked by the verifier the next time each side reads it.
+    _frozen_input_snapshots_by_key = {
+        "canon": (canon_state, canon_bytes),
+        "manifest": (manifest_state, manifest_bytes),
+        "senses": (senses_state, senses_bytes),
+    }
+    frozen_input_stamps = {
+        stamp_field: compute_frozen_input_hash_from_state(*_frozen_input_snapshots_by_key[key])
+        for key, _label, stamp_field in FROZEN_INPUT_SPECS
+    }
+
     aggregate = {
         "schema_version": 1,
         "run_id": run_id,
         "input_digest": skeptic_input_digest,
         "producer_input_digest": recomputed_producer_digest,
-        # Fix H1 (writer half): the frozen canon/manifest/senses inputs' own
-        # state-tagged hash (compute_frozen_input_hash_from_state -- codex
-        # round 2: hashing raw bytes alone made absent/regular-empty/
-        # irregular indistinguishable; folding in the path state closes
-        # that), so --verify-merged/--check-frozen-inputs (skeptic_ready.py)
-        # can re-hash the on-disk files and HALT the pass if a skeptic agent
-        # tampered any of them after this setup ran (source-text prompt
-        # injection). #243: canon_senses.json joined canon.json/manifest.json
-        # as a THIRD frozen input the moment the verifier started parsing it
-        # to project the ambiguity-competitors universe. Hashed from
-        # `canon_state`/`manifest_state`/`senses_state` (and their matching
-        # `*_bytes`) captured ONCE at the top of this function -- codex
-        # round 3: NEVER re-read `canon_path`/`manifest_path`/`senses_path`
-        # here. A fresh re-read at this point would hash whatever is on
-        # disk NOW rather than the snapshot the freshness check and the
-        # assignments above were actually derived from, silently adopting
-        # any mutation that landed in between as "the true state" (see the
-        # long comment where these were captured, top of this function).
-        "canon_sha256": compute_frozen_input_hash_from_state(canon_state, canon_bytes),
-        "manifest_sha256": compute_frozen_input_hash_from_state(manifest_state, manifest_bytes),
-        "senses_sha256": compute_frozen_input_hash_from_state(senses_state, senses_bytes),
+        **frozen_input_stamps,
         "batch_count": batch_count,
         "assignments": assignments,
     }

@@ -121,3 +121,32 @@ SKEPTIC_FRAGMENT_PREFIX = "triage_"                          # run-scoped per-ba
 SUSPICION_WORKLIST_SCHEMA = "suspicion-worklist.schema.json"
 SKEPTIC_ASSIGNMENT_SCHEMA = "skeptic-assignment.schema.json"
 SKEPTIC_TRIAGE_SCHEMA = "skeptic-triage.schema.json"
+
+# --- Frozen-input H1 tripwire descriptors (#243 round 8) ---
+# The single authoritative enumeration of every frozen input the skeptic
+# pass's H1 tamper tripwire covers. Before this table existed, the set was
+# enumerated independently in THREE places that could silently drift apart:
+# skeptic_setup.py's own hand-written stamp fields in the `assignments.json`
+# it writes, skeptic_ready.py's own hand-written verifier table
+# (`frozen_input_check()`'s `specs`), and this schema's declared
+# `canon_sha256`/`manifest_sha256`/`senses_sha256` properties -- a fourth
+# frozen input could be added to the stamper and the schema and simply
+# omitted from the verifier table, and nothing would fail. Both
+# `skeptic_setup.py` (the stamper) and `skeptic_ready.py`'s
+# `frozen_input_check()` (the verifier) now iterate this SAME tuple to build
+# their respective stamp-field dict / check table -- neither has a
+# hand-maintained per-input line left to add without touching this tuple, so
+# a frozen input cannot be wired into one side without automatically being
+# wired into the other. `skeptic-assignment.schema.json`'s own
+# `canon_sha256`/`manifest_sha256`/`senses_sha256` properties are NOT
+# generated from this tuple -- JSON Schema is static data, this module is
+# not a schema generator -- so a parity test asserts the schema's declared
+# stamp-field set equals `{spec.stamp_field for spec in FROZEN_INPUT_SPECS}`;
+# that test is the mechanism that catches a schema property added without a
+# matching tuple entry (or vice versa).
+# Each entry: (key, filename label, stamp field name in assignments.json).
+FROZEN_INPUT_SPECS = (
+    ("canon", "canon.json", "canon_sha256"),
+    ("manifest", "manifest.json", "manifest_sha256"),
+    ("senses", "canon_senses.json", "senses_sha256"),
+)

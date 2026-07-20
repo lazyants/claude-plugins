@@ -1317,14 +1317,34 @@ def test_template_always_passes_canon_and_senses_path_flags_unconditionally():
     when the file doesn't exist (the other fix codex offered), it would also
     need to revert skeptic_ready.py's own tolerance back to the
     explicit-path-must-exist convention -- the two must move together, never
-    drift independently."""
+    drift independently.
+
+    Codex round 8 (MINOR): the old form of this test sliced from
+    "function verifyMergedPrompt" to EOF, which swallowed verifyMergedPrompt's
+    OWN prose comment (it name-drops --canon/--senses-path in English before
+    the actual command line) plus the entirety of frozenInputCheckPrompt()
+    below it (which passes both flags too) -- so a codex mutation that
+    deleted --canon/--senses-path from verifyMergedPrompt's own RENDERED
+    `const cmd = ...` line still left both substrings present elsewhere in
+    that slice and the assertion stayed green. checkCommand's own slice
+    never had this hole (its preceding comment sits BEFORE
+    "function checkCommand", outside the slice, and it has no trailing
+    sibling function inside its own bound), so only verifyMergedPrompt
+    needed narrowing -- down to its own rendered `const cmd = ...` line,
+    the actual text skeptic_ready.py sees, not any prose around it."""
     template_text = SKEPTIC_TEMPLATE_SRC.read_text(encoding="utf-8")
     check_command_src = template_text[
         template_text.index("function checkCommand"):template_text.index("function batchPrecheckPrompt")
     ]
-    verify_prompt_src = template_text[
-        template_text.index("function verifyMergedPrompt"):
-    ]
-    for label, src in (("checkCommand", check_command_src), ("verifyMergedPrompt", verify_prompt_src)):
+
+    def _rendered_cmd_line(func_marker: str, next_marker: str) -> str:
+        func_src = template_text[template_text.index(func_marker):template_text.index(next_marker)]
+        cmd_start = func_src.index("const cmd = ")
+        cmd_end = func_src.index("\n", cmd_start)
+        return func_src[cmd_start:cmd_end]
+
+    verify_prompt_cmd = _rendered_cmd_line("function verifyMergedPrompt", "function frozenInputCheckPrompt")
+
+    for label, src in (("checkCommand", check_command_src), ("verifyMergedPrompt", verify_prompt_cmd)):
         assert "--canon" in src and "CANON_PATH" in src, f"{label} must pass --canon"
         assert "--senses-path" in src and "SENSES_PATH" in src, f"{label} must pass --senses-path"

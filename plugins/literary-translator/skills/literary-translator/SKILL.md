@@ -780,18 +780,42 @@ each one describes.
 All three frozen inputs — `canon.json`, `manifest.json`, `canon_senses.json`
 — now go through that one gated capture step alike, with no exception:
 `frozen_input_check()` drives all three off a single table, and the loop
-over that table is the only place in this module that reads a frozen
+over that table is the only place in `skeptic_ready.py` that reads a frozen
 input's bytes. `manifest.json` used to be wired in separately, as a
 hand-written call that captured its own snapshot outside that gate — which
 is exactly how a stamped `manifest.json` read failure could escape the
 standalone check raw, despite that mode's own documented "never crashes"
 contract. Folding it into the same table doesn't just fix that one gap, it
 removes the capacity for a future fourth frozen input to reopen it the same
-way: the only way to wire one in is to add a table entry, and there is no
-longer a code shape that reaches a frozen input's bytes any other route.
-`manifest.json`'s snapshot is captured through that same gate but, having
-no downstream parser in this module the way canon/senses do, is discarded
-once its own tamper comparison is done.
+way *inside `skeptic_ready.py` itself*: the only way to wire a read into
+this module's own verifier is to add a table entry, and there is no longer
+a code shape in `skeptic_ready.py` that reaches a frozen input's bytes any
+other route. `manifest.json`'s snapshot is captured through that same gate
+but, having no downstream parser in this module the way canon/senses do, is
+discarded once its own tamper comparison is done.
+
+That table (round 7) closed the read-side gap inside the verifier, but it
+was still, by itself, only ONE of three independent enumerations of the
+frozen-input set: `skeptic_setup.py` (the stamper) separately hand-wrote
+the three `"..._sha256": ...` fields into `assignments.json`, and this
+schema separately declared them — a fourth frozen input could be added to
+the stamper and the schema and simply never typed into
+`frozen_input_check()`'s table, and nothing would fail; it just wouldn't be
+checked. Round 8 (#243 codex follow-up) closes that: `FROZEN_INPUT_SPECS`,
+a single `(key, filename label, stamp field name)` tuple in
+`skeptic_constants.py`, is now the shared source both sides iterate — the
+stamper builds every stamp field in `assignments.json` from it (no
+hand-written `"..._sha256"` line remains in `skeptic_setup.py`), and the
+verifier builds its own check table from the exact same tuple. A frozen
+input can no longer be wired into the stamper without also being wired into
+the verifier, because there is no longer a place in EITHER script's own
+code to add one without touching that shared tuple first. The schema's
+`canon_sha256`/`manifest_sha256`/`senses_sha256` properties are still
+separately-declared static data (JSON Schema cannot derive from a Python
+tuple) — a parity test asserts the schema's declared stamp-field set equals
+the one `FROZEN_INPUT_SPECS` derives, so a schema property added without a
+matching tuple entry (or the reverse) fails that test rather than going
+unnoticed.
 
 Detection now fires at **two** decision points, not one. The first is
 `skeptic_ready.py --verify-merged`'s own internal check, which runs after a

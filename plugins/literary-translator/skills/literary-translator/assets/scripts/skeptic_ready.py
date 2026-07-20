@@ -69,8 +69,15 @@ Four deterministic CLI modes, mutually exclusive:
     meaningful post-merge): re-validates TRIAGE against the schema,
     re-validates AGGREGATE_MANIFEST (the assignments.json
     ``skeptic_setup.py`` wrote BEFORE dispatch) against
-    ``skeptic-assignment.schema.json``, then, all FAIL-CLOSED (each
-    accumulates into ``missing[]``, never raised):
+    ``skeptic-assignment.schema.json``, then every merged-verification check
+    below accumulates into ``missing[]`` rather than raising -- WITH ONE
+    DELIBERATE EXCEPTION: the frozen-input integrity tripwire's own read of
+    canon.json/manifest.json/canon_senses.json (``frozen_input_check()``,
+    called with ``tolerant_reads=False``) still raises RAW on an ``OSError``,
+    same as every other genuine precondition failure in this function --
+    see that call's own comment for why degrading it to ``missing[]`` would
+    be fail-OPEN on exactly the property this release makes fail-closed.
+    Every check that follows that call IS fail-closed into ``missing[]``:
       - coverage: the merged triage's ``assignment_id`` set is EXACTLY the
         assignment manifest's assigned set (a gap -- an assigned entity with
         no triage record -- is a FAIL, same as an extra record referencing
@@ -140,8 +147,8 @@ Four deterministic CLI modes, mutually exclusive:
     ``{"verified": bool, "missing": [...], "frozen_input_mismatch": bool}``
     -- the base two fields are the same relay shape ``canon_validate.py
     --verify-merged``/``CANON_VERIFY_SCHEMA`` use; ``frozen_input_mismatch``
-    is this mode's own addition, true iff at least one canon/manifest hash
-    check above actually fired (its own reason is ALSO still folded into
+    is this mode's own addition, true iff at least one canon/manifest/senses
+    hash check above actually fired (its own reason is ALSO still folded into
     ``missing[]``, so ``verified`` stays False either way -- this field only
     adds the ability to distinguish WHICH kind of failure occurred).
 
@@ -222,6 +229,7 @@ try:
         TRIAGE_PROPOSE_SPLIT,
         TRIAGE_PROPOSE_RESCOPE,
         TRIAGE_INSUFFICIENT_WINDOW,
+        FROZEN_INPUT_SPECS,
     )
 except ImportError as exc:
     sys.exit(
@@ -272,7 +280,6 @@ except ImportError as exc:
 
 try:
     from suspicion_scan import (
-        compute_frozen_input_hash,
         compute_frozen_input_hash_from_state,
         read_frozen_input_snapshot,
     )
@@ -290,10 +297,13 @@ except ImportError as exc:
         "compute_frozen_input_hash_from_state() -- see that function's own "
         "docstring for why the stamper and verifier need opposite freshness "
         "semantics from the same hash formula. compute_frozen_input_hash() (the "
-        "fresh-read, path-based wrapper around the same two) is imported here too, "
-        "purely so this module's own test suite can stamp fixtures with it -- "
-        "nothing in this module's production code calls it directly any more "
-        "(codex round 7 closed the last such call site). Re-run "
+        "fresh-read, path-based wrapper around the same two, also defined in "
+        "suspicion_scan.py) is deliberately NOT imported here (round 8): nothing "
+        "in this module's production code has called it directly since codex "
+        "round 7 closed the last such call site, and importing it purely so this "
+        "module's own namespace could re-export it to tests put a test-only need "
+        "in the PRODUCTION import list -- the test suite now imports it straight "
+        "from suspicion_scan.py, where it is actually defined. Re-run "
         "Step 0a, or verify the plugin install is not corrupted."
     )
 
@@ -977,11 +987,28 @@ def frozen_input_check(
     # to be a separate hand-written call to a path-based, ungated
     # comparator) is the round-7 fix itself -- see _frozen_input_tamper_reason's
     # own docstring for the bug that call site reintroduced.
-    specs = (
-        ("canon", "canon.json", "canon_sha256", canon_path),
-        ("manifest", "manifest.json", "manifest_sha256", manifest_path),
-        ("senses", "canon_senses.json", "senses_sha256", senses_path),
-    )
+    #
+    # Round 8 (#243 codex follow-up): the (key, label, stamp_key) triples
+    # below are no longer a literal written here -- they come from
+    # `FROZEN_INPUT_SPECS` (skeptic_constants.py), the SAME table
+    # skeptic_setup.py's stamper iterates to build the stamp fields it
+    # writes into `assignments.json`. Before this, the round-7 table above
+    # was still an independent, hand-maintained copy of the set the stamper
+    # separately enumerated: a fourth frozen input could be added to the
+    # stamper (and to this schema) while simply never being typed in here,
+    # and nothing would fail -- it just wouldn't be checked. Sourcing both
+    # sides from one tuple closes that: this loop is still the only place
+    # that reads a frozen input's bytes (round-7's own guarantee, unchanged),
+    # and now it is also true that the SET of inputs it reads can't diverge
+    # from the set the stamper stamps, because both read that set from the
+    # same place. `paths` below is the one place PER-CALL path overrides
+    # (``--canon``/``--manifest-path``/``--senses-path``) join the shared
+    # key names -- a genuinely new frozen input still needs a matching entry
+    # here too (this function's own signature has no room for a path it was
+    # never told about), which fails loudly (``KeyError``) rather than
+    # silently, unlike the pre-round-8 gap this closes.
+    paths = {"canon": canon_path, "manifest": manifest_path, "senses": senses_path}
+    specs = tuple((key, label, stamp_key, paths[key]) for key, label, stamp_key in FROZEN_INPUT_SPECS)
     snapshots = {}
     for key, label, stamp_key, path in specs:
         snapshot = None

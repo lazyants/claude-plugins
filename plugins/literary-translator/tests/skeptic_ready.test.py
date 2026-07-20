@@ -61,6 +61,15 @@ def _load_module(name: str, path: Path, extra_sys_path: Path):
 bn = _load_module("bootstrap_names_for_skeptic_ready_test", BOOTSTRAP_NAMES_SCRIPT, SCRIPTS_DIR)
 occ = _load_module("occ_index_for_skeptic_ready_test", OCC_INDEX_SCRIPT, SCRIPTS_DIR)
 sr = _load_module("skeptic_ready_under_test", SKEPTIC_READY_SCRIPT, SCRIPTS_DIR)
+# Codex round 8: compute_frozen_input_hash() is deliberately NOT imported
+# into skeptic_ready.py any more (nothing in its production code has called
+# it directly since round 7) -- it stays test-only fixture-stamping sugar,
+# so this suite imports it straight from suspicion_scan.py, where it is
+# actually defined. `sr = _load_module(...)` above already triggered a real
+# `import suspicion_scan` as a side effect of skeptic_ready.py's own
+# top-level `from suspicion_scan import (...)`, so this is the SAME cached
+# module object, not a second independent load.
+suspicion_scan = sys.modules["suspicion_scan"]
 
 
 # ---------------------------------------------------------------------------
@@ -903,7 +912,7 @@ def test_verify_merged_fails_on_canon_tamper(tmp_path):
 
     canon_path = tmp_path / "canon.json"
     canon_path.write_text(json.dumps({"entries": {}}), encoding="utf-8")
-    canon_sha256 = sr.compute_frozen_input_hash(canon_path)
+    canon_sha256 = suspicion_scan.compute_frozen_input_hash(canon_path)
 
     rec = insufficient_record("Jean")
     triage_path = tmp_path / "skeptic_triage.json"
@@ -948,7 +957,7 @@ def test_verify_merged_fails_on_senses_tamper(tmp_path):
 
     senses_path = tmp_path / "canon_senses.json"
     senses_path.write_text(json.dumps({"schema_version": 1, "entries_by_source_form": {}}), encoding="utf-8")
-    senses_sha256 = sr.compute_frozen_input_hash(senses_path)
+    senses_sha256 = suspicion_scan.compute_frozen_input_hash(senses_path)
 
     rec = insufficient_record("Jean")
     triage_path = tmp_path / "skeptic_triage.json"
@@ -1010,7 +1019,7 @@ def test_verify_merged_fails_on_senses_deletion_after_stamping(tmp_path):
 
     senses_path = tmp_path / "canon_senses.json"
     senses_path.write_text(json.dumps({"schema_version": 1, "entries_by_source_form": {}}), encoding="utf-8")
-    senses_sha256 = sr.compute_frozen_input_hash(senses_path)
+    senses_sha256 = suspicion_scan.compute_frozen_input_hash(senses_path)
 
     rec = insufficient_record("Jean")
     triage_path = tmp_path / "skeptic_triage.json"
@@ -1064,7 +1073,7 @@ def test_verify_merged_fails_on_senses_malformed_after_stamping_still_reports_sh
 
     senses_path = tmp_path / "canon_senses.json"
     senses_path.write_text(json.dumps({"schema_version": 1, "entries_by_source_form": {}}), encoding="utf-8")
-    senses_sha256 = sr.compute_frozen_input_hash(senses_path)
+    senses_sha256 = suspicion_scan.compute_frozen_input_hash(senses_path)
 
     rec = insufficient_record("Jean")
     triage_path = tmp_path / "skeptic_triage.json"
@@ -1124,9 +1133,9 @@ def test_check_frozen_inputs_clean_reports_no_mismatch(tmp_path):
     aggregate_path = tmp_path / "assignments.json"
     write_json(aggregate_path, {
         **make_aggregate_manifest("run-1", []),
-        "canon_sha256": sr.compute_frozen_input_hash(canon_path),
-        "manifest_sha256": sr.compute_frozen_input_hash(manifest_path),
-        "senses_sha256": sr.compute_frozen_input_hash(senses_path),
+        "canon_sha256": suspicion_scan.compute_frozen_input_hash(canon_path),
+        "manifest_sha256": suspicion_scan.compute_frozen_input_hash(manifest_path),
+        "senses_sha256": suspicion_scan.compute_frozen_input_hash(senses_path),
     })
 
     result = sr.run_check_frozen_inputs(
@@ -1151,9 +1160,9 @@ def test_check_frozen_inputs_detects_tamper_the_verify_merged_path_never_reaches
     aggregate_path = tmp_path / "assignments.json"
     write_json(aggregate_path, {
         **make_aggregate_manifest("run-1", []),
-        "canon_sha256": sr.compute_frozen_input_hash(canon_path),
-        "manifest_sha256": sr.compute_frozen_input_hash(manifest_path),
-        "senses_sha256": sr.compute_frozen_input_hash(senses_path),
+        "canon_sha256": suspicion_scan.compute_frozen_input_hash(canon_path),
+        "manifest_sha256": suspicion_scan.compute_frozen_input_hash(manifest_path),
+        "senses_sha256": suspicion_scan.compute_frozen_input_hash(senses_path),
     })
 
     # Tamper: sidecar overwritten with SCHEMA-INVALID content (never even
@@ -1173,6 +1182,55 @@ def test_check_frozen_inputs_detects_tamper_the_verify_merged_path_never_reaches
     )
     assert result["frozen_input_mismatch"] is True
     assert any("canon_senses.json" in m and "tamper" in m for m in result["missing"])
+
+
+@pytest.mark.parametrize("frozen_input, label", [
+    ("canon", "canon.json"), ("manifest", "manifest.json"), ("senses", "canon_senses.json"),
+])
+def test_check_frozen_inputs_detects_tamper_per_frozen_input(tmp_path, frozen_input, label):
+    """Codex round 8 (finding 1c, point 2): the two existing standalone
+    --check-frozen-inputs tamper tests each exercise exactly ONE slot --
+    the test above mutates canon_senses.json,
+    test_check_frozen_inputs_cli_exit_code_reflects_mismatch below mutates
+    canon.json -- so a manifest-only mismatch was never proven detected on
+    THIS caller (run_check_frozen_inputs/--check-frozen-inputs), only on
+    run_verify_merged's own test_verify_merged_fails_on_manifest_tamper.
+    Parametrized over all three slots so every one of them has its own
+    standalone mismatch case here, closing that gap directly rather than
+    trusting one slot's coverage to generalize to the others -- the same
+    reasoning that made frozen_input_check() itself table-driven applies to
+    proving its callers actually exercise every row of that table."""
+    canon_path = tmp_path / "canon.json"
+    canon_path.write_text(json.dumps({"entries": {}}), encoding="utf-8")
+    manifest_path = tmp_path / "manifest.json"
+    write_json(manifest_path, make_manifest())
+    senses_path = tmp_path / "canon_senses.json"
+    senses_path.write_text(json.dumps({"schema_version": 1, "entries_by_source_form": {}}), encoding="utf-8")
+
+    aggregate_path = tmp_path / "assignments.json"
+    write_json(aggregate_path, {
+        **make_aggregate_manifest("run-1", []),
+        "canon_sha256": suspicion_scan.compute_frozen_input_hash(canon_path),
+        "manifest_sha256": suspicion_scan.compute_frozen_input_hash(manifest_path),
+        "senses_sha256": suspicion_scan.compute_frozen_input_hash(senses_path),
+    })
+
+    result = sr.run_check_frozen_inputs(
+        aggregate_path, canon_path=canon_path, manifest_path=manifest_path, senses_path=senses_path,
+    )
+    assert result == {"frozen_input_mismatch": False, "missing": []}, f"[{frozen_input}] not clean before tamper: {result}"
+
+    # Tamper: mutate ONLY this slot's on-disk content after stamping -- the
+    # other two stay byte-identical to what was stamped, so a mismatch here
+    # proves THIS slot's own comparison fired, not some other slot's.
+    tamper_target = {"canon": canon_path, "manifest": manifest_path, "senses": senses_path}[frozen_input]
+    tamper_target.write_text(tamper_target.read_text(encoding="utf-8") + " ", encoding="utf-8")
+
+    result = sr.run_check_frozen_inputs(
+        aggregate_path, canon_path=canon_path, manifest_path=manifest_path, senses_path=senses_path,
+    )
+    assert result["frozen_input_mismatch"] is True, f"[{frozen_input}] {result}"
+    assert any(label in m and "tamper" in m for m in result["missing"]), f"[{frozen_input}] {result['missing']}"
 
 
 @pytest.mark.parametrize("frozen_input", ["canon", "manifest", "senses"])
@@ -1217,7 +1275,18 @@ def test_check_frozen_inputs_tolerates_a_read_failure(tmp_path, monkeypatch, fro
     round fixes -- the [manifest] case would silently pass again even if
     frozen_input_check() were reverted to call compute_frozen_input_hash()
     for manifest.json directly, since the injected failure would never
-    reach that call chain."""
+    reach that call chain.
+
+    Codex round 8 (BLOCKER): a mutation that excludes manifest from the
+    check under tolerant_reads=True (e.g. dropping its stamp from the
+    table before the loop runs) makes frozen_input_check() never even
+    attempt manifest.json's read -- no OSError is raised, the "clean"
+    result comes back unchanged, and the [manifest] case passed for a
+    reason that has nothing to do with tolerance. Below, `_reads` records
+    every path either patched function actually saw, and the final assert
+    proves `failing_path` was among them -- a slot whose read was skipped
+    entirely (rather than attempted-and-tolerated) now fails loud instead
+    of passing vacuously."""
     canon_path = tmp_path / "canon.json"
     canon_path.write_text(json.dumps({"entries": {}}), encoding="utf-8")
     manifest_path = tmp_path / "manifest.json"
@@ -1230,9 +1299,9 @@ def test_check_frozen_inputs_tolerates_a_read_failure(tmp_path, monkeypatch, fro
     aggregate_path = tmp_path / "assignments.json"
     write_json(aggregate_path, {
         **make_aggregate_manifest("run-1", []),
-        "canon_sha256": sr.compute_frozen_input_hash(canon_path),
-        "manifest_sha256": sr.compute_frozen_input_hash(manifest_path),
-        "senses_sha256": sr.compute_frozen_input_hash(senses_path),
+        "canon_sha256": suspicion_scan.compute_frozen_input_hash(canon_path),
+        "manifest_sha256": suspicion_scan.compute_frozen_input_hash(manifest_path),
+        "senses_sha256": suspicion_scan.compute_frozen_input_hash(senses_path),
     })
 
     suspicion_scan_module = sys.modules.get("suspicion_scan")
@@ -1242,9 +1311,30 @@ def test_check_frozen_inputs_tolerates_a_read_failure(tmp_path, monkeypatch, fro
         "-- if this ever stops holding, the second monkeypatch below would "
         "silently become a no-op instead of failing loud"
     )
+    # Pin IDENTITY, not mere presence: sr.read_frozen_input_snapshot must be
+    # the EXACT SAME function object as suspicion_scan_module's own
+    # attribute of that name, proving skeptic_ready.py's own `from
+    # suspicion_scan import read_frozen_input_snapshot` really did bind to
+    # THIS module's current attribute (not a stale/shadow/reloaded copy).
+    # A truthiness-only check (`is not None`) would let the second
+    # monkeypatch below silently patch a function nothing in the call chain
+    # actually resolves through, degrading it to a no-op that the [manifest]
+    # slot in particular has no other coverage for (it is the ONE slot whose
+    # legacy call site, per the docstring above, used to resolve
+    # read_frozen_input_snapshot via suspicion_scan's own globals rather
+    # than skeptic_ready's).
+    assert suspicion_scan_module.read_frozen_input_snapshot is sr.read_frozen_input_snapshot, (
+        "suspicion_scan_module.read_frozen_input_snapshot is not the same object as "
+        "sr.read_frozen_input_snapshot -- the two names have diverged, so patching "
+        "the module attribute below would not affect what skeptic_ready.py's own "
+        "`from suspicion_scan import read_frozen_input_snapshot` binding calls"
+    )
+
+    _reads = []
 
     def _make_failing(real):
         def _fail_on_target(path):
+            _reads.append(Path(path))
             if Path(path) == failing_path:
                 raise OSError("simulated transient read failure")
             return real(path)
@@ -1268,6 +1358,15 @@ def test_check_frozen_inputs_tolerates_a_read_failure(tmp_path, monkeypatch, fro
         aggregate_path, canon_path=canon_path, manifest_path=manifest_path, senses_path=senses_path,
     )
     assert result == {"frozen_input_mismatch": False, "missing": []}
+    # MUTATION CAUGHT (codex round 8) if this fails: proves failing_path was
+    # actually READ (and its failure actually caught), not silently skipped
+    # -- a slot excluded from the check before the read is ever attempted
+    # would satisfy the assertion above for the wrong reason.
+    assert failing_path in _reads, (
+        f"{frozen_input}'s frozen input ({failing_path}) was never read -- "
+        "the clean result above proves nothing about this slot unless its "
+        "own read was genuinely attempted and its failure genuinely caught"
+    )
 
 
 def test_verify_merged_still_raises_on_the_same_read_failure(tmp_path, monkeypatch):
@@ -1291,7 +1390,7 @@ def test_verify_merged_still_raises_on_the_same_read_failure(tmp_path, monkeypat
 
     canon_path = tmp_path / "canon.json"
     canon_path.write_text(json.dumps({"entries": {}}), encoding="utf-8")
-    canon_sha256 = sr.compute_frozen_input_hash(canon_path)
+    canon_sha256 = suspicion_scan.compute_frozen_input_hash(canon_path)
 
     rec = insufficient_record("Jean")
     triage_path = tmp_path / "skeptic_triage.json"
@@ -1360,9 +1459,9 @@ def test_check_frozen_inputs_cli_exit_code_reflects_mismatch(tmp_path):
     aggregate_path = tmp_path / "assignments.json"
     write_json(aggregate_path, {
         **make_aggregate_manifest("run-1", []),
-        "canon_sha256": sr.compute_frozen_input_hash(canon_path),
-        "manifest_sha256": sr.compute_frozen_input_hash(manifest_path),
-        "senses_sha256": sr.compute_frozen_input_hash(senses_path),
+        "canon_sha256": suspicion_scan.compute_frozen_input_hash(canon_path),
+        "manifest_sha256": suspicion_scan.compute_frozen_input_hash(manifest_path),
+        "senses_sha256": suspicion_scan.compute_frozen_input_hash(senses_path),
     })
 
     argv_clean = [
@@ -1491,7 +1590,7 @@ def test_verify_merged_resolve_competitors_consumes_h1s_own_snapshot(tmp_path, m
         FOLD_FORM_A: {"canonical_target_form": "Target", "is_proper_name": True,
                       "basis": "transliterated", "confidence": "high"},
     }}), encoding="utf-8")
-    canon_sha256 = sr.compute_frozen_input_hash(canon_path)
+    canon_sha256 = suspicion_scan.compute_frozen_input_hash(canon_path)
 
     aggregate_path = tmp_path / "assignments.json"
     write_json(aggregate_path, {
@@ -1586,7 +1685,7 @@ def test_verify_merged_fails_on_manifest_tamper(tmp_path):
     block_id, blk = block(text)
     manifest_path = tmp_path / "manifest.json"
     write_json(manifest_path, make_manifest((block_id, blk)))
-    manifest_sha256 = sr.compute_frozen_input_hash(manifest_path)
+    manifest_sha256 = suspicion_scan.compute_frozen_input_hash(manifest_path)
 
     rec = insufficient_record("Jean")
     triage_path = tmp_path / "skeptic_triage.json"

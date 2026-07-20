@@ -62,7 +62,9 @@ REFERENCES_DIR = PLUGIN_ROOT / "skills" / "literary-translator" / "references"
 CACHE_KEY_SCRIPT = SCRIPTS_DIR / "cache_key.py"
 LEDGER_MERGE_SCRIPT = SCRIPTS_DIR / "ledger_merge.py"
 SELECT_SEGMENTS_SCRIPT = SCRIPTS_DIR / "select_segments.py"
+SKEPTIC_CONSTANTS_SCRIPT = SCRIPTS_DIR / "skeptic_constants.py"
 LEDGER_RECORD_BASE_SCHEMA = SCHEMAS_DIR / "ledger-record-base.schema.json"
+SKEPTIC_ASSIGNMENT_SCHEMA = SCHEMAS_DIR / "skeptic-assignment.schema.json"
 LEDGER_AND_RESUMABILITY_DOC = REFERENCES_DIR / "ledger-and-resumability.md"
 
 
@@ -100,8 +102,26 @@ def select_segments_module() -> types.ModuleType:
     return _load_module("select_segments_under_test", SELECT_SEGMENTS_SCRIPT)
 
 
+@pytest.fixture(scope="module")
+def skeptic_constants_module() -> types.ModuleType:
+    """Imports the real, shipped skeptic_constants.py so FROZEN_INPUT_SPECS
+    -- the single authoritative enumeration of the skeptic pass's H1
+    frozen-input tripwire (#243 round 8) -- can be read directly. Both
+    skeptic_setup.py's stamper and skeptic_ready.py's verifier now derive
+    from this SAME tuple, so this file's own drift check below is the last
+    restatement left to guard: skeptic-assignment.schema.json's declared
+    *_sha256 properties, which is static JSON data deliberately NOT
+    generated from the tuple (codegen would be disproportionate for 3
+    literal properties)."""
+    return _load_module("skeptic_constants_under_test", SKEPTIC_CONSTANTS_SCRIPT)
+
+
 def _load_ledger_record_base_schema() -> dict:
     return json.loads(LEDGER_RECORD_BASE_SCHEMA.read_text(encoding="utf-8"))
+
+
+def _load_skeptic_assignment_schema() -> dict:
+    return json.loads(SKEPTIC_ASSIGNMENT_SCHEMA.read_text(encoding="utf-8"))
 
 
 def _load_ledger_and_resumability_doc() -> str:
@@ -600,3 +620,51 @@ def test_bundle_member_scripts_and_templates_exist_on_disk(cache_key_module):
             f"derivation_bundle_hash names script {filename!r}, but no such "
             f"file exists under {SCRIPTS_DIR}"
         )
+
+
+# ---------------------------------------------------------------------------
+# 3. FROZEN_INPUT_SPECS (skeptic_constants.py, #243 round 8) <-> the *_sha256
+#    stamp properties skeptic-assignment.schema.json declares. Round 8 bound
+#    skeptic_setup.py's stamper AND skeptic_ready.py's verifier to this SAME
+#    tuple specifically so neither could drift from the other any more --
+#    but the schema is static JSON data, deliberately not generated from
+#    the tuple (codegen would be disproportionate for 3 literal
+#    properties), so it is now the ONE remaining independent restatement of
+#    the frozen-input set. An unbound enumeration left to drift is exactly
+#    how #243's original bug (manifest.json quietly missing from the
+#    verifier table) happened; this is the same discipline as section 1
+#    above, applied to the newer table.
+# ---------------------------------------------------------------------------
+
+
+def test_frozen_input_specs_stamp_fields_match_schema_declared_sha256_properties(
+    skeptic_constants_module,
+):
+    """EQUALS, not a subset check in either direction: a schema property
+    with no FROZEN_INPUT_SPECS entry would be stamped nowhere but declared
+    accepted by the schema (silently unverified); a FROZEN_INPUT_SPECS
+    entry with no schema property would make skeptic_setup.py write a
+    field skeptic-assignment.schema.json's own additionalProperties:false
+    then rejects outright. A subset assertion in either direction would
+    stay green through the exact drift this test exists to catch."""
+    tuple_stamp_fields = {
+        stamp_field for _key, _label, stamp_field in skeptic_constants_module.FROZEN_INPUT_SPECS
+    }
+
+    schema = _load_skeptic_assignment_schema()
+    schema_properties = set(schema["properties"].keys())
+    # Frozen-input stamps are exactly this schema's own *_sha256
+    # properties: input_digest/producer_input_digest use an unrelated
+    # "_digest" suffix, and the only other "sha256" anywhere in this
+    # schema is nested inside assignments[].evidence.sha256 (a citation
+    # hash, not a top-level property) -- so filtering the TOP-LEVEL
+    # properties dict by this suffix is exact, not a heuristic subset.
+    schema_stamp_fields = {name for name in schema_properties if name.endswith("_sha256")}
+
+    assert tuple_stamp_fields == schema_stamp_fields, (
+        "FROZEN_INPUT_SPECS (skeptic_constants.py) has diverged from "
+        "skeptic-assignment.schema.json's own declared *_sha256 stamp "
+        "properties -- exactly the class of drift #243 itself was:\n"
+        f"  FROZEN_INPUT_SPECS only:  {sorted(tuple_stamp_fields - schema_stamp_fields)}\n"
+        f"  schema-declared only:     {sorted(schema_stamp_fields - tuple_stamp_fields)}"
+    )

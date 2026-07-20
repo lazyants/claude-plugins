@@ -78,6 +78,15 @@ def _load_module(name: str, path: Path, extra_sys_path: Path):
 bn = _load_module("bootstrap_names_for_skeptic_e2e_test", BOOTSTRAP_NAMES_SCRIPT, SCRIPTS_DIR)
 occ = _load_module("occ_index_for_skeptic_e2e_test", OCC_INDEX_SCRIPT, SCRIPTS_DIR)
 sr = _load_module("skeptic_ready_for_skeptic_e2e_test", SKEPTIC_READY_SCRIPT, SCRIPTS_DIR)
+# compute_frozen_input_hash() is deliberately NOT imported into
+# skeptic_ready.py's production code any more (round 8) -- it stays
+# test-only fixture-stamping sugar, so this suite imports it straight from
+# suspicion_scan.py, where it is actually defined. `sr = _load_module(...)`
+# above already triggered a real `import suspicion_scan` as a side effect
+# of skeptic_ready.py's own top-level `from suspicion_scan import (...)`,
+# so this is the SAME cached module object, not a second independent load
+# (mirrors tests/skeptic_ready.test.py's own identical fix).
+suspicion_scan = sys.modules["suspicion_scan"]
 
 
 # ---------------------------------------------------------------------------
@@ -585,9 +594,9 @@ def test_e2e_frozen_input_mismatch_from_not_ready_batches_real_check(tmp_path):
     # frozen inputs' state AT SETUP TIME, exactly as skeptic_setup.py would.
     write_json(run_dir / "assignments.json", {
         **make_aggregate_manifest(run_id, [make_assignment_for_manifest("Jean", [])]),
-        "canon_sha256": sr.compute_frozen_input_hash(canon_path),
-        "manifest_sha256": sr.compute_frozen_input_hash(manifest_path),
-        "senses_sha256": sr.compute_frozen_input_hash(senses_path),
+        "canon_sha256": suspicion_scan.compute_frozen_input_hash(canon_path),
+        "manifest_sha256": suspicion_scan.compute_frozen_input_hash(manifest_path),
+        "senses_sha256": suspicion_scan.compute_frozen_input_hash(senses_path),
     })
 
     # Tamper: overwrite canon_senses.json with SCHEMA-INVALID content
@@ -652,9 +661,9 @@ def test_e2e_not_ready_batches_without_tamper_still_reports_ordinary_failure(tmp
     write_json(run_dir / "assignments_0.json", [aid("Jean")])
     write_json(run_dir / "assignments.json", {
         **make_aggregate_manifest(run_id, [make_assignment_for_manifest("Jean", [])]),
-        "canon_sha256": sr.compute_frozen_input_hash(canon_path),
-        "manifest_sha256": sr.compute_frozen_input_hash(manifest_path),
-        "senses_sha256": sr.compute_frozen_input_hash(senses_path),
+        "canon_sha256": suspicion_scan.compute_frozen_input_hash(canon_path),
+        "manifest_sha256": suspicion_scan.compute_frozen_input_hash(manifest_path),
+        "senses_sha256": suspicion_scan.compute_frozen_input_hash(senses_path),
     })
     # No tamper this time.
 
