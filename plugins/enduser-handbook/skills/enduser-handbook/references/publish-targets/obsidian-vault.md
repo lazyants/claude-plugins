@@ -159,7 +159,7 @@ mechanics matter at publish time:
 Start from `assets/chapter-template.md` and substitute the placeholders — never
 hand-rewrite the skeleton from memory. Under `publish.wikilinks: false`, override the
 template's `[[…]]` Related-block placeholders with the standard Markdown-link form from
-"Wikilinks vs Markdown links" above — the template's Related section is written for the
+"Wikilinks vs Markdown links" below — the template's Related section is written for the
 wikilinks-on case only.
 
 ## INDEX wiring (do all of these on every chapter create/update)

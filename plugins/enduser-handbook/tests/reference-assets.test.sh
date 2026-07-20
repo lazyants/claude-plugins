@@ -804,6 +804,30 @@ has_in_section "revalidation: recipe step 4 embed rewrite is unconditional (all 
 has_in_section "revalidation: recipe step 4 chapter-target and glossary-target links use DIFFERENT formulas, never conflated" \
   "$REVAL" '### The manual group-migration recipe' \
   'never the chapter-link formula, even within the same mode — the two target types use different formulas'
+# round-19 [fifth instance of the category-collapse shape, second self-inflicted]: step 4's
+# chapter/glossary split (above) still omitted a THIRD target type static-md.md's Related block
+# requires — the mandatory index-target link its own navigability check (Link-integrity gate item
+# 3) enforces. Following the two-category recipe exactly on a moved chapter leaves that link at the
+# OLD depth, pointing at a file that no longer exists there; the migration cannot converge. Two
+# needles: the third category's EXISTENCE (a mandatory index-target link, on top of chapter and
+# glossary), and its OWN anti-collapse clause — a distinct sentence from the chapter/glossary pin
+# above, not a restatement of it. Either alone is the property that would fail if someone
+# re-collapsed three cases back to two, which is exactly how both prior collapses (round 16, round
+# 17) happened.
+#
+# The obsidian-vault.md NEGATIVE half of A4's clause ("no equivalent mandatory index-target link...
+# so this case does not apply there") is deliberately left unpinned. It's a verified fact today,
+# but A4 flagged it as tied to a filed, tracked gap (group-H's Related-block enumeration) — if that
+# gap is ever legitimately closed by giving Obsidian's Related block an index member, this exact
+# clause is the line that SHOULD change. Pinning it would fight that future correct edit rather than
+# catch a regression; the asymmetry is stated in prose (static-md.md:15-16's "no backlinks panel"
+# rationale) rather than gated in a test.
+has_in_section "revalidation: recipe step 4 names a THIRD target type — static-md.md's mandatory index-target link" \
+  "$REVAL" '### The manual group-migration recipe' \
+  'also has a mandatory **index-target link** back to `{{publish.index_file}}`'
+has_in_section "revalidation: recipe step 4's index-target case is never the chapter or glossary formula" \
+  "$REVAL" '### The manual group-migration recipe' \
+  'never the chapter-link or glossary-link formula'
 has "revalidation: recipe fixes inbound links from other chapters"  'Fix inbound links from other chapters that referenced the old path' "$REVAL"
 has "revalidation: recipe updates the capture spec output dir(s)"   "Update the project's capture spec output dir(s)" "$REVAL"
 has "revalidation: terminal-state convergence checklist heading"    'Terminal-state convergence checklist' "$REVAL"
