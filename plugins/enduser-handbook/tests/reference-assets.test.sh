@@ -378,19 +378,107 @@ printf '## Target\naxb\n## Next\n' > "$SELFTEST_DIR/literal-needle.md"
 hasnt_in_section "self-test: a needle containing regex metacharacters is matched literally, not as a pattern" \
   "$SELFTEST_DIR/literal-needle.md" '## Target' 'a.b'
 
-# Two rules considered and deliberately left unfixtured, because no discriminating mutation exists
-# under the current code structure (not overlooked — provably unfalsifiable, so a fixture would be
-# decorative):
-#   - The `n2 == 1` check alongside the `/^#+/` regex anchor: both independently prevent a `#` that
-#     is not at the start of a line from registering as a heading. Removing EITHER ONE ALONE changes
-#     nothing observable, because the other still blocks it — only removing BOTH simultaneously
-#     would (a coordinated double-edit, not a plausible single-point regression).
-#   - The `found_heading` term in the END exit expression (`... && found_heading && found_needle`):
-#     `found_needle` can only ever become 1 inside the `in_section`-gated branch, and `in_section`
-#     can only become 1 in the SAME statement that sets `found_heading = 1` — so found_needle == 1
-#     structurally implies found_heading == 1 already. Dropping `found_heading` from the END check
-#     is logically redundant with `found_needle` and produces zero observable difference on any
-#     input.
+# round-23 [IMPORTANT — the closure claim itself failed]: two rows of the round-22 enumeration were
+# marked "guarded" on REASONING rather than a mutant actually run — round 23 wrote both mutants and
+# both survived. "Transitively covered" and "every fixture depends on it" are themselves claims,
+# and they need the same evidence as the rule they're about; asserting coverage is not
+# demonstrating it. Closure criterion from here on: a row counts as guarded only when a specific
+# mutant was run against a specific fixture and watched go red. The two rows below, plus two rules
+# missed entirely by the round-22 walk, get that treatment now.
+
+# Tilde as a valid fence-OPENER character (not just closer — the existing tilde fixture only ever
+# exercises tildes as a CLOSER for a backtick fence). Backtick-info-string content ("lang`x") is
+# included per the reviewer's suggestion: the info-string rejection rule is backtick-only by
+# design, so this also proves that rule doesn't accidentally reject a valid tilde opener.
+cat > "$SELFTEST_DIR/tilde-open.md" <<'EOF'
+## Target
+~~~lang`x
+NEEDLE
+~~~
+## Next
+EOF
+hasnt_in_section "self-test: a tilde run opens a fence just like a backtick run (tilde-opener rule)" \
+  "$SELFTEST_DIR/tilde-open.md" '## Target' 'NEEDLE'
+
+# Heading level = length of the leading `#` run: a DEEPER heading (H3 under H2) must NOT close its
+# shallower parent's section. Round 22 marked this "transitively covered by the boundary fixtures"
+# — wrong: both boundary fixtures (round 21) only ever exercise the CLOSING direction (a same-level
+# or shallower heading correctly closing); neither proves a heading that's genuinely DEEPER stays
+# inside. A mutant that hardcodes the level to a constant survives both of round 21's fixtures
+# (the relative ordering it depends on happens to be preserved for THOSE two cases) and only fails
+# here, where H3's real level (3) must be compared against H2's real level (2) and found greater.
+cat > "$SELFTEST_DIR/h2-h3-nested.md" <<'EOF'
+## Target
+### Sub
+NEEDLE
+## Next
+EOF
+has_in_section "self-test: a deeper (H3) heading does not close its shallower (H2) parent section" \
+  "$SELFTEST_DIR/h2-h3-nested.md" '## Target' 'NEEDLE'
+
+# Heading match must be EXACT text equality, not a prefix match. Round 22 marked this "guarded —
+# every fixture depends on it" — true and irrelevant: every existing fixture's heading and file
+# both happen to match exactly, so a prefix-match mutant satisfies every one of them too. A decoy
+# heading that only SHARES A PREFIX with the query proves the distinction: under exact match it
+# never opens (the query heading is genuinely absent from this file); under prefix match it opens
+# on the decoy and leaks needles that were never meant to be in this section.
+cat > "$SELFTEST_DIR/decoy-heading.md" <<'EOF'
+## Target extra
+NEEDLE
+## Next
+EOF
+hasnt_in_section "self-test: a heading that only shares a prefix with the query does not bind (exact-match rule)" \
+  "$SELFTEST_DIR/decoy-heading.md" '## Target' 'NEEDLE'
+
+# The closer's tail rule (blank_from) has two directions, and the earlier fixture (above) only
+# proved the rejecting one — trailing non-whitespace text does not close. This proves the
+# accepting direction the same code path also has to get right: trailing WHITESPACE (spaces after
+# the fence-character run, nothing else) still closes the fence, per CommonMark. A mutant requiring
+# the run to end the line with nothing else at all — not even legal trailing whitespace — survives
+# the earlier rejecting-direction fixture (a run followed by real text is still correctly rejected)
+# and only fails here.
+# printf, not a heredoc — a heredoc's trailing whitespace on the closer line is exactly the kind
+# of thing an editor or a future hand-edit silently strips, which would quietly turn this back into
+# a duplicate of the plain-closer case above and stop testing the whitespace-suffix direction at
+# all. printf keeps the trailing spaces explicit in the source.
+printf '## Target\n```\n```   \nNEEDLE\n## Next\n' > "$SELFTEST_DIR/close-whitespace.md"
+has_in_section "self-test: a closer run followed only by trailing whitespace still closes the fence" \
+  "$SELFTEST_DIR/close-whitespace.md" '## Target' 'NEEDLE'
+
+# Two rules remain unfixtured — but this time backed by an ACTUAL mutant run against an adversarial
+# fixture, not merely reasoned about (the standard round 23 raised the bar to). Fixture: a heading
+# opens a section, then a line of ordinary prose contains a `#` NOT at its start, then NEEDLE.
+cat > "$SELFTEST_DIR/midline-hash.md" <<'EOF'
+## Target
+prose with a # mid-line marker
+NEEDLE
+## Next
+EOF
+# Removing the `/^#+/` anchor ALONE (regex becomes `/#+/`, still gated by `n2 == 1`): the match
+# position for a mid-line `#` is never 1, so `n2 == 1` still correctly rejects it — hlevel stays 0,
+# NEEDLE is unaffected. Confirmed by running this exact single-point mutant: undetected, matching
+# the prediction.
+#
+# Removing the `n2 == 1` check ALONE (condition becomes `n2 > 0`, anchor `^` still in the regex):
+# the anchored regex simply never matches a mid-line `#` at all, so `n2` is 0 either way — `n2 > 0`
+# is exactly as false as `n2 == 1` was. Also confirmed undetected.
+#
+# Removing BOTH together (regex `/#+/`, condition `n2 > 0`): the mid-line `#` now matches, hlevel
+# becomes non-zero, and the prose line is wrongly read as a same-level heading that closes the
+# section early — NEEDLE is lost. This is the one combination that IS observable, confirming the
+# other two are genuinely redundant rather than merely believed to be:
+has_in_section "self-test: a REAL heading, not a mid-line '#', is what closes a section (anchor+match-position rule)" \
+  "$SELFTEST_DIR/midline-hash.md" '## Target' 'NEEDLE'
+
+# The `found_heading` term in the END exit expression (`needle != "" && found_heading &&
+# found_needle`) has no dedicated fixture, for the same reason as before — but this time the claim
+# was checked, not just argued: `found_needle` can only be set to 1 inside the `in_section`-gated
+# branch, and `in_section` can only become 1 in the SAME statement that sets `found_heading = 1`,
+# so `found_needle == 1` structurally implies `found_heading == 1` already. Ran a mutant dropping
+# `found_heading` from the END check against every fixture above (thirteen files, including one
+# querying a heading absent from its file entirely) and every single one produced the identical
+# exit code with and without the term. No fixture is added because none can discriminate it — that
+# absence is now evidence, not assumption.
 
 echo "== surface-audit.playwright.ts =="
 SA="$ASSETS/surface-audit.playwright.ts"
