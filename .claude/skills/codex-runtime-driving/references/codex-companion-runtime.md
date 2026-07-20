@@ -128,13 +128,17 @@ authoritative but was never grounded in the artifact (verified 2026-07-19: a pla
 silently degraded this way and had to be re-run). Fix — copy it in and git-exclude it:
 ```
 /bin/cp -f <scratchpad>/plan.md <worktree>/PLAN-REVIEW-SCRATCH.md
-echo "PLAN-REVIEW-SCRATCH.md" >> "$(git rev-parse --git-path info/exclude)"   # NOT .git/info/exclude
-git status --short          # must be empty — proves it is excluded, not staged
+echo "PLAN-REVIEW-SCRATCH.md" >> "$(git -C <worktree> rev-parse --git-path info/exclude)"
+git -C <worktree> check-ignore -q PLAN-REVIEW-SCRATCH.md && echo excluded   # proves it, on any tree
 ```
-Two traps in those three lines: **(a)** in a worktree `.git` is a FILE, not a directory, so a literal
+Three traps in those three lines: **(a)** in a worktree `.git` is a FILE, not a directory, so a literal
 `.git/info/exclude` redirect fails with `not a directory` — always resolve it via
 `git rev-parse --git-path info/exclude`; **(b)** `cp` is aliased to `cp -i` in this shell and will sit
-on an interactive overwrite prompt even with `-f`, so call `/bin/cp -f`. Delete the staged copy before
+on an interactive overwrite prompt even with `-f`, so call `/bin/cp -f`; **(c)** `git -C <worktree>` on
+BOTH git calls — bare `git` uses the shell's cwd, which this same file documents as prone to drift, so
+an unscoped `rev-parse` writes the exclude into whatever repo you happen to be standing in. Verify with
+`check-ignore` on the one path, not `git status --short` — status cannot be empty on an
+already-dirty tree, so it proves nothing there. Delete the staged copy before
 committing, and re-sync it on every plan revision or codex reviews a stale draft.
 Smoke-test first: `printf 'reply PONG' | codex exec -s read-only -C <root> --skip-git-repo-check -o /tmp/o -`
 should print `PONG`. For a broad working-tree review, SPLIT into N tightly-bounded parallel

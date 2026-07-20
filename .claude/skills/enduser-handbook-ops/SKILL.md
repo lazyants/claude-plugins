@@ -40,8 +40,12 @@ teammate/reviewer actually wrote a required phrase, a plain `grep` for that phra
 nothing if it straddles a wrap — and the natural reading is "they didn't write it", i.e. you accuse
 correct work of being missing. Verified 2026-07-19 four separate times in one session (twice by a
 teammate mid-edit, once by the lead auditing a teammate's output, once as a false-RED in a staged
-gate). For a VERIFICATION grep, join lines first: `tr '\n' ' ' < FILE | grep -o '<phrase>'`, or match
-a short fragment guaranteed to sit on one physical line. Reserve single-line needles for gates you
+gate). For a VERIFICATION grep, join lines AND collapse whitespace:
+`tr '\n' ' ' < FILE | tr -s '[:space:]' ' ' | grep -o '<phrase>'`. The collapse is not optional —
+continuation lines in Markdown lists are indented, so `tr '\n' ' '` alone turns `chapters or\n  glossary`
+into THREE spaces and a single-spaced needle still misses. Joining without collapsing reproduces the
+very false-negative this is meant to prevent (caught by review 2026-07-20, in this advice itself).
+Alternatively match a short fragment guaranteed to sit on one physical line. Reserve single-line needles for gates you
 control the wording of; use wrap-tolerant matching whenever you are reading someone else's prose.
 
 **Sweep discipline that holds:** run **several** short, wrap-surviving needles case-insensitively over the WHOLE repo, e.g.
