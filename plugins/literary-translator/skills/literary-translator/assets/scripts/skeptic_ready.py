@@ -1003,10 +1003,15 @@ def frozen_input_check(
     # from the set the stamper stamps, because both read that set from the
     # same place. `paths` below is the one place PER-CALL path overrides
     # (``--canon``/``--manifest-path``/``--senses-path``) join the shared
-    # key names -- a genuinely new frozen input still needs a matching entry
-    # here too (this function's own signature has no room for a path it was
-    # never told about), which fails loudly (``KeyError``) rather than
-    # silently, unlike the pre-round-8 gap this closes.
+    # key names -- a genuinely NEW frozen input (a key with no existing
+    # entry in `paths`) still needs a matching entry here too (this
+    # function's own signature has no room for a path it was never told
+    # about), and omitting one fails loudly (``KeyError``) rather than
+    # silently. That claim was only ever half true, though: a
+    # `FROZEN_INPUT_SPECS` entry that instead REUSES an existing key does
+    # NOT ``KeyError`` -- ``paths[key]`` resolves fine to the path already
+    # there -- so this dict alone never closed the pre-round-8 gap against
+    # THAT shape of drift; see round 11 below.
     # Round 9 (#243): this dict, and the digest functions in
     # skeptic_setup.py/suspicion_scan.py, are the other hand-maintained
     # sites FROZEN_INPUT_SPECS does NOT drive -- see that tuple's own
@@ -1029,7 +1034,32 @@ def frozen_input_check(
     # see skeptic_constants.py's own comment for the current, re-derived
     # list of what still needs a hand-added entry versus what now fails
     # loud automatically.
+    #
+    # Round 11 (#243): codex found the exact gap the round-8 comment above
+    # now calls out directly -- a `FROZEN_INPUT_SPECS` entry that REUSES an
+    # existing key (rather than getting its own) sails through
+    # `paths[key]` with no `KeyError`, so `specs` below ends up with FOUR
+    # rows but only THREE distinct paths: the reused key's path (e.g.
+    # canon.json) gets tamper-checked TWICE, under two different
+    # `stamp_key`s, while the actual fourth frozen input is never
+    # represented in `paths` at all and is silently never checked. This is
+    # the same class the two digest functions' own round-10 key-set guard
+    # was ALSO blind to until round 11 hardened it from a set to a sorted,
+    # non-deduplicated key list -- this `paths` dict never had ANY guard
+    # against it, set-based or otherwise, so it gets the same fix fresh
+    # here rather than a hardening of a prior one.
     paths = {"canon": canon_path, "manifest": manifest_path, "senses": senses_path}
+    _spec_keys = [key for key, _label, _stamp_key in FROZEN_INPUT_SPECS]
+    if sorted(paths) != sorted(_spec_keys):
+        raise AssertionError(
+            "frozen_input_check(): paths keys "
+            f"{sorted(paths)} != FROZEN_INPUT_SPECS keys {sorted(_spec_keys)} "
+            "-- a frozen input was added to skeptic_constants.FROZEN_INPUT_SPECS "
+            "without a matching hand-added path parameter/paths entry here (or "
+            "vice versa), or FROZEN_INPUT_SPECS contains a duplicate key; see "
+            "skeptic_constants.py's \"what FROZEN_INPUT_SPECS does NOT cover\" "
+            "comment."
+        )
     specs = tuple((key, label, stamp_key, paths[key]) for key, label, stamp_key in FROZEN_INPUT_SPECS)
     snapshots = {}
     for key, label, stamp_key, path in specs:

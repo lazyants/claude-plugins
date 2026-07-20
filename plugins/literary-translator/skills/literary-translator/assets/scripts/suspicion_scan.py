@@ -914,11 +914,18 @@ def compute_producer_input_digest(canon_state: str, canon_bytes: bytes,
 
     Round 9 (#243): this signature is a fixed positional enumeration of
     canon/manifest/senses, NOT derived from `skeptic_constants.FROZEN_INPUT_SPECS`
-    -- a frozen input added to that tuple is stamped and H1-tamper-checked
-    automatically, but does NOT gain freshness coverage here without a
-    matching hand-added parameter (see that tuple's own "what
-    FROZEN_INPUT_SPECS does NOT cover" comment). Generalizing this
-    SIGNATURE to an ordered/keyed collection was considered and deferred:
+    -- a frozen input added to that tuple gains H1-tamper-checked stamping
+    ONLY once every hand-maintained manual site that isn't tuple-driven is
+    also updated to give it its OWN entry: the `read_frozen_input_snapshot()`
+    capture in `skeptic_setup.py::run()`, that same function's
+    `_frozen_input_snapshots_by_key` map, `skeptic_ready.py`'s matching
+    `paths` map, and (for freshness coverage specifically) a hand-added
+    parameter here and in `compute_skeptic_input_digest()` (see that
+    tuple's own "what FROZEN_INPUT_SPECS does NOT cover" comment). A tuple
+    entry that instead REUSES an existing key at any of those sites does
+    NOT get "stamped and checked automatically" -- it silently aliases the
+    reused key's existing snapshot instead (round 11, #243). Generalizing
+    this SIGNATURE to an ordered/keyed collection was considered and deferred:
     this function is direct-called from dozens of sites in
     `tests/suspicion_scan.test.py` and `tests/skeptic_setup.test.py`,
     including ones asserting the exact NUL-byte framing between two
@@ -946,14 +953,25 @@ def compute_producer_input_digest(canon_state: str, canon_bytes: bytes,
         "manifest": (manifest_state, manifest_bytes),
         "senses": (senses_state, senses_bytes),
     }
-    spec_keys = {spec[0] for spec in FROZEN_INPUT_SPECS}
-    if set(frozen_input_snapshots) != spec_keys:
+    # Round 11 (#243): a SET comparison collapses duplicate keys -- a fourth
+    # FROZEN_INPUT_SPECS entry that REUSES an existing key (e.g. a second
+    # "canon" tuple instead of its own "fourth") reduces to the same
+    # {"canon", "manifest", "senses"} set as this hand-written dict and
+    # would pass the old `set(frozen_input_snapshots) != spec_keys` guard
+    # silently, then alias the reused key's snapshot into the loop below
+    # instead of raising. Comparing the full, non-deduplicated KEY LIST
+    # (sorted, so order doesn't matter) is strictly stronger: a duplicate
+    # changes the list's length/multiset even when it doesn't change the
+    # set, so it still fails this comparison.
+    spec_keys = [spec[0] for spec in FROZEN_INPUT_SPECS]
+    if sorted(frozen_input_snapshots) != sorted(spec_keys):
         raise AssertionError(
             "compute_producer_input_digest(): frozen_input_snapshots keys "
             f"{sorted(frozen_input_snapshots)} != FROZEN_INPUT_SPECS keys "
             f"{sorted(spec_keys)} -- a frozen input was added to "
             "skeptic_constants.FROZEN_INPUT_SPECS without a matching "
-            "hand-added parameter/snapshot entry here (or vice versa); see "
+            "hand-added parameter/snapshot entry here (or vice versa), or "
+            "FROZEN_INPUT_SPECS contains a duplicate key; see "
             "skeptic_constants.py's \"what FROZEN_INPUT_SPECS does NOT "
             "cover\" comment."
         )

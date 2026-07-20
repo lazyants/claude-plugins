@@ -874,7 +874,10 @@ def test_skeptic_input_digest_state_membership_pinned(tmp_path, slot):
     )
 
 
-@pytest.mark.parametrize("direction", ["extra_tuple_entry", "missing_tuple_entry"])
+@pytest.mark.parametrize("direction", [
+    "extra_tuple_entry", "missing_tuple_entry",
+    "duplicate_key_entry", "same_count_key_swap",
+])
 def test_skeptic_input_digest_fails_closed_on_frozen_input_specs_key_mismatch(tmp_path, monkeypatch, direction):
     """Round 10 (#243, codex overrule of the prior round's refusal): mirrors
     tests/suspicion_scan.test.py's own
@@ -907,11 +910,45 @@ def test_skeptic_input_digest_fails_closed_on_frozen_input_specs_key_mismatch(tm
     binding via `monkeypatch` -- in memory, restored after the test, never
     touching `skeptic_constants.py` on disk (a peer owner's file).
 
-    Parametrized over both mismatch directions the exact-key-set check
-    must catch: ``extra_tuple_entry`` appends a fourth entry (a tuple key
-    with no matching snapshot-map entry); ``missing_tuple_entry`` drops
-    the existing ``"senses"`` entry (a snapshot-map entry -- still
-    hard-coded regardless of the tuple -- with no matching tuple key)."""
+    Round 11 (#243, codex round-11 finding, mirrors
+    tests/suspicion_scan.test.py's own round-11 addition to its sibling
+    test): the round-10 guard this test originally covered was
+    `set(frozen_input_snapshots) != spec_keys` -- a SET comparison. The
+    docstring above already claimed to cover "both mismatch directions the
+    exact-key-set check must catch", but `extra_tuple_entry` and
+    `missing_tuple_entry` both change the tuple's LENGTH, so neither
+    exercises what a SET specifically collapses (duplicates) nor what a
+    bare length check specifically misses (same-count divergent names).
+    Codex reproduced both gaps: `duplicate_key_entry` (a fourth entry
+    reusing the existing `"canon"` key) reduces to the identical
+    `{"canon","manifest","senses"}` set as the hand-written snapshot map,
+    so it silently passed the round-10 SET guard -- verified against a
+    throwaway copy of that exact guard (git-shown from HEAD `b7306de`)
+    outside this worktree, which raises nothing for this case
+    (`pytest.raises` sees "DID NOT RAISE", real reproduced RED evidence,
+    not synthetic); `same_count_key_swap` (`"senses"` renamed to
+    `"sessens"`, cardinality unchanged) would silently pass a hypothetical
+    LENGTH-ONLY guard -- verified the same way against a hand-mutated
+    `len(frozen_input_snapshots) != len(spec_keys)` guard copy, which
+    fails to raise `AssertionError` for this case (it instead falls
+    through to the hashing loop and raises an unrelated bare `KeyError`
+    on the renamed key, which `pytest.raises(AssertionError)` below does
+    not catch either). Against the CURRENT (round 11, sorted
+    non-deduplicated key-LIST comparison) guard, all four directions
+    raise `AssertionError` naming both key lists, as asserted below.
+
+    Parametrized over all four mismatch shapes the exact, non-deduplicated
+    key-LIST check must catch: ``extra_tuple_entry`` appends a fourth
+    entry (a tuple key with no matching snapshot-map entry);
+    ``missing_tuple_entry`` drops the existing ``"senses"`` entry (a
+    snapshot-map entry -- still hard-coded regardless of the tuple --
+    with no matching tuple key); ``duplicate_key_entry`` appends a fourth
+    entry that reuses the existing ``"canon"`` key (a SET-collapsing case
+    a length check alone would still catch, since cardinality changes,
+    but a set-of-keys check would not); ``same_count_key_swap`` renames
+    the ``"senses"`` entry's key to ``"sessens"`` without changing the
+    tuple's length (a case a length-only check would NOT catch, but a
+    set-of-keys check would)."""
     root = make_skeptic_root(tmp_path)
     mod = _load_module(
         "skeptic_setup_for_digest_fail_closed_test", root / "scripts" / "skeptic_setup.py", root / "scripts"
@@ -934,8 +971,17 @@ def test_skeptic_input_digest_fails_closed_on_frozen_input_specs_key_mismatch(tm
         mutated_specs = mod.FROZEN_INPUT_SPECS + (
             ("mystery_fourth", "mystery_fourth.json", "mystery_fourth_sha256"),
         )
-    else:
+    elif direction == "missing_tuple_entry":
         mutated_specs = tuple(spec for spec in mod.FROZEN_INPUT_SPECS if spec[0] != "senses")
+    elif direction == "duplicate_key_entry":
+        mutated_specs = mod.FROZEN_INPUT_SPECS + (
+            ("canon", "fourth.json", "fourth_sha256"),
+        )
+    else:  # same_count_key_swap
+        mutated_specs = tuple(
+            ("sessens", spec[1], spec[2]) if spec[0] == "senses" else spec
+            for spec in mod.FROZEN_INPUT_SPECS
+        )
     monkeypatch.setattr(mod, "FROZEN_INPUT_SPECS", mutated_specs)
 
     with pytest.raises(AssertionError) as exc_info:

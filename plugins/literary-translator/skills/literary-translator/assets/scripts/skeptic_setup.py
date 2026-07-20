@@ -445,14 +445,23 @@ def compute_skeptic_input_digest(
         "manifest": (manifest_state, manifest_bytes),
         "senses": (senses_state, senses_bytes),
     }
-    spec_keys = {spec[0] for spec in FROZEN_INPUT_SPECS}
-    if set(frozen_input_snapshots) != spec_keys:
+    # Round 11 (#243): mirrors suspicion_scan.compute_producer_input_digest()'s
+    # own round-11 fix -- a SET comparison collapses duplicate keys, so a
+    # fourth FROZEN_INPUT_SPECS entry that REUSES an existing key (rather
+    # than getting its own) would pass a `set(...) != spec_keys` guard
+    # silently and then alias the reused key's snapshot in the loop below.
+    # Comparing the full, non-deduplicated KEY LIST (sorted) is strictly
+    # stronger: a duplicate changes the list even when it doesn't change
+    # the set.
+    spec_keys = [spec[0] for spec in FROZEN_INPUT_SPECS]
+    if sorted(frozen_input_snapshots) != sorted(spec_keys):
         raise AssertionError(
             "compute_skeptic_input_digest(): frozen_input_snapshots keys "
             f"{sorted(frozen_input_snapshots)} != FROZEN_INPUT_SPECS keys "
             f"{sorted(spec_keys)} -- a frozen input was added to "
             "skeptic_constants.FROZEN_INPUT_SPECS without a matching "
-            "hand-added parameter/snapshot entry here (or vice versa); see "
+            "hand-added parameter/snapshot entry here (or vice versa), or "
+            "FROZEN_INPUT_SPECS contains a duplicate key; see "
             "skeptic_constants.py's \"what FROZEN_INPUT_SPECS does NOT "
             "cover\" comment."
         )
@@ -807,6 +816,27 @@ def run(args) -> dict:
         "manifest": (manifest_state, manifest_bytes),
         "senses": (senses_state, senses_bytes),
     }
+    # Round 11 (#243): this comprehension INDEXES by `key`, so a
+    # FROZEN_INPUT_SPECS entry that reuses an existing key (rather than
+    # getting its own hand-added entry above) would silently alias that
+    # key's snapshot into the reused entry's stamp_field instead of
+    # raising -- the exact class this round's `compute_producer_input_digest`/
+    # `compute_skeptic_input_digest` fix closes, just at a different site.
+    # In practice `run()` always calls both of those first (lines above),
+    # and their own duplicate-key guard already raises before control
+    # reaches here -- but that ordering isn't enforced by anything at this
+    # site itself, so this guard stays as defense-in-depth against a future
+    # reordering or a second caller of this comprehension's shape.
+    _spec_keys = [spec[0] for spec in FROZEN_INPUT_SPECS]
+    if sorted(_frozen_input_snapshots_by_key) != sorted(_spec_keys):
+        raise AssertionError(
+            "run(): _frozen_input_snapshots_by_key keys "
+            f"{sorted(_frozen_input_snapshots_by_key)} != FROZEN_INPUT_SPECS "
+            f"keys {sorted(_spec_keys)} -- a frozen input was added to "
+            "skeptic_constants.FROZEN_INPUT_SPECS without a matching "
+            "hand-added snapshot entry above (or vice versa), or "
+            "FROZEN_INPUT_SPECS contains a duplicate key."
+        )
     frozen_input_stamps = {
         stamp_field: compute_frozen_input_hash_from_state(*_frozen_input_snapshots_by_key[key])
         for key, _label, stamp_field in FROZEN_INPUT_SPECS

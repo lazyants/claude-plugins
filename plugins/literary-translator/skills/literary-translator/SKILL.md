@@ -837,23 +837,44 @@ fail: that field appears in the tuple's unfiltered stamp-field set with
 nothing on the filtered schema side to match it.
 
 `FROZEN_INPUT_SPECS` binds the stamper and the verifier's tamper check —
-that is its whole, and only, guarantee. It does NOT bind the earlier
+that is its whole guarantee, and even that much is conditional on every
+tuple entry having its OWN key (round 11, #243: a new entry that instead
+REUSES an existing key aliases that key's existing snapshot at the
+stamper/verifier's own hand-maintained lookup dicts instead of raising.
+All four such maps now carry the same fail-closed
+`sorted(<keys>) != sorted(<spec keys>)` guard — `suspicion_scan.py`'s and
+`skeptic_setup.py`'s two digest functions and `skeptic_setup.py`'s own
+`run()` block (round 11), plus `skeptic_ready.py`'s `paths` map in
+`frozen_input_check()` (round 12) — and a static sibling-consistency test
+derives the file set it scans, so a fifth copy landing in a fifth script
+is found rather than silently excluded).
+`FROZEN_INPUT_SPECS` does NOT bind the earlier
 `read_frozen_input_snapshot()` capture in `skeptic_setup.py`, and its
 SIGNATURE does not bind `compute_producer_input_digest()`/
 `compute_skeptic_input_digest()` either — both still take a fixed
 positional/keyword canon+manifest+senses signature, unrelated to this
 tuple; a fourth frozen input still needs its own hand-added parameter (and
 a matching update at every call site) before either digest can hash it at
-all. Round 9 shipped with that gap silent: a fourth frozen input added
-ONLY to `FROZEN_INPUT_SPECS` (plus the schema, plus a matching signature
-parameter with no corresponding hand-added tuple-key entry, or vice versa)
-would be captured, stamped, and H1-tamper-checked correctly, yet invisible
-to both freshness digests — a mutation to it BEFORE `skeptic_setup.py` ran
-would leave a stale worklist's `producer_input_digest` unchanged, so the
-stale worklist would still read as fresh and get (re)certified against the
-new state, the same stale-certified-as-fresh failure mode this release
-closes for `canon_senses.json`, just re-opened at a boundary this tuple
-didn't reach.
+all. Round 9 shipped with that gap silent, and it remains true only
+CONDITIONALLY, historically stated: a fourth frozen input added to
+`FROZEN_INPUT_SPECS` (plus the schema) is captured, stamped, and
+H1-tamper-checked ONLY once it ALSO gets its own hand-added entry at every
+one of those other manual sites — never from the tuple entry alone, and
+never by reusing an existing key at any one of them (rounds 11 and 12
+closed that silent-alias failure mode at all four key-indexed maps, and
+`test_frozen_input_specs_keys_are_unique` closes it a layer beneath, on
+the tuple itself; the schema's own `_sha256`-suffix parity test stays
+deliberately blind to it, comparing STAMP FIELDS rather than keys, which
+is why the uniqueness invariant is a separate test with its own
+unambiguous failure message). Assuming those manual sites ARE correctly
+updated, the gap that remained through round 9 was narrower but still
+real: the fourth input would be captured, stamped, and H1-tamper-checked
+correctly, yet invisible to both freshness digests — a mutation to it
+BEFORE `skeptic_setup.py` ran would leave a stale worklist's
+`producer_input_digest` unchanged, so the stale worklist would still read
+as fresh and get (re)certified against the new state, the same
+stale-certified-as-fresh failure mode this release closes for
+`canon_senses.json`, just re-opened at a boundary this tuple didn't reach.
 
 Round 10 (#243) closed that silent half WITHOUT touching either
 signature or any call site: each function body now builds its own
@@ -867,6 +888,17 @@ forever. Both digest functions were re-derived this way against
 `FROZEN_INPUT_SPECS`'s current 3-entry order and verified byte-identical
 to the pre-round-10 formula on a fixed fixture — this is a hardening of
 what already-shipped projects hash, not a digest-compatibility break.
+
+Round 11 (#243): that key-SET comparison itself had a gap -- a `set()` on
+both sides collapses duplicates, so a `FROZEN_INPUT_SPECS` entry that
+REUSES an existing key (rather than getting its own) reduced to the same
+key set as the hand-maintained map and passed the guard silently, then
+aliased the reused key's snapshot into the loop instead of hashing the
+new input at all. Both digest functions now compare the full,
+non-deduplicated, sorted KEY LIST instead of a set -- strictly stronger,
+since a duplicate changes the list even when it doesn't change the set —
+and were re-verified byte-identical to the pre-round-11 formula on the
+same fixed fixture.
 `skeptic_constants.py`'s own comment next to `FROZEN_INPUT_SPECS` lists
 every site a new frozen input still needs by hand, and which of them now
 fail loud versus which (the raw capture calls only) still don't.

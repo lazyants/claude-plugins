@@ -668,3 +668,223 @@ def test_frozen_input_specs_stamp_fields_match_schema_declared_sha256_properties
         f"  FROZEN_INPUT_SPECS only:  {sorted(tuple_stamp_fields - schema_stamp_fields)}\n"
         f"  schema-declared only:     {sorted(schema_stamp_fields - tuple_stamp_fields)}"
     )
+
+
+def test_frozen_input_specs_keys_are_unique(skeptic_constants_module):
+    """Round 11 (#243, codex round-11 finding): a SEPARATE invariant from
+    the parity test immediately above, and deliberately a SEPARATE test
+    rather than folded into it. The parity test compares SETS of STAMP
+    FIELD names (the third tuple element) against the schema's declared
+    *_sha256 properties -- it is blind to a duplicate in the FIRST tuple
+    element (the snapshot KEY compute_producer_input_digest()/
+    compute_skeptic_input_digest()/skeptic_setup.py's own
+    `_frozen_input_snapshots_by_key` all index by): a fourth
+    `FROZEN_INPUT_SPECS` entry that reuses an existing key, e.g.
+    `("canon", "fourth.json", "fourth_sha256")`, has a perfectly distinct,
+    schema-matchable stamp field (`"fourth_sha256"` != `"canon_sha256"`),
+    so it would stay GREEN through the parity test above even though the
+    reused `"canon"` key makes every KEY-indexed consumer alias
+    `fourth.json`'s stamp onto `canon.json`'s own (state, bytes) snapshot
+    -- `canon.json` gets stamped and checked twice, `fourth.json` never
+    genuinely represented. Widening the parity test's own EQUALS-not-
+    subset assertion to also dedupe-check would blur what it actually
+    proves (stamp-field <-> schema-property correspondence) and make its
+    own failure message ambiguous about which of two unrelated invariants
+    broke; a dedicated test keeps each failure message pointing at the
+    one thing that's actually wrong.
+
+    This is deliberately a STATIC, structural check on the tuple itself
+    -- independent of, and a layer beneath, the runtime fail-closed guards
+    `compute_producer_input_digest()` / `compute_skeptic_input_digest()` /
+    `skeptic_setup.py`'s `run()` now carry (round 11's sorted
+    non-deduplicated key-LIST comparison, see
+    tests/suspicion_scan.test.py's and tests/skeptic_setup.test.py's own
+    `duplicate_key_entry` cases): those guards catch a duplicate key
+    reactively, the moment some digest/stamp function is next called with
+    it. This test catches the SAME mistake proactively, the moment it
+    lands in skeptic_constants.py, without needing to drive any of the
+    three consumers through a call at all."""
+    keys = [spec[0] for spec in skeptic_constants_module.FROZEN_INPUT_SPECS]
+    assert len(keys) == len(set(keys)), (
+        "FROZEN_INPUT_SPECS (skeptic_constants.py) has a duplicate key -- "
+        f"keys: {keys!r}. Every entry must own a UNIQUE first element: "
+        "compute_producer_input_digest()/compute_skeptic_input_digest()/"
+        "skeptic_setup.py's run() all index a {key: (state, bytes)} "
+        "snapshot map by this exact value, so a reused key silently "
+        "aliases one frozen input's snapshot onto another entry's stamp "
+        "instead of raising -- see skeptic_constants.py's \"what "
+        "FROZEN_INPUT_SPECS does NOT cover\" comment."
+    )
+
+
+# ---------------------------------------------------------------------------
+# 4. The hand-duplicated FROZEN_INPUT_SPECS key-mismatch guards (round 11,
+#    #243) -- a STATIC, structural sibling-consistency check, not a
+#    behavioral one.
+# ---------------------------------------------------------------------------
+#
+# `compute_producer_input_digest()` (suspicion_scan.py),
+# `compute_skeptic_input_digest()` (skeptic_setup.py), `run()`'s own
+# `_frozen_input_snapshots_by_key` stamping block (skeptic_setup.py, added
+# as defense-in-depth), and `frozen_input_check()`'s own `paths` dict
+# (skeptic_ready.py, the verifier side) each carry their OWN hand-typed
+# copy of the identical `sorted(snapshot_keys) != sorted(spec_keys)`
+# comparison -- round 11's fix for the SET-collapses-duplicates gap codex
+# found (see tests/suspicion_scan.test.py's and
+# tests/skeptic_setup.test.py's own `duplicate_key_entry`/
+# `same_count_key_swap` cases for the runtime, call-driven proof that this
+# shape is non-vacuous).
+#
+# Round 12 (#243): this section originally scanned only
+# suspicion_scan.py/skeptic_setup.py by NAME and asserted a hard-coded
+# count of 3 -- accurate when written, but skeptic_ready.py's own copy of
+# this exact guard (its `paths`/`frozen_input_check()` block) landed in
+# the SAME round, concurrently, in a file this section never looked at.
+# The count-of-3 assertion stayed green with the fourth guard entirely
+# outside its view -- a hard-coded FILE LIST has the identical failure
+# shape a hard-coded field/key LIST has everywhere else in this file: it
+# is correct until something new lands somewhere it never looked. Fixed
+# by deriving the file SET to scan (every `*.py` directly under
+# `SCRIPTS_DIR` -- the real shipped script directory, not a restated
+# subset of it) rather than naming files one at a time; a fifth guard
+# landing in a fifth script is now found automatically. What is still a
+# literal, hand-maintained number is the total COUNT (4) the derived scan
+# must produce -- deliberately kept restated rather than derived, because
+# there is no honest way to derive "how many guards SHOULD exist" from
+# the source itself; a silent drop (a guard deleted, or its message
+# reworded so the anchor phrase no longer matches) must fail LOUD via a
+# count mismatch, not be absorbed by an unbounded "at least one" check.
+#
+# `run()`'s copy (skeptic_setup.py) and `frozen_input_check()`'s copy
+# (skeptic_ready.py) are NOT independently runtime-testable the way the
+# two digest functions are: `run()`'s guard sits behind
+# `compute_producer_input_digest()`/`compute_skeptic_input_digest()`,
+# called earlier in the SAME `run()` invocation against the SAME
+# `FROZEN_INPUT_SPECS` and the SAME captured canon/manifest/senses
+# state -- nothing reassigns either in between, so by the time control
+# reaches `run()`'s own guard, the identical boolean already evaluated
+# False twice. `frozen_input_check()`'s guard is likewise the FIRST thing
+# in its own function body, but that function is itself only reachable
+# through `skeptic_ready.py`'s `--verify-merged`/`--check-frozen-inputs`
+# CLI paths, which independently validate the aggregate's stamps against
+# `FROZEN_INPUT_SPECS`-derived expectations before ever constructing the
+# `paths` dict this guard checks -- reaching a genuine mismatch here would
+# require the SAME upstream stamping (already guarded, already tested) to
+# have first produced an aggregate whose stamp fields don't already prove
+# the mismatch. A test that reached either guard through its real call
+# path would need to first neutralize whatever makes it unreachable there,
+# at which point it would no longer be exercising that function's real
+# path at all -- only a harness's own artificial bypass, which can never
+# validate a scenario that doesn't otherwise exist. Building that harness
+# was considered and declined for exactly this reason: it would
+# re-verify the identical comparison algorithm yet again through a
+# heavier, more contrived route, and its only way to "fail red" pre-fix
+# would be to construct the very bypass that makes the test meaningless
+# post-fix too.
+#
+# What IS honestly testable, and actually targets these guards' real risk
+# (a hand-duplicated fix silently drifting in exactly one of its four
+# copies -- e.g. someone "simplifies" one copy back to a `set(...)`
+# comparison without touching its siblings, unnoticed because nothing
+# ever exercises that specific line): a STATIC source-text check that all
+# four copies still share the identical, non-deduplicated sorted-list
+# shape. This does not prove any one site is reachable or correct at
+# runtime -- the runtime-reachable sites already have that proof
+# elsewhere -- it proves the four copies have not diverged from each
+# other.
+
+
+def _guard_conditions_in_file(path: Path) -> list:
+    """Every `if sorted(...)/set(...)/len(...) != ...:` condition line
+    that most closely PRECEDES a round-11 "FROZEN_INPUT_SPECS contains a
+    duplicate key" message in the file at `path` -- the exact phrase
+    A2f's round-11 fix added to every one of these guards' exception
+    messages, used here purely as an anchor to locate a FROZEN_INPUT_SPECS
+    key-mismatch guard specifically (not any other `if`/comparison
+    anywhere in these scripts), so this stays correct regardless of what
+    a given call site names its local snapshot-dict/spec-keys variables.
+    A broad condition-shape regex (matching `sorted`/`set`/`len` alike)
+    means a future regression to any weaker shape is still located and
+    reported, not silently skipped by a pattern that only recognizes the
+    shape it expects. Returns `(path, condition_text)` pairs so a failing
+    assertion can name which FILE a drifted or missing guard is in."""
+    source_text = path.read_text(encoding="utf-8")
+    condition_re = re.compile(
+        r"^[ \t]*if (?:sorted|set|len)\([\w.]+\)[^\n:]*:[ \t]*$", re.MULTILINE
+    )
+    conditions = [(m.start(), m.group(0).strip()) for m in condition_re.finditer(source_text)]
+    # NOT anchored to a leading `"` -- suspicion_scan.py's and
+    # skeptic_setup.py's two copies happen to give this phrase its own
+    # source line (so it starts right after an opening quote), but
+    # skeptic_ready.py's copy runs it on inline after "...or " within a
+    # longer string literal. Matching the bare phrase, independent of
+    # its surrounding quoting/line-wrapping, is what makes this anchor
+    # actually portable across all three files' own independent prose.
+    anchor_re = re.compile(re.escape("FROZEN_INPUT_SPECS contains a duplicate key"))
+    found = []
+    for anchor_match in anchor_re.finditer(source_text):
+        preceding = [c for c in conditions if c[0] < anchor_match.start()]
+        assert preceding, (
+            f"{path}: found a round-11 duplicate-key exception message "
+            "with no `if sorted/set/len(...) != ...:` guard condition "
+            f"anywhere before it in the source (anchor at offset {anchor_match.start()})"
+        )
+        found.append((path, preceding[-1][1]))
+    return found
+
+
+def test_frozen_input_key_mismatch_guards_share_the_same_sorted_list_shape():
+    """Static sibling-consistency check across every FROZEN_INPUT_SPECS
+    key-mismatch guard shipped anywhere under `SCRIPTS_DIR` -- currently
+    `compute_producer_input_digest()` (suspicion_scan.py),
+    `compute_skeptic_input_digest()` and `run()` (both skeptic_setup.py),
+    and `frozen_input_check()` (skeptic_ready.py). See this section's own
+    comment block above for why this is a STATIC text check rather than a
+    runtime one for the two sites that aren't independently reachable
+    through their own real call paths.
+
+    The file SET scanned is DERIVED (every `*.py` directly under
+    `SCRIPTS_DIR`), not a hand-typed list of the files known to carry a
+    guard today -- see the round-12 comment above for why: a hard-coded
+    file list is exactly the restatement shape this test exists to avoid,
+    and it is what let this test's own first version miss
+    skeptic_ready.py's guard, landing in the same round, entirely.
+
+    Two things must hold: exactly FOUR such guards exist across the whole
+    scanned directory (a regression that silently drops one of the four
+    duplicated copies -- e.g. `run()`'s or `frozen_input_check()`'s
+    defense-in-depth block being deleted in a future edit -- is itself a
+    real loss of coverage this test names, and a fifth guard landing in a
+    fifth script bumps this count too, forcing a deliberate update rather
+    than silent inclusion); and every one of them uses the exact
+    `sorted(<name>) != sorted(<name>):` shape -- never `set(...)` (round
+    10's real, shipped, SET-based guard, which collapses duplicate keys --
+    see tests/suspicion_scan.test.py's and tests/skeptic_setup.test.py's
+    own `duplicate_key_entry` cases for the call-driven proof this shape
+    is unsafe) and never a bare `len(...)` comparison (which misses a
+    same-count divergent-key-name swap -- see those same tests'
+    `same_count_key_swap` cases)."""
+    conditions = []
+    for script_path in sorted(SCRIPTS_DIR.glob("*.py")):
+        conditions.extend(_guard_conditions_in_file(script_path))
+    found_summary = [(str(p.relative_to(SCRIPTS_DIR)), c) for p, c in conditions]
+    assert len(conditions) == 4, (
+        "expected exactly 4 FROZEN_INPUT_SPECS key-mismatch guards across "
+        f"every *.py file under {SCRIPTS_DIR} -- "
+        "compute_producer_input_digest() (suspicion_scan.py), "
+        "compute_skeptic_input_digest() and run()'s own "
+        "_frozen_input_snapshots_by_key block (both skeptic_setup.py), and "
+        "frozen_input_check()'s own paths dict (skeptic_ready.py) -- "
+        f"found {len(conditions)}: {found_summary!r}"
+    )
+
+    sorted_list_shape = re.compile(r"^if sorted\(\w+\) != sorted\(\w+\):$")
+    for script_path, condition in conditions:
+        assert sorted_list_shape.fullmatch(condition), (
+            f"{script_path}: a FROZEN_INPUT_SPECS key-mismatch guard has "
+            f"drifted off the sorted non-deduplicated key-LIST comparison "
+            f"shape: {condition!r} -- a `set(...)` comparison collapses "
+            "duplicate keys, a bare `len(...)` comparison misses a "
+            "same-count divergent-key-name swap; only "
+            "`sorted(X) != sorted(Y)` catches both."
+        )
