@@ -312,6 +312,86 @@ EOF
 hasnt_in_section "self-test: a shallower heading closes a deeper section, later content does not leak in" \
   "$SELFTEST_DIR/boundary-shallower-level.md" '### Sub' 'NEEDLE'
 
+# round-22: rounds 20-21 each found a member of one class — a rule this engine implements whose
+# LOSS no permanent fixture would catch. The candidate list (four rules named by the reviewer, four
+# more found walking the function line by line) turned out to close the class rather than sample
+# it: every remaining branch/condition in _section_contains is now either fixture-guarded or
+# provably unfalsifiable (documented inline at the two such cases below, and in the enumeration
+# table in this round's report — not restated here). Each fixture below was verified against a
+# reference engine — correct behaviour vs. its OWN targeted single-rule mutant, AND cross-checked
+# against every OTHER new fixture's mutant — before being wired, so isolation is measured, not
+# assumed (the fence-axis and boundary-`<=`-half lessons both came from assuming wrong).
+
+# CRLF normalization (:114): a CRLF-terminated file must match identically to its LF counterpart —
+# without stripping \r, `line == heading` never matches (trailing \r makes every line compare
+# unequal to the LF-only heading param), so the heading is never found at all.
+printf '## Target\r\nNEEDLE\r\n## Next\r\n' > "$SELFTEST_DIR/crlf.md"
+has_in_section "self-test: a CRLF-terminated file matches the same as LF (CRLF normalization)" \
+  "$SELFTEST_DIR/crlf.md" '## Target' 'NEEDLE'
+
+# Fence-close indent gate (<=3 spaces, independent site from the opener's own gate below): a
+# same-char, same-length run indented 4+ spaces is CommonMark indented-code, not a fence marker,
+# and must not close an open fence.
+printf '## Target\n```\n    ```\n```\nNEEDLE\n## Next\n' > "$SELFTEST_DIR/close-indent.md"
+has_in_section "self-test: a 4-space-indented closer does not close a column-0 fence (close-indent gate)" \
+  "$SELFTEST_DIR/close-indent.md" '## Target' 'NEEDLE'
+
+# Fence-close no-trailing-content rule (blank_from): CommonMark requires a closing fence line to
+# contain ONLY the fence marker, optionally followed by whitespace — trailing non-whitespace
+# content after the run means the line is not a valid closer.
+printf '## Target\n```\n``` extra\n```\nNEEDLE\n## Next\n' > "$SELFTEST_DIR/close-blank.md"
+has_in_section "self-test: a closer run followed by non-whitespace text does not close the fence" \
+  "$SELFTEST_DIR/close-blank.md" '## Target' 'NEEDLE'
+
+# Fence-open indent gate (<=3 spaces, independent from the closer's own gate above — verified,
+# neither fixture's mutant trips the other): a 4-space-indented backtick/tilde run is indented
+# code, not a fence opener, so it must not swallow the content that follows it.
+printf '## Target\n    ```\nNEEDLE\n## Next\n' > "$SELFTEST_DIR/open-indent.md"
+has_in_section "self-test: a 4-space-indented run does not open a fence (open-indent gate)" \
+  "$SELFTEST_DIR/open-indent.md" '## Target' 'NEEDLE'
+
+# Fence-open minimum-length-3 rule: CommonMark requires at least 3 of the same character to open a
+# fence — a run of 2 is ordinary text and must not swallow subsequent content.
+printf '## Target\n``\nNEEDLE\n## Next\n' > "$SELFTEST_DIR/open-minlen.md"
+has_in_section "self-test: a 2-character run does not open a fence (open-minimum-length rule)" \
+  "$SELFTEST_DIR/open-minlen.md" '## Target' 'NEEDLE'
+
+# First-occurrence-only heading binding (found_heading == 0): if the exact heading text appears a
+# SECOND time later in the file, that second occurrence must not re-open (or extend) the section —
+# it is a duplicate heading line, and by itself already closes the FIRST occurrence's section as an
+# ordinary same-level boundary. Content between the second occurrence and the next heading must NOT
+# be attributed to the first occurrence's section.
+printf '## Target\nNEEDLE_FIRST\n## Target\nNEEDLE_SECOND\n## Next\n' > "$SELFTEST_DIR/rebind.md"
+hasnt_in_section "self-test: a repeated identical heading does not re-open or extend the first section" \
+  "$SELFTEST_DIR/rebind.md" '## Target' 'NEEDLE_SECOND'
+
+# Empty-needle rejection (:151, needle != "") is orthogonal to file content, so it reuses the
+# rebind fixture above rather than a dedicated file — the claim under test is about the NEEDLE
+# argument, not anything in the markdown.
+hasnt_in_section "self-test: an empty needle is always rejected, never a silent pass" \
+  "$SELFTEST_DIR/rebind.md" '## Target' ''
+
+# Needle matched as a literal fixed string (index()), never as a regex: 'a.b' as a regex matches
+# ANY-character-between-a-and-b (so it would wrongly match "axb"); as a literal substring it must
+# not, since "axb" contains no literal dot.
+printf '## Target\naxb\n## Next\n' > "$SELFTEST_DIR/literal-needle.md"
+hasnt_in_section "self-test: a needle containing regex metacharacters is matched literally, not as a pattern" \
+  "$SELFTEST_DIR/literal-needle.md" '## Target' 'a.b'
+
+# Two rules considered and deliberately left unfixtured, because no discriminating mutation exists
+# under the current code structure (not overlooked — provably unfalsifiable, so a fixture would be
+# decorative):
+#   - The `n2 == 1` check alongside the `/^#+/` regex anchor: both independently prevent a `#` that
+#     is not at the start of a line from registering as a heading. Removing EITHER ONE ALONE changes
+#     nothing observable, because the other still blocks it — only removing BOTH simultaneously
+#     would (a coordinated double-edit, not a plausible single-point regression).
+#   - The `found_heading` term in the END exit expression (`... && found_heading && found_needle`):
+#     `found_needle` can only ever become 1 inside the `in_section`-gated branch, and `in_section`
+#     can only become 1 in the SAME statement that sets `found_heading = 1` — so found_needle == 1
+#     structurally implies found_heading == 1 already. Dropping `found_heading` from the END check
+#     is logically redundant with `found_needle` and produces zero observable difference on any
+#     input.
+
 echo "== surface-audit.playwright.ts =="
 SA="$ASSETS/surface-audit.playwright.ts"
 hasnt "surface-audit: does NOT use \$\$eval (extraction stays unit-testable)" '$$eval' "$SA"
