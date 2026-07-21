@@ -1074,14 +1074,18 @@ def test_run_fails_closed_on_frozen_input_specs_key_mismatch_after_upstream_dige
     from the mutated 4-entry `FROZEN_INPUT_SPECS`, so `3 != 4` still trips
     a length-only guard; this duplicate-key case is exactly the one a
     length check does NOT miss (only a same-count divergent-key swap
-    would slip past it, which line 831's guard was never trying to catch
-    on its own -- that gap belongs to `compute_skeptic_input_digest()`'s
-    OWN round-11 parametrized test above
+    would slip past a length-only comparison -- a property of that weakened
+    MUTANT, not of line 831's actual SHIPPED guard, which is itself a
+    sorted-LIST comparison and DOES distinguish a same-count divergent-key
+    swap; this test's own duplicate-key mutation just doesn't exercise that
+    swap direction, which is covered directly by
+    `compute_skeptic_input_digest()`'s OWN round-11 parametrized test above
     (`test_skeptic_input_digest_fails_closed_on_frozen_input_specs_key_mismatch`,
-    `same_count_key_swap` direction, skeptic_setup.test.py:877-881), which
-    proves THAT function's own guard catches it -- not run()'s line-831
-    guard, which has no same-count-key-swap coverage of its own beyond the
-    length-argument above). The load-bearing probe is (3): relocating the
+    `same_count_key_swap` direction, skeptic_setup.test.py:877-881), proving
+    THAT function's own guard catches it -- run()'s line-831 guard has no
+    dedicated same-count-key-swap test in this file, despite its
+    sorted-comparison shape covering that case structurally). The
+    load-bearing probe is (3): relocating the
     guard to dead code after `run()`'s `return` -- the exact scenario
     nothing else in this suite catches -- went red the same way as (1)
     ("DID NOT RAISE"). All three restored via `git show HEAD:<path>` +

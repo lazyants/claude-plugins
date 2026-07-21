@@ -852,66 +852,70 @@ All four such maps now carry the same fail-closed
 `sorted(<keys>) != sorted(<spec keys>)` guard — `suspicion_scan.py`'s and
 `skeptic_setup.py`'s two digest functions and `skeptic_setup.py`'s own
 `run()` block (round 11), plus `skeptic_ready.py`'s `paths` map in
-`frozen_input_check()` (round 12) — and a static, AST-driven
-sibling-consistency test parses every top-level `*.py` file directly under
-`SCRIPTS_DIR` and binds each guard to its owning function. Round 13's
-first pass (#243) tried to resolve one level of hoisting (`_flag =
-sorted(X) != sorted(Y); if _flag:`) back to the assignment it actually
-tested, on the theory that hoisting itself isn't unsafe — only a weakened
-comparison hidden behind it would be. A regex-based predecessor of this
-test had already been shown unsound the same round: it located a guard by
-the round-11 exception phrase alone, with no binding to the actual
-`if`/function it lived in, so hoisting one copy's comparison into a named
-local broke the regex's condition-shape match entirely and silently
-rebound the phrase to an unrelated sibling guard, staying green through a
-weakened `set(...)`-based comparison shipped live in `run()`.
+`frozen_input_check()` (round 12) — and an AST-driven ALLOWLIST test parses
+every top-level `*.py` file directly under `SCRIPTS_DIR` and requires each
+of the four sites to carry a guard structurally identical to a canonical
+shape. This replaced a six-round DENYLIST (#243, rounds 11-16, preserved
+in git history, not reproduced here): each round found one more way to
+weaken a guard while still passing, and the check grew one more rejection
+rule to name that specific weakening. Six rounds in, the reviewer's own
+prescribed fix was to build a general reaching-definition/dataflow
+analyzer inside a test, for four guards that are, in practice, textually
+near-identical — a denylist has no bounded endpoint, since it can only
+enumerate weakenings someone has already thought to check for.
 
-The hoist-resolving AST version that replaced the regex turned out to be
-unsound too, on a second codex pass the same round: its candidate list
-came from a breadth-first scope walk, not source-line order, so "nearest
-preceding" could pick an earlier assignment from a conditional branch over
-a later, unconditional one, with no notion of reachability or scope-exit
-at all — a guard placed after a `return`, or relocated into a nested class
-body, resolved and passed exactly as if it still guarded its intended
-access. The shipped version REJECTS hoisting outright instead of resolving
-it: `if_node.test` must itself be the `sorted(X) != sorted(Y)` comparison,
-found directly at the guard; a bare-name test (`if _flag:`) fails with a
-message saying the hoisted form is unsupported rather than being resolved
-or silently passed. All four shipped guards are, and always were, written
-as direct comparisons, so no currently shipped guard is affected — the
-constraint does still bind how any future guard may be written, a real
-cost the rejection accepts rather than one it avoids.
+The allowlist inverts the approach: a candidate `if` qualifies only if it
+is structurally identical to the canonical shape, and anything that does
+not match is rejected outright, with no attempt to resolve or characterize
+why it differs. Concretely: the test must be exactly `sorted(X) !=
+sorted(Y)` for two bare-Name operands, with the builtin `sorted` itself
+unshadowed anywhere reachable from the guard's owning or module scope;
+exactly one of X/Y must be bound, as its owning scope's SOLE binding, to
+one of the two canonical `FROZEN_INPUT_SPECS` key-projection
+comprehensions the real sites actually ship — the subscript form
+`[spec[0] for spec in FROZEN_INPUT_SPECS]` at three sites, or the
+destructure form `[key for key, _label, _stamp_key in FROZEN_INPUT_SPECS]`
+at `skeptic_ready.py`'s `frozen_input_check()`; and the body must directly
+raise `AssertionError` carrying the anchor phrase. A hoisted `if _flag:`
+(the comparison assigned to a name first) simply isn't this shape — a
+bare-Name test — so it needs no special-case rejection rule of its own,
+unlike the denylist version it replaced. This is sound by construction
+against every weakening at once, including ones nobody has thought of
+yet, and needs no dataflow analysis: only structural AST comparison plus
+a few scope-bounded binding facts.
 
-The same round-13 review found the shape check itself too permissive two
-further ways, both now closed. First, it only confirmed both `sorted()`
-callees were named `sorted` and never inspected their arguments, so
-`sorted(set(X)) != sorted(set(Y))` (duplicate-collapse restored),
-`sorted(X) != sorted(X)` (never fires), and a comparison against literal
-or nested-call arguments all passed silently — fixed by requiring each
-`sorted()` call take exactly one bare-Name positional argument (no nested
-call, no literal, no starred/keyword arg). Second, it accepted "any two
-`sorted()` calls" at a site, so a guard copy-pasted from a sibling site
-without updating one operand name still passed — fixed by binding
-`EXPECTED_GUARD_SITES` to each site's own specific two operand names
-(order-insensitive, since `!=` is symmetric): it is now a hand-maintained
-mapping from each of the four (file, function) obligations a guard must
-resolve to, to that site's own required operand-name pair, not just a set
-of (file, function) pairs. A third fix, same review: a guard relocated
-into a class nested inside its owning function was still attributed to
-that outer function, because the ownership walk had no reset on
-`ClassDef`; fixed by resetting the tracked owning function to `None` at
-every `ClassDef`, so such a relocation now reports as unowned instead of
-staying invisibly attached to its former function.
+`EXPECTED_GUARD_SITES` is still a hand-maintained set of the four (file,
+function) obligations a guard must resolve to — there is no way to derive
+"which four functions should own a guard" from the source itself — but it
+no longer also pins each site's own two operand names the way an earlier
+version of this check did: the structural requirements above already make
+a "right shape, wrong operand" copy-paste pointless to separately guard
+against, since the spec operand must independently prove itself against
+the canonical projection shape and the other operand's own spelling is
+never validated at all (it is simply the value under test). A guard's
+owner is the nearest lexically-enclosing function, tracked by a scope walk
+that resets attribution to `None` on crossing a `ClassDef` boundary — a
+class body's own top-level statements run in the class's namespace, not
+the enclosing function's runtime scope, so a guard relocated into a class
+nested inside its owning function is reported as unowned rather than
+misattributed. Separately, an owner only counts as matching an
+`EXPECTED_GUARD_SITES` entry when it resolves to the UNIQUE module-level
+def of that name; two module-level defs sharing a name — a dead `if
+False: def run(): <guard>` sitting beside the real, unguarded `def run()`
+— are reported AMBIGUOUS rather than silently resolved toward whichever
+copy happens to carry the guard. Either way — wrong owner, no owner, or
+an ambiguous one — a report happens only because a human already
+enumerated the sites being compared against, not because the test derives
+on its own which functions should own one. A guard is still located only
+by this exact structural shape and file-set scan — a copy that lands in a
+nested subdirectory the scan doesn't recurse into (no shipped script does
+today) is still invisible to it.
 
-A guard is still located only by the same exact-phrase anchor — a copy
-whose raised message drops the phrase, or that lands in a nested
-subdirectory the scan doesn't recurse into, is still invisible to it. What
-the AST rewrite changes is HOW a fifth or relocated guard gets caught: not
-by an open-ended count, but by breaking an equality check against
-`EXPECTED_GUARD_SITES` — a new or moved guard fails that comparison and is
-reported, but only because a human already enumerated the sites (and their
-required operand names) it is being compared against, not because the
-test derives on its own which functions should own one.
+Also invisible by construction: an unknown FIFTH key-indexed consumer
+added later with no guard of its own at all — there is nothing to compare
+it against. The durable fix, tracked as a follow-up, is to centralize all
+four guards behind one shared helper each consumer calls, closing this by
+construction instead of by enumeration.
 
 What none of this proves, and does not claim to: that a guard's `if`
 DOMINATES the protected access at runtime. A guard of the exact required
