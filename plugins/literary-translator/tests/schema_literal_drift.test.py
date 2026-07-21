@@ -762,8 +762,22 @@ def test_frozen_input_specs_keys_are_unique(skeptic_constants_module):
 # not yet strict enough (a non-canonical destructure target, a
 # non-adjacent message assignment, a decoy anchor reachable through a
 # non-constant expression, a scope walker blind to decorator/default/
-# annotation bindings) and one place it was too strict. The actual TRUST
-# BOUNDARY this check rests on is the COMPLETENESS of the canonical-shape
+# annotation bindings) and one place it was too strict. Round 18 then found
+# the SYMMETRIC other half of two of round 17's own fixes -- each fixed at
+# only ONE of its two real sites: the decoy-anchor fix (requirement 6)
+# covered only the message-VARIABLE path (`message = ANCHOR if False else
+# "wrong"`), leaving a DIRECT `raise AssertionError(ANCHOR if False else
+# "wrong")` still walkable via the old subtree search; the header-binding
+# fix (requirement 4) covered only FunctionDef/AsyncFunctionDef, leaving a
+# `sorted` rebind reachable through a ClassDef's own bases/keywords/
+# decorators (`class C((sorted := object)): pass`) unrecorded. Patching
+# each newly-found second site the same way round 17 patched the first
+# would only have restarted the same one-site-at-a-time cycle; both are
+# instead closed by routing BOTH forms of each family through one shared
+# check apiece (`_expr_guarantees_anchor` for the message; `_visit_header`
+# for the header walk), so the two forms cannot drift apart again by
+# construction. The actual TRUST BOUNDARY this check rests on is the
+# COMPLETENESS of the canonical-shape
 # template each guard is compared against -- a gap in that template (a real
 # weakening the template happens not to distinguish from the canonical
 # shape) still passes silently. What this buys over the denylist is that
@@ -800,14 +814,19 @@ def test_frozen_input_specs_keys_are_unique(skeptic_constants_module):
 #      DIRECT statement of the `if`'s own body, not nested inside any
 #      further compound statement the body contains
 #      (`_is_assertion_error_raise`).
-#   6. That SAME Raise's exception value carries `ANCHOR_PHRASE` -- either
-#      directly, as a string literal anywhere in the Raise's own subtree,
-#      or via a message Name whose SOLE binding anywhere in the if-body's
-#      own flattened scope is a plain, directly-preceding, same-level
-#      if-body Assign to that name
-#      (`_if_body_sole_preceding_message_value`). An intervening rebind --
-#      wherever in the if-body it is nested, not just a same-level one --
-#      disqualifies the message unconditionally.
+#   6. That SAME Raise's own message -- `AssertionError(<expr>)` with
+#      EXACTLY one positional argument and no keywords -- STATICALLY
+#      GUARANTEES `ANCHOR_PHRASE` per `_expr_guarantees_anchor`, checked
+#      either directly on `<expr>` itself (the direct-raise form), or --
+#      when `<expr>` is itself a bare Name -- on the `.value` of that
+#      name's SOLE binding anywhere in the if-body's own flattened scope,
+#      which must be a plain, directly-preceding, same-level if-body
+#      Assign to that name (`_if_body_sole_preceding_message_value`; the
+#      message-variable form). The SAME `_expr_guarantees_anchor` helper
+#      backs both forms -- there is no separate, looser subtree search for
+#      either one. An intervening rebind -- wherever in the if-body it is
+#      nested, not just a same-level one -- disqualifies the
+#      message-variable form unconditionally.
 #   7. The guard's owner resolves to exactly ONE module-level function of
 #      the expected name in `EXPECTED_GUARD_SITES` (`_scan_file`,
 #      `_site_key`). Two module-level defs sharing that name (e.g. a dead
@@ -973,12 +992,15 @@ def _scope_binding_info(
     that is done as the very first thing in the same method: `def
     sorted(...): ...` at module level is a real rebind of the builtin, not
     a no-op, precisely because Python's `def` statement is itself a
-    name-binding statement), and a match-case capture. A nested `def`'s own
-    HEADER -- its decorator list, parameter annotations and defaults, and
-    return annotation -- executes in THIS scope at def-statement time, not
-    inside the function's own separate body, so a walrus there (e.g. a
-    module-level `@(sorted := (lambda value: value))` decorator on a
-    guard's owning function) is walked too, unlike the body itself.
+    name-binding statement), and a match-case capture. A nested `def`'s OR
+    `class`'s own HEADER -- decorator list (shared by both); a function's
+    parameter annotations, defaults, and return annotation; a class's own
+    bases and keywords (e.g. `metaclass=...`) -- executes in THIS scope at
+    def/class-statement time, not inside its own separate body/namespace,
+    so a walrus there (e.g. a module-level `@(sorted := (lambda value:
+    value))` decorator on a guard's owning function, or a module-level
+    `class C((sorted := object)): pass` rebinding the builtin through its
+    own base expression) is walked too, unlike the body itself.
 
     `sole_assign_values[name]` is the `.value` of `name`'s own single
     plain `name = <value>` Assign (a bare-Name target, not a tuple/
@@ -1000,19 +1022,41 @@ def _scope_binding_info(
         counts[name] = counts.get(name, 0) + 1
 
     class _ScopeBindingVisitor(ast.NodeVisitor):
-        def _visit_function_header(
-            self, node: "ast.FunctionDef | ast.AsyncFunctionDef"
+        def _visit_header(
+            self, node: "ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef"
         ) -> None:
-            """Walks the decorator list, every parameter annotation/default,
-            and the return annotation -- all of which execute in THIS
-            (owning) scope at def-statement time -- using this SAME visitor,
-            so a walrus/def/class/etc. nested in one of them is recorded
-            exactly as it would be anywhere else in this scope, while a
-            nested Lambda within one of them still correctly halts descent
-            via `visit_Lambda` below. Never touches `node.body` -- that
-            remains a separate scope this walk does not enter."""
+            """ONE header-inspection routine, shared by ALL THREE def-types
+            below (FunctionDef, AsyncFunctionDef, AND ClassDef): walks every
+            binding-bearing expression in `node`'s own HEADER -- the part
+            that executes in THIS (owning) scope at def/class-statement
+            time, before `node`'s own separate body/namespace scope exists
+            -- using this SAME visitor, so a walrus/def/class/etc. nested in
+            one of them is recorded exactly as it would be anywhere else in
+            this scope, while a nested Lambda within one of them still
+            correctly halts descent via `visit_Lambda` below. Never touches
+            `node.body` -- that remains a separate scope this walk does not
+            enter.
+
+            All three share `decorator_list` (every one of a class's or a
+            function's own decorators executes here, at def/class-statement
+            time). A ClassDef additionally executes its `bases` and
+            `keywords` (e.g. `metaclass=...`) here -- round 18 found a
+            module-level `class C((sorted := object)): pass` rebinding the
+            builtin completely unrecorded, because this routine used to
+            exist only for FunctionDef/AsyncFunctionDef, walking their own
+            additional header parts instead (every parameter annotation/
+            default and the return annotation) -- a ClassDef has no
+            equivalent of any of those, so this branches once, structurally,
+            rather than duplicating the shared decorator walk into two
+            near-identical methods."""
             for decorator in node.decorator_list:
                 self.visit(decorator)
+            if isinstance(node, ast.ClassDef):
+                for base in node.bases:
+                    self.visit(base)
+                for keyword in node.keywords:
+                    self.visit(keyword.value)
+                return
             args = node.args
             for arg in (*args.posonlyargs, *args.args, *args.kwonlyargs):
                 if arg.annotation is not None:
@@ -1021,28 +1065,56 @@ def _scope_binding_info(
                 self.visit(args.vararg.annotation)
             if args.kwarg is not None and args.kwarg.annotation is not None:
                 self.visit(args.kwarg.annotation)
+            self._visit_arg_defaults(args)
+            if node.returns is not None:
+                self.visit(node.returns)
+
+        def _visit_arg_defaults(self, args: "ast.arguments") -> None:
+            """Walks every parameter DEFAULT value expression in `args` --
+            factored out because it is shared by TWO callers, not just
+            `_visit_header`'s function branch: a bare `lambda`'s own
+            defaults execute in exactly the same enclosing scope, at
+            exactly the same lambda-EXPRESSION-evaluation time, as a
+            `def`'s defaults do at def-STATEMENT time -- `lambda
+            x=(sorted := int): x` really does rebind `sorted` in the
+            enclosing scope (verified empirically, not assumed), even
+            though a lambda has no decorator/annotation/return-annotation
+            of its own to also walk. A lambda's own annotations are not
+            even syntactically possible, so defaults are the ONLY header
+            piece `visit_Lambda` below needs from this helper."""
             for default in args.defaults:
                 self.visit(default)
             for kw_default in args.kw_defaults:
                 if kw_default is not None:
                     self.visit(kw_default)
-            if node.returns is not None:
-                self.visit(node.returns)
 
         def visit_FunctionDef(self, node: "ast.FunctionDef") -> None:
             _record(node.name)
-            self._visit_function_header(node)
+            self._visit_header(node)
             # own body is a separate scope -- do not descend into it.
 
         def visit_AsyncFunctionDef(self, node: "ast.AsyncFunctionDef") -> None:
             _record(node.name)
-            self._visit_function_header(node)
+            self._visit_header(node)
 
         def visit_ClassDef(self, node: "ast.ClassDef") -> None:
             _record(node.name)
+            self._visit_header(node)
+            # own body is a separate namespace scope -- do not descend into it.
 
         def visit_Lambda(self, node: "ast.Lambda") -> None:
-            return  # anonymous -- nothing of its own to record; separate scope
+            """A Lambda has no name of its own to record, and no
+            decorator/annotation/return-annotation slot at all -- but its
+            parameter DEFAULTS are still evaluated in THIS (enclosing)
+            scope, at the point the lambda expression itself runs, exactly
+            like a `def`'s defaults are (see `_visit_arg_defaults`). Only
+            `node.body` -- the lambda's own separate scope -- is left
+            unvisited; a nested Lambda/FunctionDef/AsyncFunctionDef/
+            ClassDef inside a default expression is still walked, exactly
+            as it would be anywhere else in this scope, since
+            `_visit_arg_defaults` dispatches back through this SAME
+            visitor via `self.visit(...)`."""
+            self._visit_arg_defaults(node.args)
 
         def _record_comprehension_walrus(self, node: "ast.AST") -> None:
             for name in _walrus_targets_in_comprehension(node):
@@ -1292,55 +1364,82 @@ def _is_assertion_error_raise(exc: "ast.AST | None") -> bool:
     return isinstance(exc, ast.Name) and exc.id == "AssertionError"
 
 
-def _sole_bare_name_argument(exc: "ast.AST | None") -> "str | None":
-    """If `exc` is a bare Name, or a Call with exactly one positional
-    bare-Name argument and no keywords, returns that Name's `.id` -- the
-    message-holding variable a `raise AssertionError(message)` form
-    passes. Returns None for anything else (a literal message built
-    inline, a multi-argument call, a keyword argument, ...)."""
-    if isinstance(exc, ast.Name):
-        return exc.id
+def _sole_positional_call_argument(exc: "ast.AST | None") -> "ast.AST | None":
+    """Returns the sole positional-argument expression of `exc` iff `exc`
+    is a Call with EXACTLY one positional argument and no keywords --
+    `AssertionError(<expr>)`. Returns None for anything else: the bare
+    `raise AssertionError` (no message at all -- `exc` is a Name, not a
+    Call), a zero-argument call, a multi-argument call, or any keyword
+    argument. This is the ONE recognized message-argument shape both
+    forms in `_guard_raise_is_qualifying` below share: in the
+    direct-raise form, `<expr>` IS the message, checked directly by
+    `_expr_guarantees_anchor`; in the message-variable form, `<expr>` is
+    itself a bare Name that gets one further resolution hop through
+    `_if_body_sole_preceding_message_value` before the SAME
+    `_expr_guarantees_anchor` check runs on its resolved value."""
     if isinstance(exc, ast.Call) and len(exc.args) == 1 and not exc.keywords:
-        arg = exc.args[0]
-        if isinstance(arg, ast.Name):
-            return arg.id
+        return exc.args[0]
     return None
 
 
-def _string_constants_contain_anchor(node: "ast.AST") -> bool:
-    return any(
-        isinstance(n, ast.Constant) and isinstance(n.value, str) and ANCHOR_PHRASE in n.value
-        for n in ast.walk(node)
-    )
+def _expr_guarantees_anchor(expr: "ast.AST") -> bool:
+    """True iff `expr` STATICALLY, GUARANTEED-AT-RUNTIME carries
+    ANCHOR_PHRASE in one of its own literal segments -- the ONE anchor
+    check shared by BOTH recognized message forms in
+    `_guard_raise_is_qualifying` below (the direct-raise argument, and the
+    message-variable's resolved assignment value). A decoy that would
+    defeat one form is written once here and so defeats both, rather than
+    needing to be independently rediscovered and separately re-patched at
+    each site -- exactly the round-17-then-round-18 pattern this file's
+    own comment block above describes.
 
+    Accepts exactly two shapes:
+      - `ast.Constant` of type `str`: the phrase must appear in `.value`
+        (adjacent plain string literals -- `"a" "b"` -- are already
+        merged into a single Constant by the parser, so no separate
+        concatenation handling is needed for that case).
+      - `ast.JoinedStr` (an f-string, or an implicit concatenation mixing
+        an f-string with plain literals): the phrase must appear WHOLLY
+        within at least one of its own Constant (non-interpolated)
+        segments, checked independently, segment by segment --
+        `ast.FormattedValue` segments (the `{...}` parts) are skipped
+        entirely, their runtime content never inspected, and never
+        allowed to bridge two Constant segments into a match that
+        neither segment carries alone (a decoy that split the phrase
+        across an interpolation gap, e.g. `f"...duplicate ke{y}y..."`,
+        renders a DIFFERENT string at runtime than the literal anchor
+        text and must not qualify just because concatenating the two
+        constant halves happens to spell it back out -- deliberately
+        STRICTER than "concatenate every constant segment and search
+        that", for this reason). This is what lets the four real guards'
+        own f-string-with-interpolation messages qualify -- e.g.
+        `f"{sorted(frozen_input_snapshots)} != FROZEN_INPUT_SPECS keys
+        {sorted(spec_keys)} -- ... or FROZEN_INPUT_SPECS contains a
+        duplicate key; ..."` -- the phrase lives whole inside its own
+        trailing Constant segment, same as the plain-Constant case above
+        (verified against all four real sites' actual parsed ASTs before
+        writing this, not assumed).
 
-def _plain_string_constant_value(value: "ast.AST") -> "str | None":
-    """Returns the literal string `value` denotes iff `value` is a PLAIN
-    string-literal expression: an `ast.Constant` of type `str` (adjacent
-    string literals -- `"a" "b"` -- are already merged into a single
-    Constant by the parser, so no separate concatenation handling is
-    needed here), or an f-string (`ast.JoinedStr`) every one of whose parts
-    is itself a constant string -- any interpolated `ast.FormattedValue`
-    part disqualifies the whole expression. Returns None for anything
-    else: a conditional (`IfExp`), a call, a subscript, a bare Name, a
-    binary op, an f-string with any interpolated part, .... This is what
-    makes a decoy like `message = ANCHOR_PHRASE if False else "wrong"` get
-    REJECTED: walking the assigned expression's whole subtree for a
-    constant that merely CONTAINS the anchor phrase somewhere would find
-    it inside the dead `if False` branch even though the runtime value of
-    that expression is always `"wrong"` -- restricting to a plain string
-    form first, before ever looking for the phrase, is what closes that
-    gap."""
-    if isinstance(value, ast.Constant) and isinstance(value.value, str):
-        return value.value
-    if isinstance(value, ast.JoinedStr):
-        parts: "list[str]" = []
-        for part in value.values:
-            if not (isinstance(part, ast.Constant) and isinstance(part.value, str)):
-                return None
-            parts.append(part.value)
-        return "".join(parts)
-    return None
+    Anything else -- `IfExp` (ternary), `BoolOp`, `Call`, `Subscript`,
+    `Name`, attribute access, a comprehension, ... -- is REJECTED
+    outright, with no attempt to evaluate or partially trust it. This is
+    what makes a decoy like `ANCHOR_PHRASE if False else "wrong"` fail
+    identically on BOTH the direct-raise and the message-variable form:
+    the anchor Constant sits in the dead `if False` branch, but the
+    GUARANTEED, always-reachable value of the `IfExp` itself is
+    `"wrong"`, and an `IfExp` is not one of the two accepted shapes at
+    all -- there is no subtree walk here that could find the buried
+    literal."""
+    if isinstance(expr, ast.Constant) and isinstance(expr.value, str):
+        return ANCHOR_PHRASE in expr.value
+    if isinstance(expr, ast.JoinedStr):
+        return any(
+            isinstance(part, ast.Constant)
+            and isinstance(part.value, str)
+            and ANCHOR_PHRASE in part.value
+            for part in expr.values
+        )
+    return False
 
 
 def _if_body_sole_preceding_message_value(
@@ -1391,32 +1490,35 @@ def _if_body_sole_preceding_message_value(
 def _guard_raise_is_qualifying(if_node: "ast.If") -> bool:
     """True iff `if_node.body` contains, as a DIRECT statement (not nested
     inside any further loop/conditional/with/try the body contains), a
-    `raise AssertionError(...)` whose own exception value carries
-    `ANCHOR_PHRASE` -- either as a string literal anywhere in the Raise's
-    own subtree, or (per `_if_body_sole_preceding_message_value` and
-    `_plain_string_constant_value`) via a message Name resolved back to
-    its sole, immediately preceding, same-level if-body assignment WHOSE
-    OWN VALUE is itself a plain string-literal expression -- never a
-    conditional, call, subscript, or any other non-constant expression. A
-    decoy sitting in a dead branch, e.g. `message = ANCHOR_PHRASE if False
-    else "wrong"`, does not qualify just because the phrase appears
-    somewhere in the assigned expression's subtree."""
+    `raise AssertionError(<expr>)` with EXACTLY one positional argument
+    and no keywords (`_sole_positional_call_argument`) whose message
+    STATICALLY GUARANTEES `ANCHOR_PHRASE` per `_expr_guarantees_anchor` --
+    checked either directly on `<expr>` itself (the direct-raise form), or
+    -- when `<expr>` is itself a bare Name -- on the `.value` of that
+    name's sole, immediately preceding, same-level if-body assignment
+    (`_if_body_sole_preceding_message_value`; the message-variable form).
+
+    Both forms run through the SAME `_expr_guarantees_anchor` helper, so a
+    decoy sitting in a dead branch, e.g. `ANCHOR_PHRASE if False else
+    "wrong"`, is rejected identically whether it is assigned to a message
+    variable first or passed directly to `AssertionError(...)` -- neither
+    an `IfExp` nor anything else outside `_expr_guarantees_anchor`'s two
+    accepted shapes qualifies just because the phrase appears somewhere in
+    the expression's own subtree."""
     for index, stmt in enumerate(if_node.body):
         if not isinstance(stmt, ast.Raise):
             continue
         if not _is_assertion_error_raise(stmt.exc):
             continue
-        if _string_constants_contain_anchor(stmt):
-            return True
-        message_name = _sole_bare_name_argument(stmt.exc)
-        if message_name is None:
+        message_arg = _sole_positional_call_argument(stmt.exc)
+        if message_arg is None:
             continue
-        value = _if_body_sole_preceding_message_value(if_node, index, message_name)
-        if value is None:
-            continue
-        plain_string = _plain_string_constant_value(value)
-        if plain_string is not None and ANCHOR_PHRASE in plain_string:
+        if _expr_guarantees_anchor(message_arg):
             return True
+        if isinstance(message_arg, ast.Name):
+            value = _if_body_sole_preceding_message_value(if_node, index, message_arg.id)
+            if value is not None and _expr_guarantees_anchor(value):
+                return True
     return False
 
 
