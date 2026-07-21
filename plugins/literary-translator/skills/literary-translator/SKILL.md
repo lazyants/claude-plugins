@@ -879,10 +879,16 @@ at `skeptic_ready.py`'s `frozen_input_check()`; and the body must directly
 raise `AssertionError` carrying the anchor phrase. A hoisted `if _flag:`
 (the comparison assigned to a name first) simply isn't this shape — a
 bare-Name test — so it needs no special-case rejection rule of its own,
-unlike the denylist version it replaced. This is sound by construction
-against every weakening at once, including ones nobody has thought of
-yet, and needs no dataflow analysis: only structural AST comparison plus
-a few scope-bounded binding facts.
+unlike the denylist version it replaced. This is strictly stronger
+than that: the denylist enumerated specific weakenings to reject, and
+each round found one it had missed, while the allowlist rejects any
+candidate that does not match the canonical shape — no dataflow
+analysis needed, only structural AST comparison plus a few
+scope-bounded binding facts. The remaining trust boundary is not an
+unanticipated class of weakening but a gap in the structural template
+itself — some node facet the match doesn't pin. Structural completeness
+is what has to be gotten right, and unlike "did we think of every
+weakening," it is a property that can be checked directly.
 
 `EXPECTED_GUARD_SITES` is still a hand-maintained set of the four (file,
 function) obligations a guard must resolve to — there is no way to derive

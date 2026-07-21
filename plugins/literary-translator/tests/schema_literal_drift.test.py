@@ -754,11 +754,24 @@ def test_frozen_input_specs_keys_are_unique(skeptic_constants_module):
 # weakened in some way we remember to check for", it requires each guard to
 # be STRUCTURALLY IDENTICAL to one of a small, closed set of canonical AST
 # shapes -- anything that does not match is REJECTED outright, with no
-# attempt to characterize why it differs. This is sound by construction
-# against every weakening at once (including ones nobody has thought of
-# yet), and needs no dataflow/reaching-definition analysis: only structural
-# AST comparison plus a small set of SCOPE-BOUNDED facts (a name's binding
-# count and binding kind within its own owning function).
+# attempt to characterize why it differs. This is strictly STRONGER than
+# the denylist it replaced (which could only ever enumerate weakenings
+# someone had already thought to check for) -- but it is NOT "sound by
+# construction against every weakening, including ones nobody has thought
+# of yet": round 17 found four places where the structural match itself was
+# not yet strict enough (a non-canonical destructure target, a
+# non-adjacent message assignment, a decoy anchor reachable through a
+# non-constant expression, a scope walker blind to decorator/default/
+# annotation bindings) and one place it was too strict. The actual TRUST
+# BOUNDARY this check rests on is the COMPLETENESS of the canonical-shape
+# template each guard is compared against -- a gap in that template (a real
+# weakening the template happens not to distinguish from the canonical
+# shape) still passes silently. What this buys over the denylist is that
+# closing such a gap is a bounded, one-time tightening of the template
+# itself, not an open-ended new rejection rule; it needs no dataflow/
+# reaching-definition analysis, only structural AST comparison plus a small
+# set of SCOPE-BOUNDED facts (a name's binding count and binding kind
+# within its own owning function).
 #
 # The allowlist, in full -- a candidate `if` qualifies as a guard iff ALL
 # of:
@@ -879,12 +892,30 @@ def _walrus_targets_in_comprehension(node: "ast.AST") -> "list[str]":
     everything else the comprehension binds (its own `for` targets, its
     element expression), which stays local to the comprehension itself and
     is correctly invisible to the enclosing scope this function is asked
-    about."""
-    return [
-        n.target.id
-        for n in ast.walk(node)
-        if isinstance(n, ast.NamedExpr) and isinstance(n.target, ast.Name)
-    ]
+    about. PEP 572 also makes a comprehension NESTED inside `node` (e.g.
+    `[[y := x for x in row] for row in grid]`) transparent for this same
+    rule -- its walrus binds to the SAME containing scope as `node`'s own,
+    not to the inner comprehension -- so this walk continues through a
+    nested comprehension rather than treating it as a boundary. A `Lambda`,
+    `FunctionDef`, `AsyncFunctionDef`, or `ClassDef` nested inside `node` is
+    a REAL scope boundary, though: a walrus inside one of those belongs to
+    THAT scope, never to `node`'s containing scope, so the walk stops
+    there -- unlike a raw `ast.walk(node)`, which cannot tell the
+    difference and would wrongly attribute e.g. `[x for x in (lambda: (y
+    := 1))()]`'s inner walrus to `node`'s own containing scope, exactly
+    the false-reject this replaces."""
+    targets: "list[str]" = []
+
+    def _walk(n: "ast.AST") -> None:
+        if isinstance(n, ast.NamedExpr) and isinstance(n.target, ast.Name):
+            targets.append(n.target.id)
+        if isinstance(n, (ast.Lambda, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            return  # a real nested scope -- its own walruses are not node's
+        for child in ast.iter_child_nodes(n):
+            _walk(child)
+
+    _walk(node)
+    return targets
 
 
 def _match_pattern_capture_names(pattern: "ast.AST") -> "list[str]":
@@ -942,7 +973,12 @@ def _scope_binding_info(
     that is done as the very first thing in the same method: `def
     sorted(...): ...` at module level is a real rebind of the builtin, not
     a no-op, precisely because Python's `def` statement is itself a
-    name-binding statement), and a match-case capture.
+    name-binding statement), and a match-case capture. A nested `def`'s own
+    HEADER -- its decorator list, parameter annotations and defaults, and
+    return annotation -- executes in THIS scope at def-statement time, not
+    inside the function's own separate body, so a walrus there (e.g. a
+    module-level `@(sorted := (lambda value: value))` decorator on a
+    guard's owning function) is walked too, unlike the body itself.
 
     `sole_assign_values[name]` is the `.value` of `name`'s own single
     plain `name = <value>` Assign (a bare-Name target, not a tuple/
@@ -964,12 +1000,43 @@ def _scope_binding_info(
         counts[name] = counts.get(name, 0) + 1
 
     class _ScopeBindingVisitor(ast.NodeVisitor):
+        def _visit_function_header(
+            self, node: "ast.FunctionDef | ast.AsyncFunctionDef"
+        ) -> None:
+            """Walks the decorator list, every parameter annotation/default,
+            and the return annotation -- all of which execute in THIS
+            (owning) scope at def-statement time -- using this SAME visitor,
+            so a walrus/def/class/etc. nested in one of them is recorded
+            exactly as it would be anywhere else in this scope, while a
+            nested Lambda within one of them still correctly halts descent
+            via `visit_Lambda` below. Never touches `node.body` -- that
+            remains a separate scope this walk does not enter."""
+            for decorator in node.decorator_list:
+                self.visit(decorator)
+            args = node.args
+            for arg in (*args.posonlyargs, *args.args, *args.kwonlyargs):
+                if arg.annotation is not None:
+                    self.visit(arg.annotation)
+            if args.vararg is not None and args.vararg.annotation is not None:
+                self.visit(args.vararg.annotation)
+            if args.kwarg is not None and args.kwarg.annotation is not None:
+                self.visit(args.kwarg.annotation)
+            for default in args.defaults:
+                self.visit(default)
+            for kw_default in args.kw_defaults:
+                if kw_default is not None:
+                    self.visit(kw_default)
+            if node.returns is not None:
+                self.visit(node.returns)
+
         def visit_FunctionDef(self, node: "ast.FunctionDef") -> None:
             _record(node.name)
+            self._visit_function_header(node)
             # own body is a separate scope -- do not descend into it.
 
         def visit_AsyncFunctionDef(self, node: "ast.AsyncFunctionDef") -> None:
             _record(node.name)
+            self._visit_function_header(node)
 
         def visit_ClassDef(self, node: "ast.ClassDef") -> None:
             _record(node.name)
@@ -1095,10 +1162,13 @@ def _is_canonical_spec_keys_projection(value: "ast.AST") -> bool:
 
       Form B (skeptic_ready.py -- verified against the real source before
       writing this check, not assumed identical to the other three): `X
-      for X, ..., ... in FROZEN_INPUT_SPECS` -- the generator's target is a
-      Tuple of two or more bare Names (a destructuring unpack of each
-      3-tuple entry), and the element is bare the tuple target's OWN first
-      Name.
+      for X, _, _ in FROZEN_INPUT_SPECS` -- the generator's target is a
+      Tuple of EXACTLY THREE bare Names (a full destructuring unpack of
+      each 3-tuple entry -- FROZEN_INPUT_SPECS entries are `(key, label,
+      stamp_field)` 3-tuples, per skeptic_constants.py's own definition, so
+      a 2-name or 4+-name unpack target is not this shape at all, whatever
+      it happens to project), and the element is bare the tuple target's
+      OWN first Name.
 
     Both forms project the identical value -- FROZEN_INPUT_SPECS entries
     are `(key, label, stamp_field)` 3-tuples, per skeptic_constants.py's
@@ -1145,10 +1215,10 @@ def _is_canonical_spec_keys_projection(value: "ast.AST") -> bool:
             and _subscript_zero_index(elt.slice)
         )
 
-    if isinstance(target, ast.Tuple):  # Form B: X for X, ..., ... in FROZEN_INPUT_SPECS
+    if isinstance(target, ast.Tuple):  # Form B: X for X, _, _ in FROZEN_INPUT_SPECS
         elts = target.elts
         return (
-            len(elts) >= 2
+            len(elts) == 3
             and all(isinstance(e, ast.Name) for e in elts)
             and isinstance(elt, ast.Name)
             and isinstance(elts[0], ast.Name)
@@ -1244,6 +1314,35 @@ def _string_constants_contain_anchor(node: "ast.AST") -> bool:
     )
 
 
+def _plain_string_constant_value(value: "ast.AST") -> "str | None":
+    """Returns the literal string `value` denotes iff `value` is a PLAIN
+    string-literal expression: an `ast.Constant` of type `str` (adjacent
+    string literals -- `"a" "b"` -- are already merged into a single
+    Constant by the parser, so no separate concatenation handling is
+    needed here), or an f-string (`ast.JoinedStr`) every one of whose parts
+    is itself a constant string -- any interpolated `ast.FormattedValue`
+    part disqualifies the whole expression. Returns None for anything
+    else: a conditional (`IfExp`), a call, a subscript, a bare Name, a
+    binary op, an f-string with any interpolated part, .... This is what
+    makes a decoy like `message = ANCHOR_PHRASE if False else "wrong"` get
+    REJECTED: walking the assigned expression's whole subtree for a
+    constant that merely CONTAINS the anchor phrase somewhere would find
+    it inside the dead `if False` branch even though the runtime value of
+    that expression is always `"wrong"` -- restricting to a plain string
+    form first, before ever looking for the phrase, is what closes that
+    gap."""
+    if isinstance(value, ast.Constant) and isinstance(value.value, str):
+        return value.value
+    if isinstance(value, ast.JoinedStr):
+        parts: "list[str]" = []
+        for part in value.values:
+            if not (isinstance(part, ast.Constant) and isinstance(part.value, str)):
+                return None
+            parts.append(part.value)
+        return "".join(parts)
+    return None
+
+
 def _if_body_sole_preceding_message_value(
     if_node: "ast.If", raise_index: int, name: str
 ) -> "ast.AST | None":
@@ -1253,30 +1352,39 @@ def _if_body_sole_preceding_message_value(
     one nested inside a `for`/`if`/`while` the direct body does not
     literally contain as a sibling -- disqualifies the message
     unconditionally, not just a same-level reassignment); AND that sole
-    binding is a plain `name = <value>` Assign that is ALSO a DIRECT,
-    top-level statement of `if_node.body` itself (not nested inside any
-    further compound statement); AND it appears BEFORE `raise_index` (the
-    Raise it is meant to feed). Returns None otherwise.
+    binding is a plain `name = <value>` Assign that is ALSO the DIRECT
+    statement of `if_node.body` IMMEDIATELY PRECEDING `raise_index` --
+    `if_node.body[raise_index - 1]` exactly, not merely some earlier
+    statement in the body. Returns None otherwise.
 
-    Both conditions matter independently: without the flattened-scope
-    rebind count, `message = "...anchor..."; for _ in (0,): message =
-    "wrong"; raise AssertionError(message)` would still resolve to the
-    anchor-carrying value even though `message` is NOT what the raise
-    actually sees at runtime -- the `for` loop's own reassignment lives one
-    level deeper than a same-level scan alone would ever look."""
+    Both conditions matter independently, against two distinct decoys:
+    without the flattened-scope rebind count, `message = "...anchor...";
+    for _ in (0,): message = "wrong"; raise AssertionError(message)` would
+    still resolve to the anchor-carrying value even though `message` is NOT
+    what the raise actually sees at runtime -- the `for` loop's own
+    reassignment lives one level deeper than a same-level scan alone would
+    ever look. And without the immediate-adjacency requirement, an
+    intervening same-level statement that does not rebind `name` at all --
+    e.g. `message = "...anchor..."; _ = 0; raise AssertionError(message)`
+    -- would still resolve to the anchor-carrying value even though the
+    assignment is not the last thing the if-body does before the raise;
+    pinning the check to exactly `raise_index - 1` is what makes
+    "immediately preceding" mean what it says, rather than merely
+    "somewhere earlier in the same body"."""
     counts, _sole, _global_nonlocal = _scope_binding_info(if_node.body)
     if counts.get(name, 0) != 1:
         return None
-    for index, stmt in enumerate(if_node.body):
-        if index >= raise_index:
-            break
-        if (
-            isinstance(stmt, ast.Assign)
-            and len(stmt.targets) == 1
-            and isinstance(stmt.targets[0], ast.Name)
-            and stmt.targets[0].id == name
-        ):
-            return stmt.value
+    message_index = raise_index - 1
+    if message_index < 0:
+        return None
+    stmt = if_node.body[message_index]
+    if (
+        isinstance(stmt, ast.Assign)
+        and len(stmt.targets) == 1
+        and isinstance(stmt.targets[0], ast.Name)
+        and stmt.targets[0].id == name
+    ):
+        return stmt.value
     return None
 
 
@@ -1285,9 +1393,14 @@ def _guard_raise_is_qualifying(if_node: "ast.If") -> bool:
     inside any further loop/conditional/with/try the body contains), a
     `raise AssertionError(...)` whose own exception value carries
     `ANCHOR_PHRASE` -- either as a string literal anywhere in the Raise's
-    own subtree, or (per `_if_body_sole_preceding_message_value`) via a
-    message Name resolved back to its sole, immediately preceding,
-    same-level if-body assignment."""
+    own subtree, or (per `_if_body_sole_preceding_message_value` and
+    `_plain_string_constant_value`) via a message Name resolved back to
+    its sole, immediately preceding, same-level if-body assignment WHOSE
+    OWN VALUE is itself a plain string-literal expression -- never a
+    conditional, call, subscript, or any other non-constant expression. A
+    decoy sitting in a dead branch, e.g. `message = ANCHOR_PHRASE if False
+    else "wrong"`, does not qualify just because the phrase appears
+    somewhere in the assigned expression's subtree."""
     for index, stmt in enumerate(if_node.body):
         if not isinstance(stmt, ast.Raise):
             continue
@@ -1299,7 +1412,10 @@ def _guard_raise_is_qualifying(if_node: "ast.If") -> bool:
         if message_name is None:
             continue
         value = _if_body_sole_preceding_message_value(if_node, index, message_name)
-        if value is not None and _string_constants_contain_anchor(value):
+        if value is None:
+            continue
+        plain_string = _plain_string_constant_value(value)
+        if plain_string is not None and ANCHOR_PHRASE in plain_string:
             return True
     return False
 
