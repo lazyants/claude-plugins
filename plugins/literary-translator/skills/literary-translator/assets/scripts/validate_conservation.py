@@ -105,18 +105,24 @@ absent config, never a forced-on hard gate" shape as
     (e.g. straddling a running head); checking spans independently risks a
     false PASS from crediting one span's words against a sibling span's own
     portion of the same block.
-  - `reading_order_reversal` -- a block's earliest baseline anchor position
-    (`min` of its own spans' starts) is out of step with its manifest
-    `order_index`, relative to an order_index-adjacent neighbor. Distinct
-    from `hollowed_or_truncated_block`: a block can be internally
-    content-complete (nothing hollowed, nothing dropped) while the WRAP
-    still physically shuffled it relative to its neighbors -- pages or
-    paragraphs swapped, each individually faithful. None of the other four
-    checks can see this (no dangling ref, no overlap, no gap, and the
-    per-block word-multiset still matches its own correctly-assigned span);
-    this is the one check that looks at ORDER rather than content. See
-    `check_reading_order`'s own docstring for the adjacent-pair
-    sufficiency argument.
+  - `reading_order_reversal` -- walking every live provenance span in
+    baseline PHYSICAL-POSITION order, some span's manifest `order_index` is
+    LOWER than the immediately preceding span's -- content the manifest
+    places earlier resumes after content it places later already began.
+    This is a full span-sequence walk, not a per-block min-anchor
+    comparison: an anchor reduction cannot see another block's span
+    INTERLEAVED between two spans of the same block (block A starts, block
+    B's whole span lands, then A resumes) -- A's anchor is still its first
+    span's position, which sorts before B's, so a naive anchor comparison
+    misses it. Distinct from `hollowed_or_truncated_block`: a block can be
+    internally content-complete (nothing hollowed, nothing dropped) while
+    the WRAP still physically shuffled it relative to its neighbors --
+    pages or paragraphs swapped or interleaved, each individually faithful.
+    None of the other four checks can see this (no dangling ref, no
+    overlap, no gap, and the per-block word-multiset still matches its own
+    correctly-assigned span); this is the one check that looks at ORDER
+    rather than content. See `check_reading_order`'s own docstring for the
+    adjacent-pair sufficiency argument.
 
 Normalization is deliberately narrow: NFC + whitespace-run collapse only
 (`normalize_words`), no case-folding, no punctuation stripping -- matching
@@ -566,53 +572,71 @@ def check_reading_order(live_spans, manifest_blocks):
     its OWN correctly-assigned span. This check is the one that looks at
     ORDER, not content.
 
-    For each block_id with at least one live (non-dangling) span, takes its
-    EARLIEST baseline position (`min` of that block's own span starts) as an
-    anchor, then walks every anchored block in its own manifest
-    `order_index` order (the single global reading-order axis every other
-    manifest-derivable check in this plugin already keys off of --
-    validate_extraction.py's `spine_order_preserved`, `assemble.py`'s own
-    monotonicity WARN) and asserts the anchor positions are non-decreasing
-    along that walk. A decrease between two order_index-adjacent blocks
-    means the wrap placed the LATER (by manifest order) block's content
-    BEFORE the earlier one's in the baseline -- a reading-order reversal.
+    A per-block MIN-anchor reduction (take each block's earliest span start,
+    compare those anchors across blocks) is NOT sufficient: it collapses a
+    multi-span block down to one position and so cannot see another block's
+    span physically INTERLEAVED between two spans of the same block (block A
+    starts, block B's whole span lands, then block A resumes) -- A's anchor
+    is still its first span's position, which sorts before B's, so the
+    anchor comparison reports no defect even though the wrap shuffled
+    content between them. Instead this check walks the FULL span sequence:
 
-    Only ADJACENT-in-order_index pairs are checked (mirrors
-    `check_overlaps`'s own sufficiency argument): any inversion in a
-    sequence surfaces as a decrease between at least one adjacent pair once
-    the sequence is sorted by order_index, so a full pairwise scan is
-    unnecessary. A block whose own `order_index` is missing or not a
-    (non-bool) int is skipped here -- manifest.schema.json already requires
-    `order_index` to be a real integer on every block; a manifest that
-    violates that is a schema-shape defect for `validate_extraction.py` to
-    catch, not this check's concern."""
-    anchor = {}
-    for block_id, start, _end in live_spans:
-        if block_id not in anchor or start < anchor[block_id]:
-            anchor[block_id] = start
+    1. Build `(start, end, order_index, block_id)` for every live
+       (non-dangling) span whose block's own `order_index` is a real
+       (non-bool) int -- manifest.schema.json already requires that on every
+       block; a manifest that violates it is a schema-shape defect for
+       `validate_extraction.py` to catch, not this check's concern.
+    2. Sort that list by `(start, end)` -- i.e. baseline physical position.
+    3. Walk ADJACENT pairs of the sorted span list and flag any pair whose
+       `order_index` DECREASES: the span immediately following (by baseline
+       position) a span of order_index N belongs to a block whose manifest
+       order_index is less than N, meaning content the manifest places
+       EARLIER physically resumes AFTER content it places LATER already
+       began -- a reading-order reversal or interleave.
 
+    Only adjacent pairs of the sorted SPAN sequence are checked (the same
+    sufficiency argument `check_overlaps` already uses): a sequence of
+    values is non-decreasing iff every adjacent pair in it is non-decreasing,
+    so a full pairwise scan across the whole span list is unnecessary. This
+    is strictly stronger than a per-block anchor comparison: two spans of
+    the SAME block always share one order_index, so `cur < prev` is never
+    true between them -- legitimate multi-span blocks (e.g. straddling a
+    running head) never false-flag -- while an inversion or an interleave
+    between two DIFFERENT blocks that carry DISTINCT `order_index` values
+    always surfaces as a decrease somewhere in the walk, because it is then a
+    decrease in the underlying order_index sequence and any such decrease
+    appears between at least one adjacent pair once sorted. (Two DIFFERENT
+    blocks sharing ONE `order_index` could interleave without producing a
+    decrease, but that collision is a FATAL `duplicate_order_index` manifest
+    defect `assemble.py` raises on before assembly -- order_index is the
+    single global reading-order axis and must be unique per block; gaps in
+    the sequence are fine, only collisions are fatal -- so it never reaches a
+    real book.)"""
     ordered = []
-    for block_id, pos in anchor.items():
+    for block_id, start, end in live_spans:
         oi = manifest_blocks[block_id].get("order_index")
         if not isinstance(oi, int) or isinstance(oi, bool):
             continue
-        ordered.append((oi, block_id, pos))
+        ordered.append((start, end, oi, block_id))
     ordered.sort(key=lambda t: (t[0], t[1]))
 
     defects = []
     for i in range(1, len(ordered)):
-        prev_oi, prev_id, prev_pos = ordered[i - 1]
-        cur_oi, cur_id, cur_pos = ordered[i]
-        if cur_pos < prev_pos:
+        prev_start, _prev_end, prev_oi, prev_id = ordered[i - 1]
+        cur_start, _cur_end, cur_oi, cur_id = ordered[i]
+        if cur_oi < prev_oi:
             defects.append(
                 {
                     "kind": "reading_order_reversal",
                     "block_ids": [prev_id, cur_id],
                     "detail": (
-                        f"manifest order_index places {prev_id!r} ({prev_oi}) before "
-                        f"{cur_id!r} ({cur_oi}), but their own provenance spans anchor "
-                        f"them in the OPPOSITE order in the baseline (positions "
-                        f"{prev_pos} then {cur_pos})"
+                        f"walking the baseline in position order, a span of "
+                        f"{cur_id!r} (manifest order_index {cur_oi}) at baseline "
+                        f"position {cur_start} appears immediately after a span of "
+                        f"{prev_id!r} (manifest order_index {prev_oi}) at baseline "
+                        f"position {prev_start}, but manifest order places "
+                        f"{cur_id!r} BEFORE {prev_id!r} -- the wrap physically "
+                        f"shuffled or interleaved their content"
                     ),
                 }
             )

@@ -490,6 +490,86 @@ def test_wrapper_conservation_green_correct_reading_order(tmp_path):
     assert doc["defects"] == []
 
 
+def test_wrapper_conservation_red_reading_order_interleaving(tmp_path):
+    """The interleaving gap a min-anchor-per-block reduction cannot see:
+    block PARA:seg01:0001 (order_index=0) has TWO spans, and block
+    PARA:seg01:0002 (order_index=1) has ONE span physically BETWEEN
+    0001's two spans in the baseline -- so 0001 resumes AFTER 0002 already
+    began, even though each block's own content is fully intact (so
+    hollowed_or_truncated_block must never fire here). A min-of-own-starts
+    anchor for 0001 is the position of its FIRST span, which still sorts
+    before 0002's anchor -- non-decreasing, no defect -- even though the
+    baseline was physically shuffled. Only walking the full span sequence in
+    baseline-position order (not per-block anchors) can see this."""
+    root = make_root(tmp_path)
+    baseline, offsets = build_baseline([
+        ("a1", "Alpha first half about foxes.\n"),
+        ("b", "Beta entire chunk about oceans.\n"),
+        ("a2", "Alpha second half about forests.\n"),
+    ])
+    write_baseline(root, baseline)
+    write_provenance(root, [
+        ("PARA:seg01:0001", *offsets["a1"]),
+        ("PARA:seg01:0002", *offsets["b"]),
+        ("PARA:seg01:0001", *offsets["a2"]),
+    ])
+    write_profile(root, conservation={"baseline_path": "baseline.txt", "provenance_path": "provenance_map.json"})
+    write_manifest(root, {
+        "PARA:seg01:0001": make_block(
+            "PARA", "Alpha first half about foxes. Alpha second half about forests."
+        ),
+        "PARA:seg01:0002": make_block("PARA", "Beta entire chunk about oceans.", order_index=1),
+    }, [{"seg": "seg01", "kind": "body", "block_ids": ["PARA:seg01:0001", "PARA:seg01:0002"], "word_count": 15}])
+
+    proc = run_validate_conservation(root, "wrapper-conservation")
+    assert proc.returncode == 1, proc.stderr
+    doc = parse_stdout_json(proc)
+    kinds = {d["kind"] for d in doc["defects"]}
+    assert "reading_order_reversal" in kinds
+    assert "hollowed_or_truncated_block" not in kinds
+
+
+def test_wrapper_conservation_green_block_split_by_omission_not_interleaving(tmp_path):
+    """The legitimate counterpart to the interleaving test above: block
+    PARA:seg01:0001 (order_index=0) genuinely has two spans, but the region
+    between them is an ALLOWED OMISSION (a running head, carrying no
+    provenance span of its own) rather than another block's span. Block
+    PARA:seg01:0002 (order_index=1) comes entirely after. This must NOT
+    false-flag reading_order_reversal -- same-block multi-spans share one
+    order_index, so no adjacent pair in the sorted span sequence ever
+    decreases."""
+    root = make_root(tmp_path)
+    baseline, offsets = build_baseline([
+        ("a1", "Alpha first half about foxes.\n"),
+        ("headgap", "RUNNING HEAD\n"),
+        ("a2", "Alpha second half about forests.\n"),
+        ("b", "Beta entire chunk about oceans.\n"),
+    ])
+    write_baseline(root, baseline)
+    write_provenance(root, [
+        ("PARA:seg01:0001", *offsets["a1"]),
+        ("PARA:seg01:0001", *offsets["a2"]),
+        ("PARA:seg01:0002", *offsets["b"]),
+    ])
+    write_allowed_omissions(root, line_patterns=[r"^RUNNING HEAD$"])
+    write_profile(root, conservation={
+        "baseline_path": "baseline.txt",
+        "provenance_path": "provenance_map.json",
+        "allowed_omissions_path": "allowed_omissions.json",
+    })
+    write_manifest(root, {
+        "PARA:seg01:0001": make_block(
+            "PARA", "Alpha first half about foxes. Alpha second half about forests."
+        ),
+        "PARA:seg01:0002": make_block("PARA", "Beta entire chunk about oceans.", order_index=1),
+    }, [{"seg": "seg01", "kind": "body", "block_ids": ["PARA:seg01:0001", "PARA:seg01:0002"], "word_count": 15}])
+
+    proc = run_validate_conservation(root, "wrapper-conservation")
+    assert proc.returncode == 0, proc.stderr
+    doc = parse_stdout_json(proc)
+    assert doc["defects"] == []
+
+
 def test_wrapper_conservation_omission_range_is_characters_not_bytes(tmp_path):
     """Codex review probe (IMPORTANT finding): profile.schema.json documents
     allowed_omissions ranges as covering the baseline, and this script reads
