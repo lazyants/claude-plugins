@@ -2,6 +2,15 @@
 
 All notable changes to `lazyants/claude-plugins` are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is per-plugin, not repo-wide.
 
+## [multi-profile-plugins 1.0.0] — 2026-07-21
+
+Initial release. Knowledge + read-only diagnostics for Claude Code plugin behavior across multiple `CLAUDE_CONFIG_DIR` profiles.
+
+### Added
+- **Skill** — explains why profiles that share a `plugins/` store hit recurring "corrupted installLocation" errors and cross-profile plugin deletion, and the structural fix (independent per-profile stores). Diagnosis-and-reasoning only; no automated migration is performed.
+- **`references/cli-mechanism.md`** — the reverse-engineered CLI `installLocation` prefix validation and catalog-scoped garbage-collection mechanism, and why a durable fix needs fully independent per-profile plugin content rather than just a de-shared registry file.
+- **`scripts/inspect_profiles.py`** — a read-only, stdlib-only health check that auto-detects `~/.claude*` profiles (or accepts explicit ones), flags a shared `known_marketplaces.json` (the churn risk) and cross-profile pointer leaks (exact prefix match, not a substring grep), and exits non-zero on any warning.
+
 ## [enduser-handbook 1.6.0] — 2026-07-19
 
 Group-free manifests get the same link canon as grouped ones, and a duplicate flat slug now halts instead of silently overwriting a chapter. Closes #220. Closes #221.

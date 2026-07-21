@@ -5,7 +5,7 @@
   },
   "metadata": {
     "description": "Lazy Ants Claude Code plugins",
-    "version": "1.5.0"
+    "version": "1.6.0"
   },
   "plugins": [
     {
@@ -132,6 +132,27 @@
         "verse",
         "ledger",
         "hebrew"
+      ]
+    },
+    {
+      "name": "multi-profile-plugins",
+      "source": "./plugins/multi-profile-plugins",
+      "description": "Understand and diagnose Claude Code plugin behavior across multiple CLAUDE_CONFIG_DIR profiles. Explains why profiles that share a plugins store hit recurring \"corrupted installLocation\" errors and cross-profile plugin deletion, ships a read-only health-check script that detects shared registries and cross-profile pointer leaks, and documents the reverse-engineered CLI validation and garbage-collection mechanism behind it.",
+      "version": "1.0.0",
+      "author": {
+        "name": "Lazy Ants"
+      },
+      "category": "maintenance",
+      "keywords": [
+        "claude-code",
+        "plugins",
+        "multi-profile",
+        "config-dir",
+        "claude-config-dir",
+        "corrupted-installlocation",
+        "marketplace",
+        "diagnostics",
+        "profiles"
       ]
     }
   ]

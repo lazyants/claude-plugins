@@ -12,6 +12,7 @@ Public plugins for [Claude Code](https://claude.com/claude-code), maintained und
 | [`cc-usage-coach`](#cc-usage-coach--v100) | 1.0.0 | Personalized, behavior-aware analysis of where your Claude Code (Max/Pro) usage-limit tokens go, with ranked, low-effort ways to use fewer — computed entirely from your local session logs. Python measures; Claude concludes. |
 | [`enduser-handbook`](#enduser-handbook--v160) | 1.6.0 | Author, capture, and publish a Diátaxis-structured end-user handbook for any project — methodology shipped as a reusable skill, project-specific bindings supplied via `.claude/handbook/profile.yml`. |
 | [`literary-translator`](#literary-translator--v1100) | 1.10.0 | High-fidelity literary book translation over a Gutenberg-style EPUB source (expert-mode `custom` extractor also supported) — a codex-translate → deterministic false-green gate → codex-review → Claude-fix loop run to convergence, with a frozen name/realia canon, a configurable verse policy, and ledger-based resumability, plus optional book assembly into an Obsidian glossary-wiki behind a deterministic render/diff gate. |
+| [`multi-profile-plugins`](#multi-profile-plugins--v100) | 1.0.0 | Understand and diagnose Claude Code plugin behavior across multiple `CLAUDE_CONFIG_DIR` profiles — why profiles that share a plugins store hit recurring "corrupted installLocation" errors and cross-profile plugin deletion, with a read-only health-check script and the reverse-engineered CLI validation/GC mechanism behind it. |
 
 ## Install / update / uninstall
 
@@ -202,6 +203,22 @@ Trigger phrases: "translate this book", "set up a literary translation pipeline"
 - The shipped `gutenberg_epub` source adapter and the expert-mode `custom` extractor remain **experimental / unstable** until each is pilot-proven end-to-end on a real project (see `references/source-format-adapters/`); `plain_text` is specified but not yet implemented (#62).
 - Scoped to texts whose natural segments / chapters fit under a configurable per-segment word cap; a novel with genuinely long natural chapters is out of scope for v1.
 - The v1.2 Workflow-orchestration reliability pass is new plugin hardening, not itself pilot-proven — a real end-to-end pilot run is still the honest gate before treating it as fully load-bearing; a synchronous codex block-and-hang on a DISPATCH call's own `await` remains an accepted residual risk (see `references/gotchas.md`).
+
+## `multi-profile-plugins` — v1.0.0
+
+Understand and diagnose how Claude Code stores plugins when several `CLAUDE_CONFIG_DIR` profiles run on one machine. If some profiles share a `plugins/` directory (commonly via symlinks), a `claude plugin` op from one profile re-stamps the shared `known_marketplaces.json`, and every other profile then fails with `Marketplace 'X' has a corrupted installLocation …`; catalog-scoped garbage collection can also delete a plugin version one profile still uses. This plugin explains the mechanism and ships a read-only health check — it does **not** perform an automated migration.
+
+Trigger phrases: "corrupted installLocation", "claude plugin across profiles", "CLAUDE_CONFIG_DIR profiles", "plugin deleted in one profile", "multi-profile plugins" — full list in `plugins/multi-profile-plugins/skills/multi-profile-plugins/SKILL.md`.
+
+### What it covers
+
+- **The skill** — when to keep profiles' plugin stores shared vs. independent, why a shared store causes "corrupted installLocation" churn and cross-profile deletion, and (conceptually) the structural fix: give each profile its own independent `plugins/` store. Diagnosis-and-reasoning only; no bundled destructive tool.
+- **The deep mechanism** (`references/cli-mechanism.md`) — the reverse-engineered `installLocation` prefix check (`path.resolve` + `startsWith`, no symlink resolution; cache-managed sources checked while `file`/`directory`/seed skip it), the catalog-scoped startup GC + `uninstall` that force full content independence rather than just a de-shared registry, the per-config-dir cache model, and the "a read-only probe can mutate state" caveat.
+- **The health check** (`scripts/inspect_profiles.py`) — a read-only, stdlib-only Python script that auto-detects `~/.claude*` profiles (or takes explicit ones), reports which `plugins/` dirs are real vs. symlinked, flags profiles that share a `known_marketplaces.json` (the churn risk), and detects cross-profile pointer leaks via exact path-prefix matching (never a substring grep). Exits non-zero on any warning.
+
+### Scope
+
+Knowledge + read-only diagnostics. Converting a shared store to independent per-profile stores touches live plugin data and is intentionally left as a deliberate, backed-up manual step — not an automated action this plugin performs.
 
 ## License & disclaimer
 
