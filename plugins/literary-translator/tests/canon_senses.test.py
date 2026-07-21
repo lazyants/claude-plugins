@@ -224,7 +224,7 @@ def test_invalid_utf8_sidecar_raises_load_error(tmp_path):
 def test_deeply_nested_json_raises_load_error(tmp_path):
     """A document nested `MAX_NESTING_DEPTH + 1` levels deep must be
     rejected via the DETERMINISTIC depth preflight (`_measure_nesting_depth`
-    in `_read_json_file`), asserted by checking the message names the
+    in `_parse_utf8_json_with_depth_guard`), asserted by checking the message names the
     measured depth. This fixture is deliberately just ONE level past the
     ceiling (not the earlier extreme 100000-level fixture, see
     `test_extreme_nesting_is_rejected_by_some_layer` below): depth 101

@@ -879,6 +879,86 @@ def test_uncased_corpus_no_name_inventory_yields_zero_candidates(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# Class 8: fold_collision (#243)
+# ---------------------------------------------------------------------------
+
+# The real occ_index.test.py collision pair (space-joined/unvocalized vs
+# maqaf-joined/vocalized Baal Shem Tov-style forms) -- both fold to the same
+# bootstrap_names.fold_match_key.
+FORM_A = "משה לייב"
+FORM_B = "מֹשֶׁה־לַיִיב"
+
+
+def test_fold_collision_two_in_scope_colliding_forms_both_flagged_two_rows(tmp_path):
+    # Routing fires BEFORE any occurrence search even runs (the whole point
+    # of skipping the corrupted combined-occurrence computation) -- an empty
+    # manifest is enough to prove the two rows exist and carry the class.
+    canon = {
+        FORM_A: make_entry("Target", confidence="high"),
+        FORM_B: make_entry("Target", confidence="high"),
+    }
+    manifest_path, manifest = write_manifest(tmp_path, {})
+    competitors = ss.fold_collision_map([FORM_A, FORM_B])
+    entries, _warnings = scan(canon, manifest, manifest_path, make_lang(), competitors=competitors)
+    out = by_form(entries)
+    # Mutation: granularity of "one flag per collision group" (instead of
+    # one row per source_form) would collapse these into a single row.
+    assert set(out.keys()) == {FORM_A, FORM_B}
+    for sf in (FORM_A, FORM_B):
+        assert ss.RISK_FOLD_COLLISION in out[sf]["risk_classes"]
+        # Mutation: combining fold_collision with the ordinary
+        # occurrence-count classes (instead of skipping that computation
+        # entirely) would leave occurrence_refs non-empty here even though
+        # this form's own occurrences were never even searched.
+        assert out[sf]["occurrence_refs"] == []
+        assert ss.FOLD_COLLISION_OCCURRENCES_SUPPRESSED_TAG in out[sf].get("notes", [])
+
+
+def test_fold_collision_sibling_outside_scope_in_keeps_ordinary_counters(tmp_path):
+    # FORM_B shares FORM_A's competitor group but is NEVER a scope_in member
+    # here (simulates BOTH real exclusion reasons identically -- an
+    # is_proper_name:false canon entry, or a split-only canon_senses.json
+    # form that never became a canon entry at all -- build_worklist only
+    # ever asks "is the sibling in scope_in", never why it might not be).
+    canon = {FORM_A: make_entry("Target", confidence="high")}
+    blocks = {"PARA:1": make_block("PARA:1", "Lone occurrence here.", seg="seg01")}
+    manifest_path, manifest = write_manifest(tmp_path, blocks)
+    competitors = ss.fold_collision_map([FORM_A, FORM_B])  # FORM_B never in canon/scope_in
+    entries, _ = scan(canon, manifest, manifest_path, make_lang(), competitors=competitors)
+    out = by_form(entries)
+    # Mutation: flagging fold_collision off the RAW competitors.is_colliding
+    # check (global, ignoring scope_in) instead of re-projecting each group
+    # down to scope_in would wrongly flag FORM_A here even though its only
+    # sibling never gets an output row at all.
+    assert ss.RISK_FOLD_COLLISION not in out.get(FORM_A, {}).get("risk_classes", [])
+
+
+def test_fold_collision_none_competitors_disables_class_entirely(tmp_path):
+    # competitors=None (the default -- no caller resolved a senses sidecar)
+    # must be inert, even for a genuinely fold-colliding pair -- pre-#243
+    # backward compatibility for every existing caller.
+    canon = {
+        FORM_A: make_entry("Target", confidence="high"),
+        FORM_B: make_entry("Target", confidence="high"),
+    }
+    manifest_path, manifest = write_manifest(tmp_path, {})
+    entries, _ = scan(canon, manifest, manifest_path, make_lang())  # no competitors kwarg
+    out = by_form(entries)
+    for sf in (FORM_A, FORM_B):
+        assert ss.RISK_FOLD_COLLISION not in out.get(sf, {}).get("risk_classes", [])
+
+
+def test_fold_colliding_forms_helper_unit():
+    competitors = ss.fold_collision_map([FORM_A, FORM_B, "Solo"])
+    # Both scope_in members of the colliding group.
+    assert ss._fold_colliding_forms([FORM_A, FORM_B, "Solo"], competitors) == {FORM_A, FORM_B}
+    # FORM_B not in THIS call's scope_in_forms -- FORM_A must not collide.
+    assert ss._fold_colliding_forms([FORM_A, "Solo"], competitors) == set()
+    # competitors=None -- nothing collides.
+    assert ss._fold_colliding_forms([FORM_A, FORM_B], None) == set()
+
+
+# ---------------------------------------------------------------------------
 # resolve_citation_block_types
 # ---------------------------------------------------------------------------
 
@@ -915,8 +995,12 @@ def test_producer_input_digest_deterministic_across_two_calls(tmp_path):
     contents = {name: f"content-{name}".encode() for name in ss.PRODUCER_CODE_CLOSURE}
     _write_closure_files(tmp_path, contents)
     params = {"dispersion_threshold": 12}
-    d1 = ss.compute_producer_input_digest(b"canon", b"manifest", params, b"lang", tmp_path)
-    d2 = ss.compute_producer_input_digest(b"canon", b"manifest", params, b"lang", tmp_path)
+    d1 = ss.compute_producer_input_digest(
+        "regular", b"canon", "regular", b"manifest", "regular", b"senses", params, b"lang", tmp_path
+    )
+    d2 = ss.compute_producer_input_digest(
+        "regular", b"canon", "regular", b"manifest", "regular", b"senses", params, b"lang", tmp_path
+    )
     # Mutation: hashing a non-canonical (e.g. insertion-order-dependent)
     # serialization of `resolved_params` would make this flaky across dict
     # construction orders even for byte-identical inputs.
@@ -930,13 +1014,17 @@ def test_producer_input_digest_changes_with_each_closure_member(tmp_path, closur
     contents = {name: f"content-{name}".encode() for name in names}
     _write_closure_files(tmp_path, contents)
     params = {"dispersion_threshold": 12}
-    baseline = ss.compute_producer_input_digest(b"canon", b"manifest", params, b"lang", tmp_path)
+    baseline = ss.compute_producer_input_digest(
+        "regular", b"canon", "regular", b"manifest", "regular", b"senses", params, b"lang", tmp_path
+    )
 
     mutated = dict(contents)
     target = names[closure_index]
     mutated[target] = contents[target] + b"-mutated"
     _write_closure_files(tmp_path, mutated)
-    changed = ss.compute_producer_input_digest(b"canon", b"manifest", params, b"lang", tmp_path)
+    changed = ss.compute_producer_input_digest(
+        "regular", b"canon", "regular", b"manifest", "regular", b"senses", params, b"lang", tmp_path
+    )
     # Mutation: omitting `target` from PRODUCER_CODE_CLOSURE (or reading a
     # cached/stale copy of its bytes) would make a change to that ONE file
     # invisible to the digest, letting a stale worklist silently pass
@@ -948,34 +1036,280 @@ def test_producer_input_digest_changes_with_canon_manifest_params_and_lang_bytes
     contents = {name: f"content-{name}".encode() for name in ss.PRODUCER_CODE_CLOSURE}
     _write_closure_files(tmp_path, contents)
     base_params = {"dispersion_threshold": 12}
-    baseline = ss.compute_producer_input_digest(b"canon-A", b"manifest-A", base_params,
-                                                 b"lang-A", tmp_path)
+    baseline = ss.compute_producer_input_digest(
+        "regular", b"canon-A", "regular", b"manifest-A", "regular", b"senses-A",
+        base_params, b"lang-A", tmp_path,
+    )
 
-    assert ss.compute_producer_input_digest(b"canon-B", b"manifest-A", base_params,
-                                             b"lang-A", tmp_path) != baseline
-    assert ss.compute_producer_input_digest(b"canon-A", b"manifest-B", base_params,
-                                             b"lang-A", tmp_path) != baseline
-    assert ss.compute_producer_input_digest(b"canon-A", b"manifest-A",
-                                             {"dispersion_threshold": 13},
-                                             b"lang-A", tmp_path) != baseline
+    assert ss.compute_producer_input_digest(
+        "regular", b"canon-B", "regular", b"manifest-A", "regular", b"senses-A",
+        base_params, b"lang-A", tmp_path,
+    ) != baseline
+    assert ss.compute_producer_input_digest(
+        "regular", b"canon-A", "regular", b"manifest-B", "regular", b"senses-A",
+        base_params, b"lang-A", tmp_path,
+    ) != baseline
+    assert ss.compute_producer_input_digest(
+        "regular", b"canon-A", "regular", b"manifest-A", "regular", b"senses-A",
+        {"dispersion_threshold": 13}, b"lang-A", tmp_path,
+    ) != baseline
     # Mutation: forgetting to fold language_config_raw_bytes into the
     # digest (e.g. dropping it from the `parts` list) would make this last
     # comparison equal to baseline even though the particle-config file
     # content differs.
-    assert ss.compute_producer_input_digest(b"canon-A", b"manifest-A", base_params,
-                                             b"lang-B", tmp_path) != baseline
+    assert ss.compute_producer_input_digest(
+        "regular", b"canon-A", "regular", b"manifest-A", "regular", b"senses-A",
+        base_params, b"lang-B", tmp_path,
+    ) != baseline
+    # #243: senses_bytes itself must be folded into the digest -- a curator
+    # editing canon_senses.json (e.g. adding/removing a split-only form)
+    # with canon/manifest/params/lang all held constant must still change
+    # the stamped digest, or a stale worklist computed against the OLD
+    # competitors universe would pass skeptic_setup.py's freshness check.
+    assert ss.compute_producer_input_digest(
+        "regular", b"canon-A", "regular", b"manifest-A", "regular", b"senses-B",
+        base_params, b"lang-A", tmp_path,
+    ) != baseline
+
+
+def test_producer_input_digest_absent_senses_differs_from_logically_empty_senses(tmp_path):
+    # #243: an absent canon_senses.json sidecar (senses_bytes == b"", the
+    # tolerant-read convention -- see compute_producer_input_digest's own
+    # docstring) must hash DIFFERENTLY from a schema-valid but logically
+    # empty document's real bytes -- otherwise deleting the sidecar between
+    # scans would be invisible to the digest. Both hashed with state
+    # "regular" here deliberately -- this test isolates the CONTENT
+    # distinction (absent bytes vs logically-empty bytes); the STATE
+    # distinction (this same senses_bytes==b"" under "absent" vs "regular"
+    # states) is covered separately, see
+    # test_producer_input_digest_state_only_change_moves_digest below.
+    contents = {name: f"content-{name}".encode() for name in ss.PRODUCER_CODE_CLOSURE}
+    _write_closure_files(tmp_path, contents)
+    params = {"dispersion_threshold": 12}
+    absent = ss.compute_producer_input_digest(
+        "regular", b"canon", "regular", b"manifest", "regular", b"", params, b"lang", tmp_path
+    )
+    logically_empty_bytes = b'{"schema_version":1,"entries_by_source_form":{}}'
+    logically_empty = ss.compute_producer_input_digest(
+        "regular", b"canon", "regular", b"manifest", "regular", logically_empty_bytes,
+        params, b"lang", tmp_path,
+    )
+    # Mutation: normalizing/short-circuiting an absent sidecar's bytes to
+    # match a "logically empty" canonical form (instead of hashing the raw
+    # b"" a caller actually read) would collapse this distinction.
+    assert absent != logically_empty
+
+
+@pytest.mark.parametrize("slot", ["canon", "manifest", "senses"])
+def test_producer_input_digest_state_only_change_moves_digest(tmp_path, slot):
+    """codex round 4: a STATE-only change (content held constant at b"" --
+    "absent" vs a genuinely-empty "regular" file, both read as b"") must
+    move this digest too, not just H1's own stamp -- otherwise
+    skeptic_setup.py's freshness check (which recomputes this SAME digest)
+    cannot tell a project whose frozen input's STATE changed since the
+    worklist was stamped from one that is genuinely still fresh, and
+    (transitively, since compute_skeptic_input_digest hashes worklist_bytes)
+    the skeptic RESUME digest would stay blind to it too."""
+    contents = {name: f"content-{name}".encode() for name in ss.PRODUCER_CODE_CLOSURE}
+    _write_closure_files(tmp_path, contents)
+    params = {"dispersion_threshold": 12}
+    states = {"canon": "regular", "manifest": "regular", "senses": "regular"}
+    states[slot] = "absent"
+    absent_variant = ss.compute_producer_input_digest(
+        states["canon"], b"", states["manifest"], b"", states["senses"], b"",
+        params, b"lang", tmp_path,
+    )
+    regular_variant = ss.compute_producer_input_digest(
+        "regular", b"", "regular", b"", "regular", b"", params, b"lang", tmp_path
+    )
+    assert absent_variant != regular_variant, (
+        f"MUTATION CAUGHT: a state-only change on {slot!r} (content b\"\" either way) "
+        "must move the digest -- state args are not actually being hashed"
+    )
 
 
 def test_producer_input_digest_separator_prevents_boundary_collision(tmp_path):
     contents = {name: b"x" for name in ss.PRODUCER_CODE_CLOSURE}
     _write_closure_files(tmp_path, contents)
     params = {}
-    d_ab_c = ss.compute_producer_input_digest(b"AB", b"C", params, b"", tmp_path)
-    d_a_bc = ss.compute_producer_input_digest(b"A", b"BC", params, b"", tmp_path)
+    d_ab_c = ss.compute_producer_input_digest(
+        "regular", b"AB", "regular", b"C", "regular", b"", params, b"", tmp_path
+    )
+    d_a_bc = ss.compute_producer_input_digest(
+        "regular", b"A", "regular", b"BC", "regular", b"", params, b"", tmp_path
+    )
     # Mutation: removing the `hasher.update(b"\\x00")` separator between
     # concatenated parts would make these two genuinely different inputs
     # ("AB"+"C" vs "A"+"BC") hash identically.
     assert d_ab_c != d_a_bc
+
+
+@pytest.mark.parametrize("direction", [
+    "extra_tuple_entry", "missing_tuple_entry",
+    "duplicate_key_entry", "same_count_key_swap",
+])
+def test_producer_input_digest_fails_closed_on_frozen_input_specs_key_mismatch(tmp_path, monkeypatch, direction):
+    """Round 10 (#243, codex overrule of the prior round's refusal):
+    `compute_producer_input_digest()`'s signature is still the fixed
+    positional enumeration (canon/manifest/senses) round 9 left it as --
+    generalizing it was deliberately deferred again -- but the function
+    BODY now builds its own `{"canon": (state, bytes), "manifest": ...,
+    "senses": ...}` map and asserts that map's key set equals
+    `skeptic_constants.FROZEN_INPUT_SPECS`' own key set BEFORE hashing
+    anything. A `FROZEN_INPUT_SPECS` entry added (or removed) without a
+    matching hand-added parameter/snapshot-map entry here must now raise,
+    naming the mismatched key sets, instead of the digest silently
+    omitting -- forever -- whatever the tuple grew to include.
+
+    RED-before-green (verified manually against HEAD 681d19d's pre-round-10
+    `compute_producer_input_digest()`, not re-asserted here every run since
+    that would require carrying a stale git-show'd copy in the permanent
+    suite): loading HEAD's version and mutating the real, already-imported
+    `skeptic_constants.FROZEN_INPUT_SPECS` module attribute to append a
+    fourth entry left the digest BYTE-IDENTICAL to the unmutated baseline
+    (`91fa9493...c48b64a` both times) and raised nothing -- exactly the
+    silent-omission bug this test now guards against. Against the CURRENT
+    (fixed) function below, the identical mutation raises `AssertionError`
+    instead. This test therefore fails pre-fix (`pytest.raises` sees no
+    exception -- "DID NOT RAISE") and passes post-fix.
+
+    Mutates `ss.FROZEN_INPUT_SPECS` -- the name the ALREADY-LOADED `ss`
+    module (this file's own module-level import) bound at import time --
+    in memory via `monkeypatch`, auto-restored after the test; never
+    touches `skeptic_constants.py` on disk (that file belongs to a peer
+    owner). `compute_producer_input_digest()` looks up the bare name
+    `FROZEN_INPUT_SPECS` from its own module globals at CALL time (a
+    plain global reference, not a default-argument snapshot taken at def
+    time), so rebinding `ss.FROZEN_INPUT_SPECS` is indistinguishable, from
+    the function's own point of view, from a real edit landing in
+    `skeptic_constants.py`.
+
+    Round 11 (#243, codex round-11 finding): the round-10 guard this test
+    originally covered was `set(frozen_input_snapshots) != spec_keys` --
+    a SET comparison. This docstring already claimed (wrongly) to guard
+    "the finding's own point: a `len()`-only check would miss a same-count
+    divergent-name swap", but the parametrize list below never actually
+    contained a same-count case: both `extra_tuple_entry` and
+    `missing_tuple_entry` change the tuple's LENGTH, so a bare
+    `len(frozen_input_snapshots) != len(FROZEN_INPUT_SPECS)` guard would
+    satisfy both of them too, and neither exercises what a SET collapses.
+    Codex reproduced both gaps concretely: a `duplicate_key_entry` (a
+    fourth tuple entry that REUSES the `"canon"` key instead of getting
+    its own) reduces to the identical `{"canon","manifest","senses"}` set
+    as the hand-written snapshot dict, so it silently passed the round-10
+    SET guard; a `same_count_key_swap` (`"senses"` renamed to
+    `"sessens"`, cardinality unchanged) would silently pass a hypothetical
+    LENGTH-ONLY guard. Verified against a throwaway copy of both guard
+    shapes outside this worktree (scratchpad, not committed): re-running
+    `duplicate_key_entry` against a copy of round-10's real SET-based
+    guard (git-shown from HEAD `b7306de`) raises nothing --
+    `pytest.raises` sees "DID NOT RAISE" -- confirming this is real,
+    reproduced RED evidence, not a synthetic case; re-running
+    `same_count_key_swap` against a hand-mutated
+    `len(frozen_input_snapshots) != len(spec_keys)` guard copy also fails
+    to raise `AssertionError` (it falls through to the hashing loop and
+    raises an unrelated bare `KeyError` on the renamed key instead,
+    equally not what `pytest.raises(AssertionError)` below expects).
+    Against the CURRENT (round 11, sorted non-deduplicated key-LIST
+    comparison) guard, all four directions raise `AssertionError` naming
+    both key lists, as asserted below.
+
+    Parametrized over all four mismatch shapes the exact, non-deduplicated
+    key-LIST check must catch -- ``extra_tuple_entry`` appends a fourth
+    ``FROZEN_INPUT_SPECS`` entry (a tuple key with no matching
+    snapshot-map entry); ``missing_tuple_entry`` drops the existing
+    ``"senses"`` entry (the reverse: a snapshot-map entry -- ``"senses"``
+    is still hard-coded into the map regardless of the tuple -- with no
+    matching tuple key); ``duplicate_key_entry`` appends a fourth entry
+    that reuses the existing ``"canon"`` key (a SET-collapsing case a
+    length check alone would still catch, since it changes cardinality,
+    but a set-of-keys check would not); ``same_count_key_swap`` renames
+    the ``"senses"`` entry's key to ``"sessens"`` without changing the
+    tuple's length (a case a length-only check would NOT catch, since
+    cardinality is unchanged, but a set-of-keys check would)."""
+    contents = {name: f"content-{name}".encode() for name in ss.PRODUCER_CODE_CLOSURE}
+    _write_closure_files(tmp_path, contents)
+    params = {"dispersion_threshold": 12}
+
+    if direction == "extra_tuple_entry":
+        mutated_specs = ss.FROZEN_INPUT_SPECS + (
+            ("mystery_fourth", "mystery_fourth.json", "mystery_fourth_sha256"),
+        )
+    elif direction == "missing_tuple_entry":
+        mutated_specs = tuple(spec for spec in ss.FROZEN_INPUT_SPECS if spec[0] != "senses")
+    elif direction == "duplicate_key_entry":
+        mutated_specs = ss.FROZEN_INPUT_SPECS + (
+            ("canon", "fourth.json", "fourth_sha256"),
+        )
+    else:  # same_count_key_swap
+        mutated_specs = tuple(
+            ("sessens", spec[1], spec[2]) if spec[0] == "senses" else spec
+            for spec in ss.FROZEN_INPUT_SPECS
+        )
+    monkeypatch.setattr(ss, "FROZEN_INPUT_SPECS", mutated_specs)
+
+    with pytest.raises(AssertionError) as exc_info:
+        ss.compute_producer_input_digest(
+            "regular", b"canon", "regular", b"manifest", "regular", b"senses",
+            params, b"lang", tmp_path,
+        )
+
+    # Assert on the actual key-SET mismatch the exception must name, not
+    # merely that "something raised" -- a test satisfied by any exception
+    # would pass even if the guard crashed for an unrelated reason.
+    msg = str(exc_info.value)
+    expected_snapshot_keys = repr(sorted(["canon", "manifest", "senses"]))
+    expected_spec_keys = repr(sorted(spec[0] for spec in mutated_specs))
+    assert expected_snapshot_keys in msg and expected_spec_keys in msg, (
+        f"MUTATION CAUGHT ({direction}): the raised exception must name "
+        f"BOTH the fixed {{'canon','manifest','senses'}} snapshot key set "
+        f"({expected_snapshot_keys}) and the mutated FROZEN_INPUT_SPECS "
+        f"key set ({expected_spec_keys}) -- got: {msg!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# compute_frozen_input_hash -- H1's shared producer/verifier hash (codex
+# round 2: absent/regular-empty/irregular must never collide)
+# ---------------------------------------------------------------------------
+
+def test_frozen_input_hash_absent_regular_empty_and_irregular_all_differ(tmp_path):
+    absent_path = tmp_path / "absent.json"
+    assert not absent_path.exists()
+
+    regular_empty_path = tmp_path / "regular_empty.json"
+    regular_empty_path.write_bytes(b"")
+
+    irregular_path = tmp_path / "irregular_dir"
+    irregular_path.mkdir()
+
+    h_absent = ss.compute_frozen_input_hash(absent_path)
+    h_regular_empty = ss.compute_frozen_input_hash(regular_empty_path)
+    h_irregular = ss.compute_frozen_input_hash(irregular_path)
+
+    # Mutation: hashing raw content bytes alone (the pre-fix scheme, bare
+    # `sha256(path.read_bytes() if path.is_file() else b"")`) makes all
+    # three of these collapse to the SAME sha256(b"") -- replacing a
+    # stamped non-empty frozen input with an empty regular file, or with a
+    # directory, would then silently NOT trip the H1 tamper tripwire.
+    assert len({h_absent, h_regular_empty, h_irregular}) == 3, (
+        f"expected 3 distinct hashes, got absent={h_absent!r} "
+        f"regular_empty={h_regular_empty!r} irregular={h_irregular!r}"
+    )
+    # None of them accidentally regress to the bare pre-fix formula either.
+    assert h_absent != hashlib.sha256(b"").hexdigest()
+    assert h_regular_empty != hashlib.sha256(b"").hexdigest()
+    assert h_irregular != hashlib.sha256(b"").hexdigest()
+
+
+def test_frozen_input_hash_regular_content_still_content_sensitive(tmp_path):
+    path_a = tmp_path / "a.json"
+    path_a.write_bytes(b"one")
+    path_b = tmp_path / "b.json"
+    path_b.write_bytes(b"two")
+    assert ss.compute_frozen_input_hash(path_a) != ss.compute_frozen_input_hash(path_b)
+    # Same content, re-hashed -- deterministic.
+    assert ss.compute_frozen_input_hash(path_a) == ss.compute_frozen_input_hash(path_a)
 
 
 def test_resolved_scan_params_uses_actual_resolved_citation_types():
@@ -1106,10 +1440,206 @@ def test_main_end_to_end_produces_schema_valid_worklist_with_matching_digest(tmp
         resolved_citation_types=ss.resolve_citation_block_types("plain_text", None),
     )
     expected_digest = ss.compute_producer_input_digest(
-        canon_path.read_bytes(), manifest_path.read_bytes(), resolved_params,
-        lang.raw_bytes, ss.SCRIPT_DIR,
+        "regular", canon_path.read_bytes(), "regular", manifest_path.read_bytes(),
+        "absent", b"",  # no canon_senses.json in this fixture
+        resolved_params, lang.raw_bytes, ss.SCRIPT_DIR,
     )
     # Mutation: hashing the WRONG resolved parameters (e.g. CLI defaults
     # that don't match what main() actually resolved) would desync
     # producer and an independent verifier's recomputed digest.
     assert worklist["producer_input_digest"] == expected_digest
+
+
+def test_main_cli_senses_path_wires_competitors_split_only_form_never_flags(tmp_path):
+    """#243 end-to-end: --senses-path is parsed to build the ambiguity-
+    competitors universe (union of canon.json entries + canon_senses.json
+    forms, split-only included). FORM_B here is split-only -- present ONLY
+    in the sidecar, never in canon.json -- so it can poison FORM_A's
+    ambiguity detection (competitor) but never itself becomes eligible for
+    output (never in scope_in). FORM_A alone in canon.json, with no OTHER
+    scope_in sibling, must therefore stay UNFLAGGED by class 8."""
+    languages_dir = tmp_path / "languages"
+    write_particle_config(languages_dir, "en.json")
+
+    canon_path = tmp_path / "canon.json"
+    canon_path.write_text(json.dumps({
+        "entries": {FORM_A: make_entry("Target", confidence="high")},
+    }, ensure_ascii=False), encoding="utf-8")
+
+    valid_evidence = {
+        "block": "b1", "seg": "seg01", "char_start": 0, "char_end": 4,
+        "context_start": 0, "context_end": 20, "sha256": "a" * 64,
+    }
+    valid_sense = lambda sid: {  # noqa: E731 -- local test-only shorthand
+        "sense_id": sid, "disambiguator": sid, "index_scope": "narrative", "evidence": valid_evidence,
+    }
+    senses_path = tmp_path / "canon_senses.json"
+    senses_path.write_text(json.dumps({
+        "schema_version": 1,
+        "entries_by_source_form": {FORM_B: {"senses": [valid_sense("s1"), valid_sense("s2")]}},
+    }, ensure_ascii=False), encoding="utf-8")
+
+    blocks = {"PARA:1": make_block("PARA:1", "Lone occurrence here.", seg="seg01")}
+    manifest_path, _manifest = write_manifest(tmp_path, blocks)
+    out_path = tmp_path / "suspicion_worklist.json"
+
+    rc = ss.main([
+        "--canon", str(canon_path), "--manifest", str(manifest_path),
+        "--senses-path", str(senses_path),
+        "--particle-config", "en.json", "--languages-dir", str(languages_dir),
+        "--research-mode", "live", "--source-format", "plain_text",
+        "--out", str(out_path),
+    ])
+    assert rc == 0, "main() must accept --senses-path"
+    worklist = json.loads(out_path.read_text(encoding="utf-8"))
+    out = by_form(worklist["entries"]).get(FORM_A, {})
+    # Mutation: building competitors from canon.json entries alone (never
+    # unioning in the senses sidecar's own forms) would trivially pass this
+    # assertion for the WRONG reason (FORM_B never even entering the
+    # universe) -- this test only proves the negative half; the positive
+    # half (two canon entries DO flag) is covered by
+    # test_fold_collision_two_in_scope_colliding_forms_both_flagged_two_rows.
+    assert ss.RISK_FOLD_COLLISION not in out.get("risk_classes", [])
+
+
+def test_main_tolerates_absent_senses_path_default(tmp_path):
+    languages_dir = tmp_path / "languages"
+    write_particle_config(languages_dir, "en.json")
+    canon_path = tmp_path / "canon.json"
+    canon_path.write_text(json.dumps({
+        "entries": {"Winifred": make_entry("Winifred", confidence="high")},
+    }, ensure_ascii=False), encoding="utf-8")
+    blocks = {"PARA:1": make_block("PARA:1", "Winifred spoke.", seg="seg01")}
+    manifest_path, _manifest = write_manifest(tmp_path, blocks)
+    out_path = tmp_path / "suspicion_worklist.json"
+    senses_path = tmp_path / "canon_senses.json"
+    assert not senses_path.is_file()
+
+    rc = ss.main([
+        "--canon", str(canon_path), "--manifest", str(manifest_path),
+        "--particle-config", "en.json", "--languages-dir", str(languages_dir),
+        "--research-mode", "live", "--source-format", "plain_text",
+        "--out", str(out_path),
+    ])
+    # Mutation: treating an absent implicit-default canon_senses.json as a
+    # hard error (instead of allow_absent=True, the same tolerance --canon
+    # already gets) would make main() return nonzero here.
+    assert rc == 0
+    worklist = json.loads(out_path.read_text(encoding="utf-8"))
+    assert by_form(worklist["entries"])["Winifred"]["risk_classes"] == [ss.RISK_SINGLETON]
+
+
+def test_main_explicit_senses_path_missing_is_hard_error(tmp_path):
+    languages_dir = tmp_path / "languages"
+    write_particle_config(languages_dir, "en.json")
+    canon_path = tmp_path / "canon.json"
+    canon_path.write_text(json.dumps({"entries": {}}, ensure_ascii=False), encoding="utf-8")
+    blocks = {"PARA:1": make_block("PARA:1", "Nothing here.", seg="seg01")}
+    manifest_path, _manifest = write_manifest(tmp_path, blocks)
+    missing_senses_path = tmp_path / "typo_canon_senses.json"
+    assert not missing_senses_path.is_file()
+
+    rc = ss.main([
+        "--canon", str(canon_path), "--manifest", str(manifest_path),
+        "--senses-path", str(missing_senses_path),
+        "--particle-config", "en.json", "--languages-dir", str(languages_dir),
+        "--research-mode", "live", "--source-format", "plain_text",
+        "--out", str(tmp_path / "out.json"),
+    ])
+    # Mutation: `allow_absent=True` unconditionally (never gated on whether
+    # --senses-path was explicitly given) would silently treat this typo'd
+    # path as "no splits" instead of a hard error.
+    assert rc == 1
+
+
+def test_main_senses_parse_consumes_the_same_snapshot_the_digest_hashed(tmp_path, monkeypatch):
+    """Codex round 5 BLOCKER: main() used to capture
+    (senses_state, senses_bytes) via read_frozen_input_snapshot() for
+    producer_input_digest, then call load_senses() -- a SEPARATE,
+    independent re-read of senses_path -- to get the entries that feed the
+    #243 ambiguity-competitors universe. A mutation landing in the window
+    between those two reads let the digest describe the ORIGINAL sidecar
+    while the worklist's own parse of it silently reflected the MUTATED
+    one -- the "approved snapshot is not always the consumed snapshot" bug,
+    at this script's own trust boundary.
+
+    Proves there is now only ONE read: monkeypatches `read_frozen_input_snapshot`
+    (the ONLY function call between the frozen-input capture and any
+    would-be second read of senses_path -- see suspicion_scan.py main()'s
+    own comment on this) to capture the ORIGINAL bytes via the real
+    implementation, then mutate canon_senses.json on disk immediately
+    after, then RETURN the ORIGINAL captured tuple -- exactly the "mutation
+    lands in the gap" shape the round-3/4 H1 tests already use for
+    skeptic_setup.py, applied here to the OTHER trust boundary codex round
+    5 found.
+
+    Deliberately does NOT use a fold_collision scenario as the observable
+    signal (an earlier draft of this test tried that and was wrong): a
+    split-only canon_senses.json form -- present ONLY in the sidecar, never
+    in canon.json -- can NEVER by itself flip a canon-only sibling's
+    RISK_FOLD_COLLISION flag (`_fold_colliding_forms` requires >=1 OTHER
+    SCOPE_IN member in the same group, and scope_in comes exclusively from
+    canon.json; see `test_fold_collision_sibling_outside_scope_in_keeps_ordinary_counters`'s
+    own docstring), so that signal cannot distinguish original from
+    mutated content here. Uses schema-validity instead: the ORIGINAL
+    sidecar is genuinely SCHEMA-INVALID (parsing it must fail-closed); the
+    mutation rewrites it to be schema-valid on disk. In the pre-fix code
+    (load_senses(senses_path, ...), its own independent read), main()
+    would SUCCEED -- the second read sees the now-valid mutated file,
+    silently laundering the fact that the snapshot actually captured (and
+    hashed into producer_input_digest) was invalid. In the fixed code
+    (load_senses_from_snapshot() parses the SAME captured senses_bytes
+    directly, no second read), main() MUST still fail: the worklist this
+    run would produce and the digest it would be stamped with can never
+    describe two different sidecar versions."""
+    languages_dir = tmp_path / "languages"
+    write_particle_config(languages_dir, "en.json")
+
+    canon_path = tmp_path / "canon.json"
+    canon_path.write_text(json.dumps({
+        "entries": {FORM_A: make_entry("Target", confidence="high")},
+    }, ensure_ascii=False), encoding="utf-8")
+
+    # Genuinely schema-invalid: missing the required entries_by_source_form
+    # key entirely (canon-senses.schema.json requires it).
+    original_senses_bytes = json.dumps({"schema_version": 1}, ensure_ascii=False).encode("utf-8")
+    senses_path = tmp_path / "canon_senses.json"
+    senses_path.write_bytes(original_senses_bytes)
+
+    mutated_senses_bytes = json.dumps(
+        {"schema_version": 1, "entries_by_source_form": {}}, ensure_ascii=False
+    ).encode("utf-8")
+
+    blocks = {"PARA:1": make_block("PARA:1", "Lone occurrence here.", seg="seg01")}
+    manifest_path, _manifest = write_manifest(tmp_path, blocks)
+    out_path = tmp_path / "suspicion_worklist.json"
+
+    real_read_frozen_input_snapshot = ss.read_frozen_input_snapshot
+
+    def _capture_then_mutate_senses(path):
+        result = real_read_frozen_input_snapshot(path)
+        if Path(path) == senses_path:
+            senses_path.write_bytes(mutated_senses_bytes)
+        return result
+
+    monkeypatch.setattr(ss, "read_frozen_input_snapshot", _capture_then_mutate_senses)
+
+    rc = ss.main([
+        "--canon", str(canon_path), "--manifest", str(manifest_path),
+        "--senses-path", str(senses_path),
+        "--particle-config", "en.json", "--languages-dir", str(languages_dir),
+        "--research-mode", "live", "--source-format", "plain_text",
+        "--out", str(out_path),
+    ])
+    assert rc == 1, (
+        "MUTATION CAUGHT: main() succeeded, meaning it re-read "
+        "canon_senses.json AFTER producer_input_digest's own senses_bytes "
+        "was already captured -- a second, independent read that silently "
+        "consumed the on-disk file this run's snapshot never actually "
+        "described, laundering the fact that the captured snapshot was "
+        "schema-invalid"
+    )
+    assert not out_path.is_file(), "a fail-closed run must not still write a worklist"
+    # The on-disk file genuinely IS mutated now -- confirms this is a real
+    # injected mutation, not a no-op.
+    assert senses_path.read_bytes() == mutated_senses_bytes

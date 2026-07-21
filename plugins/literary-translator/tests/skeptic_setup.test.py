@@ -33,6 +33,8 @@ import time
 import unicodedata
 from pathlib import Path
 
+import pytest
+
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 ASSETS_DIR = PLUGIN_ROOT / "skills" / "literary-translator" / "assets"
 SCRIPTS_DIR = ASSETS_DIR / "scripts"
@@ -110,6 +112,31 @@ def _load_module(name: str, path: Path, extra_sys_path: Path):
         sys.path.remove(str(extra_sys_path))
 
 
+# Loaded once, module-level: compute_frozen_input_hash is a pure function
+# (os/hashlib/Path only, no project-specific state), so the REAL, shipped
+# implementation can be reused directly by every fixture below that needs to
+# independently compute an EXPECTED canon_sha256/manifest_sha256/
+# senses_sha256 -- never a second, hand-rolled reimplementation of the same
+# state-tagged hash formula that could silently drift from production.
+ss = _load_module("suspicion_scan_for_frozen_hash", SUSPICION_SCAN_SRC, SCRIPTS_DIR)
+
+# Codex round 9: the per-slot H1 tests below used to hard-code their own
+# ("canon"/"manifest"/"senses", ...) parametrization rows -- a literal
+# restatement of skeptic_constants.FROZEN_INPUT_SPECS (the single
+# authoritative table skeptic_setup.py's stamper and skeptic_ready.py's
+# verifier now both derive from, round 8) that could silently drift from
+# it: a fourth frozen input added to the tuple would get NO test case here
+# at all, and the suite would stay green while reporting full per-slot
+# coverage. Loaded once, module-level (collection-time, mirrors `ss` above)
+# so `pytest.mark.parametrize` below reads the SAME tuple production reads
+# -- a new FROZEN_INPUT_SPECS entry therefore grows this parametrization
+# automatically, with no line here to remember to touch.
+_frozen_input_specs_module = _load_module(
+    "skeptic_constants_for_frozen_specs", SKEPTIC_CONSTANTS_SRC, SCRIPTS_DIR
+)
+FROZEN_INPUT_SPECS = _frozen_input_specs_module.FROZEN_INPUT_SPECS
+
+
 def make_skeptic_root(tmp_path) -> Path:
     """An isolated durable_root with real copies of every shipped script/
     template skeptic_setup.py's code closure depends on (including owner
@@ -165,9 +192,15 @@ def compute_expected_producer_digest(root: Path, scan_params: dict,
     ss = _load_module("suspicion_scan_for_test", scripts_dir / "suspicion_scan.py", scripts_dir)
     bn = _load_module("bootstrap_names_for_test", scripts_dir / "bootstrap_names.py", scripts_dir)
     lang = bn.load_language_config(particle_config_filename, languages_dir)
-    canon_path = root / "canon.json"
-    canon_bytes = canon_path.read_bytes() if canon_path.is_file() else b""
-    manifest_bytes = (root / "manifest.json").read_bytes()
+    # codex round 4: (state, bytes) via the REAL read_frozen_input_snapshot()
+    # -- never a hand-rolled tolerant read here -- so this helper's own
+    # classification can never independently drift from what main() itself
+    # calls. make_skeptic_root() never writes a canon_senses.json sidecar by
+    # default, so senses_state is "absent" unless a test writes one itself
+    # before calling write_worklist()/this helper.
+    canon_state, canon_bytes = ss.read_frozen_input_snapshot(root / "canon.json")
+    manifest_state, manifest_bytes = ss.read_frozen_input_snapshot(root / "manifest.json")
+    senses_state, senses_bytes = ss.read_frozen_input_snapshot(root / "canon_senses.json")
 
     resolved_citation_types = ss.resolve_citation_block_types(scan_params["source_format"], citation_override)
     resolved_params = ss.resolved_scan_params(
@@ -182,7 +215,8 @@ def compute_expected_producer_digest(root: Path, scan_params: dict,
         resolved_citation_types=resolved_citation_types,
     )
     return ss.compute_producer_input_digest(
-        canon_bytes, manifest_bytes, resolved_params, lang.raw_bytes, scripts_dir,
+        canon_state, canon_bytes, manifest_state, manifest_bytes, senses_state, senses_bytes,
+        resolved_params, lang.raw_bytes, scripts_dir,
     )
 
 
@@ -359,16 +393,17 @@ def test_success_writes_schema_valid_aggregate_and_batch_manifests(tmp_path):
     assert aggregate["input_digest"] == parsed["input_digest"]
     assert aggregate["producer_input_digest"] == parsed["producer_input_digest"]
 
-    # Fix H1 (writer half): the frozen canon/manifest bytes' own sha256 are
+    # Fix H1 (writer half): the frozen canon/manifest inputs' own
+    # state-tagged hash (compute_frozen_input_hash, codex round 2) are
     # stamped so --verify-merged (A3) can re-hash the on-disk files and
     # detect a post-setup tamper.
-    assert aggregate["canon_sha256"] == hashlib.sha256((root / "canon.json").read_bytes()).hexdigest(), (
+    assert aggregate["canon_sha256"] == ss.compute_frozen_input_hash(root / "canon.json"), (
         "MUTATION CAUGHT: the aggregate manifest must stamp canon_sha256 == "
-        "sha256 of the ACTUAL canon.json bytes this run was set up against"
+        "compute_frozen_input_hash() of the ACTUAL canon.json this run was set up against"
     )
-    assert aggregate["manifest_sha256"] == hashlib.sha256((root / "manifest.json").read_bytes()).hexdigest(), (
+    assert aggregate["manifest_sha256"] == ss.compute_frozen_input_hash(root / "manifest.json"), (
         "MUTATION CAUGHT: the aggregate manifest must stamp manifest_sha256 == "
-        "sha256 of the ACTUAL manifest.json bytes this run was set up against"
+        "compute_frozen_input_hash() of the ACTUAL manifest.json this run was set up against"
     )
 
     # Independent re-validation against the REAL schema file -- never trust
@@ -395,6 +430,185 @@ def test_success_writes_schema_valid_aggregate_and_batch_manifests(tmp_path):
     assert isinstance(batch1_ids, list) and len(batch1_ids) == 1
     aggregate_ids_by_form = {a["source_form"]: a["assignment_id"] for a in aggregate["assignments"]}
     assert {batch0_ids[0], batch1_ids[0]} == set(aggregate_ids_by_form.values())
+
+
+def test_aggregate_stamps_senses_sha256_of_actual_sidecar_bytes(tmp_path):
+    """#243 H1 (writer half): canon_senses.json joined canon.json/
+    manifest.json as a THIRD frozen input this script must stamp, so
+    --verify-merged can re-hash it and detect a post-setup tamper the same
+    way it already does for canon_sha256/manifest_sha256."""
+    root = make_skeptic_root(tmp_path)
+    (root / "canon_senses.json").write_text(
+        json.dumps({"schema_version": 1, "entries_by_source_form": {}}), encoding="utf-8"
+    )
+    entry = make_worklist_entry("Jean", occurrence_refs=[make_occurrence_ref("b1", "seg01", 0, 4)])
+    write_worklist(root, [entry])
+
+    proc, parsed = run_skeptic_setup(root)
+
+    assert proc.returncode == 0, f"stdout={proc.stdout}\nstderr={proc.stderr}"
+    run_dir = Path(parsed["run_dir"])
+    aggregate = json.loads((run_dir / "assignments.json").read_text(encoding="utf-8"))
+    assert aggregate["senses_sha256"] == ss.compute_frozen_input_hash(root / "canon_senses.json"), (
+        "MUTATION CAUGHT: the aggregate manifest must stamp senses_sha256 == "
+        "compute_frozen_input_hash() of the ACTUAL canon_senses.json this run was set up against"
+    )
+
+
+def test_aggregate_stamps_senses_sha256_of_absent_state_when_sidecar_absent(tmp_path):
+    """The default fixture (make_skeptic_root) never writes canon_senses.json
+    -- senses_sha256 must still be present, stamping the "absent"-state hash
+    (compute_frozen_input_hash's own state tag, codex round 2 -- NOT bare
+    sha256(b"") any more, which would collide with a regular-but-empty file
+    or a directory), never omitted or null, so an aggregate manifest is
+    always comparable byte-for-byte against a fresh re-hash regardless of
+    whether the sidecar exists."""
+    root = make_skeptic_root(tmp_path)
+    assert not (root / "canon_senses.json").is_file()
+    entry = make_worklist_entry("Jean", occurrence_refs=[make_occurrence_ref("b1", "seg01", 0, 4)])
+    write_worklist(root, [entry])
+
+    proc, parsed = run_skeptic_setup(root)
+
+    assert proc.returncode == 0, f"stdout={proc.stdout}\nstderr={proc.stderr}"
+    run_dir = Path(parsed["run_dir"])
+    aggregate = json.loads((run_dir / "assignments.json").read_text(encoding="utf-8"))
+    assert aggregate["senses_sha256"] == ss.compute_frozen_input_hash(root / "canon_senses.json")
+    # Mutation: reverting to bare sha256(b"") would make this equal a
+    # regular, genuinely-empty file's hash too -- pin the DISTINCTION
+    # directly, not just "some hash was stamped".
+    (root / "canon_senses.json").write_bytes(b"")
+    assert aggregate["senses_sha256"] != hashlib.sha256(b"").hexdigest()
+
+
+@pytest.mark.parametrize("slot", [key for key, _label, _stamp_field in FROZEN_INPUT_SPECS])
+def test_h1_stamp_snapshots_derivation_time_state_not_a_later_reread(tmp_path, slot):
+    """codex round 3 BLOCKER, round-4-corrected: skeptic_setup.py reads
+    canon/manifest/senses ONCE early (driving the freshness check +
+    assignments this run builds), but the H1 stamp was previously computed
+    by RE-READING the paths later, right before writing assignments.json. A
+    mutation landing in that window was silently ADOPTED as "the true
+    state" instead of being caught -- the published stamp would describe
+    the MUTATED file while the worklist-freshness check and the
+    assignments this run just built both still describe the ORIGINAL one.
+
+    Parameterized over all THREE (slot, stamp-field) pairs -- codex round 4:
+    the original version of this test only ever mutated canon_senses.json
+    and only ever asserted `senses_sha256`, so regressing ONLY
+    `canon_sha256` or ONLY `manifest_sha256` would have stayed green. A
+    "RED-prove all three at once" pass over that version only demonstrated
+    the test catches a TOTAL regression (all three stamps reverted
+    simultaneously), never a PER-STAMP one -- re-proving RED here means
+    reverting exactly the ONE stamp this parametrization targets, one at a
+    time.
+
+    Codex round 9: `slot` is parametrized straight off
+    `FROZEN_INPUT_SPECS` (module-level, see the load near `ss` above), not
+    a second hand-typed `["canon", "manifest", "senses"]` list -- a fourth
+    frozen input added to that tuple now automatically grows this
+    parametrization into a fourth case instead of staying invisibly
+    uncovered.
+
+    Injects a mutation at the exact boundary via a monkeypatch on
+    `_schemas_dir_hash()` -- called well after the derivation reads (top of
+    `run()`) and well before the aggregate dict (with its H1 stamps) is
+    built, the same real ordering this bug lived in -- and asserts the
+    TARGETED slot's stamp reflects the ORIGINAL snapshot, never the mutated
+    one. This is NOT "no mutation is ever missed": the whole point of H1 is
+    that the NEXT --verify-merged/--check-frozen-inputs re-read catches
+    this by comparing the (correctly-original) stamp against what's
+    ACTUALLY on disk now (mutated) -- a re-read stamp would instead make
+    the stamp agree with the mutation, and nothing downstream would ever
+    see a mismatch at all. skeptic_setup.py itself never JSON-parses
+    canon.json/manifest.json/canon_senses.json (only suspicion_scan.py/
+    skeptic_ready.py do, for their own different purposes), so an
+    arbitrary byte-suffix mutation is safe for all three slots here --
+    never needs to stay schema-valid."""
+    root = make_skeptic_root(tmp_path)
+    mod = _load_module(
+        "skeptic_setup_for_snapshot_race_test", root / "scripts" / "skeptic_setup.py", root / "scripts"
+    )
+    # Derived straight from FROZEN_INPUT_SPECS (not a hand-copied second
+    # restatement) -- structurally cannot omit an entry `slot` was
+    # parametrized over, since both come from the same tuple.
+    filenames = {key: label for key, label, _stamp_field in FROZEN_INPUT_SPECS}
+    stamp_fields = {key: stamp_field for key, _label, stamp_field in FROZEN_INPUT_SPECS}
+    target_path = root / filenames[slot]
+    if not target_path.is_file():
+        # make_skeptic_root() only pre-writes canon.json/manifest.json --
+        # any OTHER frozen input (canon_senses.json today, or a future
+        # addition to FROZEN_INPUT_SPECS) starts absent and needs seed
+        # bytes here before this test can mutate it. Keyed explicitly by
+        # `slot` (never a generic "write empty JSON for whatever's
+        # missing") so a genuinely new frozen input fails LOUDLY with a
+        # clear diagnosis instead of silently seeding content that may not
+        # suit it.
+        seed_bytes_by_slot = {
+            "senses": json.dumps({"schema_version": 1, "entries_by_source_form": {}}).encode("utf-8"),
+        }
+        assert slot in seed_bytes_by_slot, (
+            f"FROZEN_INPUT_SPECS grew a new slot {slot!r} that neither "
+            "make_skeptic_root() nor this test's seed_bytes_by_slot knows "
+            "how to bring into existence -- add fixture seed bytes for it "
+            "here (and/or have make_skeptic_root() pre-write it) before "
+            "this test can exercise it"
+        )
+        target_path.write_bytes(seed_bytes_by_slot[slot])
+    original_bytes = target_path.read_bytes()
+    original_hash = mod.compute_frozen_input_hash_from_state("regular", original_bytes)
+
+    entry = make_worklist_entry("Jean", occurrence_refs=[make_occurrence_ref("b1", "seg01", 0, 4)])
+    write_worklist(root, [entry])
+
+    mutated_bytes = original_bytes + b"  // mutated mid-run"
+
+    real_schemas_dir_hash = mod._schemas_dir_hash
+
+    def _mutate_then_hash_schemas():
+        # Simulates a skeptic-agent tamper (or any other mid-run mutation)
+        # landing in the window between this run's derivation reads and its
+        # H1 stamp -- _schemas_dir_hash() is a real, unrelated call this
+        # function makes at exactly that point, never touching canon/
+        # manifest/senses itself, which is what makes it a clean injection
+        # site rather than interfering with anything else in the flow.
+        target_path.write_bytes(mutated_bytes)
+        return real_schemas_dir_hash()
+
+    mod._schemas_dir_hash = _mutate_then_hash_schemas
+
+    sp = DEFAULT_SCAN_PARAMS
+    argv = [
+        "--particle-config", "test.json",
+        "--research-mode", sp["research_mode"],
+        "--source-format", sp["source_format"],
+        "--dispersion-threshold", str(sp["dispersion_threshold"]),
+        "--sample-cap", str(sp["sample_cap"]),
+        "--windows-per-entity", str(sp["windows_per_entity"]),
+        "--near-threshold", str(sp["near_threshold"]),
+        "--near-cap", str(sp["near_cap"]),
+        "--near-pair-budget", str(sp["near_pair_budget"]),
+        "--entities-per-batch", "5", "--batch-agent-cap", "100",
+        "--source-lang", "fr",
+    ]
+    args = mod.build_arg_parser().parse_args(argv)
+    result = mod.run(args)
+
+    run_dir = Path(result["run_dir"])
+    aggregate = json.loads((run_dir / "assignments.json").read_text(encoding="utf-8"))
+    # Mutation this test guards: a stamp computed by RE-READING the target
+    # path at stamp time (the pre-fix shape) would hash the MUTATED bytes
+    # instead, making this assertion fail.
+    assert aggregate[stamp_fields[slot]] == original_hash, (
+        f"MUTATION CAUGHT ({slot}): the H1 stamp must describe the snapshot "
+        "this run actually derived its worklist-freshness check and "
+        f"assignments from -- re-reading {filenames[slot]} fresh at stamp "
+        "time instead laundered the mid-run mutation into the published stamp"
+    )
+    # The on-disk file genuinely IS mutated now -- confirms the NEXT
+    # --verify-merged/--check-frozen-inputs re-read will correctly catch
+    # this as a tamper (stamped-original != actually-on-disk-mutated),
+    # which is the property this whole test protects.
+    assert target_path.read_bytes() == mutated_bytes
 
 
 def test_windows_capped_truncated_flag_and_verse_embedded_excluded(tmp_path):
@@ -583,6 +797,8 @@ def test_skeptic_input_digest_frames_members_no_boundary_collision(tmp_path):
     )
     scripts_dir = root / "scripts"
     common = dict(
+        canon_state="regular", manifest_state="regular",
+        senses_state="regular", senses_bytes=b"",
         worklist_bytes=b"{}",
         assignments=[],
         config_values={},
@@ -601,6 +817,343 @@ def test_skeptic_input_digest_frames_members_no_boundary_collision(tmp_path):
         "manifest_bytes=b'C' both concatenate to b'ABC' and hash "
         "identically -- a real collision the plan's closure guarantee "
         "forbids"
+    )
+
+
+@pytest.mark.parametrize("slot", ["canon", "manifest", "senses"])
+def test_skeptic_input_digest_state_membership_pinned(tmp_path, slot):
+    """Codex round 5: a pure pin that `compute_skeptic_input_digest()`
+    actually HASHES `canon_state`/`manifest_state`/`senses_state` (not just
+    ACCEPTS them as parameters). The round-4 blocker fix added these three
+    kwargs specifically so a state-only mutation (an absent sidecar
+    replaced by a genuinely-empty regular file, content unchanged) moves
+    the skeptic resume digest -- but nothing in the existing suite would
+    catch a future edit that keeps the kwarg in the signature while
+    dropping its `.encode('ascii')` line from `parts` (a "looks done, does
+    nothing" regression: the function still ACCEPTS `canon_state`, just
+    stops actually folding it in). Calls compute_skeptic_input_digest()
+    directly (a pure function, no subprocess/mod.run()) with every OTHER
+    argument -- including the targeted slot's own BYTES -- held
+    byte-identical across two calls that differ ONLY in that one slot's
+    `_state` value, and asserts the digests differ. Parameterized over all
+    three slots independently, mirroring the same per-slot isolation
+    `test_h1_stamp_snapshots_derivation_time_state_not_a_later_reread`
+    above already established for the H1 stamps -- a single "change all
+    three states at once" version would only prove the digest reacts to
+    SOME state change, not that THIS slot's state is actually a member."""
+    root = make_skeptic_root(tmp_path)
+    mod = _load_module(
+        "skeptic_setup_for_digest_state_membership_test", root / "scripts" / "skeptic_setup.py", root / "scripts"
+    )
+    scripts_dir = root / "scripts"
+    common = dict(
+        canon_state="regular", canon_bytes=b"canon-fixture",
+        manifest_state="regular", manifest_bytes=b"manifest-fixture",
+        senses_state="regular", senses_bytes=b"senses-fixture",
+        worklist_bytes=b"{}",
+        assignments=[],
+        config_values={},
+        language_config_raw_bytes=b"",
+        schemas_dir_hash_hex="deadbeef",
+        script_dir=scripts_dir,
+        template_bytes=b"",
+    )
+    state_kwarg = f"{slot}_state"
+    common.pop(state_kwarg)
+
+    digest_regular = mod.compute_skeptic_input_digest(**common, **{state_kwarg: "regular"})
+    digest_absent = mod.compute_skeptic_input_digest(**common, **{state_kwarg: "absent"})
+
+    assert digest_regular != digest_absent, (
+        f"MUTATION CAUGHT ({slot}): compute_skeptic_input_digest() must "
+        f"hash {state_kwarg}, not just accept it as a parameter -- with "
+        f"{slot}_bytes held byte-identical across both calls, only "
+        f"{state_kwarg} differing ('regular' vs 'absent') failed to move "
+        "the digest, meaning that state argument is dead weight the "
+        "function silently ignores"
+    )
+
+
+@pytest.mark.parametrize("direction", [
+    "extra_tuple_entry", "missing_tuple_entry",
+    "duplicate_key_entry", "same_count_key_swap",
+])
+def test_skeptic_input_digest_fails_closed_on_frozen_input_specs_key_mismatch(tmp_path, monkeypatch, direction):
+    """Round 10 (#243, codex overrule of the prior round's refusal): mirrors
+    tests/suspicion_scan.test.py's own
+    ``test_producer_input_digest_fails_closed_on_frozen_input_specs_key_mismatch``
+    -- `compute_skeptic_input_digest()` is the SKEPTIC-side sibling of
+    `compute_producer_input_digest()`, a SEPARATE hand-maintained
+    ``{"canon","manifest","senses"}`` enumeration (skeptic_constants.py's
+    own "what FROZEN_INPUT_SPECS does NOT cover" comment is explicit that
+    the two digest functions are independent gaps -- fixing one says
+    nothing about the other), so it needs its OWN fail-closed proof, not a
+    shared one. Its signature stays the fixed keyword enumeration round 9
+    left it as, but the body now builds a `{key: (state, bytes)}` map from
+    its own canon/manifest/senses kwargs and asserts that map's key set
+    equals `FROZEN_INPUT_SPECS`' key set before hashing.
+
+    RED-before-green (verified manually against HEAD 681d19d's
+    pre-round-10 `compute_skeptic_input_digest()`, not re-asserted here
+    every run): loading HEAD's version and mutating its already-imported
+    `FROZEN_INPUT_SPECS` to append a fourth entry left the digest
+    BYTE-IDENTICAL to the unmutated baseline
+    (`f5990202...f0a2486bbf9` both times) and raised nothing. Against the
+    CURRENT (fixed) function below, the identical mutation raises
+    `AssertionError` instead -- this test fails pre-fix ("DID NOT RAISE")
+    and passes post-fix.
+
+    Loads a FRESH `skeptic_setup.py` off a `make_skeptic_root(tmp_path)`
+    mirrored tree (this file's own established pattern, mirrors
+    `test_skeptic_input_digest_state_membership_pinned` immediately
+    above), then mutates the loaded module's OWN `FROZEN_INPUT_SPECS`
+    binding via `monkeypatch` -- in memory, restored after the test, never
+    touching `skeptic_constants.py` on disk (a peer owner's file).
+
+    Round 11 (#243, codex round-11 finding, mirrors
+    tests/suspicion_scan.test.py's own round-11 addition to its sibling
+    test): the round-10 guard this test originally covered was
+    `set(frozen_input_snapshots) != spec_keys` -- a SET comparison. The
+    docstring above already claimed to cover "both mismatch directions the
+    exact-key-set check must catch", but `extra_tuple_entry` and
+    `missing_tuple_entry` both change the tuple's LENGTH, so neither
+    exercises what a SET specifically collapses (duplicates) nor what a
+    bare length check specifically misses (same-count divergent names).
+    Codex reproduced both gaps: `duplicate_key_entry` (a fourth entry
+    reusing the existing `"canon"` key) reduces to the identical
+    `{"canon","manifest","senses"}` set as the hand-written snapshot map,
+    so it silently passed the round-10 SET guard -- verified against a
+    throwaway copy of that exact guard (git-shown from HEAD `b7306de`)
+    outside this worktree, which raises nothing for this case
+    (`pytest.raises` sees "DID NOT RAISE", real reproduced RED evidence,
+    not synthetic); `same_count_key_swap` (`"senses"` renamed to
+    `"sessens"`, cardinality unchanged) would silently pass a hypothetical
+    LENGTH-ONLY guard -- verified the same way against a hand-mutated
+    `len(frozen_input_snapshots) != len(spec_keys)` guard copy, which
+    fails to raise `AssertionError` for this case (it instead falls
+    through to the hashing loop and raises an unrelated bare `KeyError`
+    on the renamed key, which `pytest.raises(AssertionError)` below does
+    not catch either). Against the CURRENT (round 11, sorted
+    non-deduplicated key-LIST comparison) guard, all four directions
+    raise `AssertionError` naming both key lists, as asserted below.
+
+    Parametrized over all four mismatch shapes the exact, non-deduplicated
+    key-LIST check must catch: ``extra_tuple_entry`` appends a fourth
+    entry (a tuple key with no matching snapshot-map entry);
+    ``missing_tuple_entry`` drops the existing ``"senses"`` entry (a
+    snapshot-map entry -- still hard-coded regardless of the tuple --
+    with no matching tuple key); ``duplicate_key_entry`` appends a fourth
+    entry that reuses the existing ``"canon"`` key (a SET-collapsing case
+    a length check alone would still catch, since cardinality changes,
+    but a set-of-keys check would not); ``same_count_key_swap`` renames
+    the ``"senses"`` entry's key to ``"sessens"`` without changing the
+    tuple's length (a case a length-only check would NOT catch, but a
+    set-of-keys check would)."""
+    root = make_skeptic_root(tmp_path)
+    mod = _load_module(
+        "skeptic_setup_for_digest_fail_closed_test", root / "scripts" / "skeptic_setup.py", root / "scripts"
+    )
+    scripts_dir = root / "scripts"
+    common = dict(
+        canon_state="regular", canon_bytes=b"canon-fixture",
+        manifest_state="regular", manifest_bytes=b"manifest-fixture",
+        senses_state="regular", senses_bytes=b"senses-fixture",
+        worklist_bytes=b"{}",
+        assignments=[],
+        config_values={},
+        language_config_raw_bytes=b"",
+        schemas_dir_hash_hex="deadbeef",
+        script_dir=scripts_dir,
+        template_bytes=b"",
+    )
+
+    if direction == "extra_tuple_entry":
+        mutated_specs = mod.FROZEN_INPUT_SPECS + (
+            ("mystery_fourth", "mystery_fourth.json", "mystery_fourth_sha256"),
+        )
+    elif direction == "missing_tuple_entry":
+        mutated_specs = tuple(spec for spec in mod.FROZEN_INPUT_SPECS if spec[0] != "senses")
+    elif direction == "duplicate_key_entry":
+        mutated_specs = mod.FROZEN_INPUT_SPECS + (
+            ("canon", "fourth.json", "fourth_sha256"),
+        )
+    else:  # same_count_key_swap
+        mutated_specs = tuple(
+            ("sessens", spec[1], spec[2]) if spec[0] == "senses" else spec
+            for spec in mod.FROZEN_INPUT_SPECS
+        )
+    monkeypatch.setattr(mod, "FROZEN_INPUT_SPECS", mutated_specs)
+
+    with pytest.raises(AssertionError) as exc_info:
+        mod.compute_skeptic_input_digest(**common)
+
+    # Assert on the actual key-SET mismatch the exception must name, not
+    # merely that "something raised" -- a test satisfied by any exception
+    # would pass even if the guard crashed for an unrelated reason.
+    msg = str(exc_info.value)
+    expected_snapshot_keys = repr(sorted(["canon", "manifest", "senses"]))
+    expected_spec_keys = repr(sorted(spec[0] for spec in mutated_specs))
+    assert expected_snapshot_keys in msg and expected_spec_keys in msg, (
+        f"MUTATION CAUGHT ({direction}): the raised exception must name "
+        f"BOTH the fixed {{'canon','manifest','senses'}} snapshot key set "
+        f"({expected_snapshot_keys}) and the mutated FROZEN_INPUT_SPECS "
+        f"key set ({expected_spec_keys}) -- got: {msg!r}"
+    )
+
+
+def test_run_fails_closed_on_frozen_input_specs_key_mismatch_after_upstream_digests(tmp_path, monkeypatch):
+    """Round 14 (#243, codex review): `run()`'s OWN
+    `_frozen_input_snapshots_by_key` vs `FROZEN_INPUT_SPECS` guard
+    (skeptic_setup.py:831, defense-in-depth against a future reordering
+    ahead of the H1-stamp comprehension right below it -- see that guard's
+    own comment) was the ONLY one of the four FROZEN_INPUT_SPECS-key-
+    mismatch guards in this file's code closure (suspicion_scan's own
+    `compute_producer_input_digest()`, this module's `compute_skeptic_input_digest()`
+    immediately above via `test_skeptic_input_digest_fails_closed_on_frozen_input_specs_key_mismatch`,
+    and this one) with no mismatch-driven behavioral test. Relocating it
+    into dead code after `run()`'s `return` left the full suite green --
+    nothing here previously caught a dead or never-firing guard at this
+    specific site.
+
+    The trap a naive version of this test falls into: `compute_skeptic_input_digest()`
+    is DEFINED in this module (skeptic_setup.py:382) and reads the SAME
+    module-level `FROZEN_INPUT_SPECS` global the target guard at line 831
+    reads (its own guard is at skeptic_setup.py:456-467). `run()` calls it
+    at step 6 (skeptic_setup.py:731), before resolving the RUN_ID at step 7
+    (`resolve_skeptic_run()`, skeptic_setup.py:743). Mutating
+    `mod.FROZEN_INPUT_SPECS` before calling `mod.run(args)` at all would
+    trip THAT function's own guard first and never reach line 831 --
+    proving nothing about the guard this test targets. `compute_producer_input_digest()`
+    (step 3, skeptic_setup.py:650) is NOT part of this trap and this test
+    says nothing about it either way: it's imported from `suspicion_scan`
+    (skeptic_setup.py:187-188), is DEFINED there (suspicion_scan.py:868),
+    and its own `FROZEN_INPUT_SPECS` name lookup (suspicion_scan.py:966)
+    resolves through a Python function's `__globals__`, which is bound to
+    the module it was DEFINED in -- so it reads `suspicion_scan`'s own
+    `FROZEN_INPUT_SPECS` binding, never this module's `mod.FROZEN_INPUT_SPECS`.
+    Mutating `mod.FROZEN_INPUT_SPECS` can never reach it, regardless of
+    when the mutation happens relative to its call -- this test's
+    injection timing is chosen entirely around `compute_skeptic_input_digest()`'s
+    guard, and proves nothing about `compute_producer_input_digest()`'s.
+
+    The fix: wrap the REAL `resolve_skeptic_run()` so the mismatch is
+    injected only AFTER it returns -- i.e. after step 6's call to
+    `compute_skeptic_input_digest()` has already run against unmutated
+    `mod.FROZEN_INPUT_SPECS` and, sharing that same guard, necessarily not
+    raised. That's what makes control reach line 831 at all. The call
+    order this relies on -- both digest checks (steps 3 and 6) before
+    `resolve_skeptic_run()` (step 7) before the target guard (line 831) --
+    reflects the CURRENT source as read at the time this test was written
+    (skeptic_setup.py:650, :731, :743, :831); nothing in this test enforces
+    that order as an invariant. A future edit moving `resolve_skeptic_run()`
+    ahead of step 6's call would land the injected mutation before
+    `compute_skeptic_input_digest()` runs, tripping ITS guard instead of
+    the target one -- this test's own assertion on `"_frozen_input_snapshots_by_key"
+    in msg` (the line-831 guard's exception text, not
+    `compute_skeptic_input_digest()`'s) would catch that as a failure
+    rather than silently accept it. A reorder that still leaves
+    `compute_skeptic_input_digest()` running before the injection point
+    (e.g. `resolve_skeptic_run()` moving later, or the target guard moving
+    earlier) is NOT something this test can distinguish from today's
+    arrangement. Appends a duplicate `("canon", "canon.json",
+    "canon_sha256")` entry, reusing the real "canon" stamp field rather
+    than inventing a new one, so a downstream schema failure could never
+    accidentally satisfy the assertion for the wrong reason (moot here
+    since the assertion fires before any further write, but kept for the
+    same reason the sibling test above does).
+
+    RED-proven manually against this file, one mutation at a time,
+    restored immediately after each (not re-asserted every run):
+    (1) weakening the target guard to a SET comparison (`set(...) !=
+    set(...)`) let the duplicate "canon" key collapse into the unmutated
+    `{"canon","manifest","senses"}` set on both sides -- this test went
+    red ("Failed: DID NOT RAISE AssertionError"); (2) weakening to a bare
+    LENGTH comparison (`len(...) != len(...)`) stayed GREEN for this
+    specific mutation -- `_frozen_input_snapshots_by_key` is a dict (always
+    3 keys, duplicates can't exist in it), but `_spec_keys` is a LIST built
+    from the mutated 4-entry `FROZEN_INPUT_SPECS`, so `3 != 4` still trips
+    a length-only guard; this duplicate-key case is exactly the one a
+    length check does NOT miss (only a same-count divergent-key swap
+    would slip past a length-only comparison -- a property of that weakened
+    MUTANT, not of line 831's actual SHIPPED guard, which is itself a
+    sorted-LIST comparison and DOES distinguish a same-count divergent-key
+    swap; this test's own duplicate-key mutation just doesn't exercise that
+    swap direction, which is covered directly by
+    `compute_skeptic_input_digest()`'s OWN round-11 parametrized test above
+    (`test_skeptic_input_digest_fails_closed_on_frozen_input_specs_key_mismatch`,
+    `same_count_key_swap` direction, skeptic_setup.test.py:877-881), proving
+    THAT function's own guard catches it -- run()'s line-831 guard has no
+    dedicated same-count-key-swap test in this file, despite its
+    sorted-comparison shape covering that case structurally). The
+    load-bearing probe is (3): relocating the
+    guard to dead code after `run()`'s `return` -- the exact scenario
+    nothing else in this suite catches -- went red the same way as (1)
+    ("DID NOT RAISE"). All three restored via `git show HEAD:<path>` +
+    `command cp -f`, confirmed with `git diff HEAD --
+    skills/literary-translator/assets/scripts/` empty afterward."""
+    root = make_skeptic_root(tmp_path)
+    mod = _load_module(
+        "skeptic_setup_for_run_frozen_specs_mismatch_test", root / "scripts" / "skeptic_setup.py", root / "scripts"
+    )
+    entry = make_worklist_entry("Jean", occurrence_refs=[make_occurrence_ref("b1", "seg01", 0, 4)])
+    write_worklist(root, [entry])
+
+    real_resolve_skeptic_run = mod.resolve_skeptic_run
+    mutated_specs = mod.FROZEN_INPUT_SPECS + (("canon", "canon.json", "canon_sha256"),)
+
+    def _resolve_then_inject_duplicate_key(input_digest, resume_from_run_id):
+        # The REAL resolve_skeptic_run(), called FIRST, against the REAL
+        # (still-unmutated) FROZEN_INPUT_SPECS -- by the time control
+        # reaches here, both upstream digest checks (compute_producer_input_digest
+        # at the freshness check, compute_skeptic_input_digest just above
+        # this call inside run()) have already executed normally.
+        result = real_resolve_skeptic_run(input_digest, resume_from_run_id)
+        monkeypatch.setattr(mod, "FROZEN_INPUT_SPECS", mutated_specs)
+        # Confirm the mutation actually landed on the SAME module binding
+        # run() itself reads a few lines further down, rather than trusting
+        # a green result -- `run` is DEFINED in this module, so its
+        # unqualified `FROZEN_INPUT_SPECS` reference resolves through
+        # `mod.__dict__`, the exact attribute just set above.
+        assert mod.FROZEN_INPUT_SPECS == mutated_specs, (
+            "setup bug: mutating mod.FROZEN_INPUT_SPECS did not stick "
+            "before run() reads it"
+        )
+        return result
+
+    monkeypatch.setattr(mod, "resolve_skeptic_run", _resolve_then_inject_duplicate_key)
+
+    sp = DEFAULT_SCAN_PARAMS
+    argv = [
+        "--particle-config", "test.json",
+        "--research-mode", sp["research_mode"],
+        "--source-format", sp["source_format"],
+        "--dispersion-threshold", str(sp["dispersion_threshold"]),
+        "--sample-cap", str(sp["sample_cap"]),
+        "--windows-per-entity", str(sp["windows_per_entity"]),
+        "--near-threshold", str(sp["near_threshold"]),
+        "--near-cap", str(sp["near_cap"]),
+        "--near-pair-budget", str(sp["near_pair_budget"]),
+        "--entities-per-batch", "5", "--batch-agent-cap", "100",
+        "--source-lang", "fr",
+    ]
+    args = mod.build_arg_parser().parse_args(argv)
+
+    with pytest.raises(AssertionError) as exc_info:
+        mod.run(args)
+
+    msg = str(exc_info.value)
+    expected_snapshot_keys = repr(sorted(["canon", "manifest", "senses"]))
+    expected_spec_keys = repr(sorted(spec[0] for spec in mutated_specs))
+    assert "_frozen_input_snapshots_by_key" in msg, (
+        "raised AssertionError must be run()'s OWN guard (skeptic_setup.py:831, "
+        "which names its local `_frozen_input_snapshots_by_key`), not "
+        f"compute_skeptic_input_digest()'s sibling guard -- got: {msg!r}"
+    )
+    assert expected_snapshot_keys in msg and expected_spec_keys in msg, (
+        "MUTATION CAUGHT: the raised exception must name BOTH the fixed "
+        f"{{'canon','manifest','senses'}} snapshot key set ({expected_snapshot_keys}) "
+        f"and the mutated FROZEN_INPUT_SPECS key set ({expected_spec_keys}) "
+        f"-- got: {msg!r}"
     )
 
 
@@ -693,6 +1246,69 @@ def test_particle_config_one_byte_edit_forces_new_run_id(tmp_path):
         "invisible and the run would wrongly RESUME run_id_1"
     )
     assert parsed2["effectiveRunId"] != run_id_1
+
+
+def test_senses_sidecar_edit_forces_new_run_id(tmp_path):
+    """#243: canon_senses.json's own raw bytes joined the producer/skeptic
+    digest closures -- a curator editing the sidecar (adding a split-only
+    form, say) with canon/manifest/particle-config/params all held constant
+    must be indistinguishable from any other invalidating change, exactly
+    like the particle-config one-byte-edit case above."""
+    root = make_skeptic_root(tmp_path)
+    (root / "canon_senses.json").write_text(
+        json.dumps({"schema_version": 1, "entries_by_source_form": {}}), encoding="utf-8"
+    )
+    entry = make_worklist_entry("Jean", occurrence_refs=[make_occurrence_ref("b1", "seg01", 0, 4)])
+    write_worklist(root, [entry])
+
+    proc1, parsed1 = run_skeptic_setup(root)
+    assert proc1.returncode == 0, f"stdout={proc1.stdout}\nstderr={proc1.stderr}"
+    run_id_1 = parsed1["effectiveRunId"]
+
+    senses_path = root / "canon_senses.json"
+    senses_path.write_bytes(senses_path.read_bytes() + b" ")
+
+    # A real re-run of suspicion_scan.py would re-stamp the worklist with a
+    # digest over the NEW sidecar bytes -- do that here too, so the mismatch
+    # this test targets is the RUN_ID property, not a masking "stale
+    # worklist" rejection (see test_stale_producer_input_digest_rejected...
+    # for that half).
+    write_worklist(root, [entry])
+
+    proc2, parsed2 = run_skeptic_setup(root, resume_from_run_id=run_id_1)
+    assert proc2.returncode == 0, f"stdout={proc2.stdout}\nstderr={proc2.stderr}"
+    assert parsed2["resume"] is False, (
+        "MUTATION CAUGHT: if senses_bytes were left out of the producer/"
+        "skeptic input digests, this one-byte canon_senses.json edit would "
+        "be invisible and the run would wrongly RESUME run_id_1"
+    )
+    assert parsed2["effectiveRunId"] != run_id_1
+
+
+def test_stale_worklist_rejected_when_senses_sidecar_changes_after_stamping(tmp_path):
+    """The freshness half of the same guarantee: editing canon_senses.json
+    AFTER a worklist was stamped (never re-running suspicion_scan.py) must
+    be rejected fail-closed, exactly like editing canon.json after stamping
+    already is (test_stale_producer_input_digest_rejected_fail_closed)."""
+    root = make_skeptic_root(tmp_path)
+    entry = make_worklist_entry("Jean", occurrence_refs=[make_occurrence_ref("b1", "seg01", 0, 4)])
+    write_worklist(root, [entry])  # stamped against an ABSENT canon_senses.json (senses_bytes == b"")
+
+    (root / "canon_senses.json").write_text(
+        json.dumps({"schema_version": 1, "entries_by_source_form": {}}), encoding="utf-8"
+    )
+
+    proc, parsed = run_skeptic_setup(root)
+
+    assert proc.returncode == 1
+    assert parsed is not None and parsed["success"] is False
+    assert "stale" in parsed["error"].lower(), (
+        "MUTATION CAUGHT: if senses_bytes were left out of the recomputed "
+        "producer_input_digest, a canon_senses.json edit made AFTER the "
+        "worklist was stamped would go undetected and this run would "
+        "wrongly succeed against a stale competitors universe"
+    )
+    assert existing_skeptic_run_dirs(root) == []
 
 
 def test_source_lang_change_forces_new_run_id(tmp_path):
@@ -1010,3 +1626,48 @@ def test_assignment_batch_prefix_matches_template_js_convention():
         "ASSIGNMENT_BATCH_PREFIX has drifted from the template's "
         "assignmentsBatchPath() convention"
     )
+
+
+def test_template_always_passes_canon_and_senses_path_flags_unconditionally():
+    """#243 (codex review): the template's checkCommand() (batch precheck/
+    dispatch-self-check/wait-poll) and verifyMergedPrompt() must BOTH pass
+    --canon/--senses-path UNCONDITIONALLY -- deliberately, even for a
+    project with no canon_senses.json yet -- because skeptic_ready.py's own
+    --senses-path is UNCONDITIONALLY absence-tolerant (see
+    _resolve_competitors' own docstring), not gated on whether the flag was
+    explicitly given. This is a regression lock on the DESIGN DECISION
+    itself: if a future edit made the template conditionally OMIT the flag
+    when the file doesn't exist (the other fix codex offered), it would also
+    need to revert skeptic_ready.py's own tolerance back to the
+    explicit-path-must-exist convention -- the two must move together, never
+    drift independently.
+
+    Codex round 8 (MINOR): the old form of this test sliced from
+    "function verifyMergedPrompt" to EOF, which swallowed verifyMergedPrompt's
+    OWN prose comment (it name-drops --canon/--senses-path in English before
+    the actual command line) plus the entirety of frozenInputCheckPrompt()
+    below it (which passes both flags too) -- so a codex mutation that
+    deleted --canon/--senses-path from verifyMergedPrompt's own RENDERED
+    `const cmd = ...` line still left both substrings present elsewhere in
+    that slice and the assertion stayed green. checkCommand's own slice
+    never had this hole (its preceding comment sits BEFORE
+    "function checkCommand", outside the slice, and it has no trailing
+    sibling function inside its own bound), so only verifyMergedPrompt
+    needed narrowing -- down to its own rendered `const cmd = ...` line,
+    the actual text skeptic_ready.py sees, not any prose around it."""
+    template_text = SKEPTIC_TEMPLATE_SRC.read_text(encoding="utf-8")
+    check_command_src = template_text[
+        template_text.index("function checkCommand"):template_text.index("function batchPrecheckPrompt")
+    ]
+
+    def _rendered_cmd_line(func_marker: str, next_marker: str) -> str:
+        func_src = template_text[template_text.index(func_marker):template_text.index(next_marker)]
+        cmd_start = func_src.index("const cmd = ")
+        cmd_end = func_src.index("\n", cmd_start)
+        return func_src[cmd_start:cmd_end]
+
+    verify_prompt_cmd = _rendered_cmd_line("function verifyMergedPrompt", "function frozenInputCheckPrompt")
+
+    for label, src in (("checkCommand", check_command_src), ("verifyMergedPrompt", verify_prompt_cmd)):
+        assert "--canon" in src and "CANON_PATH" in src, f"{label} must pass --canon"
+        assert "--senses-path" in src and "SENSES_PATH" in src, f"{label} must pass --senses-path"

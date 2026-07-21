@@ -43,6 +43,7 @@ of the restatement sites above and cross-checked against the others.
 """
 from __future__ import annotations
 
+import ast
 import importlib.util
 import json
 import re
@@ -62,7 +63,9 @@ REFERENCES_DIR = PLUGIN_ROOT / "skills" / "literary-translator" / "references"
 CACHE_KEY_SCRIPT = SCRIPTS_DIR / "cache_key.py"
 LEDGER_MERGE_SCRIPT = SCRIPTS_DIR / "ledger_merge.py"
 SELECT_SEGMENTS_SCRIPT = SCRIPTS_DIR / "select_segments.py"
+SKEPTIC_CONSTANTS_SCRIPT = SCRIPTS_DIR / "skeptic_constants.py"
 LEDGER_RECORD_BASE_SCHEMA = SCHEMAS_DIR / "ledger-record-base.schema.json"
+SKEPTIC_ASSIGNMENT_SCHEMA = SCHEMAS_DIR / "skeptic-assignment.schema.json"
 LEDGER_AND_RESUMABILITY_DOC = REFERENCES_DIR / "ledger-and-resumability.md"
 
 
@@ -100,8 +103,26 @@ def select_segments_module() -> types.ModuleType:
     return _load_module("select_segments_under_test", SELECT_SEGMENTS_SCRIPT)
 
 
+@pytest.fixture(scope="module")
+def skeptic_constants_module() -> types.ModuleType:
+    """Imports the real, shipped skeptic_constants.py so FROZEN_INPUT_SPECS
+    -- the single authoritative enumeration of the skeptic pass's H1
+    frozen-input tripwire (#243 round 8) -- can be read directly. Both
+    skeptic_setup.py's stamper and skeptic_ready.py's verifier now derive
+    from this SAME tuple, so this file's own drift check below is the last
+    restatement left to guard: skeptic-assignment.schema.json's declared
+    *_sha256 properties, which is static JSON data deliberately NOT
+    generated from the tuple (codegen would be disproportionate for 3
+    literal properties)."""
+    return _load_module("skeptic_constants_under_test", SKEPTIC_CONSTANTS_SCRIPT)
+
+
 def _load_ledger_record_base_schema() -> dict:
     return json.loads(LEDGER_RECORD_BASE_SCHEMA.read_text(encoding="utf-8"))
+
+
+def _load_skeptic_assignment_schema() -> dict:
+    return json.loads(SKEPTIC_ASSIGNMENT_SCHEMA.read_text(encoding="utf-8"))
 
 
 def _load_ledger_and_resumability_doc() -> str:
@@ -600,3 +621,1153 @@ def test_bundle_member_scripts_and_templates_exist_on_disk(cache_key_module):
             f"derivation_bundle_hash names script {filename!r}, but no such "
             f"file exists under {SCRIPTS_DIR}"
         )
+
+
+# ---------------------------------------------------------------------------
+# 3. FROZEN_INPUT_SPECS (skeptic_constants.py, #243 round 8) <-> the *_sha256
+#    stamp properties skeptic-assignment.schema.json declares. Round 8 bound
+#    skeptic_setup.py's stamper AND skeptic_ready.py's verifier to this SAME
+#    tuple specifically so neither could drift from the other any more --
+#    but the schema is static JSON data, deliberately not generated from
+#    the tuple (codegen would be disproportionate for 3 literal
+#    properties), so it is now the ONE remaining independent restatement of
+#    the frozen-input set. An unbound enumeration left to drift is exactly
+#    how #243's original bug (manifest.json quietly missing from the
+#    verifier table) happened; this is the same discipline as section 1
+#    above, applied to the newer table.
+# ---------------------------------------------------------------------------
+
+
+def test_frozen_input_specs_stamp_fields_match_schema_declared_sha256_properties(
+    skeptic_constants_module,
+):
+    """EQUALS, not a subset check in either direction: a schema property
+    with no FROZEN_INPUT_SPECS entry would be stamped nowhere but declared
+    accepted by the schema (silently unverified); a FROZEN_INPUT_SPECS
+    entry with no schema property would make skeptic_setup.py write a
+    field skeptic-assignment.schema.json's own additionalProperties:false
+    then rejects outright. A subset assertion in either direction would
+    stay green through the exact drift this test exists to catch."""
+    tuple_stamp_fields = {
+        stamp_field for _key, _label, stamp_field in skeptic_constants_module.FROZEN_INPUT_SPECS
+    }
+
+    schema = _load_skeptic_assignment_schema()
+    schema_properties = set(schema["properties"].keys())
+    # Frozen-input stamps are exactly this schema's own *_sha256
+    # properties: input_digest/producer_input_digest use an unrelated
+    # "_digest" suffix, and the only other "sha256" anywhere in this
+    # schema is nested inside assignments[].evidence.sha256 (a citation
+    # hash, not a top-level property) -- so filtering the TOP-LEVEL
+    # properties dict by this suffix is exact, not a heuristic subset.
+    schema_stamp_fields = {name for name in schema_properties if name.endswith("_sha256")}
+
+    assert tuple_stamp_fields == schema_stamp_fields, (
+        "FROZEN_INPUT_SPECS (skeptic_constants.py) has diverged from "
+        "skeptic-assignment.schema.json's own declared *_sha256 stamp "
+        "properties -- exactly the class of drift #243 itself was:\n"
+        f"  FROZEN_INPUT_SPECS only:  {sorted(tuple_stamp_fields - schema_stamp_fields)}\n"
+        f"  schema-declared only:     {sorted(schema_stamp_fields - tuple_stamp_fields)}"
+    )
+
+
+def test_frozen_input_specs_keys_are_unique(skeptic_constants_module):
+    """Round 11 (#243, codex round-11 finding): a SEPARATE invariant from
+    the parity test immediately above, and deliberately a SEPARATE test
+    rather than folded into it. The parity test compares SETS of STAMP
+    FIELD names (the third tuple element) against the schema's declared
+    *_sha256 properties -- it is blind to a duplicate in the FIRST tuple
+    element (the snapshot KEY compute_producer_input_digest()/
+    compute_skeptic_input_digest()/skeptic_setup.py's own
+    `_frozen_input_snapshots_by_key` all index by): a fourth
+    `FROZEN_INPUT_SPECS` entry that reuses an existing key, e.g.
+    `("canon", "fourth.json", "fourth_sha256")`, has a perfectly distinct,
+    schema-matchable stamp field (`"fourth_sha256"` != `"canon_sha256"`),
+    so it would stay GREEN through the parity test above even though the
+    reused `"canon"` key makes every KEY-indexed consumer alias
+    `fourth.json`'s stamp onto `canon.json`'s own (state, bytes) snapshot
+    -- `canon.json` gets stamped and checked twice, `fourth.json` never
+    genuinely represented. Widening the parity test's own EQUALS-not-
+    subset assertion to also dedupe-check would blur what it actually
+    proves (stamp-field <-> schema-property correspondence) and make its
+    own failure message ambiguous about which of two unrelated invariants
+    broke; a dedicated test keeps each failure message pointing at the
+    one thing that's actually wrong.
+
+    This is deliberately a STATIC, structural check on the tuple itself
+    -- independent of, and a layer beneath, the runtime fail-closed guards
+    `compute_producer_input_digest()` / `compute_skeptic_input_digest()` /
+    `skeptic_setup.py`'s `run()` now carry (round 11's sorted
+    non-deduplicated key-LIST comparison, see
+    tests/suspicion_scan.test.py's and tests/skeptic_setup.test.py's own
+    `duplicate_key_entry` cases): those guards catch a duplicate key
+    reactively, the moment some digest/stamp function is next called with
+    it. This test catches the SAME mistake proactively, the moment it
+    lands in skeptic_constants.py, without needing to drive any of the
+    three consumers through a call at all."""
+    keys = [spec[0] for spec in skeptic_constants_module.FROZEN_INPUT_SPECS]
+    assert len(keys) == len(set(keys)), (
+        "FROZEN_INPUT_SPECS (skeptic_constants.py) has a duplicate key -- "
+        f"keys: {keys!r}. Every entry must own a UNIQUE first element: "
+        "compute_producer_input_digest()/compute_skeptic_input_digest()/"
+        "skeptic_setup.py's run() all index a {key: (state, bytes)} "
+        "snapshot map by this exact value, so a reused key silently "
+        "aliases one frozen input's snapshot onto another entry's stamp "
+        "instead of raising -- see skeptic_constants.py's \"what "
+        "FROZEN_INPUT_SPECS does NOT cover\" comment."
+    )
+
+
+# ---------------------------------------------------------------------------
+# 4. The hand-duplicated FROZEN_INPUT_SPECS key-mismatch guards -- an
+#    ALLOWLIST, not a denylist (redesigned; the six-round denylist story
+#    this replaces -- #243 rounds 11-16 -- is preserved in git history, not
+#    reproduced here).
+# ---------------------------------------------------------------------------
+#
+# `compute_producer_input_digest()` (suspicion_scan.py),
+# `compute_skeptic_input_digest()` and `run()` (both skeptic_setup.py), and
+# `frozen_input_check()` (skeptic_ready.py) each carry their OWN hand-typed
+# copy of the identical `sorted(snapshot_keys) != sorted(spec_keys)`
+# comparison -- guarding against a frozen input added to
+# skeptic_constants.FROZEN_INPUT_SPECS without a matching hand-added entry
+# at that site (or a duplicate key within the tuple itself). Runtime,
+# call-driven proof that each of these four guards actually FIRES on a real
+# mismatch lives in tests/suspicion_scan.test.py's and
+# tests/skeptic_setup.test.py's own `duplicate_key_entry`/
+# `same_count_key_swap` cases and tests/skeptic_ready.test.py's
+# `test_check_frozen_inputs_fails_closed_on_frozen_input_specs_key_mismatch`;
+# this section is a STATIC, sibling-consistency check that all four still
+# exist, unweakened, as distinct source-level obligations.
+#
+# The prior version of this check (#243, rounds 11-16) was a DENYLIST: each
+# review round found one more way to weaken a guard while keeping it "close
+# enough" to pass, and the check grew one more rejection rule to name that
+# specific weakening. Six rounds in, the reviewer's own prescribed fixes
+# were "implement reaching-definition analysis" and "handle every binding
+# form systematically" -- i.e. build a general dataflow analyzer inside a
+# test, for four guards that are all, today, textually near-identical in
+# shape. A denylist has no bounded endpoint: it can only ever enumerate
+# weakenings someone has already thought to check for.
+#
+# This version inverts the approach. Instead of asking "is this guard
+# weakened in some way we remember to check for", it requires each guard to
+# be STRUCTURALLY IDENTICAL to one of a small, closed set of canonical AST
+# shapes -- anything that does not match is REJECTED outright, with no
+# attempt to characterize why it differs. This is strictly STRONGER than
+# the denylist it replaced (which could only ever enumerate weakenings
+# someone had already thought to check for) -- but it is NOT "sound by
+# construction against every weakening, including ones nobody has thought
+# of yet": round 17 found four places where the structural match itself was
+# not yet strict enough (a non-canonical destructure target, a
+# non-adjacent message assignment, a decoy anchor reachable through a
+# non-constant expression, a scope walker blind to decorator/default/
+# annotation bindings) and one place it was too strict. Round 18 then found
+# the SYMMETRIC other half of two of round 17's own fixes -- each fixed at
+# only ONE of its two real sites: the decoy-anchor fix (requirement 6)
+# covered only the message-VARIABLE path (`message = ANCHOR if False else
+# "wrong"`), leaving a DIRECT `raise AssertionError(ANCHOR if False else
+# "wrong")` still walkable via the old subtree search; the header-binding
+# fix (requirement 4) covered only FunctionDef/AsyncFunctionDef, leaving a
+# `sorted` rebind reachable through a ClassDef's own bases/keywords/
+# decorators (`class C((sorted := object)): pass`) unrecorded. Patching
+# each newly-found second site the same way round 17 patched the first
+# would only have restarted the same one-site-at-a-time cycle; both are
+# instead closed by routing BOTH forms of each family through one shared
+# check apiece (`_expr_guarantees_anchor` for the message; `_visit_header`
+# for the header walk), so the two forms cannot drift apart again by
+# construction. The actual TRUST BOUNDARY this check rests on is the
+# COMPLETENESS of the canonical-shape
+# template each guard is compared against -- a gap in that template (a real
+# weakening the template happens not to distinguish from the canonical
+# shape) still passes silently. What this buys over the denylist is that
+# closing such a gap is a bounded, one-time tightening of the template
+# itself, not an open-ended new rejection rule; it needs no dataflow/
+# reaching-definition analysis, only structural AST comparison plus a small
+# set of SCOPE-BOUNDED facts (a name's binding count and binding kind
+# within its own owning function).
+#
+# The allowlist, in full -- a candidate `if` qualifies as a guard iff ALL
+# of:
+#   1. Its test is `sorted(X) != sorted(Y)`: a `Compare` with a single
+#      `!=` whose both sides are a bare-Name-argument call to the builtin
+#      `sorted` (`_sorted_mismatch_operand_names`).
+#   2. Exactly ONE of X/Y is bound, as its scope's SOLE binding (of any
+#      kind at all -- a name that is ALSO a parameter, or declared
+#      global/nonlocal, has more than one real binding even when only one
+#      of those is a plain Assign), by a plain `name = <value>` Assign
+#      whose value is STRUCTURALLY one of the two canonical
+#      FROZEN_INPUT_SPECS key-projection comprehensions the real sites use
+#      (`_is_canonical_spec_keys_projection`, `_spec_operand_name`) -- NOT
+#      a membership/contains check on whether the name `FROZEN_INPUT_SPECS`
+#      merely appears somewhere in the expression (a label projection or a
+#      third-name alias both merely CONTAIN that name too).
+#   3. The OTHER operand is simply a different bare Name. This check does
+#      not validate how it was built -- it is the value under test.
+#   4. The builtin `sorted` is bound by NO form -- assignment, `def`,
+#      `class`, parameter (incl. defaults/posonly/kwonly/*args/**kwargs),
+#      walrus (incl. one scoped inside a comprehension), `for`/`with`/
+#      `except`/`import ... as`, `global`/`nonlocal`, or a match-case
+#      capture -- anywhere in the guard's own owning scope OR at module
+#      level in the same file (`_sorted_is_unshadowed`).
+#   5. The raised exception is EXPLICITLY `AssertionError`, found as a
+#      DIRECT statement of the `if`'s own body, not nested inside any
+#      further compound statement the body contains
+#      (`_is_assertion_error_raise`).
+#   6. That SAME Raise's own message -- `AssertionError(<expr>)` with
+#      EXACTLY one positional argument and no keywords -- STATICALLY
+#      GUARANTEES `ANCHOR_PHRASE` per `_expr_guarantees_anchor`, checked
+#      either directly on `<expr>` itself (the direct-raise form), or --
+#      when `<expr>` is itself a bare Name -- on the `.value` of that
+#      name's SOLE binding anywhere in the if-body's own flattened scope,
+#      which must be a plain, directly-preceding, same-level if-body
+#      Assign to that name (`_if_body_sole_preceding_message_value`; the
+#      message-variable form). The SAME `_expr_guarantees_anchor` helper
+#      backs both forms -- there is no separate, looser subtree search for
+#      either one. An intervening rebind -- wherever in the if-body it is
+#      nested, not just a same-level one -- disqualifies the
+#      message-variable form unconditionally.
+#   7. The guard's owner resolves to exactly ONE module-level function of
+#      the expected name in `EXPECTED_GUARD_SITES` (`_scan_file`,
+#      `_site_key`). Two module-level defs sharing that name (e.g. a dead
+#      `if False: def run(): ...` sitting beside a real, unguarded `def
+#      run()`) is treated as AMBIGUOUS, not silently resolved toward
+#      whichever copy happens to carry the guard.
+#
+# `_is_canonical_spec_keys_projection` accepts TWO forms, not one, because
+# the four real, shipped sites use both -- verified against the actual
+# source before writing this, not assumed identical across sites:
+# `spec_keys = [spec[0] for spec in FROZEN_INPUT_SPECS]` at three sites,
+# and skeptic_ready.py's own `_spec_keys = [key for key, _label,
+# _stamp_key in FROZEN_INPUT_SPECS]` at the fourth. Both are the identical
+# projection -- the first field of every FROZEN_INPUT_SPECS 3-tuple --
+# spelled two equally direct ways; treating only one as canonical would
+# false-reject a real, already-shipped guard. The loop variable's own
+# spelling is deliberately NOT pinned (this check is alpha-equivalent): a
+# bound variable's name carries no semantic weight, so pinning it to
+# today's literal `spec`/`key` spellings would be a gratuitous false-RED
+# risk against a cosmetic rename, not a real weakening closed.
+#
+# What this does NOT prove, stated plainly (unchanged from every prior
+# version of this section):
+#   - Reachability/dominance: a canonical guard placed after an
+#     unconditional `return` (or behind any other dead-code path) still
+#     qualifies. The behavioral tests named above give real, but partial,
+#     evidence beyond what this static check provides -- not a general
+#     reachability proof.
+#   - An unknown FIFTH key-indexed consumer added later with no guard at
+#     all: invisible to this check by construction. Tracked separately as
+#     a follow-up to centralize all four guards behind one shared helper,
+#     which would close this by construction instead of by enumeration.
+#   - A rebind reached through `builtins.sorted = ...`, `globals()[...]`,
+#     or an alias built through a THIRD name never itself checked against
+#     FROZEN_INPUT_SPECS or the other operand -- general aliasing analysis,
+#     which this file continues to decline to build (disproportionate for
+#     four guards, none of which need it today).
+#   - A non-canonical-but-CORRECT guard form -- a chained/destructuring
+#     assignment, a message built via `+=` or `.format()`, ... -- is
+#     intentionally REJECTED. The allowlist requires the canonical shape,
+#     which all four real sites already use; this is a deliberate
+#     false-reject by design, not a bug to fix later.
+
+
+ANCHOR_PHRASE = "FROZEN_INPUT_SPECS contains a duplicate key"
+
+# The four (file, function) semantic obligations a guard must resolve to --
+# still a literal, hand-maintained mapping, like section 1's literal `4`:
+# there is no honest way to derive "which four functions SHOULD own a
+# guard" from the source itself, so a guard silently vanishing, or
+# reappearing somewhere else, must fail LOUD via an identity mismatch
+# below, not be absorbed by an unbounded count. Unlike the pre-redesign
+# version, this does NOT also pin each site's own two operand NAMES: the
+# structural requirements above (the spec operand must independently prove
+# itself, via requirement 2; the other operand's own spelling is never
+# validated, per requirement 3) already make a "right shape, wrong
+# operand" copy-paste pointless to separately guard against here.
+EXPECTED_GUARD_SITES: "tuple[tuple[str, str], ...]" = (
+    ("suspicion_scan.py", "compute_producer_input_digest"),
+    ("skeptic_setup.py", "compute_skeptic_input_digest"),
+    ("skeptic_setup.py", "run"),
+    ("skeptic_ready.py", "frozen_input_check"),
+)
+
+
+# ---------------------------------------------------------------------------
+# 4a. Scope-bounded binding facts -- shared by the operand check
+#     (requirement 2/3), the `sorted`-shadow check (requirement 4), and the
+#     message-immediacy check (requirement 6). "Scope", throughout, means
+#     a flattened view of a statement list: every statement reachable
+#     through control-flow (If/For/While/Try/With/Match, and their
+#     `orelse`/`finalbody`/`handlers`/`cases`) that does not itself
+#     introduce a new Python scope, but never descending into a nested
+#     FunctionDef/AsyncFunctionDef/ClassDef/Lambda body, each of which
+#     owns its own separate scope.
+# ---------------------------------------------------------------------------
+
+
+def _walrus_targets_in_comprehension(node: "ast.AST") -> "list[str]":
+    """Every walrus (`:=`) target bound by a comprehension node -- PEP 572
+    binds a comprehension's own walrus to its CONTAINING scope, unlike
+    everything else the comprehension binds (its own `for` targets, its
+    element expression), which stays local to the comprehension itself and
+    is correctly invisible to the enclosing scope this function is asked
+    about. PEP 572 also makes a comprehension NESTED inside `node` (e.g.
+    `[[y := x for x in row] for row in grid]`) transparent for this same
+    rule -- its walrus binds to the SAME containing scope as `node`'s own,
+    not to the inner comprehension -- so this walk continues through a
+    nested comprehension rather than treating it as a boundary. A `Lambda`,
+    `FunctionDef`, `AsyncFunctionDef`, or `ClassDef` nested inside `node` is
+    a REAL scope boundary, though: a walrus inside one of those belongs to
+    THAT scope, never to `node`'s containing scope, so the walk stops
+    there -- unlike a raw `ast.walk(node)`, which cannot tell the
+    difference and would wrongly attribute e.g. `[x for x in (lambda: (y
+    := 1))()]`'s inner walrus to `node`'s own containing scope, exactly
+    the false-reject this replaces."""
+    targets: "list[str]" = []
+
+    def _walk(n: "ast.AST") -> None:
+        if isinstance(n, ast.NamedExpr) and isinstance(n.target, ast.Name):
+            targets.append(n.target.id)
+        if isinstance(n, (ast.Lambda, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            return  # a real nested scope -- its own walruses are not node's
+        for child in ast.iter_child_nodes(n):
+            _walk(child)
+
+    _walk(node)
+    return targets
+
+
+def _match_pattern_capture_names(pattern: "ast.AST") -> "list[str]":
+    """Every name a `match`/`case` pattern binds via capture -- `case x:`,
+    `case [a, *rest]:`, `case {"k": v, **rest}:`, `case Point(x=a, y=b) as
+    p:`, `case A() | B() as q:`, .... None of these are `ast.Name` nodes
+    (a pattern's bound identifiers are plain `str` attributes --
+    `MatchAs.name`, `MatchStar.name`, `MatchMapping.rest`), so a
+    Store-context Name walk alone can never see them; required explicitly
+    because match-capture is one of the binding forms `sorted` must not be
+    reachable through (requirement 4)."""
+    names: "list[str]" = []
+    if isinstance(pattern, ast.MatchAs):
+        if pattern.name:
+            names.append(pattern.name)
+        if pattern.pattern is not None:
+            names.extend(_match_pattern_capture_names(pattern.pattern))
+    elif isinstance(pattern, ast.MatchStar):
+        if pattern.name:
+            names.append(pattern.name)
+    elif isinstance(pattern, ast.MatchMapping):
+        if pattern.rest:
+            names.append(pattern.rest)
+        for sub in pattern.patterns:
+            names.extend(_match_pattern_capture_names(sub))
+    elif isinstance(pattern, ast.MatchSequence):
+        for sub in pattern.patterns:
+            names.extend(_match_pattern_capture_names(sub))
+    elif isinstance(pattern, ast.MatchClass):
+        for sub in (*pattern.patterns, *pattern.kwd_patterns):
+            names.extend(_match_pattern_capture_names(sub))
+    elif isinstance(pattern, ast.MatchOr):
+        for sub in pattern.patterns:
+            names.extend(_match_pattern_capture_names(sub))
+    # MatchValue / MatchSingleton bind nothing.
+    return names
+
+
+def _scope_binding_info(
+    scope_body: "list[ast.stmt]",
+) -> "tuple[dict[str, int], dict[str, ast.AST | None], set[str]]":
+    """Returns `(counts, sole_assign_values, global_or_nonlocal_names)` for
+    every name bound within `scope_body`'s own flattened scope (see the
+    section header above for exactly what "flattened" means here).
+
+    `counts[name]` is the total number of times `name` is bound by ANY
+    form this scope can see: a plain or tuple/starred-unpack Assign
+    target, AugAssign/AnnAssign/For/With targets, a walrus (including one
+    scoped inside a comprehension), `except ... as name`, `import ... as
+    name`/`from ... import x as name`, a `def`/`class` statement's OWN
+    name (bound in ITS containing scope, before this walk skips into its
+    separate body -- easy to miss, since the natural way to skip a nested
+    def/class's body is to return immediately from an overridden visitor
+    method, which also skips recording the def/class's own name unless
+    that is done as the very first thing in the same method: `def
+    sorted(...): ...` at module level is a real rebind of the builtin, not
+    a no-op, precisely because Python's `def` statement is itself a
+    name-binding statement), and a match-case capture. A nested `def`'s OR
+    `class`'s own HEADER -- decorator list (shared by both); a function's
+    parameter annotations, defaults, and return annotation; a class's own
+    bases and keywords (e.g. `metaclass=...`) -- executes in THIS scope at
+    def/class-statement time, not inside its own separate body/namespace,
+    so a walrus there (e.g. a module-level `@(sorted := (lambda value:
+    value))` decorator on a guard's owning function, or a module-level
+    `class C((sorted := object)): pass` rebinding the builtin through its
+    own base expression) is walked too, unlike the body itself.
+
+    `sole_assign_values[name]` is the `.value` of `name`'s own single
+    plain `name = <value>` Assign (a bare-Name target, not a tuple/
+    starred unpack) -- meaningful, and only ever consulted by a caller,
+    when `counts[name] == 1`; any other binding kind, or more than one
+    binding, is already a disqualifying fact before this map is read.
+
+    `global_or_nonlocal_names` is every name a `global`/`nonlocal`
+    statement anywhere in `scope_body` declares -- such a name's real
+    binding lives in an outer scope this walk never visits, so a local
+    count for it cannot be trusted either way; callers treat membership
+    here as an unconditional disqualifier rather than trusting `counts`.
+    """
+    counts: "dict[str, int]" = {}
+    sole_assign_values: "dict[str, ast.AST | None]" = {}
+    global_or_nonlocal: "set[str]" = set()
+
+    def _record(name: str) -> None:
+        counts[name] = counts.get(name, 0) + 1
+
+    class _ScopeBindingVisitor(ast.NodeVisitor):
+        def _visit_header(
+            self, node: "ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef"
+        ) -> None:
+            """ONE header-inspection routine, shared by ALL THREE def-types
+            below (FunctionDef, AsyncFunctionDef, AND ClassDef): walks every
+            binding-bearing expression in `node`'s own HEADER -- the part
+            that executes in THIS (owning) scope at def/class-statement
+            time, before `node`'s own separate body/namespace scope exists
+            -- using this SAME visitor, so a walrus/def/class/etc. nested in
+            one of them is recorded exactly as it would be anywhere else in
+            this scope, while a nested Lambda within one of them still
+            correctly halts descent via `visit_Lambda` below. Never touches
+            `node.body` -- that remains a separate scope this walk does not
+            enter.
+
+            All three share `decorator_list` (every one of a class's or a
+            function's own decorators executes here, at def/class-statement
+            time). A ClassDef additionally executes its `bases` and
+            `keywords` (e.g. `metaclass=...`) here -- round 18 found a
+            module-level `class C((sorted := object)): pass` rebinding the
+            builtin completely unrecorded, because this routine used to
+            exist only for FunctionDef/AsyncFunctionDef, walking their own
+            additional header parts instead (every parameter annotation/
+            default and the return annotation) -- a ClassDef has no
+            equivalent of any of those, so this branches once, structurally,
+            rather than duplicating the shared decorator walk into two
+            near-identical methods."""
+            for decorator in node.decorator_list:
+                self.visit(decorator)
+            if isinstance(node, ast.ClassDef):
+                for base in node.bases:
+                    self.visit(base)
+                for keyword in node.keywords:
+                    self.visit(keyword.value)
+                return
+            args = node.args
+            for arg in (*args.posonlyargs, *args.args, *args.kwonlyargs):
+                if arg.annotation is not None:
+                    self.visit(arg.annotation)
+            if args.vararg is not None and args.vararg.annotation is not None:
+                self.visit(args.vararg.annotation)
+            if args.kwarg is not None and args.kwarg.annotation is not None:
+                self.visit(args.kwarg.annotation)
+            self._visit_arg_defaults(args)
+            if node.returns is not None:
+                self.visit(node.returns)
+
+        def _visit_arg_defaults(self, args: "ast.arguments") -> None:
+            """Walks every parameter DEFAULT value expression in `args` --
+            factored out because it is shared by TWO callers, not just
+            `_visit_header`'s function branch: a bare `lambda`'s own
+            defaults execute in exactly the same enclosing scope, at
+            exactly the same lambda-EXPRESSION-evaluation time, as a
+            `def`'s defaults do at def-STATEMENT time -- `lambda
+            x=(sorted := int): x` really does rebind `sorted` in the
+            enclosing scope (verified empirically, not assumed), even
+            though a lambda has no decorator/annotation/return-annotation
+            of its own to also walk. A lambda's own annotations are not
+            even syntactically possible, so defaults are the ONLY header
+            piece `visit_Lambda` below needs from this helper."""
+            for default in args.defaults:
+                self.visit(default)
+            for kw_default in args.kw_defaults:
+                if kw_default is not None:
+                    self.visit(kw_default)
+
+        def visit_FunctionDef(self, node: "ast.FunctionDef") -> None:
+            _record(node.name)
+            self._visit_header(node)
+            # own body is a separate scope -- do not descend into it.
+
+        def visit_AsyncFunctionDef(self, node: "ast.AsyncFunctionDef") -> None:
+            _record(node.name)
+            self._visit_header(node)
+
+        def visit_ClassDef(self, node: "ast.ClassDef") -> None:
+            _record(node.name)
+            self._visit_header(node)
+            # own body is a separate namespace scope -- do not descend into it.
+
+        def visit_Lambda(self, node: "ast.Lambda") -> None:
+            """A Lambda has no name of its own to record, and no
+            decorator/annotation/return-annotation slot at all -- but its
+            parameter DEFAULTS are still evaluated in THIS (enclosing)
+            scope, at the point the lambda expression itself runs, exactly
+            like a `def`'s defaults are (see `_visit_arg_defaults`). Only
+            `node.body` -- the lambda's own separate scope -- is left
+            unvisited; a nested Lambda/FunctionDef/AsyncFunctionDef/
+            ClassDef inside a default expression is still walked, exactly
+            as it would be anywhere else in this scope, since
+            `_visit_arg_defaults` dispatches back through this SAME
+            visitor via `self.visit(...)`."""
+            self._visit_arg_defaults(node.args)
+
+        def _record_comprehension_walrus(self, node: "ast.AST") -> None:
+            for name in _walrus_targets_in_comprehension(node):
+                _record(name)
+
+        def visit_ListComp(self, node: "ast.ListComp") -> None:
+            self._record_comprehension_walrus(node)
+
+        def visit_SetComp(self, node: "ast.SetComp") -> None:
+            self._record_comprehension_walrus(node)
+
+        def visit_DictComp(self, node: "ast.DictComp") -> None:
+            self._record_comprehension_walrus(node)
+
+        def visit_GeneratorExp(self, node: "ast.GeneratorExp") -> None:
+            self._record_comprehension_walrus(node)
+
+        def visit_Assign(self, node: "ast.Assign") -> None:
+            if len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
+                name = node.targets[0].id
+                # More than one plain Assign to the same bare name is
+                # itself already a count>1 fact `counts` will carry;
+                # recording None here just avoids handing back an
+                # arbitrary ONE of several conflicting values.
+                sole_assign_values[name] = (
+                    node.value if name not in sole_assign_values else None
+                )
+            self.generic_visit(node)  # still counts the target(s) + walks the value
+
+        def visit_ExceptHandler(self, node: "ast.ExceptHandler") -> None:
+            if node.name:
+                _record(node.name)
+            self.generic_visit(node)
+
+        def visit_Import(self, node: "ast.Import") -> None:
+            for alias in node.names:
+                _record(alias.asname or alias.name.split(".")[0])
+
+        def visit_ImportFrom(self, node: "ast.ImportFrom") -> None:
+            for alias in node.names:
+                _record(alias.asname or alias.name)
+
+        def visit_Global(self, node: "ast.Global") -> None:
+            global_or_nonlocal.update(node.names)
+
+        def visit_Nonlocal(self, node: "ast.Nonlocal") -> None:
+            global_or_nonlocal.update(node.names)
+
+        def visit_Match(self, node: "ast.Match") -> None:
+            for case in node.cases:
+                for name in _match_pattern_capture_names(case.pattern):
+                    _record(name)
+            # Pattern identifiers are plain `str`, never `ast.Name`, so
+            # generic_visit re-walking the patterns cannot double-count;
+            # this still normally walks each case's own guard + body.
+            self.generic_visit(node)
+
+        def visit_Name(self, node: "ast.Name") -> None:
+            if isinstance(node.ctx, ast.Store):
+                _record(node.id)
+
+    visitor = _ScopeBindingVisitor()
+    for stmt in scope_body:
+        visitor.visit(stmt)
+    return counts, sole_assign_values, global_or_nonlocal
+
+
+def _param_names(func_node: "ast.FunctionDef | ast.AsyncFunctionDef") -> "set[str]":
+    """Every parameter name `func_node`'s own signature introduces into its
+    local scope -- positional-only, positional-or-keyword, keyword-only,
+    `*args`, `**kwargs`, with or without a default value. `ast.arg` is
+    never an `ast.Name` node, so no Store-context Name walk can ever see a
+    parameter on its own; `sorted=set` as a default parameter value is
+    otherwise structurally invisible."""
+    args = func_node.args
+    names = {arg.arg for arg in (*args.posonlyargs, *args.args, *args.kwonlyargs)}
+    if args.vararg is not None:
+        names.add(args.vararg.arg)
+    if args.kwarg is not None:
+        names.add(args.kwarg.arg)
+    return names
+
+
+# ---------------------------------------------------------------------------
+# 4b. The canonical FROZEN_INPUT_SPECS key-projection shape (requirement 2).
+# ---------------------------------------------------------------------------
+
+
+def _subscript_zero_index(slice_node: "ast.AST") -> bool:
+    """True iff `slice_node` (a Subscript's own `.slice`) denotes the
+    literal integer `0` -- handles both the 3.9+ shape (`.slice` is the
+    index expression itself) and the pre-3.9 `ast.Index(...)` wrapper still
+    present as an AST class for compatibility. Explicitly excludes `False`:
+    `False == 0` in Python, so a bare `node.value == 0` check alone would
+    wrongly accept `spec[False]`."""
+    node = slice_node
+    if isinstance(node, ast.Index):  # pragma: no cover -- pre-3.9 shape only
+        node = getattr(node, "value", node)
+    return (
+        isinstance(node, ast.Constant)
+        and not isinstance(node.value, bool)
+        and node.value == 0
+    )
+
+
+def _is_canonical_spec_keys_projection(value: "ast.AST") -> bool:
+    """True iff `value` is structurally EXACTLY one of the two forms the
+    real, shipped guards use to project "the key" out of every
+    FROZEN_INPUT_SPECS entry -- a single-generator `ListComp` over the bare
+    Name `FROZEN_INPUT_SPECS`, with no `if` filter and no second `for`
+    clause, whose element expression is either:
+
+      Form A (suspicion_scan.py, and skeptic_setup.py's two guards -- all
+      three spelled identically): `X[0] for X in FROZEN_INPUT_SPECS` -- the
+      generator's target is a single bare Name, and the element is that
+      SAME name subscripted by the literal `0`.
+
+      Form B (skeptic_ready.py -- verified against the real source before
+      writing this check, not assumed identical to the other three): `X
+      for X, _, _ in FROZEN_INPUT_SPECS` -- the generator's target is a
+      Tuple of EXACTLY THREE bare Names (a full destructuring unpack of
+      each 3-tuple entry -- FROZEN_INPUT_SPECS entries are `(key, label,
+      stamp_field)` 3-tuples, per skeptic_constants.py's own definition, so
+      a 2-name or 4+-name unpack target is not this shape at all, whatever
+      it happens to project), and the element is bare the tuple target's
+      OWN first Name.
+
+    Both forms project the identical value -- FROZEN_INPUT_SPECS entries
+    are `(key, label, stamp_field)` 3-tuples, per skeptic_constants.py's
+    own definition -- as two equally direct spellings of "the first field
+    of each entry", not two different things one of which is "more
+    correct". Treating only Form A as canonical would false-reject
+    skeptic_ready.py's own real, already-shipped guard.
+
+    Deliberately alpha-equivalent, not spelling-pinned: the loop
+    variable's own name carries no semantic weight (renaming `spec` to `s`
+    throughout does not change what the comprehension computes), so this
+    accepts ANY name if used consistently between the generator target and
+    the element -- not just the literal spellings (`spec`/`key`) the four
+    real sites happen to use today.
+
+    This is a whole-expression STRUCTURAL check, not a membership/contains
+    check: an expression that merely references the name
+    `FROZEN_INPUT_SPECS` somewhere in its subtree (`[spec[1] for spec in
+    FROZEN_INPUT_SPECS]` -- the label, not the key; `alias if
+    FROZEN_INPUT_SPECS else [...]` -- a third-name alias) does NOT qualify
+    just because the name appears. Membership-style matching is exactly
+    what let a label-projection and a third-name alias both slip through
+    an earlier version of this file."""
+    if not isinstance(value, ast.ListComp):
+        return False
+    if len(value.generators) != 1:
+        return False
+    generator = value.generators[0]
+    if generator.ifs or generator.is_async:
+        return False
+    if not (
+        isinstance(generator.iter, ast.Name) and generator.iter.id == "FROZEN_INPUT_SPECS"
+    ):
+        return False
+
+    target = generator.target
+    elt = value.elt
+
+    if isinstance(target, ast.Name):  # Form A: X[0] for X in FROZEN_INPUT_SPECS
+        return (
+            isinstance(elt, ast.Subscript)
+            and isinstance(elt.value, ast.Name)
+            and elt.value.id == target.id
+            and _subscript_zero_index(elt.slice)
+        )
+
+    if isinstance(target, ast.Tuple):  # Form B: X for X, _, _ in FROZEN_INPUT_SPECS
+        elts = target.elts
+        return (
+            len(elts) == 3
+            and all(isinstance(e, ast.Name) for e in elts)
+            and isinstance(elt, ast.Name)
+            and isinstance(elts[0], ast.Name)
+            and elt.id == elts[0].id
+        )
+
+    return False
+
+
+# ---------------------------------------------------------------------------
+# 4c. The `if sorted(X) != sorted(Y):` comparison shape (requirement 1).
+# ---------------------------------------------------------------------------
+
+
+def _bare_name_sorted_call(node: "ast.AST") -> "ast.Name | None":
+    """Returns the argument Name node iff `node` is exactly `sorted(<bare
+    name>)`: a Call to the bare name `sorted`, exactly one positional
+    argument, no keyword arguments, and that argument itself a bare Name
+    (excludes a nested call like `sorted(set(x))`, a literal like
+    `sorted([1])`, and a starred arg like `sorted(*x)`). Returns None for
+    anything else."""
+    if not (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "sorted"
+    ):
+        return None
+    if len(node.args) != 1 or node.keywords:
+        return None
+    arg = node.args[0]
+    return arg if isinstance(arg, ast.Name) else None
+
+
+def _sorted_mismatch_operand_names(test: "ast.AST") -> "tuple[str, str] | None":
+    """If `test` is exactly `sorted(X) != sorted(Y)` for two bare-Name
+    operands (a `Compare` with a single `!=` and both sides a bare
+    `sorted(<Name>)` call), returns `(X.id, Y.id)` in the order written.
+    Returns None for anything else -- a `set(...)`/`len(...)` comparison, a
+    hoisted `if _flag:` (a bare Name test is not this shape at all, and is
+    rejected outright rather than resolved -- this file has never chased a
+    flag back to its own assignment), a nested-call or literal `sorted()`
+    argument, a self-comparison, ...."""
+    if not isinstance(test, ast.Compare):
+        return None
+    if len(test.ops) != 1 or not isinstance(test.ops[0], ast.NotEq):
+        return None
+    if len(test.comparators) != 1:
+        return None
+    left = _bare_name_sorted_call(test.left)
+    right = _bare_name_sorted_call(test.comparators[0])
+    if left is None or right is None:
+        return None
+    return (left.id, right.id)
+
+
+# ---------------------------------------------------------------------------
+# 4d. The raise (requirements 5/6).
+# ---------------------------------------------------------------------------
+
+
+def _is_assertion_error_raise(exc: "ast.AST | None") -> bool:
+    """True iff `exc` (a Raise node's own `.exc`) names AssertionError
+    directly -- `raise AssertionError(...)` (a Call whose callee is the
+    bare Name `AssertionError`) or the bare `raise AssertionError`. Any
+    other exception -- including a plausible-looking custom subclass, or an
+    unrelated builtin like RuntimeError -- fails: a `raise
+    RuntimeError(anchor_phrase)` guard is not the fail-closed contract
+    every real site ships, no matter how the message reads."""
+    if isinstance(exc, ast.Call):
+        return isinstance(exc.func, ast.Name) and exc.func.id == "AssertionError"
+    return isinstance(exc, ast.Name) and exc.id == "AssertionError"
+
+
+def _sole_positional_call_argument(exc: "ast.AST | None") -> "ast.AST | None":
+    """Returns the sole positional-argument expression of `exc` iff `exc`
+    is a Call with EXACTLY one positional argument and no keywords --
+    `AssertionError(<expr>)`. Returns None for anything else: the bare
+    `raise AssertionError` (no message at all -- `exc` is a Name, not a
+    Call), a zero-argument call, a multi-argument call, or any keyword
+    argument. This is the ONE recognized message-argument shape both
+    forms in `_guard_raise_is_qualifying` below share: in the
+    direct-raise form, `<expr>` IS the message, checked directly by
+    `_expr_guarantees_anchor`; in the message-variable form, `<expr>` is
+    itself a bare Name that gets one further resolution hop through
+    `_if_body_sole_preceding_message_value` before the SAME
+    `_expr_guarantees_anchor` check runs on its resolved value."""
+    if isinstance(exc, ast.Call) and len(exc.args) == 1 and not exc.keywords:
+        return exc.args[0]
+    return None
+
+
+def _expr_guarantees_anchor(expr: "ast.AST") -> bool:
+    """True iff `expr` STATICALLY, GUARANTEED-AT-RUNTIME carries
+    ANCHOR_PHRASE in one of its own literal segments -- the ONE anchor
+    check shared by BOTH recognized message forms in
+    `_guard_raise_is_qualifying` below (the direct-raise argument, and the
+    message-variable's resolved assignment value). A decoy that would
+    defeat one form is written once here and so defeats both, rather than
+    needing to be independently rediscovered and separately re-patched at
+    each site -- exactly the round-17-then-round-18 pattern this file's
+    own comment block above describes.
+
+    Accepts exactly two shapes:
+      - `ast.Constant` of type `str`: the phrase must appear in `.value`
+        (adjacent plain string literals -- `"a" "b"` -- are already
+        merged into a single Constant by the parser, so no separate
+        concatenation handling is needed for that case).
+      - `ast.JoinedStr` (an f-string, or an implicit concatenation mixing
+        an f-string with plain literals): the phrase must appear WHOLLY
+        within at least one of its own Constant (non-interpolated)
+        segments, checked independently, segment by segment --
+        `ast.FormattedValue` segments (the `{...}` parts) are skipped
+        entirely, their runtime content never inspected, and never
+        allowed to bridge two Constant segments into a match that
+        neither segment carries alone (a decoy that split the phrase
+        across an interpolation gap, e.g. `f"...duplicate ke{y}y..."`,
+        renders a DIFFERENT string at runtime than the literal anchor
+        text and must not qualify just because concatenating the two
+        constant halves happens to spell it back out -- deliberately
+        STRICTER than "concatenate every constant segment and search
+        that", for this reason). This is what lets the four real guards'
+        own f-string-with-interpolation messages qualify -- e.g.
+        `f"{sorted(frozen_input_snapshots)} != FROZEN_INPUT_SPECS keys
+        {sorted(spec_keys)} -- ... or FROZEN_INPUT_SPECS contains a
+        duplicate key; ..."` -- the phrase lives whole inside its own
+        trailing Constant segment, same as the plain-Constant case above
+        (verified against all four real sites' actual parsed ASTs before
+        writing this, not assumed).
+
+    Anything else -- `IfExp` (ternary), `BoolOp`, `Call`, `Subscript`,
+    `Name`, attribute access, a comprehension, ... -- is REJECTED
+    outright, with no attempt to evaluate or partially trust it. This is
+    what makes a decoy like `ANCHOR_PHRASE if False else "wrong"` fail
+    identically on BOTH the direct-raise and the message-variable form:
+    the anchor Constant sits in the dead `if False` branch, but the
+    GUARANTEED, always-reachable value of the `IfExp` itself is
+    `"wrong"`, and an `IfExp` is not one of the two accepted shapes at
+    all -- there is no subtree walk here that could find the buried
+    literal."""
+    if isinstance(expr, ast.Constant) and isinstance(expr.value, str):
+        return ANCHOR_PHRASE in expr.value
+    if isinstance(expr, ast.JoinedStr):
+        return any(
+            isinstance(part, ast.Constant)
+            and isinstance(part.value, str)
+            and ANCHOR_PHRASE in part.value
+            for part in expr.values
+        )
+    return False
+
+
+def _if_body_sole_preceding_message_value(
+    if_node: "ast.If", raise_index: int, name: str
+) -> "ast.AST | None":
+    """Returns the `.value` of `name`'s message-carrying assignment iff ALL
+    of: `name` is bound EXACTLY ONCE anywhere in `if_node.body`'s own
+    flattened scope (an intervening rebind ANYWHERE in that scope -- even
+    one nested inside a `for`/`if`/`while` the direct body does not
+    literally contain as a sibling -- disqualifies the message
+    unconditionally, not just a same-level reassignment); AND that sole
+    binding is a plain `name = <value>` Assign that is ALSO the DIRECT
+    statement of `if_node.body` IMMEDIATELY PRECEDING `raise_index` --
+    `if_node.body[raise_index - 1]` exactly, not merely some earlier
+    statement in the body. Returns None otherwise.
+
+    Both conditions matter independently, against two distinct decoys:
+    without the flattened-scope rebind count, `message = "...anchor...";
+    for _ in (0,): message = "wrong"; raise AssertionError(message)` would
+    still resolve to the anchor-carrying value even though `message` is NOT
+    what the raise actually sees at runtime -- the `for` loop's own
+    reassignment lives one level deeper than a same-level scan alone would
+    ever look. And without the immediate-adjacency requirement, an
+    intervening same-level statement that does not rebind `name` at all --
+    e.g. `message = "...anchor..."; _ = 0; raise AssertionError(message)`
+    -- would still resolve to the anchor-carrying value even though the
+    assignment is not the last thing the if-body does before the raise;
+    pinning the check to exactly `raise_index - 1` is what makes
+    "immediately preceding" mean what it says, rather than merely
+    "somewhere earlier in the same body"."""
+    counts, _sole, _global_nonlocal = _scope_binding_info(if_node.body)
+    if counts.get(name, 0) != 1:
+        return None
+    message_index = raise_index - 1
+    if message_index < 0:
+        return None
+    stmt = if_node.body[message_index]
+    if (
+        isinstance(stmt, ast.Assign)
+        and len(stmt.targets) == 1
+        and isinstance(stmt.targets[0], ast.Name)
+        and stmt.targets[0].id == name
+    ):
+        return stmt.value
+    return None
+
+
+def _guard_raise_is_qualifying(if_node: "ast.If") -> bool:
+    """True iff `if_node.body` contains, as a DIRECT statement (not nested
+    inside any further loop/conditional/with/try the body contains), a
+    `raise AssertionError(<expr>)` with EXACTLY one positional argument
+    and no keywords (`_sole_positional_call_argument`) whose message
+    STATICALLY GUARANTEES `ANCHOR_PHRASE` per `_expr_guarantees_anchor` --
+    checked either directly on `<expr>` itself (the direct-raise form), or
+    -- when `<expr>` is itself a bare Name -- on the `.value` of that
+    name's sole, immediately preceding, same-level if-body assignment
+    (`_if_body_sole_preceding_message_value`; the message-variable form).
+
+    Both forms run through the SAME `_expr_guarantees_anchor` helper, so a
+    decoy sitting in a dead branch, e.g. `ANCHOR_PHRASE if False else
+    "wrong"`, is rejected identically whether it is assigned to a message
+    variable first or passed directly to `AssertionError(...)` -- neither
+    an `IfExp` nor anything else outside `_expr_guarantees_anchor`'s two
+    accepted shapes qualifies just because the phrase appears somewhere in
+    the expression's own subtree."""
+    for index, stmt in enumerate(if_node.body):
+        if not isinstance(stmt, ast.Raise):
+            continue
+        if not _is_assertion_error_raise(stmt.exc):
+            continue
+        message_arg = _sole_positional_call_argument(stmt.exc)
+        if message_arg is None:
+            continue
+        if _expr_guarantees_anchor(message_arg):
+            return True
+        if isinstance(message_arg, ast.Name):
+            value = _if_body_sole_preceding_message_value(if_node, index, message_arg.id)
+            if value is not None and _expr_guarantees_anchor(value):
+                return True
+    return False
+
+
+# ---------------------------------------------------------------------------
+# 4e. Tying the operand shape to the canonical projection (requirements
+#     2/3), and the `sorted`-shadow check (requirement 4).
+# ---------------------------------------------------------------------------
+
+
+def _spec_operand_name(
+    operand_names: "tuple[str, str]",
+    owner_scope_body: "list[ast.stmt]",
+    owner_node: "ast.FunctionDef | ast.AsyncFunctionDef | None",
+) -> "str | None":
+    """Returns the one operand name that qualifies as the
+    FROZEN_INPUT_SPECS key-projection operand -- bound as its scope's SOLE
+    binding (of ANY kind -- also not a parameter, also not declared
+    global/nonlocal: either makes this NOT its sole binding even when
+    there is exactly one plain Assign) by a plain `name = <value>` Assign
+    whose value is `_is_canonical_spec_keys_projection`. Returns None
+    unless EXACTLY ONE of the two operand names qualifies -- if neither
+    does, or (a pathological case) both independently do, that is not
+    "the" spec operand and this guard does not qualify. Also returns None
+    outright if the two operand names are identical (not a real two-sided
+    comparison at all)."""
+    if operand_names[0] == operand_names[1]:
+        return None
+    counts, sole_assign_values, global_or_nonlocal = _scope_binding_info(owner_scope_body)
+    owner_params = _param_names(owner_node) if owner_node is not None else set()
+    qualifying = [
+        name
+        for name in operand_names
+        if name not in global_or_nonlocal
+        and name not in owner_params
+        and counts.get(name) == 1
+        and (assign_value := sole_assign_values.get(name)) is not None
+        and _is_canonical_spec_keys_projection(assign_value)
+    ]
+    return qualifying[0] if len(qualifying) == 1 else None
+
+
+def _sorted_is_unshadowed(
+    owner_node: "ast.FunctionDef | ast.AsyncFunctionDef | None", module_tree: "ast.Module"
+) -> bool:
+    """True iff the builtin name `sorted` is bound by NO binding form
+    (assignment, def, class, parameter, walrus, `for`/`with`/`except`/
+    `import ... as`, global/nonlocal, match-capture) anywhere in the
+    guard's own owning scope, OR at module level in this same file --
+    `sorted = set` (restoring duplicate-key collapse) while the accepted
+    `sorted(X) != sorted(Y)` AST shape stays untouched is exactly the
+    defect this closes."""
+    owner_scope_body = owner_node.body if owner_node is not None else module_tree.body
+    owner_counts, _sole, owner_global_nonlocal = _scope_binding_info(owner_scope_body)
+    if owner_counts.get("sorted", 0) > 0:
+        return False
+    if "sorted" in owner_global_nonlocal:
+        return False
+    if owner_node is not None and "sorted" in _param_names(owner_node):
+        return False
+    module_counts, _sole2, _global2 = _scope_binding_info(module_tree.body)
+    return module_counts.get("sorted", 0) == 0
+
+
+# ---------------------------------------------------------------------------
+# 4f. Owner identity (requirement 7) and the full per-guard verdict.
+# ---------------------------------------------------------------------------
+
+
+def _scan_file(
+    tree: "ast.Module",
+) -> "tuple[dict[str, list], list[tuple]]":
+    """Single walk over `tree`'s whole subtree. Returns `(module_level_defs,
+    if_hits)`:
+
+    `module_level_defs`: `dict[name -> list[FunctionDef/AsyncFunctionDef]]`
+    of every def whose own lexical position is DIRECTLY the module scope --
+    reachable only through control-flow (If/For/While/Try/With/Match) that
+    does not itself introduce a scope, never through a ClassDef or another
+    FunctionDef/AsyncFunctionDef. `def run():` sitting inside `if False:`
+    at module level is still module-level by this definition -- Python's
+    `if` does not create a new scope -- which is deliberate: requirement 7
+    needs exactly this to report a dead, guarded `if False: def run():
+    <guard>` sitting ALONGSIDE a real, unguarded `def run()` as an
+    AMBIGUOUS pair of same-named module-level defs, rather than silently
+    preferring whichever copy happens to carry the guard.
+
+    `if_hits`: `list[(owner_or_None, ast.If)]` for every `ast.If` anywhere
+    in the file, tagged with its nearest lexically-enclosing FunctionDef/
+    AsyncFunctionDef (by object identity), or `None` if it sits directly at
+    module level or directly inside a class body outside any method. A
+    `ClassDef` resets attribution to `None`: a class body's own top-level
+    statements execute in the class's own namespace at class-definition
+    time, not as part of any lexically enclosing function's runtime scope,
+    so a guard relocated into a class nested inside its owning function
+    must not be misattributed to that function."""
+    module_level_defs: "dict[str, list]" = {}
+    if_hits: "list[tuple]" = []
+
+    def _walk(node: "ast.AST", owner, in_class: bool) -> None:
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                if owner is None and not in_class:
+                    module_level_defs.setdefault(child.name, []).append(child)
+                next_owner, next_in_class = child, in_class
+            elif isinstance(child, ast.ClassDef):
+                next_owner, next_in_class = None, True
+            else:
+                next_owner, next_in_class = owner, in_class
+            if isinstance(child, ast.If):
+                if_hits.append((owner, child))
+            _walk(child, next_owner, next_in_class)
+
+    _walk(tree, None, False)
+    return module_level_defs, if_hits
+
+
+def _site_key(filename: str, owner_node, module_level_defs: "dict[str, list]") -> "tuple[str, str]":
+    """The `(file, label)` key used to compare a found guard's location
+    against `EXPECTED_GUARD_SITES`. Only a guard whose owner is
+    IDENTITY-verified as the UNIQUE module-level def of its own bare name
+    gets the plain `(filename, name)` key that can equal an expected site
+    -- a class method or nested function sharing that bare name, an
+    AMBIGUOUS name with 2+ module-level defs, or a guard with no owning def
+    at all, each get a label that can never equal any `EXPECTED_GUARD_SITES`
+    entry, so they always surface as 'unexpected' rather than silently
+    masquerading as (or silently satisfying) a real site."""
+    if owner_node is None:
+        return (filename, "<module level, no owning function>")
+    candidates = module_level_defs.get(owner_node.name, [])
+    if len(candidates) == 1 and candidates[0] is owner_node:
+        return (filename, owner_node.name)
+    return (filename, f"<{owner_node.name!r} is not a unique module-level function>")
+
+
+def _guard_qualification(
+    if_node: "ast.If", owner_node, module_tree: "ast.Module"
+) -> "str | None":
+    """Returns `None` if `if_node` fully qualifies as one of the four
+    canonical guards. Otherwise returns a short, human-readable reason it
+    was rejected. Only ever called on an `if` whose test already has the
+    `sorted(X) != sorted(Y)` comparison shape (see the caller in the test
+    function below), so the reasons here are about WHICH further allowlist
+    requirement failed, not whether this looked like an attempted guard at
+    all."""
+    operand_names = _sorted_mismatch_operand_names(if_node.test)
+    if operand_names is None:
+        return "test is not `sorted(X) != sorted(Y)` with bare-Name operands"
+    if not _guard_raise_is_qualifying(if_node):
+        return (
+            f"body does not directly raise AssertionError carrying {ANCHOR_PHRASE!r}, "
+            "either literally or via a message name bound exactly once, "
+            "immediately before the raise"
+        )
+    owner_scope_body = owner_node.body if owner_node is not None else module_tree.body
+    if _spec_operand_name(operand_names, owner_scope_body, owner_node) is None:
+        return (
+            "neither (or both) of the compared operands is bound, as its "
+            "scope's sole binding, to the canonical FROZEN_INPUT_SPECS "
+            "key-projection comprehension"
+        )
+    if not _sorted_is_unshadowed(owner_node, module_tree):
+        return "the builtin `sorted` is shadowed in the guard's owning or module scope"
+    return None
+
+
+def test_frozen_input_key_mismatch_guards_match_canonical_allowlisted_shape():
+    """AST-driven ALLOWLIST check across every FROZEN_INPUT_SPECS
+    key-mismatch guard shipped anywhere under `SCRIPTS_DIR`. See the
+    section-4 comment block above for the full allowlist this implements,
+    why it replaced a six-round denylist, and what it deliberately does
+    NOT prove (reachability/dominance; an unguarded fifth consumer; a
+    rebind through `builtins`/`globals()`/a third-name alias chain).
+
+    This proves each of the four `EXPECTED_GUARD_SITES` obligations --
+    `compute_producer_input_digest()` (suspicion_scan.py),
+    `compute_skeptic_input_digest()` and `run()` (both skeptic_setup.py),
+    `frozen_input_check()` (skeptic_ready.py) -- independently carries a
+    guard STRUCTURALLY IDENTICAL to the canonical shape: `if sorted(X) !=
+    sorted(Y):` where one of X/Y is bound, as its owning scope's sole
+    binding, to one of the two canonical FROZEN_INPUT_SPECS
+    key-projection comprehensions those sites actually ship, `sorted`
+    itself is unshadowed anywhere reachable, and the body directly raises
+    `AssertionError` carrying the anchor phrase. The file set scanned is
+    DERIVED (every `*.py` directly under `SCRIPTS_DIR`, non-recursive --
+    no shipped script lives in a nested subdirectory today) rather than
+    hand-typed, so a fifth guard landing in a fifth script is found
+    automatically; what remains hand-maintained, deliberately, is
+    `EXPECTED_GUARD_SITES` itself -- there is no way to derive "which four
+    functions SHOULD own a guard" from the source."""
+    all_hits: "list[tuple[str, tuple[str, str], ast.If]]" = []
+    near_misses: "list[str]" = []
+    ambiguous_owners: "list[tuple[str, str, int]]" = []
+
+    for script_path in sorted(SCRIPTS_DIR.glob("*.py")):
+        tree = ast.parse(script_path.read_text(encoding="utf-8"), filename=str(script_path))
+        module_level_defs, if_hits = _scan_file(tree)
+        filename = script_path.name
+
+        for site_file, site_function in EXPECTED_GUARD_SITES:
+            if site_file != filename:
+                continue
+            candidates = module_level_defs.get(site_function, [])
+            if len(candidates) > 1:
+                ambiguous_owners.append((filename, site_function, len(candidates)))
+
+        for owner_node, if_node in if_hits:
+            if _sorted_mismatch_operand_names(if_node.test) is None:
+                continue  # not even attempting the shape -- not a candidate at all
+            reason = _guard_qualification(if_node, owner_node, tree)
+            if reason is None:
+                site = _site_key(filename, owner_node, module_level_defs)
+                all_hits.append((filename, site, if_node))
+            else:
+                owner_label = owner_node.name if owner_node is not None else "<module level>"
+                near_misses.append(
+                    f"{filename}::{owner_label}: `{ast.unparse(if_node.test)}` -- {reason}"
+                )
+
+    assert not ambiguous_owners, (
+        "an EXPECTED_GUARD_SITES function name resolves to more than one "
+        "module-level def in the same file (e.g. a dead `if False: def "
+        "run(): ...` sitting alongside a real `def run()`):\n"
+        + "\n".join(
+            f"  {file}::{func}: {count} module-level defs"
+            for file, func, count in ambiguous_owners
+        )
+    )
+
+    found_sites = {hit[1] for hit in all_hits}
+    expected_sites = frozenset(EXPECTED_GUARD_SITES)
+    near_miss_context = (
+        "\nnear-miss candidates (right `sorted(X) != sorted(Y)` shape, "
+        "rejected on another ground):\n" + "\n".join(f"  {m}" for m in near_misses)
+        if near_misses
+        else ""
+    )
+
+    assert len(all_hits) == 4, (
+        "expected exactly 4 FROZEN_INPUT_SPECS key-mismatch guards across "
+        f"every *.py file under {SCRIPTS_DIR}, found {len(all_hits)}:\n"
+        + "\n".join(f"  {file}::{site}" for file, site, _if_node in all_hits)
+        + near_miss_context
+    )
+    assert found_sites == expected_sites, (
+        "FROZEN_INPUT_SPECS key-mismatch guards were not found at exactly "
+        "the expected (file, function) locations -- a guard's `if` may have "
+        "relocated out of its owning function, or a new one landed "
+        "somewhere unexpected:\n"
+        f"  missing:    {sorted(expected_sites - found_sites)}\n"
+        f"  unexpected: {sorted(found_sites - expected_sites)}"
+        + near_miss_context
+    )

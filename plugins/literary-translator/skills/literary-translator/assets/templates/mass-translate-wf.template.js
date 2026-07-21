@@ -954,7 +954,12 @@ async function getVerifiedReview(seg, roundLabel) {
   const ready = await agent(reviewWaitPrompt(seg, roundLabel, disp), {
     effort: "low", phase: "ReviewFix", label: waitLabel,
   });
-  if (!ready || ready.indexOf("READY") === -1) {
+  // EXACT match, never substring (content-matching-sentinel-fragility, #228):
+  // a timeout reply like "TIMEOUT seg01 (not READY)" contains the literal
+  // substring "READY" and would falsely pass a `.indexOf("READY") === -1`
+  // check -- reviewWaitPrompt instructs the agent to return exactly "READY
+  // <seg>"/"TIMEOUT <seg>".
+  if (String(ready).trim() !== "READY " + seg) {
     return { status: "blocked", reason: "review-timeout" };
   }
 
@@ -1005,7 +1010,19 @@ async function runRound(seg, round, isFinal) {
   }
 
   const fx = await callFix(seg, round, rev);
-  if (!fx || fx.indexOf("DRAFT_MISSING") !== -1) {
+  // EXACT match against the failure sentinel, never substring
+  // (content-matching-sentinel-fragility, #228) -- fixPrompt instructs the
+  // agent to return exactly "DRAFT_MISSING <seg>", and a genuine fix reply
+  // that merely mentions that literal substring in its own prose must not
+  // collide with it. The `!fx ||` falsy branch is KEPT deliberately and is
+  // NOT redundant with the exact-match check: the runtime treats a falsy fx
+  // (agent death / output-token ceiling / classifier block -- #131 facet A)
+  // and a genuine DRAFT_MISSING alike as inconclusive, both routed through
+  // the draftPresentAndValid probe below, whose own contract says null means
+  // inconclusive, never absent (see its comment above). Dropping `!fx` would
+  // let a dead fix call silently read as an ordinary review round instead of
+  // probing for what actually happened.
+  if (!fx || String(fx).trim() === "DRAFT_MISSING " + seg) {
     // #131 facet A: a falsy/DRAFT_MISSING return conflates (a) a genuine
     // missing draft with (b) a hard API/output-token-ceiling error and (c) a
     // classifier block -- both (b) and (c) also yield a falsy fx even though
@@ -1048,7 +1065,16 @@ async function reviewFixLoop(stage1Result, seg) {
   // return was unparseable -- safe degradation, fail-fast simply disabled).
   const disp = stage1Result && typeof stage1Result.disp === "string" ? stage1Result.disp : "";
   const ready = await agent(waitPrompt(seg, disp), { effort: "low", phase: "ReviewFix", label: "wait:" + seg });
-  if (!ready || ready.indexOf("READY") === -1) {
+  // EXACT match, never substring (content-matching-sentinel-fragility, #228):
+  // a timeout reply like "TIMEOUT seg01 (not READY)" contains the literal
+  // substring "READY" and would falsely pass a `.indexOf("READY") === -1`
+  // check -- waitPrompt instructs the agent to return exactly "READY
+  // <seg>"/"TIMEOUT <seg>". This is the worst of the five sites (#228): a
+  // false pass here sends the ENTIRE review/fix cycle over a draft that
+  // never actually finished translating, and the "we'll pick it back up
+  // next run" safety net never fires because nothing here is recorded as
+  // recoverable.
+  if (String(ready).trim() !== "READY " + seg) {
     // #131 facet C: a translate-timeout is transient/mechanical (the codex
     // translator agent died, hit an infra hiccup, or is simply still
     // running past the bounded poll) -- not genuine content

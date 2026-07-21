@@ -51,8 +51,26 @@ order):
   7. sampled -- a globally-capped, deterministic stratified sample of the
      remaining accepted high/medium-confidence entries (a spot-check safety
      net over everything the first six classes did not already catch).
+  8. fold_collision (#243) -- this scope_in source_form's
+     `bootstrap_names.fold_match_key` collides with ANOTHER scope_in
+     source_form's (`canon_senses.fold_collision_map()`, computed over the
+     UNION of every `canon.json` entry and every `canon_senses.json` form,
+     split-only included -- the same "competitors" universe every #243
+     consumer shares -- then re-checked against THIS scope: a collision with
+     an out-of-scope or split-only-only competitor never fires this).
+     ALWAYS flagged, and NEVER combined with classes 3/4/5/6's ordinary
+     occurrence-count computation for the same entry: `verse_occurrences()`
+     is called per-form, fold-collision-unaware, so two colliding forms
+     sharing one physical verse span would otherwise double-file that span
+     to BOTH while their block-origin counts are independently zeroed by
+     `occ_index.py`'s own fail-closed collision handling -- the two paths
+     disagreeing in opposite directions makes singleton/high_dispersion/
+     near_merge meaningless for these forms. Skipping that computation
+     entirely and flagging unconditionally guarantees a colliding entry can
+     never end up with zero risk classes and silently never reach the
+     skeptic pass (this script's own promise, one paragraph up).
 
-Scope filter (classes 1, 3, 4, 5, 6, 7 -- every class except
+Scope filter (classes 1, 3, 4, 5, 6, 7, 8 -- every class except
 established_offline, which is a provenance signal, not an identity one):
 entries with `is_proper_name: false` or `basis: "not_a_name"` are excluded
 -- mirrors the shipped audit's own entity-merge filter
@@ -83,22 +101,40 @@ changes.
 
 `producer_input_digest`: this script stamps every worklist it writes with a
 sha256 hex digest over its own ENTIRE behavior-determining closure --
-`canon.json` + `manifest.json` + the canonically-serialized resolved scan
-parameters + the resolved `LanguageConfig.raw_bytes` + the raw bytes of
-every file in `PRODUCER_CODE_CLOSURE` below. `skeptic_setup.py` (the
-skeptic resume-domain owner, Part B) imports `compute_producer_input_digest`
-from this module and recomputes the IDENTICAL value to reject a stale
-worklist fail-closed -- see that function's own docstring for the exact
-algorithm. `skeptic_constants.py` is itself a closure member (governs every
-default this script uses), never a `PLUGIN_BUNDLE_MEMBER` -- editing it must
-never re-translate a converged segment, but it DOES invalidate a worklist's
-freshness, same as editing this script itself.
+`canon.json` + `manifest.json` + `canon_senses.json` (#243, each a
+state-tagged `(state, bytes)` pair, codex round 4 -- an absent sidecar is
+state `"absent"`/bytes `b""`, distinct from a schema-valid logically-empty
+document, which is state `"regular"`/non-empty-schema bytes; see
+`--senses-path` below) + the
+canonically-serialized resolved scan parameters + the resolved
+`LanguageConfig.raw_bytes` + the raw bytes of every file in
+`PRODUCER_CODE_CLOSURE` below. `skeptic_setup.py` (the skeptic resume-domain
+owner, Part B) imports `compute_producer_input_digest` from this module and
+recomputes the IDENTICAL value to reject a stale worklist fail-closed --
+see that function's own docstring for the exact algorithm. `skeptic_constants.py`
+is itself a closure member (governs every default this script uses), never
+a `PLUGIN_BUNDLE_MEMBER` -- editing it must never re-translate a converged
+segment, but it DOES invalidate a worklist's freshness, same as editing this
+script itself.
+
+Ambiguity competitors (#243): class 8 (`fold_collision`, see above) needs the
+same "competitors" universe every #243 consumer shares -- the union of every
+`canon.json` entry and every `canon_senses.json` form (split-only included).
+`--senses-path` (mirrors `canon_adjudication_audit.py`'s own
+`--senses-path`/`DEFAULT_SENSES_PATH`/`allow_absent` convention exactly: an
+implicit default sidecar that is genuinely absent is tolerated as empty; an
+EXPLICIT `--senses-path` that does not exist is a hard error) is parsed via
+`canon_senses.load_senses_from_snapshot()` (codex round 5: from THIS
+script's own already-captured snapshot, never a second independent read)
+to build that universe, then `canon_senses.fold_collision_map()` computes
+the collision groups passed into `build_worklist()`.
 
 CLI:
 
     python3 suspicion_scan.py --particle-config fr.json \\
         --research-mode offline --source-format gutenberg_epub \\
-        [--canon PATH] [--manifest PATH] [--languages-dir PATH] \\
+        [--canon PATH] [--manifest PATH] [--senses-path PATH] \\
+        [--languages-dir PATH] \\
         [--dispersion-threshold N] [--sample-cap N] [--near-threshold F] \\
         [--near-cap N] [--near-pair-budget N] [--windows-per-entity N] \\
         [--citation-block-types TYPE [TYPE ...]] [--out PATH]
@@ -112,6 +148,7 @@ import difflib
 import hashlib
 import itertools
 import json
+import os
 import sys
 from collections import defaultdict
 from pathlib import Path
@@ -122,6 +159,11 @@ SCHEMAS_DIR = DURABLE_ROOT / "schemas"
 
 DEFAULT_CANON_PATH = DURABLE_ROOT / "canon.json"
 DEFAULT_MANIFEST_PATH = DURABLE_ROOT / "manifest.json"
+# Sibling of DEFAULT_CANON_PATH, self-anchored the same way -- NOT imported
+# from canon_adjudication_audit.py/canon_validate.py, each consumer computes
+# its own copy (see canon_senses.py's own module docstring on why
+# DEFAULT_SENSES_PATH is deliberately not defined there).
+DEFAULT_SENSES_PATH = DURABLE_ROOT / "canon_senses.json"
 
 try:
     import jsonschema
@@ -160,15 +202,22 @@ except ImportError as exc:
     )
 
 try:
-    from canon_senses import normalize_form
+    from canon_senses import (
+        normalize_form,
+        fold_collision_map,
+        load_senses_from_snapshot,
+        CanonSensesLoadError,
+    )
 except ImportError as exc:
     sys.exit(
         f"suspicion_scan.py: cannot import canon_senses.py from {SCRIPT_DIR} ({exc}).\n"
         "canon_senses.py must be installed alongside suspicion_scan.py under "
         "${durable_root}/scripts/ -- it supplies normalize_form(), the shared "
         "NFC+casefold+whitespace-collapse comparator every grouping/matching key in "
-        "this script is computed from. Re-run Step 0a, or verify the plugin install "
-        "is not corrupted."
+        "this script is computed from, plus load_senses_from_snapshot()/"
+        "fold_collision_map() (#243), the shared ambiguity-competitors projection "
+        "class 8 (fold_collision) needs. Re-run Step 0a, or verify the plugin "
+        "install is not corrupted."
     )
 
 try:
@@ -178,11 +227,14 @@ try:
         CITATION_BLOCK_TYPES_BY_FORMAT,
         RISK_MERGE_PARTICIPANT, RISK_ESTABLISHED_OFFLINE, RISK_SINGLETON,
         RISK_HIGH_DISPERSION, RISK_ALL_CITATION, RISK_NEAR_MERGE, RISK_SAMPLED,
+        RISK_FOLD_COLLISION,
         RISK_CLASSES,
         CITATION_UNAVAILABLE_TAG, VERSE_PARENT_UNRESOLVED_TAG, ZERO_OCCURRENCE_TAG,
-        NEAR_BUDGET_TRUNCATED_TAG, NO_CATEGORY_SENTINEL, NON_IDENTITY_BASIS,
+        NEAR_BUDGET_TRUNCATED_TAG, FOLD_COLLISION_OCCURRENCES_SUPPRESSED_TAG,
+        NO_CATEGORY_SENTINEL, NON_IDENTITY_BASIS,
         OCC_ORIGIN_BLOCK, OCC_ORIGIN_VERSE_EMBEDDED, VERSE_MOUNT_EMBEDDED,
         SUSPICION_WORKLIST_FILENAME, SUSPICION_WORKLIST_SCHEMA,
+        FROZEN_INPUT_SPECS,
     )
 except ImportError as exc:
     sys.exit(
@@ -323,6 +375,47 @@ def verse_occurrences(source_form: str, manifest: dict, language_config) -> list
                 "malformed": malformed,
             })
     return results
+
+
+# ---------------------------------------------------------------------------
+# Class 8: fold_collision (#243) -- ALWAYS flagged, gates classes 3/4/5 off
+# ---------------------------------------------------------------------------
+
+def _fold_colliding_forms(scope_in_forms: list, competitors) -> set:
+    """Every `scope_in_forms` member that shares its `fold_match_key` group
+    (`competitors`, a `canon_senses.FoldCollisionMap` built by the caller
+    over the shared #243 "competitors" universe -- every `canon.json` entry
+    UNION every `canon_senses.json` form, split-only included, per this
+    module's own docstring) with >=1 OTHER `scope_in_forms` member.
+
+    Re-projects each collision group down to THIS consumer's own
+    `scope_in_forms` -- a group that includes a competitor OUTSIDE
+    `scope_in_forms` (an `is_proper_name:false`/`not_a_name` canon entry, or
+    a split-only-only `canon_senses.json` form that never became a canon
+    entry at all) does NOT, by itself, make its scope_in sibling collide:
+    only another scope_in_forms member sharing the SAME group does. This is
+    what keeps "a form colliding only with an out-of-scope entry keeps its
+    ordinary counters" true while still sharing ONE global collision
+    computation with every other #243 consumer.
+
+    `competitors=None` (no `canon_senses.json` resolution -- see
+    `build_worklist`'s own `competitors` parameter) means "nothing collides":
+    returns the empty set, i.e. today's pre-#243 behavior."""
+    if competitors is None:
+        return set()
+    scope_in_set = set(scope_in_forms)
+    member_to_group = {}
+    for group in competitors.groups.values():
+        for member in group:
+            member_to_group[member] = group
+    colliding = set()
+    for sf in scope_in_forms:
+        group = member_to_group.get(sf)
+        if group is None:
+            continue
+        if any(other != sf and other in scope_in_set for other in group):
+            colliding.add(sf)
+    return colliding
 
 
 # ---------------------------------------------------------------------------
@@ -623,8 +716,8 @@ def _to_occurrence_ref(c: dict) -> dict:
 def build_worklist(canon_entries: dict, manifest: dict, manifest_path, language_config, *,
                     research_mode: str, citation_types, dispersion_threshold: int,
                     sample_cap: int, near_threshold: float, near_cap: int,
-                    near_pair_budget: int) -> tuple:
-    """Runs all seven risk classes over `canon_entries` (canon.json's own
+                    near_pair_budget: int, competitors=None) -> tuple:
+    """Runs all eight risk classes over `canon_entries` (canon.json's own
     `entries{}`, keyed by source_form) + `manifest` (already-parsed
     manifest.json) and returns `(entries: list[dict], warnings: list[str])`
     -- `entries` is exactly `suspicion-worklist.schema.json`'s `entries[]`
@@ -633,6 +726,16 @@ def build_worklist(canon_entries: dict, manifest: dict, manifest_path, language_
     the schema-valid nothing-suspicious state" contract). `warnings` are
     human-facing lines (e.g. near_pair_budget truncation) the CLI prints to
     stderr; they never affect the worklist's own bytes.
+
+    `competitors` (#243): a `canon_senses.FoldCollisionMap` built by the
+    caller over the shared "competitors" universe (this module's own
+    docstring, class 8) -- resolved OUTSIDE this function (via
+    `canon_senses.load_senses_from_snapshot()` +
+    `canon_senses.fold_collision_map()`) the same way `citation_types` is
+    already resolved outside and passed in.
+    `None` (the default) disables class 8 entirely -- today's pre-#243
+    behavior -- so every existing caller that never resolves a senses
+    sidecar keeps working unchanged.
     """
     warnings = []
     scope_in = {sf: e for sf, e in canon_entries.items() if _in_scope(e)}
@@ -649,9 +752,28 @@ def build_worklist(canon_entries: dict, manifest: dict, manifest_path, language_
         per_entry_group_key[sf] = key
 
     scope_in_forms = sorted(scope_in.keys())
+
+    # Class 8 FIRST, before any occurrence is ever collected for these forms
+    # -- a colliding form's block/verse occurrences are never trusted (see
+    # this module's own docstring), so `_combined_occurrences` (the side
+    # door verse_occurrences() call included) must never even run for one.
+    fold_colliding = _fold_colliding_forms(scope_in_forms, competitors)
+    for sf in fold_colliding:
+        per_entry_risk[sf].add(RISK_FOLD_COLLISION)
+        per_entry_notes[sf].add(FOLD_COLLISION_OCCURRENCES_SUPPRESSED_TAG)
+
     block_by_form = _block_occurrences_by_form(manifest_path, scope_in_forms, language_config)
     combined_by_form = {}
     for sf in scope_in_forms:
+        if sf in fold_colliding:
+            # Never combined with classes 3/4/5's occurrence counting --
+            # occ_index.py's own site-2 collision handling already zeroes
+            # this form's block-origin records, but the verse-embedded side
+            # door (verse_occurrences(), called per-form, collision-unaware)
+            # is not similarly protected; skipping the call entirely (rather
+            # than trusting its output) is what actually closes it.
+            combined_by_form[sf] = []
+            continue
         combined = _combined_occurrences(sf, block_by_form.get(sf, []), manifest, language_config)
         combined_by_form[sf] = combined
         risk, notes, dispersion_units = _classify_occurrences(combined, citation_types)
@@ -743,35 +865,247 @@ def resolved_scan_params(*, dispersion_threshold: int, sample_cap: int, windows_
     }
 
 
-def compute_producer_input_digest(canon_bytes: bytes, manifest_bytes: bytes,
-                                   resolved_params: dict, language_config_raw_bytes: bytes,
+def compute_producer_input_digest(canon_state: str, canon_bytes: bytes,
+                                   manifest_state: str, manifest_bytes: bytes,
+                                   senses_state: str, senses_bytes: bytes,
+                                   resolved_params: dict,
+                                   language_config_raw_bytes: bytes,
                                    script_dir: Path) -> str:
     """THE one shared producer_input_digest algorithm: sha256 hex over --
-    in this fixed order -- `canon_bytes`, `manifest_bytes`, the
-    canonically-serialized `resolved_params` (see `resolved_scan_params()`),
-    `language_config_raw_bytes` (the resolved particle-config FILE's own
-    exact bytes -- `bootstrap_names.LanguageConfig.raw_bytes`), then the
-    raw bytes of every file named in `PRODUCER_CODE_CLOSURE`, read FRESH
-    off `script_dir` (never cached, never trusted from a caller). Each part
-    is separated by a single NUL byte so two adjacent parts can never
-    collide by boundary concatenation (e.g. `"AB"+"C"` vs `"A"+"BC"`
-    hashing identically with no separator).
+    in this fixed order -- `canon_state`, `canon_bytes`, `manifest_state`,
+    `manifest_bytes`, `senses_state`, `senses_bytes` (#243: the
+    `canon_senses.json` sidecar's own raw bytes -- an absent sidecar is
+    `b""`, tolerant-read the SAME way `canon_bytes` already is, NEVER via
+    `canon_senses.load_senses_from_snapshot()`, which exposes no raw bytes
+    and would make an absent sidecar indistinguishable from a schema-valid
+    logically-empty
+    one), the canonically-serialized `resolved_params` (see
+    `resolved_scan_params()`), `language_config_raw_bytes` (the resolved
+    particle-config FILE's own exact bytes --
+    `bootstrap_names.LanguageConfig.raw_bytes`), then the raw bytes of every
+    file named in `PRODUCER_CODE_CLOSURE`, read FRESH off `script_dir`
+    (never cached, never trusted from a caller). Each part is separated by
+    a single NUL byte so two adjacent parts can never collide by boundary
+    concatenation (e.g. `"AB"+"C"` vs `"A"+"BC"` hashing identically with no
+    separator).
+
+    Codex round 4: `canon_state`/`manifest_state`/`senses_state` (each
+    "absent"/"regular"/"irregular", see `_frozen_input_path_state`) are
+    hashed ALONGSIDE their matching bytes, never folded into the bytes
+    themselves (a caller elsewhere -- `main()`'s own `json.loads(canon_bytes)`
+    -- still needs `canon_bytes` to be the LITERAL file content). Without
+    this, a purely STATE-only change (an absent sidecar replaced by a
+    genuinely-empty regular file, or by a directory -- content `b""` either
+    way) is invisible to this digest: the worklist-freshness check this
+    digest drives would then treat a project whose frozen inputs changed
+    STATE as still-fresh, and (transitively, since `skeptic_setup.py`'s own
+    resume digest hashes the worklist's raw bytes) could let `skeptic_setup.py`
+    silently RESUME an existing run and overwrite its H1 stamps with the new
+    state, laundering the very state-only mutation H1 (round 2/3) exists to
+    catch. Caller's responsibility to resolve each `*_state` the SAME way
+    `compute_frozen_input_hash`/`read_frozen_input_snapshot` would (never a
+    second, independently-drifting classification).
 
     `suspicion_scan.py` calls this to STAMP a freshly-produced worklist;
     `skeptic_setup.py` (Part B) imports this EXACT function to RECOMPUTE
     and compare against a worklist's stored `producer_input_digest` before
     trusting it -- the two must never drift into two independent
     algorithms that could disagree on the same inputs.
+
+    Round 9 (#243): this signature is a fixed positional enumeration of
+    canon/manifest/senses, NOT derived from `skeptic_constants.FROZEN_INPUT_SPECS`
+    -- a frozen input added to that tuple gains H1-tamper-checked stamping
+    ONLY once every hand-maintained manual site that isn't tuple-driven is
+    also updated to give it its OWN entry: the `read_frozen_input_snapshot()`
+    capture in `skeptic_setup.py::run()`, that same function's
+    `_frozen_input_snapshots_by_key` map, `skeptic_ready.py`'s matching
+    `paths` map, and (for freshness coverage specifically) a hand-added
+    parameter here and in `compute_skeptic_input_digest()` (see that
+    tuple's own "what FROZEN_INPUT_SPECS does NOT cover" comment). A tuple
+    entry that instead REUSES an existing key at any of those sites does
+    NOT get "stamped and checked automatically" -- it silently aliases the
+    reused key's existing snapshot instead (round 11, #243). Generalizing
+    this SIGNATURE to an ordered/keyed collection was considered and deferred:
+    this function is direct-called from dozens of sites in
+    `tests/suspicion_scan.test.py` and `tests/skeptic_setup.test.py`,
+    including ones asserting the exact NUL-byte framing between two
+    specific adjacent positional arguments -- a signature change here is a
+    cross-file test-authoring change, not a same-file refactor.
+
+    Round 10 (#243): the signature and every call site above stay exactly
+    as round 9 left them -- but the BODY below no longer hard-codes which
+    three `(state, bytes)` pairs get hashed. It builds a
+    `{key: (state, bytes)}` map and flattens it in `FROZEN_INPUT_SPECS`
+    order, asserting the map's key set equals the tuple's key set first.
+    This closes the silent half of round 9's gap: a fourth `FROZEN_INPUT_SPECS`
+    entry still needs its own hand-added parameter here (the signature is
+    unchanged), but now failing to add one raises `AssertionError` the
+    first time this function runs after the tuple grows, rather than
+    quietly hashing only the original three forever. `FROZEN_INPUT_SPECS`
+    is enumerated `("canon", "manifest", "senses")` today, so this
+    flattening reproduces the exact `canon_state, canon_bytes,
+    manifest_state, manifest_bytes, senses_state, senses_bytes` byte order
+    round 9 hashed -- the digest of any existing project is unchanged.
     """
     hasher = hashlib.sha256()
-    parts = [canon_bytes, manifest_bytes, _canonical_json_bytes(resolved_params),
-             language_config_raw_bytes]
+    frozen_input_snapshots = {
+        "canon": (canon_state, canon_bytes),
+        "manifest": (manifest_state, manifest_bytes),
+        "senses": (senses_state, senses_bytes),
+    }
+    # Round 11 (#243): a SET comparison collapses duplicate keys -- a fourth
+    # FROZEN_INPUT_SPECS entry that REUSES an existing key (e.g. a second
+    # "canon" tuple instead of its own "fourth") reduces to the same
+    # {"canon", "manifest", "senses"} set as this hand-written dict and
+    # would pass the old `set(frozen_input_snapshots) != spec_keys` guard
+    # silently, then alias the reused key's snapshot into the loop below
+    # instead of raising. Comparing the full, non-deduplicated KEY LIST
+    # (sorted, so order doesn't matter) is strictly stronger: a duplicate
+    # changes the list's length/multiset even when it doesn't change the
+    # set, so it still fails this comparison.
+    spec_keys = [spec[0] for spec in FROZEN_INPUT_SPECS]
+    if sorted(frozen_input_snapshots) != sorted(spec_keys):
+        raise AssertionError(
+            "compute_producer_input_digest(): frozen_input_snapshots keys "
+            f"{sorted(frozen_input_snapshots)} != FROZEN_INPUT_SPECS keys "
+            f"{sorted(spec_keys)} -- a frozen input was added to "
+            "skeptic_constants.FROZEN_INPUT_SPECS without a matching "
+            "hand-added parameter/snapshot entry here (or vice versa), or "
+            "FROZEN_INPUT_SPECS contains a duplicate key; see "
+            "skeptic_constants.py's \"what FROZEN_INPUT_SPECS does NOT "
+            "cover\" comment."
+        )
+    parts = []
+    for key, _label, _stamp_field in FROZEN_INPUT_SPECS:
+        state, snapshot_bytes = frozen_input_snapshots[key]
+        parts.append(state.encode("ascii"))
+        parts.append(snapshot_bytes)
+    parts.append(_canonical_json_bytes(resolved_params))
+    parts.append(language_config_raw_bytes)
     for member in PRODUCER_CODE_CLOSURE:
         parts.append((script_dir / member).read_bytes())
     for part in parts:
         hasher.update(part)
         hasher.update(b"\x00")
     return hasher.hexdigest()
+
+
+# ---------------------------------------------------------------------------
+# H1 frozen-input tamper hashing -- the ONE shared algorithm skeptic_setup.py
+# (stamps canon_sha256/manifest_sha256/senses_sha256 at setup time) and
+# skeptic_ready.py (re-hashes and compares at --verify-merged /
+# --check-frozen-inputs time) both import, mirroring
+# compute_producer_input_digest's own "one algorithm, never two independently
+# -drifting copies" discipline immediately above -- H1 is exactly the same
+# class of problem: a producer stamp and a verifier re-hash that must always
+# agree on the identical bytes for the identical on-disk state.
+# ---------------------------------------------------------------------------
+
+def _frozen_input_path_state(path: Path) -> str:
+    """Classifies `path` as "absent" / "regular" / "irregular" -- a small,
+    deliberate LOCAL duplicate of `canon_senses.py`'s own private
+    `_path_state` (never imported across the module boundary; mirrors this
+    plugin's existing "duplicate a tiny primitive rather than import a
+    sibling module's private name" convention, e.g. `skeptic_setup.py`'s own
+    `RUN_ID_RE`; pinned by `tests/frozen_input_path_state_parity.test.py`,
+    which asserts the two classifiers never disagree). Stays PRIVATE to
+    this module -- `skeptic_setup.py` (codex round 3) reaches
+    `read_frozen_input_snapshot()` below instead of this raw classifier
+    directly, so this function's own name/signature is free to change
+    without touching that caller. Presence is detected via `os.path.lexists`
+    (never `Path.exists`, which follows symlinks and would misreport a
+    dangling symlink as absent); a present path only counts as "regular" if
+    `Path.is_file()` is also true."""
+    if not os.path.lexists(path):
+        return "absent"
+    if path.is_file():
+        return "regular"
+    return "irregular"
+
+
+def compute_frozen_input_hash_from_state(state: str, content: bytes) -> str:
+    """H1's own tamper-detection hash CORE: sha256 hex over `state`
+    ("absent"/"regular"/"irregular", see `_frozen_input_path_state`) plus
+    `content` (the caller's own responsibility to have resolved
+    consistently with `state` -- `b""` for anything but "regular"),
+    separated by a single NUL byte. Pure -- no I/O of any kind.
+
+    Codex round 3: this is deliberately SEPARATE from any path-reading --
+    `skeptic_setup.py` (the STAMPER) must hash the EXACT (state, content)
+    snapshot it already captured at derivation-read time (before the
+    freshness/worklist validation that snapshot fed, via
+    `read_frozen_input_snapshot()` below), never a fresh re-read of the path
+    moments later when it publishes the aggregate. A path-based re-read at
+    stamp time launders any mutation that happens in that window: the stamp
+    would describe the MUTATED state while everything else this run derived
+    (the worklist check, the assignments, `input_digest`) still describes
+    the ORIGINAL one -- a real, disk-level instance of the trust-the-caller
+    class this whole H1 mechanism exists to close, just moved to a
+    different boundary. `compute_frozen_input_hash` below (path-based,
+    re-reads) remains correct for a VERIFIER that has no reason to keep the
+    read around, whose entire job IS to re-read fresh and compare against
+    what was stamped -- the STAMPER and the VERIFIER need opposite
+    freshness semantics from the same hash formula, which is exactly why
+    the formula itself is split out here as its own pure function.
+    `skeptic_ready.py` (this codebase's own VERIFIER) is NOT that caller,
+    though: since codex round 7 it calls `read_frozen_input_snapshot()`
+    plus THIS function directly for canon.json/manifest.json/
+    canon_senses.json alike -- the STAMPER's own shape, not
+    `compute_frozen_input_hash`'s -- because two of the three snapshots
+    also feed a downstream parse it needs to stay byte-consistent with
+    (see `skeptic_ready.py`'s own `frozen_input_check()` docstring). Its
+    test suite remains the one caller left that still wants the
+    read-fresh-and-hash-NOW convenience, to stamp fixtures.
+    """
+    hasher = hashlib.sha256()
+    hasher.update(state.encode("ascii"))
+    hasher.update(b"\x00")
+    hasher.update(content)
+    return hasher.hexdigest()
+
+
+def read_frozen_input_snapshot(path: Path) -> tuple:
+    """Reads `path` EXACTLY ONCE, returning `(state, content)` -- the
+    snapshot `compute_frozen_input_hash_from_state()` needs. This is what a
+    STAMPER (`skeptic_setup.py`, codex round 3) calls at derivation-read
+    time: it captures the tuple once, uses it for whatever validation
+    follows (the freshness/worklist check), and later hashes THAT SAME
+    captured tuple for the H1 stamp -- never touching `path` again in
+    between. `compute_frozen_input_hash()` below (which calls this and
+    hashes immediately) is the read-fresh-and-hash-NOW convenience a
+    VERIFIER wants instead."""
+    state = _frozen_input_path_state(path)
+    content = path.read_bytes() if state == "regular" else b""
+    return state, content
+
+
+def compute_frozen_input_hash(path: Path) -> str:
+    """H1's own tamper-detection hash for ONE frozen input file (canon.json
+    / manifest.json / canon_senses.json), READ FRESH off `path` -- correct
+    for a VERIFIER re-hashing "what's on disk right now" to compare against
+    a stamp, PROVIDED it has no reason to keep the read around afterward
+    (see `compute_frozen_input_hash_from_state`'s own docstring, codex
+    round 7, for why `skeptic_ready.py` -- this codebase's own VERIFIER --
+    is no longer such a caller in production: it needs the captured
+    snapshot itself, not just this function's hash, so it calls
+    `read_frozen_input_snapshot()` + `compute_frozen_input_hash_from_state()`
+    directly instead). `skeptic_ready.py`'s own test suite still imports
+    this one, purely to stamp fixtures conveniently. A STAMPER must NOT
+    call this -- see `compute_frozen_input_hash_from_state`'s own docstring
+    (codex round 3) for why re-reading at stamp time is dangerous
+    specifically for a stamper, and never for a verifier.
+
+    Codex round-2 finding this formula itself closes: hashing raw content
+    bytes ALONE (the pre-round-2 scheme) makes an absent file, a
+    genuinely-empty regular file, and a directory/dangling-symlink all hash
+    IDENTICALLY to `sha256(b"")` -- replacing a stamped non-empty sidecar
+    with an empty regular file, or with a directory, would silently NOT
+    trip the tamper tripwire. Folding the state tag in makes all three
+    states produce DIFFERENT hashes, closing that hole for every
+    H1-covered input, not just the one codex happened to probe.
+    """
+    state, content = read_frozen_input_snapshot(path)
+    return compute_frozen_input_hash_from_state(state, content)
 
 
 # ---------------------------------------------------------------------------
@@ -827,6 +1161,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help=f"Path to manifest.json (default: {DEFAULT_MANIFEST_PATH}).",
     )
     p.add_argument(
+        "--senses-path", metavar="PATH", default=None,
+        help=f"Override the canon_senses.json path (default: {DEFAULT_SENSES_PATH}). "
+             "Parsed to build the #243 ambiguity-competitors universe (union of every "
+             "canon.json entry and every canon_senses.json form, split-only included) "
+             "that drives class 8 (fold_collision) -- mirrors "
+             "canon_adjudication_audit.py's own --senses-path/allow_absent convention: "
+             "an implicit default sidecar that is genuinely absent is tolerated as "
+             "empty; an EXPLICIT --senses-path that does not exist is a hard error "
+             "instead (a typo'd path must never silently disable class 8).",
+    )
+    p.add_argument(
         "--particle-config", required=True, metavar="FILENAME",
         help="Bare filename under ${durable_root}/languages/ -- the profile's own "
              "source.language.particle_config LITERAL value.",
@@ -880,8 +1225,18 @@ def main(argv=None) -> int:
     manifest_path = Path(args.manifest) if args.manifest else DEFAULT_MANIFEST_PATH
     languages_dir = Path(args.languages_dir) if args.languages_dir else DEFAULT_LANGUAGES_DIR
     out_path = Path(args.out) if args.out else DEFAULT_OUT_PATH
+    senses_path = Path(args.senses_path) if args.senses_path else DEFAULT_SENSES_PATH
+    # allow_absent=True ONLY for the genuinely-implicit default -- an EXPLICIT
+    # --senses-path that turns out missing must BLOCK (mirrors
+    # canon_adjudication_audit.py's own convention exactly).
+    allow_absent_senses = args.senses_path is None
 
-    canon_bytes = canon_path.read_bytes() if canon_path.is_file() else b""
+    # codex round 4: canon/manifest/senses are each captured as a (state,
+    # bytes) SNAPSHOT via read_frozen_input_snapshot() -- both feed
+    # compute_producer_input_digest() below, state ALONGSIDE bytes (see that
+    # function's own docstring for why a state-only change must move this
+    # digest too, not just H1's own stamp).
+    canon_state, canon_bytes = read_frozen_input_snapshot(canon_path)
     canon_entries = {}
     if canon_bytes:
         try:
@@ -892,10 +1247,10 @@ def main(argv=None) -> int:
         if isinstance(canon_doc, dict) and isinstance(canon_doc.get("entries"), dict):
             canon_entries = canon_doc["entries"]
 
-    if not manifest_path.is_file():
+    manifest_state, manifest_bytes = read_frozen_input_snapshot(manifest_path)
+    if manifest_state != "regular":
         print(f"error: manifest not found: {manifest_path}", file=sys.stderr)
         return 1
-    manifest_bytes = manifest_path.read_bytes()
     try:
         manifest = json.loads(manifest_bytes.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -907,6 +1262,27 @@ def main(argv=None) -> int:
     except BootstrapNamesError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
+
+    # #243: senses_bytes feeds producer_input_digest directly (tolerant raw
+    # read, mirrors canon_bytes -- see compute_producer_input_digest's own
+    # docstring on why NOT via a parsed load); the PARSED senses entries
+    # feed the #243 ambiguity-competitors universe (class 8, fold_collision)
+    # via canon_senses.fold_collision_map(). Both genuinely derive from the
+    # SAME captured (state, bytes) snapshot, read once -- codex round 5:
+    # load_senses_from_snapshot() parses THIS snapshot directly, never a
+    # second, independent read of senses_path (the pre-fix shape let the
+    # digest and the parsed entries silently disagree about which on-disk
+    # version of the sidecar they each described).
+    senses_state, senses_bytes = read_frozen_input_snapshot(senses_path)
+    try:
+        senses_result = load_senses_from_snapshot(
+            senses_path, senses_state, senses_bytes, allow_absent=allow_absent_senses
+        )
+    except CanonSensesLoadError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    competitor_forms = set(canon_entries.keys()) | set(senses_result.entries_by_source_form.keys())
+    competitors = fold_collision_map(competitor_forms)
 
     citation_override = (
         tuple(args.citation_block_types) if args.citation_block_types is not None else None
@@ -922,6 +1298,7 @@ def main(argv=None) -> int:
         near_threshold=args.near_threshold,
         near_cap=args.near_cap,
         near_pair_budget=args.near_pair_budget,
+        competitors=competitors,
     )
     for w in warnings:
         print(f"warning: {w}", file=sys.stderr)
@@ -938,7 +1315,8 @@ def main(argv=None) -> int:
         resolved_citation_types=resolved_citation_types,
     )
     digest = compute_producer_input_digest(
-        canon_bytes, manifest_bytes, resolved_params, lang.raw_bytes, SCRIPT_DIR
+        canon_state, canon_bytes, manifest_state, manifest_bytes, senses_state, senses_bytes,
+        resolved_params, lang.raw_bytes, SCRIPT_DIR,
     )
 
     worklist = {"schema_version": 1, "producer_input_digest": digest, "entries": entries_out}

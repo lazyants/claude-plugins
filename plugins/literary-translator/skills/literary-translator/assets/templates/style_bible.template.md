@@ -141,6 +141,18 @@ an inline gloss is usually the only mechanism actually available).
   language, an older stage of the source language, or a foreign-to-both aside) -- ALWAYS glossed in-text:
   keep the original AND give the target-language translation immediately alongside it. Never bury the
   gloss only in a translator's internal notes.
+
+<!-- LT_REQUIRED_FILL_BEGIN: embedded-third-language-convention -->
+LT_PLACEHOLDER_UNFILLED -- state this project's own fixed convention for embedded third-language text (a
+language other than both source and target appearing inline in the source -- e.g. Yiddish inside a Hebrew
+source, Latin inside an English source, an older stage of the source language, ...): romanize it or
+translate it outright; the gloss format (inline parenthetical vs. its own footnote -- pick one and apply it
+uniformly, same choice as section D's realia gloss mechanism); and whether the kept original is set off
+from the surrounding target-language prose in a particular way (parentheses, italics, a distinct marker).
+If this project's source has no embedded third-language text at all, state that explicitly here rather
+than leaving this unfilled.
+<!-- LT_REQUIRED_FILL_END -->
+
 - **Word-sense / realia accuracy** -- a notable word or reference may have meant something different in
   the source's own era/domain than its first present-day sense. This is a first-class, explicitly named
   review dimension (see `references/engine-loop.md`'s R6), not folded into generic accuracy.

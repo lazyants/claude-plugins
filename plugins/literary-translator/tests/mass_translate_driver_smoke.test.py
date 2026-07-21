@@ -102,13 +102,18 @@ def _wrap(js_source: str) -> str:
 # The mock records the ACTUAL rendered prompt text per label, counts calls,
 # and drives a one-round happy path to convergence. DRIVE_RETURNS lets a test
 # override the translate/review dispatcher return (default: a valid
-# DISPATCHED <seg> <DISP>).
+# DISPATCHED <seg> <DISP>). OVERRIDES is a more general escape hatch, keyed
+# by the EXACT label string, that short-circuits every other branch below --
+# used by the #228 exact-match sentinel tests to inject a substring-collision
+# or falsy/null reply at review-wait:*, wait:*, or fix:* without having to
+# thread a new bespoke parameter through this harness for each site.
 HARNESS = r"""
 'use strict';
 __WRAPPED_SOURCE__
 
 const SEGS_ARGS = __SEGS_JSON__;
 const DRIVE_RETURNS = __DRIVE_RETURNS_JSON__;
+const OVERRIDES = __OVERRIDES_JSON__;
 const promptByLabel = {};
 const callsLog = [];
 let pipelineCalled = false;
@@ -118,6 +123,10 @@ async function agent(promptText, opts) {
   const label = opts.label || "";
   promptByLabel[label] = promptText;
   callsLog.push({ label: label, agentType: opts.agentType || null, hasSchema: !!opts.schema });
+
+  if (Object.prototype.hasOwnProperty.call(OVERRIDES, label)) {
+    return OVERRIDES[label];
+  }
 
   if (label.indexOf("ledger:") === 0) {
     const parts = label.split(":");
@@ -168,7 +177,7 @@ function log() {}
 
 
 def run(*, tmp_path: Path, segs: list, max_fix_rounds: int = 1, batch_agent_cap: int = 100000,
-        drive_returns: dict | None = None, timeout: int = 30) -> dict:
+        drive_returns: dict | None = None, overrides: dict | None = None, timeout: int = 30) -> dict:
     """Returns {ok, out, stderr}. ok=False (with stderr) when the template
     threw before producing stdout (the SEGS-guard throw path)."""
     drive_returns = drive_returns or {}
@@ -178,9 +187,16 @@ def run(*, tmp_path: Path, segs: list, max_fix_rounds: int = 1, batch_agent_cap:
         HARNESS.replace("__WRAPPED_SOURCE__", _wrap(src))
         .replace("__SEGS_JSON__", json.dumps(segs))
         .replace("__DRIVE_RETURNS_JSON__", json.dumps(dr))
+        .replace("__OVERRIDES_JSON__", json.dumps(overrides or {}))
     )
     p = tmp_path / "smoke_harness.js"
     p.write_text(harness, encoding="utf-8")
+    # NODE is only None when `node` is absent from PATH, in which case
+    # pytestmark's skipif already skips every test in this file before this
+    # call is ever reached -- this assert just narrows that for the type
+    # checker rather than casting it away (a real None here would be a
+    # genuine bug, not a typing false-positive).
+    assert NODE is not None
     proc = subprocess.run([NODE, str(p)], capture_output=True, text=True, timeout=timeout)
     if proc.returncode != 0:
         return {"ok": False, "out": None, "stderr": proc.stderr}
@@ -392,6 +408,121 @@ def test_valid_disp_still_produces_failfast_control(tmp_path):
     assert res["ok"], res["stderr"]
     poll = extract_poll(res["out"]["promptByLabel"]["wait:seg01"])
     assert '.codex_failed.seg01.abcDEF01" ] && exit 1' in poll
+
+
+# ---------------------------------------------------------------------------
+# #228 exact-match sentinels (content-matching-sentinel-fragility class) at
+# this template's three remaining sentinel sites -- C (getVerifiedReview's
+# "review-wait:"), D (runRound's "fix:"), E (reviewFixLoop's "wait:").
+# Mirrors skeptic_pipeline_e2e.test.py's own precheck/wait substring-
+# collision tests for skeptic-pass-wf.template.js. OVERRIDES (see HARNESS
+# above) injects the colliding/falsy reply at the exact label under test;
+# every other call in the sequence keeps its ordinary happy-path default.
+# ---------------------------------------------------------------------------
+
+def _non_clean_review():
+    return {
+        "clean": False, "coverage_ok": True,
+        "findings": [{"loc": "VERSE:1", "severity": "minor", "issue": "i", "suggest": "s"}],
+        "draft_sha1": "a" * 40,
+    }
+
+
+def test_translate_wait_substring_collision_reports_timeout(tmp_path):
+    """RED before the #228 exact-match fix at site E (reviewFixLoop's
+    "wait:" + seg): the OLD `ready.indexOf("READY") === -1` check falsely
+    treated a TIMEOUT reply that merely contains the literal substring
+    "READY" inside its own explanatory prose (e.g. "TIMEOUT seg01 (not
+    READY)") as ready -- `indexOf` finds "READY" so the negated `=== -1`
+    check was false. This is the worst of the five #228 sites: a false pass
+    here sends the entire review/fix cycle over a draft that never actually
+    finished translating, and no recoverable signal is ever recorded to
+    pick it back up."""
+    res = run(tmp_path=tmp_path, segs=["seg01"], overrides={"wait:seg01": "TIMEOUT seg01 (not READY)"})
+    assert res["ok"], res["stderr"]
+    out = res["out"]
+    assert out["result"]["failed"] == [{"seg": "seg01", "converged": False, "reason": "translate-timeout"}]
+    assert out["result"]["converged"] == []
+    labels = [c["label"] for c in out["calls"]]
+    # A substring-collision bug proceeds straight into the review/fix cycle
+    # on an unfinished draft instead of stopping at the wait.
+    assert "review-dispatch:seg01:r1" not in labels
+    assert "review-wait:seg01:r1" not in labels
+
+
+def test_review_wait_substring_collision_reports_review_timeout(tmp_path):
+    """RED before the #228 exact-match fix at site C (getVerifiedReview's
+    "review-wait:" + seg + ":r" + roundLabel): the OLD
+    `ready.indexOf("READY") === -1` check falsely treated a TIMEOUT reply
+    containing the literal substring "READY" as ready, letting the code go
+    on to read a review artifact that review_ready.py never actually
+    confirmed."""
+    res = run(tmp_path=tmp_path, segs=["seg01"], overrides={"review-wait:seg01:r1": "TIMEOUT seg01 (not READY)"})
+    assert res["ok"], res["stderr"]
+    out = res["out"]
+    assert out["result"]["failed"] == [
+        {"seg": "seg01", "converged": False, "reason": "review-timeout", "rounds": 1}
+    ]
+    assert out["result"]["converged"] == []
+    labels = [c["label"] for c in out["calls"]]
+    # A substring-collision bug proceeds to read the (never-ready) review
+    # artifact instead of stopping at the wait.
+    assert "review-read:seg01:r1" not in labels
+    assert "artifact-check:seg01:r1" not in labels
+
+
+def test_fix_substring_collision_does_not_falsely_trigger_probe(tmp_path):
+    """RED before the #228 exact-match fix at site D (runRound's "fix:" + seg
+    + ":r" + round): the OLD `fx.indexOf("DRAFT_MISSING") !== -1` check
+    falsely matched a genuine, successful fix reply that merely mentions the
+    literal substring "DRAFT_MISSING" in its own prose (e.g. explaining what
+    it fixed) -- wrongly routing a perfectly healthy segment through the
+    #131 draft-probe and, on this harness's default present:true probe
+    result, into a needless fix-call-failed non-convergence instead of
+    accepting the fix and moving on."""
+    res = run(
+        tmp_path=tmp_path, segs=["seg01"],
+        overrides={
+            "review-read:seg01:r1": _non_clean_review(),
+            "artifact-check:seg01:r1": {"match": True},
+            "fix:seg01:r1": "FIXED seg01 (previously printed DRAFT_MISSING due to a timing race; now translated cleanly)",
+        },
+    )
+    assert res["ok"], res["stderr"]
+    out = res["out"]
+    assert out["result"]["converged"] == [{"seg": "seg01", "converged": True, "rounds": 2}]
+    assert out["result"]["failed"] == []
+    labels = [c["label"] for c in out["calls"]]
+    assert "draft-probe:seg01" not in labels, "a substring collision must NOT trigger the #131 draft probe"
+
+
+def test_fix_null_return_still_triggers_probe(tmp_path):
+    """Mandatory regression guard for site D's permissive-falsy branch
+    (`!fx || ...`): a literal falsy `fx` (agent death / output-token ceiling
+    / classifier block on the fix call itself -- #131 facet A) MUST still
+    route through the draftPresentAndValid probe, exactly like an exact
+    DRAFT_MISSING reply does. This is deliberately NOT redundant with the
+    exact-match check above it: `null` is not the string "DRAFT_MISSING
+    seg01", so a version of the fix that dropped the `!fx ||` disjunct (kept
+    only the bare `String(fx).trim() === ...` exact match) would let a dead
+    fix call fall through as an ordinary review round -- silently skipping
+    the probe that exists precisely to disambiguate that case."""
+    res = run(
+        tmp_path=tmp_path, segs=["seg01"],
+        overrides={
+            "review-read:seg01:r1": _non_clean_review(),
+            "artifact-check:seg01:r1": {"match": True},
+            "fix:seg01:r1": None,
+        },
+    )
+    assert res["ok"], res["stderr"]
+    out = res["out"]
+    labels = [c["label"] for c in out["calls"]]
+    assert "draft-probe:seg01" in labels, "a falsy fix-call return must still trigger the #131 draft probe"
+    assert out["result"]["failed"] == [
+        {"seg": "seg01", "converged": False, "reason": "fix-call-failed", "rounds": 1}
+    ]
+    assert out["result"]["converged"] == []
 
 
 if __name__ == "__main__":

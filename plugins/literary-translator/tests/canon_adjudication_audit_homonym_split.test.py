@@ -72,6 +72,7 @@ def _load_module(name: str, path: Path, extra_sys_path: Path):
     sys.path.insert(0, str(extra_sys_path))
     try:
         spec = importlib.util.spec_from_file_location(name, path)
+        assert spec is not None and spec.loader is not None, f"could not load spec for {path}"
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
         return module
@@ -472,7 +473,7 @@ def test_canon_absent_with_senses_also_reports_evidence_unverified(tmp_path):
     dimension (evidence_unverified isolation) stays uncontaminated by cat5's
     own missing-verdict blocker."""
     root = make_durable_root(tmp_path)
-    block_text, senses = two_jean_senses()
+    _block_text, senses = two_jean_senses()  # block_text unused -- see the comment below
     # Deliberately do NOT write manifest.json -- every sense's evidence fails to verify
     # (mirrors _read_manifest_for_evidence's own tolerant "missing manifest -> per-sense
     # failure" contract, see canon_adjudication_audit_evidence_matrix.test.py).
@@ -729,3 +730,97 @@ def test_senses_path_schema_invalid_default_one_sense_record_is_fatal(tmp_path):
     })
     proc = run_audit(root, "--check")
     assert_fatal(proc)
+
+
+# ===========================================================================
+# #243 competitor universe -- the canon-PRESENT branch of run_check() must
+# widen verify_senses()'s competitor universe with canon.json's own entries,
+# exactly like the canon-ABSENT branch already (correctly) omits it because
+# there is nothing to pass. A senses form colliding with a canon-ONLY
+# sibling (never itself present in canon_senses.json) must not read as
+# unique and get full evidence credit.
+# ===========================================================================
+
+# The real occ_index.test.py collision pair (space-joined/unvocalized vs
+# maqaf-joined/vocalized Baal Shem Tov-style forms) -- both fold to the same
+# bootstrap_names.fold_match_key. FOLD_FORM_B_HE is used ONLY as a canon-only
+# sibling below -- it never appears in canon_senses.json at all.
+FOLD_FORM_A_HE = "משה לייב"
+FOLD_FORM_B_HE = "מֹשֶׁה־לַיִיב"
+
+
+def write_he_language_with_inventory(root, name_inventory):
+    """he.json is already staged into root/languages by make_durable_root --
+    add a name_inventory on top (Hebrew is an uncased script, so
+    is_upper_initial() can never see a candidate without one; mirrors
+    occ_index.test.py/suspicion_scan.test.py's own convention)."""
+    he_path = root / "languages" / "he.json"
+    doc = json.loads(he_path.read_text(encoding="utf-8"))
+    doc["name_inventory"] = list(name_inventory)
+    he_path.write_text(json.dumps(doc, ensure_ascii=False), encoding="utf-8")
+
+
+def test_243_canon_present_branch_widens_competitor_universe_to_canon_entries(tmp_path):
+    """BLOCKER regression (codex review): run_check()'s canon-PRESENT branch
+    called ``verify_senses(senses, manifest, language_config)`` with NO
+    ``canon=`` argument, so its own #243 competitor universe was
+    senses-forms-only. FOLD_FORM_B_HE here is canon-ONLY (never in
+    canon_senses.json) -- a senses-only universe can never see it, so
+    FOLD_FORM_A_HE's evidence would wrongly verify clean. Passing
+    ``canon=canon`` (the fix) must catch the collision and fail both of its
+    senses' evidence -- the SAME failure the unit-level
+    ``test_243_verify_senses_canon_param_widens_the_competitor_universe``
+    (evidence_verify.test.py) already proves at the function level; this is
+    the audit-level proof that the CALL SITE actually wires it."""
+    root = make_durable_root(tmp_path)
+    write_he_language_with_inventory(root, [FOLD_FORM_A_HE])
+    he_lang = bn.load_language_config("he.json", languages_dir=root / "languages")
+
+    block_text = f"ראה {FOLD_FORM_A_HE} אתמול."
+    spans = oi.production_occurrences(FOLD_FORM_A_HE, block_text, he_lang)
+    assert len(spans) == 1, f"expected exactly 1 occurrence, got {spans}"
+    char_start, char_end = spans[0]
+    senses = [
+        make_sense("s1", "sense A", block_text, char_start, char_end),
+        make_sense("s2", "sense B", block_text, char_start, char_end),
+    ]
+    write_manifest(root, {"b1": {"seg": None, "plain_text": block_text}})
+    write_senses(root, {FOLD_FORM_A_HE: {"senses": senses}})
+    # FOLD_FORM_B_HE is a plain, unrelated canon entry -- never appears in
+    # canon_senses.json, so it is invisible to a senses-only competitor
+    # universe. It fold-collides with FOLD_FORM_A_HE.
+    write_canon(root, [entry(FOLD_FORM_B_HE, "Target")])
+    # codex round 2: confirmed_ok the homonym_split identity itself so
+    # missing_verdict (category 5, its OWN independent -- and already
+    # separately tested -- advisory-immune blocker) contributes NOTHING to
+    # blocking_count here. Without this, blocking_count/gate_passed/
+    # --advisory staying non-zero/False would be confounded: they would
+    # pass for the unadjudicated-split reason alone even if evidence_
+    # unverified's own contribution (and its own advisory-immunity) were
+    # broken, since compute_collapsed_split_findings/verify_senses are
+    # never gated by any adjudication verdict either way -- this pins the
+    # count to evidence_unverified specifically, nothing else.
+    write_adjudications(root, {split_key(FOLD_FORM_A_HE, senses): adjudication_record("confirmed_ok")})
+
+    proc = run_audit(root, "--check", "--particle-config", "he.json")
+    summary = parse_stdout(proc)
+    assert_summary_schema_valid(summary)
+    # Mutation: verify_senses() called without canon=canon (the bug this
+    # test guards) finds no local collision within senses_result alone --
+    # FOLD_FORM_A_HE has no sibling there -- and both senses verify clean,
+    # wrongly reporting 0 here instead of 2.
+    assert summary["totals"]["evidence_unverified"] == 2, (
+        f"canon-only sibling {FOLD_FORM_B_HE!r} must poison BOTH of "
+        f"{FOLD_FORM_A_HE!r}'s senses' evidence verification -- got summary={summary}"
+    )
+    assert summary["totals"]["missing_verdict"] == 0 and summary["totals"]["confirmed_ok"] == 1, (
+        "the split itself is confirmed_ok -- blocking_count below must come "
+        "from evidence_unverified alone, not a second, unrelated source"
+    )
+    assert summary["blocking_count"] == 2 and summary["gate_passed"] is False
+    # evidence_unverified is a hard blocker, never masked by --advisory.
+    proc_advisory = run_audit(root, "--check", "--particle-config", "he.json", "--advisory")
+    summary_advisory = parse_stdout(proc_advisory)
+    assert summary_advisory["totals"]["evidence_unverified"] == 2
+    assert summary_advisory["gate_passed"] is False
+    assert proc.returncode == 1 and proc_advisory.returncode == 1

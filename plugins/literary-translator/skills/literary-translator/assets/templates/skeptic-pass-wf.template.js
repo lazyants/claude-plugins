@@ -89,15 +89,15 @@
 
 export const meta = {
   name: "literary-translator-skeptic-pass",
-  description: "Adversarially re-examine structurally-suspicious canon entries (RFC #215 Phase 2) against bounded, whole-block source windows via a fire-and-forget codex-rescue call per batch, writing a run-scoped triage fragment per batch, then one serialized deterministic merge into skeptic_triage.json plus a disk-independent coverage/evidence verify. Opt-in, advisory, adverse-only -- never touches canon.json; every ordinary skeptic-pass failure is non-blocking, EXCEPT a frozen-input hash mismatch (canon.json/manifest.json changed since setup), which the orchestrator gates as FATAL/HALT.",
+  description: "Adversarially re-examine structurally-suspicious canon entries (RFC #215 Phase 2) against bounded, whole-block source windows via a fire-and-forget codex-rescue call per batch, writing a run-scoped triage fragment per batch, then one serialized deterministic merge into skeptic_triage.json plus a disk-independent coverage/evidence verify. Opt-in, advisory, adverse-only -- never touches canon.json; every ordinary skeptic-pass failure is non-blocking, EXCEPT a frozen-input hash mismatch (canon.json/manifest.json/canon_senses.json changed since setup), which the orchestrator gates as FATAL/HALT.",
   phases: [
     {
       title: "SkepticPass",
-      detail: "codex adversarially examines each batch of assigned entities against their bounded source windows, resolving each to adverse/propose_split/propose_rescope/insufficient_window, and writes its own run-scoped fragment atomically, self-validated (shape + token/coverage + evidence re-auth, with any unverifiable citation silently coerced to insufficient_window) via skeptic_ready.py --validate-fragment -- never a shared file, so concurrent batches never race",
+      detail: "codex adversarially examines each batch of assigned entities against their bounded source windows, resolving each to adverse/propose_split/propose_rescope/insufficient_window, and writes its own run-scoped fragment atomically, self-validated (shape + token/coverage + evidence re-auth, with any unverifiable citation silently coerced to insufficient_window) via skeptic_ready.py --validate-fragment -- never a shared file, so concurrent batches never race; the same run's own frozen-input tripwire is also checked directly if no batch ever becomes ready, so a tamper is never missed just because dispatch itself failed",
     },
     {
       title: "Merge",
-      detail: "one serialized skeptic_ready.py --merge-fragments call folds every ready batch's fragment into skeptic_triage.json in a fully deterministic order, then a disk-independent skeptic_ready.py --verify-merged call re-checks coverage, multiplicity, token/source_form/window-scoping consistency, every cited evidence record, and (when stamped) a best-effort frozen canon.json/manifest.json integrity tripwire, straight off disk, before this run reports merged:true -- a tripwire mismatch is surfaced as a distinct frozen-input-mismatch signal, not an ordinary advisory failure",
+      detail: "one serialized skeptic_ready.py --merge-fragments call folds every ready batch's fragment into skeptic_triage.json in a fully deterministic order, then a disk-independent skeptic_ready.py --verify-merged call re-checks coverage, multiplicity, token/source_form/window-scoping consistency, every cited evidence record, and (when stamped) a best-effort frozen canon.json/manifest.json/canon_senses.json integrity tripwire, straight off disk, before this run reports merged:true -- a tripwire mismatch is surfaced as a distinct frozen-input-mismatch signal, not an ordinary advisory failure",
     },
   ],
 }
@@ -142,6 +142,23 @@ const SKEPTIC_VERIFY_SCHEMA = {
     verified: { type: "boolean" },
     missing: { type: "array", items: { type: "string" } },
     frozen_input_mismatch: { type: "boolean" },
+  },
+}
+
+// codex round 2: relays skeptic_ready.py --check-frozen-inputs's own
+// {frozen_input_mismatch, missing[]} line verbatim -- REQUIRED, not
+// optional, same "the command's own output always includes this field"
+// discipline SKEPTIC_VERIFY_SCHEMA's own comment documents above (a
+// schema-valid reply that silently DROPS it would be indistinguishable
+// from `undefined === true` -> false downstream, quietly downgrading a
+// real frozen-input mismatch to "nothing to report").
+const SKEPTIC_FROZEN_CHECK_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: ["frozen_input_mismatch"],
+  properties: {
+    frozen_input_mismatch: { type: "boolean" },
+    missing: { type: "array", items: { type: "string" } },
   },
 }
 
@@ -208,11 +225,20 @@ const AGGREGATE_ASSIGNMENTS_PATH = RUN_DIR + "/assignments.json"
 const SKEPTIC_TRIAGE_PATH = ROOT + "/skeptic_triage.json"
 const MANIFEST_PATH = ROOT + "/manifest.json"
 const CANON_PATH = ROOT + "/canon.json"
+const SENSES_PATH = ROOT + "/canon_senses.json"
 
+// #243: --canon/--senses-path project the shared ambiguity-competitors
+// universe (canon_senses.fold_collision_map) every cited evidence record is
+// re-verified against -- see skeptic_ready.py's own module docstring. Both
+// inputs feed --validate-fragment (this batch check, reused by precheck,
+// dispatch's own self-check, and the wait poll below) the SAME way
+// --verify-merged already needs --canon (and, as of #243, --senses-path
+// too, see verifyMergedPrompt() below).
 function checkCommand(batch) {
   return PY + " " + ROOT + "/scripts/skeptic_ready.py --validate-fragment " + fragmentPath(batch.index) +
     " --particle-config " + PARTICLE_CONFIG +
-    " --expect-assignments-file " + assignmentsBatchPath(batch.index)
+    " --expect-assignments-file " + assignmentsBatchPath(batch.index) +
+    " --canon " + CANON_PATH + " --senses-path " + SENSES_PATH
 }
 
 // ---------------------------------------------------------------------------
@@ -327,9 +353,38 @@ function verifyMergedPrompt() {
   const lines = []
   lines.push("Effort: low. Mechanical disk-independent merge verification only -- do not judge the comparison yourself.")
   lines.push("Durable root: " + ROOT + ".")
-  const cmd = PY + " " + ROOT + "/scripts/skeptic_ready.py --verify-merged " + SKEPTIC_TRIAGE_PATH + " " + AGGREGATE_ASSIGNMENTS_PATH + " --particle-config " + PARTICLE_CONFIG + " --manifest-path " + MANIFEST_PATH + " --canon " + CANON_PATH
+  // #243: --senses-path joins the already-present --canon -- merged
+  // verification projects the SAME ambiguity-competitors universe
+  // --validate-fragment's per-batch check does, and also re-hashes the
+  // sidecar (when the aggregate manifest stamps senses_sha256) as a third
+  // H1 tamper tripwire alongside canon.json/manifest.json.
+  const cmd = PY + " " + ROOT + "/scripts/skeptic_ready.py --verify-merged " + SKEPTIC_TRIAGE_PATH + " " + AGGREGATE_ASSIGNMENTS_PATH + " --particle-config " + PARTICLE_CONFIG + " --manifest-path " + MANIFEST_PATH + " --canon " + CANON_PATH + " --senses-path " + SENSES_PATH
   lines.push("Run exactly this command and read its one line of JSON output: " + cmd)
   lines.push("Return a structured result with exactly these fields: verified (the command's own verified value), frozen_input_mismatch (the command's own frozen_input_mismatch value, copied verbatim -- it is always present in the command's output), and, only when the command's own output actually includes it, missing (the command's own missing array, copied verbatim). Do not add, omit, or alter any value the command printed.")
+  return lines.join("\n")
+}
+
+// Frozen-input check -- Claude, effort:low, no agentType, schema:
+// SKEPTIC_FROZEN_CHECK_SCHEMA. Disk-independent, TRIAGE-independent: codex
+// round 2 found that when every batch's own fragment fails to become ready
+// (the notReadyBatches branch below), this pipeline gave up with an
+// ordinary advisory `fragment-check-failed` and NEVER called
+// verifyMergedPrompt() at all -- so a sidecar tampered sometime after
+// skeptic_setup.py stamped this run but before any batch's fragment ever
+// validated went completely unreported as the FATAL tamper it is. This is
+// the SAME skeptic_ready.py H1 tripwire verifyMergedPrompt() already
+// applies (--check-frozen-inputs is a standalone mode built from the exact
+// same shared frozen_input_check() Python function --verify-merged calls
+// internally), run at THIS decision point too, unconditionally, so no path
+// through this pipeline can reach a final verdict without having consulted
+// it.
+function frozenInputCheckPrompt() {
+  const lines = []
+  lines.push("Effort: low. Mechanical disk-independent frozen-input tamper check only -- do not judge anything yourself.")
+  lines.push("Durable root: " + ROOT + ".")
+  const cmd = PY + " " + ROOT + "/scripts/skeptic_ready.py --check-frozen-inputs " + AGGREGATE_ASSIGNMENTS_PATH + " --canon " + CANON_PATH + " --senses-path " + SENSES_PATH + " --manifest-path " + MANIFEST_PATH
+  lines.push("Run exactly this command and read its one line of JSON output: " + cmd)
+  lines.push("Return a structured result with exactly these fields: frozen_input_mismatch (the command's own frozen_input_mismatch value, copied verbatim -- it is always present in the command's output), and, only when the command's own output actually includes it, missing (the command's own missing array, copied verbatim). Do not add, omit, or alter any value the command printed.")
   return lines.join("\n")
 }
 
@@ -396,6 +451,26 @@ const readyBatches = batchResults.filter((r) => r && r.ready)
 const notReadyBatches = batchResults.filter((r) => !r || !r.ready)
 
 if (notReadyBatches.length > 0) {
+  // codex round 2: this branch never reaches verifyMergedPrompt()'s own H1
+  // check below (merge+verify is never attempted once any batch failed to
+  // become ready) -- run the SAME frozen-input tripwire here explicitly,
+  // unconditionally, before deciding this is merely an ordinary advisory
+  // outcome.
+  const frozenCheck = await agent(frozenInputCheckPrompt(), {
+    effort: "low", phase: "SkepticPass", label: "skeptic:frozen-check", schema: SKEPTIC_FROZEN_CHECK_SCHEMA,
+  })
+  if (frozenCheck && frozenCheck.frozen_input_mismatch === true) {
+    const missingDetail = Array.isArray(frozenCheck.missing) ? frozenCheck.missing : null
+    log(
+      "Skeptic pass: FROZEN-INPUT MISMATCH -- canon.json/manifest.json/canon_senses.json changed since " +
+      "skeptic_setup.py stamped this run's hashes, detected before any batch fragment became ready" +
+      (missingDetail && missingDetail.length ? " -- " + missingDetail.join(", ") : "") + "."
+    )
+    return {
+      batches: batchResults, merged: false, reason: "frozen-input-mismatch",
+      missing: missingDetail, frozenInputMismatch: true,
+    }
+  }
   log("Skeptic pass: " + notReadyBatches.length + "/" + BATCHES.length + " batch(es) never produced a ready fragment; the merge is not attempted.")
   return {
     batches: batchResults, merged: false, reason: "fragment-check-failed",
@@ -418,15 +493,15 @@ const verified = await agent(verifyMergedPrompt(), {
 if (!isVerifiedResult(verified)) {
   const missingDetail = verified && Array.isArray(verified.missing) ? verified.missing : null
   // P1 fix (review-bot #227): a frozen-input hash mismatch (canon.json/
-  // manifest.json changed since skeptic_setup.py stamped this run) must be
-  // surfaced as a DISTINCT reason/flag, never folded into the generic
-  // "verify-failed" bucket every other skeptic-pass failure (batch-too-
+  // manifest.json/canon_senses.json changed since skeptic_setup.py stamped
+  // this run) must be surfaced as a DISTINCT reason/flag, never folded into
+  // the generic "verify-failed" bucket every other skeptic-pass failure (batch-too-
   // large / fragment-check-failed / an ordinary coverage gap or unverified
   // citation) shares -- SKILL.md's exit-contract gates FATAL/HALT on this
   // signal specifically, keeping every other skeptic-pass failure advisory.
   if (verified && verified.frozen_input_mismatch === true) {
     log(
-      "Skeptic pass: FROZEN-INPUT MISMATCH -- canon.json/manifest.json changed since " +
+      "Skeptic pass: FROZEN-INPUT MISMATCH -- canon.json/manifest.json/canon_senses.json changed since " +
       "skeptic_setup.py stamped this run's hashes" +
       (missingDetail && missingDetail.length ? " -- " + missingDetail.join(", ") : "") + "."
     )

@@ -23,6 +23,7 @@ import importlib.util
 import re
 import sys
 from pathlib import Path
+from typing import Optional
 
 import pytest
 
@@ -61,9 +62,12 @@ ev = _load_module("evidence_verify_under_test", EVIDENCE_VERIFY_SCRIPT, SCRIPTS_
 # Helpers
 # ---------------------------------------------------------------------------
 
-def make_lang(particles=(), stopwords=(), elision_pattern=None, has_elision=None):
-    """Mirrors tests/occ_index.test.py's own make_lang helper exactly, so
-    fixtures stay comparable across both suites."""
+def make_lang(particles=(), stopwords=(), elision_pattern=None, has_elision=None,
+              name_inventory=()):
+    """Mirrors tests/occ_index.test.py's own make_lang helper exactly (now
+    including its `name_inventory` param, needed for the #243 Hebrew
+    fold-collision fixtures below), so fixtures stay comparable across both
+    suites."""
     elision_re = re.compile(elision_pattern) if elision_pattern else None
     if has_elision is None:
         has_elision = elision_re is not None
@@ -74,6 +78,7 @@ def make_lang(particles=(), stopwords=(), elision_pattern=None, has_elision=None
         elision_re=elision_re,
         has_elision=has_elision,
         raw_bytes=b"{}",
+        name_inventory=frozenset(name_inventory),
     )
 
 
@@ -84,7 +89,7 @@ def _sha256_hex(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def _block(text, seg="seg01", block_id="PARA:seg01:0001"):
+def _block(text, seg: Optional[str] = "seg01", block_id="PARA:seg01:0001"):
     return block_id, {
         "id": block_id, "type": "PARA", "seg": seg, "order_index": 0,
         "source_file": "x.txt", "plain_text": text, "sha1": "deadbeef",
@@ -535,6 +540,135 @@ def test_verify_senses_aggregates_across_entries_and_senses():
 
 
 # ---------------------------------------------------------------------------
+# #243 -- fold-key collisions, fail-closed. Real Baal Shem Tov pointed/
+# unpointed maqaf/space variants (whoswho.final.json:87-98), mirroring
+# tests/occ_index.test.py's own Hebrew collision fixture so both sites'
+# behavior stays directly comparable.
+# ---------------------------------------------------------------------------
+
+BST_MAQAF_UNPOINTED = "הבעל־שם־טוב"
+BST_SPACE_UNPOINTED = "הבעל שם טוב"
+BST_MAQAF_POINTED_OCCURRENCE = "הַבַּעַל־שֵׁם־טוֹב"
+
+
+def test_243_verify_senses_fold_collision_fail_closed_both_senses_fail():
+    """Two DISTINCT canon source_forms (maqaf-joined and space-joined,
+    both unpointed) fold to the SAME #238/#241 match key. Each has ONE
+    sense whose stored evidence points at the SAME single physical
+    occurrence (pointed+maqaf in the source text). Matcher-authentication
+    must fail for BOTH -- fail-closed -- never accept one arbitrarily
+    (which of the two "won" would depend on dict/iteration order, exactly
+    the silent-overwrite hazard this guard exists to prevent)."""
+    lang = make_lang(name_inventory=[BST_MAQAF_UNPOINTED, BST_SPACE_UNPOINTED])
+    text = f"ראה {BST_MAQAF_POINTED_OCCURRENCE} אתמול."
+    block_id, block = _block(text)
+    manifest = _manifest((block_id, block))
+    char_start = text.index(BST_MAQAF_POINTED_OCCURRENCE)
+    char_end = char_start + len(BST_MAQAF_POINTED_OCCURRENCE)
+
+    class _Entries:
+        entries_by_source_form = {
+            BST_MAQAF_UNPOINTED: {"senses": [
+                _sense("maqaf1", _whole_block_evidence(block_id, "seg01", text, char_start, char_end)),
+            ]},
+            BST_SPACE_UNPOINTED: {"senses": [
+                _sense("space1", _whole_block_evidence(block_id, "seg01", text, char_start, char_end)),
+            ]},
+        }
+
+    failures = ev.verify_senses(_Entries(), manifest, lang)
+    assert len(failures) == 2
+    failure_by_sense = {f.sense_id: f for f in failures}
+    assert set(failure_by_sense) == {"maqaf1", "space1"}
+    for failure in failures:
+        assert "matcher-authentication" in failure.reason
+
+
+def test_243_verify_senses_no_collision_still_verifies_clean():
+    # Sanity/non-regression: a SINGLE Hebrew source_form with no colliding
+    # sibling in the competitor universe must still verify normally under
+    # the new fold-aware grouping.
+    lang = make_lang(name_inventory=[BST_MAQAF_UNPOINTED])
+    text = f"ראה {BST_MAQAF_POINTED_OCCURRENCE} אתמול."
+    block_id, block = _block(text)
+    manifest = _manifest((block_id, block))
+    char_start = text.index(BST_MAQAF_POINTED_OCCURRENCE)
+    char_end = char_start + len(BST_MAQAF_POINTED_OCCURRENCE)
+
+    class _Entries:
+        entries_by_source_form = {
+            BST_MAQAF_UNPOINTED: {"senses": [
+                _sense("s1", _whole_block_evidence(block_id, "seg01", text, char_start, char_end)),
+            ]},
+        }
+
+    assert ev.verify_senses(_Entries(), manifest, lang) == []
+
+
+def test_243_verify_senses_canon_param_widens_the_competitor_universe():
+    """`canon` is optional (defaults to None, the canon-absent audit branch)
+    but when given, its `entries` join the competitor universe. Here the
+    ONLY sense being verified is BST_MAQAF_UNPOINTED -- alone, senses_result
+    has no local collision -- but `canon` carries BST_SPACE_UNPOINTED as a
+    sibling entry (e.g. a plain non-split canon entry that never needed its
+    own canon_senses.json record). Passing `canon=` must still catch the
+    collision; omitting it must not (proving `canon` is genuinely load-
+    bearing here, not a no-op)."""
+    lang = make_lang(name_inventory=[BST_MAQAF_UNPOINTED, BST_SPACE_UNPOINTED])
+    text = f"ראה {BST_MAQAF_POINTED_OCCURRENCE} אתמול."
+    block_id, block = _block(text)
+    manifest = _manifest((block_id, block))
+    char_start = text.index(BST_MAQAF_POINTED_OCCURRENCE)
+    char_end = char_start + len(BST_MAQAF_POINTED_OCCURRENCE)
+
+    class _Entries:
+        entries_by_source_form = {
+            BST_MAQAF_UNPOINTED: {"senses": [
+                _sense("s1", _whole_block_evidence(block_id, "seg01", text, char_start, char_end)),
+            ]},
+        }
+
+    without_canon = ev.verify_senses(_Entries(), manifest, lang)
+    assert without_canon == [], "no local collision within senses_result alone -- must verify clean"
+
+    canon = {"entries": {BST_SPACE_UNPOINTED: {"is_proper_name": True}}}
+    with_canon = ev.verify_senses(_Entries(), manifest, lang, canon=canon)
+    assert len(with_canon) == 1
+    assert with_canon[0].source_form == BST_MAQAF_UNPOINTED
+    assert "matcher-authentication" in with_canon[0].reason
+
+
+# ---------------------------------------------------------------------------
+# #243 parity -- _group_production_spans_by_name()'s fold-aware grouping
+# must agree with production_occurrences()'s own fold-aware comparison
+# (occ_index.py Site 1) for every NON-colliding source_form: this is the
+# exact invariant _group_production_spans_by_name()'s own docstring promises
+# ("mirrors index_manifest()'s ... so the two never drift"), checked here
+# against Site 1 directly rather than re-deriving it.
+# ---------------------------------------------------------------------------
+
+def test_243_group_production_spans_by_name_parity_with_production_occurrences():
+    # evidence_verify.py itself already imports fold_collision_map from
+    # canon_senses at module level -- reuse that binding (ev.fold_collision_map)
+    # rather than a bare top-level `import canon_senses`, which a static
+    # checker cannot resolve from this test file's own location (mirrors
+    # tests/occ_index.test.py's own fix for the identical pattern).
+    cases = [
+        (make_lang(), "Jean marchait. Jean revint.", "Jean"),
+        (make_lang(particles=["de"]), "Il visita le Chateau de Versailles hier.",
+         "Chateau de Versailles"),
+        (make_lang(name_inventory=[BST_MAQAF_UNPOINTED]),
+         f"ראה {BST_MAQAF_POINTED_OCCURRENCE} אתמול.", BST_MAQAF_UNPOINTED),
+    ]
+    for lang, text, source_form in cases:
+        competitors = ev.fold_collision_map([source_form])
+        grouped = ev._group_production_spans_by_name(text, lang, competitors)
+        assert list(grouped.get(source_form, [])) == ev.production_occurrences(
+            source_form, text, lang
+        ), f"parity broke for source_form={source_form!r}"
+
+
+# ---------------------------------------------------------------------------
 # Performance -- per-block production-span caching (codex round-4 MAJOR
 # finding). verify_senses() previously called verify_evidence() -> occ_index.
 # production_occurrences() -> the full extract_candidate_spans() tokenizer
@@ -584,13 +718,18 @@ def test_verify_senses_extracts_each_block_once_regardless_of_sense_count():
             ]}
         }
 
-    oi_module._run_spans = counting_run_spans
-    ev._run_spans = counting_run_spans
+    # setattr(), not `oi_module._run_spans = ...` -- both `oi_module` (a bare
+    # sys.modules lookup) and `ev` (loaded via importlib, below) are typed as
+    # ModuleType by a static checker, which does not know `_run_spans` is a
+    # real attribute of either at runtime; setattr() patches/restores the
+    # exact same live attribute without a static existence check.
+    setattr(oi_module, "_run_spans", counting_run_spans)
+    setattr(ev, "_run_spans", counting_run_spans)
     try:
         failures = ev.verify_senses(_Entries(), manifest, lang)
     finally:
-        oi_module._run_spans = real_run_spans
-        ev._run_spans = real_run_spans
+        setattr(oi_module, "_run_spans", real_run_spans)
+        setattr(ev, "_run_spans", real_run_spans)
 
     assert failures == []
     assert call_count["n"] == 1, (

@@ -51,6 +51,7 @@ CLI:
         --particle-config FILENAME --research-mode {live,offline}
         --source-format FORMAT
         --batch-agent-cap N --source-lang LANG
+        [--senses-path PATH]
         [--languages-dir PATH] [--dispersion-threshold N] [--sample-cap N]
         [--windows-per-entity N] [--near-threshold F] [--near-cap N]
         [--near-pair-budget N] [--citation-block-types [TYPE ...]]
@@ -86,9 +87,10 @@ Self-anchored: this script always lives at
 durable root. Never assumes cwd, never takes a ``--durable-root`` flag.
 
 skeptic ``input_digest`` (see ``compute_skeptic_input_digest()`` below):
-the producer set (canon.json, manifest.json, the resolved scan parameters,
-the resolved ``LanguageConfig.raw_bytes``, and the producer's own code
-closure -- reused verbatim via ``suspicion_scan.compute_producer_input_digest``)
+the producer set (canon.json, manifest.json, canon_senses.json's own raw
+bytes (#243), the resolved scan parameters, the resolved
+``LanguageConfig.raw_bytes``, and the producer's own code closure -- reused
+verbatim via ``suspicion_scan.compute_producer_input_digest``)
 PLUS: the worklist's own raw bytes, the fully-resolved per-entity windows +
 batch assignment (so even a bug in THIS script's own derivation algorithm is
 covered, belt-and-suspenders, on top of this script's own bytes already
@@ -161,6 +163,7 @@ try:
         SKEPTIC_INPUT_DIGEST_FILENAME,
         SUSPICION_WORKLIST_SCHEMA,
         SKEPTIC_ASSIGNMENT_SCHEMA,
+        FROZEN_INPUT_SPECS,
     )
 except ImportError as exc:
     sys.exit(
@@ -183,6 +186,8 @@ except ImportError as exc:
 try:
     from suspicion_scan import (
         compute_producer_input_digest,
+        compute_frozen_input_hash_from_state,
+        read_frozen_input_snapshot,
         resolved_scan_params,
         resolve_citation_block_types,
         PRODUCER_CODE_CLOSURE,
@@ -199,6 +204,11 @@ except ImportError as exc:
 
 DEFAULT_CANON_PATH = DURABLE_ROOT / "canon.json"
 DEFAULT_MANIFEST_PATH = DURABLE_ROOT / "manifest.json"
+# Sibling of DEFAULT_CANON_PATH, self-anchored the same way -- each consumer
+# computes its own copy (see canon_senses.py's own module docstring on why
+# DEFAULT_SENSES_PATH is deliberately not defined there). #243: the sidecar
+# became a THIRD frozen producer input this script recomputes/re-stamps.
+DEFAULT_SENSES_PATH = DURABLE_ROOT / "canon_senses.json"
 DEFAULT_WORKLIST_PATH = DURABLE_ROOT / SUSPICION_WORKLIST_FILENAME
 SKEPTIC_RUNS_DIR = DURABLE_ROOT / SKEPTIC_RUNS_SUBDIR
 
@@ -370,34 +380,103 @@ def _build_entity_windows(entry: dict, windows_per_entity: int):
 
 
 def compute_skeptic_input_digest(
-    *, canon_bytes: bytes, manifest_bytes: bytes, worklist_bytes: bytes,
+    *, canon_state: str, canon_bytes: bytes, manifest_state: str, manifest_bytes: bytes,
+    senses_state: str, senses_bytes: bytes, worklist_bytes: bytes,
     assignments: list, config_values: dict, language_config_raw_bytes: bytes,
     schemas_dir_hash_hex: str, script_dir: Path, template_bytes: bytes,
 ) -> str:
-    """sha256 hex over, concatenated in this FIXED order: canon.json bytes +
-    manifest.json bytes + the worklist's own raw bytes + canonical-JSON of
-    the fully-resolved per-entity windows/batch assignment + canonical-JSON
-    of every CLI/config value (the producer's own scan parameters plus the
-    two skeptic-only ones) + the resolved LanguageConfig.raw_bytes + the
-    schemas-dir hash + the full skeptic code closure's bytes (sorted) + the
-    skeptic template's own bytes. Any single-byte change to any one of these
-    inputs changes this digest -- see this module's docstring for the full
-    member list and rationale. Every member is separated by a single NUL
-    byte (mirrors suspicion_scan.compute_producer_input_digest()'s own
-    framing exactly) so two adjacent variable-length members -- most
-    notably two adjacent closure script files -- can never collide by
-    boundary concatenation (e.g. "AB"+"C" vs "A"+"BC" hashing identically
-    with no separator)."""
+    """sha256 hex over, concatenated in this FIXED order: canon.json state +
+    canon.json bytes + manifest.json state + manifest.json bytes +
+    canon_senses.json state + canon_senses.json bytes + the worklist's own
+    raw bytes + canonical-JSON of the fully-resolved per-entity windows/
+    batch assignment + canonical-JSON of every CLI/config value (the
+    producer's own scan parameters plus the two skeptic-only ones) + the
+    resolved LanguageConfig.raw_bytes + the schemas-dir hash + the full
+    skeptic code closure's bytes (sorted) + the skeptic template's own
+    bytes. Any single-byte change to any one of these inputs changes this
+    digest -- see this module's docstring for the full member list and
+    rationale. Every member is separated by a single NUL byte (mirrors
+    suspicion_scan.compute_producer_input_digest()'s own framing exactly)
+    so two adjacent variable-length members -- most notably two adjacent
+    closure script files -- can never collide by boundary concatenation
+    (e.g. "AB"+"C" vs "A"+"BC" hashing identically with no separator).
+
+    Codex round 4: `canon_state`/`manifest_state`/`senses_state` (each
+    "absent"/"regular"/"irregular") are new -- this is the SKEPTIC RESUME
+    digest (`resolve_skeptic_run()` decides fresh-vs-resume purely by
+    comparing this value against a prior run's own stamped `input.digest`),
+    and it previously carried NO senses input at all and no state
+    information for canon/manifest either. A state-only mutation of any of
+    the three frozen inputs (an absent sidecar replaced by a genuinely-empty
+    regular file, or by a directory -- content unchanged either way) was
+    therefore invisible to it: `resolve_skeptic_run()` would wrongly resume
+    the existing run and `run()` would go on to REWRITE that run's
+    `assignments.json`, overwriting its H1 stamps with the new state and
+    silently laundering the very mutation H1 exists to catch. Callers pass
+    the SAME `(state, bytes)` snapshot `read_frozen_input_snapshot()`
+    captured once at derivation-read time -- never a fresh re-read here
+    either, for the identical reason round 3's stamping fix does not
+    re-read.
+
+    Round 9 (#243): like `suspicion_scan.compute_producer_input_digest()`,
+    this signature is a fixed positional/keyword enumeration of
+    canon/manifest/senses, NOT derived from `skeptic_constants.FROZEN_INPUT_SPECS`
+    -- see that tuple's own "what FROZEN_INPUT_SPECS does NOT cover"
+    comment. Generalizing this SIGNATURE was deferred for the same
+    dozens-of-call-sites/pinned-NUL-framing reason given there.
+
+    Round 10 (#243): the signature and every call site stay exactly as
+    round 9 left them -- but the BODY below no longer hard-codes which
+    three `(state, bytes)` pairs get hashed. It builds a
+    `{key: (state, bytes)}` map and flattens it in `FROZEN_INPUT_SPECS`
+    order, asserting the map's key set equals the tuple's key set first.
+    A fourth `FROZEN_INPUT_SPECS` entry still needs its own hand-added
+    parameter here (the signature is unchanged), but omitting one now
+    raises `AssertionError` the first time this function runs after the
+    tuple grows, instead of silently resuming a run whose new input
+    changed underneath it. `FROZEN_INPUT_SPECS` is enumerated
+    `("canon", "manifest", "senses")` today, so this flattening reproduces
+    the exact `canon_state, canon_bytes, manifest_state, manifest_bytes,
+    senses_state, senses_bytes` byte order round 9 hashed -- the digest of
+    any existing project is unchanged."""
     h = hashlib.sha256()
-    parts = [
-        canon_bytes,
-        manifest_bytes,
+    frozen_input_snapshots = {
+        "canon": (canon_state, canon_bytes),
+        "manifest": (manifest_state, manifest_bytes),
+        "senses": (senses_state, senses_bytes),
+    }
+    # Round 11 (#243): mirrors suspicion_scan.compute_producer_input_digest()'s
+    # own round-11 fix -- a SET comparison collapses duplicate keys, so a
+    # fourth FROZEN_INPUT_SPECS entry that REUSES an existing key (rather
+    # than getting its own) would pass a `set(...) != spec_keys` guard
+    # silently and then alias the reused key's snapshot in the loop below.
+    # Comparing the full, non-deduplicated KEY LIST (sorted) is strictly
+    # stronger: a duplicate changes the list even when it doesn't change
+    # the set.
+    spec_keys = [spec[0] for spec in FROZEN_INPUT_SPECS]
+    if sorted(frozen_input_snapshots) != sorted(spec_keys):
+        raise AssertionError(
+            "compute_skeptic_input_digest(): frozen_input_snapshots keys "
+            f"{sorted(frozen_input_snapshots)} != FROZEN_INPUT_SPECS keys "
+            f"{sorted(spec_keys)} -- a frozen input was added to "
+            "skeptic_constants.FROZEN_INPUT_SPECS without a matching "
+            "hand-added parameter/snapshot entry here (or vice versa), or "
+            "FROZEN_INPUT_SPECS contains a duplicate key; see "
+            "skeptic_constants.py's \"what FROZEN_INPUT_SPECS does NOT "
+            "cover\" comment."
+        )
+    parts = []
+    for key, _label, _stamp_field in FROZEN_INPUT_SPECS:
+        state, snapshot_bytes = frozen_input_snapshots[key]
+        parts.append(state.encode("ascii"))
+        parts.append(snapshot_bytes)
+    parts.extend([
         worklist_bytes,
         _canonical_json_bytes(assignments),
         _canonical_json_bytes(config_values),
         language_config_raw_bytes,
         schemas_dir_hash_hex.encode("utf-8"),
-    ]
+    ])
     for name in SKEPTIC_CLOSURE_SCRIPT_FILENAMES:
         parts.append((script_dir / name).read_bytes())
     parts.append(template_bytes)
@@ -477,21 +556,42 @@ def resolve_skeptic_run(input_digest: str, resume_from_run_id):
 def run(args) -> dict:
     canon_path = Path(args.canon) if args.canon else DEFAULT_CANON_PATH
     manifest_path = Path(args.manifest) if args.manifest else DEFAULT_MANIFEST_PATH
+    senses_path = Path(args.senses_path) if args.senses_path else DEFAULT_SENSES_PATH
     worklist_path = Path(args.worklist) if args.worklist else DEFAULT_WORKLIST_PATH
 
-    # canon.json absence is TOLERATED -- mirrors suspicion_scan.py's own
-    # main() exactly (an empty/absent canon is "nothing to scan", not an
-    # error), so the two scripts' canon_bytes agree byte-for-byte
-    # (b"" both times) and the recomputed producer_input_digest can match.
-    canon_bytes = canon_path.read_bytes() if canon_path.is_file() else b""
-    if not manifest_path.is_file():
+    # codex round 3: canon.json/manifest.json/canon_senses.json are each
+    # read EXACTLY ONCE here, as a (state, bytes) SNAPSHOT via
+    # read_frozen_input_snapshot() -- before any freshness/worklist
+    # validation below ever consults them, and well before the H1 stamp is
+    # written far below. The stamp hashes THIS captured snapshot directly
+    # (compute_frozen_input_hash_from_state), never re-touching these paths
+    # -- re-reading fresh at stamp time (the pre-fix shape) would let a
+    # mutation land in the window between this read and that write and get
+    # silently ADOPTED as "the true state": the stamp would then describe
+    # the MUTATED file while the worklist-freshness check and the
+    # assignments this run just built both still describe the ORIGINAL one
+    # -- a real, disk-level instance of the exact trust-the-caller class H1
+    # exists to close, just moved to a different boundary. canon.json
+    # absence is TOLERATED (mirrors suspicion_scan.py's own main() exactly
+    # -- an empty/absent canon is "nothing to scan", not an error) --
+    # canon_bytes/senses_bytes are b"" for anything but "regular" state,
+    # matching suspicion_scan.py's own tolerant convention so the two
+    # scripts' bytes agree byte-for-byte and the recomputed
+    # producer_input_digest can match.
+    # Round 9 (#243): this capture is NOT driven by FROZEN_INPUT_SPECS --
+    # see skeptic_constants.py's own "what FROZEN_INPUT_SPECS does NOT
+    # cover" comment next to that tuple for the full list of sites (this
+    # one included) a new frozen input must still be added to by hand.
+    canon_state, canon_bytes = read_frozen_input_snapshot(canon_path)
+    senses_state, senses_bytes = read_frozen_input_snapshot(senses_path)
+    manifest_state, manifest_bytes = read_frozen_input_snapshot(manifest_path)
+    if manifest_state != "regular":
         raise SkepticSetupError(f"manifest.json not found: {manifest_path}")
     if not worklist_path.is_file():
         raise SkepticSetupError(
             f"suspicion_worklist.json not found: {worklist_path} -- run suspicion_scan.py first"
         )
 
-    manifest_bytes = manifest_path.read_bytes()
     worklist_bytes = worklist_path.read_bytes()
 
     try:
@@ -542,8 +642,14 @@ def run(args) -> dict:
     #    helper suspicion_scan.py itself stamped the worklist with, and
     #    reject fail-closed on any mismatch (stale canon/manifest/params/
     #    language-config/producer-code).
+    # Round 9 (#243): fixed positional args, not FROZEN_INPUT_SPECS-driven
+    # -- see that tuple's own "what it does NOT cover" comment in
+    # skeptic_constants.py. A frozen input added to the tuple still needs
+    # a hand-added positional arg here (and in compute_producer_input_digest
+    # itself) before a change to it can invalidate a stale worklist.
     recomputed_producer_digest = compute_producer_input_digest(
-        canon_bytes, manifest_bytes, resolved_params, lang.raw_bytes, SCRIPT_DIR,
+        canon_state, canon_bytes, manifest_state, manifest_bytes, senses_state, senses_bytes,
+        resolved_params, lang.raw_bytes, SCRIPT_DIR,
     )
     stamped_producer_digest = worklist.get("producer_input_digest")
     if recomputed_producer_digest != stamped_producer_digest:
@@ -620,8 +726,13 @@ def run(args) -> dict:
         raise SkepticSetupError(f"skeptic template not found: {template_path}")
     template_bytes = template_path.read_bytes()
 
+    # Round 9 (#243): same caveat as the compute_producer_input_digest call
+    # above -- fixed keyword args, not FROZEN_INPUT_SPECS-driven.
     skeptic_input_digest = compute_skeptic_input_digest(
-        canon_bytes=canon_bytes, manifest_bytes=manifest_bytes, worklist_bytes=worklist_bytes,
+        canon_state=canon_state, canon_bytes=canon_bytes,
+        manifest_state=manifest_state, manifest_bytes=manifest_bytes,
+        senses_state=senses_state, senses_bytes=senses_bytes,
+        worklist_bytes=worklist_bytes,
         assignments=assignments, config_values=config_values,
         language_config_raw_bytes=lang.raw_bytes, schemas_dir_hash_hex=schemas_dir_hash_hex,
         script_dir=SCRIPT_DIR, template_bytes=template_bytes,
@@ -651,17 +762,92 @@ def run(args) -> dict:
     #    digest-hashed worklist+config (a MATCH-resume rebuild is always
     #    byte-identical to what's already on disk), mirroring
     #    resume_setup.py's own glossary-manifest-rewrite-on-resume rationale.
+    #    Codex round 4: this claim depends on `skeptic_input_digest` (the
+    #    resume gate above) actually covering EVERYTHING this dict derives
+    #    from, INCLUDING canon_state/manifest_state/senses_state -- before
+    #    that fix, a MATCH-resume could still rewrite this dict's H1 stamps
+    #    with a DIFFERENT state than the original run captured (the digest
+    #    was blind to state, so "MATCH" didn't actually mean "same inputs").
+    #    Now that compute_skeptic_input_digest() hashes state directly, a
+    #    MATCH really does mean canon_state/canon_bytes/manifest_state/
+    #    manifest_bytes/senses_state/senses_bytes are ALL identical to the
+    #    original run's, so the rewrite (H1 stamps included) really is
+    #    byte-identical -- this comment's claim is what codex round 4 is
+    #    the fix FOR, not a pre-existing invariant it merely restates.
+    # Fix H1 (writer half): the frozen canon/manifest/senses inputs' own
+    # state-tagged hash (compute_frozen_input_hash_from_state -- codex round
+    # 2: hashing raw bytes alone made absent/regular-empty/irregular
+    # indistinguishable; folding in the path state closes that), so
+    # --verify-merged/--check-frozen-inputs (skeptic_ready.py) can re-hash
+    # the on-disk files and HALT the pass if a skeptic agent tampered any of
+    # them after this setup ran (source-text prompt injection). #243:
+    # canon_senses.json joined canon.json/manifest.json as a THIRD frozen
+    # input the moment the verifier started parsing it to project the
+    # ambiguity-competitors universe. Hashed from `canon_state`/
+    # `manifest_state`/`senses_state` (and their matching `*_bytes`)
+    # captured ONCE at the top of this function -- codex round 3: NEVER
+    # re-read `canon_path`/`manifest_path`/`senses_path` here. A fresh
+    # re-read at this point would hash whatever is on disk NOW rather than
+    # the snapshot the freshness check and the assignments above were
+    # actually derived from, silently adopting any mutation that landed in
+    # between as "the true state" (see the long comment where these were
+    # captured, top of this function).
+    #
+    # Round 8 (#243 codex follow-up): the three stamp fields below are built
+    # from `FROZEN_INPUT_SPECS` (skeptic_constants.py) -- the SAME table
+    # `skeptic_ready.py`'s `frozen_input_check()` verifier reads to build its
+    # own check table -- rather than three hand-written `"..._sha256": ...`
+    # lines. Before this, the frozen-input set was enumerated independently
+    # here and in the verifier, so a fourth frozen input could be stamped
+    # here (and declared in the schema) while never being wired into the
+    # verifier's own separate table -- nothing would fail, it just wouldn't
+    # be checked. This dict comprehension is now the ONLY place a stamp
+    # field is written into `aggregate`: there is no hand-maintained literal
+    # line left to add a stamp without adding a `FROZEN_INPUT_SPECS` entry
+    # first, and any entry appended there is automatically both stamped here
+    # and checked by the verifier the next time each side reads it.
+    # This dict IS keyed off FROZEN_INPUT_SPECS' own keys below -- unlike
+    # the capture above and the two digest calls above it, this stamp step
+    # (and frozen_input_check()'s verifier-side check table) really is
+    # fully tuple-driven; see skeptic_constants.py's "what FROZEN_INPUT_SPECS
+    # does NOT cover" comment for the contrast.
+    _frozen_input_snapshots_by_key = {
+        "canon": (canon_state, canon_bytes),
+        "manifest": (manifest_state, manifest_bytes),
+        "senses": (senses_state, senses_bytes),
+    }
+    # Round 11 (#243): this comprehension INDEXES by `key`, so a
+    # FROZEN_INPUT_SPECS entry that reuses an existing key (rather than
+    # getting its own hand-added entry above) would silently alias that
+    # key's snapshot into the reused entry's stamp_field instead of
+    # raising -- the exact class this round's `compute_producer_input_digest`/
+    # `compute_skeptic_input_digest` fix closes, just at a different site.
+    # In practice `run()` always calls both of those first (lines above),
+    # and their own duplicate-key guard already raises before control
+    # reaches here -- but that ordering isn't enforced by anything at this
+    # site itself, so this guard stays as defense-in-depth against a future
+    # reordering or a second caller of this comprehension's shape.
+    _spec_keys = [spec[0] for spec in FROZEN_INPUT_SPECS]
+    if sorted(_frozen_input_snapshots_by_key) != sorted(_spec_keys):
+        raise AssertionError(
+            "run(): _frozen_input_snapshots_by_key keys "
+            f"{sorted(_frozen_input_snapshots_by_key)} != FROZEN_INPUT_SPECS "
+            f"keys {sorted(_spec_keys)} -- a frozen input was added to "
+            "skeptic_constants.FROZEN_INPUT_SPECS without a matching "
+            "hand-added snapshot entry above (or vice versa), or "
+            "FROZEN_INPUT_SPECS contains a duplicate key."
+        )
+    frozen_input_stamps = {
+        stamp_field: compute_frozen_input_hash_from_state(*_frozen_input_snapshots_by_key[key])
+        for key, _label, stamp_field in FROZEN_INPUT_SPECS
+    }
+
     aggregate = {
         "schema_version": 1,
         "run_id": run_id,
         "input_digest": skeptic_input_digest,
         "producer_input_digest": recomputed_producer_digest,
-        # Fix H1 (writer half): the frozen canon/manifest bytes' own sha256,
-        # so --verify-merged (skeptic_ready.py, owner A3) can re-hash the
-        # on-disk files and HALT the pass if a skeptic agent tampered either
-        # one after this setup ran (source-text prompt injection).
-        "canon_sha256": hashlib.sha256(canon_bytes).hexdigest(),
-        "manifest_sha256": hashlib.sha256(manifest_bytes).hexdigest(),
+        **frozen_input_stamps,
         "batch_count": batch_count,
         "assignments": assignments,
     }
@@ -701,6 +887,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
                          help=f"Path to canon.json (default: {DEFAULT_CANON_PATH}).")
     parser.add_argument("--manifest", metavar="PATH", default=None,
                          help=f"Path to manifest.json (default: {DEFAULT_MANIFEST_PATH}).")
+    parser.add_argument("--senses-path", metavar="PATH", default=None,
+                         help=f"Path to canon_senses.json (default: {DEFAULT_SENSES_PATH}). "
+                              "MUST be the same sidecar suspicion_scan.py resolved this "
+                              "worklist against -- read ONCE here (never trusted from a "
+                              "caller), as a (state, bytes) snapshot, to recompute "
+                              "producer_input_digest AND the skeptic resume digest (#243), "
+                              "and to stamp senses_sha256 into the aggregate manifest (H1) "
+                              "from that SAME captured snapshot -- never a second, later "
+                              "re-read (codex round 3/4: a stamp-time re-read would let a "
+                              "mutation land in the gap and get silently adopted as trusted).")
     parser.add_argument("--worklist", metavar="PATH", default=None,
                          help=f"Path to suspicion_worklist.json (default: {DEFAULT_WORKLIST_PATH}).")
     parser.add_argument("--particle-config", required=True, metavar="FILENAME",

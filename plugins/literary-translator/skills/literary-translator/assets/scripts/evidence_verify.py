@@ -87,6 +87,31 @@ except ImportError as exc:
         "against. Re-run Step 0a, or verify the plugin install is not corrupted."
     )
 
+try:
+    from bootstrap_names import fold_match_key
+except ImportError as exc:
+    sys.exit(
+        f"evidence_verify.py: cannot import bootstrap_names.py from {SCRIPT_DIR} ({exc}).\n"
+        "bootstrap_names.py must be installed alongside evidence_verify.py under "
+        "${durable_root}/scripts/ -- it supplies fold_match_key(), the #238/#241 Hebrew "
+        "mark/connector MATCH KEY #243 uses to group production spans by the same key "
+        "occ_index.production_occurrences() itself now compares against. Re-run Step 0a, "
+        "or verify the plugin install is not corrupted."
+    )
+
+try:
+    from canon_senses import fold_collision_map, FoldCollisionMap
+except ImportError as exc:
+    sys.exit(
+        f"evidence_verify.py: cannot import canon_senses.py from {SCRIPT_DIR} ({exc}).\n"
+        "canon_senses.py must be installed alongside evidence_verify.py under "
+        "${durable_root}/scripts/ -- it supplies fold_collision_map(), the shared "
+        "#238/#241 fold-key collision detector verify_senses() uses to fail-closed a "
+        "many-to-one match rather than crediting a stored evidence span to the wrong "
+        "colliding source_form. Re-run Step 0a, or verify the plugin install is not "
+        "corrupted."
+    )
+
 
 @dataclass(frozen=True)
 class EvidenceFailure:
@@ -117,19 +142,44 @@ def _blocks_mapping(manifest) -> dict:
     return blocks if isinstance(blocks, dict) else {}
 
 
-def _group_production_spans_by_name(block_text: str, language_config) -> dict:
+def _group_production_spans_by_name(block_text: str, language_config,
+                                     competitors: "FoldCollisionMap") -> dict:
     """Every production span `_run_spans()` emits for `block_text`, grouped
-    by the exact `name` the matcher assigns each run -- ONE extraction pass
-    regardless of how many distinct source_forms end up querying this
-    block's spans. Mirrors ``occ_index.py::index_manifest()``'s own
-    grouping (same `_run_spans()` call, same `defaultdict(list)` shape) so
-    the two never drift. This is the per-block cache `verify_senses()`
-    builds lazily, once per block id, instead of calling
-    `production_occurrences()` -- which re-runs the full extraction --
-    once per (block, source_form) pair."""
-    grouped = defaultdict(list)
+    by canon `source_form` -- ONE extraction pass regardless of how many
+    distinct source_forms end up querying this block's spans. This is the
+    per-block cache `verify_senses()` builds lazily, once per block id,
+    instead of calling `production_occurrences()` -- which re-runs the full
+    extraction -- once per (block, source_form) pair.
+
+    #243: mirrors ``occ_index.py::index_manifest()``'s own fold-aware,
+    fail-closed grouping (same `_run_spans()` call, same single forward
+    pass) so the two never drift -- honoring this function's own prior
+    promise that they wouldn't. Every emitted `name` is first grouped by
+    `bootstrap_names.fold_match_key(name)` -- never its own raw dict key
+    directly, which would only catch a collision AMONG the matcher's own
+    emitted spellings in this one block, not a canon-level collision
+    between two source_forms that happen to have no occurrence in common
+    in this particular block. `competitors` (a `canon_senses.
+    FoldCollisionMap`, already built by `verify_senses()` over the full
+    competitor universe -- every `canon_senses.json` form plus, when
+    available, every `canon.json` entry) is what resolves a fold key to
+    the ONE non-colliding raw canon `source_form` it belongs to, via
+    `competitors.groups`: a key absent from `competitors.groups`, or
+    present with >= 2 members (a collision), is dropped entirely --
+    fail-closed, credited to no `source_form` -- rather than exposed under
+    the matcher's own raw spelling, which `verify_evidence()`'s `.get(
+    source_form, ())` lookup would never find anyway (it queries by canon
+    `source_form`, not by matcher-emitted `name`)."""
+    folded_spans_by_key = defaultdict(list)
     for name, _mid_sentence, char_start, char_end in _run_spans(block_text, language_config):
-        grouped[name].append((char_start, char_end))
+        folded_spans_by_key[fold_match_key(name)].append((char_start, char_end))
+
+    grouped = {}
+    for key, spans in folded_spans_by_key.items():
+        members = competitors.groups.get(key)
+        if members is None or len(members) != 1:
+            continue  # unknown to the competitor universe, or a fold-key collision
+        grouped[members[0]] = spans
     return grouped
 
 
@@ -195,8 +245,19 @@ def verify_evidence(source_form: str, sense: dict, manifest, language_config,
 
     text_len = len(block_text)
 
-    offsets = (char_start, char_end, context_start, context_end)
-    if not all(isinstance(o, int) and not isinstance(o, bool) for o in offsets):
+    # Four separate guards, not one `all(isinstance(o, int) ... for o in offsets)`
+    # check over a tuple: functionally identical (same message, same fail-fast
+    # intent), but a static type checker cannot narrow char_start/char_end/
+    # context_start/context_end themselves from a generator-expression check
+    # over a tuple built from them -- it can from a direct `isinstance(x, int)`
+    # check on `x` itself, which is what the comparisons below need.
+    if not isinstance(char_start, int) or isinstance(char_start, bool):
+        return fail("evidence char_start/char_end/context_start/context_end must all be integers")
+    if not isinstance(char_end, int) or isinstance(char_end, bool):
+        return fail("evidence char_start/char_end/context_start/context_end must all be integers")
+    if not isinstance(context_start, int) or isinstance(context_start, bool):
+        return fail("evidence char_start/char_end/context_start/context_end must all be integers")
+    if not isinstance(context_end, int) or isinstance(context_end, bool):
         return fail("evidence char_start/char_end/context_start/context_end must all be integers")
 
     if not (0 <= char_start < char_end <= text_len):
@@ -249,7 +310,7 @@ def verify_evidence(source_form: str, sense: dict, manifest, language_config,
     return None
 
 
-def verify_senses(senses_result, manifest, language_config) -> list:
+def verify_senses(senses_result, manifest, language_config, canon: Optional[dict] = None) -> list:
     """The public entry the mandatory W-step calls once per audit run:
     verifies EVERY sense's evidence in `senses_result.entries_by_source_form`
     (as returned by `canon_senses.py::load_senses` -- already schema- and
@@ -257,6 +318,22 @@ def verify_senses(senses_result, manifest, language_config) -> list:
     `EvidenceFailure`s -- one per failing sense, in `entries_by_source_form`/
     `senses` iteration order. An empty list means every stored evidence
     record verified clean.
+
+    #243: builds the fold-key COMPETITOR universe (never just this call's
+    own iteration order) that `_group_production_spans_by_name()`'s
+    fail-closed collision guard needs -- the union of every
+    `senses_result.entries_by_source_form` key (split-only forms INCLUDED;
+    they still occupy a real fold key and must still poison an ambiguous
+    match even though they never get their own note) and, when `canon` is
+    given, every `canon.json` `entries` key too. `canon` defaults to `None`
+    because a caller genuinely may not have one: `canon_adjudication_audit.
+    py`'s own W-step deliberately still calls this when `canon.json` is
+    ABSENT (evidence verification does not depend on canon presence) -- the
+    competitor universe there is `canon_senses.json` alone, exactly what a
+    missing `canon` correctly degrades to. When `canon` IS available, the
+    caller should pass it: a split-only form or a same-fold-key sibling
+    that only exists in `canon.json` would otherwise be invisible to
+    collision detection here.
 
     A single sense's verification is never allowed to abort the batch: one
     hostile/corrupt block in `manifest` must degrade to THAT sense's own
@@ -284,6 +361,11 @@ def verify_senses(senses_result, manifest, language_config) -> list:
     matcher-authentication step that would consult this map ever runs for
     that block."""
     blocks = _blocks_mapping(manifest)
+    competitor_forms = list(senses_result.entries_by_source_form.keys())
+    if isinstance(canon, dict):
+        competitor_forms.extend((canon.get("entries") or {}).keys())
+    competitors = fold_collision_map(competitor_forms)
+
     production_spans_by_block = {}
 
     failures = []
@@ -300,7 +382,7 @@ def verify_senses(senses_result, manifest, language_config) -> list:
                         block_record.get("plain_text") if isinstance(block_record, dict) else None
                     )
                     production_spans_by_block[block_id] = (
-                        _group_production_spans_by_name(block_text, language_config)
+                        _group_production_spans_by_name(block_text, language_config, competitors)
                         if isinstance(block_text, str) else {}
                     )
                 failure = verify_evidence(
