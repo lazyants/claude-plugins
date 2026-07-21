@@ -44,10 +44,12 @@ that is INODE-shared (cross-profile).
 
 Run the bundled `scripts/inspect_profiles.py` read-only against the profiles in use (it auto-detects
 `~/.claude*` profiles, or takes explicit ones as arguments). It reports: which `plugins/` dirs are real vs.
-symlinked, whether any profiles share a `known_marketplaces.json` (the churn risk), and whether any
-registry points into another profile's `plugins/` tree (a cross-profile leak). Use it to confirm whether a
-given machine has this shared-store problem at all, and to re-check after any remediation — verify the
-topology, don't assume it.
+symlinked, whether any profiles share a `known_marketplaces.json` (the churn risk), whether any profiles
+share a content store (`marketplaces/`/`cache/`/`data/`/`.install-manifests/` — the cross-profile
+GC/uninstall deletion vector, which a de-shared registry alone does NOT fix), and whether any registry
+points into another profile's `plugins/` tree (a cross-profile leak). Use it to confirm whether a given
+machine has this shared-store problem at all, and to re-check after any remediation — verify the topology,
+don't assume it.
 
 Prefer an exact path-prefix comparison over an ad hoc `grep` for a config-dir path — a naive substring match
 reports a false positive whenever one profile's directory name is a prefix of another's (e.g. `~/.claude` is
