@@ -121,37 +121,51 @@ def main(argv: list[str]) -> int:
         print("No Claude Code profile directories found.")
         print("Pass explicit profile directories as arguments to check a specific set.")
         return 0
-    print(f"Profiles: {', '.join(p.name for p in profile_paths)}\n")
+
+    # Internal comparison maps below key on the full Path (never prof.name) — two explicit
+    # profile dirs can share a basename (e.g. .../one/.claude and .../two/.claude), and a
+    # basename-keyed dict would silently collapse them into one entry, hiding a real shared
+    # registry/store/leak between them. `label()` is DISPLAY-only: normally just the basename,
+    # but falls back to the full path for any basename that isn't unique across profile_paths.
+    name_counts: dict[str, int] = {}
+    for prof in profile_paths:
+        name_counts[prof.name] = name_counts.get(prof.name, 0) + 1
+
+    def label(prof: Path) -> str:
+        return prof.name if name_counts[prof.name] == 1 else str(prof)
+
+    width = max(15, max(len(label(p)) for p in profile_paths) + 1)
+
+    print(f"Profiles: {', '.join(label(p) for p in profile_paths)}\n")
 
     warns: list[str] = []
 
     # 1. plugins/ dir type per profile
     print("== plugins/ dir type ==")
     for prof in profile_paths:
-        print(f"  {prof.name:15} {kind(prof / 'plugins')}")
+        print(f"  {label(prof):<{width}} {kind(prof / 'plugins')}")
 
     # 2. registry inodes — same (device, inode) across profiles means one real file on disk
     print("\n== known_marketplaces.json identity ==")
-    idents: dict[str, tuple[int, int]] = {}
+    idents: dict[Path, tuple[int, int]] = {}
     for prof in profile_paths:
         rp = prof / REGISTRY
         try:
             st = os.stat(rp)
-            idents[prof.name] = (st.st_dev, st.st_ino)
-            print(f"  {prof.name:15} inode={st.st_ino}")
+            idents[prof] = (st.st_dev, st.st_ino)
+            print(f"  {label(prof):<{width}} inode={st.st_ino}")
         except OSError:
-            warns.append(f"{prof.name}/{REGISTRY} missing/unreadable")
-            print(f"  {prof.name:15} MISSING")
+            warns.append(f"{label(prof)}/{REGISTRY} missing/unreadable")
+            print(f"  {label(prof):<{width}} MISSING")
 
-    by_ident: dict[tuple[int, int], list[str]] = {}
-    for name, ident in idents.items():
-        by_ident.setdefault(ident, []).append(name)
-    shared_groups = [names for names in by_ident.values() if len(names) > 1]
-    for names in shared_groups:
-        warns.append(
-            f"shared registry (corrupted-installLocation churn risk): {', '.join(names)}"
-        )
-        print(f"  <-- WARN: {', '.join(names)} share one registry (corrupted-installLocation churn risk)")
+    by_ident: dict[tuple[int, int], list[Path]] = {}
+    for prof, ident in idents.items():
+        by_ident.setdefault(ident, []).append(prof)
+    shared_groups = [profs for profs in by_ident.values() if len(profs) > 1]
+    for profs in shared_groups:
+        names = ", ".join(label(p) for p in profs)
+        warns.append(f"shared registry (corrupted-installLocation churn risk): {names}")
+        print(f"  <-- WARN: {names} share one registry (corrupted-installLocation churn risk)")
 
     # 3. content stores (marketplaces/, cache/, data/, .install-manifests/) — a profile can have its
     #    own distinct registry file yet still share one of these with another profile (e.g. only
@@ -163,47 +177,48 @@ def main(argv: list[str]) -> int:
     #    symlink resolves to the same target as a shared real dir reached another way.
     print("\n== content store identity (marketplaces/, cache/, data/, .install-manifests/) ==")
     for store in CONTENT_STORES:
-        store_targets: dict[str, str] = {}
+        store_targets: dict[Path, str] = {}
         for prof in profile_paths:
             sp = prof / "plugins" / store
             if not sp.exists():
                 continue
-            store_targets[prof.name] = os.path.realpath(sp)
-        status = ", ".join(f"{p.name}={kind(p / 'plugins' / store)}" for p in profile_paths)
+            store_targets[prof] = os.path.realpath(sp)
+        status = ", ".join(f"{label(p)}={kind(p / 'plugins' / store)}" for p in profile_paths)
         print(f"  {store:18} {status}")
 
-        by_target: dict[str, list[str]] = {}
-        for name, target in store_targets.items():
-            by_target.setdefault(target, []).append(name)
-        for names in (g for g in by_target.values() if len(g) > 1):
+        by_target: dict[str, list[Path]] = {}
+        for prof, target in store_targets.items():
+            by_target.setdefault(target, []).append(prof)
+        for profs in (g for g in by_target.values() if len(g) > 1):
+            names = ", ".join(label(p) for p in profs)
             warns.append(
-                f"profiles {', '.join(names)} share their `{store}` store — "
+                f"profiles {names} share their `{store}` store — "
                 "cross-profile GC/uninstall can delete each other's plugins"
             )
-            print(f"    <-- WARN: {', '.join(names)} share `{store}` (cross-profile GC/uninstall risk)")
+            print(f"    <-- WARN: {names} share `{store}` (cross-profile GC/uninstall risk)")
 
     # 4. cross-profile pointer leaks — EXACT prefix match against another profile's plugins/ dir,
     #    NEVER a substring check (".claude" is a substring of ".claude2", which would false-positive).
     print("\n== cross-profile pointer leaks ==")
-    plugin_dir_prefixes = {p.name: f"{p / 'plugins'}/" for p in profile_paths}
+    plugin_dir_prefixes = {prof: f"{prof / 'plugins'}/" for prof in profile_paths}
     for prof in profile_paths:
         rp = prof / REGISTRY
         try:
             reg = json.loads(rp.read_text())
         except (OSError, json.JSONDecodeError):
-            print(f"  {prof.name:15} unreadable, skipped")
+            print(f"  {label(prof):<{width}} unreadable, skipped")
             continue
         leaks = [
-            (other, s)
+            (label(other), s)
             for s in walk_strings(reg)
             for other, prefix in plugin_dir_prefixes.items()
-            if other != prof.name and s.startswith(prefix)
+            if other != prof and s.startswith(prefix)
         ]
         if leaks:
-            warns.append(f"{prof.name} registry references another profile: {leaks[:3]}")
-            print(f"  {prof.name:15} LEAK -> {leaks[:3]}")
+            warns.append(f"{label(prof)} registry references another profile: {leaks[:3]}")
+            print(f"  {label(prof):<{width}} LEAK -> {leaks[:3]}")
         else:
-            print(f"  {prof.name:15} clean")
+            print(f"  {label(prof):<{width}} clean")
 
     print()
     if warns:
