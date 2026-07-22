@@ -56,7 +56,7 @@ from _canon_project_fixture import (  # noqa: E402
     perturb_derivation_bundle,
     read_canon,
     run_canon_validate,
-    run_init,
+    run_canon_init,
     run_script,
     run_segpack,
     stamp_of,
@@ -178,7 +178,7 @@ def test_blocked_derivation_gate_is_recoverable_via_the_documented_escape(tmp_pa
     root = make_pipeline_project(tmp_path)
 
     # ---- 1. A converged project whose segpack carries the current stamp ----
-    assert run_init(root).returncode == 0
+    assert run_canon_init(root).returncode == 0
     assert run_segpack(root).returncode == 0
 
     draft_sha1 = write_draft(root, SEG, {"text": "In the beginning."})

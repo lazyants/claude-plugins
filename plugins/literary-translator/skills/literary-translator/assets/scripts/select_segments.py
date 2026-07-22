@@ -228,11 +228,19 @@ def _w3_regen_step(field: str) -> str:
     )
 
 
+# The W2 remedy. One literal for both W2 fields for the same reason
+# _w3_regen_step() exists: two identical hand-maintained strings is how the
+# W3 pair drifted, one gaining the restamp escape while the other silently
+# did not. These two need no escape (they are re-run by the extractor at W2,
+# never by the glossary pass), but they get one source of truth anyway --
+# the point is that editing this remedy is a single edit, always.
+_W2_REGEN_STEP = "W2 (re-run the source-format extractor)"
+
 # Actionable "what to rerun" message per derivation-state field, per
 # ledger-and-resumability.md's own wording.
 FIELD_TO_REGEN_STEP = {
-    "source_extraction_hash": "W2 (re-run the source-format extractor)",
-    "source_input_hash": "W2 (re-run the source-format extractor)",
+    "source_extraction_hash": _W2_REGEN_STEP,
+    "source_input_hash": _W2_REGEN_STEP,
     "particle_config_hash": _w3_regen_step("particle_config_hash"),
     "derivation_bundle_hash": _w3_regen_step("derivation_bundle_hash"),
 }

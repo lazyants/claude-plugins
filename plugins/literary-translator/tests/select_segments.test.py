@@ -846,6 +846,15 @@ def test_every_w3_regen_hint_names_the_restamp_escape():
         # Generated from the one shared template, not hand-maintained twice.
         assert step == module._w3_regen_step(field)
 
+    # The W2 half of the same class: two fields, one source of truth. They
+    # need no restamp escape (the extractor re-runs them at W2, not the
+    # glossary pass), but duplicated literals are how the W3 pair drifted.
+    w2_fields = [f for f, step in module.FIELD_TO_REGEN_STEP.items() if step.startswith("W2 ")]
+    assert set(w2_fields) == {"source_extraction_hash", "source_input_hash"}
+    assert all(
+        module.FIELD_TO_REGEN_STEP[f] is module._W2_REGEN_STEP for f in w2_fields
+    ), "the W2 remedies are no longer one shared literal -- they can now drift apart"
+
 
 # ---------------------------------------------------------------------------
 # 6. Issue #174 regression: a segpack that is unreadable/corrupt/invalid at

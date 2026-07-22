@@ -148,7 +148,7 @@ def run_canon_validate(root: Path, *args, research_mode="offline", timeout=120):
     )
 
 
-def run_init(root: Path, research_mode="offline"):
+def run_canon_init(root: Path, research_mode="offline"):
     return run_canon_validate(root, "--init", research_mode=research_mode)
 
 

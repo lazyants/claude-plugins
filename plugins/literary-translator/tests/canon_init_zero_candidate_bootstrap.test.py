@@ -53,7 +53,7 @@ from _canon_project_fixture import (  # noqa: E402
     make_project,
     perturb_derivation_bundle,
     run_canon_validate,
-    run_init,
+    run_canon_init,
     run_script,
     run_segpack,
 )
@@ -133,7 +133,7 @@ def test_documented_skip_path_bootstraps_canon_and_segpack_succeeds(tmp_path):
     root = make_project(tmp_path)
     walk_zero_candidate_path(root)
 
-    init = run_init(root)
+    init = run_canon_init(root)
     assert init.returncode == 0, f"canon_validate.py --init failed:\n{init.stdout}\n{init.stderr}"
     payload = json.loads(init.stdout)
     assert payload["success"] is True
@@ -173,7 +173,7 @@ def test_init_leaves_an_existing_canon_byte_identical(tmp_path):
     Exit 0 either way, so the documented SKIP-branch command stays safe on
     every re-run of an already-bootstrapped project."""
     root = make_project(tmp_path)
-    assert run_init(root).returncode == 0
+    assert run_canon_init(root).returncode == 0
 
     canon_path = root / "canon.json"
     before = canon_path.read_bytes()
@@ -187,7 +187,7 @@ def test_init_leaves_an_existing_canon_byte_identical(tmp_path):
         "not detect a re-stamp"
     )
 
-    again = run_init(root)
+    again = run_canon_init(root)
     assert again.returncode == 0, f"second --init failed:\n{again.stdout}\n{again.stderr}"
     assert json.loads(again.stdout)["created"] is False
     assert canon_path.read_bytes() == before, "--init re-wrote an existing canon.json"

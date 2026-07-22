@@ -65,9 +65,13 @@ Canon population is not "paste the whole book into context and ask for a glossar
    `blocked_needs_regeneration` without anything having been regenerated (segments
    then read as caught-up and stale output ships). A `review_queue[]`-only change
    DOES count as a change and does re-stamp — that array is schema-required content
-   this file's own consumers read back. Every merge result now reports
-   `generation_hashes_restamped`, so a conserved stamp is visible rather than
-   silent.
+   this file's own consumers read back. **Every mode that writes canon.json**
+   — `--merge-batches`, legacy `--batch`, `--init` and `--restamp-derivation`
+   alike — reports the same `generation_hashes_restamped` boolean, so a
+   conserved stamp is visible rather than silent and a caller can ask "did the
+   provenance move?" without branching on which mode ran.
+   `--restamp-derivation` additionally reports `generation_hashes_changed`,
+   naming which of the two fields actually differed.
 
    The deliberate way to advance provenance on an UNCHANGED canon is
    `canon_validate.py --research-mode <mode> --restamp-derivation`. That matters for

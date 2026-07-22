@@ -43,6 +43,7 @@ restamp path). `--restamp-derivation` is the sanctioned replacement, and is
 covered here too -- without it this fix would turn #193's latent brick into
 an unconditional one.
 """
+import importlib.util
 import json
 import sys
 from pathlib import Path
@@ -53,6 +54,7 @@ TESTS_DIR = Path(__file__).resolve().parent
 if str(TESTS_DIR) not in sys.path:
     sys.path.insert(0, str(TESTS_DIR))
 from _canon_project_fixture import (  # noqa: E402
+    SCRIPTS_SRC,
     accepted_item,
     live_generation_hashes,
     make_project,
@@ -60,7 +62,7 @@ from _canon_project_fixture import (  # noqa: E402
     queued_item,
     read_canon,
     run_canon_validate,
-    run_init,
+    run_canon_init,
     stamp_of,
     write_fragment,
 )
@@ -72,7 +74,7 @@ def bootstrapped_project(tmp_path):
     #291 test starts here: without the perturbation, "the stamp did not move"
     would be trivially true and the suite would prove nothing."""
     root = make_project(tmp_path)
-    assert run_init(root).returncode == 0
+    assert run_canon_init(root).returncode == 0
     before = stamp_of(root)
 
     perturb_derivation_bundle(root)
@@ -300,6 +302,109 @@ def test_batch_alongside_another_mode_is_rejected(tmp_path, other_mode):
     assert "יעקב" not in json.dumps(read_canon(root), ensure_ascii=False), (
         "the rejected --batch fragment must not have been merged"
     )
+
+
+# ---------------------------------------------------------------------------
+# One mode table -- adding a mode must require touching exactly one place
+# ---------------------------------------------------------------------------
+
+
+def load_canon_validate_module():
+    """In-process load of the REAL canon_validate.py, to read its own
+    MODE_SPECS table. Never used to execute the CLI -- every behavioural test
+    here drives it as a subprocess. The script's directory goes on sys.path
+    for the load so its sibling `from canon_senses import ...` resolves."""
+    scripts_dir = SCRIPTS_SRC
+    sys.path.insert(0, str(scripts_dir))
+    try:
+        spec = importlib.util.spec_from_file_location(
+            "canon_validate_modes_under_test", scripts_dir / "canon_validate.py"
+        )
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+    finally:
+        sys.path.remove(str(scripts_dir))
+
+
+def test_every_parser_mode_flag_is_declared_in_the_one_mode_table():
+    """The P3 drift guard. Previously main() carried THREE hand-maintained
+    lists -- the mode table, a subset tuple for the fragmentless guard, and a
+    `!= "--verify-merged"` magic string for the batch guard -- so a mode added
+    to one was silently missed by the others. Verified by experiment before
+    the fix: a new fragmentless mode added to the first table only sailed
+    past the --expect-source-forms-file guard that rejects --init in the
+    identical position.
+
+    Checks BOTH directions, because either gap reintroduces the defect: a
+    parser flag missing from the table gets no guards, and a table row with
+    no parser flag is a typo that silently never matches."""
+    module = load_canon_validate_module()
+    parser = module.build_arg_parser()
+
+    parser_dests = {action.dest for action in parser._actions} - set(module.NON_MODE_DESTS)
+    table_dests = {spec.dest for spec in module.MODE_SPECS}
+    assert parser_dests == table_dests, (
+        "canon_validate.py's mode flags and MODE_SPECS have drifted apart.\n"
+        f"  on the parser but NOT in MODE_SPECS: {sorted(parser_dests - table_dests)}\n"
+        f"  in MODE_SPECS but NOT on the parser: {sorted(table_dests - parser_dests)}\n"
+        "Every guard in main() is a comprehension over MODE_SPECS, so a mode "
+        "missing from it silently gets no mutual-exclusion, no --batch "
+        "conflict check and no fragmentless check."
+    )
+
+    option_strings = {opt for action in parser._actions for opt in action.option_strings}
+    for spec in module.MODE_SPECS:
+        assert spec.flag in option_strings, (
+            f"MODE_SPECS names {spec.flag!r}, which is not an option string on "
+            "the parser -- error messages would name a flag that does not exist"
+        )
+
+
+@pytest.mark.parametrize(
+    "flag", ["--init", "--restamp-derivation"], ids=["init", "restamp-derivation"]
+)
+def test_no_fragmentless_mode_accepts_a_source_forms_manifest(tmp_path, flag):
+    """Behavioural counterpart to the table check: every mode declared
+    reads_fragment=False must actually reject the manifest flag, not just be
+    listed as such."""
+    root, _, _ = bootstrapped_project(tmp_path)
+    proc = run_canon_validate(root, flag, "--expect-source-forms-file", "manifest_all.json")
+    assert proc.returncode == 2, (
+        f"{flag} accepted --expect-source-forms-file:\n{proc.stdout}\n{proc.stderr}"
+    )
+
+
+def test_every_writing_mode_reports_generation_hashes_restamped(tmp_path):
+    """P4: one question, one key, across all four writing modes. These fields
+    are new in unreleased 1.15.0 with no consumers yet, so this is the last
+    moment to make them consistent cheaply."""
+    root = make_project(tmp_path)
+
+    init = run_canon_init(root)
+    assert json.loads(init.stdout)["generation_hashes_restamped"] is True, (
+        "a bootstrap writes a fresh stamp and must report it as such"
+    )
+
+    perturb_derivation_bundle(root)
+    noop = run_canon_validate(root, "--merge-batches", str(write_fragment(root, [])))
+    assert json.loads(noop.stdout)["generation_hashes_restamped"] is False
+
+    legacy = run_canon_validate(root, "--batch", str(write_fragment(root, [], "f_legacy.json")))
+    assert json.loads(legacy.stdout)["generation_hashes_restamped"] is False
+
+    restamp = run_canon_validate(root, "--restamp-derivation")
+    payload = json.loads(restamp.stdout)
+    assert payload["generation_hashes_restamped"] is True
+    # The extra detail this mode alone carries, alongside the shared key.
+    assert payload["generation_hashes_changed"] == ["derivation_bundle_hash"]
+
+    # A second restamp legitimately moves nothing -- restamped stays true
+    # (it did write), while the field list is empty (nothing changed).
+    again = json.loads(run_canon_validate(root, "--restamp-derivation").stdout)
+    assert again["generation_hashes_restamped"] is True
+    assert again["generation_hashes_changed"] == []
 
 
 def test_the_two_legitimate_batch_shapes_still_work(tmp_path):

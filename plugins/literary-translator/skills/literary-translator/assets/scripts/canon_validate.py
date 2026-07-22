@@ -160,6 +160,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from typing import NamedTuple
 from urllib.parse import urlparse
 
 try:
@@ -210,6 +211,59 @@ DEFAULT_SENSES_PATH = DURABLE_ROOT / "canon_senses.json"
 CACHE_KEY_SCRIPT = SCRIPTS_DIR / "cache_key.py"
 
 RESEARCH_MODES = ("live", "offline")
+
+
+class ModeSpec(NamedTuple):
+    """One selectable CLI mode, declared once.
+
+    flag           -- the spelling used in error messages.
+    dest           -- the argparse destination the flag writes to.
+    batch_ok       -- may a bare `--batch` accompany this mode? Only
+                      --verify-merged, where --batch NAMES the already-
+                      processed fragments to verify.
+    reads_fragment -- does the mode consume a batch fragment at all, and so
+                      is --expect-source-forms-file even meaningful?
+    """
+
+    flag: str
+    dest: str
+    batch_ok: bool
+    reads_fragment: bool
+
+
+# Every mode flag other than the legacy bare `--batch`, declared exactly
+# ONCE. Every guard in main() is a comprehension over this table, so adding a
+# mode means adding one row here and nothing else -- the previous shape kept
+# a second, hand-maintained subset tuple for the fragmentless guard plus a
+# `!= "--verify-merged"` magic string for the batch guard, which meant a new
+# mode could be added to one and silently missed by the other. That is the
+# same two-hand-maintained-lists defect this release fixes in
+# select_segments.py's FIELD_TO_REGEN_STEP, so it does not get to live here
+# either. tests/canon_stamp_conservation.test.py pins parser<->table
+# completeness in both directions.
+MODE_SPECS = (
+    ModeSpec("--init", "init", batch_ok=False, reads_fragment=False),
+    ModeSpec("--restamp-derivation", "restamp_derivation", batch_ok=False, reads_fragment=False),
+    ModeSpec("--check-batch", "check_batch", batch_ok=False, reads_fragment=True),
+    ModeSpec("--merge-batches", "merge_batches", batch_ok=False, reads_fragment=True),
+    ModeSpec("--verify-merged", "verify_merged", batch_ok=True, reads_fragment=True),
+)
+
+# Parser destinations that are OPTIONS, not modes -- the complement of
+# MODE_SPECS across the whole parser. Named here rather than inside the test
+# so the script itself owns the mode/option distinction.
+NON_MODE_DESTS = frozenset(
+    {"help", "research_mode", "batch", "expect_source_forms_file", "canon_path", "senses_path"}
+)
+
+
+def _mode_selected(args, spec: "ModeSpec") -> bool:
+    """Whether `spec`'s flag was given. Uniform across store_true flags
+    (False when absent) and value-carrying flags (None when absent), without
+    `==` comparisons that would treat an empty-string argument as absent."""
+    value = getattr(args, spec.dest)
+    return value is not None and value is not False
+
 
 # The two global generation_hashes fields canon.json stamps at merge time
 # (references/canon-and-glossary.md, "Bootstrap sequence" step 4) -- both
@@ -923,7 +977,7 @@ def _validate_whole_file(canon: dict, registry: "Registry") -> None:
 
 
 # ---------------------------------------------------------------------------
-# Top-level modes
+# Write path -- stamping policy shared by every mode that writes canon.json
 # ---------------------------------------------------------------------------
 
 
@@ -1021,6 +1075,11 @@ def _stamp_write_verify(
 
     Returns `(freshly re-read on-disk document, restamped)`.
     """
+    # This re-reads canon.json from disk even though the caller already holds
+    # a pre-merge copy. That is DELIBERATE, not redundant I/O -- see
+    # _preservable_prior's docstring: reading here keeps the guard correct
+    # even if a future refactor starts mutating the merge accumulator in
+    # place, rather than resting on _merge_batch's docstring promise.
     prior = None if force_restamp else _preservable_prior(canon_path)
     restamped = prior is None or _content_view(merged) != _content_view(prior)
 
@@ -1040,6 +1099,11 @@ def _stamp_write_verify(
     on_disk = _load_canon(canon_path)
     _validate_whole_file(on_disk, registry)
     return on_disk, restamped
+
+
+# ---------------------------------------------------------------------------
+# Top-level modes
+# ---------------------------------------------------------------------------
 
 
 def run_init(canon_path: Path, research_mode: str, registry: "Registry") -> dict:
@@ -1065,10 +1129,13 @@ def run_init(canon_path: Path, research_mode: str, registry: "Registry") -> dict
     re-run of an already-bootstrapped project.
     """
     created = not canon_path.is_file()
+    restamped = False
     if created:
         # No prior file, so _stamp_write_verify always stamps fresh here --
         # the #291 conservation path cannot apply to a bootstrap.
-        _stamp_write_verify(canon_path, {"entries": {}, "review_queue": []}, registry)
+        _, restamped = _stamp_write_verify(
+            canon_path, {"entries": {}, "review_queue": []}, registry
+        )
 
     return {
         "success": True,
@@ -1076,6 +1143,9 @@ def run_init(canon_path: Path, research_mode: str, registry: "Registry") -> dict
         "canon_path": str(canon_path),
         "research_mode": research_mode,
         "created": created,
+        # Every writing mode answers the same question the same way, so a
+        # caller can ask "did the provenance move?" without branching on mode.
+        "generation_hashes_restamped": restamped,
     }
 
 
@@ -1113,7 +1183,7 @@ def run_restamp_derivation(canon_path: Path, research_mode: str, registry: "Regi
     _validate_existing_entries(canon, registry)
 
     before = dict(canon.get("generation_hashes") or {})
-    on_disk, _ = _stamp_write_verify(canon_path, canon, registry, force_restamp=True)
+    on_disk, restamped = _stamp_write_verify(canon_path, canon, registry, force_restamp=True)
     after = on_disk["generation_hashes"]
 
     return {
@@ -1121,6 +1191,11 @@ def run_restamp_derivation(canon_path: Path, research_mode: str, registry: "Regi
         "mode": "restamp_derivation",
         "canon_path": str(canon_path),
         "research_mode": research_mode,
+        # Same key, same meaning, as every other writing mode -- always true
+        # here, since force_restamp bypasses the #291 conservation path.
+        "generation_hashes_restamped": restamped,
+        # This mode's EXTRA detail: which fields actually moved. A restamp on
+        # an already-current canon legitimately moves nothing and reports [].
         "generation_hashes_changed": sorted(
             field for field in GENERATION_HASH_FIELDS if before.get(field) != after.get(field)
         ),
@@ -1480,19 +1555,9 @@ def main(argv=None) -> int:
     senses_path = Path(args.senses_path) if args.senses_path else DEFAULT_SENSES_PATH
     allow_absent_senses = args.senses_path is None
 
-    # Every mode flag other than the legacy bare `--batch`, paired with the
-    # spelling used in error messages. One table, so a mode added later
-    # cannot be forgotten by one guard and remembered by another.
-    non_batch_modes = (
-        ("--init", args.init),
-        ("--restamp-derivation", args.restamp_derivation),
-        ("--check-batch", args.check_batch is not None),
-        ("--merge-batches", args.merge_batches is not None),
-        ("--verify-merged", args.verify_merged),
-    )
-    selected_modes = [name for name, selected in non_batch_modes if selected]
+    selected_modes = [spec for spec in MODE_SPECS if _mode_selected(args, spec)]
     if len(selected_modes) > 1:
-        parser.error(", ".join(selected_modes) + " are mutually exclusive")
+        parser.error(", ".join(spec.flag for spec in selected_modes) + " are mutually exclusive")
 
     # #292: `--batch` is meaningful in exactly two shapes -- ALONE (legacy
     # single-fragment merge) or under --verify-merged (naming the already-
@@ -1502,9 +1567,7 @@ def main(argv=None) -> int:
     # A call site could therefore read `{"success": true}` for a fragment
     # that was never merged. Fail loud instead; no shipped caller passes the
     # combination, so nothing legitimate regresses.
-    batch_conflicts = [
-        name for name, selected in non_batch_modes if selected and name != "--verify-merged"
-    ]
+    batch_conflicts = [spec.flag for spec in selected_modes if not spec.batch_ok]
     if args.batch is not None and batch_conflicts:
         parser.error(
             "--batch is not accepted with "
@@ -1514,11 +1577,7 @@ def main(argv=None) -> int:
         )
 
     # Modes that read no fragment at all must not appear to consume one.
-    fragmentless_modes = [
-        name
-        for name, selected in (("--init", args.init), ("--restamp-derivation", args.restamp_derivation))
-        if selected
-    ]
+    fragmentless_modes = [spec.flag for spec in selected_modes if not spec.reads_fragment]
     if fragmentless_modes and args.expect_source_forms_file is not None:
         parser.error(
             ", ".join(fragmentless_modes)
