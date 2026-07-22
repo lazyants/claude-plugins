@@ -554,6 +554,9 @@ def test_collision_is_exit_neutral(tmp_path):
     # gate reports a collision the renderer will never act on -- RED today:
     # the field does not exist at all (KeyError).
     assert report["collisions"][0]["renderer_delinked"] is False
+    # C2 regression: no owner has ANY expected occurrence in this fixture
+    # (eligible_by_source_form is empty), so neither can ever be orphaned.
+    assert report["collisions"][0]["orphaned_owners"] == []
 
 
 def test_collision_renderer_delinked_true_for_same_case_pair(tmp_path):
@@ -576,6 +579,7 @@ def test_collision_renderer_delinked_true_for_same_case_pair(tmp_path):
     assert len(report["collisions"]) == 1
     assert report["collisions"][0]["canonical_target_form"] == "Peter"
     assert report["collisions"][0]["renderer_delinked"] is True
+    assert report["collisions"][0]["orphaned_owners"] == []  # C2: nothing expected in this fixture
 
 
 def test_collision_sense_translated_pair_is_delinked_after_240(tmp_path):
@@ -601,6 +605,278 @@ def test_collision_sense_translated_pair_is_delinked_after_240(tmp_path):
     assert len(report["collisions"]) == 1
     assert report["collisions"][0]["canonical_target_form"] == "Hope"
     assert report["collisions"][0]["renderer_delinked"] is True
+    assert report["collisions"][0]["orphaned_owners"] == []  # C2: nothing expected in this fixture
+
+
+def test_collision_orphaned_owner_surfaced_in_orphaned_owners(tmp_path):
+    """C2 (#207 gate): a de-linked homonym owner with >=1 expected
+    occurrence but ZERO actual Mentions links (its entity note's Mentions
+    region exists but is empty) -- its source_form must appear in the
+    collision's `orphaned_owners` list. `warnings` must stay EXACTLY
+    Metric-1's own count -- `orphaned_owners` is not a second warnings
+    source. RED today: the field does not exist at all (KeyError)."""
+    root = make_root(tmp_path)
+    write_canon(root, {
+        "Petro": canon_entry("Petro", "Peter"),
+        "Pavlo": canon_entry("Pavlo", "Peter"),
+    })
+    write_nodestream(root, ["seg01"])
+    set_aggregate(root, {
+        "eligible_by_source_form": {
+            "Petro": [{"source_form": "Petro", "seg": "seg01", "origin": "block"}],
+            "Pavlo": [{"source_form": "Pavlo", "seg": "seg01", "origin": "block"}],
+        },
+        "unresolved_homonyms": {},
+    })
+    # Both entity notes exist with a well-formed but EMPTY Mentions region --
+    # both owners are genuinely orphaned: de-linked inline (collision) AND
+    # uncovered by the appendix.
+    write_note(root, "other/Petro.md", raw_entity_note(
+        source_form="Petro", canonical_target_form="Peter", body_lines=mentions_block([])
+    ))
+    write_note(root, "other/Pavlo.md", raw_entity_note(
+        source_form="Pavlo", canonical_target_form="Peter", body_lines=mentions_block([])
+    ))
+    write_note(root, "001 seg01.md", raw_segment_note())
+
+    proc = run_gate(root)
+    assert proc.returncode == 1, proc.stderr
+    report = report_of(proc)
+    assert report["warnings"] == len(report["mentions_coverage"]["missing"]) == 2
+    assert len(report["collisions"]) == 1
+    collision = report["collisions"][0]
+    assert sorted(collision["owners"]) == ["Pavlo", "Petro"]
+    assert sorted(collision["orphaned_owners"]) == ["Pavlo", "Petro"]
+
+
+def test_collision_covered_sibling_not_flagged_orphaned(tmp_path):
+    """C2: a collision with ONE covered owner (its Mentions link present)
+    and ONE orphaned owner (empty Mentions region) -- `orphaned_owners`
+    must contain ONLY the orphaned sibling; the predicate is OWNER-level,
+    never collision-level. Also the `owners: [str]` shape stays unchanged
+    (regression) and `warnings == len(missing)` still holds (no second
+    warnings source). RED today: the field does not exist (KeyError)."""
+    root = make_root(tmp_path)
+    write_canon(root, {
+        "Petro": canon_entry("Petro", "Peter"),
+        "Pavlo": canon_entry("Pavlo", "Peter"),
+    })
+    write_nodestream(root, ["seg01"])
+    set_aggregate(root, {
+        "eligible_by_source_form": {
+            "Petro": [{"source_form": "Petro", "seg": "seg01", "origin": "block"}],
+            "Pavlo": [{"source_form": "Pavlo", "seg": "seg01", "origin": "block"}],
+        },
+        "unresolved_homonyms": {},
+    })
+    # Petro's Mentions region IS satisfied (covered); Pavlo's is empty
+    # (orphaned).
+    write_note(root, "other/Petro.md", raw_entity_note(
+        source_form="Petro", canonical_target_form="Peter", body_lines=mentions_block(["001 seg01"])
+    ))
+    write_note(root, "other/Pavlo.md", raw_entity_note(
+        source_form="Pavlo", canonical_target_form="Peter", body_lines=mentions_block([])
+    ))
+    write_note(root, "001 seg01.md", raw_segment_note())
+
+    proc = run_gate(root)
+    assert proc.returncode == 1, proc.stderr
+    report = report_of(proc)
+    assert report["warnings"] == len(report["mentions_coverage"]["missing"]) == 1
+    collision = report["collisions"][0]
+    assert sorted(collision["owners"]) == ["Pavlo", "Petro"]  # unchanged shape (regression)
+    assert collision["orphaned_owners"] == ["Pavlo"]
+
+
+def test_collision_zero_expected_owner_never_flagged_orphaned(tmp_path):
+    """C2: an owner with ZERO expected source occurrences (nothing to link
+    from -- absent from `coverage_by_sf` entirely) must never be flagged
+    orphaned, even when its sibling in the same collision IS orphaned.
+    RED today: the field does not exist (KeyError)."""
+    root = make_root(tmp_path)
+    write_canon(root, {
+        "Petro": canon_entry("Petro", "Peter"),
+        "Pavlo": canon_entry("Pavlo", "Peter"),
+    })
+    write_nodestream(root, ["seg01"])
+    set_aggregate(root, {
+        "eligible_by_source_form": {
+            "Petro": [{"source_form": "Petro", "seg": "seg01", "origin": "block"}],
+            "Pavlo": [],  # zero expected occurrences -- never checked (D4)
+        },
+        "unresolved_homonyms": {},
+    })
+    # Petro is orphaned (empty Mentions region). Pavlo has no note at all --
+    # irrelevant, since it has nothing expected either way.
+    write_note(root, "other/Petro.md", raw_entity_note(
+        source_form="Petro", canonical_target_form="Peter", body_lines=mentions_block([])
+    ))
+    write_note(root, "001 seg01.md", raw_segment_note())
+
+    proc = run_gate(root)
+    report = report_of(proc)
+    collision = report["collisions"][0]
+    assert collision["orphaned_owners"] == ["Petro"]
+    assert "Pavlo" not in collision["orphaned_owners"]
+
+
+def test_collision_eligible_but_absent_from_prose_owner_is_flagged_orphaned(tmp_path):
+    """Codex root-cause finding #2 (Test B, bot-named): linker ELIGIBILITY
+    is not the same thing as an ACTUALLY-EMITTED inline link. "Upper" ->
+    "Peter" and "Lower" -> "peter" fold into ONE casefold collision group
+    here; each target is NFC-exact distinct with exactly ONE (ordinary,
+    non-sense_translated) owner, so `render_obsidian.build_entity_index`
+    is WILLING to inline-link either one (`renderer_delinked_targets` is
+    EMPTY -- neither de-linked). But the hand-crafted segment note below
+    carries NO `[[...]]` link at all -- neither target string actually
+    OCCURS anywhere in the rendered prose, so the renderer never emits a
+    link for either, regardless of eligibility. Both owners are ALSO
+    appendix-uncovered -- so BOTH are genuinely orphaned (no emitted
+    inline link AND no appendix backlink). RED on an eligibility-based
+    check (this test file's earlier round): it wrongly concluded neither
+    is orphaned because both are LINKABLE, never checking whether the
+    vault actually contains a link to either."""
+    root = make_root(tmp_path)
+    write_canon(root, {
+        "Upper": canon_entry("Upper", "Peter"),
+        "Lower": canon_entry("Lower", "peter"),
+    })
+    write_nodestream(root, ["seg01"])
+    set_aggregate(root, {
+        "eligible_by_source_form": {
+            "Upper": [{"source_form": "Upper", "seg": "seg01", "origin": "block"}],
+            "Lower": [{"source_form": "Lower", "seg": "seg01", "origin": "block"}],
+        },
+        "unresolved_homonyms": {},
+    })
+    # Both appendix-uncovered (empty Mentions region); the segment note
+    # carries NO inline `[[...]]` link at all -- neither target string
+    # actually occurs in the rendered prose.
+    write_note(root, "other/Upper.md", raw_entity_note(
+        source_form="Upper", canonical_target_form="Peter", body_lines=mentions_block([])
+    ))
+    write_note(root, "other/Lower.md", raw_entity_note(
+        source_form="Lower", canonical_target_form="peter", body_lines=mentions_block([])
+    ))
+    write_note(root, "001 seg01.md", raw_segment_note())
+
+    proc = run_gate(root)
+    report = report_of(proc)
+    assert len(report["collisions"]) == 1
+    collision = report["collisions"][0]
+    assert sorted(collision["owners"]) == ["Lower", "Upper"]
+    # B5/#240-gate-half: NFC-exact, case-SENSITIVE -- "Peter" and "peter"
+    # each have exactly one owner in the renderer's own grouping, so the
+    # renderer de-links NEITHER.
+    assert collision["renderer_delinked"] is False
+    assert sorted(collision["orphaned_owners"]) == ["Lower", "Upper"]
+    assert report["warnings"] == len(report["mentions_coverage"]["missing"]) == 2
+
+
+def test_collision_actually_emitted_inline_link_owner_not_flagged_orphaned(tmp_path):
+    """Codex root-cause finding #2 (Test A, bot-named): the counterpart to
+    the eligible-but-absent test above -- "Upper" -> "Peter" is eligible
+    AND its target string genuinely occurs in the rendered prose, so the
+    segment note below carries a REAL emitted `[[other/Upper|Peter]]`
+    inline link (hand-crafted here to stand in for what
+    `render_obsidian.render()` would actually write). Even though "Upper"
+    is appendix-uncovered, it must NOT appear in `orphaned_owners` -- it
+    genuinely has an emitted inline backlink. "Lower" -> "peter" is
+    appendix-COVERED instead (a different, independent reason to exclude
+    it), isolating the assertion to "emission suppresses orphan status"
+    for "Upper" alone."""
+    root = make_root(tmp_path)
+    write_canon(root, {
+        "Upper": canon_entry("Upper", "Peter"),
+        "Lower": canon_entry("Lower", "peter"),
+    })
+    write_nodestream(root, ["seg01"])
+    set_aggregate(root, {
+        "eligible_by_source_form": {
+            "Upper": [{"source_form": "Upper", "seg": "seg01", "origin": "block"}],
+            "Lower": [{"source_form": "Lower", "seg": "seg01", "origin": "block"}],
+        },
+        "unresolved_homonyms": {},
+    })
+    write_note(root, "other/Upper.md", raw_entity_note(
+        source_form="Upper", canonical_target_form="Peter", body_lines=mentions_block([])
+    ))
+    write_note(root, "other/Lower.md", raw_entity_note(
+        source_form="Lower", canonical_target_form="peter", body_lines=mentions_block(["001 seg01"])
+    ))
+    # "Peter" (Upper's target) actually occurs in the prose -- a real
+    # emitted inline link, the same shape `_compute_inline_advisory`
+    # already scans for (mirrors test_inline_advisory_counts_a_real_
+    # inline_link's own convention).
+    write_note(root, "001 seg01.md", raw_segment_note(
+        body_lines=["Peter arrived: [[other/Upper|Peter]] said hello."]
+    ))
+
+    proc = run_gate(root)
+    report = report_of(proc)
+    assert len(report["collisions"]) == 1
+    collision = report["collisions"][0]
+    assert sorted(collision["owners"]) == ["Lower", "Upper"]
+    assert collision["renderer_delinked"] is False
+    # "Upper": excluded via an actual emitted link. "Lower": excluded via
+    # appendix coverage. Two different reasons, zero orphans total.
+    assert collision["orphaned_owners"] == []
+    assert report["warnings"] == len(report["mentions_coverage"]["missing"]) == 1
+
+
+def test_collision_sense_translated_case_variant_owner_is_flagged_orphaned(tmp_path):
+    """Codex root-cause finding: the "require the owner's own target to be
+    in `renderer_delinked_targets`" check (this test file's previous
+    round) was itself over-narrow -- a `basis: "sense_translated"` owner
+    NEVER gets an inline link (by design, #138: an ordinary word, not a
+    collision casualty), so it is never inserted into the renderer's link
+    map AT ALL and therefore never appears in `renderer_delinked_targets`
+    EITHER (that set only holds targets REMOVED after having been
+    present). "Sense" -> "Peter" (basis sense_translated, the sole owner
+    of the NFC-exact "Peter") + "Lower" -> "peter" (ordinary, sole owner
+    of NFC-exact "peter") fold into ONE casefold collision group here, but
+    NEITHER target has >=2 NFC-exact owners, so `renderer_delinked` is
+    False and `renderer_delinked_targets` is empty for this pair -- the
+    OLD (per-owner-de-link) check would have wrongly concluded "Sense" is
+    never orphaned. It IS genuinely orphaned: appendix-uncovered AND the
+    renderer never inline-links a sense_translated entity for any reason.
+    `orphaned_owners` must contain ONLY "Sense" -- "Lower" is an ordinary
+    entry the renderer DOES inline-link, and is also appendix-covered
+    here besides."""
+    root = make_root(tmp_path)
+    write_canon(root, {
+        "Sense": canon_entry("Sense", "Peter", basis="sense_translated"),
+        "Lower": canon_entry("Lower", "peter"),
+    })
+    write_nodestream(root, ["seg01"])
+    set_aggregate(root, {
+        "eligible_by_source_form": {
+            "Sense": [{"source_form": "Sense", "seg": "seg01", "origin": "block"}],
+            "Lower": [{"source_form": "Lower", "seg": "seg01", "origin": "block"}],
+        },
+        "unresolved_homonyms": {},
+    })
+    # "Sense" appendix-uncovered (empty Mentions region); "Lower" fully
+    # covered -- isolates the assertion to "Sense" alone.
+    write_note(root, "other/Sense.md", raw_entity_note(
+        source_form="Sense", canonical_target_form="Peter", body_lines=mentions_block([])
+    ))
+    write_note(root, "other/Lower.md", raw_entity_note(
+        source_form="Lower", canonical_target_form="peter", body_lines=mentions_block(["001 seg01"])
+    ))
+    write_note(root, "001 seg01.md", raw_segment_note())
+
+    proc = run_gate(root)
+    report = report_of(proc)
+    assert len(report["collisions"]) == 1
+    collision = report["collisions"][0]
+    assert sorted(collision["owners"]) == ["Lower", "Sense"]
+    # Neither NFC-exact target has >=2 owners -- this collision only
+    # exists under the gate's own casefold grouping.
+    assert collision["renderer_delinked"] is False
+    assert collision["orphaned_owners"] == ["Sense"]
+    # warnings == len(missing) unchanged: only "Sense" is uncovered.
+    assert report["warnings"] == len(report["mentions_coverage"]["missing"]) == 1
 
 
 def test_unresolved_homonym_is_not_a_coverage_warning(tmp_path):

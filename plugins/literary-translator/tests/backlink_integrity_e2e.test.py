@@ -574,6 +574,11 @@ def test_flag_on_end_to_end_matches_expected_vault_and_gate_report(tmp_path):
             "canonical_target_form": case_spec.EXPECTED_COLLISION_TARGET,
             "owners": case_spec.EXPECTED_COLLISION_OWNERS,
             "renderer_delinked": case_spec.EXPECTED_COLLISION_DELINKED,
+            # C2 (#207 gate): both Petro and Pavlo are FULLY covered by
+            # their own Mentions entries in this fixture (asserted just
+            # above -- mentions_coverage.missing == []), so neither owner
+            # of the "Peter" collision is orphaned.
+            "orphaned_owners": [],
         }
     ]
     assert report["unresolved_homonyms"] == [
@@ -605,10 +610,15 @@ def test_flag_on_end_to_end_matches_expected_vault_and_gate_report(tmp_path):
 
     # #207-a collision de-linking: flag-on means "Peter" is entirely removed
     # from the inline auto-link map -- neither Petro nor Pavlo's note gets
-    # an inline wikilink from p2's "Peter ... Peter ..." text. Anchored on
-    # the TAIL of the sentence (never touched by linking, whichever
-    # occurrence -- if any -- gets wrapped) rather than the leading "Peter",
-    # which the flag-off tiebreak (a separate test) DOES wrap.
+    # an inline wikilink from p2's "Peter ... Peter ..." text. D3 gates on
+    # `target == "obsidian"` alone (not the Mentions flag), so the SAME
+    # holds flag-off -- see `test_flag_off_pipeline_preserves_1_7_0_
+    # behavior_except_collisions` below (post-C1: neither state ever wraps
+    # "Peter" anymore; pre-C1, flag-off used to wrap the leading occurrence
+    # via the shortest-source_form tiebreak). Anchored on the TAIL of the
+    # sentence rather than the leading "Peter" purely for note-lookup
+    # stability (`_find_note_containing` needs one substring unique to one
+    # note, valid across both this test and the flag-off one).
     seg01_note = _find_note_containing(out_dir, "spoke quietly to Peter before they parted ways.")
     assert "[[People/Pavlo|Peter]]" not in seg01_note
     assert "[[People/Petro|Peter]]" not in seg01_note
@@ -770,12 +780,24 @@ def test_gate_frontmatter_scalar_injection_does_not_satisfy_coverage(tmp_path):
 
 
 # ===========================================================================
-# 6. Flag-OFF: byte-identical to 1.7.0 behavior (no Mentions section
-#    anywhere, old collision tiebreak preserved, nothing new attached).
+# 6. Flag-OFF: 1.7.0 behavior EXCEPT homonym collisions (#206/#207
+#    close-out, C1): no Mentions section anywhere, nothing new attached --
+#    but collision de-linking is now gated on `target == "obsidian"` alone,
+#    DE-COUPLED from the Mentions-appendix flag -- so the pre-1.10.0
+#    shortest-source_form misattribution tiebreak no longer fires on ANY
+#    obsidian render, appendix on or off (this fixture only ever renders
+#    `target: "obsidian"`; the tiebreak survives, unexercised here, on a
+#    non-obsidian `target: "custom"` render, where D3 stays inert). A
+#    misattributed inline link actively misleads (reader clicks -> wrong
+#    entity's page); that is strictly worse than a missing one (recoverable
+#    via the appendix or a manual search), so the renderer de-links a
+#    collision on every obsidian render regardless of the flag -- see
+#    render_obsidian.py's render()/build_entity_index and this file's own
+#    docstring on `orphaned_owners`.
 # ===========================================================================
 
 
-def test_flag_off_pipeline_preserves_1_7_0_behavior(tmp_path):
+def test_flag_off_pipeline_preserves_1_7_0_behavior_except_collisions(tmp_path):
     root, _proc, nodestream = run_flag_pipeline(tmp_path, mentions_enabled=False, label="flag_off")
     out_dir = root / "out"
 
@@ -785,13 +807,16 @@ def test_flag_off_pipeline_preserves_1_7_0_behavior(tmp_path):
     assert "lt:mentions:" not in all_text, "flag-off render must emit no Mentions markers/section anywhere"
     assert "## Mentions" not in all_text
 
-    # Old tiebreak preserved: shortest-then-lexicographic source_form wins
-    # the shared "Peter" target -- "Pavlo" (both 5 chars, lexicographic).
-    # Anchored on the sentence TAIL (never wrapped) -- the leading "Peter"
-    # IS wrapped here (that's the assertion), so it can't itself be the
-    # anchor substring used to locate the note.
+    # C1 (#207 code fix): collision de-linking now gates on `target ==
+    # "obsidian"` alone (decoupled from the Mentions flag) -- the
+    # pre-1.10.0 shortest-then-lexicographic tiebreak ("Pavlo" wins, both
+    # 5 chars, lexicographic) no longer fires on this (obsidian) render
+    # even with the appendix off. NEITHER owner gets an inline link for
+    # the shared "Peter" target -- verified (this was RED against
+    # unmodified render_obsidian.py, which still misattributed it to
+    # "Pavlo"; GREEN once C1 landed).
     seg01_note = _find_note_containing(out_dir, "spoke quietly to Peter before they parted ways.")
-    assert "[[People/Pavlo|Peter]]" in seg01_note
+    assert "[[People/Pavlo|Peter]]" not in seg01_note
     assert "[[People/Petro|Peter]]" not in seg01_note
 
     # sense_translated stays unlinked (unchanged 1.7.0 behavior, independent

@@ -22,11 +22,18 @@ contractually exact frontmatter field set, contract §8).
 
 ## Documented interpretation calls (genuine contract ambiguities)
 
-  1. **canonical_target_form tiebreak when two entries share the exact same
-     value.** Contract §8 says only "pick one and test it" -- this file
-     picks: shortest ``source_form`` wins, then lexicographic. If the real
-     implementation picks a different (but equally documented) tiebreak,
-     that is a flagged ambiguity for the lead, not a bug in either side.
+  1. **canonical_target_form collision when two entries share the exact
+     same value (#206/#207).** `render()` passes `collision_delink=
+     _is_obsidian_target(profile)`, so on every REAL obsidian render a
+     >=2-owner target is de-linked -- neither owner gets an inline link,
+     independent of the `## Mentions` appendix flag (this file's tests
+     below exercise both appendix-on and appendix-off, always with
+     `output.target: "obsidian"`). `build_entity_index`'s own
+     `collision_delink=False` default -- the shortest-`source_form`-then-
+     lexicographic tiebreak -- survives only for direct callers/tests of
+     that function, and for `render()` itself when `output.target` is NOT
+     "obsidian" (the standalone-CLI dormant-flag path, covered in
+     render_obsidian_occindex.test.py). See that function's docstring.
   2. **An unmapped-but-syntactically-safe category** (not blank, not in
      ``adapter_config.obsidian.folders``, but passes the allow-list) is left
      UNTESTED here -- only the two contract-unambiguous cases (mapped, and
@@ -378,20 +385,24 @@ def test_first_occurrence_per_block_only_the_first_mention_is_wrapped(tmp_path):
     assert "Мария снова" in body_text, "the second, unwrapped occurrence must remain plain text"
 
 
-def test_shared_canonical_target_form_tiebreak_prefers_shorter_source_form(tmp_path):
-    """Documented interpretation call #1 (see module docstring): shortest
-    source_form wins when two entries share one canonical_target_form.
-
-    D3 (#207-a, lt-appendix-backlink-integrity): this is the
-    `collision_delink=False` code path -- exercised here under a REAL
-    `output.target: "obsidian"` profile (the shape dispatch_adapter()
-    actually hands this renderer) with `mentions_section.enabled` set to
-    an EXPLICIT `false` (the only way to reach collision_delink=False
-    since mentions_section is ON BY DEFAULT as of 1.10.0), so a silent
-    tiebreak-winner regression would still be caught even though the
-    Mentions feature itself is inert. Flag-ON collision de-linking (both
-    owners removed, no tiebreak winner) is covered separately in
-    render_obsidian_occindex.test.py."""
+def test_shared_canonical_target_form_delinks_even_with_appendix_off(tmp_path):
+    """#207: a >=2-owner canonical_target_form is de-linked on every real
+    obsidian render now, independent of the `## Mentions` appendix flag --
+    the shortest-source_form tiebreak this test used to pin (see git
+    history) was the #207 misattribution bug: it silently linked EVERY
+    "Джон" mention to Yan_src's note even where the source actually meant
+    Ioann_src, with no visible sign anything was wrong. `render()` passes
+    `collision_delink=_is_obsidian_target(profile)`, which is `True` for
+    this REAL `output.target: "obsidian"` profile (the shape
+    dispatch_adapter() actually hands this renderer) regardless of the
+    EXPLICIT `mentions_section.enabled: false` opt-out exercised here --
+    only a non-obsidian `output.target` (the standalone-CLI dormant-flag
+    path, covered in render_obsidian_occindex.test.py) reaches
+    `build_entity_index`'s own `collision_delink=False` default -- the old
+    tiebreak -- through `render()`; see that function's docstring. Flag-ON
+    collision de-linking is covered separately in
+    render_obsidian_occindex.test.py, including the appendix-on/appendix-off
+    parity assertion below."""
     canon = make_canon({
         "Ioann_src": canon_entry("Ioann_src", "Джон"),  # 9 chars
         "Yan_src": canon_entry("Yan_src", "Джон"),       # 7 chars -- shorter
@@ -408,9 +419,51 @@ def test_shared_canonical_target_form_tiebreak_prefers_shorter_source_form(tmp_p
     )
     assert len(body_matches) == 1
     body_text = body_matches[0].read_text(encoding="utf-8")
-    identity = entity_note_identity(out_dir, manifest, "Yan_src")
-    assert f"[[{identity}|Джон]]" in body_text, (
-        f"expected the shorter source_form (Yan_src) to win the tiebreak, got:\n{body_text}"
+    assert "[[" not in body_text, (
+        f"a >=2-owner canonical_target_form must never be inline-linked, even "
+        f"with the Mentions appendix off -- got:\n{body_text}"
+    )
+    assert "Джон пришёл домой" in body_text, body_text
+
+    # Both owners' notes must still render -- de-linking removes the INLINE
+    # link only, never the entity note itself.
+    for source_form in ("Ioann_src", "Yan_src"):
+        entity_note_identity(out_dir, manifest, source_form)  # raises if not exactly one note found
+
+
+def test_shared_canonical_target_form_delink_is_appendix_on_off_parity(tmp_path):
+    """Parity assertion (#207): the SAME collision renders byte-identical
+    inline handling (no inline link for either owner) whether the `##
+    Mentions` appendix is on or off -- collision de-linking no longer
+    branches on the appendix `enabled` flag at all (both renders here keep
+    `output.target: "obsidian"`; only that target check still gates D3,
+    see build_entity_index's docstring)."""
+    def _make_canon():
+        return make_canon({
+            "Ioann_src": canon_entry("Ioann_src", "Джон"),
+            "Yan_src": canon_entry("Yan_src", "Джон"),
+        })
+
+    def _body_text(mentions_enabled, subdir):
+        canon = _make_canon()
+        ns = make_nodestream([make_node("p1", "seg01", "Джон пришёл домой.")])
+        profile = make_profile(folders={"person": "people"})
+        profile["output"]["target"] = "obsidian"
+        profile["output"]["adapter_config"]["obsidian"]["mentions_section"] = {
+            "enabled": mentions_enabled
+        }
+        out_dir, manifest = render_into(tmp_path / subdir, ns, canon, profile)
+        body_matches = find_file_with_content(
+            all_written_paths(out_dir, manifest), lambda t: "пришёл домой" in t
+        )
+        assert len(body_matches) == 1
+        return body_matches[0].read_text(encoding="utf-8")
+
+    on_text = _body_text(True, "on")
+    off_text = _body_text(False, "off")
+    assert "[[" not in on_text and "[[" not in off_text, (
+        f"appendix-on and appendix-off must both de-link the collision -- "
+        f"on:\n{on_text}\noff:\n{off_text}"
     )
 
 
