@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.14.1 — 2026-07-22
+
+Fixes a rare wasted-work edge in the W5 codex-job driver: a codex attempt that completed just as the finalize tail was exhausted used to be silently discarded and re-launched from scratch on the next dispatch. Closes #213.
+
+### Fixed — preserve a completed-but-unvalidated attempt at the finalize tail (#213)
+
+- `codex_job.py`'s `CodexJob.run()` treated "`completed` but no budget left to validate" the same as any other non-promotable outcome and let `finalize()` `_silent_remove` the completed attempt outright. Because every run mints a fresh random `inv`-scoped attempt path, the discarded work was unrecoverable and the next W5 dispatch re-launched codex from scratch.
+- The tail-exhausted case now atomically defers the completed attempt into a deterministic per-seg/kind pending slot (`segments/.att_pending.<seg>.<draft|review>.json`) via a new `_defer_attempt()`. A new pre-launch `adopt_pending()` step re-validates any pending attempt through the SAME kind-specific candidate gates used for a live attempt — which enforce `--expect-token` against the candidate's own `dispatch_token`, so a stale attempt from a different run is rejected — and only on a full pass atomically promotes it to canonical. Never-promote-unvalidated is preserved; a gate that could not run (exhausted budget) leaves the pending intact rather than deleting recoverable work, and every non-promotion outcome still falls through to a fresh `launch()` (no starvation). A non-regular entry forged onto the deterministic slot is cleared so it cannot permanently block the deferral.
+- No consumer-visible CLI or schema change. Fixes a rare, bounded efficiency edge — never a correctness bug; the driver always failed safe, it just paid an avoidable re-launch.
+
+### Migration
+
+`codex_job.py` is a `PLUGIN_BUNDLE_MEMBERS` script (`cache_key.py:113`), so this edit moves `plugin_bundle_hash` — a 15-field `cache_key` composite member. At the next Step-0a bundle refresh, every converged **mass** segment of an in-flight project routes to `stale` and re-translates only. This is NOT `blocked_needs_regeneration`: `codex_job.py` is plugin-bundle, not derivation-bundle, so there is no W2/W3 regeneration and no mature-project brick. This is the standard, unavoidable cost of editing any plugin-bundle script — not a "zero migration" change.
+
 ## 1.14.0 — 2026-07-22
 
 Finishes #210 and advances #202. Custom extractors can now declare per-heading-type markdown levels, an undeclared heading type fails loudly at W2 instead of silently shipping mis-titled files, and `output-coverage` gains an opt-in within-cohort ratio-outlier surfacer. Closes #210. Refs #202 — **this release does not close it**; see the stated limitation below.
