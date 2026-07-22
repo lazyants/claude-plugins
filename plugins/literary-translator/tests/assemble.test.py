@@ -1369,17 +1369,16 @@ def test_frontback_regenerate_emits_a_placeholder_node_and_a_warning(tmp_path):
     assert "regenerate" in result.stderr.lower() and "cover" in result.stderr, (
         "a regenerate disposition must be surfaced as a warning naming the frontback id"
     )
-    # #210 R1: the synthesized placeholder node is the SECOND (and only
-    # other) all_nodes.append() call site in assemble.py -- it must carry
-    # the "level" key too (present, not just a compatible value), so a
-    # consumer written against the documented BlockNode contract (every
-    # node has "level") never KeyErrors on this one path. Presence, not
-    # just value equality -- a future refactor that drops the key must fail
-    # this assertion even if it happens to leave every OTHER field intact.
-    assert "level" in placeholder_nodes[0], (
-        "every node, including the frontback-regenerate placeholder, must "
-        "carry a \"level\" key"
-    )
+    # #210 R1: assemble.py has exactly two all_nodes.append() call sites --
+    # the ordinary per-block loop and this frontback-regenerate placeholder
+    # -- and this fixture's assembled nodestream contains a node from EACH
+    # ("p1" from the ordinary loop, the placeholder from this one), so a
+    # loop over every node here genuinely exercises both sites, not just
+    # the one this test's name calls out. Assert PRESENCE, not just a
+    # compatible value -- a future refactor that drops the key on some path
+    # must fail this even if it happens to leave every OTHER field intact.
+    for node in ns["nodes"]:
+        assert "level" in node, f"node {node['id']!r} missing 'level'"
     assert placeholder_nodes[0]["level"] is None, (
         "the placeholder's kind is hardcoded \"prose\" -- level is a "
         "heading-only concept"
