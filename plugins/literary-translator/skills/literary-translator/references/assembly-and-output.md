@@ -180,6 +180,34 @@ in `manifest.json`.
    (full regeneration is a later-phase refinement, not Phase 0/1);
    `omit` is dropped.
 
+#### Heading levels (`heading_levels`, #210)
+
+Every heading node built before this feature existed rendered at a
+hardcoded markdown level 2 (`##`). `manifest.json` may now declare an
+optional `heading_levels` map — `{block_type: level}`, level an integer
+1-6 — sibling to `heading_types`. Assembly looks up a heading block's own
+`raw_type` in that map and stores the result as the node's `level`; a type
+absent from the map, or an absent map entirely, resolves to **2** —
+byte-identical to pre-1.12.0 output for any project that does not opt in.
+A non-heading node's `level` is always `None`.
+
+Every key of `heading_levels` must be a member of `heading_types ∪
+{"HEAD"}` — a key outside that set is a typo that would otherwise silently
+no-op, since it would never be looked up against any real block.
+`assemble.py` enforces this itself, raising `AssembleError` on violation,
+rather than trusting that W2 already ran (`assemble.py` is also reachable
+on a resumed project); `validate_extraction.py` enforces the identical
+rule independently at W2 (see `SKILL.md`'s W2 Extract). There is no
+schema file for the NodeStream IR this document describes — this contract
+doc is the authoritative shape.
+
+`render_obsidian.py` clamps rather than trusts: a malformed `level` on a
+`kind:"heading"` node (absent, `None`, a non-`int`, a `bool`, or outside
+1..6) renders at level 2, a renderer fail-safe rather than a second
+validation gate — a raw `#` run must never reach 0 (which would silently
+demote a heading to bare prose with a stray leading space) or exceed 6
+(not a valid ATX heading).
+
 #### Sentinel resolution — fail closed
 
 Two sentinel families appear byte-for-byte inside `draft.blocks[id]` strings:
@@ -225,6 +253,7 @@ BlockNode = {
   "order_index": int,
   "medium": "html" | "plain",
   "text": str,                            # translated text, sentinels still inline
+  "level": int | None,                    # heading level 1-6 (#210), else None
   "fnrefs": [int, ...],                   # footnote numbers referenced in this block
   "verses": [ { "vid": str, "placeholder": str, "content": <object|{}> }, ... ]
 }

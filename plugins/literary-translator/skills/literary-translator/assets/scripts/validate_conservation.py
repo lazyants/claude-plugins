@@ -149,6 +149,55 @@ Instead:
     measured source/target ratio distribution from a real he->en run
     (Step 1 of the SSK vol.2 restart), which does not exist yet.
 
+## `output-coverage` mode -- the within-cohort ratio-outlier surfacer (#202
+## R3, PARTIAL -- does NOT close #202)
+
+Alongside the v1 floor above, `output-coverage` also runs an OPT-IN
+within-cohort ratio-outlier lane, gated on `validation.conservation_ratio_band`
+being present (non-null) in profile.yml -- absent or explicit `null` means
+this lane does not run at all and `output-coverage`'s output is byte-identical
+to 1.11.0 (see `profile.schema.json`). It is NOT a cross-language-pair band --
+that shape is refused above and stays refused. Instead, every eligible block
+is grouped into a COHORT by its raw manifest block `type`, and compared only
+against its OWN cohort's measured out/source word-ratio distribution: a
+robust fence (median +/- `k` MADs, in log space) plus an independent
+`abs_guard` absolute-ratio condition, both required, over blocks with
+`source_words >= min_source_words_band` and a cohort of at least `min_cohort`
+eligible members.
+
+**Eligibility is a strict-precedence four-arm partition, first match wins**
+(see `compute_ratio_band_findings()`): (1) a block this SAME run already
+floor-flagged as `hollowed_output_block` -> excluded, never double-reported;
+(2) else `source_words < min_source_words_band` -> excluded (this bound is
+independent from `conservation_hollow_floor`'s own `min_source_words` on
+purpose -- the floor `continue`s past short blocks below ITS OWN minimum
+before this lane ever sees them, so if the floor's minimum is raised above
+this lane's, a short zero-output block can reach here with `out_words == 0`;
+without arm (3) below that would call `math.log(0)` and crash a
+contractually WARN-only, exit-0 command); (3) else `out_words == 0` ->
+excluded, emitting `zero_output_block` (this is what makes `log(0)`
+unreachable -- every block that survives to arm (4) has `out_words >= 1`);
+(4) else eligible. Every block in a cohort lands in exactly one bucket, and
+`cohort_size == n + excluded_floor_flagged + excluded_below_min_source_words
++ excluded_zero_output` always holds -- these counts are the authoritative
+data, and are emitted on every cohort so a reader never has to trust a
+derived label to know how much of the cohort a statistic did NOT see.
+
+**STRUCTURAL BLIND SPOT.** This lane cannot detect UNIFORM cohort-wide
+truncation: a self-relative fence measures deviation FROM the cohort, never
+truncation OF the cohort. If every block in a cohort is equally truncated
+(e.g. 30 blocks all at ratio 0.30), the median IS 0.30, MAD == 0, and nothing
+is an outlier -- this is by construction, not a bug, and is pinned by a
+characterization test rather than silently rediscovered later. Detecting it
+would need a reference not derived from the audited population itself (a
+per-language-pair prior, refused elsewhere in this repo; or a
+translation-invariant per-block anchor, which does not exist here -- prose
+blocks have no invariant to conserve). What this lane DOES catch, and is
+still worth shipping for: a FEW collapsed blocks among an otherwise healthy
+cohort -- the more common failure, and invisible to the v1 floor's absolute,
+size-independent thresholds outside their own narrow band. For this reason
+the PR shipping this ships `Refs #202`, never `Closes #202`.
+
 Population scope: exactly `segments[].block_ids[]`, resolved through
 `manifest.blocks{}` -- the SAME iteration `validate_assembled.
 collect_source_markers()` performs (imported and reused here, with an
@@ -200,7 +249,9 @@ a malformed `profile.yml` conservation config).
 """
 import argparse
 import json
+import math
 import re
+import statistics
 import sys
 import unicodedata
 from collections import Counter
@@ -231,6 +282,22 @@ DURABLE_ROOT = va.DURABLE_ROOT
 
 DEFAULT_HOLLOW_MIN_SOURCE_WORDS = 1
 DEFAULT_HOLLOW_MAX_OUTPUT_WORDS = 0
+
+# D3 (#202 R3, PARTIAL) -- within-cohort output-coverage outlier surfacer.
+# See the module docstring's "output-coverage mode" section for the
+# algorithm this backs and its structural blind spot. `min_source_words_band`
+# is DELIBERATELY independent from DEFAULT_HOLLOW_MIN_SOURCE_WORDS above --
+# straddling the two is exactly the log(0) hazard guarded in
+# compute_ratio_band_findings(). 40, not some smaller "just excludes trivia"
+# number, because normalize_words() is NFC + whitespace splitting only (no
+# morphological/markup/sentinel normalization) -- a sub-40-word
+# markup-or-sentinel-heavy block yields a raw-token ratio that is not
+# linguistically comparable and can be arbitrary; this gate is what keeps
+# that population out of the band.
+DEFAULT_RATIO_BAND_MIN_SOURCE_WORDS = 40
+DEFAULT_RATIO_BAND_MIN_COHORT = 25
+DEFAULT_RATIO_BAND_K = 3.0
+DEFAULT_RATIO_BAND_ABS_GUARD = 0.5
 
 
 class ConservationError(Exception):
@@ -746,6 +813,227 @@ def collect_nodestream_output_word_counts(nodestream):
     return counts
 
 
+def _validate_ratio_band_config(ratio_cfg):
+    """Validates + fills defaults for `validation.conservation_ratio_band`
+    (#202 R3, D3). Same defensive shape as `conservation_hollow_floor`'s own
+    validation: explicit isinstance + bool exclusion + range, raising
+    ConservationError. `k`/`abs_guard` additionally require math.isfinite()
+    -- profile.yml loads through yaml.safe_load, and YAML `.nan`/`.inf`
+    parse to real floats that pass a naive isinstance(x, float) check; a
+    NaN `k` would make the fence NaN and every comparison against it False,
+    silently disabling this lane while it reports success (see module
+    docstring). Returns (min_source_words_band, min_cohort, k, abs_guard)."""
+    min_source_words_band = ratio_cfg.get("min_source_words_band", DEFAULT_RATIO_BAND_MIN_SOURCE_WORDS)
+    min_cohort = ratio_cfg.get("min_cohort", DEFAULT_RATIO_BAND_MIN_COHORT)
+    k = ratio_cfg.get("k", DEFAULT_RATIO_BAND_K)
+    abs_guard = ratio_cfg.get("abs_guard", DEFAULT_RATIO_BAND_ABS_GUARD)
+
+    if (
+        not isinstance(min_source_words_band, int)
+        or isinstance(min_source_words_band, bool)
+        or min_source_words_band < 1
+    ):
+        raise ConservationError(
+            f"validation.conservation_ratio_band.min_source_words_band must "
+            f"be an integer >= 1, got {min_source_words_band!r}"
+        )
+    if not isinstance(min_cohort, int) or isinstance(min_cohort, bool) or min_cohort < 1:
+        raise ConservationError(
+            f"validation.conservation_ratio_band.min_cohort must be an "
+            f"integer >= 1, got {min_cohort!r}"
+        )
+    if (
+        not isinstance(k, (int, float))
+        or isinstance(k, bool)
+        or not math.isfinite(k)
+        or k <= 0
+    ):
+        raise ConservationError(
+            f"validation.conservation_ratio_band.k must be a finite number "
+            f"> 0, got {k!r}"
+        )
+    if (
+        not isinstance(abs_guard, (int, float))
+        or isinstance(abs_guard, bool)
+        or not math.isfinite(abs_guard)
+        or abs_guard <= 0
+        or abs_guard > 1
+    ):
+        raise ConservationError(
+            f"validation.conservation_ratio_band.abs_guard must be a finite "
+            f"number in (0, 1], got {abs_guard!r}"
+        )
+    return min_source_words_band, min_cohort, float(k), float(abs_guard)
+
+
+def compute_ratio_band_findings(
+    eligible_keys,
+    manifest_blocks,
+    output_words,
+    floor_flagged_keys,
+    min_source_words_band,
+    min_cohort,
+    k,
+    abs_guard,
+):
+    """D3 (#202 R3, PARTIAL): within-cohort output-coverage outlier
+    surfacer. See the module docstring's "output-coverage mode" section for
+    the full algorithm and its structural blind spot -- this lane cannot
+    detect uniform cohort-wide truncation (a self-relative fence measures
+    deviation FROM the cohort, never truncation OF it); it does not close
+    #202.
+
+    Groups `eligible_keys` (the SAME population the v1 floor above
+    iterates) into cohorts by raw manifest block `type`, partitions each
+    cohort into exactly one of four buckets per block via a strict-
+    precedence if/elif chain (floor-flagged this run / below
+    `min_source_words_band` / zero output / eligible), then flags an
+    eligible block as `low_coverage_outlier` only when BOTH a robust
+    median+MAD fence (log space) AND an independent `abs_guard` absolute-
+    ratio condition hold, and only for a cohort with >= `min_cohort`
+    eligible members. A cohort below that sample size is never silently
+    skipped -- it emits `insufficient_sample` instead, with a TOTAL `reason`
+    label derived from the (authoritative) exclusion counts.
+
+    Returns (ratio_warnings: list[dict], coverage_distribution: dict) --
+    `coverage_distribution` always has one entry per cohort that has at
+    least one member in `eligible_keys`; `median_ratio`/`mad`/`fence_ratio`
+    are `None` only when a cohort's eligible count `n == 0` (present, never
+    omitted -- see module docstring)."""
+    cohorts = {}
+    for (seg, bid) in sorted(eligible_keys):
+        mb = manifest_blocks.get(bid) or {}
+        raw_type = mb.get("type")
+        cohorts.setdefault(raw_type, []).append((seg, bid))
+
+    ratio_warnings = []
+    coverage_distribution = {}
+
+    for raw_type in sorted(cohorts, key=lambda t: (t is None, t)):
+        members = cohorts[raw_type]
+        cohort_size = len(members)
+        excluded_floor_flagged = 0
+        excluded_below_min_source_words = 0
+        excluded_zero_output = 0
+        eligible_blocks = []  # (seg, bid, source_words, out_words, ratio, r)
+
+        for (seg, bid) in members:
+            mb = manifest_blocks.get(bid) or {}
+            source_words = len(normalize_words(mb.get("plain_text")))
+            out_words = output_words.get((seg, bid), 0)
+            if (seg, bid) in floor_flagged_keys:
+                excluded_floor_flagged += 1
+            elif source_words < min_source_words_band:
+                excluded_below_min_source_words += 1
+            elif out_words == 0:
+                excluded_zero_output += 1
+                ratio_warnings.append(
+                    {
+                        "kind": "zero_output_block",
+                        "seg": seg,
+                        "block_id": bid,
+                        "raw_type": raw_type,
+                        "source_words": source_words,
+                    }
+                )
+            else:
+                ratio = out_words / source_words
+                eligible_blocks.append((seg, bid, source_words, out_words, ratio, math.log(ratio)))
+
+        n = len(eligible_blocks)
+        if cohort_size != n + excluded_floor_flagged + excluded_below_min_source_words + excluded_zero_output:
+            raise ConservationError(  # pragma: no cover -- defensive, structurally unreachable
+                f"internal invariant violated for cohort {raw_type!r}: bucket "
+                f"counts do not partition cohort_size"
+            )
+
+        reason = None
+        if n == 0:
+            median_ratio = mad = fence_ratio = None
+            nonzero_buckets = sum(
+                1
+                for c in (excluded_floor_flagged, excluded_below_min_source_words, excluded_zero_output)
+                if c
+            )
+            if nonzero_buckets == 0:
+                raise ConservationError(  # pragma: no cover -- defensive, structurally unreachable
+                    f"internal invariant violated: cohort {raw_type!r} has "
+                    f"cohort_size={cohort_size} but n == 0 with every "
+                    f"exclusion bucket at 0 -- an empty cohort must never be "
+                    f"constructed"
+                )
+            if nonzero_buckets > 1:
+                reason = "all_excluded_mixed"
+            elif excluded_floor_flagged:
+                reason = "all_floor_flagged"
+            elif excluded_below_min_source_words:
+                reason = "all_below_min_source_words"
+            else:
+                reason = "all_zero_output"
+        else:
+            r_values = [r for (_s, _b, _sw, _ow, _ratio, r) in eligible_blocks]
+            median_r = statistics.median(r_values)
+            mad_r = statistics.median([abs(r - median_r) for r in r_values])
+            fence_log = median_r - k * 1.4826 * mad_r
+            cohort_median_ratio = math.exp(median_r)
+            median_ratio = round(cohort_median_ratio, 6)
+            mad = round(mad_r, 6)
+            fence_ratio = round(math.exp(fence_log), 6)
+
+            if n < min_cohort:
+                reason = "too_few_eligible"
+            else:
+                for (seg, bid, source_words, out_words, ratio, r) in eligible_blocks:
+                    if r < fence_log and ratio < abs_guard * cohort_median_ratio:
+                        ratio_warnings.append(
+                            {
+                                "kind": "low_coverage_outlier",
+                                "seg": seg,
+                                "block_id": bid,
+                                "raw_type": raw_type,
+                                "source_words": source_words,
+                                "output_words": out_words,
+                                "ratio": round(ratio, 6),
+                                "cohort_median_ratio": median_ratio,
+                                "fence_ratio": fence_ratio,
+                            }
+                        )
+
+        if reason is not None:
+            ratio_warnings.append(
+                {
+                    "kind": "insufficient_sample",
+                    "cohort": raw_type,
+                    "n": n,
+                    "min_cohort": min_cohort,
+                    "cohort_size": cohort_size,
+                    "reason": reason,
+                    "excluded_floor_flagged": excluded_floor_flagged,
+                    "excluded_below_min_source_words": excluded_below_min_source_words,
+                    "excluded_zero_output": excluded_zero_output,
+                }
+            )
+
+        coverage_distribution[raw_type] = {
+            "cohort_size": cohort_size,
+            "n": n,
+            "median_ratio": median_ratio,
+            "mad": mad,
+            "fence_ratio": fence_ratio,
+            "excluded_floor_flagged": excluded_floor_flagged,
+            "excluded_below_min_source_words": excluded_below_min_source_words,
+            "excluded_zero_output": excluded_zero_output,
+        }
+
+    # Sorted deterministically -- see module docstring. `.get(...)` defaults
+    # cover the fields a given `kind` does not carry (`insufficient_sample`
+    # has no seg/block_id; the others have no cohort).
+    ratio_warnings.sort(
+        key=lambda w: (w["kind"], w.get("cohort") or "", w.get("seg") or "", w.get("block_id") or "")
+    )
+    return ratio_warnings, coverage_distribution
+
+
 def run_output_coverage():
     """Returns True always (WARN-first v1 never HARD-gates) -- raises
     ConservationError on any env/usage precondition."""
@@ -848,17 +1136,64 @@ def run_output_coverage():
                 }
             )
 
+    # D3 (#202 R3, PARTIAL): the within-cohort ratio-outlier lane is OPT-IN,
+    # gated on validation.conservation_ratio_band being present (non-null) --
+    # absent or explicit null means it does not run at all and this
+    # subcommand's output is byte-identical to 1.11.0 (see module docstring
+    # and profile.schema.json). The floor-flagged set below is exactly the
+    # `warnings` computed above (the floor's OWN (seg, block_id) keys from
+    # THIS run, not an out_words == 0 test -- max_output_words is
+    # profile-configurable and not necessarily 0).
+    ratio_cfg = (profile.get("validation") or {}).get("conservation_ratio_band")
+    coverage_distribution = None
+    if ratio_cfg is not None:
+        if not isinstance(ratio_cfg, dict):
+            raise ConservationError(
+                "profile.yml validation.conservation_ratio_band must be an object when present"
+            )
+        min_source_words_band, min_cohort, k, abs_guard = _validate_ratio_band_config(ratio_cfg)
+        floor_flagged_keys = {(w["seg"], w["block_id"]) for w in warnings}
+        ratio_warnings, coverage_distribution = compute_ratio_band_findings(
+            eligible_keys,
+            manifest_blocks,
+            output_words,
+            floor_flagged_keys,
+            min_source_words_band,
+            min_cohort,
+            k,
+            abs_guard,
+        )
+        warnings = warnings + ratio_warnings
+
     print("=" * 70, file=sys.stderr)
     print(f"OUTPUT COVERAGE (v1 floor, WARN-only) -- scope={v1_scope}", file=sys.stderr)
     print("=" * 70, file=sys.stderr)
     print(f"\nWARN ({len(warnings)}):", file=sys.stderr)
     for w in warnings:
-        print(
-            f"  * [{w['seg']}/{w['block_id']}] source_words={w['source_words']} "
-            f"output_words={w['output_words']}",
-            file=sys.stderr,
-        )
-    print(json.dumps({"warnings": warnings}, ensure_ascii=False))
+        if w["kind"] in ("hollowed_output_block", "zero_output_block"):
+            print(
+                f"  * [{w['seg']}/{w['block_id']}] {w['kind']} "
+                f"source_words={w['source_words']}"
+                + (f" output_words={w['output_words']}" if "output_words" in w else ""),
+                file=sys.stderr,
+            )
+        elif w["kind"] == "low_coverage_outlier":
+            print(
+                f"  * [{w['seg']}/{w['block_id']}] low_coverage_outlier "
+                f"ratio={w['ratio']} cohort_median_ratio={w['cohort_median_ratio']} "
+                f"fence_ratio={w['fence_ratio']}",
+                file=sys.stderr,
+            )
+        else:  # insufficient_sample
+            print(
+                f"  * [{w['cohort']}] insufficient_sample n={w['n']}/{w['min_cohort']} "
+                f"reason={w['reason']}",
+                file=sys.stderr,
+            )
+    output_doc = {"warnings": warnings}
+    if coverage_distribution is not None:
+        output_doc["coverage_distribution"] = coverage_distribution
+    print(json.dumps(output_doc, ensure_ascii=False, allow_nan=False))
     return True
 
 

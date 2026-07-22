@@ -597,7 +597,7 @@
           "minLength": 1
         },
         "conservation_hollow_floor": {
-          "description": "Optional thresholds for validate_conservation.py's output-coverage v1 floor (#202, WARN-only): a block is flagged hollowed_output_block when its source word count is >= min_source_words AND its output word count is <= max_output_words. Absent -- both default (1, 0), i.e. 'non-empty source, empty output'. Absolute word counts, deliberately not a ratio -- see validate_assembled.py's own docstring on why a length-band is unsound across language pairs; a real calibrated band is deferred to v2.",
+          "description": "Optional thresholds for validate_conservation.py's output-coverage v1 floor (#202, WARN-only): a block is flagged hollowed_output_block when its source word count is >= min_source_words AND its output word count is <= max_output_words. Absent -- both default (1, 0), i.e. 'non-empty source, empty output'. Absolute word counts, deliberately not a ratio -- see validate_assembled.py's own docstring on why a length-band is unsound across language pairs. A within-cohort ratio-based surfacer now exists alongside this floor as the separate, opt-in conservation_ratio_band block below (#202 R3, PARTIAL): it compares a block only against its own cohort's measured distribution, never a cross-language absolute band, and is structurally unable to catch uniform cohort-wide truncation -- see validate_conservation.py's own module docstring.",
           "type": ["object", "null"],
           "additionalProperties": false,
           "properties": {
@@ -608,6 +608,30 @@
             "max_output_words": {
               "type": "integer",
               "minimum": 0
+            }
+          }
+        },
+        "conservation_ratio_band": {
+          "description": "Optional config for validate_conservation.py's output-coverage within-cohort ratio-outlier surfacer (#202 R3, PARTIAL -- WARN-only, does NOT close #202). OPT-IN: absent or null means this lane does not run at all and output-coverage behaves exactly as in 1.11.0. Blocks are grouped into cohorts by their raw manifest block type and a block is compared only against its OWN cohort's measured out/source word-ratio distribution -- never a cross-language-pair or project-wide absolute threshold (that shape is refused, see validate_conservation.py's own module docstring). min_source_words_band (default 40) is a per-block eligibility floor, DELIBERATELY independent from conservation_hollow_floor's own min_source_words above -- coupling the two creates a log(0) hazard (see validate_conservation.py); 40 specifically because normalize_words() does NFC+whitespace splitting only, so a shorter, markup- or sentinel-heavy block yields a raw-token ratio that is not linguistically comparable. min_cohort (default 25) is the minimum eligible-block sample a cohort needs before an outlier fence is computed; below it the cohort emits insufficient_sample instead of silently being skipped. k (default 3.0) and abs_guard (default 0.5) tune the robust median+MAD fence and the independent absolute-ratio guard, both required for a flag. This lane is STRUCTURALLY BLIND to uniform cohort-wide truncation (see validate_conservation.py) -- it narrows #202, it does not close it.",
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "properties": {
+            "min_source_words_band": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "min_cohort": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "k": {
+              "type": "number",
+              "exclusiveMinimum": 0
+            },
+            "abs_guard": {
+              "type": "number",
+              "exclusiveMinimum": 0,
+              "maximum": 1
             }
           }
         }

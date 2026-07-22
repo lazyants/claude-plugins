@@ -261,7 +261,7 @@ requires a custom extractor to call its heading blocks `"HEAD"`. If the
 co-designed extractor emits its own tag for headings (e.g. `"SIMAN"`,
 `"PEREK"`, `"CHAPTER_TITLE"`), that tag **must** be listed in
 `manifest.heading_types`, or every such block silently assembles and
-renders as ordinary prose — no heading markdown (`## `), and the segment
+renders as ordinary prose — no heading markdown (`##`), and the segment
 note's frontmatter `title` / filename fall back to the raw seg id instead
 of the heading text (`assembly-and-output.md`'s algorithm section spells
 out the fallback). This is a silent misclassification, not a validation
@@ -271,7 +271,78 @@ failure — schema validation and the self-check suite both pass on it, since
 
 `heading_types` is optional and empty by default — a `custom` extractor
 whose only heading blocks are tagged `"HEAD"` (matching the shipped
-`gutenberg_epub` convention) does not need to set it at all.
+`gutenberg_epub` convention) does not need to set it at all. But once a
+custom extractor's own tags include anything heading-shaped (see the W2
+gate below), the key stops being silently skippable.
+
+### The W2 fail-loud gate for undeclared heading-shaped types (#210)
+
+Prior to this gate, the silent misclassification described above was the
+*only* diagnostic — and it fired at W7/W9, after the whole book had
+already been translated. `validate_extraction.py`'s W2 `run_derivable_checks`
+now HARD-fails (exit `1`) instead: it fires when the manifest **omits the
+`heading_types` key entirely** (a bare absence, not an explicit `[]`) AND
+at least one `manifest.blocks[*].type` full-matches, case-insensitively,
+the heading-shaped allowlist
+`^(?:HEADING|TITLE|CHAPTER|SECTION|PART|SIMAN|PEREK|H[1-6])$` — the same
+literal pattern the WARN-only backstop above already used, duplicated
+byte-identically per this plugin's no-shared-util convention and pinned
+against drift by `tests/heading_like_regex_drift.test.py`.
+
+`"HEAD"` itself never matches this allowlist (`HEADING` != `HEAD`; `H[1-6]`
+requires exactly one trailing digit 1-6, which `HEAD` has none of), so
+every shipped `gutenberg_epub`/`plain_text` project — tagging headings
+`"HEAD"` and never setting `heading_types` — is untouched by this gate.
+It runs unconditionally, including for `source.format: custom` — only the
+`extract.py` region-hash pin described above is format-conditional.
+
+**If W2 rejects your manifest, the fix is exactly one of two remedies**
+(the gate's own error message names both, plus every offending type):
+
+1. List the offending type(s) in `manifest.heading_types` — the normal
+   case, when they genuinely are headings.
+2. Set `heading_types: []` explicitly — an affirmative declaration that
+   this source has no heading-shaped blocks worth promoting, distinct
+   from simply omitting the key. An explicit `[]` always passes this
+   gate, even when heading-shaped `type` tags are present (e.g. a source
+   using `"SECTION"` purely as a structural label with no intent to
+   render it as a markdown heading).
+
+## Declaring heading levels (`heading_levels`)
+
+An optional sibling to `heading_types`, `manifest.heading_levels` maps a
+block `type` string to a markdown heading level (integer, 1-6):
+
+```json
+{
+  "heading_types": ["SIMAN", "PEREK"],
+  "heading_levels": { "SIMAN": 2, "PEREK": 3 }
+}
+```
+
+Every key of `heading_levels` **must** be a member of
+`heading_types ∪ {"HEAD"}` — a key outside that set is a typo that would
+otherwise silently no-op (never looked up against any real block), so it
+is rejected HARD rather than left unused: `validate_extraction.py`
+enforces this at W2 (exit `1`, naming the offending key), and
+`assemble.py` enforces the identical rule again, independently, as an
+`AssembleError` — `assemble.py` must not trust that W2 ran, since it is
+also reachable on a resumed project.
+
+A block type absent from `heading_levels` — or an absent `heading_levels`
+map entirely — renders at level **2**, byte-identical to pre-1.12.0
+output (every heading was hardcoded `##` before this feature existed).
+`"HEAD"` may itself be given a level (e.g. `{"HEAD": 1}`) without needing
+a matching `heading_types` entry, since `HEAD` is always an implicit
+heading type.
+
+Values must be actual integers 1-6, never booleans and never numeric
+strings — `manifest.schema.json` rejects `true`, `"2"`, `0`, and `7`
+alike. See [`../assembly-and-output.md`](../assembly-and-output.md)'s
+BlockNode contract for how the resolved level rides through to the
+rendered output, and `render_obsidian.py`'s own clamp for what happens if
+a level ever reaches the renderer malformed regardless (belt-and-braces,
+not expected from a schema-valid manifest).
 
 ## `footnotes.apparatus_policy` for `custom`
 

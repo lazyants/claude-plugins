@@ -1,5 +1,32 @@
 # Changelog
 
+## 1.14.0 — 2026-07-22
+
+Finishes #210 and advances #202. Custom extractors can now declare per-heading-type markdown levels, an undeclared heading type fails loudly at W2 instead of silently shipping mis-titled files, and `output-coverage` gains an opt-in within-cohort ratio-outlier surfacer. Closes #210. Refs #202 — **this release does not close it**; see the stated limitation below.
+
+### Added — heading levels (#210)
+
+- New optional `manifest.heading_levels` maps a declared heading type to a markdown level 1-6; previously every heading rendered as `##` regardless of type. Keys are cross-validated against `heading_types ∪ {"HEAD"}`, and that guard runs independently in both `assemble.py` and the W2 gate — `assemble.py` is reachable on a resumed project, so it cannot rely on W2 having run.
+- `render_obsidian.py` renders the declared level, with a defensive clamp to 2 for anything malformed or absent (`0`, `7`, `"3"`, `True`, `None`, missing). Output is **byte-identical** for any project that does not declare `heading_levels`.
+- Every assembled node now carries a `level` key — including the frontback-regenerate placeholder — so the BlockNode contract in `references/assembly-and-output.md` holds for every node a consumer can encounter.
+
+### Added — fail-loud undeclared heading types (#210)
+
+- Extraction now FAILS when `manifest.json` omits `heading_types` entirely **and** at least one block type is heading-shaped (`HEADING|TITLE|CHAPTER|SECTION|PART|SIMAN|PEREK|H1-H6`, case-insensitive, full-match). The error names the offending types and both remedies.
+- The opt-out is an explicit `heading_types: []` — a declared stance that this source has no heading blocks.
+- **Shipped adapters are unaffected**: `HEAD` deliberately does not match the heading-shaped pattern, so a Gutenberg-shaped manifest with no `heading_types` key still passes. This is a property of the pattern itself, not of a fixture.
+
+### Added — output-coverage ratio-outlier surfacer (Refs #202)
+
+- New **opt-in** `validation.conservation_ratio_band`. Absent or `null` means the lane does not run and `output-coverage` behaves exactly as in 1.11.0.
+- Groups blocks into cohorts by raw manifest type and compares each block only against **its own cohort's** measured out/source word-ratio distribution — never a cross-language-pair or project-wide absolute threshold, a shape this plugin refuses on record. WARN-only, exit 0; it surfaces candidates for the W5/W7 reviewer and never decides that a block is truncated.
+- Reports `coverage_distribution` per cohort with a full exclusion accounting (`excluded_floor_flagged`, `excluded_below_min_source_words`, `excluded_zero_output`) so a reader can always see how much of a cohort the statistic did not cover.
+- **Stated limitation — this does NOT close #202.** A within-cohort fence measures deviation *from* a cohort, never truncation *of* one: if every block in a cohort is truncated equally, the median is the truncated ratio and nothing is an outlier. Detecting that needs a reference outside the audited population, and neither candidate exists here — per-language-pair priors are refused by this plugin, and prose blocks carry no translation-invariant anchor. The limitation is pinned by a characterization test, not merely documented.
+
+### Fixed — CHANGELOG closure claims
+
+- The 1.7.0 and 1.11.0 entries claimed to close #210 and #202. Neither was closed: GitHub binds a `Closes` keyword to the **first** issue reference only, so trailing references in a `Closes #a, #b, #c` list never auto-close. Both entries are corrected in place with a dated note.
+
 ## 1.13.0 — 2026-07-22
 
 Honest close-out of #206/#207: retires the inline linker's homonym-collision tiebreak from production and reconciles the doc claims it left stale. Closes #206, #207.
@@ -43,7 +70,9 @@ Any existing project fully re-translates on upgrade — and this is forced regar
 
 ## 1.11.0 — 2026-07-19
 
-Closes the A-C6 residual 1.10.0 shipped knowingly: the evidence/adjudication chain is now mark/connector-insensitive too, so the `## Mentions` appendix and the evidence chain finally agree on what counts as the same Hebrew name. Alongside it: exact-match sentinel comparison across the two remaining workflow templates, a new content-conservation gate, and a required style-contract slot for embedded third-language text. Closes #243, #228, #196, #202 (output-coverage half), #203.
+Closes the A-C6 residual 1.10.0 shipped knowingly: the evidence/adjudication chain is now mark/connector-insensitive too, so the `## Mentions` appendix and the evidence chain finally agree on what counts as the same Hebrew name. Alongside it: exact-match sentinel comparison across the two remaining workflow templates, a new content-conservation gate, and a required style-contract slot for embedded third-language text. Closes #243, #228, #196, #203. Advances #202 (the output-coverage structural half; the per-block anti-truncation half was deferred).
+
+> **Correction (1.12.0):** this line originally read "Closes … #202 (output-coverage half) …". The parenthetical was accurate about scope but the `Closes` verb was not — #202 was never closed and is still open after 1.12.0.
 
 ### Fixed — fold-aware evidence chain (#243)
 
@@ -170,7 +199,9 @@ Opt-in source-anchored **appendix backlink integrity** for the Obsidian adapter 
 
 ## 1.7.0 — 2026-07-17
 
-Delivery-gate hardening on the assemble/audit path, closing three real gaps found during the SSK vol.2 he→en remediation. Closes #208, #210, #202.
+Delivery-gate hardening on the assemble/audit path, closing three real gaps found during the SSK vol.2 he→en remediation. Closes #208. Advances #210 (heading-shape output contract, but heading LEVEL and the undeclared-type gate both remained) and #202 (structural-completeness checks, but no per-block anti-truncation lane).
+
+> **Correction (1.12.0):** this line originally read "Closes #208, #210, #202". Only #208 was actually closed — GitHub binds a `Closes` keyword to the FIRST issue reference only, so #210 and #202 were never auto-closed, and neither was finished in 1.7.0. #210 is closed by 1.12.0; #202 remains open.
 
 ### Added
 

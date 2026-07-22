@@ -520,6 +520,47 @@ produced. See `references/source-format-adapters/custom.md` and
 `references/false-green-gate.md` for the full reconciliation. The pipeline
 advances to W3 ONLY on its exit `0` (see R2 / `references/false-green-gate.md`).
 
+**New in 1.12.0 (#210) — two additional HARD checks land in
+`run_derivable_checks`**, both exit `1`, both running unconditionally,
+including for `source.format: custom` (only the extractor self-check
+region-hash pin above is format-conditional):
+
+- **Heading levels, cross-field validity.** The manifest may declare an
+  optional `heading_levels` map (`{block_type: level 1-6}`, sibling to
+  `heading_types`, schema-accepted by the
+  `jsonschema.Draft202012Validator` pass above) so assembly no longer
+  hardcodes every heading to markdown `##` — `render_obsidian.py` emits
+  each heading node at its own resolved level, defaulting to level 2 for a
+  type absent from the map (or an absent map entirely), byte-identical to
+  pre-1.12.0 output. Every key of `heading_levels` must be a member of
+  `heading_types ∪ {"HEAD"}` — a key outside that set is a typo that would
+  otherwise silently no-op, so it fails loudly here rather than sitting
+  unused. `assemble.py` enforces the identical rule again, independently,
+  as an `AssembleError`, since it must not trust that W2 ran — it is also
+  reachable on a resumed project. See `references/assembly-and-output.md`'s
+  BlockNode contract.
+- **Undeclared heading-shaped type.** This check fires only when the
+  manifest omits the `heading_types` key entirely — a bare absence, never
+  an explicit `[]` — AND at least one `manifest.blocks[*].type`
+  full-matches, case-insensitively, the heading-shaped allowlist
+  `^(?:HEADING|TITLE|CHAPTER|SECTION|PART|SIMAN|PEREK|H[1-6])$` — the same
+  literal pattern `validate_assembled.py` already used for its WARN-only
+  backstop, now duplicated byte-identically (this plugin's no-shared-util
+  convention) and pinned against drift by
+  `tests/heading_like_regex_drift.test.py`. An explicit
+  `heading_types: []` is a positive declaration and always passes.
+  `"HEAD"` never matches the allowlist, so every shipped
+  `gutenberg_epub`/`plain_text` project — which tags headings `"HEAD"` and
+  never sets `heading_types` — is untouched. The error names every
+  offending type plus both remedies: declare it in `heading_types`, or set
+  `heading_types: []` to affirm this source has no heading blocks at all.
+  This closes the silent half of #210: previously an extractor tagging its
+  own heading blocks (e.g. `"CHAPTER"`) and forgetting to declare the tag
+  shipped silently, with no error until the WARN-only
+  `validate_assembled.py` backstop caught it at W7/W9 — after the whole
+  book had already been translated. See
+  `references/source-format-adapters/custom.md` for the full walkthrough.
+
 Then, immediately after `validate_extraction.py` passes, run the
 **wrapper-conservation gate (#196)** — a normal bundle-copied durable-root
 script (unlike `validate_extraction.py` above), so run the durable copy:
@@ -1296,16 +1337,49 @@ Runs at W7 over every converged segment:
   SHA, mirroring `assemble.py`'s own guard). Exit `1` HARD on either
   violation; exit `0` with non-gating WARN entries for an undeclared
   heading-like block. See `references/assembly-and-output.md`.
-- **Output-coverage v1 floor (`scripts/validate_conservation.py
-  output-coverage`, the #202 half `validate_assembled.py` declines):** runs
-  immediately after the structural-completeness gate above, same scope. **WARN-only
-  — never gates, exit `0` always** (barring an env/usage precondition, exit
-  `2`): flags `hollowed_output_block` when a `segments[].block_ids[]`-cited
-  block's source text is non-trivial but its current converged-draft text is
-  empty/near-empty (an absolute word-count floor, not a length band — see
-  that script's own module docstring for why a band is deliberately not
-  built here). Read the WARN list; it is diagnostic input for W8's report,
-  not a stop condition.
+- **Output-coverage v1 floor + within-cohort ratio-outlier lane
+  (`scripts/validate_conservation.py output-coverage`, the #202 half
+  `validate_assembled.py` declines):** runs immediately after the
+  structural-completeness gate above, same scope. **WARN-only — never
+  gates, exit `0` always** (barring an env/usage precondition, exit `2`).
+  Two lanes share the one subcommand:
+  - The **absolute floor** (1.11.0): flags `hollowed_output_block` when a
+    `segments[].block_ids[]`-cited block's source text is non-trivial but
+    its current converged-draft text is empty/near-empty (an absolute
+    word-count floor, not a length band — see that script's own module
+    docstring for why a band is deliberately not built here).
+  - **New in 1.12.0 — a within-cohort output-coverage ratio-outlier
+    surfacer, `Refs #202` (this does NOT close #202 — see the limitation
+    below).** OPT-IN: config `validation.conservation_ratio_band`
+    (`min_source_words_band`/`min_cohort`/`k`/`abs_guard`); absent or
+    `null` means this lane does not run at all and `output-coverage`
+    behaves exactly as it did in 1.11.0. Per cohort
+    (blocks sharing a manifest `type`), it flags `low_coverage_outlier`
+    when a block's output/source word ratio falls below a robust
+    median-and-MAD fence computed from its OWN cohort, AND is well below
+    that cohort's own typical ratio (a second, independent `abs_guard`
+    condition that defends against a degenerate near-zero-MAD cohort).
+    `zero_output_block` and `insufficient_sample` (naming a `reason`)
+    cover the edge cases; a `coverage_distribution` entry
+    (`median_ratio`/`mad`/`fence_ratio` per cohort, `null` when nothing
+    was eligible to compute them from) rides alongside the warnings on the
+    same stdout JSON line.
+  - **Stated limitation — this lane structurally cannot close #202.** It
+    is a within-cohort comparison, never an absolute truthfulness check:
+    if every block in a cohort is truncated by roughly the same
+    proportion, that cohort's own median absorbs the truncation and
+    nothing reads as an outlier — detecting uniform collapse would need a
+    reference outside the audited population, and none exists here. It is
+    also NOT language-pair-agnostic: `normalize_words()` is NFC +
+    whitespace splitting only, no morphological/markup/sentinel
+    normalization, so agglutinative/compounding target languages and
+    markup-heavy blocks produce ratios that are not linguistically
+    comparable across language pairs. What it DOES catch: a few collapsed
+    blocks amid an otherwise healthy cohort — proportional truncation
+    across a range of block sizes, which the absolute floor above cannot
+    see at any single fixed `(min_source_words, max_output_words)` pair.
+  Read the WARN list; it is diagnostic input for W8's report, not a stop
+  condition.
 
 **W8 Deliver** — report convergence stats, list any `blocked`/
 `non_converged` segments explicitly. Also surface W7's whole-project
@@ -1350,10 +1424,11 @@ declared heading source marker surfaced as a non-empty `kind:"heading"` node
 in the assembled NodeStream. Exit `1` HARD on a dropped/misclassified
 heading; exit `0` with non-gating WARN entries otherwise.
 
-Then run `scripts/validate_conservation.py output-coverage` — same
-WARN-only #202 floor as W7, this time reading `out/.assembled/
-nodestream.json` (`output.v1_scope: assembled_book`) instead of converged
-drafts. Never gates; exit `0` always barring an env/usage precondition.
+Then run `scripts/validate_conservation.py output-coverage` — the same
+WARN-only #202 floor + within-cohort ratio-outlier lane as W7 (see above),
+this time reading `out/.assembled/nodestream.json`
+(`output.v1_scope: assembled_book`) instead of converged drafts. Never
+gates; exit `0` always barring an env/usage precondition.
 
 Then run `scripts/diff_rendered_output.py` as the acceptance gate: it
 re-renders and diffs against the last accepted baseline — exit `0` on an exact match, `1`

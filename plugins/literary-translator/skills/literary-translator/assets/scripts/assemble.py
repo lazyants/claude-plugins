@@ -881,6 +881,44 @@ def build_nodestream(profile: dict, manifest: dict, converged: dict) -> tuple:
     # addition to the always-heading built-in "HEAD" (empty by default --
     # byte-identical to pre-#210 behavior when the manifest omits it).
     heading_types = frozenset(manifest.get("heading_types") or ())
+    # #210 R1: optional per-block-type markdown heading level (1-6).
+    # Validated HERE, independently of validate_extraction.py's own W2
+    # jsonschema gate -- assemble.py is directly reachable on a resumed
+    # project, so a manifest that never passed through W2 (or was hand-
+    # edited after) must still be defended against a typo'd or malformed
+    # heading_levels map. Absent map, or a type absent from it, both fall
+    # back to level 2 at node-construction time below -- byte-identical to
+    # pre-1.12.0 output.
+    heading_levels = manifest.get("heading_levels") or {}
+    if not isinstance(heading_levels, dict):
+        raise AssembleError(
+            f"manifest.json heading_levels must be an object, got "
+            f"{type(heading_levels).__name__}"
+        )
+    heading_level_keys_allowed = heading_types | {"HEAD"}
+    for level_key, level_value in heading_levels.items():
+        if not isinstance(level_key, str) or not level_key:
+            raise AssembleError(
+                f"manifest.json heading_levels has an invalid key "
+                f"{level_key!r} -- keys must be non-empty strings"
+            )
+        if level_key not in heading_level_keys_allowed:
+            raise AssembleError(
+                f"manifest.json heading_levels key {level_key!r} is not "
+                f"declared in heading_types (or the built-in 'HEAD') -- add "
+                f"it to heading_types or remove this heading_levels entry",
+                reason="undeclared_heading_level_type",
+            )
+        if isinstance(level_value, bool) or not isinstance(level_value, int):
+            raise AssembleError(
+                f"manifest.json heading_levels[{level_key!r}] must be an "
+                f"int 1..6, got {level_value!r}"
+            )
+        if not 1 <= level_value <= 6:
+            raise AssembleError(
+                f"manifest.json heading_levels[{level_key!r}] = "
+                f"{level_value} is out of range -- must be 1..6"
+            )
 
     footnote_entries_by_n = {}
     for fe in manifest_footnotes:
@@ -1084,6 +1122,7 @@ def build_nodestream(profile: dict, manifest: dict, converged: dict) -> tuple:
                     "seg": seg,
                     "kind": kind,
                     "raw_type": raw_type,
+                    "level": heading_levels.get(raw_type, 2) if kind == "heading" else None,
                     "order_index": order_index,
                     "medium": medium,
                     "text": text,
@@ -1220,6 +1259,7 @@ def build_nodestream(profile: dict, manifest: dict, converged: dict) -> tuple:
                 "seg": fb_id,
                 "kind": "prose",
                 "raw_type": "FRONTBACK_REGENERATE_PLACEHOLDER",
+                "level": None,
                 "order_index": mb["order_index"],
                 "medium": "plain",
                 "text": placeholder_text,

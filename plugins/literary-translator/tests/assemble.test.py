@@ -275,14 +275,17 @@ def _yaml_dump(obj) -> str:
 
 
 def write_manifest(root, blocks, segments, footnotes=None, verse_store=None, frontback=None,
-                    heading_types=None):
+                    heading_types=None, heading_levels=None):
     """blocks: dict[id -> block dict, WITHOUT 'id' key (filled in here)].
     segments: list of segment dicts (each already fully shaped).
     heading_types: optional list of manifest-declared heading block-type
     tags (#210) -- omitted entirely (not even as an empty list) unless a
     caller passes one, so the default fixture stays byte-identical to
     pre-#210 manifests and exercises the schema's back-compat "absent"
-    path."""
+    path.
+    heading_levels: optional dict[raw_type -> level int] (#210 R1) --
+    likewise omitted entirely unless a caller passes one, for the same
+    back-compat-default reason."""
     for bid, b in blocks.items():
         b.setdefault("id", bid)
         b.setdefault("sha1", hashlib.sha1(bid.encode()).hexdigest())
@@ -304,6 +307,8 @@ def write_manifest(root, blocks, segments, footnotes=None, verse_store=None, fro
     }
     if heading_types is not None:
         manifest["heading_types"] = heading_types
+    if heading_levels is not None:
+        manifest["heading_levels"] = heading_levels
     (root / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False), encoding="utf-8")
 
 
@@ -1363,6 +1368,20 @@ def test_frontback_regenerate_emits_a_placeholder_node_and_a_warning(tmp_path):
     assert placeholder_nodes[0]["text"].strip(), "the placeholder node must carry some non-empty text"
     assert "regenerate" in result.stderr.lower() and "cover" in result.stderr, (
         "a regenerate disposition must be surfaced as a warning naming the frontback id"
+    )
+    # #210 R1: assemble.py has exactly two all_nodes.append() call sites --
+    # the ordinary per-block loop and this frontback-regenerate placeholder
+    # -- and this fixture's assembled nodestream contains a node from EACH
+    # ("p1" from the ordinary loop, the placeholder from this one), so a
+    # loop over every node here genuinely exercises both sites, not just
+    # the one this test's name calls out. Assert PRESENCE, not just a
+    # compatible value -- a future refactor that drops the key on some path
+    # must fail this even if it happens to leave every OTHER field intact.
+    for node in ns["nodes"]:
+        assert "level" in node, f"node {node['id']!r} missing 'level'"
+    assert placeholder_nodes[0]["level"] is None, (
+        "the placeholder's kind is hardcoded \"prose\" -- level is a "
+        "heading-only concept"
     )
 
 
@@ -2807,10 +2826,11 @@ def test_footnote_nested_two_levels_deep_in_def_embedded_verses_is_discovered(tm
 # ===========================================================================
 
 
-def _book_with_custom_heading_block_type(root, heading_types=None):
+def _book_with_custom_heading_block_type(root, heading_types=None, heading_levels=None):
     """Two segments, each with one CHAPTER-typed block (the candidate
     heading) followed by one ordinary PARA block. CHAPTER is never "HEAD" --
-    only `heading_types` (when passed) can make it classify as a heading."""
+    only `heading_types` (when passed) can make it classify as a heading.
+    `heading_levels`: optional (#210 R1) -- forwarded straight through."""
     write_manifest(
         root,
         blocks={
@@ -2830,6 +2850,7 @@ def _book_with_custom_heading_block_type(root, heading_types=None):
              "block_ids": ["h2", "p2"], "word_count": 20},
         ],
         heading_types=heading_types,
+        heading_levels=heading_levels,
     )
     write_segpack(
         root, "seg01",
@@ -2935,6 +2956,214 @@ def test_manifest_declared_heading_type_drives_render_title_and_filename(tmp_pat
         "the raw seg id must not leak into the frontmatter title once a "
         "real heading is present"
     )
+
+
+# ===========================================================================
+# 17. #210 R1 -- manifest-declared heading_levels (markdown heading LEVEL).
+#
+# Pre-#210-R1, render_obsidian.py hardcoded every heading node to "## " --
+# a custom adapter declaring both a chapter type and a sub-section type got
+# both flattened to the same level. manifest.heading_levels (schema-
+# optional, additive, keyed by the SAME raw block-type tags heading_types
+# declares, plus the always-heading built-in "HEAD") lets a manifest assign
+# each heading type its own level (1-6). assemble.py reads/validates it and
+# stamps a "level" key onto every node; render_obsidian.py (A2's own file,
+# not this one) is what actually emits the "#"*level markdown -- this file
+# only proves the node's own "level" field is correct, not the rendered
+# bytes.
+#
+# The cross-field rule (every heading_levels key must be a member of
+# heading_types union {"HEAD"}) is NOT expressible in JSON Schema, so it is
+# enforced independently in TWO places: validate_extraction.py at W2 (its
+# own test file), and HERE in assemble.py itself -- because assemble.py is
+# directly reachable on a resumed project whose manifest.json may never
+# have passed through W2's jsonschema gate (or was hand-edited after). The
+# AssembleError tests below prove assemble.py does not trust W2 to have run.
+# ===========================================================================
+
+
+def _book_with_heading_levels(root, heading_types=None, heading_levels=None):
+    """One segment mixing every kind _classify_kind can produce: the
+    built-in "HEAD" heading, a declared "CHAPTER" heading, a declared-but-
+    unmapped "PART" heading, an ordinary PARA (prose), and a block-mounted
+    VERSE. Lets one fixture cover "heading gets a level", "declared type
+    absent from heading_levels defaults to 2", and "non-heading kinds carry
+    level: None" all at once."""
+    write_manifest(
+        root,
+        blocks={
+            "hHead": {"type": "HEAD", "seg": "seg01", "order_index": 0,
+                      "plain_text": "Raw Head Heading"},
+            "hChapter": {"type": "CHAPTER", "seg": "seg01", "order_index": 1,
+                         "plain_text": "Raw Chapter Heading"},
+            "hPart": {"type": "PART", "seg": "seg01", "order_index": 2,
+                      "plain_text": "Raw Part Heading"},
+            "p1": {"type": "PARA", "seg": "seg01", "order_index": 3,
+                   "plain_text": "Body text one."},
+            "vblockA": {"type": "VERSE", "seg": "seg01", "order_index": 4,
+                        "plain_text": V_PH_A},
+        },
+        segments=[
+            {"seg": "seg01", "kind": "body", "title_text": "Chapter One",
+             "block_ids": ["hHead", "hChapter", "hPart", "p1", "vblockA"],
+             "word_count": 50},
+        ],
+        verse_store=[{"vid": "vA", "placeholder": V_PH_A, "context": "body",
+                       "parent_block": "vblockA", "mount": "block"}],
+        heading_types=heading_types,
+        heading_levels=heading_levels,
+    )
+    write_segpack(
+        root, "seg01",
+        blocks=[
+            {"id": "hHead", "order_index": 0, "plain_text": "Raw Head Heading"},
+            {"id": "hChapter", "order_index": 1, "plain_text": "Raw Chapter Heading"},
+            {"id": "hPart", "order_index": 2, "plain_text": "Raw Part Heading"},
+            {"id": "p1", "order_index": 3, "plain_text": "Body text one."},
+            {"id": "vblockA", "order_index": 4, "source_html": "<p>Verse line one<br/>Verse line two</p>"},
+        ],
+        verses=[{"vid": "vA", "placeholder": V_PH_A, "parent_block": "vblockA"}],
+    )
+    write_draft(
+        root, "seg01",
+        blocks={
+            "hHead": "Translated Head Heading",
+            "hChapter": "Translated Chapter Heading",
+            "hPart": "Translated Part Heading",
+            "p1": "Translated body text one.",
+            "vblockA": V_PH_A,
+        },
+        verses={"vA": {"rendered": "Line one\nLine two", "literal_gloss": "Gloss for one and two"}},
+    )
+    write_ledger(root, {"seg01": {"status": "converged"}})
+
+
+def test_heading_gets_level_prose_and_verse_get_none(tmp_path):
+    """heading_levels maps "HEAD" and "CHAPTER" to distinct levels; "PART" is
+    declared in heading_types but deliberately left OUT of heading_levels
+    (must default to 2, not error). Prose and verse nodes must carry
+    level: None -- level is a heading-only concept."""
+    root = make_root(tmp_path)
+    _book_with_heading_levels(
+        root, heading_types=["CHAPTER", "PART"],
+        heading_levels={"HEAD": 1, "CHAPTER": 3},
+    )
+
+    result = run_assemble(root)
+    assert result.returncode == 0, f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+
+    ns = read_nodestream(root)
+    by_id = {n["id"]: n for n in ns["nodes"]}
+    # Presence, not just value equality, over EVERY node -- a future
+    # refactor that drops the key on some path must fail here even if
+    # every value assertion below still happens to hold.
+    for node in ns["nodes"]:
+        assert "level" in node, f"node {node.get('id')!r} is missing the \"level\" key entirely"
+    assert by_id["hHead"]["kind"] == "heading"
+    assert by_id["hHead"]["level"] == 1
+    assert by_id["hChapter"]["kind"] == "heading"
+    assert by_id["hChapter"]["level"] == 3
+    assert by_id["hPart"]["kind"] == "heading", (
+        "PART is declared in heading_types, so it must still classify as "
+        "a heading even though heading_levels omits it"
+    )
+    assert by_id["hPart"]["level"] == 2, (
+        "a heading type absent from heading_levels must default to level "
+        "2 -- byte-identical to pre-#210-R1 output"
+    )
+    assert by_id["p1"]["kind"] == "prose"
+    assert by_id["p1"]["level"] is None, "level is a heading-only concept"
+    assert by_id["vblockA"]["kind"] == "verse"
+    assert by_id["vblockA"]["level"] is None, "level is a heading-only concept"
+
+
+def test_heading_levels_absent_defaults_every_heading_to_level_2(tmp_path):
+    """The exact same book, but manifest.heading_levels is entirely absent
+    (not even an empty object) -- every heading node (built-in HEAD and the
+    declared CHAPTER/PART types alike) must default to level 2, matching
+    the pre-#210-R1 hardcoded "## " output byte-for-byte."""
+    root = make_root(tmp_path)
+    _book_with_heading_levels(
+        root, heading_types=["CHAPTER", "PART"], heading_levels=None,
+    )
+    manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
+    assert "heading_levels" not in manifest, "sanity: the field must be genuinely absent"
+
+    result = run_assemble(root)
+    assert result.returncode == 0, f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+
+    ns = read_nodestream(root)
+    by_id = {n["id"]: n for n in ns["nodes"]}
+    assert by_id["hHead"]["level"] == 2
+    assert by_id["hChapter"]["level"] == 2
+    assert by_id["hPart"]["level"] == 2
+
+
+def test_heading_level_key_not_declared_in_heading_types_is_fatal(tmp_path):
+    """Cross-field guard, proven INDEPENDENTLY of W2 (this is a real
+    assemble.py subprocess, never run through validate_extraction.py's own
+    jsonschema gate first): a heading_levels key ("SECTION") that is
+    neither in heading_types nor the built-in "HEAD" is a typo that would
+    otherwise silently no-op -- must raise AssembleError, exit 1."""
+    root = make_root(tmp_path)
+    _book_with_custom_heading_block_type(
+        root, heading_types=["CHAPTER"], heading_levels={"SECTION": 2},
+    )
+
+    result = run_assemble(root)
+    assert result.returncode == 1, f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    payload = parse_one_json_line(result)
+    assert payload.get("reason") == "undeclared_heading_level_type", payload
+    assert "SECTION" in payload.get("error", ""), payload
+    assert not (root / "out" / ".assembled" / "nodestream.json").is_file()
+
+
+def test_heading_level_non_int_value_is_fatal(tmp_path):
+    """A heading_levels value that is not an int (a string digit, here) must
+    raise AssembleError -- assemble.py cannot trust the manifest was ever
+    jsonschema-validated."""
+    root = make_root(tmp_path)
+    _book_with_custom_heading_block_type(
+        root, heading_types=["CHAPTER"], heading_levels={"CHAPTER": "2"},
+    )
+
+    result = run_assemble(root)
+    assert result.returncode == 1, f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    payload = parse_one_json_line(result)
+    assert "heading_levels" in payload.get("error", ""), payload
+
+
+def test_heading_level_bool_value_is_fatal(tmp_path):
+    """`bool` is a subclass of `int` in Python -- `isinstance(True, int)` is
+    True -- so a naive `isinstance(v, int)` check would silently accept
+    `heading_levels: {"CHAPTER": true}` as level 1. Must be rejected
+    explicitly, same as validate_extraction.py's own W2 schema gate."""
+    root = make_root(tmp_path)
+    _book_with_custom_heading_block_type(
+        root, heading_types=["CHAPTER"], heading_levels={"CHAPTER": True},
+    )
+
+    result = run_assemble(root)
+    assert result.returncode == 1, f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    payload = parse_one_json_line(result)
+    assert "heading_levels" in payload.get("error", ""), payload
+
+
+@pytest.mark.parametrize("bad_level", [0, 7])
+def test_heading_level_out_of_range_value_is_fatal(tmp_path, bad_level):
+    """A heading_levels value outside 1..6 must raise AssembleError --
+    level 0 would render zero "#" characters (silently producing prose,
+    not a heading), level 7 is not valid markdown."""
+    root = make_root(tmp_path)
+    _book_with_custom_heading_block_type(
+        root, heading_types=["CHAPTER"], heading_levels={"CHAPTER": bad_level},
+    )
+
+    result = run_assemble(root)
+    assert result.returncode == 1, f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    payload = parse_one_json_line(result)
+    assert "heading_levels" in payload.get("error", ""), payload
+    assert str(bad_level) in payload.get("error", ""), payload
 
 
 # ===========================================================================
