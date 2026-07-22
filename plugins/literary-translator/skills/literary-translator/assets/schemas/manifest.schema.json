@@ -276,6 +276,12 @@
       "items": { "type": "string", "minLength": 1 },
       "uniqueItems": true,
       "description": "Adapter-declared block-type tags that are headings (in addition to the always-heading built-in 'HEAD'). A custom extractor lists its own heading tags here (e.g. ['SIMAN','PEREK']); the shipped gutenberg_epub adapter emits 'HEAD' and need not set it."
+    },
+    "heading_levels": {
+      "type": "object",
+      "propertyNames": { "type": "string", "minLength": 1 },
+      "additionalProperties": { "type": "integer", "minimum": 1, "maximum": 6 },
+      "description": "Optional per-block-type markdown heading level (1-6) for types listed in heading_types (or the built-in 'HEAD'). A type absent from this map, or an absent map, renders at level 2 -- byte-identical to pre-1.12.0 output."
     }
   },
   "required": ["blocks", "spine", "segments", "footnotes", "frontback", "verse", "source_inputs", "generation_hashes"],
