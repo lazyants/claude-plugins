@@ -101,3 +101,26 @@ described the reviewed tree.
 Corollary for the post-verdict delta: a doc/count correction that fires AFTER the clean verdict is by
 design unreviewed. Scope a confirm pass to exactly that delta rather than skipping it — skipping
 recreates the same gap at the last possible moment.
+
+## Name your own design's weakest joint IN the review prompt
+
+Handing a reviewer a neutrally-presented plan wastes the round it takes them to find the seam you
+already suspected. Instead, state the joint you are least sure of as an explicit, named question and
+say it is the sharpest one — then let the reviewer rule on it. You know where you hand-waved; the
+reviewer has to discover it.
+
+Verified 2026-07-22 (enduser-handbook plan review, rounds 1-2), twice in one loop. Round 1's prompt
+enumerated the load-bearing research premises and asked "flag any place where the design would be
+wrong if a premise were subtly off" — both BLOCKERs came back against exactly those premises. Round
+2's prompt asked directly whether including a path in a derived root's *selection* set made the
+existing containment gate on that same path circular, and labelled it "the sharpest question in this
+round"; that framing is what turned a vague unease into a concrete false-GREEN (→
+skill:schema-gate-hardening lens 10).
+
+Two things make this work rather than bias the reviewer: ask it as a **question with a real "no"
+available** ("is X correct? — prescribe the correct membership"), never as a leading assertion; and
+keep asking the rest of the plan openly, so naming one joint narrows nothing else. The technique
+composes with the freeze above — freeze the tree, then point at the seam.
+
+Corollary: if you cannot name a weakest joint, you have not understood your own plan well enough to
+review-gate it yet. That absence is a signal, not a clean bill of health.

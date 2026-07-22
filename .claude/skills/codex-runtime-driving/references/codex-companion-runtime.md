@@ -120,12 +120,19 @@ verdict (clean); `-C <root>` sets the readable root; `--skip-git-repo-check` all
 Inline the plan text into the prompt (scratchpad may be outside `-C`). Read only the `-o` verdict
 file, NOT the verbose log (session-memory noise there can trip a false prompt-injection warning).
 
-**Reviewing a file that lives in the SCRATCHPAD — stage it into the repo/worktree first.** This bites
-the rescue Agent too, not just `codex exec`: a fresh (non-resumed) codex session cannot see
-`/private/tmp/claude-501/…/scratchpad/`, and it reports back that it "could not locate the file",
-then reviews **whatever it can infer from your prompt text instead** — a review that reads as
-authoritative but was never grounded in the artifact (verified 2026-07-19: a plan-review round
-silently degraded this way and had to be re-run). Fix — copy it in and git-exclude it:
+**Reviewing a file that lives in the SCRATCHPAD — CHECK first, then stage only if the check fails.**
+A fresh (non-resumed) codex session *may* be unable to see `/private/tmp/claude-501/…/scratchpad/`;
+it then reports "could not locate the file" and reviews **whatever it can infer from your prompt
+text instead** — a review that reads as authoritative but was never grounded in the artifact
+(verified 2026-07-19: a plan-review round silently degraded this way and had to be re-run).
+**But this is environment-dependent, NOT universal** — verified 2026-07-22 in a worktree run where
+codex read the scratchpad plan directly and the job log showed its `wc -l <scratchpad-path>` at
+`exit 0`, with round-1 findings correctly citing plan line numbers. So do not stage reflexively:
+the staged copy is a real **staleness hazard** (every plan revision must be re-synced or codex
+silently reviews an old draft, and you now have two copies to keep honest). Cheap check, ~2 s:
+grep the job `.log` for your read of the file and its `exit 0` / `could not locate` line. Stage the
+copy only if the read actually fails, and delete it once direct reads are confirmed working.
+Fix, when you do need it — copy it in and git-exclude it:
 ```
 /bin/cp -f <scratchpad>/plan.md <worktree>/PLAN-REVIEW-SCRATCH.md
 echo "PLAN-REVIEW-SCRATCH.md" >> "$(git -C <worktree> rev-parse --path-format=absolute --git-path info/exclude)"
@@ -234,7 +241,15 @@ When the forwarder's prose "job ID" matches nothing under `status --all`:
 
 ## Session-boundedness & worker liveness
 - The **forwarder's native detached `task-<id>` SURVIVES its own exit**, runs to completion, and is
-  adoptable/pollable later — this is the reliable case.
+  adoptable/pollable later — this is the *usual* case, but **not unconditional: verify liveness, do
+  not assume it.** Counter-observation (2026-07-22, n=1, plan-review round 2): the harness
+  BACKGROUNDED the `Agent(codex:codex-rescue)` call itself — the forwarder returned "manually
+  backgrounded by the user … I don't monitor progress" and the codex WORKER died with it. Tell:
+  `.status` still says `running`, but `kill -0 <pid>` is DEAD and the job `.log` ends mid-command,
+  cold for minutes. Same signature as the `--background`-under-a-Bash-tool-`timeout` kill below, but
+  a different trigger (the Agent call, not a Bash timeout), so the "detached ⇒ safe" reading does not
+  cover it. **Always check `kill -0 .pid` + log mtime before believing `running`**; recovery is
+  `cancel <id>` + a FRESH direct `--prompt-file` dispatch (pattern A), never a resume.
 - A **codex arm spawned INSIDE a Workflow agent** (e.g. via the codex-cli-runtime wrapper) is
   SESSION-BOUND: it survives the Workflow subagent's ~2-min wrapper timeout WITHIN the session (poll
   `status`/`result`, or read the partial verdict from `…/jobs/<id>.log`), but after a full CC session
