@@ -1369,6 +1369,21 @@ def test_frontback_regenerate_emits_a_placeholder_node_and_a_warning(tmp_path):
     assert "regenerate" in result.stderr.lower() and "cover" in result.stderr, (
         "a regenerate disposition must be surfaced as a warning naming the frontback id"
     )
+    # #210 R1: the synthesized placeholder node is the SECOND (and only
+    # other) all_nodes.append() call site in assemble.py -- it must carry
+    # the "level" key too (present, not just a compatible value), so a
+    # consumer written against the documented BlockNode contract (every
+    # node has "level") never KeyErrors on this one path. Presence, not
+    # just value equality -- a future refactor that drops the key must fail
+    # this assertion even if it happens to leave every OTHER field intact.
+    assert "level" in placeholder_nodes[0], (
+        "every node, including the frontback-regenerate placeholder, must "
+        "carry a \"level\" key"
+    )
+    assert placeholder_nodes[0]["level"] is None, (
+        "the placeholder's kind is hardcoded \"prose\" -- level is a "
+        "heading-only concept"
+    )
 
 
 # ===========================================================================
@@ -3040,6 +3055,11 @@ def test_heading_gets_level_prose_and_verse_get_none(tmp_path):
 
     ns = read_nodestream(root)
     by_id = {n["id"]: n for n in ns["nodes"]}
+    # Presence, not just value equality, over EVERY node -- a future
+    # refactor that drops the key on some path must fail here even if
+    # every value assertion below still happens to hold.
+    for node in ns["nodes"]:
+        assert "level" in node, f"node {node.get('id')!r} is missing the \"level\" key entirely"
     assert by_id["hHead"]["kind"] == "heading"
     assert by_id["hHead"]["level"] == 1
     assert by_id["hChapter"]["kind"] == "heading"

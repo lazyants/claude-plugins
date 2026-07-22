@@ -1259,6 +1259,7 @@ def build_nodestream(profile: dict, manifest: dict, converged: dict) -> tuple:
                 "seg": fb_id,
                 "kind": "prose",
                 "raw_type": "FRONTBACK_REGENERATE_PLACEHOLDER",
+                "level": None,
                 "order_index": mb["order_index"],
                 "medium": "plain",
                 "text": placeholder_text,
