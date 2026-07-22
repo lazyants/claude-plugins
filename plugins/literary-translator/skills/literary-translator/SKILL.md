@@ -1350,8 +1350,10 @@ Runs at W7 over every converged segment:
     docstring for why a band is deliberately not built here).
   - **New in 1.12.0 — a within-cohort output-coverage ratio-outlier
     surfacer, `Refs #202` (this does NOT close #202 — see the limitation
-    below).** Config `validation.conservation_ratio_band`
-    (`min_source_words_band`/`min_cohort`/`k`/`abs_guard`). Per cohort
+    below).** OPT-IN: config `validation.conservation_ratio_band`
+    (`min_source_words_band`/`min_cohort`/`k`/`abs_guard`); absent or
+    `null` means this lane does not run at all and `output-coverage`
+    behaves exactly as it did in 1.11.0. Per cohort
     (blocks sharing a manifest `type`), it flags `low_coverage_outlier`
     when a block's output/source word ratio falls below a robust
     median-and-MAD fence computed from its OWN cohort, AND is well below
