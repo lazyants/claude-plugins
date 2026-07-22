@@ -767,6 +767,31 @@ def _render_verse_inline(content):
 # BlockNode -> markdown
 # ---------------------------------------------------------------------------
 
+def _heading_level(node):
+    """Renderer fail-safe CLAMP for a heading node's markdown level -- not a
+    validation gate (a gate, when one exists, lives upstream in assemble.py/
+    validate_extraction.py; this function's only job is to never let a
+    malformed `level` reach an invalid or silently-degrading `#` run).
+    Returns `node["level"]` when it is an `int` (explicitly NOT `bool` --
+    Python's `bool` is an `int` subclass, so `isinstance(True, int)` is
+    `True`, and a stray `level: true` must not sail through as if it were
+    `1`) in the range 1..6; anything else -- absent, `None`, a `str` like
+    `"3"`, a `bool`, or an out-of-range int (`0`, `7`) -- falls back to
+    **2**, the pre-1.12.0 hardcoded value. The absent case matters most:
+    every heading node built before this feature existed (and any
+    hand-built/legacy nodestream) has no `level` key at all, so the
+    byte-identical-output invariant for a project without `heading_levels`
+    depends on this fallback. Clamping is mandatory, not merely tidy: a
+    `level` of `0` would emit `f"{'#' * 0} {text}"` == `" {text}"`, silently
+    demoting a heading to plain prose with a stray leading space -- no
+    error, no heading, just vanished structure. A `level` above `6` would
+    emit `#######...`, which is not a valid ATX heading past level 6."""
+    level = node.get("level")
+    if isinstance(level, int) and not isinstance(level, bool) and 1 <= level <= 6:
+        return level
+    return 2
+
+
 def _render_block(node, linker):
     # One shared `seen_in_block` for the WHOLE rendered block (#105c) --
     # created once here. The prose branch below splices UNLINKED inline-verse
@@ -871,7 +896,7 @@ def _render_block(node, linker):
     if not text:
         return ""
     if kind == "heading":
-        return f"## {text}"
+        return f"{'#' * _heading_level(node)} {text}"
     return text
 
 
