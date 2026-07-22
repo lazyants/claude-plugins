@@ -57,7 +57,8 @@ path. Payload shape:
       "subst": {                                 # required; every key required
         "research_mode": "...", "verse_policy": "...",
         "source_lang": "...", "target_lang": "...",
-        "max_fix_rounds": N, "batch_agent_cap": N
+        "max_fix_rounds": N, "batch_agent_cap": N,
+        "effort": "low|medium|high|xhigh"        # #197; NOT "model" (see SUBST_FIELDS)
       },
       "resume_from_run_id": "<candidate RUN_ID>" | null,   # optional
       "segs": ["seg01", "seg02", ...],           # required for kind="mass"

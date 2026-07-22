@@ -15,6 +15,10 @@ Makes the codex reasoning **effort** a real, per-project knob and adds an option
 - **The glossary resume-integrity digest now carries `effort`** (`resume_setup.SUBST_FIELDS` gains `effort`). The mass digest already carried effort/model via the per-segment cache key; `model` is deliberately NOT added to `SUBST_FIELDS`, because the glossary pass has no model knob — adding it would encode a false dependency.
 - `profile.example.yml`'s `engine.effort` comment is corrected (it previously overstated that the driver already passed the profile value as a real `--effort` flag) and gains a commented `# model:` example.
 
+### Security
+
+- **Sink-side allowlist guard for `EFFORT`/`MODEL`** (`mass-translate-wf.template.js`). Both values are spliced into the detached `codex_job.py` dispatch shell command — `EFFORT` unquoted, `MODEL` single-quoted — so the workflow now re-validates each against its schema allowlist (`^(low|medium|high|xhigh)$` and `^[A-Za-z0-9][A-Za-z0-9._-]*$`; empty `MODEL` = unset) and throws before building any command, mirroring the existing `SEG_ID_RE` / `parseDisp` guards. This makes shell-safety independent of whether `profile.yml`'s Step-0 schema validation actually ran, closing the resume-path / hand-edited-profile bypass window. Covered by real node-execution tests in `seg_safety_source_and_workflow.test.py`.
+
 ### Migration
 
 Any existing project fully re-translates on upgrade — and this is forced regardless of the identity change: (1) `agent_config_hash` gains `model`, moving a GLOBAL `cache_key` field → every converged segment stales; (2) both the W5 and glossary templates are `PLUGIN_BUNDLE_MEMBERS`, so editing them moves `plugin_bundle_hash` (also GLOBAL) → every segment stales anyway (subsuming #1); (3) `SUBST_FIELDS` gains `effort`, so the resume digest value changes (moved digest, nothing extra to run). No delivered or in-flight project is affected: the frozen books are never re-run, and any new run starts from a clean scaffold on this code.

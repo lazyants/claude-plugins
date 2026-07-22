@@ -314,6 +314,27 @@ const BATCH_AGENT_CAP = {{BATCH_AGENT_CAP}};
 // threads only to the two codex_job.py launches, never to the fix step.
 const EFFORT = "{{EFFORT}}";
 const MODEL = "{{MODEL}}";
+
+// #197 -- defense-in-depth: EFFORT and MODEL are substituted from profile.yml
+// (schema-validated at Step 0) but are re-checked HERE, before either reaches
+// the codex_job.py dispatch SHELL command built in translateDrivePrompt/
+// reviewDrivePrompt below -- EFFORT is spliced UNQUOTED, MODEL single-quoted.
+// Mirrors the SEG_ID_RE / parseDisp guards below: a poisoned or hand-edited
+// profile.yml (or a resume that skips Step 0's schema validation) fails LOUDLY
+// here instead of silently reaching a shell splice. Allowlists kept identical
+// to profile.schema.json's engine.effort enum and engine.model pattern.
+const EFFORT_RE = /^(low|medium|high|xhigh)$/;
+if (!EFFORT_RE.test(EFFORT)) {
+  throw new Error("Unsafe engine.effort " + JSON.stringify(EFFORT) + ": must be one of low|medium|high|xhigh");
+}
+const MODEL_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+if (MODEL !== "" && !MODEL_RE.test(MODEL)) {
+  throw new Error("Unsafe engine.model " + JSON.stringify(MODEL) + ": must match ^[A-Za-z0-9][A-Za-z0-9._-]*$ (or be empty when unset)");
+}
+// MODEL_ARG single-quoted, appended only when truthy; a bare --model flag with
+// no value is never emitted. Hoisted here (identical in the translate and
+// review codex_job.py launches below; depends only on MODEL).
+const MODEL_ARG = MODEL ? " --model '" + MODEL + "'" : "";
 const VERSE_POLICY_INSTRUCTION_BLOCK = "{{VERSE_POLICY_INSTRUCTION_BLOCK}}";
 
 // #198 -- resolved codex-companion.mjs path. Substituted as a strict
@@ -556,9 +577,6 @@ function translateDrivePrompt(seg) {
   const taskFile = ROOT + "/segments/.codex_task.translate." + seg;
   const expectToken = RUN_ID + ":" + seg;
   const codexTask = translatePrompt(seg);
-  // #197 -- MODEL is single-quoted, like COMPANION, and appended only when
-  // truthy; a bare --model flag with no value is never emitted.
-  const MODEL_ARG = MODEL ? " --model '" + MODEL + "'" : "";
   const cmd =
     "DISP=$(uuidgen 2>/dev/null || echo $RANDOM$RANDOM$RANDOM); " +
     "TASKFILE=\"" + taskFile + ".$DISP\"; " +
@@ -621,9 +639,6 @@ function reviewDrivePrompt(seg, roundLabel) {
   const taskFile = ROOT + "/segments/.codex_task.review." + seg;
   const expectToken = RUN_ID + ":" + seg + ":r" + roundLabel;
   const codexTask = reviewDispatchPrompt(seg, roundLabel);
-  // #197 -- MODEL is single-quoted, like COMPANION, and appended only when
-  // truthy; a bare --model flag with no value is never emitted.
-  const MODEL_ARG = MODEL ? " --model '" + MODEL + "'" : "";
   const cmd =
     "DISP=$(uuidgen 2>/dev/null || echo $RANDOM$RANDOM$RANDOM); " +
     "TASKFILE=\"" + taskFile + ".$DISP\"; " +
