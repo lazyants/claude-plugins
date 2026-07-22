@@ -619,7 +619,13 @@ def test_merge_batches_rejects_expect_source_forms_file(tmp_path):
     ]
     proc = subprocess.run(cmd, capture_output=True, text=True, timeout=30, cwd=str(root))
     assert proc.returncode == 2, proc.stdout + proc.stderr
-    assert "expect-source-forms-file is not accepted with --merge-batches" in proc.stderr, proc.stderr
+    # 1.15.0: the refusal moved into canon_validate.py's MODE_SPECS table, so
+    # the sentence frame is now uniform across every refusing mode. The REASON
+    # is unchanged and still the point of this assertion -- an operator must
+    # be told where coverage IS enforced, not merely that the flag was
+    # refused.
+    assert "--merge-batches does not accept --expect-source-forms-file" in proc.stderr, proc.stderr
+    assert "coverage is enforced by --check-batch per fragment" in proc.stderr, proc.stderr
 
 
 # ===========================================================================

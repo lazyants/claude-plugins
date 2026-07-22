@@ -189,8 +189,22 @@ def test_init_leaves_an_existing_canon_byte_identical(tmp_path):
 
     again = run_canon_init(root)
     assert again.returncode == 0, f"second --init failed:\n{again.stdout}\n{again.stderr}"
-    assert json.loads(again.stdout)["created"] is False
+    payload = json.loads(again.stdout)
+    assert payload["created"] is False
     assert canon_path.read_bytes() == before, "--init re-wrote an existing canon.json"
+
+    # The REPORTED counterpart of the byte-identical check above, asserted in
+    # the same place so the observable behaviour and the signal a caller reads
+    # cannot drift apart. This is the one path where a successful invocation
+    # must still answer "no" to "did provenance move?" -- an inverted or
+    # stale flag here would be a false provenance signal, which is precisely
+    # the class this release exists to close. (The four WRITING modes are
+    # covered by canon_stamp_conservation.test.py's own uniformity test; this
+    # create-only case is not a writing mode and lives here.)
+    assert payload["generation_hashes_restamped"] is False, (
+        "--init on an existing canon wrote nothing but reported that "
+        "provenance moved"
+    )
 
 
 @pytest.mark.parametrize(

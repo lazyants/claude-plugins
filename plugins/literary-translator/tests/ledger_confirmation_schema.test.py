@@ -127,6 +127,29 @@ extract_const_object_literal = _drift.extract_const_object_literal
 
 
 # ---------------------------------------------------------------------------
+# Reuse ledger_update.test.py's verbatim JS extractors for the node harness
+# below -- same house rule, never a second vendored copy. That file already
+# splices real template functions into a standalone node script; this file
+# does the same for the consume-site guards, so the extraction primitives are
+# shared rather than reimplemented. Importing it is read-only: its
+# module-level work is template reads and extractions, and its own node
+# dependency is expressed as a pytest marker, not an import-time failure.
+# ---------------------------------------------------------------------------
+
+_LEDGER_UPDATE_TEST_PATH = Path(__file__).resolve().parent / "ledger_update.test.py"
+assert _LEDGER_UPDATE_TEST_PATH.is_file(), f"expected sibling test file not found: {_LEDGER_UPDATE_TEST_PATH}"
+
+_ledger_update_spec = importlib.util.spec_from_file_location(
+    "ledger_update_shared_for_ledger_confirmation_schema", _LEDGER_UPDATE_TEST_PATH
+)
+_ledger_update = importlib.util.module_from_spec(_ledger_update_spec)
+_ledger_update_spec.loader.exec_module(_ledger_update)
+
+_extract_js_function = _ledger_update._extract_js_function
+_extract_js_const = _ledger_update._extract_js_const
+
+
+# ---------------------------------------------------------------------------
 # Fixtures: the on-disk STRONG schemas (unchanged by this build) and the
 # FLAT agent-facing JS literals (parsed from the real shipped template).
 # ---------------------------------------------------------------------------
@@ -984,46 +1007,51 @@ def test_missing_key_set_const_fails_the_bridge_rather_than_skipping_it(
 
 
 # ---------------------------------------------------------------------------
-# #289 CLASS LOCK -- the presence-test idiom must stay deleted.
+# #289 CLASS LOCK -- a consume-site guard must judge failure EVIDENCE, never
+# key PRESENCE.
 #
 # #289 was found three times in one file (ledgerWriteSucceeded,
 # ledgerMergeSucceeded, artifactCheckMatched): a key-PRESENCE test standing
-# in for a failure-EVIDENCE test on a field the flat schema itself
-# advertises as fillable. Patching the three sites is rung 3; this lock is
-# rung 4.
+# in for a failure-EVIDENCE test on a field the flat schema itself advertises
+# as fillable. Patching the three sites is rung 3; this is rung 4.
 #
-# An earlier form of this lock enumerated the SPELLINGS a presence test can
-# be written in: it derived every optional field from the flat literals and
-# searched the template for `"<field>" in <obj>`. That is a blacklist, and it
-# did not actually cover #289 -- two of the three sites tested a LOOP
-# VARIABLE (`FAILURE_ONLY_KEYS.some((k) => k in raw)`), never a quoted field
-# name, so the lock would have missed the very defect it exists to lock out.
-# Only artifactCheckMatched's `!("mismatch_detail" in art)` matched it.
+# TWO STATIC ATTEMPTS AT RUNG 4 FAILED, AND THE REASON IS THE SAME BOTH TIMES.
+# The first enumerated the SPELLINGS a presence test can take, searching for
+# `"<field>" in <obj>`; it missed #289 itself, because two of the three sites
+# tested a LOOP VARIABLE (`FAILURE_ONLY_KEYS.some((k) => k in raw)`). The
+# second inverted that into "the `in` operator may appear only inside
+# hasFailureEvidence()", which needed a JS lexer to tell code from the
+# template's very large prose layer -- and the lexer's own division-vs-regex
+# heuristic could be tricked into blanking real code:
 #
-# So the lock is stated as its INVERSE instead: the JS `in` operator may
-# appear in this template's CODE only inside hasFailureEvidence(), the single
-# helper that owns the judgement. Every spelling -- quoted literal, loop
-# variable, computed key -- and every site, including a fourth consume-site
-# guard that does not exist yet, is then a failure by construction rather
-# than by enumeration.
+#     let z = "x" /FAILURE_EVIDENCE_KEYS.some(k => k in raw)/ 1;
 #
-# Two consequences, both deliberate:
-#   * A `for (const k in obj)` would trip this lock too, even though it is
-#     not a presence test. The template's idiom is Object.keys() (see
-#     hasOnlyKeys()), so nothing is given up today; a genuine future need has
-#     to amend this lock in the same commit and say why, which is exactly the
-#     review this defect class earned. A looser regex that tried to tell the
-#     two apart would be back to enumerating spellings.
-#   * hasFailureEvidence() is the ONE exemption, and it cannot be widened by
-#     moving a presence test INTO the helper and then not calling it:
-#     test_every_consume_site_guard_routes_through_the_shared_evidence_helper
-#     below pins that all three guards still consult it.
+# reads as a regex literal to that heuristic, so a fully present presence
+# test disappeared and the lock passed. The lexer existed to avoid false
+# REDs, and it bought them by creating false GREENs. For a safety lock that
+# is the wrong trade in the wrong direction: an over-firing lock is loud and
+# gets fixed, an under-firing one is silent exactly when it matters.
 #
-# The scan runs over CODE only. This template is ~1300 lines of which most is
-# comment and agent-prompt prose ("in place", "in full", "in binary mode"),
-# so a search for the word over the raw source would be meaningless.
-# _js_code_only() blanks comments, string/template literals and regex
-# literals to spaces, preserving offsets so reported line numbers stay honest.
+# Neither could see the other shape a static check cannot reach -- a guard
+# that calls hasFailureEvidence() and DISCARDS the verdict. Textually it
+# routes through the helper; behaviourally it judges nothing.
+#
+# So rung 4 is no longer a reader of the template. It is a pair:
+#
+#   1. A dumb raw-source TRIPWIRE (no lexing): the functions that consult
+#      hasOnlyKeys() must be exactly the roster in CONSUME_SITE_GUARDS. It
+#      cannot tell a call from a mention in a comment, and that is accepted
+#      -- a mention produces a false RED, which is loud and is fixed by
+#      amending the roster on purpose.
+#   2. BEHAVIOURAL tests driven by that roster, which EXECUTE each guard on
+#      returns it must accept and returns it must reject. A presence test
+#      fails the accept side in any spelling, obfuscated or not; a discarded
+#      verdict fails the reject side. Nothing is being read, so nothing can
+#      be read wrongly.
+#
+# Adding a consume site therefore cannot be done silently: the tripwire fires
+# until the roster names it, and naming it requires stating its accepted and
+# rejected returns, which is what makes it tested.
 # ---------------------------------------------------------------------------
 
 FLAT_AGENT_FACING_LITERALS = (
@@ -1069,22 +1097,30 @@ _REGEX_MAY_FOLLOW_KEYWORDS = frozenset({
 def _regex_may_start_at(source: str, offset: int) -> bool:
     """The standard JS `/`-is-a-regex-not-a-division disambiguation: a regex
     literal may begin only where an expression may begin, so anything that
-    can close one -- `)`, `]`, `}`, an identifier, a number -- is read as
-    division, unless that identifier is one of the keywords above.
+    can close one is read as division, unless it is a keyword after which an
+    expression may follow.
 
-    The current template contains no division at all (all five of its `/`
-    literals are regexes); the division branch exists so that introducing one
-    cannot silently make the scanner swallow code up to the next `/`. Where
-    the two readings are genuinely ambiguous the tie goes to division, which
-    consumes one character, over a regex, which could consume a line."""
+    What closes an expression, and why each entry is here: `)`, `]`, `}`; an
+    identifier or number; a closing string quote or template backtick (in
+    code context an opening one is impossible -- the scanner consumes a
+    literal whole, so a quote reached here is always the closing one); and a
+    postfix `++`/`--`, distinguished from binary `+`/`-` by the doubled
+    character. Every one of those was a demonstrated false-GREEN before it
+    was listed: `let z = "x" /KEYS.some(k => k in raw)/ 1;` read as a regex
+    literal and blanked a live presence test out of the projection.
+
+    Where the two readings are genuinely ambiguous the tie goes to division,
+    which consumes one character, over a regex, which could consume a line."""
     j = offset - 1
     while j >= 0 and source[j] in " \t\r\n":
         j -= 1
     if j < 0:
         return True
     c = source[j]
-    if c in ")]}":
+    if c in ")]}\"'`":
         return False
+    if c in "+-" and j > 0 and source[j - 1] == c:
+        return False  # postfix ++/--, not binary +/-
     if c.isalnum() or c in "_$":
         k = j
         while k >= 0 and (source[k].isalnum() or source[k] in "_$"):
@@ -1167,8 +1203,10 @@ def _regex_literal_end(source: str, start: int) -> int:
         j += 1
     raise AssertionError(
         f"unterminated regex literal at line {_line_of(source, start)}: "
-        f"{source[start:start + 60]!r}. If that `/` is actually a division, "
-        "_regex_may_start_at() misclassified it and needs the new context."
+        f"{source[start:start + 60]!r}. A `/` that opens no regex is usually a "
+        "DIVISION that _regex_may_start_at() mistook for a regex start -- add "
+        "whatever closes the expression to its division list. This fails loudly "
+        "rather than blanking the rest of the line, which is the safe direction."
     )
 
 
@@ -1182,7 +1220,10 @@ def _js_code_only(source: str) -> str:
     the schema literals' restricted grammar (its token regex accepts only
     `{}[]:,` punctuation and raises on anything else), so it cannot walk a
     whole template. This is the complementary, cruder job -- decide per
-    character whether it is code, and blank everything that is not."""
+    character whether it is code, and blank everything that is not.
+
+    Pinned by test_js_code_only_shapes below, which is the direct test table
+    this had no equivalent of when it first shipped."""
     out = list(source)
     n = len(source)
 
@@ -1260,15 +1301,17 @@ def _in_operator_sites(mass_translate_source: str) -> list:
 
 
 def _function_body_span(mass_translate_source: str, name: str) -> tuple:
-    """(start, end) offsets of `function <name>(...) { ... }` -- same
-    column-0 `\\n}` terminator convention as the sibling guard test below."""
-    start = mass_translate_source.find(f"function {name}(")
+    """(start, end) offsets of `function <name>(...) { ... }`, terminated at
+    the first column-0 `}` in the CODE PROJECTION -- never in raw source,
+    where an unindented `}` inside prompt text would truncate the body."""
+    code = _js_code_only(mass_translate_source)
+    start = code.find(f"function {name}(")
     assert start != -1, (
         f"the template no longer declares function {name}() -- the #289 class "
         "lock is anchored on it. If the helper was renamed or removed, "
         "re-anchor the lock deliberately rather than letting it disappear."
     )
-    return start, mass_translate_source.index("\n}", start)
+    return start, code.index("\n}", start)
 
 
 def assert_in_operator_confined_to_evidence_helper(mass_translate_source: str) -> None:
@@ -1306,6 +1349,52 @@ def assert_in_operator_confined_to_evidence_helper(mass_translate_source: str) -
     )
 
 
+@pytest.mark.parametrize(
+    "snippet,in_survives",
+    [
+        # --- blanked: `in` here is prose or pattern text, never an operator
+        pytest.param("/* in a block comment */\nlet a = 1;", False, id="block-comment"),
+        pytest.param("// in a line comment\nlet a = 1;", False, id="line-comment"),
+        pytest.param('let s = "a string saying in";', False, id="string-literal"),
+        pytest.param("let s = `template text saying in`;", False, id="template-text"),
+        pytest.param("let s = `head ${x} tail saying in`;", False,
+                     id="template-text-resuming-after-a-substitution"),
+        pytest.param("let s = `it's in text`;", False,
+                     id="apostrophe-inside-template-text"),
+        pytest.param("const re = /^(in|out)$/;", False, id="in-inside-a-regex-literal"),
+        # --- survives: a real `in` operator, however it is reached
+        pytest.param("let s = `${k in raw}`;", True,
+                     id="in-inside-a-substitution-body"),
+        pytest.param("for (const k in raw) { }", True, id="for-in-loop"),
+        pytest.param("const q = raw.n / 2;\nif (k in raw) { }", True,
+                     id="presence-test-after-a-real-division"),
+        # The three false-GREENs the division heuristic used to have: a `/`
+        # after a closing quote, a closing backtick, or a postfix increment
+        # was read as opening a regex literal, blanking everything to the
+        # next `/` -- including a live presence test.
+        pytest.param('let z = "x" /k in raw/ 1;', True, id="fake-regex-after-string-quote"),
+        pytest.param("let z = `x` /k in raw/ 1;", True, id="fake-regex-after-template-backtick"),
+        pytest.param("let w = 1; w++ /k in raw/ 1;", True, id="fake-regex-after-postfix-increment"),
+    ],
+)
+def test_js_code_only_shapes(snippet, in_survives):
+    """The direct test table _js_code_only() shipped without. It was written
+    to fit this one template, which is exactly the argument
+    _object_literal_key_names() makes for having its own table -- the same
+    argument applies here, and with more at stake: every static lock in this
+    file reads the projection this produces, so a shape it blanks wrongly is
+    a silent false GREEN in all of them at once.
+
+    Offsets and newlines must survive too, or the line numbers every failure
+    message reports would be lies."""
+    code = _js_code_only(snippet)
+    assert len(code) == len(snippet), "offsets were not preserved"
+    assert code.count("\n") == snippet.count("\n"), "newlines were not preserved"
+    assert bool(re.search(r"\bin\b", code)) is in_survives, (
+        f"projection of {snippet!r} was {code!r}"
+    )
+
+
 def test_flat_literals_still_declare_the_fields_289_fired_on_as_optional(mass_translate_source):
     """The lock is spelling-agnostic, but the reason the class exists at all
     is that these fields are OPTIONAL in the flat agent-facing schemas --
@@ -1324,99 +1413,100 @@ def test_flat_literals_still_declare_the_fields_289_fired_on_as_optional(mass_tr
     )
 
 
-def test_no_key_presence_test_exists_outside_the_shared_evidence_helper(mass_translate_source):
-    assert_in_operator_confined_to_evidence_helper(mass_translate_source)
-
-
-# A consume-site guard is the natural home for a reintroduction, so every
-# mutant below is spliced into ledgerWriteSucceeded() -- code context,
-# outside hasFailureEvidence(). The shipped template is never modified.
-_GUARD_BODY_ANCHOR = "function ledgerWriteSucceeded(raw) {\n"
-
-
-@pytest.mark.parametrize(
-    "reintroduced",
-    [
-        # The shape #289 ACTUALLY had at two of its three sites, and the one
-        # the previous enumerate-the-spellings form of this lock missed.
-        pytest.param(
-            "  if (FAILURE_EVIDENCE_KEYS.some((k) => k in raw)) return false;",
-            id="loop-variable",
-        ),
-        pytest.param('  if ("exit_code" in raw) return false;', id="quoted-literal"),
-        # #289's third site, the one spelling the old lock did catch -- kept
-        # so broadening the check cannot quietly trade one spelling for the other.
-        pytest.param('  if (!("mismatch_detail" in raw)) return false;', id="negated-quoted-literal"),
-        pytest.param(
-            '  const probe = "exit_code";\n  if (probe in raw) return false;',
-            id="computed-key",
-        ),
-    ],
+# Top-level declaration forms _function_spans() can find and delimit. The
+# arrow-const form is not used by the template today; it is recognised anyway
+# so that introducing one does not silently drop the function out of the
+# routing lock's view.
+_DECLARATION_FORMS = (
+    r"^(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*\(",
+    r"^const\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?\([^)]*\)\s*=>\s*\{",
 )
-def test_presence_test_lock_catches_a_reintroduction_in_any_spelling(
-    mass_translate_source, reintroduced,
-):
-    assert _GUARD_BODY_ANCHOR in mass_translate_source, (
-        "ledgerWriteSucceeded() no longer opens with the anchored signature "
-        "these RED-proof mutants splice into -- re-anchor them, do not delete them"
-    )
-    mutated = mass_translate_source.replace(
-        _GUARD_BODY_ANCHOR, _GUARD_BODY_ANCHOR + reintroduced + "\n", 1
-    )
-    with pytest.raises(AssertionError, match="#289 class regression"):
-        assert_in_operator_confined_to_evidence_helper(mutated)
+
+# Statement keywords whose `keyword (...) {` line looks exactly like an
+# object-literal method declaration. Excluded by name, not by heuristic.
+_STATEMENT_KEYWORDS = frozenset({
+    "catch", "do", "else", "for", "function", "if", "return", "switch",
+    "try", "while", "with",
+})
 
 
-@pytest.mark.parametrize(
-    "carrier",
-    [
-        pytest.param(
-            '  // a later note recalling that `"exit_code" in raw` was the #289 bug',
-            id="line-comment",
-        ),
-        pytest.param(
-            '  lines.push("Say whether exit_code in raw was set on the return.");',
-            id="prompt-string",
-        ),
-    ],
-)
-def test_presence_test_lock_ignores_the_idiom_inside_a_comment_or_a_prompt_string(
-    mass_translate_source, carrier,
-):
-    """The other half of the RED proof: the lock reads CODE, not the file. A
-    check that fired on the raw source would be unusable against a template
-    this comment- and prose-heavy, and would tempt the next author to loosen
-    it back into a spelling blacklist."""
-    mutated = mass_translate_source.replace(
-        _GUARD_BODY_ANCHOR, _GUARD_BODY_ANCHOR + carrier + "\n", 1
-    )
-    assert_in_operator_confined_to_evidence_helper(mutated)
+def _function_spans(mass_translate_source: str) -> dict:
+    """{name: (start, end)} for every top-level declaration, over the CODE
+    PROJECTION at BOTH ends. The terminator is looked up in the projection
+    rather than in raw source specifically so that an unindented `}` sitting
+    inside prompt text or a comment cannot end a span early and hide the rest
+    of a function body from every check built on this."""
+    code = _js_code_only(mass_translate_source)
+    spans = {}
+    for pattern in _DECLARATION_FORMS:
+        for m in re.finditer(pattern, code, re.M):
+            spans[m.group(1)] = (m.start(), code.index("\n}", m.start()))
+    return spans
+
+
+def _unspannable_declaration_sites(mass_translate_source: str) -> list:
+    """Object-literal method declarations (`const probes = { name(x) { ... } }`)
+    -- a function this file's span machinery cannot delimit, and therefore a
+    consume site the routing lock below would not see.
+
+    Reported so it can FAIL LOUDLY rather than be silently skipped. Spanning
+    the idiom correctly is more machinery than a currently-unused form
+    deserves; noticing that it arrived is nearly free, and converts a silent
+    blind spot into an instruction to extend _DECLARATION_FORMS in the same
+    commit."""
+    code = _js_code_only(mass_translate_source)
+    return [
+        (m.group(1), _line_of(mass_translate_source, m.start()))
+        for m in re.finditer(r"^[ \t]+([A-Za-z_$][\w$]*)\s*\([^()]*\)\s*\{[ \t]*$",
+                             code, re.M)
+        if m.group(1) not in _STATEMENT_KEYWORDS
+    ]
+
+
+def _hasonlykeys_callers(mass_translate_source: str) -> dict:
+    """{function name: declaration line} for every function whose body calls
+    hasOnlyKeys() -- read off the code projection, so a mention in a comment
+    or in prompt text is not counted."""
+    code = _js_code_only(mass_translate_source)
+    return {
+        name: _line_of(mass_translate_source, start)
+        for name, (start, end) in _function_spans(mass_translate_source).items()
+        if name != "hasOnlyKeys" and "hasOnlyKeys(" in code[start:end]
+    }
 
 
 def assert_every_consume_site_guard_routes_through_helper(mass_translate_source: str) -> None:
-    """The lock above is satisfiable by simply DELETING a check, which would
-    trade a false-reject for a false-green. Pin the other side, from two
-    directions: the three guards that exist today must still consult the
-    shared judgement (a named floor, which also notices if one of them is
-    deleted outright), AND -- since that enumeration cannot see a fourth
-    guard -- so must any OTHER function that consults hasOnlyKeys().
+    """The `in`-lock above is satisfiable by DELETING a check outright -- a
+    guard with no evidence test contains no `in` to find. This is the other
+    half of that pair: every consume site must still consult the shared
+    judgement. Neither half subsumes the other, and neither is redundant.
 
-    hasOnlyKeys() is the structural marker, not a naming convention: its only
-    argument is an object an agent returned, and every caller is therefore a
-    consume site that owes the same evidence judgement. A fourth guard that
-    remembered its allowed-key check but forgot its evidence check is exactly
-    the shape #289 had, and is invisible to a hand-kept list of three names.
-    """
-    named_guards = ("ledgerWriteSucceeded", "ledgerMergeSucceeded", "artifactCheckMatched")
+    Both halves are static, and both share one blind spot they cannot close:
+    a guard that CALLS hasFailureEvidence() and discards the verdict routes
+    through the helper textually while judging nothing. Detecting that
+    statically means data flow, and approximating it by pattern
+    (`if (hasFailureEvidence(`) is spelling enumeration, which is the exact
+    failure this whole lock has already had twice. It is covered by
+    EXECUTION instead -- see test_rostered_guard_rejects_every_evidence_
+    bearing_return, which is the only check here that catches it."""
+    unspannable = _unspannable_declaration_sites(mass_translate_source)
+    assert not unspannable, (
+        "the template now declares a function in an object-method form this "
+        "file cannot span, so the routing lock below cannot see whether it is "
+        "a consume site. Add the form to _DECLARATION_FORMS in this same "
+        f"commit. Sites (name, line): {unspannable}"
+    )
+
     spans = _function_spans(mass_translate_source)
-    for guard in named_guards:
+    code = _js_code_only(mass_translate_source)
+    for guard in ("ledgerWriteSucceeded", "ledgerMergeSucceeded", "artifactCheckMatched"):
         assert guard in spans, (
             f"{guard}() is no longer declared in the template -- if a "
             "consume-site guard was renamed or removed, re-anchor this floor "
             "deliberately rather than dropping the name."
         )
         start, end = spans[guard]
-        assert "hasFailureEvidence(" in mass_translate_source[start:end], (
+        assert "hasFailureEvidence(" in code[start:end], (
             f"{guard}() no longer calls hasFailureEvidence() -- the #289 "
             "class lock above would then pass vacuously, with the guard "
             "having no failure-evidence check at all."
@@ -1425,8 +1515,8 @@ def assert_every_consume_site_guard_routes_through_helper(mass_translate_source:
     unjudged = sorted(
         name for name, (start, end) in spans.items()
         if name != "hasOnlyKeys"
-        and "hasOnlyKeys(" in mass_translate_source[start:end]
-        and "hasFailureEvidence(" not in mass_translate_source[start:end]
+        and "hasOnlyKeys(" in code[start:end]
+        and "hasFailureEvidence(" not in code[start:end]
     )
     assert not unjudged, (
         "unjudged consume site -- these functions check an agent return's "
@@ -1441,21 +1531,188 @@ def test_every_consume_site_guard_routes_through_the_shared_evidence_helper(mass
     assert_every_consume_site_guard_routes_through_helper(mass_translate_source)
 
 
+def test_no_key_presence_test_exists_outside_the_shared_evidence_helper(mass_translate_source):
+    assert_in_operator_confined_to_evidence_helper(mass_translate_source)
+
+
+# Every mutant below is spliced into ledgerWriteSucceeded() -- code context,
+# outside hasFailureEvidence(). The shipped template is never modified.
+_GUARD_BODY_ANCHOR = "function ledgerWriteSucceeded(raw) {\n"
+
+
+def _splice_into_guard(mass_translate_source: str, line: str) -> str:
+    """Insert `line` at the top of ledgerWriteSucceeded()'s body, asserting
+    the anchor still exists. Every RED proof in this file goes through here
+    so none of them can go vacuous by silently not applying."""
+    assert _GUARD_BODY_ANCHOR in mass_translate_source, (
+        "ledgerWriteSucceeded() no longer opens with the anchored signature "
+        "the RED proofs splice into -- re-anchor them, do not delete them"
+    )
+    mutated = mass_translate_source.replace(
+        _GUARD_BODY_ANCHOR, _GUARD_BODY_ANCHOR + line + "\n", 1
+    )
+    assert mutated != mass_translate_source, "the splice did not apply"
+    return mutated
+
+
 @pytest.mark.parametrize(
-    "mutate,expected_message",
+    "reintroduced",
     [
-        # The named floor: an existing guard drops its evidence check.
+        # The shape #289 ACTUALLY had at two of its three sites, and the one
+        # the first enumerate-the-spellings form of this lock missed.
         pytest.param(
-            lambda s: s.replace(
-                "  if (hasFailureEvidence(art, REVIEW_ARTIFACT_EVIDENCE_KEYS)) return false;\n",
-                "",
-                1,
-            ),
-            "artifactCheckMatched.. no longer calls hasFailureEvidence",
-            id="named-guard-drops-its-check",
+            "  if (FAILURE_EVIDENCE_KEYS.some((k) => k in raw)) return false;",
+            id="loop-variable",
         ),
-        # The derived half: a FOURTH guard the enumeration cannot see, which
-        # remembered its allowed-key check and forgot its evidence check.
+        pytest.param('  if ("exit_code" in raw) return false;', id="quoted-literal"),
+        # #289's third site, the one spelling the old lock did catch -- kept
+        # so broadening the check cannot quietly trade one spelling for the other.
+        pytest.param('  if (!("mismatch_detail" in raw)) return false;', id="negated-quoted-literal"),
+        pytest.param(
+            '  const probe = "exit_code";\n  if (probe in raw) return false;',
+            id="computed-key",
+        ),
+        # The demonstrated false-GREEN: a presence test that the
+        # division-vs-regex disambiguator used to blank away as a fake regex
+        # literal, once after a closing string quote, once after a closing
+        # template backtick, once after a postfix increment.
+        pytest.param(
+            '  let z = "x" /FAILURE_EVIDENCE_KEYS.some(k => k in raw)/ 1;',
+            id="fake-regex-after-string-quote",
+        ),
+        pytest.param(
+            "  let z = `x` /FAILURE_EVIDENCE_KEYS.some(k => k in raw)/ 1;",
+            id="fake-regex-after-template-backtick",
+        ),
+        pytest.param(
+            "  let w = 1; w++ /FAILURE_EVIDENCE_KEYS.some(k => k in raw)/ 1;",
+            id="fake-regex-after-postfix-increment",
+        ),
+    ],
+)
+def test_presence_test_lock_catches_a_reintroduction_in_any_spelling(
+    mass_translate_source, reintroduced,
+):
+    with pytest.raises(AssertionError, match="#289 class regression"):
+        assert_in_operator_confined_to_evidence_helper(
+            _splice_into_guard(mass_translate_source, reintroduced)
+        )
+
+
+@pytest.mark.parametrize(
+    "carrier",
+    [
+        pytest.param(
+            '  // a later note recalling that `"exit_code" in raw` was the #289 bug',
+            id="line-comment",
+        ),
+        pytest.param(
+            '  lines.push("Say whether exit_code in raw was set on the return.");',
+            id="prompt-string",
+        ),
+        pytest.param(
+            "  const re = /^(in|out)$/;",
+            id="in-inside-a-regex-literal",
+        ),
+        pytest.param(
+            "  const msg = `checked ${raw.status} in place`;",
+            id="in-inside-template-text",
+        ),
+    ],
+)
+def test_presence_test_lock_ignores_the_idiom_inside_a_comment_or_a_prompt_string(
+    mass_translate_source, carrier,
+):
+    """The other half of the RED proof: the lock reads CODE, not the file. A
+    check that fired on the raw source would be unusable against a template
+    this comment- and prose-heavy (49 `in` occurrences in raw source, 1 in
+    the projection), and would tempt the next author to loosen it back into a
+    spelling blacklist. The splice is asserted to have landed, so a moved
+    anchor fails this loudly instead of passing it vacuously."""
+    assert_in_operator_confined_to_evidence_helper(
+        _splice_into_guard(mass_translate_source, carrier)
+    )
+
+
+@pytest.mark.parametrize(
+    "declaration",
+    [
+        pytest.param(
+            "function draftProbeMatched(probe) {\n"
+            "  if (!probe || probe.ok !== true) return false;\n"
+            "  return hasOnlyKeys(probe, REVIEW_ARTIFACT_ALLOWED_KEYS);\n"
+            "}\n",
+            id="function-declaration",
+        ),
+        # The arrow-const form the span machinery used to miss entirely: it
+        # matched only `function NAME(`, so a guard written this way was
+        # invisible to the routing lock AND contained no `in` for the lock
+        # above to find. Both halves missed it; now the span forms cover it.
+        pytest.param(
+            "const draftProbeMatched = (probe) => {\n"
+            "  if (!probe || probe.ok !== true) return false;\n"
+            "  return hasOnlyKeys(probe, REVIEW_ARTIFACT_ALLOWED_KEYS);\n"
+            "};\n",
+            id="arrow-const-declaration",
+        ),
+    ],
+)
+def test_routing_lock_catches_an_unjudged_consume_site(mass_translate_source, declaration):
+    """RED proof: a fourth guard that checks its allowed KEY SET but never
+    failure EVIDENCE -- #289's shape, at a site no name list knows about."""
+    unjudged = mass_translate_source.replace(
+        "function artifactCheckMatched(art) {",
+        declaration + "\nfunction artifactCheckMatched(art) {",
+        1,
+    )
+    assert unjudged != mass_translate_source, "the unjudged-guard mutation did not apply"
+    with pytest.raises(AssertionError, match="unjudged consume site"):
+        assert_every_consume_site_guard_routes_through_helper(unjudged)
+
+
+def test_routing_lock_refuses_an_unspannable_declaration_form(mass_translate_source):
+    """The object-literal method form is NOT spanned. Rather than let such a
+    guard slip past the routing lock unnoticed, its arrival is a loud failure
+    telling the author to extend _DECLARATION_FORMS in the same commit."""
+    method_form = mass_translate_source.replace(
+        "function artifactCheckMatched(art) {",
+        "const probes = {\n"
+        "  draftProbeMatched(probe) {\n"
+        "    return hasOnlyKeys(probe, REVIEW_ARTIFACT_ALLOWED_KEYS);\n"
+        "  },\n"
+        "};\n"
+        "\n"
+        "function artifactCheckMatched(art) {",
+        1,
+    )
+    assert method_form != mass_translate_source, "the object-method mutation did not apply"
+    with pytest.raises(AssertionError, match="object-method form this file cannot span"):
+        assert_every_consume_site_guard_routes_through_helper(method_form)
+
+
+def assert_consume_site_list_is_exhaustive(mass_translate_source: str) -> None:
+    """The tripwire. CONSUME_SITE_GUARDS must name exactly the functions that
+    consult hasOnlyKeys() -- no more, no fewer."""
+    found = set(_hasonlykeys_callers(mass_translate_source))
+    declared = set(CONSUME_SITE_GUARDS)
+    assert found == declared, (
+        "consume-site roster drift -- CONSUME_SITE_GUARDS must name exactly "
+        "the functions that consult hasOnlyKeys(), because that roster is what "
+        "drives the behavioural tests below. Undeclared (a consume site "
+        f"nothing is executing): {sorted(found - declared)}. Declared but not "
+        f"found (stale entry, or renamed): {sorted(declared - found)}. Amend "
+        "the roster in the same commit as the guard, and give the new entry "
+        "its accepted/rejected cases -- that is what makes the guard testable."
+    )
+
+
+def test_consume_site_roster_is_exhaustive(mass_translate_source):
+    assert_consume_site_list_is_exhaustive(mass_translate_source)
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
         pytest.param(
             lambda s: s.replace(
                 "function artifactCheckMatched(art) {",
@@ -1467,21 +1724,290 @@ def test_every_consume_site_guard_routes_through_the_shared_evidence_helper(mass
                 "function artifactCheckMatched(art) {",
                 1,
             ),
-            "unjudged consume site",
-            id="fourth-guard-skips-the-evidence-check",
+            id="undeclared-fourth-consume-site",
+        ),
+        pytest.param(
+            lambda s: s.replace("function artifactCheckMatched(art) {",
+                                "function artifactCheckRenamed(art) {", 1),
+            id="declared-guard-renamed-away",
         ),
     ],
 )
-def test_guard_routing_lock_catches_an_unjudged_consume_site(
-    mass_translate_source, mutate, expected_message,
+def test_roster_tripwire_catches_drift_in_either_direction(mass_translate_source, mutate):
+    mutated = mutate(mass_translate_source)
+    assert mutated != mass_translate_source, "the mutation did not apply"
+    with pytest.raises(AssertionError, match="consume-site roster drift"):
+        assert_consume_site_list_is_exhaustive(mutated)
+
+
+# ---------------------------------------------------------------------------
+# BEHAVIOURAL half -- each rostered guard is EXECUTED, on the real extracted
+# JS, against the returns it must accept and the returns it must reject.
+#
+# This is what actually locks #289's class, and it replaced a static scanner
+# that tried to do the same job by reading the template's text. Two shapes
+# defeated the scanner and are caught here by construction, because nothing
+# is being read -- the guard is run:
+#
+#   * A presence test in ANY spelling, however it is written or obfuscated:
+#     it rejects a benign `exit_code: 0`, so an "accepted" case fails.
+#   * A guard that calls hasFailureEvidence() and THROWS THE RESULT AWAY:
+#     textually it routes through the helper, so every static check passes,
+#     but it accepts `exit_code: 3`, so a "rejected" case fails.
+#
+# Note which side catches which -- the accepted cases alone would miss the
+# discarded-return shape entirely, and the rejected cases alone would miss
+# #289 itself. Both halves are load-bearing; neither is decoration.
+#
+# HONEST COST, stated rather than papered over: this half is node-gated. On a
+# machine without node it does not run, and the only surviving cover is the
+# roster tripwire plus the static table-coverage check below -- neither of
+# which executes anything. That is already true of every other behavioural
+# test of this template (mass_translate_driver_smoke.test.py is skipif'd for
+# the whole file), so it is not a regression, but it does mean a node-free
+# CI leg cannot be read as "the guards are correct".
+# ---------------------------------------------------------------------------
+
+NODE = shutil.which("node")
+requires_node = pytest.mark.skipif(NODE is None, reason="node is not installed")
+
+# The roster the tripwire above pins, and the behavioural cases below drive.
+# Adding a consume site means adding an entry here -- which means stating,
+# in the same commit, what it must accept and what it must reject.
+CONSUME_SITE_GUARDS = {
+    "ledgerWriteSucceeded": {
+        "accepted": {
+            "clean-success": {
+                "success": True, "status": "converged",
+                "fragment_path": "/x/seg01.json", "fragment_sha1": "a" * 40,
+            },
+            # #289 itself: the truthful exit_code a presence test rejected.
+            "truthful-exit-code-zero": {
+                "success": True, "status": "converged",
+                "fragment_path": "/x/seg01.json", "fragment_sha1": "a" * 40, "exit_code": 0,
+            },
+        },
+        "rejected": {
+            "nonzero-exit-code": {
+                "success": True, "status": "converged",
+                "fragment_path": "/x/seg01.json", "fragment_sha1": "a" * 40, "exit_code": 3,
+            },
+            "wrong-typed-exit-code": {
+                "success": True, "status": "converged",
+                "fragment_path": "/x/seg01.json", "fragment_sha1": "a" * 40, "exit_code": "0",
+            },
+            "nonempty-stderr": {
+                "success": True, "status": "converged",
+                "fragment_path": "/x/seg01.json", "fragment_sha1": "a" * 40,
+                "stderr": "Traceback (most recent call last):",
+            },
+            "nonempty-error": {
+                "success": True, "status": "converged",
+                "fragment_path": "/x/seg01.json", "fragment_sha1": "a" * 40,
+                "error": "runs/ledger.d is not writable",
+            },
+        },
+    },
+    "ledgerMergeSucceeded": {
+        "accepted": {
+            "clean-success": {
+                "success": True, "ledger_path": "/x/l.json", "n_segments": 3,
+                "missing_segments": [], "stale_segments": [],
+            },
+            "truthful-exit-code-zero": {
+                "success": True, "ledger_path": "/x/l.json", "n_segments": 3,
+                "missing_segments": [], "stale_segments": [], "exit_code": 0,
+            },
+        },
+        "rejected": {
+            "nonzero-exit-code": {
+                "success": True, "ledger_path": "/x/l.json", "n_segments": 3,
+                "missing_segments": [], "stale_segments": [], "exit_code": 2,
+            },
+            "nonempty-stderr": {
+                "success": True, "ledger_path": "/x/l.json", "n_segments": 3,
+                "missing_segments": [], "stale_segments": [], "stderr": "cache_key.py died",
+            },
+            "incomplete-batch-despite-exit-code-zero": {
+                "success": True, "ledger_path": "/x/l.json", "n_segments": 1,
+                "missing_segments": ["seg09"], "stale_segments": [], "exit_code": 0,
+            },
+        },
+    },
+    "artifactCheckMatched": {
+        "accepted": {
+            "bare-match": {"match": True},
+            # #289's third site: review_artifact_check.py never emits
+            # mismatch_detail on a match, so an empty one is agent-added and
+            # benign. The pre-fix guard escalated it on presence alone.
+            "benign-empty-mismatch-detail": {"match": True, "mismatch_detail": ""},
+        },
+        "rejected": {
+            "real-mismatch-detail": {"match": True, "mismatch_detail": "verse count differs"},
+            "match-false": {"match": False},
+            "undeclared-key": {"match": True, "exit_code": 0},
+        },
+    },
+}
+
+
+def _guard_harness_preamble(mass_translate_source: str) -> str:
+    """Every declaration a rostered guard needs, spliced verbatim from the
+    real template in SOURCE order -- which is what keeps the dependency chain
+    valid: the `*_ALLOWED_KEYS` consts `.concat()` their inputs at
+    declaration time, and NO_FAILURE_EVIDENCE references the benign-value
+    predicates by identifier. The `*_KEYS` consts are collected by pattern
+    rather than named, so a fourth schema's own key sets come along without
+    editing this."""
+    parts = [
+        _extract_js_function(mass_translate_source, "function isNonEmptyString("),
+        _extract_js_function(mass_translate_source, "function isEmptyString("),
+        _extract_js_function(mass_translate_source, "function isZeroExitCode("),
+        _extract_js_function(mass_translate_source, "function hasOnlyKeys("),
+    ]
+    key_consts = re.findall(r"^const ([A-Za-z_$][\w$]*_KEYS)\s*=", mass_translate_source, re.M)
+    assert key_consts, "no `const *_KEYS` declarations found in the template"
+    parts += [_extract_js_const(mass_translate_source, name) for name in key_consts]
+    parts.append(_extract_js_const(mass_translate_source, "NO_FAILURE_EVIDENCE"))
+    parts.append(_extract_js_function(mass_translate_source, "function hasFailureEvidence("))
+    return "\n".join(parts)
+
+
+def run_guard(tmp_path, mass_translate_source: str, guard: str, raws: list) -> list:
+    """Run the REAL extracted `guard` under node over `raws`, returning its
+    verdicts. Nothing is reimplemented in Python -- a mirror predicate could
+    agree with a broken guard, which is the blind spot this exists to avoid."""
+    signature = f"function {guard}("
+    assert signature in mass_translate_source, f"template declares no {guard}()"
+    script = tmp_path / f"{guard}_probe.js"
+    script.write_text(
+        _guard_harness_preamble(mass_translate_source) + "\n"
+        + _extract_js_function(mass_translate_source, signature) + "\n"
+        f"console.log(JSON.stringify(JSON.parse(process.argv[2]).map({guard})));\n",
+        encoding="utf-8",
+    )
+    proc = subprocess.run(
+        [NODE, str(script), json.dumps(raws)],
+        capture_output=True, text=True, timeout=60,
+    )
+    assert proc.returncode == 0, f"{guard} harness failed: {proc.stderr}"
+    verdicts = json.loads(proc.stdout)
+    assert len(verdicts) == len(raws), f"{guard} returned {len(verdicts)} verdicts for {len(raws)} inputs"
+    return verdicts
+
+
+@pytest.mark.parametrize("guard", sorted(CONSUME_SITE_GUARDS))
+@requires_node
+def test_rostered_guard_accepts_every_benign_return(tmp_path, mass_translate_source, guard):
+    """A presence test in ANY spelling fails here: it rejects a return whose
+    only sin is carrying a truthful, benign value in a declared optional
+    field. This is #289 stated as behaviour rather than as text."""
+    cases = CONSUME_SITE_GUARDS[guard]["accepted"]
+    verdicts = run_guard(tmp_path, mass_translate_source, guard, list(cases.values()))
+    wrong = [label for label, ok in zip(cases, verdicts) if ok is not True]
+    assert not wrong, (
+        f"#289 regression -- {guard}() REJECTED a benign return. A declared "
+        "optional field carrying a truthful benign value (`exit_code: 0`, an "
+        "empty mismatch_detail) is proof of success, not of failure; rejecting "
+        "it fails work that was already correct, non-deterministically, "
+        f"depending on whether the agent volunteered the field. Cases: {wrong}"
+    )
+
+
+@pytest.mark.parametrize("guard", sorted(CONSUME_SITE_GUARDS))
+@requires_node
+def test_rostered_guard_rejects_every_evidence_bearing_return(tmp_path, mass_translate_source, guard):
+    """The anti-false-green half, and the one that catches a guard which
+    calls hasFailureEvidence() and discards the result -- textually perfect,
+    behaviourally inert."""
+    cases = CONSUME_SITE_GUARDS[guard]["rejected"]
+    verdicts = run_guard(tmp_path, mass_translate_source, guard, list(cases.values()))
+    wrong = [label for label, ok in zip(cases, verdicts) if ok is not False]
+    assert not wrong, (
+        f"false green -- {guard}() ACCEPTED a return carrying real evidence of "
+        "failure. Check that the guard does not merely CALL hasFailureEvidence() "
+        "but acts on what it returns, and that its allowed-key check still "
+        f"runs. Cases: {wrong}"
+    )
+
+
+@pytest.mark.parametrize(
+    "guard,mutate,broken_side",
+    [
+        # Bypass 1's payload: the #289 presence test, reintroduced. The
+        # deleted scanner could be blinded to this by a fake regex literal;
+        # execution cannot be.
+        pytest.param(
+            "ledgerWriteSucceeded",
+            lambda s: s.replace(
+                "  if (hasFailureEvidence(raw, FAILURE_EVIDENCE_KEYS)) return false;",
+                "  if (FAILURE_EVIDENCE_KEYS.some((k) => k in raw)) return false;",
+                1,
+            ),
+            "accepted",
+            id="presence-test-reintroduced",
+        ),
+        # Bypass 2's payload: calls the helper, throws the result away.
+        pytest.param(
+            "ledgerWriteSucceeded",
+            lambda s: s.replace(
+                "  if (hasFailureEvidence(raw, FAILURE_EVIDENCE_KEYS)) return false;",
+                "  hasFailureEvidence(raw, FAILURE_EVIDENCE_KEYS);",
+                1,
+            ),
+            "rejected",
+            id="evidence-verdict-discarded",
+        ),
+        pytest.param(
+            "artifactCheckMatched",
+            lambda s: s.replace(
+                "  if (hasFailureEvidence(art, REVIEW_ARTIFACT_EVIDENCE_KEYS)) return false;",
+                '  if (REVIEW_ARTIFACT_EVIDENCE_KEYS.some((k) => k in art)) return false;',
+                1,
+            ),
+            "accepted",
+            id="presence-test-at-the-third-site",
+        ),
+    ],
+)
+@requires_node
+def test_behavioural_lock_catches_both_static_bypasses(
+    tmp_path, mass_translate_source, guard, mutate, broken_side,
 ):
+    """RED proof, kept permanently, for the two shapes that defeated the
+    static scanner this replaced. Each mutant is spliced into a COPY of the
+    template source; the shipped file is never touched.
+
+    `broken_side` records WHICH half catches it, so a future edit that
+    quietly drops one half cannot claim the other still covers the class."""
     mutated = mutate(mass_translate_source)
     assert mutated != mass_translate_source, (
-        "the mutation did not apply -- its anchor text has moved, so this RED "
-        "proof would pass without ever exercising the lock"
+        "the mutation did not apply -- its anchor has moved, so this RED proof "
+        "would pass without exercising anything"
     )
-    with pytest.raises(AssertionError, match=expected_message):
-        assert_every_consume_site_guard_routes_through_helper(mutated)
+    cases = CONSUME_SITE_GUARDS[guard][broken_side]
+    verdicts = run_guard(tmp_path, mutated, guard, list(cases.values()))
+    expected = True if broken_side == "accepted" else False
+    assert any(v is not expected for v in verdicts), (
+        f"the {broken_side} half did not catch this mutant of {guard}() -- it "
+        f"returned {verdicts} where an honest guard returns all {expected!r}"
+    )
+
+
+@requires_node
+def test_guard_harness_reproduces_the_honest_verdicts(tmp_path, mass_translate_source):
+    """Non-vacuity control for the harness itself: a harness that silently
+    failed to splice the guard, or that always returned the same verdict,
+    would make both behavioural tests above meaningless. The unmutated guard
+    must produce BOTH verdicts."""
+    write = CONSUME_SITE_GUARDS["ledgerWriteSucceeded"]
+    verdicts = run_guard(
+        tmp_path, mass_translate_source, "ledgerWriteSucceeded",
+        list(write["accepted"].values()) + list(write["rejected"].values()),
+    )
+    assert set(verdicts) == {True, False}, (
+        f"the harness returned only {set(verdicts)} -- it is not discriminating"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1550,8 +2076,19 @@ def _object_literal_key_names(literal_text: str) -> list:
             i += 1
             continue
         if c in "\"'":
-            end = _quoted_literal_end(literal_text, i)
-            token = literal_text[i + 1:end - 1]
+            # A quoted key. Scanned inline rather than via a shared JS string
+            # helper: this walks one small object-literal text, not a whole
+            # template, and the general lexer that used to provide that helper
+            # was deleted for being unsafe at template scale.
+            end = i + 1
+            while end < n and literal_text[end] != c:
+                end += 2 if literal_text[end] == "\\" else 1
+            if end >= n:
+                raise AssertionError(
+                    f"unterminated {c} key literal in {literal_text[:60]!r}"
+                )
+            token = literal_text[i + 1:end]
+            end += 1
         elif c.isalpha() or c in "_$":
             end = i
             while end < n and (literal_text[end].isalnum() or literal_text[end] in "_$"):
@@ -1571,65 +2108,44 @@ def _object_literal_key_names(literal_text: str) -> list:
     return keys
 
 
-def _function_spans(mass_translate_source: str) -> dict:
-    """{name: (start, end)} for every top-level `function name(...)` in the
-    template -- same column-0 `\\n}` terminator convention as
-    _function_body_span(). Declarations are matched against the CODE
-    projection so a `// function foo(` in a comment cannot invent one."""
-    code = _js_code_only(mass_translate_source)
-    spans = {}
-    for m in re.finditer(r"^(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*\(", code, re.M):
-        spans[m.group(1)] = (m.start(), mass_translate_source.index("\n}", m.start()))
-    return spans
-
-
-def _call_argument_texts(code: str, open_paren: int) -> list:
-    """The comma-separated argument texts of the call whose `(` is at
-    `open_paren`. Runs on the CODE projection, where string literals are
-    already blanked, so a comma inside a string cannot split an argument."""
-    depth = 0
-    args = []
-    start = open_paren + 1
-    i = open_paren
-    n = len(code)
-    while i < n:
-        c = code[i]
-        if c in "([{":
-            depth += 1
-        elif c in ")]}":
-            depth -= 1
-            if depth == 0:
-                args.append(code[start:i])
-                return args
-        elif c == "," and depth == 1:
-            args.append(code[start:i])
-            start = i + 1
-        i += 1
-    raise AssertionError(f"unbalanced call parentheses at offset {open_paren}")
-
-
 def _evidence_key_consts_passed_to_helper(mass_translate_source: str) -> set:
-    """The const NAMES the template actually passes as hasFailureEvidence()'s
-    `evidenceKeys` argument, read off the call sites."""
-    code = _js_code_only(mass_translate_source)
+    """The const NAMES the template passes as hasFailureEvidence()'s
+    `evidenceKeys` argument, read off the RAW source with a plain regex --
+    no lexing, and no function-span extraction.
+
+    Both of this scan's failure modes are loud and safe. A `hasFailureEvidence(
+    raw, FOO_KEYS)` mentioned only in a comment yields a name that has no
+    `const FOO_KEYS` array, and extraction fails naming it. A call site whose
+    second argument is an inline array literal simply does not match, so it
+    is reported as an unmatched call site below rather than silently skipped.
+    The previous version read a lexed projection, which could be blinded into
+    dropping a real call site altogether -- a false GREEN.
+
+    A bare `hasFailureEvidence()` with no argument at all is prose, not a
+    call -- the template's own comments refer to the helper that way -- so
+    only mentions carrying at least one identifier argument are considered."""
+    call = re.compile(
+        r"\bhasFailureEvidence\s*\(\s*[A-Za-z_$][\w$]*\s*,\s*([A-Za-z_$][\w$]*)\s*\)"
+    )
     names = set()
-    for m in re.finditer(r"\bhasFailureEvidence\s*\(", code):
-        if code[:m.start()].rstrip().endswith("function"):
-            continue  # the declaration itself
-        args = _call_argument_texts(code, m.end() - 1)
-        assert len(args) == 2, (
-            f"hasFailureEvidence() called with {len(args)} arguments at line "
-            f"{_line_of(mass_translate_source, m.start())}, expected 2"
-        )
-        evidence_arg = args[1].strip()
-        assert re.fullmatch(r"[A-Za-z_$][\w$]*", evidence_arg), (
-            "hasFailureEvidence()'s evidenceKeys argument at line "
-            f"{_line_of(mass_translate_source, m.start())} is {evidence_arg!r}, "
-            "not a bare const name. Pass a named const -- an inline array "
-            "literal is invisible to the NO_FAILURE_EVIDENCE coverage check "
-            "below, which is the whole point of that check."
-        )
-        names.add(evidence_arg)
+    unmatched = []
+    for m in re.finditer(r"\bhasFailureEvidence\s*\(\s*[A-Za-z_$][\w$]*",
+                         mass_translate_source):
+        if mass_translate_source[:m.start()].rstrip().endswith("function"):
+            continue  # the helper's own declaration, not a call of it
+        full = call.match(mass_translate_source, m.start())
+        if full:
+            names.add(full.group(1))
+        else:
+            unmatched.append(_line_of(mass_translate_source, m.start()))
+    assert not unmatched, (
+        "hasFailureEvidence() is called at line(s) "
+        f"{unmatched} in a shape this check cannot read -- most likely an "
+        "inline array literal as the evidenceKeys argument. Pass a NAMED "
+        "const instead: an inline literal has no declaration for the "
+        "NO_FAILURE_EVIDENCE coverage check to follow, which is the whole "
+        "point of that check."
+    )
     return names
 
 
@@ -1758,14 +2274,115 @@ def test_table_coverage_catches_an_evidence_key_with_no_row(
 def test_table_coverage_accepts_a_new_evidence_key_that_declares_its_row(mass_translate_source):
     """The other side of the RED proof: the lock must not be satisfiable only
     by never growing. Adding the key AND its benign-value row passes."""
-    mutated = mass_translate_source.replace(
+    # Each replace is asserted separately. Chained, only the second was
+    # checked, so a moved anchor on the FIRST one left this passing against
+    # an unmutated key list -- the vacuous shape this test exists to rule out.
+    with_key = mass_translate_source.replace(
         'const FAILURE_EVIDENCE_KEYS = ["error", "exit_code", "stderr"];',
         'const FAILURE_EVIDENCE_KEYS = ["error", "exit_code", "stderr", "timed_out"];',
         1,
-    ).replace(
+    )
+    assert with_key != mass_translate_source, "the evidence-key mutation did not apply"
+    mutated = with_key.replace(
         "const NO_FAILURE_EVIDENCE = { error: isEmptyString,",
         "const NO_FAILURE_EVIDENCE = { timed_out: isEmptyString, error: isEmptyString,",
         1,
     )
-    assert "timed_out: isEmptyString" in mutated, "the table mutation did not apply"
+    assert mutated != with_key, "the table-row mutation did not apply"
     assert_every_evidence_key_has_a_table_row(mutated)
+
+
+# ---------------------------------------------------------------------------
+# #289 ALLOWED-KEY PARITY -- each guard's allowed-key list must equal the
+# properties its flat literal declares.
+#
+# hasOnlyKeys(raw, X_ALLOWED_KEYS) rejects any key the list omits. Add a
+# property to a flat literal without adding it to the key list and an agent
+# that honestly fills the field it was just promised gets its return REJECTED
+# -- a false reject, silent, surfacing only as failed work in a live run.
+# That is #289's shape and #289's exact cost, reached from the other side.
+#
+# The reverse gap is real too, just cheaper: a key allowed but never declared
+# waves through a field the schema does not advertise, which is the
+# undeclared-key rejection those lists exist to perform.
+# ---------------------------------------------------------------------------
+
+ALLOWED_KEYS_TO_FLAT_LITERAL = {
+    "LEDGER_WRITE_ALLOWED_KEYS": "LEDGER_WRITE_SCHEMA",
+    "LEDGER_MERGE_ALLOWED_KEYS": "LEDGER_MERGE_SCHEMA",
+    "REVIEW_ARTIFACT_ALLOWED_KEYS": "REVIEW_ARTIFACT_SCHEMA",
+}
+
+
+def _resolve_allowed_keys(mass_translate_source: str, const_name: str) -> set:
+    """`const X_ALLOWED_KEYS = A.concat(B);` -> the union of A's and B's keys.
+
+    The operand names are read out of the concat EXPRESSION rather than
+    hand-paired here, so a list that grows a third operand is followed
+    automatically."""
+    code = _js_code_only(mass_translate_source)
+    m = re.search(r"const\s+" + re.escape(const_name) + r"\s*=\s*([^;]+);", code)
+    assert m, f"the template declares no `const {const_name} = ...;`"
+    operands = [w for w in re.findall(r"[A-Za-z_$][\w$]*", m.group(1)) if w != "concat"]
+    assert operands, f"{const_name} names no key-set operands: {m.group(1)!r}"
+    keys = set()
+    for operand in operands:
+        keys |= set(parse_js_object_literal(
+            extract_const_array_literal(mass_translate_source, operand)
+        ))
+    return keys
+
+
+def assert_allowed_keys_match_flat_literal_properties(mass_translate_source: str) -> None:
+    mismatches = {}
+    for allowed_const, literal_const in ALLOWED_KEYS_TO_FLAT_LITERAL.items():
+        declared = set(parse_js_object_literal(
+            extract_const_object_literal(mass_translate_source, literal_const)
+        ).get("properties", {}))
+        allowed = _resolve_allowed_keys(mass_translate_source, allowed_const)
+        assert declared, f"{literal_const} declares no properties"
+        if allowed != declared:
+            mismatches[allowed_const] = {
+                "declared by the schema but NOT allowed (honest returns get rejected)":
+                    sorted(declared - allowed),
+                "allowed but NOT declared by the schema": sorted(allowed - declared),
+            }
+    assert not mismatches, (
+        "allowed-key drift -- a guard's hasOnlyKeys() list no longer matches "
+        "the properties its flat literal advertises to the agent. A property "
+        "the schema declares but the list omits is the worse direction: the "
+        "agent is invited to fill the field and then REJECTED for filling it, "
+        "silently, exactly as in #289. Keep the two in step in the same "
+        f"commit. {mismatches}"
+    )
+
+
+def test_every_allowed_key_set_matches_its_flat_literal_properties(mass_translate_source):
+    assert_allowed_keys_match_flat_literal_properties(mass_translate_source)
+
+
+@pytest.mark.parametrize(
+    "old,new,label",
+    [
+        pytest.param(
+            "    fragment_sha1: { type: \"string\" },\n",
+            "    fragment_sha1: { type: \"string\" },\n    duration_ms: { type: \"integer\" },\n",
+            "a property added to the flat literal but not to the key list",
+            id="schema-grew-key-list-did-not",
+        ),
+        pytest.param(
+            'const LEDGER_WRITE_SUCCESS_KEYS = ["success", "status", "fragment_path", "fragment_sha1"];',
+            'const LEDGER_WRITE_SUCCESS_KEYS = ["success", "status", "fragment_path"];',
+            "a key dropped from the list but still declared by the schema",
+            id="key-list-shrank-schema-did-not",
+        ),
+    ],
+)
+def test_allowed_key_parity_catches_drift_in_either_direction(
+    mass_translate_source, old, new, label,
+):
+    assert old in mass_translate_source, f"anchor for {label!r} has moved: {old!r}"
+    mutated = mass_translate_source.replace(old, new, 1)
+    assert mutated != mass_translate_source, f"the {label!r} mutation did not apply"
+    with pytest.raises(AssertionError, match="allowed-key drift"):
+        assert_allowed_keys_match_flat_literal_properties(mutated)

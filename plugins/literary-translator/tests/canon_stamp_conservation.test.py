@@ -305,7 +305,16 @@ def test_batch_alongside_another_mode_is_rejected(tmp_path, other_mode):
 
 
 # ---------------------------------------------------------------------------
-# One mode table -- adding a mode must require touching exactly one place
+# One mode table -- no cross-flag guard may know about a mode another misses
+#
+# Scoped precisely, because the earlier wording here overstated it: adding a
+# mode is still THREE edits (a MODE_SPECS row, an add_argument(), a dispatch
+# branch). What the table plus the drift test below guarantee is narrower and
+# still worth having -- the row cannot be forgotten, and the three cross-flag
+# guards cannot diverge from each other. Two guards remain hardcoded
+# per-flag (--verify-merged requires --batch; --batch repeatable only under
+# it); both express a requires-relation between two named flags, not a
+# per-mode property.
 # ---------------------------------------------------------------------------
 
 
@@ -344,7 +353,16 @@ def test_every_parser_mode_flag_is_declared_in_the_one_mode_table():
     parser = module.build_arg_parser()
 
     parser_dests = {action.dest for action in parser._actions} - set(module.NON_MODE_DESTS)
-    table_dests = {spec.dest for spec in module.MODE_SPECS}
+    table_dests = {spec.dest for spec in module.MODE_SPECS if spec.dest is not None}
+
+    # Exactly one dest-less row is legitimate -- the legacy bare-`--batch`
+    # merge, which no single flag selects. Pinned so a future row cannot dodge
+    # the completeness check below simply by omitting its dest.
+    fallback_rows = [spec for spec in module.MODE_SPECS if spec.dest is None]
+    assert len(fallback_rows) == 1, (
+        f"expected exactly one dest-less MODE_SPECS row (the legacy bare-"
+        f"--batch merge), found {[s.flag for s in fallback_rows]}"
+    )
     assert parser_dests == table_dests, (
         "canon_validate.py's mode flags and MODE_SPECS have drifted apart.\n"
         f"  on the parser but NOT in MODE_SPECS: {sorted(parser_dests - table_dests)}\n"
@@ -356,30 +374,94 @@ def test_every_parser_mode_flag_is_declared_in_the_one_mode_table():
 
     option_strings = {opt for action in parser._actions for opt in action.option_strings}
     for spec in module.MODE_SPECS:
-        assert spec.flag in option_strings, (
-            f"MODE_SPECS names {spec.flag!r}, which is not an option string on "
-            "the parser -- error messages would name a flag that does not exist"
-        )
+        if spec.dest is not None:
+            assert spec.flag in option_strings, (
+                f"MODE_SPECS names {spec.flag!r}, which is not an option string "
+                "on the parser -- error messages would name a flag that does "
+                "not exist"
+            )
+        else:
+            # The fallback row's flag is a human LABEL ("--batch (legacy
+            # single-fragment merge)"), since no single option selects it. It
+            # must still LEAD with a real option string, so the operator is
+            # pointed at a flag that exists rather than at a phantom.
+            assert any(spec.flag.startswith(opt) for opt in option_strings), (
+                f"the fallback row's label {spec.flag!r} does not begin with any "
+                "real option string -- an operator could not act on it"
+            )
 
 
 @pytest.mark.parametrize(
-    "flag", ["--init", "--restamp-derivation"], ids=["init", "restamp-derivation"]
+    "flag,expected_reason",
+    [
+        ("--init", "it reads no fragment"),
+        ("--restamp-derivation", "it reads no fragment"),
+        ("--merge-batches", "coverage is enforced by"),
+        ("--batch", "coverage is enforced by"),
+    ],
+    ids=["init", "restamp-derivation", "merge-batches", "legacy-batch"],
 )
-def test_no_fragmentless_mode_accepts_a_source_forms_manifest(tmp_path, flag):
-    """Behavioural counterpart to the table check: every mode declared
-    reads_fragment=False must actually reject the manifest flag, not just be
-    listed as such."""
+def test_every_source_forms_refuser_rejects_the_manifest_with_its_own_reason(
+    tmp_path, flag, expected_reason
+):
+    """Behavioural counterpart to the table check: every mode carrying a
+    `source_forms_refusal` must actually reject the manifest flag, and must
+    give ITS OWN reason rather than one flattened message.
+
+    `--merge-batches` is the case that forced the field's shape. It DOES read
+    fragments, so the earlier `reads_fragment` predicate said nothing about
+    it and a hardcoded `args.merge_batches is not None` check had to catch it
+    separately -- the exact per-mode magic MODE_SPECS exists to remove.
+    Verified before the change: deleting that hardcoded guard while keeping
+    `reads_fragment` let the combination through (exit 2 -> 1)."""
     root, _, _ = bootstrapped_project(tmp_path)
-    proc = run_canon_validate(root, flag, "--expect-source-forms-file", "manifest_all.json")
+    # `--batch` here is the LEGACY bare merge -- no mode flag at all. It has a
+    # MODE_SPECS row with dest=None precisely so it stops escaping the
+    # table-driven guards by virtue of selecting no spec.
+    extra = (
+        [str(write_fragment(root, [], "refuser.json"))]
+        if flag in ("--merge-batches", "--batch")
+        else []
+    )
+    proc = run_canon_validate(
+        root, flag, *extra, "--expect-source-forms-file", "manifest_all.json"
+    )
     assert proc.returncode == 2, (
         f"{flag} accepted --expect-source-forms-file:\n{proc.stdout}\n{proc.stderr}"
+    )
+    assert expected_reason in proc.stderr, (
+        f"{flag} was refused, but without its own reason -- the two distinct "
+        f"explanations must not collapse into one generic message:\n{proc.stderr}"
+    )
+
+
+@pytest.mark.parametrize(
+    "flag,extra",
+    [("--check-batch", True), ("--verify-merged", False)],
+    ids=["check-batch", "verify-merged"],
+)
+def test_modes_that_accept_a_source_forms_manifest_still_do(tmp_path, flag, extra):
+    """Negative control: absorbing the hardcoded guard into the table must not
+    start refusing the two modes for which the manifest is the whole point."""
+    root, _, _ = bootstrapped_project(tmp_path)
+    frag = str(write_fragment(root, [], "accepted.json"))
+    argv = [flag, frag] if extra else [flag, "--batch", frag]
+    proc = run_canon_validate(root, *argv, "--expect-source-forms-file", "manifest_all.json")
+    assert proc.returncode != 2, (
+        f"{flag} must still accept --expect-source-forms-file:\n{proc.stdout}\n{proc.stderr}"
     )
 
 
 def test_every_writing_mode_reports_generation_hashes_restamped(tmp_path):
     """P4: one question, one key, across all four writing modes. These fields
     are new in unreleased 1.15.0 with no consumers yet, so this is the last
-    moment to make them consistent cheaply."""
+    moment to make them consistent cheaply.
+
+    Deliberately scoped to the modes that WRITE. The fifth shape -- `--init`
+    on an ALREADY-EXISTING canon, which writes nothing and must still report
+    `false` -- is pinned in canon_init_zero_candidate_bootstrap.test.py's
+    `test_init_leaves_an_existing_canon_byte_identical`, next to the
+    byte-identical check it is the reported counterpart of."""
     root = make_project(tmp_path)
 
     init = run_canon_init(root)

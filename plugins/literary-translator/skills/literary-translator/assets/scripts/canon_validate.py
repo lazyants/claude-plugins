@@ -216,38 +216,124 @@ RESEARCH_MODES = ("live", "offline")
 class ModeSpec(NamedTuple):
     """One selectable CLI mode, declared once.
 
-    flag           -- the spelling used in error messages.
-    dest           -- the argparse destination the flag writes to.
-    batch_ok       -- may a bare `--batch` accompany this mode? Only
-                      --verify-merged, where --batch NAMES the already-
-                      processed fragments to verify.
-    reads_fragment -- does the mode consume a batch fragment at all, and so
-                      is --expect-source-forms-file even meaningful?
+    flag     -- the spelling used in error messages.
+    dest     -- the argparse destination the flag writes to, or None for the
+                one mode that no single flag selects: the LEGACY bare-`--batch`
+                merge, which is by definition "what you get when no mode flag
+                was given". It still gets a row so it inherits every column
+                below (and every column added later) instead of escaping the
+                table-driven guards, which is exactly how it came to silently
+                ignore --expect-source-forms-file. `_selected_modes()` owns
+                the one-line special case that selects it; nothing else in
+                this file needs to know it is unusual.
+    batch_ok -- may a bare `--batch` accompany this mode? Only
+                --verify-merged, where --batch NAMES the already-processed
+                fragments to verify.
+    source_forms_refusal -- None when --expect-source-forms-file is accepted
+                with this mode; otherwise the REASON it is refused, shown to
+                the operator verbatim.
+
+    That last field deliberately carries both the predicate and its
+    explanation in one place. The earlier shape asked "does this mode read a
+    fragment?", which is a DIFFERENT question from "does it accept
+    --expect-source-forms-file" -- --merge-batches reads fragments yet
+    refuses the flag, so it slipped past the table-driven guard and had to be
+    caught by a hardcoded `args.merge_batches is not None` check further
+    down: the exact per-mode magic this table exists to eliminate. Folding
+    the reason in rather than adding a separate bool makes "refused with no
+    stated reason" and "a stale reason on a mode that accepts it" both
+    unrepresentable, and keeps the two genuinely different explanations
+    (nothing to check coverage against vs coverage is enforced elsewhere)
+    instead of flattening them into one generic message.
     """
 
     flag: str
-    dest: str
+    dest: "str | None"
     batch_ok: bool
-    reads_fragment: bool
+    source_forms_refusal: "str | None"
 
 
-# Every mode flag other than the legacy bare `--batch`, declared exactly
-# ONCE. Every guard in main() is a comprehension over this table, so adding a
-# mode means adding one row here and nothing else -- the previous shape kept
-# a second, hand-maintained subset tuple for the fragmentless guard plus a
-# `!= "--verify-merged"` magic string for the batch guard, which meant a new
-# mode could be added to one and silently missed by the other. That is the
+# EVERY mode, declared exactly ONCE, carrying the per-mode facts main()'s
+# CROSS-FLAG guards need. That includes the legacy bare-`--batch` merge, which
+# no single flag selects and which therefore carries `dest=None` -- see
+# ModeSpec.dest and `_selected_modes()`. It is IN the table deliberately:
+# while it sat outside, it selected no spec and so escaped every table-driven
+# guard, which is precisely how it came to accept `--expect-source-forms-file`
+# and silently never enforce coverage while returning `{"success": true}`.
+# Giving it a row fixed that with no new guard, and means it inherits every
+# column added here later instead of needing to be remembered each time.
+#
+# What this guarantees, precisely: the three cross-flag guards below
+# (mutual exclusion, --batch compatibility, --expect-source-forms-file
+# acceptance) are comprehensions over this table, so none of them can be
+# taught about a new mode while another silently is not, and
+# tests/canon_stamp_conservation.test.py fails if a parser flag is missing
+# from the table or vice versa -- the row is unforgettable.
+#
+# What it does NOT guarantee: adding a mode is still THREE edits -- a row
+# here, an `add_argument()` in build_arg_parser(), and a dispatch branch in
+# main(). Two guards also remain hardcoded per-flag (`--verify-merged`
+# requires `--batch`; `--batch` is repeatable only under it), because both
+# express a REQUIRES relation between two specific flags rather than a
+# per-mode property. They are expressible as table columns if that ever
+# earns its keep; today it would be a column with one meaningful row.
+#
+# The reason the table exists at all: the previous shape kept a second,
+# hand-maintained subset tuple plus a `!= "--verify-merged"` magic string,
+# so a new mode could be added to one guard and missed by another -- the
 # same two-hand-maintained-lists defect this release fixes in
-# select_segments.py's FIELD_TO_REGEN_STEP, so it does not get to live here
-# either. tests/canon_stamp_conservation.test.py pins parser<->table
-# completeness in both directions.
-MODE_SPECS = (
-    ModeSpec("--init", "init", batch_ok=False, reads_fragment=False),
-    ModeSpec("--restamp-derivation", "restamp_derivation", batch_ok=False, reads_fragment=False),
-    ModeSpec("--check-batch", "check_batch", batch_ok=False, reads_fragment=True),
-    ModeSpec("--merge-batches", "merge_batches", batch_ok=False, reads_fragment=True),
-    ModeSpec("--verify-merged", "verify_merged", batch_ok=True, reads_fragment=True),
+# select_segments.py's FIELD_TO_REGEN_STEP.
+_READS_NO_FRAGMENT = "it reads no fragment"
+_COVERAGE_ENFORCED_ELSEWHERE = (
+    "coverage is enforced by --check-batch per fragment and by "
+    "--verify-merged for the merged set"
 )
+
+MODE_SPECS = (
+    ModeSpec("--init", "init", batch_ok=False, source_forms_refusal=_READS_NO_FRAGMENT),
+    ModeSpec(
+        "--restamp-derivation",
+        "restamp_derivation",
+        batch_ok=False,
+        source_forms_refusal=_READS_NO_FRAGMENT,
+    ),
+    ModeSpec("--check-batch", "check_batch", batch_ok=False, source_forms_refusal=None),
+    ModeSpec(
+        "--merge-batches",
+        "merge_batches",
+        batch_ok=False,
+        source_forms_refusal=_COVERAGE_ENFORCED_ELSEWHERE,
+    ),
+    ModeSpec("--verify-merged", "verify_merged", batch_ok=True, source_forms_refusal=None),
+    # The legacy bare-`--batch` merge. batch_ok=True is load-bearing, not
+    # cosmetic: `--batch` IS this mode's own selector, so a False here would
+    # make the --batch-compatibility guard fire on the mode itself.
+    ModeSpec(
+        "--batch (legacy single-fragment merge)",
+        None,
+        batch_ok=True,
+        source_forms_refusal=_COVERAGE_ENFORCED_ELSEWHERE,
+    ),
+)
+
+
+def _selected_modes(args) -> list:
+    """The mode(s) this invocation selects -- at most one in practice.
+
+    The flag-selected rows are checked first; the legacy bare-`--batch` merge
+    is appended ONLY when none of them matched, because that is precisely its
+    definition. Doing it in that order is what keeps `--verify-merged --batch
+    F1` legal: there `--batch` is --verify-merged's own value-carrying flag,
+    --verify-merged matches first, and the legacy row is never considered --
+    so mutual exclusion cannot fire on a legitimate combination.
+
+    This ordering is the ONE special case the legacy mode needs. Every guard
+    downstream then treats it as an ordinary row.
+    """
+    selected = [spec for spec in MODE_SPECS if spec.dest and _mode_selected(args, spec)]
+    if not selected and args.batch is not None:
+        selected = [spec for spec in MODE_SPECS if spec.dest is None]
+    return selected
 
 # Parser destinations that are OPTIONS, not modes -- the complement of
 # MODE_SPECS across the whole parser. Named here rather than inside the test
@@ -1555,7 +1641,7 @@ def main(argv=None) -> int:
     senses_path = Path(args.senses_path) if args.senses_path else DEFAULT_SENSES_PATH
     allow_absent_senses = args.senses_path is None
 
-    selected_modes = [spec for spec in MODE_SPECS if _mode_selected(args, spec)]
+    selected_modes = _selected_modes(args)
     if len(selected_modes) > 1:
         parser.error(", ".join(spec.flag for spec in selected_modes) + " are mutually exclusive")
 
@@ -1576,28 +1662,26 @@ def main(argv=None) -> int:
             "single-fragment merge), or under --verify-merged."
         )
 
-    # Modes that read no fragment at all must not appear to consume one.
-    fragmentless_modes = [spec.flag for spec in selected_modes if not spec.reads_fragment]
-    if fragmentless_modes and args.expect_source_forms_file is not None:
+    # Every mode that refuses --expect-source-forms-file, with its own reason.
+    # Silently dropping the flag would give a false sense that coverage was
+    # verified when nothing checked it, so each refusal is loud and says why.
+    # Modes are mutually exclusive (checked above), so this names at most one.
+    source_forms_refusers = [
+        spec for spec in selected_modes if spec.source_forms_refusal is not None
+    ]
+    if source_forms_refusers and args.expect_source_forms_file is not None:
         parser.error(
-            ", ".join(fragmentless_modes)
-            + " does not accept --expect-source-forms-file (it reads no fragment)"
+            "; ".join(
+                f"{spec.flag} does not accept --expect-source-forms-file "
+                f"({spec.source_forms_refusal})"
+                for spec in source_forms_refusers
+            )
         )
     if args.verify_merged and not args.batch:
         parser.error("--verify-merged requires one or more --batch PATH")
     if not args.verify_merged and args.batch is not None and len(args.batch) > 1:
         parser.error(
             "--batch may be given more than once only under --verify-merged"
-        )
-    if args.merge_batches is not None and args.expect_source_forms_file is not None:
-        # --merge-batches does not enforce source-form coverage (that is the
-        # job of --check-batch per fragment and --verify-merged for the merged
-        # set); silently dropping the flag would give a false sense that merge
-        # verified coverage. Fail loud instead.
-        parser.error(
-            "--expect-source-forms-file is not accepted with --merge-batches "
-            "(coverage is enforced by --check-batch per fragment and by "
-            "--verify-merged for the merged set)"
         )
 
     try:
