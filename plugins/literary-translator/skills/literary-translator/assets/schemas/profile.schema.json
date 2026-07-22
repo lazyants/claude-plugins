@@ -486,7 +486,10 @@
       "required": ["effort", "max_fix_rounds", "batch_agent_cap"],
       "properties": {
         "effort": {
-          "const": "high"
+          "type": "string",
+          "enum": ["low", "medium", "high", "xhigh"],
+          "default": "high",
+          "description": "Reasoning effort threaded to codex (mass translate/review + glossary passes) and to the Claude fix step. Excludes 'none'/'minimal' (nonsensical for accuracy work) and 'max' (codex-companion's --effort flag throws on it)."
         },
         "max_fix_rounds": {
           "type": "integer",
@@ -495,6 +498,12 @@
         "batch_agent_cap": {
           "type": "integer",
           "minimum": 1
+        },
+        "model": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$",
+          "description": "Optional codex model id threaded to the W5 codex dispatch (mass translate/review only; not the glossary or fix paths). Unset (the common case) means codex resolves its own ~/.codex config default."
         }
       }
     },

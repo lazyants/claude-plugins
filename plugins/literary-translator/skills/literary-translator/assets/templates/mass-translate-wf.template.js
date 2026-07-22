@@ -52,6 +52,22 @@
 //   {{SOURCE_LANG}}                      -- source.language.code, e.g. "fr"
 //   {{TARGET_LANG}}                      -- target.language.code, e.g. "ru"
 //   {{MAX_FIX_ROUNDS}}                   -- engine.max_fix_rounds, substituted as a BARE integer literal
+//   {{EFFORT}}                           -- engine.effort (enum: low/medium/high/xhigh), substituted
+//                                          as a plain quoted string, same style as {{SOURCE_LANG}}
+//                                          above. Drives BOTH carriers for every codex/fix pass in
+//                                          this file from the SAME value: the --effort flag on the
+//                                          two detached codex_job.py launches below (translate/
+//                                          review) and the Claude fix step's own agent() effort
+//                                          option -- never one hard-coded while the other reads
+//                                          this token (see references/ledger-and-resumability.md's
+//                                          dual-injection rule).
+//   {{MODEL}}                            -- engine.model, or an EMPTY STRING when unset. Substituted
+//                                          as a plain quoted string. Threads ONLY to the two detached
+//                                          codex_job.py launches below (translate/review), as an
+//                                          optional single-quoted --model argument omitted entirely
+//                                          from the launch command when this value is empty -- never
+//                                          threaded to the Claude fix step (a codex model id is not
+//                                          meaningful there).
 //   {{VERSE_POLICY_INSTRUCTION_BLOCK}}   -- resolved verse-policy instruction text, read fresh from
 //                                          the CURRENT profile.yml every time a run is scaffolded --
 //                                          never spliced into translate_TASK.md/review_TASK.md
@@ -291,6 +307,34 @@ const SOURCE_LANG = "{{SOURCE_LANG}}";
 const TARGET_LANG = "{{TARGET_LANG}}";
 const MAXFIX = {{MAX_FIX_ROUNDS}};
 const BATCH_AGENT_CAP = {{BATCH_AGENT_CAP}};
+// #197 -- engine.effort/engine.model. EFFORT drives both the codex_job.py
+// --effort flag (translate/review launches below) and the Claude fix step's
+// agent() effort option, always from this one value. MODEL is the empty
+// string when engine.model is unset (see the header token doc above); it
+// threads only to the two codex_job.py launches, never to the fix step.
+const EFFORT = "{{EFFORT}}";
+const MODEL = "{{MODEL}}";
+
+// #197 -- defense-in-depth: EFFORT and MODEL are substituted from profile.yml
+// (schema-validated at Step 0) but are re-checked HERE, before either reaches
+// the codex_job.py dispatch SHELL command built in translateDrivePrompt/
+// reviewDrivePrompt below -- EFFORT is spliced UNQUOTED, MODEL single-quoted.
+// Mirrors the SEG_ID_RE / parseDisp guards below: a poisoned or hand-edited
+// profile.yml (or a resume that skips Step 0's schema validation) fails LOUDLY
+// here instead of silently reaching a shell splice. Allowlists kept identical
+// to profile.schema.json's engine.effort enum and engine.model pattern.
+const EFFORT_RE = /^(low|medium|high|xhigh)$/;
+if (!EFFORT_RE.test(EFFORT)) {
+  throw new Error("Unsafe engine.effort " + JSON.stringify(EFFORT) + ": must be one of low|medium|high|xhigh");
+}
+const MODEL_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+if (MODEL !== "" && !MODEL_RE.test(MODEL)) {
+  throw new Error("Unsafe engine.model " + JSON.stringify(MODEL) + ": must match ^[A-Za-z0-9][A-Za-z0-9._-]*$ (or be empty when unset)");
+}
+// MODEL_ARG single-quoted, appended only when truthy; a bare --model flag with
+// no value is never emitted. Hoisted here (identical in the translate and
+// review codex_job.py launches below; depends only on MODEL).
+const MODEL_ARG = MODEL ? " --model '" + MODEL + "'" : "";
 const VERSE_POLICY_INSTRUCTION_BLOCK = "{{VERSE_POLICY_INSTRUCTION_BLOCK}}";
 
 // #198 -- resolved codex-companion.mjs path. Substituted as a strict
@@ -505,7 +549,7 @@ function parseDisp(raw, seg) {
 function translatePrompt(seg) {
   const dispatchToken = RUN_ID + ":" + seg;
   const lines = [];
-  lines.push("Effort: high. Literary translation of segment " + seg + " (" + SOURCE_LANG + " to " + TARGET_LANG + ").");
+  lines.push("Effort: " + EFFORT + ". Literary translation of segment " + seg + " (" + SOURCE_LANG + " to " + TARGET_LANG + ").");
   lines.push("Read in order: " + ROOT + "/translate_TASK.md ; " + ROOT + "/style_bible.md (in full, especially the word-sense/realia traps section) ; " + ROOT + "/segments/segpack_" + seg + ".json (source text plus the frozen name/realia canon for this segment).");
   lines.push("Verse policy for this project: " + VERSE_POLICY_INSTRUCTION_BLOCK);
   lines.push("Translate every block, footnote, and verse this segpack contains. Copy every placeholder sentinel (e.g. ⟦FNREF_N⟧, ⟦VERSE_...⟧) byte for byte, in its correct position in the sentence -- never translate, drop, or reword a sentinel itself. Any embedded third-language text (Latin, an older form of the source language, or similar) gets an in-text gloss, never a notes-only translation. The segpack's canon_map gives each already-canonized name's frozen canonical target form (source form -> target form): render each such name using that target form's stem/spelling, declined as the target grammar requires -- a correctly inflected form of the canonical stem is correct, never a verbatim copy of the citation form where grammar needs another case. For a new_names entry not yet in canon_map, choose a reasoned rendering and flag it in notes as NEW:.");
@@ -539,7 +583,7 @@ function translateDrivePrompt(seg) {
     "cat > \"$TASKFILE\" <<'LT_CODEX_TASK_EOF'\n" +
     codexTask + "\n" +
     "LT_CODEX_TASK_EOF\n" +
-    "nohup " + PY + " " + ROOT + "/scripts/codex_job.py --kind translate --companion '" + COMPANION + "' --cwd " + ROOT + " --seg " + seg + " --prompt-file \"$TASKFILE\" --expect-token " + expectToken + " --disp \"$DISP\" --deadline-sec " + CODEX_DEADLINE_SEC + " </dev/null >/dev/null 2>&1 &\n" +
+    "nohup " + PY + " " + ROOT + "/scripts/codex_job.py --kind translate --companion '" + COMPANION + "' --cwd " + ROOT + " --seg " + seg + " --prompt-file \"$TASKFILE\" --expect-token " + expectToken + " --disp \"$DISP\" --deadline-sec " + CODEX_DEADLINE_SEC + " --effort " + EFFORT + MODEL_ARG + " </dev/null >/dev/null 2>&1 &\n" +
     "echo \"DISPATCHED " + seg + " $DISP\"";
   const lines = [];
   lines.push("Effort: low. You are DISPATCHING a background codex translation job for segment " + seg + " -- you do NOT translate anything yourself, and you do NOT wait for the job to finish.");
@@ -568,7 +612,7 @@ function reviewDispatchPrompt(seg, roundLabel) {
   const dispatchToken = RUN_ID + ":" + seg + ":r" + roundLabel;
   const draftToken = RUN_ID + ":" + seg;
   const lines = [];
-  lines.push("Effort: high. Single reviewer covering both accuracy and literary quality for segment " + seg + " (" + SOURCE_LANG + " to " + TARGET_LANG + "), round " + roundLabel + ".");
+  lines.push("Effort: " + EFFORT + ". Single reviewer covering both accuracy and literary quality for segment " + seg + " (" + SOURCE_LANG + " to " + TARGET_LANG + "), round " + roundLabel + ".");
   lines.push("This prompt is self-contained and supersedes " + ROOT + "/review_TASK.md for the field contract below. Read review_TASK.md for narrative guidance only -- it may predate this instruction, and its own field list must never override the fields spelled out here.");
   lines.push("First run the deterministic gate: " + PY + " " + ROOT + "/scripts/validate_draft.py " + seg + " -- remember whether it printed OK or FAIL, and any defects it named.");
   lines.push("Before reading the draft, compute its current sha1 by running: " + PY + " " + ROOT + "/scripts/draft_sha1.py " + seg + " -- this becomes your draft_sha1 value below, and it must be computed BEFORE you read the draft file itself.");
@@ -601,7 +645,7 @@ function reviewDrivePrompt(seg, roundLabel) {
     "cat > \"$TASKFILE\" <<'LT_CODEX_TASK_EOF'\n" +
     codexTask + "\n" +
     "LT_CODEX_TASK_EOF\n" +
-    "nohup " + PY + " " + ROOT + "/scripts/codex_job.py --kind review --companion '" + COMPANION + "' --cwd " + ROOT + " --seg " + seg + " --prompt-file \"$TASKFILE\" --expect-token " + expectToken + " --disp \"$DISP\" --deadline-sec " + CODEX_DEADLINE_SEC + " </dev/null >/dev/null 2>&1 &\n" +
+    "nohup " + PY + " " + ROOT + "/scripts/codex_job.py --kind review --companion '" + COMPANION + "' --cwd " + ROOT + " --seg " + seg + " --prompt-file \"$TASKFILE\" --expect-token " + expectToken + " --disp \"$DISP\" --deadline-sec " + CODEX_DEADLINE_SEC + " --effort " + EFFORT + MODEL_ARG + " </dev/null >/dev/null 2>&1 &\n" +
     "echo \"DISPATCHED " + seg + " $DISP\"";
   const lines = [];
   lines.push("Effort: low. You are DISPATCHING a background codex review job for segment " + seg + " (round " + roundLabel + ") -- you do NOT review anything yourself, and you do NOT wait for the job to finish.");
@@ -716,7 +760,7 @@ function waitPrompt(seg, disp) {
 // dispatch_token check (references/ledger-and-resumability.md).
 function fixPrompt(seg, round, revObj) {
   const lines = [];
-  lines.push("Effort: high. You are the Claude editor applying review findings to segment " + seg + ", round " + round + ".");
+  lines.push("Effort: " + EFFORT + ". You are the Claude editor applying review findings to segment " + seg + ", round " + round + ".");
   lines.push("Read " + ROOT + "/segments/" + seg + ".review.json -- this is the AUTHORITATIVE source of the reviewer's findings for this round. review_ready.py already confirmed, before this fix call was ever dispatched, that this exact file is fresh (its dispatch_token matches this run and round) -- so this read is race-free. Apply every entry in its findings[] array, in full, to the draft.");
   lines.push("Important: only codex translates. If the draft is missing or is not actually ready -- check by running " + PY + " " + ROOT + "/scripts/draft_ready.py " + seg + " -- do not translate it yourself: return exactly the line DRAFT_MISSING " + seg + " and write nothing.");
   lines.push("Otherwise, read " + ROOT + "/segments/" + seg + ".draft.json and " + ROOT + "/segments/segpack_" + seg + ".json, and carefully apply every finding from " + ROOT + "/segments/" + seg + ".review.json to the draft. Never touch a placeholder sentinel (e.g. ⟦FNREF_...⟧, ⟦VERSE_...⟧) -- copy each one byte for byte in place. Keep the verse policy: " + VERSE_POLICY_INSTRUCTION_BLOCK);
@@ -896,7 +940,7 @@ async function callArtifactCheck(seg, revObj, roundLabel, isRetry) {
 async function callFix(seg, round, revObj) {
   const label = "fix:" + seg + ":r" + round;
   return await agent(fixPrompt(seg, round, revObj), {
-    effort: "high", phase: "ReviewFix", label: label,
+    effort: EFFORT, phase: "ReviewFix", label: label,
   });
 }
 

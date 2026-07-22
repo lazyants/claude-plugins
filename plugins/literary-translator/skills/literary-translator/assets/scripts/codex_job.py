@@ -32,7 +32,7 @@ CLI (canonical path is DERIVED, never caller-supplied):
       --cwd <durable_root> --seg <seg> --prompt-file <abs prompt with EXACTLY one ⟦JOB_OUT⟧>
       --expect-token <RUN_ID:seg|RUN_ID:seg:r<label>> --disp <per-dispatch nonce>
       --deadline-sec <int> [--poll-sec <int default 15>]
-      [--write] [--fresh] [--effort high] [--node <exe default "node">]
+      [--write] [--fresh] [--effort high] [--model <model>] [--node <exe default "node">]
 
 Exit codes: 0 = promoted (or adopted) a validated artifact; 1 = launch/run/validate failure
 (recoverable, wrote an empty fail sentinel); 2 = usage/env error.
@@ -129,7 +129,7 @@ def _ok(proc):
 
 class CodexJob:
     def __init__(self, kind, seg, tok, disp, root, companion, prompt_text, prompt_file,
-                 deadline_sec, poll_sec, effort, node):
+                 deadline_sec, poll_sec, effort, node, model=None):
         self.kind = kind
         self.seg = seg
         self.tok = tok
@@ -141,6 +141,7 @@ class CodexJob:
         self.poll_sec = poll_sec
         self.effort = effort
         self.node = node
+        self.model = model
 
         self.inv = os.urandom(8).hex()
         self.segdir = os.path.join(self.root, "segments")
@@ -304,6 +305,8 @@ class CodexJob:
         argv = [self.node, self.companion, "task", "--background", "--json", "--write", "--fresh"]
         if self.effort:
             argv += ["--effort", self.effort]
+        if self.model:
+            argv += ["--model", self.model]
         argv += ["--cwd", self.root, "--prompt-file", self.final_prompt]
         proc = self._run(argv, self.poll_timeout())
         if not _ok(proc):
@@ -482,6 +485,7 @@ def _build_parser():
     p.add_argument("--write", action="store_true")
     p.add_argument("--fresh", action="store_true")
     p.add_argument("--effort", default="high")
+    p.add_argument("--model", default=None)
     p.add_argument("--node", default="node")
     return p
 
@@ -516,6 +520,7 @@ def main(argv=None):
         kind=args.kind, seg=args.seg, tok=args.expect_token, disp=args.disp, root=args.cwd,
         companion=args.companion, prompt_text=prompt_text, prompt_file=args.prompt_file,
         deadline_sec=args.deadline_sec, poll_sec=poll_sec, effort=args.effort, node=args.node,
+        model=args.model,
     )
     return job.run()
 

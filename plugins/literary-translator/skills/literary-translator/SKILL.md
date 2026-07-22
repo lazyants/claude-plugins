@@ -603,7 +603,14 @@ this run, nothing to research. Otherwise run the codex-glossary-pass,
 instantiating `glossary-pass-wf.template.js` fresh from the plugin's current
 copy every time — batched over `${durable_root}/glossary_TASK.md`, feeding the
 planner's `args` into the Workflow tool and its `batches` into
-`resume_setup.py`'s payload. **1.4.0:** on that same non-empty-candidates
+`resume_setup.py`'s payload. **#197:** the same instantiation substitutes
+`{{EFFORT}}` (`profile.yml`'s `engine.effort`) alongside every other token —
+there is no `{{MODEL}}` token for this template, since a codex model id
+does not thread to the glossary pass. The resolved `effort` value also
+belongs in the `subst` object of the payload this session writes for
+`resume_setup.py` below — `resume_setup.py`'s own `SUBST_FIELDS` now
+requires it, and `compute_input_digest` fails loudly
+(`missing required field(s): ['effort']`) if it's omitted. **1.4.0:** on that same non-empty-candidates
 path, after `glossary_batch_plan.py` and strictly before `resume_setup.py`
 runs (and before any dispatch), invoke the glossary staleness preflight:
 
@@ -635,7 +642,8 @@ atomically writes each batch's `manifest_{index}.json` plus the aggregate
 `references/orchestration-and-batching.md`). Only then does each batch run
 the shared fire-and-forget dispatch → bounded poll → disk-truth pattern:
 `agent(batchDispatchPrompt(batch), {agentType:'codex:codex-rescue',
-effort:'high'})` (schema-less, writes the run-scoped fragment
+effort: EFFORT})` (`EFFORT` = this project's own `engine.effort`, #197 — a
+configurable enum, default `high`; schema-less, writes the run-scoped fragment
 `glossary/runs/{{RUN_ID}}/out_{index}.json`, self-checks against its own
 manifest) → `batchWaitPrompt` (bounded poll) → once every fragment is
 `READY`, one serialized `canon_validate.py --merge-batches` call plus one
@@ -1192,7 +1200,12 @@ absent → fresh `RUN_ID`, no `resumeFromRunId`), and creates
 then is `mass-translate-wf.template.js` instantiated (fresh from the
 plugin's current copy every run — never reuse a stale generated copy),
 substituting the resolved `{{RUN_ID}}` alongside every other token, and
-`pipeline()` launched. **1.4.7:** as part of that same instantiation the
+`pipeline()` launched. **#197:** the same instantiation substitutes
+`{{EFFORT}}` (`engine.effort`) and `{{MODEL}}` (`engine.model`, or an
+empty string when unset) too; the `resume_setup.py` payload's `subst`
+object must carry the resolved `effort` value as well (see the W3
+glossary-pass note above — `compute_input_digest` fails loudly if it's
+missing). **1.4.7:** as part of that same instantiation the
 orchestrator first runs `resolve_codex_companion.py --durable-root
 ${durable_root}` from the plugin's own install path (never a durable-root
 copy — it must glob the plugin's install locations to find the newest

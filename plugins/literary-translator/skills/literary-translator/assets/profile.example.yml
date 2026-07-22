@@ -149,11 +149,15 @@ engine:
   # point elsewhere would reintroduce exactly the failure mode this methodology
   # was built to eliminate.
   effort: high
-    # The accuracy-bearing effort tier. For W5 translate/review the codex_job.py driver passes it to codex as a
-    # real --effort high CLI flag (the plain-Claude dispatcher that launches the driver runs at effort:'low'); for
-    # the fix and the glossary-pass batches it is the effort:'high' on those agent() calls. Does NOT apply to
-    # purely mechanical, no-judgment calls: the translator-readiness poll and the ledger-bookkeeping call are both
-    # effort:'low' by design.
+    # low | medium | high | xhigh -- the accuracy-bearing effort tier. Excludes none/minimal (nonsensical for
+    # accuracy work) and max (codex-companion's --effort flag throws "Unsupported reasoning effort" on it). This
+    # single value drives THREE carriers, always in sync (never independently pinned): for W5 translate/review the
+    # codex_job.py driver passes it to codex as a real --effort <value> CLI flag (the plain-Claude dispatcher that
+    # launches the driver runs at effort:'low' regardless -- it only dispatches, it never translates/reviews); the
+    # glossary-pass codex batch call and the Claude fix step both read this same value as their own agent()
+    # effort option. Does NOT apply to purely mechanical, no-judgment calls: the translator-readiness poll and the
+    # ledger-bookkeeping call are both effort:'low' by design.
+  # model: gpt-5.3-codex   # optional codex model for W5 translate/review; unset = codex config default
   max_fix_rounds: 4                       # cap before escalating to non_converged / blocked
   batch_agent_cap: 3500
     # A worst-case agent-call-count ESTIMATE for this batch is computed before dispatch begins -- if the

@@ -121,16 +121,19 @@ step's own poll timeout. Structured verdicts come from the on-disk artifact thes
 calls write, read back by a later CONSUME call instead. Their LAUNCH mechanism
 splits by path (#198): the **W5 drive prompts** are plain-Claude `agent()` calls
 (NO `agentType`, `effort:'low'`) that write the codex task-file and launch the
-detached `codex_job.py` driver — codex itself runs at `--effort high` as a real
+detached `codex_job.py` driver — codex itself runs at `--effort <engine.effort>` as a real
 CLI flag on the driver's `task` launch — and return `DISPATCHED <seg> <DISP>`; the
 **glossary `batchDispatchPrompt`** stays a direct `agentType:'codex:codex-rescue'`
 fire-and-forget call:
 
 ```
-agent(translateDrivePrompt(seg), {effort: 'low'})        // launches codex_job.py --kind translate DETACHED (codex at --effort high); returns "DISPATCHED <seg> <DISP>"
-agent(reviewDrivePrompt(seg, round), {effort: 'low'})    // launches codex_job.py --kind review DETACHED (codex at --effort high)
-agent(batchDispatchPrompt(batch), {agentType: 'codex:codex-rescue', effort: 'high'})
+agent(translateDrivePrompt(seg), {effort: 'low'})        // launches codex_job.py --kind translate DETACHED (codex at --effort <engine.effort>); returns "DISPATCHED <seg> <DISP>"
+agent(reviewDrivePrompt(seg, round), {effort: 'low'})    // launches codex_job.py --kind review DETACHED (codex at --effort <engine.effort>)
+agent(batchDispatchPrompt(batch), {agentType: 'codex:codex-rescue', effort: EFFORT})
 ```
+
+(`EFFORT` = the template's own `engine.effort` const, #197 — see
+`references/ledger-and-resumability.md`'s dual-injection rule.)
 
 ### WAIT calls — Claude, schema-less, bounded poll
 
@@ -486,7 +489,8 @@ fresh dispatch to fix that a fresh read/check pair wouldn't also fix, and
 re-dispatching would burn a second codex call for no reason.
 
 On `match:true`, the fix step dispatches:
-`agent(fixPrompt(seg, round, revObj), {effort:'high'})`.
+`agent(fixPrompt(seg, round, revObj), {effort: EFFORT})` (`EFFORT` = the
+template's own `engine.effort` const, #197).
 
 ### The residual risk this gate cannot fully close, and why
 

@@ -786,6 +786,11 @@ def _instantiate_and_slice_js(durable_root_str):
         # value is irrelevant to this file's draft_path/review_path assertions;
         # it only needs to be a valid JS literal so the sliced head parses.
         "{{CODEX_COMPANION_PATH_JSON}}": json.dumps("/fake/codex-companion.mjs"),
+        # #197 -- engine.effort/engine.model. Neither value is inspected by
+        # this file's draft_path/review_path assertions; they only need to
+        # resolve so the no-leftover-token assertion below stays meaningful.
+        "{{EFFORT}}": "high",
+        "{{MODEL}}": "",
     }
     for token, value in substitutions.items():
         head = head.replace(token, value)

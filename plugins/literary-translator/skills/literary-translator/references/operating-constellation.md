@@ -89,11 +89,21 @@ trusting it — the pattern is the part meant to outlive any one generation.
   `xhigh` reasoning effort), doing the parallel decomposition the durable
   pattern describes; translator AND reviewer (R1, codex fills both roles,
   hard-locked, no engine-per-role choice) = **codex, launched by the
-  `codex_job.py` driver** for W5 translate/review, pinned explicitly to
-  `--effort high` as a real CLI flag on the driver's `task` launch (`xhigh` for
-  the hardest correctness passes; this plugin hard-locks `engine.effort: "high"`
-  for every codex accuracy-bearing call) — the plain-Claude drive agent that
-  launches the detached driver is itself `effort: 'low'`. (The glossary pass is
+  `codex_job.py` driver** for W5 translate/review, driven by this project's
+  own `engine.effort` — a **configurable enum** (`low`/`medium`/`high`/`xhigh`,
+  default `high`) passed to codex as a real `--effort` CLI flag on the
+  driver's `task` launch (`xhigh` for the hardest correctness passes; never
+  Claude's `max` tier, which the codex `--effort` flag rejects outright) —
+  the same value also drives the glossary-pass codex call's and the Claude
+  fix step's own `agent()` effort option, all from this one profile knob
+  (see `references/ledger-and-resumability.md`'s dual-injection rule) — the
+  plain-Claude drive agent that launches the detached driver is itself
+  `effort: 'low'`. An optional `engine.model` threads to the W5 codex
+  dispatch only (translate/review; never the glossary pass or the fix
+  step, where a codex model id isn't meaningful) — folded into
+  `agent_config_hash` as the **requested** model, since codex-companion
+  never reports back which model actually ran (see
+  `references/ledger-and-resumability.md`). (The glossary pass is
   the one codex work-call still made directly as `codex:codex-rescue`, the role
   R7 requires to be schema-validated — `references/workflow-schema-validation.md`.)
   Fixer (Claude, no `agentType`, R1) = Sonnet 5, applying findings only, never
@@ -107,8 +117,9 @@ above is what's meant to survive any one generation.
 
 ## Cross-references
 
-- `references/engine-loop.md` — R1 role separation, the hard-locked
-  `engine.effort: "high"` requirement, `max_fix_rounds` as the loop's cap.
+- `references/engine-loop.md` — R1 role separation, the configurable
+  `engine.effort` knob (enum, default `high`) and optional `engine.model`,
+  `max_fix_rounds` as the loop's cap.
 - `references/orchestration-and-batching.md` — `pipeline()` dispatch
   mechanics, the smallest-fan-out principle the "unit of review" rule
   mirrors.

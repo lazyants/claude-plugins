@@ -88,6 +88,11 @@ MASS_TRANSLATE_TOKENS = (
     # json.dumps JS STRING LITERAL (WITH its own quotes -- the token sits
     # OUTSIDE quotes in `const COMPANION = {{CODEX_COMPANION_PATH_JSON}};`).
     "{{CODEX_COMPANION_PATH_JSON}}",
+    # #197 -- engine.effort/engine.model. EFFORT drives the codex_job.py
+    # --effort flag + the Claude fix step's agent() effort option; MODEL
+    # threads only to the two codex_job.py launches (empty string when unset).
+    "{{EFFORT}}",
+    "{{MODEL}}",
 )
 GLOSSARY_PASS_TOKENS = (
     "{{DURABLE_ROOT}}",
@@ -96,6 +101,9 @@ GLOSSARY_PASS_TOKENS = (
     "{{TARGET_LANG}}",
     "{{RESEARCH_MODE}}",
     "{{BATCH_AGENT_CAP}}",
+    # #197 -- engine.effort. No {{MODEL}} here -- the glossary pass has no
+    # model knob (see the pinned contract in mass-translate-wf's own header).
+    "{{EFFORT}}",
 )
 
 # A named-token shape (always {{UPPER_SNAKE_CASE}} in both templates) --
@@ -133,6 +141,13 @@ FIXTURE_SOURCE_LANG = "fr"
 FIXTURE_TARGET_LANG = "ru"
 FIXTURE_MAX_FIX_ROUNDS = 4
 FIXTURE_BATCH_AGENT_CAP = 1000
+# #197 -- a non-default enum value (never the shipped "high" default) so a
+# substitution that silently no-ops (leaving the template's own literal
+# "high") would be caught by the positive landed-value assertions below.
+FIXTURE_EFFORT = "xhigh"
+# Empty string = engine.model unset (the common case) -- the mass template's
+# own documented sentinel for "no --model flag threaded to codex_job.py".
+FIXTURE_MODEL = ""
 
 # Deliberately includes a double quote, a backslash, and a real embedded
 # newline -- exactly the characters the template's own header comment warns
@@ -167,6 +182,8 @@ def instantiate_mass_translate(
     batch_agent_cap: int,
     verse_policy_instruction_block: str,
     companion_path: str = FIXTURE_COMPANION_PATH,
+    effort: str = FIXTURE_EFFORT,
+    model: str = FIXTURE_MODEL,
 ) -> str:
     text = MASS_TRANSLATE_TEMPLATE.read_text(encoding="utf-8")
 
@@ -177,6 +194,12 @@ def instantiate_mass_translate(
     text = text.replace("{{RUN_ID}}", run_id)
     text = text.replace("{{SOURCE_LANG}}", source_lang)
     text = text.replace("{{TARGET_LANG}}", target_lang)
+    # #197 -- EFFORT/MODEL both sit inside their own quotes in the template
+    # (`const EFFORT = "{{EFFORT}}";` / `const MODEL = "{{MODEL}}";`), so the
+    # raw value is spliced in as-is, same as the plain-string tokens above.
+    # MODEL is the empty string when engine.model is unset.
+    text = text.replace("{{EFFORT}}", effort)
+    text = text.replace("{{MODEL}}", model)
 
     # Bare-integer tokens -- the header comment is explicit that these two
     # substitute as a BARE integer literal (`const MAXFIX = {{MAX_FIX_ROUNDS}};`),
@@ -210,6 +233,7 @@ def instantiate_glossary_pass(
     target_lang: str,
     research_mode: str,
     batch_agent_cap: int = FIXTURE_BATCH_AGENT_CAP,
+    effort: str = FIXTURE_EFFORT,
 ) -> str:
     text = GLOSSARY_PASS_TEMPLATE.read_text(encoding="utf-8")
 
@@ -224,6 +248,10 @@ def instantiate_glossary_pass(
     # template reads, substituted as a BARE integer literal (never a quoted
     # string), feeding the glossary preflight cost cap.
     text = text.replace("{{BATCH_AGENT_CAP}}", str(int(batch_agent_cap)))
+    # #197 -- EFFORT sits inside its own quotes (`const EFFORT = "{{EFFORT}}"`),
+    # so the raw value is spliced in as-is. No {{MODEL}} here -- the glossary
+    # pass has no model knob.
+    text = text.replace("{{EFFORT}}", effort)
 
     return text
 
@@ -303,6 +331,10 @@ def test_mass_translate_template_instantiates_with_zero_unresolved_tokens():
         "BATCH_AGENT_CAP must substitute as a bare integer literal, not a "
         "quoted string"
     )
+    assert f'const EFFORT = "{FIXTURE_EFFORT}";' in out
+    assert f'const MODEL = "{FIXTURE_MODEL}";' in out, (
+        "MODEL must substitute to the empty string when engine.model is unset"
+    )
 
     expected_escaped_verse_block = json.dumps(FIXTURE_VERSE_POLICY_INSTRUCTION_BLOCK)[1:-1]
     assert (
@@ -316,6 +348,25 @@ def test_mass_translate_template_instantiates_with_zero_unresolved_tokens():
         "CODEX_COMPANION_PATH_JSON must substitute as a strict json.dumps JS "
         "string literal (with its own surrounding quotes)"
     )
+
+
+def test_mass_translate_template_model_substitutes_a_real_pinned_id():
+    """Companion positive case for the FIXTURE_MODEL="" (unset) coverage
+    above: a real, non-empty engine.model id also lands correctly in
+    `const MODEL = "{{MODEL}}";`, exercising the substitution with a value
+    the template's own MODEL_ARG conditional treats as truthy."""
+    out = instantiate_mass_translate(
+        durable_root=FIXTURE_DURABLE_ROOT,
+        run_id=FIXTURE_RUN_ID,
+        source_lang=FIXTURE_SOURCE_LANG,
+        target_lang=FIXTURE_TARGET_LANG,
+        max_fix_rounds=FIXTURE_MAX_FIX_ROUNDS,
+        batch_agent_cap=FIXTURE_BATCH_AGENT_CAP,
+        verse_policy_instruction_block=FIXTURE_VERSE_POLICY_INSTRUCTION_BLOCK,
+        model="gpt-5.3-codex",
+    )
+    _assert_no_double_brace(out, "mass-translate-wf.template.js (model=gpt-5.3-codex)")
+    assert 'const MODEL = "gpt-5.3-codex";' in out
 
 
 # ---------------------------------------------------------------------------
@@ -347,6 +398,7 @@ def test_glossary_pass_template_instantiates_with_zero_unresolved_tokens(researc
         "{{BATCH_AGENT_CAP}} must substitute as a bare integer literal, not a "
         "quoted string (matching mass-translate-wf.template.js's own token)"
     )
+    assert f'const EFFORT = "{FIXTURE_EFFORT}"' in out
 
 
 @pytest.mark.parametrize("research_mode", ["live", "offline"])

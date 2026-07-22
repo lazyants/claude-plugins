@@ -74,9 +74,17 @@ FIXTURE_SOURCE_LANG = "fr"
 FIXTURE_TARGET_LANG = "ru"
 FIXTURE_VERSE_POLICY = "Render every verse literally, line by line."
 FIXTURE_COMPANION_PATH = "/opt/codex/1.0.10/codex-companion.mjs"
+# #197 -- a non-default enum value (never the shipped "high" default) so a
+# template that silently dropped --effort (the exact "profile effort never
+# reaches codex" regression this file's docstring calls out) would be caught.
+FIXTURE_EFFORT = "xhigh"
+# Empty string = engine.model unset -- the mass template's own documented
+# sentinel for "no --model flag threaded to codex_job.py".
+FIXTURE_MODEL = ""
 
 
-def instantiate(*, max_fix_rounds: int, batch_agent_cap: int) -> str:
+def instantiate(*, max_fix_rounds: int, batch_agent_cap: int,
+                 effort: str = FIXTURE_EFFORT, model: str = FIXTURE_MODEL) -> str:
     """The exact one-time substitution the template's header documents
     (duplicated, not imported, so this file stays self-contained like every
     sibling)."""
@@ -89,6 +97,8 @@ def instantiate(*, max_fix_rounds: int, batch_agent_cap: int) -> str:
     text = text.replace("{{BATCH_AGENT_CAP}}", str(int(batch_agent_cap)))
     text = text.replace("{{VERSE_POLICY_INSTRUCTION_BLOCK}}", json.dumps(FIXTURE_VERSE_POLICY)[1:-1])
     text = text.replace("{{CODEX_COMPANION_PATH_JSON}}", json.dumps(FIXTURE_COMPANION_PATH))
+    text = text.replace("{{EFFORT}}", effort)
+    text = text.replace("{{MODEL}}", model)
     assert "{{" not in text, "fixture instantiation left an unresolved token"
     return text
 
@@ -177,12 +187,14 @@ function log() {}
 
 
 def run(*, tmp_path: Path, segs: list, max_fix_rounds: int = 1, batch_agent_cap: int = 100000,
-        drive_returns: dict | None = None, overrides: dict | None = None, timeout: int = 30) -> dict:
+        drive_returns: dict | None = None, overrides: dict | None = None, timeout: int = 30,
+        effort: str = FIXTURE_EFFORT, model: str = FIXTURE_MODEL) -> dict:
     """Returns {ok, out, stderr}. ok=False (with stderr) when the template
     threw before producing stdout (the SEGS-guard throw path)."""
     drive_returns = drive_returns or {}
     dr = {"translate": drive_returns.get("translate"), "review": drive_returns.get("review")}
-    src = instantiate(max_fix_rounds=max_fix_rounds, batch_agent_cap=batch_agent_cap)
+    src = instantiate(max_fix_rounds=max_fix_rounds, batch_agent_cap=batch_agent_cap,
+                       effort=effort, model=model)
     harness = (
         HARNESS.replace("__WRAPPED_SOURCE__", _wrap(src))
         .replace("__SEGS_JSON__", json.dumps(segs))
@@ -267,8 +279,49 @@ def test_drive_prompt_launches_detached_codex_job(tmp_path, drive_label, launch_
     else:
         assert f"--expect-token {FIXTURE_RUN_ID}:seg01:r1 " in launch
 
+    # #197 regression-catcher: the profile's engine.effort must reach the
+    # dispatched codex_job.py launch as a real --effort flag (THE assertion
+    # that would have caught "profile effort never reaches codex" -- a
+    # template that silently dropped it would leave codex_job.py's own
+    # argparse default of "high" in charge instead of FIXTURE_EFFORT).
+    assert f"--effort {FIXTURE_EFFORT}" in launch
+    # engine.model is unset by default (FIXTURE_MODEL == "") -- no --model
+    # flag on the launch line at all.
+    assert "--model" not in launch
+
     # the task-file path carries the runtime DISP.
     assert f'TASKFILE="{FIXTURE_DURABLE_ROOT}/segments/.codex_task.{kind}.seg01.$DISP"' in prompt
+
+
+@pytest.mark.parametrize(
+    "drive_label,launch_needle",
+    [("translate:seg01", "codex_job.py --kind translate"),
+     ("review-dispatch:seg01:r1", "codex_job.py --kind review")],
+)
+def test_drive_prompt_launch_carries_model_when_pinned(tmp_path, drive_label, launch_needle):
+    """#197 -- a pinned engine.model threads to both codex_job.py launches
+    as a single-quoted --model flag, same convention as --companion."""
+    res = run(tmp_path=tmp_path, segs=["seg01"], model="gpt-5.3-codex")
+    assert res["ok"], res["stderr"]
+    prompt = res["out"]["promptByLabel"][drive_label]
+    launch = [ln for ln in prompt.splitlines() if launch_needle in ln][0]
+    assert "--model 'gpt-5.3-codex'" in launch
+
+
+@pytest.mark.parametrize(
+    "drive_label,launch_needle",
+    [("translate:seg01", "codex_job.py --kind translate"),
+     ("review-dispatch:seg01:r1", "codex_job.py --kind review")],
+)
+def test_drive_prompt_launch_omits_model_when_unset(tmp_path, drive_label, launch_needle):
+    """#197 -- positive control paired with the pinned-model case above: an
+    empty engine.model (the common, unset case) produces NO --model flag at
+    all on either codex_job.py launch line."""
+    res = run(tmp_path=tmp_path, segs=["seg01"], model="")
+    assert res["ok"], res["stderr"]
+    prompt = res["out"]["promptByLabel"][drive_label]
+    launch = [ln for ln in prompt.splitlines() if launch_needle in ln][0]
+    assert "--model" not in launch
 
 
 @pytest.mark.parametrize(

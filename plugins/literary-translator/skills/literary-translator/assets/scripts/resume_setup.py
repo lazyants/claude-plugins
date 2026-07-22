@@ -57,7 +57,8 @@ path. Payload shape:
       "subst": {                                 # required; every key required
         "research_mode": "...", "verse_policy": "...",
         "source_lang": "...", "target_lang": "...",
-        "max_fix_rounds": N, "batch_agent_cap": N
+        "max_fix_rounds": N, "batch_agent_cap": N,
+        "effort": "low|medium|high|xhigh"        # #197; NOT "model" (see SUBST_FIELDS)
       },
       "resume_from_run_id": "<candidate RUN_ID>" | null,   # optional
       "segs": ["seg01", "seg02", ...],           # required for kind="mass"
@@ -128,8 +129,12 @@ CACHE_KEY_SCRIPT = SCRIPTS_DIR / "cache_key.py"
 
 SUBST_FIELDS = frozenset({
     "research_mode", "verse_policy", "source_lang", "target_lang",
-    "max_fix_rounds", "batch_agent_cap",
+    "max_fix_rounds", "batch_agent_cap", "effort",
 })
+# NOT "model": the mass digest already carries engine.model via each
+# segment's own cache_key/agent_config_hash; the glossary pass has no model
+# knob at all, so folding model into this SHARED digest would be a false
+# dependency (a model pin would spuriously stale the glossary run too).
 
 # ${durable_root}/runs/<RUN_ID>/ -- the same hardened allowlist the
 # {{RUN_ID}} substitution token itself is validated against (references/

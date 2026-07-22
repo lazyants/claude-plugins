@@ -742,6 +742,41 @@ def test_default_launch_argv_is_write_and_high_effort_with_8_flags_only(tmp_path
     assert argv[2] == "task" and "--background" in argv and "--json" in argv
 
 
+def test_launch_argv_includes_model_when_set(tmp_path, monkeypatch):
+    """#197 -- a pinned CodexJob.model threads to the internal codex `task`
+    launch argv as a real --model flag."""
+    job = _mkjob(tmp_path)
+    job.model = "gpt-5.3-codex"
+    job.final_prompt = str(tmp_path / "fp.txt")
+    captured = {}
+
+    def fake_run(argv, timeout):
+        captured["argv"] = argv
+        return SimpleNamespace(returncode=0, stdout=json.dumps({"jobId": "j1"}))
+    monkeypatch.setattr(job, "_run", fake_run)
+    assert job.launch() is True
+    argv = captured["argv"]
+    assert "--model" in argv
+    assert argv[argv.index("--model") + 1] == "gpt-5.3-codex"
+
+
+def test_launch_argv_omits_model_when_unset(tmp_path, monkeypatch):
+    """#197 -- positive control: CodexJob's `model` keyword defaults to None
+    (see _mkjob, which never passes it), and the internal launch argv then
+    carries NO --model flag at all."""
+    job = _mkjob(tmp_path)
+    assert job.model is None
+    job.final_prompt = str(tmp_path / "fp.txt")
+    captured = {}
+
+    def fake_run(argv, timeout):
+        captured["argv"] = argv
+        return SimpleNamespace(returncode=0, stdout=json.dumps({"jobId": "j1"}))
+    monkeypatch.setattr(job, "_run", fake_run)
+    assert job.launch() is True
+    assert "--model" not in captured["argv"]
+
+
 # --------------------------------------------------------------------------- #
 # SUBPROCESS integration (fake node + stub gates)
 # --------------------------------------------------------------------------- #

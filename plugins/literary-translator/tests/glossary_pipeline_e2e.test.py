@@ -62,6 +62,10 @@ def instantiate(*, batch_agent_cap: int) -> str:
     text = text.replace("{{RESEARCH_MODE}}", FIXTURE_RESEARCH_MODE)
     text = text.replace("{{RUN_ID}}", FIXTURE_RUN_ID)
     text = text.replace("{{BATCH_AGENT_CAP}}", str(int(batch_agent_cap)))
+    # #197 -- engine.effort (no {{MODEL}} here -- the glossary pass has no
+    # model knob). Not inspected by this file's dispatch/wait assertions; it
+    # only needs to resolve.
+    text = text.replace("{{EFFORT}}", "high")
     assert "{{" not in text, "fixture instantiation left an unresolved token"
     return text
 

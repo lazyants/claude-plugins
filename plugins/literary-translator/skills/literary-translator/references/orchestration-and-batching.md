@@ -238,7 +238,7 @@ const results = await pipeline(
 Stage 1 is the translate DISPATCH — a plain-Claude drive agent (no `agentType`,
 `effort: 'low'`) that writes the codex task-file and launches the shipped
 `codex_job.py --kind translate` driver DETACHED (`nohup`), returning
-`DISPATCHED <seg> <DISP>` (#198; codex itself runs at `--effort high` via the
+`DISPATCHED <seg> <DISP>` (#198; codex itself runs at `--effort <engine.effort>` via the
 driver, NOT as an agent effort option). Stage 2 is `reviewFixLoop(seg,
 dispatchResult)` — a plain async function, not another `agent()` call — which
 parses the drive return for the per-dispatch `DISP` nonce (used to key the
@@ -252,7 +252,7 @@ and atomically promotes it.
    `agentType`) — the DISPATCH half of the shared codex work-call pattern
    (`references/workflow-schema-validation.md`), now the plain-Claude drive
    agent that launches the detached `codex_job.py --kind translate` driver and
-   returns `DISPATCHED <seg> <DISP>`. codex (at `--effort high`) writes its
+   returns `DISPATCHED <seg> <DISP>`. codex (at `--effort <engine.effort>`) writes its
    attempt carrying a `dispatch_token = <RUN_ID>:<seg>` metadata field; the
    driver **validates the isolated attempt** (`draft_ready.py`/`validate_draft.py`
    on the `--candidate-file`) and only then atomically promotes it to
@@ -306,7 +306,7 @@ and atomically promotes it.
      shape — are in `references/workflow-schema-validation.md` and
      `references/ledger-and-resumability.md`.
    - **Fix call**, only on `match: true`:
-     `agent(fixPrompt(seg, round, revObj), { effort: 'high' })` — no
+     `agent(fixPrompt(seg, round, revObj), { effort: EFFORT })` — no
      `agentType` field, keeping it on plain Claude. Since 1.3.6/#132 option b
      `fixPrompt` instructs the fixer to READ `review_path(seg)` back off disk
      and apply its on-disk `findings[]` array; `revObj` (the same
@@ -383,7 +383,14 @@ The template documents its own substitution tokens explicitly:
 `{{VERSE_POLICY_INSTRUCTION_BLOCK}}`, `{{MAX_FIX_ROUNDS}}`,
 `{{BATCH_AGENT_CAP}}` (both templates' preflight cost caps — the glossary-pass
 template's use is new in 1.3.5), `{{RUN_ID}}`
-(new in 1.2.0, both templates — see below), `{{CODEX_COMPANION_PATH_JSON}}`
+(new in 1.2.0, both templates — see below), `{{EFFORT}}` (#197, both
+templates — `engine.effort`'s enum value, substituted as a plain quoted
+string; drives every codex/fix effort carrier in the instantiated template
+from this one value, see `references/ledger-and-resumability.md`'s
+dual-injection rule), `{{MODEL}}` (#197, mass-translate template only —
+`engine.model`, or an empty string when unset; threads only to the two
+`codex_job.py` driver launches, never to the glossary pass or the fix
+step), `{{CODEX_COMPANION_PATH_JSON}}`
 (new in 1.4.7, mass-translate template only — the `json.dumps`-encoded absolute
 `codex-companion.mjs` path, resolved once at instantiation by
 `resolve_codex_companion.py` and handed to `codex_job.py --companion`;
@@ -451,7 +458,7 @@ input_digest = sha256(canonical_json({
   kind: "mass" | "glossary",
   args: <the full ordered args this invocation was given>,
   subst: {research_mode, verse_policy, source_lang, target_lang,
-          max_fix_rounds, batch_agent_cap},   // resolved profile substitutions
+          max_fix_rounds, batch_agent_cap, effort},   // resolved profile substitutions (#197: effort added)
   domain: mass: {seg: <cache_key.py's 15-field composite per seg>}
         | glossary: {glossary_rule, canon_hash},
   version: {plugin_bundle_hash: <runs/.plugin_bundle_hash>,
@@ -471,7 +478,16 @@ change" check would think to cover — a `research_mode: live→offline` flip,
 for instance, changes agent policy and `--check-batch` validity without
 changing a single hashed content byte, which is exactly why `subst` is a
 first-class digest input alongside `args`/`domain`/`version`, not folded
-into one of them. `resume_setup.py` (new script, `assets/scripts/`)
+into one of them. **#197:** `subst` gains `effort` for the identical
+reason — an `engine.effort` tier change (e.g. `high`→`xhigh`) changes what
+the codex/fix calls actually do without changing any hashed content byte.
+The mass path already sees an `engine.effort` (and `engine.model`) change
+per-segment via `agent_config_hash` (see
+`references/ledger-and-resumability.md`), but the glossary pass has no
+per-segment cache key at all, so `subst` is the only place its own
+resume-integrity digest can see an effort change. `model` is deliberately
+**not** added to `subst` — the glossary pass has no model knob, so folding
+it in here would encode a false dependency. `resume_setup.py` (new script, `assets/scripts/`)
 implements this: given the run kind, `args`, resolved substitutions, and the
 per-seg cache keys / glossary candidates, it computes `input_digest`,
 create-or-compares `runs/<RUN_ID>/input.digest`, creates the run
@@ -571,7 +587,7 @@ project.
 
 `engine.batch_agent_cap` is a pure orchestration/scheduling knob with no
 effect on translation output — it is deliberately excluded from
-`agent_config_hash` (only `effort`/`max_fix_rounds` are hashed), so changing
+`agent_config_hash` (only `effort`/`max_fix_rounds`/`model` are hashed), so changing
 the cap alone never re-invalidates an already-converged segment's cache key.
 See `references/ledger-and-resumability.md` for the full cache-key
 membership list. **1.3.5:** W3's glossary-pass template reads this SAME
@@ -653,7 +669,7 @@ pipeline(batches, (batch) => batchDispatchWaitLoop(batch))
   no old fragments on disk, so a fragment that still passes `--check-batch`
   against the CURRENT manifest is genuinely current, never stale.
 - `batchDispatchPrompt(batch)` — codex, `agentType:'codex:codex-rescue'`,
-  `effort:'high'`, **schema-less**, fire-and-forget: writes the run-scoped
+  `effort: EFFORT` (`engine.effort`, #197), **schema-less**, fire-and-forget: writes the run-scoped
   fragment `glossary/runs/{{RUN_ID}}/out_{index}.json` **atomically**,
   self-validates it via `canon_validate.py --check-batch <frag>
   --research-mode X --expect-source-forms-file

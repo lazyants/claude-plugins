@@ -61,8 +61,14 @@ path that KEEPS the direct `codex:codex-rescue` call — it is out of #198's sco
   else this step is mentioned:
 
   ```
-  agent(fixPrompt(seg, round, revObj), {effort: 'high'})
+  agent(fixPrompt(seg, round, revObj), {effort: EFFORT})
   ```
+
+  (`EFFORT` is this project's own `engine.effort` value — a configurable
+  enum, never hardcoded — substituted once at template-instantiation time
+  alongside every other codex/fix effort carrier in this loop; see
+  "Effort discipline" below and `references/ledger-and-resumability.md`'s
+  dual-injection rule.)
 
   Explicitly **no `agentType` field.** Omitting `agentType` is what keeps this
   call on the plain Claude/main model rather than codex — the same mechanism (a
@@ -132,7 +138,7 @@ steps below:
 1. A plain-Claude **drive agent** (`effort: 'low'`, no `agentType`) launches the
    shipped `codex_job.py --kind translate` driver DETACHED (`nohup`) and returns
    `DISPATCHED <seg> <DISP>` — it does NOT itself translate. The driver runs codex
-   `task --background` (with `--effort high` as a real CLI flag), and on a completed
+   `task --background` (with `--effort <engine.effort>` as a real CLI flag), and on a completed
    job **validates the isolated attempt** (`draft_ready.py`/`validate_draft.py` on
    the `--candidate-file` attempt) and only then **atomically promotes** it to
    `draft_path(seg)` carrying a run-scoped `dispatch_token`. This is the one
@@ -155,7 +161,7 @@ steps below:
    → bounded wait → schema-validated consume; the DISPATCH half is now the
    `codex_job.py --kind review` driver launched by a plain-Claude drive agent, NOT
    an `agentType: 'codex:codex-rescue'` call — codex still reviews, launched via the
-   driver at `--effort high`) → Claude fix (`effort: 'high'`, no `agentType`) →
+   driver at `--effort <engine.effort>`) → Claude fix (`effort: <engine.effort>`, no `agentType`) →
    re-review**, exiting early the moment a review reports `clean && coverage_ok`.
    Each round's review point runs four functions in sequence —
    `reviewDispatchPrompt` (the drive agent that launches the detached
@@ -236,22 +242,32 @@ fatal extraction preflight, not by an under-specified fan-out.
 
 ### Effort discipline
 
-**Every ACCURACY-BEARING codex work-call in this loop runs codex at high effort.**
-For W5 translate and review this is now `--effort high` passed to codex as a REAL
-CLI flag on the `codex_job.py` driver's `task` launch (the plain-Claude drive agent
-that launches the detached driver is itself `effort: 'low'` — it only dispatches, it
-does not translate/review). `fixPrompt` (plain Claude) and the glossary-pass
-`batchDispatchPrompt` (still `agentType: 'codex:codex-rescue'`) keep `effort: 'high'`
-as an agent option. No such call inherits a session-level xhigh/ultracode effort.
-This is both a literal requirement and the fix for a known `max_tokens` wedge on
-synthesis-heavy agent configs.
+**Every ACCURACY-BEARING codex work-call in this loop is driven by
+`engine.effort`** — a configurable enum (`low`/`medium`/`high`/`xhigh`,
+default `high`; excludes `none`/`minimal` as nonsensical for accuracy work,
+and excludes `max`, which codex-companion's own `--effort` flag rejects
+outright). For W5 translate and review this is `--effort <engine.effort>`
+passed to codex as a REAL CLI flag on the `codex_job.py` driver's `task`
+launch (the plain-Claude drive agent that launches the detached driver is
+itself `effort: 'low'` — it only dispatches, it does not translate/review).
+`fixPrompt` (plain Claude) and the glossary-pass `batchDispatchPrompt` (still
+`agentType: 'codex:codex-rescue'`) keep `effort: <engine.effort>` as their
+own agent option — all three carriers read the SAME resolved value from one
+profile knob, burned in at a single template instantiation, never
+independently pinned (see `references/ledger-and-resumability.md`'s
+dual-injection rule). No such call inherits a session-level xhigh/ultracode
+effort. This is both a literal, profile-driven requirement and the fix for
+a known `max_tokens` wedge on synthesis-heavy agent configs. An optional
+`engine.model` threads to the two `codex_job.py` driver launches
+(translate/review) only — never to the glossary pass or the fix step,
+where a codex model id is not meaningful (see `assets/profile.example.yml`).
 
 The purely mechanical, no-judgment calls are deliberately `effort: 'low'` — this
 is **not** an oversight to be "fixed" to high:
 - every W5 translate/review **drive/dispatch** step (the plain-Claude agent that
   writes the codex task-file and launches the detached `codex_job.py` driver, then
   returns `DISPATCHED <seg> <DISP>`) — the accuracy-bearing effort lives on codex's
-  own `--effort high` flag, not on this dispatcher,
+  own `--effort <engine.effort>` flag, not on this dispatcher,
 - every WAIT/readiness poll (`waitPrompt`/`draft_ready.py`,
   `reviewWaitPrompt`/`review_ready.py`, `batchWaitPrompt`/
   `canon_validate.py --check-batch`),

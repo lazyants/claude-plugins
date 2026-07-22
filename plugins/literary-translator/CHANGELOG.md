@@ -1,5 +1,28 @@
 # Changelog
 
+## 1.12.0 — 2026-07-22
+
+Makes the codex reasoning **effort** a real, per-project knob and adds an optional codex **model** pin — both first-class `profile.yml` inputs under `engine:`, threaded into the W5 (mass translate/review/fix) and glossary codex dispatch, and folded into the run's cache/resume identity so a re-run at a different `(model, effort)` no longer silently reuses artifacts. Before this, `engine.effort` was schema-pinned to `const: "high"`, the profile value never actually reached codex (the W5 driver launched with `codex_job.py`'s own `--effort high` default, and the prose openers hard-coded `"Effort: high."`), and there was no model knob at all. Closes #197.
+
+### Added
+
+- **`engine.effort` is now a configurable enum** — `low | medium | high | xhigh` (default `high`). Excludes `max` (codex-companion's whitelist rejects it — it throws) and `none`/`minimal` (nonsensical for accuracy work). The value is threaded into every accuracy-bearing codex call it nominally governs: the W5 codex translate/review dispatch (as a real `codex_job.py --effort` flag AND the `"Effort: …"` task openers), the Claude fix step (its `agent()` effort opt + opener), and the glossary codex pass (its opener + forwarder opt).
+- **Optional `engine.model`** — a codex model id (e.g. `gpt-5.3-codex`), pinned per project and threaded to the **W5 codex dispatch only** via `codex_job.py --model` (single-quoted; shell-safe pattern `^[A-Za-z0-9][A-Za-z0-9._-]*$`; omitted entirely when unset → codex uses its config default). Not threaded to the glossary/fix paths, where a codex model id is not meaningful (they run through `codex:codex-rescue` / plain-Claude `agent()`, whose model is the Claude forwarder's, not codex's).
+
+### Changed
+
+- **`agent_config_hash` (cache key) now folds `{effort, max_fix_rounds, model}`** (was `{effort, max_fix_rounds}`). The folded model is the **requested** value (unset → `null`): codex-companion never reports the *resolved* model, so provenance is honestly the requested pin, not the effective one.
+- **The glossary resume-integrity digest now carries `effort`** (`resume_setup.SUBST_FIELDS` gains `effort`). The mass digest already carried effort/model via the per-segment cache key; `model` is deliberately NOT added to `SUBST_FIELDS`, because the glossary pass has no model knob — adding it would encode a false dependency.
+- `profile.example.yml`'s `engine.effort` comment is corrected (it previously overstated that the driver already passed the profile value as a real `--effort` flag) and gains a commented `# model:` example.
+
+### Security
+
+- **Sink-side allowlist guard for `EFFORT`/`MODEL`** (`mass-translate-wf.template.js`). Both values are spliced into the detached `codex_job.py` dispatch shell command — `EFFORT` unquoted, `MODEL` single-quoted — so the workflow now re-validates each against its schema allowlist (`^(low|medium|high|xhigh)$` and `^[A-Za-z0-9][A-Za-z0-9._-]*$`; empty `MODEL` = unset) and throws before building any command, mirroring the existing `SEG_ID_RE` / `parseDisp` guards. This makes shell-safety independent of whether `profile.yml`'s Step-0 schema validation actually ran, closing the resume-path / hand-edited-profile bypass window. Covered by real node-execution tests in `seg_safety_source_and_workflow.test.py`.
+
+### Migration
+
+Any existing project fully re-translates on upgrade — and this is forced regardless of the identity change: (1) `agent_config_hash` gains `model`, moving a GLOBAL `cache_key` field → every converged segment stales; (2) both the W5 and glossary templates are `PLUGIN_BUNDLE_MEMBERS`, so editing them moves `plugin_bundle_hash` (also GLOBAL) → every segment stales anyway (subsuming #1); (3) `SUBST_FIELDS` gains `effort`, so the resume digest value changes (moved digest, nothing extra to run). No delivered or in-flight project is affected: the frozen books are never re-run, and any new run starts from a clean scaffold on this code.
+
 ## 1.11.0 — 2026-07-19
 
 Closes the A-C6 residual 1.10.0 shipped knowingly: the evidence/adjudication chain is now mark/connector-insensitive too, so the `## Mentions` appendix and the evidence chain finally agree on what counts as the same Hebrew name. Alongside it: exact-match sentinel comparison across the two remaining workflow templates, a new content-conservation gate, and a required style-contract slot for embedded third-language text. Closes #243, #228, #196, #202 (output-coverage half), #203.

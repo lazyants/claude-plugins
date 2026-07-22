@@ -542,7 +542,8 @@ def test_prompt_hash_exact_scope(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# 7. agent_config_hash -- sha1 of canonical {effort, max_fix_rounds} ONLY.
+# 7. agent_config_hash -- sha1 of canonical {effort, max_fix_rounds, model}.
+#    #197: model is read defensively (engine.model absent -> None sentinel).
 #    (The dedicated batch_agent_cap NEGATIVE case is further below.)
 # ---------------------------------------------------------------------------
 
@@ -553,8 +554,10 @@ def test_agent_config_hash_exact_scope(tmp_path):
     set_profile_value(root, "engine.max_fix_rounds", 5)
     set_profile_value(root, "engine.batch_agent_cap", 42)
 
+    # default_profile() ships no engine.model at all -- the unset case, hashed
+    # as the JSON null sentinel.
     expected = hashlib.sha1(
-        canonical_json_bytes({"effort": "high", "max_fix_rounds": 5})
+        canonical_json_bytes({"effort": "high", "max_fix_rounds": 5, "model": None})
     ).hexdigest()
     assert one_field(root, "agent_config_hash") == expected
 
@@ -562,7 +565,22 @@ def test_agent_config_hash_exact_scope(tmp_path):
     changed = one_field(root, "agent_config_hash")
     assert changed != expected
     assert changed == hashlib.sha1(
-        canonical_json_bytes({"effort": "low", "max_fix_rounds": 5})
+        canonical_json_bytes({"effort": "low", "max_fix_rounds": 5, "model": None})
+    ).hexdigest()
+
+    # #197 -- setting engine.model moves the hash away from the unset
+    # baseline, and folds the exact requested model id.
+    set_profile_value(root, "engine.effort", "high")
+    set_profile_value(root, "engine.model", "gpt-5.3-codex")
+    with_model = one_field(root, "agent_config_hash")
+    assert with_model != expected, (
+        "setting engine.model must move agent_config_hash away from the "
+        "unset (model: null) baseline"
+    )
+    assert with_model == hashlib.sha1(
+        canonical_json_bytes(
+            {"effort": "high", "max_fix_rounds": 5, "model": "gpt-5.3-codex"}
+        )
     ).hexdigest()
 
 
@@ -834,9 +852,10 @@ def test_batch_agent_cap_excluded_and_never_invalidates_any_segment(tmp_path):
     )
 
     # And directly confirm agent_config_hash's own byte-scope excludes it:
-    # the field equals the hash of {effort, max_fix_rounds} alone.
+    # the field equals the hash of {effort, max_fix_rounds, model} alone
+    # (default_profile() ships no engine.model -> the None sentinel).
     expected_agent_config_hash = hashlib.sha1(
-        canonical_json_bytes({"effort": "medium", "max_fix_rounds": 3})
+        canonical_json_bytes({"effort": "medium", "max_fix_rounds": 3, "model": None})
     ).hexdigest()
     assert baseline["agent_config_hash"] == expected_agent_config_hash
     assert after["agent_config_hash"] == expected_agent_config_hash

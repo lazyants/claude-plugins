@@ -442,6 +442,53 @@ def test_verse_policy_non_mixed_mode_requires_null_threshold_lines():
 
 
 # ---------------------------------------------------------------------------
+# #197 -- engine.effort enum + engine.model pattern
+# ---------------------------------------------------------------------------
+
+
+def test_engine_effort_xhigh_passes_schema():
+    profile = make_base_profile()
+    profile["engine"]["effort"] = "xhigh"
+    assert schema_errors(profile) == []
+
+
+@pytest.mark.parametrize("bad_effort", ["max", "ultra", "none", "minimal", "HIGH", ""])
+def test_engine_effort_out_of_enum_rejected(bad_effort):
+    """The enum deliberately excludes 'none'/'minimal' (nonsensical for
+    accuracy work) and 'max' ('--effort max' throws in codex-companion) --
+    see profile.schema.json's own engine.effort description."""
+    profile = make_base_profile()
+    profile["engine"]["effort"] = bad_effort
+    errors = schema_errors(profile)
+    assert errors != []
+    assert any("effort" in e for e in errors)
+
+
+def test_engine_model_well_formed_passes_schema():
+    profile = make_base_profile()
+    profile["engine"]["model"] = "gpt-5.3-codex-spark"
+    assert schema_errors(profile) == []
+
+
+def test_engine_model_absent_passes_schema():
+    # engine.model is optional -- make_base_profile() already omits it.
+    profile = make_base_profile()
+    assert "model" not in profile["engine"]
+    assert schema_errors(profile) == []
+
+
+@pytest.mark.parametrize(
+    "bad_model", ["has space", "semi;colon", "", "-leading-dash", 'quote"here']
+)
+def test_engine_model_malformed_rejected(bad_model):
+    profile = make_base_profile()
+    profile["engine"]["model"] = bad_model
+    errors = schema_errors(profile)
+    assert errors != []
+    assert any("model" in e for e in errors)
+
+
+# ---------------------------------------------------------------------------
 # Procedural path-safety check: source.language.particle_config
 # ---------------------------------------------------------------------------
 
