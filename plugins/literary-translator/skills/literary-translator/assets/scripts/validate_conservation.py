@@ -288,8 +288,13 @@ DEFAULT_HOLLOW_MAX_OUTPUT_WORDS = 0
 # algorithm this backs and its structural blind spot. `min_source_words_band`
 # is DELIBERATELY independent from DEFAULT_HOLLOW_MIN_SOURCE_WORDS above --
 # straddling the two is exactly the log(0) hazard guarded in
-# compute_ratio_band_findings().
-DEFAULT_RATIO_BAND_MIN_SOURCE_WORDS = 10
+# compute_ratio_band_findings(). 40, not some smaller "just excludes trivia"
+# number, because normalize_words() is NFC + whitespace splitting only (no
+# morphological/markup/sentinel normalization) -- a sub-40-word
+# markup-or-sentinel-heavy block yields a raw-token ratio that is not
+# linguistically comparable and can be arbitrary; this gate is what keeps
+# that population out of the band.
+DEFAULT_RATIO_BAND_MIN_SOURCE_WORDS = 40
 DEFAULT_RATIO_BAND_MIN_COHORT = 25
 DEFAULT_RATIO_BAND_K = 3.0
 DEFAULT_RATIO_BAND_ABS_GUARD = 0.5
