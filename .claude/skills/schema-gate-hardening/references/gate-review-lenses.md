@@ -9,6 +9,7 @@ Lenses for reviewing a gate's soundness and choosing its shape. See the spine in
 4. LLM-output vs an exact-string registry — typographic false-REDs
 5. Untrusted identifier → path / shell — allowlist, `fullmatch`, calibrate
 6. Nested-discovery fixed-point, mode-voided exemption, reason-code relabel
+7. What does this assertion actually PROVE? — the strength ladder, satisfiability, witness completeness
 
 ---
 
@@ -85,3 +86,57 @@ Patterns from generalizing a nested-discovery scan (footnotes/verses nested insi
 - **Whack-a-mole reason-code RELABEL is not a fix (review lens).** The first skip-exemption fixed `orphan_footnote_def` but the SAME topology then died with `orphan_verse`. Resolving error A by moving the same input's failure to error B is zero progress. Before declaring a fix done, **enumerate the full failure set for the topology the fix targets**, not just the one error code the ticket named.
 - **Referenced-only-not-rendered + SPLIT return channel.** An item can be marked "referenced" (satisfying orphan/bijection checks) without appearing in output — correct when its sole reference site is itself stripped/invisible. Load-bearing: keep it OUT of any channel that would surface it (a nested-discovered footnote number reaches `seg_referenced_ns` but NEVER a node's `fnrefs`, which would re-emit a dangling `[^n]:`). Give the scan helper a SEPARATE return slot so referenced-only discoveries physically cannot ride the renderable path.
 - **A flat loop CAN be the fixed point — no second worklist needed** when the exemption predicate reads only immutable state (order-independent, derived from immutable manifest ground truth): the existing full-set iteration is already the fixed point. Adding a worklist there is over-engineering. (The DISCOVERY side genuinely needs the worklist because it grows the frontier; the distinction is whether the set being iterated is fixed or growing.)
+
+---
+
+## 7. What does this assertion actually PROVE?
+
+For a gate asserting over **prose/doc contracts** (fixed-string, line-based helpers: `grep -F`,
+section-scoped scans, occurrence counts, line-order comparisons). Verified over an 11-round
+adversarial plan review, 2026-07-22 — every round found the *next* rung, always in the assertion
+added to close the previous round.
+
+### The strength ladder
+
+Each rung is a distinct question. **Passing rung N says nothing about rung N+1**, and the natural
+reading of a green assertion silently claims all of them:
+
+| rung | question | what defeats it |
+|---|---|---|
+| 0 | does the needle exist *anywhere*? | a whole-file `has` is satisfied by an unrelated copy elsewhere |
+| 1 | is it in the right **section**? | scoped scans can't tell "needle absent" from "**heading** absent"; can't see inside fences; can't prove a heading's **parent** (a same-named decoy under another parent binds) |
+| 2 | is it **new** — a witness of the change, not a pre-existing attractor? | a needle already present passes before the edit. Fix: assert `count == 0` before, `== 1` after |
+| 3 | is it in the right **place** *within* the section? | novelty proves nothing about position. Fix: line-order comparison against anchors |
+| 4 | is its **anchor** unrenameable? | a bare label (`**Flat entries**`) can be renamed and a decoy reference planted. Fix: anchor on text carrying the section's *defining condition*, which can't be repurposed without destroying its meaning |
+
+Practical rules: an occurrence-count comparison needs `count == 1` on **every anchor** first, or
+`line_of` takes its first match from a duplicate. A count is line-based (`grep -cF`), not
+occurrence-based — two hits on one line read as one.
+
+### Satisfiability — check assertion PAIRS, not assertions
+
+**A set of individually-reasonable assertions can be jointly impossible.** A spec requiring a
+sentence *inside* a section while a negative pin forbids that sentence's identifier *in* that
+section cannot be satisfied — and reviewing each assertion alone never finds it, because each is
+fine in isolation. Before shipping an assertion set, ask of every positive/negative pair: *can both
+pass on the same artifact?* Resolve by relocating the positive to a section where the term
+legitimately lives; a **bare-identifier** negative then also becomes strictly stronger than a
+specific bad-phrasing needle, because it forbids every future wording rather than one.
+
+### Witness completeness — witness the OUTCOME, not the setup
+
+If a requirement has **N** normative outcomes, **N** witnesses are needed. One collapsed assertion
+("pins the membership branch") lets the implementer write the setup plus one outcome and omit the
+rest with everything green. The failure mode is choosing needles from *which assertions already
+exist* rather than from *what the requirement actually is* — a proxy standing in for the goal. Same
+trap for a structural requirement ("this must MOVE"): needles taken from the moved block's
+introductory paragraph pass while the normative bullets stay behind.
+
+### The termination rule
+
+This ladder does not terminate in a fixed-string world — rung 5 is always available to an author who
+edits the anchors. **Bound the threat model in the artifact itself**: these assertions defend against
+*incomplete/careless implementation and drift*, not a hostile author; note the other layers (human
+review, a review loop); and file the real structural guarantee (a **structure-aware parser** that
+resolves each element to its owning branch) as a follow-up. Then fence later rounds from re-opening
+it. → the contrivance-gradient stop signal in skill:review-loop-discipline.

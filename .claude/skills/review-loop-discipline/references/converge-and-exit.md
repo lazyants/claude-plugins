@@ -11,6 +11,7 @@
 - [Same mechanism patched a 3rd time → reach for the platform primitive](#same-mechanism-third-time)
 - [The loop's exit condition](#the-loops-exit-condition)
 - [When the classifier blocks codex](#when-the-classifier-blocks-codex)
+- [The contrivance gradient — when the evasions outrun the threat model](#the-contrivance-gradient--when-the-evasions-outrun-the-threat-model)
 
 ## Healthy loop vs rabbit hole
 
@@ -124,3 +125,37 @@ composes with the freeze above — freeze the tree, then point at the seam.
 
 Corollary: if you cannot name a weakest joint, you have not understood your own plan well enough to
 review-gate it yet. That absence is a signal, not a clean bill of health.
+
+## The contrivance gradient — when the evasions outrun the threat model
+
+A stop signal distinct from "findings have gone HYPOTHETICAL" above. Here every round's finding is
+genuinely *reachable* — the artifact really would pass — yet the loop must still stop, because what
+is escalating is not the reachability but the **INTENT required of the implementer**.
+
+Read the gradient across rounds. For an assertion guarding a doc contract it ran (2026-07-22,
+rounds 9-11 of one plan review):
+
+1. "they just never wrote the outcomes" — a careless teammate genuinely does this. **Real.**
+2. "they wrote them, but under the wrong branch" — plausible mistake. **Real.**
+3. "they renamed the anchor heading AND planted a decoy cross-reference elsewhere so the
+   line-order comparison still passes" — requires an author deliberately defeating the test.
+   **Out of threat model.**
+
+When the gradient crosses from *careless* to *hostile*, the loop has left the threat model it was
+ever defending, and round N+1 will produce variant four for no gain — no fixed-string, line-based
+assertion survives an author who rewrites its anchors.
+
+**Exit move, all four parts:**
+
+- take the round's cheap real improvement anyway if one exists (better anchors cost nothing);
+- **write the threat model INTO the artifact** — what these assertions defend against (incomplete
+  or careless implementation, and drift) and what they explicitly do not (a hostile author);
+- name the other layers that do cover it (human review of the diff, the code-review loop) so the
+  assertion is honestly one layer rather than the only one;
+- file the real structural guarantee as a follow-up (for text contracts: a structure-aware parser
+  resolving each element to its owning section), and **fence later rounds** — "do not treat a new
+  anchor-rewriting variant as gating" — with an explicit category-A/category-B bucket in the prompt.
+
+The tell that you are on the gradient rather than converging: each fix is sound, each next finding
+is sound, and yet the adversary in the reviewer's counterexample is getting steadily more
+determined. Convergence looks like *simpler* counterexamples, not more elaborate ones.
