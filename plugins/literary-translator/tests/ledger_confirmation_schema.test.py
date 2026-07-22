@@ -22,16 +22,18 @@ sections 1 and 5; PLAN's "NEW ledger_confirmation_schema.test.py" spec):
       on-disk strong schema's SUCCESS-branch-union-FAILURE-branch property
       set, for both LEDGER_WRITE and LEDGER_MERGE -- derived PROGRAMMATICALLY
       from the on-disk schema files, never hand-typed.
-  (d) EXACT-KEY-SET JS GUARD (CONTRACT section 5): a small Python mirror of
+  (d) CONSUME-SITE JS GUARD (CONTRACT section 5): a small Python mirror of
       the load-bearing `ledgerWriteSucceeded`/`ledgerMergeSucceeded` JS
       guard predicates in mass-translate-wf.template.js, FOR TESTABILITY
       ONLY -- the real, load-bearing implementation lives in the JS
       template (owner B). Property-tested against clean success/failure,
-      a branch crossover, success-keys-plus-a-failure-only-key, an
-      empty-string required string field, and a claimed success with a
-      non-empty missing_segments. Plus a best-effort, clearly-optional
-      static check that the SAME key-set literals appear in the real JS
-      guard functions near the template's ledger consume sites.
+      a branch crossover, success-keys-plus-real-failure-evidence, a
+      truthful `exit_code: 0` on a success return (#289 -- accepted; it is
+      evidence the script SUCCEEDED), an empty-string required string
+      field, and a claimed success with a non-empty missing_segments. Plus
+      a best-effort, clearly-optional static check that the SAME key-set
+      literals appear in the real JS guard functions near the template's
+      ledger consume sites.
 
 Volatility note (this file was reconciled against the FINAL landed scripts
 after several earlier-drafted CLI guesses -- including an earlier version of
@@ -643,19 +645,38 @@ def test_property_set_union_helper_catches_a_dropped_flat_property(ledger_write_
 
 
 # ===========================================================================
-# (d) EXACT-KEY-SET JS GUARD (CONTRACT section 5) -- a Python MIRROR of the
+# (d) CONSUME-SITE JS GUARD (CONTRACT section 5) -- a Python MIRROR of the
 #     load-bearing JS predicate, for testability only. The real,
 #     load-bearing implementation lives in mass-translate-wf.template.js
 #     (ledgerWriteSucceeded/ledgerMergeSucceeded), owned by Owner B.
+#
+# #289: the guard judges failure EVIDENCE, never failure-key PRESENCE. Both
+# flat literals declare error/exit_code/stderr as fillable on every call, so
+# an agent honestly relaying a successful script run may volunteer
+# `exit_code: 0` -- proof of SUCCESS. Rejecting on presence turned that proof
+# into a reported failure for segments already correctly written to disk.
 # ===========================================================================
 
 LEDGER_WRITE_SUCCESS_KEYS = {"success", "status", "fragment_path", "fragment_sha1"}
 LEDGER_MERGE_SUCCESS_KEYS = {"success", "ledger_path", "n_segments", "missing_segments", "stale_segments"}
-FAILURE_ONLY_KEYS = {"error", "exit_code", "stderr"}
+# Where failure evidence may APPEAR -- not keys that appear only on failure.
+FAILURE_EVIDENCE_KEYS = {"error", "exit_code", "stderr"}
+# Every key the corresponding flat literal declares. A benign, already
+# value-checked evidence field must not be re-rejected as an unexpected key;
+# a key neither branch declares still is.
+LEDGER_WRITE_ALLOWED_KEYS = LEDGER_WRITE_SUCCESS_KEYS | FAILURE_EVIDENCE_KEYS
+LEDGER_MERGE_ALLOWED_KEYS = LEDGER_MERGE_SUCCESS_KEYS | FAILURE_EVIDENCE_KEYS
 
 
 def _is_non_empty_string(v) -> bool:
     return isinstance(v, str) and len(v) > 0
+
+
+def _is_empty_string(v) -> bool:
+    # Deliberately NOT the negation of _is_non_empty_string: a non-string is
+    # neither. _has_failure_evidence leans on that asymmetry so a wrong-typed
+    # error/stderr is treated as unreadable evidence and fails closed.
+    return isinstance(v, str) and len(v) == 0
 
 
 def _is_plain_int(v) -> bool:
@@ -665,15 +686,29 @@ def _is_plain_int(v) -> bool:
     return isinstance(v, int) and not isinstance(v, bool)
 
 
+def _has_failure_evidence(raw) -> bool:
+    """True when a declared evidence field is filled with something that
+    actually testifies to a failure. `exit_code: 0` testifies to success;
+    `True` is not 0 here because bool is excluded via _is_plain_int, matching
+    the JS side where `false !== 0`."""
+    if "error" in raw and not _is_empty_string(raw["error"]):
+        return True
+    if "stderr" in raw and not _is_empty_string(raw["stderr"]):
+        return True
+    if "exit_code" in raw and not (_is_plain_int(raw["exit_code"]) and raw["exit_code"] == 0):
+        return True
+    return False
+
+
 def ledger_write_succeeded(raw) -> bool:
     """Mirrors CONTRACT section 5's documented guard rule for testability --
     the load-bearing implementation lives in the JS template, owned by
     Owner B (ledgerWriteSucceeded() in mass-translate-wf.template.js)."""
     if not isinstance(raw, dict) or raw.get("success") is not True:
         return False
-    if FAILURE_ONLY_KEYS & raw.keys():
+    if _has_failure_evidence(raw):
         return False
-    if not set(raw.keys()) <= LEDGER_WRITE_SUCCESS_KEYS:
+    if not set(raw.keys()) <= LEDGER_WRITE_ALLOWED_KEYS:
         return False
     return (
         _is_non_empty_string(raw.get("status"))
@@ -688,9 +723,9 @@ def ledger_merge_succeeded(raw) -> bool:
     Owner B (ledgerMergeSucceeded() in mass-translate-wf.template.js)."""
     if not isinstance(raw, dict) or raw.get("success") is not True:
         return False
-    if FAILURE_ONLY_KEYS & raw.keys():
+    if _has_failure_evidence(raw):
         return False
-    if not set(raw.keys()) <= LEDGER_MERGE_SUCCESS_KEYS:
+    if not set(raw.keys()) <= LEDGER_MERGE_ALLOWED_KEYS:
         return False
     missing = raw.get("missing_segments")
     stale = raw.get("stale_segments")
@@ -711,12 +746,43 @@ def ledger_merge_succeeded(raw) -> bool:
         ),
         pytest.param({"success": False, "error": "boom"}, False, id="clean-failure"),
         pytest.param({"success": True, "error": "x"}, False, id="crossover-success-with-error"),
+        # #289: a truthful exit_code:0 riding along on an otherwise perfect
+        # success return is evidence the script SUCCEEDED -- accept it. The
+        # flat literal advertises the field, so agents volunteer it.
         pytest.param(
             {
                 "success": True, "status": "converged", "fragment_path": "/x/seg01.json",
                 "fragment_sha1": "a" * 40, "exit_code": 0,
             },
-            False, id="success-keys-plus-failure-only-key",
+            True, id="success-keys-plus-truthful-exit-code-zero",
+        ),
+        pytest.param(
+            {
+                "success": True, "status": "converged", "fragment_path": "/x/seg01.json",
+                "fragment_sha1": "a" * 40, "exit_code": 3,
+            },
+            False, id="success-keys-plus-nonzero-exit-code",
+        ),
+        pytest.param(
+            {
+                "success": True, "status": "converged", "fragment_path": "/x/seg01.json",
+                "fragment_sha1": "a" * 40, "stderr": "Traceback (most recent call last):",
+            },
+            False, id="success-keys-plus-nonempty-stderr",
+        ),
+        pytest.param(
+            {
+                "success": True, "status": "converged", "fragment_path": "/x/seg01.json",
+                "fragment_sha1": "a" * 40, "exit_code": "0",
+            },
+            False, id="wrong-typed-exit-code-is-unreadable-evidence",
+        ),
+        pytest.param(
+            {
+                "success": True, "status": "converged", "fragment_path": "/x/seg01.json",
+                "fragment_sha1": "a" * 40, "exit_code": 0, "ledger_path": "/x/l.json",
+            },
+            False, id="undeclared-key-still-rejected-alongside-exit-code-zero",
         ),
         pytest.param(
             {"success": True, "status": "", "fragment_path": "/x/seg01.json", "fragment_sha1": "a" * 40},
@@ -746,11 +812,33 @@ def test_ledger_write_succeeded_mirror_predicate(raw, expected):
                 "success": True, "ledger_path": "/x/ledger.json", "n_segments": 3,
                 "missing_segments": [], "stale_segments": [], "stderr": "warn",
             },
-            False, id="success-keys-plus-failure-only-key",
+            False, id="success-keys-plus-nonempty-stderr",
+        ),
+        # #289, merge side.
+        pytest.param(
+            {
+                "success": True, "ledger_path": "/x/ledger.json", "n_segments": 3,
+                "missing_segments": [], "stale_segments": [], "exit_code": 0,
+            },
+            True, id="success-keys-plus-truthful-exit-code-zero",
+        ),
+        pytest.param(
+            {
+                "success": True, "ledger_path": "/x/ledger.json", "n_segments": 3,
+                "missing_segments": [], "stale_segments": [], "exit_code": 2,
+            },
+            False, id="success-keys-plus-nonzero-exit-code",
         ),
         pytest.param(
             {"success": True, "ledger_path": "/x/ledger.json", "n_segments": 1, "missing_segments": ["seg09"], "stale_segments": []},
             False, id="claimed-success-with-nonempty-missing-segments",
+        ),
+        pytest.param(
+            {
+                "success": True, "ledger_path": "/x/ledger.json", "n_segments": 1,
+                "missing_segments": ["seg09"], "stale_segments": [], "exit_code": 0,
+            },
+            False, id="exit-code-zero-never-excuses-an-incomplete-batch",
         ),
         pytest.param(
             {"success": True, "ledger_path": "/x/ledger.json", "n_segments": True, "missing_segments": [], "stale_segments": []},
@@ -770,8 +858,8 @@ def test_ledger_merge_succeeded_mirror_predicate(raw, expected):
 # asserted to actually match this file's own mirror predicate above, so a
 # genuine divergence between the JS guard and this Python mirror is caught.
 #
-# LEDGER_WRITE_SUCCESS_KEYS/LEDGER_MERGE_SUCCESS_KEYS/FAILURE_ONLY_KEYS are
-# declared as ARRAY literals (`const NAME = [...]`), not object literals --
+# LEDGER_WRITE_SUCCESS_KEYS/LEDGER_MERGE_SUCCESS_KEYS/FAILURE_EVIDENCE_KEYS
+# are declared as ARRAY literals (`const NAME = [...]`), not object literals --
 # the imported extract_const_object_literal/_find_balanced_brace_span pair
 # is scoped to `{...}` object literals only (it asserts the character right
 # after `=` is `{`), so it cannot extract these. A small local
@@ -830,12 +918,12 @@ def test_optional_js_guard_key_set_literals_match_python_mirror(mass_translate_s
     try:
         write_keys_literal = extract_const_array_literal(mass_translate_source, "LEDGER_WRITE_SUCCESS_KEYS")
         merge_keys_literal = extract_const_array_literal(mass_translate_source, "LEDGER_MERGE_SUCCESS_KEYS")
-        failure_only_literal = extract_const_array_literal(mass_translate_source, "FAILURE_ONLY_KEYS")
+        failure_evidence_literal = extract_const_array_literal(mass_translate_source, "FAILURE_EVIDENCE_KEYS")
     except AssertionError:
         pytest.skip(
             "mass-translate-wf.template.js does not (yet) declare "
             "LEDGER_WRITE_SUCCESS_KEYS/LEDGER_MERGE_SUCCESS_KEYS/"
-            "FAILURE_ONLY_KEYS as named consts near its ledger consume "
+            "FAILURE_EVIDENCE_KEYS as named consts near its ledger consume "
             "sites -- optional check, not a hard requirement (CONTRACT "
             "section 5's guard may be implemented with inline literals "
             "instead); this does not fail the file."
@@ -844,7 +932,7 @@ def test_optional_js_guard_key_set_literals_match_python_mirror(mass_translate_s
 
     js_write_keys = set(parse_js_object_literal(write_keys_literal))
     js_merge_keys = set(parse_js_object_literal(merge_keys_literal))
-    js_failure_only_keys = set(parse_js_object_literal(failure_only_literal))
+    js_failure_evidence_keys = set(parse_js_object_literal(failure_evidence_literal))
 
     assert js_write_keys == LEDGER_WRITE_SUCCESS_KEYS, (
         f"JS LEDGER_WRITE_SUCCESS_KEYS {sorted(js_write_keys)} does not match "
@@ -854,7 +942,91 @@ def test_optional_js_guard_key_set_literals_match_python_mirror(mass_translate_s
         f"JS LEDGER_MERGE_SUCCESS_KEYS {sorted(js_merge_keys)} does not match "
         f"this file's own Python mirror {sorted(LEDGER_MERGE_SUCCESS_KEYS)}"
     )
-    assert js_failure_only_keys == FAILURE_ONLY_KEYS, (
-        f"JS FAILURE_ONLY_KEYS {sorted(js_failure_only_keys)} does not match "
-        f"this file's own Python mirror {sorted(FAILURE_ONLY_KEYS)}"
+    assert js_failure_evidence_keys == FAILURE_EVIDENCE_KEYS, (
+        f"JS FAILURE_EVIDENCE_KEYS {sorted(js_failure_evidence_keys)} does not "
+        f"match this file's own Python mirror {sorted(FAILURE_EVIDENCE_KEYS)}"
     )
+
+
+# ---------------------------------------------------------------------------
+# #289 CLASS LOCK -- the presence-test idiom must stay deleted.
+#
+# #289 was found three times in one file (ledgerWriteSucceeded,
+# ledgerMergeSucceeded, artifactCheckMatched): a key-PRESENCE test standing
+# in for a failure-EVIDENCE test on a field the flat schema itself
+# advertises as fillable. Patching the three sites is rung 3; this test is
+# rung 4. Every optional field of every flat agent-facing literal in the
+# template is derived from the literal itself (never hand-typed, so a NEW
+# flat schema is covered the day it lands), and a `"<field>" in <obj>` test
+# on any of them fails the build.
+#
+# The shared helper is deliberately not exempted: it tests a loop variable
+# (`k in raw`), never a quoted field name, so the correct count here is
+# ZERO. If a future guard genuinely needs to know whether a field is
+# present -- as opposed to what it says -- it has to add a benign-value
+# entry to NO_FAILURE_EVIDENCE and go through hasFailureEvidence(), or
+# change this lock deliberately and explain why in the same commit.
+# ---------------------------------------------------------------------------
+
+FLAT_AGENT_FACING_LITERALS = (
+    "LEDGER_WRITE_SCHEMA",
+    "LEDGER_MERGE_SCHEMA",
+    "REVIEW_ARTIFACT_SCHEMA",
+    "REVIEW_SCHEMA",
+    "DRAFT_PROBE_SCHEMA",
+)
+
+
+def _optional_fields_of(mass_translate_source: str, const_name: str) -> set:
+    """A flat literal's declared-but-not-required properties -- exactly the
+    fields an agent may volunteer without violating the schema, and so
+    exactly the fields a presence test can be fooled by."""
+    literal = parse_js_object_literal(
+        extract_const_object_literal(mass_translate_source, const_name)
+    )
+    return set(literal.get("properties", {})) - set(literal.get("required", []))
+
+
+def test_no_optional_field_is_gated_on_key_presence(mass_translate_source):
+    optional_fields = set()
+    for const_name in FLAT_AGENT_FACING_LITERALS:
+        optional_fields |= _optional_fields_of(mass_translate_source, const_name)
+    assert "exit_code" in optional_fields and "mismatch_detail" in optional_fields, (
+        "sanity: the two fields #289 actually fired on must be among the "
+        f"derived optional fields, got {sorted(optional_fields)}"
+    )
+
+    offenders = {}
+    for field in sorted(optional_fields):
+        # The JS `in` operator applied to a quoted field name -- `"exit_code"
+        # in raw`, `!("mismatch_detail" in art)`. Whitespace-tolerant so a
+        # reformat cannot smuggle one past.
+        hits = re.findall(
+            r'"' + re.escape(field) + r'"\s+in\s+[A-Za-z_$][\w$]*',
+            mass_translate_source,
+        )
+        if hits:
+            offenders[field] = hits
+    assert not offenders, (
+        "#289 class regression -- a consume-site guard is testing an optional "
+        "field for PRESENCE instead of for failure EVIDENCE. A flat schema "
+        "advertises these fields as fillable on a SUCCESS return, so an "
+        "honest agent will volunteer them and a presence test will fail good "
+        "work non-deterministically. Route the field through "
+        "hasFailureEvidence()/NO_FAILURE_EVIDENCE instead. Offenders: "
+        f"{offenders}"
+    )
+
+
+def test_every_consume_site_guard_routes_through_the_shared_evidence_helper(mass_translate_source):
+    """The lock above is satisfiable by simply DELETING a check, which would
+    trade a false-reject for a false-green. Pin the other side: all three
+    guards must still consult the shared judgement."""
+    for guard in ("ledgerWriteSucceeded", "ledgerMergeSucceeded", "artifactCheckMatched"):
+        start = mass_translate_source.index(f"function {guard}(")
+        end = mass_translate_source.index("\n}", start)
+        assert "hasFailureEvidence(" in mass_translate_source[start:end], (
+            f"{guard}() no longer calls hasFailureEvidence() -- the #289 "
+            "class lock above would then pass vacuously, with the guard "
+            "having no failure-evidence check at all."
+        )

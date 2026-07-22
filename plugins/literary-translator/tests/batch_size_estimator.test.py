@@ -530,9 +530,10 @@ def run_workflow(
 # Response-object builders -- shapes matching REVIEW_SCHEMA / REVIEW_ARTIFACT_
 # SCHEMA closely enough to drive the real script's own branching
 # (`rev.clean`, `rev.coverage_ok`, `rev.findings`, `art.match`,
-# `"mismatch_detail" in art`, matching `artifactCheckMatched()`'s exact
-# check); this harness never itself validates against the JSON schemas
-# (that is the real Workflow tool's job, out of scope here) -- only
+# and `art.mismatch_detail`'s VALUE -- since #289 `artifactCheckMatched()`
+# rejects on a non-empty (or wrong-typed) mismatch_detail, never on the key
+# merely being present); this harness never itself validates against the
+# JSON schemas (that is the real Workflow tool's job, out of scope here) -- only
 # exercises the plain JS branching logic that reads these fields directly.
 # ---------------------------------------------------------------------------
 def review_obj(*, clean: bool, coverage_ok: bool = True) -> dict:

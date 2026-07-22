@@ -421,18 +421,28 @@ assert "ledger-write-mismatch" in RECORD_LEDGER_CALL_SRC, (
 )
 
 # 1.2.0 (CONTRACT-1.2.0-reliability.md section 5, #87 fix): recordLedgerCall
-# now gates on ledgerWriteSucceeded(raw) -- the exact-key-set JS guard --
+# now gates on ledgerWriteSucceeded(raw) -- the consume-site JS guard --
 # instead of trusting a bare `raw.success` truthiness check the way the
 # pre-1.2.0 template did. That guard, and its own small dependency chain
-# (isNonEmptyString/hasOnlyKeys/LEDGER_WRITE_SUCCESS_KEYS/FAILURE_ONLY_KEYS),
-# must be extracted and spliced into the harness alongside the three
-# functions above, or recordLedgerCall's first line throws a bare
-# ReferenceError before ever reaching the payload-intent-mismatch logic
-# this section exists to test.
+# (isNonEmptyString/isEmptyString/isZeroExitCode/hasOnlyKeys/
+# hasFailureEvidence/NO_FAILURE_EVIDENCE/LEDGER_WRITE_SUCCESS_KEYS/
+# FAILURE_EVIDENCE_KEYS/LEDGER_WRITE_ALLOWED_KEYS), must be extracted and
+# spliced into the harness alongside the three functions above, or
+# recordLedgerCall's first line throws a bare ReferenceError before ever
+# reaching the payload-intent-mismatch logic this section exists to test.
+# Splice order is load-bearing twice over: the two key-set consts must
+# precede LEDGER_WRITE_ALLOWED_KEYS, which `.concat()`s them at declaration
+# time, and the benign-value predicates must precede NO_FAILURE_EVIDENCE,
+# whose object literal references them by identifier.
 IS_NON_EMPTY_STRING_SRC = _extract_js_function(_TEMPLATE_JS_SOURCE, "function isNonEmptyString(")
+IS_EMPTY_STRING_SRC = _extract_js_function(_TEMPLATE_JS_SOURCE, "function isEmptyString(")
+IS_ZERO_EXIT_CODE_SRC = _extract_js_function(_TEMPLATE_JS_SOURCE, "function isZeroExitCode(")
 HAS_ONLY_KEYS_SRC = _extract_js_function(_TEMPLATE_JS_SOURCE, "function hasOnlyKeys(")
+HAS_FAILURE_EVIDENCE_SRC = _extract_js_function(_TEMPLATE_JS_SOURCE, "function hasFailureEvidence(")
+NO_FAILURE_EVIDENCE_SRC = _extract_js_const(_TEMPLATE_JS_SOURCE, "NO_FAILURE_EVIDENCE")
 LEDGER_WRITE_SUCCESS_KEYS_SRC = _extract_js_const(_TEMPLATE_JS_SOURCE, "LEDGER_WRITE_SUCCESS_KEYS")
-FAILURE_ONLY_KEYS_SRC = _extract_js_const(_TEMPLATE_JS_SOURCE, "FAILURE_ONLY_KEYS")
+FAILURE_EVIDENCE_KEYS_SRC = _extract_js_const(_TEMPLATE_JS_SOURCE, "FAILURE_EVIDENCE_KEYS")
+LEDGER_WRITE_ALLOWED_KEYS_SRC = _extract_js_const(_TEMPLATE_JS_SOURCE, "LEDGER_WRITE_ALLOWED_KEYS")
 LEDGER_WRITE_SUCCEEDED_SRC = _extract_js_function(_TEMPLATE_JS_SOURCE, "function ledgerWriteSucceeded(")
 
 
@@ -456,10 +466,18 @@ def build_harness_js(tmp_path):
         "\n"
         + IS_NON_EMPTY_STRING_SRC + "\n"
         "\n"
+        + IS_EMPTY_STRING_SRC + "\n"
+        "\n"
+        + IS_ZERO_EXIT_CODE_SRC + "\n"
+        "\n"
         + HAS_ONLY_KEYS_SRC + "\n"
         "\n"
         + LEDGER_WRITE_SUCCESS_KEYS_SRC + "\n"
-        + FAILURE_ONLY_KEYS_SRC + "\n"
+        + FAILURE_EVIDENCE_KEYS_SRC + "\n"
+        + LEDGER_WRITE_ALLOWED_KEYS_SRC + "\n"
+        + NO_FAILURE_EVIDENCE_SRC + "\n"
+        "\n"
+        + HAS_FAILURE_EVIDENCE_SRC + "\n"
         "\n"
         + LEDGER_WRITE_SUCCEEDED_SRC + "\n"
         "\n"

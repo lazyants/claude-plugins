@@ -84,18 +84,48 @@ def stage_consumer(root: Path, name: str) -> Path:
 
 # ---------------------------------------------------------------------------
 # Authoritative fixture inventory (tests/senses_fixture_guard.test.py's OTHER
-# sanctioned location for a raw consumer-isolation idiom): every entry here
-# names a test file that isolates a canon_senses consumer WITHOUT calling
-# stage_consumer() above, individually verified (see each entry's "note") to
-# still make canon_senses importable at exec/run time. Adding an entry here
-# is a deliberate, reviewed exception -- prefer stage_consumer() (or the
+# sanctioned location for a raw consumer-isolation idiom). Adding an entry
+# here is a deliberate, reviewed exception -- prefer stage_consumer() (or the
 # plain sys.path.insert(SCRIPTS_SRC_DIR) idiom for an in-process load from a
 # consumer's own real location) whenever the suite's own isolation shape
-# allows it. Currently empty: every suite this guard has checked either
-# calls stage_consumer() directly or already carries its own correct
-# sys.path.insert(...)/canon_senses.py-staging -- both of which the guard
-# recognizes on their own merits (see senses_fixture_guard.test.py's
-# `_is_handled` for exactly what counts). Add here only for a shape the
-# guard's own recognition genuinely cannot express.
+# allows it. Add here only for a shape the guard's own recognition genuinely
+# cannot express. Two such shapes exist:
+#
+#   1. A suite that really does isolate a consumer WITHOUT calling
+#      stage_consumer(), individually verified (see the entry's "note") to
+#      still make canon_senses importable at exec/run time. None today.
+#   2. A suite that does not isolate a consumer AT ALL and merely NAMES one
+#      inside an ordinary string literal, while separately using a copy/
+#      loader idiom on unrelated scripts. The guard's check-1 gate is a
+#      whole-file literal scan over code with docstrings and `#` comments
+#      stripped -- but NOT ordinary string literals, because real isolation
+#      code names its consumer exactly that way (`SCRIPTS_DIR /
+#      "canon_validate.py"`). So a consumer name used as expected OUTPUT text
+#      is indistinguishable from one used as a path component, file-locally.
+#      Narrowing the scan to exclude string literals would blind the guard to
+#      the real case, so the false positive is escaped here instead.
+#
+# Cost of a category-2 entry, stated plainly: the named file is skipped
+# WHOLESALE, so a genuine unstaged isolation added to it later would not be
+# preemptively flagged. That is the same tradeoff this guard already accepts
+# for its documented loader-precision gap -- the miss fails LOUDLY
+# (ModuleNotFoundError the instant the affected test runs), so a real
+# regression cannot land silently; only preemptive naming is lost.
 # ---------------------------------------------------------------------------
-AUTHORITATIVE_FIXTURE_INVENTORY = ()
+AUTHORITATIVE_FIXTURE_INVENTORY = (
+    {
+        "file": "select_segments.test.py",
+        "category": 2,
+        "note": (
+            "Does not isolate any canon_senses consumer: it copies only "
+            "select_segments.py / ledger_merge.py / a stub cache_key.py into "
+            "its fixture root. It names canon_validate.py solely inside the "
+            "expected text of select_segments.py's own "
+            "blocked_needs_regeneration hint, which since 1.15.0 (#193/#291) "
+            "tells a blocked operator to run `canon_validate.py "
+            "--restamp-derivation`. Verified 2026-07-22 by grepping every "
+            "shutil.copy*/spec_from_file_location call in the file: none "
+            "names a consumer script."
+        ),
+    },
+)

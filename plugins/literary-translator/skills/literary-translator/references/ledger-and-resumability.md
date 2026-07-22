@@ -672,12 +672,25 @@ was (success requires `{success: true, status, fragment_path,
 fragment_sha1}`; failure requires `{success: false, error}`, plus optional
 `exit_code`/`stderr`) — `ledger_update.py` itself still only ever emits one
 of those two exact shapes; the flat literal only relaxes what the *agent* is
-allowed to relay. The Workflow's own exact-key-set JS guard re-establishes
+allowed to relay. The Workflow's own consume-site JS guard re-establishes
 the branch discrimination the flat schema can't: a `success:true` return is
-only trusted when its key set is exactly `{success, status, fragment_path,
-fragment_sha1}` (all three non-empty strings) with **no** failure-only key
-(`error`/`exit_code`/`stderr`) present — a crossover payload like
-`{success:true, error:"x"}` is treated as a failure, never a success.
+only trusted when `{status, fragment_path, fragment_sha1}` are all non-empty
+strings, every key it carries is one this literal declares, and no
+`error`/`exit_code`/`stderr` field carries actual **evidence of failure** —
+a crossover payload like `{success:true, error:"x"}` is treated as a
+failure, never a success.
+
+The guard judges those three fields by VALUE, not by presence (**#289**).
+Because the flat literal advertises them as fillable on *every* call, an
+agent honestly relaying a successful run routinely volunteers
+`exit_code: 0` — which is proof the script SUCCEEDED. The pre-#289 guard
+rejected on presence alone and so failed segments whose fragments were
+already correctly on disk, non-deterministically (whether an agent
+volunteers the field is model discretion: on one live 3-segment batch, two
+agents included it and were failed, the third omitted it and passed, on
+identical prompts). What now counts as failure evidence: a non-empty
+`error` or `stderr`, any `exit_code` other than `0`, or a wrong-typed value
+for any of the three (unreadable evidence fails closed).
 
 **JS-side payload-intent verification** (closes "wrong segment/status
 silently accepted as success"): immediately after the schema-validated
@@ -727,12 +740,16 @@ enforces emptiness on the success path. The on-disk
 was (success requires `{success: true, ledger_path, n_segments,
 missing_segments: [] (empty), stale_segments}`; failure requires
 `{success: false, error}`, plus optional
-`missing_segments`/`exit_code`/`stderr`) — the exact-key-set JS guard
+`missing_segments`/`exit_code`/`stderr`) — the consume-site JS guard
 re-establishes discrimination on the agent-relayed object: a `success:true`
-return is only trusted when its keys are exactly `{success, ledger_path,
-n_segments, missing_segments, stale_segments}` (ledger_path a string,
+return is only trusted when `{ledger_path, n_segments, missing_segments,
+stale_segments}` are all present and well-typed (ledger_path a string,
 n_segments an integer, `missing_segments` an EMPTY array, `stale_segments`
-an array) with no `error`/`exit_code`/`stderr` key present.
+an array), every key it carries is one this literal declares, and no
+`error`/`exit_code`/`stderr` field carries evidence of failure (same
+value-based rule as the write guard above — **#289**). A benign
+`exit_code: 0` never excuses a non-empty `missing_segments`: the
+completeness check is what this call exists for.
 
 **1.2.0: the batch-final commit-gate check (point 4 of the token/sha chain
 above).** Before this check reports `success:true`/lets `batchComplete`
@@ -883,12 +900,28 @@ actually reruns the regeneration step (segpack naturally re-stamps current
 hashes, and the segment reclassifies to ordinary `stale` on the very next
 invocation).
 
-A rerun of `bootstrap_names.py` that yields zero new name candidates (every
-name already known) is a separate, deferred gap: `resume_setup.py` currently
-rejects a zero-candidate rerun outright, which can leave this gate unable to
-clear cleanly in that specific case. That gap is intentionally out of scope
-here and tracked as its own follow-up (#101) rather than worked around in
-this hint text.
+**The zero-candidate case (1.15.0, #193/#291).** "Reruns the regeneration
+step" used to be unreachable for one real project shape: a MATURE project
+whose canon is frozen with zero unresolved candidates skips the glossary
+pass entirely (`glossary_batch_plan.py` emits `no_new_candidates`), and the
+glossary merge is what re-stamps `canon.json` — so the mismatch had no way
+to advance and the block never cleared. This applies to **both** W3/W3a
+fields, since the hole is a property of the remedy rather than of which
+field flipped: `derivation_bundle_hash` (a plugin upgrade touching
+`bootstrap_names.py` or `segpack.py`) and `particle_config_hash` (an edit to
+the resolved particle config file) dead-ended identically. Since 1.15.0 the
+sanctioned escape is an explicit restamp, which re-records BOTH fields:
+
+```
+python3 ${durable_root}/scripts/canon_validate.py \
+  --research-mode <profile's glossary.research_mode> --restamp-derivation
+```
+
+then re-run `segpack.py` (in that order — segpack copies `canon.json`'s
+stamp forward, so running it first only re-copies the stale value). The
+`blocked_needs_regeneration` hint names this directly. Note the ordinary
+merge path deliberately no longer re-stamps when it changed nothing (#291),
+so a content-free glossary merge is NOT a substitute for this command.
 
 For context, `select_segments.py`'s full classification set (see also
 `SKILL.md` W5) is: `reusable` (converged, every cache-key field matches,

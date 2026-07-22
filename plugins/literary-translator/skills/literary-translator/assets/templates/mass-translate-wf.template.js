@@ -167,7 +167,7 @@ export const meta = {
 // at runtime -- they are deliberately NOT the same shape as the flattened
 // literals below, which only need to be API-legal. Branch discrimination
 // the flat literals can no longer express is instead enforced by the
-// exact-key-set JS guards further down this file (ledgerWriteSucceeded,
+// consume-site JS guards further down this file (ledgerWriteSucceeded,
 // ledgerMergeSucceeded, artifactCheckMatched).
 // ---------------------------------------------------------------------------
 
@@ -223,7 +223,10 @@ const REVIEW_SCHEMA = {
 // shape as review-artifact-check.schema.json on disk, which stays a strong
 // oneOf and validates review_artifact_check.py's own stdout at the script
 // level. artifactCheckMatched() below is what actually enforces
-// match:true-implies-no-mismatch_detail for this literal's return.
+// match:true-implies-no-mismatch-evidence for this literal's return --
+// judged on the field's VALUE, not its presence, for the same reason the
+// ledger guards are (#289): declaring the field here advertises it as
+// fillable on a match, and agents fill what a schema advertises.
 const REVIEW_ARTIFACT_SCHEMA = {
   type: "object",
   additionalProperties: false,
@@ -240,7 +243,11 @@ const REVIEW_ARTIFACT_SCHEMA = {
 // schema, which stays a strong oneOf and validates ledger_update.py's own
 // stdout at the script level. ledgerWriteSucceeded() below is what
 // actually enforces the success-branch field set and rejects a
-// success:true return that also carries a failure-only key.
+// success:true return that also carries real failure EVIDENCE. Note the
+// cost of the union, and why that guard judges values rather than keys
+// (#289): declaring error/exit_code/stderr here ADVERTISES them as fillable
+// on a success return, and agents do fill them -- `exit_code: 0` on a
+// perfectly good write is a routine, truthful return, not a red flag.
 const LEDGER_WRITE_SCHEMA = {
   type: "object",
   additionalProperties: false,
@@ -466,19 +473,56 @@ function endsWithSegJson(fragmentPath, seg) {
 }
 
 // ---------------------------------------------------------------------------
-// Exact-key-set JS guards (CONTRACT §5). The flat schemas above no longer
+// Consume-site JS guards (CONTRACT §5). The flat schemas above no longer
 // discriminate success/failure shape the way the old oneOf branches did --
 // the tool-use API cannot enforce a top-level combinator, so a returned
-// object that claims success:true/match:true while ALSO carrying a
-// failure-only key (error/exit_code/stderr/mismatch_detail), or that is
-// missing a required success-branch field, must be treated as a failed
-// call here -- never trusted, never routed down the success path. The
-// on-disk strong schemas plus each script's own runtime self-validation
-// are the second layer behind these guards, not a substitute for them.
+// object that claims success:true/match:true while ALSO carrying real
+// EVIDENCE of failure (a non-empty error/stderr/mismatch_detail, a non-zero
+// exit_code), or that is missing a required success-branch field, or that
+// carries a key neither branch of its contract ever declared, must be
+// treated as a failed call here -- never trusted, never routed down the
+// success path. The on-disk strong schemas plus each script's own runtime
+// self-validation are the second layer behind these guards, not a
+// substitute for them.
+//
+// #289 -- all three guards used to reject on the mere PRESENCE of an
+// optional failure-branch field. But a flat union advertises every one of
+// those fields as fillable on EVERY call (that is what flattening costs),
+// and agents fill what a schema advertises: a truthful relay of a
+// successful ledger_update.py run volunteers `exit_code: 0` -- proof the
+// script SUCCEEDED -- and the presence test read that proof as proof of
+// failure, failing segments whose fragments were already correct on disk.
+// Whether a given agent volunteers the field is model discretion, so the
+// verdict was non-deterministic across identical prompts.
+//
+// Because that was the THIRD site of one defect class, the judgement is no
+// longer re-implemented per guard: NO_FAILURE_EVIDENCE below is the single
+// table saying what each optional field looks like when it carries NO
+// evidence, and hasFailureEvidence() is the single place that consults it.
+// Adding a fourth flat schema means adding a table row and an evidence-key
+// list -- not writing another predicate. The `k in raw` presence idiom now
+// appears exactly ONCE in this file, inside that helper, and
+// tests/ledger_confirmation_schema.test.py fails the build if it
+// reappears at any other site.
 // ---------------------------------------------------------------------------
 
 function isNonEmptyString(v) {
   return typeof v === "string" && v.length > 0;
+}
+
+// Deliberately NOT the negation of isNonEmptyString: a non-string is neither
+// a non-empty string nor an empty one. The NO_FAILURE_EVIDENCE table leans
+// on that asymmetry -- a wrong-typed error/stderr/mismatch_detail is
+// unreadable evidence and must fail closed exactly as the old presence-only
+// check did.
+function isEmptyString(v) {
+  return typeof v === "string" && v.length === 0;
+}
+
+// `0` is the ONLY exit status that testifies to success. `"0"`, `false` and
+// `null` are all `!== 0`, so they fail closed like any other wrong type.
+function isZeroExitCode(v) {
+  return v === 0;
 }
 
 function hasOnlyKeys(obj, allowedKeys) {
@@ -487,19 +531,57 @@ function hasOnlyKeys(obj, allowedKeys) {
 
 const LEDGER_WRITE_SUCCESS_KEYS = ["success", "status", "fragment_path", "fragment_sha1"];
 const LEDGER_MERGE_SUCCESS_KEYS = ["success", "ledger_path", "n_segments", "missing_segments", "stale_segments"];
-const FAILURE_ONLY_KEYS = ["error", "exit_code", "stderr"];
+const REVIEW_ARTIFACT_SUCCESS_KEYS = ["match"];
+// The optional fields each flat schema declares for its FAILURE branch.
+// Named for where failure evidence may APPEAR, not "failure-only" (#289):
+// the flat schemas make them fillable on a success return too, and only
+// their VALUE says which branch a return really is.
+const FAILURE_EVIDENCE_KEYS = ["error", "exit_code", "stderr"];
+const REVIEW_ARTIFACT_EVIDENCE_KEYS = ["mismatch_detail"];
+// Every key the corresponding flat schema declares. hasOnlyKeys() is checked
+// against these rather than the SUCCESS keys alone, so a benign,
+// already-value-checked `exit_code: 0` is not re-rejected as an unexpected
+// key -- that second rejection was the same #289 defect wearing a different
+// hat. A key NEITHER branch declares (a merge field on a write return, an
+// invented field) is still fatal, which is the work this check exists to do:
+// the tool-use API's own additionalProperties:false is the second layer
+// behind it, not a reason to drop it.
+const LEDGER_WRITE_ALLOWED_KEYS = LEDGER_WRITE_SUCCESS_KEYS.concat(FAILURE_EVIDENCE_KEYS);
+const LEDGER_MERGE_ALLOWED_KEYS = LEDGER_MERGE_SUCCESS_KEYS.concat(FAILURE_EVIDENCE_KEYS);
+const REVIEW_ARTIFACT_ALLOWED_KEYS = REVIEW_ARTIFACT_SUCCESS_KEYS.concat(REVIEW_ARTIFACT_EVIDENCE_KEYS);
+
+// The single table of "what does this optional field look like when it
+// carries NO evidence of failure?". A text field testifies to nothing only
+// when it is exactly the empty string -- never by its CONTENT, because
+// judging whether "none"/"n/a"/"no mismatch" means "fine" is natural-language
+// interpretation, which does not belong in a gate. Anything else, including
+// a wrong-typed value, is evidence.
+const NO_FAILURE_EVIDENCE = { error: isEmptyString, stderr: isEmptyString, mismatch_detail: isEmptyString, exit_code: isZeroExitCode };
+
+// The one place this file tests a declared optional field for failure
+// evidence. An absent field testifies to nothing; a present one testifies
+// to failure unless the table's benign-value predicate accepts it. A field
+// with no table entry is unclassifiable and counts as evidence -- fail
+// closed rather than throw or wave it through.
+function hasFailureEvidence(raw, evidenceKeys) {
+  return evidenceKeys.some((k) => {
+    if (!(k in raw)) return false;
+    const benign = NO_FAILURE_EVIDENCE[k];
+    return typeof benign !== "function" || !benign(raw[k]);
+  });
+}
 
 function ledgerWriteSucceeded(raw) {
   if (!raw || raw.success !== true) return false;
-  if (FAILURE_ONLY_KEYS.some((k) => k in raw)) return false;
-  if (!hasOnlyKeys(raw, LEDGER_WRITE_SUCCESS_KEYS)) return false;
+  if (hasFailureEvidence(raw, FAILURE_EVIDENCE_KEYS)) return false;
+  if (!hasOnlyKeys(raw, LEDGER_WRITE_ALLOWED_KEYS)) return false;
   return isNonEmptyString(raw.status) && isNonEmptyString(raw.fragment_path) && isNonEmptyString(raw.fragment_sha1);
 }
 
 function ledgerMergeSucceeded(raw) {
   if (!raw || raw.success !== true) return false;
-  if (FAILURE_ONLY_KEYS.some((k) => k in raw)) return false;
-  if (!hasOnlyKeys(raw, LEDGER_MERGE_SUCCESS_KEYS)) return false;
+  if (hasFailureEvidence(raw, FAILURE_EVIDENCE_KEYS)) return false;
+  if (!hasOnlyKeys(raw, LEDGER_MERGE_ALLOWED_KEYS)) return false;
   return (
     isNonEmptyString(raw.ledger_path) &&
     Number.isInteger(raw.n_segments) &&
@@ -508,8 +590,16 @@ function ledgerMergeSucceeded(raw) {
   );
 }
 
+// #289 third site. review_artifact_check.py's own emit_match() prints a bare
+// {"match": true} and NEVER a mismatch_detail alongside it, so any
+// mismatch_detail on a match:true return was added by the relaying agent --
+// exactly how exit_code got onto the ledger returns. This guard also gains
+// the allowed-key check its two siblings always had; an undeclared key used
+// to sail through as a match.
 function artifactCheckMatched(art) {
-  return !!art && art.match === true && !("mismatch_detail" in art);
+  if (!art || art.match !== true) return false;
+  if (hasFailureEvidence(art, REVIEW_ARTIFACT_EVIDENCE_KEYS)) return false;
+  return hasOnlyKeys(art, REVIEW_ARTIFACT_ALLOWED_KEYS);
 }
 
 // ---------------------------------------------------------------------------

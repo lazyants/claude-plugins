@@ -22,10 +22,36 @@ violates the tool-use API's "top-level object, no combinator" constraint
 codex dispatches (`batchDispatchPrompt`) that write their own fragment file
 atomically and self-validate it via THIS script's `--check-batch` mode,
 never via an agent-returned schema. `CANON_BATCH_SCHEMA` no longer exists
-in any template. Five CLI modes now exist, selected by which flag is given
+in any template. Seven CLI modes now exist, selected by which flag is given
 (mutually exclusive; `--research-mode {live,offline}` is REQUIRED for
 every one of them, even where it has no effect, so no call site can
 accidentally omit declaring the precondition):
+
+--init
+    Bootstrap mode (#290): writes an EMPTY but fully stamped canon.json
+    (`entries: {}`, `review_queue: []`, both generation_hashes fields
+    freshly computed) through the SAME `_stamp_write_verify` path every
+    merge uses. Exists because W3's `{"no_new_candidates": true}` SKIP
+    branch never reaches a merge, and the merge is the only thing that
+    ever creates canon.json -- so a project with nothing to research (by
+    construction, every uncased-script source that ships no
+    `name_inventory`) used to dead-end at W3a with segpack.py's
+    "FATAL: canon.json not found". CREATE-ONLY: an already-existing
+    canon.json is left byte-untouched and reported `"created": false`,
+    never re-stamped -- re-stamping would let an operator clear
+    select_segments.py's derivation-state gate without regenerating
+    anything, since that gate reads exactly these two hashes.
+
+--restamp-derivation
+    Re-records the CURRENT particle_config/derivation-bundle provenance
+    onto an EXISTING canon.json, content untouched (#291/#193). Every
+    other write path leaves the stamp alone when the document did not
+    change (see --merge-batches below), so this is the one deliberate way
+    to advance it -- the sanctioned replacement for the
+    `--merge-batches <empty-batch.json>` trick #193 records as its only,
+    explicitly unsanctioned escape from `blocked_needs_regeneration` on a
+    mature, zero-candidate project. Reports which fields moved. Refuses on
+    a project with no canon.json yet (use --init).
 
 --check-batch PATH [--expect-source-forms-file M.json]
     Pass 1 (per-item) + the offline backstop on the ONE fragment at PATH.
@@ -43,7 +69,11 @@ accepted here -- see --verify-merged]
     (Pass 1 + offline backstop) FIRST, before merging any of them, so a
     later fragment's failure never leaves an earlier one half-applied.
     Then threads `acc = _merge_batch(acc, frag, senses)` across every
-    fragment IN THE GIVEN ORDER, stamps generation_hashes fresh, validates the
+    fragment IN THE GIVEN ORDER, resolves generation_hashes (stamping them
+    fresh ONLY if the merged document actually differs from what is already
+    on disk -- #291; an identical re-submission or an empty fragment set
+    changes nothing and must not advance the provenance claim
+    select_segments.py's derivation-state gate reads), validates the
     in-memory accumulator against canon-file.schema.json (Pass 2) BEFORE
     ever touching disk, performs ONE atomic write, then re-reads the
     JUST-WRITTEN file fresh from disk and Pass-2-validates it AGAIN --
@@ -107,6 +137,8 @@ own assets/schemas/ (this script always runs from the durable, per-project
 copy).
 
 Usage:
+    python3 canon_validate.py --research-mode offline --init
+    python3 canon_validate.py --research-mode offline --restamp-derivation
     python3 canon_validate.py --research-mode live --check-batch out_0.json
     python3 canon_validate.py --research-mode live --check-batch out_0.json --expect-source-forms-file manifest_0.json
     python3 canon_validate.py --research-mode live --merge-batches out_0.json out_1.json
@@ -895,24 +927,111 @@ def _validate_whole_file(canon: dict, registry: "Registry") -> None:
 # ---------------------------------------------------------------------------
 
 
-def _stamp_write_verify(canon_path: Path, merged: dict, registry: "Registry") -> dict:
+def _content_view(doc: dict) -> dict:
+    """The part of a canon.json document that generation_hashes is a
+    provenance claim ABOUT -- i.e. everything except the stamp itself.
+    Equality here is the definition of "this merge changed nothing" (#291).
+
+    Deliberately whole-document rather than just entries{}: review_queue[] is
+    schema-required content, is written by the merge, and is read back by
+    glossary_batch_plan.py (a queued name is excluded from re-research), so a
+    review_queue-only merge genuinely changed what this file does and MUST
+    re-stamp. Equality is plain `==`, so list order counts as content --
+    entries{} is written with sort_keys=True so its order is not observable,
+    and review_queue[] is only ever filtered/appended by `_merge_batch`, so a
+    pure reorder is not reachable today; treating one as a change is the
+    safe direction if that ever stops being true.
+    """
+    return {k: v for k, v in doc.items() if k != "generation_hashes"}
+
+
+def _preservable_prior(canon_path: Path) -> "dict | None":
+    """The current on-disk canon.json when its generation_hashes stamp is
+    trustworthy enough to CARRY FORWARD across a no-op merge, else None
+    (meaning: stamp fresh, exactly as every merge did before #291).
+
+    Read from disk rather than taken from the caller's own pre-merge `canon`
+    object on purpose: this is the single choke point every writing mode goes
+    through, and re-reading makes the guard immune to any future refactor
+    that starts mutating the merge accumulator in place. `_merge_batch`
+    promises it never does, but a correctness guard should not rest on a
+    docstring.
+
+    None is returned for a missing file (nothing to preserve -- a fresh
+    bootstrap must stamp) and for a stamp that is absent, non-object,
+    incomplete, non-string, or EMPTY. The empty case matters: canon-file.
+    schema.json types these fields as plain strings and so cannot reject "",
+    while `_stamp_generation_hash` refuses to WRITE one -- preserving an
+    empty value would smuggle past exactly the guard that exists to stop it.
+    Re-stamping instead keeps a corrupt stamp self-healing.
+    """
+    if not canon_path.is_file():
+        return None
+    try:
+        prior = _load_canon(canon_path)
+    except CanonValidationError:
+        # An unparseable/malformed canon.json is not a trustworthy source of
+        # provenance; let the normal stamp+validate path surface it.
+        return None
+    stamp = prior.get("generation_hashes")
+    if not isinstance(stamp, dict):
+        return None
+    for field in GENERATION_HASH_FIELDS:
+        value = stamp.get(field)
+        if not isinstance(value, str) or not value:
+            return None
+    return prior
+
+
+def _stamp_write_verify(
+    canon_path: Path, merged: dict, registry: "Registry", force_restamp: bool = False
+) -> "tuple[dict, bool]":
     """Shared by every mode that writes canon.json (`run_merge`,
-    `run_merge_batches`): stamps generation_hashes fresh onto the in-memory
-    `merged` document, Pass-2-validates it BEFORE ever touching disk (so a
-    corrupted merge is caught before it's written, not just after), performs
-    ONE atomic write, then re-reads the JUST-WRITTEN file fresh from disk
-    and Pass-2-validates it AGAIN -- genuinely from disk, with NO masking
-    fallback for a missing generation_hashes value (the pre-1.2.0 version of
-    this function re-injected the just-stamped value via
+    `run_merge_batches`, `run_init`, `run_restamp_derivation`): resolves
+    generation_hashes onto the in-memory `merged` document,
+    Pass-2-validates it BEFORE ever touching disk (so a corrupted merge is
+    caught before it's written, not just after), performs ONE atomic write,
+    then re-reads the JUST-WRITTEN file fresh from disk and Pass-2-validates
+    it AGAIN -- genuinely from disk, with NO masking fallback for a missing
+    generation_hashes value (the pre-1.2.0 version of this function
+    re-injected the just-stamped value via
     `on_disk.setdefault("generation_hashes", ...)` here, which silently
     defeated the whole point of the post-write re-read: a write that
     somehow dropped generation_hashes would still "validate" against the
     value this script itself remembered, not what actually landed on disk).
-    Returns the freshly re-read on-disk document.
+
+    1.15.0 (#291) -- CONSERVE THE STAMP ON A NO-OP. This function used to
+    re-stamp unconditionally, which meant any merge advanced canon.json's
+    provenance claim even when it merged nothing into the document. Since
+    segpack.py copies these two hashes verbatim into every pack and
+    select_segments.py's derivation-state gate compares that copy against a
+    freshly computed cache_key.py value, an unconditional re-stamp let a
+    content-free merge clear `blocked_needs_regeneration` without anything
+    having been regenerated -- segments then read as caught-up and stale
+    output ships. The hole was NOT limited to an empty fragment:
+    `_merge_batch` treats an identical re-submission as a silent no-op, so a
+    fully populated fragment of already-merged items changed nothing either
+    while still reporting merged_accepted > 0. The check therefore keys on
+    whether the DOCUMENT changed, never on the fragment's item count.
+
+    `force_restamp=True` is the explicit, operator-driven override
+    (`--restamp-derivation`) -- the sanctioned replacement for the
+    `--merge-batches <empty-batch.json>` trick issue #193 documents as its
+    only, unsanctioned restamp path.
+
+    Returns `(freshly re-read on-disk document, restamped)`.
     """
-    merged.setdefault("generation_hashes", {})
-    for field in GENERATION_HASH_FIELDS:
-        merged["generation_hashes"][field] = _stamp_generation_hash(field)
+    prior = None if force_restamp else _preservable_prior(canon_path)
+    restamped = prior is None or _content_view(merged) != _content_view(prior)
+
+    if restamped:
+        merged.setdefault("generation_hashes", {})
+        for field in GENERATION_HASH_FIELDS:
+            merged["generation_hashes"][field] = _stamp_generation_hash(field)
+    else:
+        # Carry the existing stamp forward verbatim (extra keys included --
+        # this function never edits provenance it did not compute).
+        merged["generation_hashes"] = dict(prior["generation_hashes"])
 
     _validate_whole_file(merged, registry)
 
@@ -920,7 +1039,94 @@ def _stamp_write_verify(canon_path: Path, merged: dict, registry: "Registry") ->
 
     on_disk = _load_canon(canon_path)
     _validate_whole_file(on_disk, registry)
-    return on_disk
+    return on_disk, restamped
+
+
+def run_init(canon_path: Path, research_mode: str, registry: "Registry") -> dict:
+    """--init: bootstrap an EMPTY but fully stamped canon.json for a project
+    whose glossary pass has nothing to research -- `glossary_batch_plan.py`
+    printed `{"no_new_candidates": true, "batches": []}`, so SKILL.md's W3
+    SKIP branch runs no merge, and the merge is the only writer of
+    canon.json (#290). Reuses `_stamp_write_verify` unchanged, so the
+    bootstrap canon carries genuine cache_key.py-computed generation_hashes
+    -- exactly what segpack.py copies verbatim into every pack -- rather
+    than a hand-rolled stub that would fail its own required-field check at
+    W3a.
+
+    CREATE-ONLY, by design: an already-existing canon.json is left
+    byte-untouched (`"created": false`) and is not even read here.
+    Re-stamping one would hand an operator a way to clear
+    select_segments.py's derivation-state gate without regenerating
+    anything, since that gate reads precisely these two hashes to decide
+    whether a particle_config edit or a bootstrap_names.py/segpack.py fix
+    has been regenerated through. Health-checking an existing canon.json is
+    VALIDATE-ONLY mode's job, not this one's; keeping --init silent about
+    it means the documented SKIP-branch command stays a safe no-op on every
+    re-run of an already-bootstrapped project.
+    """
+    created = not canon_path.is_file()
+    if created:
+        # No prior file, so _stamp_write_verify always stamps fresh here --
+        # the #291 conservation path cannot apply to a bootstrap.
+        _stamp_write_verify(canon_path, {"entries": {}, "review_queue": []}, registry)
+
+    return {
+        "success": True,
+        "mode": "init",
+        "canon_path": str(canon_path),
+        "research_mode": research_mode,
+        "created": created,
+    }
+
+
+def run_restamp_derivation(canon_path: Path, research_mode: str, registry: "Registry") -> dict:
+    """--restamp-derivation: re-record the CURRENT particle_config /
+    derivation-bundle provenance onto an existing canon.json, leaving its
+    content untouched.
+
+    This exists because #291 deliberately removed the only way this used to
+    happen. Issue #193 documents `--merge-batches <empty-batch.json>` as the
+    single (explicitly "not documented, sanctioned, or tested") escape from
+    `blocked_needs_regeneration` for a MATURE, zero-candidate project: such a
+    project has no candidates left, so the glossary pass never runs, so no
+    merge ever restamps -- and after a plugin upgrade that touches
+    bootstrap_names.py or segpack.py, segment selection stays blocked
+    forever. Closing #291 without this would have turned that latent brick
+    into an unconditional one.
+
+    Making it an explicit, single-purpose, named mode is the whole point: the
+    #291 defect was never that this operation exists, it was that it happened
+    SILENTLY as a side effect of a command whose stated job was merging
+    fragments. An operator who runs this has said what they mean, and the
+    result payload names exactly which fields moved.
+
+    Pass 1 runs over the existing entries first -- provenance should never be
+    advanced on a canon.json that is not itself valid.
+    """
+    if not canon_path.is_file():
+        raise CanonValidationError(
+            f"canon.json not found at {canon_path} (nothing to restamp -- "
+            f"bootstrap a new project with --init instead)"
+        )
+
+    canon = _load_canon(canon_path)
+    _validate_existing_entries(canon, registry)
+
+    before = dict(canon.get("generation_hashes") or {})
+    on_disk, _ = _stamp_write_verify(canon_path, canon, registry, force_restamp=True)
+    after = on_disk["generation_hashes"]
+
+    return {
+        "success": True,
+        "mode": "restamp_derivation",
+        "canon_path": str(canon_path),
+        "research_mode": research_mode,
+        "generation_hashes_changed": sorted(
+            field for field in GENERATION_HASH_FIELDS if before.get(field) != after.get(field)
+        ),
+        "entries_count": len(on_disk["entries"]),
+        "review_queue_count": len(on_disk["review_queue"]),
+    }
 
 
 def run_merge(
@@ -943,7 +1149,7 @@ def run_merge(
     _enforce_offline_backstop(batch, research_mode)
     merged = _merge_batch(canon, batch, senses)
 
-    on_disk = _stamp_write_verify(canon_path, merged, registry)
+    on_disk, restamped = _stamp_write_verify(canon_path, merged, registry)
 
     n_accepted = sum(1 for item in batch if item.get("disposition") == "accepted")
     n_queued = sum(1 for item in batch if item.get("disposition") == "review_queue")
@@ -957,6 +1163,9 @@ def run_merge(
         "merged_queued": n_queued,
         "entries_count": len(on_disk["entries"]),
         "review_queue_count": len(on_disk["review_queue"]),
+        # #291: false here means this merge changed nothing, so canon.json's
+        # provenance claim was deliberately left where it was.
+        "generation_hashes_restamped": restamped,
     }
 
 
@@ -1021,7 +1230,7 @@ def run_merge_batches(
     for batch in batches:
         acc = _merge_batch(acc, batch, senses)
 
-    on_disk = _stamp_write_verify(canon_path, acc, registry)
+    on_disk, restamped = _stamp_write_verify(canon_path, acc, registry)
 
     n_accepted = sum(1 for batch in batches for item in batch if item.get("disposition") == "accepted")
     n_queued = sum(1 for batch in batches for item in batch if item.get("disposition") == "review_queue")
@@ -1035,6 +1244,11 @@ def run_merge_batches(
         "merged_queued": n_queued,
         "entries_count": len(on_disk["entries"]),
         "review_queue_count": len(on_disk["review_queue"]),
+        # #291: false here means every item was an identical re-submission
+        # (or the fragment set was empty), so nothing changed and canon.json's
+        # provenance claim was deliberately left where it was. Note
+        # merged_accepted above counts SUBMITTED items, not changed ones.
+        "generation_hashes_restamped": restamped,
     }
 
 
@@ -1159,6 +1373,30 @@ def build_arg_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--init",
+        action="store_true",
+        help=(
+            "Bootstrap an EMPTY but fully stamped canon.json (entries={}, "
+            "review_queue=[], both generation_hashes freshly computed via "
+            "cache_key.py) when none exists yet -- W3's no_new_candidates "
+            "SKIP branch, which never reaches a merge (#290). Create-only: "
+            "an existing canon.json is left untouched and reported "
+            "\"created\": false, never re-stamped."
+        ),
+    )
+    parser.add_argument(
+        "--restamp-derivation",
+        action="store_true",
+        help=(
+            "Re-record the CURRENT particle_config/derivation-bundle "
+            "provenance onto an existing canon.json, content untouched. The "
+            "sanctioned escape for a mature, zero-candidate project whose "
+            "derivation bundle moved and which therefore has no glossary "
+            "merge left to run (#193) -- since #291, an ordinary merge that "
+            "changes nothing deliberately does NOT restamp."
+        ),
+    )
+    parser.add_argument(
         "--check-batch",
         metavar="PATH",
         default=None,
@@ -1242,15 +1480,49 @@ def main(argv=None) -> int:
     senses_path = Path(args.senses_path) if args.senses_path else DEFAULT_SENSES_PATH
     allow_absent_senses = args.senses_path is None
 
-    modes_selected = sum([
-        args.check_batch is not None,
-        args.merge_batches is not None,
-        args.verify_merged,
-    ])
-    if modes_selected > 1:
+    # Every mode flag other than the legacy bare `--batch`, paired with the
+    # spelling used in error messages. One table, so a mode added later
+    # cannot be forgotten by one guard and remembered by another.
+    non_batch_modes = (
+        ("--init", args.init),
+        ("--restamp-derivation", args.restamp_derivation),
+        ("--check-batch", args.check_batch is not None),
+        ("--merge-batches", args.merge_batches is not None),
+        ("--verify-merged", args.verify_merged),
+    )
+    selected_modes = [name for name, selected in non_batch_modes if selected]
+    if len(selected_modes) > 1:
+        parser.error(", ".join(selected_modes) + " are mutually exclusive")
+
+    # #292: `--batch` is meaningful in exactly two shapes -- ALONE (legacy
+    # single-fragment merge) or under --verify-merged (naming the already-
+    # processed fragments to verify). Alongside any other mode it used to be
+    # accepted and then SILENTLY IGNORED, because main()'s dispatch chain
+    # below tests `args.batch` only in its final elif and can never reach it.
+    # A call site could therefore read `{"success": true}` for a fragment
+    # that was never merged. Fail loud instead; no shipped caller passes the
+    # combination, so nothing legitimate regresses.
+    batch_conflicts = [
+        name for name, selected in non_batch_modes if selected and name != "--verify-merged"
+    ]
+    if args.batch is not None and batch_conflicts:
         parser.error(
-            "--check-batch, --merge-batches, and --verify-merged are "
-            "mutually exclusive"
+            "--batch is not accepted with "
+            + ", ".join(batch_conflicts)
+            + " -- it would be silently ignored. Pass --batch alone (legacy "
+            "single-fragment merge), or under --verify-merged."
+        )
+
+    # Modes that read no fragment at all must not appear to consume one.
+    fragmentless_modes = [
+        name
+        for name, selected in (("--init", args.init), ("--restamp-derivation", args.restamp_derivation))
+        if selected
+    ]
+    if fragmentless_modes and args.expect_source_forms_file is not None:
+        parser.error(
+            ", ".join(fragmentless_modes)
+            + " does not accept --expect-source-forms-file (it reads no fragment)"
         )
     if args.verify_merged and not args.batch:
         parser.error("--verify-merged requires one or more --batch PATH")
@@ -1271,7 +1543,11 @@ def main(argv=None) -> int:
 
     try:
         registry = _build_schema_registry()
-        if args.check_batch is not None:
+        if args.init:
+            result = run_init(canon_path, args.research_mode, registry)
+        elif args.restamp_derivation:
+            result = run_restamp_derivation(canon_path, args.research_mode, registry)
+        elif args.check_batch is not None:
             result = run_check_batch(
                 canon_path,
                 args.check_batch,
