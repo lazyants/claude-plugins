@@ -342,6 +342,10 @@ def instantiate_mass_translate(*, batch_agent_cap: int) -> str:
     # SEG_ID-guard assertions never read its value; it only needs to be a valid
     # JS literal so the "no leftover {{...}}" assertion below stays meaningful.
     text = text.replace("{{CODEX_COMPANION_PATH_JSON}}", '"/fake/codex-companion.mjs"')
+    # #197 -- engine.effort/engine.model. Neither is read by this file's
+    # SEG_ID-guard assertions; they only need to resolve.
+    text = text.replace("{{EFFORT}}", "high")
+    text = text.replace("{{MODEL}}", "")
     assert "{{" not in text
     return text
 

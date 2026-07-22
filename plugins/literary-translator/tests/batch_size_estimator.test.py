@@ -295,6 +295,10 @@ def instantiate_mass_translate(
     # to the call-counting here -- it only needs to resolve so the "{{ not in
     # text" assertion below (no unresolved token) still holds.
     text = text.replace("{{CODEX_COMPANION_PATH_JSON}}", json.dumps("/fixture/codex/codex-companion.mjs"))
+    # #197 -- engine.effort/engine.model. Neither is inspected by this file's
+    # call-counting assertions; they only need to resolve.
+    text = text.replace("{{EFFORT}}", "high")
+    text = text.replace("{{MODEL}}", "")
     assert "{{" not in text, "fixture instantiation left an unresolved token -- fix the fixture, not the assertion below"
     return text
 
@@ -1365,6 +1369,9 @@ def instantiate_glossary_pass(
     text = text.replace("{{TARGET_LANG}}", target_lang)
     text = text.replace("{{RESEARCH_MODE}}", research_mode)
     text = text.replace("{{BATCH_AGENT_CAP}}", str(int(batch_agent_cap)))
+    # #197 -- engine.effort. Not inspected by this file's call-counting
+    # assertions; it only needs to resolve.
+    text = text.replace("{{EFFORT}}", "high")
     assert "{{" not in text, (
         "glossary fixture instantiation left an unresolved token -- fix the "
         "fixture, not the assertion"

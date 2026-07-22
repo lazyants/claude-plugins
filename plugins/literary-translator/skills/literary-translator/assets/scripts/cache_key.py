@@ -369,16 +369,22 @@ def compute_prompt_hash(profile: dict, durable_root: Path) -> str:
 
 
 def compute_agent_config_hash(profile: dict, durable_root: Path) -> str:
+    # model is OPTIONAL (engine.model may be absent from real/fixture
+    # profiles) -- read it defensively via .get(...), never profile_get's
+    # fail-loud lookup, which would crash this CLI on a profile that simply
+    # hasn't pinned a model. Absent -> None, which canonical_json_bytes's
+    # sort_keys=True JSON dump hashes deterministically as a null.
     obj = {
         "effort": profile_get(profile, "engine.effort"),
         "max_fix_rounds": profile_get(profile, "engine.max_fix_rounds"),
+        "model": profile.get("engine", {}).get("model"),
     }
     return sha1_hex(canonical_json_bytes(obj))
 
 
 def compute_profile_semantics_hash(profile: dict, durable_root: Path) -> str:
     # Exactly these six named fields -- no more, no fewer. Deliberately
-    # does not duplicate effort/max_fix_rounds (agent_config_hash's job).
+    # does not duplicate effort/max_fix_rounds/model (agent_config_hash's job).
     obj = {
         "source_lang": profile_get(profile, "source.language.code"),
         "target_lang": profile_get(profile, "target.language.code"),

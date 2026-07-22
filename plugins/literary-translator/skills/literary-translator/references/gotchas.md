@@ -149,7 +149,8 @@ scratchpad-like path — Step 0a rejects that outright.
 
 ## 5. The fix call is 3-argument, on purpose — do not revert to 2 arguments
 
-`agent(fixPrompt(seg, round, revObj), {effort:'high'})` — a deliberate,
+`agent(fixPrompt(seg, round, revObj), {effort: EFFORT})` (`EFFORT` = the
+template's own `engine.effort` const, #197) — a deliberate,
 documented departure from the real reference script's byte-exact
 2-argument `fixPrompt(seg, round)` shape. Do not "fix" this back to two
 arguments thinking it's a drift error.

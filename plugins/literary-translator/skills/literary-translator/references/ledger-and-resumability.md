@@ -380,11 +380,25 @@ Exact byte-scope per field:
   `review_TASK.md` (the `.template` infix dropped — these are the copied,
   runtime filenames).
 - **`agent_config_hash`** (global) — sha1 of canonical JSON `{effort:
-  engine.effort, max_fix_rounds: engine.max_fix_rounds}` from
-  `profile.yml`. `batch_agent_cap` is **deliberately excluded** — it's a
+  engine.effort, max_fix_rounds: engine.max_fix_rounds, model:
+  engine.model}` from `profile.yml`. **`model` (#197)** is read
+  defensively — `profile.get("engine", {}).get("model")`, never the
+  fail-loud `profile_get` — because it's optional and real/fixture
+  profiles routinely omit it; absent resolves to JSON `null`, meaning
+  "codex config default (unpinned)". This folds the **requested** model
+  only: codex-companion never reports back which model actually ran a
+  job, so there is no resolved value to hash instead (see
+  `references/operating-constellation.md`). `batch_agent_cap` is
+  **deliberately excluded** — it's a
   pure orchestration/scheduling knob with zero effect on
   translator/reviewer output semantics; including it would invalidate every
-  converged segment on a mere batch-size tweak.
+  converged segment on a mere batch-size tweak. The glossary pass has no
+  per-segment cache key of its own, so it can't see an `engine.effort`
+  change through `agent_config_hash` at all — its own resume-integrity
+  digest instead gets `effort` directly via `resume_setup.py`'s
+  `SUBST_FIELDS` (see `references/orchestration-and-batching.md`'s digest
+  definition); `model` is deliberately **not** added there, since the
+  glossary pass has no model knob to begin with.
 - **`profile_semantics_hash`** (global) — sha1 of canonical JSON
   `{source_lang: source.language.code, target_lang: target.language.code,
   verse_policy_mode: verse_policy.mode, verse_policy_threshold_lines:
@@ -392,7 +406,7 @@ Exact byte-scope per field:
   footnotes.apparatus_policy, untranslated_sentinel:
   validation.untranslated_sentinel}` from `profile.yml` — exactly these six
   named fields, no more, no fewer. Deliberately does not duplicate
-  effort/max_fix_rounds (that's `agent_config_hash`'s job).
+  effort/max_fix_rounds/model (that's `agent_config_hash`'s job).
 - **`particle_config_hash`** (global) — sha1 of the resolved
   `particle_config` file's raw bytes — `${durable_root}/languages/<source.language.particle_config's
   literal value>` (same resolution rule as `bootstrap_names.py`, never

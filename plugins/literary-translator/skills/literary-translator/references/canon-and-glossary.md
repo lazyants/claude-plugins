@@ -73,7 +73,9 @@ findings, and codex accuracy-bearing calls in this plugin are never bare,
 never nested, and never trusted on their own in-turn say-so.
 
 Per batch: `batchDispatchPrompt(batch)` is codex, `agentType:'codex:codex-rescue'`,
-`effort:'high'`, **schema-less**, fire-and-forget — it writes the run-scoped
+`effort: engine.effort` (#197 — a configurable enum, default `high`, dual-injected
+alongside the TASK opener's own `Effort: <value>.` line; see
+`references/ledger-and-resumability.md`'s dual-injection rule), **schema-less**, fire-and-forget — it writes the run-scoped
 fragment `${durable_root}/glossary/runs/{{RUN_ID}}/out_{index}.json`
 atomically and self-validates it via `canon_validate.py --check-batch`
 before printing `FRAGMENT {index}`; `batchWaitPrompt(batch)` is Claude,
@@ -365,6 +367,15 @@ something a script silently probes (and potentially gets wrong).
   `{{RESEARCH_MODE}}` token (same mechanism as `{{DURABLE_ROOT}}`), then passed
   through literally by the merge-step agent's shelled-out invocation — this script
   never parses YAML itself.
+- **`{{EFFORT}}` (#197)** is the same substitution mechanism applied to
+  `profile.yml`'s `engine.effort`: resolved once at
+  `glossary-pass-wf.template.js` instantiation time and spliced in as a
+  plain quoted string, it drives BOTH the batch dispatch codex TASK
+  opener's own `Effort: <value>.` line and `batchDispatchPrompt`'s
+  `agent()` `effort` option, always from this one value (see
+  `references/ledger-and-resumability.md`'s dual-injection rule). There is
+  no `{{MODEL}}` token here — a codex model id does not thread to the
+  glossary pass (see `assets/profile.example.yml`).
 
 ## Citation cache: `canon.json` itself, no new file
 

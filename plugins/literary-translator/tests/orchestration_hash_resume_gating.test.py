@@ -136,6 +136,7 @@ BASE_SUBST = {
     "target_lang": "en",
     "max_fix_rounds": 3,
     "batch_agent_cap": 5,
+    "effort": "high",
 }
 
 

@@ -54,6 +54,18 @@
 //                        (3*BATCHES.length + 2) would exceed it -- the same
 //                        refusal mass-translate-wf.template.js makes for its
 //                        own oversized batch (#95).
+//   {{EFFORT}}          -- #197: engine.effort (enum: low/medium/high/xhigh),
+//                        substituted as a plain quoted string, same style as
+//                        {{SOURCE_LANG}} above. Drives BOTH the batch dispatch
+//                        codex TASK opener below and the batchStep
+//                        codex:codex-rescue agent call's own effort option,
+//                        always from this ONE value (dual-injection rule --
+//                        see references/ledger-and-resumability.md). Unlike
+//                        mass-translate-wf.template.js, this template
+//                        declares no model-knob substitution token at all: a
+//                        codex model id does not thread to the glossary pass
+//                        (its agent call's own model: opt would set the
+//                        Claude forwarder's model, never codex's).
 //
 // `args` shape this template expects (an array, or a JSON string of one):
 //   [ { index: 0, candidates: [ {name, freq, mid_sentence, multiword,
@@ -107,6 +119,10 @@ const RESEARCH_MODE = "{{RESEARCH_MODE}}"
 const RUN_ID = "{{RUN_ID}}"
 const RUN_DIR = ROOT + "/glossary/runs/" + RUN_ID
 const BATCH_AGENT_CAP = {{BATCH_AGENT_CAP}}
+// #197 -- engine.effort. Drives both the batch dispatch codex TASK opener
+// and the batchStep codex:codex-rescue agent effort option below, always
+// from this one value. No model knob here (see the header token doc above).
+const EFFORT = "{{EFFORT}}"
 
 // ---------------------------------------------------------------------------
 // Schema literal -- declared ABOVE the pipeline() call at the bottom of this
@@ -248,7 +264,7 @@ function batchDispatchPrompt(batch) {
   const outPath = fragmentPath(batch.index)
   const manifestFile = manifestPath(batch.index)
   const lines = []
-  lines.push("Effort: high. Canon-and-glossary pass (codex-glossary-pass) for a " + SOURCE_LANG + " -> " + TARGET_LANG + " literary translation project, batch " + batch.index + ".")
+  lines.push("Effort: " + EFFORT + ". Canon-and-glossary pass (codex-glossary-pass) for a " + SOURCE_LANG + " -> " + TARGET_LANG + " literary translation project, batch " + batch.index + ".")
   lines.push("Read in full, in this order: " + ROOT + "/glossary_TASK.md (the canonicalization rules and the exact per-item output contract) and " + ROOT + "/canon.json (the entries already frozen there). Never re-decide or override any source_form already present in canon.json's own entries{} -- this batch resolves only the new candidates listed below, which were already filtered against the current canon.json before you were dispatched.")
   lines.push("research_mode = " + RESEARCH_MODE + ". If it is \"offline\": basis:\"established\" is forbidden outright for every candidate in this batch, with no exception -- use basis:\"transliterated\" when the fixed practical-transcription rule in style_bible.md (section C-translit) is enough on its own, use basis:\"sense_translated\" instead when the candidate is a speaking name with a clean sense-rendering (see the speaking-name rule below -- legal under offline too, since it makes no citation claim at all), or set disposition:\"review_queue\" instead, with a note that starts with the literal prefix \"SOURCE_UNAVAILABLE:\". If it is \"live\": basis:\"established\" is allowed, but only together with a real, citable reference source URL -- never a fabricated one.")
   lines.push("This batch's candidates -- deterministically extracted by bootstrap_names.py, never yet decided by any LLM (name = the surface form as it appears in the source text; freq/n_segments = how often and how widely it recurs; likely_name/multiword/mid_sentence/abbrev = this script's own recall-oriented heuristics, not a verdict; elision_ambiguous/elision_stripped_form = present only on some rows, flagging a possible article-elision ambiguity resolved by the adjudication rule below):")
@@ -366,7 +382,7 @@ async function batchStep(batch) {
 
   await agent(batchDispatchPrompt(batch), {
     agentType: "codex:codex-rescue",
-    effort: "high",
+    effort: EFFORT,
     phase: "GlossaryPass",
     label: "glossary:dispatch:" + batch.index,
   })

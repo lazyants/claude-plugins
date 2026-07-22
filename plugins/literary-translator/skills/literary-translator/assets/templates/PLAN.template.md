@@ -66,8 +66,8 @@ LT_PLACEHOLDER_UNFILLED -- record the WHY behind this project's own `profile.yml
 reasoning is not already obvious from the schema alone. Typical items: `footnotes.apparatus_policy` and
 why; `verse_policy.mode` and why (see `references/verse-policy.md` for the six-value enum);
 `glossary.research_mode` (`live` | `offline`) and why -- this is a statement about THIS run's actual
-environment, not a preference; any project-specific reason to deviate from the shipped `engine.effort` /
-`max_fix_rounds` / `batch_agent_cap` defaults.
+environment, not a preference; any project-specific reason to deviate from the chooseable `engine.effort`
+(default `high`) / `max_fix_rounds` / `batch_agent_cap` defaults.
 <!-- LT_REQUIRED_FILL_END -->
 
 ### Intake & proportionality agreement (SKILL.md's "Intake & proportionality" step)
@@ -96,7 +96,8 @@ having actually looked at the source file -- not a promise about what the extrac
 
 <!-- LT_REQUIRED_FILL_BEGIN: risks -->
 LT_PLACEHOLDER_UNFILLED -- anything specific to this project that could derail it: scale/cost estimate
-(word count times the per-segment convergence loop, at `engine.effort: high`), session-limit exposure,
+(word count times the per-segment convergence loop, at this project's own `engine.effort` -- default
+`high`), session-limit exposure,
 known-hard passages (embedded third-language text, disputed readings, wordplay), anything else worth
 flagging before the mass-translate batches start. New risks discovered mid-project get appended below in
 section 5, not retrofitted into this section.
