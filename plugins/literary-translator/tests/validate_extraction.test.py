@@ -171,6 +171,39 @@ def _manifest_with_verse() -> dict:
     return m
 
 
+def _manifest_with_extra_heading_block(raw_type: str, *, heading_types=None) -> dict:
+    """Baseline manifest plus one extra schema-valid block of type
+    ``raw_type``, cited by seg01's own ``block_ids`` (so it participates in
+    the manifest like a real heading block would, without disturbing any
+    other derivable check). Passing ``heading_types`` sets the manifest's own
+    ``heading_types`` key to that value; leaving it ``None`` leaves the key
+    OUT of the manifest entirely -- the #210 D2 trigger condition is the
+    key's outright ABSENCE, never an empty/falsy value, so tests must be able
+    to construct "key absent" and "key present but empty" as two distinct
+    shapes."""
+    m = _baseline_manifest()
+    block_id = f"{raw_type}:seg01:0001"
+    m["blocks"][block_id] = {
+        "id": block_id, "type": raw_type, "order_index": 5,
+        "source_file": "body.xhtml", "plain_text": "A sub-heading",
+        "sha1": _sha1("A sub-heading"),
+    }
+    m["segments"][0]["block_ids"] = m["segments"][0]["block_ids"] + [block_id]
+    if heading_types is not None:
+        m["heading_types"] = heading_types
+    return m
+
+
+def _manifest_with_heading_levels(levels: dict) -> dict:
+    """Baseline manifest (whose only heading block is HEAD, never itself
+    heading-shaped per BROAD_HEADING_LIKE_RE) plus a ``heading_levels`` map --
+    isolates schema/cross-field assertions about ``heading_levels`` from the
+    #210 D2 undeclared-heading-type check."""
+    m = _baseline_manifest()
+    m["heading_levels"] = levels
+    return m
+
+
 def _ok(results, name):
     for n, ok, _ in results:
         if n == name:
@@ -896,3 +929,117 @@ def test_schema_valid_but_check_field_missing_exits_one(tmp_path, monkeypatch):
     m = _baseline_manifest()
     del m["segments"][0]["n_para"]
     assert _run_gate(tmp_path, monkeypatch, m) == 1
+
+
+# ---------------------------------------------------------------------------
+# #210 D2: fail-loud when heading_types is wholly ABSENT and a heading-shaped
+# block type exists (heading_types_declared_when_heading_shaped_blocks_exist)
+# ---------------------------------------------------------------------------
+
+def test_undeclared_heading_shaped_block_fails_naming_type_and_both_remedies(tmp_path, monkeypatch, capsys):
+    m = _manifest_with_extra_heading_block("CHAPTER")  # heading_types key absent
+    code = _run_gate(tmp_path, monkeypatch, m)
+    _out, err = capsys.readouterr()
+    assert code == 1
+    assert "CHAPTER" in err
+    assert "heading_types" in err
+    assert "[]" in err  # names the opt-out remedy, not just the declare-it remedy
+
+
+def test_undeclared_heading_shaped_block_isolated_via_run_derivable_checks():
+    m = _manifest_with_extra_heading_block("CHAPTER")
+    results = ve.run_derivable_checks(m, "omit_apparatus", 700)
+    assert _ok(results, "heading_types_declared_when_heading_shaped_blocks_exist") is False
+
+
+def test_explicit_empty_heading_types_is_a_positive_optout_and_passes(tmp_path, monkeypatch):
+    # An explicit [] is a DECLARATION ("this source has no heading blocks"),
+    # not an absence -- must NOT trigger the check, even with a CHAPTER block.
+    m = _manifest_with_extra_heading_block("CHAPTER", heading_types=[])
+    assert _run_gate(tmp_path, monkeypatch, m) == 0
+
+
+def test_declared_heading_type_passes(tmp_path, monkeypatch):
+    m = _manifest_with_extra_heading_block("CHAPTER", heading_types=["CHAPTER"])
+    assert _run_gate(tmp_path, monkeypatch, m) == 0
+
+
+def test_gutenberg_shaped_manifest_head_only_no_heading_types_key_passes(tmp_path, monkeypatch):
+    """The false-RED regression that matters most: every shipped
+    gutenberg_epub/plain_text project is exactly this shape -- its only
+    heading block is HEAD, and it never sets heading_types at all. "HEAD"
+    does not match BROAD_HEADING_LIKE_RE (HEADING != HEAD, H[1-6] != HEAD),
+    so this must stay green. If this test ever goes red, every shipped
+    adapter project breaks."""
+    m = _baseline_manifest()
+    assert "heading_types" not in m
+    assert _run_gate(tmp_path, monkeypatch, m) == 0
+
+
+def test_case_insensitive_lowercase_chapter_still_trips_the_check():
+    m = _manifest_with_extra_heading_block("chapter")
+    results = ve.run_derivable_checks(m, "omit_apparatus", 700)
+    assert _ok(results, "heading_types_declared_when_heading_shaped_blocks_exist") is False
+
+
+def test_fullmatch_not_substring_particle_does_not_trip_part():
+    m = _manifest_with_extra_heading_block("PARTICLE")
+    results = ve.run_derivable_checks(m, "omit_apparatus", 700)
+    assert _ok(results, "heading_types_declared_when_heading_shaped_blocks_exist") is True
+
+
+def test_undeclared_heading_shaped_check_still_fires_for_custom_format(tmp_path, monkeypatch):
+    """The self-check REGION PIN is skipped for source.format: custom
+    (#180), but this manifest-derivable check is NOT a region-pin check --
+    it must still fire, catching the defect immediately after extraction even
+    for a co-designed custom extractor."""
+    m = _manifest_with_extra_heading_block("CHAPTER")
+    assert _run_gate(tmp_path, monkeypatch, m, source_format="custom") == 1
+
+
+# ---------------------------------------------------------------------------
+# #210 D1 -- heading_levels: schema acceptance/rejection driven through the
+# real jsonschema.validate (validate_manifest_schema, called from main()),
+# plus the cross-field guard that is NOT expressible in JSON Schema
+# (heading_levels_keys_are_declared_heading_types).
+# ---------------------------------------------------------------------------
+
+def test_heading_levels_valid_map_is_schema_valid_and_gate_passes(tmp_path, monkeypatch):
+    # "HEAD" is always a member of heading_types ∪ {"HEAD"}, regardless of
+    # whether heading_types itself is set -- so this is valid on both axes.
+    m = _manifest_with_heading_levels({"HEAD": 3})
+    assert ve.validate_manifest_schema(m) == []
+    assert _run_gate(tmp_path, monkeypatch, m) == 0
+
+
+@pytest.mark.parametrize("bad_level", [0, 7, "2", True, 3.5])
+def test_heading_levels_value_rejected_by_schema(tmp_path, monkeypatch, bad_level):
+    m = _manifest_with_heading_levels({"HEAD": bad_level})
+    assert ve.validate_manifest_schema(m) != []
+    assert _run_gate(tmp_path, monkeypatch, m) == 1
+
+
+def test_heading_levels_empty_string_key_rejected_by_schema(tmp_path, monkeypatch):
+    m = _manifest_with_heading_levels({"": 2})
+    assert ve.validate_manifest_schema(m) != []
+    assert _run_gate(tmp_path, monkeypatch, m) == 1
+
+
+def test_heading_levels_key_not_a_declared_heading_type_fails_cross_field_guard(tmp_path, monkeypatch):
+    # "CHAPTER" is schema-valid (any non-empty string key, level in range) but
+    # is not a member of heading_types ∪ {"HEAD"} here -- a typo that would
+    # otherwise silently no-op in assemble.py. Only the cross-field guard,
+    # not the schema, can reject it.
+    m = _manifest_with_heading_levels({"CHAPTER": 2})
+    assert ve.validate_manifest_schema(m) == []
+    results = ve.run_derivable_checks(m, "omit_apparatus", 700)
+    assert _ok(results, "heading_levels_keys_are_declared_heading_types") is False
+    assert _run_gate(tmp_path, monkeypatch, m) == 1
+
+
+def test_heading_levels_key_in_declared_heading_types_passes(tmp_path, monkeypatch):
+    m = _manifest_with_heading_levels({"CHAPTER": 3})
+    m["heading_types"] = ["CHAPTER"]
+    results = ve.run_derivable_checks(m, "omit_apparatus", 700)
+    assert _ok(results, "heading_levels_keys_are_declared_heading_types") is True
+    assert _run_gate(tmp_path, monkeypatch, m) == 0

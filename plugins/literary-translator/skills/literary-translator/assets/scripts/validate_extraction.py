@@ -135,6 +135,20 @@ VALID_APPARATUS_POLICIES = ("translate_all", "preserve_source", "omit_apparatus"
 FNREF_RE = re.compile(r"⟦FNREF_(\d+)⟧")
 BODY_REF_MARKER_RE = re.compile(r"\[(\d+)\]")
 
+# Broad heading-like allowlist (#210 R2) -- a BYTE-IDENTICAL duplicate of
+# validate_assembled.py's own BROAD_HEADING_LIKE_RE. This plugin's standing
+# rule is "no shared util module -- cross-cutting helpers are duplicated
+# byte-identically, guarded by a drift test"
+# (tests/heading_like_regex_drift.test.py pins the two copies against each
+# other). Never edit this literal without also updating the sibling copy.
+# An exact (not substring) match against a block's raw `type` tag; "HEAD"
+# deliberately does NOT match (HEADING != HEAD, H[1-6] != HEAD), which is
+# what keeps every shipped gutenberg_epub/plain_text adapter out of the
+# population this gate can ever fire against.
+BROAD_HEADING_LIKE_RE = re.compile(
+    r"^(?:HEADING|TITLE|CHAPTER|SECTION|PART|SIMAN|PEREK|H[1-6])$", re.IGNORECASE
+)
+
 # ---------------------------------------------------------------------------
 # Self-check region pin (issue #86)
 # ---------------------------------------------------------------------------
@@ -552,6 +566,60 @@ def run_derivable_checks(manifest: dict, apparatus_policy: str, max_segment_word
         verse["n_block"] + verse["n_embedded"] == verse["n_nodes"] and verse["n_block"] == n_verse_blocks,
         f"block={verse['n_block']} embedded={verse['n_embedded']} nodes={verse['n_nodes']} "
         f"n_verse_blocks={n_verse_blocks}",
+    )
+
+    # 12. #210 R2: FAIL LOUD when `heading_types` is wholly ABSENT from the
+    #     manifest and at least one block's raw `type` looks heading-shaped.
+    #     An explicit `heading_types: []` is a POSITIVE opt-out ("this source
+    #     has no heading blocks") and must NOT trigger this -- only the key's
+    #     outright absence does, so `"heading_types" not in manifest` (never
+    #     `manifest.get("heading_types")` falsy-checked) is the condition.
+    #     Without this, a custom extractor emitting e.g. CHAPTER and
+    #     forgetting to declare it silently renders every heading as an
+    #     undifferentiated H2 with `_segment_title` falling back to the raw
+    #     seg id -- and the only existing diagnostic
+    #     (validate_assembled.collect_undeclared_heading_like_warnings) is a
+    #     non-gating WARN that does not run until AFTER the whole book is
+    #     translated. "HEAD" can never appear here: it does not match
+    #     BROAD_HEADING_LIKE_RE, so every shipped gutenberg_epub/plain_text
+    #     project (which never sets heading_types) is provably untouched.
+    if "heading_types" in manifest:
+        undeclared_heading_like = []
+    else:
+        undeclared_heading_like = sorted({
+            b["type"] for b in blocks.values() if BROAD_HEADING_LIKE_RE.fullmatch(b["type"])
+        })
+    chk(
+        "heading_types_declared_when_heading_shaped_blocks_exist",
+        not undeclared_heading_like,
+        (
+            f"heading_types is absent from the manifest but these block types look "
+            f"heading-shaped: {undeclared_heading_like} -- either list them in "
+            f"heading_types, or set heading_types: [] to affirm this source has no "
+            f"heading blocks"
+        ) if undeclared_heading_like else "",
+    )
+
+    # 13. #210 R1 cross-field guard (not expressible in manifest.schema.json's
+    #     vanilla JSON Schema -- a cross-property key-set comparison is
+    #     outside its reach): every key of the optional `heading_levels` map
+    #     must be a member of `heading_types ∪ {"HEAD"}`. A key outside that
+    #     set is a typo that would otherwise silently no-op (assemble.py only
+    #     ever reads heading_levels.get(raw_type, ...) for a type that IS a
+    #     heading, so a mistyped key is never applied and never diagnosed
+    #     anywhere else). assemble.py independently re-raises this as
+    #     AssembleError -- this gate must not trust that W2 ran, since
+    #     assemble.py is also reachable on a resumed project.
+    declared_heading_types = set(manifest.get("heading_types") or ()) | {"HEAD"}
+    heading_levels = manifest.get("heading_levels") or {}
+    undeclared_level_keys = sorted(k for k in heading_levels if k not in declared_heading_types)
+    chk(
+        "heading_levels_keys_are_declared_heading_types",
+        not undeclared_level_keys,
+        (
+            f"heading_levels keys not in heading_types ∪ {{'HEAD'}}: "
+            f"{undeclared_level_keys}"
+        ) if undeclared_level_keys else "",
     )
 
     return results
