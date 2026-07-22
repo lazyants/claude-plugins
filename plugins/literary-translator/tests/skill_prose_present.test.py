@@ -25,6 +25,11 @@ Covers:
 6. SKILL.md's Step 0 defines `{{PLUGIN_ROOT}}` before its first use.
 7. SKILL.md's W5 section names the detached `codex_job.py` driver and the
    `resolve_codex_companion.py` companion resolver (1.4.7 W5 launch change).
+8. SKILL.md's W2 section states the new #210 hard fail-loud condition
+   (manifest omits `heading_types` entirely) and both of its remedies.
+9. SKILL.md's W7 output-coverage section names the new #202
+   within-cohort ratio-outlier lane, its WARN-only contract, and its
+   stated structural blind spot (cannot close #202).
 """
 from __future__ import annotations
 
@@ -96,6 +101,36 @@ def test_f3_adjudication_fence_sentence_present():
     # Fully on one line as of this writing: "identity itself. Enable ONLY
     # when a per-person index, per-person bios, or".
     assert "Enable ONLY when a per-person index" in _skill_text()
+
+
+def test_w2_undeclared_heading_type_hard_check_present():
+    # #210 D2. Each fragment below sits fully on one line each as of this
+    # writing (verified with grep, not by eye -- a fragment spanning this
+    # file's hard-wrap point would silently miss):
+    #   "  manifest omits the `heading_types` key entirely -- a bare absence, never"
+    #   "  offending type plus both remedies: declare it in `heading_types`, or set"
+    #   "  `heading_types: []` to affirm this source has no heading blocks at all."
+    text = _skill_text()
+    assert "omits the `heading_types` key entirely" in text
+    # Both remedies the gate's own error message names.
+    assert "declare it in `heading_types`, or set" in text
+    assert "heading_types: []` to affirm this source has no heading blocks at all." in text
+
+
+def test_w7_output_coverage_ratio_outlier_lane_and_blind_spot_present():
+    # #202 D3 (partial -- Refs #202, does NOT close it). Each fragment below
+    # sits fully on one line each as of this writing, verified with grep:
+    #   "  - **New in 1.12.0 -- a within-cohort output-coverage ratio-outlier"
+    #   "  structural-completeness gate above, same scope. **WARN-only -- never"
+    #   "  - **Stated limitation -- this lane structurally cannot close #202.** It"
+    text = _skill_text()
+    assert "within-cohort output-coverage ratio-outlier" in text
+    # The WARN-only, never-gates contract, on the sentence introducing the
+    # shared subcommand both lanes run under.
+    assert "structural-completeness gate above, same scope. **WARN-only" in text
+    # The stated structural blind spot -- this lane cannot close #202 --
+    # must survive any future edit, not just the lane's happy path.
+    assert "structurally cannot close #202" in text
 
 
 def test_operating_constellation_reference_exists_and_has_review_orchestration_content():
