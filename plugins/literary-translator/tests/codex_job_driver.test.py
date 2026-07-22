@@ -28,6 +28,7 @@ failure writes exactly the empty per-DISP sentinel, promotion is one atomic rena
 import importlib.util
 import json
 import os
+import shutil
 import signal
 import stat
 import subprocess
@@ -40,6 +41,7 @@ import pytest
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS_DIR = PLUGIN_ROOT / "skills" / "literary-translator" / "assets" / "scripts"
+SCHEMAS_SRC_DIR = PLUGIN_ROOT / "skills" / "literary-translator" / "assets" / "schemas"
 DRIVER_SRC = SCRIPTS_DIR / "codex_job.py"
 
 assert DRIVER_SRC.is_file(), f"expected the driver at {DRIVER_SRC}"
@@ -425,11 +427,17 @@ def test_finalize_timeout_reserves_tail(tmp_path):
 
 
 def test_run_refuses_promote_when_budget_exhausted(tmp_path, monkeypatch):
-    """A job that completes with abs_remaining() <= FINALIZE_TAIL must NOT promote."""
+    """A job that completes with abs_remaining() <= FINALIZE_TAIL must NOT promote. Its
+    fake_launch writes NO attempt file, so there is nothing for _defer_attempt() to
+    preserve -- reason stays "job-completed" (contrast the DEFER case in
+    test_run_defers_completed_attempt_when_budget_exhausted, below, whose fake_launch DOES
+    write an attempt). adopt_pending is monkeypatched to False so this test exercises the
+    launch path deterministically regardless of adopt_pending's own real implementation."""
     job = _mkjob(tmp_path, deadline=5)
     monkeypatch.setattr(job, "resolve_expected_ws_root", lambda: job.root)
     monkeypatch.setattr(job, "hygiene", lambda ws: None)
     monkeypatch.setattr(job, "safe_adopt", lambda: False)
+    monkeypatch.setattr(job, "adopt_pending", lambda: False)
 
     def fake_launch():
         job.jobId = "J"
@@ -450,6 +458,213 @@ def test_run_refuses_promote_when_budget_exhausted(tmp_path, monkeypatch):
     assert validated["called"] is False          # refused to even BEGIN validation/promote
     assert not os.path.exists(job.canonical)      # canonical never created
     assert os.path.exists(job.fail_sentinel)
+    assert job.reason == "job-completed"          # nothing to defer -> unchanged reason
+    assert not os.path.exists(job.pending)
+
+
+# --------------------------------------------------------------------------- #
+# in-process white-box: adopt_pending / _defer_attempt (#213)
+# --------------------------------------------------------------------------- #
+def _gate_none(args, timeout):
+    """Stub `_gate` that always returns None, simulating _run's own no-budget/timeout/
+    spawn-fail skip contract (a gate that could NOT run, as opposed to one that ran and
+    rejected)."""
+    return None
+
+
+def test_run_defers_completed_attempt_when_budget_exhausted(tmp_path, monkeypatch):
+    """RED-before-green proof for #213. Mirrors test_run_refuses_promote_when_budget_exhausted
+    above, but fake_launch WRITES job.attempt (a completed, token-matching candidate) before
+    the finalize budget is exhausted -- so instead of discarding it, run() must DEFER it to
+    job.pending for a future dispatch's adopt_pending() to validate + adopt. On the pre-#213
+    driver this fails outright (no `job.pending` attribute) and, more importantly, would
+    discard the completed work (finalize()'s _silent_remove(self.attempt))."""
+    job = _mkjob(tmp_path, deadline=5)
+    monkeypatch.setattr(job, "resolve_expected_ws_root", lambda: job.root)
+    monkeypatch.setattr(job, "hygiene", lambda ws: None)
+    monkeypatch.setattr(job, "safe_adopt", lambda: False)
+    monkeypatch.setattr(job, "adopt_pending", lambda: False)
+
+    def fake_launch():
+        job.jobId = "J"
+        Path(job.attempt).write_text(json.dumps(
+            {"dispatch_token": job.tok, "seg": job.seg, "structure_ok": True, "quality_ok": True}),
+            encoding="utf-8")
+        return True
+    monkeypatch.setattr(job, "launch", fake_launch)
+
+    def fake_poll():
+        job.job_status = "completed"
+    monkeypatch.setattr(job, "poll", fake_poll)
+    # Exhaust the finalize budget so the promote guard refuses to begin.
+    monkeypatch.setattr(job, "abs_remaining", lambda: 2.0)
+    validated = {"called": False}
+    monkeypatch.setattr(job, "validate_attempt",
+                        lambda: validated.__setitem__("called", True) or True)
+    rc = job.run()
+    assert rc == 1
+    assert job.promoted is False
+    assert validated["called"] is False          # refused to even BEGIN validation/promote
+    assert not os.path.exists(job.canonical)      # canonical never created
+    assert os.path.exists(job.fail_sentinel)
+    assert job.reason == "deferred-completed"
+    assert not os.path.exists(job.attempt)        # NOT left at the random per-inv path
+    assert os.path.exists(job.pending)             # instead DEFERRED to the deterministic slot
+
+
+def test_adopt_pending_promotes_valid(tmp_path, monkeypatch):
+    job = _mkjob(tmp_path, kind="translate")
+    Path(job.pending).write_text("{}", encoding="utf-8")
+    gate, calls = _gate_recorder({"draft_ready.py": 0, "validate_draft.py": 0})
+    monkeypatch.setattr(job, "_gate", gate)
+    assert job.adopt_pending() is True
+    assert calls == ["draft_ready.py", "validate_draft.py"]  # order: ready THEN quality
+    assert os.path.exists(job.canonical)
+    assert not os.path.exists(job.pending)
+
+
+def test_adopt_pending_rejects_and_discards(tmp_path, monkeypatch):
+    """A gate that RAN and REJECTED the candidate (bad content / stale cross-run token) ->
+    the pending is DISCARDED, not left to poison every future dispatch."""
+    job = _mkjob(tmp_path, kind="translate")
+    Path(job.pending).write_text("{}", encoding="utf-8")
+    gate, calls = _gate_recorder({"draft_ready.py": 1})
+    monkeypatch.setattr(job, "_gate", gate)
+    assert job.adopt_pending() is False
+    assert calls == ["draft_ready.py"]
+    assert not os.path.exists(job.canonical)
+    assert not os.path.exists(job.pending)
+
+
+def test_adopt_pending_no_budget_preserves_pending(tmp_path, monkeypatch):
+    """MAJOR-1 guard: a gate that could NOT run (proc is None, e.g. exhausted budget) must
+    NOT be treated as a rejection -- the pending survives for a future dispatch to retry.
+    Fails on a naive `_ok()`-only implementation that can't distinguish None from rc!=0."""
+    job = _mkjob(tmp_path, kind="translate")
+    Path(job.pending).write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(job, "_gate", _gate_none)
+    assert job.adopt_pending() is False
+    assert not os.path.exists(job.canonical)
+    assert os.path.exists(job.pending)             # NOT deleted
+
+
+def test_adopt_pending_absent_is_false(tmp_path, monkeypatch):
+    job = _mkjob(tmp_path, kind="translate")
+    gate, calls = _gate_recorder({})
+    monkeypatch.setattr(job, "_gate", gate)
+    assert job.adopt_pending() is False
+    assert calls == []
+
+
+def test_adopt_pending_symlink_cleared(tmp_path, monkeypatch):
+    job = _mkjob(tmp_path, kind="translate")
+    target = Path(job.pending + ".target")
+    target.write_text("{}", encoding="utf-8")
+    os.symlink(target, job.pending)
+    gate, calls = _gate_recorder({})
+    monkeypatch.setattr(job, "_gate", gate)
+    assert job.adopt_pending() is False
+    assert calls == []
+    assert not os.path.lexists(job.pending)        # the symlink itself is gone, not followed
+
+
+def test_adopt_pending_forged_directory_cleared(tmp_path, monkeypatch):
+    """MAJOR-2 guard: a forged DIRECTORY squatting on the deterministic pending slot is
+    removed (recursively) rather than left to permanently block every future adopt."""
+    job = _mkjob(tmp_path, kind="translate")
+    os.mkdir(job.pending)
+    (Path(job.pending) / "child").write_text("junk", encoding="utf-8")
+    gate, calls = _gate_recorder({})
+    monkeypatch.setattr(job, "_gate", gate)
+    assert job.adopt_pending() is False
+    assert calls == []
+    assert not os.path.exists(job.pending)
+
+
+def test_defer_over_forged_directory_preserves_attempt(tmp_path):
+    """MAJOR-2 guard, defer side: a forged directory at the deterministic pending slot must
+    not brick deferral -- _defer_attempt() clears it first, so the completed attempt is
+    still preserved (no work loss) against an adversarial pre-existing dir."""
+    job = _mkjob(tmp_path, kind="translate")
+    os.mkdir(job.pending)
+    (Path(job.pending) / "child").write_text("junk", encoding="utf-8")
+    Path(job.attempt).write_text("{}", encoding="utf-8")
+    assert job._defer_attempt() is True
+    assert not os.path.isdir(job.pending)
+    assert os.path.isfile(job.pending)
+    assert not os.path.exists(job.attempt)
+
+
+def test_defer_supersedes_existing_pending_with_newer(tmp_path):
+    """#213 review: the single per-seg/kind slot deliberately retains the MOST RECENT
+    completed attempt (last-writer-wins) -- it never sticks on a stale/invalid pending.
+    Regression pin, not a RED proof (this is the driver's own restored behavior)."""
+    job = _mkjob(tmp_path, kind="translate")
+    Path(job.pending).write_text(json.dumps({"marker": "OLD"}), encoding="utf-8")
+    Path(job.attempt).write_text(json.dumps({"marker": "NEW"}), encoding="utf-8")
+    assert job._defer_attempt() is True
+    assert json.loads(Path(job.pending).read_text())["marker"] == "NEW"   # superseded
+    assert not os.path.exists(job.attempt)          # moved into the slot
+
+
+def test_run_adopts_pending_before_launch(tmp_path, monkeypatch):
+    job = _mkjob(tmp_path, kind="translate", deadline=100)
+    monkeypatch.setattr(job, "resolve_expected_ws_root", lambda: job.root)
+    monkeypatch.setattr(job, "hygiene", lambda ws: None)
+    monkeypatch.setattr(job, "safe_adopt", lambda: False)
+    Path(job.pending).write_text("{}", encoding="utf-8")
+    gate, calls = _gate_recorder({"draft_ready.py": 0, "validate_draft.py": 0})
+    monkeypatch.setattr(job, "_gate", gate)
+    launch_called = {"v": False}
+
+    def spy_launch():
+        launch_called["v"] = True
+        return True
+    monkeypatch.setattr(job, "launch", spy_launch)
+    rc = job.run()
+    assert rc == 0
+    assert job.adopted is True
+    assert job.reason == "adopted-pending"
+    assert launch_called["v"] is False              # NEVER launched -- adopted the pending instead
+    assert os.path.exists(job.canonical)
+    assert not os.path.exists(job.pending)
+
+
+def test_run_no_budget_adopt_falls_through_to_launch(tmp_path, monkeypatch):
+    """MINOR-1 guard (round 2): adopt_pending() returning False (e.g. no-budget, pending
+    preserved) must NOT starve launch() -- run() always falls through to attempt a fresh
+    launch, so a zero-budget dispatch cannot wedge into a never-launch/never-adopt loop."""
+    job = _mkjob(tmp_path, kind="translate", deadline=100)
+    monkeypatch.setattr(job, "resolve_expected_ws_root", lambda: job.root)
+    monkeypatch.setattr(job, "hygiene", lambda ws: None)
+    monkeypatch.setattr(job, "safe_adopt", lambda: False)
+    Path(job.pending).write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(job, "adopt_pending", lambda: False)
+    launch_called = {"v": False}
+
+    def spy_launch():
+        launch_called["v"] = True
+        return False   # a doomed launch under zero budget fails harmlessly -- no worse than today
+    monkeypatch.setattr(job, "launch", spy_launch)
+    rc = job.run()
+    assert rc == 1
+    assert launch_called["v"] is True               # launch WAS attempted -- no starvation
+    assert os.path.exists(job.pending)               # adopt_pending's False path never deleted it
+
+
+def test_run_safe_adopt_cleans_stale_pending(tmp_path, monkeypatch):
+    """A stale deferred pending is moot once safe_adopt() finds an already-valid canonical --
+    it is removed so it never lingers to be (mis)adopted by a later run (leak-free)."""
+    job = _mkjob(tmp_path, kind="translate", deadline=100)
+    monkeypatch.setattr(job, "resolve_expected_ws_root", lambda: job.root)
+    monkeypatch.setattr(job, "hygiene", lambda ws: None)
+    monkeypatch.setattr(job, "safe_adopt", lambda: True)
+    Path(job.pending).write_text("{}", encoding="utf-8")
+    rc = job.run()
+    assert rc == 0
+    assert job.adopted is True
+    assert job.reason == "adopted"
+    assert not os.path.exists(job.pending)
 
 
 # --------------------------------------------------------------------------- #
@@ -1067,6 +1282,96 @@ def test_flock_auto_release_on_holder_sigkill(tmp_path):
     assert cline["reason"] != "lease-held"
     assert elapsed < 15                                         # no deadlock waiting on a dead holder
     assert read_calls(root, "CONT")                            # it did launch (held the lock)
+
+
+# --------------------------------------------------------------------------- #
+# in-process: MINOR-3 -- adopt_pending() against the REAL review_ready.py gate
+# (not this file's own honour-the-CLI stub), proving the cross-run dispatch_token
+# reject holds through the ACTUAL shipped validation logic.
+# --------------------------------------------------------------------------- #
+REAL_GATE_SCRIPTS = ("codex_job.py", "draft_ready.py", "validate_draft.py",
+                     "review_ready.py", "draft_sha1.py")
+
+
+def make_real_gate_root(tmp_path):
+    """A durable_root carrying REAL (not stub) copies of codex_job.py and every gate
+    script it dispatches to, plus review.schema.json -- so a CodexJob loaded FROM this
+    root's own scripts/codex_job.py has its self-anchored SCRIPTS_DIR resolve here too,
+    letting adopt_pending()'s candidate-file gate run the actual shipped review_ready.py
+    (same self-anchoring trick build_root() uses for the SUBPROCESS harness above, just
+    with real gates instead of stubs)."""
+    root = tmp_path / "durable_realgate"
+    scripts = root / "scripts"
+    schemas = root / "schemas"
+    (root / "segments").mkdir(parents=True)
+    scripts.mkdir()
+    schemas.mkdir()
+    for name in REAL_GATE_SCRIPTS:
+        shutil.copy2(SCRIPTS_DIR / name, scripts / name)
+    shutil.copy2(SCHEMAS_SRC_DIR / "review.schema.json", schemas / "review.schema.json")
+    return root
+
+
+def _load_codex_job_copy(scripts_dir):
+    """Import the copy of codex_job.py at `scripts_dir` (NOT this test file's own top-level
+    `codex_job` import of the shipped assets/scripts/ original) under a distinct module
+    name, so its module-level SCRIPTS_DIR constant self-anchors to `scripts_dir` -- exactly
+    as production's Step-0a-copied driver self-anchors to <durable_root>/scripts/."""
+    src = scripts_dir / "codex_job.py"
+    spec = importlib.util.spec_from_file_location("codex_job_realgate_mod", str(src))
+    assert spec is not None and spec.loader is not None, f"could not load spec for {src}"
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def write_draft_for_real_gate(segments_dir, seg, dispatch_token):
+    draft = {"seg": seg, "blocks": {"p1": "hello"}, "footnotes": {}, "verses": {},
+             "names": [], "notes": [], "dispatch_token": dispatch_token}
+    (segments_dir / f"{seg}.draft.json").write_text(json.dumps(draft), encoding="utf-8")
+
+
+def real_draft_sha1_for_root(root, seg):
+    """The REAL draft_sha1.py's own reported digest for the on-disk draft -- never
+    reimplemented here (same technique as tests/review_ready.test.py's own helper of the
+    same purpose)."""
+    result = subprocess.run(
+        [sys.executable, str(root / "scripts" / "draft_sha1.py"), seg],
+        capture_output=True, text=True, timeout=30,
+    )
+    assert result.returncode == 0, f"draft_sha1.py failed:\n{result.stdout}\n{result.stderr}"
+    return result.stdout.strip()
+
+
+def test_adopt_pending_review_real_gate_rejects_token_mismatch(tmp_path):
+    """MINOR-3: drive adopt_pending()'s REVIEW-kind candidate gate through the REAL shipped
+    review_ready.py (not this file's own STUB_REVIEW_READY) with a pending whose own
+    dispatch_token mismatches the run's --expect-token -- proving design §2's "cross-run
+    token safety is automatic" claim against the ACTUAL gate script, not just the stub honour
+    -ing the frozen CLI. A gate that RAN and REJECTED must discard the pending and promote
+    nothing (same MAJOR-1-adjacent contract as test_adopt_pending_rejects_and_discards,
+    exercised here through the real dependency instead of a recorder stub)."""
+    root = make_real_gate_root(tmp_path)
+    segments_dir = root / "segments"
+    seg, run_tok = "seg01", "RUN1:seg01:r1"
+    write_draft_for_real_gate(segments_dir, seg, dispatch_token="RUN1:seg01")
+    real_sha1 = real_draft_sha1_for_root(root, seg)
+
+    mod = _load_codex_job_copy(root / "scripts")
+    job = mod.CodexJob(
+        kind="review", seg=seg, tok=run_tok, disp="D1", root=str(root),
+        companion="unused", prompt_text=PROMPT_ONE, prompt_file="unused",
+        deadline_sec=60, poll_sec=1, effort="high", node="node",
+    )
+    review = {
+        "clean": True, "coverage_ok": True, "findings": [],
+        "draft_sha1": real_sha1, "dispatch_token": "RUN2:seg01:r1",   # MISMATCHED vs run_tok
+    }
+    Path(job.pending).write_text(json.dumps(review), encoding="utf-8")
+
+    assert job.adopt_pending() is False
+    assert not os.path.exists(job.pending)         # gate RAN and REJECTED -> discarded
+    assert not os.path.exists(job.canonical)
 
 
 if __name__ == "__main__":

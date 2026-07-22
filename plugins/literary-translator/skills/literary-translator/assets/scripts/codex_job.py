@@ -17,12 +17,17 @@ Design (PLAN-198 §2.1; the 7 steps below map 1:1):
      sentinel `.codex_job.<seg>.lock` (kernel auto-releases on crash -- no stale-break race).
      A lease-loser writes ONLY its own fail sentinel + stdout, NEVER the hygiene joblog.
   4. Hygiene (cancel a verified-same-workspace stale prior job) -> safe adoption of an
-     already-valid same-token canonical -> else launch fresh (detached background codex).
+     already-valid same-token canonical -> adopt a prior run's DEFERRED completed attempt
+     (#213; re-validated through the same candidate gates before promotion) -> else launch
+     fresh (detached background codex).
   5. Poll to a terminal job status or the poll deadline (cancel-on-deadline).
   6. Best-effort validate the ATTEMPT (kind-specific candidate-file gate), then ONE atomic
      os.replace -- no backup, no post-confirm. Validation-failure => canonical untouched.
      The pre-promote validation is a BEST-EFFORT PRE-FILTER; consumption-safety rests SOLELY
-     on the Workflow's own ACCEPT gate re-validating the CURRENT canonical (§2.3).
+     on the Workflow's own ACCEPT gate re-validating the CURRENT canonical (§2.3). A
+     `completed` attempt reached with no finalize budget left to validate it is DEFERRED
+     (#213) to the deterministic pending slot rather than discarded -- recoverable; the
+     NEXT dispatch's step-4 adopt_pending() validates + adopts it.
   7. Finalize within a reserved FINALIZE_TAIL: emit the ONE stdout JSON line, write the
      empty per-dispatch fail sentinel (iff not promoted) + terminal hygiene joblog (iff we
      hold the lease), and clean this invocation's OWN scratch by exact path.
@@ -46,6 +51,7 @@ import fcntl
 import json
 import os
 import re
+import shutil
 import stat
 import subprocess
 import sys
@@ -148,6 +154,7 @@ class CodexJob:
         ext = "draft" if kind == "translate" else "review"
         self.canonical = canonical_path(self.root, seg, kind)
         self.attempt = os.path.join(self.segdir, ".att.%s.%s.%s.json" % (seg, self.inv, ext))
+        self.pending = os.path.join(self.segdir, ".att_pending.%s.%s.json" % (seg, ext))
         self.lock = os.path.join(self.segdir, ".codex_job.%s.lock" % seg)
         self.joblog = os.path.join(self.segdir, ".codex_job.%s.json" % seg)
         self.fail_sentinel = os.path.join(self.segdir, ".codex_failed.%s.%s" % (seg, disp))
@@ -200,6 +207,52 @@ class CodexJob:
     def _gate(self, args, timeout):
         script = os.path.join(SCRIPTS_DIR, args[0])
         return self._run([sys.executable, script] + list(args[1:]), timeout)
+
+    # ---- shared regular-file / candidate-gate helpers (#213) ----------------
+    def _is_regular(self, path):
+        """O_NOFOLLOW|O_NONBLOCK open + S_ISREG: reject a symlink, FIFO, dir, or absent file."""
+        try:
+            fd = os.open(path, os.O_RDONLY | _O_NOFOLLOW | _O_NONBLOCK | _O_CLOEXEC)
+        except OSError:
+            return False
+        try:
+            st = os.fstat(fd)
+        finally:
+            os.close(fd)
+        return stat.S_ISREG(st.st_mode)
+
+    def _clear_nonregular(self, path):
+        """Remove a NON-REGULAR entry squatting on a deterministic driver slot so it cannot
+        permanently block an os.replace into that slot (#213). A regular file is LEFT untouched
+        (callers overwrite it via os.replace or delete it via _silent_remove). lstat (never
+        follows) classifies: a symlink/FIFO/socket is unlinked as the entry itself; a real
+        directory is removed recursively (the slot is never legitimately a directory). Best-effort."""
+        try:
+            st = os.lstat(path)
+        except OSError:
+            return
+        if stat.S_ISREG(st.st_mode):
+            return
+        try:
+            if stat.S_ISDIR(st.st_mode):
+                shutil.rmtree(path)
+            else:
+                os.remove(path)
+        except OSError:
+            pass
+
+    def _validate_candidate(self, candidate, timeout_fn):
+        """Kind-specific candidate-file gate against `candidate`; each gate call is bounded by a
+        FRESH timeout_fn() (remaining budget re-read per call). Returns True iff every gate PASSED
+        (an _ok()-True). Used by validate_attempt (attempt path)."""
+        if self.kind == "translate":
+            if not _ok(self._gate(["draft_ready.py", self.seg, "--expect-token", self.tok,
+                                   "--candidate-file", candidate], timeout_fn())):
+                return False
+            return _ok(self._gate(["validate_draft.py", self.seg, "--candidate-file", candidate],
+                                 timeout_fn()))
+        return _ok(self._gate(["review_ready.py", self.seg, "--expect-token", self.tok,
+                              "--candidate-file", candidate], timeout_fn()))
 
     # ---- step 2: isolate codex output ---------------------------------------
     def _write_final_prompt(self):
@@ -298,6 +351,38 @@ class CodexJob:
         return _ok(self._gate(["review_ready.py", self.seg, "--expect-token", self.tok],
                              self.poll_timeout()))
 
+    def adopt_pending(self):
+        """#213: try to adopt a completed-but-unvalidated attempt DEFERRED by a prior run of the same
+        seg/kind. Validate through the same candidate gates (which also enforce --expect-token against
+        the candidate's own dispatch_token) and, only on a FULL PASS, atomically promote it -> return
+        True. Return False (caller launches fresh codex) in every other case, handling the pending
+        file so it is never lost or left to block a future run:
+          - absent / a non-regular squatter -> cleared, return False;
+          - a gate that RAN and REJECTED the candidate (proc.returncode != 0: bad content / stale
+            cross-run token) -> DISCARD the pending, return False;
+          - a gate that could NOT run (proc is None: exhausted budget / timeout / spawn fail) -> LEAVE
+            the pending intact for a future run (never delete recoverable work), return False.
+        Never promotes unvalidated content; runs before launch, so uses the poll-window budget. Because
+        False always falls through to launch(), the no-budget case cannot starve (MINOR-1)."""
+        if not self._is_regular(self.pending):
+            self._clear_nonregular(self.pending)
+            return False
+        gates = ([("draft_ready.py", True), ("validate_draft.py", False)]
+                 if self.kind == "translate" else [("review_ready.py", True)])
+        for name, with_token in gates:
+            argv = [name, self.seg]
+            if with_token:
+                argv += ["--expect-token", self.tok]
+            argv += ["--candidate-file", self.pending]
+            proc = self._gate(argv, self.poll_timeout())
+            if proc is None:
+                return False                       # could not validate -> keep pending, launch fresh
+            if proc.returncode != 0:
+                _silent_remove(self.pending)       # gate ran & rejected -> discard stale/bad, launch fresh
+                return False
+        os.replace(self.pending, self.canonical)   # every gate passed
+        return True
+
     def launch(self):
         # ALWAYS workspace-write (codex MUST write its ⟦JOB_OUT⟧ attempt -- read-only was
         # the #198 no-output failure) and a FRESH per-attempt codex thread. `--effort`
@@ -354,27 +439,38 @@ class CodexJob:
 
     # ---- step 6: validate the attempt (kind-specific candidate gate) --------
     def validate_attempt(self):
-        # Symlink-reject-at-open (defense-in-depth, NOT an inode-binding guarantee) + S_ISREG.
-        # O_NONBLOCK so a forged FIFO attempt returns a fd immediately (an O_RDONLY open of a
-        # writer-less FIFO would otherwise BLOCK the driver forever) -> caught by the S_ISREG check.
+        if not self._is_regular(self.attempt):
+            return False
+        return self._validate_candidate(self.attempt, self.finalize_timeout)
+
+    def _defer_attempt(self):
+        """#213: atomically move a completed-but-unvalidated attempt into the stable per-seg/kind
+        pending slot so the NEXT run's adopt_pending() can validate + adopt it, instead of
+        discarding a rare late-completing codex result. Clears any non-regular squatter on the slot
+        first so the rename cannot fail into finalize()'s discard. Returns True iff a real regular
+        attempt file was preserved. Promotes NOTHING.
+
+        The single per-seg/kind slot deliberately retains the MOST RECENT completed attempt
+        (last-writer-wins). Validity cannot be determined at defer time -- the defer is triggered
+        precisely because no budget remained to run the candidate gate -- so preferentially KEEPING
+        an existing pending over a fresh attempt risks sticking on an unadoptable one (a same-token
+        but structurally invalid pending would be kept forever while valid fresh attempts are
+        discarded). Always refreshing the slot instead guarantees it tracks the latest completion
+        and can NEVER get stuck: an invalid pending is superseded by the next fresh attempt, and
+        adopt_pending() discards it outright the first time a gate can actually run. Superseding an
+        equal-status older attempt is a bounded cost, and still strictly better than the pre-#213
+        status quo (which discarded EVERY tail-completed attempt). A multi-slot queue would only
+        trade this bounded, self-healing residual for unbounded pending-file accumulation (or, if
+        capped, the same discard at the cap) for no convergence benefit -- adopt_pending() promotes
+        the first candidate that passes, and a failing one is superseded by the next launch anyway."""
+        if not self._is_regular(self.attempt):
+            return False
+        self._clear_nonregular(self.pending)
         try:
-            afd = os.open(self.attempt, os.O_RDONLY | _O_NOFOLLOW | _O_NONBLOCK | _O_CLOEXEC)
+            os.replace(self.attempt, self.pending)
         except OSError:
             return False
-        try:
-            st = os.fstat(afd)
-        finally:
-            os.close(afd)
-        if not stat.S_ISREG(st.st_mode):
-            return False
-        if self.kind == "translate":
-            if not _ok(self._gate(["draft_ready.py", self.seg, "--expect-token", self.tok,
-                                   "--candidate-file", self.attempt], self.finalize_timeout())):
-                return False
-            return _ok(self._gate(["validate_draft.py", self.seg, "--candidate-file", self.attempt],
-                                 self.finalize_timeout()))
-        return _ok(self._gate(["review_ready.py", self.seg, "--expect-token", self.tok,
-                              "--candidate-file", self.attempt], self.finalize_timeout()))
+        return True
 
     # ---- step 7: finalize within the reserved tail --------------------------
     def _write_fail_sentinel(self):
@@ -432,10 +528,15 @@ class CodexJob:
             expected_ws = self.resolve_expected_ws_root()
             self.hygiene(expected_ws)
             if self.safe_adopt():
+                _silent_remove(self.pending)          # canonical already valid -> any deferred attempt is moot
                 self.adopted = True
                 self.reason = "adopted"
                 return 0
-            if not self.launch():
+            if self.adopt_pending():                  # NEW: promote a prior run's deferred completed attempt
+                self.adopted = True
+                self.reason = "adopted-pending"
+                return 0
+            if not self.launch():                     # False (incl. no-budget, pending kept) -> launch fresh
                 self.reason = "launch-failed"
                 return 1
             self.poll()
@@ -446,6 +547,8 @@ class CodexJob:
                     self.reason = "promoted"
                     return 0
                 self.reason = "validate-failed"
+            elif self.job_status == "completed":       # NEW: completed but no budget to validate this run
+                self.reason = "deferred-completed" if self._defer_attempt() else "job-completed"
             elif self.timed_out:
                 self.reason = "timed-out"
             else:
