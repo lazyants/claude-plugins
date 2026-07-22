@@ -77,6 +77,36 @@ empty too -- nothing below this point is loaded), `warnings=0`, exit 0.
     casefold grouping key and the renderer's own NFC-only,
     sense_translated-aware one. Never routed into `warnings`/exit -- see
     below.
+    Each row ALSO carries `orphaned_owners: [source_form, ...]` (C2, #207):
+    an owner is "orphaned" iff the rendered vault contains NO
+    actually-emitted inline `[[...]]` backlink to this owner's note
+    (scanned from the REAL segment notes by `_compute_inline_advisory`'s
+    own `inline_counts`, never linker eligibility -- an eligible-but-
+    absent-from-prose target is not an emitted link, and
+    `_renderer_delinked_targets` describes eligibility only, see that
+    function's own docstring for the two false starts this replaced) AND
+    no `## Mentions` appendix link, for an owner with >=1 expected source
+    occurrence (`coverage.missing == coverage.expected`, joined on each
+    owner's own RAW `source_form`, never the normalized grouping `key`
+    above, against Metric 1's own per-source_form coverage rollup) --
+    grounded in the real rendered vault for BOTH link types, never via the
+    collision-level `renderer_delinked` bool above (NOT a safe per-owner
+    proxy: a casefold-only collision, e.g. "Peter"/"peter", can leave
+    every individual owner's NFC-exact target un-de-linked -- and
+    therefore still inline-linked -- even though the GROUP collides). An
+    owner with zero expected occurrences, one that IS covered (fully or
+    partially), or one the rendered vault actually inline-links, is never
+    in this list. Because it is a rollup of Metric 1's own walk
+    intersected with `_compute_inline_advisory`'s own real-vault scan (no
+    independent re-derivation of either), an orphaned owner-with-
+    occurrences is ALWAYS also a Metric-1 `missing` entry (-> `warnings`,
+    exit-1) AND genuinely lacks an emitted inline link too;
+    `orphaned_owners` is the exit-neutral, grouped-BY-HOMONYM view of that
+    same fact, never a second `warnings` source. On the disabled-appendix
+    path (`enabled: false`) the gate short-circuits to `_disabled_report()`
+    before computing anything, so a de-linked-but-truly-orphaned homonym
+    under that opt-out has NO gate signal at all -- a documented
+    limitation, not a bug (see `obsidian.md`'s own note on this).
   - **`unresolved_homonyms`** (exit-neutral): `occurrence_targets.build`'s
     own split-form accounting, surfaced verbatim.
 
@@ -87,7 +117,8 @@ empty too -- nothing below this point is loaded), `warnings=0`, exit 0.
                               "missing": [ {"source_form", "seg"}, ... ] },
       "unresolved_homonyms": [ {"source_form", "count", "segs": [...]}, ... ],
       "collisions":          [ {"canonical_target_form", "owners": [...],
-                                 "renderer_delinked": bool}, ... ],
+                                 "renderer_delinked": bool,
+                                 "orphaned_owners": [source_form, ...]}, ... ],
       "inline_advisory":     { "thin_coverage": [
           {"source_form", "inline_links", "source_occurrences"}, ... ] },
       "warnings": int }
@@ -619,14 +650,24 @@ def _entity_maps(canon, profile):
 # ---------------------------------------------------------------------------
 
 def _compute_missing(aggregate, seg_filename_map, relpath_by_source_form, out_dir):
-    """Returns (missing, checked_entities). `missing` is a sorted-by-
-    (source_form, seg) list of {"source_form", "seg"} pairs the FRESH
-    `occurrence_targets.build()` aggregate expected but the rendered vault
-    does not actually link from within a valid Mentions region. An entity
-    with zero expected occurrences is never checked (not an error either
-    way, D4)."""
+    """Returns (missing, checked_entities, coverage_by_sf).
+
+    `missing` is a sorted-by-(source_form, seg) list of {"source_form",
+    "seg"} pairs the FRESH `occurrence_targets.build()` aggregate expected
+    but the rendered vault does not actually link from within a valid
+    Mentions region. An entity with zero expected occurrences is never
+    checked (not an error either way, D4).
+
+    `coverage_by_sf` is a per-RAW-`source_form` rollup of the SAME walk --
+    `{sf: {"expected": n, "missing": m}}` for every `sf` that WAS checked
+    (zero-expected source_forms are absent, never a zero-valued entry) --
+    computed here, not re-derived elsewhere, so `_compute_collisions`'s
+    `orphaned_owners` predicate (C2, #207) can never drift from this
+    metric's own expected-vs-actual accounting (no independent
+    re-derivation, per [[feedback-verification-sharing-a-blind-spot]])."""
     missing = []
     checked_entities = 0
+    coverage_by_sf = {}
     eligible = aggregate.get("eligible_by_source_form") or {}
     for sf in sorted(eligible):
         records = eligible[sf] or []
@@ -639,11 +680,14 @@ def _compute_missing(aggregate, seg_filename_map, relpath_by_source_form, out_di
         if relpath is not None:
             note_text = _read_text_or_none(out_dir / relpath)
         parsed = parse_mentions_region(note_text)
+        n_missing = 0
         for seg in segs_expected:
             target = seg_filename_map.get(seg)
             if parsed is None or target is None or target not in parsed:
                 missing.append({"source_form": sf, "seg": seg})
-    return missing, checked_entities
+                n_missing += 1
+        coverage_by_sf[sf] = {"expected": len(segs_expected), "missing": n_missing}
+    return missing, checked_entities, coverage_by_sf
 
 
 # ---------------------------------------------------------------------------
@@ -651,11 +695,26 @@ def _compute_missing(aggregate, seg_filename_map, relpath_by_source_form, out_di
 # ---------------------------------------------------------------------------
 
 def _compute_inline_advisory(aggregate, note_identity_by_source_form, seg_filename_map, out_dir):
-    """Tallies inline `[[note_identity|target]]`-style links (the
+    """Returns (thin, inline_counts).
+
+    `thin` tallies inline `[[note_identity|target]]`-style links (the
     pre-existing `_Linker` output) found in each SEGMENT note's own body,
     per entity, and reports entities whose inline count falls short of
     their fresh source-occurrence count -- the #206 gap made visible.
-    Exit-neutral: never contributes to `warnings`."""
+    Exit-neutral: never contributes to `warnings`.
+
+    `inline_counts` is the raw per-`source_form` `Counter` this same scan
+    produces -- the ACTUAL number of emitted `[[...]]` inline links found
+    in the real rendered vault, not linker ELIGIBILITY (`_renderer_
+    delinked_targets`'s `build_entity_index` describes what the renderer
+    is WILLING to link if the target string occurs in prose; it says
+    nothing about whether that string actually occurs anywhere). Returned
+    (never re-scanned) so `_compute_collisions`'s `orphaned_owners`
+    predicate (C2, #207) can ask "does this owner have >=1 ACTUALLY
+    EMITTED inline link", grounded in the same real-vault scan Metric 1
+    already uses for appendix coverage -- symmetric groundedness, no
+    independent re-derivation, per
+    [[feedback-verification-sharing-a-blind-spot]]."""
     identity_to_source_form = {v: k for k, v in note_identity_by_source_form.items()}
     inline_counts = Counter()
     for target in seg_filename_map.values():
@@ -685,7 +744,7 @@ def _compute_inline_advisory(aggregate, note_identity_by_source_form, seg_filena
                 "inline_links": inline_links,
                 "source_occurrences": source_occurrences,
             })
-    return thin
+    return thin, inline_counts
 
 
 # ---------------------------------------------------------------------------
@@ -700,6 +759,23 @@ def _renderer_delinked_targets(entries, note_identity_by_source_form):
     one. Calls the renderer's OWN function twice rather than
     re-implementing its collision rule, so this can never drift from
     `render()`'s real behavior.
+
+    NOTE (C2, #207 -- two false starts, kept here so a future edit does not
+    repeat them): this set describes linker ELIGIBILITY -- what the
+    renderer is WILLING to inline-link if the target string occurs in
+    rendered prose -- never whether it actually DOES occur anywhere.
+    `orphaned_owners` (`_compute_collisions`) does NOT use this set (or any
+    `build_entity_index`-derived eligibility set) for its predicate --
+    codex found that an eligible-but-absent-from-prose target (e.g. a
+    single, uncontested owner whose canonical_target_form never literally
+    appears in the translated text) is wrongly excluded by an eligibility
+    check even though the rendered vault contains ZERO actually-emitted
+    `[[...]]` links to it. `orphaned_owners` is grounded instead in
+    `_compute_inline_advisory`'s own real-vault `inline_counts` scan (the
+    ACTUAL emitted links, the same real-vault-scan symmetry appendix
+    coverage already uses) -- see that function's docstring. This set
+    remains in use ONLY for the separate, `owners`-blind `renderer_delinked`
+    bool (#240).
 
     `build_entity_index` returns a 2-TUPLE `(pattern, target_to_entity)` --
     a bare `set(build_entity_index(...))` would iterate that tuple and
@@ -726,7 +802,7 @@ def _renderer_delinked_targets(entries, note_identity_by_source_form):
     return set(no_delink) - set(delinked)
 
 
-def _compute_collisions(entries, renderer_delinked_targets):
+def _compute_collisions(entries, renderer_delinked_targets, coverage_by_sf, inline_counts):
     """Groups canon entries by `canon_senses.normalize_form
     (canonical_target_form)`, reporting every group with >=2 owners.
     Independent of the rendered vault -- computed from canon alone. The
@@ -750,7 +826,55 @@ def _compute_collisions(entries, renderer_delinked_targets):
     (possibly NFD) form; skipping that normalization would silently report
     `renderer_delinked: False` for any collision stored in decomposed
     form. NFC-exact, never casefolded here -- the casefold-vs-NFC
-    disagreement is exactly the thing being surfaced, not reconciled."""
+    disagreement is exactly the thing being surfaced, not reconciled.
+
+    Each row ALSO carries `orphaned_owners: [source_form, ...]` (C2, #207 --
+    ADDITIVE, `owners` itself stays a list of raw strings, unchanged): the
+    subset of `owners` -- joined on their own RAW `source_form` -- for
+    which the rendered vault contains NO ACTUALLY-EMITTED inline `[[...]]`
+    backlink AND no `## Mentions` appendix link:
+
+      1. `inline_counts.get(sf, 0) == 0` -- GROUNDED condition (codex
+         root-cause finding, TWO false starts before this one, both kept
+         as a NOTE in `_renderer_delinked_targets`'s own docstring so a
+         future edit does not repeat them: (a) "was this owner's own
+         target de-linked" false-negatived a `sense_translated` owner,
+         which is never inline-linked for an unrelated reason; (b) "is
+         this owner's target present in `build_entity_index`'s link map"
+         (linker ELIGIBILITY) false-negatived an eligible owner whose
+         target string simply never occurs anywhere in the rendered
+         prose -- eligibility says the renderer is WILLING to link it,
+         not that it actually DID). `inline_counts` is
+         `_compute_inline_advisory`'s own real-vault scan -- the ACTUAL
+         `[[note_identity|target]]` links found in the rendered SEGMENT
+         notes -- the same scan, reused (never re-derived), that already
+         grounds `thin_coverage`. This is symmetric with how appendix
+         coverage below is ALSO read from the real rendered vault, never
+         from a computed eligibility set.
+      2. joined against `coverage_by_sf` (never the normalized `key`
+         above -- the gate's casefold+whitespace-collapse grouping key and
+         the renderer/owners' raw `source_form` are deliberately different
+         namespaces, #245 stays a separate follow-up): >=1 expected
+         Mentions occurrence AND ZERO of them actually linked
+         (`coverage.missing == coverage.expected`). An owner absent from
+         `coverage_by_sf` (zero expected occurrences, or ineligible) is
+         NEVER orphaned -- there is nothing for it to be missing. A
+         PARTIALLY covered owner (some but not all expected segs linked)
+         is NEVER orphaned either -- only total absence counts.
+
+    (Never via the collision-level `renderer_delinked` bool above for
+    EITHER condition -- that bool is keyed on the GROUP's folded display
+    target, which is exactly the thing the casefold-vs-NFC-exact
+    disagreement makes unsafe to reuse per-owner.)
+
+    This is a rollup of `_compute_missing`'s own expected-vs-actual walk
+    intersected with `_compute_inline_advisory`'s own real-vault scan --
+    both real-vault-grounded, neither independently re-derived here -- so
+    on the enabled path an orphaned owner is ALWAYS also present in
+    Metric-1's `missing` list (-> `warnings`, exit-1) AND genuinely has no
+    emitted inline link either; this field is the exit-neutral,
+    grouped-BY-HOMONYM view of that same fact, not a second warnings
+    source."""
     groups = defaultdict(list)
     display = {}
     for sf in sorted(entries):
@@ -771,10 +895,17 @@ def _compute_collisions(entries, renderer_delinked_targets):
         renderer_delinked = (
             unicodedata.normalize("NFC", canonical_target_form) in renderer_delinked_targets
         )
+        sorted_owners = sorted(owners)
+        orphaned_owners = [
+            sf for sf in sorted_owners
+            if inline_counts.get(sf, 0) == 0
+            and (c := coverage_by_sf.get(sf)) and c["expected"] >= 1 and c["missing"] == c["expected"]
+        ]
         collisions.append({
             "canonical_target_form": canonical_target_form,
-            "owners": sorted(owners),
+            "owners": sorted_owners,
             "renderer_delinked": renderer_delinked,
+            "orphaned_owners": orphaned_owners,
         })
     return sorted(collisions, key=lambda d: d["canonical_target_form"])
 
@@ -901,10 +1032,14 @@ def main():
     entries, relpath_by_source_form, note_identity_by_source_form = _entity_maps(canon, profile)
     seg_map = _seg_filename_map(nodestream)
 
-    missing, checked_entities = _compute_missing(aggregate, seg_map, relpath_by_source_form, out_dir)
-    thin_coverage = _compute_inline_advisory(aggregate, note_identity_by_source_form, seg_map, out_dir)
+    missing, checked_entities, coverage_by_sf = _compute_missing(
+        aggregate, seg_map, relpath_by_source_form, out_dir
+    )
+    thin_coverage, inline_counts = _compute_inline_advisory(
+        aggregate, note_identity_by_source_form, seg_map, out_dir
+    )
     renderer_delinked_targets = _renderer_delinked_targets(entries, note_identity_by_source_form)
-    collisions = _compute_collisions(entries, renderer_delinked_targets)
+    collisions = _compute_collisions(entries, renderer_delinked_targets, coverage_by_sf, inline_counts)
     unresolved = _unresolved_homonyms_list(aggregate)
 
     report = {

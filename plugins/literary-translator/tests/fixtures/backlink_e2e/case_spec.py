@@ -30,11 +30,15 @@ canon entries, each isolating exactly one occurrence-eligibility rule:
     occurrences, so source-anchored `## Mentions` captures both.
   - **Petro** / **Pavlo** (#207-a, collision): distinct source_forms in
     the SAME block (`p2`/seg01), both `canonical_target_form: "Peter"`.
-    Draft `p2` renders both as "Peter" (the real-world collapse). Flag-off
-    keeps the old tiebreak (shortest-then-lexicographic source_form wins
-    the ONE inline link: "Pavlo"); flag-on de-links "Peter" from the
-    inline map entirely (both notes still get their OWN source-anchored
-    Mentions entry).
+    Draft `p2` renders both as "Peter" (the real-world collapse).
+    Collision de-linking (D3) is gated on `target == "obsidian"`, NOT on
+    the `## Mentions` appendix flag -- so BOTH flag-on and flag-off
+    obsidian renders de-link "Peter" from the inline map entirely (neither
+    owner gets the inline link; flag-on additionally gives both notes
+    their OWN source-anchored Mentions entry). The old shortest-then-
+    lexicographic tiebreak ("Pavlo" wins) survives only on the non-obsidian
+    (`target: "custom"`) render path, where D3 stays inert -- unexercised
+    by this fixture, which only ever renders `target: "obsidian"`.
   - **Marek** (#207-b, split): one occurrence (`p5`/seg02), but
     `canon_senses.json` splits it into two senses -- excluded from
     `eligible_by_source_form` entirely, surfaced only in
@@ -363,9 +367,13 @@ EXPECTED_SENSE_TRANSLATED_SOURCE_FORM = "Lucky"
 # #207-a collision: shared canonical_target_form, sorted owner list.
 EXPECTED_COLLISION_TARGET = "Peter"
 EXPECTED_COLLISION_OWNERS = ["Pavlo", "Petro"]
-# 1.7.0 tiebreak (shortest source_form, then lexicographic) -- both
-# "Petro"/"Pavlo" are 5 chars, so lexicographic order alone decides.
-EXPECTED_COLLISION_TIEBREAK_WINNER = "Pavlo"
+# NOTE: the 1.7.0 shortest-then-lexicographic tiebreak ("Pavlo" wins, both
+# "Petro"/"Pavlo" are 5 chars) is no longer this fixture's flag-off
+# behavior -- D3 (collision de-linking) now gates on `target == "obsidian"`
+# alone, independent of the Mentions flag, so both flag-on and flag-off
+# obsidian renders de-link "Peter" unconditionally. The tiebreak survives
+# only on the (unexercised-by-this-fixture) non-obsidian render path; no
+# constant for it is kept here since nothing in this fixture consumes it.
 # #240 gate half: both owners are ordinary transliterated entries (neither
 # is basis: sense_translated) sharing one canonical_target_form, same case
 # -- render_obsidian.build_entity_index DOES de-link this target under

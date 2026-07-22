@@ -121,32 +121,56 @@ inside `[[...]]`.
   script or the sanitized filename).
 - `canonical_target_form` is **not** guaranteed unique across entries (two
   different `source_form`s can transliterate to the same target-language
-  string). The documented tiebreak when more than one entry shares a
-  `canonical_target_form`: prefer the entry with the shortest `source_form`,
-  then break any remaining tie lexicographically by `source_form` — this
-  decides which entry's `note_identity` the shared display text ends up
-  linking to. This is the one arbitrary-but-fixed rule that keeps the
-  matcher deterministic; the plugin's own tests pin this exact ordering.
+  string). Sharing is checked **NFC-normalized but still case-sensitive**:
+  `"Peter"` and `"peter"` (or an NFD variant of the same string) are
+  DISTINCT targets to the renderer, so each stays single-owner and keeps
+  its inline link — only an NFC-exact match with ≥2 owners collides. **When
+  it does, collision de-linking applies to every obsidian render, on or
+  off the Mentions appendix (#207):** none of the colliding entries gets an
+  inline link — no shared display text is ever linked to a single entry's
+  `note_identity`, so a reader can never be misdirected to the wrong
+  entity's note. (This is gated on `output.target == "obsidian"`, like the
+  rest of this adapter — the non-obsidian `custom` CLI path activates none
+  of this.) `build_entity_index()` still documents a
+  shortest-`source_form`-then-lexicographic tiebreak, but only as that
+  function's `collision_delink=False` default behavior for direct callers
+  and tests; `render()` always calls it with `collision_delink=True`, so
+  the production renderer never reaches the tiebreak branch. See
+  "Collision de-linking" below.
 
-## Backlinks are the occurrence index — for free
+## Native backlinks are a best-effort affordance, not the occurrence index
 
-Obsidian's native backlinks panel on every entity note already lists every
-narrative page that links to it — that **is** the occurrence index. No
-separate index file is built, and `build_name_manifest.py` (the reference
-project's own hand-rolled occurrence-gathering script) is deliberately not
-ported; backlinks replace it entirely. `output.index.enabled` (see
-`references/assembly-and-output.md`) governs a *different*, still-later-phase
-concept — a generated standalone index page — and stays irrelevant to this
-adapter's own occurrence tracking. A depth-1 MOC (map-of-content) stub
-listing every category folder is a reasonable, proportional addition; a
-deeper generated index is explicitly out of scope here.
+Obsidian's native backlinks panel on every entity note lists every
+narrative page whose rendered prose links to it via the inline matcher (see
+the wikilink rule above). That's a convenient, zero-cost reading affordance
+— but it is **not** the authoritative occurrence index (#206): per the
+plugin's iron rule, the inline matcher never makes an identity call, so it
+only ever fires on a verbatim, case-sensitive `canonical_target_form` match
+against translated prose. A variant rendering, an abbreviated mention, or a
+de-linked homonym collision (see "Collision de-linking" below) simply gets
+no backlink. `build_name_manifest.py` (the reference project's own
+hand-rolled occurrence-gathering script) is deliberately not ported as a
+*separate* index file — instead, the source-anchored `## Mentions` section
+below is the authoritative, variant-immune, homonym-split occurrence index,
+and `validate_backlinks.py` is what verifies its coverage.
+`output.index.enabled` (see `references/assembly-and-output.md`) governs a
+*different*, still-later-phase concept — a generated standalone index page
+— and stays irrelevant to this adapter's own occurrence tracking. A depth-1
+MOC (map-of-content) stub listing every category folder is a reasonable,
+proportional addition; a deeper generated index is explicitly out of scope
+here.
 
 ### 1.8.0+ — source-anchored `## Mentions` section, ON BY DEFAULT since 1.10.0
 
 Native backlinks are only as complete as the **inline linker**, which matches
 one `canonical_target_form` string against translated prose — so a variant
-target rendering gets no backlink (#206) and two source forms sharing a target
-collapse to one owner (#207-a). `output.adapter_config.obsidian.mentions_section.enabled`
+target rendering simply gets no backlink (#206), and when two source forms
+share an NFC-exact target (grouping is case-sensitive; a case or whitespace
+variant is its own distinct, single-owner target and keeps its link),
+collision de-linking (applies to every obsidian render, independent of
+this section's own enabled flag — see "Collision de-linking" below) means
+NEITHER owner gets an inline link (#207), not just the losing one.
+`output.adapter_config.obsidian.mentions_section.enabled`
 adds an authoritative **source-anchored** occurrence index: a `## Mentions`
 section in each entity note, wrapped in reserved `<!-- lt:mentions:begin/end -->`
 markers, listing the segment notes where the entity's *source* forms occur (per
@@ -161,8 +185,18 @@ inline-link tiebreak itself — see "Collision de-linking" below.
 
 **ON BY DEFAULT (1.10.0+):** an absent `mentions_section` block, or an
 absent `enabled` key within a present block, resolves to enabled for
-`output.target: obsidian`; set `enabled: false` explicitly to opt out
-(byte-identical to pre-1.10.0 output). `enabled` must be a **boolean**
+`output.target: obsidian`; set `enabled: false` explicitly to opt out.
+Output is byte-identical to pre-1.10.0 **except** for homonym collisions:
+as of this release collision de-linking (see "Collision de-linking" below)
+applies regardless of this flag, so an NFC-exact `canonical_target_form`
+shared by ≥2 canon entries (case-sensitive — a case/whitespace variant is
+its own distinct, single-owner target) gets no inline link on the disabled
+path either, instead of pre-1.10.0's misattribution to the
+shortest-`source_form` owner. One limitation of the
+disabled path: `validate_backlinks.py` short-circuits to a disabled report
+and computes nothing there, so a homonym orphaned by this de-linking (no
+inline link, and — since the section is off — no `## Mentions` backlink
+either) is not surfaced by the gate. `enabled` must be a **boolean**
 when present — a literal `enabled: null` (or `mentions_section: null`) is
 schema-invalid (`profile.schema.json` declares both as non-nullable) and
 is **rejected by `profile_validate.py`** before it ever reaches the
@@ -181,12 +215,25 @@ The advisory `validate_backlinks.py` W9 gate (non-blocking) reports coverage;
 the aggregated `output.index` person-index page + `index_scope` routing
 remain a later phase.
 
-**Collision de-linking is part of the same effective-enabled predicate.**
-When two canon entries share one `canonical_target_form`, the inline linker's
-own shortest-source-form tiebreak (documented above) silently drops the
-losing entry's inline link; with Mentions section active, BOTH entries are
-de-linked instead — the `## Mentions` section is what makes either entity's
-occurrences discoverable once the ambiguous inline link is removed.
+**Collision de-linking is decoupled from the Mentions flag, but still
+gated on `output.target == "obsidian"`.** When two or more canon entries
+share one NFC-exact `canonical_target_form` (grouping is case-sensitive —
+`"Peter"` and `"peter"` are distinct targets, each single-owner, each
+keeps its inline link), NONE of them gets an inline link on any obsidian
+render — appendix on or off — so the inline linker never misattributes a
+shared display text to one owner's `note_identity` (#207).
+Previously this was gated on the same effective-Mentions predicate as the
+`## Mentions` section itself, so an `enabled: false` opt-out reintroduced
+the misattribution; now only the `## Mentions` section (and the
+reserved-field/gate checks around it) is governed by
+`_effective_mentions_enabled` — de-linking is not. The non-obsidian
+`custom` CLI path is unchanged: it activates neither the `## Mentions`
+section, collision de-linking, nor the `validate_backlinks.py` gate. With
+the section active,
+its per-entity `## Mentions` listing is what makes the de-linked entries'
+occurrences discoverable at all; with the section disabled, a de-linked
+homonym has no inline link AND no `## Mentions` backlink — see the
+disabled-path limitation noted above.
 
 ## Category→folder catalog — presets are EXAMPLES, not an enum
 

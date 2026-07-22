@@ -142,10 +142,13 @@ DEFAULT_FOLDER = "other"
 # dotfile so the existing dot-preserving clean keeps it across re-renders.
 VAULT_MARKER_FILENAME = ".literary-translator-vault.json"
 
-# D1/D3/D4 opt-in Mentions-section feature (RFC lt-appendix-backlink-
-# integrity): the reserved boundary-comment markers render() wraps a
-# generated "## Mentions" section in, and the token a canon field is
-# forbidden from containing once the feature is active -- see
+# D1/D4 opt-in Mentions-section feature (RFC lt-appendix-backlink-
+# integrity; D3 collision de-linking is a SEPARATE concern not gated by
+# this opt-in `enabled` flag at all -- see build_entity_index -- though it
+# still gates, like this feature, on output.target == "obsidian"): the
+# reserved boundary-comment markers render() wraps a generated
+# "## Mentions" section in, and the token a canon field is forbidden from
+# containing once the feature is active -- see
 # `_effective_mentions_enabled`/`_validate_mentions_safe_canon` below.
 # HTML comments so they stay invisible in Obsidian's rendered preview.
 MENTIONS_SECTION_MARKER_BEGIN = "<!-- lt:mentions:begin -->"
@@ -162,26 +165,43 @@ _MENTIONS_LINE_BREAK_CHARS = frozenset(
 )
 
 
+def _is_obsidian_target(profile):
+    """`True` iff `output.target` is EXACTLY "obsidian" -- the single
+    source of truth for that check, shared by `_effective_mentions_enabled`
+    (D1/D4) and render()'s own D3 collision-de-link call site, so the
+    magic string lives in exactly one place. This is what keeps the
+    standalone CLI (`main()` below, whose profile can carry a dormant
+    `obsidian` sub-block while `--out-dir`/`output.target` actually point
+    somewhere else, e.g. `target: "custom"`) from ever activating D1, D3,
+    or D4: those must fire only when this adapter is genuinely the one in
+    effect for real assembly."""
+    output_cfg = (profile or {}).get("output") or {}
+    return output_cfg.get("target") == "obsidian"
+
+
 def _effective_mentions_enabled(profile):
-    """The ONE predicate D1 (this file), D3 (collision de-link), and D4
-    (`validate_backlinks.py`, computed independently there) all gate on --
-    `output.target` must be EXACTLY "obsidian" AND
+    """The ONE predicate D1 (this file) and D4 (`validate_backlinks.py`,
+    computed independently there) both gate on -- `_is_obsidian_target(
+    profile)` must hold AND
     `output.adapter_config.obsidian.mentions_section.enabled` must not be
     boolean `False`. ON BY DEFAULT (1.10.0+): an absent `mentions_section`
     block, an absent `enabled` key, or `enabled: null` all resolve to
     enabled -- an explicit `enabled: false` is the only way to opt out.
     Computed fresh from render()'s own `profile` argument every call, never
-    cached/inherited -- this is what keeps the standalone CLI (`main()`
-    below, whose profile can carry a dormant `obsidian` sub-block while
-    `--out-dir`/`output.target` actually point somewhere else, e.g.
-    `target: "custom"`) from ever activating the Mentions section,
-    collision de-linking, or the reserved-field rejections: those must
-    fire only when this adapter is genuinely the one in effect for real
-    assembly -- the `target != "obsidian"` short-circuit below is what
-    guarantees that regardless of the flag's own value."""
-    output_cfg = (profile or {}).get("output") or {}
-    if output_cfg.get("target") != "obsidian":
+    cached/inherited -- see `_is_obsidian_target`'s own docstring for why
+    the target check alone (never this flag) is what gates the standalone
+    CLI's `target: "custom"` path out of the Mentions section and the
+    reserved-field rejections. D3 (collision de-linking,
+    `build_entity_index`) does NOT gate on THIS predicate (the `enabled`
+    flag) at all (#206/#207) -- a homonym collision is de-linked on every
+    real obsidian render regardless of the appendix flag. D3 STILL gates
+    on `_is_obsidian_target(profile)` though, via its own call in render():
+    the standalone CLI's dormant-`obsidian`-under-`target:"custom"` path
+    continues to activate none of D1/D3/D4. See build_entity_index's own
+    docstring for why."""
+    if not _is_obsidian_target(profile):
         return False
+    output_cfg = (profile or {}).get("output") or {}
     obsidian_cfg = (output_cfg.get("adapter_config") or {}).get("obsidian") or {}
     mentions_cfg = obsidian_cfg.get("mentions_section") or {}
     return mentions_cfg.get("enabled") is not False
@@ -384,15 +404,31 @@ def build_entity_index(entries, note_identity_by_source_form, collision_delink=F
     documented, fixed tiebreak -- prefer the entry with the shortest
     `source_form`, then break ties lexicographically by `source_form` --
     silently picks ONE winner and the rest simply never get an inline
-    link. `collision_delink=True` (D3, #207-a -- set by `render()` ONLY
-    when `_effective_mentions_enabled(profile)` holds, never by the flag
-    alone: see that predicate's own docstring for why): a target with >=2
-    owners is instead REMOVED from the map entirely -- no owner gets an
-    inline link for that string, closing the silent "wrong entity's page"
-    misattribution the tiebreak otherwise causes -- and the compiled
-    pattern is built from the map AFTER that removal, so `_Linker`'s
-    mandatory `target_to_entity[matched]` lookup can never `KeyError` on a
-    delinked target. Source-anchored `## Mentions` (D1) is the
+    link. `render()` passes `collision_delink=_is_obsidian_target(profile)`
+    (D3, #206/#207): `True` -- de-linking a >=2-owner target entirely --
+    on EVERY real obsidian render, regardless of
+    `_effective_mentions_enabled(profile)`/the `## Mentions` appendix
+    `enabled` flag (it used to be gated on that predicate too; see the
+    CHANGELOG for the decoupling); `False` -- the old tiebreak -- only on
+    the standalone CLI's dormant-`obsidian`-under-`target:"custom"` path
+    (`_is_obsidian_target` false), where D1/D3/D4 must all stay inert (see
+    `_is_obsidian_target`'s own docstring). `validate_backlinks.py`'s gate
+    also calls this function directly with both `True` and `False` to
+    compute its own diagnostics, and the existing unit tests exercise the
+    tiebreak directly, independent of render()'s call site.
+    `collision_delink=True`: a target with >=2 owners is instead REMOVED
+    from the map entirely -- no owner gets an inline link for that string,
+    closing the silent "wrong entity's page" misattribution the tiebreak
+    otherwise causes -- and the compiled pattern is built from the map
+    AFTER that removal, so `_Linker`'s mandatory
+    `target_to_entity[matched]` lookup can never `KeyError` on a delinked
+    target. The invariant this establishes: on every real obsidian render,
+    a `canonical_target_form` with >=2 owners is NEVER inline-linked, ever
+    -- a misattributed inline link actively misleads (a reader clicks
+    through to the WRONG entity's note), which is
+    strictly worse than a missing one (recoverable via the `## Mentions`
+    appendix or a manual search), so ambiguity always resolves toward the
+    safer failure. Source-anchored `## Mentions` (D1) is the
     collapse-free, authoritative index regardless of this parameter --
     inline auto-linking is a reading affordance, never the sole source of
     truth. (The set of colliding targets is used only to drive that
@@ -475,6 +511,10 @@ def build_entity_index(entries, note_identity_by_source_form, collision_delink=F
         source_form = by_target[t]
         note_identity = note_identity_by_source_form.get(source_form, source_form)
         target_to_entity[t] = (note_identity, source_form)
+    # #206: this is a conservative verbatim same-surface affordance --
+    # case-sensitive, no morphology, no identity call -- never the
+    # authoritative occurrence index; that is the default-on
+    # source-anchored `## Mentions` appendix (see obsidian.md).
     pattern = re.compile("|".join(re.escape(t) for t in targets_sorted))
     return pattern, target_to_entity
 
@@ -1340,12 +1380,15 @@ def render(nodestream: dict, canon: dict, profile: dict, out_dir: Path) -> dict:
     parenthetical_mode = (output_cfg.get("name_display") or {}).get("parenthetical_originals") or "never"
     folders_map = ((output_cfg.get("adapter_config") or {}).get("obsidian") or {}).get("folders") or {}
 
-    # D1/D3/D4: computed ONCE, fresh, from this call's own `profile` --
-    # gates the Mentions section, collision de-linking, and the canon
-    # reserved-field rejections below. See `_effective_mentions_enabled`'s
-    # own docstring for why this is the profile-derived predicate and not
-    # simply "the flag", so the standalone CLI's `target: "custom"` path
-    # (`main()` below) can never activate any of this.
+    # D1/D4: computed ONCE, fresh, from this call's own `profile` -- gates
+    # the Mentions section and the canon reserved-field rejections below.
+    # D3 (collision de-linking, just below) no longer gates on THIS
+    # predicate -- the `## Mentions` appendix `enabled` flag -- at all
+    # (#206/#207 -- see build_entity_index's own docstring); it still
+    # gates on `_is_obsidian_target(profile)` via its own call site. See
+    # `_effective_mentions_enabled`'s own docstring for why THIS predicate
+    # is profile-derived and not simply "the flag", so the standalone CLI's
+    # `target: "custom"` path (`main()` below) can never activate D1/D4.
     mentions_enabled = _effective_mentions_enabled(profile)
 
     entries = _canon_entries(canon)
@@ -1373,11 +1416,21 @@ def render(nodestream: dict, canon: dict, profile: dict, out_dir: Path) -> dict:
         source_form: relpath[: -len(".md")] if relpath.endswith(".md") else relpath
         for source_form, relpath in relpath_by_source_form.items()
     }
-    # D3 (#207-a): collision de-linking is gated on the SAME
-    # effective-enabled predicate as the Mentions section itself, never on
-    # a bare flag read -- see build_entity_index's own docstring.
+    # D3 (#206/#207): collision de-linking is de-coupled from the `##
+    # Mentions` appendix `enabled` flag -- a >=2-owner canonical_target_form
+    # is never inline-linked on ANY real obsidian render, appendix on or
+    # off. It still gates on `_is_obsidian_target(profile)` (the same
+    # target check `_effective_mentions_enabled` itself starts with), so
+    # the standalone CLI's dormant-`obsidian`-under-`target:"custom"` path
+    # keeps the OLD tiebreak behavior, unchanged -- D3 must stay inert
+    # there exactly like D1/D4. A misattributed inline link actively
+    # misleads (a click lands on the WRONG entity's note); a missing one is
+    # merely recoverable (via the `## Mentions` appendix or a manual
+    # search), so ambiguity always resolves toward the safer failure. See
+    # build_entity_index's own docstring.
     pattern, target_to_entity = build_entity_index(
-        entries, note_identity_by_source_form, collision_delink=mentions_enabled
+        entries, note_identity_by_source_form,
+        collision_delink=_is_obsidian_target(profile),
     )
     linker = _Linker(pattern, target_to_entity, parenthetical_mode)
 

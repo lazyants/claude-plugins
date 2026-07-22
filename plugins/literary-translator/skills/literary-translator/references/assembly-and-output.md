@@ -364,15 +364,20 @@ non-shipped historiettes-t3 provenance project referenced above.
   block, resolves to enabled; `enabled` must be a boolean when present —
   a literal `enabled: null` is schema-invalid and rejected by
   `profile_validate.py`, so it is never a reachable way to spell the
-  default-on behavior; `enabled: false` opts out), which fixes the
-  completeness/collapse gaps in native backlinks
-  (#206/#207-a). When effective-enabled (and `output.target: obsidian`),
+  default-on behavior; `enabled: false` opts out), which is the
+  authoritative fix for the completeness gap in native backlinks (#206) —
+  and, since collision de-linking now applies to every obsidian render
+  regardless of this flag (#207), makes a de-linked homonym's occurrences
+  discoverable rather than silently missing. When effective-enabled (and
+  `output.target: obsidian`),
   `assemble.py` computes the occurrence data (it holds the manifest) and
   attaches it as an **optional `mentions` field on the NodeStream** —
   `{source_form: [{seg, origin, …}]}` — which the obsidian adapter renders;
   the 4-argument `render(nodestream, canon, profile, out_dir)` contract is
   unchanged (the data rides inside `nodestream`). An explicit
-  `enabled: false` is byte-identical to pre-1.10.0 output. See
+  `enabled: false` is byte-identical to pre-1.10.0 output **except** for
+  homonym collisions, which are de-linked (not misattributed) on that path
+  too as of this release — see "Collision de-linking" in
   `references/output-target-adapters/obsidian.md`.
 - **No generic renderer-plugin framework above the three fixed presets**
   (`obsidian`/`epub`/`custom`) — see
@@ -397,7 +402,8 @@ expected to follow it.
   exactly three targets with no generic framework above them.
 - `references/output-target-adapters/obsidian.md` — the shipped `obsidian`
   adapter: vault layout, entity-note frontmatter, the wikilink rule,
-  backlinks-as-index.
+  collision de-linking, and the source-anchored `## Mentions` occurrence
+  index.
 - `references/ledger-and-resumability.md` — the `reviewed_draft_sha1` gate
   W9 reuses from `final_audit.py`'s hard check 2.
 - `references/verse-policy.md` — the placeholder-bijection invariant W9's

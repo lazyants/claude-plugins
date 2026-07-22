@@ -227,9 +227,10 @@ output:
   index:
     enabled: false
       # A separate, generated occurrence-index PAGE -- a still-later-phase feature, not yet built for any
-      # target -- OFF by default; a plain translate+gloss job never pays for it. The obsidian target already
-      # gets an occurrence index for free via its native backlinks panel regardless of this setting (see
-      # references/output-target-adapters/obsidian.md), so this knob stays irrelevant there too until that
+      # target -- OFF by default; a plain translate+gloss job never pays for it. The obsidian target's own
+      # native backlinks panel is a best-effort reading affordance, not an authoritative occurrence index
+      # (see references/output-target-adapters/obsidian.md) -- the authoritative one is the source-anchored
+      # "## Mentions" section below (mentions_section), so this knob stays irrelevant there too until that
       # later phase ships.
     person_grouping: false
       # Opt-in lightweight name-grouping for the index. REQUIRES index.enabled: true (schema-enforced) --
@@ -250,9 +251,13 @@ output:
           # ON BY DEFAULT (an absent mentions_section block, or an absent/null enabled key, all resolve
           # to enabled too -- this explicit block just keeps the shipped example self-documenting rather
           # than activating the feature by absence). Emits a source-anchored "## Mentions" occurrence
-          # index in each entity note and engages collision de-linking; the advisory validate_backlinks.py
-          # W9 gate also runs. Set to false to opt out (byte-identical to pre-1.10.0 output). See
-          # references/output-target-adapters/obsidian.md.
+          # index in each entity note -- the authoritative, variant-immune, homonym-split occurrence index;
+          # the advisory validate_backlinks.py W9 gate verifies its coverage. Collision de-linking (an
+          # NFC-exact canonical_target_form shared by >=2 entries -- case-sensitive, so "Peter" vs "peter"
+          # stay distinct single-owner targets -- never gets an inline link) now applies to every obsidian
+          # render and is NOT governed by this flag. Set to false to opt out of the "## Mentions" section only
+          # (byte-identical to pre-1.10.0 output except homonym collisions, which stay de-linked either
+          # way). See references/output-target-adapters/obsidian.md.
     epub: null
     custom:
       renderer_path: null

@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.13.0 — 2026-07-22
+
+Honest close-out of #206/#207: retires the inline linker's homonym-collision tiebreak from production and reconciles the doc claims it left stale. Closes #206, #207.
+
+### Fixed — collision de-linking now applies to every obsidian render (#207)
+
+- `render_obsidian.py`'s `render()` now calls `build_entity_index(..., collision_delink=True)` regardless of `output.adapter_config.obsidian.mentions_section.enabled` — decoupled from the appendix flag, but still gated on `output.target == "obsidian"` like the rest of this adapter (the non-obsidian `custom` CLI path is unchanged). A `canonical_target_form` shared by ≥2 canon entries is NEVER inline-linked on any obsidian render, appendix on or off — the shortest-`source_form` tiebreak that used to pick a (possibly wrong) winner is gone from production, including on the `enabled: false` opt-out path, which previously still misattributed.
+- `build_entity_index()`'s signature and its `collision_delink=False` default are unchanged — the tiebreak survives only as that default's documented behavior for direct callers and tests; the renderer no longer reaches it.
+- **Migration:** this edit flips `render_obsidian.py`'s `render_version`. For every appendix-on project (the default, and every known real project) rendered output is byte-identical to 1.11.0 — the diff gate reports a stale-version WARNING (exit 0), a routine re-accept, not a content mismatch. Only an appendix-OFF (`enabled: false`) project with an actual homonym collision sees a genuine content diff (de-linked instead of misattributed) and needs a reviewed `--force-accept-baseline`. No re-translation in either case.
+
+### Added — orphaned-homonym diagnostic (#207)
+
+- `validate_backlinks.py`'s exit-neutral `collisions[]` diagnostic gains `orphaned_owners: [source_form]` — the subset of a collision's owners with ≥1 expected source occurrence that have NO backlink anywhere in the rendered vault: neither an actually-emitted inline `[[…]]` link nor a `## Mentions` appendix link. Both link types are read from the ACTUAL emitted segment notes (the inline side reuses the same rendered-note scan as the inline advisory; the appendix side reuses the coverage scan), never from linker eligibility — so an owner whose target is eligible in `build_entity_index` but never occurs in the rendered prose (no link emitted) is correctly flagged, while one whose target the renderer actually inline-links, or that is de-linked as a genuine ≥2-owner NFC-exact collision, or a `sense_translated` name never auto-linked, is classified by what the vault actually contains. (An owner the gate groups into a collision only by case-fold — e.g. `"Peter"` vs `"peter"`, distinct to the renderer — is judged on its own emitted links, not the fold.) `owners` itself is unchanged (still a list of raw `source_form` strings); `warnings` stays `== len(missing)` (Metric-1 remains the sole `warnings` source — this is an additive, exit-neutral rollup, not a second warning source). On the `enabled: false` path the gate still short-circuits to a disabled report and computes nothing, so a homonym orphaned there is not surfaced by this diagnostic — see `references/output-target-adapters/obsidian.md`.
+
+### Docs (#206)
+
+- Reconciled every stale doc claim that predated the appendix-flag-independent collision de-linking: `obsidian.md`'s tiebreak section, its "backlinks are the occurrence index" framing (native inline backlinks are now documented as a best-effort, verbatim-same-surface reading affordance; the default-on source-anchored `## Mentions` section is the authoritative, variant-immune, homonym-split occurrence index, verified by `validate_backlinks.py`), the `enabled: false` byte-identical claim, and the collision-de-linking-is-predicate-gated claim — plus matching corrections in `assembly-and-output.md`, `profile.example.yml`, and `output-target-adapters/README.md`.
+
 ## 1.12.0 — 2026-07-22
 
 Makes the codex reasoning **effort** a real, per-project knob and adds an optional codex **model** pin — both first-class `profile.yml` inputs under `engine:`, threaded into the W5 (mass translate/review/fix) and glossary codex dispatch, and folded into the run's cache/resume identity so a re-run at a different `(model, effort)` no longer silently reuses artifacts. Before this, `engine.effort` was schema-pinned to `const: "high"`, the profile value never actually reached codex (the W5 driver launched with `codex_job.py`'s own `--effort high` default, and the prose openers hard-coded `"Effort: high."`), and there was no model knob at all. Closes #197.

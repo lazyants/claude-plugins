@@ -96,8 +96,9 @@ simplification.
 ## See also
 
 - [`obsidian.md`](./obsidian.md) — the shipped adapter: vault layout,
-  entity-note frontmatter, the wikilink rule, backlinks-as-index, the
-  category→folder catalog.
+  entity-note frontmatter, the wikilink rule, collision de-linking, the
+  source-anchored `## Mentions` occurrence index, the category→folder
+  catalog.
 - [`../assembly-and-output.md`](../assembly-and-output.md) — the two
   `output.v1_scope` paths, Step 0d, W9 Assemble, the reconstruction
   algorithm, the NodeStream/anchor-map artifacts, and the render+diff

@@ -1,12 +1,18 @@
 """tests/render_obsidian_occindex.test.py -- D1/D3/D4's renderer-side half
-of the opt-in, source-anchored occurrence index (RFC lt-appendix-backlink-
+of the source-anchored occurrence index (RFC lt-appendix-backlink-
 integrity, plan section "D1 -- Opt-in `## Mentions` section" /
 "D3 -- Collision de-link"): the `## Mentions` section render_obsidian.py
-emits on entity notes from `nodestream["mentions"]`, the flag-gated
-collision de-linking `build_entity_index` now performs, and the canon-field
-safety rejections that close the marker-forgery vector -- all gated on the
-SAME `_effective_mentions_enabled(profile)` predicate render() computes
-from its own `profile` argument.
+emits on entity notes from `nodestream["mentions"]`, the collision
+de-linking `build_entity_index` performs on every real obsidian render
+(#206/#207 -- de-coupled from the `## Mentions` appendix `enabled` flag,
+but NOT from `output.target`), and the canon-field safety rejections that
+close the marker-forgery vector. D1 (the Mentions section) and the
+reserved-field rejections stay gated on `_effective_mentions_enabled(
+profile)`, computed by render() from its own `profile` argument; D3
+(collision de-linking) is NOT gated on THAT predicate's `enabled`-flag
+half any more, but still gates on the same `_is_obsidian_target(profile)`
+check `_effective_mentions_enabled` itself starts with -- see
+render_obsidian.py's `build_entity_index` docstring.
 
 Self-contained (mirrors tests/render_obsidian.test.py's own convention: no
 cross-test-file imports) -- loads the real module via
@@ -321,10 +327,16 @@ def test_collision_delink_true_removes_both_owners_but_both_notes_still_render(t
         entity_note_path(out_dir, manifest, source_form)  # raises if not exactly one note found
 
 
-def test_collision_delink_false_keeps_tiebreak_winner_link(tmp_path):
-    """Paired with the test above (codex R2 b3): the SAME collision, with
-    the feature off, must still produce the old tiebreak-winner inline
-    link -- not de-linked, not both owners linked."""
+def test_collision_delink_false_also_delinks_now(tmp_path):
+    """Paired with the test above (codex R2 b3), UPDATED for #206/#207: D3
+    collision de-linking is de-coupled from the `## Mentions` appendix
+    `enabled` flag -- `render()` passes `collision_delink=
+    _is_obsidian_target(profile)`, which is `True` here (this profile's
+    `output.target` is "obsidian", the default from make_profile), so the
+    SAME collision de-links with the appendix off too, exactly like
+    appendix-on. This test used to pin the #207 misattribution (the old
+    tiebreak-winner link surviving with the appendix off); it now asserts
+    the fix."""
     canon = make_canon({
         "Ioann_src": canon_entry("Ioann_src", "Джон"),
         "Yan_src": canon_entry("Yan_src", "Джон"),
@@ -337,9 +349,8 @@ def test_collision_delink_false_keeps_tiebreak_winner_link(tmp_path):
         all_written_paths(out_dir, manifest), lambda t: "пришёл домой" in t
     )
     body_text = body_matches[0].read_text(encoding="utf-8")
-    identity = entity_note_identity(out_dir, manifest, "Yan_src")
-    assert f"[[{identity}|Джон]]" in body_text, (
-        f"the shorter source_form (Yan_src) must still win the tiebreak with the flag off -- got:\n{body_text}"
+    assert "[[" not in body_text, (
+        f"the collision must de-link even with the Mentions appendix off -- got:\n{body_text}"
     )
 
 
@@ -398,10 +409,6 @@ def test_all_sense_translated_owners_drop_the_target(tmp_path):
     RED is the new "if not survivors: continue" guard itself: removing
     that one guard line reproduces `ValueError: min() iterable argument is
     empty` on this exact fixture (verified while writing this test)."""
-    canon = make_canon({
-        "A_src": canon_entry("A_src", "Норов", basis="sense_translated"),
-        "B_src": canon_entry("B_src", "Норов", basis="sense_translated"),
-    })
     text = "Норов вошёл в комнату."
     for mentions_enabled in (False, True):
         canon_copy = make_canon({
@@ -424,15 +431,16 @@ def test_all_sense_translated_owners_drop_the_target(tmp_path):
         )
 
 
-def test_explicit_flag_off_preserves_tiebreak_link(tmp_path):
+def test_explicit_flag_off_also_delinks_sense_translated_collision(tmp_path):
     """The SAME sense_translated + normal collision as
     test_sense_translated_collision_delinks_both above, but with
-    mentions_section.enabled written EXPLICITLY false -- pairs with the
-    existing pin at test_collision_delink_false_keeps_tiebreak_winner_link:
-    the pre-fix tiebreak-winner inline link (the non-sense_translated
-    entry, since a sense_translated entry can never win the tiebreak
-    either way) must still be emitted, unconditional on collision_delink's
-    own value."""
+    mentions_section.enabled written EXPLICITLY false -- UPDATED for
+    #206/#207 (pairs with test_collision_delink_false_also_delinks_now):
+    de-linking is de-coupled from that `enabled` flag now (this profile's
+    `output.target` is still "obsidian", the default from make_profile),
+    so even the non-sense_translated entry (the old tiebreak winner) must
+    NOT get an inline link with the appendix off, exactly as it doesn't
+    with the appendix on."""
     canon = make_canon({
         "Nadezhda_src": canon_entry("Nadezhda_src", "Hope", basis="sense_translated"),
         "Hope_src": canon_entry("Hope_src", "Hope", basis="transliterated"),
@@ -445,10 +453,9 @@ def test_explicit_flag_off_preserves_tiebreak_link(tmp_path):
         all_written_paths(out_dir, manifest), lambda t: "walked into the room" in t
     )
     body_text = body_matches[0].read_text(encoding="utf-8")
-    identity = entity_note_identity(out_dir, manifest, "Hope_src")
-    assert f"[[{identity}|Hope]]" in body_text, (
-        f"the non-sense_translated entry must still win the tiebreak with "
-        f"the flag off -- got:\n{body_text}"
+    assert "[[" not in body_text, (
+        f"a sense_translated + narrative collision must de-link even with "
+        f"the Mentions appendix off -- got:\n{body_text}"
     )
 
 
@@ -558,8 +565,11 @@ def test_sense_translated_gets_mentions_section_but_no_inline_link(tmp_path):
 
 # ===========================================================================
 # 6. Standalone-CLI regression (codex R9 b1): a dormant obsidian sub-block
-#    under a NON-obsidian output.target must never activate ANY of D1/D3 --
-#    all trigger conditions present simultaneously, none must fire.
+#    under a NON-obsidian output.target must never activate ANY of D1/D3/D4
+#    -- all trigger conditions present simultaneously, none must fire. D3
+#    (#206/#207) still gates on `_is_obsidian_target(profile)` exactly like
+#    D1/D4 do (only the appendix `enabled` flag was decoupled, never the
+#    target check), so this stays true unchanged.
 # ===========================================================================
 
 
