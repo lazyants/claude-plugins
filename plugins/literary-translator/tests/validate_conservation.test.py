@@ -3,7 +3,9 @@ scripts/validate_conservation.py (#196/#202 content-conservation gate).
 
 See that script's own module docstring for the full invariant spec this
 file was written against: `wrapper-conservation` (HARD, opt-in, four
-defect kinds) and `output-coverage` (WARN-only v1 floor).
+defect kinds) and `output-coverage` (WARN-only v1 floor, plus the opt-in
+within-cohort ratio-outlier lane, #202 R3 PARTIAL -- see the
+"output-coverage -- within-cohort ratio-outlier lane" test section below).
 
 ## Fixture strategy
 
@@ -32,14 +34,18 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
 import yaml
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS_SRC_DIR = PLUGIN_ROOT / "skills" / "literary-translator" / "assets" / "scripts"
+SCHEMAS_SRC_DIR = PLUGIN_ROOT / "skills" / "literary-translator" / "assets" / "schemas"
 
 VALIDATE_CONSERVATION_SRC = SCRIPTS_SRC_DIR / "validate_conservation.py"
 VALIDATE_ASSEMBLED_SRC = SCRIPTS_SRC_DIR / "validate_assembled.py"
 VALIDATE_DRAFT_SRC = SCRIPTS_SRC_DIR / "validate_draft.py"
+PROFILE_SCHEMA_SRC = SCHEMAS_SRC_DIR / "profile.schema.json"
+PROFILE_EXAMPLE_SRC = PLUGIN_ROOT / "skills" / "literary-translator" / "assets" / "profile.example.yml"
 
 assert VALIDATE_CONSERVATION_SRC.is_file(), (
     f"validate_conservation.py not found at {VALIDATE_CONSERVATION_SRC} -- "
@@ -72,12 +78,23 @@ def make_root(tmp_path) -> Path:
     return root
 
 
-def write_profile(root: Path, v1_scope: str = "segment_drafts_and_audit", conservation=None, hollow_floor=None) -> None:
+def write_profile(
+    root: Path,
+    v1_scope: str = "segment_drafts_and_audit",
+    conservation=None,
+    hollow_floor=None,
+    ratio_band=None,
+) -> None:
     profile: dict = {"output": {"v1_scope": v1_scope}}
     if conservation is not None:
         profile["source"] = {"conservation": conservation}
+    validation_cfg = {}
     if hollow_floor is not None:
-        profile["validation"] = {"conservation_hollow_floor": hollow_floor}
+        validation_cfg["conservation_hollow_floor"] = hollow_floor
+    if ratio_band is not None:
+        validation_cfg["conservation_ratio_band"] = ratio_band
+    if validation_cfg:
+        profile["validation"] = validation_cfg
     (root / "profile.yml").write_text(yaml.safe_dump(profile), encoding="utf-8")
     (root / ".literary-translator-root.json").write_text(
         json.dumps({"owner_profile_path": str(root / "profile.yml")}), encoding="utf-8"
@@ -180,6 +197,53 @@ def write_nodestream(root: Path, nodestream: dict) -> None:
     assembled_dir = root / "out" / ".assembled"
     assembled_dir.mkdir(parents=True, exist_ok=True)
     (assembled_dir / "nodestream.json").write_text(json.dumps(nodestream, ensure_ascii=False), encoding="utf-8")
+
+
+def _words(n: int, tag: str) -> str:
+    """n distinct space-separated tokens -- word CONTENT never matters to
+    normalize_words(), only the count, but distinct tokens make a mismatch
+    easy to spot in a failure message."""
+    return " ".join(f"{tag}{i}" for i in range(n)) if n > 0 else ""
+
+
+def make_cohort_manifest_and_draft(root: Path, raw_type: str, ratio_specs, seg: str = "seg01") -> list:
+    """Builds a single-segment manifest + draft + converged ledger entry
+    with one block per (source_words, output_words) pair in `ratio_specs`,
+    all sharing `raw_type` (one cohort). segment_drafts_and_audit scope.
+    Returns the block_ids in creation order."""
+    blocks = {}
+    draft_blocks = {}
+    block_ids = []
+    for i, (source_words, out_words) in enumerate(ratio_specs):
+        bid = f"{raw_type}:{seg}:{i:04d}"
+        blocks[bid] = make_block(raw_type, _words(source_words, f"s{i}_") or "x", order_index=i)
+        draft_blocks[bid] = _words(out_words, f"o{i}_")
+        block_ids.append(bid)
+    write_manifest(root, blocks, [
+        {"seg": seg, "kind": "body", "block_ids": block_ids, "word_count": sum(sw for sw, _ in ratio_specs)}
+    ])
+    write_draft(root, seg, draft_blocks)
+    write_ledger(root, {seg: {"status": "converged"}})
+    return block_ids
+
+
+def make_cohort_manifest_and_nodestream(root: Path, raw_type: str, ratio_specs, seg: str = "seg01") -> list:
+    """assembled_book-scope counterpart of make_cohort_manifest_and_draft --
+    same manifest shape, but output word counts come from a nodestream
+    instead of a draft/ledger pair."""
+    blocks = {}
+    nodes = []
+    block_ids = []
+    for i, (source_words, out_words) in enumerate(ratio_specs):
+        bid = f"{raw_type}:{seg}:{i:04d}"
+        blocks[bid] = make_block(raw_type, _words(source_words, f"s{i}_") or "x", order_index=i)
+        nodes.append({"id": bid, "seg": seg, "kind": "prose", "text": _words(out_words, f"o{i}_")})
+        block_ids.append(bid)
+    write_manifest(root, blocks, [
+        {"seg": seg, "kind": "body", "block_ids": block_ids, "word_count": sum(sw for sw, _ in ratio_specs)}
+    ])
+    write_nodestream(root, {"book": {"seg_order": [seg], "title": "Test"}, "nodes": nodes})
+    return block_ids
 
 
 def run_validate_conservation(root: Path, mode: str, timeout: int = 30) -> subprocess.CompletedProcess:
@@ -733,3 +797,614 @@ def test_output_coverage_custom_threshold(tmp_path):
     doc = parse_stdout_json(proc)
     kinds = {(w["seg"], w["block_id"], w["kind"]) for w in doc["warnings"]}
     assert ("seg01", "PARA:seg01:0001", "hollowed_output_block") in kinds
+
+
+# ===========================================================================
+# output-coverage -- within-cohort ratio-outlier lane (D3, #202 R3, PARTIAL)
+#
+# OPT-IN: absent/null validation.conservation_ratio_band means this lane
+# never runs -- output-coverage's output stays byte-identical to 1.11.0 (see
+# both validate_conservation.py's own module docstring and
+# profile.schema.json). Every test below that exercises the lane passes
+# ratio_band= explicitly for that reason.
+# ===========================================================================
+
+
+def test_ratio_band_disabled_by_default(tmp_path):
+    """Absent validation.conservation_ratio_band -- no coverage_distribution
+    key at all, and the lane emits none of its three new warning kinds."""
+    root = make_root(tmp_path)
+    write_profile(root, v1_scope="segment_drafts_and_audit")
+    make_cohort_manifest_and_draft(root, "PARA", [(100, 100)] * 5)
+
+    proc = run_validate_conservation(root, "output-coverage")
+    assert proc.returncode == 0, proc.stderr
+    doc = parse_stdout_json(proc)
+    assert "coverage_distribution" not in doc
+    assert doc["warnings"] == []
+
+
+def test_ratio_band_low_coverage_outlier_flagged(tmp_path):
+    root = make_root(tmp_path)
+    write_profile(root, v1_scope="segment_drafts_and_audit", ratio_band={})
+    ratio_specs = [(100, 100)] * 30 + [(100, 10)]  # 30 at ratio 1.0, one at 0.1
+    block_ids = make_cohort_manifest_and_draft(root, "PARA", ratio_specs)
+
+    proc = run_validate_conservation(root, "output-coverage")
+    assert proc.returncode == 0, proc.stderr
+    doc = parse_stdout_json(proc)
+    outliers = [w for w in doc["warnings"] if w["kind"] == "low_coverage_outlier"]
+    assert len(outliers) == 1, doc["warnings"]
+    assert outliers[0]["block_id"] == block_ids[-1]
+    assert outliers[0]["seg"] == "seg01"
+    assert outliers[0]["raw_type"] == "PARA"
+
+
+def test_ratio_band_no_flag_at_ratio_0_9_degenerate_mad(tmp_path):
+    """30 identical ratio-1.0 blocks + one at 0.9: only one of 31 deviations
+    is nonzero, so the median deviation (MAD) is still 0 -- the robust fence
+    then equals the median, which alone would flag anything even slightly
+    below it. The abs_guard condition is what actually protects this
+    near-median block; the sibling test below flips abs_guard and shows the
+    SAME fixture then DOES get flagged, proving abs_guard is load-bearing
+    rather than assumed."""
+    root = make_root(tmp_path)
+    write_profile(root, v1_scope="segment_drafts_and_audit", ratio_band={})
+    ratio_specs = [(100, 100)] * 30 + [(100, 90)]
+    make_cohort_manifest_and_draft(root, "PARA", ratio_specs)
+
+    proc = run_validate_conservation(root, "output-coverage")
+    assert proc.returncode == 0, proc.stderr
+    doc = parse_stdout_json(proc)
+    assert [w for w in doc["warnings"] if w["kind"] == "low_coverage_outlier"] == []
+
+
+def test_ratio_band_abs_guard_is_load_bearing(tmp_path):
+    """SAME fixture as test_ratio_band_no_flag_at_ratio_0_9_degenerate_mad,
+    only abs_guard raised to its schema maximum (1.0) -- the block that was
+    NOT flagged at the default (0.5) IS now flagged, proving abs_guard
+    actually gates the outcome rather than being vacuous."""
+    root = make_root(tmp_path)
+    write_profile(root, v1_scope="segment_drafts_and_audit", ratio_band={"abs_guard": 1.0})
+    ratio_specs = [(100, 100)] * 30 + [(100, 90)]
+    block_ids = make_cohort_manifest_and_draft(root, "PARA", ratio_specs)
+
+    proc = run_validate_conservation(root, "output-coverage")
+    assert proc.returncode == 0, proc.stderr
+    doc = parse_stdout_json(proc)
+    outliers = [w for w in doc["warnings"] if w["kind"] == "low_coverage_outlier"]
+    assert len(outliers) == 1
+    assert outliers[0]["block_id"] == block_ids[-1]
+
+
+def test_ratio_band_cohort_separation(tmp_path):
+    """A terse-by-nature type (uniform ratio 0.2) and a verbose type
+    (uniform ratio 1.0) in the SAME project. If cohorts were pooled instead
+    of grouped by raw manifest type, the terse cohort's own typical ratio
+    would look like a collapse relative to the verbose cohort's dominant
+    median. Grouped correctly, each cohort's own median/MAD are computed
+    independently -- asserted directly, not just inferred from an absence
+    of warnings."""
+    root = make_root(tmp_path)
+    write_profile(root, v1_scope="segment_drafts_and_audit", ratio_band={})
+    blocks = {}
+    draft_blocks = {}
+    seg_block_ids = []
+    for i in range(25):
+        bid = f"TERSE:seg01:{i:04d}"
+        blocks[bid] = make_block("TERSE", _words(100, f"t{i}_"), order_index=len(seg_block_ids))
+        draft_blocks[bid] = _words(20, f"to{i}_")  # ratio 0.2
+        seg_block_ids.append(bid)
+    for i in range(25):
+        bid = f"VERBOSE:seg01:{i:04d}"
+        blocks[bid] = make_block("VERBOSE", _words(100, f"v{i}_"), order_index=len(seg_block_ids))
+        draft_blocks[bid] = _words(100, f"vo{i}_")  # ratio 1.0
+        seg_block_ids.append(bid)
+    write_manifest(root, blocks, [{"seg": "seg01", "kind": "body", "block_ids": seg_block_ids, "word_count": 5000}])
+    write_draft(root, "seg01", draft_blocks)
+    write_ledger(root, {"seg01": {"status": "converged"}})
+
+    proc = run_validate_conservation(root, "output-coverage")
+    assert proc.returncode == 0, proc.stderr
+    doc = parse_stdout_json(proc)
+    assert [w for w in doc["warnings"] if w["kind"] == "low_coverage_outlier"] == []
+    dist = doc["coverage_distribution"]
+    assert dist["TERSE"]["median_ratio"] == 0.2
+    assert dist["VERBOSE"]["median_ratio"] == 1.0
+
+
+def test_ratio_band_insufficient_sample_below_min_cohort(tmp_path):
+    root = make_root(tmp_path)
+    write_profile(root, v1_scope="segment_drafts_and_audit", ratio_band={"min_cohort": 5})
+    ratio_specs = [(100, 100), (100, 95)]  # only 2 eligible, below min_cohort=5
+    make_cohort_manifest_and_draft(root, "PARA", ratio_specs)
+
+    proc = run_validate_conservation(root, "output-coverage")
+    assert proc.returncode == 0, proc.stderr
+    doc = parse_stdout_json(proc)
+    samples = [w for w in doc["warnings"] if w["kind"] == "insufficient_sample"]
+    assert len(samples) == 1
+    assert samples[0]["cohort"] == "PARA"
+    assert samples[0]["n"] == 2
+    assert samples[0]["min_cohort"] == 5
+    assert samples[0]["reason"] == "too_few_eligible"
+
+
+def test_ratio_band_no_double_report_at_nonzero_floor(tmp_path):
+    """The floor's max_output_words is operator-configurable and not
+    necessarily 0 -- a floor-flagged block must be excluded from the ratio
+    band via its OWN (seg, block_id) keys from this run, never re-derived
+    via an out_words == 0 test, or it would double-report."""
+    root = make_root(tmp_path)
+    write_profile(
+        root,
+        v1_scope="segment_drafts_and_audit",
+        hollow_floor={"min_source_words": 1, "max_output_words": 2},
+        ratio_band={},
+    )
+    ratio_specs = [(100, 100)] * 30 + [(100, 1)]  # last block: floor-flagged (1 <= 2)
+    block_ids = make_cohort_manifest_and_draft(root, "PARA", ratio_specs)
+
+    proc = run_validate_conservation(root, "output-coverage")
+    assert proc.returncode == 0, proc.stderr
+    doc = parse_stdout_json(proc)
+    matches = [w for w in doc["warnings"] if w.get("block_id") == block_ids[-1]]
+    kinds = {w["kind"] for w in matches}
+    assert kinds == {"hollowed_output_block"}, doc["warnings"]
+    assert doc["coverage_distribution"]["PARA"]["excluded_floor_flagged"] == 1
+
+
+def test_ratio_band_uniform_collapse_blind_spot_characterization(tmp_path):
+    """THE documented structural blind spot: if every block in a cohort is
+    equally truncated, the median IS the truncated ratio and MAD == 0, so
+    nothing is an outlier. Pins the limitation honestly -- if a future
+    change makes the lane detect this, this test must be updated
+    deliberately rather than the gap being rediscovered in production."""
+    root = make_root(tmp_path)
+    write_profile(root, v1_scope="segment_drafts_and_audit", ratio_band={})
+    ratio_specs = [(100, 30)] * 30  # every block uniformly truncated to 0.30
+    make_cohort_manifest_and_draft(root, "PARA", ratio_specs)
+
+    proc = run_validate_conservation(root, "output-coverage")
+    assert proc.returncode == 0, proc.stderr
+    doc = parse_stdout_json(proc)
+    assert [w for w in doc["warnings"] if w["kind"] == "low_coverage_outlier"] == []
+    assert doc["coverage_distribution"]["PARA"]["median_ratio"] == 0.3
+
+
+def test_ratio_band_all_floor_flagged_reason_visible_and_distinct(tmp_path):
+    """A cohort that collapsed hard enough that the floor caught EVERY
+    block must be reported as all_floor_flagged -- distinct from
+    too_few_eligible, which would mask the collapse as mere small-sample
+    noise."""
+    root = make_root(tmp_path)
+    write_profile(
+        root,
+        v1_scope="segment_drafts_and_audit",
+        hollow_floor={"min_source_words": 1, "max_output_words": 100},
+        ratio_band={},
+    )
+    ratio_specs = [(100, 50)] * 10  # every block: out(50) <= floor.max(100) -> ALL floor-flagged
+    make_cohort_manifest_and_draft(root, "PARA", ratio_specs)
+
+    proc = run_validate_conservation(root, "output-coverage")
+    assert proc.returncode == 0, proc.stderr
+    doc = parse_stdout_json(proc)
+    samples = [w for w in doc["warnings"] if w["kind"] == "insufficient_sample"]
+    assert len(samples) == 1
+    assert samples[0]["reason"] == "all_floor_flagged"
+    assert samples[0]["reason"] != "too_few_eligible"
+    assert samples[0]["excluded_floor_flagged"] == 10
+    assert samples[0]["n"] == 0
+
+
+def test_ratio_band_partition_identity_mixed_cohort(tmp_path):
+    """Half the cohort floor-flagged, half eligible -- the exact partition
+    cohort_size == n + excluded_floor_flagged + excluded_below_min_source_words
+    + excluded_zero_output must hold, so a reader never has to trust a
+    derived label to know how much of the cohort the median did not see."""
+    root = make_root(tmp_path)
+    write_profile(
+        root,
+        v1_scope="segment_drafts_and_audit",
+        hollow_floor={"min_source_words": 1, "max_output_words": 5},
+        ratio_band={"min_cohort": 10},
+    )
+    ratio_specs = [(100, 3)] * 15 + [(100, 100)] * 15  # first 15 floor-flagged, rest eligible
+    make_cohort_manifest_and_draft(root, "PARA", ratio_specs)
+
+    proc = run_validate_conservation(root, "output-coverage")
+    assert proc.returncode == 0, proc.stderr
+    doc = parse_stdout_json(proc)
+    dist = doc["coverage_distribution"]["PARA"]
+    assert dist["cohort_size"] == 30
+    assert dist["n"] == 15
+    assert dist["excluded_floor_flagged"] == 15
+    assert dist["excluded_below_min_source_words"] == 0
+    assert dist["excluded_zero_output"] == 0
+    assert dist["cohort_size"] == (
+        dist["n"] + dist["excluded_floor_flagged"]
+        + dist["excluded_below_min_source_words"] + dist["excluded_zero_output"]
+    )
+    # n(15) >= the overridden min_cohort(10) -- no insufficient_sample noise,
+    # and the 15 eligible blocks are uniform (ratio 1.0) so none is an
+    # outlier relative to itself either.
+    assert [w for w in doc["warnings"] if w["kind"] in ("insufficient_sample", "low_coverage_outlier")] == []
+
+
+def test_ratio_band_log_zero_regression_floor_skip_straddle(tmp_path):
+    """floor.min_source_words=100 SKIPS (continues past) a source_words=50
+    block entirely -- it is never floor-flagged. band.min_source_words_band
+    =40 clears it into the band population, where out_words==0 would
+    otherwise reach math.log(0) -- a ValueError crash inside a
+    contractually WARN-only, exit-0 command. Bucket 3
+    (excluded_zero_output) is what makes this unreachable. Without the
+    guard this fixture raises ValueError, so this test is red-before-green
+    by construction."""
+    root = make_root(tmp_path)
+    write_profile(
+        root,
+        v1_scope="segment_drafts_and_audit",
+        hollow_floor={"min_source_words": 100, "max_output_words": 0},
+        ratio_band={"min_source_words_band": 40},
+    )
+    block_ids = make_cohort_manifest_and_draft(root, "PARA", [(50, 0)])
+
+    proc = run_validate_conservation(root, "output-coverage")
+    assert proc.returncode == 0, proc.stderr  # not a math domain error crash
+    doc = parse_stdout_json(proc)
+    zero_output = [w for w in doc["warnings"] if w["kind"] == "zero_output_block"]
+    assert len(zero_output) == 1
+    assert zero_output[0]["block_id"] == block_ids[0]
+    assert [
+        w for w in doc["warnings"]
+        if w["kind"] == "low_coverage_outlier" and w.get("block_id") == block_ids[0]
+    ] == []
+    assert doc["coverage_distribution"]["PARA"]["excluded_zero_output"] == 1
+
+
+def test_ratio_band_reason_too_few_eligible_with_mixed_exclusions(tmp_path):
+    """The mixed-cohort case: SOME blocks are eligible, but the cohort still
+    has fewer than min_cohort -- must land in too_few_eligible, first in the
+    reason precedence, never in an all_* label even though exclusions are
+    also present."""
+    root = make_root(tmp_path)
+    write_profile(
+        root,
+        v1_scope="segment_drafts_and_audit",
+        hollow_floor={"min_source_words": 1, "max_output_words": 2},
+        ratio_band={"min_source_words_band": 20, "min_cohort": 25},
+    )
+    ratio_specs = [
+        (100, 1),   # floor-flagged
+        (5, 3),     # below min_source_words_band (5 < 20)
+        (100, 50),  # eligible
+    ]
+    make_cohort_manifest_and_draft(root, "PARA", ratio_specs)
+
+    proc = run_validate_conservation(root, "output-coverage")
+    assert proc.returncode == 0, proc.stderr
+    doc = parse_stdout_json(proc)
+    samples = [w for w in doc["warnings"] if w["kind"] == "insufficient_sample"]
+    assert len(samples) == 1
+    assert samples[0]["reason"] == "too_few_eligible"
+    assert samples[0]["n"] == 1
+    assert samples[0]["excluded_floor_flagged"] == 1
+    assert samples[0]["excluded_below_min_source_words"] == 1
+
+
+def test_ratio_band_reason_set_is_exactly_the_documented_set(tmp_path):
+    """Collects one cohort per known `reason` branch in a SINGLE run and
+    asserts the emitted reason set is EXACTLY the five documented labels --
+    no silent extra label, none missing."""
+    root = make_root(tmp_path)
+    write_profile(
+        root,
+        v1_scope="segment_drafts_and_audit",
+        hollow_floor={"min_source_words": 60, "max_output_words": 2},
+        ratio_band={"min_source_words_band": 50, "min_cohort": 25},
+    )
+    blocks = {}
+    draft_blocks = {}
+    seg_block_ids = []
+
+    def add(raw_type, tag, specs):
+        for i, (sw, ow) in enumerate(specs):
+            bid = f"{raw_type}:seg01:{i:04d}"
+            blocks[bid] = make_block(raw_type, _words(sw, f"{tag}{i}_") or "x", order_index=len(seg_block_ids))
+            draft_blocks[bid] = _words(ow, f"{tag}o{i}_")
+            seg_block_ids.append(bid)
+
+    # TOOFEW: one floor-flagged (source>=60,out<=2) + one eligible -> n=1, too_few_eligible.
+    add("TOOFEW", "a", [(100, 1), (100, 50)])
+    # ALLFLOOR: every block floor-flagged (source>=60, out<=2).
+    add("ALLFLOOR", "b", [(100, 1)] * 3)
+    # ALLBAND: source < 60 -- floor SKIPS (never flags); source < band min(50).
+    add("ALLBAND", "c", [(10, 5)] * 3)
+    # ALLZERO: source(55) < floor.min(60) -- floor skips; source >= band.min(50); out == 0.
+    add("ALLZERO", "d", [(55, 0)] * 3)
+    # MIXED: one floor-flagged, one below band min -- both buckets nonzero, n == 0.
+    add("MIXED", "e", [(100, 1), (10, 5)])
+
+    write_manifest(root, blocks, [{"seg": "seg01", "kind": "body", "block_ids": seg_block_ids, "word_count": 10000}])
+    write_draft(root, "seg01", draft_blocks)
+    write_ledger(root, {"seg01": {"status": "converged"}})
+
+    proc = run_validate_conservation(root, "output-coverage")
+    assert proc.returncode == 0, proc.stderr
+    doc = parse_stdout_json(proc)
+    reasons = {w["cohort"]: w["reason"] for w in doc["warnings"] if w["kind"] == "insufficient_sample"}
+    assert reasons == {
+        "TOOFEW": "too_few_eligible",
+        "ALLFLOOR": "all_floor_flagged",
+        "ALLBAND": "all_below_min_source_words",
+        "ALLZERO": "all_zero_output",
+        "MIXED": "all_excluded_mixed",
+    }
+    assert set(reasons.values()) == {
+        "too_few_eligible",
+        "all_floor_flagged",
+        "all_below_min_source_words",
+        "all_zero_output",
+        "all_excluded_mixed",
+    }
+
+
+def test_ratio_band_bucket_disjointness_all_three_predicates_at_once(tmp_path):
+    """A block satisfying ALL THREE exclusion predicates simultaneously
+    (floor-flagged, below the band minimum, AND zero output) must land in
+    exactly ONE bucket -- the FIRST match (floor-flagged) -- never double-
+    or triple-counted, and the one-block cohort's reason must be the
+    single-bucket label, never all_excluded_mixed."""
+    root = make_root(tmp_path)
+    write_profile(
+        root,
+        v1_scope="segment_drafts_and_audit",
+        hollow_floor={"min_source_words": 1, "max_output_words": 0},
+        ratio_band={"min_source_words_band": 40},
+    )
+    make_cohort_manifest_and_draft(root, "PARA", [(10, 0)])
+
+    proc = run_validate_conservation(root, "output-coverage")
+    assert proc.returncode == 0, proc.stderr
+    doc = parse_stdout_json(proc)
+    dist = doc["coverage_distribution"]["PARA"]
+    assert dist["cohort_size"] == 1
+    assert dist["excluded_floor_flagged"] == 1
+    assert dist["excluded_below_min_source_words"] == 0
+    assert dist["excluded_zero_output"] == 0
+    samples = [w for w in doc["warnings"] if w["kind"] == "insufficient_sample"]
+    assert len(samples) == 1
+    assert samples[0]["reason"] == "all_floor_flagged"
+    assert samples[0]["reason"] != "all_excluded_mixed"
+    # And the block is reported once, as the floor's own finding -- never
+    # also as zero_output_block (that would be a double-report).
+    assert [w for w in doc["warnings"] if w["kind"] == "zero_output_block"] == []
+
+
+def test_ratio_band_empty_cohort_json_contract(tmp_path):
+    """n == 0 -- median_ratio/mad/fence_ratio are explicit JSON null,
+    PRESENT never omitted, and the exact key set is pinned so a future
+    refactor that drops one silently fails."""
+    root = make_root(tmp_path)
+    write_profile(
+        root,
+        v1_scope="segment_drafts_and_audit",
+        hollow_floor={"min_source_words": 1, "max_output_words": 100},
+        ratio_band={},
+    )
+    make_cohort_manifest_and_draft(root, "PARA", [(100, 50)] * 3)  # all floor-flagged (50 <= 100)
+
+    proc = run_validate_conservation(root, "output-coverage")
+    assert proc.returncode == 0, proc.stderr
+    doc = parse_stdout_json(proc)
+    entry = doc["coverage_distribution"]["PARA"]
+    assert entry["n"] == 0
+    assert entry["median_ratio"] is None
+    assert entry["mad"] is None
+    assert entry["fence_ratio"] is None
+    assert set(entry.keys()) == {
+        "cohort_size", "n", "median_ratio", "mad", "fence_ratio",
+        "excluded_floor_flagged", "excluded_below_min_source_words", "excluded_zero_output",
+    }
+
+
+def test_ratio_band_config_validation_errors(tmp_path):
+    """non-int min_cohort, k <= 0, abs_guard > 1, a boolean, a null ->
+    ConservationError exit 2 -- same defensive shape as
+    conservation_hollow_floor's own validation."""
+    cases = [
+        ({"min_cohort": "5"}, "conservation_ratio_band.min_cohort"),
+        ({"min_cohort": True}, "conservation_ratio_band.min_cohort"),
+        ({"k": 0}, "conservation_ratio_band.k"),
+        ({"k": -1}, "conservation_ratio_band.k"),
+        ({"abs_guard": 1.5}, "conservation_ratio_band.abs_guard"),
+        ({"abs_guard": None}, "conservation_ratio_band.abs_guard"),
+        ({"min_source_words_band": 0}, "conservation_ratio_band.min_source_words_band"),
+    ]
+    for i, (bad_cfg, needle) in enumerate(cases):
+        root = make_root(tmp_path / f"case{i}")
+        write_profile(root, v1_scope="segment_drafts_and_audit", ratio_band=bad_cfg)
+        make_cohort_manifest_and_draft(root, "PARA", [(100, 100)])
+
+        proc = run_validate_conservation(root, "output-coverage")
+        assert proc.returncode == 2, (bad_cfg, proc.stdout, proc.stderr)
+        assert needle in proc.stderr, (bad_cfg, proc.stderr)
+
+
+def test_ratio_band_non_finite_config_yaml_loud_failure(tmp_path):
+    """k: .nan / .inf, abs_guard: -.inf, written as REAL YAML (not a Python
+    shortcut) -- YAML .nan/.inf parse to real floats that pass a naive
+    isinstance(x, float) check, so this must be a LOUD failure (exit 2),
+    never merely 'zero warnings emitted'. A NaN fence would make every
+    comparison False, silently disabling the whole lane while it reports
+    success."""
+    cases = [
+        {"k": float("nan")},
+        {"k": float("inf")},
+        {"abs_guard": float("-inf")},
+    ]
+    for i, bad_cfg in enumerate(cases):
+        root = make_root(tmp_path / f"nan_case{i}")
+        write_profile(root, v1_scope="segment_drafts_and_audit", ratio_band=bad_cfg)
+        make_cohort_manifest_and_draft(root, "PARA", [(100, 100)])
+
+        proc = run_validate_conservation(root, "output-coverage")
+        assert proc.returncode == 2, (bad_cfg, proc.stdout, proc.stderr)
+        assert "conservation_ratio_band" in proc.stderr
+        # Confirm profile.yml genuinely carries the literal YAML token, not
+        # a Python-only artifact of this test harness.
+        yaml_text = (root / "profile.yml").read_text(encoding="utf-8")
+        assert (".nan" in yaml_text) or (".inf" in yaml_text)
+
+
+def test_ratio_band_allow_nan_guard_rejects_nan_reaching_emission(tmp_path, monkeypatch):
+    """Guard 2 (json.dumps(..., allow_nan=False)) is the TOTAL guard: it
+    must reject a non-finite value reaching stdout emission via ANY path,
+    not just the config-validation path (guard 1). Config validation
+    already rejects a NaN k/abs_guard directly, so the only way to exercise
+    guard 2 itself is to force a NaN through a path config validation
+    cannot see -- monkeypatch statistics.median inside the COPIED script's
+    own module (imported directly, since a real subprocess cannot be
+    monkeypatched from the test process) and assert the script raises
+    loudly rather than emitting a NaN token in stdout."""
+    import importlib.util
+
+    root = make_root(tmp_path)
+    write_profile(root, v1_scope="segment_drafts_and_audit", ratio_band={})
+    make_cohort_manifest_and_draft(root, "PARA", [(100, 100)] * 26)
+
+    sys.modules.pop("validate_assembled", None)
+    sys.modules.pop("validate_draft", None)
+    spec = importlib.util.spec_from_file_location(
+        "vc_nan_probe", root / "scripts" / "validate_conservation.py"
+    )
+    vc = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(vc)
+    monkeypatch.setattr(vc.statistics, "median", lambda values: float("nan"))
+    monkeypatch.chdir(root)
+
+    with pytest.raises(ValueError):
+        vc.main(["output-coverage"])
+
+
+def test_ratio_band_bucket_disjointness_partition_identity(tmp_path):
+    """Reconfirms the plan's own worked example arithmetically: cohort_size
+    == n + excluded_floor_flagged + excluded_below_min_source_words +
+    excluded_zero_output for a one-block cohort hitting all three
+    predicates -- the partition identity, not just the reason label."""
+    root = make_root(tmp_path)
+    write_profile(
+        root,
+        v1_scope="segment_drafts_and_audit",
+        hollow_floor={"min_source_words": 1, "max_output_words": 0},
+        ratio_band={"min_source_words_band": 40},
+    )
+    make_cohort_manifest_and_draft(root, "PARA", [(10, 0)])
+
+    proc = run_validate_conservation(root, "output-coverage")
+    assert proc.returncode == 0, proc.stderr
+    doc = parse_stdout_json(proc)
+    dist = doc["coverage_distribution"]["PARA"]
+    assert dist["cohort_size"] == (
+        dist["n"] + dist["excluded_floor_flagged"]
+        + dist["excluded_below_min_source_words"] + dist["excluded_zero_output"]
+    )
+
+
+def test_ratio_band_schema_rejects_deleted_absolute_threshold_keys(tmp_path):
+    """The round-2 absolute-threshold mechanisms (cross_cohort_guard,
+    implausible_ratio_floor, implausible_ratio_ceiling) were DELETED as
+    ineffective, never shipped -- additionalProperties: false on
+    conservation_ratio_band pins that deletion so they cannot silently
+    return."""
+    import jsonschema
+
+    schema = json.loads(PROFILE_SCHEMA_SRC.read_text(encoding="utf-8"))
+    base_profile = yaml.safe_load(PROFILE_EXAMPLE_SRC.read_text(encoding="utf-8"))
+    # The shipped example carries a placeholder enum sentinel by design
+    # (see tests/profile_example_validation.test.py) -- fill in the one
+    # field schema itself unconditionally restricts, so the base fixture is
+    # genuinely schema-valid before this test mutates it.
+    base_profile["glossary"]["research_mode"] = "offline"
+    jsonschema.validate(instance=base_profile, schema=schema)  # sanity: base itself is valid
+
+    for bad_key in ("cross_cohort_guard", "implausible_ratio_floor", "implausible_ratio_ceiling"):
+        profile = json.loads(json.dumps(base_profile))
+        profile["validation"]["conservation_ratio_band"] = {bad_key: 1}
+        with pytest.raises(jsonschema.exceptions.ValidationError):
+            jsonschema.validate(instance=profile, schema=schema)
+
+    # The four REAL keys are accepted -- proves this is testing the
+    # additionalProperties gate, not an unrelated schema defect.
+    ok_profile = json.loads(json.dumps(base_profile))
+    ok_profile["validation"]["conservation_ratio_band"] = {
+        "min_source_words_band": 10, "min_cohort": 25, "k": 3.0, "abs_guard": 0.5,
+    }
+    jsonschema.validate(instance=ok_profile, schema=schema)
+
+    # And explicit null (the opt-out form) is accepted too.
+    null_profile = json.loads(json.dumps(base_profile))
+    null_profile["validation"]["conservation_ratio_band"] = None
+    jsonschema.validate(instance=null_profile, schema=schema)
+
+
+def test_ratio_band_determinism_byte_identical_stdout(tmp_path):
+    root = make_root(tmp_path)
+    write_profile(root, v1_scope="segment_drafts_and_audit", ratio_band={})
+    make_cohort_manifest_and_draft(root, "PARA", [(100, 100)] * 30 + [(100, 10)])
+
+    proc1 = run_validate_conservation(root, "output-coverage")
+    proc2 = run_validate_conservation(root, "output-coverage")
+    assert proc1.returncode == 0 == proc2.returncode
+    assert proc1.stdout == proc2.stdout
+
+
+def test_ratio_band_mutation_proof_fence_neutered_via_k(tmp_path):
+    """A moderately-spread cohort (ratios alternating 0.95/1.05, MAD
+    genuinely nonzero) plus one moderate outlier at ratio 0.3, flagged at
+    the default k=3.0. Pushing k way up moves the robust fence far below
+    the outlier's own ratio -- the SAME fixture then stops flagging, which
+    proves the flag is actually driven by the fence/k, not vacuously
+    flagged by something else in the fixture. (A fixture with a degenerate
+    MAD == 0, like the ones above, would NOT distinguish this -- k has no
+    effect once MAD is 0, since k multiplies it.)"""
+    ratio_specs = [(100, 95)] * 15 + [(100, 105)] * 15 + [(100, 30)]
+
+    root = make_root(tmp_path)
+    write_profile(root, v1_scope="segment_drafts_and_audit", ratio_band={})
+    make_cohort_manifest_and_draft(root, "PARA", ratio_specs)
+    proc = run_validate_conservation(root, "output-coverage")
+    assert proc.returncode == 0, proc.stderr
+    doc = parse_stdout_json(proc)
+    assert len([w for w in doc["warnings"] if w["kind"] == "low_coverage_outlier"]) == 1  # RED, confirmed flagging
+
+    root2 = make_root(tmp_path / "neutered")
+    write_profile(root2, v1_scope="segment_drafts_and_audit", ratio_band={"k": 50.0})
+    make_cohort_manifest_and_draft(root2, "PARA", ratio_specs)
+    proc2 = run_validate_conservation(root2, "output-coverage")
+    assert proc2.returncode == 0, proc2.stderr
+    doc2 = parse_stdout_json(proc2)
+    assert [w for w in doc2["warnings"] if w["kind"] == "low_coverage_outlier"] == []
+
+
+def test_ratio_band_low_coverage_outlier_assembled_book_scope(tmp_path):
+    """Both scopes: the ratio-band lane consumes whatever eligible_keys/
+    output_words the caller's scope branch resolves -- this proves it also
+    works end-to-end against a real nodestream (assembled_book scope), not
+    only the default segment_drafts_and_audit scope every test above uses."""
+    root = make_root(tmp_path)
+    write_profile(root, v1_scope="assembled_book", ratio_band={})
+    ratio_specs = [(100, 100)] * 30 + [(100, 10)]
+    block_ids = make_cohort_manifest_and_nodestream(root, "PARA", ratio_specs)
+
+    proc = run_validate_conservation(root, "output-coverage")
+    assert proc.returncode == 0, proc.stderr
+    doc = parse_stdout_json(proc)
+    outliers = [w for w in doc["warnings"] if w["kind"] == "low_coverage_outlier"]
+    assert len(outliers) == 1
+    assert outliers[0]["block_id"] == block_ids[-1]
+
+
+if __name__ == "__main__":
+    sys.exit(pytest.main([__file__, "-v"]))
