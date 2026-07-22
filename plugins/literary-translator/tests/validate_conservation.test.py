@@ -1406,5 +1406,48 @@ def test_ratio_band_low_coverage_outlier_assembled_book_scope(tmp_path):
     assert outliers[0]["block_id"] == block_ids[-1]
 
 
+def test_default_min_source_words_band_excludes_short_blocks(tmp_path):
+    """Pins DEFAULT_RATIO_BAND_MIN_SOURCE_WORDS itself (40), not just the
+    mechanism it feeds -- every other test in this file either uses
+    source_words=100 (clear of any plausible default) or overrides
+    min_source_words_band explicitly, so the compiled-in constant was
+    otherwise unpinned: a future refactor (or someone deciding 40 'seems too
+    strict') could silently lower it back toward the value this gate exists
+    to exclude, and this suite would stay green.
+
+    40 answers a specific codex finding: normalize_words() is NFC +
+    whitespace splitting only, with no morphological/markup/sentinel
+    normalization, so a short markup- or sentinel-heavy block yields a
+    raw-token ratio that is not linguistically comparable -- a lower
+    default would silently readmit that population into the band.
+
+    Config carries NO min_source_words_band override, so the compiled-in
+    default is what governs. Fixture: 25 normal blocks (ratio 1.0, exactly
+    clearing the default min_cohort=25) plus one block at source_words=30
+    -- below the 40-word default -- whose output is drastically truncated
+    (1 word). At the default (40) that block is excluded via
+    excluded_below_min_source_words and never scored; if the default were
+    lowered to (e.g.) 10, the same block would become eligible and, being
+    drastically truncated against a uniform ratio-1.0 cohort, WOULD be
+    flagged as low_coverage_outlier -- this is the red-before-green this
+    test is built to prove (verified by hand: temporarily setting
+    DEFAULT_RATIO_BAND_MIN_SOURCE_WORDS = 10 flips this test to failing,
+    confirming it is not vacuously green)."""
+    root = make_root(tmp_path)
+    write_profile(root, v1_scope="segment_drafts_and_audit", ratio_band={})
+    ratio_specs = [(100, 100)] * 25 + [(30, 1)]
+    block_ids = make_cohort_manifest_and_draft(root, "PARA", ratio_specs)
+
+    proc = run_validate_conservation(root, "output-coverage")
+    assert proc.returncode == 0, proc.stderr
+    doc = parse_stdout_json(proc)
+    short_block_id = block_ids[-1]
+    outliers = [w for w in doc["warnings"] if w["kind"] == "low_coverage_outlier"]
+    assert [w for w in outliers if w["block_id"] == short_block_id] == [], outliers
+    dist = doc["coverage_distribution"]["PARA"]
+    assert dist["excluded_below_min_source_words"] == 1
+    assert dist["n"] == 25
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
