@@ -627,6 +627,39 @@ function parseDisp(raw, seg) {
   return m ? m[1] : "";
 }
 
+// Line-oriented sentinel verdict (#308), mirrored byte-for-byte across the
+// three workflow templates (standalone files, no runtime imports; parity is
+// test-pinned). Replaces the #228 whole-string exact match: #228 killed the
+// substring false-POSITIVE ("TIMEOUT seg01 (not READY)" passing an indexOf
+// check); its whole-string cure then rejected a benign prose-decorated
+// success ("...exit 0.\n\nREADY seg03"), mislabeling completed work as a
+// timeout (#308). True iff (a) no trimmed non-empty line equals
+// failSentinel, AND (b) the LAST trimmed non-empty line equals okSentinel
+// exactly. Requiring okSentinel to be the FINAL line (round-2 fix -- an
+// earlier "any line" draft accepted a reply that quotes the success form
+// while explicitly disavowing it, e.g. "The command failed; quoting the
+// requested success form:\nREADY seg01\nThat is not my verdict." -- the
+// shipped whole-string check rejects that reply, so "any line" would have
+// been a genuine widening of what gets accepted, not just a decoration
+// tolerance) tolerates a prose PREAMBLE (the observed real shape) while
+// rejecting a sentinel-shaped line the agent's own later prose overrides.
+// The failure-sentinel check still scans every line, not just the last, so
+// fail-priority on a contradictory reply is unchanged. A reply with no
+// non-empty lines is false. This parses only the agent's transport reply;
+// nothing else about any call site changes.
+function sentinelVerdict(reply, okSentinel, failSentinel) {
+  const rawLines = String(reply == null ? "" : reply).split("\n");
+  const lines = [];
+  for (let i = 0; i < rawLines.length; i++) {
+    const line = rawLines[i].trim();
+    if (line.length === 0) continue;
+    if (failSentinel !== null && line === failSentinel) return false;
+    lines.push(line);
+  }
+  if (lines.length === 0) return false;
+  return lines[lines.length - 1] === okSentinel;
+}
+
 // ---------------------------------------------------------------------------
 // Prompt-builder functions. All plain JavaScript string interpolation
 // against the constants above -- there is no templating engine at Workflow
@@ -1088,12 +1121,20 @@ async function getVerifiedReview(seg, roundLabel) {
   const ready = await agent(reviewWaitPrompt(seg, roundLabel, disp), {
     effort: "low", phase: "ReviewFix", label: waitLabel,
   });
-  // EXACT match, never substring (content-matching-sentinel-fragility, #228):
-  // a timeout reply like "TIMEOUT seg01 (not READY)" contains the literal
-  // substring "READY" and would falsely pass a `.indexOf("READY") === -1`
-  // check -- reviewWaitPrompt instructs the agent to return exactly "READY
-  // <seg>"/"TIMEOUT <seg>".
-  if (String(ready).trim() !== "READY " + seg) {
+  // Line-oriented match via sentinelVerdict (#308), never a whole-string
+  // exact compare: the reply's LAST trimmed non-empty line must equal
+  // "READY <seg>" exactly, and no line anywhere may equal "TIMEOUT <seg>".
+  // This keeps BOTH directions closed. #228's direction: a timeout reply
+  // like "TIMEOUT seg01 (not READY)" contains the literal substring "READY"
+  // but its one line matches neither sentinel exactly, so it still blocks
+  // (never a `.indexOf("READY") === -1` substring check). #308's direction:
+  // a benign prose-decorated success ("The poll confirmed the review
+  // artifact is ready (exit 0).\n\nREADY seg03") no longer misses the OLD
+  // whole-string `String(x).trim() !== "READY " + seg` check just because
+  // of the preamble -- reviewWaitPrompt still instructs the agent to return
+  // exactly "READY <seg>"/"TIMEOUT <seg>", this only tolerates decoration
+  // around it.
+  if (!sentinelVerdict(ready, "READY " + seg, "TIMEOUT " + seg)) {
     return { status: "blocked", reason: "review-timeout" };
   }
 
@@ -1144,19 +1185,24 @@ async function runRound(seg, round, isFinal) {
   }
 
   const fx = await callFix(seg, round, rev);
-  // EXACT match against the failure sentinel, never substring
+  // Line-oriented match via sentinelVerdict (#308) against the lone failure
+  // sentinel (okSentinel is null -- there is no success sentinel to require
+  // as the final line here, only a failure sentinel to scan for on any
+  // line), never a whole-string exact compare or a substring check
   // (content-matching-sentinel-fragility, #228) -- fixPrompt instructs the
   // agent to return exactly "DRAFT_MISSING <seg>", and a genuine fix reply
   // that merely mentions that literal substring in its own prose must not
-  // collide with it. The `!fx ||` falsy branch is KEPT deliberately and is
-  // NOT redundant with the exact-match check: the runtime treats a falsy fx
+  // collide with it, while a benign prose-decorated DRAFT_MISSING must still
+  // be recognized (#308's direction) instead of silently read as an ordinary
+  // review round. The `!fx ||` falsy branch is KEPT deliberately and is NOT
+  // redundant with the sentinelVerdict check: the runtime treats a falsy fx
   // (agent death / output-token ceiling / classifier block -- #131 facet A)
   // and a genuine DRAFT_MISSING alike as inconclusive, both routed through
   // the draftPresentAndValid probe below, whose own contract says null means
   // inconclusive, never absent (see its comment above). Dropping `!fx` would
   // let a dead fix call silently read as an ordinary review round instead of
   // probing for what actually happened.
-  if (!fx || String(fx).trim() === "DRAFT_MISSING " + seg) {
+  if (!fx || sentinelVerdict(fx, "DRAFT_MISSING " + seg, null)) {
     // #131 facet A: a falsy/DRAFT_MISSING return conflates (a) a genuine
     // missing draft with (b) a hard API/output-token-ceiling error and (c) a
     // classifier block -- both (b) and (c) also yield a falsy fx even though
@@ -1199,16 +1245,22 @@ async function reviewFixLoop(stage1Result, seg) {
   // return was unparseable -- safe degradation, fail-fast simply disabled).
   const disp = stage1Result && typeof stage1Result.disp === "string" ? stage1Result.disp : "";
   const ready = await agent(waitPrompt(seg, disp), { effort: "low", phase: "ReviewFix", label: "wait:" + seg });
-  // EXACT match, never substring (content-matching-sentinel-fragility, #228):
-  // a timeout reply like "TIMEOUT seg01 (not READY)" contains the literal
-  // substring "READY" and would falsely pass a `.indexOf("READY") === -1`
-  // check -- waitPrompt instructs the agent to return exactly "READY
-  // <seg>"/"TIMEOUT <seg>". This is the worst of the five sites (#228): a
-  // false pass here sends the ENTIRE review/fix cycle over a draft that
-  // never actually finished translating, and the "we'll pick it back up
-  // next run" safety net never fires because nothing here is recorded as
-  // recoverable.
-  if (String(ready).trim() !== "READY " + seg) {
+  // Line-oriented match via sentinelVerdict (#308), never a whole-string
+  // exact compare: the reply's LAST trimmed non-empty line must equal
+  // "READY <seg>" exactly, and no line anywhere may equal "TIMEOUT <seg>".
+  // This keeps BOTH directions closed. #228's direction: a timeout reply
+  // like "TIMEOUT seg01 (not READY)" contains the literal substring "READY"
+  // but its one line matches neither sentinel exactly, so it still blocks
+  // (never a `.indexOf("READY") === -1` substring check) -- this is the
+  // worst of the five sites (#228): a false pass here sends the ENTIRE
+  // review/fix cycle over a draft that never actually finished translating,
+  // and the "we'll pick it back up next run" safety net never fires because
+  // nothing here is recorded as recoverable. #308's direction: a benign
+  // prose-decorated success no longer misses the OLD whole-string check
+  // just because of a preamble -- waitPrompt still instructs the agent to
+  // return exactly "READY <seg>"/"TIMEOUT <seg>", this only tolerates
+  // decoration around it.
+  if (!sentinelVerdict(ready, "READY " + seg, "TIMEOUT " + seg)) {
     // #131 facet C: a translate-timeout is transient/mechanical (the codex
     // translator agent died, hit an infra hiccup, or is simply still
     // running past the bounded poll) -- not genuine content

@@ -352,6 +352,39 @@ function isVerifiedResult(v) {
   return true
 }
 
+// Line-oriented sentinel verdict (#308), mirrored byte-for-byte across the
+// three workflow templates (standalone files, no runtime imports; parity is
+// test-pinned). Replaces the #228 whole-string exact match: #228 killed the
+// substring false-POSITIVE ("TIMEOUT seg01 (not READY)" passing an indexOf
+// check); its whole-string cure then rejected a benign prose-decorated
+// success ("...exit 0.\n\nREADY seg03"), mislabeling completed work as a
+// timeout (#308). True iff (a) no trimmed non-empty line equals
+// failSentinel, AND (b) the LAST trimmed non-empty line equals okSentinel
+// exactly. Requiring okSentinel to be the FINAL line (round-2 fix -- an
+// earlier "any line" draft accepted a reply that quotes the success form
+// while explicitly disavowing it, e.g. "The command failed; quoting the
+// requested success form:\nREADY seg01\nThat is not my verdict." -- the
+// shipped whole-string check rejects that reply, so "any line" would have
+// been a genuine widening of what gets accepted, not just a decoration
+// tolerance) tolerates a prose PREAMBLE (the observed real shape) while
+// rejecting a sentinel-shaped line the agent's own later prose overrides.
+// The failure-sentinel check still scans every line, not just the last, so
+// fail-priority on a contradictory reply is unchanged. A reply with no
+// non-empty lines is false. This parses only the agent's transport reply;
+// nothing else about any call site changes.
+function sentinelVerdict(reply, okSentinel, failSentinel) {
+  const rawLines = String(reply == null ? "" : reply).split("\n");
+  const lines = [];
+  for (let i = 0; i < rawLines.length; i++) {
+    const line = rawLines[i].trim();
+    if (line.length === 0) continue;
+    if (failSentinel !== null && line === failSentinel) return false;
+    lines.push(line);
+  }
+  if (lines.length === 0) return false;
+  return lines[lines.length - 1] === okSentinel;
+}
+
 // ---------------------------------------------------------------------------
 // Per-batch dispatch -> wait sequence. pipeline() runs these concurrently;
 // each batch writes only its own fragment file, so concurrent batches never
@@ -368,14 +401,19 @@ async function batchStep(batch) {
   const precheck = await agent(batchPrecheckPrompt(batch), {
     effort: "low", phase: "GlossaryPass", label: "glossary:precheck:" + batch.index,
   })
-  // EXACT match, never substring (content-matching-sentinel-fragility, #228):
-  // a failure reply like "ABSENT 0 (fragment missing; not PRESENT)" contains
-  // the literal substring "PRESENT" and would falsely resume-skip under a
-  // `.indexOf(...) !== -1` check -- the sentinel and this check must agree
-  // on the WHOLE trimmed line, batch index included (batchPrecheckPrompt
-  // instructs the agent to return exactly "PRESENT <index>"/"ABSENT
-  // <index>"). Mirrors skeptic-pass-wf.template.js's own batchStep precheck.
-  if (String(precheck).trim() === "PRESENT " + batch.index) {
+  // Line-oriented sentinel verdict (#308), replacing the whole-string EXACT
+  // match this site used before (content-matching-sentinel-fragility,
+  // #228): a failure reply like "ABSENT 0 (fragment missing; not PRESENT)"
+  // contains the literal substring "PRESENT" and would falsely resume-skip
+  // under a naive `.indexOf(...) !== -1` check -- #228's whole-string exact
+  // match closed that direction, but then rejected a benign prose-decorated
+  // PRESENT reply as ABSENT (#308). sentinelVerdict() keeps BOTH directions
+  // closed at once: a decorated PRESENT (prose preamble, the sentinel as
+  // the reply's own final line) now resume-skips, while a plain ABSENT or a
+  // contradictory reply still regenerates (see sentinelVerdict()'s own
+  // comment for the exact rule). Mirrors skeptic-pass-wf.template.js's own
+  // batchStep precheck.
+  if (sentinelVerdict(precheck, "PRESENT " + batch.index, "ABSENT " + batch.index)) {
     log("batch " + batch.index + ": resume-skip -- existing fragment already passed --check-batch, not re-dispatching")
     return { batchIndex: batch.index, fragmentPath: fragmentPath(batch.index), ready: true }
   }
@@ -390,12 +428,17 @@ async function batchStep(batch) {
   const ready = await agent(batchWaitPrompt(batch), {
     effort: "low", phase: "GlossaryPass", label: "glossary:wait:" + batch.index,
   })
-  // Same EXACT-match discipline as the precheck above (#228): a timeout
-  // reply like "TIMEOUT 0 (not READY)" contains the literal substring
-  // "READY" and would falsely pass a `.indexOf("READY") === -1` check
-  // (batchWaitPrompt instructs the agent to return exactly "READY
-  // <index>"/"TIMEOUT <index>").
-  if (String(ready).trim() !== "READY " + batch.index) {
+  // Same line-oriented sentinel-verdict discipline as the precheck above
+  // (#308, replacing #228's whole-string EXACT match): a timeout reply like
+  // "TIMEOUT 0 (not READY)" contains the literal substring "READY" and
+  // would falsely pass a naive `.indexOf("READY") === -1` check (#228's
+  // fix); #228's whole-string cure then rejected a benign prose-decorated
+  // READY reply as a timeout (#308). sentinelVerdict() keeps both
+  // directions closed -- a decorated READY (prose preamble, sentinel as
+  // the final line) is now accepted, while a plain TIMEOUT or a
+  // contradictory reply still times out (see sentinelVerdict()'s own
+  // comment for the exact rule).
+  if (!sentinelVerdict(ready, "READY " + batch.index, "TIMEOUT " + batch.index)) {
     log("batch " + batch.index + ": fragment never became ready")
     return { batchIndex: batch.index, fragmentPath: fragmentPath(batch.index), ready: false, reason: "glossary-pass-null" }
   }
