@@ -14,10 +14,13 @@
 //
 // A group-free manifest (no entry carries `group`) must behave byte-identically to the shipped
 // 1.4.1 flat layout in every function here — the activation rule (D1): every new gate/branch is
-// gated on `anyGroup` — WITH TWO 1.6.0 EXCEPTIONS that are group-free-aware by design and no
-// longer consult this gate: staticEmbedPath (#220 — always writes the full-target embed formula,
-// no mode branch) and validateGroups (#221 — a group-free manifest's duplicate flat slug now
-// halts unconditionally). Every other function here still follows the activation rule unmodified.
+// gated on `anyGroup` — WITH THREE EXCEPTIONS that are group-free-aware by design and no longer
+// consult this gate: staticEmbedPath ([1.6.0] #220 — always writes the full-target embed formula,
+// no mode branch), validateGroups ([1.6.0] #221 — a group-free manifest's duplicate flat slug now
+// halts unconditionally), and currentIndexExpectedTarget's wikilinks branch ([1.8.0] #294 — a
+// group-free wikilinks manifest now emits the vault-root-relative `vaultRelChaptersDir/slug`
+// target, not the bare slug). Every other function here still follows the activation rule
+// unmodified.
 
 // ---------------------------------------------------------------------------------------------
 // Path algebra — private. POSIX-only by construction: segments are split on '/' AND '\\' (so a
@@ -135,9 +138,11 @@ function normalizeLinkTarget(target) {
 
 /**
  * True iff at least one entry carries `group`. The activation gate every D1-D6 branch/behavior is
- * conditioned on — WITH TWO 1.6.0 EXCEPTIONS that no longer consult this gate: staticEmbedPath
- * (#220 — always the full-target embed formula) and validateGroups (#221 — a group-free
- * manifest's duplicate flat slug now halts unconditionally). Every other function here still
+ * conditioned on — WITH THREE EXCEPTIONS that no longer consult this gate: staticEmbedPath
+ * ([1.6.0] #220 — always the full-target embed formula), validateGroups ([1.6.0] #221 — a
+ * group-free manifest's duplicate flat slug now halts unconditionally), and
+ * currentIndexExpectedTarget's wikilinks branch ([1.8.0] #294 — a group-free wikilinks manifest
+ * now emits `vaultRelChaptersDir/slug`, not the bare slug). Every other function here still
  * behaves identically to 1.4.1 when anyGroup(entries) === false.
  *
  * @param {Array<{group?: string}>} entries
@@ -319,7 +324,7 @@ function duplicateSlugHalts(entries, { groupFree }) {
       halts.push(
         groupFree
           ? `Duplicate chapter slug '${slug}' — chapter slugs must be unique; a duplicate silently overwrites the chapter file and its asset dir.`
-          : `Duplicate chapter slug '${slug}' — chapter slugs must be globally unique across all groups (wikilinks and Quartz-shortest resolution key on the basename).`,
+          : `Duplicate chapter slug '${slug}' — chapter slugs must be globally unique across all groups (chapter basenames stay unambiguous across the handbook for the file tree, user-authored bare wikilinks, and Quartz-shortest bare-name resolution).`,
       );
     }
   }
@@ -826,28 +831,48 @@ function classifyIndexForm(sanitizedLines) {
   return collectContainerHeadings(sanitizedLines).length > 0 ? 'headings' : 'non-heading';
 }
 
+// D6 (opt-in, {wikilink:true} only): folds ONE terminal '.md' off a normalized target, ASCII
+// case-insensitively — the same Obsidian `[[note.md]] == [[note]]` equivalence
+// parseWikilinkTarget already applies for the removal-scan predicate. Default (`wikilink: false`)
+// leaves the normalized target untouched, so path-mode targets (which legitimately END in `.md`)
+// and every pre-1.8.0 caller stay byte-for-byte identical.
+function foldTargetForMatch(target, wikilink) {
+  const normalized = normalizeLinkTarget(target);
+  return wikilink ? normalized.replace(/\.md$/i, '') : normalized;
+}
+
 /**
  * Step-0 idempotency check (D6). Scans `indexLines` for any line whose extracted target
  * (markdown-link href, wikilink target, or bare path) normalize-equals `expectedTarget` — the
  * CALLER computes and resolves expectedTarget (relative(dirname(index_file), chapter_file) for
- * path links, or the chapter slug for wikilink lines; see manifest-discipline's coordinate
- * system). `containerTitle` is the nearest PRECEDING markdown heading (null outside any heading —
- * the non-heading-form case, OR — R5-F1 — an active line before any container / after a depth-1
- * heading RESET in a HEADINGS-form file: `containerTitle: null` is ambiguous between those two
- * shapes on its own, which is exactly what `indexForm` disambiguates. `indexForm: 'headings'` +
- * `containerTitle: null` means UNCONTAINED — a real line sitting outside any `##` section in a
- * genuine headings-form index (the caller halts wrong-placement via `containerTitleMatches`
- * returning false, same as any other container mismatch); `indexForm: 'non-heading'` +
- * `containerTitle: null` is the ordinary non-heading-form membership-only case. Every occurrence
- * is collected in `matches` so callers can run the old-container wikilink proof (D6) over every
- * hit, not just the first.
+ * path links, or the vault-root-relative chapter path — currentIndexExpectedTarget's wikilinks
+ * branch, §1a — for wikilink lines; see manifest-discipline's coordinate system). `containerTitle`
+ * is the nearest PRECEDING markdown heading (null outside any heading — the non-heading-form
+ * case, OR — R5-F1 — an active line before any container / after a depth-1 heading RESET in a
+ * HEADINGS-form file: `containerTitle: null` is ambiguous between those two shapes on its own,
+ * which is exactly what `indexForm` disambiguates. `indexForm: 'headings'` + `containerTitle:
+ * null` means UNCONTAINED — a real line sitting outside any `##` section in a genuine
+ * headings-form index (the caller halts wrong-placement via `containerTitleMatches` returning
+ * false, same as any other container mismatch); `indexForm: 'non-heading'` + `containerTitle:
+ * null` is the ordinary non-heading-form membership-only case. Every occurrence is collected in
+ * `matches` so callers can run the old-container wikilink proof (D6) over every hit, not just the
+ * first.
+ *
+ * `options.wikilink` (D6, default `false`): when `true`, folds ONE terminal `.md`
+ * (case-insensitive) off both `expectedTarget` and every extracted line target before comparison
+ * (`foldTargetForMatch`) — so a user-authored `[[handbook/orders.md]]` / `[[orders.md]]` row is
+ * recognised as the same target as `handbook/orders` / `orders`, never double-appended. Default
+ * `false` keeps path-mode and every existing caller byte-for-byte unchanged (a path-link target
+ * legitimately ends in `.md` and must never be folded).
  *
  * @param {string[]} indexLines
  * @param {string} expectedTarget
+ * @param {{wikilink?: boolean}} [options]
  * @returns {{present: boolean, containerTitle: string|null, multiple: boolean, indexForm: 'headings'|'non-heading', matches: Array<{line: string, containerTitle: string|null}>}}
  */
-export function locateChapterLine(indexLines, expectedTarget) {
-  const wanted = normalizeLinkTarget(expectedTarget);
+export function locateChapterLine(indexLines, expectedTarget, options = {}) {
+  const { wikilink = false } = options;
+  const wanted = foldTargetForMatch(expectedTarget, wikilink);
   // R4-F2: sanitize the WHOLE index text (not line-by-line — an inert region can itself span
   // multiple lines) through the shared stripper BEFORE any per-line processing, so a row sitting
   // inside an HTML comment or a fenced code block can never report present:true (a false
@@ -875,7 +900,7 @@ export function locateChapterLine(indexLines, expectedTarget) {
       continue;
     }
     const targets = extractLineTargets(line);
-    if (targets.some((t) => normalizeLinkTarget(t) === wanted)) {
+    if (targets.some((t) => foldTargetForMatch(t, wikilink) === wanted)) {
       // Report the ORIGINAL (unsanitized) line text — `matches[].line` is diagnostic/halt
       // output, and a reader must see the real file content, never a blanked stand-in.
       matches.push({ line: indexLines[index], containerTitle });
@@ -889,6 +914,49 @@ export function locateChapterLine(indexLines, expectedTarget) {
     indexForm,
     matches,
   };
+}
+
+/**
+ * classifyChapterWiring(qualifiedTarget, legacyBareTarget, qScan, lScan) — D7: the single
+ * union-count algorithm the vault-rel legacy-transition Step-0 idempotency check (§1b) drives at
+ * W5. Pure over the two target STRINGS plus the two `locateChapterLine` results the caller already
+ * computed (`qScan = locateChapterLine(lines, qualifiedTarget, {wikilink:true})`, `lScan =
+ * locateChapterLine(lines, legacyBareTarget, {wikilink:true})`) — it never re-scans the index
+ * itself, so it is directly unit-testable in isolation.
+ *
+ * Dedup guard (root-topology flat case, codex R3 BLOCKER): when
+ * `normalizeLinkTarget(qualifiedTarget) === normalizeLinkTarget(legacyBareTarget)` the two scans
+ * searched the IDENTICAL string (`vaultRelChaptersDir === ''`, no group ⇒ qualified === legacyBare
+ * === slug — §0a's "SAFE, no halt" root topology) — counting both would double-count every
+ * correctly-wired line into a false `'duplicate'`. So `count = qScan.matches.length + (same ? 0 :
+ * lScan.matches.length)`.
+ *
+ * Returns one of:
+ * - `'absent'`    — `count === 0`: no line wires this chapter yet (caller appends).
+ * - `'duplicate'` — `count > 1`: ambiguous (manual halt). A single row that carries BOTH a
+ *   qualified and a distinct legacy link (`!same`) is deliberately classified here too — a
+ *   malformed double-reference row is a safe halt, not silent wiring.
+ * - `'canonical'` — otherwise, when `qScan.matches.length === 1` (the qualified form is present).
+ * - `'legacy'`    — otherwise (the single match is the legacy bare form only).
+ *
+ * D8: this function answers target-string PRESENCE + FORM ONLY — it says nothing about
+ * PLACEMENT. The existing container-placement halts (a correctly-spelled line under the wrong
+ * `##` heading, or an uncontained match in a headings-form index) are a SEPARATE gate the caller
+ * still runs over `qScan.matches[].containerTitle` (`containerTitleMatches`) — layered on top of,
+ * never replaced by, a `'canonical'`/`'legacy'` outcome.
+ *
+ * @param {string} qualifiedTarget
+ * @param {string} legacyBareTarget
+ * @param {{matches: Array<{line: string, containerTitle: string|null}>}} qScan
+ * @param {{matches: Array<{line: string, containerTitle: string|null}>}} lScan
+ * @returns {'absent'|'canonical'|'legacy'|'duplicate'}
+ */
+export function classifyChapterWiring(qualifiedTarget, legacyBareTarget, qScan, lScan) {
+  const same = normalizeLinkTarget(qualifiedTarget) === normalizeLinkTarget(legacyBareTarget);
+  const count = qScan.matches.length + (same ? 0 : lScan.matches.length);
+  if (count === 0) return 'absent';
+  if (count > 1) return 'duplicate';
+  return qScan.matches.length === 1 ? 'canonical' : 'legacy';
 }
 
 /**
@@ -995,25 +1063,78 @@ export function groupChanges(oldEntries, newEntries) {
   return { changes, anyGroupFlip: anyGroup(oldEntries) !== anyGroup(newEntries) };
 }
 
-function currentIndexExpectedTarget(profileLike, entry) {
-  if (profileLike.publish.wikilinks) return entry.slug;
+/**
+ * currentIndexExpectedTarget(profileLike, entry, vaultRelChaptersDir) — #295's export target: the
+ * D6 index-target formula, direct-unit-testable in isolation (previously private, reached only
+ * via manualMigrationChecklist). PURE helper — no fs, no realpath (that is #295's whole point) —
+ * so it cannot itself discover or canonicalize the vault root. In wikilinks mode the fs-aware
+ * CALLER (the obsidian-vault adapter) precomputes the canonical, vault-root-relative
+ * `vaultRelChaptersDir` prefix — `relative(realpath(<vault root>), realpath(publish.chapters_dir))`
+ * — and passes it in; this function only joins it onto the chapter's relative path (§1a). A raw,
+ * uncanonicalized lexical ancestor of `publish.chapters_dir` is NOT equivalent under a
+ * symlink-to-vault-subdirectory topology — canonicalizing both operands is the adapter's job,
+ * never this pure module's (see obsidian-vault.md's worked symlink example).
+ *
+ * - wikilinks mode (Option A, #294): `posixJoin(vaultRelChaptersDir, chapterRelPath(entry))` with
+ *   ONE terminal `.md` dropped — e.g. `vaultRelChaptersDir` `'handbook'`, entry `{slug:'orders'}`
+ *   -> `'handbook/orders'`; grouped entry `{group:'admin', slug:'orders'}` -> `'handbook/admin/orders'`.
+ *   The group axis rides on the prefix, so grouping DOES change the target (unlike the pre-1.8.0
+ *   bare slug). The empty string `''` is a VALID prefix — the root topology (`chapters_dir` IS the
+ *   vault root): `posixJoin('', 'items.md')` -> `'items.md'` -> `'items'`, the true single-segment
+ *   vault-root path (§0a: resolves via Obsidian's robust tier-3 exact match, not the fragile tier).
+ * - Fail loud (a caller bug, never a silent bare-slug fallback — that silent fallback was the
+ *   #294 defect): throws when `vaultRelChaptersDir` is `null`/`undefined`, when it is absolute
+ *   (`isAbsolute`), or when its first segment is `'..'` (escapes the vault root).
+ * - path-link mode (`wikilinks: false`) is UNCHANGED: `relative(dirname(index_file),
+ *   chapterFullPath)`, `.md` kept. `vaultRelChaptersDir` is ignored in path mode — engine-neutral
+ *   (static-md hard-requires `wikilinks: false` and never has a vault root to compute).
+ *
+ * @param {{publish: {wikilinks: boolean, index_file: string, chapters_dir: string}}} profileLike
+ * @param {{slug: string, group?: string}} entry
+ * @param {string} [vaultRelChaptersDir]  wikilinks mode only — the precomputed, realpath'd,
+ *   vault-root-relative delta to publish.chapters_dir (adapter-canonicalized; `''` means
+ *   chapters_dir IS the vault root)
+ * @returns {string}
+ */
+export function currentIndexExpectedTarget(profileLike, entry, vaultRelChaptersDir) {
+  if (profileLike.publish.wikilinks) {
+    if (vaultRelChaptersDir == null) {
+      throw new Error(
+        'currentIndexExpectedTarget: vaultRelChaptersDir is required in wikilinks mode — a ' +
+          'silent bare-slug fallback resolves ambiguously across the whole vault (#294).',
+      );
+    }
+    if (isAbsolute(vaultRelChaptersDir)) {
+      throw new Error(
+        `currentIndexExpectedTarget: vaultRelChaptersDir must be vault-root-relative, got absolute '${vaultRelChaptersDir}'.`,
+      );
+    }
+    if (pathSegments(vaultRelChaptersDir)[0] === '..') {
+      throw new Error(
+        `currentIndexExpectedTarget: vaultRelChaptersDir '${vaultRelChaptersDir}' escapes the vault root ('..').`,
+      );
+    }
+    return posixJoin(vaultRelChaptersDir, chapterRelPath(entry)).replace(/\.md$/, '');
+  }
   return posixRelative(posixDirname(profileLike.publish.index_file), chapterFullPath(profileLike, entry));
 }
 
 /**
- * manualMigrationChecklist(profileLike, oldEntry|null, newEntry|null) — the per-delta-kind
- * terminal-state FACT DESCRIPTORS the D6 convergence check verifies. This function is pure and
- * has no filesystem/index access, so it does not itself evaluate met/unmet — it derives the
- * EXPECTED VALUES (current derived paths, old derived paths, index targets, capture-spec dir
- * spellings) a caller checks the real world against. An entry untouched by the delta (no kind
- * under classifyEntryDelta) returns [].
+ * manualMigrationChecklist(profileLike, oldEntry|null, newEntry|null, vaultRelChaptersDir) — the
+ * per-delta-kind terminal-state FACT DESCRIPTORS the D6 convergence check verifies. This function
+ * is pure and has no filesystem/index access, so it does not itself evaluate met/unmet — it
+ * derives the EXPECTED VALUES (current derived paths, old derived paths, index targets,
+ * capture-spec dir spellings) a caller checks the real world against. An entry untouched by the
+ * delta (no kind under classifyEntryDelta) returns [].
  *
  * @param {{capture: {output_dir: string}, publish: {chapters_dir: string, index_file: string, wikilinks: boolean}}} profileLike
  * @param {object|null} oldEntry
  * @param {object|null} newEntry
+ * @param {string} [vaultRelChaptersDir]  wikilinks mode only — threaded into every
+ *   currentIndexExpectedTarget call this function makes (see its own JSDoc, §1a)
  * @returns {Array<object>} fact descriptors, each carrying a `kind` tag
  */
-export function manualMigrationChecklist(profileLike, oldEntry, newEntry) {
+export function manualMigrationChecklist(profileLike, oldEntry, newEntry, vaultRelChaptersDir) {
   const kind = classifyEntryDelta(oldEntry, newEntry);
   if (kind === null) return [];
 
@@ -1027,9 +1148,12 @@ export function manualMigrationChecklist(profileLike, oldEntry, newEntry) {
         kind: 'old-index-target-gone',
         form: profileLike.publish.wikilinks ? 'wikilink' : 'path',
         slug: oldEntry.slug,
-        expectedTarget: currentIndexExpectedTarget(profileLike, oldEntry),
+        expectedTarget: currentIndexExpectedTarget(profileLike, oldEntry, vaultRelChaptersDir),
         oldContainerTitle: trimmedTitle(oldEntry) ?? null,
-        expectedMatchCount: 0,
+        // §1b: a pre-1.8.0 handbook may still carry the legacy BARE `[[slug]]` row for this
+        // chapter (wikilinks mode only) — the caller's container-scoped legacy-bare-gone check
+        // (§1b BLOCKER-2a) reads this alongside expectedTarget.
+        legacyBareTarget: profileLike.publish.wikilinks ? oldEntry.slug : undefined,
       },
       {
         kind: 'no-live-capture-sink',
@@ -1068,11 +1192,14 @@ export function manualMigrationChecklist(profileLike, oldEntry, newEntry) {
     destinationGrouped
       ? {
           kind: 'current-index-membership',
-          expectedTarget: currentIndexExpectedTarget(profileLike, newEntry),
+          expectedTarget: currentIndexExpectedTarget(profileLike, newEntry, vaultRelChaptersDir),
           grouped: true,
           containerTitle: trimmedTitle(newEntry),
         }
-      : { kind: 'flat-membership', expectedTarget: currentIndexExpectedTarget(profileLike, newEntry) },
+      : {
+          kind: 'flat-membership',
+          expectedTarget: currentIndexExpectedTarget(profileLike, newEntry, vaultRelChaptersDir),
+        },
   );
   facts.push({
     kind: 'capture-spec-check',
@@ -1083,30 +1210,22 @@ export function manualMigrationChecklist(profileLike, oldEntry, newEntry) {
   facts.push({ kind: 'old-asset-dir-gone', path: oldAssetDir });
 
   const sourceWasGrouped = oldEntry.group !== undefined;
-  // The R14-F3 exactly-one exception is BARE-WIKILINK-ONLY (F2): it exists because a group-slug
-  // rename that preserves group_title leaves the old and new index lines as the textually
-  // IDENTICAL `[[slug]]` string — there is no separate "old target" spelling to look for. In
-  // path-link mode (wikilinks: false) old and new targets are always different strings (the
-  // relative path changed), so the old target is always expected GONE (zero matches) regardless
-  // of whether the title was preserved — gating on wikilinks === true keeps path-mode sound.
-  const sameContainerAsNew =
-    profileLike.publish.wikilinks === true &&
-    sourceWasGrouped &&
-    destinationGrouped &&
-    trimmedTitle(oldEntry) === trimmedTitle(newEntry);
+  // Under Option A (#294, vault-root-relative wikilinks) a group-slug rename ALWAYS changes the
+  // vault-rel target string (`handbook/admin/items` -> `handbook/management/items`), so old and
+  // new lines are never textually identical — the pre-1.8.0 "exactly one match under the shared
+  // container" exception (R14-F3, which existed only because a title-preserving bare-`[[slug]]`
+  // rename left old and new as the SAME string) has no live case under this formula and is
+  // removed. The old target is now always expected GONE, in both modes. A pre-1.8.0 handbook may
+  // still carry the legacy BARE `[[oldslug]]` row (wikilinks mode only) — that is a separate,
+  // container-scoped concern the caller checks via `legacyBareTarget` (§1b BLOCKER-2a), not this
+  // fact's `expectedTarget`.
   facts.push({
     kind: 'old-index-target-gone',
     form: profileLike.publish.wikilinks ? 'wikilink' : 'path',
     slug: oldEntry.slug,
-    expectedTarget: currentIndexExpectedTarget(profileLike, oldEntry),
+    expectedTarget: currentIndexExpectedTarget(profileLike, oldEntry, vaultRelChaptersDir),
     oldContainerTitle: sourceWasGrouped ? trimmedTitle(oldEntry) : null,
-    // Bare-wikilink form only: when the old and new containers share a title (a group-SLUG
-    // change that preserves group_title), old and new lines are the identical `[[slug]]` string
-    // — the sound fact becomes "exactly one match under the shared container" (the required
-    // current line satisfies it; a second is already caught by locateChapterLine's `multiple`),
-    // never "zero matches" (R14-F3).
-    sameContainerAsNew,
-    expectedMatchCount: sameContainerAsNew ? 1 : 0,
+    legacyBareTarget: profileLike.publish.wikilinks ? oldEntry.slug : undefined,
   });
 
   if (kind === 'group-and-title-change') {

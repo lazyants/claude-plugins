@@ -23,6 +23,8 @@ import {
   staticEmbedPath,
   validateGroups,
   locateChapterLine,
+  currentIndexExpectedTarget,
+  classifyChapterWiring,
   findContainer,
   groupChanges,
   manualMigrationChecklist,
@@ -684,6 +686,73 @@ test('normalized comparisons: ./ prefix and backslash separators are insensitive
 });
 
 // =================================================================================================
+// D6 — locateChapterLine {wikilink} .md-fold (D-6, opt-in)
+// =================================================================================================
+
+test('D-6: {wikilink:true} folds a terminal .md off a line target so it matches the extensionless wanted target', () => {
+  const indexLines = ['- [[handbook/items.md]]'];
+  assert.equal(
+    locateChapterLine(indexLines, 'handbook/items', { wikilink: true }).present,
+    true,
+    'opt-in fold recognises the .md-suffixed row as the same target',
+  );
+});
+
+test('D-6: the .md-fold is OPT-IN — default (no options) leaves a .md-suffixed line target unmatched', () => {
+  const indexLines = ['- [[handbook/items.md]]'];
+  assert.equal(
+    locateChapterLine(indexLines, 'handbook/items').present,
+    false,
+    'path-mode/pre-1.8.0 callers must stay byte-identical: no fold unless explicitly requested',
+  );
+});
+
+// =================================================================================================
+// D7 — classifyChapterWiring
+// =================================================================================================
+
+function scan(...matches) {
+  return { matches };
+}
+
+test('classifyChapterWiring: no hits at all => absent', () => {
+  assert.equal(classifyChapterWiring('handbook/items', 'items', scan(), scan()), 'absent');
+});
+
+test('classifyChapterWiring: exactly one qualified hit, no legacy hit => canonical', () => {
+  const qScan = scan({ line: '- [[handbook/items]]', containerTitle: null });
+  assert.equal(classifyChapterWiring('handbook/items', 'items', qScan, scan()), 'canonical');
+});
+
+test('classifyChapterWiring: exactly one legacy (bare) hit, no qualified hit => legacy', () => {
+  const lScan = scan({ line: '- [[items]]', containerTitle: null });
+  assert.equal(classifyChapterWiring('handbook/items', 'items', scan(), lScan), 'legacy');
+});
+
+test('classifyChapterWiring: one qualified + one DISTINCT legacy hit => duplicate (malformed double-reference row)', () => {
+  const qScan = scan({ line: '- [[handbook/items]]', containerTitle: null });
+  const lScan = scan({ line: '- [[items]]', containerTitle: null });
+  assert.equal(classifyChapterWiring('handbook/items', 'items', qScan, lScan), 'duplicate');
+});
+
+test('classifyChapterWiring: two qualified hits (no legacy) => duplicate', () => {
+  const qScan = scan(
+    { line: '- [[handbook/items]]', containerTitle: null },
+    { line: '- [[handbook/items]]', containerTitle: 'Admin' },
+  );
+  assert.equal(classifyChapterWiring('handbook/items', 'items', qScan, scan()), 'duplicate');
+});
+
+test('D-7 root-topology dedup (codex R3 BLOCKER regression pin): qualified === legacyBare must NOT double-count into duplicate', () => {
+  // vaultRelChaptersDir === '' with a flat entry makes qualified === legacyBare === slug (§0a
+  // "SAFE, no halt" root topology) — qScan and lScan searched the IDENTICAL string, so they found
+  // the SAME single index line twice, not two independent hits.
+  const qScan = scan({ line: '- [[items]]', containerTitle: null });
+  const lScan = scan({ line: '- [[items]]', containerTitle: null });
+  assert.equal(classifyChapterWiring('items', 'items', qScan, lScan), 'canonical', 'must dedup, not duplicate');
+});
+
+// =================================================================================================
 // findContainer
 // =================================================================================================
 
@@ -797,7 +866,7 @@ test('validateGroups: duplicate slug across groups (global uniqueness)', () => {
     entry({ slug: 'x', group: 'b', group_title: 'B' }),
   ]);
   assert.deepEqual(halts, [
-    `Duplicate chapter slug 'x' — chapter slugs must be globally unique across all groups (wikilinks and Quartz-shortest resolution key on the basename).`,
+    `Duplicate chapter slug 'x' — chapter slugs must be globally unique across all groups (chapter basenames stay unambiguous across the handbook for the file tree, user-authored bare wikilinks, and Quartz-shortest bare-name resolution).`,
   ]);
 });
 
@@ -813,7 +882,7 @@ test('validateGroups: THREE-occurrence duplicate slug still halts exactly ONCE [
     entry({ slug: 'x', group: 'c', group_title: 'C' }),
   ]);
   assert.deepEqual(halts, [
-    `Duplicate chapter slug 'x' — chapter slugs must be globally unique across all groups (wikilinks and Quartz-shortest resolution key on the basename).`,
+    `Duplicate chapter slug 'x' — chapter slugs must be globally unique across all groups (chapter basenames stay unambiguous across the handbook for the file tree, user-authored bare wikilinks, and Quartz-shortest bare-name resolution).`,
   ]);
 });
 
@@ -836,8 +905,8 @@ test('validateGroups: duplicate-slug gate sees the FULL entry list in an anyGrou
     entry({ slug: 'r' }), // flat — grouped-vs-flat pair (same slug 'r')
   ]);
   assert.deepEqual(halts, [
-    `Duplicate chapter slug 'p' — chapter slugs must be globally unique across all groups (wikilinks and Quartz-shortest resolution key on the basename).`,
-    `Duplicate chapter slug 'r' — chapter slugs must be globally unique across all groups (wikilinks and Quartz-shortest resolution key on the basename).`,
+    `Duplicate chapter slug 'p' — chapter slugs must be globally unique across all groups (chapter basenames stay unambiguous across the handbook for the file tree, user-authored bare wikilinks, and Quartz-shortest bare-name resolution).`,
+    `Duplicate chapter slug 'r' — chapter slugs must be globally unique across all groups (chapter basenames stay unambiguous across the handbook for the file tree, user-authored bare wikilinks, and Quartz-shortest bare-name resolution).`,
   ]);
 });
 
@@ -1021,7 +1090,7 @@ test('#221: grouped halt set AND emission order stay byte-unchanged from 1.5.0 (
   assert.deepEqual(halts, [
     `Invalid group 'Bad Group' — group must be English kebab-case, one level (no '/').`,
     `slug 'assets' is reserved in a grouped manifest (co-location follow-up; keeps the tree unambiguous).`,
-    `Duplicate chapter slug 'dup-slug' — chapter slugs must be globally unique across all groups (wikilinks and Quartz-shortest resolution key on the basename).`,
+    `Duplicate chapter slug 'dup-slug' — chapter slugs must be globally unique across all groups (chapter basenames stay unambiguous across the handbook for the file tree, user-authored bare wikilinks, and Quartz-shortest bare-name resolution).`,
     `group 'flatclash' collides with flat chapter slug 'flatclash' — a directory and a chapter file cannot share the same path under publish.chapters_dir.`,
     `Entry 'e5' in group 'g-missing-title' lacks group_title — every grouped entry carries the localized group title (never derived from the English group slug).`,
     `Groups 'g-shared-1' and 'g-shared-2' share group_title 'SharedTitle' — nav containers are located by title; give each group a distinct localized title.`,
@@ -1169,6 +1238,66 @@ test('activation pin: group-free -> group-free edits => empty + no flip', () => 
 });
 
 // =================================================================================================
+// #295 — currentIndexExpectedTarget (direct, exported)
+// =================================================================================================
+
+test('#295 currentIndexExpectedTarget: PATH mode, flat entry — 3rd arg omitted, path mode ignores it', () => {
+  const p = profile();
+  assert.equal(currentIndexExpectedTarget(p, entry()), 'handbook/items.md');
+});
+
+test('#295 currentIndexExpectedTarget: PATH mode, grouped entry', () => {
+  const p = profile();
+  assert.equal(
+    currentIndexExpectedTarget(p, entry({ group: 'admin' })),
+    'handbook/admin/items.md',
+  );
+});
+
+test('#294/§1a currentIndexExpectedTarget: WIKILINKS mode, flat entry — vault-root-relative, .md dropped', () => {
+  const p = profile({ publish: { wikilinks: true } });
+  assert.equal(currentIndexExpectedTarget(p, entry(), 'handbook'), 'handbook/items');
+});
+
+test('#294/§1a currentIndexExpectedTarget: WIKILINKS mode, grouped entry — group rides on the target (unlike the pre-1.8.0 bare slug)', () => {
+  const p = profile({ publish: { wikilinks: true } });
+  assert.equal(
+    currentIndexExpectedTarget(p, entry({ group: 'admin' }), 'handbook'),
+    'handbook/admin/items',
+  );
+});
+
+test('§0a root topology: WIKILINKS mode, vaultRelChaptersDir \'\' (chapters_dir IS the vault root) — flat entry', () => {
+  const p = profile({ publish: { wikilinks: true } });
+  assert.equal(currentIndexExpectedTarget(p, entry(), ''), 'items', 'single-segment true vault-root path');
+});
+
+test('§1a codex R2 BLOCKER-1 symlink-subdir topology: a multi-segment precomputed prefix joins correctly', () => {
+  const p = profile({ publish: { wikilinks: true } });
+  assert.equal(
+    currentIndexExpectedTarget(p, entry(), 'subdir/handbook'),
+    'subdir/handbook/items',
+    'the precomputed-prefix contract: the adapter, not this pure helper, resolves the symlink',
+  );
+});
+
+test('§1a fail-loud guard: WIKILINKS mode with vaultRelChaptersDir omitted/null throws (no silent bare-slug fallback)', () => {
+  const p = profile({ publish: { wikilinks: true } });
+  assert.throws(() => currentIndexExpectedTarget(p, entry()), /vaultRelChaptersDir is required/);
+  assert.throws(() => currentIndexExpectedTarget(p, entry(), null), /vaultRelChaptersDir is required/);
+});
+
+test('§1a fail-loud guard: WIKILINKS mode with an ABSOLUTE vaultRelChaptersDir throws', () => {
+  const p = profile({ publish: { wikilinks: true } });
+  assert.throws(() => currentIndexExpectedTarget(p, entry(), '/v'), /must be vault-root-relative/);
+});
+
+test('§1a fail-loud guard: WIKILINKS mode with a \'..\'-escaping vaultRelChaptersDir throws', () => {
+  const p = profile({ publish: { wikilinks: true } });
+  assert.throws(() => currentIndexExpectedTarget(p, entry(), '../x'), /escapes the vault root/);
+});
+
+// =================================================================================================
 // D6 — manualMigrationChecklist
 // =================================================================================================
 
@@ -1195,8 +1324,7 @@ test('manualMigrationChecklist: retained group-change facts (current path/dir/in
   const oldTarget = findFact(facts, 'old-index-target-gone');
   assert.equal(oldTarget.form, 'path');
   assert.equal(oldTarget.oldContainerTitle, 'Admin');
-  assert.equal(oldTarget.sameContainerAsNew, false, 'F2: the exactly-one exception is bare-wikilink-only');
-  assert.equal(oldTarget.expectedMatchCount, 0, 'F2: path-mode always expects the old target GONE');
+  assert.equal(oldTarget.legacyBareTarget, undefined, 'path mode never carries a legacy-bare fact');
   assert.equal(findFact(facts, 'title-container'), undefined, 'unchanged title carries no title fact');
 });
 
@@ -1218,20 +1346,24 @@ test('#253: manualMigrationChecklist derives each fact from its OWN root — dec
   assert.equal(findFact(facts, 'current-index-membership').expectedTarget, '../book/pages/management/items.md');
 });
 
-test('R14-F3 exactly-one exception: same title-preserving move in WIKILINK mode (F2 split fixture)', () => {
-  // Same title-preserving group-slug move as above, but wikilinks: true — here old and new lines
-  // ARE the textually identical `[[slug]]` string, so the exactly-one-match-under-shared-container
-  // exception is the sound fact (there is no separate "old spelling" to look for).
+test('#294 group-slug move, WIKILINK mode: old vault-rel target is expected GONE + carries legacyBareTarget (R14-F3 exception dropped)', () => {
+  // Same title-preserving group-slug move as the path-mode fixture above, but wikilinks: true.
+  // Under Option A the vault-rel target is `<vaultRelChaptersDir>/<group>/<slug>`, so old and new
+  // ARE different strings even though group_title is preserved (`handbook/admin/items` !=
+  // `handbook/management/items`) — the pre-1.8.0 "exactly one match under the shared container"
+  // exception (R14-F3) has no live case under this formula and is gone; the old QUALIFIED target
+  // is always expected GONE. A separate `legacyBareTarget` fact carries the bare pre-1.8.0 slug
+  // for the container-scoped legacy-bare-gone check (§1b BLOCKER-2a).
   const p = profile({ publish: { wikilinks: true } });
   const old = entry({ group: 'admin', group_title: 'Admin' });
   const next = entry({ group: 'management', group_title: 'Admin' });
-  const facts = manualMigrationChecklist(p, old, next);
+  const facts = manualMigrationChecklist(p, old, next, 'handbook');
 
   const oldTarget = findFact(facts, 'old-index-target-gone');
   assert.equal(oldTarget.form, 'wikilink');
   assert.equal(oldTarget.oldContainerTitle, 'Admin');
-  assert.equal(oldTarget.sameContainerAsNew, true);
-  assert.equal(oldTarget.expectedMatchCount, 1);
+  assert.equal(oldTarget.expectedTarget, 'handbook/admin/items', 'old qualified target, GONE');
+  assert.equal(oldTarget.legacyBareTarget, 'items');
 });
 
 test('R9-F5/R12-F2 grouped -> flat retained entry: flat-placement facts, NO title fact', () => {
@@ -1246,8 +1378,7 @@ test('R9-F5/R12-F2 grouped -> flat retained entry: flat-placement facts, NO titl
   assert.ok(flatMembership, 'flat destination gets membership-only facts, no container');
   assert.equal(findFact(facts, 'current-index-membership'), undefined);
   const oldTarget = findFact(facts, 'old-index-target-gone');
-  assert.equal(oldTarget.sameContainerAsNew, false);
-  assert.equal(oldTarget.expectedMatchCount, 0);
+  assert.equal(oldTarget.legacyBareTarget, undefined, 'path mode never carries a legacy-bare fact');
   assert.equal(findFact(facts, 'title-container'), undefined, 'R12-F2: grouped->flat never carries a title fact');
 });
 
@@ -1269,13 +1400,24 @@ test('manualMigrationChecklist: grouped removal emits old-gone + no-live-sink + 
 
   assert.equal(findFact(facts, 'old-chapter-path-gone').path, 'vault/handbook/admin/items.md');
   assert.equal(findFact(facts, 'old-asset-dir-gone').path, 'vault/handbook/assets/admin/items');
-  assert.equal(findFact(facts, 'old-index-target-gone').expectedMatchCount, 0);
+  assert.equal(findFact(facts, 'old-index-target-gone').legacyBareTarget, undefined, 'path mode never carries a legacy-bare fact');
   const noSink = findFact(facts, 'no-live-capture-sink');
   assert.equal(noSink.oldDirQualified, 'vault/handbook/assets/admin/items');
   assert.equal(noSink.oldDirTail, 'admin/items');
   const noWikilink = findFact(facts, 'no-forbidden-wikilink');
   assert.equal(noWikilink.slug, 'items');
   assert.equal(noWikilink.oldChapterRelPath, 'vault/handbook/admin/items.md');
+});
+
+test('#294 manualMigrationChecklist: grouped removal in WIKILINK mode carries the vault-rel qualified target + legacyBareTarget', () => {
+  const p = profile({ publish: { wikilinks: true } });
+  const old = entry({ group: 'admin', group_title: 'Admin' });
+  const facts = manualMigrationChecklist(p, old, null, 'handbook');
+
+  const oldTarget = findFact(facts, 'old-index-target-gone');
+  assert.equal(oldTarget.form, 'wikilink');
+  assert.equal(oldTarget.expectedTarget, 'handbook/admin/items');
+  assert.equal(oldTarget.legacyBareTarget, 'items');
 });
 
 test('manualMigrationChecklist: a flat removal (never a migration matter) => []', () => {
@@ -1305,7 +1447,10 @@ test('R11-F3 combined same-entry fixture: group AND title both change => facts U
   assert.equal(title.oldContainerTitle, 'Admin');
 });
 
-test('R14-F3 same-title group-move: exactly-one-match-under-shared-container rule via locateChapterLine', () => {
+test('§1b legacy-bare recognition: a bare [[users]] row is found via locateChapterLine, single vs duplicate', () => {
+  // Reframed from the pre-1.8.0 "R14-F3 exactly-one exception" (now removed — see #294's Option A
+  // formula, which makes old/new qualified targets always distinct). The underlying scan is still
+  // exactly what the §1b union-scan legacy-bare check runs: locateChapterLine over the bare slug.
   const single = ['## Admin', '- [[users]]'];
   const result = locateChapterLine(single, 'users');
   assert.equal(result.present, true);

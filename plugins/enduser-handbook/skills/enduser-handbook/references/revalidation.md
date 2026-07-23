@@ -71,13 +71,19 @@ manifest is grouped or group-free.
 
 The full-target **link** formula is not as uniform. `static-md.md` always
 uses it. `obsidian-vault.md` uses it only under `publish.wikilinks: false`
-— with wikilinks on, an Obsidian chapter links by bare
-`[[<chapter-slug>|Display title]]`, basename resolution with no
-relative-path math needed (`obsidian-vault.md`'s "Wikilinks vs Markdown
-links"). That is a different link syntax entirely, not an exception to
-this canon: a wikilinks-on chapter was never a candidate for the
-full-target link formula, so there is nothing here for the canon to
-override.
+— with wikilinks on, an Obsidian chapter links **vault-root-relative**
+instead: `[[<vault-rel>/<group>/<slug>|Display title]]` (`<group>` present
+only for a grouped entry), where `<vault-rel>` is computed against
+`<vault-root>`, never the linking chapter's own directory
+(`obsidian-vault.md`'s "Wikilinks vs Markdown links", §1a) — a *different*
+relative-path computation, not the full-target formula's chapter-relative
+one. That is a different link syntax entirely, not an exception to this
+canon: a wikilinks-on chapter was never a candidate for the full-target
+link formula, so there is nothing here for the canon to override. An
+installed handbook may still carry the pre-1.8.0 bare `[[<slug>]]`
+spelling for a chapter no run has yet touched; W6's union scan (below,
+"Terminal-state convergence checklist") recognizes it and retargets it in
+place — a recognized legacy spelling, not a second canon.
 
 The gates this canon feeds are **resolution** checks, not spelling checks:
 they verify that a link or embed target *resolves* on disk, not that it is
@@ -133,7 +139,7 @@ The halt is not delta-consuming on its own — the completion bar is terminal st
 - the index line targets the current path under the correct container — the same step-0 idempotency machinery the adapters already use to establish a new chapter; a flat destination is membership-only, no container;
 - the capture-spec fact: call `specReferencesDir(specText, dir)` once with the old asset dir's `capture.output_dir`-qualified form and once with its `output_dir`-relative tail (`<group>/<slug>` or `<slug>`) — either call reporting a hit is decisive negative evidence and the fact is UNMET, while neither hitting proves nothing on its own (a capture spec is arbitrary user TypeScript, so completion there is not mechanically provable) and the fact is met only by EXPLICIT USER CONFIRMATION that the spec now writes exclusively to the current derived dir(s);
 - when `oldEntry` is available: the old chapter path is gone and the old asset directory is gone;
-- no index line targets the OLD path, proved per the index form. Path-link indexes: no line matches the old relative expected target — the same `relative(dirname(index_file), chapter_file)` coordinate system the current-target check uses, computed against the old chapter file. The shipped bare-wikilink default (`wikilinks: true`, where the old and new lines are the identical `[[slug]]` string): inspect every `[[slug]]` line via `locateChapterLine`'s `matches` array and confirm none sits under the container titled the OLD `group_title` — the halt record below is where that title comes from on a context-free re-run, and if the old container is gone entirely the fact holds trivially. When the group's slug changed but its `group_title` did not (the old and current containers are the same container), the fact instead requires exactly ONE `[[slug]]` match under that shared container, so it never has to reject the one line you actually need — a second match is already caught by the ordinary step-0 duplicate-line halt. Non-heading index forms have no parser to check placement with, so the fact is explicit user confirmation, same pattern as the capture-spec fact above.
+- no index line targets the OLD path, proved per the index form. Path-link indexes: no line matches the old relative expected target — the same `relative(dirname(index_file), chapter_file)` coordinate system the current-target check uses, computed against the old chapter file. Wikilinks mode (`wikilinks: true`) now searches a concrete **qualified** old target too — `currentIndexExpectedTarget`'s vault-root-relative formula (`obsidian-vault.md`'s §1a) computed against the old entry, which a group-slug rename always changes (`handbook/admin/items` -> `handbook/management/items`), so the old and new lines are never textually identical under this formula: inspect every line whose folded target matches the old qualified target via `locateChapterLine`'s `matches` array (`{wikilink: true}`, so a `.md`-suffixed spelling still counts) and confirm none survives. A pre-1.8.0 handbook may ALSO still carry the old entry's **legacy bare** `[[<old slug>]]` row — that must be gone too, but the check is scoped to lines sitting under the container titled the OLD `group_title` (the halt record below is where that title comes from on a context-free re-run), never a vault-wide bare-slug scan: a root grouped-to-flat migration can make the new flat target equal the old bare slug, and a global "bare slug also gone" rule would forbid the very row the migration must create — scoping to the old container makes both requirements satisfiable at once. If the old container is gone entirely, both the qualified-gone and the scoped legacy-bare-gone halves of the fact hold trivially. Non-heading index forms have no parser to check placement with, so the fact is explicit user confirmation, same pattern as the capture-spec fact above.
 
 A retained entry moving from grouped to flat keeps every fact above except the title fact, which never applies to a flat destination — there is no current `group_title` to check the index line against. Its current chapter file, asset dir, and index line are checked against the shipped flat wiring — membership only, no container — while the capture-spec fact and the old-gone / no-old-index-target facts still apply exactly as above, verifying the move away from the old grouped location actually completed.
 
@@ -145,7 +151,7 @@ A retained entry moving from grouped to flat keeps every fact above except the t
 **Grouped entry removed** (`newEntry` is null):
 
 - the old chapter path is gone and the old asset directory is gone;
-- no index line targets the old path — for path-link indexes, no line matches the old relative expected target, exactly as in the group-change proof above; for the shipped bare-wikilink default, no `[[slug]]` line remains under the container titled the OLD `group_title` (from the halt record below) — unlike the group-change case there is no current line to protect, so the fact simply holds once the old container carries no `[[slug]]` line, or holds trivially when the old container is gone entirely; non-heading indexes fall back to explicit confirmation, same as elsewhere;
+- no index line targets the old path — for path-link indexes, no line matches the old relative expected target, exactly as in the group-change proof above; for wikilinks mode, no line matches the old entry's **qualified** target either (same `currentIndexExpectedTarget` formula, computed against the old entry) AND no line carries the old entry's **legacy bare** `[[<old slug>]]` spelling under the container titled the OLD `group_title` (from the halt record below) — unlike the group-change case there is no current line to protect, so both halves of the fact simply hold once the old container carries neither spelling, or hold trivially when the old container is gone entirely; non-heading indexes fall back to explicit confirmation, same as elsewhere;
 - no live capture sink for the removed entry: call `specReferencesDir(specText, dir)` against the removed entry's old dir, both spellings — a hit is UNMET, otherwise the fact is explicit user confirmation that the removed entry's spec or section has been deleted or disabled, so a leftover spec cannot silently recreate the deleted assets on the next capture run;
 - no chapter contains a wikilink that can reference the removed entry: call `chapterHasWikilinkTo(chapterText, slug, oldChapterRelPath)` against every remaining chapter's text, which strips the `|`/`#`/`^` suffixes and one terminal `.md` before classifying the target — an unqualified target is forbidden when its basename case-insensitively equals the removed slug, a qualified target (containing `/`) is forbidden when its path components are a component-aligned, case-insensitive suffix of the removed chapter's old path, and permitted when it is a differently-qualified explicit path to something else — a deliberate correction to a foreign note, not a stale reference to the one that got removed; any forbidden hit is UNMET.
 
@@ -177,7 +183,7 @@ This manifest change requires manual group migration (not automated in 1.5.0):
 Follow the manual migration recipe in references/revalidation.md, then re-run.
 ```
 
-The first form (a `group` change) gets suffixed with `; was under container '<old_title>'` whenever the source side was grouped — grouped-to-grouped and grouped-to-flat moves both need the old container title for the bare-wikilink old-target proof above, and a grouped-to-flat move's current entry has no `group_title` of its own to supply it, so only the record can (a flat-to-grouped move has no old container and takes no suffix). Every grouped entry carries a `group_title`, so whenever the suffix is owed, the field to fill it with always exists.
+The first form (a `group` change) gets suffixed with `; was under container '<old_title>'` whenever the source side was grouped — grouped-to-grouped and grouped-to-flat moves both need the old container title for the container-scoped legacy-bare-gone proof above, and a grouped-to-flat move's current entry has no `group_title` of its own to supply it, so only the record can (a flat-to-grouped move has no old container and takes no suffix). Every grouped entry carries a `group_title`, so whenever the suffix is owed, the field to fill it with always exists.
 
 **Scan-failure halt** — printed only after the terminal-state facts all held but the post-migration scan above still found a break. It re-embeds the full original migration record — the per-entry lines above, verbatim — between the two lines below, because a fact can regress while you are fixing the reported links, and the retry needs the whole record again, not just the new breakage:
 
