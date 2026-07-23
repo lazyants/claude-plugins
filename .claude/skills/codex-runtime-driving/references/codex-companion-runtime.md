@@ -201,6 +201,17 @@ reports a PHANTOM exit-0 "success" with no verdict file.
   FINISHED jobs; that is NOT an empty result.
 - **Don't poll in a tight loop.** Wrap it in a `Bash(run_in_background:true)` until-loop so you get one
   completion notification: `until ! node "$CC" status <id> | grep -q "| running |"; do sleep 15; done`.
+- **Never combine `&`/`disown` WITH `run_in_background:true` on the same poll loop — it double-backgrounds
+  and the completion notification fires on the WRONG thing.** `Bash(run_in_background:true)` already tracks
+  and notifies on ITS OWN command's completion; if that command is `(until …; done) & disown; echo started`,
+  the tracked foreground command is the wrapper (which returns in milliseconds after launching the detached
+  subshell), not the inner loop — so the harness reports "completed" seconds after launch while the real
+  poll is still running untracked in the background, writing to a log file nobody gets notified about.
+  Verified 2026-07-23: two consecutive false-"completed" notifications for a codex job that was still
+  genuinely `running`/pid-alive minutes later; direct `jq`/`ps` checks caught it, the harness's own
+  notification did not. Fix: write the poll loop as the DIRECT foreground command of the
+  `run_in_background:true` call, with no trailing `&`/`disown` — `run_in_background` is the ONLY
+  backgrounding mechanism needed; adding a second one breaks the first.
 - **Key the watcher to the SPECIFIC task-id**, never "newest rescue task" (`grep rescue | tail -1`):
   completed tasks from prior rounds linger in `status` and a stale one fires a false "TERMINAL".
 - **A harness-killed poller ≠ a dead review.** A `--wait` poll or a foreground `task` inside
