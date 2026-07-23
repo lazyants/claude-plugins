@@ -969,26 +969,36 @@ done
 # fan-out to pin the specific claims (revalidation.md alone repeats "newly discovered interactive
 # trigger" three times, and SKILL.md's case-insensitive 'halt' matches nine unrelated lines) — so
 # revalidation.md gets six site-bound pins instead, one per distinct claim in "The flow" (#251).
+#
+# These are has_in_section, not plain has: a whole-file `has` only proves the phrase exists
+# SOMEWHERE, so an inert copy parked in a fenced code block under an unrelated heading — or the
+# live phrase simply moved to the wrong section — would still satisfy it. has_in_section binds
+# each pin to its normative heading AND is fence-aware (skips fenced content), so relocating or
+# fencing a needle actually fails the check. Verified: for each pin below, deleting the needle
+# from its real site and pasting the identical text into a fenced block under a different heading
+# in the same file was confirmed RED under has_in_section (previously a false-green under plain
+# has) before this fix shipped.
 if [ ! -f "$REVAL" ]; then
   bad "wording: revalidation.md does not exist yet"
 else
-  has "wording: revalidation.md — accepted-diff exclusion clause (NO newly discovered trigger)" \
-    'NO newly discovered interactive trigger.' "$REVAL"
-  has "wording: revalidation.md — accepted-diff conclusion (re-author, no halt)" \
-    're-author the refreshed artifacts; no halt.' "$REVAL"
-  has "wording: revalidation.md — material class positive criterion (newly discovered interactive trigger)" \
-    '     newly discovered interactive trigger.' "$REVAL"
-  has "wording: revalidation.md — halt-on-material-delta step heading" \
-    '4. **Halt on any material delta.**' "$REVAL"
-  has "wording: revalidation.md — material-delta clause (trigger through delta-manifest halt)" \
-    'newly discovered interactive trigger — emits a delta manifest and halts for user acceptance' "$REVAL"
-  has "wording: revalidation.md — 'How this differs from W1–W5' restatement" \
-    'that emits a delta manifest and halts.' "$REVAL"
+  has_in_section "wording: revalidation.md — accepted-diff exclusion clause (NO newly discovered trigger)" \
+    "$REVAL" '## The flow' 'NO newly discovered interactive trigger.'
+  has_in_section "wording: revalidation.md — accepted-diff conclusion (re-author, no halt)" \
+    "$REVAL" '## The flow' 're-author the refreshed artifacts; no halt.'
+  has_in_section "wording: revalidation.md — material class positive criterion (newly discovered interactive trigger)" \
+    "$REVAL" '## The flow' '     newly discovered interactive trigger.'
+  has_in_section "wording: revalidation.md — halt-on-material-delta step heading" \
+    "$REVAL" '## The flow' '4. **Halt on any material delta.**'
+  has_in_section "wording: revalidation.md — material-delta clause (trigger through delta-manifest halt)" \
+    "$REVAL" '## The flow' 'newly discovered interactive trigger — emits a delta manifest and halts for user acceptance'
+  has_in_section "wording: revalidation.md — 'How this differs from W1–W5' restatement" \
+    "$REVAL" '## How this differs from W1–W5' 'that emits a delta manifest and halts.'
 fi
 
 # SKILL.md's own whole-file 'newly discovered' check has exactly one match (no fan-out) and stays
 # as-is; its case-insensitive 'halt' check (9 unrelated matches) gets replaced with a pin on
-# SKILL.md's own W6 clause, the same fragment as the revalidation.md combined pin above. The old
+# SKILL.md's own W6 clause, the same fragment as the revalidation.md combined pin above, also
+# section-bound for the same false-green reason as the revalidation.md pins above. The old
 # whole-file 'delta manifest' check is dropped rather than kept alongside it: its one match sits on
 # the same line as the W6 clause pin below, wholly contained inside that longer needle, so it can
 # never catch a mutation the W6 clause pin would miss — strictly redundant, not a distinct claim.
@@ -996,8 +1006,9 @@ if [ ! -f "$SKILL" ]; then
   bad "wording: SKILL.md does not exist yet"
 else
   has "wording: SKILL.md — 'newly discovered'" 'newly discovered' "$SKILL"
-  has "wording: SKILL.md — W6 material-delta clause (emits a delta manifest and halts for user acceptance)" \
-    'emits a delta manifest and halts for user acceptance' "$SKILL"
+  has_in_section "wording: SKILL.md — W6 material-delta clause (emits a delta manifest and halts for user acceptance)" \
+    "$SKILL" '### W6 — Revalidation / audit mode (existing chapters)' \
+    'emits a delta manifest and halts for user acceptance'
 fi
 
 echo "== v1.0.6 disclose docs + className PII boundary =="
@@ -1466,9 +1477,12 @@ echo "== group axis (#19) — index wiring (D6), both adapters =="
 has "obsidian-vault: step-0 already-wired short-circuit" 'wiring is already complete' "$OMD"
 # #252: the headings-form pin above only covers the `indexForm === 'headings'` branch. The
 # non-heading-form branch ("no container to check placement against") states its own already-wired
-# / retarget-in-place wording, previously untested.
-has "obsidian-vault: step-0 non-heading-form short-circuit (canonical complete, legacy retargets unconditionally)" \
-  'already complete and a `legacy` line retargets in place unconditionally.' "$OMD"
+# / retarget-in-place wording, previously untested. has_in_section (not plain has), same false-green
+# reason as the revalidation.md/SKILL.md pins above — a plain has would still pass if this text were
+# relocated into a fenced block under an unrelated heading.
+has_in_section "obsidian-vault: step-0 non-heading-form short-circuit (canonical complete, legacy retargets unconditionally)" \
+  "$OMD" '## INDEX wiring (do all of these on every chapter create/update)' \
+  'already complete and a `legacy` line retargets in place unconditionally.'
 has "static-md: step-0 form-agnostic short-circuit"      'form-agnostic, and it runs BEFORE any container' "$SMD"
 # round-9 [mutation testing]: the step-0 already-wired short-circuit's container-title comparison
 # had ZERO coverage — not even a bare function-name grep. Pinned with its real args (containerTitle,
