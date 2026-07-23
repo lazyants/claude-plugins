@@ -861,7 +861,7 @@ test('validateGroups: intra-group conflicting group_title', () => {
     entry({ slug: 'b', group: 'g', group_title: 'Beta' }),
   ]);
   assert.deepEqual(halts, [
-    `Group 'g' carries conflicting group_title values ('Alpha' vs 'Beta') — align all entries of the group.`,
+    `Group 'g' carries conflicting group_title values ('Alpha', 'Beta') — align all entries of the group.`,
   ]);
 });
 
@@ -869,17 +869,15 @@ test('validateGroups: THREE distinct group_titles in one group still halts, not 
   // Round-13 audit finding: the only conflicting-title fixture uses exactly 2 distinct titles,
   // so `distinctTitles.length > 1` was indistinguishable from `=== 2`. A third distinct title
   // proves the halt still fires (a `=== 2` mutant would silently accept a 3-way-inconsistent
-  // group). NOTE — pinning EXISTING behavior, not endorsing it: the halt text itself only ever
-  // names distinctTitles[0]/[1] ('Alpha' vs 'Beta') — the third title 'Gamma' is silently absent
-  // from the message even though the halt correctly fires. That truncation is a real, PRE-
-  // EXISTING production defect, written up separately (not fixed here — out of #220/#221 scope).
+  // group). The halt now enumerates EVERY distinct title in the message, so all three — including
+  // 'Gamma' — appear, not just the first two.
   const halts = validateGroups([
     entry({ slug: 'a', group: 'g', group_title: 'Alpha' }),
     entry({ slug: 'b', group: 'g', group_title: 'Beta' }),
     entry({ slug: 'c', group: 'g', group_title: 'Gamma' }),
   ]);
   assert.deepEqual(halts, [
-    `Group 'g' carries conflicting group_title values ('Alpha' vs 'Beta') — align all entries of the group.`,
+    `Group 'g' carries conflicting group_title values ('Alpha', 'Beta', 'Gamma') — align all entries of the group.`,
   ]);
 });
 
@@ -1200,6 +1198,24 @@ test('manualMigrationChecklist: retained group-change facts (current path/dir/in
   assert.equal(oldTarget.sameContainerAsNew, false, 'F2: the exactly-one exception is bare-wikilink-only');
   assert.equal(oldTarget.expectedMatchCount, 0, 'F2: path-mode always expects the old target GONE');
   assert.equal(findFact(facts, 'title-container'), undefined, 'unchanged title carries no title fact');
+});
+
+test('#253: manualMigrationChecklist derives each fact from its OWN root — decoupled output_dir/chapters_dir/index_file', () => {
+  // Every prior fixture keeps the three roots in a FIXED relationship (output_dir = chapters_dir +
+  // '/assets'; index_file = chapters_dir's parent + '/SUMMARY.md'), so a cross-substitution among
+  // the three roots would shape-match. These three roots share NO common prefix and no derivable
+  // relationship, so any root cross-substitution is caught — one fixture kills all three at once.
+  const p = profile({
+    capture: { output_dir: 'shots' },
+    publish: { chapters_dir: 'book/pages', index_file: 'toc/SUMMARY.md' },
+  });
+  const old = entry({ group: 'admin', group_title: 'Admin' });
+  const next = entry({ group: 'management', group_title: 'Admin' });
+  const facts = manualMigrationChecklist(p, old, next);
+
+  assert.equal(findFact(facts, 'current-chapter-path').path, 'book/pages/management/items.md');
+  assert.equal(findFact(facts, 'current-asset-dir').path, 'shots/management/items');
+  assert.equal(findFact(facts, 'current-index-membership').expectedTarget, '../book/pages/management/items.md');
 });
 
 test('R14-F3 exactly-one exception: same title-preserving move in WIKILINK mode (F2 split fixture)', () => {
@@ -1528,6 +1544,26 @@ test('R4-F1: a multiline inline code span is inert (closing run must match the o
   assert.equal(chapterHasWikilinkTo(text, 'orders', OLD_CHAPTER_REL_PATH), false);
 });
 
+test('#254: a fence closes on a LONGER run than its opener (runLen >= openLen, not ===) — a later real link stays live', () => {
+  // Every other fence fixture closes on an EQUAL-length run, so `>= openLen` was indistinguishable
+  // from `=== openLen`. A 3-backtick fence closed by a 4-backtick run still closes (CommonMark's >=
+  // rule), so the link on the line AFTER the close is genuinely rendered. A `=== openLen` mutant
+  // would treat the fence as unterminated (running to EOF) and swallow that link.
+  const text = ['```', '[[orders]]', '````', 'Real [[orders]] here.'].join('\n');
+  assert.equal(chapterHasWikilinkTo(text, 'orders', OLD_CHAPTER_REL_PATH), true);
+});
+
+test('#254: an inline code span does NOT close on a LONGER run than its opener (runLen === openLen, not >=)', () => {
+  // Every other inline-code fixture closes on an EQUAL-length run. A single-backtick span is NOT
+  // closed by a later 2-backtick run (CommonMark's exact-length rule): the 2-run is content, and a
+  // GENUINE later 1-backtick run closes the span — so `[[orders]]` sits INSIDE the span and is
+  // inert. The closer is real, so `false` here does NOT rely on the unterminated-span-to-EOF path;
+  // it's the exact-length rule alone. A `>= openLen` mutant would let the 2-backtick run close `x`
+  // early, leaving `[[orders]]` outside the span and wrongly live.
+  const text = 'Syntax `x`` [[orders]]` end.';
+  assert.equal(chapterHasWikilinkTo(text, 'orders', OLD_CHAPTER_REL_PATH), false);
+});
+
 test('R4-F1: a triple-backtick run NOT at line start is an inline code span, not a fence — a LATER real link stays intact', () => {
   // Fences are recognized only at a line start; a mid-line ``` is an inline code span delimiter
   // instead, closing on the NEXT matching-length run rather than swallowing the rest of the
@@ -1665,6 +1701,26 @@ test('context-free reconstruction (c): the scan-failure re-embed preserves the o
     text,
     /re-verify the terminal facts above, repeat the handbook-wide link scan, and re-run the touched-chapter gates, in that order/,
   );
+});
+
+test('#255: renderManualMigrationHalt scan-failure header + detail cover ALL tuples, not just the first', () => {
+  // The only non-empty scanFailures fixture has exactly one tuple, so a mutant hardcoding `(1
+  // broken)` or reading scanFailures[0] only would survive. Two distinct tuples pin the real length
+  // in the header AND both `chapter:line -> target` details in the joined body.
+  const p = profile();
+  const old = entry({ slug: 'orders', group: 'admin', group_title: 'Admin' });
+  const next = entry({ slug: 'orders' });
+  const change = { kind: 'group-change', slug: 'orders', oldEntry: old, newEntry: next };
+  const facts = manualMigrationChecklist(p, old, next);
+
+  const scanFailures = [
+    { chapter: 'a.md', line: 3, target: 'admin/orders.md' },
+    { chapter: 'b.md', line: 9, target: 'admin/items.md' },
+  ];
+  const text = renderManualMigrationHalt([change], [facts], scanFailures);
+  assert.match(text, /^Post-migration link scan failed \(2 broken\):/);
+  assert.ok(text.includes('a.md:3 -> admin/orders.md'));
+  assert.ok(text.includes('b.md:9 -> admin/items.md'));
 });
 
 test('renderManualMigrationHalt: an EMPTY scanFailures array uses the normal format, not the scan-failure format [round-13 audit]', () => {
