@@ -936,11 +936,43 @@ SKILL="$SKILL_DIR/SKILL.md"
 for f in "$REVAL" "$SKILL"; do
   base="$(basename "$f")"
   if [ ! -f "$f" ]; then bad "wording: $base does not exist yet"; continue; fi
-  has    "wording: $base — 'skips only the initial accepted-manifest review'" 'skips only the initial accepted-manifest review' "$f"
-  has    "wording: $base — 'newly discovered'"                                'newly discovered' "$f"
-  has    "wording: $base — 'delta manifest'"                                  'delta manifest' "$f"
-  has_ci "wording: $base — 'halt' (case-insensitive)"                         'halt' "$f"
+  has "wording: $base — 'skips only the initial accepted-manifest review'" 'skips only the initial accepted-manifest review' "$f"
 done
+
+# The whole-file 'newly discovered' / 'delta manifest' / 'halt' (ci) checks above had too much
+# fan-out to pin the specific claims (revalidation.md alone repeats "newly discovered interactive
+# trigger" three times, and SKILL.md's case-insensitive 'halt' matches nine unrelated lines) — so
+# revalidation.md gets six site-bound pins instead, one per distinct claim in "The flow" (#251).
+if [ ! -f "$REVAL" ]; then
+  bad "wording: revalidation.md does not exist yet"
+else
+  has "wording: revalidation.md — accepted-diff exclusion clause (NO newly discovered trigger)" \
+    'NO newly discovered interactive trigger.' "$REVAL"
+  has "wording: revalidation.md — accepted-diff conclusion (re-author, no halt)" \
+    're-author the refreshed artifacts; no halt.' "$REVAL"
+  has "wording: revalidation.md — material class positive criterion (newly discovered interactive trigger)" \
+    '     newly discovered interactive trigger.' "$REVAL"
+  has "wording: revalidation.md — halt-on-material-delta step heading" \
+    '4. **Halt on any material delta.**' "$REVAL"
+  has "wording: revalidation.md — material-delta clause (trigger through delta-manifest halt)" \
+    'newly discovered interactive trigger — emits a delta manifest and halts for user acceptance' "$REVAL"
+  has "wording: revalidation.md — 'How this differs from W1–W5' restatement" \
+    'that emits a delta manifest and halts.' "$REVAL"
+fi
+
+# SKILL.md's own whole-file 'newly discovered' check has exactly one match (no fan-out) and stays
+# as-is; its case-insensitive 'halt' check (9 unrelated matches) gets replaced with a pin on
+# SKILL.md's own W6 clause, the same fragment as the revalidation.md combined pin above. The old
+# whole-file 'delta manifest' check is dropped rather than kept alongside it: its one match sits on
+# the same line as the W6 clause pin below, wholly contained inside that longer needle, so it can
+# never catch a mutation the W6 clause pin would miss — strictly redundant, not a distinct claim.
+if [ ! -f "$SKILL" ]; then
+  bad "wording: SKILL.md does not exist yet"
+else
+  has "wording: SKILL.md — 'newly discovered'" 'newly discovered' "$SKILL"
+  has "wording: SKILL.md — W6 material-delta clause (emits a delta manifest and halts for user acceptance)" \
+    'emits a delta manifest and halts for user acceptance' "$SKILL"
+fi
 
 echo "== v1.0.6 disclose docs + className PII boundary =="
 has "completeness-gate: disclosure prose templates"              'Disclosure prose templates' "$REFS/completeness-gate.md"
@@ -1406,6 +1438,11 @@ has "static-md: full-target embed formula (D3)"      "$EMBED_FORMULA" "$SMD"
 echo "== group axis (#19) — index wiring (D6), both adapters =="
 # R6-F1: step-0 already-wired short-circuit runs BEFORE container classification, so re-runs converge.
 has "obsidian-vault: step-0 already-wired short-circuit" 'wiring is already complete' "$OMD"
+# #252: the headings-form pin above only covers the `indexForm === 'headings'` branch. The
+# non-heading-form branch ("no container to check placement against") states its own already-wired
+# / retarget-in-place wording, previously untested.
+has "obsidian-vault: step-0 non-heading-form short-circuit (canonical complete, legacy retargets unconditionally)" \
+  'already complete and a `legacy` line retargets in place unconditionally.' "$OMD"
 has "static-md: step-0 form-agnostic short-circuit"      'form-agnostic, and it runs BEFORE any container' "$SMD"
 # round-9 [mutation testing]: the step-0 already-wired short-circuit's container-title comparison
 # had ZERO coverage — not even a bare function-name grep. Pinned with its real args (containerTitle,
