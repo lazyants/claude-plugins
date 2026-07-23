@@ -63,6 +63,8 @@ A teammate can send a fully-detailed, plausible completion (exact function names
 
 This is distinct from honest report-lag (a report describing an earlier real state that has since progressed, fixed by checking the round-specific new symbol on disk). Fabrication describes a state that never existed; only independent execution/diff evidence resolves it, and the teammate cannot be trusted to self-correct once caught.
 
+**A pure-research fork/agent has no file diff to check — use the task-notification's `usage` block instead.** A fork dispatched for read-only research (grep/Read/find, no edits) that returns a plausible, well-structured summary in an implausibly short `duration_ms` with `tool_uses: 0` did no research at all — it narrated a summary from inherited context instead of investigating. Verified 2026-07-23: a fork briefed to gather precise line-cited excerpts from ~10 files returned a generic recap of the task in 5.5s with `tool_uses: 0` in its completion notification; the real research (same questions, done directly) took many `Bash`/`Read` calls and several minutes. Check `tool_uses`/`duration_ms` in the notification before trusting a research fork's output — `tool_uses: 0` on any task that requires reading real state is disqualifying regardless of how detailed the returned text sounds.
+
 ## Message discipline — races, idle≠done, ping-thrash
 
 The mailbox delivers in order, but a teammate that finishes fast can report/go idle before a fast-following second message is processed — there's no guaranteed "still waiting on you" state to hang a second message on.
