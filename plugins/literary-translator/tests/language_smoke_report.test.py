@@ -1286,5 +1286,95 @@ def test_lsr_mark_class_omits_no_mark_within_super_ranges():
     assert omitted == [], f"category-M codepoint(s) in a claimed span not covered: {omitted}"
 
 
+# ---------------------------------------------------------------------------
+# #282/#283 -- Hebrew ASCII-punctuation connector equivalence, lsr-side
+# mirrors of bootstrap_names.test.py's own tests (this file's TOKEN_RE and
+# _fold_token_to_units are independently-copied twins -- see
+# extractor_terminators_drift.test.py's drift guard for the pattern-level
+# parity proof; the tests below catch a future accidental BEHAVIORAL
+# divergence of that drift guard itself). ASCII double-quote (U+0022)
+# between two Hebrew letters behaves as gershayim (#282); fold-time, the
+# ASCII/Latin twins of the three NAME_CONNECTORS members (plus the ASCII
+# quote) split a Hebrew-scoped compound the same way their maqaf/geresh/
+# gershayim counterparts do (#283).
+# ---------------------------------------------------------------------------
+ASCII_QUOTE_ACRONYM_NAME = "מוהרנ" + '"' + "ת"  # R. Nathan of Breslov
+ASCII_QUOTE_ACRONYM_TEXT = f"פגשתי את {ASCII_QUOTE_ACRONYM_NAME} אתמול."
+
+
+def test_lsr_tokenizer_hebrew_ascii_quote_acronym_stays_one_token():
+    assert _lsr.TOKEN_RE.findall(ASCII_QUOTE_ACRONYM_NAME) == [ASCII_QUOTE_ACRONYM_NAME]
+
+
+def test_lsr_tokenizer_ascii_quote_latin_base_with_hebrew_mark_does_not_fuse():
+    # codex round-1 adversarial regression, lsr side: a Latin base letter
+    # carrying a trailing Hebrew mark must NOT be treated as a Hebrew base
+    # letter -- the lookbehind proves the actual base letter, not just the
+    # character immediately adjacent to the quote.
+    text_1 = "A" + chr(0x05B0) + '"' + "ב"
+    text_2 = "A" + chr(0x05B0) + chr(0x05B1) + '"' + "ב"
+    assert _lsr.TOKEN_RE.findall(text_1) == ["A" + chr(0x05B0), "ב"]
+    assert _lsr.TOKEN_RE.findall(text_2) == ["A" + chr(0x05B0) + chr(0x05B1), "ב"]
+
+
+def test_lsr_extract_candidate_names_hebrew_ascii_quote_acronym_surfaces_via_inventory():
+    # Hebrew has no case distinction, so pass 1 (is_upper_initial) never
+    # fires for this text -- only pass 2's inventory route (#204) can
+    # surface it, which is exactly what the #282 TOKEN_RE fix unblocks
+    # (pre-fix the acronym tokenized into two pieces and the TERMINATORS
+    # boundary refusal blocked pass 2 from ever bridging them).
+    lang = make_lang_dict(name_inventory=[ASCII_QUOTE_ACRONYM_NAME])
+    out = _lsr.extract_candidate_names(ASCII_QUOTE_ACRONYM_TEXT, lang)
+    names = {n for n, _mid in out}
+    assert ASCII_QUOTE_ACRONYM_NAME in names, f"{ASCII_QUOTE_ACRONYM_NAME!r} missing from {sorted(names)}"
+    # must not have split into the two bare halves.
+    assert "מוהרנ" not in names
+    assert "ת" not in names
+
+
+ASCII_HYPHEN_NAME = "הבעל" + "-" + "שם" + "-" + "טוב"  # ASCII-hyphen-joined compound
+SPACE_JOINED_NAME = "הבעל שם טוב"  # space-joined equivalent
+
+
+def test_lsr_extract_candidate_names_hebrew_ascii_hyphen_matches_space_joined():
+    # #283 repro: TOKEN_RE already fuses the ASCII-hyphen-joined spelling
+    # into one token (the hyphen was already a universal connector, no
+    # change there); without the #283 fold-time Hebrew-scoped split, that
+    # one token's match units would never agree with the three-token
+    # space-joined inventory entry.
+    lang = make_lang_dict(name_inventory=[SPACE_JOINED_NAME])
+    text = f"פגשתי את {ASCII_HYPHEN_NAME} אתמול."
+    out = _lsr.extract_candidate_names(text, lang)
+    assert ASCII_HYPHEN_NAME in {n for n, _mid in out}
+
+
+GERSHAYIM_ACRONYM_NAME = "מוהרנ" + "״" + "ת"  # same acronym, gershayim-joined
+SPACE_JOINED_ACRONYM_NAME = "מוהרנ" + " " + "ת"  # same acronym, space-joined
+
+
+@pytest.mark.parametrize(
+    "inventory_entry,text_name",
+    [
+        (GERSHAYIM_ACRONYM_NAME, ASCII_QUOTE_ACRONYM_NAME),
+        (SPACE_JOINED_ACRONYM_NAME, ASCII_QUOTE_ACRONYM_NAME),
+        (ASCII_QUOTE_ACRONYM_NAME, GERSHAYIM_ACRONYM_NAME),
+        (ASCII_QUOTE_ACRONYM_NAME, SPACE_JOINED_ACRONYM_NAME),
+    ],
+)
+def test_lsr_extract_candidate_names_hebrew_ascii_quote_acronym_matches_gershayim_and_space_joined(
+    inventory_entry, text_name
+):
+    # codex-round-2 lock, lsr side: the round-2-submitted split class omitted
+    # the ASCII quote itself, so an ASCII-quoted acronym fused by the #282
+    # TOKEN_RE fix folded to a DIFFERENT unit sequence than its gershayim/
+    # space-joined equivalents -- this test proves all three spellings
+    # converge via extract_candidate_names()'s own inventory route (not just
+    # _fold_token_to_units() in isolation), in both match directions.
+    lang = make_lang_dict(name_inventory=[inventory_entry])
+    text = f"פגשתי את {text_name} אתמול."
+    out = _lsr.extract_candidate_names(text, lang)
+    assert text_name in {n for n, _mid in out}
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
