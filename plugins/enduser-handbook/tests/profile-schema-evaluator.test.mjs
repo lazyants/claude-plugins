@@ -95,19 +95,14 @@ test('profile-schema-evaluator: fail-closed check is a generic per-key membershi
 // masking that the required-check site was separately and silently satisfied by prototype
 // inheritance. Verified by hand against a scratch revert of the fix before wiring these in.
 
-test('RED (required-check prototype leak): a required key named after an inherited Object.prototype member (toString) is not satisfied by prototype-chain inheritance on an empty instance', () => {
-  // No matching `properties` entry, deliberately — see the note above on why combining the two
-  // sites in one schema would mask this probe.
-  const scratchSchema = { type: 'object', required: ['toString'] };
-  const errors = validate({}, scratchSchema);
-  assert.ok(errors.length > 0, 'expected a missing-required-key error for "toString", got none — prototype-chain leak');
-});
-
-test('RED (required-check prototype leak): same claim for "constructor"', () => {
-  const scratchSchema = { type: 'object', required: ['constructor'] };
-  const errors = validate({}, scratchSchema);
-  assert.ok(errors.length > 0, 'expected a missing-required-key error for "constructor", got none — prototype-chain leak');
-});
+// No matching `properties` entry in the schemas below, deliberately — see the note above on why
+// combining the two sites in one schema would mask this probe.
+for (const key of ['toString', 'constructor']) {
+  test(`RED (required-check prototype leak): a required key named after an inherited Object.prototype member ('${key}') is not satisfied by prototype-chain inheritance on an empty instance`, () => {
+    const errors = validate({}, { type: 'object', required: [key] });
+    assert.ok(errors.length > 0, `expected a missing-required-key error for "${key}", got none — prototype-chain leak`);
+  });
+}
 
 test('GREEN (properties-descend prototype leak): an OPTIONAL declared property named after an inherited Object.prototype member (toString) is not spuriously validated against the inherited value on an object that never set it', () => {
   // Not `required`, deliberately, so only the properties-descend site's own membership check is
