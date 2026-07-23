@@ -82,6 +82,43 @@ test('profile-schema-evaluator: fail-closed check is a generic per-key membershi
   }
 });
 
+// ---- prototype-chain membership regression (lazy-ants-reviewer bot finding on PR #318) ------------
+//
+// `in` walks the prototype chain, so a required/declared key named after an inherited
+// Object.prototype member ('toString', 'constructor', ...) would be satisfied by that inherited
+// member even on a genuinely empty instance — two independent sites in `validate()`'s `walk()`:
+// the required-key check, and the properties-descend check. The two probes below are deliberately
+// NEVER combined in one schema: a schema with BOTH `required: ['toString']` AND a matching
+// `properties.toString` entry still produced a nonzero error count under the pre-fix code, but for
+// the WRONG reason — the properties-descend site's own leak (spuriously validating the inherited
+// Object.prototype.toString FUNCTION against the declared schema) happened to also push an error,
+// masking that the required-check site was separately and silently satisfied by prototype
+// inheritance. Verified by hand against a scratch revert of the fix before wiring these in.
+
+test('RED (required-check prototype leak): a required key named after an inherited Object.prototype member (toString) is not satisfied by prototype-chain inheritance on an empty instance', () => {
+  // No matching `properties` entry, deliberately — see the note above on why combining the two
+  // sites in one schema would mask this probe.
+  const scratchSchema = { type: 'object', required: ['toString'] };
+  const errors = validate({}, scratchSchema);
+  assert.ok(errors.length > 0, 'expected a missing-required-key error for "toString", got none — prototype-chain leak');
+});
+
+test('RED (required-check prototype leak): same claim for "constructor"', () => {
+  const scratchSchema = { type: 'object', required: ['constructor'] };
+  const errors = validate({}, scratchSchema);
+  assert.ok(errors.length > 0, 'expected a missing-required-key error for "constructor", got none — prototype-chain leak');
+});
+
+test('GREEN (properties-descend prototype leak): an OPTIONAL declared property named after an inherited Object.prototype member (toString) is not spuriously validated against the inherited value on an object that never set it', () => {
+  // Not `required`, deliberately, so only the properties-descend site's own membership check is
+  // exercised. Pre-fix, this validated the inherited Object.prototype.toString FUNCTION against
+  // the declared {"type":"number"} schema and produced a spurious type-mismatch on an object that
+  // is otherwise perfectly schema-valid (it simply never set an optional "toString" property).
+  const scratchSchema = { type: 'object', properties: { toString: { type: 'number' } } };
+  const errors = validate({}, scratchSchema);
+  assert.deepEqual(errors, [], `expected no errors on an object that never set 'toString', got: ${JSON.stringify(errors)}`);
+});
+
 test('profile-schema-evaluator: GENERATED fail-closed sweep — every schema node rejects an unrecognized keyword (single + double, rotating names)', () => {
   const nodes = enumerateSchemaNodes(schema);
   // Re-derived from the walk every run — never hardcoded — so this assertion tracks the schema as it grows.

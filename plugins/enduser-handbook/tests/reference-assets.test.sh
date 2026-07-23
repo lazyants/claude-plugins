@@ -2155,7 +2155,12 @@ if command -v node >/dev/null 2>&1; then
     const schema = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
     const required = schema.required || [];
     const properties = schema.properties || {};
-    const missing = required.filter((k) => !(k in properties));
+    // Object.hasOwn, not `in`: `in` walks the prototype chain, so a required key named
+    // "toString" or "constructor" would be satisfied by an inherited Object.prototype member even
+    // with no matching entry under root `properties`. (No apostrophe in this comment on purpose --
+    // this whole block is a bash SINGLE-quoted string, and an apostrophe here would prematurely
+    // terminate it.)
+    const missing = required.filter((k) => !Object.hasOwn(properties, k));
     if (missing.length > 0) {
       console.error("required key(s) with no matching properties entry: " + missing.join(", "));
       process.exit(1);

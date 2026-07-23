@@ -198,12 +198,17 @@ export function validate(instance, schema, path = '$') {
     }
     if (sch.required !== undefined && isPlainObject(value)) {
       for (const key of sch.required) {
-        if (!(key in value)) errors.push(`${p}: missing required key '${key}'`);
+        // Object.hasOwn, not `in`: `in` walks the prototype chain, so a required key named
+        // 'toString' or 'constructor' would be satisfied by Object.prototype's inherited member
+        // even on a genuinely empty instance object.
+        if (!Object.hasOwn(value, key)) errors.push(`${p}: missing required key '${key}'`);
       }
     }
     if (isPlainObject(sch.properties) && isPlainObject(value)) {
       for (const propName of Object.keys(sch.properties)) {
-        if (propName in value) {
+        // Same prototype-chain hazard as the required check above — `propName in value` would
+        // wrongly descend into an inherited (not own) member for a name like 'toString'.
+        if (Object.hasOwn(value, propName)) {
           walk(value[propName], sch.properties[propName], `${p}.${propName}`);
         }
       }
