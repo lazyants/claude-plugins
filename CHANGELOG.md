@@ -11,7 +11,7 @@ Documents (with a regression lock, not a behavior change) why tab-prefixed fence
 - **Missing "Write-time canon" citations in `obsidian-vault.md`** (#259) — two mentions of write-time canon had no citation back to `revalidation.md`'s "Write-time canon" section, unlike the equivalent `static-md.md` passages. Both sites now cite it, matching `static-md.md`'s exact phrasing, with new test assertions pinning the citation text at each site.
 
 ### Testing
-- `reference-assets.test.sh`: 486 → 490 assertions (+4: 2 new #257 self-test fixtures, 2 new #259 `has_in_section` citation pins).
+- `reference-assets.test.sh`: +4 assertions (2 new #257 self-test fixtures, 2 new #259 `has_in_section` citation pins). Absolute totals are environment-dependent (the suite's optional esbuild-gated TypeScript check adds 0 or 1 assertion depending on local tooling) so only the delta is stated here — see the suite's own conditional-discovery note.
 
 ## [enduser-handbook 1.8.0] — 2026-07-23
 
