@@ -73,6 +73,24 @@ Everything else (data regions, rows, badges, genuine-by-role containers wrapping
 
 **Reusable process:** when adversarial review keeps finding the SAME class on an over-capturing tool, that is the signal to (a) flip from negative per-field suppression to a positive whitelist, and (b) surface the irreducible residual to the user as a scope/boundary decision rather than looping.
 
+## 4. "Dependency-free" is a narrower claim than it sounds — check for a GATED external-tool call before inventing a lighter approximation
+
+A plan to add a new validation/gate to `tests/reference-assets.test.sh` (or `.test.mjs`) can wrongly
+conclude "no real X available, so approximate it with a grep-based/structural stand-in" from checking
+only `package.json`/`node_modules` (absent — the plugin genuinely has none). That check misses a
+**gated external-interpreter call already present in the test suite for a similar purpose**:
+`tests/profile-version.differential.test.mjs` shells out to Ruby's stdlib `Psych` YAML parser behind a
+`ruby -ryaml` availability guard, to differentially test the plugin's own hand-rolled YAML line-scanner
+against a real parser. A later plan that needed to validate `handbook.profile.example.yml` against
+`assets/profile.schema.json` almost shipped a flat/approximate "does this key name appear somewhere"
+check instead of reusing that same gated-Ruby pattern — codex plan review caught it as both false-green
+(missed an invalid `enum`/`const` value, a moved key, a removed required field) and false-red (rejected a
+valid instance correctly omitting the optional `style_guide.inline` object). **Before designing a new
+lighter-weight check to avoid "adding a dependency," grep the WHOLE test suite for existing gated
+external-tool invocations (`ruby -r`, `command -v`, `npx --no-install`, etc.), not just for a
+`package.json`** — a real, already-accepted mechanism for the same class of problem may already exist one
+file over.
+
 ## Review discipline for this contract-dense plugin
 
 - **The `lazy-ants-reviewer` (ped-ant) GitHub bot is a real cross-file/runtime-contract net, not a rubber stamp.** It has caught runtime-path contract bugs (e.g. the `W5` publish miss) that BOTH a multi-round codex plan review AND a codex working-tree review missed, because a single-tree review can't see cross-file/runtime inconsistency. After codex says CLEAN, still expect the bot to find them. Workflow: push, then reply to and resolve its thread via GraphQL (`addPullRequestReviewThreadReply` then `resolveReviewThread`), and let it re-review — it posts **"Result: no findings"** when clean; its status check stays **UNSTABLE regardless**, which is normal for this repo.

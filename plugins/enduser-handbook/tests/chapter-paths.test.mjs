@@ -1532,6 +1532,19 @@ test('specReferencesDir: no dir literal anywhere => never auto-passes (false), C
   assert.equal(specReferencesDir(`const OUTPUT_DIR = chapterAssetDir(profile, entry);`, 'admin/orders'), false);
 });
 
+test('#256 boundary: needle at literal index 0 of specText exercises the before === null branch', () => {
+  // Every fixture above has the dir literal preceded by other text (a quote, a template
+  // interpolation, ...). Here the dir sits at the very start of specText, so `before` in
+  // specReferencesDir must read null rather than indexing text[-1].
+  assert.equal(specReferencesDir(`admin/orders/capture.png`, 'admin/orders'), true);
+});
+
+test('#256 boundary: needle at literal EOF of specText exercises the after === null branch', () => {
+  // Mirror of the previous fixture: the dir literal ends exactly at the end of specText (an
+  // unterminated string literal), so `after` must read null rather than indexing past the string.
+  assert.equal(specReferencesDir(`captureRegion(main, 'admin/orders`, 'admin/orders'), true);
+});
+
 // =================================================================================================
 // D6 — chapterHasWikilinkTo (forbidden-target predicate)
 // =================================================================================================
@@ -1617,6 +1630,18 @@ test('asymmetric-suffix backstop: a LONGER vault-rooted spelling of the removed 
   // A separate (shorter) old path here so the vault-rooted target is genuinely LONGER —
   // OLD_CHAPTER_REL_PATH already starts with 'vault/', so it would not exercise this direction.
   assert.equal(chapterHasWikilinkTo('[[vault/handbook/admin/orders]]', 'orders', 'handbook/admin/orders.md'), false);
+});
+
+test('#256 boundary: a qualified target whose component length exactly equals oldChapterRelPath (offset === 0) is forbidden', () => {
+  // isComponentSuffixMatch computes offset = old.length - target.length. The interior-suffix test
+  // above (offset === 1, admin/orders inside vault/handbook/admin/orders) and the longer-than-old
+  // backstop above (target.length > old.length, short-circuited before offset is even computed)
+  // bracket this case without covering it: a target with exactly as many components as
+  // OLD_CHAPTER_REL_PATH, so offset === 0 and the alignment starts at index 0 of `old`.
+  assert.equal(
+    chapterHasWikilinkTo('[[vault/handbook/admin/orders]]', 'orders', OLD_CHAPTER_REL_PATH),
+    true,
+  );
 });
 
 test('R18-F2 component-alignment pin: [[min/orders]] is permitted (not a raw string suffix match)', () => {
