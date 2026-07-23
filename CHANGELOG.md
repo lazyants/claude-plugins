@@ -2,6 +2,22 @@
 
 All notable changes to `lazyants/claude-plugins` are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is per-plugin, not repo-wide.
 
+## [enduser-handbook 1.8.3] — 2026-07-23
+
+Adds drift-prevention gates against `profile.schema.json`, the `assets/lib` module pairing convention, and the capture-guard sentinel set, closing three follow-up issues surfaced by earlier self-review. Closes #296. Closes #297. Closes #299.
+
+### Added
+- **Schema-derived required/properties cross-check + 3 new enum assertions + obsidian-vault 8-key binding block** (#296) — the previous hardcoded 9-item required-keys loop was replaced with a real structural cross-check parsed straight off `profile.schema.json`'s own `required`/`properties` arrays, rather than grepping the schema against itself. Added the 3 missing enum assertions (`stack.frontend.type`, `stack.surface`, `diataxis.quadrants_in_use` items) and a symmetric obsidian-vault "Exact-key bindings" block mirroring static-md's existing 8-line block.
+- **Real example-profile-validates-against-schema gate** (#296) — a new recursive JSON-Schema evaluator (`tests/profile-schema-evaluator.mjs`) implementing the exact keyword subset `profile.schema.json` uses (`type` incl. union arrays, `additionalProperties` in all three forms, `required`, `properties`, `const`, `enum`, `pattern`, `items`, `minItems`), with a fail-closed structural sweep that walks every subschema reachable via `properties`/`items`/a schema-valued `additionalProperties` and rejects any unrecognized keyword — regardless of whether the shipped example instance happens to exercise that branch. Wired to `handbook.profile.example.yml` via a gated `ruby -ryaml -rjson` → Psych → JSON → Node evaluator pipeline, skipping loudly if Ruby/Psych is unavailable.
+- **`assets/lib` module-pairing gate** (#297) — for every `assets/lib/*.mjs` module, asserts its `.d.mts` declaration and `tests/*.test.mjs` file both exist, using the existing `category_files` helper. Forward-looking regression gate; no existing gap.
+- **Capture-guard sentinel set-equality gate** (#299) — extracts the actual `// [guard:*]` sentinel set from `capture-guard-policy.mjs` (excluding the header comment's own literal wildcard mention) and asserts it's set-equal to the hardcoded 7-item allowlist in `reference-assets.test.sh`, catching a sentinel added/renamed/removed in source without the test's list being updated to match. The set-equality gate's own `sort -u` pipelines check exit status before comparing (`LC_ALL=C` pinned on both) — an earlier draft compared unchecked output, so a failed `sort` would have produced two empty, "matching" strings and silently passed.
+
+### Fixed
+- **Prototype-chain membership leak in the #296 schema-validation gates** — found by the `lazy-ants-reviewer` bot on PR #318. The evaluator's required-key check, its properties-descend check, and the bash-side required/properties cross-check all used `key in obj`, which walks the prototype chain: a required/declared key named after an inherited `Object.prototype` member (`toString`, `constructor`, ...) was silently satisfied by that inherited member even on a genuinely empty instance — a false PASS on the required-key check, and a spurious false REJECT on the properties-descend check. All three sites switched to `Object.hasOwn()`; added 3 regression tests isolating each site individually (combining `required` and `properties` on the same key in one test schema was found to mask one site's leak behind the other's error output).
+
+### Testing
+- `reference-assets.test.sh`: +8 assertions across the four #296/#297/#299 sub-gates (deltas — absolute totals are environment-dependent, see the 1.8.1 entry). `profile-schema-evaluator.test.mjs`: new file, 29 tests (26 original + 3 prototype-chain regression probes).
+
 ## [enduser-handbook 1.8.2] — 2026-07-23
 
 Hardens `reference-assets.test.sh`'s `revalidation.md`/`SKILL.md` halt-clause coverage with site-bound needle pins in place of loose whole-file checks, closes a missing-coverage gap on the chapter-wiring non-heading-form completion branch, and adds two `chapter-paths.mjs` boundary-condition tests. Closes #251. Closes #252. Closes #256.
