@@ -263,12 +263,19 @@ class ModeSpec(NamedTuple):
 # Giving it a row fixed that with no new guard, and means it inherits every
 # column added here later instead of needing to be remembered each time.
 #
-# What this guarantees, precisely: the three cross-flag guards below
-# (mutual exclusion, --batch compatibility, --expect-source-forms-file
-# acceptance) are comprehensions over this table, so none of them can be
-# taught about a new mode while another silently is not, and
+# What this guarantees, precisely, and ONLY for modes a parser flag selects:
+# the three cross-flag guards below (mutual exclusion, --batch
+# compatibility, --expect-source-forms-file acceptance) are comprehensions
+# over this table, so none of them can be taught about a new FLAG-SELECTED
+# mode while another silently is not, and
 # tests/canon_stamp_conservation.test.py fails if a parser flag is missing
-# from the table or vice versa -- the row is unforgettable.
+# from the table or vice versa -- that row is unforgettable.
+#
+# The scope limit is real, not theoretical: VALIDATE-ONLY, the default mode
+# reached when no mode flag is passed at all, has no flag, no dest and no row
+# here, so it sits outside the table and outside every guarantee above. Any
+# future flagless mode inherits the same gap. The drift test compares parser
+# dests against table dests, so it cannot see a mode that has neither.
 #
 # What it does NOT guarantee: adding a mode is still THREE edits -- a row
 # here, an `add_argument()` in build_arg_parser(), and a dispatch branch in

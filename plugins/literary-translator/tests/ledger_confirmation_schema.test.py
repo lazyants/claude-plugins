@@ -123,7 +123,41 @@ _drift = importlib.util.module_from_spec(_drift_spec)
 _drift_spec.loader.exec_module(_drift)
 
 parse_js_object_literal = _drift.parse_js_object_literal
-extract_const_object_literal = _drift.extract_const_object_literal
+_extract_const_object_literal_raw = _drift.extract_const_object_literal
+
+
+def _from_declaration(mass_translate_source: str, needle: str) -> str:
+    """`mass_translate_source` sliced to begin at `needle`'s first occurrence
+    in the CODE PROJECTION.
+
+    Every shared JS extractor this file reuses -- the drift module's
+    extract_const_object_literal, ledger_update.test.py's _extract_js_function
+    and _extract_js_const -- scans BALANCED and comment-aware, but LOCATES its
+    starting point with a bare index/search over raw source. A commented-out
+    or prose copy of the same declaration therefore wins:
+
+        // historical shape: const FAILURE_EVIDENCE_KEYS = ["error"];
+
+    made all three return the decoy. Handing them a source that already
+    starts at the real declaration fixes the location without touching their
+    scanning, and without a second vendored copy of any of them. The two
+    sibling files still carry the raw-locator weakness in their own uses --
+    reported, not fixed here, since they are not this file's to change."""
+    code = _js_code_only(mass_translate_source)
+    idx = code.find(needle)
+    assert idx != -1, (
+        f"the template's CODE declares no {needle!r} -- it may exist only "
+        "inside a comment or a prompt string, which is exactly what this "
+        "projection-anchored lookup exists to refuse"
+    )
+    return mass_translate_source[idx:]
+
+
+def extract_const_object_literal(mass_translate_source: str, const_name: str) -> str:
+    """Projection-anchored wrapper -- see _from_declaration()."""
+    return _extract_const_object_literal_raw(
+        _from_declaration(mass_translate_source, f"const {const_name} "), const_name
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -940,6 +974,9 @@ def _find_balanced_bracket_span(source: str, start: int) -> int:
 
 
 def extract_const_array_literal(source: str, const_name: str) -> str:
+    # Projection-anchored for the same reason as extract_const_object_literal
+    # above: a commented-out `const NAME = [...]` used to win this search.
+    source = _from_declaration(source, f"const {const_name} ")
     m = re.search(r"const\s+" + re.escape(const_name) + r"\s*=\s*", source)
     if not m:
         raise AssertionError(f"expected 'const {const_name} = [ ... ];' declaration, found none")
@@ -1002,7 +1039,11 @@ def test_missing_key_set_const_fails_the_bridge_rather_than_skipping_it(
         f"const {const_name} =", f"const {const_name}_RENAMED_BY_TEST =", 1
     )
     assert mutated != mass_translate_source, f"could not rename const {const_name}"
-    with pytest.raises(AssertionError, match=f"const {const_name} ="):
+    # The message now comes from the projection-anchored lookup rather than
+    # from the array extractor, so match on the const NAME rather than on the
+    # `= [ ... ];` phrasing -- what must be pinned is that the failure names
+    # the const that went missing, not which layer noticed.
+    with pytest.raises(AssertionError, match=f"const {const_name}"):
         assert_js_guard_key_sets_match_python_mirror(mutated)
 
 
@@ -1125,6 +1166,18 @@ def _regex_may_start_at(source: str, offset: int) -> bool:
         k = j
         while k >= 0 and (source[k].isalnum() or source[k] in "_$"):
             k -= 1
+        # A reserved word is a legal PROPERTY NAME, and `obj.new` is an
+        # ordinary member expression that ends an expression -- so a `/`
+        # after it divides. Verified against real node: with `foo = {new: 8}`,
+        # `foo.new / 2 / 2` evaluates to 2. Without this check the keyword
+        # list below fired on the property name and read the division as a
+        # regex start, blanking a live presence test out of the projection
+        # for 9 of the 10 reserved words in it.
+        dot = k
+        while dot >= 0 and source[dot] in " \t\r\n":
+            dot -= 1
+        if dot >= 0 and source[dot] == ".":
+            return False
         return source[k + 1:j + 1] in _REGEX_MAY_FOLLOW_KEYWORDS
     return True
 
@@ -1375,6 +1428,20 @@ def assert_in_operator_confined_to_evidence_helper(mass_translate_source: str) -
         pytest.param('let z = "x" /k in raw/ 1;', True, id="fake-regex-after-string-quote"),
         pytest.param("let z = `x` /k in raw/ 1;", True, id="fake-regex-after-template-backtick"),
         pytest.param("let w = 1; w++ /k in raw/ 1;", True, id="fake-regex-after-postfix-increment"),
+        # A reserved word is a legal property name; `obj.new` ends an
+        # expression, so the `/` after it divides. 9 of the 10 words in
+        # _REGEX_MAY_FOLLOW_KEYWORDS blanked a live presence test here.
+        pytest.param("let z = foo.new /k in raw/ 1;", True,
+                     id="fake-regex-after-reserved-word-property"),
+        pytest.param("let z = foo.typeof /k in raw/ 1;", True,
+                     id="fake-regex-after-reserved-word-property-typeof"),
+        # ...but the keyword path itself must still work when the word is NOT
+        # a property name, or the fix above would have traded one hole for
+        # another: this really is a regex literal and must blank.
+        pytest.param("return /a in b/.test(x);", False,
+                     id="real-regex-after-a-genuine-keyword"),
+        pytest.param("let r = typeof /a in b/;", False,
+                     id="real-regex-after-typeof"),
     ],
 )
 def test_js_code_only_shapes(snippet, in_survives):
@@ -1393,6 +1460,46 @@ def test_js_code_only_shapes(snippet, in_survives):
     assert bool(re.search(r"\bin\b", code)) is in_survives, (
         f"projection of {snippet!r} was {code!r}"
     )
+
+
+@pytest.mark.parametrize(
+    "const_name,decoy,real_marker",
+    [
+        pytest.param(
+            "FAILURE_EVIDENCE_KEYS",
+            '// historical shape: const FAILURE_EVIDENCE_KEYS = ["error"];',
+            "exit_code", id="array-literal",
+        ),
+        pytest.param(
+            "NO_FAILURE_EVIDENCE",
+            "// old: const NO_FAILURE_EVIDENCE = { error: isEmptyString };",
+            "exit_code", id="object-literal",
+        ),
+    ],
+)
+def test_extractors_ignore_a_commented_out_declaration(
+    mass_translate_source, const_name, decoy, real_marker,
+):
+    """Every shared JS extractor scans balanced and comment-aware but used to
+    LOCATE with a bare raw index, so a commented-out declaration of the same
+    name won and the checks built on it silently read the decoy. Pinned for
+    both literal shapes."""
+    anchor = f"const {const_name} "
+    assert anchor in mass_translate_source, f"anchor {anchor!r} has moved"
+    mutated = mass_translate_source.replace(anchor, decoy + "\n" + anchor, 1)
+    assert mutated != mass_translate_source, "the decoy mutation did not apply"
+
+    if const_name == "NO_FAILURE_EVIDENCE":
+        extracted = extract_const_object_literal(mutated, const_name)
+    else:
+        extracted = extract_const_array_literal(mutated, const_name)
+    assert real_marker in extracted, (
+        f"extraction of {const_name} returned the commented-out decoy rather "
+        f"than the real declaration: {extracted!r}"
+    )
+    # And the harness's own statement extractor, which the behavioural layer
+    # splices into the node script it executes.
+    assert real_marker in _extract_const_statement(mutated, const_name)
 
 
 def test_flat_literals_still_declare_the_fields_289_fired_on_as_optional(mass_translate_source):
@@ -1466,7 +1573,12 @@ def _unspannable_declaration_sites(mass_translate_source: str) -> list:
 def _hasonlykeys_callers(mass_translate_source: str) -> dict:
     """{function name: declaration line} for every function whose body calls
     hasOnlyKeys() -- read off the code projection, so a mention in a comment
-    or in prompt text is not counted."""
+    or in prompt text is not counted.
+
+    This is the CONVENTION signal for "consume site": a function is one if it
+    performs the allowed-key discipline. Its limit -- a guard that skips the
+    convention entirely is invisible to it -- is why the structural signal
+    below exists alongside it, not instead of it."""
     code = _js_code_only(mass_translate_source)
     return {
         name: _line_of(mass_translate_source, start)
@@ -1475,20 +1587,183 @@ def _hasonlykeys_callers(mass_translate_source: str) -> dict:
     }
 
 
+def _evidence_carrying_schemas(mass_translate_source: str) -> set:
+    """Flat schema const names whose OPTIONAL properties include at least one
+    failure-evidence key -- i.e. an agent could volunteer an evidence field on
+    a success return, which is exactly the #289 hazard. A dispatch validated
+    by such a schema produces a value that MUST be judged for failure
+    evidence. Schemas with no optional evidence field (DRAFT_PROBE_SCHEMA's
+    lone required `present`, REVIEW_SCHEMA's all-required set) carry no such
+    hazard and are correctly excluded."""
+    evidence_keys = set()
+    # _evidence_key_consts_passed_to_helper already excludes the helper's own
+    # declaration and rejects inline-literal argument shapes -- reuse it
+    # rather than re-deriving the call-site scan (and its `function ` guard)
+    # a second time here.
+    for const_name in _evidence_key_consts_passed_to_helper(mass_translate_source):
+        evidence_keys |= set(parse_js_object_literal(
+            extract_const_array_literal(mass_translate_source, const_name)
+        ))
+    assert evidence_keys, "no evidence keys resolved from hasFailureEvidence() call sites"
+    carrying = set()
+    for const_name in FLAT_AGENT_FACING_LITERALS:
+        if _optional_fields_of(mass_translate_source, const_name) & evidence_keys:
+            carrying.add(const_name)
+    return carrying
+
+
+def _call_argument_texts(code: str, open_paren: int) -> list:
+    """The comma-separated argument texts of the call whose `(` is at
+    `open_paren`, split at depth 1 only. Runs on the CODE PROJECTION, where
+    strings and comments are already blanked, so a comma inside either cannot
+    split an argument."""
+    depth = 0
+    args = []
+    start = open_paren + 1
+    i = open_paren
+    n = len(code)
+    while i < n:
+        c = code[i]
+        if c in "([{":
+            depth += 1
+        elif c in ")]}":
+            depth -= 1
+            if depth == 0:
+                args.append(code[start:i])
+                return args
+        elif c == "," and depth == 1:
+            args.append(code[start:i])
+            start = i + 1
+        i += 1
+    raise AssertionError(f"unbalanced call parentheses at offset {open_paren}")
+
+
+def _agent_dispatch_consume_sites(mass_translate_source: str) -> dict:
+    """{function name: line} for every locally-defined function that is handed,
+    AS ITS WHOLE ARGUMENT, a variable bound in the same scope to an
+    `await agent(..., { schema: <evidence-carrying> })` dispatch.
+
+    This is the STRUCTURAL signal for "consume site", and it does not depend
+    on the guard following any convention: a function is one by virtue of
+    WHAT IT RECEIVES -- an untrusted, evidence-carrying agent return -- not by
+    which helper it happens to call. A guard reimplementing #289's shape
+    without hasOnlyKeys (gating on `.success` and rejecting via
+    `!== undefined`) is on the roster the moment it is fed such a dispatch,
+    and the behavioural tests then execute it.
+
+    Precisely scoped to stay decidable and false-positive-free, verified
+    against the real template:
+      * `schema:` gates it. `parseDisp(raw)` is handed the translate-drive
+        return, but that dispatch carries NO schema (it returns the bare
+        `DISPATCHED <seg> <disp>` string), so parseDisp -- a parser, not a
+        success guard -- is not mistaken for one.
+      * evidence-carrying gates it further. The draft-probe dispatch has a
+        schema but no optional evidence field, so its inline `raw.present`
+        check is not dragged in.
+      * WHOLE-argument gates it. `endsWithSegJson(raw.fragment_path, seg)`
+        receives a field of a validated return, a post-validation use, not
+        the untrusted object -- so it is not a consume site.
+
+    What it deliberately does NOT reach, and why this is a signal beside the
+    convention one rather than a replacement for it: a return that flows to
+    its guard INDIRECTLY -- `artifactCheckMatched(first.art)`, where the value
+    passes agent() -> callArtifactCheck's return -> readAndCheck's `{art}`
+    object field -> `first.art`. Following that needs interprocedural,
+    field-sensitive taint analysis; approximating it cheaply would reintroduce
+    the silent-blind-spot risk this release exists to remove. artifactCheckMatched
+    is caught today by the convention signal, so the union has no live gap;
+    the residual is a hypothetical future guard that is BOTH indirect-fed AND
+    convention-skipping. Stated in assert_every_consume_site_guard_routes_
+    through_helper()'s docstring."""
+    code = _js_code_only(mass_translate_source)
+    evidence_schemas = _evidence_carrying_schemas(mass_translate_source)
+    spans = _function_spans(mass_translate_source)
+
+    def enclosing(offset: int) -> tuple:
+        best = None
+        for name, (start, end) in spans.items():
+            if start <= offset < end and (best is None or start > spans[best][0]):
+                best = name
+        # A dispatch outside every function span is module top-level (the
+        # final mergeLedger call); its guard call is at top level too.
+        return (best, spans[best]) if best is not None else (None, (0, len(code)))
+
+    consume_sites = {}
+    for m in re.finditer(r"const\s+([A-Za-z_$][\w$]*)\s*=\s*await\s+agent\s*\(", code):
+        args = _call_argument_texts(code, code.index("(", m.end() - 1))
+        options = args[1] if len(args) >= 2 else ""
+        schema = re.search(r"\bschema:\s*([A-Za-z_$][\w$]*)", options)
+        if not schema or schema.group(1) not in evidence_schemas:
+            continue
+        var = m.group(1)
+        _name, (start, end) = enclosing(m.start())
+        # Whole-var argument only: `GUARD(var)`, optionally negated as
+        # `!GUARD(var)`. `GUARD(var.field)` is excluded by the `\)` anchor.
+        for call in re.finditer(r"([A-Za-z_$][\w$]*)\s*\(\s*" + re.escape(var) + r"\s*\)",
+                                code[start:end]):
+            fn = call.group(1)
+            if fn in spans and fn != "agent":
+                consume_sites.setdefault(fn, _line_of(mass_translate_source, start + call.start()))
+    return consume_sites
+
+
+def _derive_consume_sites(mass_translate_source: str) -> dict:
+    """The roster the tripwire pins: the UNION of the convention signal
+    (hasOnlyKeys callers) and the structural signal (functions fed an
+    evidence-carrying agent dispatch). A function found by EITHER is a consume
+    site; to escape the roster a guard must now evade BOTH -- skip the
+    allowed-key discipline AND be fed only through indirection."""
+    sites = dict(_hasonlykeys_callers(mass_translate_source))
+    for name, line in _agent_dispatch_consume_sites(mass_translate_source).items():
+        sites.setdefault(name, line)
+    return sites
+
+
 def assert_every_consume_site_guard_routes_through_helper(mass_translate_source: str) -> None:
     """The `in`-lock above is satisfiable by DELETING a check outright -- a
     guard with no evidence test contains no `in` to find. This is the other
     half of that pair: every consume site must still consult the shared
     judgement. Neither half subsumes the other, and neither is redundant.
 
-    Both halves are static, and both share one blind spot they cannot close:
-    a guard that CALLS hasFailureEvidence() and discards the verdict routes
-    through the helper textually while judging nothing. Detecting that
-    statically means data flow, and approximating it by pattern
-    (`if (hasFailureEvidence(`) is spelling enumeration, which is the exact
-    failure this whole lock has already had twice. It is covered by
-    EXECUTION instead -- see test_rostered_guard_rejects_every_evidence_
-    bearing_return, which is the only check here that catches it."""
+    TWO blind spots, not one. Both are stated here because an earlier version
+    of this docstring claimed there was only the first, and a reviewer found
+    the second:
+
+      1. A guard that CALLS hasFailureEvidence() and discards the verdict
+         routes through the helper textually while judging nothing. Both
+         static halves miss it. Detecting it statically means data flow, and
+         approximating it by pattern (`if (hasFailureEvidence(`) is spelling
+         enumeration, which is the exact failure this lock has already had
+         twice. It is covered by EXECUTION instead --
+         test_rostered_guard_rejects_every_evidence_bearing_return is the
+         only check here that catches it, and it is node-gated.
+
+      2. A guard that never calls hasOnlyKeys() is invisible to THIS lock (it
+         iterates hasOnlyKeys callers) and to the `in`-lock if it also has no
+         presence test. It is NOT, however, invisible to the roster tripwire:
+         the tripwire derives its roster from the UNION of the convention
+         signal (hasOnlyKeys callers) and a STRUCTURAL signal
+         (_agent_dispatch_consume_sites -- functions handed an
+         evidence-carrying agent() return, decided at the dispatch site, not
+         by which helper the function calls). A guard reimplementing #289 with
+         `.success` + `!== undefined` and no hasOnlyKeys is rostered the
+         moment it is fed such a dispatch, and the behavioural tests then
+         execute it and watch it reject a benign `exit_code: 0`. That closes
+         the shape a reviewer demonstrated here.
+
+    The residual, stated exactly rather than softened -- this is the release's
+    subject. The structural signal reaches only DIRECT dispatch feeds
+    (`const raw = await agent(..., {schema}); guard(raw)`). A return that
+    reaches its guard through INDIRECTION -- agent() -> a wrapper's return ->
+    an object field -> a property access, as artifactCheckMatched(first.art)
+    does -- is not followed, because doing so soundly needs interprocedural,
+    field-sensitive taint analysis, and approximating it cheaply is exactly
+    the silent-blind-spot trade this release removed. So the uncovered set is
+    precisely: a FUTURE guard that is BOTH indirect-fed AND convention-skipping
+    AND presence-test-free. The live template has no such guard --
+    artifactCheckMatched is indirect-fed but uses hasOnlyKeys, so the
+    convention signal covers it. Verified by constructing the escape:
+    test_apparatus_residual_is_exactly_indirect_plus_convention_skipping."""
     unspannable = _unspannable_declaration_sites(mass_translate_source)
     assert not unspannable, (
         "the template now declares a function in an object-method form this "
@@ -1587,6 +1862,10 @@ def _splice_into_guard(mass_translate_source: str, line: str) -> str:
         pytest.param(
             "  let w = 1; w++ /FAILURE_EVIDENCE_KEYS.some(k => k in raw)/ 1;",
             id="fake-regex-after-postfix-increment",
+        ),
+        pytest.param(
+            "  if (foo.new /FAILURE_EVIDENCE_KEYS.some(k => k in raw)/ 1) return false;",
+            id="fake-regex-after-reserved-word-property",
         ),
     ],
 )
@@ -1691,23 +1970,126 @@ def test_routing_lock_refuses_an_unspannable_declaration_form(mass_translate_sou
 
 
 def assert_consume_site_list_is_exhaustive(mass_translate_source: str) -> None:
-    """The tripwire. CONSUME_SITE_GUARDS must name exactly the functions that
-    consult hasOnlyKeys() -- no more, no fewer."""
-    found = set(_hasonlykeys_callers(mass_translate_source))
+    """The tripwire. CONSUME_SITE_GUARDS must name exactly the functions the
+    two signals derive -- convention (hasOnlyKeys callers) UNION structural
+    (fed an evidence-carrying agent dispatch) -- no more, no fewer."""
+    found = set(_derive_consume_sites(mass_translate_source))
     declared = set(CONSUME_SITE_GUARDS)
     assert found == declared, (
         "consume-site roster drift -- CONSUME_SITE_GUARDS must name exactly "
-        "the functions that consult hasOnlyKeys(), because that roster is what "
-        "drives the behavioural tests below. Undeclared (a consume site "
-        f"nothing is executing): {sorted(found - declared)}. Declared but not "
-        f"found (stale entry, or renamed): {sorted(declared - found)}. Amend "
-        "the roster in the same commit as the guard, and give the new entry "
-        "its accepted/rejected cases -- that is what makes the guard testable."
+        "the functions derived as consume sites (they call hasOnlyKeys(), OR "
+        "they are handed an evidence-carrying agent() return), because that "
+        "roster is what drives the behavioural tests below. Undeclared (a "
+        f"consume site nothing is executing): {sorted(found - declared)}. "
+        f"Declared but not found (stale entry, or renamed): {sorted(declared - found)}. "
+        "Amend the roster in the same commit as the guard, and give the new "
+        "entry its accepted/rejected cases -- that is what makes it testable."
     )
 
 
 def test_consume_site_roster_is_exhaustive(mass_translate_source):
     assert_consume_site_list_is_exhaustive(mass_translate_source)
+
+
+# The lead/reviewer's demonstrated escape: a guard that reimplements #289's
+# shape (gate on `.success`, reject evidence via `!== undefined`) with NO
+# hasOnlyKeys and NO `in`, so it is invisible to the convention roster, the
+# routing lock and the `in`-lock alike. Fed a real evidence-carrying dispatch.
+_FIXUP_GUARD_DEF = (
+    "function fixupApplied(raw) {\n"
+    "  if (!raw || raw.success !== true) return false;\n"
+    "  if (raw.exit_code !== undefined) return false;\n"
+    "  return typeof raw.status === \"string\" && raw.status.length > 0;\n"
+    "}\n\n"
+)
+_FIXUP_FEED_ANCHOR = "  if (!ledgerWriteSucceeded(raw)) {\n"
+_FIXUP_FEED = "  if (!fixupApplied(raw)) { return { ok: false, failResult: null }; }\n"
+
+
+def _splice_unrostered_agent_fed_guard(mass_translate_source: str) -> str:
+    """Add fixupApplied, fed the LEDGER_WRITE dispatch's `raw`, without adding
+    it to CONSUME_SITE_GUARDS. The shipped template is never modified."""
+    assert "function ledgerWriteSucceeded(raw) {" in mass_translate_source
+    assert _FIXUP_FEED_ANCHOR in mass_translate_source
+    out = mass_translate_source.replace(
+        "function ledgerWriteSucceeded(raw) {",
+        _FIXUP_GUARD_DEF + "function ledgerWriteSucceeded(raw) {", 1,
+    ).replace(_FIXUP_FEED_ANCHOR, _FIXUP_FEED + _FIXUP_FEED_ANCHOR, 1)
+    assert out != mass_translate_source, "the fixupApplied splice did not apply"
+    return out
+
+
+def test_structural_signal_catches_an_agent_fed_guard_the_convention_signal_misses(
+    mass_translate_source,
+):
+    """RED/GREEN for the structural half of the roster. fixupApplied is fed a
+    real evidence-carrying agent() dispatch but calls no hasOnlyKeys, so:
+
+      * the CONVENTION signal alone does NOT see it -- this is the gap the
+        reviewer demonstrated, pinned here so a regression that drops the
+        structural signal is caught;
+      * the STRUCTURAL signal DOES see it, so the union tripwire fires;
+      * the two purely-static locks miss it too (no hasOnlyKeys, no `in`),
+        proving the tripwire is the load-bearing check for this shape.
+    """
+    mutated = _splice_unrostered_agent_fed_guard(mass_translate_source)
+
+    # The gap: convention signal is blind to it.
+    assert "fixupApplied" not in _hasonlykeys_callers(mutated), (
+        "fixupApplied unexpectedly calls hasOnlyKeys -- this RED proof needs a "
+        "guard the CONVENTION signal cannot see, or it proves nothing new"
+    )
+    # The fix: structural signal sees it, so the union tripwire fires.
+    assert "fixupApplied" in _agent_dispatch_consume_sites(mutated), (
+        "the structural signal did not identify fixupApplied as fed an "
+        "evidence-carrying agent dispatch -- the whole point of this layer"
+    )
+    with pytest.raises(AssertionError, match="consume-site roster drift"):
+        assert_consume_site_list_is_exhaustive(mutated)
+
+    # And the two static locks genuinely miss it, so nothing else would have.
+    assert_every_consume_site_guard_routes_through_helper(mutated)  # no raise
+    assert_in_operator_confined_to_evidence_helper(mutated)         # no raise
+
+
+def test_apparatus_residual_is_exactly_indirect_plus_convention_skipping(mass_translate_source):
+    """The honest boundary, verified rather than asserted. A guard fed its
+    evidence-carrying return through INDIRECTION (a wrapper's return, not a
+    direct `const x = await agent(...)` binding) and calling no hasOnlyKeys is
+    the one shape NO layer here catches. Construct it and show every check
+    passes -- so the docstring's residual is real and complete, not a hedge.
+
+    The construction mirrors the live artifactCheckMatched chain: a wrapper
+    returns the agent value, the guard is fed the wrapper's result."""
+    residual = mass_translate_source.replace(
+        "function ledgerWriteSucceeded(raw) {",
+        # A guard reached only indirectly, gating on .success with no
+        # hasOnlyKeys and no `in` -- the union's acknowledged blind spot.
+        "async function wrapProbe(seg) {\n"
+        "  return await agent(draftProbePrompt(seg), { effort: \"low\", schema: LEDGER_WRITE_SCHEMA });\n"
+        "}\n\n"
+        "function probeApplied(p) {\n"
+        "  if (!p || p.success !== true) return false;\n"
+        "  if (p.exit_code !== undefined) return false;\n"
+        "  return true;\n"
+        "}\n\n"
+        "async function useProbe(seg) {\n"
+        "  const wrapped = await wrapProbe(seg);\n"
+        "  return probeApplied(wrapped);\n"
+        "}\n\n"
+        "function ledgerWriteSucceeded(raw) {", 1,
+    )
+    assert residual != mass_translate_source, "the residual construction did not apply"
+
+    # probeApplied is fed `wrapped`, which is bound to a LOCAL FUNCTION call
+    # (wrapProbe), not directly to `await agent(...)`. The structural signal,
+    # which follows only direct dispatch bindings, does not reach it --
+    assert "probeApplied" not in _agent_dispatch_consume_sites(residual)
+    assert "probeApplied" not in _hasonlykeys_callers(residual)
+    # -- so every check here passes. This is the residual, named and shown.
+    assert_consume_site_list_is_exhaustive(residual)
+    assert_every_consume_site_guard_routes_through_helper(residual)
+    assert_in_operator_confined_to_evidence_helper(residual)
 
 
 @pytest.mark.parametrize(
@@ -1851,6 +2233,24 @@ CONSUME_SITE_GUARDS = {
 }
 
 
+def _extract_function_source(mass_translate_source: str, signature_prefix: str) -> str:
+    """ledger_update.test.py's brace-balanced function extractor, located via
+    the code projection -- see _from_declaration(). Its own scanning is
+    reused verbatim; only where it starts changes."""
+    return _extract_js_function(
+        _from_declaration(mass_translate_source, signature_prefix), signature_prefix
+    )
+
+
+def _extract_const_statement(mass_translate_source: str, const_name: str) -> str:
+    """The same treatment for the single-line `const NAME = ...;` extractor.
+    That one terminates on the first raw `;`, so it was doubly exposed: a
+    decoy comment could both start it in the wrong place and end it there."""
+    return _extract_js_const(
+        _from_declaration(mass_translate_source, f"const {const_name} "), const_name
+    )
+
+
 def _guard_harness_preamble(mass_translate_source: str) -> str:
     """Every declaration a rostered guard needs, spliced verbatim from the
     real template in SOURCE order -- which is what keeps the dependency chain
@@ -1860,16 +2260,19 @@ def _guard_harness_preamble(mass_translate_source: str) -> str:
     rather than named, so a fourth schema's own key sets come along without
     editing this."""
     parts = [
-        _extract_js_function(mass_translate_source, "function isNonEmptyString("),
-        _extract_js_function(mass_translate_source, "function isEmptyString("),
-        _extract_js_function(mass_translate_source, "function isZeroExitCode("),
-        _extract_js_function(mass_translate_source, "function hasOnlyKeys("),
+        _extract_function_source(mass_translate_source, "function isNonEmptyString("),
+        _extract_function_source(mass_translate_source, "function isEmptyString("),
+        _extract_function_source(mass_translate_source, "function isZeroExitCode("),
+        _extract_function_source(mass_translate_source, "function hasOnlyKeys("),
     ]
-    key_consts = re.findall(r"^const ([A-Za-z_$][\w$]*_KEYS)\s*=", mass_translate_source, re.M)
+    # Collected from the CODE PROJECTION, so a `const FOO_KEYS = ...` sitting
+    # in a comment cannot add a name whose real declaration does not exist.
+    key_consts = re.findall(r"^const ([A-Za-z_$][\w$]*_KEYS)\s*=",
+                            _js_code_only(mass_translate_source), re.M)
     assert key_consts, "no `const *_KEYS` declarations found in the template"
-    parts += [_extract_js_const(mass_translate_source, name) for name in key_consts]
-    parts.append(_extract_js_const(mass_translate_source, "NO_FAILURE_EVIDENCE"))
-    parts.append(_extract_js_function(mass_translate_source, "function hasFailureEvidence("))
+    parts += [_extract_const_statement(mass_translate_source, name) for name in key_consts]
+    parts.append(_extract_const_statement(mass_translate_source, "NO_FAILURE_EVIDENCE"))
+    parts.append(_extract_function_source(mass_translate_source, "function hasFailureEvidence("))
     return "\n".join(parts)
 
 
@@ -1882,7 +2285,7 @@ def run_guard(tmp_path, mass_translate_source: str, guard: str, raws: list) -> l
     script = tmp_path / f"{guard}_probe.js"
     script.write_text(
         _guard_harness_preamble(mass_translate_source) + "\n"
-        + _extract_js_function(mass_translate_source, signature) + "\n"
+        + _extract_function_source(mass_translate_source, signature) + "\n"
         f"console.log(JSON.stringify(JSON.parse(process.argv[2]).map({guard})));\n",
         encoding="utf-8",
     )
