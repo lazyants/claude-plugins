@@ -23,6 +23,65 @@ You can rely on three Obsidian-specific features:
 You do not own the vault. The user may already have a custom layout, Dataview dashboards,
 templater scripts, and graph-view conventions. Add to it; never restructure it.
 
+## Vault root
+
+Every path this adapter resolves against the vault itself (as opposed to the project
+root — see "Coordinate systems" below) is expressed relative to `<vault-root>`, a
+directory this adapter derives once per run. There is no `publish.vault_root` profile
+key in 1.7.0 — nothing in the profile names the vault root directly.
+
+**Selection — one anchor, no tie-break.**
+The only discovery anchor is `publish.chapters_dir` — a `chapters_dir` that already IS
+the vault root counts too. Walking upward through its ancestors, collect every ancestor
+that holds a readable `.obsidian/` directory, all the way to the filesystem root — stop
+once an ancestor's own parent is itself, never earlier. There is deliberately no lower
+bound on the walk: stopping at the project root would wrongly exclude an absolute
+`chapters_dir` that legitimately points outside the project (every `publish.*` value may
+be absolute — see "Coordinate systems" below).
+
+- **Exactly one** `.obsidian/` ancestor ⇒ that directory is `<vault-root>`.
+- **Zero** found ⇒ halt: "No Obsidian vault found above `<chapters_dir>` — open the
+  vault in Obsidian once so `.obsidian/` exists, or point `publish.chapters_dir` inside
+  an existing vault, then re-run."
+- **Two or more** found ⇒ halt: "Multiple `.obsidian/` ancestors found above
+  `<chapters_dir>` — this vault topology is unsupported until a `publish.vault_root`
+  override ships. Neither the innermost nor the outermost marker is a safe default: a
+  stale nested vault defeats innermost, a genuine nested vault defeats outermost, and
+  disk markers alone cannot tell the two apart — only the operator knows which vault is
+  active." This halt is deliberately fail-closed: a confident wrong guess would silently
+  publish into the wrong vault, and resolving it today means removing or relocating a
+  stale `.obsidian/` yourself — this skill will not do that automatically.
+- **An ancestor exists on disk but is unreadable during the walk** ⇒ halt, naming the
+  exact path: "Cannot read `<path>` while walking for the vault root — grant
+  read/execute access (e.g. `chmod +rx <path>`), or re-run as an account that can
+  traverse it." Never treat an unreadable ancestor as "no marker here" — silently
+  skipping past it would let the walk continue and select an outer, wrong vault.
+
+**Validation — everything else is tested against `<vault-root>`; nothing else selects
+it.** `publish.chapters_dir`, `publish.index_file` and `publish.glossary_dir` must each
+resolve **under** `<vault-root>` — a failure here means that path is wrong, never that a
+wider root should be chosen instead. `publish.glossary_seed` participates in neither
+selection nor this validation: the schema requires the key, but the base skill only
+consumes it "when set and readable", so an empty value is a legal "unset" and this
+adapter does not strengthen that to mandatory (see "INDEX wiring" below).
+
+**Path canonicalization — defined for paths that may not exist yet.** A first-run
+`chapters_dir`, or an `index_file` whose file has not been created yet, cannot be
+resolved with a plain `realpath`. Resolve in this order: (1) turn a project-root-relative
+value into an absolute one — an already-absolute value passes through unchanged; (2)
+lexically normalize `.` and `..` segments; (3) canonicalize the longest **existing**
+ancestor, resolving its symlinks; (4) re-append the normalized non-existent suffix; (5)
+compare paths with a **segment-aware** prefix/equality test, never a raw string prefix —
+`/vault2` must never count as inside `/vault`; (6) an `ENOENT` **in the non-existent
+trailing suffix** is expected on a first run and is not an error, but every other
+resolution failure (`ENOTDIR`, `ELOOP`, a permission error, any other I/O error) halts
+the same way an unreadable ancestor does above — never silently read as "does not exist
+yet".
+
+**Coordinate systems.** Every `publish.*` value is project-root-anchored (see "What
+'Obsidian vault' implies" above); `<vault-root>` is the only vault-anchored quantity this
+adapter computes, and the two coordinate systems are never mixed.
+
 ## Layout you produce
 
 Resolve every path from profile keys. The shape below is the discipline; the literal
@@ -37,7 +96,6 @@ folder names come from the profile.
 {{capture.output_dir}}/<group>/<chapter-slug>/NN-*.png  # grouped chapter's screenshots
 {{publish.glossary_dir}}/
   index.md                                       # canonical glossary page (see glossary-discipline.md)
-{{publish.glossary_seed}}                        # vault-wide INDEX that tracks the glossary row
 ```
 
 Chapter slugs are **always English kebab-case** even when the prose is in another
@@ -120,6 +178,31 @@ the same directory as the chapter so no `../` climb is ever needed. This is docu
 only: the existing embed-exists and under-vault gates below are unaffected by depth, so
 there is no new gate here.
 
+**The glossary wikilink is a different spelling with a different Quartz sensitivity.**
+The embed climb above is about **relative-path depth**; the glossary link (see "Glossary
+backlink discipline" below) is vault-root-relative, and when Quartz's `shortest` mode
+resolves it at all, it does so via the **content-root-absolute** fallback mentioned
+above — so its sensitivity is to a different relationship entirely: the Quartz content
+root versus `<vault-root>`, not climb depth.
+
+| content root vs `<vault-root>` | behavior of the glossary wikilink |
+|---|---|
+| **==** `<vault-root>` | resolves under `shortest` (`v4` via the root-absolute fallback, `v5` via multi-segment suffix) and under `absolute` |
+| **⊊** `<vault-root>` (e.g. a `content/` subdirectory) | carries a stale leading prefix ⇒ does **not** resolve |
+| **⊋** `<vault-root>` (the vault is nested inside the content root) | the target lacks the nesting prefix ⇒ **version-dependent**: fails under `v4` `shortest`/`absolute`, but `v5`'s multi-segment suffix matching may resolve it |
+| disjoint, or the vault is not published through Quartz at all | the glossary is not on the site; **no** spelling repairs this |
+
+It does **not** resolve under Quartz's `markdownLinkResolution: relative` — that mode
+expects a source-relative target, the coordinate system the embed formula above uses,
+not a vault-root-relative one.
+
+**This conditionality does not undermine the choice.** This adapter's contract is
+Obsidian (`publish.target: obsidian_vault`), and the vault-root-relative form is the
+only spelling that resolves from every source note there. There is no spelling that is
+universal once a Quartz content root differs from `<vault-root>` — keep the form, and
+treat Quartz as a separately configured publishing constraint rather than inventing a
+Quartz-content-root profile key.
+
 ## Frontmatter
 
 When `publish.frontmatter_required: true`, every chapter starts with YAML frontmatter:
@@ -165,14 +248,37 @@ wikilinks-on case only.
 ## INDEX wiring (do all of these on every chapter create/update)
 
 These are the Obsidian-specific writes that turn a new `.md` file into a discoverable
-chapter. Skip any of them and the chapter exists but no reader will find it.
+chapter. Skip any of them and the chapter exists but no reader will find it. Item 2 is
+the one exception to "do all of these" — see its own conditional note below.
 
 1. **`{{publish.index_file}}`** — the section TOC. What "wire the chapter" means depends
    on whether the manifest entry sets `group` (`references/manifest-discipline.md`).
 
-   **Flat entries** (no `group`, the 1.4.1 shipped case) — add a row for the new chapter
-   under the appropriate heading. Order alphabetically by display title unless the
-   existing file uses a different order — match what is there.
+   **Flat entries** (no `group`, the 1.4.1 shipped case) — a flat entry never resolves a
+   container, so wiring here is a membership check against one expected link target.
+   A flat entry's expected link target uses `dirname(index_file)` — never
+   `dirname(chapter_file)`, a different, chapter-relative coordinate system used
+   elsewhere in this file: for `publish.wikilinks: false`,
+   `relative(dirname(index_file), chapter_file)`; for wikilinks (the Obsidian default),
+   the bare chapter slug. Scan `{{publish.index_file}}` for a line matching that target
+   with `locateChapterLine` (the same helper the grouped Step 0 below calls) and branch
+   on the match count:
+
+   - **Two or more matches** — halt: a flat entry gets no special case here, the same
+     duplicate halt fires exactly as it does for the grouped branch below.
+   - **Exactly one match** — a flat entry has no container to verify, so that one line
+     means this chapter is already wired; go straight to the link-integrity gate below.
+   - **No match** — append a row for this chapter
+     under whichever heading the file already uses for its flat chapter list; a flat
+     entry never creates a container of its own. Order alphabetically by display title
+     unless the existing file uses a different order — match what is there. The row's
+     display text is always the manifest entry's `title`, never a slug or a hand-typed
+     label.
+
+   Two worked examples (`publish.wikilinks: false`): `index_file` and the chapter share
+   one directory ⇒ the target is the bare `<slug>.md`, no `../` climb; a repo-root
+   `index_file` with chapters nested under `publish.chapters_dir` ⇒ the target is the
+   full `chapters_dir`-prefixed path, e.g. `handbook/<slug>.md`.
 
    **Grouped entries** (`anyGroup` manifests) additionally resolve a container, so wiring
    runs a fixed sequence every time — first run and re-run alike:
@@ -226,10 +332,11 @@ chapter. Skip any of them and the chapter exists but no reader will find it.
    and the recipe in `references/revalidation.md` (see `SKILL.md` W6). Step 0 above only
    ever finds or adds a line; it never moves or deletes one.
 
-2. **`{{publish.glossary_seed}}`** — the vault-wide INDEX that tracks section status.
-   Confirm there is a `handbook` row with status `active` listing the section. If the
-   row is missing, add it. If it exists with status `seed`, flip to `active` once your
-   first real chapter lands.
+2. **`{{publish.glossary_seed}}` reconciliation (conditional)** — only when
+   `publish.glossary_seed` is set and readable, confirm there is a `handbook` row with
+   status `active` listing the section (add it if missing; flip `seed` to `active` once
+   your first real chapter lands). Skip this item entirely when the key is unset — a
+   vault with no seed index has nothing to reconcile.
 
 3. **Dashboard / graph entry points** (only if the vault has one). Many vaults use a
    `Dashboard.md` with Dataview blocks scoped to a folder. The pattern is:
@@ -260,7 +367,7 @@ chapter. Skip any of them and the chapter exists but no reader will find it.
 `publish.wikilinks: true` (Obsidian default):
 
 - Internal chapter link: `[[<chapter-slug>|Display title]]`
-- Glossary link: `[[{{publish.glossary_dir}}/index#Term|Term]]`
+- Glossary link: see "Glossary backlink discipline" below for the exact target.
 - The pipe `|` separates target from display; omit it when display equals target.
 - Wikilinks resolve by basename, so grouping never changes this form — a chapter slug
   stays globally unique across every group (`references/manifest-discipline.md`), so no
@@ -287,11 +394,20 @@ Every domain term's **first occurrence** in a chapter links to its glossary entr
 glossary itself lives at `{{publish.glossary_dir}}/index.md` and is owned by
 `references/glossary-discipline.md` — this adapter only encodes the linking syntax:
 
-- Wikilinks on: `[[{{publish.glossary_dir basename}}/index#TermHeading|TermHeading]]`
+- Wikilinks on: `[[<vault-rel>/index#TermHeading|TermHeading]]`, where `<vault-rel>` is
+  `relative(<vault-root>, {{publish.glossary_dir}})` — vault-root-relative, **not** the
+  basename form 1.6.0 shipped. Worked example (vault root `vault/`, `glossary_dir:
+  vault/knowledge/glossary`): `[[knowledge/glossary/index#Term|Term]]`.
 - Wikilinks off, any manifest — every chapter the skill WRITES uses the full-target
   formula (write-time canon; retained chapters keep whatever spelling they already have,
   per the link-integrity gate below):
   `[TermHeading](relative(dirname(chapter_file), {{publish.glossary_dir}}/index.md)#termheading)`.
+
+Two wrong spellings shipped in 1.6.0 for want of this rationale, so record it: the raw
+`publish.glossary_dir` path (project-root-anchored, the wikilinks-on form 1.6.0 shipped)
+is unresolvable as a wikilink target — worse, clicking it in Obsidian **creates a bogus
+file** inside the vault; the bare-basename form resolves in Obsidian only through the
+non-segment-aware last-resort suffix tier, and under **no** Quartz mode at all.
 
 The glossary entry heading is the term in `glossary.canonical_term_language`; the
 English code identifier is a field inside the entry, not the heading.
@@ -306,13 +422,20 @@ failure:
    `{{capture.output_dir}}/<chapter-slug>/` for a flat entry,
    `{{capture.output_dir}}/<group>/<chapter-slug>/` for a grouped one
    (`chapterAssetDir(entry)`, D3) — no orphan embeds, no captures the run did not produce.
-   The resolved target must also stay inside the active Obsidian vault — halt if
-   `capture.output_dir` resolves outside the vault root (e.g.
+   The resolved target must also stay inside `<vault-root>` (see "Vault root" above) —
+   halt if `capture.output_dir` resolves outside it (e.g.
    `capture.output_dir: screenshots` from a chapter at `vault/handbook/foo.md` resolves
-   to `../../screenshots/…`, outside the vault, so the embed is broken and unportable). This
-   containment check applies unchanged at any group depth. Unlike the static-Markdown
-   target, `capture.output_dir` is **not** required to sit under `publish.chapters_dir` —
-   sibling vault subtrees resolve fine as long as the target stays inside the vault.
+   to `../../screenshots/…`, outside the vault, so the embed is broken and unportable).
+   This containment check applies unchanged at any group depth, and it applies equally
+   under `publish.wikilinks: false` — the glossary link there is filesystem-relative too
+   (see "Glossary backlink discipline" below), so this is the adapter-wide "inside the
+   vault" contract, not a wikilink-syntax concern. Unlike the static-Markdown target,
+   `capture.output_dir` is **not** required to sit under `publish.chapters_dir` —
+   sibling vault subtrees resolve fine as long as the target stays inside `<vault-root>`.
+   `capture.output_dir` deliberately plays no part in selecting `<vault-root>` itself —
+   it is validated only here, which keeps this check meaningful: widening which
+   `.obsidian/` marker counts as the root could otherwise paper over a capture
+   destination that has drifted outside the vault.
 2. Every wikilink target (`[[…]]`) resolves to either an existing `.md` file in the
    vault or an existing heading anchor in the glossary. Broken wikilinks render as
    red placeholders in Obsidian and are silent in plain Markdown views. When
@@ -336,8 +459,9 @@ failure:
 3. The chapter has ≥2 outbound links in its Related block (outbound-link floor).
 4. The frontmatter `language` matches `language.code`; the section labels match
    `publish.section_labels.*` verbatim.
-5. `{{publish.index_file}}` lists the chapter — under its `group_title` container, for a
-   grouped entry (per "INDEX wiring" above); `{{publish.glossary_seed}}` has the
-   `handbook` row marked `active`.
+5. `{{publish.index_file}}` lists the chapter — under its `group_title` container for a
+   grouped entry, or under its flat chapter-list heading for a flat one (both per "INDEX
+   wiring" above); when `{{publish.glossary_seed}}` is set and readable, its `handbook`
+   row is marked `active` — this half of item 5 is skipped when the key is unset.
 
 A chapter that fails any of these is unpublished, not "almost done" — fix and re-verify.

@@ -2,6 +2,25 @@
 
 All notable changes to `lazyants/claude-plugins` are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is per-plugin, not repo-wide.
 
+## [enduser-handbook 1.7.0] — 2026-07-23
+
+De-hardcodes the reference-assets doc test suite's enumeration, fixes both wrong glossary wikilink spellings down to one vault-root-relative form, and specifies the flat/group-free INDEX target at the same precision as the grouped one. Closes #262. Closes #247. Closes #248.
+
+### Fixed
+- **The Obsidian glossary wikilink was wrong two different ways** (#247) — the raw `{{publish.glossary_dir}}/index#term` path (the same shape #220 already fixed for the wikilinks-off case) and, separately, a self-contradiction under `publish.wikilinks: true`. Both are replaced by one vault-root-relative `relative(<vault-root>, {{publish.glossary_dir}})` form, stated at a single site instead of being repeated — and able to drift — per branch.
+- **`tests/reference-assets.test.sh` hardcoded its own coverage** (#262) — a nine-name list of unit-test files to re-run, plus three separate doc-scan lists kept in sync with the reference tree by hand. `profile-version.differential.test.mjs` was never on the nine-name list, so a whole test file was silently never executed; new asset or reference files added since could go unscanned the same way. Both mechanisms are now derived from the directory via a fail-closed glob helper, so a new file is covered the moment it exists rather than the moment someone remembers to list it.
+- **A false "pinned by unit test" claim in `static-md.md`** — the grouped container-line half of the claim was never actually exercised by the cited test.
+
+### Changed
+- **The flat / group-free INDEX target reaches grouped-level precision in both adapters** (#248), closing two different gaps. The Obsidian adapter's flat branch stated no link-target formula at all, in either `wikilinks` mode — now added. The static-Markdown adapter already stated the formula, but its group-free flow was incompletely specified: the flat membership/duplicate outcomes (including the duplicate-slug halt) lived entirely under a `### Grouped index wiring (anyGroup manifests only)` heading, so a group-free reader was told the whole section was inapplicable and never saw them; there was also no index→chapter worked example for either degenerate layout, the row's display text was never bound to the manifest `title`, and the activation rule falsely claimed a unit-test pin that does not exist (see the false "pinned by unit test" claim under Fixed). All of these are now specified.
+- **The glossary rule collapses to one site** (#247) — see Fixed above.
+- **A newly-bound Obsidian vault root**, with three new halts: zero-marker, ambiguous-marker, and unreadable-ancestor. The ambiguous two-marker case is an **unsupported topology**, not a correctable error — it halts rather than guessing which marker is authoritative.
+- **`publish.glossary_seed` becomes conditional in the Obsidian adapter** — the one actual behaviour change in this release, and its scope is precise: a profile with a set, readable `glossary_seed` keeps exactly today's reconciliation behaviour; only the unset/unreadable branch changes, from silently required to skipped. No deprecation cycle — this corrects the Obsidian adapter *to* the base skill's long-standing "when set and readable" contract, not a new one.
+
+### Testing
+- `reference-assets.test.sh`: 455 unconditional core assertions, +10 when `node` is on `PATH` (the executable-unit-test block, now a glob over all 10 `*.test.mjs` files — one assertion per file — instead of the old hardcoded nine-name list, so it now also covers `profile-version.differential.test.mjs`), +1 when `esbuild` is reachable (the optional TypeScript syntax check, unchanged). The two optional blocks are independent of each other.
+- `node --test plugins/enduser-handbook/tests/*.test.mjs`: 462 tests, unchanged — this release adds no unit test.
+
 ## [multi-profile-plugins 1.0.0] — 2026-07-21
 
 Initial release. Knowledge + read-only diagnostics for Claude Code plugin behavior across multiple `CLAUDE_CONFIG_DIR` profiles.

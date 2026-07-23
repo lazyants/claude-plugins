@@ -51,14 +51,17 @@ English kebab-case, one level (nested groups like `a/b` are out of scope for 1.5
 
 **Activation rule.** This adapter's group-aware machinery — the grouped branch of the chapter
 path above, and the grouped index-wiring container logic further down — is gated on
-`anyGroup(entries)`, pinned by unit test: a wholly group-free manifest never produces a grouped
-path or a container line anywhere in this adapter. `assets/lib/chapter-paths.mjs`'s own activation
-rule has **two 1.6.0 exceptions that are group-free-aware by design and no longer consult
-`anyGroup`: `staticEmbedPath` (see "Assets" below) and `validateGroups` (see
-`manifest-discipline.md`)**. That count is a property of the **helper module**, not a ceiling on
-adapter behavior — an individual publish-target adapter (this one, or another) may carry its own
-group-free behavior changes on top of it, so `anyGroup` gating must never be assumed to cover
-everything an adapter does.
+`anyGroup(entries)`. The grouped-**path** half is pinned by unit test: a wholly group-free
+manifest never produces a grouped chapter path. The grouped-**index-line** half is **not**
+independently pinned — no code in this repo emits index lines at all, so no direct
+`anyGroup(...) === false` assertion exists to run one; both mutation directions are exercised
+only transitively, through whatever wiring behavior consumes `anyGroup`.
+`assets/lib/chapter-paths.mjs`'s own activation rule has **two 1.6.0 exceptions that are
+group-free-aware by design and no longer consult `anyGroup`: `staticEmbedPath` (see "Assets"
+below) and `validateGroups` (see `manifest-discipline.md`)**. That count is a property of the
+**helper module**, not a ceiling on adapter behavior — an individual publish-target adapter
+(this one, or another) may carry its own group-free behavior changes on top of it, so
+`anyGroup` gating must never be assumed to cover everything an adapter does.
 
 ## Assets
 
@@ -228,11 +231,19 @@ required writes**, plus one conditional `publish.glossary_seed` reconciliation:
 
 1. **`{{publish.index_file}}`** — the flat table of contents (`SUMMARY.md`, `README.md`, an
    MkDocs `nav:` list, etc.). Add **one** TOC line linking to the new chapter, computed relative
-   to the index file's own directory: `relative(dirname(index_file), chapter_file)`. Order
-   alphabetically by display title unless the existing file uses a different order — match what
-   is there. Do not rewrite unrelated rows. **For a grouped entry (`anyGroup` manifests), the
-   line is wired under a `<group_title>` container** instead of directly into the flat list — see
-   "Grouped index wiring" below.
+   to the index file's own directory: `relative(dirname(index_file), chapter_file)`. The link's
+   display text is the manifest entry's `title` verbatim — never the slug, never a paraphrase.
+   Order alphabetically by display title unless the existing file uses a different order — match
+   what is there. Do not rewrite unrelated rows. **For a grouped entry (`anyGroup` manifests),
+   the line is wired under a `<group_title>` container** instead of directly into the flat list —
+   see "Grouped index wiring" below.
+   - **Degenerate — same-directory index** (`index_file: vault/handbook/SUMMARY.md`, chapter in
+     the same `vault/handbook/` directory): `relative(dirname(index_file), chapter_file)`
+     degenerates to the bare filename — `[Title](chapter-slug.md)`. This is the index→chapter
+     direction (the TOC line points at the chapter); see "Chapter → index" above for the reverse.
+   - **Repo-root index** (`index_file: SUMMARY.md`, chapter in `vault/handbook/`), same
+     index→chapter direction: `relative(dirname(index_file), chapter_file)` climbs down from the
+     repo root — `[Title](vault/handbook/chapter-slug.md)`.
 2. **Glossary entry** — for each new domain term, add or link its entry under
    `{{publish.glossary_dir}}/index.md` (the page is owned by `references/glossary-discipline.md`;
    this adapter only encodes the relative link syntax).
@@ -240,19 +251,12 @@ required writes**, plus one conditional `publish.glossary_seed` reconciliation:
    is set and readable, reconcile its row as that file's convention requires; when it is unset,
    proceed without it — a static docs tree often has no seed index.
 
-### Grouped index wiring (`anyGroup` manifests only)
-
-Both shipped adapters wire the index before their link-integrity gate, so every wiring halt
-below must be convergent on re-run: a first run halts with instructions, the container and
-chapter line get added (by you, or by the user for a non-heading index), and the very next run's
-step 0 finds them and proceeds without re-halting.
-
 **Step 0 — idempotency check, form-agnostic, and it runs BEFORE any container
 classification.** This adapter only ever emits path links — `wikilinks: false` is a hard
 requirement here (see "Halt conditions") — so the expected link target is always the same
 coordinate system item 1 above uses:
 
-`relative(dirname(index_file), chapter_file)`
+`relative(dirname(index_file), chapter_file)` — step 0's own target.
 
 Locate the chapter's current line by that target via `locateChapterLine(indexLines,
 expectedTarget)` ⇒ `{present, containerTitle, indexForm, multiple}`. `indexForm` is
@@ -269,6 +273,21 @@ two `null` cases are not the same signal and are handled separately below:
 - **Flat entry, line absent** ⇒ not a step-0 halt — append the flat TOC line per item 1 above,
   exactly as shipped in 1.4.1, regardless of index form. Only a GROUPED entry's container
   machinery is headings-form-only.
+
+**A grouped entry** (`anyGroup` manifests) — whether its line above came back present or
+absent — is resolved in "Grouped index wiring" below, which reuses this same step-0 result
+rather than locating the line a second time.
+
+### Grouped index wiring (`anyGroup` manifests only)
+
+Both shipped adapters wire the index before their link-integrity gate, so every wiring halt
+below must be convergent on re-run: a first run halts with instructions, the container and
+chapter line get added (by you, or by the user for a non-heading index), and the very next run's
+step 0 finds them and proceeds without re-halting.
+
+These outcomes reuse the step-0 result computed above (`containerTitle`, `indexForm`,
+`multiple`) and cover a **grouped** entry only — step 0 above already decided the flat case:
+
 - **Grouped entry, line present, `indexForm: 'non-heading'`** ⇒ wiring complete, proceed — a
   non-heading index has no container concept to verify against, so line presence alone is the
   whole check. The per-chapter line-presence check is deliberately form-agnostic; container
