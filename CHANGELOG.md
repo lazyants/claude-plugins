@@ -2,6 +2,17 @@
 
 All notable changes to `lazyants/claude-plugins` are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is per-plugin, not repo-wide.
 
+## [enduser-handbook 1.8.1] — 2026-07-23
+
+Documents (with a regression lock, not a behavior change) why tab-prefixed fence markers in `_section_contains` can never produce an incorrect halt decision, and adds the missing "Write-time canon" citation to two previously-uncited `obsidian-vault.md` mentions. Closes #257. Closes #259.
+
+### Added
+- **Tab-handling proof + regression lock for `_section_contains`** (#257) — the original issue asked whether a leading tab in a fence marker's indentation could cause `leading_spaces()`'s character-offset and CommonMark's column-count semantics to disagree. A structural proof (documented in a comment above `leading_spaces()`) shows they never can: any leading tab forces the derived `rest` to begin at that unconsumed tab (which can never match a fence marker), and independently forces the true CommonMark column past the fence-gate threshold — so the two never disagree, for any input. No code change; two new self-test fixtures lock in the current (correct) behavior as a forward-looking regression guard.
+- **Missing "Write-time canon" citations in `obsidian-vault.md`** (#259) — two mentions of write-time canon had no citation back to `revalidation.md`'s "Write-time canon" section, unlike the equivalent `static-md.md` passages. Both sites now cite it, matching `static-md.md`'s exact phrasing, with new test assertions pinning the citation text at each site.
+
+### Testing
+- `reference-assets.test.sh`: +4 assertions (2 new #257 self-test fixtures, 2 new #259 `has_in_section` citation pins). Absolute totals are environment-dependent (the suite's optional esbuild-gated TypeScript check adds 0 or 1 assertion depending on local tooling) so only the delta is stated here — see the suite's own conditional-discovery note.
+
 ## [enduser-handbook 1.8.0] — 2026-07-23
 
 Obsidian-vault chapter wikilinks and INDEX targets become vault-root-relative, and the formula that computes them is now exported and directly tested. Closes #294. Closes #295.

@@ -91,6 +91,16 @@ has_ci() {
 _section_contains() {
   local file="$1" heading="$2" needle="$3"
   awk -v heading="$heading" -v needle="$needle" '
+       # #257: this counts SPACE characters only, so a leading TAB reports indent=0 and `rest`
+       # (computed below from `indent`) starts AT that unconsumed tab char — whose first
+       # character (`fc`) can never equal a fence marker (` or ~), so a tab-prefixed line never
+       # opens or closes a fence no matter what indent says. Column-wise this is independently
+       # always correct too: CommonMark expands a leading tab to the next multiple-of-4 column,
+       # so a single leading tab already exceeds the <=3 fence threshold used below on its own —
+       # the character-offset behavior and the column-correct answer never disagree, for any
+       # input, not just the fixtures tested. There is no code fix here: a tab-stop-expansion
+       # "fix" would be a pure no-op with zero observable behavior change. See the open-tab/
+       # close-tab self-tests below for the regression lock.
        function leading_spaces(s,    i, n) {
          n = length(s); i = 1
          while (i <= n && substr(s, i, 1) == " ") i++
@@ -510,6 +520,22 @@ has_in_section "self-test: a 4-space-indented run does not open a fence (open-in
 printf '## Target\n``\nNEEDLE\n## Next\n' > "$SELFTEST_DIR/open-minlen.md"
 has_in_section "self-test: a 2-character run does not open a fence (open-minimum-length rule)" \
   "$SELFTEST_DIR/open-minlen.md" '## Target' 'NEEDLE'
+
+# #257 [forward-looking regression lock, not red-before-green — see the note above
+# leading_spaces() for the proof that there is no current bug and nothing to fix]: a leading TAB is
+# not a leading SPACE, so it must not open or close a fence either, same claim as the space-based
+# open-indent/close-indent fixtures above but on the OTHER axis (character mismatch, not column
+# overflow) — verified independently load-bearing: reverting either the tab fixture or the
+# space-indent fixture alone still leaves the other's mutant caught (see PR description for the
+# scratch mutation used to confirm this pair goes red if `leading_spaces()` is ever changed to
+# count tabs as spaces).
+printf '## Target\n\t```\nNEEDLE\n## Next\n' > "$SELFTEST_DIR/open-tab.md"
+has_in_section "self-test: a tab-led run does not open a fence (#257, tab-vs-space opener gate)" \
+  "$SELFTEST_DIR/open-tab.md" '## Target' 'NEEDLE'
+
+printf '## Target\n```\n\t```\n```\nNEEDLE\n## Next\n' > "$SELFTEST_DIR/close-tab.md"
+has_in_section "self-test: a tab-led run does not close an open fence (#257, tab-vs-space closer gate)" \
+  "$SELFTEST_DIR/close-tab.md" '## Target' 'NEEDLE'
 
 # First-occurrence-only heading binding (found_heading == 0): if the exact heading text appears a
 # SECOND time later in the file, that second occurrence must not re-open (or extend) the section —
@@ -1899,6 +1925,19 @@ has_in_section "obsidian-vault: wikilinks-off internal-link formula uses dirname
 has_in_section "obsidian-vault: wikilinks-off glossary-link formula uses dirname(chapter_file)" \
   "$OMD" '## Glossary backlink discipline' \
   '`[TermHeading](relative(dirname(chapter_file), {{publish.glossary_dir}}/index.md)#termheading)`'
+# #259: both "write-time canon" mentions under this heading (the internal-chapter-link formula)
+# and under "Glossary backlink discipline" (below) previously named the concept without citing
+# where it's actually defined — a reader had no path from the mention to `revalidation.md`'s own
+# "Write-time canon" section (:65) unless they already knew to look there. static-md.md:126 already
+# cites it in exactly this form; these two pins mirror that same citation string at both
+# previously-uncited sites, section-scoped so a future rewrite can't satisfy one and silently drop
+# the other.
+has_in_section "obsidian-vault: internal-chapter-link write-time-canon mention cites revalidation.md" \
+  "$OMD" '## Wikilinks vs Markdown links' \
+  '(see "Write-time canon" in `revalidation.md`)'
+has_in_section "obsidian-vault: glossary-link write-time-canon mention cites revalidation.md" \
+  "$OMD" '## Glossary backlink discipline' \
+  '(see "Write-time canon" in `revalidation.md`)'
 # round-7: the wikilinks-off fallback told authors to skip the Related block and glossary linking
 # entirely, while a separate rule required every Related block to hold >=2 wikilinks with a halt —
 # unsatisfiable when wikilinks are off, and contradicting the very canon #220 exists to ship. A4

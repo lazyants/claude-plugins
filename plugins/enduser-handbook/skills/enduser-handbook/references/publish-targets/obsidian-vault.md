@@ -462,8 +462,9 @@ the one exception to "do all of these" — see its own conditional note below.
 
 - Internal chapter link, any manifest — every chapter the skill WRITES (new chapters, and
   chapters a manual-migration rewrite touches) uses the full-target formula (write-time
-  canon; retained chapters keep whatever spelling they already have — the link-integrity
-  gate below checks that the target resolves, not that the spelling matches this formula):
+  canon (see "Write-time canon" in `revalidation.md`); retained chapters keep whatever
+  spelling they already have — the link-integrity gate below checks that the target
+  resolves, not that the spelling matches this formula):
   `[Display title](relative(dirname(chapter_file), <target-chapter-file>))`. For a
   group-free manifest, linking and target chapters share one directory, so this formula
   naturally evaluates to `<chapter-slug>.md` — the same spelling as the shipped 1.4.1
@@ -493,8 +494,8 @@ glossary itself lives at `{{publish.glossary_dir}}/index.md` and is owned by
   basename form 1.6.0 shipped. Worked example (vault root `vault/`, `glossary_dir:
   vault/knowledge/glossary`): `[[knowledge/glossary/index#Term|Term]]`.
 - Wikilinks off, any manifest — every chapter the skill WRITES uses the full-target
-  formula (write-time canon; retained chapters keep whatever spelling they already have,
-  per the link-integrity gate below):
+  formula (write-time canon (see "Write-time canon" in `revalidation.md`); retained
+  chapters keep whatever spelling they already have, per the link-integrity gate below):
   `[TermHeading](relative(dirname(chapter_file), {{publish.glossary_dir}}/index.md)#termheading)`.
 
 Two wrong spellings shipped in 1.6.0 for want of this rationale, so record it: the raw
