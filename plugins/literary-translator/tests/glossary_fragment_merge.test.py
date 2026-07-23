@@ -628,6 +628,34 @@ def test_merge_batches_rejects_expect_source_forms_file(tmp_path):
     assert "coverage is enforced by --check-batch per fragment" in proc.stderr, proc.stderr
 
 
+def test_validate_only_rejects_expect_source_forms_file(tmp_path):
+    # VALIDATE-ONLY -- the default mode reached when NO mode flag is passed --
+    # reads no fragment and runs no coverage check, so it has no source-form
+    # coverage it COULD verify. Passing --expect-source-forms-file with no mode
+    # flag must FAIL LOUD (exit 2), not silently drop the flag and return
+    # {"success": true} as if coverage had been checked (PR #304 silent-ignore
+    # regression guard). A VALID canon is staged so that, absent the fix,
+    # validate-only would REACH success -- proving the flag is what is ignored,
+    # not some unrelated validation error.
+    root = make_durable_root(tmp_path)
+    write_canon(root, canon_file_doc())
+    manifest = write_manifest(root, ["Guerin"])
+    cmd = [
+        sys.executable, str(root / "scripts" / "canon_validate.py"),
+        "--research-mode", "live",
+        "--expect-source-forms-file", str(manifest),
+    ]
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=30, cwd=str(root))
+    assert proc.returncode == 2, proc.stdout + proc.stderr
+    assert (
+        "validate-only (no mode flag) does not accept --expect-source-forms-file"
+        in proc.stderr
+    ), proc.stderr
+    # "Say why", like the other refusals: point the operator at the modes that
+    # DO enforce coverage rather than merely rejecting the flag.
+    assert "--check-batch or --verify-merged" in proc.stderr, proc.stderr
+
+
 # ===========================================================================
 # 5. canon.json-untouched invariants -- CONTRACT §3's reordering fix.
 # ===========================================================================

@@ -271,11 +271,18 @@ class ModeSpec(NamedTuple):
 # tests/canon_stamp_conservation.test.py fails if a parser flag is missing
 # from the table or vice versa -- that row is unforgettable.
 #
-# The scope limit is real, not theoretical: VALIDATE-ONLY, the default mode
-# reached when no mode flag is passed at all, has no flag, no dest and no row
-# here, so it sits outside the table and outside every guarantee above. Any
-# future flagless mode inherits the same gap. The drift test compares parser
-# dests against table dests, so it cannot see a mode that has neither.
+# The scope limit is real but narrower than "outside every guard": VALIDATE-
+# ONLY, the default mode reached when no mode flag is passed at all, has no
+# flag, no dest and no row here, so it sits outside the TABLE. It is not
+# outside every guard, though -- main() refuses --expect-source-forms-file
+# for it with an explicit `elif not selected_modes` check (it reads no
+# fragment, exactly like --init), so the silent-ignore that once returned
+# {"success": true} without checking coverage is closed. The residual is only
+# that it stays invisible to the TABLE-DRIVEN guards -- mutual exclusion and
+# --batch compatibility -- and to the drift test, which compares parser dests
+# against table dests and so cannot see a mode that has neither. Any future
+# flagless mode inherits that residual and must be guarded by hand the same
+# way.
 #
 # What it does NOT guarantee: adding a mode is still THREE edits -- a row
 # here, an `add_argument()` in build_arg_parser(), and a dispatch branch in
@@ -1676,14 +1683,28 @@ def main(argv=None) -> int:
     source_forms_refusers = [
         spec for spec in selected_modes if spec.source_forms_refusal is not None
     ]
-    if source_forms_refusers and args.expect_source_forms_file is not None:
-        parser.error(
-            "; ".join(
-                f"{spec.flag} does not accept --expect-source-forms-file "
-                f"({spec.source_forms_refusal})"
-                for spec in source_forms_refusers
+    if args.expect_source_forms_file is not None:
+        if source_forms_refusers:
+            parser.error(
+                "; ".join(
+                    f"{spec.flag} does not accept --expect-source-forms-file "
+                    f"({spec.source_forms_refusal})"
+                    for spec in source_forms_refusers
+                )
             )
-        )
+        elif not selected_modes:
+            # VALIDATE-ONLY (no mode flag) has no MODE_SPECS row, so the
+            # comprehension above never reaches it -- guard it by hand. It
+            # reads no fragment and runs no coverage check (exactly like
+            # --init), so there is nothing --expect-source-forms-file could
+            # verify; honoring it silently was the false-success bug. Refuse
+            # loudly and point at the modes that DO enforce coverage.
+            parser.error(
+                "validate-only (no mode flag) does not accept "
+                "--expect-source-forms-file -- it reads no fragment and runs "
+                "no coverage check. Pass --check-batch or --verify-merged to "
+                "enforce source-forms coverage."
+            )
     if args.verify_merged and not args.batch:
         parser.error("--verify-merged requires one or more --batch PATH")
     if not args.verify_merged and args.batch is not None and len(args.batch) > 1:
