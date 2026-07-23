@@ -901,6 +901,175 @@ def test_e2e_wait_substring_collision_reports_not_ready(tmp_path):
     assert "skeptic:verify" not in labels
 
 
+# ---------------------------------------------------------------------------
+# #308 P1 fixes: line-oriented sentinel verdicts (sentinelVerdict()) at
+# skeptic-pass-wf.template.js's two sentinel sites -- A' (batch precheck)
+# and B' (batch wait). The #227 fix above (mirroring #228) killed the
+# substring false-POSITIVE; #308 is the false-NEGATIVE dual that whole-
+# string cure introduced -- a benign prose-decorated sentinel misclassified
+# as absent/timed-out. None of these tests need a real on-disk fragment:
+# the mock's precheck/dispatch/wait branches never touch disk themselves
+# (only an explicit ``dispatchWrite`` and the canned merge/verify results
+# do), so an empty-windows assignment is enough, mirroring
+# ``test_e2e_preflight_batch_too_large_dispatches_nothing``'s own fixture.
+# ---------------------------------------------------------------------------
+
+def test_e2e_precheck_decorated_present_still_resume_skips(tmp_path):
+    """Site A' accept: a genuine PRESENT reply decorated with a prose
+    preamble (the observed real #308 shape) must still resume-skip, not
+    fall through to a full dispatch."""
+    durable_root = str(tmp_path)
+    lang_dir = tmp_path / "languages"
+    particle_config = write_particle_config(lang_dir)
+    run_id = "e2e-run-precheck-decorated"
+    batches = [{"index": 0, "assignments": [make_assignment_for_args("Jean", [])]}]
+    plan = {"0": {
+        "precheck": "The precheck command exited 0, confirming the existing fragment is already valid.\n\nPRESENT 0",
+    }}
+
+    out = run_skeptic_workflow(
+        tmp_path=tmp_path, durable_root=durable_root, particle_config=particle_config,
+        run_id=run_id, batch_agent_cap=10_000, batches=batches, plan=plan,
+    )
+    labels = [c["label"] for c in out["calls"]]
+    assert "skeptic:dispatch:0" not in labels
+    assert "skeptic:wait:0" not in labels
+    assert out["result"]["merged"] is True
+
+
+def test_e2e_wait_decorated_ready_is_accepted_not_timeout(tmp_path):
+    """Site B' accept: a genuine READY reply decorated with a prose
+    preamble (the exact #308 evidence reply, journal-verbatim) must be
+    accepted, not misclassified as a timeout."""
+    durable_root = str(tmp_path)
+    lang_dir = tmp_path / "languages"
+    particle_config = write_particle_config(lang_dir)
+    run_id = "e2e-run-wait-decorated"
+    batches = [{"index": 0, "assignments": [make_assignment_for_args("Jean", [])]}]
+    plan = {
+        "0": {
+            "precheck": "ABSENT 0",
+            "wait": "The poll confirmed the review artifact is ready (exit 0).\n\nREADY 0",
+        },
+        # Not reached on the fix (notReadyBatches stays empty), but pins a
+        # clean, deterministic canned answer rather than falling through to
+        # the REAL "skeptic:frozen-check" subprocess branch (which needs
+        # staged scripts) should a future regression misclassify this
+        # reply as not-ready -- mirrors the fail-priority test below.
+        "frozenCheck": {"frozen_input_mismatch": False},
+    }
+
+    out = run_skeptic_workflow(
+        tmp_path=tmp_path, durable_root=durable_root, particle_config=particle_config,
+        run_id=run_id, batch_agent_cap=10_000, batches=batches, plan=plan,
+    )
+    assert out["result"]["merged"] is True
+    labels = [c["label"] for c in out["calls"]]
+    assert "skeptic:merge" in labels
+    assert "skeptic:verify" in labels
+
+
+def test_e2e_precheck_fail_priority_discriminating_order(tmp_path):
+    """Fail-priority, discriminating order (PLAN-308 sec3 item 3's round-3
+    codex finding): ABSENT before a trailing PRESENT line must still
+    regenerate -- proves the fail-sentinel scan runs over every line, not
+    just the last one (a last-line-only reader would wrongly accept this,
+    since PRESENT is the reply's own final line)."""
+    durable_root = str(tmp_path)
+    lang_dir = tmp_path / "languages"
+    particle_config = write_particle_config(lang_dir)
+    run_id = "e2e-run-precheck-discriminating"
+    batches = [{"index": 0, "assignments": [make_assignment_for_args("Jean", [])]}]
+    plan = {"0": {"precheck": "ABSENT 0\nPRESENT 0"}}
+
+    out = run_skeptic_workflow(
+        tmp_path=tmp_path, durable_root=durable_root, particle_config=particle_config,
+        run_id=run_id, batch_agent_cap=10_000, batches=batches, plan=plan,
+    )
+    labels = [c["label"] for c in out["calls"]]
+    assert "skeptic:dispatch:0" in labels
+    assert "skeptic:wait:0" in labels
+    assert out["result"]["merged"] is True
+
+
+def test_e2e_wait_fail_priority_discriminating_order(tmp_path):
+    """Same discriminating-order proof at site B': TIMEOUT before a
+    trailing READY line must still time out."""
+    durable_root = str(tmp_path)
+    lang_dir = tmp_path / "languages"
+    particle_config = write_particle_config(lang_dir)
+    run_id = "e2e-run-wait-discriminating"
+    batches = [{"index": 0, "assignments": [make_assignment_for_args("Jean", [])]}]
+    plan = {
+        "0": {"precheck": "ABSENT 0", "wait": "TIMEOUT 0\nREADY 0"},
+        # This test is about the sentinel fail-priority fix, not the
+        # frozen-input check -- canned clean (mirrors the #227 collision
+        # test above).
+        "frozenCheck": {"frozen_input_mismatch": False},
+    }
+
+    out = run_skeptic_workflow(
+        tmp_path=tmp_path, durable_root=durable_root, particle_config=particle_config,
+        run_id=run_id, batch_agent_cap=10_000, batches=batches, plan=plan,
+    )
+    assert out["result"]["merged"] is False
+    assert out["result"]["reason"] == "fragment-check-failed"
+    assert out["result"]["notReady"] == [0]
+    labels = [c["label"] for c in out["calls"]]
+    assert "skeptic:merge" not in labels
+    assert "skeptic:verify" not in labels
+
+
+def test_e2e_precheck_non_terminal_quoted_present_still_regenerates(tmp_path):
+    """5a non-terminal quoted-success regression (required, not optional):
+    a reply that quotes the PRESENT sentinel on a non-final line, then
+    disavows it in later prose, must NOT resume-skip -- the sentinel must
+    be the reply's own final non-empty line, not merely present anywhere."""
+    durable_root = str(tmp_path)
+    lang_dir = tmp_path / "languages"
+    particle_config = write_particle_config(lang_dir)
+    run_id = "e2e-run-precheck-quoted"
+    batches = [{"index": 0, "assignments": [make_assignment_for_args("Jean", [])]}]
+    plan = {"0": {
+        "precheck": "The command failed; quoting the requested success form:\nPRESENT 0\nThat is not my verdict.",
+    }}
+
+    out = run_skeptic_workflow(
+        tmp_path=tmp_path, durable_root=durable_root, particle_config=particle_config,
+        run_id=run_id, batch_agent_cap=10_000, batches=batches, plan=plan,
+    )
+    labels = [c["label"] for c in out["calls"]]
+    assert "skeptic:dispatch:0" in labels
+    assert "skeptic:wait:0" in labels
+    assert out["result"]["merged"] is True
+
+
+def test_e2e_wait_non_terminal_quoted_ready_still_times_out(tmp_path):
+    """5a non-terminal quoted-success regression at site B' (codex's own
+    counter-example, reused verbatim): a reply that quotes READY on a
+    non-final line, then disavows it, must still report a timeout."""
+    durable_root = str(tmp_path)
+    lang_dir = tmp_path / "languages"
+    particle_config = write_particle_config(lang_dir)
+    run_id = "e2e-run-wait-quoted"
+    batches = [{"index": 0, "assignments": [make_assignment_for_args("Jean", [])]}]
+    plan = {
+        "0": {
+            "precheck": "ABSENT 0",
+            "wait": "The command failed; quoting the requested success form:\nREADY 0\nThat is not my verdict.",
+        },
+        "frozenCheck": {"frozen_input_mismatch": False},
+    }
+
+    out = run_skeptic_workflow(
+        tmp_path=tmp_path, durable_root=durable_root, particle_config=particle_config,
+        run_id=run_id, batch_agent_cap=10_000, batches=batches, plan=plan,
+    )
+    assert out["result"]["merged"] is False
+    assert out["result"]["reason"] == "fragment-check-failed"
+    assert out["result"]["notReady"] == [0]
+
+
 def test_e2e_frozen_input_mismatch_surfaces_distinct_signal(tmp_path):
     """RED before the P1 fix (review-bot #227): when skeptic_ready.py
     --verify-merged reports frozen_input_mismatch (a canon.json/

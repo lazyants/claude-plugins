@@ -114,7 +114,7 @@ def draft_present_and_valid_body(js_source: str) -> str:
 
 def test_translate_timeout_branch_has_no_ledger_write(review_fix_loop_body):
     branch = _extract_if_block(
-        review_fix_loop_body, 'String(ready).trim() !== "READY " + seg', context="reviewFixLoop"
+        review_fix_loop_body, '!sentinelVerdict(ready, "READY " + seg, "TIMEOUT " + seg)', context="reviewFixLoop"
     )
     assert "recordLedgerCall" not in branch, (
         "the translate-timeout branch must NOT call recordLedgerCall -- a terminal "
@@ -152,7 +152,7 @@ def test_verified_review_blocked_branch_has_no_ledger_write(run_round_body):
 
 def test_fix_call_branch_probes_before_concluding_draft_missing(run_round_body):
     branch = _extract_if_block(
-        run_round_body, 'String(fx).trim() === "DRAFT_MISSING " + seg', context="runRound"
+        run_round_body, 'sentinelVerdict(fx, "DRAFT_MISSING " + seg, null)', context="runRound"
     )
     assert "draftPresentAndValid(seg)" in branch, (
         "the fix-call branch must probe draftPresentAndValid(seg) before concluding "

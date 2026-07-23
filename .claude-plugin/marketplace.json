@@ -116,7 +116,7 @@
       "name": "literary-translator",
       "source": "./plugins/literary-translator",
       "description": "High-fidelity literary book translation from a Gutenberg EPUB source (expert-mode `custom` extractor also supported), run to convergence through a codex-translate -> false-green gate -> codex-review -> Claude-fix loop over a frozen name/realia canon, with configurable verse policy, ledger resumability, and optional assembly into a rendered Obsidian glossary-wiki.",
-      "version": "1.15.0",
+      "version": "1.15.1",
       "author": {
         "name": "Lazy Ants"
       },

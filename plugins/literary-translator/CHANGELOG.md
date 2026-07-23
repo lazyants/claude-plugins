@@ -1,5 +1,24 @@
 # Changelog
 
+## 1.15.1 — 2026-07-23
+
+Bug fix. Closes #308.
+
+### Fixed — wait/precheck sentinel comparison no longer false-rejects a decorated reply (#308)
+
+- Seven consume sites across the three workflow templates (`mass-translate-wf.template.js`, `glossary-pass-wf.template.js`, `skeptic-pass-wf.template.js`) gated on a whole-string exact match of a low-effort wait/precheck agent's free-text reply against a bare sentinel (`READY <seg>`, `PRESENT <i>`, `DRAFT_MISSING <seg>`). When the agent decorated the mandated sentinel with a prose preamble — observed in the 1.15.0 W5 smoke, e.g. `"The poll confirmed the review artifact is ready (exit 0).\n\nREADY seg03"` — the exact match failed and a **completed** review/translate/batch was mislabeled a timeout (`review-timeout`/`translate-timeout`) or a present fragment triggered a redundant regeneration, even though the underlying work had genuinely succeeded.
+- All seven sites now route through one `sentinelVerdict(reply, okSentinel, failSentinel)` helper, mirrored byte-for-byte across all three templates: a reply is accepted iff no line anywhere in it equals the failure sentinel, AND its own last non-empty line equals the success sentinel exactly. Requiring the success sentinel to be the reply's *final* line (not just any line) means a reply that quotes the sentinel and then explicitly disavows it is still rejected, not accepted. The failure-sentinel scan still covers every line, so fail-priority on a contradictory reply is unchanged from before. This closes the false-negative dual of #228, which converted these same sites from substring checks to whole-string exact match specifically to kill a different false-positive (a `TIMEOUT` reply substring-matching a `READY` check); both directions now stay closed simultaneously. Prompts are unchanged — agents are still instructed to return exactly the bare sentinel line; the parser merely tolerates decoration around it.
+
+### Migration
+
+No source data, canon, or ledger content changes. Three separate hash/digest domains are touched by editing the templates, each with a distinct, bounded consequence:
+
+1. **Per-segment cache staleness (mass only).** `mass-translate-wf.template.js` and `glossary-pass-wf.template.js` are both `PLUGIN_BUNDLE_MEMBERS` (`cache_key.py`), so this release flips `plugin_bundle_hash`. Previously-converged **mass** segments' stored cache keys no longer match and route to `stale`/re-translate at the next Step-0a refresh. No derivation regen and no mature-project brick — the same migration class as 1.14.1's `codex_job.py` edit.
+2. **Run-level resume-identity invalidation (mass AND glossary).** That same `plugin_bundle_hash` is also an unconditional input to `resume_setup.py`'s run-level `compute_input_digest()` for both `kind="mass"` and `kind="glossary"` — it is not conditional on kind. So this release also invalidates resuming any in-flight, not-yet-complete **glossary** run, not only mass: `resolve_run()` mints a fresh RUN_ID instead of matching the existing input digest, restarting that run's resume bookkeeping from scratch (glossary fragments already written to disk are unaffected content-wise, but the run loses its resume identity).
+3. **Skeptic run-identity invalidation (separate domain).** `skeptic-pass-wf.template.js` is edited too and, although it is in neither `PLUGIN_BUNDLE_MEMBERS` nor `ORCHESTRATION_BUNDLE_MEMBERS`, `skeptic_setup.py` reads the skeptic template's own bytes directly (`SKEPTIC_TEMPLATE_FILENAME = "skeptic-pass-wf.template.js"`) and folds them into its own dedicated `compute_skeptic_input_digest()`. So this release independently forces a fresh skeptic RUN_ID too — a third, separate resume domain from (1) and (2).
+
+No live or mature project is affected by any of the above today — only throwaway smoke roots exist, and the pending SSK vol.2 re-run is not yet started and will scaffold fresh on this release. These three consequences are priced here for completeness and for future runs, not because this release forces an active migration.
+
 ## 1.15.0 — 2026-07-22
 
 Found by the plugin's first live end-to-end W5 run. Three of the five fixes are consume-site correctness bugs where a gate rejected honest input, and the last two supply a recovery path for a project-bricking state that 1.9.0/1.10.0 already armed in the field. Closes #289. Closes #290. Closes #291. Closes #292. Closes #193.

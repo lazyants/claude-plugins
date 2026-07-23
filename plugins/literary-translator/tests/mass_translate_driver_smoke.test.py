@@ -579,6 +579,159 @@ def test_fix_null_return_still_triggers_probe(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# #308 -- sentinelVerdict() line-oriented match at the same three sites (C,
+# D, E). #228 (above) converted these sites from indexOf substring checks to
+# whole-string exact match to kill substring false-POSITIVES; #308 is the
+# false-NEGATIVE dual that whole-string cure introduced: a low-effort wait
+# agent's benign prose preamble (real evidence: 2-in-6 review-waits in the
+# 1.15.0 W5 smoke) made the exact match fail and mislabeled a **completed**
+# review/translate as a timeout. sentinelVerdict tolerates the preamble while
+# keeping BOTH #228's and #308's directions closed. The two decorated-READY
+# replies below are the REAL production replies from the #308 evidence
+# (journal-verbatim), not invented paraphrases.
+# ---------------------------------------------------------------------------
+
+DECORATED_READY_A = "The poll confirmed the review artifact is ready (exit 0).\n\nREADY "
+DECORATED_READY_B = 'The command exited 0 (final line shows `{"ready": true}`).\n\nREADY '
+
+QUOTED_SUCCESS_DISAVOWED = (
+    "The command failed; quoting the requested success form:\n"
+    "READY seg01\n"
+    "That is not my verdict."
+)
+
+
+def test_review_wait_decorated_ready_still_converges(tmp_path):
+    """Site C accept (#308): a prose-decorated READY reply (the real #308
+    evidence shape) at review-wait:seg01:r1 must NOT be misread as a
+    review-timeout -- the segment converges and the read/check calls run."""
+    res = run(
+        tmp_path=tmp_path, segs=["seg01"],
+        overrides={"review-wait:seg01:r1": DECORATED_READY_A + "seg01"},
+    )
+    assert res["ok"], res["stderr"]
+    out = res["out"]
+    assert out["result"]["converged"] == [{"seg": "seg01", "converged": True, "rounds": 1}]
+    assert out["result"]["failed"] == []
+    labels = [c["label"] for c in out["calls"]]
+    assert "review-read:seg01:r1" in labels, "a decorated READY must still let the read/check pair run"
+    assert "artifact-check:seg01:r1" in labels
+
+
+def test_translate_wait_decorated_ready_still_converges(tmp_path):
+    """Site E accept (#308): a prose-decorated READY reply at wait:seg01 must
+    NOT be misread as a translate-timeout -- the run proceeds into the
+    review/fix cycle and converges."""
+    res = run(
+        tmp_path=tmp_path, segs=["seg01"],
+        overrides={"wait:seg01": DECORATED_READY_B + "seg01"},
+    )
+    assert res["ok"], res["stderr"]
+    out = res["out"]
+    assert out["result"]["converged"] == [{"seg": "seg01", "converged": True, "rounds": 1}]
+    assert out["result"]["failed"] == []
+    labels = [c["label"] for c in out["calls"]]
+    assert "review-dispatch:seg01:r1" in labels, "a decorated READY must still enter the review cycle"
+
+
+def test_review_wait_fail_sentinel_wins_when_not_last_line(tmp_path):
+    """Fail-priority, discriminating order (round-3 codex finding): the
+    failure sentinel appearing BEFORE the success sentinel -- "TIMEOUT
+    seg01\\nREADY seg01" -- must still block. READY is the reply's own FINAL
+    line, so a last-line-only reader would wrongly ACCEPT it; the correct
+    full-scan-for-failSentinel-then-check-last-line algorithm still rejects
+    it because the failure-sentinel scan runs over every line, not just the
+    last. The non-discriminating order ("READY seg01\\nTIMEOUT seg01",
+    covered by the #228 substring-collision tests' sibling cases above)
+    would not tell a correct implementation apart from a broken
+    last-line-only one."""
+    res = run(
+        tmp_path=tmp_path, segs=["seg01"],
+        overrides={"review-wait:seg01:r1": "TIMEOUT seg01\nREADY seg01"},
+    )
+    assert res["ok"], res["stderr"]
+    out = res["out"]
+    assert out["result"]["failed"] == [
+        {"seg": "seg01", "converged": False, "reason": "review-timeout", "rounds": 1}
+    ]
+    assert out["result"]["converged"] == []
+    labels = [c["label"] for c in out["calls"]]
+    assert "review-read:seg01:r1" not in labels
+
+
+def test_translate_wait_fail_sentinel_wins_when_not_last_line(tmp_path):
+    """Same discriminating-order fail-priority case as above, at site E."""
+    res = run(
+        tmp_path=tmp_path, segs=["seg01"],
+        overrides={"wait:seg01": "TIMEOUT seg01\nREADY seg01"},
+    )
+    assert res["ok"], res["stderr"]
+    out = res["out"]
+    assert out["result"]["failed"] == [{"seg": "seg01", "converged": False, "reason": "translate-timeout"}]
+    assert out["result"]["converged"] == []
+    labels = [c["label"] for c in out["calls"]]
+    assert "review-dispatch:seg01:r1" not in labels
+
+
+def test_fix_decorated_draft_missing_still_triggers_probe(tmp_path):
+    """Site D probe-routing (#308): a decorated DRAFT_MISSING reply (prose
+    preamble, sentinel as the final line) at fix:seg01:r1 -- the label
+    callFix() actually emits is "fix:" + seg + ":r" + round, i.e.
+    "fix:seg01:r1" for round 1, NOT the bare "fix:seg01" -- must still route
+    through the #131 draftPresentAndValid probe instead of silently
+    continuing as an ordinary review round. With the probe's default
+    {present: true}, the segment ends transient fix-call-failed."""
+    res = run(
+        tmp_path=tmp_path, segs=["seg01"],
+        overrides={
+            "review-read:seg01:r1": _non_clean_review(),
+            "artifact-check:seg01:r1": {"match": True},
+            "fix:seg01:r1": "I attempted the fix but could not locate the draft.\nDRAFT_MISSING seg01",
+        },
+    )
+    assert res["ok"], res["stderr"]
+    out = res["out"]
+    labels = [c["label"] for c in out["calls"]]
+    assert "draft-probe:seg01" in labels, "a decorated DRAFT_MISSING must still trigger the #131 draft probe"
+    assert out["result"]["failed"] == [
+        {"seg": "seg01", "converged": False, "reason": "fix-call-failed", "rounds": 1}
+    ]
+    assert out["result"]["converged"] == []
+
+
+def test_review_wait_non_terminal_quoted_ready_still_times_out(tmp_path):
+    """5a (round-2 codex finding, MAJOR): READY appearing on a NON-final line
+    while later prose explicitly disavows it must NOT be accepted. This is
+    codex's own counter-example, reused verbatim so the regression is
+    grounded in the exact reply that broke the round-1 "any line" draft --
+    proving the shipped whole-string check's rejection of this reply is
+    preserved by the round-2 last-line design, not reintroduced as a false
+    accept."""
+    res = run(
+        tmp_path=tmp_path, segs=["seg01"],
+        overrides={"review-wait:seg01:r1": QUOTED_SUCCESS_DISAVOWED},
+    )
+    assert res["ok"], res["stderr"]
+    out = res["out"]
+    assert out["result"]["failed"] == [
+        {"seg": "seg01", "converged": False, "reason": "review-timeout", "rounds": 1}
+    ]
+    assert out["result"]["converged"] == []
+
+
+def test_translate_wait_non_terminal_quoted_ready_still_times_out(tmp_path):
+    """5a at site E -- same disavowed-quote regression as above."""
+    res = run(
+        tmp_path=tmp_path, segs=["seg01"],
+        overrides={"wait:seg01": QUOTED_SUCCESS_DISAVOWED},
+    )
+    assert res["ok"], res["stderr"]
+    out = res["out"]
+    assert out["result"]["failed"] == [{"seg": "seg01", "converged": False, "reason": "translate-timeout"}]
+    assert out["result"]["converged"] == []
+
+
+# ---------------------------------------------------------------------------
 # #289 -- the two ledger guards (ledgerWriteSucceeded/ledgerMergeSucceeded)
 # must judge failure EVIDENCE, never failure-key PRESENCE.
 #

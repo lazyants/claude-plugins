@@ -270,6 +270,101 @@ def test_wait_substring_collision_in_one_of_two_batches(tmp_path):
     assert out["result"]["notReady"] == [0]
 
 
+# ---------------------------------------------------------------------------
+# #308 P1 fixes: line-oriented sentinel verdicts (sentinelVerdict()) at
+# glossary-pass-wf.template.js's two sentinel sites -- A (batch precheck)
+# and B (batch wait). #228 (above) killed the substring false-POSITIVE;
+# #308 is the false-NEGATIVE dual #228's own whole-string cure introduced --
+# a benign prose-decorated sentinel misclassified as absent/timed-out.
+# ---------------------------------------------------------------------------
+
+def test_precheck_decorated_present_still_resume_skips(tmp_path):
+    """Site A accept: a genuine PRESENT reply decorated with a prose
+    preamble (the observed real #308 shape) must still resume-skip, not
+    fall through to a full dispatch."""
+    plan = {"0": {"precheck": "The precheck command exited 0, confirming the existing fragment is already valid.\n\nPRESENT 0"}}
+    res = run(tmp_path=tmp_path, batches=[make_batch(0, ["Jean"])], plan=plan)
+    assert res["ok"], res["stderr"]
+    labels = [c["label"] for c in res["out"]["calls"]]
+    assert "glossary:dispatch:0" not in labels
+    assert "glossary:wait:0" not in labels
+    assert res["out"]["result"]["merged"] is True
+
+
+def test_wait_decorated_ready_is_accepted_not_timeout(tmp_path):
+    """Site B accept: a genuine READY reply decorated with a prose preamble
+    (the exact #308 evidence reply, journal-verbatim) must be accepted, not
+    misclassified as a timeout."""
+    plan = {"0": {
+        "precheck": "ABSENT 0",
+        "wait": "The poll confirmed the review artifact is ready (exit 0).\n\nREADY 0",
+    }}
+    res = run(tmp_path=tmp_path, batches=[make_batch(0, ["Jean"])], plan=plan)
+    assert res["ok"], res["stderr"]
+    out = res["out"]
+    assert out["result"]["merged"] is True
+    labels = [c["label"] for c in out["calls"]]
+    assert "glossary:merge" in labels
+    assert "glossary:verify" in labels
+
+
+def test_precheck_fail_priority_discriminating_order(tmp_path):
+    """Fail-priority, discriminating order (PLAN-308 sec3 item 3's round-3
+    codex finding): ABSENT before a trailing PRESENT line must still
+    regenerate -- proves the fail-sentinel scan runs over every line, not
+    just the last one (a last-line-only reader would wrongly accept this,
+    since PRESENT is the reply's own final line)."""
+    plan = {"0": {"precheck": "ABSENT 0\nPRESENT 0"}}
+    res = run(tmp_path=tmp_path, batches=[make_batch(0, ["Jean"])], plan=plan)
+    assert res["ok"], res["stderr"]
+    labels = [c["label"] for c in res["out"]["calls"]]
+    assert "glossary:dispatch:0" in labels
+    assert "glossary:wait:0" in labels
+    assert res["out"]["result"]["merged"] is True
+
+
+def test_wait_fail_priority_discriminating_order(tmp_path):
+    """Same discriminating-order proof at site B: TIMEOUT before a trailing
+    READY line must still time out."""
+    plan = {"0": {"precheck": "ABSENT 0", "wait": "TIMEOUT 0\nREADY 0"}}
+    res = run(tmp_path=tmp_path, batches=[make_batch(0, ["Jean"])], plan=plan)
+    assert res["ok"], res["stderr"]
+    out = res["out"]
+    assert out["result"]["merged"] is False
+    assert out["result"]["reason"] == "fragment-check-failed"
+    assert out["result"]["notReady"] == [0]
+
+
+def test_precheck_non_terminal_quoted_present_still_regenerates(tmp_path):
+    """5a non-terminal quoted-success regression (required, not optional):
+    a reply that quotes the PRESENT sentinel on a non-final line, then
+    disavows it in later prose, must NOT resume-skip -- the sentinel must be
+    the reply's own final non-empty line, not merely present anywhere."""
+    plan = {"0": {"precheck": "The command failed; quoting the requested success form:\nPRESENT 0\nThat is not my verdict."}}
+    res = run(tmp_path=tmp_path, batches=[make_batch(0, ["Jean"])], plan=plan)
+    assert res["ok"], res["stderr"]
+    labels = [c["label"] for c in res["out"]["calls"]]
+    assert "glossary:dispatch:0" in labels
+    assert "glossary:wait:0" in labels
+    assert res["out"]["result"]["merged"] is True
+
+
+def test_wait_non_terminal_quoted_ready_still_times_out(tmp_path):
+    """5a non-terminal quoted-success regression at site B (codex's own
+    counter-example, reused verbatim): a reply that quotes READY on a
+    non-final line, then disavows it, must still report a timeout."""
+    plan = {"0": {
+        "precheck": "ABSENT 0",
+        "wait": "The command failed; quoting the requested success form:\nREADY 0\nThat is not my verdict.",
+    }}
+    res = run(tmp_path=tmp_path, batches=[make_batch(0, ["Jean"])], plan=plan)
+    assert res["ok"], res["stderr"]
+    out = res["out"]
+    assert out["result"]["merged"] is False
+    assert out["result"]["reason"] == "fragment-check-failed"
+    assert out["result"]["notReady"] == [0]
+
+
 if __name__ == "__main__":
     import sys
     sys.exit(pytest.main([__file__, "-v"]))
