@@ -639,8 +639,29 @@ survivors by `likely_name`/`--min-candidate-freq` (the profile's
 `glossary.min_candidate_freq` when set, else 2), force-includes any
 `elision_ambiguous` pair for adjudication (#91), and prints one JSON line. If
 that line is `{"no_new_candidates": true, "batches": []}`, every candidate is
-already in canon — SKIP `resume_setup.py` and the glossary Workflow entirely
-this run, nothing to research. Otherwise run the codex-glossary-pass,
+already in canon — or, on an uncased-script source whose preset ships no
+`name_inventory`, there were never any candidates to begin with — so SKIP
+`resume_setup.py` and the glossary Workflow entirely this run, nothing to
+research. **#290:** that SKIP branch is the one W3 path that never reaches the
+glossary merge — and apart from the bootstrap command below, the merge is the
+only thing that ever CREATES `canon.json` — so bootstrap it explicitly here,
+or W3a below dies with `FATAL: canon.json not found`:
+
+```
+python3 ${durable_root}/scripts/canon_validate.py \
+  --research-mode <profile's glossary.research_mode> --init
+```
+
+That writes an empty-but-stamped `canon.json` (`entries: {}`,
+`review_queue: []`, both `generation_hashes` computed by the same
+`cache_key.py` a real merge would use, which is exactly what `segpack.py`
+copies into every pack). It is create-only: on a project whose `canon.json`
+already exists it leaves the file byte-untouched and reports
+`"created": false`, exit `0` — so run it unconditionally on this branch. Never
+hand-roll the file instead: `segpack.py` rejects a `canon.json` whose
+`generation_hashes` fields are absent, and invented values would propagate
+verbatim into every pack that `select_segments.py`'s derivation-state gate
+later reads. Otherwise run the codex-glossary-pass,
 instantiating `glossary-pass-wf.template.js` fresh from the plugin's current
 copy every time — batched over `${durable_root}/glossary_TASK.md`, feeding the
 planner's `args` into the Workflow tool and its `batches` into

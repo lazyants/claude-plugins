@@ -221,12 +221,22 @@ fix has two parts that must not be conflated:
    `ledger-merge-confirmation.schema.json`, `review-artifact-check.schema.json`)
    **stay strong `oneOf`** and validate the *script's* real output at
    runtime (`ledger_merge.py` self-validates its own stdout, for instance).
-   The **exact-key-set JS guard**, at every flat-schema consume site, is what
+   The **consume-site JS guard**, at every flat-schema consume site, is what
    re-establishes discrimination on the *agent-relayed* object — see
    `references/ledger-and-resumability.md` for the guard field sets. A flat
    schema without its paired JS guard is not safe to trust on its own: it
    would accept `{success:true, error:"x"}` as a success just as readily as
    a genuine one.
+
+   **The guard must judge the failure fields by VALUE, not by presence**
+   (**#289**). A flat union advertises `error`/`exit_code`/`stderr` as
+   fillable on every call, so an agent relaying a *successful* run may
+   truthfully volunteer `exit_code: 0` — evidence the script succeeded. A
+   presence-based guard reads that as failure and rejects honest work; worse,
+   whether the field is volunteered is model discretion, so the same prompt
+   yields different verdicts on different segments of the same batch. Reject
+   on a non-empty `error`/`stderr`, a non-zero `exit_code`, or a wrong-typed
+   value — never on the key being there.
 
 `CANON_BATCH_SCHEMA` itself is **deleted**, not flattened — the glossary
 batch dispatch is schema-less fire-and-forget now (see above), so there is
@@ -331,8 +341,9 @@ these are flat while the on-disk files stay strong `oneOf`):
   see `references/canon-and-glossary.md`.
 
 None of the four flat literals above are safe to trust without their paired
-exact-key-set JS guard at the consume site (a flat schema alone would accept
-`{success:true, error:"x"}` as a success) — the guard field sets are
+consume-site JS guard (a flat schema alone would accept `{success:true,
+error:"x"}` as a success) — the guard field sets, and the value-based
+failure-evidence rule #289 established, are
 `references/ledger-and-resumability.md`'s subject.
 
 `tests/agent_schema_top_level_object.test.py` asserts every remaining agent
@@ -466,6 +477,22 @@ strong `oneOf` requires:
 ```
 
 (each branch `additionalProperties: false`, `match` required in both.)
+
+`artifactCheckMatched()` re-establishes that discrimination on the relayed
+object under the same value-based rule as the ledger guards (**#289**): a
+`match:true` return is trusted only when `mismatch_detail` carries no
+evidence — absent, or exactly the empty string — and every key it carries is
+one the flat literal declares. Because the script's `emit_match()` prints a
+bare `{"match": true}` and never a `mismatch_detail` beside it, any
+`mismatch_detail` on a match is agent-added, and the pre-#289 presence test
+turned that benign fill into `blocked/review-artifact-mismatch`. That reason
+is classified transient/infra by `runRound` — no terminal ledger write is
+made, the `in_progress` fragment stays the durable record, and
+`select_segments.py` reclassifies the segment `recoverable` and
+auto-redispatches it next run. So the cost of a false reject here is a
+wasted review cycle (dispatch + wait + read + check, twice, plus the codex
+reviewer's own work), not human escalation — the same recovery class as the
+ledger path, not a worse one.
 
 ### Null-review and the shared retry budget
 

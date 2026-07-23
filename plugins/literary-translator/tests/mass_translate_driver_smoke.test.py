@@ -578,6 +578,249 @@ def test_fix_null_return_still_triggers_probe(tmp_path):
     assert out["result"]["converged"] == []
 
 
+# ---------------------------------------------------------------------------
+# #289 -- the two ledger guards (ledgerWriteSucceeded/ledgerMergeSucceeded)
+# must judge failure EVIDENCE, never failure-key PRESENCE.
+#
+# LEDGER_WRITE_SCHEMA/LEDGER_MERGE_SCHEMA are flat unions of both branches
+# (CONTRACT section 1), so they ADVERTISE error/exit_code/stderr as fillable
+# fields on every ledger call. In the first live end-to-end W5 run two of
+# three agents took that invitation and truthfully relayed `exit_code: 0`
+# alongside an otherwise perfect success return; the guards' old
+# `FAILURE_ONLY_KEYS.some((k) => k in raw)` presence test read that PROOF OF
+# SUCCESS as proof of failure and reported ledger-write-failed /
+# ledger-merge-failed for segments whose fragments were already correctly on
+# disk. Whether an agent volunteers the field is model discretion, so the
+# old gate's verdict was non-deterministic across identical prompts.
+#
+# These cases run the REAL template under Node and assert the OBSERVABLE
+# workflow result, not the predicate in isolation: OVERRIDES injects the
+# return at the exact ledger label under test, every other call keeps its
+# happy-path default.
+# ---------------------------------------------------------------------------
+
+def _write_success(seg: str, status: str = "converged", **extra) -> dict:
+    """The exact success return recordLedgerPrompt asks for, plus whatever
+    extra fields a test wants the agent to have volunteered."""
+    raw = {
+        "success": True, "status": status,
+        "fragment_path": "/x/" + seg + ".json", "fragment_sha1": "d",
+    }
+    raw.update(extra)
+    return raw
+
+
+def _merge_success(n_segments: int = 1, **extra) -> dict:
+    """The merge-ledger counterpart of _write_success."""
+    raw = {
+        "success": True, "ledger_path": "/x/l.json", "n_segments": n_segments,
+        "missing_segments": [], "stale_segments": [],
+    }
+    raw.update(extra)
+    return raw
+
+
+WRITE_FAILED_DEFAULT_DETAIL = "ledger_update.py write did not report success"
+MERGE_FAILED_DEFAULT_DETAIL = "ledger_merge.py completeness check did not report success"
+
+
+def test_ledger_write_accepts_truthful_exit_code_zero(tmp_path):
+    """#289 core case, reproducing the live W5 run: BOTH per-segment ledger
+    writes come back with a truthful `exit_code: 0` riding along. The script
+    really did exit 0, so the segment must converge -- the run that motivated
+    this issue instead reported ledger-write-failed for a fragment that was
+    already correct on disk."""
+    res = run(
+        tmp_path=tmp_path, segs=["seg01"],
+        overrides={
+            "ledger:in_progress:seg01": _write_success("seg01", status="in_progress", exit_code=0),
+            "ledger:converged:seg01": _write_success("seg01", exit_code=0),
+        },
+    )
+    assert res["ok"], res["stderr"]
+    out = res["out"]
+    assert out["result"]["converged"] == [{"seg": "seg01", "converged": True, "rounds": 1}]
+    assert out["result"]["failed"] == []
+    assert out["result"]["batchComplete"] is True
+
+
+def test_ledger_merge_accepts_truthful_exit_code_zero(tmp_path):
+    """The merge-ledger half of the same defect: a truthful `exit_code: 0` on
+    the batch-final completeness check must not flip an otherwise complete
+    batch to ledger-merge-failed."""
+    res = run(
+        tmp_path=tmp_path, segs=["seg01"],
+        overrides={"merge-ledger": _merge_success(exit_code=0)},
+    )
+    assert res["ok"], res["stderr"]
+    out = res["out"]
+    assert out["result"]["batchComplete"] is True
+    assert out["result"]["ledgerPath"] == "/x/l.json"
+    assert "reason" not in out["result"]
+
+
+@pytest.mark.parametrize(
+    "evidence,expected_detail",
+    [
+        pytest.param({"exit_code": 3}, WRITE_FAILED_DEFAULT_DETAIL, id="nonzero-exit-code"),
+        pytest.param({"exit_code": "0"}, WRITE_FAILED_DEFAULT_DETAIL, id="wrong-typed-exit-code"),
+        pytest.param(
+            {"stderr": "Traceback (most recent call last):\n  RuntimeError"},
+            WRITE_FAILED_DEFAULT_DETAIL, id="nonempty-stderr",
+        ),
+        pytest.param(
+            {"error": "runs/ledger.d is not writable"},
+            "runs/ledger.d is not writable", id="nonempty-error",
+        ),
+    ],
+)
+def test_ledger_write_still_rejects_real_failure_evidence(tmp_path, evidence, expected_detail):
+    """The anti-false-green half of #289: relaxing the guard to accept
+    `exit_code: 0` must not weaken it for anything that is genuine evidence
+    of failure -- a non-zero (or unreadable, wrong-typed) exit code, a
+    traceback on stderr, or an error message -- even when `success: true` and
+    every success field is present and plausible."""
+    res = run(
+        tmp_path=tmp_path, segs=["seg01"],
+        overrides={"ledger:converged:seg01": _write_success("seg01", **evidence)},
+    )
+    assert res["ok"], res["stderr"]
+    out = res["out"]
+    assert out["result"]["converged"] == []
+    assert out["result"]["failed"] == [
+        {"seg": "seg01", "converged": False, "reason": "ledger-write-failed", "detail": expected_detail}
+    ]
+
+
+def test_ledger_write_still_rejects_success_false(tmp_path):
+    """`success: false` remains fatal on its own, with the returned error
+    relayed as the failure detail."""
+    res = run(
+        tmp_path=tmp_path, segs=["seg01"],
+        overrides={"ledger:converged:seg01": {"success": False, "error": "boom"}},
+    )
+    assert res["ok"], res["stderr"]
+    assert res["out"]["result"]["failed"] == [
+        {"seg": "seg01", "converged": False, "reason": "ledger-write-failed", "detail": "boom"}
+    ]
+
+
+@pytest.mark.parametrize(
+    "raw,expected_detail",
+    [
+        pytest.param(
+            _write_success("seg01", fragment_sha1="", exit_code=0),
+            WRITE_FAILED_DEFAULT_DETAIL, id="empty-success-field-alongside-exit-code-zero",
+        ),
+        pytest.param(
+            _write_success("seg01", ledger_path="/x/l.json", exit_code=0),
+            WRITE_FAILED_DEFAULT_DETAIL, id="undeclared-key-alongside-exit-code-zero",
+        ),
+    ],
+)
+def test_exit_code_zero_does_not_bypass_the_other_write_guards(tmp_path, raw, expected_detail):
+    """A benign `exit_code: 0` buys nothing beyond itself: the success-field
+    completeness check and the allowed-key-set check still run and still
+    reject. Locks in that the #289 relaxation was scoped to the three
+    failure-evidence fields and did not turn into a blanket
+    `additionalProperties` amnesty."""
+    res = run(tmp_path=tmp_path, segs=["seg01"], overrides={"ledger:converged:seg01": raw})
+    assert res["ok"], res["stderr"]
+    assert res["out"]["result"]["failed"] == [
+        {"seg": "seg01", "converged": False, "reason": "ledger-write-failed", "detail": expected_detail}
+    ]
+
+
+@pytest.mark.parametrize(
+    "raw,expected_detail",
+    [
+        pytest.param(_merge_success(exit_code=2), MERGE_FAILED_DEFAULT_DETAIL, id="nonzero-exit-code"),
+        pytest.param(_merge_success(stderr="cache_key.py died"), MERGE_FAILED_DEFAULT_DETAIL, id="nonempty-stderr"),
+        pytest.param(_merge_success(error="fragment dir missing"), "fragment dir missing", id="nonempty-error"),
+        pytest.param(
+            _merge_success(missing_segments=["seg09"], exit_code=0),
+            MERGE_FAILED_DEFAULT_DETAIL, id="incomplete-batch-alongside-exit-code-zero",
+        ),
+        pytest.param({"success": False, "error": "boom"}, "boom", id="success-false"),
+    ],
+)
+def test_ledger_merge_still_rejects_real_failure_evidence(tmp_path, raw, expected_detail):
+    """The merge-side anti-false-green cases, including the guarantee that a
+    benign `exit_code: 0` never excuses a non-empty missing_segments -- the
+    completeness check is the whole point of this call."""
+    res = run(tmp_path=tmp_path, segs=["seg01"], overrides={"merge-ledger": raw})
+    assert res["ok"], res["stderr"]
+    out = res["out"]
+    assert out["result"]["batchComplete"] is False
+    assert out["result"]["reason"] == "ledger-merge-failed"
+    assert out["result"]["detail"] == expected_detail
+
+
+# ---------------------------------------------------------------------------
+# #289 third site -- artifactCheckMatched(), same class as the two ledger
+# guards above. REVIEW_ARTIFACT_SCHEMA declares `mismatch_detail` fillable
+# alongside `match`, and review_artifact_check.py itself NEVER emits it on a
+# match (`emit_match` prints a bare `{"match": true}`), so any
+# mismatch_detail riding on a match:true return is agent-added -- exactly
+# how `exit_code` got onto the ledger returns. Rejecting on presence turned
+# a benign fill into `blocked/review-artifact-mismatch`, which is terminal
+# human escalation rather than the ledger path's recoverable redispatch.
+#
+# The retried read+check pair carries its own ":retry" label suffix, so a
+# case that must survive BOTH attempts overrides both.
+# ---------------------------------------------------------------------------
+
+ARTIFACT_LABELS = ("artifact-check:seg01:r1", "artifact-check:seg01:r1:retry")
+
+
+def _artifact_overrides(art: dict) -> dict:
+    """Same artifact-check return on the first attempt and on the one shared
+    retry -- getVerifiedReview only blocks after both have failed."""
+    return {label: art for label in ARTIFACT_LABELS}
+
+
+def test_artifact_check_accepts_benign_empty_mismatch_detail(tmp_path):
+    """#289 at the third site: a genuine match whose relay volunteered an
+    EMPTY mismatch_detail must still be a match. The pre-fix guard rejected
+    it on presence alone and escalated a perfectly good review artifact."""
+    res = run(
+        tmp_path=tmp_path, segs=["seg01"],
+        overrides=_artifact_overrides({"match": True, "mismatch_detail": ""}),
+    )
+    assert res["ok"], res["stderr"]
+    out = res["out"]
+    assert out["result"]["converged"] == [{"seg": "seg01", "converged": True, "rounds": 1}]
+    assert out["result"]["failed"] == []
+    labels = [c["label"] for c in out["calls"]]
+    assert ARTIFACT_LABELS[1] not in labels, (
+        "an accepted first check must not trigger the shared read+check retry"
+    )
+
+
+@pytest.mark.parametrize(
+    "art",
+    [
+        pytest.param({"match": True, "mismatch_detail": "expected sha1 a.. got b.."}, id="real-mismatch-detail"),
+        pytest.param({"match": True, "mismatch_detail": None}, id="wrong-typed-mismatch-detail"),
+        pytest.param({"match": False, "mismatch_detail": "artifact differs"}, id="honest-mismatch"),
+        pytest.param({"match": True, "verified": True}, id="undeclared-key"),
+    ],
+)
+def test_artifact_check_still_rejects(tmp_path, art):
+    """The anti-false-green half at the third site. A real mismatch_detail is
+    still fatal even next to match:true; an unreadable (wrong-typed) one
+    fails closed; an honest match:false is unchanged; and a key
+    REVIEW_ARTIFACT_SCHEMA never declared is now rejected too -- the guard
+    gained the allowed-key check its two ledger siblings always had."""
+    res = run(tmp_path=tmp_path, segs=["seg01"], overrides=_artifact_overrides(art))
+    assert res["ok"], res["stderr"]
+    out = res["out"]
+    assert out["result"]["converged"] == []
+    assert out["result"]["failed"] == [
+        {"seg": "seg01", "converged": False, "reason": "review-artifact-mismatch", "rounds": 1}
+    ]
+
+
 if __name__ == "__main__":
     import sys
     sys.exit(pytest.main([__file__, "-v"]))

@@ -54,6 +54,36 @@ Canon population is not "paste the whole book into context and ask for a glossar
    through yet (see `references/ledger-and-resumability.md` for the full
    derivation-state gate).
 
+   **1.15.0 (#291) — a merge that changes nothing does NOT re-stamp.** These two
+   hashes are a claim that this canon's CONTENT was produced under that derivation
+   state, so a merge only advances them when the merged document actually differs
+   from what is already on disk. This is deliberately keyed on the DOCUMENT, not on
+   the fragment's item count: `_merge_batch` treats an identical re-submission as a
+   silent no-op, so a fully populated fragment of already-merged items changes
+   nothing either — and still reports `merged_accepted > 0`. Before 1.15.0 every
+   merge re-stamped unconditionally, which let a content-free merge clear
+   `blocked_needs_regeneration` without anything having been regenerated (segments
+   then read as caught-up and stale output ships). A `review_queue[]`-only change
+   DOES count as a change and does re-stamp — that array is schema-required content
+   this file's own consumers read back. **Every mode that writes canon.json**
+   — `--merge-batches`, legacy `--batch`, `--init` and `--restamp-derivation`
+   alike — reports the same `generation_hashes_restamped` boolean, so a
+   conserved stamp is visible rather than silent and a caller can ask "did the
+   provenance move?" without branching on which mode ran.
+   `--restamp-derivation` additionally reports `generation_hashes_changed`,
+   naming which of the two fields actually differed.
+
+   The deliberate way to advance provenance on an UNCHANGED canon is
+   `canon_validate.py --research-mode <mode> --restamp-derivation`. That matters for
+   a mature, zero-candidate project: it has no candidates left, so the glossary pass
+   never runs, so no merge exists to re-stamp — and after a plugin upgrade that
+   touches `bootstrap_names.py` or `segpack.py`, segment selection would otherwise
+   stay blocked with no recourse (issue #193, which records the pre-1.15.0
+   `--merge-batches <empty-batch.json>` trick as its only, explicitly unsanctioned
+   escape). The operation is unchanged; what changed is that it is now explicit,
+   named, validated, and reports which fields moved, instead of happening silently
+   as a side effect of a command whose stated job was merging fragments.
+
 **Enforced, not just claimed.** The merge step's final action validates the WHOLE
 just-written `canon.json` against `canon-file.schema.json`, which requires
 `entries{}`, `review_queue`, AND both `generation_hashes` fields present
@@ -401,7 +431,17 @@ curated list is legitimately empty (every candidate already resolved),
 `glossary_batch_plan.py` emits `{"no_new_candidates": true, "batches": []}` and
 the orchestrating session skips `resume_setup.py` and the Workflow dispatch
 entirely — nothing to research this run (`resume_setup.py` rejects an empty
-`batches` list, which is why the marker exists).
+`batches` list, which is why the marker exists). The same marker is also the
+NORMAL first-run outcome on an uncased-script source whose preset ships no
+`name_inventory` — `bootstrap_names.py`'s `Lu`-gated detector has nothing to
+find there, so the curated list is empty because there were never candidates,
+not because they were all resolved. Either way this branch skips the merge,
+and the merge is the only writer of `canon.json` — so the SKIP branch must
+run `canon_validate.py --research-mode <mode> --init` to bootstrap an
+empty-but-stamped canon before W3a, or `segpack.py` fatals with
+`canon.json not found` (#290). `--init` is create-only: it never re-stamps an
+existing `canon.json`, since `select_segments.py`'s derivation-state gate
+reads exactly the two hashes it would overwrite.
 
 ## `segpack.py`'s canon injection contract
 

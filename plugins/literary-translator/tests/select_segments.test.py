@@ -58,6 +58,7 @@ call paths both ledger_merge.py AND select_segments.py itself make to
 `cache_key.py --seg <id>`.
 """
 import hashlib
+import importlib.util
 import json
 import shutil
 import subprocess
@@ -445,7 +446,11 @@ def test_full_classification_taxonomy_and_report(tmp_path):
         "pending_fields": ["particle_config_hash"],
         "message": (
             "segment 'seg05_blocked_regen' is blocked on regeneration: rerun "
-            "W3/W3a (re-run bootstrap_names.py, the glossary pass, then segpack.py) "
+            "W3/W3a (re-run bootstrap_names.py to regenerate name candidates, "
+            "then the glossary pass to re-stamp canon.json's "
+            "particle_config_hash -- or, on a project with no new candidates "
+            "left to merge, canon_validate.py --restamp-derivation -- then "
+            "segpack.py) "
             "before this segment can be reclassified"
         ),
     }
@@ -728,10 +733,127 @@ def test_derivation_bundle_hash_regen_hint_names_glossary_pass(tmp_path):
             f"segment {seg!r} is blocked on regeneration: rerun "
             "W3/W3a (re-run bootstrap_names.py to regenerate name candidates, "
             "then the glossary pass to re-stamp canon.json's "
-            "derivation_bundle_hash, then segpack.py) "
+            "derivation_bundle_hash -- or, on a project with no new "
+            "candidates left to merge, canon_validate.py "
+            "--restamp-derivation -- then segpack.py) "
             "before this segment can be reclassified"
         ),
     }
+
+
+# ---------------------------------------------------------------------------
+# 5a. #193/#291: the hint above must ALSO name the sanctioned restamp escape.
+#     The glossary pass it names only re-stamps when it actually merges
+#     something, and a mature project with zero unresolved candidates skips
+#     the pass entirely -- so for exactly that project the remedy the gate
+#     prints was unreachable, and 1.15.0's #291 fix removed the undocumented
+#     `--merge-batches <empty-batch.json>` workaround it used to have. The
+#     message an operator reads AT THE MOMENT OF FAILURE must therefore name
+#     `--restamp-derivation`, and must still put segpack.py last: segpack
+#     copies canon.json's stamp forward, so running it before the restamp
+#     just re-copies the stale value.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize(
+    "field", ["derivation_bundle_hash", "particle_config_hash"], ids=lambda f: f
+)
+def test_w3_regen_hints_name_the_sanctioned_restamp_escape(tmp_path, field):
+    """Parameterized over BOTH W3/W3a derivation-state fields on purpose.
+
+    The zero-candidate dead-end is a property of the REMEDY (a glossary pass
+    that does not run), not of which field happened to flip, so it applies
+    identically to `particle_config_hash` (the particle config file's bytes
+    changed) and `derivation_bundle_hash` (bootstrap_names.py/segpack.py's
+    bytes changed). Fixing one hint and leaving the other is exactly the
+    drift this parameterization exists to make impossible."""
+    root = make_durable_root(tmp_path)
+    seg = f"seg13_blocked_regen_{field}"
+    write_manifest(root, [seg])
+
+    current_key = make_cache_key("current")
+    sha1 = write_draft(root, seg, {"text": f"draft-{seg}-content"})
+    stored = with_field(current_key, field, f"{field}-OLD")
+    write_fragment(root, seg, converged_fragment(stored, sha1))
+    write_segpack(root, seg, {field: f"{field}-OLD-SEGPACK-NOT-CAUGHT-UP"})
+    write_fixture_cache_keys(root, {seg: current_key})
+
+    proc = run_select(root, "--allow-empty")
+    assert proc.returncode == 0, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    classification = parse_stdout(proc)["classification"][seg]
+    assert classification["pending_fields"] == [field]
+    message = classification["message"]
+
+    assert "--restamp-derivation" in message, (
+        f"the blocked_needs_regeneration hint for {field} does not name the "
+        "sanctioned restamp escape, so a mature zero-candidate project is "
+        "told to run a glossary pass that will not run and has no other way "
+        "out (#193/#291)"
+    )
+    assert "canon_validate.py" in message, "the escape is named without its script"
+    # Order is load-bearing, not cosmetic.
+    assert message.index("--restamp-derivation") < message.index("segpack.py"), (
+        "segpack.py must come AFTER the restamp -- it copies canon.json's "
+        "stamp forward, so running it first just re-copies the stale value"
+    )
+    # The ordinary has-candidates remedy must survive alongside the escape.
+    assert "glossary pass" in message
+    # The hint must name the field it is actually about.
+    assert field in message
+
+
+def load_select_segments_module():
+    """In-process load of the REAL select_segments.py, purely to read its own
+    FIELD_TO_REGEN_STEP table. Never used to execute the CLI -- every
+    behavioural test in this file drives the script as a subprocess. The
+    script's own directory goes on sys.path for the duration so its sibling
+    imports resolve, the same idiom the other in-process suites use."""
+    scripts_dir = SELECT_SCRIPT_SRC.parent
+    sys.path.insert(0, str(scripts_dir))
+    try:
+        spec = importlib.util.spec_from_file_location(
+            "select_segments_regen_table_under_test", SELECT_SCRIPT_SRC
+        )
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+    finally:
+        sys.path.remove(str(scripts_dir))
+
+
+def test_every_w3_regen_hint_names_the_restamp_escape():
+    """Table-driven, so a W3/W3a field added LATER is covered too.
+
+    The parameterized test above pins the two fields that exist today; this
+    one pins the rule itself. Any entry whose remedy routes through the W3
+    glossary pass inherits that pass's zero-candidate hole, so it must also
+    name the sanctioned escape -- the exact drift that left
+    `particle_config_hash` behind when `derivation_bundle_hash` was fixed."""
+    module = load_select_segments_module()
+    w3_fields = [f for f, step in module.FIELD_TO_REGEN_STEP.items() if "glossary pass" in step]
+    assert set(w3_fields) == {"derivation_bundle_hash", "particle_config_hash"}, (
+        f"the set of glossary-pass-routed regen hints changed: {sorted(w3_fields)} "
+        "-- re-check that each one still needs the restamp escape"
+    )
+    for field in w3_fields:
+        step = module.FIELD_TO_REGEN_STEP[field]
+        assert "--restamp-derivation" in step, (
+            f"FIELD_TO_REGEN_STEP[{field!r}] routes the operator through the W3 "
+            "glossary pass but never names canon_validate.py "
+            "--restamp-derivation, so a mature zero-candidate project blocked "
+            "on this field has no way out (#193)"
+        )
+        # Generated from the one shared template, not hand-maintained twice.
+        assert step == module._w3_regen_step(field)
+
+    # The W2 half of the same class: two fields, one source of truth. They
+    # need no restamp escape (the extractor re-runs them at W2, not the
+    # glossary pass), but duplicated literals are how the W3 pair drifted.
+    w2_fields = [f for f, step in module.FIELD_TO_REGEN_STEP.items() if step.startswith("W2 ")]
+    assert set(w2_fields) == {"source_extraction_hash", "source_input_hash"}
+    assert all(
+        module.FIELD_TO_REGEN_STEP[f] is module._W2_REGEN_STEP for f in w2_fields
+    ), "the W2 remedies are no longer one shared literal -- they can now drift apart"
 
 
 # ---------------------------------------------------------------------------

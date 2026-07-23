@@ -192,13 +192,57 @@ DERIVATION_STATE_FIELDS = frozenset(
     }
 )
 
+def _w3_regen_step(field: str) -> str:
+    """The W3/W3a remedy, generated once for every derivation-state field
+    whose regeneration routes through the W3 glossary pass.
+
+    Both such fields share one remedy AND one hole. `particle_config_hash`
+    flips when the resolved particle config file's bytes change;
+    `derivation_bundle_hash` flips when bootstrap_names.py's or segpack.py's
+    bytes change (cache_key.py's DERIVATION_BUNDLE_MEMBERS). Either way the
+    fix is the same chain, and either way it dead-ends the same way: the
+    glossary pass only re-stamps canon.json when it actually MERGES
+    something, and a mature project with zero unresolved candidates skips
+    that pass entirely -- so for exactly that project the remedy is
+    unreachable and the block never clears (#193). 1.15.0 (#291) additionally
+    removed the undocumented `--merge-batches <empty-batch.json>` restamp
+    that had been its only unsanctioned way out, so the hint must name the
+    sanctioned replacement.
+
+    Two orderings are load-bearing, not cosmetic. bootstrap_names.py comes
+    FIRST: jumping straight to the glossary pass when only its bytes changed
+    would consume stale name_candidates.json rows and still re-stamp, quietly
+    papering over the staleness. segpack.py comes LAST: it copies
+    canon.json's stamp forward rather than recomputing it, so running it
+    before the restamp merely re-copies the stale value.
+
+    Generated rather than spelled out per field because these were two
+    hand-maintained strings -- which is exactly how the escape came to be
+    added to one and forgotten on the other.
+    """
+    return (
+        "W3/W3a (re-run bootstrap_names.py to regenerate name candidates, "
+        f"then the glossary pass to re-stamp canon.json's {field} -- or, on "
+        "a project with no new candidates left to merge, canon_validate.py "
+        "--restamp-derivation -- then segpack.py)"
+    )
+
+
+# The W2 remedy. One literal for both W2 fields for the same reason
+# _w3_regen_step() exists: two identical hand-maintained strings is how the
+# W3 pair drifted, one gaining the restamp escape while the other silently
+# did not. These two need no escape (they are re-run by the extractor at W2,
+# never by the glossary pass), but they get one source of truth anyway --
+# the point is that editing this remedy is a single edit, always.
+_W2_REGEN_STEP = "W2 (re-run the source-format extractor)"
+
 # Actionable "what to rerun" message per derivation-state field, per
 # ledger-and-resumability.md's own wording.
 FIELD_TO_REGEN_STEP = {
-    "source_extraction_hash": "W2 (re-run the source-format extractor)",
-    "source_input_hash": "W2 (re-run the source-format extractor)",
-    "particle_config_hash": "W3/W3a (re-run bootstrap_names.py, the glossary pass, then segpack.py)",
-    "derivation_bundle_hash": "W3/W3a (re-run bootstrap_names.py to regenerate name candidates, then the glossary pass to re-stamp canon.json's derivation_bundle_hash, then segpack.py)",
+    "source_extraction_hash": _W2_REGEN_STEP,
+    "source_input_hash": _W2_REGEN_STEP,
+    "particle_config_hash": _w3_regen_step("particle_config_hash"),
+    "derivation_bundle_hash": _w3_regen_step("derivation_bundle_hash"),
 }
 
 # Fragment statuses that mean "a human must resolve this before automated
