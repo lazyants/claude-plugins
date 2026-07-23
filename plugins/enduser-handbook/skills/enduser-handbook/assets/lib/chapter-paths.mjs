@@ -405,7 +405,7 @@ export function validateGroups(entries) {
     const distinctTitles = [...new Set(groupEntries.filter((e) => isUsableTitle(e.group_title)).map(trimmedTitle))];
     if (distinctTitles.length > 1) {
       halts.push(
-        `Group '${group}' carries conflicting group_title values ('${distinctTitles[0]}' vs '${distinctTitles[1]}') — align all entries of the group.`,
+        `Group '${group}' carries conflicting group_title values (${distinctTitles.map((t) => `'${t}'`).join(', ')}) — align all entries of the group.`,
       );
     }
   }

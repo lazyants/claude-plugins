@@ -2,6 +2,10 @@
 
 All notable changes to `lazyants/claude-plugins` are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is per-plugin, not repo-wide.
 
+## [enduser-handbook 1.7.1] — 2026-07-23
+
+Fixes the conflicting-`group_title` manifest halt to name EVERY conflicting title, not just the first two. `validateGroups` enumerated only `distinctTitles[0]`/`[1]`, so a group with three or more distinct titles fired the halt correctly but dropped the 3rd+ from the message — an operator aligning the first two would re-hit the same halt on a title it never named. The halt now comma-joins all distinct titles. Closes #250. The rest is `chapter-paths` test-suite hardening against three mutant classes the shipped fixtures couldn't distinguish: `manualMigrationChecklist`'s `output_dir`/`chapters_dir`/`index_file` roots are now exercised fully decoupled (#253); the fence (`runLen >= openLen`) and inline-code (`runLen === openLen`) delimiter-length rules are now tested with UNEQUAL opener/closer runs (#254); and `renderManualMigrationHalt`'s scan-failure header + detail rendering is pinned with a multi-tuple fixture (#255). Closes #253. Closes #254. Closes #255.
+
 ## [enduser-handbook 1.7.0] — 2026-07-23
 
 De-hardcodes the reference-assets doc test suite's enumeration, fixes both wrong glossary wikilink spellings down to one vault-root-relative form, and specifies the flat/group-free INDEX target at the same precision as the grouped one. Closes #262. Closes #247. Closes #248.

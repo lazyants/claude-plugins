@@ -111,7 +111,7 @@ are verbatim and both are blocking.
 - **Reserved slug** — `slug 'assets' is reserved in a grouped manifest (co-location follow-up; keeps the tree unambiguous).`
 - **Group/slug collision** — `group '<g>' collides with flat chapter slug '<g>' — a directory and a chapter file cannot share the same path under publish.chapters_dir.`
 - **Missing title** — `Entry '<slug>' in group '<g>' lacks group_title — every grouped entry carries the localized group title (never derived from the English group slug).`
-- **Conflicting titles** — `Group '<g>' carries conflicting group_title values ('<a>' vs '<b>') — align all entries of the group.`
+- **Conflicting titles** — `Group '<g>' carries conflicting group_title values ('<a>', '<b>', ...) — align all entries of the group.`
 - **Shared title** — `Groups '<g1>' and '<g2>' share group_title '<t>' — nav containers are located by title; give each group a distinct localized title.`
 
 **Group-free manifest** halts, verbatim, on:
