@@ -196,6 +196,161 @@ line_of() {
   grep -nF -- "$1" "$2" 2>/dev/null | head -n1 | cut -d: -f1
 }
 
+
+# Assert that a needle's own line (already resolved via line_of) sits STRICTLY BEFORE a boundary
+# line (also already resolved). This is the PLACEMENT half of a §3.1/§3.2 group proof: an H2's
+# scope legitimately includes its nested H3s, so has_in_section alone cannot tell "before the H3"
+# from "inside the H3" — only a position comparison against the boundary heading's own line can.
+# Centralized here (round-3 codex BLOCKER 1) rather than hand-duplicated per call site, which is
+# exactly the copy-paste-drift risk this file's whole helper discipline exists to avoid.
+assert_line_before() {
+  local msg="$1" needle_line="$2" boundary_line="$3"
+  if [ -n "$needle_line" ] && [ -n "$boundary_line" ] && [ "$needle_line" -lt "$boundary_line" ]; then
+    ok "$msg (line=$needle_line < boundary=$boundary_line)"
+  else
+    bad "$msg (line=$needle_line boundary=$boundary_line)"
+  fi
+}
+
+# The ONLY way to iterate a glob-derived category in this file. Expands, fails CLOSED on an empty
+# category, and returns paths in the global CATEGORY_FILES. nullglob/globstar are deliberately OFF
+# (:20), so a bare `for f in "$DIR"/*.x` would iterate the LITERAL pattern once and turn "covered
+# nothing" into a silent pass — that shape must not appear anywhere below.
+# MUST be called directly in the main shell: `bad` mutates FAIL, which is lost in ANY subshell,
+# including the producer side of `< <(...)`.
+CATEGORY_FILES=()
+category_files() {   # $1 = human label, $2 = root dir, $3… = find predicates
+  local label="$1" root="$2"; shift 2
+  local f raw find_rc saw_sentinel raw_n
+  CATEGORY_FILES=()
+  # EVERY stage runs in the main shell and has its exit status checked. NO process substitution
+  # and NO pipe anywhere in this function: both discard the producer's status, and a stage that
+  # emits SOME records then fails (unreadable subtree, I/O error, disk full) would truncate the
+  # category silently. `pipefail` does NOT cover process substitutions — it cannot rescue this.
+  raw="$(mktemp "${TMPDIR:-/tmp}/eh-cat.XXXXXX")" \
+    || { bad "category '$label' — mktemp failed; coverage is UNKNOWN"; return; }
+
+  find "$root" "$@" -print0 > "$raw"; find_rc=$?
+  [ "$find_rc" -eq 0 ] \
+    || bad "category '$label' — find exited $find_rc (partial traversal); coverage is UNKNOWN"
+
+  # Round-7 codex P1 (ped-ant): the pipeline used to be find -> sort -z -> consume, with `sort -z`
+  # existing ONLY for cosmetic deterministic ordering — every gate here is COUNT/PRESENCE-based,
+  # never order-sensitive, so nothing downstream cares what order CATEGORY_FILES holds paths in.
+  # `sort -z` is a GNU extension some older BSD `sort` vintages lack (this plugin ships to whatever
+  # macOS a user has, and this file already commits to bash-3.2-era portability), so depending on it
+  # bought a real distribution risk for zero functional benefit. Removed: find -> consume is the
+  # whole pipeline now, and the record-count taken below is straight off find's own output — no
+  # transformer stage sits between producer and consumer to lose records, so the old
+  # raw_n-vs-sorted_n conservation check (which existed solely to catch A TRANSFORMER dropping
+  # records) has nothing left to guard and is gone with it. `-mindepth`/`-maxdepth` are ORDINARY
+  # BSD/macOS-supported find options (not POSIX, but verified on stock macOS BSD find), not a
+  # portability risk, and stay.
+  raw_n="$(_nul_records "$raw")"
+
+  # COMPLETION SENTINEL: an empty record, which `find -print0` can never emit for a real path.
+  # Without it the CONSUMER is the last unchecked stage — a $raw truncated AFTER find's own check
+  # makes `read` stop early, leaving a nonempty-but-partial array that the count guard below
+  # happily accepts. The loop must SEE the sentinel to prove it consumed the whole stream. Appended
+  # to $raw directly (there is no separate sorted file anymore); `raw_n` above was already taken
+  # before this append, so it counts real records only, never the sentinel itself.
+  printf '\0' >> "$raw" \
+    || bad "category '$label' — could not append completion sentinel; coverage is UNKNOWN"
+
+  # Reading from a PLAIN FILE keeps the loop in the caller's shell, so `bad` still mutates FAIL.
+  saw_sentinel=0
+  while IFS= read -r -d '' f; do
+    if [ -z "$f" ]; then saw_sentinel=1; break; fi
+    CATEGORY_FILES+=("$f")
+  done < "$raw"
+  [ "$saw_sentinel" -eq 1 ] \
+    || bad "category '$label' — consumer never reached the completion sentinel (truncated read); coverage is UNKNOWN"
+  [ "${#CATEGORY_FILES[@]}" -eq "$raw_n" ] \
+    || bad "category '$label' — consumed ${#CATEGORY_FILES[@]} of $raw_n records; coverage is UNKNOWN"
+  rm -f "$raw"
+  [ "${#CATEGORY_FILES[@]}" -gt 0 ] \
+    || bad "category '$label' matched no files — this gate covered nothing"
+}
+
+# Counts NUL-delimited records. Runs in a command substitution (a subshell) DELIBERATELY: it
+# returns its answer on stdout and mutates no counter, so the subshell-loses-`bad` trap (§0.6)
+# does not apply.
+_nul_records() {
+  local n=0 x
+  while IFS= read -r -d '' x; do n=$((n+1)); done < "$1"
+  printf '%s' "$n"
+}
+
+# §1.2 membership boundary — a POSITIVE allowlist, fail CLOSED: every direct child of assets/lib/
+# must be a regular file named *.mjs or *.d.mts. A directory, a symlink, a dotfile, or any other
+# extension `bad`s BY NAME — that is what makes the category TOTAL, not merely wide (rev-2, codex
+# round-1 m3 / round-2 C3). This is deliberately SEPARATE from category_files: the two content
+# loops over assets/lib (banner, fork-wording) only need to SELECT the well-formed members; this
+# is the one place that also polices what does NOT belong, which no other category in this file
+# needs (test files, references, assets/*.ts have no closed-membership rule).
+# `[ -f "$f" ]` FOLLOWS a symlink and would wrongly pass one (codex round-3) — `[ -L "$f" ]` sees
+# the link itself, never its target. Runs directly in the main shell so `bad` mutates FAIL, same
+# discipline as category_files.
+assert_lib_no_stragglers() {
+  local dir="$1" f base raw find_rc straggler_seen=0
+  raw="$(mktemp "${TMPDIR:-/tmp}/eh-cat.XXXXXX")" \
+    || { bad "assets/lib membership — mktemp failed; coverage is UNKNOWN"; return; }
+  find "$dir" -mindepth 1 -maxdepth 1 -print0 > "$raw"; find_rc=$?
+  [ "$find_rc" -eq 0 ] \
+    || bad "assets/lib membership — find exited $find_rc (partial traversal); coverage is UNKNOWN"
+  while IFS= read -r -d '' f; do
+    # Round-3 codex MAJOR 3a: `basename "$f"` runs through a command substitution, which STRIPS
+    # trailing newlines from its captured output — so an entry literally named "x.mjs<NEWLINE>"
+    # would print "x.mjs\n" and be captured as the indistinguishable "x.mjs", silently misclassified
+    # as an allowed member. Check the RAW path (never stripped, since `read -d ''` only splits on
+    # NUL) for an embedded newline FIRST, before basename ever runs on it.
+    case "$f" in
+      *$'\n'*)
+        bad "assets/lib membership — an entry's path contains an embedded newline, not an allowed member (allowlist)"
+        straggler_seen=1
+        continue
+        ;;
+    esac
+    base="$(basename "$f")"
+    case "$base" in
+      .*)
+        bad "assets/lib membership — '$base' is a hidden entry, not an allowed member (allowlist)"
+        straggler_seen=1
+        continue
+        ;;
+    esac
+    if [ -L "$f" ]; then
+      bad "assets/lib membership — '$base' is a symlink, not an allowed member (allowlist)"
+      straggler_seen=1
+      continue
+    fi
+    if [ -d "$f" ]; then
+      bad "assets/lib membership — '$base' is a directory, not an allowed member (allowlist)"
+      straggler_seen=1
+      continue
+    fi
+    # Round-3 codex MAJOR 3b: everything above rules OUT bad shapes (hidden/symlink/directory) but
+    # never required a GOOD one — a FIFO, socket, or device node named e.g. "x.mjs" fell through to
+    # the extension check below and was accepted BY NAME. `[ -L ]` already excluded symlinks above,
+    # so `[ -f ]` here is safe (nothing left to follow) and requires an actual regular file.
+    if [ ! -f "$f" ]; then
+      bad "assets/lib membership — '$base' is not a regular file (fifo/socket/device?), not an allowed member (allowlist)"
+      straggler_seen=1
+      continue
+    fi
+    case "$base" in
+      *.mjs|*.d.mts) : ;;   # allowed
+      *)
+        bad "assets/lib membership — '$base' has an extension other than .mjs/.d.mts, not an allowed member (allowlist)"
+        straggler_seen=1
+        ;;
+    esac
+  done < "$raw"
+  rm -f "$raw"
+  [ "$straggler_seen" -eq 0 ] \
+    && ok "assets/lib membership — every direct child is an allowed *.mjs/*.d.mts regular file (no stragglers)"
+}
+
 echo "== has_in_section self-test: backtick-fence info-string boundary (round-4 regression) =="
 # Permanent boundary cases for the fence-opener fix above — synthetic fixtures, not project docs.
 # These two are phrased as plain has_in_section (positive, "must be found") calls via a
@@ -801,6 +956,10 @@ has "control-inventory.d.mts: declares className"                 'className' "$
 
 echo "== normative-vs-reference one-liner in every decision-5 touch point + asset header =="
 NORMATIVE='non-normative reference implementation'
+# Decision-5 touch points are a deliberate HAND-PICKED subset of references/ (+ SKILL.md), not a
+# directory category — keep them explicit (§1.2). The two genuine categories — every assets/lib
+# module (both extensions) and every top-level assets/*.ts file — are derived below via
+# category_files so a future addition (like chapter-paths.mjs/.d.mts) cannot be silently omitted.
 for f in \
   "$REFS/completeness-gate.md" \
   "$REFS/running-ui-source.md" \
@@ -809,33 +968,27 @@ for f in \
   "$REFS/container-isolation.md" \
   "$REFS/capture-spec-helpers.md" \
   "$SKILL" \
-  "$ASSETS/surface-audit.playwright.ts" \
-  "$ASSETS/capture-helpers.playwright.ts" \
-  "$ASSETS/capture.example.spec.ts" \
-  "$ASSETS/lib/control-inventory.mjs" \
-  "$ASSETS/lib/control-inventory.d.mts" \
-  "$ASSETS/lib/capture-guard-policy.mjs" \
-  "$ASSETS/lib/capture-guard-policy.d.mts" \
-  "$ASSETS/lib/identity-match.mjs" \
-  "$ASSETS/lib/identity-match.d.mts" \
-  "$ASSETS/lib/graphql-read-classifier.mjs" \
-  "$ASSETS/lib/graphql-read-classifier.d.mts" \
-  "$ASSETS/lib/profile-version.mjs" \
-  "$ASSETS/lib/profile-version.d.mts" \
   "$REFS/profile-validation.md" \
   "$REFS/capture-engines.md" \
-  "$ASSETS/lib/surface-diff.mjs" \
-  "$ASSETS/lib/surface-diff.d.mts" \
-  "$ASSETS/lib/viewport-clip.mjs" \
-  "$ASSETS/lib/viewport-clip.d.mts" \
-  "$ASSETS/lib/dismiss-safe-label-policy.mjs" \
-  "$ASSETS/lib/dismiss-safe-label-policy.d.mts" \
-  "$ASSETS/reaudit.example.spec.ts" \
   "$REFS/surface-diff.md"; do
   base="$(basename "$f")"
   if [ ! -f "$f" ]; then bad "normative banner: $base does not exist yet"; continue; fi
   has "normative banner present: $base" "$NORMATIVE" "$f"
 done
+assert_lib_no_stragglers "$ASSETS/lib"
+category_files 'assets/lib modules (normative banner)' "$ASSETS/lib" -mindepth 1 -maxdepth 1 -type f \
+  \( -name '*.mjs' -o -name '*.d.mts' \)   # UNION — both extensions, never just *.mjs (rev-13)
+if [ "${#CATEGORY_FILES[@]}" -gt 0 ]; then
+  for f in "${CATEGORY_FILES[@]}"; do
+    has "normative banner present: $(basename "$f")" "$NORMATIVE" "$f"
+  done
+fi
+category_files 'assets/*.ts (normative banner)' "$ASSETS" -maxdepth 1 -name '*.ts'
+if [ "${#CATEGORY_FILES[@]}" -gt 0 ]; then
+  for f in "${CATEGORY_FILES[@]}"; do
+    has "normative banner present: $(basename "$f")" "$NORMATIVE" "$f"
+  done
+fi
 
 echo "== glossaryTerms fully renamed to glossary_terms =="
 if grep -rn 'glossaryTerms' "$SKILL_DIR" "$PLUGIN_DIR/.claude-plugin" 2>/dev/null; then
@@ -846,30 +999,45 @@ fi
 
 echo "== executable unit tests (node --test) =="
 if command -v node >/dev/null 2>&1; then
-  for t in control-inventory.test.mjs capture-guard-policy.test.mjs identity-match.test.mjs graphql-read-classifier.test.mjs profile-version.test.mjs surface-diff.test.mjs viewport-clip.test.mjs dismiss-safe-label-policy.test.mjs chapter-paths.test.mjs; do
-    if node --test "$TEST_DIR/$t" >/dev/null 2>&1; then
-      ok "$t passes under node --test"
-    else
-      bad "$t FAILED under node --test"
-    fi
-  done
+  category_files 'unit test files' "$TEST_DIR" -maxdepth 1 -name '*.test.mjs'
+  if [ "${#CATEGORY_FILES[@]}" -gt 0 ]; then
+    for t in "${CATEGORY_FILES[@]}"; do
+      tbase="$(basename "$t")"
+      if node --test "$t" >/dev/null 2>&1; then
+        ok "$tbase passes under node --test"
+      else
+        bad "$tbase FAILED under node --test"
+      fi
+    done
+  fi
 else
   echo "  note  node not on PATH — skipping the executable unit tests"
 fi
 
 echo "== optional local TypeScript syntax check =="
-TS_FILES="$ASSETS/surface-audit.playwright.ts $ASSETS/capture-helpers.playwright.ts $ASSETS/capture.example.spec.ts $ASSETS/reaudit.example.spec.ts"
+category_files 'assets/*.ts (TypeScript check)' "$ASSETS" -maxdepth 1 -name '*.ts'
+# Round-3 codex MAJOR 4: an unguarded copy of an EMPTY array is fatal under bash 3.2 `set -u` (the
+# same hazard §0.6/§1.7 document for every other CATEGORY_FILES consumer) — the empty-category
+# probe for THIS call (rows 10-16) would abort with "unbound variable" instead of failing through
+# the parent FAIL counter, which is exactly the false-negative the zero-match guard exists to
+# prevent. Length-guarded the same way every other expansion in this file is.
+TS_FILES=()
+[ "${#CATEGORY_FILES[@]}" -gt 0 ] && TS_FILES=("${CATEGORY_FILES[@]}")   # copied immediately — a later category_files call clobbers the global
 if command -v esbuild >/dev/null 2>&1; then
   ts_ok=1
-  for f in $TS_FILES; do
-    esbuild "$f" --bundle=false --log-level=silent --outfile=/dev/null >/dev/null 2>&1 || ts_ok=0
-  done
+  if [ "${#TS_FILES[@]}" -gt 0 ]; then
+    for f in "${TS_FILES[@]}"; do
+      esbuild "$f" --bundle=false --log-level=silent --outfile=/dev/null >/dev/null 2>&1 || ts_ok=0
+    done
+  fi
   [ "$ts_ok" -eq 1 ] && ok "TypeScript parses under local esbuild" || bad "TypeScript syntax error under local esbuild"
 elif npx --no-install esbuild --version >/dev/null 2>&1; then
   ts_ok=1
-  for f in $TS_FILES; do
-    npx --no-install esbuild "$f" --bundle=false --log-level=silent --outfile=/dev/null >/dev/null 2>&1 || ts_ok=0
-  done
+  if [ "${#TS_FILES[@]}" -gt 0 ]; then
+    for f in "${TS_FILES[@]}"; do
+      npx --no-install esbuild "$f" --bundle=false --log-level=silent --outfile=/dev/null >/dev/null 2>&1 || ts_ok=0
+    done
+  fi
   [ "$ts_ok" -eq 1 ] && ok "TypeScript parses under local npx esbuild" || bad "TypeScript syntax error under local npx esbuild"
 else
   echo "  note  no local esbuild (and never network-fetching npx -y) — skipping the .ts syntax check"
@@ -988,7 +1156,241 @@ echo "== obsidian-vault adapter (#153) =="
 # assets/<chapter-slug>/ prefix, and the link-integrity gate keeps the resolved target inside the vault.
 # v1.5.0 #19: the join() innards became chapterAssetDir(entry) (group-aware, D3) — re-picked below.
 has "obsidian-vault: embed derived from capture.output_dir" 'chapterAssetDir(entry) = join(capture.output_dir' "$OMD"
-has "obsidian-vault: vault-boundary gate"                   'inside the active Obsidian vault'                          "$OMD"
+# #247 (round-2, A2): the containment gate's own wording moved from "the active Obsidian vault"
+# to the derived `<vault-root>` symbol (see "## Vault root" / §2.1) — re-pointed to the new prose,
+# same containment claim, verified count_fixed == 1 file-wide.
+has "obsidian-vault: vault-boundary gate"                   'stay inside `<vault-root>`'                          "$OMD"
+
+echo "== #247: <vault-root> derivation (§2.1/§2.6) =="
+# The vault root is derived once per run from a SINGLE anchor (publish.chapters_dir) — there is no
+# publish.vault_root profile key. Five positives pin the derivation's normative shape (selection,
+# zero-marker halt, multiple-marker halt, unreadable-ancestor halt); each is novel (absent from the
+# Round-0 baseline — verified against $BASELINE, not re-checked at runtime since the pre-edit tree
+# is not available here) and unique file-wide.
+# Round-3 codex MAJOR 5: the needle stopped BEFORE the identifier, so it proved only that SOME
+# anchor is named, not WHICH one — a mutation swapping publish.chapters_dir for publish.index_file
+# left this green. Extended to bind the identifier itself (A2-returned string).
+has_in_section "obsidian-vault: vault-root selection names publish.chapters_dir as its one discovery anchor" \
+  "$OMD" '## Vault root' \
+  'The only discovery anchor is `publish.chapters_dir`'
+has_in_section "obsidian-vault: vault-root selection requires a readable .obsidian/ directory" \
+  "$OMD" '## Vault root' \
+  'holds a readable `.obsidian/` directory'
+has_in_section "obsidian-vault: vault-root zero-marker halt" \
+  "$OMD" '## Vault root' \
+  'No Obsidian vault found above'
+has_in_section "obsidian-vault: vault-root multiple-marker halt names it an unsupported topology" \
+  "$OMD" '## Vault root' \
+  'this vault topology is unsupported'
+has_in_section "obsidian-vault: vault-root unreadable-ancestor halt names the exact path" \
+  "$OMD" '## Vault root' \
+  'while walking for the vault root'
+# The heading itself must be unique — a duplicated "## Vault root" would let has_in_section bind to
+# the wrong (first) occurrence, silently validating nothing about the real section.
+VAULT_ROOT_HEADING_COUNT="$(count_fixed '## Vault root' "$OMD")"
+if [ "$VAULT_ROOT_HEADING_COUNT" -eq 1 ]; then
+  ok "obsidian-vault: '## Vault root' heading appears exactly once"
+else
+  bad "obsidian-vault: '## Vault root' heading count drifted from 1 (found $VAULT_ROOT_HEADING_COUNT)"
+fi
+# capture.output_dir must NEVER participate in vault-root SELECTION (§2.1's corrected derivation —
+# the rev-2 BLOCKER this whole section exists to prevent). Scoped to the H2 itself: a whole-file
+# hasnt would be defeated by the term's legitimate use elsewhere (the containment check below).
+hasnt_in_section "obsidian-vault: capture.output_dir plays no part in vault-root selection" \
+  "$OMD" '## Vault root' \
+  'capture.output_dir'
+# Round-3 codex MAJOR 5: same gap on the gate side — "plays no part in selecting" alone doesn't
+# say WHAT plays no part. Extended to bind capture.output_dir itself (A2-returned string).
+has_in_section "obsidian-vault: link-integrity gate states capture.output_dir plays no part in vault-root selection" \
+  "$OMD" '## Link integrity gate before you publish' \
+  '`capture.output_dir` deliberately plays no part in selecting'
+# The corrected glossary wikilink form: vault-root-relative, replacing the two wrong 1.6.0 spellings.
+has_in_section "obsidian-vault: glossary wikilink target is vault-root-relative" \
+  "$OMD" '## Glossary backlink discipline' \
+  'relative(<vault-root>, {{publish.glossary_dir}})'
+# Round-3 codex MINOR 8: mislabeled — this needle sits on the `publish.wikilinks: true` (Obsidian
+# default) bullet ("see 'Glossary backlink discipline' below FOR THE EXACT TARGET", :371), not the
+# wikilinks-OFF one (which just says "...below.", :387, no "for the exact target" suffix). The
+# wikilinks-ON pointer is deliberately MORE DETAILED than the off one — that asymmetry (lead-
+# ratified) is what makes "below for the exact target" discriminate a real cross-reference from a
+# copy-pasted one, since only the wikilinks-ON copy carries the longer phrase.
+has_in_section "obsidian-vault: wikilinks-ON glossary bullet points at the exact-target section" \
+  "$OMD" '## Wikilinks vs Markdown links' \
+  'below for the exact target'
+# Retired-form check (codex round-1 M7): neither wrong 1.6.0 path-prefix spelling survives, anywhere.
+hasnt "obsidian-vault: no retired basename-form glossary path prefix" 'basename}}/index#' "$OMD"
+hasnt "obsidian-vault: no retired raw glossary_dir path prefix"       '{{publish.glossary_dir}}/index#' "$OMD"
+
+echo "== #247: glossary_seed becomes conditional (§2.7) =="
+# glossary_seed is set-and-readable-conditional at exactly its two operative sites (INDEX wiring
+# item 2, link-integrity gate item 5) — never mandatory. count_fixed proves the third (unconditional
+# 1.6.0 layout-diagram) site is gone: exactly 2 occurrences file-wide, not 3.
+GLOSSARY_SEED_COUNT="$(count_fixed '{{publish.glossary_seed}}' "$OMD")"
+if [ "$GLOSSARY_SEED_COUNT" -eq 2 ]; then
+  ok "obsidian-vault: {{publish.glossary_seed}} occurs at exactly its 2 conditional sites"
+else
+  bad "obsidian-vault: {{publish.glossary_seed}} count drifted from 2 (found $GLOSSARY_SEED_COUNT) — a site was added, removed, or the unconditional layout-diagram line regressed"
+fi
+has_in_section "obsidian-vault: INDEX wiring item 2 names glossary_seed" \
+  "$OMD" '## INDEX wiring (do all of these on every chapter create/update)' \
+  '{{publish.glossary_seed}}'
+has_in_section "obsidian-vault: INDEX wiring item 2 is skipped when the key is unset" \
+  "$OMD" '## INDEX wiring (do all of these on every chapter create/update)' \
+  'Skip this item entirely when the key is unset'
+# Round-3 codex MAJOR 6: the "skipped when unset" pins above prove the negative half of the
+# conditional but not the POSITIVE trigger — a mutation dropping "and readable" (leaving only "is
+# set") would silently widen the condition and stayed green. A2-returned pins on the exact trigger
+# at both operative sites; removing "and readable" from either must now go red.
+has_in_section "obsidian-vault: INDEX wiring item 2 triggers on set AND readable, not merely set" \
+  "$OMD" '## INDEX wiring (do all of these on every chapter create/update)' \
+  '`publish.glossary_seed` is set and readable'
+has_in_section "obsidian-vault: link-integrity gate item 5 names glossary_seed" \
+  "$OMD" '## Link integrity gate before you publish' \
+  '{{publish.glossary_seed}}'
+has_in_section "obsidian-vault: link-integrity gate item 5's glossary_seed half is skipped when the key is unset" \
+  "$OMD" '## Link integrity gate before you publish' \
+  'this half of item 5 is skipped when the key is unset'
+has_in_section "obsidian-vault: link-integrity gate item 5 triggers on set AND readable, not merely set" \
+  "$OMD" '## Link integrity gate before you publish' \
+  '{{publish.glossary_seed}}` is set and readable'
+
+echo "== #248: obsidian-vault flat-branch witnesses (O6) =="
+# Every flat-branch witness (O6) needs BOTH novelty (absent before A2's #248 edit — verified against
+# the Round-0 $BASELINE, not re-checked at runtime for the same reason as the #247 block above) and
+# placement between the full-semantic branch openers, L_FLAT < L < L_GRP. The three anchors are
+# FROZEN — A2 must not reword them — so each is asserted unique first, same discipline as the guard-
+# sentinel-order check above: an ordering comparison over a non-unique anchor proves nothing.
+L_FLAT_NEEDLE='**Flat entries** (no `group`, the 1.4.1 shipped case)'
+L_GRP_NEEDLE='**Grouped entries** (`anyGroup` manifests) additionally resolve a container'
+L_S0_NEEDLE='**Step 0 — idempotency check.**'
+o6_anchor_ok=1
+c="$(count_fixed "$L_FLAT_NEEDLE" "$OMD")"
+if [ "$c" -eq 1 ]; then ok "obsidian-vault: O6 flat-opener anchor is unique"; else bad "obsidian-vault: O6 flat-opener anchor count drifted from 1 (found $c)"; o6_anchor_ok=0; fi
+c="$(count_fixed "$L_GRP_NEEDLE" "$OMD")"
+if [ "$c" -eq 1 ]; then ok "obsidian-vault: O6 grouped-opener anchor is unique"; else bad "obsidian-vault: O6 grouped-opener anchor count drifted from 1 (found $c)"; o6_anchor_ok=0; fi
+c="$(count_fixed "$L_S0_NEEDLE" "$OMD")"
+if [ "$c" -eq 1 ]; then ok "obsidian-vault: O6 step-0-opener anchor is unique"; else bad "obsidian-vault: O6 step-0-opener anchor count drifted from 1 (found $c)"; o6_anchor_ok=0; fi
+
+L_FLAT="$(line_of "$L_FLAT_NEEDLE" "$OMD")"
+L_GRP="$(line_of "$L_GRP_NEEDLE" "$OMD")"
+L_S0="$(line_of "$L_S0_NEEDLE" "$OMD")"
+if [ "$o6_anchor_ok" -eq 1 ] && [ -n "$L_FLAT" ] && [ -n "$L_GRP" ] && [ -n "$L_S0" ] \
+   && [ "$L_FLAT" -lt "$L_GRP" ] && [ "$L_GRP" -lt "$L_S0" ]; then
+  ok "obsidian-vault: O6 anchors ordered L_FLAT < L_GRP < L_S0 ($L_FLAT < $L_GRP < $L_S0)"
+else
+  bad "obsidian-vault: O6 anchor order wrong (flat=$L_FLAT grp=$L_GRP s0=$L_S0)"
+fi
+
+# Witness 1 (round-5 codex MAJOR, 3rd and terminating fix — A2/lead-verified). The bare formula
+# `relative(dirname(index_file), chapter_file)` is a SHARED string (both branches legitimately use
+# it), so no bare-formula check can bind a copy to its branch: round-3's first-match-placement only
+# protected the flat copy (round-4 found the grouped copy unprotected); round-4's "second match >
+# L_GRP" fix had no UPPER bound (a grouped-formula relocation past its own section stayed green)
+# and used a LINE-based count (grep -oF, not count_fixed, is required to catch a 3rd occurrence
+# appended onto an existing line). The terminating design: stop pinning the shared string and bind
+# EACH copy to its own branch-specific sentence, which the two formula lines already carry —
+#   FLAT (:262):    ...chapter_file)`; for wikilinks (the Obsidian default), ...
+#   GROUPED (:287): ...Markdown links (`publish.wikilinks: false`), `relative(...chapter_file)`; ...
+# Neither branch context appears in the other's line (verified), so each needle is inherently
+# branch-bound — placement then only needs to prove it sits in ITS branch's line range.
+FLAT_FORMULA_NEEDLE='chapter_file)`; for wikilinks'
+c="$(count_fixed "$FLAT_FORMULA_NEEDLE" "$OMD")"; L="$(line_of "$FLAT_FORMULA_NEEDLE" "$OMD")"
+if [ "$c" -eq 1 ] && [ -n "$L" ] && [ -n "$L_FLAT" ] && [ -n "$L_GRP" ] && [ "$L_FLAT" -lt "$L" ] && [ "$L" -lt "$L_GRP" ]; then
+  ok "obsidian-vault: O6 witness — flat entry's expected-target formula, branch-bound (placed at $L)"
+else
+  bad "obsidian-vault: O6 witness FAILED — flat entry's expected-target formula, branch-bound (count=$c line=$L, need count==1 and $L_FLAT<L<$L_GRP)"
+fi
+# Round-6 codex MAJOR (4th, precision refinement): the previous upper bound — the NEXT H2, "##
+# Wikilinks vs Markdown links" — was too loose. Step 0's own target-computation region ends far
+# earlier, at "- **Container resolution**" (:313); everything between :313 and the H2 is container
+# resolution / INDEX item 2 / manual-migration prose, none of which is Step 0. A careless
+# cut-and-paste moving the grouped formula sentence down into that later prose (still legitimately
+# "somewhere under INDEX wiring, after L_GRP") stayed inside [L_GRP, L_UPPER] and went undetected.
+# Tightened to the actual Step-0 interval: (L_GRP, L_CR), a ~30-line window. "Container resolution"
+# verified unique file-wide before use — an ordering comparison over a non-unique anchor proves
+# nothing (same discipline as every other anchor in this file).
+CR_ANCHOR='- **Container resolution**'
+CR_ANCHOR_COUNT="$(count_fixed "$CR_ANCHOR" "$OMD")"
+if [ "$CR_ANCHOR_COUNT" -eq 1 ]; then
+  ok "obsidian-vault: O6 witness — Container-resolution anchor is unique"
+else
+  bad "obsidian-vault: O6 witness FAILED — Container-resolution anchor count drifted from 1 (found $CR_ANCHOR_COUNT)"
+fi
+L_CR="$(line_of "$CR_ANCHOR" "$OMD")"
+GROUPED_FORMULA_NEEDLE='Markdown links (`publish.wikilinks: false`), `relative(dirname(index_file), chapter_file)`'
+c="$(count_fixed "$GROUPED_FORMULA_NEEDLE" "$OMD")"; L="$(line_of "$GROUPED_FORMULA_NEEDLE" "$OMD")"
+if [ "$CR_ANCHOR_COUNT" -eq 1 ] && [ "$c" -eq 1 ] && [ -n "$L" ] && [ -n "$L_GRP" ] && [ -n "$L_CR" ] && [ "$L_GRP" -lt "$L" ] && [ "$L" -lt "$L_CR" ]; then
+  ok "obsidian-vault: O6 witness — grouped Step-0's expected-target formula, branch-bound (placed at $L, before L_CR=$L_CR)"
+else
+  bad "obsidian-vault: O6 witness FAILED — grouped Step-0's expected-target formula, branch-bound (count=$c line=$L, need count==1 and $L_GRP<L<L_CR=$L_CR)"
+fi
+# Occurrence-level count, deliberately NOT count_fixed (which is LINE-based, per its own :188
+# comment — a 3rd bare-formula copy appended onto an EXISTING line would still read as 2 lines).
+# `grep -oF` emits one line per MATCH, so `wc -l` counts occurrences, catching a 3rd copy anywhere,
+# same-line or not.
+FORMULA_OCCURRENCES="$(grep -oF 'relative(dirname(index_file), chapter_file)' "$OMD" 2>/dev/null | wc -l | tr -d ' ')"
+if [ "$FORMULA_OCCURRENCES" -eq 2 ]; then
+  ok "obsidian-vault: O6 witness — expected-target formula occurs exactly twice at occurrence level (flat + grouped)"
+else
+  bad "obsidian-vault: O6 witness FAILED — expected-target formula occurrence count drifted from 2 (found $FORMULA_OCCURRENCES)"
+fi
+# Witness 2 (round-3 codex BLOCKER 2): the >=2-match outcome. The old needle ("a flat entry gets no
+# special case here") was the INTRO fragment only — it ends before the actual action ("duplicate
+# halt fires"), which sits on the FOLLOWING physical line, so a mutation to the action itself left
+# this green. Re-pointed to the TRIGGER+ACTION needle A2 returned, which is what the halt actually
+# fires ON, not just the sentence that introduces it.
+W2='Two or more matches** — halt'
+c="$(count_fixed "$W2" "$OMD")"; L="$(line_of "$W2" "$OMD")"
+if [ "$c" -eq 1 ] && [ -n "$L" ] && [ -n "$L_FLAT" ] && [ -n "$L_GRP" ] && [ "$L_FLAT" -lt "$L" ] && [ "$L" -lt "$L_GRP" ]; then
+  ok "obsidian-vault: O6 witness — flat >=2-match outcome (novel, placed at $L)"
+else
+  bad "obsidian-vault: O6 witness FAILED — flat >=2-match outcome (count=$c line=$L, need count==1 and $L_FLAT<L<$L_GRP)"
+fi
+# Own adversarial check while wiring W2: the sentence wraps onto a SECOND physical line ("duplicate
+# halt fires exactly as it does for the grouped branch below."), which W2 above does not span
+# (has_in_section/count_fixed match per-line) — mutating just that continuation (e.g. "something
+# entirely different happens here.") left W2 green in a probe. Same two-half-needle discipline as
+# the locateChapterLine/expectedTarget pair: a second needle for the CONTINUATION line, so the
+# claim that this is the IDENTICAL duplicate halt (not merely "some halt") is itself proven.
+W2B='duplicate halt fires exactly as it does for the grouped branch below.'
+c="$(count_fixed "$W2B" "$OMD")"; L="$(line_of "$W2B" "$OMD")"
+if [ "$c" -eq 1 ] && [ -n "$L" ] && [ -n "$L_FLAT" ] && [ -n "$L_GRP" ] && [ "$L_FLAT" -lt "$L" ] && [ "$L" -lt "$L_GRP" ]; then
+  ok "obsidian-vault: O6 witness — flat >=2-match outcome names the IDENTICAL duplicate halt (novel, placed at $L)"
+else
+  bad "obsidian-vault: O6 witness FAILED — flat >=2-match outcome's duplicate-halt continuation (count=$c line=$L, need count==1 and $L_FLAT<L<$L_GRP)"
+fi
+# Witness 3: the exactly-1-match outcome — already wired, no container to verify.
+W3='a flat entry has no container to verify'
+c="$(count_fixed "$W3" "$OMD")"; L="$(line_of "$W3" "$OMD")"
+if [ "$c" -eq 1 ] && [ -n "$L" ] && [ -n "$L_FLAT" ] && [ -n "$L_GRP" ] && [ "$L_FLAT" -lt "$L" ] && [ "$L" -lt "$L_GRP" ]; then
+  ok "obsidian-vault: O6 witness — flat exactly-1-match outcome (novel, placed at $L)"
+else
+  bad "obsidian-vault: O6 witness FAILED — flat exactly-1-match outcome (count=$c line=$L, need count==1 and $L_FLAT<L<$L_GRP)"
+fi
+# Witness 4: the 0-match (append) outcome — under the existing flat chapter-list heading, never a
+# new container.
+W4='under whichever heading the file already uses for its flat chapter list'
+c="$(count_fixed "$W4" "$OMD")"; L="$(line_of "$W4" "$OMD")"
+if [ "$c" -eq 1 ] && [ -n "$L" ] && [ -n "$L_FLAT" ] && [ -n "$L_GRP" ] && [ "$L_FLAT" -lt "$L" ] && [ "$L" -lt "$L_GRP" ]; then
+  ok "obsidian-vault: O6 witness — flat 0-match append outcome (novel, placed at $L)"
+else
+  bad "obsidian-vault: O6 witness FAILED — flat 0-match append outcome (count=$c line=$L, need count==1 and $L_FLAT<L<$L_GRP)"
+fi
+# Witness 5 (two-mode target + display-text binding, O6). Round-3 codex BLOCKER 2: the old needle
+# stopped BEFORE the bound value ("...manifest entry's", no `title`), so a title->slug mutation
+# left it green. Extended to include the value itself (A2-returned string).
+W5='display text is always the manifest entry'"'"'s `title`'
+c="$(count_fixed "$W5" "$OMD")"; L="$(line_of "$W5" "$OMD")"
+if [ "$c" -eq 1 ] && [ -n "$L" ] && [ -n "$L_FLAT" ] && [ -n "$L_GRP" ] && [ "$L_FLAT" -lt "$L" ] && [ "$L" -lt "$L_GRP" ]; then
+  ok "obsidian-vault: O6 witness — flat display-text binding (novel, placed at $L)"
+else
+  bad "obsidian-vault: O6 witness FAILED — flat display-text binding (count=$c line=$L, need count==1 and $L_FLAT<L<$L_GRP)"
+fi
+# The gate-target witness sits OUTSIDE the flat/grouped branch structure — plain has_in_section, NOT
+# O6 (no placement mutation exists for it; rev-19 corrected rev-18's wrongful demand for one).
+has_in_section "obsidian-vault: link-integrity gate item 5's flat target (no container heading)" \
+  "$OMD" '## Link integrity gate before you publish' \
+  'under its flat chapter-list heading for a flat one'
 
 echo "== group axis (#19) — chapter path + asset dir + embed formula, both adapters + SKILL.md =="
 # D2: grouped chapter path form, shared across both adapters and SKILL.md W5.
@@ -1022,21 +1424,27 @@ has_in_section "obsidian-vault: step-0 idempotency check calls containerTitleMat
 # expectedTarget (permits a duplicate TOC insertion); containerTitleMatches comparing
 # entry.group_title against itself (accepts a wrong container). Both left every existing pin green.
 #
-# BOTH calls wrap mid-argument in this file (`### Grouped index wiring` is hard-wrapped, unlike the
-# sections pinned earlier this round) — `locateChapterLine(indexLines,` ends one line and
-# `expectedTarget)` starts the next; `containerTitleMatches(containerTitle,` ends one line and
-# `entry)` starts the next. Neither full signature fits a single fixed-string needle. What's pinned
-# instead: two needles per call, one per physical line, each covering one argument independently —
-# so a mutation to EITHER argument is still caught, just not by one needle proving the whole
-# signature at once. What this does NOT prove: that the two half-needles are adjacent lines of the
-# SAME call (an adversarial rewrite that separated them further apart, keeping both halves
-# individually true, would not be caught) — a narrower gap than round-9's SKILL.md pins, which each
-# cover a complete signature in one shot.
+# #248 (round-2, A3): Step 0 is now FORM-AGNOSTIC and runs before container classification, so
+# `locateChapterLine`/`expectedTarget` moved UP into the shared "## Index wiring" H2 (a group-free
+# reader now sees them) — only `containerTitleMatches`, which verifies a GROUPED entry's container,
+# still belongs to "### Grouped index wiring" and stays pinned there. Re-pointing the first pair's
+# heading is what actually proves the relocation: an H2's scope includes its nested H3s, so pinning
+# them to the (now too-narrow) H3 would silently pass on the pre-move text too.
+#
+# BOTH calls wrap mid-argument in this file (hard-wrapped, unlike the sections pinned earlier this
+# round) — `locateChapterLine(indexLines,` ends one line and `expectedTarget)` starts the next;
+# `containerTitleMatches(containerTitle,` ends one line and `entry)` starts the next. Neither full
+# signature fits a single fixed-string needle. What's pinned instead: two needles per call, one per
+# physical line, each covering one argument independently — so a mutation to EITHER argument is
+# still caught, just not by one needle proving the whole signature at once. What this does NOT
+# prove: that the two half-needles are adjacent lines of the SAME call (an adversarial rewrite that
+# separated them further apart, keeping both halves individually true, would not be caught) — a
+# narrower gap than round-9's SKILL.md pins, which each cover a complete signature in one shot.
 has_in_section "static-md: step-0 idempotency check calls locateChapterLine, first arg indexLines" \
-  "$SMD" '### Grouped index wiring (`anyGroup` manifests only)' \
+  "$SMD" '## Index wiring (do this on every chapter create/update)' \
   'locateChapterLine(indexLines,'
 has_in_section "static-md: step-0 idempotency check's locateChapterLine, second arg expectedTarget" \
-  "$SMD" '### Grouped index wiring (`anyGroup` manifests only)' \
+  "$SMD" '## Index wiring (do this on every chapter create/update)' \
   'expectedTarget)`'
 has_in_section "static-md: step-0 idempotency check calls containerTitleMatches, first arg containerTitle" \
   "$SMD" '### Grouped index wiring (`anyGroup` manifests only)' \
@@ -1044,39 +1452,85 @@ has_in_section "static-md: step-0 idempotency check calls containerTitleMatches,
 has_in_section "static-md: step-0 idempotency check's containerTitleMatches, second arg entry (trimmed compare)" \
   "$SMD" '### Grouped index wiring (`anyGroup` manifests only)' \
   'entry)`** (from `assets/lib/chapter-paths.mjs`; titles compare TRIMMED, not raw `===`)'
+# #248 (round-2, A3): the three normative Step-0 OUTCOMES a group-free reader must actually see —
+# the ambiguous-match halt, and the two flat-entry branches (line present / line absent) — now live
+# in the same shared "## Index wiring" H2 rather than being reachable only through the grouped-only
+# subsection. These are witnesses of OUTCOME, not setup: proving the calls above exist is not the
+# same as proving each branch's result is stated. Each needle is unique file-wide (verified).
+has_in_section "static-md: step-0's ambiguous-match halt (>=2 lines) is stated under the shared H2" \
+  "$SMD" '## Index wiring (do this on every chapter create/update)' \
+  'appears multiple times in <index_file>'
+has_in_section "static-md: step-0's flat-entry, line-present outcome is stated under the shared H2" \
+  "$SMD" '## Index wiring (do this on every chapter create/update)' \
+  '**Flat entry, line present**'
+has_in_section "static-md: step-0's flat-entry, line-absent outcome is stated under the shared H2" \
+  "$SMD" '## Index wiring (do this on every chapter create/update)' \
+  '**Flat entry, line absent**'
+# PLACEMENT, not just presence (round-3 codex BLOCKER 1 — the original 2-of-6 coverage let all of
+# the following move independently below the H3 while every has_in_section above stayed green: the
+# SECOND locateChapterLine half (`expectedTarget)`), and all three OUTCOME witnesses). An H2's
+# scope legitimately includes its nested H3, so presence alone proves nothing about which side of
+# the H3 boundary a line sits on — only a position comparison against the H3's own line does.
+# ALL SIX setup+outcome assertions above get one, empirically confirmed to catch a moved-under-H3
+# clone for each (verified individually before wiring, same discipline as the original two).
+L_H3_GROUPED="$(line_of '### Grouped index wiring (`anyGroup` manifests only)' "$SMD")"
+assert_line_before "static-md: step-0's locateChapterLine (1st half) sits before the grouped-only H3" \
+  "$(line_of 'locateChapterLine(indexLines,' "$SMD")" "$L_H3_GROUPED"
+assert_line_before "static-md: step-0's locateChapterLine (2nd half, expectedTarget) sits before the grouped-only H3" \
+  "$(line_of 'expectedTarget)`' "$SMD")" "$L_H3_GROUPED"
+assert_line_before "static-md: step-0's ambiguous-match halt sits before the grouped-only H3" \
+  "$(line_of 'appears multiple times in <index_file>' "$SMD")" "$L_H3_GROUPED"
+assert_line_before "static-md: step-0's flat-entry, line-present outcome sits before the grouped-only H3" \
+  "$(line_of '**Flat entry, line present**' "$SMD")" "$L_H3_GROUPED"
+assert_line_before "static-md: step-0's flat-entry, line-absent outcome sits before the grouped-only H3" \
+  "$(line_of '**Flat entry, line absent**' "$SMD")" "$L_H3_GROUPED"
 # R7-F1: wrong-container halt — never silently relocate a user-curated index line.
 WRONG_CONTAINER_HALT="Chapter '<slug>' is listed in <index_file> under '<found_title>' instead of '<group_title>'"
 has "obsidian-vault: wrong-container halt" "$WRONG_CONTAINER_HALT" "$OMD"
 has "static-md: wrong-container halt"      "$WRONG_CONTAINER_HALT" "$SMD"
 # R7-F2: step-0's expected link target uses the same index-relative coordinate system as the TOC write.
-# obsidian-vault.md has exactly ONE site for this formula (INDEX wiring), so the whole-file `has`
-# below is a complete proof there — no per-site pin needed for that file.
+# Round-6 codex fix: this comment previously claimed obsidian-vault.md has "exactly ONE site" for
+# this formula — FALSE since #248's O6 work (round-2/5/6): it has TWO, the flat branch (:262) and
+# the grouped Step-0 branch (:287), each independently proven by the branch-bound witnesses above
+# (novel + placed in its own branch interval) plus the occurrence-count==2 check (also above), which
+# is the REAL proof now. The whole-file `has` below only proves "at least one site exists" — strictly
+# weaker, and fully subsumed — kept anyway as a cheap early signal (same call as static-md.md's own
+# subsumed whole-file check just below: not duplicate coverage to be "simplified" away).
 has "obsidian-vault: index-relative expected-target formula" 'relative(dirname(index_file), chapter_file)' "$OMD"
 # round-10 exhaustive sweep / round-11: static-md.md has THREE independent sites for this SAME
-# formula, not the two originally flagged — the flat TOC-write (:231, "## Index wiring"), the
-# grouped step-0 idempotency check's expected target (:255, "### Grouped index wiring", which
-# explicitly reuses "the same coordinate system item 1 above uses" rather than an unrelated
-# computation, but is still its own independent call site that must not drift from :231's write
-# path or re-runs stop converging), and the link-integrity gate's item 5 (:417). This whole-file
-# `has` is now SUBSUMED by the three per-site pins below — kept deliberately as a cheap early
-# signal, not duplicate coverage to be "simplified" away; a mutation corrupting only one of the
-# three sites would leave this needle green since the other two copies still match.
+# formula, not the two originally flagged — the flat TOC-write (item 1, "## Index wiring"), the
+# step-0 idempotency check's expected target (also "## Index wiring" since #248's round-2 move —
+# it explicitly reuses "the same coordinate system item 1 above uses" rather than an unrelated
+# computation, but is still its own independent call site that must not drift from item 1's write
+# path or re-runs stop converging), and the link-integrity gate's item 5. This whole-file `has` is
+# now SUBSUMED by the three per-site pins below — kept deliberately as a cheap early signal, not
+# duplicate coverage to be "simplified" away; a mutation corrupting only one of the three sites
+# would leave this needle green since the other two copies still match.
 has "static-md: index-relative expected-target formula"      'relative(dirname(index_file), chapter_file)' "$SMD"
-# Section nesting caught in mutation-testing: "## Index wiring" (:223) CONTAINS "### Grouped index
-# wiring" (:243) as a subsection — has_in_section stops only at the same-or-shallower level, so a
-# needle scoped to the H2 legitimately also scans everything inside its H3 subsection. The bare
-# formula string alone can't tell :231's copy from :255's copy once both sit inside that scanned
-# range, so a mutation touching ONLY :231 would have been invisible (255's untouched copy still
-# satisfies the H2-scoped needle) — the exact cross-site-independence failure this round exists to
-# prevent, just one level removed. Fixed by extending :231's needle with its own unique trailing
-# context ("`. Order") that :255's differently-worded sentence does not share, so the two pins are
-# now genuinely independent even though their sections nest.
+# The bare formula occurs FIVE times file-wide, FOUR of them inside this same "## Index wiring" H2
+# alone (item 1's write, its two degenerate-case bullets, and step 0's own target) — an H2-scoped
+# needle using the bare formula cannot tell item 1's copy from step 0's copy, since has_in_section
+# stops only at the same-or-shallower heading and both sit in the identical scanned range. Fixed
+# the same way both times: each needle carries its OWN unique trailing context that the other
+# occurrences do not share — item 1's ends "`. The link" (round-2, A3 added a new sentence binding
+# the link's display text to the manifest title right after the formula, which is why this needle
+# is "The link", not the older "Order"), step 0's ends "— step 0's own target." (verified
+# count_fixed == 1 for each, file-wide). #248 (round-2, A3) moved step 0 itself from the
+# grouped-only H3 into this shared H2, so the two pins are now siblings in the SAME section rather
+# than nested across an H2/H3 boundary — the bare-formula ambiguity got WORSE by the move, which is
+# exactly why the trailing-context discipline, not the heading alone, is what keeps them
+# independent.
 has_in_section "static-md: flat TOC-write uses the index-relative expected-target formula" \
   "$SMD" '## Index wiring (do this on every chapter create/update)' \
-  'relative(dirname(index_file), chapter_file)`. Order'
+  'relative(dirname(index_file), chapter_file)`. The link'
 has_in_section "static-md: grouped step-0 idempotency check uses the same expected-target formula" \
-  "$SMD" '### Grouped index wiring (`anyGroup` manifests only)' \
-  'relative(dirname(index_file), chapter_file)'
+  "$SMD" '## Index wiring (do this on every chapter create/update)' \
+  'relative(dirname(index_file), chapter_file)` — step 0'"'"'s own target.'
+# Same PLACEMENT gap as the setup/outcome sextet above (O4 §3.3 group proof, reusing the already-
+# resolved $L_H3_GROUPED): H2's scope includes the nested H3, so this needle stays green even moved
+# back under "### Grouped index wiring" — empirically confirmed before wiring this check.
+assert_line_before "static-md: step-0's own-target formula sits before the grouped-only H3" \
+  "$(line_of 'step 0'"'"'s own target.' "$SMD")" "$L_H3_GROUPED"
 has_in_section "static-md: link-integrity gate item 5 uses the same expected-target formula" \
   "$SMD" '## Link-integrity gate before you publish' \
   'relative(dirname(index_file), chapter_file)'
@@ -1446,35 +1900,30 @@ has   "states the Playwright 1.51 module minimum" 'Playwright >= 1.51'          
 hasnt "no stale six-branch guard-order comment"  'deny < eventsource'           "$CH"
 
 echo "== #69: no residual 'fork it for other engines' wording =="
-for f in \
-  "$CH" \
-  "$SA" \
-  "$SPEC" \
-  "$CI" \
-  "$ASSETS/lib/control-inventory.d.mts" \
-  "$POLICY" \
-  "$ASSETS/lib/capture-guard-policy.d.mts" \
-  "$ASSETS/lib/identity-match.mjs" \
-  "$ASSETS/lib/identity-match.d.mts" \
-  "$GQL" \
-  "$ASSETS/lib/graphql-read-classifier.d.mts" \
-  "$ASSETS/lib/viewport-clip.mjs" \
-  "$ASSETS/lib/viewport-clip.d.mts" \
-  "$ASSETS/lib/dismiss-safe-label-policy.mjs" \
-  "$ASSETS/lib/dismiss-safe-label-policy.d.mts"; do
-  hasnt "no residual fork-it wording (banner): $(basename "$f")" 'Fork for other' "$f"
-done
-for f in \
-  "$SKILL" \
-  "$REFS/completeness-gate.md" \
-  "$REFS/running-ui-source.md" \
-  "$REFS/container-isolation.md" \
-  "$REFS/manifest-discipline.md" \
-  "$REFS/capture-spec-helpers.md" \
-  "$REFS/capture-safety.md"; do
-  hasnt "no residual fork-it wording (prose): $(basename "$f")" 'fork the asset' "$f"
-  hasnt "no residual fork-it wording (prose): $(basename "$f")" 'fork it for'    "$f"
-done
+category_files 'assets/lib modules (fork-banner)' "$ASSETS/lib" -mindepth 1 -maxdepth 1 -type f \
+  \( -name '*.mjs' -o -name '*.d.mts' \)   # UNION — both extensions, never just *.mjs (rev-13)
+if [ "${#CATEGORY_FILES[@]}" -gt 0 ]; then
+  for f in "${CATEGORY_FILES[@]}"; do
+    hasnt "no residual fork-it wording (banner): $(basename "$f")" 'Fork for other' "$f"
+  done
+fi
+category_files 'assets/*.ts (fork-banner)' "$ASSETS" -maxdepth 1 -name '*.ts'
+if [ "${#CATEGORY_FILES[@]}" -gt 0 ]; then
+  for f in "${CATEGORY_FILES[@]}"; do
+    hasnt "no residual fork-it wording (banner): $(basename "$f")" 'Fork for other' "$f"
+  done
+fi
+# $SKILL stays explicit (decision-5 touch point, not a directory category); references/ is walked
+# RECURSIVELY — globstar is OFF (:20), so "$REFS"/**/*.md would silently mean one level (§1.2).
+hasnt "no residual fork-it wording (prose): $(basename "$SKILL")" 'fork the asset' "$SKILL"
+hasnt "no residual fork-it wording (prose): $(basename "$SKILL")" 'fork it for'    "$SKILL"
+category_files 'references (recursive, fork-prose)' "$REFS" -type f -name '*.md'
+if [ "${#CATEGORY_FILES[@]}" -gt 0 ]; then
+  for f in "${CATEGORY_FILES[@]}"; do
+    hasnt "no residual fork-it wording (prose): $(basename "$f")" 'fork the asset' "$f"
+    hasnt "no residual fork-it wording (prose): $(basename "$f")" 'fork it for'    "$f"
+  done
+fi
 has "capture-spec-helpers: read classifier is documented GraphQL-only" 'is GraphQL-only' "$REFS/capture-spec-helpers.md"
 
 echo "== profile validator (#64) =="
