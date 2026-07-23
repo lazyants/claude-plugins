@@ -917,6 +917,103 @@ def test_hebrew_maqaf_name_stays_one_token():
     assert "בן גוריון" not in by_name
 
 
+# ---------------------------------------------------------------------------
+# #282/#283: Hebrew ASCII-punctuation connector equivalence. ASCII double-
+# quote (U+0022) between two Hebrew letters behaves as gershayim (#282);
+# fold-time, the ASCII/Latin twins of the three NAME_CONNECTORS members
+# (plus the ASCII quote) split a Hebrew-scoped compound the same way their
+# maqaf/geresh/gershayim counterparts do (#283, exercised in
+# tests/caseless_offset.test.py -- these tests target TOKEN_RE tokenization
+# only).
+# ---------------------------------------------------------------------------
+ASCII_QUOTE_ACRONYM_NAME = "מוהרנ" + '"' + "ת"  # R. Nathan of Breslov
+ASCII_QUOTE_ACRONYM_TEXT = f"פגשתי את {ASCII_QUOTE_ACRONYM_NAME} אתמול."
+
+
+def test_hebrew_ascii_quote_acronym_stays_one_token():
+    lang = load_he_config_with_inventory([ASCII_QUOTE_ACRONYM_NAME])
+    out = bn.extract_candidate_spans(ASCII_QUOTE_ACRONYM_TEXT, lang)
+    by_name = {n: (s, e) for n, _mid, s, e in out}
+    assert ASCII_QUOTE_ACRONYM_NAME in by_name, f"{ASCII_QUOTE_ACRONYM_NAME!r} missing from {sorted(by_name)}"
+    s, e = by_name[ASCII_QUOTE_ACRONYM_NAME]
+    assert ASCII_QUOTE_ACRONYM_TEXT[s:e] == ASCII_QUOTE_ACRONYM_NAME
+    # must not have split into the two bare halves.
+    assert "מוהרנ" not in by_name
+    assert "ת" not in by_name
+
+
+def test_hebrew_pointed_ascii_quote_acronym_stays_one_token():
+    # 2 stacked marks (patach U+05B7 + dagesh U+05BC) on the letter directly
+    # before the quote -- exercises the bounded N=0..4 mark-count proof, not
+    # just the N=0 base case tested above.
+    base = "מוהרנ" + chr(0x05B7) + chr(0x05BC)
+    text = base + '"' + "ת"
+    assert bn.TOKEN_RE.findall(text) == [text]
+
+
+FINAL_HEBREW_LETTER_FORMS = (
+    chr(0x05DA),  # final kaf
+    chr(0x05DD),  # final mem
+    chr(0x05DF),  # final nun
+    chr(0x05E3),  # final pe
+    chr(0x05E5),  # final tsadi
+)
+
+
+@pytest.mark.parametrize("final_form", FINAL_HEBREW_LETTER_FORMS)
+def test_hebrew_final_letter_forms_ascii_quote_acronym_stays_one_token(final_form):
+    # codex round 2: the plan's "all five final forms covered" claim was
+    # broader than its one concrete example (only exercised nun/tsadi) --
+    # every final form must be individually proven, not assumed from the
+    # shared U+05D0-U+05EA range.
+    text = "א" + final_form + '"' + "ב"
+    assert bn.TOKEN_RE.findall(text) == [text]
+
+
+def test_ascii_quote_exactly_max_marks_fuses():
+    # Boundary lock (codex round 2): exactly _HEBREW_QUOTE_MAX_MARKS (4)
+    # stacked marks before the quote must still fuse -- an off-by-one
+    # implementation (accepting only 0-3) would pass every other test above.
+    assert bn._HEBREW_QUOTE_MAX_MARKS == 4
+    marks = chr(0x0591) + chr(0x05B7) + chr(0x05BC) + chr(0x05BF)
+    text = "א" + marks + '"' + "ב"
+    assert bn.TOKEN_RE.findall(text) == [text]
+
+
+def test_ascii_quote_still_terminates_a_latin_sentence():
+    # Real terminal-quote behavior is unaffected -- no Hebrew neighbor means
+    # the new lookbehind/lookahead never fires and " stays a TERMINATORS
+    # sentence-closer exactly as before.
+    assert bn.TOKEN_RE.findall('"Fiona" said George.') == ["Fiona", "said", "George"]
+
+
+def test_ascii_quote_between_hebrew_and_latin_does_not_fuse():
+    # Only one side is Hebrew -- must stay refused, same as pre-fix baseline.
+    text = "א" + '"' + "A"
+    assert bn.TOKEN_RE.findall(text) == ["א", "A"]
+
+
+def test_ascii_quote_latin_base_with_hebrew_mark_does_not_fuse():
+    # codex round-1 adversarial regression: a Latin base letter carrying a
+    # trailing Hebrew mark must NOT be treated as a Hebrew base letter -- the
+    # lookbehind proves the actual base letter, not just the character
+    # immediately adjacent to the quote.
+    text_1 = "A" + chr(0x05B0) + '"' + "ב"
+    text_2 = "A" + chr(0x05B0) + chr(0x05B1) + '"' + "ב"
+    assert bn.TOKEN_RE.findall(text_1) == ["A" + chr(0x05B0), "ב"]
+    assert bn.TOKEN_RE.findall(text_2) == ["A" + chr(0x05B0) + chr(0x05B1), "ב"]
+
+
+def test_ascii_quote_beyond_max_marks_falls_back_to_not_fusing():
+    # The disclosed residual, inverted into a positive proof: a Hebrew letter
+    # with MORE than _HEBREW_QUOTE_MAX_MARKS (5) stacked marks before the
+    # quote fails safe (does not fuse) rather than mis-fusing or raising.
+    marks = chr(0x0591) + chr(0x05B7) + chr(0x05BC) + chr(0x05BF) + chr(0x05C1)
+    assert len(marks) == 5
+    text = "א" + marks + '"' + "ב"
+    assert bn.TOKEN_RE.findall(text) == ["א" + marks, "ב"]
+
+
 # --- MARK class completeness / purity backstop -----------------------------
 # The spans the curated sub-ranges claim to cover COMPLETELY. Bounded at the
 # curated upper edge (U+1ACE) rather than the whole 1AB0-1AFF block so a FUTURE

@@ -1065,6 +1065,132 @@ def test_terminator_boundary_control_mutation_would_bridge_it():
     assert UNPOINTED_NAME not in {n for n, _m, _s, _e in out}
 
 
+# ---- #283: Hebrew-scoped ASCII/Latin connector-twin fold ----
+# TOKEN_RE already fuses these five ASCII/Latin characters into one token
+# across a Hebrew-letter boundary exactly like the maqaf/geresh/gershayim
+# forms; _HEBREW_ASCII_CONNECTOR_SPLIT_RE now folds them the same way too,
+# scoped to Hebrew-letter neighbors so NAME_CONNECTORS itself stays
+# untouched (see test_latin_non_regression_hyphen_and_apostrophe_stay_
+# unfolded_connectors above -- that pin must stay green throughout this
+# section, re-confirmed explicitly below).
+
+HEBREW_ASCII_HYPHEN_TWINS = ("-", "\u2011")  # ASCII hyphen, non-breaking hyphen
+HEBREW_ASCII_APOSTROPHE_TWINS = ("'", "\u2019")  # ASCII apostrophe, right single quote
+HEBREW_ASCII_CONNECTOR_TWINS = HEBREW_ASCII_HYPHEN_TWINS + HEBREW_ASCII_APOSTROPHE_TWINS
+
+# #283's own repro name -- Baal Shem Tov, three units, for the hyphen twins.
+BAAL_SHEM_TOV_WORDS = ("הבעל", "שם", "טוב")
+
+# A geresh-bearing two-unit synthetic compound (no real grammatical claim
+# intended -- same "purely a fold-path exerciser" pattern as HEBREW_NAME
+# above) for the apostrophe twins.
+GERESH_COMPOUND_WORDS = ("אברהם", "יצחק")
+
+
+def _words_for_twin(twin):
+    return BAAL_SHEM_TOV_WORDS if twin in HEBREW_ASCII_HYPHEN_TWINS else GERESH_COMPOUND_WORDS
+
+
+@pytest.mark.parametrize("twin", HEBREW_ASCII_CONNECTOR_TWINS)
+def test_283_bootstrap_ascii_twin_joined_inventory_matches_space_joined_text(twin):
+    words = _words_for_twin(twin)
+    ascii_joined_name = twin.join(words)
+    space_name = " ".join(words)
+    text = f"ראה {space_name} אתמול."
+    lang = bn_lang(name_inventory=[ascii_joined_name])
+    out = bn.extract_candidate_spans(text, lang)
+    hit = _first_span(out, space_name)
+    assert hit is not None, f"space-joined surface not found for twin {twin!r} in {out}"
+    _mid, s, e = hit
+    assert text[s:e] == space_name
+
+
+@pytest.mark.parametrize("twin", HEBREW_ASCII_CONNECTOR_TWINS)
+def test_283_bootstrap_space_joined_inventory_matches_ascii_twin_joined_text(twin):
+    words = _words_for_twin(twin)
+    space_name = " ".join(words)
+    ascii_joined_name = twin.join(words)
+    text = f"ראה {ascii_joined_name} אתמול."
+    lang = bn_lang(name_inventory=[space_name])
+    out = bn.extract_candidate_spans(text, lang)
+    hit = _first_span(out, ascii_joined_name)
+    assert hit is not None, f"ascii-twin-joined surface not found for twin {twin!r} in {out}"
+    _mid, s, e = hit
+    assert text[s:e] == ascii_joined_name
+
+
+def test_283_latin_non_regression_still_refused_with_new_split_active():
+    # Explicit re-run of the pinned Latin non-regression against the NEW
+    # #283 code path -- this is the regression proof the whole design hinges
+    # on, not just "the untouched original test above still passes".
+    lang_hyphen = bn_lang(name_inventory=["jean-baptiste"])
+    assert bn.extract_candidate_spans("il vit jean baptiste hier.", lang_hyphen) == []
+
+    lang_apos = bn_lang(name_inventory=["o'brien"])
+    assert bn.extract_candidate_spans("il vit o brien hier.", lang_apos) == []
+
+
+def test_283_control_mutation_disabling_hebrew_ascii_split_breaks_the_match():
+    """Red-before-green control mirroring test_241_control_mutation_...:
+    with _HEBREW_ASCII_CONNECTOR_SPLIT_RE forced to never match, the
+    space-joined inventory entry must NOT match the ASCII-hyphen-joined
+    text."""
+    space_name = " ".join(BAAL_SHEM_TOV_WORDS)
+    ascii_joined_name = "-".join(BAAL_SHEM_TOV_WORDS)
+    text = f"ראה {ascii_joined_name} אתמול."
+    lang = bn_lang(name_inventory=[space_name])
+    original_re = bn._HEBREW_ASCII_CONNECTOR_SPLIT_RE
+    try:
+        bn._HEBREW_ASCII_CONNECTOR_SPLIT_RE = re.compile(r"(?!x)x")  # never matches
+        bn.match_units.cache_clear()
+        bn.fold_match_key.cache_clear()
+        bn._compiled_inventory_trie.cache_clear()
+        out = bn.extract_candidate_spans(text, lang)
+        assert _first_span(out, ascii_joined_name) is None
+    finally:
+        bn._HEBREW_ASCII_CONNECTOR_SPLIT_RE = original_re
+        bn.match_units.cache_clear()
+        bn.fold_match_key.cache_clear()
+        bn._compiled_inventory_trie.cache_clear()
+
+
+# codex-round-2 blocking finding's direct regression lock: an ASCII-quoted
+# acronym token TOKEN_RE's #282 fix now fuses must converge with its
+# gershayim- and space-joined equivalents, not fold to a different unit
+# sequence (the round-2-submitted split class omitted the ASCII quote
+# itself, so the acronym-quote spelling folded to ('מוהרנ"ת',) while the
+# other two folded to ('מוהרנ', 'ת')).
+ASCII_QUOTE_ACRONYM_SPELLING = "מוהרנ" + '"' + "ת"
+GERSHAYIM_ACRONYM_SPELLING = "מוהרנ" + "״" + "ת"
+SPACE_ACRONYM_SPELLING = "מוהרנ ת"
+ACRONYM_SPELLINGS = (
+    ASCII_QUOTE_ACRONYM_SPELLING,
+    GERSHAYIM_ACRONYM_SPELLING,
+    SPACE_ACRONYM_SPELLING,
+)
+
+
+def test_hebrew_ascii_quote_acronym_converges_with_gershayim_and_space_spellings():
+    keys = {bn.fold_match_key(spelling) for spelling in ACRONYM_SPELLINGS}
+    assert len(keys) == 1, [(s, bn.fold_match_key(s)) for s in ACRONYM_SPELLINGS]
+
+    units = {bn.match_units(spelling) for spelling in ACRONYM_SPELLINGS}
+    assert len(units) == 1, [(s, bn.match_units(s)) for s in ACRONYM_SPELLINGS]
+    assert next(iter(units)) == ("מוהרנ", "ת")
+
+    # an inventory entry spelled one way is found by text spelled either of
+    # the other two ways.
+    for inventory_spelling in ACRONYM_SPELLINGS:
+        lang = bn_lang(name_inventory=[inventory_spelling])
+        for text_spelling in ACRONYM_SPELLINGS:
+            text = f"ראה {text_spelling} אתמול."
+            out = bn.extract_candidate_spans(text, lang)
+            hit = _first_span(out, text_spelling)
+            assert hit is not None, (
+                f"inventory={inventory_spelling!r} did not match text={text_spelling!r}: {out}"
+            )
+
+
 # ---- match_units() memoization (session-a §7 test 9) ----
 
 def test_match_units_memoized_per_token_not_recomputed_at_every_trie_depth(monkeypatch):

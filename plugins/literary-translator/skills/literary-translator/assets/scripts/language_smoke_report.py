@@ -186,9 +186,28 @@ def _build_mark_class():
 
 
 _MARK_CLASS = _build_mark_class()
+# Hebrew ASCII-punctuation connector equivalence (#282/#283) -- see
+# bootstrap_names.py's own comment block for the full derivation. Bound on
+# stacked niqqud/cantillation marks the #282 lookbehind below proves a base
+# letter through: real book prose is overwhelmingly unpointed; even heavily
+# cantillated liturgical Hebrew rarely exceeds 2-3 marks on one letter (vowel
+# point + dagesh + one trope mark). 4 is a generous, disclosed bound: a
+# letter with MORE than 4 stacked marks before the quote falls back to NOT
+# fusing (the pre-fix, safe behavior for that one rare case) rather than
+# mis-fusing -- fail-safe direction, never a false positive. MUST stay
+# identical across both files (drift guard enforces it) -- edit BOTH.
+_HEBREW_LETTERS = "\u05D0-\u05EA"
+_HEBREW_MARK = "\u0591-\u05BD\u05BF\u05C1-\u05C2\u05C4-\u05C5\u05C7"
+_HEBREW_QUOTE_MAX_MARKS = 4
+_HEBREW_QUOTE_LOOKBEHIND = "(?:" + "|".join(
+    "(?<=[" + _HEBREW_LETTERS + "]" + ("[" + _HEBREW_MARK + "]") * _n + ")"
+    for _n in range(_HEBREW_QUOTE_MAX_MARKS + 1)
+) + ")"
 # LETTER MARK* (CONNECTOR? LETTER MARK*)*  -- byte-identical to bootstrap_names.py.
 TOKEN_RE = re.compile(
-    r"[^\W\d_][" + _MARK_CLASS + r"]*(?:['’‑׳״־-]?[^\W\d_][" + _MARK_CLASS + r"]*)*"
+    "[^\\W\\d_][" + _MARK_CLASS + "]*(?:"
+    + "(?:['’‑׳״־-]|" + _HEBREW_QUOTE_LOOKBEHIND + '"(?=[' + _HEBREW_LETTERS + "]))?"
+    + "[^\\W\\d_][" + _MARK_CLASS + "]*)*"
 )
 # Sentinels this plugin bakes into plain_text (footnote refs, verse
 # placeholders -- see manifest.schema.json's FNREF_N / VERSE_{vid}_{shortsha}
@@ -231,6 +250,11 @@ NAME_CONNECTORS = "־׳״"
 _NAME_CONNECTOR_SPLIT_RE = re.compile("[" + NAME_CONNECTORS + "]")
 
 
+_HEBREW_ASCII_CONNECTOR_SPLIT_RE = re.compile(
+    "(?<=[" + _HEBREW_LETTERS + "])[" + re.escape("-‑'’\"") + "](?=[" + _HEBREW_LETTERS + "])"
+)
+
+
 def _fold_match_marks(s):
     """Fold Hebrew niqqud/cantillation for the #238 MATCH KEY ONLY -- mirrors
     bootstrap_names.py's own ``_fold_match_marks`` (itself a mirror of
@@ -249,11 +273,21 @@ def _fold_match_marks(s):
 
 
 def _fold_token_to_units(token):
-    """Uncached #238 mark-fold + #241 connector-split for ONE raw token
-    string -- mirrors bootstrap_names.py's own ``_fold_token_to_units``.
-    Wrapped by ``match_units()``'s per-string cache below."""
+    """Uncached #238 mark-fold + #241/#283 connector-split for ONE raw token
+    string -- mirrors bootstrap_names.py's own ``_fold_token_to_units``. The
+    #283 Hebrew-scoped ASCII/Latin connector-twin split (hyphen/apostrophe/
+    quote, only between two Hebrew letters) runs as a second pass so a
+    Hebrew compound spelled with the ASCII hyphen or an ASCII-quoted acronym
+    fused by the #282 TOKEN_RE fix converges with its maqaf/gershayim/space-
+    joined equivalents. Wrapped by ``match_units()``'s per-string cache
+    below."""
     folded = _fold_match_marks(token)
-    return tuple(u for u in _NAME_CONNECTOR_SPLIT_RE.split(folded) if u)
+    units = (
+        u2
+        for u1 in _NAME_CONNECTOR_SPLIT_RE.split(folded)
+        for u2 in _HEBREW_ASCII_CONNECTOR_SPLIT_RE.split(u1)
+    )
+    return tuple(u for u in units if u)
 
 
 @lru_cache(maxsize=None)

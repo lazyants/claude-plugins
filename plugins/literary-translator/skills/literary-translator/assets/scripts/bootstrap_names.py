@@ -204,9 +204,40 @@ def _build_mark_class():
 
 
 _MARK_CLASS = _build_mark_class()
+
+# #282: ASCII double-quote (U+0022) is a connector too, but ONLY between two
+# Hebrew letters -- real Hebrew corpora overwhelmingly spell an internal-
+# acronym gershayim with the ASCII quote rather than the dedicated glyph
+# (measured: 3,815+ \" vs. zero ״ in the SSK vol.2 corpus). A single-char
+# lookbehind is not enough: a mark has no script identity of its own (see
+# _MARK_CLASS above, shared across all four scripts), so
+# _HEBREW_QUOTE_LOOKBEHIND proves the actual BASE LETTER under up to
+# _HEBREW_QUOTE_MAX_MARKS stacked marks is Hebrew, not just the character
+# adjacent to the quote -- otherwise a pathological Latin-base-plus-Hebrew-
+# mark token would wrongly fuse. Python's `re` requires each lookbehind to
+# be individually fixed-width but not that alternatives OR'd together share
+# one width, so this is a bounded union of exact-width alternatives (letter
+# + exactly N marks, N = 0..`_HEBREW_QUOTE_MAX_MARKS`).
+_HEBREW_LETTERS = "\u05D0-\u05EA"
+_HEBREW_MARK = "\u0591-\u05BD\u05BF\u05C1-\u05C2\u05C4-\u05C5\u05C7"
+# Bound on stacked niqqud/cantillation marks the #282 lookbehind below proves
+# a base letter through. Real book prose is overwhelmingly unpointed; even
+# heavily cantillated liturgical Hebrew rarely exceeds 2-3 marks on one
+# letter (vowel point + dagesh + one trope mark). 4 is a generous, disclosed
+# bound: a letter with MORE than 4 stacked marks before the quote falls back
+# to NOT fusing (the pre-fix, safe behavior for that one rare case) rather
+# than mis-fusing -- fail-safe direction, never a false positive.
+_HEBREW_QUOTE_MAX_MARKS = 4
+_HEBREW_QUOTE_LOOKBEHIND = "(?:" + "|".join(
+    "(?<=[" + _HEBREW_LETTERS + "]" + ("[" + _HEBREW_MARK + "]") * _n + ")"
+    for _n in range(_HEBREW_QUOTE_MAX_MARKS + 1)
+) + ")"
+
 # LETTER MARK* (CONNECTOR? LETTER MARK*)*  -- see the OFFSET CONTRACT comment.
 TOKEN_RE = re.compile(
-    r"[^\W\d_][" + _MARK_CLASS + r"]*(?:['’‑׳״־-]?[^\W\d_][" + _MARK_CLASS + r"]*)*"
+    "[^\\W\\d_][" + _MARK_CLASS + "]*(?:"
+    + "(?:['’‑׳״־-]|" + _HEBREW_QUOTE_LOOKBEHIND + '"(?=[' + _HEBREW_LETTERS + "]))?"
+    + "[^\\W\\d_][" + _MARK_CLASS + "]*)*"
 )
 
 APOSTROPHES = "'’"  # ' and the Unicode right single quote
@@ -250,6 +281,21 @@ WRAPPERS = frozenset("()[]{}'’‘“«")
 NAME_CONNECTORS = "־׳״"
 _NAME_CONNECTOR_SPLIT_RE = re.compile("[" + NAME_CONNECTORS + "]")
 
+# #283: a second, Hebrew-scoped fold-time split for the ASCII/Latin twins of
+# the three NAME_CONNECTORS members (plus the ASCII double-quote, needed so
+# an ASCII-quoted acronym token TOKEN_RE's #282 fix now fuses -- e.g. an
+# acronym spelled with an ASCII quote -- folds to the SAME units as its
+# gershayim/space-joined equivalent, not a different sequence). NAME_
+# CONNECTORS itself stays untouched (see its own comment above) -- widening
+# it would also match Latin "jean-baptiste" against space-separated "jean
+# baptiste" text, breaking tests/caseless_offset.test.py's pinned
+# non-regression. None of these five characters is ever Unicode category
+# Mn (all Pd/Po/Pf), so split-after-fold stays safe by the same argument
+# NAME_CONNECTORS's own comment already makes for its three members.
+_HEBREW_ASCII_CONNECTOR_SPLIT_RE = re.compile(
+    "(?<=[" + _HEBREW_LETTERS + "])[" + re.escape("-‑'’\"") + "](?=[" + _HEBREW_LETTERS + "])"
+)
+
 
 def _fold_match_marks(s: str) -> str:
     """Fold Hebrew niqqud/cantillation for the #238 MATCH KEY ONLY -- mirrors
@@ -278,14 +324,22 @@ def _fold_token_to_units(token: str) -> tuple:
     letter, but dropped defensively rather than assumed). Split-after-fold is
     safe because no ``NAME_CONNECTORS`` member is ever category ``Mn`` (see
     that constant's own comment) -- the fold can never consume or move a
-    connector boundary. Wrapped by ``match_units()``'s per-string cache below;
-    a test's counting monkeypatch wraps THIS function (mirrors
-    ``_build_inventory_trie``/``_compiled_inventory_trie``'s own split) to
-    assert a token's units are computed once, not once per trie-walk position
-    that visits it.
+    connector boundary. Also applies the #283 Hebrew-scoped ASCII/Latin
+    connector-twin split (``_HEBREW_ASCII_CONNECTOR_SPLIT_RE``) so an
+    ASCII-hyphen/apostrophe/quote-joined Hebrew compound folds to the same
+    units as its maqaf/geresh/gershayim/space-joined equivalent. Wrapped by
+    ``match_units()``'s per-string cache below; a test's counting monkeypatch
+    wraps THIS function (mirrors ``_build_inventory_trie``/
+    ``_compiled_inventory_trie``'s own split) to assert a token's units are
+    computed once, not once per trie-walk position that visits it.
     """
     folded = _fold_match_marks(token)
-    return tuple(u for u in _NAME_CONNECTOR_SPLIT_RE.split(folded) if u)
+    units = (
+        u2
+        for u1 in _NAME_CONNECTOR_SPLIT_RE.split(folded)
+        for u2 in _HEBREW_ASCII_CONNECTOR_SPLIT_RE.split(u1)
+    )
+    return tuple(u for u in units if u)
 
 
 @lru_cache(maxsize=None)
