@@ -235,9 +235,9 @@ _HEBREW_QUOTE_LOOKBEHIND = "(?:" + "|".join(
 
 # LETTER MARK* (CONNECTOR? LETTER MARK*)*  -- see the OFFSET CONTRACT comment.
 TOKEN_RE = re.compile(
-    "[^\\W\\d_][" + _MARK_CLASS + "]*(?:"
-    + "(?:['’‑׳״־-]|" + _HEBREW_QUOTE_LOOKBEHIND + '"(?=[' + _HEBREW_LETTERS + "]))?"
-    + "[^\\W\\d_][" + _MARK_CLASS + "]*)*"
+    r"[^\W\d_][" + _MARK_CLASS + r"]*(?:"
+    + "(?:['’‑׳״־-]|" + _HEBREW_QUOTE_LOOKBEHIND + '"(?=[' + _HEBREW_LETTERS + r"]))?"
+    + r"[^\W\d_][" + _MARK_CLASS + r"]*)*"
 )
 
 APOSTROPHES = "'’"  # ' and the Unicode right single quote
@@ -334,12 +334,12 @@ def _fold_token_to_units(token: str) -> tuple:
     computed once, not once per trie-walk position that visits it.
     """
     folded = _fold_match_marks(token)
-    units = (
+    return tuple(
         u2
         for u1 in _NAME_CONNECTOR_SPLIT_RE.split(folded)
         for u2 in _HEBREW_ASCII_CONNECTOR_SPLIT_RE.split(u1)
+        if u2
     )
-    return tuple(u for u in units if u)
 
 
 @lru_cache(maxsize=None)

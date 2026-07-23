@@ -985,6 +985,16 @@ def test_ascii_quote_still_terminates_a_latin_sentence():
     # the new lookbehind/lookahead never fires and " stays a TERMINATORS
     # sentence-closer exactly as before.
     assert bn.TOKEN_RE.findall('"Fiona" said George.') == ["Fiona", "said", "George"]
+    # Extraction-level lock (codex non-blocking finding): the TOKEN_RE
+    # assertion above only proves tokenization, not that " still REFUSES to
+    # bridge two Latin candidate tokens at extraction time -- a regression
+    # that dropped " from TERMINATORS entirely would leave that assertion
+    # green while extract_candidate_spans() wrongly bridged 'Fiona"George'
+    # into one candidate. Prove the boundary refusal directly.
+    lang = dataclasses.replace(load_real_fr_config(), name_inventory=frozenset(["Fiona George"]))
+    out = bn.extract_candidate_spans('Elle dit : "Fiona"George etait la.', lang)
+    names = {n for n, _mid, _s, _e in out}
+    assert "Fiona George" not in names
 
 
 def test_ascii_quote_between_hebrew_and_latin_does_not_fuse():
