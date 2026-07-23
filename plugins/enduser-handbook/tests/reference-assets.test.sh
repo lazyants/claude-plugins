@@ -982,17 +982,23 @@ if [ ! -f "$REVAL" ]; then
   bad "wording: revalidation.md does not exist yet"
 else
   has_in_section "wording: revalidation.md — accepted-diff exclusion clause (NO newly discovered trigger)" \
-    "$REVAL" '## The flow' 'NO newly discovered interactive trigger.'
+    "$REVAL" '## The flow' \
+    'NO newly discovered interactive trigger.'
   has_in_section "wording: revalidation.md — accepted-diff conclusion (re-author, no halt)" \
-    "$REVAL" '## The flow' 're-author the refreshed artifacts; no halt.'
+    "$REVAL" '## The flow' \
+    're-author the refreshed artifacts; no halt.'
   has_in_section "wording: revalidation.md — material class positive criterion (newly discovered interactive trigger)" \
-    "$REVAL" '## The flow' '     newly discovered interactive trigger.'
+    "$REVAL" '## The flow' \
+    '     newly discovered interactive trigger.'
   has_in_section "wording: revalidation.md — halt-on-material-delta step heading" \
-    "$REVAL" '## The flow' '4. **Halt on any material delta.**'
+    "$REVAL" '## The flow' \
+    '4. **Halt on any material delta.**'
   has_in_section "wording: revalidation.md — material-delta clause (trigger through delta-manifest halt)" \
-    "$REVAL" '## The flow' 'newly discovered interactive trigger — emits a delta manifest and halts for user acceptance'
+    "$REVAL" '## The flow' \
+    'newly discovered interactive trigger — emits a delta manifest and halts for user acceptance'
   has_in_section "wording: revalidation.md — 'How this differs from W1–W5' restatement" \
-    "$REVAL" '## How this differs from W1–W5' 'that emits a delta manifest and halts.'
+    "$REVAL" '## How this differs from W1–W5' \
+    'that emits a delta manifest and halts.'
 fi
 
 # SKILL.md's own whole-file 'newly discovered' check has exactly one match (no fan-out) and stays
