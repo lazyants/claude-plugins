@@ -841,6 +841,42 @@ if [ "$sentinel_ok" -eq 1 ]; then
     bad "guard sentinel order wrong: deny=$L_DENY benign=$L_BENIGN es=$L_ES beacon=$L_BEACON read=$L_READ get=$L_GET fail=$L_FC"
   fi
 fi
+# #299: derive the ACTUAL sentinel set straight from the source and cross-check it (set equality —
+# same count, same members) against the hardcoded 7-item allowlist above. This is additive to the
+# per-sentinel exactly-once + ascending-order checks: it catches a sentinel gaining/losing a member or
+# being renamed on ONE side without the other being updated, which neither existing check would see
+# (an exactly-once count and an ascending order both still hold for a set of the WRONG members).
+# The payload class (letters/digits/underscore/hyphen) is wide enough to catch a malformed/unexpected
+# sentinel, e.g. an underscore-containing '// [guard:new_branch]'. The whole-line anchor (^...$)
+# naturally excludes the header comment's own literal '[guard:*]' wildcard mention (embedded mid-
+# sentence prose about the convention, never alone on its own line, and its '*' payload is outside the
+# allowed character class anyway) — no line-number-based special case needed.
+echo "== capture-guard-policy.mjs guard sentinel set — derived vs hardcoded allowlist (#299) =="
+# Both sides are `sort -u` output captured as multi-line shell strings and compared with `[ = ]`;
+# `$(...)` strips trailing newlines identically on both, so the equality is byte-exact. `LC_ALL=C`
+# pins a plain byte-order sort on both sides, independent of the invoking shell's locale.
+#
+# `set -uo pipefail` (:20) makes each pipeline's exit status the rightmost failing command, but a
+# plain `VAR="$(pipeline)"` assignment does NOT itself abort the script (no `-e`) and nothing here
+# was checking $? — so if the shared grep/sed/sort/printf pipeline ever failed for either side (e.g.
+# `sort` OOM, a broken pipe, disk full), both variables could come out identically empty/truncated
+# and `[ "$DERIVED_SENTINELS" = "$ALLOWLIST_SENTINELS" ]` would silently report a false PASS instead
+# of failing loud (codex round-1 MAJOR, reproduced by forcing `sort` to fail: derived=<empty>
+# allow=<empty> equality=PASS). Both exit statuses are captured explicitly and checked BEFORE the
+# string comparison so a canonicalization failure is itself a hard `bad`, never a silent pass-through.
+DERIVED_SENTINELS="$(grep -E '^[[:space:]]*// \[guard:[A-Za-z0-9_-]+\][[:space:]]*$' "$POLICY" \
+  | sed -E 's/^[[:space:]]*\/\/ \[guard:([A-Za-z0-9_-]+)\][[:space:]]*$/\1/' \
+  | LC_ALL=C sort -u)"
+derived_sentinels_rc=$?
+ALLOWLIST_SENTINELS="$(printf '%s\n' 'deny' 'classify-benign' 'eventsource' 'beacon' 'classify-read' 'get-head' 'fail-closed' | LC_ALL=C sort -u)"
+allowlist_sentinels_rc=$?
+if [ "$derived_sentinels_rc" -ne 0 ] || [ "$allowlist_sentinels_rc" -ne 0 ]; then
+  bad "guard sentinel set — canonicalization pipeline failed (derived_rc=$derived_sentinels_rc allowlist_rc=$allowlist_sentinels_rc); cannot compare, treating as a failure"
+elif [ "$DERIVED_SENTINELS" = "$ALLOWLIST_SENTINELS" ]; then
+  ok "guard sentinel set: derived source set matches the hardcoded 7-item allowlist exactly"
+else
+  bad "guard sentinel set MISMATCH — derived: [$(echo "$DERIVED_SENTINELS" | tr '\n' ',')] vs allowlist: [$(echo "$ALLOWLIST_SENTINELS" | tr '\n' ',')]"
+fi
 # v1.0.6: the benign-telemetry verdict. classifyRequest gains a 'benign' return that BLOCKS the request
 # (it never fires) but routes it to a SEPARATE non-dangerous ledger, so assertNoDangerousHits does not
 # false-trip on dev telemetry (laravel-boost /_boost/, Sentry). No new allowlist; the order test above
@@ -987,6 +1023,29 @@ category_files 'assets/*.ts (normative banner)' "$ASSETS" -maxdepth 1 -name '*.t
 if [ "${#CATEGORY_FILES[@]}" -gt 0 ]; then
   for f in "${CATEGORY_FILES[@]}"; do
     has "normative banner present: $(basename "$f")" "$NORMATIVE" "$f"
+  done
+fi
+
+# #297 — forward-looking regression gate: every assets/lib/*.mjs module must ship BOTH a matching
+# assets/lib/<name>.d.mts type-declaration file AND a matching tests/<name>.test.mjs unit-test file.
+# Today's modules already follow this convention (nothing to fix); this guards a FUTURE addition from
+# silently skipping either. Derived via category_files (same helper the normative-banner block above
+# uses) so a new module is picked up automatically, never hand-listed.
+echo "== assets/lib/*.mjs <-> .d.mts <-> tests/*.test.mjs pairing (#297) =="
+category_files 'assets/lib modules (.mjs, for d.mts/test pairing)' "$ASSETS/lib" -mindepth 1 -maxdepth 1 -type f -name '*.mjs'
+if [ "${#CATEGORY_FILES[@]}" -gt 0 ]; then
+  for f in "${CATEGORY_FILES[@]}"; do
+    base="$(basename "$f" .mjs)"
+    if [ -f "$ASSETS/lib/$base.d.mts" ]; then
+      ok "lib pairing: $base.mjs has a matching $base.d.mts"
+    else
+      bad "lib pairing: $base.mjs has NO matching $base.d.mts in assets/lib"
+    fi
+    if [ -f "$TEST_DIR/$base.test.mjs" ]; then
+      ok "lib pairing: $base.mjs has a matching tests/$base.test.mjs"
+    else
+      bad "lib pairing: $base.mjs has NO matching tests/$base.test.mjs"
+    fi
   done
 fi
 
@@ -1151,6 +1210,17 @@ hasnt "publish-targets README: no raw adapter path"  '<publish.target>.md' "$PTR
 hasnt "profile: no over-promise" 'only obsidian_vault ships' "$PROF"
 
 echo "== obsidian-vault adapter (#153) =="
+# #296 — symmetric Exact-key bindings, mirroring static-md's own 8-line block above. All 8 keys are
+# already documented in obsidian-vault.md (verified: grep -cF found each one before this block was
+# written) — this closes a missing-TEST-coverage gap, not a missing-doc gap.
+has "obsidian-vault: binds publish.chapters_dir"               'publish.chapters_dir'               "$OMD"
+has "obsidian-vault: binds publish.index_file"                 'publish.index_file'                 "$OMD"
+has "obsidian-vault: binds publish.glossary_dir"               'publish.glossary_dir'               "$OMD"
+has "obsidian-vault: binds publish.frontmatter_required"       'publish.frontmatter_required'       "$OMD"
+has "obsidian-vault: binds publish.section_labels.prerequisites" 'publish.section_labels.prerequisites' "$OMD"
+has "obsidian-vault: binds publish.section_labels.related"     'publish.section_labels.related'     "$OMD"
+has "obsidian-vault: binds publish.wikilinks"                  'publish.wikilinks'                  "$OMD"
+has "obsidian-vault: binds capture.output_dir"                 'capture.output_dir'                 "$OMD"
 # v1.4.0 #153: chapter image embeds are DERIVED from capture.output_dir (full-target relative form —
 # relative(dirname(chapter_file), join(capture.output_dir, <slug>, <file>))), replacing the hardcoded
 # assets/<chapter-slug>/ prefix, and the link-integrity gate keeps the resolved target inside the vault.
@@ -2032,14 +2102,78 @@ has "profile-schema: pins profile_version const 1"          '"const": 1'        
 has "profile-schema: inline closed to its 4 fields"         '"additionalProperties": false'  "$SCHEMA"
 has "profile-schema: root stays open for sibling packages"  '"additionalProperties": true'   "$SCHEMA"
 has "profile-schema: normative provenance note"             'NORMATIVE profile contract'     "$SCHEMA"
-for k in '"profile_version"' '"language"' '"audience"' '"stack"' '"capture"' \
-         '"publish"' '"diataxis"' '"style_guide"' '"glossary"'; do
-  has "profile-schema: defines top-level key $k" "$k" "$SCHEMA"
-done
+# #296 part 1 — schema-DERIVED required/properties cross-check. The old hardcoded 9-item loop here
+# just re-grepped the same literal strings back against the same schema file, which is a tautology
+# (it can never fail unless the strings themselves are deleted). This parses profile.schema.json as
+# JSON and asserts a REAL structural invariant instead: every member of the root `required` array has
+# a matching entry under root `properties` — i.e. the schema never requires a key it does not define.
+if command -v node >/dev/null 2>&1; then
+  # `2>&1 >/dev/null` order matters: stderr is dup'd to the current stdout (the substitution
+  # capture) FIRST, then stdout is redirected to /dev/null — so $SCHEMA_REQ_ERR captures ONLY
+  # stderr, and the `if` still tests node's exit code.
+  if SCHEMA_REQ_ERR="$(node -e '
+    const fs = require("fs");
+    const schema = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+    const required = schema.required || [];
+    const properties = schema.properties || {};
+    const missing = required.filter((k) => !(k in properties));
+    if (missing.length > 0) {
+      console.error("required key(s) with no matching properties entry: " + missing.join(", "));
+      process.exit(1);
+    }
+  ' "$SCHEMA" 2>&1 >/dev/null)"; then
+    ok "profile-schema: every root required key has a matching properties entry (schema-derived, non-tautological)"
+  else
+    bad "profile-schema: root required/properties mismatch — $SCHEMA_REQ_ERR"
+  fi
+else
+  echo "  note  node not on PATH — skipping the schema-derived required/properties cross-check"
+fi
 has   "profile-schema: backend.type enum"                 '"laravel"'   "$SCHEMA"
 has   "profile-schema: capture.engine enum"               '"playwright"' "$SCHEMA"
 has   "profile-schema: publish.target shipped set"        '"static_md"' "$SCHEMA"
 hasnt "profile-schema: no fabricated future publish target" '"confluence"' "$SCHEMA"
+# #296 part 2 — the 3 enum assertions the issue names, missing from the checks above.
+has   "profile-schema: stack.frontend.type enum includes vue"              '"vue"'       "$SCHEMA"
+has   "profile-schema: stack.surface enum includes web_ui"                 '"web_ui"'    "$SCHEMA"
+has   "profile-schema: diataxis.quadrants_in_use enum includes tutorials"  '"tutorials"' "$SCHEMA"
+
+# #296 part 4 — a REAL example-profile-validates-against-schema gate. Ruby/Psych (ground-truth YAML
+# engine, same one profile-version.differential.test.mjs uses) loads the shipped example and re-emits
+# it as JSON; that JSON is piped into tests/profile-schema-evaluator.mjs, a recursive evaluator scoped
+# exactly to this schema's keyword usage (type incl. union, additionalProperties in all three forms,
+# required, properties, const, enum, pattern, items, minItems) that also fails closed on any
+# unrecognized schema keyword via an exhaustive schema-structure walk. See
+# tests/profile-schema-evaluator.test.mjs for the full mutation-probe suite this gate is backed by.
+echo "== profile validates against schema (#296 part 4) =="
+EVALUATOR="$TEST_DIR/profile-schema-evaluator.mjs"
+if command -v ruby >/dev/null 2>&1 && ruby -ryaml -rjson -e '1' >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
+  RUBY_LOAD_SCRIPT='
+require "yaml"
+require "json"
+begin
+  doc = Psych.safe_load(File.read(ARGV[0]), aliases: true)
+  puts JSON.generate(doc)
+rescue Exception => e
+  STDERR.puts "ruby-load-error: #{e.class}: #{e.message}"
+  exit 1
+end
+'
+  PROFILE_JSON_FILE="$(mktemp "${TMPDIR:-/tmp}/eh-profile-json.XXXXXX")"
+  if ruby -e "$RUBY_LOAD_SCRIPT" "$PROF" > "$PROFILE_JSON_FILE" 2>/dev/null && [ -s "$PROFILE_JSON_FILE" ]; then
+    if node "$EVALUATOR" "$SCHEMA" < "$PROFILE_JSON_FILE" >/dev/null 2>&1; then
+      ok "shipped handbook.profile.example.yml validates against profile.schema.json (Ruby/Psych -> recursive evaluator)"
+    else
+      bad "shipped handbook.profile.example.yml FAILS validation against profile.schema.json"
+    fi
+  else
+    bad "profile-schema validation gate — ruby failed to load $(basename "$PROF") as YAML"
+  fi
+  rm -f "$PROFILE_JSON_FILE"
+else
+  echo "  note  SKIPPED (ruby -ryaml/-rjson unavailable) — profile-schema validation gate"
+fi
+
 has "profile-version: exports readProfileVersion"         'export function readProfileVersion' "$PV"
 has "profile-version: exports SUPPORTED_PROFILE_VERSIONS" 'SUPPORTED_PROFILE_VERSIONS'         "$PV"
 has "profile-version: exports MIGRATIONS extension point" 'export const MIGRATIONS'            "$PV"
