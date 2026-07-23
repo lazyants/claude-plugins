@@ -221,7 +221,7 @@ assert_line_before() {
 CATEGORY_FILES=()
 category_files() {   # $1 = human label, $2 = root dir, $3… = find predicates
   local label="$1" root="$2"; shift 2
-  local f raw sorted find_rc sort_rc saw_sentinel raw_n sorted_n
+  local f raw find_rc saw_sentinel raw_n
   CATEGORY_FILES=()
   # EVERY stage runs in the main shell and has its exit status checked. NO process substitution
   # and NO pipe anywhere in this function: both discard the producer's status, and a stage that
@@ -229,33 +229,32 @@ category_files() {   # $1 = human label, $2 = root dir, $3… = find predicates
   # category silently. `pipefail` does NOT cover process substitutions — it cannot rescue this.
   raw="$(mktemp "${TMPDIR:-/tmp}/eh-cat.XXXXXX")" \
     || { bad "category '$label' — mktemp failed; coverage is UNKNOWN"; return; }
-  sorted="$(mktemp "${TMPDIR:-/tmp}/eh-cat.XXXXXX")" \
-    || { rm -f "$raw"; bad "category '$label' — mktemp failed; coverage is UNKNOWN"; return; }
 
   find "$root" "$@" -print0 > "$raw"; find_rc=$?
   [ "$find_rc" -eq 0 ] \
     || bad "category '$label' — find exited $find_rc (partial traversal); coverage is UNKNOWN"
 
-  # Record count taken BEFORE sort consumes $raw, so it is an INDEPENDENT expectation rather than
-  # one derived from the same artifact it validates.
+  # Round-7 codex P1 (ped-ant): the pipeline used to be find -> sort -z -> consume, with `sort -z`
+  # existing ONLY for cosmetic deterministic ordering — every gate here is COUNT/PRESENCE-based,
+  # never order-sensitive, so nothing downstream cares what order CATEGORY_FILES holds paths in.
+  # `sort -z` is a GNU extension some older BSD `sort` vintages lack (this plugin ships to whatever
+  # macOS a user has, and this file already commits to bash-3.2-era portability), so depending on it
+  # bought a real distribution risk for zero functional benefit. Removed: find -> consume is the
+  # whole pipeline now, and the record-count taken below is straight off find's own output — no
+  # transformer stage sits between producer and consumer to lose records, so the old
+  # raw_n-vs-sorted_n conservation check (which existed solely to catch A TRANSFORMER dropping
+  # records) has nothing left to guard and is gone with it. `-mindepth`/`-maxdepth` are ORDINARY
+  # BSD/macOS-supported find options (not POSIX, but verified on stock macOS BSD find), not a
+  # portability risk, and stay.
   raw_n="$(_nul_records "$raw")"
 
-  LC_ALL=C sort -z < "$raw" > "$sorted"; sort_rc=$?
-  [ "$sort_rc" -eq 0 ] \
-    || bad "category '$label' — sort exited $sort_rc (partial output); coverage is UNKNOWN"
-
-  # A TRANSFORMER must neither drop nor invent records. `sort -z` can return 0 having consumed a
-  # shortened input (codex round-24 measured it accepting an unterminated stream), so its status
-  # alone is not evidence of conservation.
-  sorted_n="$(_nul_records "$sorted")"
-  [ "$sorted_n" -eq "$raw_n" ] \
-    || bad "category '$label' — sort emitted $sorted_n records, find produced $raw_n; coverage is UNKNOWN"
-
   # COMPLETION SENTINEL: an empty record, which `find -print0` can never emit for a real path.
-  # Without it the CONSUMER is the last unchecked stage — a $sorted truncated AFTER the checked
-  # sort makes `read` stop early, leaving a nonempty-but-partial array that the count guard below
-  # happily accepts. The loop must SEE the sentinel to prove it consumed the whole stream.
-  printf '\0' >> "$sorted" \
+  # Without it the CONSUMER is the last unchecked stage — a $raw truncated AFTER find's own check
+  # makes `read` stop early, leaving a nonempty-but-partial array that the count guard below
+  # happily accepts. The loop must SEE the sentinel to prove it consumed the whole stream. Appended
+  # to $raw directly (there is no separate sorted file anymore); `raw_n` above was already taken
+  # before this append, so it counts real records only, never the sentinel itself.
+  printf '\0' >> "$raw" \
     || bad "category '$label' — could not append completion sentinel; coverage is UNKNOWN"
 
   # Reading from a PLAIN FILE keeps the loop in the caller's shell, so `bad` still mutates FAIL.
@@ -263,12 +262,12 @@ category_files() {   # $1 = human label, $2 = root dir, $3… = find predicates
   while IFS= read -r -d '' f; do
     if [ -z "$f" ]; then saw_sentinel=1; break; fi
     CATEGORY_FILES+=("$f")
-  done < "$sorted"
+  done < "$raw"
   [ "$saw_sentinel" -eq 1 ] \
     || bad "category '$label' — consumer never reached the completion sentinel (truncated read); coverage is UNKNOWN"
-  [ "${#CATEGORY_FILES[@]}" -eq "$sorted_n" ] \
-    || bad "category '$label' — consumed ${#CATEGORY_FILES[@]} of $sorted_n records; coverage is UNKNOWN"
-  rm -f "$raw" "$sorted"
+  [ "${#CATEGORY_FILES[@]}" -eq "$raw_n" ] \
+    || bad "category '$label' — consumed ${#CATEGORY_FILES[@]} of $raw_n records; coverage is UNKNOWN"
+  rm -f "$raw"
   [ "${#CATEGORY_FILES[@]}" -gt 0 ] \
     || bad "category '$label' matched no files — this gate covered nothing"
 }
