@@ -113,9 +113,48 @@ def test_name_connectors_are_a_strict_subset_of_token_re_connector_class():
     "Jean-Baptiste",
     "O'Brien",
     "Ångstrom",
+    'מוהרנ"ת',
+    "הבעל-שם-טוב",
 ])
 def test_match_units_identical_across_both_extractors(s):
     assert bn.match_units(s) == lsr.match_units(s)
+
+
+# ---------------------------------------------------------------------------
+# #282/#283 -- the Hebrew ASCII-punctuation connector-equivalence literals
+# must be byte-identical across both extractors too, same rationale as
+# TOKEN_RE/NAME_CONNECTORS above: no shared import, so a future edit to one
+# copy that forgets the other must fail loudly here.
+# ---------------------------------------------------------------------------
+
+def test_hebrew_letters_identical_across_both_extractors():
+    assert bn._HEBREW_LETTERS == lsr._HEBREW_LETTERS
+
+
+def test_hebrew_mark_identical_across_both_extractors():
+    assert bn._HEBREW_MARK == lsr._HEBREW_MARK
+
+
+def test_hebrew_quote_lookbehind_identical_across_both_extractors():
+    assert bn._HEBREW_QUOTE_MAX_MARKS == lsr._HEBREW_QUOTE_MAX_MARKS
+    assert bn._HEBREW_QUOTE_LOOKBEHIND == lsr._HEBREW_QUOTE_LOOKBEHIND
+
+
+def test_hebrew_ascii_connector_split_re_identical_across_both_extractors():
+    assert bn._HEBREW_ASCII_CONNECTOR_SPLIT_RE.pattern == lsr._HEBREW_ASCII_CONNECTOR_SPLIT_RE.pattern
+
+
+def test_hebrew_ascii_connector_twins_never_overlap_name_connectors():
+    # #283: the five ASCII/Latin connector twins (-, U+2011, ', U+2019, ")
+    # are a Hebrew-scoped FOLD-TIME split, deliberately kept separate from
+    # NAME_CONNECTORS (maqaf/geresh/gershayim only -- see
+    # test_name_connectors_are_a_strict_subset_of_token_re_connector_class
+    # above for why NAME_CONNECTORS itself must never widen). Enforce the
+    # two sets stay disjoint in both extractors, so neither module could
+    # accidentally merge them.
+    ascii_twins = set("-‑'’\"")
+    assert not (ascii_twins & set(bn.NAME_CONNECTORS))
+    assert not (ascii_twins & set(lsr.NAME_CONNECTORS))
 
 
 @pytest.mark.parametrize("s", [
