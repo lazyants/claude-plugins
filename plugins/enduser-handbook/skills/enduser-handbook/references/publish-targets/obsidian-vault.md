@@ -82,6 +82,19 @@ yet".
 'Obsidian vault' implies" above); `<vault-root>` is the only vault-anchored quantity this
 adapter computes, and the two coordinate systems are never mixed.
 
+**Wikilink target prefix.** Once `<vault-root>` is known, this adapter derives one more
+quantity, used only by the wikilinks-mode chapter-link and INDEX-target formulas
+("Wikilinks vs Markdown links" and "INDEX wiring" below): `vaultRelChaptersDir =
+relative(realpath(<vault-root>), realpath(publish.chapters_dir))`. Both operands are
+realpath'd before the join, which is why a `chapters_dir` reached through a symlink into
+a vault subdirectory still resolves to its true vault-root-relative position, never the
+raw lexical path a naive `relative()` would produce. `currentIndexExpectedTarget`
+(`assets/lib/chapter-paths.mjs`) is a pure helper with no filesystem access of its own;
+this adapter is the fs-aware caller that computes `vaultRelChaptersDir` once per run and
+passes it in — never a raw, un-realpath'd `publish.chapters_dir` value. An empty
+`vaultRelChaptersDir` (`chapters_dir === <vault-root>`, the root topology) is a valid
+result, not an error — see "Wikilinks vs Markdown links" below for what it produces.
+
 ## Layout you produce
 
 Resolve every path from profile keys. The shape below is the discipline; the literal
@@ -108,15 +121,18 @@ also always English kebab-case, one level (no `/`). A manifest where no entry se
 the 1.4.1 shipped default — produces only the flat form above. As of 1.6.0, in
 `assets/lib/chapter-paths.mjs`, `staticEmbedPath` (the asset-embed path formula, "Layout
 you produce" below, now always the full-target join) and `validateGroups` (the
-duplicate-slug halt, always runs) both now apply to group-free manifests. In
-`publish.wikilinks: false` mode this adapter also changes group-free behavior further:
-the full-target glossary formula and the Markdown-link integrity gate both now cover
-group-free manifests (see "Glossary backlink discipline" and "Link integrity gate before
-you publish" below), and the Related block's sibling/glossary links — including the ≥2
-floor — are required in Markdown form, not skipped (see "Wikilinks vs Markdown links" and
-"Chapter structure" below). This list names the group-free changes we are aware of; it is
-not a claim that every other section is unchanged. Flat and grouped entries coexist in one
-manifest. Canonical chapter path (D2, shared with `static-md.md` and `SKILL.md`):
+duplicate-slug halt, always runs) both now apply to group-free manifests; as of 1.8.0,
+`currentIndexExpectedTarget`'s wikilinks branch is a third — a group-free manifest's
+flat entry now emits `vaultRelChaptersDir/<slug>` ("Wikilinks vs Markdown links" below),
+not the bare `<slug>` it emitted before 1.8.0. In `publish.wikilinks: false` mode this
+adapter also changes group-free behavior further: the full-target glossary formula and
+the Markdown-link integrity gate both now cover group-free manifests (see "Glossary
+backlink discipline" and "Link integrity gate before you publish" below), and the
+Related block's sibling/glossary links — including the ≥2 floor — are required in
+Markdown form, not skipped (see "Wikilinks vs Markdown links" and "Chapter structure"
+below). This list names the group-free changes we are aware of; it is not a claim that
+every other section is unchanged. Flat and grouped entries coexist in one manifest.
+Canonical chapter path (D2, shared with `static-md.md` and `SKILL.md`):
 
 ```
 grouped: {{publish.chapters_dir}}/<group>/<slug>.md
@@ -178,14 +194,17 @@ the same directory as the chapter so no `../` climb is ever needed. This is docu
 only: the existing embed-exists and under-vault gates below are unaffected by depth, so
 there is no new gate here.
 
-**The glossary wikilink is a different spelling with a different Quartz sensitivity.**
-The embed climb above is about **relative-path depth**; the glossary link (see "Glossary
-backlink discipline" below) is vault-root-relative, and when Quartz's `shortest` mode
-resolves it at all, it does so via the **content-root-absolute** fallback mentioned
-above — so its sensitivity is to a different relationship entirely: the Quartz content
-root versus `<vault-root>`, not climb depth.
+**The glossary AND chapter wikilinks share a different spelling with a different Quartz
+sensitivity.** The embed climb above is about **relative-path depth**; the glossary link
+(see "Glossary backlink discipline" below) and, since 1.8.0, the chapter wikilink (see
+"Wikilinks vs Markdown links" below) are both vault-root-relative, and when Quartz's
+`shortest` mode resolves either one at all, it does so via the **content-root-absolute**
+fallback mentioned above — so their sensitivity is to a different relationship entirely:
+the Quartz content root versus `<vault-root>`, not climb depth. The table below applies
+identically to both link types, since both now resolve through the same
+vault-root-relative coordinate.
 
-| content root vs `<vault-root>` | behavior of the glossary wikilink |
+| content root vs `<vault-root>` | behavior of the vault-root-relative wikilink (glossary or chapter) |
 |---|---|
 | **==** `<vault-root>` | resolves under `shortest` (`v4` via the root-absolute fallback, `v5` via multi-segment suffix) and under `absolute` |
 | **⊊** `<vault-root>` (e.g. a `content/` subdirectory) | carries a stale leading prefix ⇒ does **not** resolve |
@@ -260,9 +279,10 @@ the one exception to "do all of these" — see its own conditional note below.
    `dirname(chapter_file)`, a different, chapter-relative coordinate system used
    elsewhere in this file: for `publish.wikilinks: false`,
    `relative(dirname(index_file), chapter_file)`; for wikilinks (the Obsidian default),
-   the bare chapter slug. Scan `{{publish.index_file}}` for a line matching that target
-   with `locateChapterLine` (the same helper the grouped Step 0 below calls) and branch
-   on the match count:
+   the vault-root-relative chapter path (`.md` dropped) — `currentIndexExpectedTarget`'s
+   **qualified** target (see "Wikilinks vs Markdown links" below). Path mode scans
+   `{{publish.index_file}}` for a line matching that one target with `locateChapterLine`
+   (the same helper the grouped Step 0 below calls) and branches on the match count:
 
    - **Two or more matches** — halt: a flat entry gets no special case here, the same
      duplicate halt fires exactly as it does for the grouped branch below.
@@ -275,6 +295,16 @@ the one exception to "do all of these" — see its own conditional note below.
      display text is always the manifest entry's `title`, never a slug or a hand-typed
      label.
 
+   Wikilinks mode instead runs the qualified/legacy-bare **union scan** through
+   `classifyChapterWiring` (`assets/lib/chapter-paths.mjs`) — see the "Step 0" bullet
+   under Grouped entries below for the full algorithm. A flat entry has no container, so
+   the four outcomes map directly onto the three bullets above, plus one new one: `absent`
+   → append, same as "No match"; `duplicate` → the same "appears multiple times" halt as
+   "Two or more matches"; `canonical` → already wired, same as "Exactly one match";
+   `legacy` → retarget the matched bare-slug line to the qualified form in place,
+   unconditionally — a flat entry has no container to be wrong about, so there is no
+   placement check to run first here (unlike the grouped case below).
+
    Two worked examples (`publish.wikilinks: false`): `index_file` and the chapter share
    one directory ⇒ the target is the bare `<slug>.md`, no `../` climb; a repo-root
    `index_file` with chapters nested under `publish.chapters_dir` ⇒ the target is the
@@ -285,31 +315,72 @@ the one exception to "do all of these" — see its own conditional note below.
 
    - **Step 0 — idempotency check.** Compute the expected link target: for standard
      Markdown links (`publish.wikilinks: false`), `relative(dirname(index_file), chapter_file)`;
-     for wikilinks (the Obsidian default), the bare chapter slug — safe to match on
-     because slugs stay globally unique across every group. Scan `{{publish.index_file}}`
-     for a line matching that target — `locateChapterLine` (`assets/lib/chapter-paths.mjs`)
-     returns the match plus a structural `indexForm: 'headings' | 'non-heading'` field; key
-     every branch below on `indexForm`, never on whether `containerTitle` is `null` — a
-     `null` title occurs both for a genuinely non-heading file and for an uncontained match
-     inside a headings-form file, and those two cases need different handling, below.
-     - The target matches more than one line — never guess which line is canonical, halt:
+     for wikilinks (the Obsidian default), the vault-root-relative chapter path (`.md`
+     dropped) — `currentIndexExpectedTarget` returns `posixJoin(vaultRelChaptersDir,
+     chapterRelPath(entry))` ("Vault root" above for `vaultRelChaptersDir`), the
+     **qualified** target below.
+
+     Path mode scans `{{publish.index_file}}` for a line matching that one target —
+     `locateChapterLine` (`assets/lib/chapter-paths.mjs`) returns the match plus a
+     structural `indexForm: 'headings' | 'non-heading'` field; key every branch below on
+     `indexForm`, never on whether `containerTitle` is `null` — a `null` title occurs both
+     for a genuinely non-heading file and for an uncontained match inside a headings-form
+     file, and those two cases need different handling, below.
+
+     Wikilinks mode instead runs a **union scan**: an installed handbook may still carry
+     the pre-1.8.0 bare `[[<slug>]]` spelling for a chapter this run has not yet
+     retargeted, so a single-target scan would silently double-append a qualified row next
+     to an untouched legacy one. Compute the **legacy-bare** target too — `entry.slug` —
+     and scan for both: `qScan = locateChapterLine(lines, qualified, {wikilink: true})`,
+     `lScan = locateChapterLine(lines, legacyBare, {wikilink: true})` (the `{wikilink:
+     true}` option folds one terminal `.md` off both sides of the comparison, so a
+     hand-authored `[[handbook/admin/orders.md]]` or `[[orders.md]]` row still counts as a
+     match, never a miss). Fold both scans through `classifyChapterWiring(qualified,
+     legacyBare, qScan, lScan)` (`assets/lib/chapter-paths.mjs`) into exactly one of four
+     outcomes — when `qualified === legacyBare` (the root-topology flat case,
+     `vaultRelChaptersDir === ''` with no group) the two scans searched the identical
+     string and are never double-counted:
+
+     - `absent` (no line matches either target) — continue to container resolution below.
+     - `duplicate` (two or more matching lines, in any combination of qualified and
+       legacy-bare form) — never guess which line is canonical, halt:
        "Chapter '<slug>' appears multiple times in <index_file> — curate the index manually, then re-run."
-     - `indexForm === 'headings'` and the matching line sits under a heading matching the
-       entry's current `group_title` — compare via
-       `containerTitleMatches(containerTitle, entry)` (titles compare TRIMMED, so a padded
-       manifest title still converges) — for this chapter, wiring is already complete; go
-       straight to the link-integrity gate below.
-     - `indexForm === 'headings'` and the matching line sits under a **different** heading
-       — never silently relocate a user-curated line, halt:
+     - `canonical` (exactly one line, already spelled in the qualified form) — the target
+       string is present; run the placement check immediately below against that one line.
+     - `legacy` (exactly one line, still spelled in the pre-1.8.0 bare-slug form) — the
+       target is present under an old spelling; run the SAME placement check immediately
+       below against that one line BEFORE touching anything — a misplaced bare line halts
+       for manual relocation exactly like a misplaced qualified one, it is never retargeted
+       first and relocated later.
+
+     **The placement check is retained unchanged (D-8)** — `classifyChapterWiring` decides
+     target-string presence and form only, never placement, so the pre-1.8.0 container gate
+     still runs, layered on top of a `canonical` or `legacy` outcome, against whichever one
+     line it selected:
+     - `indexForm === 'headings'` and that line sits under a heading matching the entry's
+       current `group_title` — compare via `containerTitleMatches(containerTitle, entry)`
+       (titles compare TRIMMED, so a padded manifest title still converges) — correctly
+       placed. A `canonical` line needs nothing further: wiring is already complete, go
+       straight to the link-integrity gate below. A `legacy` line instead **retargets in
+       place** — rewrite that line (the one `matches[0].line` identifies) from `[[<legacy
+       slug>|Title]]` to `[[<qualified>|Title]]`, changing only its text, never its
+       position.
+     - `indexForm === 'headings'` and that line sits under a **different** heading, or is
+       **uncontained** (`containerTitle` is `null` — the line sits above the file's first
+       `##`, or after an H1 that resets the active container) — never silently relocate OR
+       retarget a user-curated line, halt:
        "Chapter '<slug>' is listed in <index_file> under '<found_title>' instead of '<group_title>' — move the line (or curate the index manually), then re-run."
-     - `indexForm === 'headings'` and the matching line is **uncontained**
-       (`containerTitle` is `null` — the line sits above the file's first `##`, or after an
-       H1 that resets the active container) — this is a misplaced line, not a completed
-       one: apply the same halt as the previous bullet, with `<found_title>` read as
-       "(none)" in the halted message.
+       (`<found_title>` reads "(none)" for the uncontained case.) **This halt fires
+       identically for `canonical` and `legacy` (D-8):** a grouped chapter whose qualified
+       wikilink is spelled exactly right but sits under the wrong heading is still a
+       relocate-halt, not silently "already wired" — the 4-way classification answers
+       presence and form only, it does not decide placement and it does not replace this
+       gate. A `legacy`-form bare line under the wrong container also halts for relocation
+       here, before any retarget is attempted — placement is checked before the in-place
+       retarget, never after it.
      - `indexForm === 'non-heading'` (a nested list, an MkDocs-style YAML `nav:`, a bare
-       path table, …) and the target matches anywhere — wiring is already complete.
-     - No match in either form — continue to container resolution.
+       path table, …) — no container to check placement against: a `canonical` line is
+       already complete and a `legacy` line retargets in place unconditionally.
    - **Container resolution** (headings-form index only — the only automated grouped form
      in 1.5.0; every other index shape is fully manual, next bullet). Look for a heading
      whose text equals the entry's `group_title` — containers are located by title, never
@@ -366,12 +437,26 @@ the one exception to "do all of these" — see its own conditional note below.
 
 `publish.wikilinks: true` (Obsidian default):
 
-- Internal chapter link: `[[<chapter-slug>|Display title]]`
+- Internal chapter link: `[[<vault-rel>/<group>/<slug>|Display title]]` (`<group>`
+  present only for a grouped entry; a flat entry's target is `<vault-rel>/<slug>`),
+  where `<vault-rel>` is `vaultRelChaptersDir` ("Vault root" above), computed as
+  `relative(<vault-root>, {{publish.chapters_dir}})` — the SAME vault-root-relative
+  coordinate the glossary link below already uses, not the pre-1.8.0 bare `<slug>`
+  basename form. Worked example (`vaultRelChaptersDir` `handbook`, entry `{group:
+  'admin', slug: 'orders'}`): `[[handbook/admin/orders|Orders]]`. Root topology
+  (`chapters_dir === <vault-root>`) collapses `<vault-rel>` to the empty string, so a
+  flat entry's target is just `<slug>` — still the chapter's exact vault-root path (see
+  "Vault root" above), never a special case.
 - Glossary link: see "Glossary backlink discipline" below for the exact target.
 - The pipe `|` separates target from display; omit it when display equals target.
-- Wikilinks resolve by basename, so grouping never changes this form — a chapter slug
-  stays globally unique across every group (`references/manifest-discipline.md`), so no
-  relative-path math is ever needed here, grouped or flat.
+- The target is vault-root-relative, never a bare basename — grouping DOES change it
+  (the `<group>` segment rides on the joined path), unlike the pre-1.8.0 bare `<slug>`
+  form. A bare slug only disambiguates when it is unique across the WHOLE vault; this
+  skill enforces uniqueness only across the handbook
+  (`references/manifest-discipline.md`), so a same-basename foreign vault note could
+  shadow it. The vault-root-relative form resolves Obsidian's exact full-path tier
+  instead, unambiguous regardless of what else shares the chapter's basename elsewhere
+  in the vault.
 
 `publish.wikilinks: false`:
 
@@ -387,6 +472,15 @@ the one exception to "do all of these" — see its own conditional note below.
 - Skip Dataview blocks; they require Obsidian to render.
 
 You do not mix the two styles in one chapter. The profile decides; the chapter follows.
+
+**Transition note (pre-1.8.0 handbooks).** A chapter this run does not touch keeps whatever
+wikilink spelling it already has — established behavior, `references/revalidation.md`'s
+"Write-time canon". An untouched NESTED chapter's bare `[[<slug>]]` link resolves through
+Obsidian's fragile suffix tier (tier 5, §0a) — it works today only as long as no foreign
+vault note shares the basename. An untouched ROOT-level chapter's bare `[[<slug>]]` already
+resolves through the exact-match tier (tier 3) and needs no fix. The next publish, or a
+material revalidation, that touches a nested chapter upgrades it to the vault-root-relative
+form ("INDEX wiring" above, the union scan's `legacy` outcome).
 
 ## Glossary backlink discipline
 

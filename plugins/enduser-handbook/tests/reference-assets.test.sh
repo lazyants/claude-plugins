@@ -1632,6 +1632,20 @@ has_in_section "revalidation: recipe step 4 names a THIRD target type — static
 has_in_section "revalidation: recipe step 4's index-target case is never the chapter or glossary formula" \
   "$REVAL" '### The manual group-migration recipe' \
   'never the chapter-link or glossary-link formula'
+# Bot P1 (ped-ant, post-#294/#295 review): step 4's chapter-target-links clause still emitted
+# the pre-1.8.0 bare `[[<slug>|Display title]]` spelling under `publish.wikilinks: true` — a
+# SECOND site carrying the same stale form the "## Write-time canon" section above already
+# fixed (the round-15/16/17 history above only covers THAT section; this is the migration
+# recipe's own separate paragraph, missed in the first pass). Following this recipe literally
+# on a group move would rewrite a chapter's sibling wikilinks back to the ambiguous bare form,
+# recreating #294, while the resolution-only convergence gate stays green throughout — it only
+# checks that a target RESOLVES, not which spelling it uses, and the bare form still resolves
+# as long as the basename happens to still be unique.
+has_in_section "revalidation: recipe step 4's chapter-target wikilink is vault-root-relative under wikilinks:true" \
+  "$REVAL" '### The manual group-migration recipe' \
+  'vault-root-relative `[[<vault-rel>/<group>/<slug>|Display title]]` wikilink'
+hasnt "revalidation: recipe no longer instructs the pre-1.8.0 bare wikilink as the wikilinks:true chapter-link canon" \
+  'bare `[[<slug>|Display title]]` wikilink under `publish.wikilinks: true`' "$REVAL"
 has "revalidation: recipe fixes inbound links from other chapters"  'Fix inbound links from other chapters that referenced the old path' "$REVAL"
 has "revalidation: recipe updates the capture spec output dir(s)"   "Update the project's capture spec output dir(s)" "$REVAL"
 has "revalidation: terminal-state convergence checklist heading"    'Terminal-state convergence checklist' "$REVAL"
@@ -1669,6 +1683,88 @@ has_in_section "revalidation: wikilink-reference fact calls chapterHasWikilinkTo
 
 echo "== group axis (#19) — publish-targets README =="
 has "publish-targets README: Group handling: support or halt bullet" 'Group handling: support or halt.' "$PTREADME"
+
+echo "== #294/#295: vault-root-relative wikilinks + INDEX target (v1.8.0) =="
+# #294 (Option A): wikilinks-mode chapter link and INDEX target are now vault-root-relative,
+# mirroring the #247 glossary-link fix above (L1207-1218) — a bare basename only
+# disambiguates vault-wide, which this skill never guarantees (it enforces uniqueness only
+# across the handbook). Each pin below is red-before-green against the pre-#294 doc text.
+has_in_section "obsidian-vault: chapter wikilink target is vault-root-relative (mirrors glossary)" \
+  "$OMD" '## Wikilinks vs Markdown links' \
+  'relative(<vault-root>, {{publish.chapters_dir}})'
+hasnt "obsidian-vault: no longer claims wikilinks resolve by basename with a grouping-invariant form" \
+  'Wikilinks resolve by basename, so grouping never changes this form' "$OMD"
+has_in_section "obsidian-vault: chapter wikilink target changes with grouping, unlike the pre-1.8.0 bare slug" \
+  "$OMD" '## Wikilinks vs Markdown links' \
+  'grouping DOES change it'
+
+# The legacy-bare union scan (§1b): an installed handbook may still carry the pre-1.8.0 bare
+# `[[slug]]` spelling. W5 reconciles a qualified scan and a legacy-bare scan into exactly one
+# of four outcomes via `classifyChapterWiring`: absent -> append, canonical -> leave (already
+# wired), legacy -> retarget in place, duplicate -> halt. Pinned at both the flat-entry
+# pointer (this algorithm applies with no container) and the grouped Step 0 (the full text).
+has_in_section "obsidian-vault: flat entries' wikilinks-mode wiring points at the union scan through classifyChapterWiring" \
+  "$OMD" '## INDEX wiring (do all of these on every chapter create/update)' \
+  'Wikilinks mode instead runs the qualified/legacy-bare **union scan**'
+has_in_section "obsidian-vault: the four union-scan outcomes map onto append/leave/retarget/halt" \
+  "$OMD" '## INDEX wiring (do all of these on every chapter create/update)' \
+  'the four outcomes map directly onto the three bullets above, plus one new one'
+has_in_section "obsidian-vault: a legacy-form line is retargeted to the qualified spelling in place" \
+  "$OMD" '## INDEX wiring (do all of these on every chapter create/update)' \
+  'retarget the matched bare-slug line to the qualified form in place'
+has_in_section "obsidian-vault: grouped Step 0 runs the same union scan via classifyChapterWiring" \
+  "$OMD" '## INDEX wiring (do all of these on every chapter create/update)' \
+  'Wikilinks mode instead runs a **union scan**'
+
+# D-8: the 4-way classification decides target-string presence/form only — the pre-1.8.0
+# wrong-container / uncontained placement halts are RETAINED, layered on top, never replaced.
+# Two cases: (a) a grouped chapter's qualified wikilink is spelled exactly right but sits
+# under the wrong heading — still a relocate-halt, not silently "already wired"; (b) a
+# `legacy`-form bare line under the wrong container halts too, checked BEFORE any retarget.
+has_in_section "obsidian-vault: D-8(a) — a correctly-spelled qualified wikilink under the wrong heading still halts for relocation" \
+  "$OMD" '## INDEX wiring (do all of these on every chapter create/update)' \
+  'relocate-halt, not silently "already wired"'
+has_in_section "obsidian-vault: D-8(b) — a legacy bare line under the wrong container halts BEFORE any retarget is attempted" \
+  "$OMD" '## INDEX wiring (do all of these on every chapter create/update)' \
+  'before any retarget is attempted — placement is checked before'
+
+# revalidation.md: the write-time canon's wikilinks-on case is now vault-root-relative, not a
+# bare basename — the old "basename resolution with no relative-path math" claim is gone.
+hasnt "revalidation: no longer describes the wikilinks-on chapter link as bare basename resolution" \
+  'basename resolution with no' "$REVAL"
+has_in_section "revalidation: write-time-canon states the wikilinks-on link is vault-root-relative" \
+  "$REVAL" '## Write-time canon' \
+  'chapter links **vault-root-relative**'
+
+# revalidation.md §1b BLOCKER-2a: the legacy-bare-gone check is scoped to the OLD container,
+# never a vault-wide bare-slug scan — a root grouped-to-flat migration can make the new flat
+# target equal the old bare slug, which a global rule would wrongly forbid. The pre-1.8.0
+# "exactly ONE match under a shared container" special case (dead under vault-rel targets,
+# which are never textually identical across a group rename) is gone.
+has_in_section "revalidation: legacy-bare-gone check is scoped to the OLD container, not global" \
+  "$REVAL" '### Terminal-state convergence checklist' \
+  'the check is scoped to lines sitting under the container titled the OLD'
+hasnt "revalidation: no longer requires exactly ONE match under a shared container (dead under vault-rel)" \
+  'the fact instead requires exactly ONE' "$REVAL"
+
+# manifest-discipline.md: the duplicate-slug gate stays global despite skill-emitted links no
+# longer keying on basename — the file tree, a user-authored bare wikilink, and Quartz-shortest
+# bare-name resolution still need it; relaxing to per-group is a deferred follow-up (D-3).
+has_in_section "manifest-discipline: 1.8.0 states skill-emitted wikilinks are vault-root-relative, not bare basename" \
+  "$MDISC" '### Manifest review — grouped and group-free halts' \
+  'target are vault-root-relative, not a bare basename'
+has_in_section "manifest-discipline: duplicate-slug gate rationale names user-authored bare wikilinks" \
+  "$MDISC" '### Manifest review — grouped and group-free halts' \
+  'for a user-authored bare `[[<slug>]]` wikilink anywhere'
+has_in_section "manifest-discipline: duplicate-slug gate rationale names Quartz-shortest bare-name resolution" \
+  "$MDISC" '### Manifest review — grouped and group-free halts' \
+  'Quartz'"'"'s `shortest`-mode bare-name resolution'
+has "manifest-discipline: activation rule lists the 1.8.0 currentIndexExpectedTarget group-free exception (third)" \
+  'one from 1.8.0: `currentIndexExpectedTarget`' "$MDISC"
+
+# publish-targets/README.md: the module-level group-free-exception inventory is now three, not two.
+has "publish-targets README: three module-level group-free exceptions (adds currentIndexExpectedTarget)" \
+  'Three exceptions are in' "$PTREADME"
 
 echo "== #220/#221 write-canon + mandatory validateGroups wiring (Task H) =="
 # Section-bound (has_in_section), not whole-file: a whole-file grep cannot prove a claim is made

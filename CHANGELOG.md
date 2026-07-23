@@ -2,6 +2,17 @@
 
 All notable changes to `lazyants/claude-plugins` are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is per-plugin, not repo-wide.
 
+## [enduser-handbook 1.8.0] — 2026-07-23
+
+Obsidian-vault chapter wikilinks and INDEX targets become vault-root-relative, and the formula that computes them is now exported and directly tested. Closes #294. Closes #295.
+
+### Changed
+- **Chapter wikilinks/index targets are vault-root-relative in wikilinks mode** (#294) — the `obsidian-vault` adapter previously emitted the bare chapter `slug` (Obsidian basename resolution), which only disambiguates when that slug is unique across the *whole* vault; the plugin only enforces uniqueness across the handbook, so a same-basename foreign vault note could shadow a nested chapter's link and force Obsidian onto its fragile suffix-match resolution tier. The formula now emits the vault-root-relative path instead (Obsidian's exact-match tier), mirroring the #247 glossary-link fix. A root-topology handbook (`chapters_dir` == vault root) already resolved safely and is unaffected.
+- **Legacy bare-link transition, applied on publish** — a pre-1.8.0 chapter row or in-chapter link still spelled as the bare `[[slug]]` is recognized (via a union scan over both the old and new spellings) and retargeted to the vault-relative form in place, instead of being duplicated or silently left stale. Existing placement halts (wrong/missing container) are unchanged and still apply on top of this.
+
+### Added
+- **`currentIndexExpectedTarget` is exported** (#295) — previously a private helper inside `chapter-paths.mjs`, reachable only through the Step-0 index-wiring flow and asserted by no direct test. It is now a named export, declared in `chapter-paths.d.mts`, and covered by direct unit tests in `chapter-paths.test.mjs`.
+
 ## [enduser-handbook 1.7.1] — 2026-07-23
 
 Fixes the conflicting-`group_title` manifest halt to name EVERY conflicting title, not just the first two. `validateGroups` enumerated only `distinctTitles[0]`/`[1]`, so a group with three or more distinct titles fired the halt correctly but dropped the 3rd+ from the message — an operator aligning the first two would re-hit the same halt on a title it never named. The halt now comma-joins all distinct titles. Closes #250. The rest is `chapter-paths` test-suite hardening against three mutant classes the shipped fixtures couldn't distinguish: `manualMigrationChecklist`'s `output_dir`/`chapters_dir`/`index_file` roots are now exercised fully decoupled (#253); the fence (`runLen >= openLen`) and inline-code (`runLen === openLen`) delimiter-length rules are now tested with UNEQUAL opener/closer runs (#254); and `renderManualMigrationHalt`'s scan-failure header + detail rendering is pinned with a multi-tuple fixture (#255). Closes #253. Closes #254. Closes #255.

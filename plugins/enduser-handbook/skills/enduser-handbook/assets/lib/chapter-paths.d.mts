@@ -23,7 +23,7 @@ export interface CaptureProfileLike {
 }
 
 // The full profile shape — required by functions that resolve index/chapters-dir paths in
-// addition to capture.output_dir (currently only manualMigrationChecklist).
+// addition to capture.output_dir (currentIndexExpectedTarget and manualMigrationChecklist).
 export interface ProfileLike extends CaptureProfileLike {
   publish: { chapters_dir: string; index_file: string; wikilinks: boolean };
 }
@@ -37,6 +37,16 @@ export interface LocateChapterLineMatch {
 // SAME sanitized view — 'headings' iff the index has >=1 depth>=2 heading and no YAML-mapping
 // structure outside a leading frontmatter block; 'non-heading' otherwise.
 export type IndexForm = 'headings' | 'non-heading';
+
+export interface LocateChapterLineOptions {
+  // D6, default false: fold ONE terminal '.md' (case-insensitive) off both the wanted target and
+  // every extracted line target before comparison.
+  wikilink?: boolean;
+}
+
+// D7: the classifyChapterWiring outcome — see chapter-paths.mjs for the full dedup-guard/D8
+// placement-separation contract.
+export type ChapterWiringClassification = 'absent' | 'canonical' | 'legacy' | 'duplicate';
 
 export interface LocateChapterLineResult {
   present: boolean;
@@ -113,8 +123,27 @@ export function staticEmbedPath(
 /** See chapter-paths.mjs: all D1 manifest-review gates; [1.6.0, #221] a group-free manifest now halts unconditionally on a duplicate flat slug instead of always returning []. */
 export function validateGroups(entries: ChapterEntry[]): string[];
 
-/** See chapter-paths.mjs: the D6 step-0 index-line idempotency check. */
-export function locateChapterLine(indexLines: string[], expectedTarget: string): LocateChapterLineResult;
+/** See chapter-paths.mjs: the D6 step-0 index-line idempotency check; options.wikilink (default false) folds ONE terminal '.md' off both sides before comparison. */
+export function locateChapterLine(
+  indexLines: string[],
+  expectedTarget: string,
+  options?: LocateChapterLineOptions,
+): LocateChapterLineResult;
+
+/** See chapter-paths.mjs: [1.8.0] #295 — the exported D6 index-target formula; vaultRelChaptersDir is required (and validated) in wikilinks mode, ignored in path mode. */
+export function currentIndexExpectedTarget(
+  profileLike: ProfileLike,
+  entry: ChapterEntry,
+  vaultRelChaptersDir?: string,
+): string;
+
+/** See chapter-paths.mjs: [1.8.0] #294 D7 — the single union-count wiring classifier over two locateChapterLine scans; answers target-string presence/form only, never placement (D8). */
+export function classifyChapterWiring(
+  qualifiedTarget: string,
+  legacyBareTarget: string,
+  qScan: LocateChapterLineResult,
+  lScan: LocateChapterLineResult,
+): ChapterWiringClassification;
 
 /** See chapter-paths.mjs: the D6 container-resolution classifier. */
 export function findContainer(indexLines: string[], groupTitle: string): FindContainerResult;
@@ -122,11 +151,12 @@ export function findContainer(indexLines: string[], groupTitle: string): FindCon
 /** See chapter-paths.mjs: the D6 manual-migration boundary trigger. */
 export function groupChanges(oldEntries: ChapterEntry[], newEntries: ChapterEntry[]): GroupChangesResult;
 
-/** See chapter-paths.mjs: the per-delta-kind terminal-state fact descriptors. */
+/** See chapter-paths.mjs: the per-delta-kind terminal-state fact descriptors; vaultRelChaptersDir is threaded into every currentIndexExpectedTarget call this function makes (wikilinks mode). */
 export function manualMigrationChecklist(
   profileLike: ProfileLike,
   oldEntry: ChapterEntry | null,
   newEntry: ChapterEntry | null,
+  vaultRelChaptersDir?: string,
 ): MigrationFact[];
 
 /** See chapter-paths.mjs: the production D6 halt-text formatter (exact strings). */

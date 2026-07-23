@@ -94,7 +94,7 @@ nav group instead of the flat `publish.chapters_dir/<slug>.md` layout:
 
 **Every grouped entry requires `group_title`**: identical within a group, unique across groups, and never derived from the English `group` slug.
 
-**Activation rule**: a manifest becomes *grouped* the moment any single entry carries `group`. Within the helper module `assets/lib/chapter-paths.mjs`, a manifest with no `group` field anywhere behaves identically to 1.4.1 in every respect, at zero review cost to existing flat manifests — except two 1.6.0 group-free exceptions in that module: `staticEmbedPath` now always writes the full-target embed formula (the legacy `anyGroup` branch is gone — see `references/revalidation.md`'s "Write-time canon"), and `validateGroups(entries)` now runs its duplicate-slug gate unconditionally instead of short-circuiting to `[]`. Every other check below stays grouped-only. **This inventory is scoped to the helper module only** — a publish-target adapter may carry its own group-free behaviour changes on top of these two (1.6.0 also changed the Obsidian adapter's group-free glossary link formula and widened its Markdown-link integrity gate to cover group-free chapters), so `anyGroup` gating in an adapter file must never be assumed to mirror this module's activation rule.
+**Activation rule**: a manifest becomes *grouped* the moment any single entry carries `group`. Within the helper module `assets/lib/chapter-paths.mjs`, a manifest with no `group` field anywhere behaves identically to 1.4.1 in every respect, at zero review cost to existing flat manifests — except three group-free exceptions in that module: two from 1.6.0 — `staticEmbedPath` now always writes the full-target embed formula (the legacy `anyGroup` branch is gone — see `references/revalidation.md`'s "Write-time canon"), and `validateGroups(entries)` now runs its duplicate-slug gate unconditionally instead of short-circuiting to `[]` — and one from 1.8.0: `currentIndexExpectedTarget`'s wikilinks branch now emits `vaultRelChaptersDir/<slug>` for a group-free entry too (`references/publish-targets/obsidian-vault.md`'s "Wikilinks vs Markdown links"), not the bare `<slug>` it emitted before — the vault-rel fix applies regardless of grouping. Every other check below stays grouped-only. **This inventory is scoped to the helper module only** — a publish-target adapter may carry its own group-free behaviour changes on top of these three (1.6.0 also changed the Obsidian adapter's group-free glossary link formula and widened its Markdown-link integrity gate to cover group-free chapters), so `anyGroup` gating in an adapter file must never be assumed to mirror this module's activation rule.
 
 ### Manifest review — grouped and group-free halts
 
@@ -105,7 +105,7 @@ are verbatim and both are blocking.
 
 **Grouped manifest** halts, verbatim, on:
 
-- **Duplicate slug** — `Duplicate chapter slug '<slug>' — chapter slugs must be globally unique across all groups (wikilinks and Quartz-shortest resolution key on the basename).`
+- **Duplicate slug** — `Duplicate chapter slug '<slug>' — chapter slugs must be globally unique across all groups (chapter basenames stay unambiguous across the handbook for the file tree, user-authored bare wikilinks, and Quartz-shortest bare-name resolution).`
 - **Bad group** — `Invalid group '<value>' — group must be English kebab-case, one level (no '/').`
 - **Reserved group** — `group 'assets' is reserved (co-location follow-up; keeps the tree unambiguous).`
 - **Reserved slug** — `slug 'assets' is reserved in a grouped manifest (co-location follow-up; keeps the tree unambiguous).`
@@ -125,6 +125,17 @@ duplicate-slug gate unconditionally, and the halt above is what surfaces it.
 Invoking `validateGroups(entries)` is never an optional convenience — see
 "The discipline: no capture code before review" below, where it is a
 mandatory, blocking pre-write step for every manifest shape.
+
+As of 1.8.0, the Obsidian adapter's wikilinks-mode chapter link and INDEX
+target are vault-root-relative, not a bare basename
+(`references/publish-targets/obsidian-vault.md`'s "Wikilinks vs Markdown
+links") — links the skill itself emits no longer key on the slug's
+basename. The **grouped** duplicate-slug gate above stays global (across
+every group) anyway: chapter basenames still need to stay unambiguous for
+the file tree, for a user-authored bare `[[<slug>]]` wikilink anywhere
+else in the vault, and for Quartz's `shortest`-mode bare-name resolution —
+none of which this skill controls. Relaxing the gate to per-group
+uniqueness is a deferred follow-up, not a consequence of this fix.
 
 Path derivation, the group-aware asset tree, index wiring, and the
 manual-migration recipe for changing an entry's group live in
