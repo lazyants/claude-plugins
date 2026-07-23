@@ -2,6 +2,20 @@
 
 All notable changes to `lazyants/claude-plugins` are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is per-plugin, not repo-wide.
 
+## [enduser-handbook 1.8.2] — 2026-07-23
+
+Hardens `reference-assets.test.sh`'s `revalidation.md`/`SKILL.md` halt-clause coverage with site-bound needle pins in place of loose whole-file checks, closes a missing-coverage gap on the chapter-wiring non-heading-form completion branch, and adds two `chapter-paths.mjs` boundary-condition tests. Closes #251. Closes #252. Closes #256.
+
+### Changed
+- **`revalidation.md`/`SKILL.md` halt and delta-manifest assertions replaced with site-bound pins** (#251) — the previous whole-file `has`/`has_ci` checks for `'newly discovered'`, `'delta manifest'`, and case-insensitive `'halt'` were too loose to distinguish a mutation of the accepted-diff class's "no halt" conclusion from the material class's "newly discovered" trigger clause. Replaced with six needle pins bound to exact, verified-unique lines in `revalidation.md`, plus one scoped pin on `SKILL.md`'s own W6 halt clause.
+
+### Added
+- **Missing non-heading-form completion assertion** (#252) — `obsidian-vault.md`'s chapter-wiring section has two branches that independently claim completion in different wording; only the headings-form branch had test coverage. Added the missing assertion for the non-heading-form branch's own wording — no doc change, purely closing a test-coverage gap.
+- **Two `chapter-paths.mjs` boundary tests** (#256) — `specReferencesDir` fixtures exercising the needle-at-index-0 and needle-at-EOF branches, and a `chapterHasWikilinkTo`/`isComponentSuffixMatch` fixture exercising the equal-component-length boundary. No production code changed; both functions were already correct by design.
+
+### Testing
+- `reference-assets.test.sh`: 6 old whole-file checks removed (3 each, `revalidation.md` + `SKILL.md`), 8 new site-bound pins added in their place plus 1 new #252 pin — net +3 assertions. `chapter-paths.test.mjs`: +3 assertions (190 → 193). Absolute suite totals are environment-dependent (see the 1.8.1 entry above) — deltas are the portable figures.
+
 ## [enduser-handbook 1.8.1] — 2026-07-23
 
 Documents (with a regression lock, not a behavior change) why tab-prefixed fence markers in `_section_contains` can never produce an incorrect halt decision, and adds the missing "Write-time canon" citation to two previously-uncited `obsidian-vault.md` mentions. Closes #257. Closes #259.
