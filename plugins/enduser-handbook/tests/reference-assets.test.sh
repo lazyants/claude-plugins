@@ -1632,6 +1632,20 @@ has_in_section "revalidation: recipe step 4 names a THIRD target type — static
 has_in_section "revalidation: recipe step 4's index-target case is never the chapter or glossary formula" \
   "$REVAL" '### The manual group-migration recipe' \
   'never the chapter-link or glossary-link formula'
+# Bot P1 (ped-ant, post-#294/#295 review): step 4's chapter-target-links clause still emitted
+# the pre-1.8.0 bare `[[<slug>|Display title]]` spelling under `publish.wikilinks: true` — a
+# SECOND site carrying the same stale form the "## Write-time canon" section above already
+# fixed (the round-15/16/17 history above only covers THAT section; this is the migration
+# recipe's own separate paragraph, missed in the first pass). Following this recipe literally
+# on a group move would rewrite a chapter's sibling wikilinks back to the ambiguous bare form,
+# recreating #294, while the resolution-only convergence gate stays green throughout — it only
+# checks that a target RESOLVES, not which spelling it uses, and the bare form still resolves
+# as long as the basename happens to still be unique.
+has_in_section "revalidation: recipe step 4's chapter-target wikilink is vault-root-relative under wikilinks:true" \
+  "$REVAL" '### The manual group-migration recipe' \
+  'vault-root-relative `[[<vault-rel>/<group>/<slug>|Display title]]` wikilink'
+hasnt "revalidation: recipe no longer instructs the pre-1.8.0 bare wikilink as the wikilinks:true chapter-link canon" \
+  'bare `[[<slug>|Display title]]` wikilink under `publish.wikilinks: true`' "$REVAL"
 has "revalidation: recipe fixes inbound links from other chapters"  'Fix inbound links from other chapters that referenced the old path' "$REVAL"
 has "revalidation: recipe updates the capture spec output dir(s)"   "Update the project's capture spec output dir(s)" "$REVAL"
 has "revalidation: terminal-state convergence checklist heading"    'Terminal-state convergence checklist' "$REVAL"
