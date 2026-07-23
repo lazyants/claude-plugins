@@ -1716,7 +1716,21 @@ def _agent_dispatch_consume_sites(mass_translate_source: str) -> dict:
     is caught today by the convention signal, so the union has no live gap;
     the residual is a hypothetical future guard that is BOTH indirect-fed AND
     convention-skipping. Stated in assert_every_consume_site_guard_routes_
-    through_helper()'s docstring."""
+    through_helper()'s docstring.
+
+    Binding keyword: `const` ONLY, by design -- not merely conservatively. This
+    is a second, sibling residual. const-immutability is exactly what makes the
+    whole-span `GUARD(name)` scan sound: a const-bound name provably still holds
+    the dispatch's evidence-carrying return at every call site in the enclosing
+    function, so any `GUARD(name)` genuinely received it. A `let`/`var`-bound
+    name can be REASSIGNED to a derived value before a downstream `GUARD(name)`,
+    so binding on `let`/`var` here would FALSELY roster a benign guard that never
+    saw the untrusted return. Supporting them soundly needs reassignment-
+    tracking, not warranted for a shape no live dispatch uses -- all real
+    dispatch sites bind with `const`. So a `let`/`var`-bound dispatch feeding a
+    convention-skipping, presence-test-free guard is a known, narrow residual, a
+    sibling of the indirect-fed one above. Pinned by
+    test_structural_signal_is_const_only_by_design."""
     code = _js_code_only(mass_translate_source)
     evidence_schemas = _evidence_carrying_schemas(mass_translate_source)
     spans = _function_spans(mass_translate_source)
@@ -1731,10 +1745,11 @@ def _agent_dispatch_consume_sites(mass_translate_source: str) -> dict:
         return (best, spans[best]) if best is not None else (None, (0, len(code)))
 
     consume_sites = {}
-    for m in re.finditer(r"(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*await\s+agent\s*\(", code):
+    for m in re.finditer(r"const\s+([A-Za-z_$][\w$]*)\s*=\s*await\s+agent\s*\(", code):
         # The regex ends in `agent\s*\(`, so m.end()-1 is already the `(`; the
-        # `(` here is the call's open paren. (const-only was widened to
-        # const|let|var so a let/var-bound retry-loop dispatch stays visible.)
+        # `(` here is the call's open paren. Binds on `const` ONLY, by design --
+        # see this function's docstring: const-immutability makes the whole-span
+        # GUARD(name) scan sound; let/var would need reassignment-tracking.
         args = _call_argument_texts(code, m.end() - 1)
         options = args[1] if len(args) >= 2 else ""
         schema = re.search(r"\bschema:\s*([A-Za-z_$][\w$]*)", options)
@@ -2162,12 +2177,14 @@ def test_structural_signal_survives_a_template_literal_first_argument(mass_trans
         assert_consume_site_list_is_exhaustive(mutated)
 
 
-# FIX 3 regression fixture: a dispatch bound with `let` (e.g. a retry loop that
-# reassigns) rather than `const`. The structural signal's binding regex was
-# const-only, so a let/var-bound dispatch was invisible to it. letFedGuard is
-# fed such a dispatch, skips hasOnlyKeys, and is NOT rostered. The positional
-# prompt is a plain string, so this fixture exercises the binding keyword ALONE
-# (independent of FIX 1).
+# Const-only-boundary fixture: a dispatch bound with `let` (e.g. a retry loop
+# that reassigns) rather than `const`. The structural signal binds on `const`
+# ALONE by design (const-immutability is what makes the whole-span GUARD(name)
+# scan sound; a let/var name may be reassigned before a downstream GUARD(name)),
+# so a let/var-bound dispatch is outside it -- a known, narrow residual.
+# letFedGuard is fed such a dispatch, skips hasOnlyKeys, and is NOT rostered.
+# The positional prompt is a plain string, so this fixture exercises the binding
+# keyword ALONE (independent of FIX 1's template-substitution brace).
 _LET_FED_SPLICE = (
     "async function letGuardConsumer(seg) {\n"
     "  let rawLet = await agent(\"probe prompt\", { schema: LEDGER_WRITE_SCHEMA });\n"
@@ -2194,25 +2211,49 @@ def _splice_let_fed_guard(mass_translate_source: str) -> str:
     return out
 
 
-def test_structural_signal_catches_a_let_bound_dispatch(mass_translate_source):
-    """RED/GREEN for FIX 3. The structural signal's binding regex was const-
-    only, so a `let`/`var`-bound dispatch (an ordinary retry-loop refactor)
-    was invisible. Widened to (?:const|let|var), a let-bound dispatch feeding
-    an unrostered guard is caught and the tripwire fires. The positional prompt
-    is a plain string, so the RED here is due to the binding keyword alone, not
-    the template-substitution brace of FIX 1."""
+def test_structural_signal_is_const_only_by_design(mass_translate_source):
+    """The const-only boundary, pinned rather than asserted. The structural
+    signal binds on `const` ALONE, by design -- not merely conservatively.
+    const-immutability is exactly what makes the whole-span `GUARD(name)` scan
+    sound: a const-bound name provably still holds the dispatch's
+    evidence-carrying return at every call site in the enclosing function, so
+    any `GUARD(name)` genuinely received it. A `let`/`var`-bound name can be
+    REASSIGNED to a derived value before a downstream `GUARD(name)`, so binding
+    on `let`/`var` would falsely roster a benign guard that never saw the
+    untrusted return. Supporting them soundly needs reassignment-tracking, not
+    warranted for a shape no live dispatch uses -- all real dispatch sites bind
+    with `const`.
+
+    So a `let`/`var`-bound dispatch feeding a convention-skipping,
+    presence-test-free guard is a known, narrow residual -- a sibling of the
+    indirect-fed one pinned by
+    test_apparatus_residual_is_exactly_indirect_plus_convention_skipping.
+    Construct that shape and show every layer here passes it through, so the
+    docstring's const-only residual is real and complete, not a hedge.
+
+    (This is the inverse of a RED/GREEN fix test: widening the binding regex to
+    (?:const|let|var) is deliberately OUT of scope, and this pins it out.)"""
     mutated = _splice_let_fed_guard(mass_translate_source)
 
+    # The let-bound guard genuinely skips the convention signal too (no
+    # hasOnlyKeys), so if the structural signal DID bind on `let` this benign
+    # guard would be rostered -- exactly the false positive const-only avoids.
     assert "letFedGuard" not in _hasonlykeys_callers(mutated), (
-        "letFedGuard unexpectedly calls hasOnlyKeys -- this RED proof needs a "
-        "guard the CONVENTION signal cannot see, or it proves nothing new"
+        "letFedGuard unexpectedly calls hasOnlyKeys -- this boundary proof needs "
+        "a guard the CONVENTION signal cannot see, or it proves nothing"
     )
-    assert "letFedGuard" in _agent_dispatch_consume_sites(mutated), (
-        "the structural signal missed a `let`-bound agent dispatch -- the "
-        "binding-keyword regex was const-only (FIX 3)"
+    # The const-only boundary itself: a `let`-bound dispatch is outside the
+    # structural signal by design, so its guard is NOT rostered.
+    assert "letFedGuard" not in _agent_dispatch_consume_sites(mutated), (
+        "a `let`-bound agent dispatch was rostered by the structural signal -- "
+        "the binding regex must be const-only by design (const-immutability is "
+        "what makes the whole-span GUARD(name) scan sound; supporting let/var "
+        "soundly would need reassignment-tracking)"
     )
-    with pytest.raises(AssertionError, match="consume-site roster drift"):
-        assert_consume_site_list_is_exhaustive(mutated)
+    # -- so the guard escapes every layer here, exactly as the residual does.
+    assert_consume_site_list_is_exhaustive(mutated)
+    assert_every_consume_site_guard_routes_through_helper(mutated)
+    assert_in_operator_confined_to_evidence_helper(mutated)
 
 
 def test_apparatus_residual_is_exactly_indirect_plus_convention_skipping(mass_translate_source):
