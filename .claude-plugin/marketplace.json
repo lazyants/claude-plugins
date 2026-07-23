@@ -78,7 +78,7 @@
       "name": "enduser-handbook",
       "source": "./plugins/enduser-handbook",
       "description": "Generate and maintain a Di\u00e1taxis-structured end-user handbook for any project from a per-project profile, with live screenshot capture and ongoing completeness audits; ships Obsidian-vault and static-Markdown publish adapters.",
-      "version": "1.8.0",
+      "version": "1.8.1",
       "author": {
         "name": "Lazy Ants"
       },
@@ -116,7 +116,7 @@
       "name": "literary-translator",
       "source": "./plugins/literary-translator",
       "description": "High-fidelity literary book translation from a Gutenberg EPUB source (expert-mode `custom` extractor also supported), run to convergence through a codex-translate -> false-green gate -> codex-review -> Claude-fix loop over a frozen name/realia canon, with configurable verse policy, ledger resumability, and optional assembly into a rendered Obsidian glossary-wiki.",
-      "version": "1.15.1",
+      "version": "1.15.2",
       "author": {
         "name": "Lazy Ants"
       },

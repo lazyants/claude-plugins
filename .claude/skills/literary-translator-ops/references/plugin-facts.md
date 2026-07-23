@@ -64,6 +64,26 @@ no-terminator-behind case (`«Fiona» George` must stay two names). When extendi
 to the domain's real quote chars (the guillemet `«` opener is the dominant FR/RU/ES dialogue case),
 not the English examples a ticket happens to cite.
 
+**Extending `TOKEN_RE`/`NAME_CONNECTORS` with a script-conditional connector (issues #282/#283):**
+two traps, both caught by codex-rescue, not by manual review:
+- **A single-char lookaround checking "is the adjacent char a letter-or-mark of script X" is NOT
+  proof the run is script X** — a combining MARK has no script identity of its own (`_MARK_CLASS`
+  already accepts marks from any of the four supported scripts after ANY letter), so a non-X base
+  letter immediately followed by an X-range mark passes a naive check. Python's `re` requires each
+  lookbehind to be individually fixed-width, but does NOT require several *separately* fixed-width
+  lookbehinds OR'd together to share one width — so proving "a genuine script-X LETTER sits N marks
+  back" (N = 0..some small disclosed bound) needs a bounded UNION of exact-width alternatives
+  (`(?:(?<=[LETTERS])|(?<=[LETTERS][MARK])|(?<=[LETTERS][MARK]{2})|...)`), each alternative requiring
+  the actual letter class, never the letter-or-mark union. Adversarial test case that catches a wrong
+  design: a foreign-script base letter directly followed by one of the target script's own combining
+  marks, then the connector, then a target-script letter.
+- **Building such a pattern across multiple `r"..." r"..."` lines mixed with explicit `+` risks
+  Python's implicit adjacent-string-literal concatenation silently combining pieces you meant to
+  keep separate** — the resulting `.pattern` can compile fine and just be the WRONG regex, with no
+  error. Build multi-part patterns via unambiguous explicit `+` concatenation only (no bare adjacent
+  string literals), and always print/diff the final compiled `.pattern` against a few known cases
+  before trusting the source formatting.
+
 ## THE IRON RULE (enforced plugin-wide)
 
 Scripts **surface candidates and enforce schemas; they NEVER make an accuracy/identity call.** "Are

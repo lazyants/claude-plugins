@@ -1,5 +1,60 @@
 # Changelog
 
+## 1.15.2 — 2026-07-23
+
+Two related proper-noun-extraction bug fixes for Hebrew source text. Closes #282. Closes #283.
+
+### Fixed — ASCII `"` acronym connector between two Hebrew letters (#282)
+- `TOKEN_RE` treated ASCII `"` (U+0022) purely as a `TERMINATORS` sentence-closer, never as a
+  connector, even though real Hebrew corpora overwhelmingly spell an internal-acronym gershayim
+  with the ASCII quote rather than the dedicated glyph (measured: 3,815+ `"` vs zero `״` in the
+  SSK vol.2 corpus). A Hebrew acronym like `מוהרנ"ת` therefore split into two tokens at
+  tokenization time, and pass 2's own `TERMINATORS`-boundary refusal then blocked the trie walk
+  from ever bridging them — dropping the candidate entirely (0 of 592 real occurrences; 26
+  inventory keys, 655 occurrences lost total). `"` is now also a connector, but only when it
+  provably sits between two Hebrew letters — the lookbehind proves the actual BASE letter (not
+  just the adjacent character) via a bounded union of letter-plus-up-to-4-stacked-marks
+  alternatives, since Python's stdlib `re` has no variable-width lookbehind and a naive
+  single-character check would wrongly fuse a non-Hebrew letter that merely happens to be followed
+  by a stray Hebrew combining mark. The condition is purely lexical -- a Hebrew base letter,
+  optionally followed by up to four Hebrew marks, on the left, and a Hebrew letter immediately
+  on the right (never a mark on the right side) -- not acronym-aware -- **codex round 3
+  correction, wording tightened round 4**: a directly-quoted single Hebrew word
+  immediately abutting another Hebrew word with no surrounding whitespace also fuses (e.g. `"מוהרנ"` touching
+  the next word), a disclosed, vanishingly-rare residual (quoted words virtually always have
+  surrounding whitespace/punctuation in real prose). Every other use of `"`, including a real
+  Latin dialogue quote or a normally-spaced Hebrew quote, is unaffected.
+
+### Fixed — ASCII hyphen/apostrophe/quote connector-twin fold, Hebrew-scoped (#283)
+- `fold_match_key`'s unit-splitting (`NAME_CONNECTORS`) only recognized maqaf/geresh/gershayim,
+  not their ASCII/Latin twins — even though `TOKEN_RE` already fuses `-`/`‑`/`'`/`’`/`"` into
+  one token exactly like it fuses the Hebrew forms (the last of those, `"`, purely when it sits
+  between two Hebrew letters per the #282 fix above -- **codex round 3 correction**: a lexical
+  condition, not acronym-detection, so it also fires for two ordinary adjacent Hebrew words
+  abutting a quote with no whitespace, e.g. `שלום"עולם`). A Hebrew compound spelled with the
+  ASCII hyphen (`הבעל-שם-טוב`) never matched a maqaf-joined or space-joined inventory
+  spelling, silently dropping the book's single most-frequent name's dominant surface form
+  (78 occurrences) — and an ASCII-quoted acronym fused by the #282 fix (`מוהרנ"ת`)
+  likewise never matched its gershayim- or space-joined equivalent. `NAME_CONNECTORS` itself
+  is unchanged — a literal widening there was rejected: it flips two pinned Latin
+  non-regression tests, letting a hyphen/apostrophe-written Latin inventory entry match
+  space-separated text. Instead, a new, separate fold-time split applies the same five
+  ASCII/Latin connector twins, but only when both neighbors are Hebrew-block letters —
+  `Jean-Baptiste`/`O'Brien`/`Ångstrom` are provably unaffected.
+
+### Migration
+Editing `bootstrap_names.py` (both fixes touch it) flips `derivation_bundle_hash` — every
+already-converged segment (not just ones referencing specific canon entries) routes to
+`blocked_needs_regeneration`: rerun W3/W3a (bootstrap names, then glossary merge or
+`--restamp-derivation`, then segpack) before re-translating -- W2 (source extraction) is not
+required. For a mature, zero-candidate project, use the 1.15.0
+`canon_validate.py --restamp-derivation` escape, then rerun `segpack.py`. No live Hebrew project
+has converged yet, so this is currently payable, not a bricking risk today.
+Editing `language_smoke_report.py` (both fixes also touch it — it has an identical, independently
+buggy inventory route) is not a cache-key member — no re-translation is forced directly, but any
+in-flight/interrupted run starts fresh on upgrade, and its own bytes flip
+`smoke_report_contract_hash`, forcing a fresh W3 language-smoke re-run.
+
 ## 1.15.1 — 2026-07-23
 
 Bug fix. Closes #308.
