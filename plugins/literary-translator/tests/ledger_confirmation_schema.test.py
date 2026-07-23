@@ -1330,6 +1330,14 @@ def _js_code_only(source: str) -> str:
             depth -= 1
             if substitutions and depth == substitutions[-1]:
                 substitutions.pop()
+                # Blank the substitution-closing `}` too: its opening `${` was
+                # already blanked, so leaving this brace would put an
+                # unbalanced close into the projection that every depth-counting
+                # consumer (_call_argument_texts, _function_spans) would cross
+                # at depth 0 early. The substitution's INNER code is untouched
+                # and stays correctly positioned; only this one brace is blanked
+                # (ordinary code-block `}` must survive for depth counting).
+                blank(i, i + 1)
                 i = enter_template_text(i + 1)  # back into the literal's text
             else:
                 i += 1
@@ -1459,6 +1467,40 @@ def test_js_code_only_shapes(snippet, in_survives):
     assert code.count("\n") == snippet.count("\n"), "newlines were not preserved"
     assert bool(re.search(r"\bin\b", code)) is in_survives, (
         f"projection of {snippet!r} was {code!r}"
+    )
+
+
+def test_js_code_only_blanks_a_template_substitution_closing_brace():
+    """A template substitution's opening `${` is blanked, but its matching
+    `}` used to survive into the code projection. That left every consumer
+    that depth-counts over the projection -- _call_argument_texts and
+    _function_spans -- one unbalanced close brace that crosses depth 0 early
+    (so a call's argument split closes at the stray `}` before reaching a
+    later argument). Blank the substitution close too: the substitution's
+    INNER code still survives at its real offset, the projection is
+    brace-balanced, and every offset is preserved (or the line numbers every
+    failure reports would lie)."""
+    src = "const raw = await agent(`seg ${seg} now`, { schema: S });"
+    code = _js_code_only(src)
+    assert len(code) == len(src), "offsets were not preserved"
+    # The substitution's inner code survives, still at its real offset.
+    inner = src.index("seg}")
+    assert code[inner:inner + 3] == "seg", (
+        f"substitution inner code did not survive: {code!r}"
+    )
+    # Brace projection is balanced AND never crosses depth 0 early -- exactly
+    # what _call_argument_texts / _function_spans depth-count on.
+    depth = lowest = 0
+    for ch in code:
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            lowest = min(lowest, depth)
+    assert depth == 0, f"unbalanced braces in projection (net {depth}): {code!r}"
+    assert lowest == 0, (
+        f"projection crossed depth 0 early -- a stray substitution close brace "
+        f"survived (lowest {lowest}): {code!r}"
     )
 
 
@@ -1689,8 +1731,11 @@ def _agent_dispatch_consume_sites(mass_translate_source: str) -> dict:
         return (best, spans[best]) if best is not None else (None, (0, len(code)))
 
     consume_sites = {}
-    for m in re.finditer(r"const\s+([A-Za-z_$][\w$]*)\s*=\s*await\s+agent\s*\(", code):
-        args = _call_argument_texts(code, code.index("(", m.end() - 1))
+    for m in re.finditer(r"(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*await\s+agent\s*\(", code):
+        # The regex ends in `agent\s*\(`, so m.end()-1 is already the `(`; the
+        # `(` here is the call's open paren. (const-only was widened to
+        # const|let|var so a let/var-bound retry-loop dispatch stays visible.)
+        args = _call_argument_texts(code, m.end() - 1)
         options = args[1] if len(args) >= 2 else ""
         schema = re.search(r"\bschema:\s*([A-Za-z_$][\w$]*)", options)
         if not schema or schema.group(1) not in evidence_schemas:
@@ -2050,6 +2095,124 @@ def test_structural_signal_catches_an_agent_fed_guard_the_convention_signal_miss
     # And the two static locks genuinely miss it, so nothing else would have.
     assert_every_consume_site_guard_routes_through_helper(mutated)  # no raise
     assert_in_operator_confined_to_evidence_helper(mutated)         # no raise
+
+
+# FIX 1 regression fixture: a dispatch whose FIRST (positional) prompt argument
+# is an inline template literal carrying a `${...}` substitution. The
+# substitution's closing `}` used to survive the code projection unbalanced, so
+# _call_argument_texts closed the call at that stray brace and never reached the
+# `schema:` option in arg1 -- the structural signal silently dropped the
+# dispatch. templateFedGuard is fed the dispatch's `raw`, skips hasOnlyKeys, and
+# is NOT added to CONSUME_SITE_GUARDS.
+_TEMPLATE_FED_SPLICE = (
+    "async function templateGuardConsumer(seg) {\n"
+    "  const rawTpl = await agent(`seg ${seg} now`, { schema: LEDGER_WRITE_SCHEMA });\n"
+    "  if (!templateFedGuard(rawTpl)) { return { ok: false }; }\n"
+    "  return { ok: true };\n"
+    "}\n\n"
+    "function templateFedGuard(raw) {\n"
+    "  if (!raw || raw.success !== true) return false;\n"
+    "  if (raw.exit_code !== undefined) return false;\n"
+    "  return typeof raw.status === \"string\";\n"
+    "}\n\n"
+)
+
+
+def _splice_template_fed_guard(mass_translate_source: str) -> str:
+    """Add templateGuardConsumer + templateFedGuard, the latter fed a dispatch
+    whose positional prompt is an inline template literal, without rostering
+    it. The shipped template is never modified."""
+    assert "function ledgerWriteSucceeded(raw) {" in mass_translate_source
+    out = mass_translate_source.replace(
+        "function ledgerWriteSucceeded(raw) {",
+        _TEMPLATE_FED_SPLICE + "function ledgerWriteSucceeded(raw) {", 1,
+    )
+    assert out != mass_translate_source, "the template-fed splice did not apply"
+    return out
+
+
+def test_structural_signal_survives_a_template_literal_first_argument(mass_translate_source):
+    """RED/GREEN for FIX 1's structural consequence. A dispatch whose
+    positional prompt argument is an inline template literal with a `${...}`
+    substitution: the substitution's closing `}` used to survive the code
+    projection unbalanced, so _call_argument_texts closed the call early and
+    the structural signal never saw the `schema:` in arg1 -- the guard fed
+    that dispatch slipped the roster silently. With the substitution close
+    blanked the projection is brace-balanced, the argument split reaches the
+    schema, and the tripwire fires on the unrostered guard.
+
+    Mirrors test_structural_signal_catches_an_agent_fed_guard_the_convention_
+    signal_misses, differing only in the dispatch's argument shape."""
+    mutated = _splice_template_fed_guard(mass_translate_source)
+
+    # Convention signal is blind to it (no hasOnlyKeys), so only the structural
+    # signal can catch this shape -- exactly as the tripwire's union intends.
+    assert "templateFedGuard" not in _hasonlykeys_callers(mutated), (
+        "templateFedGuard unexpectedly calls hasOnlyKeys -- this RED proof needs "
+        "a guard the CONVENTION signal cannot see, or it proves nothing new"
+    )
+    # The fix: the substitution `}` no longer truncates the argument split, so
+    # the structural signal identifies the dispatch and its guard.
+    assert "templateFedGuard" in _agent_dispatch_consume_sites(mutated), (
+        "the structural signal missed a dispatch whose first argument is an "
+        "inline template literal -- the substitution's `}` truncated the "
+        "argument split before the schema: option (FIX 1)"
+    )
+    with pytest.raises(AssertionError, match="consume-site roster drift"):
+        assert_consume_site_list_is_exhaustive(mutated)
+
+
+# FIX 3 regression fixture: a dispatch bound with `let` (e.g. a retry loop that
+# reassigns) rather than `const`. The structural signal's binding regex was
+# const-only, so a let/var-bound dispatch was invisible to it. letFedGuard is
+# fed such a dispatch, skips hasOnlyKeys, and is NOT rostered. The positional
+# prompt is a plain string, so this fixture exercises the binding keyword ALONE
+# (independent of FIX 1).
+_LET_FED_SPLICE = (
+    "async function letGuardConsumer(seg) {\n"
+    "  let rawLet = await agent(\"probe prompt\", { schema: LEDGER_WRITE_SCHEMA });\n"
+    "  if (!letFedGuard(rawLet)) { return { ok: false }; }\n"
+    "  return { ok: true };\n"
+    "}\n\n"
+    "function letFedGuard(raw) {\n"
+    "  if (!raw || raw.success !== true) return false;\n"
+    "  if (raw.exit_code !== undefined) return false;\n"
+    "  return typeof raw.status === \"string\";\n"
+    "}\n\n"
+)
+
+
+def _splice_let_fed_guard(mass_translate_source: str) -> str:
+    """Add letGuardConsumer + letFedGuard, the latter fed a `let`-bound
+    dispatch, without rostering it. The shipped template is never modified."""
+    assert "function ledgerWriteSucceeded(raw) {" in mass_translate_source
+    out = mass_translate_source.replace(
+        "function ledgerWriteSucceeded(raw) {",
+        _LET_FED_SPLICE + "function ledgerWriteSucceeded(raw) {", 1,
+    )
+    assert out != mass_translate_source, "the let-fed splice did not apply"
+    return out
+
+
+def test_structural_signal_catches_a_let_bound_dispatch(mass_translate_source):
+    """RED/GREEN for FIX 3. The structural signal's binding regex was const-
+    only, so a `let`/`var`-bound dispatch (an ordinary retry-loop refactor)
+    was invisible. Widened to (?:const|let|var), a let-bound dispatch feeding
+    an unrostered guard is caught and the tripwire fires. The positional prompt
+    is a plain string, so the RED here is due to the binding keyword alone, not
+    the template-substitution brace of FIX 1."""
+    mutated = _splice_let_fed_guard(mass_translate_source)
+
+    assert "letFedGuard" not in _hasonlykeys_callers(mutated), (
+        "letFedGuard unexpectedly calls hasOnlyKeys -- this RED proof needs a "
+        "guard the CONVENTION signal cannot see, or it proves nothing new"
+    )
+    assert "letFedGuard" in _agent_dispatch_consume_sites(mutated), (
+        "the structural signal missed a `let`-bound agent dispatch -- the "
+        "binding-keyword regex was const-only (FIX 3)"
+    )
+    with pytest.raises(AssertionError, match="consume-site roster drift"):
+        assert_consume_site_list_is_exhaustive(mutated)
 
 
 def test_apparatus_residual_is_exactly_indirect_plus_convention_skipping(mass_translate_source):
