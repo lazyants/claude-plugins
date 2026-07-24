@@ -134,7 +134,7 @@ across translations.
 also always English kebab-case, one level (no `/`). A manifest where no entry sets it —
 the 1.4.1 shipped default — produces only the flat form above. As of 1.6.0, in
 `assets/lib/chapter-paths.mjs`, `staticEmbedPath` (the asset-embed path formula, "Layout
-you produce" below, now always the full-target join) and `validateGroups` (the
+you produce" above, now always the full-target join) and `validateGroups` (the
 duplicate-slug halt, always runs) both now apply to group-free manifests; as of 1.8.0,
 `currentIndexExpectedTarget`'s wikilinks branch is a third — a group-free manifest's
 flat entry now emits `vaultRelChaptersDir/<slug>` ("Wikilinks vs Markdown links" below),
@@ -541,7 +541,7 @@ failure:
    to `../../screenshots/…`, outside the vault, so the embed is broken and unportable).
    This containment check applies unchanged at any group depth, and it applies equally
    under `publish.wikilinks: false` — the glossary link there is filesystem-relative too
-   (see "Glossary backlink discipline" below), so this is the adapter-wide "inside the
+   (see "Glossary backlink discipline" above), so this is the adapter-wide "inside the
    vault" contract, not a wikilink-syntax concern. Unlike the static-Markdown target,
    `capture.output_dir` is **not** required to sit under `publish.chapters_dir` —
    sibling vault subtrees resolve fine as long as the target stays inside `<vault-root>`.
