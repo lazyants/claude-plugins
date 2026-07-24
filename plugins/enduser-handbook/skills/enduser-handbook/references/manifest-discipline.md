@@ -106,6 +106,7 @@ are verbatim and both are blocking.
 **Grouped manifest** halts, verbatim, on:
 
 - **Duplicate slug** — `Duplicate chapter slug '<slug>' — chapter slugs must be globally unique across all groups (chapter basenames stay unambiguous across the handbook for the file tree, user-authored bare wikilinks, and Quartz-shortest bare-name resolution).`
+- **Same-group duplicate slug** (fires only when `publish.per_group_slug_uniqueness` is enabled; the global gate above is then relaxed to per-group, and this replaces it for a within-group collision) — `Duplicate chapter slug '<slug>' within group '<group>' — with publish.per_group_slug_uniqueness enabled, chapter slugs must be unique within each group; a duplicate silently overwrites the chapter file and its asset dir.`
 - **Bad group** — `Invalid group '<value>' — group must be English kebab-case, one level (no '/').`
 - **Reserved group** — `group 'assets' is reserved (co-location follow-up; keeps the tree unambiguous).`
 - **Reserved slug** — `slug 'assets' is reserved in a grouped manifest (co-location follow-up; keeps the tree unambiguous).`
@@ -130,12 +131,22 @@ As of 1.8.0, the Obsidian adapter's wikilinks-mode chapter link and INDEX
 target are vault-root-relative, not a bare basename
 (`references/publish-targets/obsidian-vault.md`'s "Wikilinks vs Markdown
 links") — links the skill itself emits no longer key on the slug's
-basename. The **grouped** duplicate-slug gate above stays global (across
-every group) anyway: chapter basenames still need to stay unambiguous for
-the file tree, for a user-authored bare `[[<slug>]]` wikilink anywhere
-else in the vault, and for Quartz's `shortest`-mode bare-name resolution —
-none of which this skill controls. Relaxing the gate to per-group
-uniqueness is a deferred follow-up, not a consequence of this fix.
+basename. The **grouped** duplicate-slug gate above is global (across
+every group) by deliberate DEFAULT, not a technical necessity: two
+same-slug grouped chapters — `admin/items` and `billing/items` — resolve
+to DISTINCT files (`admin/items.md` vs `billing/items.md`, each with its
+own asset dir), so there is no file-tree overwrite between them. The
+file-tree reason that makes a flat-vs-flat collision genuine does NOT
+carry across two groups; what the global default still buys the grouped
+case is narrower — two cross-group hazards this skill does not control. A
+bare basename can no longer disambiguate, once two groups share a slug,
+for a user-authored bare `[[<slug>]]` wikilink anywhere else in the vault
+or for Quartz's `shortest`-mode bare-name resolution. Setting
+`publish.per_group_slug_uniqueness: true` (default false) opts into
+per-group uniqueness: it is safe for group-qualified paths and the skill's
+own vault-root-relative links, which stay unambiguous, but it re-admits
+exactly those two bare-name hazards — the same-group halt above still
+fires — which is why it is an explicit opt-in, not the standing behavior.
 
 Path derivation, the group-aware asset tree, index wiring, and the
 manual-migration recipe for changing an entry's group live in

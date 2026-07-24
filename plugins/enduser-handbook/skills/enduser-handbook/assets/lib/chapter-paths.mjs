@@ -309,22 +309,47 @@ export function containerTitleMatches(containerTitle, entry) {
  * 1.6.0 activation-rule exceptions, alongside staticEmbedPath). The two literals differ because a
  * group-free duplicate has no group axis to describe — see the halt-text contract on each branch.
  *
- * @param {Array<{slug: string}>} entries
- * @param {{groupFree: boolean}} options
+ * #310 [1.9.0], `perGroupSlugs` (default false ⇒ pre-1.9.0 behavior byte-for-byte): when true,
+ * slug uniqueness is scoped PER GROUP rather than global. A GROUPED entry then keys on
+ * `<group><NUL><slug>` (a real NUL — it can never appear in a kebab group/slug, so the composite
+ * can never alias a different group/slug pair), so two chapters in DIFFERENT groups may reuse a
+ * slug (distinct group subdirectories ⇒ no file-tree collision) while a duplicate WITHIN one group
+ * still halts. Every other case keys on the bare slug: the opt-in off, OR a flat (group-less) entry
+ * even under the opt-in — flat chapters share the one file-tree namespace regardless of the flag,
+ * so their global-uniqueness constraint is unchanged. The per-COLLIDING-BUCKET literal choice keys
+ * on whether that bucket carried a group into its key: a bucket keyed WITH a group (perGroupSlugs
+ * grouped) renders the group-scoped literal; every other colliding bucket renders the existing
+ * group-free (`groupFree`) or global (default) literal unchanged. Default (perGroupSlugs=false) ⇒
+ * every key is the bare slug ⇒ no bucket ever carries a group ⇒ identical to the pre-1.9.0 gate.
+ *
+ * @param {Array<{slug: string, group?: string}>} entries
+ * @param {{groupFree: boolean, perGroupSlugs?: boolean}} options
  * @returns {string[]}
  */
-function duplicateSlugHalts(entries, { groupFree }) {
+function duplicateSlugHalts(entries, { groupFree, perGroupSlugs = false }) {
+  const NUL = String.fromCharCode(0);
   const halts = [];
-  const slugCounts = new Map();
+  // Map<key, {count, slug, group}> — `group` is set on the bucket ONLY when the key was composed
+  // WITH a group (perGroupSlugs && a grouped entry); it drives the per-bucket literal choice below.
+  const seen = new Map();
   for (const entry of entries) {
-    slugCounts.set(entry.slug, (slugCounts.get(entry.slug) ?? 0) + 1);
+    const keyedByGroup = perGroupSlugs && entry.group !== undefined;
+    const key = keyedByGroup ? [entry.group, entry.slug].join(NUL) : entry.slug;
+    const record = seen.get(key);
+    if (record === undefined) {
+      seen.set(key, { count: 1, slug: entry.slug, group: keyedByGroup ? entry.group : undefined });
+    } else {
+      record.count += 1;
+    }
   }
-  for (const [slug, count] of slugCounts) {
+  for (const { count, slug, group } of seen.values()) {
     if (count > 1) {
       halts.push(
-        groupFree
-          ? `Duplicate chapter slug '${slug}' — chapter slugs must be unique; a duplicate silently overwrites the chapter file and its asset dir.`
-          : `Duplicate chapter slug '${slug}' — chapter slugs must be globally unique across all groups (chapter basenames stay unambiguous across the handbook for the file tree, user-authored bare wikilinks, and Quartz-shortest bare-name resolution).`,
+        group !== undefined
+          ? `Duplicate chapter slug '${slug}' within group '${group}' — with publish.per_group_slug_uniqueness enabled, chapter slugs must be unique within each group; a duplicate silently overwrites the chapter file and its asset dir.`
+          : groupFree
+            ? `Duplicate chapter slug '${slug}' — chapter slugs must be unique; a duplicate silently overwrites the chapter file and its asset dir.`
+            : `Duplicate chapter slug '${slug}' — chapter slugs must be globally unique across all groups (chapter basenames stay unambiguous across the handbook for the file tree, user-authored bare wikilinks, and Quartz-shortest bare-name resolution).`,
       );
     }
   }
@@ -339,11 +364,19 @@ function duplicateSlugHalts(entries, { groupFree }) {
  * two 1.6.0 activation-rule exceptions, alongside staticEmbedPath). Gates 1, 2, 4, 5, and 6 below
  * still run only when anyGroup(entries) is true.
  *
+ * #310 [1.9.0], `options.perGroupSlugs` (default false): threaded verbatim into BOTH
+ * duplicateSlugHalts calls (the group-free early return and gate 3). When true, slug uniqueness is
+ * scoped per group — see duplicateSlugHalts' own contract. A 1-arg / options-absent call defaults
+ * perGroupSlugs to false, so the whole gate is byte-for-byte the pre-1.9.0 behavior. The option is
+ * inert on the group-free early-return branch (no entry carries a group there) but is passed anyway
+ * so the two call sites stay uniform.
+ *
  * @param {Array<{slug: string, group?: string, group_title?: string}>} entries
+ * @param {{perGroupSlugs?: boolean}} [options]
  * @returns {string[]}
  */
-export function validateGroups(entries) {
-  if (!anyGroup(entries)) return duplicateSlugHalts(entries, { groupFree: true });
+export function validateGroups(entries, { perGroupSlugs = false } = {}) {
+  if (!anyGroup(entries)) return duplicateSlugHalts(entries, { groupFree: true, perGroupSlugs });
   const halts = [];
 
   // 1. group regex/one-level + reserved group name. The type check runs BEFORE the regex — a
@@ -373,8 +406,9 @@ export function validateGroups(entries) {
   // 3. slug uniqueness, GLOBAL across all entries. #221 [1.6.0]: extracted into
   // duplicateSlugHalts so the SAME gate also runs unconditionally for a group-free manifest via
   // the early return above — this gate is no longer grouped-only, but its position and literal
-  // here (groupFree: false) are byte-unchanged from 1.5.0.
-  halts.push(...duplicateSlugHalts(entries, { groupFree: false }));
+  // here (groupFree: false) are byte-unchanged from 1.5.0. #310 [1.9.0]: `perGroupSlugs` is
+  // threaded through; when true this becomes per-group scope (flat entries still key globally).
+  halts.push(...duplicateSlugHalts(entries, { groupFree: false, perGroupSlugs }));
 
   // 4. group-vs-flat-slug collision — a directory (group) and a chapter file (flat slug) cannot
   // share the same path segment under publish.chapters_dir.
