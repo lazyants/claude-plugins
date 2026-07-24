@@ -2,6 +2,16 @@
 
 All notable changes to `lazyants/claude-plugins` are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is per-plugin, not repo-wide.
 
+## [enduser-handbook 1.8.4] — 2026-07-24
+
+Fixes a silent-pass gap in the reference-doc test harness's negative-assertion helper. Closes #302.
+
+### Fixed
+- **`hasnt_in_section` can't distinguish "needle absent" from "heading absent"** (#302) — `_section_contains` now returns a distinct exit code (2) when the queried heading itself is absent, separate from exit 1 (heading present, needle genuinely not found under it). `hasnt_in_section` dispatches on the three-way code, so a negative pin correctly hard-fails once its heading is renamed or deleted, instead of silently and permanently passing because both cases used to fold into one nonzero exit.
+
+### Testing
+- `reference-assets.test.sh`: +2 assertions (the absent-heading exit-code lock and the wrapper hard-fail lock), both watched red against the prior two-way engine before the fix. All 9 pre-existing `hasnt_in_section` self-tests plus the one real caller (`## Vault root`) reconfirmed unaffected.
+
 ## [enduser-handbook 1.8.3] — 2026-07-23
 
 Adds drift-prevention gates against `profile.schema.json`, the `assets/lib` module pairing convention, and the capture-guard sentinel set, closing three follow-up issues surfaced by earlier self-review. Closes #296. Closes #297. Closes #299.
