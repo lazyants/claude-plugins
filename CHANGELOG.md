@@ -2,6 +2,16 @@
 
 All notable changes to `lazyants/claude-plugins` are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is per-plugin, not repo-wide.
 
+## [enduser-handbook 1.9.0] — 2026-07-24
+
+Adds a real, dependency-free Markdown structural parser backing the reference-doc test harness's placement proofs. Closes #303.
+
+### Added
+- **`assets/lib/md-structure.mjs` Markdown heading-tree parser** (#303) — a pure, dependency-free structural resolver (`parseHeadings`, `findOwner`, `sectionStatus`, and the shared `maskFencedRegions` fence primitive) porting the fence/CRLF/tab rules from the existing `_section_contains` awk engine in `reference-assets.test.sh`, so the two engines that hard-gate the same reference docs stay provably consistent. Backs the shell suite's line-order `assert_line_before` heuristic (kept, additive, not replaced) with an authoritative structural proof: 6 new node:test branch-ownership pins against the real `static-md.md`, each guarded by sentinel- and heading-uniqueness checks plus a decoy/moved-occurrence mutant fixture proving a moved real occurrence can't hide behind a correct-position decoy.
+
+### Testing
+- New `tests/md-structure.test.mjs`: 28 cases (every ported fence rule in both directions, exact-heading/first-occurrence/prefix-decoy binding, the three `sectionStatus` states, the corrected half-open interval boundary, `findOwner` nesting, prototype-chain heading titles, and the 6 real branch-ownership pins with their mutant fixture). Full suite: +11 assertions (module-pairing/normative-banner gates for the new files + the node:test run).
+
 ## [enduser-handbook 1.8.3] — 2026-07-23
 
 Adds drift-prevention gates against `profile.schema.json`, the `assets/lib` module pairing convention, and the capture-guard sentinel set, closing three follow-up issues surfaced by earlier self-review. Closes #296. Closes #297. Closes #299.
