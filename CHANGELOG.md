@@ -2,6 +2,21 @@
 
 All notable changes to `lazyants/claude-plugins` are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is per-plugin, not repo-wide.
 
+## [enduser-handbook 1.10.0] — 2026-07-24
+
+Automates GitBook `SUMMARY.md`-style nested-list index container wiring, so a grouped chapter on a bulleted (non-heading) index no longer always halts for manual container creation. Closes #223.
+
+### Added
+- **Nested-list index container automation** (#223) — a new `wireNestedListChapter` (`assets/lib/chapter-paths.mjs`, alongside exported `extractLabel`/`isPlainLabel`) automates grouped-chapter wiring on a GitBook-style nested-list index: a single forward-pass validator over a raw-faithful BODY finds or creates a plain-label container bullet and inserts the chapter line under it, with EOL-faithful emission (CRLF and terminal-newline preserved byte-for-byte). Both publish adapters (`static-md`, `obsidian-vault`) call it on the line-absent non-heading branch; two or more matching container bullets halt naming them (`Found multiple '<group_title>' container bullets …`). The automatable subset is a deliberately conservative, user-ratified boundary: plain-text container labels and group titles only — inline markup, a `*`/`+` bare-path row, inline code / comments / fences, YAML `nav:`, path tables, mixed line endings, and any other ambiguous shape defer to the existing manual halt (safety over reach; the residual worst case is a cosmetic duplicate the author can see and delete, never data loss). A richer rendering-aware matcher is a possible follow-up, not a bug.
+
+### Changed
+- Both publish-target adapter docs (`static-md.md`, `obsidian-vault.md`) and `revalidation.md` updated to the actual scope — headings-form plus the bounded nested-list subset — with a new "Nested-list automation limits" section documenting the residual; stale "only headings-form is automated" and "no parser exists" prose narrowed.
+
+### Testing
+- `tests/chapter-paths.test.mjs`: +43 tests — SINGLE/ZERO/MULTIPLE outcomes, rule-isolating `not-a-list` mutant fixtures (each watched red-before-green, one guard removed at a time), mask-pair rejections, positive-accept fixtures, direct `extractLabel`/`isPlainLabel` units, and input purity.
+- `tests/reference-assets.test.sh`: +17 assertions — `has_in_section` needles for the new adapter scope/branch/halt/limits prose in both adapters plus an `md-structure` structural ownership pin.
+- `tests/citation-audit.test.mjs`: the #258 citation-direction lint re-pinned after the doc edits added five citations and shifted offsets — every new unresolved entry reviewed as a legitimate near-miss (parenthetical `INDEX wiring`/`Grouped index wiring` headings, the non-heading `Non-headings index` reference).
+
 ## [enduser-handbook 1.9.3] — 2026-07-24
 
 Adds a structural citation-direction lint and fixes two live wrong-direction citations it was built to catch. Closes #258.
