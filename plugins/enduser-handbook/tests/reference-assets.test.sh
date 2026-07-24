@@ -78,9 +78,14 @@ has_ci() {
 # second comment span on one line) faster than they could be fixed soundly. If a caller ever needs
 # comment-awareness, reach for a real Markdown parser instead of extending this awk state machine.
 #
-# Internal: exit 0 iff `needle` is found within `heading`'s section of `file`, exit 1 otherwise (no
-# ok/bad side effects). Shared by has_in_section and hasnt_in_section below, so the fence/CRLF/
-# empty-needle engine lives in exactly one place rather than as two copies that could drift.
+# Internal: three-way exit status, no ok/bad side effects (#302). exit 0 = `heading` found AND
+# `needle` found within its section; exit 1 = `heading` found but `needle` absent (an empty needle
+# also lands here — a genuinely-present heading with nothing to look for); exit 2 = `heading` not
+# found at all, so a negative pin can tell a real "needle not present" from a heading that was
+# renamed/deleted rather than folding both into one nonzero code. Shared by has_in_section (which
+# maps any nonzero exit to bad) and hasnt_in_section (which dispatches on the specific code) below,
+# so the fence/CRLF/empty-needle engine lives in exactly one place rather than as two copies that
+# could drift.
 # Round 4 built this exact split (`_section_contains` + both callers) and reverted it — not because
 # the split was wrong, but because there was no real caller for hasnt_in_section yet and it landed
 # mid-round at a convergence point that didn't want the extra surface; the write-up explicitly
@@ -158,7 +163,14 @@ _section_contains() {
          if (in_section && hlevel > 0 && hlevel <= level) { in_section = 0 }
          if (in_section && index(line, needle) > 0) { found_needle = 1 }
        }
-       END { exit (needle != "" && found_heading && found_needle) ? 0 : 1 }
+       END {
+         # #302 three-way contract: an absent heading (exit 2) must be distinguishable from a
+         # present heading whose section simply lacks the needle (exit 1), so a negative pin can
+         # hard-fail when its heading is renamed/deleted instead of silently passing forever.
+         if (!found_heading) exit 2
+         if (needle != "" && found_needle) exit 0
+         exit 1
+       }
      ' "$file"
 }
 
@@ -183,11 +195,18 @@ has_in_section() {
 hasnt_in_section() {
   local msg="$1" file="$2" heading="$3" needle="$4"
   if [ ! -f "$file" ]; then bad "$msg (file not found: $(basename "$file"))"; return; fi
-  if _section_contains "$file" "$heading" "$needle"; then
-    bad "$msg ('$needle' unexpectedly found under heading '$heading' in $(basename "$file"))"
-  else
-    ok "$msg"
-  fi
+  # Capture _section_contains's three-way exit (#302) via the `if …; then rc=0; else rc=$?; fi` form
+  # this file already uses around commands whose nonzero exit is expected (see count_fixed/`|| true`
+  # below) — never a bare `_section_contains …; rc=$?`. Exit 2 (heading absent) must NOT pass as a
+  # satisfied negative claim: a renamed/deleted heading makes the claim unverifiable, so it fails.
+  # The wildcard `*)` folds any unexpected status into that fail-closed branch, not just literal 2.
+  local rc
+  if _section_contains "$file" "$heading" "$needle"; then rc=0; else rc=$?; fi
+  case "$rc" in
+    0) bad "$msg ('$needle' unexpectedly found under heading '$heading' in $(basename "$file"))" ;;
+    1) ok "$msg" ;;
+    *) bad "$msg (heading '$heading' not found in $(basename "$file") — negative claim unverifiable, #302)" ;;
+  esac
 }
 
 # Count exact occurrences of a fixed string in a file (line-based). grep exits 1 (not just non-zero
@@ -600,12 +619,17 @@ has_in_section "self-test: a deeper (H3) heading does not close its shallower (H
 # Heading match must be EXACT text equality, not a prefix match. Round 22 marked this "guarded —
 # every fixture depends on it" — true and irrelevant: every existing fixture's heading and file
 # both happen to match exactly, so a prefix-match mutant satisfies every one of them too. A decoy
-# heading that only SHARES A PREFIX with the query proves the distinction: under exact match it
-# never opens (the query heading is genuinely absent from this file); under prefix match it opens
-# on the decoy and leaks needles that were never meant to be in this section.
+# heading that only SHARES A PREFIX with the query proves the distinction. The real `## Target`
+# heading is genuinely present (empty, after the decoy) — required under the #302 three-way engine
+# so this exercises exact-match, not heading-absent: a truly-missing heading would now exit 2/bad
+# instead. NEEDLE sits under the decoy `## Target extra`, OUTSIDE the real `## Target` section.
+# Under exact match the engine binds only at the real (empty) `## Target`, so NEEDLE is out of
+# section -> exit 1 -> ok; under a prefix-match mutant it binds on the decoy, captures NEEDLE ->
+# exit 0 -> bad. Mutant-catching power preserved, heading-absent collision removed.
 cat > "$SELFTEST_DIR/decoy-heading.md" <<'EOF'
 ## Target extra
 NEEDLE
+## Target
 ## Next
 EOF
 hasnt_in_section "self-test: a heading that only shares a prefix with the query does not bind (exact-match rule)" \
@@ -728,6 +752,34 @@ hasnt_in_section "self-test: a needle inside the fence opener's own info string 
 # the four before it did. Do not re-open a general audit of this function on the theory that the
 # closure claim might still be incomplete; it is incomplete, structurally, and chasing that
 # completeness is the same receding target rounds 20-24 already walked into once.
+
+# #302: `_section_contains` gives a genuinely ABSENT heading its own exit code (2), distinct from
+# "heading present but needle not found under it" (exit 1) — so hasnt_in_section can HARD-FAIL when
+# its heading is renamed or deleted instead of silently passing forever (a negative pin folded both
+# cases into exit 1 before this). Both self-tests use the exact discriminating shapes the design
+# requires: bash's ok()/bad() both return printf's exit status regardless of which one fired, so a
+# naive `if hasnt_in_section ...` cannot tell "reported bad" from "reported ok" — the wrapper's own
+# exit code carries no signal. Test 1 reads the engine's raw exit code directly (no `!`, no pipeline,
+# so `$?` is read cleanly under `set -o pipefail`); test 2 isolates the wrapper's OWN FAIL counter in
+# a subshell — bad()'s `FAIL=$((FAIL + 1))` mutation does not survive the subshell boundary, so this
+# reads the negative outcome without corrupting the real suite tally.
+printf 'NEEDLE\n' > "$SELFTEST_DIR/heading-absent.md"
+if _section_contains "$SELFTEST_DIR/heading-absent.md" '## Ghost Heading' 'NEEDLE'; then
+  HEADING_ABSENT_RC=0
+else
+  HEADING_ABSENT_RC=$?
+fi
+if [ "$HEADING_ABSENT_RC" -eq 2 ]; then
+  ok "self-test: a genuinely absent heading gets its own distinct exit code (2), not folded into needle-not-found (#302)"
+else
+  bad "self-test: absent-heading exit code drifted from 2 (got $HEADING_ABSENT_RC) — #302 regression"
+fi
+if ( FAIL=0; hasnt_in_section "self-test: hasnt_in_section hard-fails on a genuinely absent heading (#302)" \
+       "$SELFTEST_DIR/heading-absent.md" '## Ghost Heading' 'NEEDLE' >/dev/null 2>&1; [ "$FAIL" -eq 1 ] ); then
+  ok "self-test: hasnt_in_section correctly hard-fails on an absent heading (#302)"
+else
+  bad "self-test: hasnt_in_section did not hard-fail on an absent heading (#302 regression)"
+fi
 
 echo "== surface-audit.playwright.ts =="
 SA="$ASSETS/surface-audit.playwright.ts"
