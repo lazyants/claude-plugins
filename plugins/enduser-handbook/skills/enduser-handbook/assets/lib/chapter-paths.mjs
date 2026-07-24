@@ -1285,7 +1285,7 @@ export function wireNestedListChapter(indexLines, groupTitle, chapterLink) {
   // Immediate guards on BODY.
   // YAML: MkDocs `nav:` / `- key: value` mapping structure (frontmatter already blanked).
   if (hasYamlMappingStructure(BODY)) return { kind: 'not-a-list' };
-  const wanted = groupTitle.trim();
+  const wanted = String(groupTitle).trim();
   // Plain-label allowlist on the group_title (both sides — §5.1): a construct-bearing title could
   // emit a container that render-collides with an existing plain one, or fail to match one.
   if (!isPlainLabel(wanted)) return { kind: 'not-a-list' };
@@ -1366,6 +1366,7 @@ export function wireNestedListChapter(indexLines, groupTitle, chapterLink) {
     const k = containers[0].index;
     const containerMarker = containers[0].marker;
     let insertAt = k + 1;
+    let childMarker = null; // marker of the LAST existing C-indent child seen in the region, if any
     for (let i = k + 1; i < logical.length; ) {
       const line = logical[i];
       if (line.trim() === '') {
@@ -1375,12 +1376,16 @@ export function wireNestedListChapter(indexLines, groupTitle, chapterLink) {
       const bm = line.match(NESTED_BULLET_RE);
       if (bm && bm[1].length === childIndent) {
         insertAt = i + 1;
+        childMarker = bm[2];
         i += 1;
         continue;
       }
       break; // first line that is neither blank nor a C-indent child ends the region
     }
-    const childLine = ' '.repeat(childIndent) + containerMarker + ' ' + chapterLink;
+    // Reuse the existing children's marker so the inserted line stays in the SAME list block
+    // (CommonMark starts a new list on a marker change); a container with no existing child has
+    // no sibling marker to match, so fall back to the container's own marker (first-ever child).
+    const childLine = ' '.repeat(childIndent) + (childMarker ?? containerMarker) + ' ' + chapterLink;
     return emit(logical.slice(0, insertAt).concat([childLine], logical.slice(insertAt)), false);
   }
 

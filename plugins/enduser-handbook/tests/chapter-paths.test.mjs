@@ -897,6 +897,27 @@ test('wireNestedListChapter SINGLE w/children: child inserted after the LAST C-i
   ]);
 });
 
+test('wireNestedListChapter SINGLE w/children, DIVERGENT container/child markers: the inserted child reuses the EXISTING CHILD marker, not the container marker (R1 regression catcher)', () => {
+  // The container is "+"-marked but its existing child is "-"-marked — the validator's own forward
+  // pass tracks only child INDENT (chapter-paths.mjs's childIndentSeen), never child MARKER, so this
+  // shape is accepted. If the insertion reused containerMarker ("+") here, the new line would carry a
+  // DIFFERENT marker than its sibling "- [Orders]…" -> CommonMark starts a fresh list block at the
+  // marker change, silently splitting the sublist instead of appending to it.
+  const indexLines = ['+ Admin', '  - [Orders](admin/orders.md)'];
+  const result = wireNestedListChapter(indexLines, 'Admin', '[Items](admin/items.md)');
+  assert.equal(result.kind, 'inserted');
+  assert.equal(result.created, false);
+  assert.deepEqual(result.newLines, ['+ Admin', '  - [Orders](admin/orders.md)', '  - [Items](admin/items.md)']);
+});
+
+test('wireNestedListChapter SINGLE, first-ever child: with NO existing child bullet, the inserted child falls back to the CONTAINER marker ("?? containerMarker" branch)', () => {
+  const indexLines = ['* Admin'];
+  const result = wireNestedListChapter(indexLines, 'Admin', '[Items](admin/items.md)');
+  assert.equal(result.kind, 'inserted');
+  assert.equal(result.created, false);
+  assert.deepEqual(result.newLines, ['* Admin', '  * [Items](admin/items.md)']);
+});
+
 test('wireNestedListChapter SINGLE no-children: child inserted immediately under the container at the default C=2 (no child bullet anywhere in the file)', () => {
   const indexLines = ['# Summary', '', '- Introduction', '- Admin', '- Other'];
   const result = wireNestedListChapter(indexLines, 'Admin', '[Items](admin/items.md)');
@@ -1268,6 +1289,15 @@ test('public match: "See [Admin](a.md)" never falsely matches groupTitle "Admin"
   const indexLines = ['- See [Admin](a.md)'];
   const result = wireNestedListChapter(indexLines, 'Admin', '[Items](admin/items.md)');
   assert.equal(result.kind, 'not-a-list');
+});
+
+test('wireNestedListChapter: a non-string groupTitle (42, null, undefined) never throws — returns a typed result, matching the sibling findContainer contract (R1 MINOR)', () => {
+  for (const badTitle of [42, null, undefined]) {
+    assert.doesNotThrow(() => {
+      const result = wireNestedListChapter(['- Admin'], badTitle, 'x');
+      assert.equal(typeof result.kind, 'string', `expected a typed result for groupTitle ${String(badTitle)}`);
+    }, `wireNestedListChapter must not throw for groupTitle ${String(badTitle)}`);
+  }
 });
 
 // -------------------------------------------------------------------------------------------------
