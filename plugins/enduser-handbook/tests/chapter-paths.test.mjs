@@ -707,6 +707,19 @@ test('D-6: the .md-fold is OPT-IN — default (no options) leaves a .md-suffixed
   );
 });
 
+test('#311: path mode (default options) treats an extensionless hand-authored line as UNMATCHED — by design, resolution-gate-backstopped', () => {
+  // Reverse of the opt-in fold: here the LINE dropped the `.md` (`handbook/items`) while the
+  // wanted target carries it (`handbook/items.md`). In path mode the `.md` is load-bearing —
+  // `items` and `items.md` are DIFFERENT hrefs — so this divergent line must NOT be folded to a
+  // match. It is a false-positive that path-mode byte-identity deliberately refuses; a real
+  // stale/divergent line is caught by static-md's link-integrity resolution gate, not folded here.
+  assert.equal(
+    locateChapterLine(['- [Items](handbook/items)'], 'handbook/items.md').present,
+    false,
+    'path-mode byte-identity is intentional (#311): an extensionless divergent line stays unmatched',
+  );
+});
+
 // =================================================================================================
 // D7 — classifyChapterWiring
 // =================================================================================================

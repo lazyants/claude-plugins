@@ -113,7 +113,7 @@ A W6 manifest delta splits every entry into one of three domains: **retained** (
 - a `group_title` change on a **retained** group;
 - a **grouped** old-only entry — a flat removal needs no migration, because nothing moved outside the flat slots of `publish.chapters_dir` and `capture.output_dir`.
 
-An anyGroup flip with no retained-entry group change is NOT a halt — it surfaces only an informational write-canon note in the W6 report, because an untouched chapter's links keep resolving (nothing they point at moved), so the skill never imposes a retroactive rewrite just because the manifest went from group-free to grouped or back elsewhere. The note tells you only that new and rewritten chapters are now written with the group-aware path and embed formulas — see the write-time canon rule the adapters follow (`static-md.md`, `obsidian-vault.md`).
+An anyGroup flip with no retained-entry group change is NOT a halt — it surfaces only an informational write-canon note in the W6 report, because an untouched chapter's links keep resolving (nothing they point at moved), so the skill never imposes a retroactive rewrite just because the manifest went from group-free to grouped or back elsewhere. The note tells you only that new and rewritten chapters are now written with the group-aware path and embed formulas — **not** the link formula, which is scoped differently per adapter and mode — see the write-time canon rule the adapters follow (`static-md.md`, `obsidian-vault.md`).
 
 ### The manual group-migration recipe
 

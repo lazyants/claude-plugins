@@ -258,6 +258,14 @@ coordinate system item 1 above uses:
 
 `relative(dirname(index_file), chapter_file)` — step 0's own target.
 
+Path-mode index matching is byte-identical on purpose (#311) — `locateChapterLine` is
+called with NO `wikilink` option, so a target's terminal `.md` is never folded. Unlike
+Obsidian, `handbook/orders` and `handbook/orders.md` are DIFFERENT hrefs on a static site
+(one resolves, one 404s), so a stale or divergent hand-authored line — a row whose target
+dropped or gained an extension — is NOT silently folded to a match. It is caught instead by
+the link-integrity resolution gate below ("Link-integrity gate before you publish", item 5),
+which requires the index link to resolve to the real chapter file.
+
 Locate the chapter's current line by that target via `locateChapterLine(indexLines,
 expectedTarget)` ⇒ `{present, containerTitle, indexForm, multiple}`. `indexForm` is
 `'headings' | 'non-heading'`, computed from the file's own structural shape — NEVER inferred

@@ -876,6 +876,14 @@ function classifyIndexForm(sanitizedLines) {
 // parseWikilinkTarget already applies for the removal-scan predicate. Default (`wikilink: false`)
 // leaves the normalized target untouched, so path-mode targets (which legitimately END in `.md`)
 // and every pre-1.8.0 caller stay byte-for-byte identical.
+//
+// #311: that path-mode byte-identity is INTENTIONAL, not an oversight — the fold must NOT be
+// generalized to path mode. In path mode a target is a real filesystem href where the '.md' is
+// load-bearing: `items` and `items.md` are DIFFERENT resources (one 404s, the other serves), and
+// there is no Obsidian `[[note.md]] == [[note]]` equivalence off the static site — so folding here
+// would manufacture a FALSE-POSITIVE match against a divergent href. A stale or divergent
+// hand-authored path-mode line is caught instead by static-md's link-integrity resolution gate
+// (the href must resolve to the real chapter file), never silently folded to a match.
 function foldTargetForMatch(target, wikilink) {
   const normalized = normalizeLinkTarget(target);
   return wikilink ? normalized.replace(/\.md$/i, '') : normalized;
@@ -903,7 +911,8 @@ function foldTargetForMatch(target, wikilink) {
  * (`foldTargetForMatch`) — so a user-authored `[[handbook/orders.md]]` / `[[orders.md]]` row is
  * recognised as the same target as `handbook/orders` / `orders`, never double-appended. Default
  * `false` keeps path-mode and every existing caller byte-for-byte unchanged (a path-link target
- * legitimately ends in `.md` and must never be folded).
+ * legitimately ends in `.md` and must never be folded — #311: this byte-identity is intentional,
+ * a stale/divergent path-mode line is caught by the link-integrity resolution gate, not folded).
  *
  * @param {string[]} indexLines
  * @param {string} expectedTarget
