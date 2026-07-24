@@ -1626,6 +1626,14 @@ has_in_section "static-md: step-0's flat-entry, line-absent outcome is stated un
 # the H3 boundary a line sits on — only a position comparison against the H3's own line does.
 # ALL SIX setup+outcome assertions above get one, empirically confirmed to catch a moved-under-H3
 # clone for each (verified individually before wiring, same discipline as the original two).
+# #303 REFRAME: these six assert_line_before calls are a NODE-LESS HEURISTIC FLOOR, not the
+# authoritative branch-membership proof. A line-order comparison ("witness line < grouped-H3 line")
+# only shows a witness sits before the H3's line — it never resolves which Markdown branch actually
+# OWNS the witness. The real structural proof (parseHeadings + findOwner resolves each of these six
+# witnesses to the "## Index wiring" H2 node, each guarded by sentinel- and heading-uniqueness so a
+# moved occurrence can't hide behind a correct-position decoy) now lives in
+# tests/md-structure.test.mjs. These bash calls stay as the always-available floor beneath it (the
+# node:test layer is optional in this suite, gated on `command -v node`), never as its equivalent.
 L_H3_GROUPED="$(line_of '### Grouped index wiring (`anyGroup` manifests only)' "$SMD")"
 assert_line_before "static-md: step-0's locateChapterLine (1st half) sits before the grouped-only H3" \
   "$(line_of 'locateChapterLine(indexLines,' "$SMD")" "$L_H3_GROUPED"
@@ -1682,6 +1690,9 @@ has_in_section "static-md: grouped step-0 idempotency check uses the same expect
 # Same PLACEMENT gap as the setup/outcome sextet above (O4 §3.3 group proof, reusing the already-
 # resolved $L_H3_GROUPED): H2's scope includes the nested H3, so this needle stays green even moved
 # back under "### Grouped index wiring" — empirically confirmed before wiring this check.
+# #303 REFRAME: like the sextet above, this is the node-less heuristic floor — a line-order check,
+# not a branch-membership proof; the authoritative structural proof (findOwner === the "## Index
+# wiring" H2 node) is the 6th branch-ownership pin in tests/md-structure.test.mjs.
 assert_line_before "static-md: step-0's own-target formula sits before the grouped-only H3" \
   "$(line_of 'step 0'"'"'s own target.' "$SMD")" "$L_H3_GROUPED"
 has_in_section "static-md: link-integrity gate item 5 uses the same expected-target formula" \
