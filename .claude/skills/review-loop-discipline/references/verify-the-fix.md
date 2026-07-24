@@ -2,6 +2,7 @@
 
 - [Cover the DOMAIN, not the ticket's example](#cover-the-domain-not-the-tickets-example)
 - [Widening a matcher needs its own over-correction check](#widening-a-matcher)
+- ["Looks redundant" is a reading, not a measurement — full-dataset diff proves it](#looks-redundant-is-a-reading-not-a-measurement)
 - [Any reword/rename: verify the REPLACEMENT is accurate](#any-rewordrename)
 - [A rebuild can regress what the original got right](#a-rebuild-can-regress)
 - [State what your proof GUARANTEES — check the axis](#state-what-your-proof-guarantees)
@@ -22,6 +23,24 @@ When fixing a bug in a domain-specific processor (parser, tokenizer, extractor, 
 ## Widening a matcher
 
 Not every domain char/case is safe to add — a widened fix needs its OWN over-correction check (a second adversarial pass hunting regression). And that check needs REAL domain data: widening `ELISION_RE` to split capitalized `L'`/`D'` passes clean PLAN review yet breaks real fixed compounds (`D'Artagnan`, `L'Aquila`, `D'Annunzio`, `L'Oréal`) — only code-level review running the actual widened regex against real proper nouns catches it. A clean plan-review pass is NOT evidence against over-correction; if the domain has known fixed-form exceptions, have an adversarial code reviewer test the fix against them explicitly.
+
+## "Looks redundant" is a reading, not a measurement
+
+When a piece of code looks redundant with logic elsewhere in the SAME file, do NOT trust the
+redundancy argument from READING alone — the two paths can cover overlapping-but-not-identical
+populations, so one is a strict superset of the other on exactly the inputs your reasoning skipped.
+Only an empirical before/after diff across the FULL dataset — not just the cases motivating the
+change — reveals the gap. Concrete: `re.IGNORECASE` in `audit_name_annotations.py`'s
+`_compile_form_pattern` looked dead, because `generate_case_paradigm` already emits both the
+capitalized and the lowercased form of every name as separate literal candidates, so case-sensitive
+matching should lose nothing. Removing it to fix two collisions broke 8+ previously-clean entities:
+the redundancy held only for paradigm-GENERATED forms, never for the hand-declared literal-case
+`ru_match_forms` strings, each frozen in whatever case it happened to have where the annotator first
+saw it — and a first-word-of-sentence capital legitimately alternates with a mid-sentence lowercase
+across different occurrences of the same word. Eyeballing the two segments the change targeted
+showed nothing; only the full-corpus diff surfaced the regression. Snapshot a full baseline
+immediately BEFORE any shared-code change, so a concurrent agent's unrelated edit landing between
+your two runs cannot be mistaken for — or mask — your own regression.
 
 ## Any reword/rename
 
