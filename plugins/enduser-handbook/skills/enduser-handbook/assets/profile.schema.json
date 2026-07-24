@@ -167,7 +167,9 @@
             "related": { "type": "string" }
           }
         },
-        "wikilinks": { "type": "boolean" }
+        "wikilinks": { "type": "boolean" },
+        "vault_root": { "type": "string" },
+        "per_group_slug_uniqueness": { "type": "boolean" }
       }
     },
     "diataxis": {

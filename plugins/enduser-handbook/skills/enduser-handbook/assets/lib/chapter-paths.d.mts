@@ -120,8 +120,14 @@ export function staticEmbedPath(
   file: string,
 ): string;
 
-/** See chapter-paths.mjs: all D1 manifest-review gates; [1.6.0, #221] a group-free manifest now halts unconditionally on a duplicate flat slug instead of always returning []. */
-export function validateGroups(entries: ChapterEntry[]): string[];
+export interface ValidateGroupsOptions {
+  // #310 [1.9.0], default false: scope slug uniqueness PER GROUP (publish.per_group_slug_uniqueness)
+  // — two chapters in different groups may reuse a slug; a duplicate within one group still halts.
+  perGroupSlugs?: boolean;
+}
+
+/** See chapter-paths.mjs: all D1 manifest-review gates; [1.6.0, #221] a group-free manifest now halts unconditionally on a duplicate flat slug instead of always returning []; [1.9.0, #310] options.perGroupSlugs (default false) scopes slug uniqueness per group. */
+export function validateGroups(entries: ChapterEntry[], options?: ValidateGroupsOptions): string[];
 
 /** See chapter-paths.mjs: the D6 step-0 index-line idempotency check; options.wikilink (default false) folds ONE terminal '.md' off both sides before comparison. */
 export function locateChapterLine(

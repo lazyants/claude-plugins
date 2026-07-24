@@ -2,7 +2,7 @@
 
 All notable changes to `lazyants/claude-plugins` are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is per-plugin, not repo-wide.
 
-## [enduser-handbook 1.9.0] — 2026-07-24
+## [enduser-handbook 1.9.1] — 2026-07-24
 
 Adds a real, dependency-free Markdown structural parser backing the reference-doc test harness's placement proofs. Closes #303.
 
@@ -11,6 +11,17 @@ Adds a real, dependency-free Markdown structural parser backing the reference-do
 
 ### Testing
 - New `tests/md-structure.test.mjs`: 28 cases (every ported fence rule in both directions, exact-heading/first-occurrence/prefix-decoy binding, the three `sectionStatus` states, the corrected half-open interval boundary, `findOwner` nesting, prototype-chain heading titles, and the 6 real branch-ownership pins with their mutant fixture). Full suite: +11 assertions (module-pairing/normative-banner gates for the new files + the node:test run).
+
+## [enduser-handbook 1.9.0] — 2026-07-24
+
+Adds an optional `publish.vault_root` override for the Obsidian vault-root binding (#298) and an opt-in `publish.per_group_slug_uniqueness` key that relaxes the duplicate-slug halt to per-group under group-qualified links (#310). Closes #298. Closes #310.
+
+### Added
+- **Optional `publish.vault_root` override** (#298) — a new optional profile key names the Obsidian vault root directly: the escape hatch when `.obsidian/` is gitignored or absent, and the in-release resolution for the previously-unsupported multiple-`.obsidian/`-marker ambiguity halt. When set, it must resolve to an existing readable directory (external/absolute paths allowed; unlike a first-run `chapters_dir` it gets no ENOENT trailing-suffix allowance) and bypasses the `.obsidian/` discovery walk and both the zero- and two-or-more-marker halts; the pre-existing "everything must resolve under `<vault-root>`" validation still catches a mis-pointed value. Schema + example + adapter prose only — `chapter-paths.mjs` already consumes the precomputed `vaultRelChaptersDir`, so `<vault-root>` merely gains a second provenance.
+- **Opt-in `publish.per_group_slug_uniqueness`** (#310) — a new optional boolean (default false = the pre-1.9.0 global duplicate-slug halt, byte-for-byte). When true, `validateGroups`/`duplicateSlugHalts` scope slug uniqueness *per namespace*: a well-formed grouped entry keys on `group<NUL>slug`, so two chapters in different groups — or a flat (group-less) chapter and a grouped one — may share a slug, while a same-group duplicate and two flat chapters still halt. The opt-in re-admits cross-namespace basename ambiguity for user-authored bare `[[slug]]` wikilinks and Quartz-shortest bare-name resolution, documented across the adapter and manifest docs as the accepted tradeoff. `validateGroups` gains an optional `{ perGroupSlugs }` second argument (1-arg callers unchanged); `SKILL.md` W1/W6 thread it from the profile.
+
+### Testing
+- `chapter-paths.test.mjs`: +9 tests — the four per-namespace scenarios (different-group OK / same-group halt / two-flat halt / flat-vs-grouped OK), a NUL-separator alias-freedom discriminator (adjacent-boundary values, red against a no-separator join), and a malformed-group guard (red against a loose `!== undefined` predicate). `profile-schema-evaluator.test.mjs`: +4 tests — `vault_root`/`per_group_slug_uniqueness` GREEN validation + RED type probes. `reference-assets.test.sh`: net +10 pins for the #298 override prose and the #310 per-namespace rationale (deltas — absolute totals are environment-dependent, see the 1.8.1 entry).
 
 ## [enduser-handbook 1.8.4] — 2026-07-24
 

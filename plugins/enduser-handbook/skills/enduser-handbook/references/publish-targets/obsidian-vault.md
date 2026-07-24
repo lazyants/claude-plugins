@@ -27,30 +27,44 @@ templater scripts, and graph-view conventions. Add to it; never restructure it.
 
 Every path this adapter resolves against the vault itself (as opposed to the project
 root — see "Coordinate systems" below) is expressed relative to `<vault-root>`, a
-directory this adapter derives once per run. There is no `publish.vault_root` profile
-key in 1.7.0 — nothing in the profile names the vault root directly.
+directory this adapter derives once per run. An optional `publish.vault_root` profile
+key may name the vault root directly; when set it takes precedence over the `.obsidian/`
+discovery below (see "Override" in the Selection block).
 
 **Selection — one anchor, no tie-break.**
-The only discovery anchor is `publish.chapters_dir` — a `chapters_dir` that already IS
-the vault root counts too. Walking upward through its ancestors, collect every ancestor
-that holds a readable `.obsidian/` directory, all the way to the filesystem root — stop
-once an ancestor's own parent is itself, never earlier. There is deliberately no lower
-bound on the walk: stopping at the project root would wrongly exclude an absolute
-`chapters_dir` that legitimately points outside the project (every `publish.*` value may
-be absolute — see "Coordinate systems" below).
+
+**Override — `publish.vault_root` short-circuits discovery.** When `publish.vault_root`
+is set it names `<vault-root>` directly: canonicalize it through the "Path
+canonicalization" rules below, but require the fully-resolved path to be an existing
+readable **directory** — the ENOENT trailing-suffix allowance there does NOT apply to
+`publish.vault_root`, so the vault root must exist. That directory IS `<vault-root>`;
+the `.obsidian/` walk and BOTH the zero-marker and two-or-more-marker halts below are
+bypassed entirely. On a non-directory, missing, or unreadable override, halt:
+"publish.vault_root '<value>' does not resolve to an existing readable directory —
+create the vault directory, or correct publish.vault_root to name an existing Obsidian
+vault (it must be a directory, not a file or a not-yet-created path)."
+
+With no `publish.vault_root` set, the only discovery anchor is `publish.chapters_dir`
+— a `chapters_dir` that already IS the vault root counts too. Walking upward through
+its ancestors, collect every ancestor that holds a readable `.obsidian/` directory, all
+the way to the filesystem root — stop once an ancestor's own parent is itself, never
+earlier. There is deliberately no lower bound on the walk: stopping at the project root
+would wrongly exclude an absolute `chapters_dir` that legitimately points outside the
+project (every `publish.*` value may be absolute — see "Coordinate systems" below).
 
 - **Exactly one** `.obsidian/` ancestor ⇒ that directory is `<vault-root>`.
 - **Zero** found ⇒ halt: "No Obsidian vault found above `<chapters_dir>` — open the
   vault in Obsidian once so `.obsidian/` exists, or point `publish.chapters_dir` inside
   an existing vault, then re-run."
 - **Two or more** found ⇒ halt: "Multiple `.obsidian/` ancestors found above
-  `<chapters_dir>` — this vault topology is unsupported until a `publish.vault_root`
-  override ships. Neither the innermost nor the outermost marker is a safe default: a
-  stale nested vault defeats innermost, a genuine nested vault defeats outermost, and
-  disk markers alone cannot tell the two apart — only the operator knows which vault is
-  active." This halt is deliberately fail-closed: a confident wrong guess would silently
-  publish into the wrong vault, and resolving it today means removing or relocating a
-  stale `.obsidian/` yourself — this skill will not do that automatically.
+  `<chapters_dir>` — set `publish.vault_root` to name the active vault. Neither the
+  innermost nor the outermost marker is a safe default: a stale nested vault defeats
+  innermost, a genuine nested vault defeats outermost, and disk markers alone cannot
+  tell the two apart — only the operator knows which vault is active." This halt is
+  deliberately fail-closed: a confident wrong guess would silently publish into the
+  wrong vault, and resolving it today means removing or relocating a stale `.obsidian/`
+  yourself, or setting `publish.vault_root` to name the active vault — this skill will
+  not do that automatically.
 - **An ancestor exists on disk but is unreadable during the walk** ⇒ halt, naming the
   exact path: "Cannot read `<path>` while walking for the vault root — grant
   read/execute access (e.g. `chmod +rx <path>`), or re-run as an account that can
@@ -454,9 +468,13 @@ the one exception to "do all of these" — see its own conditional note below.
   form. A bare slug only disambiguates when it is unique across the WHOLE vault; this
   skill enforces uniqueness only across the handbook
   (`references/manifest-discipline.md`), so a same-basename foreign vault note could
-  shadow it. The vault-root-relative form resolves Obsidian's exact full-path tier
-  instead, unambiguous regardless of what else shares the chapter's basename elsewhere
-  in the vault.
+  shadow it — and under `publish.per_group_slug_uniqueness` that guarantee narrows to
+  within each namespace — every group, plus the flat group-less set, is its own
+  namespace — so two different-group chapters may share a slug, and likewise a flat
+  chapter and a grouped one, so a user-authored bare `[[slug]]` link can no longer
+  disambiguate the pair either: the caveat this opt-in accepts. The vault-root-relative
+  form resolves Obsidian's exact full-path tier instead, unambiguous regardless of what
+  else shares the chapter's basename elsewhere in the vault.
 
 `publish.wikilinks: false`:
 
