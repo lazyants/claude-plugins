@@ -2,7 +2,7 @@
 
 All notable changes to `lazyants/claude-plugins` are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is per-plugin, not repo-wide.
 
-## [enduser-handbook 1.9.1] — 2026-07-24
+## [enduser-handbook 1.9.2] — 2026-07-24
 
 Documentation-only follow-ups: makes the path-mode `.md` byte-identity in `locateChapterLine` an explicitly intentional design (#311) and the omission of the link formula from `revalidation.md`'s boundary-trigger note deliberate (#260). No behavior change. Closes #311. Closes #260.
 
@@ -12,6 +12,16 @@ Documentation-only follow-ups: makes the path-mode `.md` byte-identity in `locat
 
 ### Testing
 - `chapter-paths.test.mjs`: +1 test locking the by-design path-mode extensionless non-match. `reference-assets.test.sh`: +2 `has_in_section` pins for the #311 static-md note and the #260 boundary-trigger clause.
+
+## [enduser-handbook 1.9.1] — 2026-07-24
+
+Adds a real, dependency-free Markdown structural parser backing the reference-doc test harness's placement proofs. Closes #303.
+
+### Added
+- **`assets/lib/md-structure.mjs` Markdown heading-tree parser** (#303) — a pure, dependency-free structural resolver (`parseHeadings`, `findOwner`, `sectionStatus`, and the shared `maskFencedRegions` fence primitive) porting the fence/CRLF/tab rules from the existing `_section_contains` awk engine in `reference-assets.test.sh`, so the two engines that hard-gate the same reference docs stay provably consistent. Backs the shell suite's line-order `assert_line_before` heuristic (kept, additive, not replaced) with an authoritative structural proof: 6 new node:test branch-ownership pins against the real `static-md.md`, each guarded by sentinel- and heading-uniqueness checks plus a decoy/moved-occurrence mutant fixture proving a moved real occurrence can't hide behind a correct-position decoy.
+
+### Testing
+- New `tests/md-structure.test.mjs`: 28 cases (every ported fence rule in both directions, exact-heading/first-occurrence/prefix-decoy binding, the three `sectionStatus` states, the corrected half-open interval boundary, `findOwner` nesting, prototype-chain heading titles, and the 6 real branch-ownership pins with their mutant fixture). Full suite: +11 assertions (module-pairing/normative-banner gates for the new files + the node:test run).
 
 ## [enduser-handbook 1.9.0] — 2026-07-24
 
@@ -23,6 +33,7 @@ Adds an optional `publish.vault_root` override for the Obsidian vault-root bindi
 
 ### Testing
 - `chapter-paths.test.mjs`: +9 tests — the four per-namespace scenarios (different-group OK / same-group halt / two-flat halt / flat-vs-grouped OK), a NUL-separator alias-freedom discriminator (adjacent-boundary values, red against a no-separator join), and a malformed-group guard (red against a loose `!== undefined` predicate). `profile-schema-evaluator.test.mjs`: +4 tests — `vault_root`/`per_group_slug_uniqueness` GREEN validation + RED type probes. `reference-assets.test.sh`: net +10 pins for the #298 override prose and the #310 per-namespace rationale (deltas — absolute totals are environment-dependent, see the 1.8.1 entry).
+
 ## [enduser-handbook 1.8.4] — 2026-07-24
 
 Fixes a silent-pass gap in the reference-doc test harness's negative-assertion helper. Closes #302.
