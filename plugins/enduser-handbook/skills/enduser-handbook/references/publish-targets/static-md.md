@@ -258,6 +258,20 @@ coordinate system item 1 above uses:
 
 `relative(dirname(index_file), chapter_file)` — step 0's own target.
 
+Path-mode index matching is byte-identical on purpose (#311) — `locateChapterLine` is
+called with NO `wikilink` option, so a target's terminal `.md` is never folded. Unlike
+Obsidian, `handbook/orders` and `handbook/orders.md` are DIFFERENT hrefs on a static site
+(one resolves, one 404s), so folding a divergent hand-authored row to a match would risk a
+FALSE POSITIVE against a genuinely-different resource. A stale or divergent extensionless row
+is therefore deliberately NOT matched: the "Flat entry, line absent" branch above appends the
+canonical `.md` row, and the divergent row is RETAINED alongside it (append-and-retain). This
+is a benign redundant index entry — both rows exist, the appended `.md` row resolves and
+satisfies the link-integrity gate below (item 5 needs only ONE resolving index link), and the
+machine round-trip stays exact — it is NOT a silent false-match. The link-integrity gate does
+NOT remove or reject the retained divergent row: item 2 checks the CHAPTER's own relative
+links, not an index-wide sweep, so catching a stale alias row would need an index-wide
+broken-link/alias check (a possible future improvement, out of scope here).
+
 Locate the chapter's current line by that target via `locateChapterLine(indexLines,
 expectedTarget)` ⇒ `{present, containerTitle, indexForm, multiple}`. `indexForm` is
 `'headings' | 'non-heading'`, computed from the file's own structural shape — NEVER inferred
