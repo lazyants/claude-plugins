@@ -2,6 +2,17 @@
 
 All notable changes to `lazyants/claude-plugins` are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is per-plugin, not repo-wide.
 
+## [enduser-handbook 1.9.1] — 2026-07-24
+
+Documentation-only follow-ups: makes the path-mode `.md` byte-identity in `locateChapterLine` an explicitly intentional design (#311) and the omission of the link formula from `revalidation.md`'s boundary-trigger note deliberate (#260). No behavior change. Closes #311. Closes #260.
+
+### Changed
+- **Path-mode index-matching byte-identity documented as intentional** (#311) — the opt-in `{wikilink}` `.md`-fold in `foldTargetForMatch`/`locateChapterLine` is deliberately NOT generalized to path mode: a path-mode index target is a real href where `.md` is load-bearing (`items` and `items.md` are distinct resources, with no Obsidian `[[note.md]] == [[note]]` equivalence off a static site), so a stale/divergent hand-authored line is caught by the link-integrity resolution gate rather than silently folded to a match. Strengthened the `foldTargetForMatch` comment + `locateChapterLine` JSDoc + a `static-md.md` Step-0 note; zero logic change (the fold still only fires under `wikilink: true`).
+- **Link-formula omission made deliberate in `revalidation.md`** (#260) — the "Boundary triggers" note names the group-aware path and embed formulas; a scoping clause now explicitly excludes the link formula (scoped differently per adapter and mode) so a future editor can't naively add it and reintroduce the embed/link conflation two earlier rounds fixed.
+
+### Testing
+- `chapter-paths.test.mjs`: +1 test locking the by-design path-mode extensionless non-match. `reference-assets.test.sh`: +2 `has_in_section` pins for the #311 static-md note and the #260 boundary-trigger clause.
+
 ## [enduser-handbook 1.9.0] — 2026-07-24
 
 Adds an optional `publish.vault_root` override for the Obsidian vault-root binding (#298) and an opt-in `publish.per_group_slug_uniqueness` key that relaxes the duplicate-slug halt to per-group under group-qualified links (#310). Closes #298. Closes #310.
