@@ -1721,7 +1721,7 @@ MDISC="$REFS/manifest-discipline.md"
 has "manifest-discipline: activation rule" 'a manifest becomes *grouped* the moment any single entry carries `group`' "$MDISC"
 has_in_section "manifest-discipline: duplicate-slug halt (globally unique across all)" \
   "$MDISC" '### Manifest review — grouped and group-free halts' \
-  'globally unique across all' 
+  'globally unique across all'
 has "manifest-discipline: reserved-slug halt" "slug 'assets' is reserved in a grouped manifest" "$MDISC"
 has "manifest-discipline: every-grouped-entry title rule" 'Every grouped entry requires `group_title`' "$MDISC"
 has "manifest-discipline: recapture carve-out for a group-only move" 'the screenshot set is NOT recaptured for a group-only move' "$MDISC"
