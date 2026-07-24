@@ -1247,6 +1247,9 @@ has "static-md: binds publish.wikilinks"                  'publish.wikilinks'   
 has "static-md: binds capture.output_dir"                 'capture.output_dir'                 "$SMD"
 
 has_ci "static-md: adapter documents halt conditions" 'halt' "$SMD"
+has_in_section "static-md: #311 path-mode index matching byte-identity is intentional" \
+  "$SMD" '## Index wiring (do this on every chapter create/update)' \
+  'Path-mode index matching is byte-identical on purpose (#311)'
 
 # Relative-link mandate: pins the general formula AND both worked path examples.
 has "static-md: cross-subtree relative example" '](../'    "$SMD"
@@ -1810,6 +1813,9 @@ has_in_section "revalidation: write-time-canon embed formula is unconditional, b
 has_in_section "revalidation: write-time-canon link formula is scoped, NOT uniform like the embed" \
   "$REVAL" '## Write-time canon' \
   'uses it only under `publish.wikilinks: false`'
+has_in_section "revalidation: #260 Boundary-triggers names the link-formula omission deliberately" \
+  "$REVAL" '### Boundary triggers' \
+  'the link formula, which is scoped differently per adapter and mode'
 # round-16 [what our own change newly exposed, not ambiguity or a stale citation]: round 15 fixed
 # the "## Write-time canon" paragraph above, but the manual-migration recipe's own step 4 — which
 # routes readers past that very paragraph — still said rewrite "embeds and glossary/Related links
