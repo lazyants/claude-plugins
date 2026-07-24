@@ -53,9 +53,11 @@ English kebab-case, one level (nested groups like `a/b` are out of scope for 1.5
 path above, and the grouped index-wiring container logic further down — is gated on
 `anyGroup(entries)`. The grouped-**path** half is pinned by unit test: a wholly group-free
 manifest never produces a grouped chapter path. The grouped-**index-line** half is **not**
-independently pinned — no code in this repo emits index lines at all, so no direct
-`anyGroup(...) === false` assertion exists to run one; both mutation directions are exercised
-only transitively, through whatever wiring behavior consumes `anyGroup`.
+independently pinned on `anyGroup`: the nested-list wiring `wireNestedListChapter` now emits
+index lines and is directly unit-tested, but it does not itself consult `anyGroup` — the
+adapter reaches it only inside the already group-gated grouped branch — so no direct
+`anyGroup(...) === false` assertion exists on the index-line half; both mutation directions
+there are exercised only transitively, through whatever wiring behavior consumes `anyGroup`.
 `assets/lib/chapter-paths.mjs`'s own activation rule has **two 1.6.0 exceptions that are
 group-free-aware by design and no longer consult `anyGroup`: `staticEmbedPath` (see "Assets"
 below) and `validateGroups` (see `manifest-discipline.md`)**. That count is a property of the
@@ -285,8 +287,9 @@ two `null` cases are not the same signal and are handled separately below:
 - **Flat entry, line present** ⇒ membership-only check passes; nothing else to do — no
   container to verify.
 - **Flat entry, line absent** ⇒ not a step-0 halt — append the flat TOC line per item 1 above,
-  exactly as shipped in 1.4.1, regardless of index form. Only a GROUPED entry's container
-  machinery is headings-form-only.
+  exactly as shipped in 1.4.1, regardless of index form. Only a GROUPED entry resolves a
+  container, and that container machinery is form-restricted (a headings-form index, plus the
+  bounded nested-list subset — see "Grouped index wiring" below).
 
 **A grouped entry** (`anyGroup` manifests) — whether its line above came back present or
 absent — is resolved in "Grouped index wiring" below, which reuses this same step-0 result
@@ -302,10 +305,11 @@ step 0 finds them and proceeds without re-halting.
 These outcomes reuse the step-0 result computed above (`containerTitle`, `indexForm`,
 `multiple`) and cover a **grouped** entry only — step 0 above already decided the flat case:
 
-- **Grouped entry, line present, `indexForm: 'non-heading'`** ⇒ wiring complete, proceed — a
-  non-heading index has no container concept to verify against, so line presence alone is the
-  whole check. The per-chapter line-presence check is deliberately form-agnostic; container
-  verification below applies only when `indexForm: 'headings'`.
+- **Grouped entry, line present, `indexForm: 'non-heading'`** ⇒ wiring complete, proceed — no
+  present-line placement verifier runs on a non-heading index (placement verification is
+  deferred, see `revalidation.md`), so line presence alone is the whole check. The per-chapter
+  line-presence check is deliberately form-agnostic; container verification below applies only
+  when `indexForm: 'headings'`.
 - **Grouped entry, line present, `indexForm: 'headings'`, and `containerTitleMatches(containerTitle,
   entry)`** (from `assets/lib/chapter-paths.mjs`; titles compare TRIMMED, not raw `===`) ⇒
   placement complete, move to the next chapter.
@@ -318,11 +322,24 @@ These outcomes reuse the step-0 result computed above (`containerTitle`, `indexF
   `(none)` — the halt string itself never changes, only the substituted value does.
 - **Grouped entry, line absent, headings-form index** ⇒ resolve the container (below).
 - **Grouped entry, line absent, non-heading index form** (a nested list, an MkDocs YAML `nav:`,
-  a bare path row) ⇒ halt with:
-  `Index <index_file> is not a headings-form file — add a '<group_title>' container and the chapter line for '<slug>' manually, then re-run.`
-  This is what makes the manual flow converge: you halt once with instructions, the user adds
-  the container and the chapter line, and the re-run's step 0 finds the line present under the
-  `indexForm: 'non-heading'` branch above and proceeds.
+  a bare path row) ⇒ attempt automated nested-list wiring: call
+  `wireNestedListChapter(indexLines, group_title, <path-mode chapter link>)`
+  (`assets/lib/chapter-paths.mjs`), where the chapter link is the same path-mode
+  `[Title](<relative-index-path>)` form item 1 computes, and branch on its result:
+  - **`{kind: 'inserted', newLines}`** ⇒ the index was a bounded nested-list container form;
+    persist the returned `newLines` (joined back, they reproduce the exact bytes — EOL and
+    terminal newline preserved) and proceed — the container was found or created and the
+    chapter line inserted under it, no halt.
+  - **`{kind: 'multiple'}`** ⇒ two or more container bullets match `group_title`; never guess
+    which is canonical, halt with:
+    `Found multiple '<group_title>' container bullets in <index_file> — curate the index manually, then re-run.`
+  - **`{kind: 'not-a-list'}`** ⇒ the index is not in the automatable nested-list subset (see
+    "Nested-list automation limits" below) — a YAML `nav:`, a bare path table, or a list shape
+    outside the bounded safe subset. Fall back to the existing manual halt, unchanged:
+    `Index <index_file> is not a headings-form file — add a '<group_title>' container and the chapter line for '<slug>' manually, then re-run.`
+    This is what makes the manual flow converge: you halt once with instructions, the user adds
+    the container and the chapter line, and the re-run's step 0 finds the line present under the
+    `indexForm: 'non-heading'` branch above and proceeds.
 
 **Container resolution** — reached only for a grouped entry on a headings-form index once step 0
 found no existing line. Locate the container by the entry's **current** `group_title`, which is
@@ -335,10 +352,35 @@ unique across groups (see `manifest-discipline.md`):
 - **Multiple candidates** ⇒ halt with:
   `Found multiple '<group_title>' containers in <index_file> — curate the index manually, then re-run.`
 
-**Automated grouped wiring works only on a Markdown-headings-form index.** For any other static
-index form — a nested `SUMMARY.md` list, an MkDocs YAML `nav:` block — grouped index wiring is
-**fully manual** in 1.5.0: you halt with the non-heading instructions above and stop there;
-first-class non-heading container automation is a follow-up issue.
+**Automated grouped wiring covers a Markdown-headings-form index and a bounded nested-list
+(GitBook `SUMMARY.md`) container subset.** A headings-form index resolves its container as
+above; a non-heading index whose shape falls inside that bounded subset (see "Nested-list
+automation limits" below) is wired by `wireNestedListChapter` per the line-absent branch above.
+Every other static index form — an MkDocs YAML `nav:` block, a bare path table, or any list
+shape outside the safe subset — stays **fully manual**: you halt with the non-heading
+instructions above and stop there. First-class YAML `nav:` and path-table container automation
+remain follow-up issues.
+
+### Nested-list automation limits
+
+`wireNestedListChapter` automates only a **bounded, conservative** nested-list subset and
+defers everything else to the manual `not-a-list` halt above — safety over reach. It wires an
+index only when it is a plain bullet list whose container labels **and** the entry's
+`group_title` are plain-text: it refuses any label or `group_title` carrying inline markup or
+a leading block trigger — emphasis, a link inside the visible text, an image, raw HTML, an
+entity, a backslash escape, inline code, a leading `#` heading or list marker, or a run of
+collapsing whitespace — because a character allowlist cannot prove such a label renders equal
+to a plain `group_title`, so matching it could miss a real container or manufacture a
+duplicate. It also refuses a `*`- or `+`-marked bullet whose visible text is a **bare
+(non-link) path** — one containing a `/` or backslash separator, or ending in `.md` — because
+the shipped membership scan only sees `-`-marked bare rows, so wiring such a file could create
+a second container beside a retained phantom row (a legitimate `*`/`+` plain label that happens
+to contain `/` is refused too, a deliberate over-rejection, not corruption). Inline code, an
+HTML comment or a fenced block anywhere, a mixed or bare-CR line ending, a YAML `nav:` or
+`- key: value` mapping bullet, a list nested more than one level deep, and a multiline
+`group_title` fall outside the subset as well. Worst case for the residual is a cosmetic
+duplicate container the author can see and delete — never data loss. A richer rendering-aware
+matcher is a possible follow-up, not a bug.
 
 ### Manual group migration
 

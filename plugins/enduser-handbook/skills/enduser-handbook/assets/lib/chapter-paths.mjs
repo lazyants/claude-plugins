@@ -1023,8 +1023,12 @@ export function classifyChapterWiring(qualifiedTarget, legacyBareTarget, qScan, 
  * Headings-only contract: a file with no markdown heading at depth >= 2, OR one that contains
  * YAML-mapping-shaped structure anywhere outside a leading frontmatter block
  * (`hasYamlMappingStructure`, R3-F2(b) — depth >= 2 alone is not sound evidence; see its own
- * comment), is classified `'non-heading'` (manual-wiring territory — first-class non-heading
- * automation is a follow-up issue). Depth >= 2 is deliberate (F1): a GROUP CONTAINER is `##
+ * comment), is classified `'non-heading'`. findContainer itself is UNCHANGED — it still returns
+ * `{kind:'non-heading'}` for every such file; but [#223, 1.10.0] that verdict is no longer the end
+ * of the road: the adapter now falls through to `wireNestedListChapter` (below), which auto-wires a
+ * BOUNDED nested-list safe subset (§5.1 — plain-label GitBook `SUMMARY.md` lists) and defers
+ * everything outside it (YAML `nav:`, bare path tables, exotic labels) to the existing manual halt
+ * via `{kind:'not-a-list'}`. Depth >= 2 is deliberate (F1): a GROUP CONTAINER is `##
  * <group_title>` by D6 convention, never a bare `#`, so requiring depth >= 2 as evidence closes
  * two false-positive classifications a naive "any `#`-line" detector hits — a YAML end-of-line
  * comment (`# Main navigation` in mkdocs.yml) and a GitBook `SUMMARY.md` that opens with a single
@@ -1054,6 +1058,342 @@ export function findContainer(indexLines, groupTitle) {
   if (matches.length > 1) return { kind: 'multiple', matches };
   if (matches.length === 1) return { kind: 'single', location: matches[0] };
   return { kind: 'zero', headingDepth: headings[0].depth };
+}
+
+// ---------------------------------------------------------------------------------------------
+// #223 [1.10.0] — nested-list (GitBook `SUMMARY.md`) grouped-index WRITE automation
+//
+// Reached only when findContainer(...) returned {kind:'non-heading'} AND step 0
+// (locateChapterLine) found no existing chapter line — the adapter falls through to
+// wireNestedListChapter, which either fully mutates a BOUNDED, plain-label nested-list index or
+// declines with {kind:'not-a-list'} (the caller then keeps today's manual halt, byte-identical).
+// The whole soundness argument (§5.1/§5.4/§5.5 of the plan) rests on a single invariant: after the
+// frontmatter block is blanked and the inert-identity guard has refused any file carrying a
+// comment/fence/inline-code span, EVERY non-frontmatter BODY line is byte-identical to its raw
+// form — so the line we classify IS the line we edit and the label we match IS its rendered label,
+// and a positive plain-label allowlist (isPlainLabel) keeps every container label and the emitted
+// group_title trivially plain so literal equality equals rendered equality. Everything ambiguous
+// fails toward manual.
+// ---------------------------------------------------------------------------------------------
+
+// §5.1/§5.2 EXACT shapes (pinned by the shared contract): a bullet is spaces-only indent, one
+// marker char, exactly ONE ASCII space, then a first content char that is neither space nor tab
+// (the `(?![ \t])` lookahead — R6-2 — so `-   Admin`, `-\tAdmin`, `- \tAdmin` and a lone `-` all
+// fall through to FOREIGN). A thematic break is tested against the line's `.trim()` (R6-3) so a
+// `<hr>` at ANY indent (`    - - -`) is excluded before the bullet branch, since `- - -` / `* * *`
+// also match the bullet regex.
+const NESTED_BULLET_RE = /^( *)([-*+]) (?![ \t])(.*)$/;
+const NESTED_THEMATIC_BREAK_RE = /^([-*_])([ \t]*\1){2,}$/;
+const NESTED_ATX_HEADING_RE = /^#{1,6}\s/;
+const NESTED_ORDERED_MARKER_RE = /^\s*\d+[.)]\s/;
+
+/**
+ * §5.2 escape-aware whole-content label extraction, returning both the display LABEL and the shape
+ * KIND ('mdlink' | 'wikilink' | 'raw') the §5.7 bare-path guard keys on. Private core of the
+ * exported extractLabel (which returns only `.label`).
+ *
+ * On `t = content.trim()`:
+ * - Whole-content markdown link — `t` is exactly one `[label](dest)` spanning the entire string:
+ *   the SAME escape-aware scan as findLinkOpeners/findMarkdownLinkGroups (from a `[` at position 0
+ *   skip `\X` to the closing `]`, then `(`, an optional `<…>` angle-wrapped destination, balanced
+ *   `)`, then only optional whitespace to end) ⇒ decodeMarkdownEscapes(labelText), kind 'mdlink'.
+ *   Rejects `See [Admin](a.md)` (`[` not at 0) and `[A](a) [B](b)` (does not end at the first
+ *   real `)`), both of which fall to 'raw'.
+ * - Whole-content wikilink — `^\[\[([^\]]*)\]\]$`: the alias after `|` if present, else the target
+ *   before `#`/`^`; kind 'wikilink'.
+ * - Otherwise ⇒ the trimmed content verbatim, kind 'raw'.
+ *
+ * Deliberately NOT findMarkdownLinkGroups (that returns the DESTINATION, chapter-paths.mjs:562-596).
+ */
+function parseNestedLabel(content) {
+  const t = String(content).trim();
+
+  if (t[0] === '[') {
+    // Closing ']' of the label, escape-aware (an escaped `\]` never closes — same left-to-right
+    // atomic '\X' skip findLinkOpeners uses for a legitimate "[Plans \[Beta\]]" title).
+    let j = 1;
+    while (j < t.length) {
+      if (t[j] === '\\') {
+        j += 2;
+        continue;
+      }
+      if (t[j] === ']') break;
+      j += 1;
+    }
+    if (t[j] === ']' && t[j + 1] === '(') {
+      let i = j + 2;
+      // An angle-wrapped destination's own parens never affect depth — skip past its '>' first
+      // (mirrors findMarkdownLinkGroups:569-572).
+      if (t[i] === '<') {
+        const gt = t.indexOf('>', i + 1);
+        i = gt === -1 ? t.length : gt + 1;
+      }
+      let depth = 0;
+      let closeParen = -1;
+      while (i < t.length) {
+        if (t[i] === '\\') {
+          i += 2;
+          continue;
+        }
+        if (t[i] === '(') {
+          depth += 1;
+          i += 1;
+          continue;
+        }
+        if (t[i] === ')') {
+          if (depth === 0) {
+            closeParen = i;
+            break;
+          }
+          depth -= 1;
+          i += 1;
+          continue;
+        }
+        i += 1;
+      }
+      // Whole-content only: nothing but optional whitespace may follow the link's own closing ')'.
+      if (closeParen !== -1 && t.slice(closeParen + 1).trim() === '') {
+        return { label: decodeMarkdownEscapes(t.slice(1, j)), kind: 'mdlink' };
+      }
+    }
+  }
+
+  const wiki = t.match(/^\[\[([^\]]*)\]\]$/);
+  if (wiki) {
+    const inner = wiki[1];
+    const pipe = inner.indexOf('|');
+    if (pipe !== -1) return { label: inner.slice(pipe + 1).trim(), kind: 'wikilink' };
+    return { label: inner.split(/[#^]/, 1)[0].trim(), kind: 'wikilink' };
+  }
+
+  return { label: t, kind: 'raw' };
+}
+
+/**
+ * §5.2 — the display text a nested-list bullet's `content` renders to, matched by exact equality
+ * against the trimmed group_title (and emitted verbatim as a container label on create). Escape-
+ * aware whole-content link/wikilink unwrap, else the trimmed content verbatim. Exported so §9's
+ * direct unit tests can import it (R5-4).
+ *
+ * @param {string} content  a bullet's post-marker content (already single-space-separated)
+ * @returns {string}
+ */
+export function extractLabel(content) {
+  return parseNestedLabel(content).label;
+}
+
+/**
+ * §5.1 plain-label allowlist (R5-1→R6-1) — the positive whitelist that replaced the receding
+ * markup denylist. `s` is ALREADY TRIMMED by the caller. A label/title is "plain" (its rendered
+ * form equals its literal form, so a literal match equals a rendered match) iff ALL hold:
+ * - no inline-active char: none of `\ * _ < > & ~ [ ] !` (backtick/comment/fence already refused
+ *   upstream by the inert-identity guard);
+ * - no leading block trigger: not a leading ATX heading (`# `), not a leading list marker
+ *   (`- `/`+ `/`1. `/`1) `; `*`/`>` already caught by the inline-active char rule);
+ * - no whitespace-collapse or tab (HTML folds a run of spaces/tabs to one, so `A  B` and `A B`
+ *   would render-collide though their source differs).
+ * Ordinary `.`, interior `-`/`+`, `(`, `)`, `/`, `:`, single interior spaces, letters and digits
+ * stay allowed — they render literally in label position.
+ *
+ * @param {string} s  an already-trimmed candidate label / group_title
+ * @returns {boolean}
+ */
+export function isPlainLabel(s) {
+  if (/[\\*_<>&~[\]!]/.test(s)) return false;
+  if (/^#{1,6}(\s|$)/.test(s)) return false;
+  if (/^([-+]|\d+[.)])(\s|$)/.test(s)) return false;
+  if (/[ \t]{2,}/.test(s)) return false;
+  if (/\t/.test(s)) return false;
+  return true;
+}
+
+// §5.7 bare-path guard: step-0's bare-row fallback strips only `-` (chapter-paths.mjs:812), so a
+// `*`/`+`-marked bullet whose content is a bare (non-link) path is INVISIBLE to the caller's
+// membership scan — auto-wiring would create a duplicate container beside the retained phantom
+// text row. Refuse when the marker is `*`/`+`, the label fell to the RAW branch (not a whole-
+// content link/wikilink), and the raw value contains `/` OR `\` (the path layer treats `\`≡`/`,
+// chapter-paths.mjs:46-49) OR ends in `.md` (case-insensitive). Deliberately conservative — a
+// legitimate `*`/`+` plain label containing `/` (`* Sales/Marketing`) is also refused (defers to
+// manual, never corrupts). `-`-marked such rows ARE seen by step 0, so they stay automatable.
+function isBarePathBullet(marker, info) {
+  if (marker !== '*' && marker !== '+') return false;
+  if (info.kind !== 'raw') return false;
+  return info.label.includes('/') || info.label.includes('\\') || /\.md$/i.test(info.label);
+}
+
+/**
+ * Nested-list grouped index wiring, ABSENT-line path only. Pure: returns the fully-mutated index
+ * line array; the runtime persists it. Reached only when findContainer(...) === {kind:'non-heading'}
+ * AND step-0 found no existing line. Idempotency is the CALLER's guarantee (step-0 runs first); this
+ * is a pure transform with no internal membership check. NEVER mutates the input array; NEVER moves/
+ * deletes an existing line (insert-only).
+ *
+ * @param {string[]} indexLines  index file split on '\n' (a CRLF file leaves a trailing '\r' per elem)
+ * @param {string}   groupTitle  entry's current group_title (trimmed for comparison)
+ * @param {string}   chapterLink the fully-formatted, MODE-CORRECT link the adapter already uses for
+ *                               this profile ('[Items](admin/items.md)' path mode; '[[admin/items|Items]]'
+ *                               wikilink mode). OPAQUE: this fn owns list STRUCTURE, caller owns link FORMAT.
+ * @returns {{kind:'inserted', created:boolean, newLines:string[]}
+ *         | {kind:'multiple', matches:Array<{index:number, label:string}>}
+ *         | {kind:'not-a-list'}}
+ */
+export function wireNestedListChapter(indexLines, groupTitle, chapterLink) {
+  // §5.1 step 1-3: undo the runtime split, detect the EOL, and split logically on it.
+  const original = indexLines.join('\n');
+  // A lone '\r' not part of a '\r\n' pair (old-Mac EOL, or a stray '\r') ⇒ not a list.
+  if (/\r(?!\n)/.test(original)) return { kind: 'not-a-list' };
+  const isCRLF = original.includes('\r\n');
+  // Mixed EOL: after removing every CRLF, a surviving '\n' means bare-LF lines coexist with CRLF.
+  if (isCRLF && original.replace(/\r\n/g, '').includes('\n')) return { kind: 'not-a-list' };
+  const EOL = isCRLF ? '\r\n' : '\n';
+
+  const rawLines = original.split(EOL);
+  const hadTerminalNewline = rawLines.length > 0 && rawLines[rawLines.length - 1] === '';
+  // The content lines, guaranteed '\r'-free (split on the detected EOL). Never mutated — every
+  // emission below is built from fresh slice/concat arrays, so indexLines is never touched.
+  const logical = hadTerminalNewline ? rawLines.slice(0, -1) : rawLines;
+
+  // §5.1 step 4: validateGroups permits a multiline group_title/link; embedding a '\r'/'\n' would
+  // inject a foreign physical line the validator itself would reject — refuse rather than corrupt.
+  if (/[\r\n]/.test(groupTitle) || /[\r\n]/.test(chapterLink)) return { kind: 'not-a-list' };
+
+  // §5.1 step 5: blank a leading frontmatter block, with a robust column-0 closer (an EXACT,
+  // untrimmed '---'/'...' — an indented '  ---' inside a block scalar is scalar content, NOT the
+  // closer, so the module's own `.trim()==='---'` test at :843 is deliberately NOT reused). Blanking
+  // here, BEFORE the sanitizer, also stops a backtick inside YAML scalar content from being misread
+  // by stripInertContexts (which has no frontmatter awareness, :675-731).
+  let fm = logical;
+  if (logical[0] === '---') {
+    let j = 1;
+    while (j < logical.length && logical[j] !== '---' && logical[j] !== '...') j += 1;
+    if (j >= logical.length) return { kind: 'not-a-list' }; // unclosed frontmatter
+    fm = logical.slice();
+    for (let x = 0; x <= j; x += 1) fm[x] = '';
+  }
+
+  // §5.1 step 6 — the load-bearing R3 fix: refuse any file carrying an HTML comment / fenced block /
+  // inline-code span. stripInertContexts is newline-preserving and 1:1 (:610), so SAN[i] === fm[i]
+  // for every line holds EXACTLY when no such inert construct exists — making every non-frontmatter
+  // BODY line byte-identical to its raw form (no sanitized-vs-raw gap on any line we classify or
+  // edit) and keeping our view consistent with the caller's step-0 scan, which also sanitizes.
+  const SAN = stripInertContexts(fm.join('\n')).split('\n');
+  for (let i = 0; i < fm.length; i += 1) {
+    if (SAN[i] !== fm[i]) return { kind: 'not-a-list' };
+  }
+  const BODY = fm;
+
+  // Immediate guards on BODY.
+  // YAML: MkDocs `nav:` / `- key: value` mapping structure (frontmatter already blanked).
+  if (hasYamlMappingStructure(BODY)) return { kind: 'not-a-list' };
+  const wanted = groupTitle.trim();
+  // Plain-label allowlist on the group_title (both sides — §5.1): a construct-bearing title could
+  // emit a container that render-collides with an existing plain one, or fail to match one.
+  if (!isPlainLabel(wanted)) return { kind: 'not-a-list' };
+
+  // §5.1 single forward pass over BODY.
+  let sawTop = false;
+  let currentContainer = null; // index of the last indent-0 bullet; reset by any heading
+  let childIndentSeen = null; // C: the file's single child indent, if any child bullet exists
+  let firstTopMarker = null; // marker of the FIRST indent-0 bullet (used on ZERO create)
+  let lastBulletIndex = -1; // greatest index that is any bullet (indent 0 or child)
+  const containers = []; // indent-0 bullets whose extracted label === wanted
+
+  for (let i = 0; i < BODY.length; i += 1) {
+    const line = BODY[i];
+    if (line.trim() === '') continue; // blank line — tolerated inside/between regions
+
+    // 1. ATX heading — allowed; ends any open list region.
+    if (NESTED_ATX_HEADING_RE.test(line)) {
+      currentContainer = null;
+      continue;
+    }
+    // 2. Thematic break at ANY indent (on the trimmed line) — before the bullet branch, because
+    //    `- - -` / `* * *` also match the bullet regex but are horizontal rules, not list parents.
+    if (NESTED_THEMATIC_BREAK_RE.test(line.trim())) return { kind: 'not-a-list' };
+    // 3. Ordered-list marker.
+    if (NESTED_ORDERED_MARKER_RE.test(line)) return { kind: 'not-a-list' };
+
+    // 4/5. Bullet.
+    const m = line.match(NESTED_BULLET_RE);
+    if (!m) return { kind: 'not-a-list' }; // 6. FOREIGN CONTENT (prose, table row, tab line, …)
+
+    const indent = m[1].length;
+    const marker = m[2];
+    const info = parseNestedLabel(m[3]);
+
+    // Bare-path guard applies to indent-0 bullets AND children.
+    if (isBarePathBullet(marker, info)) return { kind: 'not-a-list' };
+
+    if (indent === 0) {
+      if (!isPlainLabel(info.label)) return { kind: 'not-a-list' };
+      sawTop = true;
+      currentContainer = i;
+      if (firstTopMarker === null) firstTopMarker = marker;
+      lastBulletIndex = i;
+      if (info.label === wanted) containers.push({ index: i, label: info.label, marker });
+    } else {
+      if (currentContainer === null) return { kind: 'not-a-list' }; // orphan child
+      if (childIndentSeen === null) {
+        childIndentSeen = indent;
+        // C-cap: a >= 6-space "bullet" is a CommonMark indented-code line, not a child; the cap
+        // stays below the code-block threshold and matches GitBook's 2/4-space convention.
+        if (childIndentSeen < 2 || childIndentSeen > 4) return { kind: 'not-a-list' };
+      } else if (indent !== childIndentSeen) {
+        return { kind: 'not-a-list' }; // a second, distinct child indent
+      }
+      lastBulletIndex = i;
+    }
+  }
+
+  if (!sawTop) return { kind: 'not-a-list' };
+
+  // §5.4 resolution + EOL-faithful emission. A file with no child bullet anywhere defaults C = 2
+  // (GitBook-standard, within the 2..4 cap); every accepted bullet has a single-space marker, so a
+  // container's content column is indent+2 and a child at C in [2,4] is always a valid sublist.
+  const childIndent = childIndentSeen === null ? 2 : childIndentSeen;
+  const emit = (outLogical, created) => {
+    const out = outLogical.join(EOL) + (hadTerminalNewline ? EOL : '');
+    return { kind: 'inserted', created, newLines: out.split('\n') };
+  };
+
+  if (containers.length >= 2) {
+    return { kind: 'multiple', matches: containers.map((c) => ({ index: c.index, label: c.label })) };
+  }
+
+  if (containers.length === 1) {
+    // SINGLE — insert after the last C-indent child in the container's child region (trailing
+    // blanks stay after); if the region has no child bullet, immediately after the container.
+    const k = containers[0].index;
+    const containerMarker = containers[0].marker;
+    let insertAt = k + 1;
+    for (let i = k + 1; i < logical.length; ) {
+      const line = logical[i];
+      if (line.trim() === '') {
+        i += 1;
+        continue;
+      }
+      const bm = line.match(NESTED_BULLET_RE);
+      if (bm && bm[1].length === childIndent) {
+        insertAt = i + 1;
+        i += 1;
+        continue;
+      }
+      break; // first line that is neither blank nor a C-indent child ends the region
+    }
+    const childLine = ' '.repeat(childIndent) + containerMarker + ' ' + chapterLink;
+    return emit(logical.slice(0, insertAt).concat([childLine], logical.slice(insertAt)), false);
+  }
+
+  // ZERO — create a bare-label container + child spliced immediately after the last bullet. The
+  // container label is the TRIMMED group_title (validateGroups does not strip padding, which would
+  // otherwise push the content column and misplace the child, R4-4); the container mirrors the bare
+  // `## <group_title>` heading create (convergence-neutral — step 0 checks the CHAPTER line).
+  const containerLine = firstTopMarker + ' ' + wanted;
+  const childLine = ' '.repeat(childIndent) + firstTopMarker + ' ' + chapterLink;
+  return emit(
+    logical.slice(0, lastBulletIndex + 1).concat([containerLine, childLine], logical.slice(lastBulletIndex + 1)),
+    true,
+  );
 }
 
 // ---------------------------------------------------------------------------------------------

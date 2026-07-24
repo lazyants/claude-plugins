@@ -73,6 +73,21 @@ export type FindContainerResult =
   | { kind: 'multiple'; matches: FindContainerHeading[] }
   | { kind: 'non-heading' };
 
+// #223 [1.10.0] — a nested-list container bullet that matched the trimmed group_title.
+export interface NestedContainerMatch {
+  index: number;
+  label: string;
+}
+
+// #223 [1.10.0] — the wireNestedListChapter outcome. 'inserted' carries the fully-mutated index
+// (newLines.join('\n') reproduces the exact file bytes, EOL + terminal-newline preserved);
+// 'multiple' lists the >=2 ambiguous container bullets (adapter halts); 'not-a-list' means the
+// index is outside the bounded safe subset (caller keeps today's manual halt, byte-identical).
+export type WireNestedListChapterResult =
+  | { kind: 'inserted'; created: boolean; newLines: string[] }
+  | { kind: 'multiple'; matches: NestedContainerMatch[] }
+  | { kind: 'not-a-list' };
+
 export interface EntryChange {
   kind: 'group-change' | 'title-change' | 'group-and-title-change' | 'removal';
   slug: string;
@@ -153,6 +168,19 @@ export function classifyChapterWiring(
 
 /** See chapter-paths.mjs: the D6 container-resolution classifier. */
 export function findContainer(indexLines: string[], groupTitle: string): FindContainerResult;
+
+/** See chapter-paths.mjs: #223 [1.10.0] pure nested-list (GitBook SUMMARY.md) grouped-index write automation, absent-line path only — returns the fully-mutated index, a multiple-container halt, or 'not-a-list' (outside the bounded safe subset). */
+export function wireNestedListChapter(
+  indexLines: string[],
+  groupTitle: string,
+  chapterLink: string,
+): WireNestedListChapterResult;
+
+/** See chapter-paths.mjs: #223 [1.10.0] escape-aware whole-content link/wikilink label unwrap (else the trimmed content verbatim) — the display text matched against a group_title. */
+export function extractLabel(content: string): string;
+
+/** See chapter-paths.mjs: #223 [1.10.0] the §5.1 positive plain-label allowlist (`s` already trimmed) — true iff the label's rendered form equals its literal form. */
+export function isPlainLabel(s: string): boolean;
 
 /** See chapter-paths.mjs: the D6 manual-migration boundary trigger. */
 export function groupChanges(oldEntries: ChapterEntry[], newEntries: ChapterEntry[]): GroupChangesResult;
