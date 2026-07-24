@@ -13,16 +13,12 @@
 // new sentence template that a verb-anchored ("see ...") regex missed (parenthesized, unparenthesized,
 // comma-before-direction, compound two-title, and finally quoted titles with NO introducing verb at
 // all — e.g. `"Layout you produce" below`). The structural signal was never the verb; it is the
-// PROXIMITY of a quoted title to a direction word. So the pattern anchors on nothing but that:
+// PROXIMITY of a quoted title to a direction word: one-or-more quoted titles, each optionally
+// separated by whitespace / a single [,;:] / "and", then a trailing direction word. A single-target
+// citation is just the one-quote case; a compound "A" and "B" below is the multi-quote case, and
+// every quoted title in a matched chain is exploded into its own record sharing the chain's direction.
 //
-//   (?:"[^"]*"\s*(?:[,;:]|and\b)?\s*)+(above|below)\b     (case-insensitive on the direction word)
-//
-// One-or-more quoted titles, each optionally separated by whitespace / a single [,;:] / "and", then a
-// trailing direction word. A single-target citation is just the one-quote case; a compound
-// "A" and "B" below is the multi-quote case — the SAME span pattern covers both, and every quoted
-// title inside a matched span is exploded into its own record sharing that span's direction.
-//
-// This is a DELIBERATE over-match, not a precision regex. A quoted string that coincidentally
+// This is a DELIBERATE over-match, not a precision matcher. A quoted string that coincidentally
 // precedes "above"/"below" for an unrelated reason still becomes a candidate — but a candidate only
 // gets a direction assertion if its text EXACTLY matches a real heading title; every other candidate
 // lands in the mechanically-enforced unresolved allowlist (see citation-audit.test.mjs), never a
@@ -30,6 +26,31 @@
 // into a tracked allowlist is the safer failure mode than guessing sentence templates. Explicit scope
 // boundary: a bare, unquoted prose reference ("the section above") is out of scope by construction —
 // there is no delimited target string to resolve against a heading.
+//
+// ALGORITHM — one linear forward pass, not one monolithic backtracking regex (review-bot finding,
+// 2026-07-24). An earlier revision matched the whole "one-or-more quotes + direction" shape with a
+// single regex retried at every quote-start position via `matchAll`; a security review then found
+// exponential backtracking in that regex's separator, and after that was fixed (one quantified
+// alternation instead of two adjacent optional `\s*`s), the review-bot found the retry-from-every-
+// quote-start SHAPE was still quadratic on an undirected run (each of the N quote-start positions
+// re-scans up to the remaining N-i quotes trying to complete a match before failing). The fix here
+// removes the retry-from-every-position shape entirely:
+//   1. Find every quoted title ONCE via `QUOTED_TITLE_RE.matchAll` (a single linear pass — this
+//      regex has no repeated-group shape, so it cannot itself be quadratic).
+//   2. Walk that (much smaller) list of quote matches ONE time, greedily growing a "chain" of
+//      adjacent quotes for as long as the gap between consecutive quotes is separator-only
+//      (`GAP_IS_SEPARATOR_ONLY_RE`, tested only against the SHORT slice strictly between two already-
+//      found offsets — never a rescan of already-chained quotes).
+//   3. Check ONCE, at the chain's actual end, whether a direction word immediately follows
+//      (`TRAILING_DIRECTION_RE`, anchored so it either matches right there or fails immediately).
+// This is provably complete for this task, not just faster: if the gap between quote[k] and
+// quote[k+1] were "above"/"below" text, chain growth would have STOPPED at k (that gap fails the
+// separator-only test, since "above"/"below" isn't in the separator alternation) — so no interior
+// quote inside a maximal chain can ever be a valid direction-word boundary, and checking only the
+// chain's endpoint misses nothing a shorter internal sub-chain could have matched. Each quote is
+// visited O(1) times for chain growth and each chain incurs one bounded direction check, so the
+// whole pass is O(document length) — verified via the regression test below, which asserts both the
+// non-match AND that runtime doesn't grow with input size.
 //
 // Fence handling is NOT reimplemented here: maskFencedRegions is imported from the ONE JS fence
 // engine in assets/lib/md-structure.mjs and reused, so a citation-shaped string inside a ``` fence is
@@ -53,23 +74,21 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 // against its own heading list only.
 export const SKILL_ROOT = join(HERE, '../skills/enduser-handbook');
 
-// One span = one-or-more quoted titles sharing a single trailing direction word. `g` is required by
-// `matchAll` (walks every occurrence); `i` lets a sentence-initial "Above"/"Below" match (the
-// direction word is the only case-insensitive part; heading-title comparison stays case-sensitive
-// below).
-//
-// The separator between quoted titles is ONE quantified alternation, `(?:[\s,;:]|\band\b)*` — not
-// `\s*(?:[,;:]|and\b)?\s*` (two adjacent `\s*`s sandwiching an optional middle group). That
-// adjacent-optional-quantifier shape is a textbook ReDoS: a run of whitespace between two titles can
-// split across the two `\s*`s in multiple ways, and every extra repetition of the outer `+` doubles
-// the backtracking paths once the trailing `(above|below)` fails to match (security review,
-// verified empirically: a ~26-quoted-title run with no direction word hung for 8+ seconds and kept
-// climbing exponentially; the single-quantifier form below stays polynomial/bounded on the same
-// input — quadratic in the pathological all-quotes-no-direction-word case (every `"` is a valid
-// match-start that scans to end-of-input before failing), never exponential).
-const CITATION_SPAN_RE = /(?:"[^"]*"(?:[\s,;:]|\band\b)*)+(above|below)\b/gi;
-// Every quoted title inside a matched span. `g` is required by `matchAll`.
+// Every quoted title in the text, found ONCE via a single linear `matchAll` pass — `g` is required.
+// This regex has no repetition-of-a-group shape (just a literal-quote-delimited run), so it cannot
+// itself exhibit the retry-from-every-position cost the old monolithic span regex had.
 const QUOTED_TITLE_RE = /"([^"]*)"/g;
+// A gap between two ADJACENT quoted titles counts as "still the same citation span" only if it is
+// ENTIRELY separator characters (whitespace / `[,;:]` / the word "and") — anchored both ends (`^...$`)
+// so it either fully matches a SHORT slice (the text strictly between two already-found quote
+// offsets) or fails immediately; there is nothing left to backtrack over either way.
+const GAP_IS_SEPARATOR_ONLY_RE = /^(?:[\s,;:]|\band\b)*$/i;
+// The direction word immediately following the LAST quote in a chain, anchored at the start of the
+// (small, bounded) text right after that quote's closing `"`. `[\s,;:]|\band\b` is a single quantified
+// alternation with disjoint first characters (whitespace/`,`/`;`/`:` vs literal `a`), so it is
+// deterministic — it consumes the immediate separator run (typically a handful of characters) and
+// then either matches "above"/"below" right there or fails outright; it never rescans.
+const TRAILING_DIRECTION_RE = /^(?:[\s,;:]|\band\b)*(above|below)\b/i;
 
 // Collapse internal whitespace runs (a title wrapped across a source line break picks up a newline
 // plus continuation-line indent — confirmed to bite at static-md.md's "Relative links" citation) and
@@ -121,21 +140,40 @@ export function offsetToLine(lineStarts, offset) {
 export function extractCitations(text) {
   const masked = maskFencedRegions(text);
   const lineStarts = buildLineTable(text);
+  const quotes = [...masked.matchAll(QUOTED_TITLE_RE)];
   const out = [];
-  for (const span of masked.matchAll(CITATION_SPAN_RE)) {
-    const spanStart = span.index;
-    const direction = span[1].toLowerCase();
-    for (const q of span[0].matchAll(QUOTED_TITLE_RE)) {
-      const offset = spanStart + q.index;
-      const quotedRaw = q[1];
-      out.push({
-        offset,
-        line: offsetToLine(lineStarts, offset),
-        quotedRaw,
-        quotedText: collapseWhitespace(quotedRaw),
-        direction,
-      });
+  let i = 0;
+  while (i < quotes.length) {
+    // Grow the maximal chain of quotes[i..j] joined only by separator-only gaps — each comparison is
+    // against the short slice strictly between two already-found quote offsets, so this loop visits
+    // every quote O(1) times overall, never rescanning a quote already absorbed into the chain.
+    let j = i;
+    while (j + 1 < quotes.length) {
+      const gapStart = quotes[j].index + quotes[j][0].length;
+      const gapEnd = quotes[j + 1].index;
+      if (!GAP_IS_SEPARATOR_ONLY_RE.test(masked.slice(gapStart, gapEnd))) break;
+      j += 1;
     }
+    const afterChainEnd = quotes[j].index + quotes[j][0].length;
+    const dirMatch = TRAILING_DIRECTION_RE.exec(masked.slice(afterChainEnd));
+    if (dirMatch) {
+      const direction = dirMatch[1].toLowerCase();
+      for (let k = i; k <= j; k += 1) {
+        const offset = quotes[k].index;
+        const quotedRaw = quotes[k][1];
+        out.push({
+          offset,
+          line: offsetToLine(lineStarts, offset),
+          quotedRaw,
+          quotedText: collapseWhitespace(quotedRaw),
+          direction,
+        });
+      }
+    }
+    // Whether or not this chain resolved to a citation, no sub-chain ending anywhere within [i, j]
+    // can find a different, earlier direction boundary (see the ALGORITHM note above) — advance past
+    // the whole chain rather than retrying from i+1, which is what keeps this pass linear.
+    i = j + 1;
   }
   return out;
 }

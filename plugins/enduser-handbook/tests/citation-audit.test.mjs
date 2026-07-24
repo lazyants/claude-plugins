@@ -171,19 +171,40 @@ test('synthetic: two headings sharing a title make a citation AMBIGUOUS, not sil
   assert.deepEqual(recs[0].matchLines, [1, 3]);
 });
 
-// Security review (2026-07-24): a long comma-joined run of quoted decoys with NO trailing direction
-// word is a doomed match that must backtrack all the way through CITATION_SPAN_RE's outer `+` — the
-// original `\s*(?:[,;:]|and\b)?\s*` separator (two adjacent `\s*`s sandwiching an optional middle
-// group) hit catastrophic backtracking here (verified: ~26 repeats already took 8+ seconds, growing
-// exponentially). The fix collapsed the separator into one quantified alternation,
-// `(?:[\s,;:]|\band\b)*` — this test pins BOTH the absence of a false match AND a tight time bound,
-// so a future "simplification" that reintroduces the adjacent-optional shape fails loudly instead of
-// silently reintroducing the hang.
+// Security review (2026-07-24): a long run of quoted decoys with NO trailing direction word is a
+// doomed match. Two shapes were found and fixed here, both against exactly this kind of input:
+//   1. The original span regex's separator, `\s*(?:[,;:]|and\b)?\s*` (two adjacent `\s*`s sandwiching
+//      an optional middle group), hit EXPONENTIAL backtracking (~26 repeats already took 8+ seconds).
+//      Fixed by collapsing it into one quantified alternation, `(?:[\s,;:]|\band\b)*`.
+//   2. That fix alone still left the outer matching SHAPE — one monolithic regex retried at every
+//      quote-start position via `matchAll` — QUADRATIC on this input (review-bot finding: 29ms at
+//      2,000 titles growing to 1.64s at 16,000). Fixed by replacing the whole approach with the
+//      single-forward-pass chain-growing algorithm in extractCitations (see its doc comment).
+// This test pins the absence of a false match AND — since an absolute bound at one N cannot tell
+// linear from quadratic from exponential apart — the actual SCALING behavior across two sizes, so a
+// future change that reintroduces either superlinear shape fails loudly instead of silently
+// reintroducing a hang.
 test('extractCitations does not catastrophically backtrack on a long undirected quoted-title run (ReDoS regression)', () => {
-  const decoyRun = '"a" '.repeat(2000) + 'end.';
-  const start = Date.now();
-  const recs = extractCitations(decoyRun);
-  const elapsed = Date.now() - start;
-  assert.deepEqual(recs, [], 'no trailing above/below means no citation span should match at all');
-  assert.ok(elapsed < 500, `expected well under 500ms, took ${elapsed}ms — possible ReDoS regression`);
+  const timeFor = (n) => {
+    const decoyRun = '"a" '.repeat(n) + 'end.';
+    const start = Date.now();
+    const recs = extractCitations(decoyRun);
+    const elapsed = Date.now() - start;
+    assert.deepEqual(recs, [], `n=${n}: no trailing above/below means no citation span should match at all`);
+    return elapsed;
+  };
+  const small = timeFor(5_000);
+  const large = timeFor(80_000); // 16x the input
+  // Linear ⇒ ~16x; quadratic ⇒ ~256x; exponential ⇒ unmeasurably larger. A generous 40x ceiling
+  // (allows timer-granularity noise on the small run) still fails hard on quadratic-or-worse scaling.
+  const ratio = large / Math.max(small, 1);
+  assert.ok(
+    large < 2000,
+    `expected the 80,000-title run well under 2s, took ${large}ms — possible ReDoS regression`,
+  );
+  assert.ok(
+    ratio < 40,
+    `16x input took ${ratio.toFixed(1)}x longer (small=${small}ms, large=${large}ms) — ` +
+      'that is quadratic-or-worse scaling, not linear; possible ReDoS regression',
+  );
 });
