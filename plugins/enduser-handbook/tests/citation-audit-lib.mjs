@@ -53,12 +53,12 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 // against its own heading list only.
 export const SKILL_ROOT = join(HERE, '../skills/enduser-handbook');
 
-// One span = one-or-more quoted titles sharing a single trailing direction word. `g` to walk every
-// occurrence, `i` so a sentence-initial "Above"/"Below" is still caught (the direction word is the
-// only case-insensitive part; heading-title comparison stays case-sensitive below).
+// One span = one-or-more quoted titles sharing a single trailing direction word. `g` is required by
+// `matchAll` (walks every occurrence); `i` lets a sentence-initial "Above"/"Below" match (the
+// direction word is the only case-insensitive part; heading-title comparison stays case-sensitive
+// below).
 const CITATION_SPAN_RE = /(?:"[^"]*"\s*(?:[,;:]|and\b)?\s*)+(above|below)\b/gi;
-// Every quoted title inside a matched span. A fresh non-global regex per call would also work; this
-// is reset via lastIndex before each use.
+// Every quoted title inside a matched span. `g` is required by `matchAll`.
 const QUOTED_TITLE_RE = /"([^"]*)"/g;
 
 // Collapse internal whitespace runs (a title wrapped across a source line break picks up a newline
@@ -112,15 +112,10 @@ export function extractCitations(text) {
   const masked = maskFencedRegions(text);
   const lineStarts = buildLineTable(text);
   const out = [];
-  CITATION_SPAN_RE.lastIndex = 0;
-  let span;
-  while ((span = CITATION_SPAN_RE.exec(masked)) !== null) {
+  for (const span of masked.matchAll(CITATION_SPAN_RE)) {
     const spanStart = span.index;
-    const spanText = span[0];
     const direction = span[1].toLowerCase();
-    QUOTED_TITLE_RE.lastIndex = 0;
-    let q;
-    while ((q = QUOTED_TITLE_RE.exec(spanText)) !== null) {
+    for (const q of span[0].matchAll(QUOTED_TITLE_RE)) {
       const offset = spanStart + q.index;
       const quotedRaw = q[1];
       out.push({
@@ -160,8 +155,10 @@ export function auditText(text) {
       return { ...c, status: 'ambiguous', matchLines: matches.map((h) => h.line) };
     }
     const heading = matches[0];
-    const expectedDirection =
-      heading.line < c.line ? 'above' : heading.line > c.line ? 'below' : 'same';
+    let expectedDirection;
+    if (heading.line < c.line) expectedDirection = 'above';
+    else if (heading.line > c.line) expectedDirection = 'below';
+    else expectedDirection = 'same';
     return {
       ...c,
       status: 'resolved',
