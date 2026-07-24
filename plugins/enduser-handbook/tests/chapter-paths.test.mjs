@@ -707,12 +707,13 @@ test('D-6: the .md-fold is OPT-IN — default (no options) leaves a .md-suffixed
   );
 });
 
-test('#311: path mode (default options) treats an extensionless hand-authored line as UNMATCHED — by design, resolution-gate-backstopped', () => {
+test('#311: path mode (default options) treats an extensionless hand-authored line as UNMATCHED — by design (canonical row appended, divergent row retained)', () => {
   // Reverse of the opt-in fold: here the LINE dropped the `.md` (`handbook/items`) while the
   // wanted target carries it (`handbook/items.md`). In path mode the `.md` is load-bearing —
   // `items` and `items.md` are DIFFERENT hrefs — so this divergent line must NOT be folded to a
-  // match. It is a false-positive that path-mode byte-identity deliberately refuses; a real
-  // stale/divergent line is caught by static-md's link-integrity resolution gate, not folded here.
+  // match (that would be a false-positive against a genuinely-different resource). Left unmatched,
+  // step 0's flat-entry-absent branch appends the canonical `.md` row and RETAINS this divergent
+  // row alongside it (append-and-retain) — the link-integrity gate does not reject the retained row.
   assert.equal(
     locateChapterLine(['- [Items](handbook/items)'], 'handbook/items.md').present,
     false,

@@ -882,8 +882,12 @@ function classifyIndexForm(sanitizedLines) {
 // load-bearing: `items` and `items.md` are DIFFERENT resources (one 404s, the other serves), and
 // there is no Obsidian `[[note.md]] == [[note]]` equivalence off the static site — so folding here
 // would manufacture a FALSE-POSITIVE match against a divergent href. A stale or divergent
-// hand-authored path-mode line is caught instead by static-md's link-integrity resolution gate
-// (the href must resolve to the real chapter file), never silently folded to a match.
+// hand-authored path-mode line is therefore left UNMATCHED: static-md's step-0 flat-entry-absent
+// branch then appends the canonical `.md` row and RETAINS the divergent row alongside it
+// (append-and-retain) — a benign redundant entry, not a silent false-match. The link-integrity
+// gate does NOT reject the retained row (item 5 only needs ONE resolving index link; item 2
+// checks the CHAPTER's own links, not an index-wide sweep) — removing a stale alias row would
+// need an index-wide broken-link/alias check (a possible future improvement, out of scope here).
 function foldTargetForMatch(target, wikilink) {
   const normalized = normalizeLinkTarget(target);
   return wikilink ? normalized.replace(/\.md$/i, '') : normalized;
@@ -911,8 +915,9 @@ function foldTargetForMatch(target, wikilink) {
  * (`foldTargetForMatch`) — so a user-authored `[[handbook/orders.md]]` / `[[orders.md]]` row is
  * recognised as the same target as `handbook/orders` / `orders`, never double-appended. Default
  * `false` keeps path-mode and every existing caller byte-for-byte unchanged (a path-link target
- * legitimately ends in `.md` and must never be folded — #311: this byte-identity is intentional,
- * a stale/divergent path-mode line is caught by the link-integrity resolution gate, not folded).
+ * legitimately ends in `.md` and must never be folded — #311: this byte-identity is intentional;
+ * a divergent path-mode line stays unmatched, so step 0 appends the canonical row and RETAINS the
+ * divergent one alongside it (append-and-retain) — the link-integrity gate does not reject it).
  *
  * @param {string[]} indexLines
  * @param {string} expectedTarget
