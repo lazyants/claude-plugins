@@ -980,6 +980,151 @@ test('R2-F5: padding-only differences within a group do not spuriously trigger t
   assert.deepEqual(halts, []);
 });
 
+// =================================================================================================
+// #310 [1.9.0] — validateGroups per-group slug uniqueness opt-in (publish.per_group_slug_uniqueness)
+// =================================================================================================
+// The opt-in scopes slug uniqueness PER GROUP: two chapters in DIFFERENT groups may reuse a slug
+// (distinct group subdirectories ⇒ no file-tree collision), but a duplicate WITHIN one group still
+// halts. Default (option absent / false) is byte-for-byte the pre-1.9.0 global-uniqueness gate —
+// the existing 1-arg validateGroups tests above (global-uniqueness, three-occurrence, round-18)
+// remain the default-off proof.
+
+// Scenario 1 (primary discriminator): different-group same-slug ⇒ NO halt under the opt-in. RED
+// against pre-1.9.0 code, which ignores the option and always halts on a repeated slug.
+test('#310 opt-in: different-group same-slug does NOT halt', () => {
+  const halts = validateGroups(
+    [
+      entry({ slug: 'x', group: 'a', group_title: 'A' }),
+      entry({ slug: 'x', group: 'b', group_title: 'B' }),
+    ],
+    { perGroupSlugs: true },
+  );
+  assert.deepEqual(halts, []);
+});
+
+// Scenario 2: same-group same-slug ⇒ halts with the NEW group-scoped literal (S1). RED against
+// pre-1.9.0 (returns the global-uniqueness literal, not this one).
+test('#310 opt-in: same-group same-slug halts with the group-scoped literal', () => {
+  const halts = validateGroups(
+    [
+      entry({ slug: 'x', group: 'a', group_title: 'A' }),
+      entry({ slug: 'x', group: 'a', group_title: 'A' }),
+    ],
+    { perGroupSlugs: true },
+  );
+  assert.deepEqual(halts, [
+    `Duplicate chapter slug 'x' within group 'a' — with publish.per_group_slug_uniqueness enabled, chapter slugs must be unique within each group; a duplicate silently overwrites the chapter file and its asset dir.`,
+  ]);
+});
+
+// Mutant guard (group-only key): a mutant keying on the group alone (dropping the slug) would
+// falsely halt two DISTINCT slugs sharing a group. Same-group / different-slug under the opt-in
+// must stay clean. (Green before and after — a mutant killer, not a red-before-green discriminator.)
+test('#310 opt-in: same-group DIFFERENT slugs do not halt (kills the group-only key mutant)', () => {
+  const halts = validateGroups(
+    [
+      entry({ slug: 'x', group: 'a', group_title: 'A' }),
+      entry({ slug: 'y', group: 'a', group_title: 'A' }),
+    ],
+    { perGroupSlugs: true },
+  );
+  assert.deepEqual(halts, []);
+});
+
+// Scenario 4: flat `items` vs grouped `admin/items` (same basename) ⇒ NO halt under the opt-in —
+// distinct namespaces (flat keys the bare slug; a grouped entry keys `<group><NUL><slug>`). RED
+// against pre-1.9.0 (option ignored ⇒ slug 'items' seen twice ⇒ global halt).
+test('#310 opt-in: flat slug vs grouped same-basename do not collide', () => {
+  const halts = validateGroups(
+    [entry({ slug: 'items' }), entry({ slug: 'items', group: 'admin', group_title: 'Admin' })],
+    { perGroupSlugs: true },
+  );
+  assert.deepEqual(halts, []);
+});
+
+// Scenario 3a: even under the opt-in, a GROUP-FREE manifest's duplicate flat slug still halts with
+// the unchanged group-free literal (326) — the option is threaded into the group-free branch but
+// inert there (no entry carries a group). Unchanged behavior ⇒ green before and after.
+test('#310 opt-in inert on a group-free manifest: duplicate flat slug still halts (326 literal)', () => {
+  const halts = validateGroups([entry({ slug: 'f' }), entry({ slug: 'f' })], { perGroupSlugs: true });
+  assert.deepEqual(halts, [
+    `Duplicate chapter slug 'f' — chapter slugs must be unique; a duplicate silently overwrites the chapter file and its asset dir.`,
+  ]);
+});
+
+// Scenario 3b: within a GROUPED manifest under the opt-in, a flat-vs-flat pair still keys the bare
+// slug and halts with the UNCHANGED global-uniqueness literal (327 / S2) — flat entries share one
+// file-tree namespace regardless of the opt-in. Unchanged behavior ⇒ green before and after.
+test('#310 opt-in: flat-vs-flat pair in a grouped manifest still halts globally (327/S2 literal)', () => {
+  const halts = validateGroups(
+    [
+      entry({ slug: 'k', group: 'g', group_title: 'G' }), // grouped anchor keeps anyGroup true
+      entry({ slug: 'f' }),
+      entry({ slug: 'f' }),
+    ],
+    { perGroupSlugs: true },
+  );
+  assert.deepEqual(halts, [
+    `Duplicate chapter slug 'f' — chapter slugs must be globally unique across all groups (chapter basenames stay unambiguous across the handbook for the file tree, user-authored bare wikilinks, and Quartz-shortest bare-name resolution).`,
+  ]);
+});
+
+// Default-off proof: the exact different-group same-slug manifest scenario 1 CLEARS under the
+// opt-in STILL halts globally when the option is absent / {} / explicitly false — the opt-in is
+// genuinely opt-in and option-absent callers are byte-for-byte unchanged. (Complements the 1-arg
+// existing tests above; also kills an "always-on" mutant that treats perGroupSlugs as true.)
+test('#310 default (option absent/false): different-group same-slug still halts globally', () => {
+  const entries = [
+    entry({ slug: 'x', group: 'a', group_title: 'A' }),
+    entry({ slug: 'x', group: 'b', group_title: 'B' }),
+  ];
+  const expected = [
+    `Duplicate chapter slug 'x' — chapter slugs must be globally unique across all groups (chapter basenames stay unambiguous across the handbook for the file tree, user-authored bare wikilinks, and Quartz-shortest bare-name resolution).`,
+  ];
+  assert.deepEqual(validateGroups(entries), expected);
+  assert.deepEqual(validateGroups(entries, {}), expected);
+  assert.deepEqual(validateGroups(entries, { perGroupSlugs: false }), expected);
+});
+
+// FIX-2: a MALFORMED group (blank YAML `group:` ⇒ null) under the opt-in must NOT be keyed
+// per-group — otherwise a duplicate renders a misleading "within group 'null'" literal, and null
+// vs '' alias onto one `<NUL><slug>` bucket. The tightened predicate (GROUP_PATTERN, the gate-1
+// validator) makes it fall back to the bare-slug (global) key; gate 1 remains the sole group-level
+// halt. Two null-group same-slug entries would, under the OLD `!== undefined` predicate, emit the
+// per-group S1 literal ⇒ this test is RED without the fix.
+test("#310 FIX-2: malformed (null) group under the opt-in never renders a per-group literal; gate 1 still halts", () => {
+  const halts = validateGroups(
+    [
+      entry({ slug: 'a', group: null, group_title: 'T' }),
+      entry({ slug: 'a', group: null, group_title: 'T' }),
+    ],
+    { perGroupSlugs: true },
+  );
+  assert.ok(
+    !halts.some((h) => h.includes('within group')),
+    `a malformed group must not take the per-group S1 literal; got ${JSON.stringify(halts)}`,
+  );
+  assert.ok(
+    halts.includes(`Invalid group 'null' — group must be English kebab-case, one level (no '/').`),
+    'gate 1 is still the halt that fires for a malformed group',
+  );
+});
+
+// FIX-3: the NUL key separator is alias-free. Boundary values chosen so a separator-LESS
+// `group+slug` join would collapse both entries to the same string `"abc"` and falsely halt:
+// group 'a' + slug 'bc' vs group 'ab' + slug 'c'. The real NUL join keys them `a<NUL>bc` vs
+// `ab<NUL>c` — DISTINCT ⇒ no duplicate. GREEN with the real impl; a no-separator mutant goes RED.
+test('#310 FIX-3: NUL key separator is alias-free — a|bc vs ab|c do not collide', () => {
+  const halts = validateGroups(
+    [
+      entry({ slug: 'bc', group: 'a', group_title: 'A' }),
+      entry({ slug: 'c', group: 'ab', group_title: 'AB' }),
+    ],
+    { perGroupSlugs: true },
+  );
+  assert.deepEqual(halts, []);
+});
+
 test('R2-F5: a padded-but-valid group_title converges against an existing heading (findContainer trims its own param)', () => {
   const result = findContainer(['## Admin', '- x'], '  Admin  ');
   assert.equal(result.kind, 'single');

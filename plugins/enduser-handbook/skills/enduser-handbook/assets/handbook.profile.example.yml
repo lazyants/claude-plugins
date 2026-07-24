@@ -89,6 +89,16 @@ publish:
     prerequisites: "Voraussetzungen"
     related: "Verwandte Themen"
   wikilinks: true                   # obsidian-style [[…]]; false = markdown links
+  # vault_root:                      # optional (#298) escape hatch — name the vault root directly when
+                                     # .obsidian/ is gitignored/absent, or to disambiguate a repo with
+                                     # multiple .obsidian/ markers. Must be an EXISTING readable directory
+                                     # (external/absolute OK); when set it bypasses the .obsidian/ discovery
+                                     # walk. See references/publish-targets/obsidian-vault.md.
+  # per_group_slug_uniqueness:       # optional (#310) default false = today's global slug-uniqueness halt.
+                                     # true relaxes it to PER-NAMESPACE: two chapters in distinct namespaces
+                                     # may share a slug — two different groups, OR a flat (group-less) chapter
+                                     # vs a grouped one. Re-admits basename collisions that a bare-[[slug]] /
+                                     # Quartz-shortest consumer can no longer disambiguate. See obsidian-vault.md.
 
 diataxis:
   quadrants_in_use: [tutorials, howtos]   # subset of [tutorials, howtos, reference, explanation]

@@ -209,6 +209,23 @@ test('RED: a wrong type on a BOOLEAN field (publish.frontmatter_required)', { sk
   assert.ok(validate(c, schema).length > 0);
 });
 
+// #298: publish.vault_root is a newly-declared typed STRING. RED bites only after the property lands
+// — with no publish.additionalProperties, an undeclared vault_root is unvalidated, so a number would
+// slip through until "vault_root": {"type":"string"} is added. Mirrors the frontmatter_required shape.
+test('RED: a wrong type on publish.vault_root (#298) — a number must fail', { skip: !RUBY_AVAILABLE }, () => {
+  const c = baseInstance();
+  c.publish.vault_root = 42;
+  assert.ok(validate(c, schema).length > 0);
+});
+
+// #310: publish.per_group_slug_uniqueness is a newly-declared typed BOOLEAN — a string must fail once
+// the property lands (same undeclared-key RED-before-green as vault_root above).
+test('RED: a wrong type on publish.per_group_slug_uniqueness (#310) — a string must fail', { skip: !RUBY_AVAILABLE }, () => {
+  const c = baseInstance();
+  c.publish.per_group_slug_uniqueness = 'yes';
+  assert.ok(validate(c, schema).length > 0);
+});
+
 test('RED: style_guide.source set outside its ["string","null"] union', { skip: !RUBY_AVAILABLE }, () => {
   const c = baseInstance();
   c.style_guide.source = 42;
@@ -302,5 +319,21 @@ test('GREEN: an extra unknown key inside publish.section_labels (also explicit a
 test('GREEN: a capture.role_flags entry that IS validly shaped (array of strings) is accepted', { skip: !RUBY_AVAILABLE }, () => {
   const c = baseInstance();
   c.capture.role_flags.external = ['SomeOtherRole'];
+  assert.deepEqual(validate(c, schema), []);
+});
+
+// #298: the shipped example leaves publish.vault_root absent (commented), so set it explicitly to a
+// valid string here to prove the newly-declared optional key validates cleanly when present.
+test('GREEN: publish.vault_root set to a valid string (#298) validates', { skip: !RUBY_AVAILABLE }, () => {
+  const c = baseInstance();
+  c.publish.vault_root = 'vault';
+  assert.deepEqual(validate(c, schema), []);
+});
+
+// #310: the shipped example leaves publish.per_group_slug_uniqueness absent (default-false is
+// code-side, not a schema default), so set it true here to prove the boolean key validates cleanly.
+test('GREEN: publish.per_group_slug_uniqueness set true (#310) validates', { skip: !RUBY_AVAILABLE }, () => {
+  const c = baseInstance();
+  c.publish.per_group_slug_uniqueness = true;
   assert.deepEqual(validate(c, schema), []);
 });

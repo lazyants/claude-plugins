@@ -1359,8 +1359,8 @@ has "obsidian-vault: embed derived from capture.output_dir" 'chapterAssetDir(ent
 has "obsidian-vault: vault-boundary gate"                   'stay inside `<vault-root>`'                          "$OMD"
 
 echo "== #247: <vault-root> derivation (§2.1/§2.6) =="
-# The vault root is derived once per run from a SINGLE anchor (publish.chapters_dir) — there is no
-# publish.vault_root profile key. Five positives pin the derivation's normative shape (selection,
+# The vault root comes from an optional publish.vault_root override (#298) or, absent it, a SINGLE
+# anchor (publish.chapters_dir). Positives pin the normative shape (override precedence, not-a-dir halt, selection,
 # zero-marker halt, multiple-marker halt, unreadable-ancestor halt); each is novel (absent from the
 # Round-0 baseline — verified against $BASELINE, not re-checked at runtime since the pre-edit tree
 # is not available here) and unique file-wide.
@@ -1369,19 +1369,32 @@ echo "== #247: <vault-root> derivation (§2.1/§2.6) =="
 # left this green. Extended to bind the identifier itself (A2-returned string).
 has_in_section "obsidian-vault: vault-root selection names publish.chapters_dir as its one discovery anchor" \
   "$OMD" '## Vault root' \
-  'The only discovery anchor is `publish.chapters_dir`'
+  'the only discovery anchor is `publish.chapters_dir`'
 has_in_section "obsidian-vault: vault-root selection requires a readable .obsidian/ directory" \
   "$OMD" '## Vault root' \
   'holds a readable `.obsidian/` directory'
 has_in_section "obsidian-vault: vault-root zero-marker halt" \
   "$OMD" '## Vault root' \
   'No Obsidian vault found above'
-has_in_section "obsidian-vault: vault-root multiple-marker halt names it an unsupported topology" \
+has_in_section "obsidian-vault: vault-root multiple-marker halt now points at the publish.vault_root override" \
   "$OMD" '## Vault root' \
-  'this vault topology is unsupported'
+  'set `publish.vault_root` to name the active vault'
+hasnt "obsidian-vault: retired the pre-#298 unsupported-topology multiple-marker phrasing" \
+  'this vault topology is unsupported' "$OMD"
 has_in_section "obsidian-vault: vault-root unreadable-ancestor halt names the exact path" \
   "$OMD" '## Vault root' \
   'while walking for the vault root'
+has_in_section "obsidian-vault: #298 publish.vault_root override short-circuits the .obsidian/ walk + halts" \
+  "$OMD" '## Vault root' \
+  'the `.obsidian/` walk and BOTH the zero-marker and two-or-more-marker halts below are'
+has_in_section "obsidian-vault: #298 override must resolve to an existing readable directory" \
+  "$OMD" '## Vault root' \
+  'create the vault directory, or correct publish.vault_root to name an existing Obsidian'
+hasnt "obsidian-vault: retired the pre-#298 no-publish.vault_root-key claim" \
+  'There is no `publish.vault_root` profile key' "$OMD"
+has_in_section "obsidian-vault: #310 documents the per-group opt-in bare-[[slug]] shadowing caveat" \
+  "$OMD" '## Wikilinks vs Markdown links' \
+  'two different-group chapters may share a slug'
 # The heading itself must be unique — a duplicated "## Vault root" would let has_in_section bind to
 # the wrong (first) occurrence, silently validating nothing about the real section.
 VAULT_ROOT_HEADING_COUNT="$(count_fixed '## Vault root' "$OMD")"
@@ -1758,7 +1771,9 @@ has "static-md: non-heading manual-wiring halt" "Index <index_file> is not a hea
 echo "== group axis (#19) — manifest-discipline.md =="
 MDISC="$REFS/manifest-discipline.md"
 has "manifest-discipline: activation rule" 'a manifest becomes *grouped* the moment any single entry carries `group`' "$MDISC"
-has "manifest-discipline: duplicate-slug halt (globally unique across all)" 'globally unique across all' "$MDISC"
+has_in_section "manifest-discipline: duplicate-slug halt (globally unique across all)" \
+  "$MDISC" '### Manifest review — grouped and group-free halts' \
+  'globally unique across all'
 has "manifest-discipline: reserved-slug halt" "slug 'assets' is reserved in a grouped manifest" "$MDISC"
 has "manifest-discipline: every-grouped-entry title rule" 'Every grouped entry requires `group_title`' "$MDISC"
 has "manifest-discipline: recapture carve-out for a group-only move" 'the screenshot set is NOT recaptured for a group-only move' "$MDISC"
@@ -1952,9 +1967,10 @@ has_in_section "revalidation: legacy-bare-gone check is scoped to the OLD contai
 hasnt "revalidation: no longer requires exactly ONE match under a shared container (dead under vault-rel)" \
   'the fact instead requires exactly ONE' "$REVAL"
 
-# manifest-discipline.md: the duplicate-slug gate stays global despite skill-emitted links no
-# longer keying on basename — the file tree, a user-authored bare wikilink, and Quartz-shortest
-# bare-name resolution still need it; relaxing to per-group is a deferred follow-up (D-3).
+# manifest-discipline.md: the duplicate-slug gate is GLOBAL by default; #310 (1.9.0) adds an opt-in
+# publish.per_group_slug_uniqueness that relaxes it to per-group for grouped entries. The default
+# stays global because a user-authored bare `[[slug]]` wikilink and Quartz-shortest bare-name
+# resolution still key on basename (the "file tree" reason is dropped for the grouped case).
 has_in_section "manifest-discipline: 1.8.0 states skill-emitted wikilinks are vault-root-relative, not bare basename" \
   "$MDISC" '### Manifest review — grouped and group-free halts' \
   'target are vault-root-relative, not a bare basename'
@@ -1964,6 +1980,15 @@ has_in_section "manifest-discipline: duplicate-slug gate rationale names user-au
 has_in_section "manifest-discipline: duplicate-slug gate rationale names Quartz-shortest bare-name resolution" \
   "$MDISC" '### Manifest review — grouped and group-free halts' \
   'Quartz'"'"'s `shortest`-mode bare-name resolution'
+has_in_section "manifest-discipline: #310 per-group uniqueness is opt-in and safe for group-qualified links" \
+  "$MDISC" '### Manifest review — grouped and group-free halts' \
+  'per-group uniqueness: it is safe for group-qualified paths and the skill'
+has_in_section "manifest-discipline: #310 same-group duplicate halt string is in the verbatim halt list" \
+  "$MDISC" '### Manifest review — grouped and group-free halts' \
+  'with publish.per_group_slug_uniqueness enabled, chapter slugs must be unique within each group'
+has_in_section "manifest-discipline: #310 opt-in scope is per-namespace, covering flat-vs-grouped too" \
+  "$MDISC" '### Manifest review — grouped and group-free halts' \
+  'flat-vs-grouped same-basename pairs'
 has "manifest-discipline: activation rule lists the 1.8.0 currentIndexExpectedTarget group-free exception (third)" \
   'one from 1.8.0: `currentIndexExpectedTarget`' "$MDISC"
 
@@ -1992,10 +2017,10 @@ has_in_section "SKILL.md W6: MUST run validation before re-capture/re-authoring"
 # a single shared gate would pass a mutation that disables just one of the two call sites.
 has_in_section "SKILL.md W1: pins the actual validateGroups(entries) call, not just its prose" \
   "$SKILL" '### W1 — Discover the feature surface' \
-  'MUST run `validateGroups(entries)`'
+  'MUST run `validateGroups(entries, { perGroupSlugs: publish.per_group_slug_uniqueness === true })`'
 has_in_section "SKILL.md W6: pins the actual validateGroups(entries) call, not just its prose" \
   "$SKILL" '### W6 — Revalidation / audit mode (existing chapters)' \
-  'MUST run `validateGroups(entries)`'
+  'MUST run `validateGroups(entries, { perGroupSlugs: publish.per_group_slug_uniqueness === true })`'
 # round-14 [IMPORTANT]: the pin above proves the CALL exists, but not what it's called WITH. The
 # original wording — "against the current manifest (delta or unchanged)" — read naturally as "the
 # delta manifest". validateGroups only counts duplicates within the array it receives, so
@@ -2285,6 +2310,8 @@ fi
 has   "profile-schema: backend.type enum"                 '"laravel"'   "$SCHEMA"
 has   "profile-schema: capture.engine enum"               '"playwright"' "$SCHEMA"
 has   "profile-schema: publish.target shipped set"        '"static_md"' "$SCHEMA"
+has "profile-schema: publish.vault_root typed string (#298)"              '"vault_root": { "type": "string" }'                "$SCHEMA"
+has "profile-schema: publish.per_group_slug_uniqueness typed bool (#310)" '"per_group_slug_uniqueness": { "type": "boolean" }' "$SCHEMA"
 hasnt "profile-schema: no fabricated future publish target" '"confluence"' "$SCHEMA"
 # #296 part 2 — the 3 enum assertions the issue names, missing from the checks above.
 has   "profile-schema: stack.frontend.type enum includes vue"              '"vue"'       "$SCHEMA"
