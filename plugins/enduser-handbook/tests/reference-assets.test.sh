@@ -1541,11 +1541,16 @@ fi
 # comment — a 3rd bare-formula copy appended onto an EXISTING line would still read as 2 lines).
 # `grep -oF` emits one line per MATCH, so `wc -l` counts occurrences, catching a 3rd copy anywhere,
 # same-line or not.
+# #223 legitimately adds a THIRD site: the "Non-headings index, no existing line" bullet's
+# wireNestedListChapter call names the same path-mode target formula ("...whose `<target>` is the
+# very spelling step 0 computed above for this profile (`relative(dirname(index_file),
+# chapter_file)` in path mode; ..."), reusing — not duplicating — the flat/grouped coordinate
+# system rather than inventing a new one. Bumped from 2 to 3; a drift off 3 now is the real signal.
 FORMULA_OCCURRENCES="$(grep -oF 'relative(dirname(index_file), chapter_file)' "$OMD" 2>/dev/null | wc -l | tr -d ' ')"
-if [ "$FORMULA_OCCURRENCES" -eq 2 ]; then
-  ok "obsidian-vault: O6 witness — expected-target formula occurs exactly twice at occurrence level (flat + grouped)"
+if [ "$FORMULA_OCCURRENCES" -eq 3 ]; then
+  ok "obsidian-vault: O6 witness — expected-target formula occurs exactly three times at occurrence level (flat + grouped + #223 nested-list)"
 else
-  bad "obsidian-vault: O6 witness FAILED — expected-target formula occurrence count drifted from 2 (found $FORMULA_OCCURRENCES)"
+  bad "obsidian-vault: O6 witness FAILED — expected-target formula occurrence count drifted from 3 (found $FORMULA_OCCURRENCES)"
 fi
 # Witness 2 (round-3 codex BLOCKER 2): the >=2-match outcome. The old needle ("a flat entry gets no
 # special case here") was the INTRO fragment only — it ends before the actual action ("duplicate
@@ -1624,9 +1629,17 @@ has "obsidian-vault: step-0 already-wired short-circuit" 'wiring is already comp
 # / retarget-in-place wording, previously untested. has_in_section (not plain has), same false-green
 # reason as the revalidation.md/SKILL.md pins above — a plain has would still pass if this text were
 # relocated into a fenced block under an unrelated heading.
-has_in_section "obsidian-vault: step-0 non-heading-form short-circuit (canonical complete, legacy retargets unconditionally)" \
+# #223 rewrap: the non-heading-form branch now opens with a new "no present-line placement
+# verifier runs here..." sentence (see the #223 cluster below) that pushed this claim's wrap point
+# — it now spans TWO physical lines, so the old single-line needle stopped matching. Split the same
+# way this file already handles other wrapped multi-line assertions (locateChapterLine/
+# expectedTarget precedent above): one needle per physical line, each verified unique file-wide.
+has_in_section "obsidian-vault: step-0 non-heading-form short-circuit — canonical line is already complete" \
   "$OMD" '## INDEX wiring (do all of these on every chapter create/update)' \
-  'already complete and a `legacy` line retargets in place unconditionally.'
+  'a `canonical` line is already complete and a'
+has_in_section "obsidian-vault: step-0 non-heading-form short-circuit — legacy line retargets unconditionally" \
+  "$OMD" '## INDEX wiring (do all of these on every chapter create/update)' \
+  '`legacy` line retargets in place unconditionally.'
 has "static-md: step-0 form-agnostic short-circuit"      'form-agnostic, and it runs BEFORE any container' "$SMD"
 # round-9 [mutation testing]: the step-0 already-wired short-circuit's container-title comparison
 # had ZERO coverage — not even a bare function-name grep. Pinned with its real args (containerTitle,
@@ -1779,8 +1792,148 @@ has "obsidian-vault: markdown-link gate extension covers group-free" 'group-free
 
 echo "== group axis (#19) — static-md-only: gate #1 group-aware + headings-only automation =="
 has "static-md: gate #1 is a resolution check, not a spelling check" 'resolution** check, not a spelling check' "$SMD"
-has "static-md: automated grouped wiring is headings-only" '**Automated grouped wiring works only on a Markdown-headings-form index.**' "$SMD"
+# #223: the old scope claim ("headings-form only") is gone — grouped wiring now also covers a
+# bounded nested-list subset. REPLACED, not merely supplemented (plan §9.2): the old needle would
+# false-fail against the current doc.
+has_in_section "static-md: automated grouped wiring's new scope (headings-form + bounded nested-list, #223)" \
+  "$SMD" '### Grouped index wiring (`anyGroup` manifests only)' \
+  'Automated grouped wiring covers a Markdown-headings-form index and a bounded nested-list'
 has "static-md: non-heading manual-wiring halt" "Index <index_file> is not a headings-form file — add a '<group_title>' container and the chapter line for '<slug>' manually, then re-run." "$SMD"
+
+echo "== #223: nested-list index container automation (wireNestedListChapter), both adapters =="
+# static-md.md — the flat-entry-absent branch and the new automated subset both sit under the
+# shared H2; the branch prose, the multiple-container halt, and the narrowed present-line
+# rationale sit under the grouped-only H3 (before its own "Nested-list automation limits" child).
+has_in_section "static-md: activation rule names wireNestedListChapter for the index-line half" \
+  "$SMD" '## Layout you produce' \
+  'the nested-list wiring `wireNestedListChapter` now emits'
+has_in_section "static-md: step-0 flat-entry-absent branch narrows container machinery to form-restricted" \
+  "$SMD" '## Index wiring (do this on every chapter create/update)' \
+  'that container machinery is form-restricted'
+has_in_section "static-md: grouped, line-absent, non-heading branch attempts nested-list wiring" \
+  "$SMD" '### Grouped index wiring (`anyGroup` manifests only)' \
+  'the index was a bounded nested-list container form'
+has_in_section "static-md: nested-list multiple-container-bullets halt" \
+  "$SMD" '### Grouped index wiring (`anyGroup` manifests only)' \
+  "Found multiple '<group_title>' container bullets in <index_file> — curate the index manually, then re-run."
+has_in_section "static-md: grouped, line-present, non-heading branch narrows present-line placement rationale" \
+  "$SMD" '### Grouped index wiring (`anyGroup` manifests only)' \
+  'present-line placement verifier runs on a non-heading index'
+has_in_section "static-md: Nested-list automation limits — plain-label allowlist boundary" \
+  "$SMD" '### Nested-list automation limits' \
+  'a character allowlist cannot prove such a label renders equal'
+has_in_section "static-md: Nested-list automation limits — bare-path refusal (membership scan)" \
+  "$SMD" '### Nested-list automation limits' \
+  'the shipped membership scan only sees `-`-marked bare rows'
+
+# obsidian-vault.md — everything below lives directly under the shared H2: unlike static-md.md,
+# there is no intervening H3 for the grouped branch, so "### Nested-list automation limits" is the
+# ONLY child H3 and it comes after all of this content (line order verified against the doc).
+has_in_section "obsidian-vault: non-heading Step-0 branch narrows present-line placement rationale" \
+  "$OMD" '## INDEX wiring (do all of these on every chapter create/update)' \
+  'no present-line placement verifier runs here (placement verification'
+has_in_section "obsidian-vault: container-resolution scope note (headings-form vs bounded nested-list)" \
+  "$OMD" '## INDEX wiring (do all of these on every chapter create/update)' \
+  'Container resolution** (headings-form index — resolved by heading here; a bounded'
+has_in_section "obsidian-vault: non-headings-index branch attempts nested-list wiring" \
+  "$OMD" '## INDEX wiring (do all of these on every chapter create/update)' \
+  'the index was a bounded nested-list container form'
+has_in_section "obsidian-vault: nested-list multiple-container-bullets halt" \
+  "$OMD" '## INDEX wiring (do all of these on every chapter create/update)' \
+  "Found multiple '<group_title>' container bullets in <index_file> — curate the index manually, then re-run."
+has_in_section "obsidian-vault: Nested-list automation limits — plain-label allowlist boundary" \
+  "$OMD" '### Nested-list automation limits' \
+  'a character allowlist cannot prove such a label renders equal'
+has_in_section "obsidian-vault: Nested-list automation limits — bare-path refusal (membership scan)" \
+  "$OMD" '### Nested-list automation limits' \
+  'the shipped membership scan only sees `-`-marked bare rows'
+
+# revalidation.md — the manual-migration recipe's own container-creation step now names the
+# nested-list bullet form too, and the group_title-changed terminal fact narrows its non-heading
+# branch the same way the adapters do.
+has_in_section "revalidation: manual group-migration recipe step 3 covers a nested-list container bullet" \
+  "$REVAL" '### The manual group-migration recipe' \
+  'creating the container (a `##` heading, or a bullet for a nested-list index) first'
+has_in_section "revalidation: group_title-changed fact narrows non-heading placement to explicit confirmation" \
+  "$REVAL" '### Terminal-state convergence checklist' \
+  'no present-line placement verifier runs, and raw string presence is gameable'
+
+# Structural pin (independent of the awk has_in_section engine above): parseHeadings/findOwner from
+# assets/lib/md-structure.mjs — the SAME primitive tests/md-structure.test.mjs uses for its 6 real
+# branch-ownership pins against static-md.md (there: ~:337-358). This is a second, JS-native
+# implementation of section-boundary resolution — PORTED, NOT REINVENTED, from this file's own awk
+# engine (see the module banner in md-structure.mjs) — so it can catch a defect the awk engine alone
+# could share a blind spot with, not merely duplicate the has_in_section calls above. Proves the
+# plain-label boundary and the bare-path-refusal prose are owned by "Nested-list automation limits"
+# in BOTH adapters, and that the branch prose stays owned by the GROUPED branch (static-md.md's H3,
+# obsidian-vault.md's shared H2) rather than sliding into the limits section. Run inline via
+# `node -e` — this file cannot touch tests/md-structure.test.mjs, a different concern's suite —
+# mirroring the profile-schema-evaluator node -e pattern used further below ("profile validator").
+echo "== #223 structural pin: nested-list automation limits ownership (md-structure.mjs, independent engine) =="
+MDSTRUCT="$ASSETS/lib/md-structure.mjs"
+if command -v node >/dev/null 2>&1; then
+  if MDSTRUCT_ERR="$(node -e '
+    const fs = require("fs");
+    const { pathToFileURL } = require("url");
+
+    async function main() {
+      const mod = await import(pathToFileURL(process.argv[1]).href);
+      const { parseHeadings, findOwner } = mod;
+      const smd = fs.readFileSync(process.argv[2], "utf8");
+      const omd = fs.readFileSync(process.argv[3], "utf8");
+
+      function lineCountContaining(text, needle) {
+        return text.split("\n").filter((l) => l.includes(needle)).length;
+      }
+      function firstLineOf(text, needle) {
+        const idx = text.indexOf(needle);
+        return idx === -1 ? -1 : text.slice(0, idx).split("\n").length;
+      }
+      const failures = [];
+      function assertOwnership(label, text, sentinel, headingRaw) {
+        const sc = lineCountContaining(text, sentinel);
+        if (sc !== 1) { failures.push(label + ": sentinel occurs " + sc + " times, want 1 (" + sentinel + ")"); return; }
+        const hc = lineCountContaining(text, headingRaw);
+        if (hc !== 1) { failures.push(label + ": heading occurs " + hc + " times, want 1 (" + headingRaw + ")"); return; }
+        const heads = parseHeadings(text);
+        const target = heads.find((h) => h.raw === headingRaw);
+        if (target === undefined) { failures.push(label + ": heading not parsed: " + headingRaw); return; }
+        const owner = findOwner(heads, firstLineOf(text, sentinel));
+        if (owner !== target) {
+          failures.push(label + ": sentinel owned by " + JSON.stringify(owner ? owner.raw : null) + ", want " + JSON.stringify(headingRaw));
+        }
+      }
+
+      const GROUPED_H3 = "### Grouped index wiring (`anyGroup` manifests only)";
+      const LIMITS_H3 = "### Nested-list automation limits";
+      const OBS_INDEX_H2 = "## INDEX wiring (do all of these on every chapter create/update)";
+      const BARE_PATH_SENTINEL = "the shipped membership scan only sees `-`-marked bare rows";
+      const PLAIN_LABEL_SENTINEL = "a character allowlist cannot prove such a label renders equal";
+      const BRANCH_PROSE_SENTINEL = "the index was a bounded nested-list container form";
+
+      assertOwnership("static-md: plain-label boundary owned by Nested-list automation limits", smd, PLAIN_LABEL_SENTINEL, LIMITS_H3);
+      assertOwnership("static-md: bare-path refusal owned by Nested-list automation limits", smd, BARE_PATH_SENTINEL, LIMITS_H3);
+      assertOwnership("static-md: nested-list branch prose owned by Grouped index wiring, not the limits section", smd, BRANCH_PROSE_SENTINEL, GROUPED_H3);
+
+      assertOwnership("obsidian-vault: plain-label boundary owned by Nested-list automation limits", omd, PLAIN_LABEL_SENTINEL, LIMITS_H3);
+      assertOwnership("obsidian-vault: bare-path refusal owned by Nested-list automation limits", omd, BARE_PATH_SENTINEL, LIMITS_H3);
+      assertOwnership("obsidian-vault: nested-list branch prose owned by INDEX wiring, not the limits section", omd, BRANCH_PROSE_SENTINEL, OBS_INDEX_H2);
+
+      if (failures.length > 0) {
+        console.error(failures.join("\n"));
+        process.exitCode = 1;
+      }
+    }
+
+    main().catch((e) => { console.error(String((e && e.stack) || e)); process.exitCode = 1; });
+  ' "$MDSTRUCT" "$SMD" "$OMD" 2>&1 >/dev/null)"; then
+    ok "#223 structural pin: all 6 nested-list branch-ownership witnesses resolve correctly (md-structure.mjs, independent engine)"
+  else
+    bad "#223 structural pin FAILED — $MDSTRUCT_ERR"
+  fi
+else
+  echo "  note  node not on PATH — skipping the #223 nested-list structural pin"
+fi
 
 echo "== group axis (#19) — manifest-discipline.md =="
 MDISC="$REFS/manifest-discipline.md"

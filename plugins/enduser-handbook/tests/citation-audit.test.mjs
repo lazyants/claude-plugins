@@ -31,7 +31,7 @@ import { auditCorpus, auditText, extractCitations } from './citation-audit-lib.m
 // Total citation occurrences across references/**/*.md + SKILL.md (resolved + unresolved). Re-derived
 // against source 2026-07-24; the count grew every round of plan review, so it is pinned to the fresh
 // measurement, never a number quoted in the plan.
-const EXPECTED_TOTAL_CITATIONS = 47;
+const EXPECTED_TOTAL_CITATIONS = 52;
 
 // Every citation whose quoted text does NOT resolve to exactly one heading title in its own file — an
 // over-match, a near-miss (e.g. "INDEX wiring" vs the full parenthetical heading), or a title that
@@ -49,13 +49,15 @@ const EXPECTED_UNRESOLVED = [
   { file: 'references/publish-targets/obsidian-vault.md', offset: 6333, quotedText: "What 'Obsidian vault' implies", direction: 'above' },
   { file: 'references/publish-targets/obsidian-vault.md', offset: 6700, quotedText: 'INDEX wiring', direction: 'below' },
   { file: 'references/publish-targets/obsidian-vault.md', offset: 9709, quotedText: 'Chapter structure', direction: 'below' },
-  { file: 'references/publish-targets/obsidian-vault.md', offset: 32939, quotedText: 'INDEX wiring', direction: 'above' },
-  { file: 'references/publish-targets/obsidian-vault.md', offset: 38166, quotedText: 'INDEX wiring', direction: 'above' },
-  { file: 'references/publish-targets/static-md.md', offset: 12759, quotedText: 'Chapter path', direction: 'above' },
-  { file: 'references/publish-targets/static-md.md', offset: 14812, quotedText: 'Grouped index wiring', direction: 'below' },
-  { file: 'references/publish-targets/static-md.md', offset: 15179, quotedText: 'Chapter → index', direction: 'above' },
-  { file: 'references/publish-targets/static-md.md', offset: 18756, quotedText: 'Grouped index wiring', direction: 'below' },
-  { file: 'references/publish-targets/static-md.md', offset: 30162, quotedText: 'Grouped index wiring', direction: 'above' },
+  { file: 'references/publish-targets/obsidian-vault.md', offset: 26397, quotedText: 'Non-headings index', direction: 'below' },
+  { file: 'references/publish-targets/obsidian-vault.md', offset: 36195, quotedText: 'INDEX wiring', direction: 'above' },
+  { file: 'references/publish-targets/obsidian-vault.md', offset: 41422, quotedText: 'INDEX wiring', direction: 'above' },
+  { file: 'references/publish-targets/static-md.md', offset: 12961, quotedText: 'Chapter path', direction: 'above' },
+  { file: 'references/publish-targets/static-md.md', offset: 15014, quotedText: 'Grouped index wiring', direction: 'below' },
+  { file: 'references/publish-targets/static-md.md', offset: 15381, quotedText: 'Chapter → index', direction: 'above' },
+  { file: 'references/publish-targets/static-md.md', offset: 18937, quotedText: 'Grouped index wiring', direction: 'below' },
+  { file: 'references/publish-targets/static-md.md', offset: 19082, quotedText: 'Grouped index wiring', direction: 'below' },
+  { file: 'references/publish-targets/static-md.md', offset: 33611, quotedText: 'Grouped index wiring', direction: 'above' },
 ];
 
 // Per-occurrence key. offset alone is already unique; file/quotedText/direction are folded in so a
