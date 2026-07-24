@@ -64,7 +64,9 @@ export const SKILL_ROOT = join(HERE, '../skills/enduser-handbook');
 // split across the two `\s*`s in multiple ways, and every extra repetition of the outer `+` doubles
 // the backtracking paths once the trailing `(above|below)` fails to match (security review,
 // verified empirically: a ~26-quoted-title run with no direction word hung for 8+ seconds and kept
-// climbing exponentially; the single-quantifier form below stays linear on the same input).
+// climbing exponentially; the single-quantifier form below stays polynomial/bounded on the same
+// input — quadratic in the pathological all-quotes-no-direction-word case (every `"` is a valid
+// match-start that scans to end-of-input before failing), never exponential).
 const CITATION_SPAN_RE = /(?:"[^"]*"(?:[\s,;:]|\band\b)*)+(above|below)\b/gi;
 // Every quoted title inside a matched span. `g` is required by `matchAll`.
 const QUOTED_TITLE_RE = /"([^"]*)"/g;
