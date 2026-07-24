@@ -132,21 +132,28 @@ target are vault-root-relative, not a bare basename
 (`references/publish-targets/obsidian-vault.md`'s "Wikilinks vs Markdown
 links") — links the skill itself emits no longer key on the slug's
 basename. The **grouped** duplicate-slug gate above is global (across
-every group) by deliberate DEFAULT, not a technical necessity: two
-same-slug grouped chapters — `admin/items` and `billing/items` — resolve
-to DISTINCT files (`admin/items.md` vs `billing/items.md`, each with its
-own asset dir), so there is no file-tree overwrite between them. The
-file-tree reason that makes a flat-vs-flat collision genuine does NOT
-carry across two groups; what the global default still buys the grouped
-case is narrower — two cross-group hazards this skill does not control. A
-bare basename can no longer disambiguate, once two groups share a slug,
+every group) by deliberate DEFAULT, not a technical necessity. The opt-in
+below scopes slug uniqueness PER NAMESPACE — each group is a namespace and
+the flat, group-less space is its own namespace — so under it a slug may
+repeat across ANY two distinct namespaces: two different groups
+(`admin/items` and `billing/items`), OR a flat chapter and a grouped one
+(`items` and `admin/items`). Either pair resolves to DISTINCT files
+(`admin/items.md` vs `billing/items.md`, or `items.md` vs `admin/items.md`),
+each with its own asset dir, so there is no file-tree overwrite between
+them. The file-tree reason that makes a flat-vs-flat collision genuine
+does NOT carry across two distinct namespaces; what the global default
+still buys is narrower — two bare-name hazards this skill does not
+control. A bare basename can no longer disambiguate, once two distinct
+namespaces share a basename (two groups, or a flat and a grouped chapter),
 for a user-authored bare `[[<slug>]]` wikilink anywhere else in the vault
 or for Quartz's `shortest`-mode bare-name resolution. Setting
 `publish.per_group_slug_uniqueness: true` (default false) opts into
 per-group uniqueness: it is safe for group-qualified paths and the skill's
 own vault-root-relative links, which stay unambiguous, but it re-admits
-exactly those two bare-name hazards — the same-group halt above still
-fires — which is why it is an explicit opt-in, not the standing behavior.
+exactly those two bare-name hazards for BOTH two-different-group and
+flat-vs-grouped same-basename pairs — the same-group halt above still
+fires within a group — which is why it is an explicit opt-in, not the
+standing behavior.
 
 Path derivation, the group-aware asset tree, index wiring, and the
 manual-migration recipe for changing an entry's group live in

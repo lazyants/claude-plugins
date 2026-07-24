@@ -1086,6 +1086,45 @@ test('#310 default (option absent/false): different-group same-slug still halts 
   assert.deepEqual(validateGroups(entries, { perGroupSlugs: false }), expected);
 });
 
+// FIX-2: a MALFORMED group (blank YAML `group:` ⇒ null) under the opt-in must NOT be keyed
+// per-group — otherwise a duplicate renders a misleading "within group 'null'" literal, and null
+// vs '' alias onto one `<NUL><slug>` bucket. The tightened predicate (GROUP_PATTERN, the gate-1
+// validator) makes it fall back to the bare-slug (global) key; gate 1 remains the sole group-level
+// halt. Two null-group same-slug entries would, under the OLD `!== undefined` predicate, emit the
+// per-group S1 literal ⇒ this test is RED without the fix.
+test("#310 FIX-2: malformed (null) group under the opt-in never renders a per-group literal; gate 1 still halts", () => {
+  const halts = validateGroups(
+    [
+      entry({ slug: 'a', group: null, group_title: 'T' }),
+      entry({ slug: 'a', group: null, group_title: 'T' }),
+    ],
+    { perGroupSlugs: true },
+  );
+  assert.ok(
+    !halts.some((h) => h.includes('within group')),
+    `a malformed group must not take the per-group S1 literal; got ${JSON.stringify(halts)}`,
+  );
+  assert.ok(
+    halts.includes(`Invalid group 'null' — group must be English kebab-case, one level (no '/').`),
+    'gate 1 is still the halt that fires for a malformed group',
+  );
+});
+
+// FIX-3: the NUL key separator is alias-free. Boundary values chosen so a separator-LESS
+// `group+slug` join would collapse both entries to the same string `"abc"` and falsely halt:
+// group 'a' + slug 'bc' vs group 'ab' + slug 'c'. The real NUL join keys them `a<NUL>bc` vs
+// `ab<NUL>c` — DISTINCT ⇒ no duplicate. GREEN with the real impl; a no-separator mutant goes RED.
+test('#310 FIX-3: NUL key separator is alias-free — a|bc vs ab|c do not collide', () => {
+  const halts = validateGroups(
+    [
+      entry({ slug: 'bc', group: 'a', group_title: 'A' }),
+      entry({ slug: 'c', group: 'ab', group_title: 'AB' }),
+    ],
+    { perGroupSlugs: true },
+  );
+  assert.deepEqual(halts, []);
+});
+
 test('R2-F5: a padded-but-valid group_title converges against an existing heading (findContainer trims its own param)', () => {
   const result = findContainer(['## Admin', '- x'], '  Admin  ');
   assert.equal(result.kind, 'single');

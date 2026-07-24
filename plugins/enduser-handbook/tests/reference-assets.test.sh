@@ -1934,6 +1934,9 @@ has_in_section "manifest-discipline: #310 per-group uniqueness is opt-in and saf
 has_in_section "manifest-discipline: #310 same-group duplicate halt string is in the verbatim halt list" \
   "$MDISC" '### Manifest review — grouped and group-free halts' \
   'with publish.per_group_slug_uniqueness enabled, chapter slugs must be unique within each group'
+has_in_section "manifest-discipline: #310 opt-in scope is per-namespace, covering flat-vs-grouped too" \
+  "$MDISC" '### Manifest review — grouped and group-free halts' \
+  'flat-vs-grouped same-basename pairs'
 has "manifest-discipline: activation rule lists the 1.8.0 currentIndexExpectedTarget group-free exception (third)" \
   'one from 1.8.0: `currentIndexExpectedTarget`' "$MDISC"
 

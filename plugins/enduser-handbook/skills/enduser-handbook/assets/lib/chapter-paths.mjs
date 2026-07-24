@@ -333,7 +333,13 @@ function duplicateSlugHalts(entries, { groupFree, perGroupSlugs = false }) {
   // WITH a group (perGroupSlugs && a grouped entry); it drives the per-bucket literal choice below.
   const seen = new Map();
   for (const entry of entries) {
-    const keyedByGroup = perGroupSlugs && entry.group !== undefined;
+    // Key per-group ONLY for a WELL-FORMED group — the same format validator gate 1 uses
+    // (GROUP_PATTERN). A malformed group (a blank YAML `group:` ⇒ null, `group: ''`, a non-string,
+    // or any non-kebab value) falls back to the bare-slug (global) key, so it never renders a
+    // misleading "within group 'null'" literal and null/'' never alias onto the same `<NUL><slug>`
+    // bucket. Gate 1 is the sole halt for such a manifest — this predicate only decides which
+    // duplicate-scope key a malformed entry takes, never whether it is reported.
+    const keyedByGroup = perGroupSlugs && typeof entry.group === 'string' && GROUP_PATTERN.test(entry.group);
     const key = keyedByGroup ? [entry.group, entry.slug].join(NUL) : entry.slug;
     const record = seen.get(key);
     if (record === undefined) {
