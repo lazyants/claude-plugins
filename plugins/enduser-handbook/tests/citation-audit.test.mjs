@@ -170,3 +170,20 @@ test('synthetic: two headings sharing a title make a citation AMBIGUOUS, not sil
   assert.equal(recs[0].status, 'ambiguous', 'a title matched by 2+ headings must be flagged, never picked');
   assert.deepEqual(recs[0].matchLines, [1, 3]);
 });
+
+// Security review (2026-07-24): a long comma-joined run of quoted decoys with NO trailing direction
+// word is a doomed match that must backtrack all the way through CITATION_SPAN_RE's outer `+` — the
+// original `\s*(?:[,;:]|and\b)?\s*` separator (two adjacent `\s*`s sandwiching an optional middle
+// group) hit catastrophic backtracking here (verified: ~26 repeats already took 8+ seconds, growing
+// exponentially). The fix collapsed the separator into one quantified alternation,
+// `(?:[\s,;:]|\band\b)*` — this test pins BOTH the absence of a false match AND a tight time bound,
+// so a future "simplification" that reintroduces the adjacent-optional shape fails loudly instead of
+// silently reintroducing the hang.
+test('extractCitations does not catastrophically backtrack on a long undirected quoted-title run (ReDoS regression)', () => {
+  const decoyRun = '"a" '.repeat(2000) + 'end.';
+  const start = Date.now();
+  const recs = extractCitations(decoyRun);
+  const elapsed = Date.now() - start;
+  assert.deepEqual(recs, [], 'no trailing above/below means no citation span should match at all');
+  assert.ok(elapsed < 500, `expected well under 500ms, took ${elapsed}ms — possible ReDoS regression`);
+});

@@ -57,7 +57,15 @@ export const SKILL_ROOT = join(HERE, '../skills/enduser-handbook');
 // `matchAll` (walks every occurrence); `i` lets a sentence-initial "Above"/"Below" match (the
 // direction word is the only case-insensitive part; heading-title comparison stays case-sensitive
 // below).
-const CITATION_SPAN_RE = /(?:"[^"]*"\s*(?:[,;:]|and\b)?\s*)+(above|below)\b/gi;
+//
+// The separator between quoted titles is ONE quantified alternation, `(?:[\s,;:]|\band\b)*` — not
+// `\s*(?:[,;:]|and\b)?\s*` (two adjacent `\s*`s sandwiching an optional middle group). That
+// adjacent-optional-quantifier shape is a textbook ReDoS: a run of whitespace between two titles can
+// split across the two `\s*`s in multiple ways, and every extra repetition of the outer `+` doubles
+// the backtracking paths once the trailing `(above|below)` fails to match (security review,
+// verified empirically: a ~26-quoted-title run with no direction word hung for 8+ seconds and kept
+// climbing exponentially; the single-quantifier form below stays linear on the same input).
+const CITATION_SPAN_RE = /(?:"[^"]*"(?:[\s,;:]|\band\b)*)+(above|below)\b/gi;
 // Every quoted title inside a matched span. `g` is required by `matchAll`.
 const QUOTED_TITLE_RE = /"([^"]*)"/g;
 
