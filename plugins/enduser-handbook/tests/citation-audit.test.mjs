@@ -54,8 +54,8 @@ const EXPECTED_UNRESOLVED = [
   { file: 'references/publish-targets/static-md.md', offset: 12759, quotedText: 'Chapter path', direction: 'above' },
   { file: 'references/publish-targets/static-md.md', offset: 14812, quotedText: 'Grouped index wiring', direction: 'below' },
   { file: 'references/publish-targets/static-md.md', offset: 15179, quotedText: 'Chapter → index', direction: 'above' },
-  { file: 'references/publish-targets/static-md.md', offset: 17589, quotedText: 'Grouped index wiring', direction: 'below' },
-  { file: 'references/publish-targets/static-md.md', offset: 28995, quotedText: 'Grouped index wiring', direction: 'above' },
+  { file: 'references/publish-targets/static-md.md', offset: 18756, quotedText: 'Grouped index wiring', direction: 'below' },
+  { file: 'references/publish-targets/static-md.md', offset: 30162, quotedText: 'Grouped index wiring', direction: 'above' },
 ];
 
 // Per-occurrence key. offset alone is already unique; file/quotedText/direction are folded in so a
