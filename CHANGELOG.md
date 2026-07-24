@@ -12,6 +12,15 @@ Adds an optional `publish.vault_root` override for the Obsidian vault-root bindi
 
 ### Testing
 - `chapter-paths.test.mjs`: +9 tests — the four per-namespace scenarios (different-group OK / same-group halt / two-flat halt / flat-vs-grouped OK), a NUL-separator alias-freedom discriminator (adjacent-boundary values, red against a no-separator join), and a malformed-group guard (red against a loose `!== undefined` predicate). `profile-schema-evaluator.test.mjs`: +4 tests — `vault_root`/`per_group_slug_uniqueness` GREEN validation + RED type probes. `reference-assets.test.sh`: net +10 pins for the #298 override prose and the #310 per-namespace rationale (deltas — absolute totals are environment-dependent, see the 1.8.1 entry).
+## [enduser-handbook 1.8.4] — 2026-07-24
+
+Fixes a silent-pass gap in the reference-doc test harness's negative-assertion helper. Closes #302.
+
+### Fixed
+- **`hasnt_in_section` can't distinguish "needle absent" from "heading absent"** (#302) — `_section_contains` now returns a distinct exit code (2) when the queried heading itself is absent, separate from exit 1 (heading present, needle genuinely not found under it). `hasnt_in_section` dispatches on the three-way code, so a negative pin correctly hard-fails once its heading is renamed or deleted, instead of silently and permanently passing because both cases used to fold into one nonzero exit.
+
+### Testing
+- `reference-assets.test.sh`: +2 assertions (the absent-heading exit-code lock and the wrapper hard-fail lock), both watched red against the prior two-way engine before the fix. All 9 pre-existing `hasnt_in_section` self-tests plus the one real caller (`## Vault root`) reconfirmed unaffected.
 
 ## [enduser-handbook 1.8.3] — 2026-07-23
 
