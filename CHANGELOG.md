@@ -2,6 +2,22 @@
 
 All notable changes to `lazyants/claude-plugins` are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is per-plugin, not repo-wide.
 
+## [enduser-handbook 1.9.3] — 2026-07-24
+
+Adds a structural citation-direction lint and fixes two live wrong-direction citations it was built to catch. Closes #258.
+
+### Added
+- **Citation-direction lint** (#258) — `tests/citation-audit-lib.mjs` scans every reference doc + `SKILL.md` for a quoted-title citation immediately followed by an "above"/"below" direction word (deliberately verb-free — no "see" requirement — after three rounds of plan review each found a real citation form a verb-anchored pattern missed), reusing `assets/lib/md-structure.mjs`'s exported `maskFencedRegions` so a fenced-code false-positive is excluded by the one shared fence engine. Every occurrence carries its absolute character offset — a true per-occurrence identity — via a newline-offset table. `tests/citation-audit.test.mjs` asserts: a non-vacuity guard (nonzero citation count), a mechanically-enforced unresolved-citation allowlist keyed `{file, offset, quotedText, direction}` (exact match — a new unresolved citation, a stale entry that's since become resolvable, or a direction flip on an unresolved citation all fail loudly), a uniqueness guard (an ambiguous title matching 2+ headings never silently resolves), and a direction assertion over every resolved citation.
+
+### Fixed
+- **Two live wrong-direction citations** (#258) — `references/publish-targets/obsidian-vault.md`: `"Layout you produce"` said "below" (heading is above); the containment-check note's `"Glossary backlink discipline"` said "below" (heading is above). Both targeted, length-preserving single-occurrence edits — the same phrases are correctly directed elsewhere in the file.
+
+### Security
+- **ReDoS in the citation-matching regex, found and fixed pre-merge** — the original separator shape (`\s*(?:[,;:]|and\b)?\s*`, two adjacent unbounded quantifiers sandwiching an optional group) had exponential backtracking on an undirected run of quoted titles (verified: ~26 repeats took 8+ seconds). Not triggered by the shipped corpus, but a latent hang risk for a future doc edit. Fixed by collapsing the separator into one quantified alternation (`(?:[\s,;:]|\band\b)*`), verified polynomial-bounded (not exponential) up to 80,000 repeats; regression test pins both the non-match and a tight time bound.
+
+### Testing
+- New `tests/citation-audit.test.mjs`: 11 cases (non-vacuity, allowlist exactness, uniqueness, direction assertion over 31 resolved citations, 6 synthetic fixtures including a same-line/same-title/opposite-direction pair and the ReDoS regression lock). Full suite: +2 assertions (module discovery + the node:test run).
+
 ## [enduser-handbook 1.9.2] — 2026-07-24
 
 Documentation-only follow-ups: makes the path-mode `.md` byte-identity in `locateChapterLine` an explicitly intentional design (#311) and the omission of the link formula from `revalidation.md`'s boundary-trigger note deliberate (#260). No behavior change. Closes #311. Closes #260.
