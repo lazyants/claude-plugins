@@ -1186,8 +1186,11 @@ export function extractLabel(content) {
  * §5.1 plain-label allowlist (R5-1→R6-1) — the positive whitelist that replaced the receding
  * markup denylist. `s` is ALREADY TRIMMED by the caller. A label/title is "plain" (its rendered
  * form equals its literal form, so a literal match equals a rendered match) iff ALL hold:
- * - no inline-active char: none of `\ * _ < > & ~ [ ] !` (backtick/comment/fence already refused
- *   upstream by the inert-identity guard);
+ * - no inline-active char: none of `` \ * _ < > & ~ [ ] ! ` `` (the backtick is included here
+ *   because it opens a code span in RENDERED markdown — the inert-identity guard upstream only
+ *   refuses a backtick already present in the INDEX FILE body via stripInertContexts, and has no
+ *   reach over a manifest-supplied group_title, which never passes through that sanitizer; this
+ *   allowlist is what refuses a backtick- (or `<`/`~`-) bearing group_title on ITS side, R2);
  * - no leading block trigger: not a leading ATX heading (`# `), not a leading list marker
  *   (`- `/`+ `/`1. `/`1) `; `*`/`>` already caught by the inline-active char rule);
  * - no whitespace-collapse or tab (HTML folds a run of spaces/tabs to one, so `A  B` and `A B`
@@ -1199,7 +1202,7 @@ export function extractLabel(content) {
  * @returns {boolean}
  */
 export function isPlainLabel(s) {
-  if (/[\\*_<>&~[\]!]/.test(s)) return false;
+  if (/[\\*_<>&~[\]!`]/.test(s)) return false;
   if (/^#{1,6}(\s|$)/.test(s)) return false;
   if (/^([-+]|\d+[.)])(\s|$)/.test(s)) return false;
   if (/[ \t]{2,}/.test(s)) return false;

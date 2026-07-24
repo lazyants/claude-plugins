@@ -977,6 +977,18 @@ test('not-a-list, inert-identity guard [isolating]: a code-span container label 
   assert.equal(result.kind, 'not-a-list');
 });
 
+test('not-a-list, plain-label allowlist / group_title side, backtick [R2 regression]: a code-span-wrapped manifest group_title ("`Admin`") is refused, never emitted as a duplicate container', () => {
+  // The inert-identity guard above only refuses a backtick already present in the INDEX FILE body —
+  // it has no reach over a manifest-supplied group_title, which never passes through stripInertContexts.
+  // isPlainLabel is the ONLY guard standing between a backtick-bearing group_title and a false ZERO
+  // create: WITHOUT the backtick in its denylist, '`Admin`'.trim() would pass isPlainLabel, never equal
+  // the existing plain "Admin" label, and ZERO would CREATE a second "- `Admin`" container that renders
+  // as a code-styled duplicate of "- Admin".
+  const indexLines = ['- Admin'];
+  const result = wireNestedListChapter(indexLines, '`Admin`', '[Items](admin/items.md)');
+  assert.equal(result.kind, 'not-a-list');
+});
+
 test('not-a-list, plain-label allowlist / existing-label side [isolating]: an emphasis-wrapped container label is refused, not silently unwrapped', () => {
   // WITH the allowlist: refused. WITHOUT it: extractLabel legitimately returns "**Admin**" verbatim
   // (emphasis is not link/wikilink syntax it unwraps), which never equals "Admin" -> ZERO CREATES a
@@ -1272,6 +1284,8 @@ test('isPlainLabel: every inline-active char / leading block trigger / whitespac
   assert.equal(isPlainLabel('![x]'), false, 'image bang+bracket');
   assert.equal(isPlainLabel('~x~'), false, 'strikethrough tilde');
   assert.equal(isPlainLabel('a_b_'), false, 'underscore anywhere is rejected, not just a flanking pair');
+  assert.equal(isPlainLabel('`Admin`'), false, 'backtick code-span delimiter (R2 regression)');
+  assert.equal(isPlainLabel('Admin'), true, 'a normal plain label with no backtick stays accepted');
 });
 
 test('public match: an allowlist-clean whole-content link matches its groupTitle through the public wireNestedListChapter API', () => {
