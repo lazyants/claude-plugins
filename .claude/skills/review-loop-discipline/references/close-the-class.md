@@ -10,6 +10,7 @@ When an adversarial reviewer returns ~1 finding/round that is a new INSTANCE of 
 - [Algorithm-internal dedup: a "claimed" bitmap is the tell](#algorithm-internal-dedup)
 - [Swapping a core data structure drops implicit behaviors](#swapping-a-core-data-structure)
 - [Symbolic refs, not line numbers](#symbolic-refs-not-line-numbers)
+- [Fixing catastrophic backtracking is not fixing complexity](#fixing-catastrophic-backtracking-is-not-fixing-complexity)
 
 ## Enumerate the set + state the invariant
 
@@ -76,3 +77,25 @@ Same shape recurred four other ways in that branch: a category named with fewer 
 list one behind the directory it mirrors, and a rules table blind to statement-level mutants.
 **Enumerations of outcomes are fragile; mechanisms generate.** When the set is generated, ship the
 generator and state that the conditions are independent.
+
+## Fixing catastrophic backtracking is not fixing complexity
+
+A reviewer's ReDoS finding names the regex's internal ambiguity (e.g. two adjacent optional
+quantifiers) as the root cause; fixing THAT ambiguity only proves the exponential case is gone — it
+says nothing about the surrounding MATCH STRATEGY. If that strategy retries one monolithic
+pattern at every candidate start position (`matchAll` over a "one-or-more-X-then-Y" regex), removing
+the exponential blowup commonly still leaves it quadratic, and a reviewer that already found one
+perf bug in a matcher will look harder at the fix, not less — expect (and pre-empt) a second finding
+on the very next round. Verified 2026-07-24 (enduser-handbook `citation-audit-lib.mjs`, #258): an
+adjacent-`\s*` separator was genuinely exponential (~26 repeats hung 8+s), fixed by collapsing it to
+one quantified alternation and confirmed clean by two independent reviewers — then the NEXT review
+round found the outer retry-from-every-position shape was still O(n²) (29ms→1.64s from 2k→16k
+titles). Closing the class required abandoning the single-regex-retried-everywhere approach for a
+genuine single forward pass (find every candidate unit once; group adjacent units into chains once;
+check the terminating condition once per chain, never per interior position) — provably lossless
+here because any position where the terminator legitimately could appear would already have stopped
+chain growth there, so no shorter internal sub-chain is ever missed. After any backtracking fix,
+benchmark ACTUAL scaling across at least two widely-separated sizes (not just re-running the
+original repro at the size that made it hang) before calling the finding closed — "no longer
+exponential" and "linear" are different claims, and only a scaling ratio (not a single absolute
+timing) distinguishes them.

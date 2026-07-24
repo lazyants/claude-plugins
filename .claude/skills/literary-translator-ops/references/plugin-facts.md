@@ -84,6 +84,32 @@ two traps, both caught by codex-rescue, not by manual review:
   string literals), and always print/diff the final compiled `.pattern` against a few known cases
   before trusting the source formatting.
 
+**Elision handling — the tokenizer SPLITS an elided article so the name behind it survives** (verified
+against v1.15.2; the plugin's own `references/gotchas.md` carries the `french-elision-tokenizer-miss`
+lesson, cited in `bootstrap_names.py`'s `tokenize` docstring). A capitalized-run extractor over
+French/Romance text otherwise SILENTLY drops any name behind a lowercase elided article: a continuation
+class that includes the apostrophe fuses `d'Effiat` into ONE token whose lowercase initial `d` makes
+`is_upper_initial()` reject it, so `Effiat` NEVER surfaces as a candidate — a TOTAL, corpus-wide, silent
+miss for that whole name (every elided occurrence fails identically), not a probabilistic under-count.
+The plugin guards it: `tokenize(text, elision_re)` matches each raw token against the language's own
+`ELISION_RE` — a per-language, exactly-2-capture-group regex loaded from the
+`languages/<particle_config>` file (group 1 = article remnant, group 2 = name-initial remainder; NO
+hardcoded `[dDlL]`, so `fr.json`/`it.json` share the mechanism, gated by a `has_elision` bool) — and
+emits the two pieces as SEPARATE tokens each with its own recomputed span, so the remainder passes
+`is_upper_initial()` and starts its own run.
+
+- **Two DIFFERENT elision mechanisms — don't conflate them.** (1) The tokenizer's hard SPLIT above fires
+  only for a LOWERCASE article (`d'Effiat`), unambiguously an elided article — `ELISION_RE`'s article
+  group is lowercase-only, so a CAPITAL-article surface (`D'Artagnan`, `L'Enclos`) stays FUSED and passes
+  the upper gate on its own. (2) For those capital-article forms `bootstrap_names.py` layers a
+  DETECTION-ONLY flag (`elision_ambiguous: true` + `elision_stripped_form`, issue #91) when the stripped
+  remainder is itself another candidate row — genuinely ambiguous (fixed compound `D'Artagnan` vs elided
+  article + a known name), so per THE IRON RULE it only surfaces the ambiguity for the glossary
+  adjudicator and NEVER auto-splits. When touching either extractor copy, preserve BOTH; regression-test
+  with synthetic `d'X`/`l'X`/`qu'X` sentences (the split must fire ONLY on true elision, not on
+  contractions `J'ai`/`C'est`, which stay capitalized and are caught separately). Generalizes to ANY
+  Romance-language (`l'`, `qu'`) elision extractor.
+
 ## THE IRON RULE (enforced plugin-wide)
 
 Scripts **surface candidates and enforce schemas; they NEVER make an accuracy/identity call.** "Are
