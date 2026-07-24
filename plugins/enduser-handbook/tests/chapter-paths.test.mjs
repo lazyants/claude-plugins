@@ -26,6 +26,9 @@ import {
   currentIndexExpectedTarget,
   classifyChapterWiring,
   findContainer,
+  wireNestedListChapter,
+  extractLabel,
+  isPlainLabel,
   groupChanges,
   manualMigrationChecklist,
   renderManualMigrationHalt,
@@ -396,7 +399,12 @@ test('F1: findContainer classifies a mkdocs.yml-shaped YAML comment as non-headi
 
 test('F1: findContainer classifies a GitBook "# Summary" + nested-list file as non-heading, never headings-form', () => {
   // A GitBook SUMMARY.md: one H1 document title, then nested bullet lists — no real '##' group
-  // containers anywhere, so this must stay manual-wiring territory, not silently automated.
+  // containers anywhere, so findContainer ITSELF is unchanged and still classifies this shape as
+  // non-heading (never headings-form). [#223, 1.10.0] that verdict is no longer manual-wiring's
+  // final word for a shape like this one: the adapter falls through to wireNestedListChapter,
+  // which DOES auto-wire this exact bounded plain-label nested-list subset — see the
+  // wireNestedListChapter suite below for the write-side behavior findContainer itself never
+  // attempts (it only classifies; it never mutates the index).
   const indexLines = [
     '# Summary',
     '',
@@ -846,6 +854,476 @@ test('R7-F1 wrong-container fixture: the line exists but under the WRONG contain
   assert.equal(result.present, true);
   assert.equal(result.containerTitle, 'Billing');
   assert.notEqual(result.containerTitle, 'Admin', 'must not be treated as complete under the wrong container');
+});
+
+// =================================================================================================
+// #223 [1.10.0] — wireNestedListChapter (nested-list / GitBook SUMMARY.md write automation)
+// =================================================================================================
+// Reached only when findContainer(...) returned {kind:'non-heading'} AND step 0 found no existing
+// chapter line (plan §4/§5). Fixtures below drive the real ABSENT-line write outcomes (SINGLE / ZERO
+// / MULTIPLE) or prove a specific §5.1 guard refuses ('not-a-list') — grouped to mirror the plan's
+// own guard inventory (§8/§9.1) so a fixture maps back to the guard it isolates. Distinct group
+// titles/markers/indents are used throughout (never all 'Admin'/2-space) so a constant-hardcoding
+// mutant cannot hide behind a repeated fixture shape (round-13 discipline).
+
+// -------------------------------------------------------------------------------------------------
+// SINGLE / ZERO / MULTIPLE — the three real write outcomes
+// -------------------------------------------------------------------------------------------------
+
+test('wireNestedListChapter SINGLE w/children: child inserted after the LAST C-indent child, container marker reused (3-space C kills a hardcode-indent-2 mutant)', () => {
+  const indexLines = [
+    '# Summary',
+    '',
+    '* Introduction',
+    '* Admin',
+    '   * [Orders](admin/orders.md)',
+    '   * [Billing](admin/billing.md)',
+    '* Other',
+    '',
+  ];
+  const result = wireNestedListChapter(indexLines, 'Admin', '[Items](admin/items.md)');
+  assert.equal(result.kind, 'inserted');
+  assert.equal(result.created, false, 'the existing "Admin" container is reused, not re-created');
+  assert.deepEqual(result.newLines, [
+    '# Summary',
+    '',
+    '* Introduction',
+    '* Admin',
+    '   * [Orders](admin/orders.md)',
+    '   * [Billing](admin/billing.md)',
+    '   * [Items](admin/items.md)',
+    '* Other',
+    '',
+  ]);
+});
+
+test('wireNestedListChapter SINGLE w/children, DIVERGENT container/child markers: the inserted child reuses the EXISTING CHILD marker, not the container marker (R1 regression catcher)', () => {
+  // The container is "+"-marked but its existing child is "-"-marked — the validator's own forward
+  // pass tracks only child INDENT (chapter-paths.mjs's childIndentSeen), never child MARKER, so this
+  // shape is accepted. If the insertion reused containerMarker ("+") here, the new line would carry a
+  // DIFFERENT marker than its sibling "- [Orders]…" -> CommonMark starts a fresh list block at the
+  // marker change, silently splitting the sublist instead of appending to it.
+  const indexLines = ['+ Admin', '  - [Orders](admin/orders.md)'];
+  const result = wireNestedListChapter(indexLines, 'Admin', '[Items](admin/items.md)');
+  assert.equal(result.kind, 'inserted');
+  assert.equal(result.created, false);
+  assert.deepEqual(result.newLines, ['+ Admin', '  - [Orders](admin/orders.md)', '  - [Items](admin/items.md)']);
+});
+
+test('wireNestedListChapter SINGLE, first-ever child: with NO existing child bullet, the inserted child falls back to the CONTAINER marker ("?? containerMarker" branch)', () => {
+  const indexLines = ['* Admin'];
+  const result = wireNestedListChapter(indexLines, 'Admin', '[Items](admin/items.md)');
+  assert.equal(result.kind, 'inserted');
+  assert.equal(result.created, false);
+  assert.deepEqual(result.newLines, ['* Admin', '  * [Items](admin/items.md)']);
+});
+
+test('wireNestedListChapter SINGLE no-children: child inserted immediately under the container at the default C=2 (no child bullet anywhere in the file)', () => {
+  const indexLines = ['# Summary', '', '- Introduction', '- Admin', '- Other'];
+  const result = wireNestedListChapter(indexLines, 'Admin', '[Items](admin/items.md)');
+  assert.equal(result.kind, 'inserted');
+  assert.equal(result.created, false);
+  assert.deepEqual(result.newLines, [
+    '# Summary',
+    '',
+    '- Introduction',
+    '- Admin',
+    '  - [Items](admin/items.md)',
+    '- Other',
+  ]);
+});
+
+test('wireNestedListChapter ZERO (create): bare-label container + child spliced after the LAST bullet line, file ends with the list (no trailing prose)', () => {
+  const indexLines = ['# Summary', '', '* Introduction', '* Billing'];
+  const result = wireNestedListChapter(indexLines, 'Admin', '[Items](admin/items.md)');
+  assert.equal(result.kind, 'inserted');
+  assert.equal(result.created, true);
+  assert.deepEqual(result.newLines, [
+    '# Summary',
+    '',
+    '* Introduction',
+    '* Billing',
+    '* Admin',
+    '  * [Items](admin/items.md)',
+  ]);
+});
+
+test('wireNestedListChapter MULTIPLE: THREE indent-0 bullets sharing the same label all count (kills a matches.length===2 mutant)', () => {
+  const indexLines = ['- Ops', '- Billing', '- Ops', '- Support', '- Ops'];
+  const result = wireNestedListChapter(indexLines, 'Ops', '[Runbook](ops/runbook.md)');
+  assert.equal(result.kind, 'multiple');
+  assert.deepEqual(result.matches, [
+    { index: 0, label: 'Ops' },
+    { index: 2, label: 'Ops' },
+    { index: 4, label: 'Ops' },
+  ]);
+});
+
+// -------------------------------------------------------------------------------------------------
+// Rule-isolating not-a-list fixtures — each passes every OTHER guard, fails ONLY the one under test
+// (removing that guard alone flips the fixture to wrongly 'inserted'). Verified by hand against the
+// real chapter-paths.mjs: apply the named guard-removal mutation, confirm RED, restore, confirm
+// git diff --stat is pristine before the next mutation — see the red-before-green log in the report.
+// -------------------------------------------------------------------------------------------------
+
+test('not-a-list, inert-identity guard [isolating]: a code-span container label ("`Admin`") is refused rather than silently treated as raw', () => {
+  // WITH the guard: refused outright (BODY must equal its raw form). WITHOUT it: BODY would equal
+  // SAN's blanked view for classification purposes while insertion still used the raw line, so the
+  // label "`Admin`" (with backticks) would never equal "Admin" -> ZERO would CREATE a duplicate
+  // "- Admin" beside the code-span one. That flip (not-a-list -> inserted) is what makes this
+  // fixture genuinely isolating, unlike the multiline-comment mask-pair below.
+  const indexLines = ['- `Admin`'];
+  const result = wireNestedListChapter(indexLines, 'Admin', '[Items](admin/items.md)');
+  assert.equal(result.kind, 'not-a-list');
+});
+
+test('not-a-list, plain-label allowlist / group_title side, backtick [R2 regression]: a code-span-wrapped manifest group_title ("`Admin`") is refused, never emitted as a duplicate container', () => {
+  // The inert-identity guard above only refuses a backtick already present in the INDEX FILE body —
+  // it has no reach over a manifest-supplied group_title, which never passes through stripInertContexts.
+  // isPlainLabel is the ONLY guard standing between a backtick-bearing group_title and a false ZERO
+  // create: WITHOUT the backtick in its denylist, '`Admin`'.trim() would pass isPlainLabel, never equal
+  // the existing plain "Admin" label, and ZERO would CREATE a second "- `Admin`" container that renders
+  // as a code-styled duplicate of "- Admin".
+  const indexLines = ['- Admin'];
+  const result = wireNestedListChapter(indexLines, '`Admin`', '[Items](admin/items.md)');
+  assert.equal(result.kind, 'not-a-list');
+});
+
+test('not-a-list, plain-label allowlist / existing-label side [isolating]: an emphasis-wrapped container label is refused, not silently unwrapped', () => {
+  // WITH the allowlist: refused. WITHOUT it: extractLabel legitimately returns "**Admin**" verbatim
+  // (emphasis is not link/wikilink syntax it unwraps), which never equals "Admin" -> ZERO CREATES a
+  // duplicate "- Admin" that renders as a second, DIFFERENTLY-STYLED "Admin" container.
+  const indexLines = ['- [**Admin**](admin/index.md)'];
+  const result = wireNestedListChapter(indexLines, 'Admin', '[Items](admin/items.md)');
+  assert.equal(result.kind, 'not-a-list');
+});
+
+test('not-a-list, plain-label allowlist / existing-label side, SAME guard, further char-class variants (raw escape, entity, reference link, strikethrough, image)', () => {
+  const variants = ['- Admin\\!', '- A &amp; B', '- [x][ref]', '- ~~Admin~~', '- ![x](y)'];
+  for (const line of variants) {
+    const result = wireNestedListChapter([line], 'Admin', '[Items](admin/items.md)');
+    assert.equal(result.kind, 'not-a-list', `expected not-a-list for ${JSON.stringify(line)}`);
+  }
+});
+
+test('not-a-list, plain-label allowlist / group_title side [isolating]: a construct-bearing group_title is refused, never emitted', () => {
+  // WITH the allowlist: refused (checked BEFORE the forward pass even starts, independent of file
+  // content). WITHOUT it: ZERO would emit "- **Admin**" as a new container, a rendered duplicate of
+  // the plain "- Admin" already present.
+  const indexLines = ['- Admin', '- Billing'];
+  const result = wireNestedListChapter(indexLines, '**Admin**', '[Items](admin/items.md)');
+  assert.equal(result.kind, 'not-a-list');
+});
+
+test('not-a-list, plain-label allowlist / leading ATX block-trigger [isolating]: "- # Admin" is refused (renders <h1>Admin</h1>, not a plain label)', () => {
+  const indexLines = ['- # Admin'];
+  const result = wireNestedListChapter(indexLines, 'Admin', '[Items](admin/items.md)');
+  assert.equal(result.kind, 'not-a-list');
+});
+
+test('not-a-list, plain-label allowlist / leading nested list-marker [isolating]: "- 1. Intro" is refused', () => {
+  const indexLines = ['- 1. Intro'];
+  const result = wireNestedListChapter(indexLines, 'Intro', '[Items](admin/items.md)');
+  assert.equal(result.kind, 'not-a-list');
+});
+
+test('not-a-list, plain-label allowlist / whitespace-collapse [isolating]: "A  B" (double interior space) is refused even against a groupTitle already collapsed to "A B"', () => {
+  // WITHOUT the [ \t]{2,} check, "A  B" and "A B" render-collide in HTML though their source
+  // differs, which would let a raw double-space label falsely match/duplicate a single-space title.
+  const indexLines = ['- A  B'];
+  const result = wireNestedListChapter(indexLines, 'A B', '[Items](admin/items.md)');
+  assert.equal(result.kind, 'not-a-list');
+});
+
+test('not-a-list, thematic break at a CHILD indent [isolating]: a 4-space "- - -" (<hr> inside the item) is excluded, not accepted as a child', () => {
+  // WITH the trimmed step-2 guard (any indent): refused. WITHOUT it (reverting to the old {0,3}-
+  // leading-space form): the 4-space line matches the bullet regex, passes the 2..4 C-cap, and is
+  // wrongly accepted as a real child of "Admin" -> inserted. A CHILD bullet's content never goes
+  // through isPlainLabel (only indent-0 candidates do), so no other guard backstops this one.
+  const indexLines = ['- Admin', '    - - -'];
+  const result = wireNestedListChapter(indexLines, 'Admin', '[Items](admin/items.md)');
+  assert.equal(result.kind, 'not-a-list');
+});
+
+test('not-a-list, thematic break at the root: "- - -" alone is excluded (double-guarded — also fails the label leading-marker rule, so this is a defensive rejection test, not a single-guard isolator)', () => {
+  const indexLines = ['- - -'];
+  const result = wireNestedListChapter(indexLines, 'Admin', '[Items](admin/items.md)');
+  assert.equal(result.kind, 'not-a-list');
+});
+
+test('not-a-list, true single-space marker / 3-space padding [isolating]: "-   Admin" is refused as FOREIGN, not accepted with a trimmed label', () => {
+  // WITHOUT the (?![ \t]) lookahead (old form with no space enforcement): the line matches with
+  // content "  Admin", and parseNestedLabel trims it right back down to "Admin" — silently masking
+  // the malformed marker spacing and misplacing the content column.
+  const indexLines = ['-   Admin'];
+  const result = wireNestedListChapter(indexLines, 'Admin', '[Items](admin/items.md)');
+  assert.equal(result.kind, 'not-a-list');
+});
+
+test('not-a-list, true single-space marker / space+tab [isolating, R6-2]: "- \\tAdmin" is refused — closes the gap an earlier (?! ) (space-only) lookahead left open for a following TAB', () => {
+  const indexLines = ['- \tAdmin'];
+  const result = wireNestedListChapter(indexLines, 'Admin', '[Items](admin/items.md)');
+  assert.equal(result.kind, 'not-a-list');
+});
+
+test('not-a-list, C-cap [isolating]: a 6-space "child" is a CommonMark indented-code line, not a real child', () => {
+  // WITHOUT the 2..4 cap: childIndentSeen=6 is accepted, and the new child is spliced in at the SAME
+  // 6-space indent — which CommonMark would render as an indented code block, not a list item.
+  const indexLines = ['- Admin', '', '      - child'];
+  const result = wireNestedListChapter(indexLines, 'Admin', '[Items](admin/items.md)');
+  assert.equal(result.kind, 'not-a-list');
+});
+
+test('not-a-list, heading-reset / orphan-after-reset [isolating, R3-7]: a child after a depth-1 heading reset is an orphan, not still under the earlier container', () => {
+  // WITHOUT the currentContainer=null reset on an ATX heading (or the orphan-child check that
+  // consults it): the child would be silently accepted and resolved under "Admin" anyway — this is
+  // the fixture that genuinely isolates the orphan-child guard (see the report note: a bare
+  // orphan-child-before-any-top-bullet fixture is masked by the separate !sawTop guard, since there
+  // is no other way in this grammar to reach "sawTop=true, currentContainer=null" except via a
+  // heading reset).
+  const indexLines = ['# Summary', '- Admin', '# Other', '  - child'];
+  const result = wireNestedListChapter(indexLines, 'Admin', '[Items](admin/items.md)');
+  assert.equal(result.kind, 'not-a-list');
+});
+
+test('not-a-list, orphan child before any top bullet (masked by !sawTop) [rejection, not independently isolating]: a document that opens directly with a child bullet has no container to attach to', () => {
+  // In this grammar sawTop only ever becomes true AT the same moment currentContainer is set (an
+  // indent-0 bullet), so a child appearing before ANY top-level bullet is caught by the orphan
+  // check, but removing ONLY that check would still leave the file rejected by the separate
+  // !sawTop guard below (sawTop never becomes true here either). Kept as a plain rejection proof,
+  // like the mask-pairs — true isolation of the orphan-child branch is the heading-reset fixture above.
+  const indexLines = ['  - child'];
+  const result = wireNestedListChapter(indexLines, 'Admin', '[Items](admin/items.md)');
+  assert.equal(result.kind, 'not-a-list');
+});
+
+test('not-a-list, bare-path guard [isolating, §5.7]: a "*"/"+"-marked bare (non-link) path row is refused, never silently left as a duplicate-risk phantom', () => {
+  // step-0's bare-row fallback strips only "-", so "* admin/items.md" is invisible to it. WITH the
+  // guard: refused outright. WITHOUT it: the row would parse as a normal plain-label indent-0
+  // bullet ("admin/items.md" contains no denylisted char) that simply fails to match "Admin" -> the
+  // real "Admin" container gets a new child spliced under it while this untouched phantom row stays
+  // right where it was — a duplicate reference to the same real target step-0 can never see.
+  const indexLines = ['- Admin', '* admin/items.md'];
+  const result = wireNestedListChapter(indexLines, 'Admin', '[Items](admin/items.md)');
+  assert.equal(result.kind, 'not-a-list');
+});
+
+test('not-a-list, args guard [isolating, groupTitle side]: a groupTitle carrying an embedded newline is refused, never spliced in as a foreign physical line', () => {
+  const indexLines = ['- Admin'];
+  const result = wireNestedListChapter(indexLines, 'Admin\nRogue Line', '[Items](admin/items.md)');
+  assert.equal(result.kind, 'not-a-list');
+});
+
+test('not-a-list, args guard [isolating, chapterLink side]: a chapterLink carrying an embedded newline is refused too', () => {
+  const indexLines = ['- Admin'];
+  const result = wireNestedListChapter(indexLines, 'Admin', '[Items](admin/items.md)\nRogue Line');
+  assert.equal(result.kind, 'not-a-list');
+});
+
+test('not-a-list, YAML guard [isolating]: "- Admin: path" (a mapping bullet) is refused even though it would ALSO pass the plain-bullet regex and label allowlist', () => {
+  // This is what makes the fixture genuinely isolating (unlike a real "nav:" line, which fails the
+  // bullet regex outright and is masked by step 6): "Admin: path" itself is a PLAIN label (":" is
+  // allowed) — WITHOUT hasYamlMappingStructure's immediate guard, this line would be silently
+  // accepted as an ordinary indent-0 bullet.
+  const indexLines = ['- Admin: path'];
+  const result = wireNestedListChapter(indexLines, 'Admin', '[Items](admin/items.md)');
+  assert.equal(result.kind, 'not-a-list');
+});
+
+test('not-a-list, !sawTop [isolating]: a heading + blank lines only, never a real bullet, is refused rather than falling into a bogus create', () => {
+  // ATX headings are ALLOWED lines (never step-6 foreign) — so WITHOUT the trailing !sawTop check,
+  // this file would fall straight through to the ZERO-create branch with firstTopMarker still null,
+  // producing a broken "null Admin" container line.
+  const indexLines = ['# Summary', '', ''];
+  const result = wireNestedListChapter(indexLines, 'Admin', '[Items](admin/items.md)');
+  assert.equal(result.kind, 'not-a-list');
+});
+
+test('not-a-list, inconsistent child indent [isolating]: a second, DIFFERENT child indent under the same container is refused', () => {
+  const indexLines = ['- Admin', '  - first', '   - second'];
+  const result = wireNestedListChapter(indexLines, 'Admin', '[Items](admin/items.md)');
+  assert.equal(result.kind, 'not-a-list');
+});
+
+test('not-a-list, foreign content [rejection, step 6]: a table row or a tab-prefixed line before an otherwise-clean list is refused', () => {
+  assert.equal(wireNestedListChapter(['| A | B |', '- Admin'], 'Admin', '[Items](admin/items.md)').kind, 'not-a-list');
+  assert.equal(wireNestedListChapter(['\tAdmin', '- Billing'], 'Billing', '[Items](admin/items.md)').kind, 'not-a-list');
+});
+
+// -------------------------------------------------------------------------------------------------
+// Non-isolable mask-pairs (R3-7/R4-7) — test REJECTION, not isolation: step 6's foreign-content
+// fallback backstops each of these, so removing the NAMED earlier guard alone does not flip the
+// fixture to 'inserted' (a genuine remove-guard-flips-green isolation is impossible here).
+// -------------------------------------------------------------------------------------------------
+
+test('not-a-list, mask-pair: a stray "---" line is refused by step 2 (thematic break) AND, independently, would still fail the bullet regex at step 6', () => {
+  const indexLines = ['- Admin', '---'];
+  const result = wireNestedListChapter(indexLines, 'Admin', '[Items](admin/items.md)');
+  assert.equal(result.kind, 'not-a-list');
+});
+
+test('not-a-list, mask-pair: a "1. Ordered" row is refused by step 3 (ordered marker) AND, independently, would still fail the bullet regex at step 6', () => {
+  const indexLines = ['- Admin', '1. Ordered'];
+  const result = wireNestedListChapter(indexLines, 'Admin', '[Items](admin/items.md)');
+  assert.equal(result.kind, 'not-a-list');
+});
+
+test('not-a-list, mask-pair [R4-7]: a multiline HTML comment ("- Admin <!--" / "-->" / "- Other") is refused by the inert-identity guard AND, independently, its "-->" line would still be foreign at step 6', () => {
+  // Unlike the isolating "`Admin`" fixture above, removing the identity guard here does NOT flip
+  // this to 'inserted': the raw "-->" line fails the bullet/heading/thematic/ordered shapes on its
+  // own, so step 6 rejects it regardless of the identity guard's presence.
+  const indexLines = ['- Admin <!--', '-->', '- Other'];
+  const result = wireNestedListChapter(indexLines, 'Admin', '[Items](admin/items.md)');
+  assert.equal(result.kind, 'not-a-list');
+});
+
+test('not-a-list, mask-pair: a file mixing a CRLF-terminated line with a bare-LF-terminated line is refused by the mixed-EOL guard AND, independently, backstopped by the inert-identity guard', () => {
+  // Empirically verified (not just argued): '- Admin\r' + '' + '' joins to '- Admin\r\n\n' — one
+  // real CRLF boundary, then one bare LF. Removing JUST the mixed-EOL check does NOT flip this to
+  // 'inserted' — the wrong EOL ('\r\n') splits the trailing bare '\n' into ITS OWN logical element
+  // (a one-character string containing a literal '\n', not an empty string), and that embedded raw
+  // newline desyncs the identity guard's own join('\n')/split('\n') round-trip (fm.join('\n') folds
+  // the element's OWN '\n' together with the join separator, so splitting it back yields MORE
+  // elements than fm has) — SAN[i] !== fm[i] fires independently. This is structural, not specific
+  // to this fixture: any wrong-EOL split that leaves a bare LF embedded inside a logical element
+  // will always desync that round-trip, so the mixed-EOL guard can never be independently isolated
+  // from the inert-identity guard by ANY fixture of this shape.
+  const indexLines = ['- Admin\r', '', ''];
+  const result = wireNestedListChapter(indexLines, 'Admin', '[Items](admin/items.md)');
+  assert.equal(result.kind, 'not-a-list');
+});
+
+// -------------------------------------------------------------------------------------------------
+// Positive-accept fixtures — guard against over-rejection (a mutant that is TOO strict must also fail)
+// -------------------------------------------------------------------------------------------------
+
+test('positive-accept: closed frontmatter with an interior block-scalar "  ---" plus a real column-0 "---" closer is accepted, and the raw frontmatter survives untouched in the output', () => {
+  // A mutant reverting to the module's trimmed '.trim()===\'---\'' closer test would mis-read the
+  // INDENTED block-scalar line as the closer (falsely rejecting a clean file) — the real, robust
+  // closer is an EXACT, untrimmed column-0 equality check that only the true closer (line index 4)
+  // satisfies.
+  const indexLines = ['---', 'description: |', '  ---', '  more scalar text', '---', '', '- Admin'];
+  const result = wireNestedListChapter(indexLines, 'Admin', '[Items](admin/items.md)');
+  assert.equal(result.kind, 'inserted');
+  assert.deepEqual(result.newLines, [
+    '---',
+    'description: |',
+    '  ---',
+    '  more scalar text',
+    '---',
+    '',
+    '- Admin',
+    '  - [Items](admin/items.md)',
+  ]);
+});
+
+test('positive-accept: a CRLF file with NO terminal newline round-trips exactly — interior \\r\\n preserved, no trailing bare \\r (mutant: a per-element \\r patch would corrupt this)', () => {
+  const indexLines = ['- Admin\r', '- Billing'];
+  const result = wireNestedListChapter(indexLines, 'Billing', '[Items](billing/items.md)');
+  assert.equal(result.kind, 'inserted');
+  assert.deepEqual(result.newLines, ['- Admin\r', '- Billing\r', '  - [Items](billing/items.md)']);
+  assert.equal(result.newLines.join('\n'), '- Admin\r\n- Billing\r\n  - [Items](billing/items.md)');
+  assert.ok(
+    !result.newLines[result.newLines.length - 1].endsWith('\r'),
+    'the final (non-terminated) line must not gain a trailing bare \\r',
+  );
+});
+
+test('positive-accept, padded group_title on CREATE [R4-4]: the emitted container is the exactly-trimmed label, never the raw padded value', () => {
+  const indexLines = ['- Intro'];
+  const result = wireNestedListChapter(indexLines, '  Admin  ', '[Items](admin/items.md)');
+  assert.equal(result.kind, 'inserted');
+  assert.equal(result.created, true);
+  assert.deepEqual(result.newLines, ['- Intro', '- Admin', '  - [Items](admin/items.md)']);
+});
+
+test('positive-accept: a padded group_title also converges against an EXISTING plain container (trimmed match, not just trimmed create)', () => {
+  const indexLines = ['- Admin'];
+  const result = wireNestedListChapter(indexLines, '  Admin  ', '[Items](admin/items.md)');
+  assert.equal(result.kind, 'inserted');
+  assert.equal(result.created, false, 'must match the existing container, not create a duplicate');
+});
+
+// -------------------------------------------------------------------------------------------------
+// extractLabel / isPlainLabel — DIRECT unit tests (exported per R5-4). String literals below use
+// DOUBLED backslashes so a real Markdown backslash-escape survives into the JS string value being
+// tested (a single backslash in the .mjs source literal is a JS escape, not a Markdown one).
+// -------------------------------------------------------------------------------------------------
+
+test('extractLabel: escape-aware whole-content link unwrap (an escaped "]" inside the label does not close it early)', () => {
+  assert.equal(extractLabel('[Plans \\[Beta\\]](p.md)'), 'Plans [Beta]');
+});
+
+test('extractLabel: surrounding prose prevents a false whole-content unwrap (the "[" is not at position 0)', () => {
+  assert.equal(extractLabel('See [Admin](a.md)'), 'See [Admin](a.md)');
+});
+
+test('extractLabel: whole-content wikilink with an alias returns the alias', () => {
+  assert.equal(extractLabel('[[t|alias]]'), 'alias');
+});
+
+test('extractLabel: whole-content wikilink with no alias returns the target', () => {
+  assert.equal(extractLabel('[[t]]'), 't');
+});
+
+test('extractLabel: bare text is returned trimmed, verbatim', () => {
+  assert.equal(extractLabel('  Just text  '), 'Just text');
+});
+
+test('isPlainLabel: ordinary plain strings are accepted (interior hyphen, dot, parens, single interior space)', () => {
+  assert.equal(isPlainLabel('Admin'), true);
+  assert.equal(isPlainLabel('A - B'), true);
+  assert.equal(isPlainLabel('v1.2'), true);
+  assert.equal(isPlainLabel('a (b)'), true);
+});
+
+test('isPlainLabel: every inline-active char / leading block trigger / whitespace-collapse construct is rejected', () => {
+  assert.equal(isPlainLabel('**Admin**'), false, 'emphasis asterisks');
+  assert.equal(isPlainLabel('Admin\\!'), false, 'raw backslash escape');
+  assert.equal(isPlainLabel('A & B'), false, 'entity ampersand');
+  assert.equal(isPlainLabel('![x]'), false, 'image bang+bracket');
+  assert.equal(isPlainLabel('~x~'), false, 'strikethrough tilde');
+  assert.equal(isPlainLabel('a_b_'), false, 'underscore anywhere is rejected, not just a flanking pair');
+  assert.equal(isPlainLabel('`Admin`'), false, 'backtick code-span delimiter (R2 regression)');
+  assert.equal(isPlainLabel('Admin'), true, 'a normal plain label with no backtick stays accepted');
+});
+
+test('public match: an allowlist-clean whole-content link matches its groupTitle through the public wireNestedListChapter API', () => {
+  const indexLines = ['- [Getting Started](gs.md)'];
+  const result = wireNestedListChapter(indexLines, 'Getting Started', '[Setup](gs/setup.md)');
+  assert.equal(result.kind, 'inserted');
+  assert.equal(result.created, false, 'the existing "Getting Started" bullet is reused, not re-created');
+});
+
+test('public match: "See [Admin](a.md)" never falsely matches groupTitle "Admin" — extractLabel refuses the false unwrap AND the raw bracketed label independently fails isPlainLabel (a STRONGER outcome than a bare non-match: the file is refused outright, not routed to a ZERO create)', () => {
+  // Two independent safeguards compose here rather than one masking a gap in the other: even if
+  // extractLabel unwrapped more aggressively, isPlainLabel would still refuse the resulting raw
+  // label (it carries '[' ']'); even if isPlainLabel's char denylist were narrower, extractLabel's
+  // refusal to whole-content-unwrap a non-whole-content string already prevents the false match.
+  const indexLines = ['- See [Admin](a.md)'];
+  const result = wireNestedListChapter(indexLines, 'Admin', '[Items](admin/items.md)');
+  assert.equal(result.kind, 'not-a-list');
+});
+
+test('wireNestedListChapter: a non-string groupTitle (42, null, undefined) never throws — returns a typed result, matching the sibling findContainer contract (R1 MINOR)', () => {
+  for (const badTitle of [42, null, undefined]) {
+    assert.doesNotThrow(() => {
+      const result = wireNestedListChapter(['- Admin'], badTitle, 'x');
+      assert.equal(typeof result.kind, 'string', `expected a typed result for groupTitle ${String(badTitle)}`);
+    }, `wireNestedListChapter must not throw for groupTitle ${String(badTitle)}`);
+  }
+});
+
+// -------------------------------------------------------------------------------------------------
+// Purity
+// -------------------------------------------------------------------------------------------------
+
+test('wireNestedListChapter is pure: a frozen input array is never mutated, and the output is always a fresh array reference', () => {
+  const frozen = Object.freeze(['- Admin']);
+  const result = wireNestedListChapter(frozen, 'Admin', '[Items](admin/items.md)');
+  assert.equal(result.kind, 'inserted');
+  assert.deepEqual(frozen, ['- Admin'], 'the frozen input array must be byte-for-byte unchanged');
+  assert.notEqual(result.newLines, frozen, 'the returned newLines must be a distinct array reference');
 });
 
 // =================================================================================================

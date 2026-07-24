@@ -393,22 +393,41 @@ the one exception to "do all of these" — see its own conditional note below.
        here, before any retarget is attempted — placement is checked before the in-place
        retarget, never after it.
      - `indexForm === 'non-heading'` (a nested list, an MkDocs-style YAML `nav:`, a bare
-       path table, …) — no container to check placement against: a `canonical` line is
-       already complete and a `legacy` line retargets in place unconditionally.
-   - **Container resolution** (headings-form index only — the only automated grouped form
-     in 1.5.0; every other index shape is fully manual, next bullet). Look for a heading
-     whose text equals the entry's `group_title` — containers are located by title, never
-     by the English `group` slug:
+       path table, …) — no present-line placement verifier runs here (placement verification
+       is deferred, see `revalidation.md`): a `canonical` line is already complete and a
+       `legacy` line retargets in place unconditionally.
+   - **Container resolution** (headings-form index — resolved by heading here; a bounded
+     nested-list index is instead wired by `wireNestedListChapter`, "Non-headings index"
+     below). Look for a heading whose text equals the entry's `group_title` — containers are
+     located by title, never by the English `group` slug:
      - Zero matches — create one (`## <group_title>`, at the heading depth the file
        already uses for its top-level sections), then append the chapter line under it.
      - Exactly one — append the chapter line under it, respecting whatever ordering
        convention the file already follows.
      - More than one — halt:
        "Found multiple '<group_title>' containers in <index_file> — curate the index manually, then re-run."
-   - **Non-headings index, no existing line.** This is fully manual in 1.5.0. Halt:
-     "Index <index_file> is not a headings-form file — add a '<group_title>' container and the chapter line for '<slug>' manually, then re-run."
-     The next run's step 0 finds the line you added and proceeds — this convergence is
-     why step 0 always runs first.
+   - **Non-headings index, no existing line.** Attempt automated nested-list wiring: call
+     `wireNestedListChapter(indexLines, group_title, <mode-correct chapter link>)`
+     (`assets/lib/chapter-paths.mjs`). The chapter link is the profile's own mode-correct
+     form — under `publish.wikilinks: false` a Markdown link `[Display title](<target>)`,
+     under `publish.wikilinks: true` a wikilink `[[<target>|Display title]]` — whose `<target>`
+     is the very spelling step 0 computed above for this profile
+     (`relative(dirname(index_file), chapter_file)` in path mode;
+     `currentIndexExpectedTarget`'s vault-root-relative qualified target in wikilinks mode).
+     The function owns list structure only and treats the link as opaque. Branch on the result:
+     - `{kind: 'inserted', newLines}` — the index was a bounded nested-list container form;
+       persist the returned `newLines` (joined back, they reproduce the exact bytes — EOL and
+       terminal newline preserved) and proceed — the container was found or created and the
+       chapter line inserted under it.
+     - `{kind: 'multiple'}` — two or more container bullets match `group_title`; never guess
+       which is canonical, halt:
+       "Found multiple '<group_title>' container bullets in <index_file> — curate the index manually, then re-run."
+     - `{kind: 'not-a-list'}` — the index is not in the automatable nested-list subset (see
+       "Nested-list automation limits" below): a YAML `nav:`, a bare path table, or a list
+       shape outside the bounded safe subset. Fall back to the existing manual halt, unchanged:
+       "Index <index_file> is not a headings-form file — add a '<group_title>' container and the chapter line for '<slug>' manually, then re-run."
+       The next run's step 0 finds the line you added and proceeds — this convergence is
+       why step 0 always runs first.
 
    **Manual group migration is a different halt, not part of establishment.** A manifest
    edit that changes a retained entry's `group` or `group_title`, or removes a grouped
@@ -446,6 +465,27 @@ the one exception to "do all of these" — see its own conditional note below.
    `{{publish.chapters_dir}}/ is the end-user handbook section`. This is what tells
    future Claude Code sessions (and the `obsidian-project-vault` skill if installed)
    that the directory is owned by this skill and not by general note-taking.
+
+### Nested-list automation limits
+
+`wireNestedListChapter` automates only a **bounded, conservative** nested-list subset and
+defers everything else to the manual `not-a-list` halt above — safety over reach. It wires an
+index only when it is a plain bullet list whose container labels **and** the entry's
+`group_title` are plain-text: it refuses any label or `group_title` carrying inline markup or
+a leading block trigger — emphasis, a link inside the visible text, an image, raw HTML, an
+entity, a backslash escape, inline code, a leading `#` heading or list marker, or a run of
+collapsing whitespace — because a character allowlist cannot prove such a label renders equal
+to a plain `group_title`, so matching it could miss a real container or manufacture a
+duplicate. It also refuses a `*`- or `+`-marked bullet whose visible text is a **bare
+(non-link) path** — one containing a `/` or backslash separator, or ending in `.md` — because
+the shipped membership scan only sees `-`-marked bare rows, so wiring such a file could create
+a second container beside a retained phantom row (a legitimate `*`/`+` plain label that happens
+to contain `/` is refused too, a deliberate over-rejection, not corruption). Inline code, an
+HTML comment or a fenced block anywhere, a mixed or bare-CR line ending, a YAML `nav:` or
+`- key: value` mapping bullet, a list nested more than one level deep, and a multiline
+`group_title` fall outside the subset as well. Worst case for the residual is a cosmetic
+duplicate container the author can see and delete — never data loss. A richer rendering-aware
+matcher is a possible follow-up, not a bug.
 
 ## Wikilinks vs Markdown links
 
