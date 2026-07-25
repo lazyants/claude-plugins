@@ -47,10 +47,10 @@ The zero-name path above ACCEPTS blindness. To actually surface uncased proper n
 A zero-candidate glossary writes no `canon.json`, which makes W3a's `segpack.py` halt. Seed the canon first, then build segpacks:
 
 ```
-canon_validate.py --research-mode offline --merge-batches <file containing literal []>
+canon_validate.py --research-mode offline --init
 ```
 
-That stamps the `generation_hashes`. Then:
+`--init` (shipped 1.15.0, #290) is the sanctioned create-only bootstrap: it refuses when `canon.json` already exists (exit 0, `"created": false`, never re-stamps) and writes an empty-but-stamped canon (`entries: {}`, `review_queue: []`) whose `generation_hashes` are genuine `cache_key.py` values — exactly what `segpack.py` copies into every pack. It replaces the old `--merge-batches <empty []>` hack, which #291 removed (that path now refuses and points at `--init`). Then:
 
 ```
 segpack.py --all --particle-config he.json --apparatus-policy omit_apparatus
