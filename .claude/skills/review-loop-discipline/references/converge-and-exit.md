@@ -3,6 +3,7 @@
 - [Healthy loop vs rabbit hole](#healthy-loop-vs-rabbit-hole)
 - [The deletion pivot](#the-deletion-pivot)
 - [A reviewer can misread — verify each finding](#a-reviewer-can-misread)
+- [A reviewer's proposed FIX is scoped to its own lane — reconcile across lanes before dispatching](#a-reviewers-proposed-fix-is-scoped-to-its-own-lane--reconcile-it-against-the-other-lanes-before-dispatching)
 - [Stopping a verifier / gate loop](#stopping-a-verifier--gate-loop)
 - [Mutation-completeness is a receding target](#mutation-completeness-is-a-receding-target)
 - [FREEZE the tree for the deciding round](#freeze-the-tree-for-the-deciding-round)
@@ -11,6 +12,7 @@
 - [Same mechanism patched a 3rd time → reach for the platform primitive](#same-mechanism-third-time)
 - [The loop's exit condition](#the-loops-exit-condition)
 - [When the classifier blocks codex](#when-the-classifier-blocks-codex)
+- [Name your own design's weakest joint IN the review prompt](#name-your-own-designs-weakest-joint-in-the-review-prompt)
 - [The contrivance gradient — when the evasions outrun the threat model](#the-contrivance-gradient--when-the-evasions-outrun-the-threat-model)
 - [Review rounds are non-monotonic](#review-rounds-are-non-monotonic)
 - [Non-convergent loops: exit, document, escalate](#non-convergent-loops-exit-document-escalate)
@@ -41,6 +43,16 @@ A fix round that DELETES code/complexity is converging; one that ADDS a normaliz
 ## A reviewer can misread
 
 A reviewer's finding can be wrong (proposing a change the data doesn't support). Verify each finding against the source before fixing; a clarifying comment can be the correct answer to a misread, not a code change.
+
+## A reviewer's proposed FIX is scoped to its own lane — reconcile it against the other lanes before dispatching
+
+Verifying a finding against the source is not enough, because the finding can be entirely correct and its proposed fix still wrong. Parallel reviewers are independent BY DESIGN, so each one's fix proposal is blind to whatever the other lanes found. **Check each proposed fix against the constraints the OTHER reviewers discovered, not just against the code it touches** — that reconciliation is the lead's job and cannot be delegated to any single lane, because no lane can see it.
+
+**Two reviewers independently proposing the same fix is not corroboration when both are blind to the same constraint.** Neither is wrong; they are jointly incomplete, and the agreement raises confidence in exactly the wrong direction. Distinct from [[feedback-convergence-needs-two-sound-methods]] (one method unsound) and [[feedback-verification-sharing-a-blind-spot]] (a check sharing a seam with its target): here both checkers are sound and share a blind spot with *each other*.
+
+Verified 2026-07-25 (literary-translator 1.16.0): the security and correctness lanes each independently recommended widening a string split "for consistency" with its sibling function — a real, measured gap. The simplification lane had separately established that the same function is mirrored byte-for-byte across three workflow templates and pinned by a parity test. Applying the recommendation would have broken the pin, or forced the identical edit into two untouched templates, flipping their cache-bundle hashes and falsifying the release's own CHANGELOG promise that those domains were unaffected — for a gap both lanes had themselves shown to be fail-safe. The fix agent had already been dispatched with the proposal as written and needed an urgent correction.
+
+Two follow-throughs: **brief the fix agent with the declining constraint explicitly**, since it will otherwise implement the proposal as written and its own tests will not object; and **record the declined direction in the file itself**, or the next round's reviewer re-raises it (it did — a second lane proposed the same change after the first was overruled).
 
 ## Stopping a verifier / gate loop
 
