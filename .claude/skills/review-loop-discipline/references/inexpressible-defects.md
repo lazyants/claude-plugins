@@ -1,0 +1,226 @@
+# Make the defect inexpressible, not merely absent
+
+- [The escalation ladder, and why the first three rungs fail](#the-escalation-ladder-and-why-the-first-three-rungs-fail)
+- [The step people skip: delete the alternative path](#the-step-people-skip-delete-the-alternative-path)
+- [How to apply](#how-to-apply)
+- [Brief the design question, and invite a reasoned refusal](#brief-the-design-question-and-invite-a-reasoned-refusal)
+- [When the recurring defect is in the CHECK itself: denylist → allowlist](#when-the-recurring-defect-is-in-the-check-itself-denylist--allowlist)
+- [The symmetric-twin tell](#the-symmetric-twin-tell)
+- [Treadmill vs convergent — and surface the call](#treadmill-vs-convergent--and-surface-the-call)
+- [When a check RECONSTRUCTS a materialized property: read the output](#when-a-check-reconstructs-a-materialized-property-read-the-output)
+- [Three sharper moves for rung 4](#three-sharper-moves-for-rung-4)
+- [When rung-2 patching is a REGEX, not a table: drop the accidental anchor](#when-rung-2-patching-is-a-regex-not-a-table-drop-the-accidental-anchor)
+
+Verified across eight codex review rounds (2026-07-19/20, literary-translator 1.11.0). One class —
+*a mechanism is present, but not engaged on the path production actually takes* — appeared **eight
+times**. Every fix was individually correct and verified. Each moved the boundary outward instead
+of closing it. Round 6's own fix produced instance seven **against itself, within one round**.
+
+## The escalation ladder, and why the first three rungs fail
+
+1. **Fix the site.** Correct, and the class reappears at the next site.
+2. **Fix all N known sites.** Better, but the reviewer's site list has been a SUBSET every single
+   round of this release — the enumeration is the weak step. **This applies to the TEST that
+   guards against drift, too, and that is the sharpest trap:** a static consistency check written
+   to catch one of N duplicated guards diverging enumerated 3 of 4 sites and asserted
+   `len(guards) == 3` — accurate when authored, stale within the same round because a peer added
+   the fourth concurrently. The newest guard could drift freely and the check stayed green. A
+   hard-coded list of files to scan has exactly the failure mode it exists to prevent; DERIVE the
+   set (glob the directory for the guard shape) so a new site cannot be silently excluded by not
+   being looked at.
+3. **Add a shared helper and call it from each site.** This is the seductive one: it *looks*
+   structural. It isn't — each call site must still remember to call it, so a site that routes
+   around the helper is still writable. Instance eight was exactly this: canon and senses went
+   through the new gate; manifest kept a hand-written call to the old ungated comparator.
+4. **Make the defect inexpressible.** A table/tuple of the things to handle, iterated by ONE loop
+   that is the only code performing the guarded operation. A new member can only be added as a
+   table entry; there is no code shape that reaches the unguarded path.
+
+## The step people skip: delete the alternative path
+
+**Delete the alternative path.** Rung 4 with the old helper left in place is rung 3 wearing a
+costume — the exemption is merely unexercised, and the next author (or a refactor) can reach it
+again. In one release the path-based comparator was deleted outright and the snapshot-based one
+took over its name, so afterward there was literally no function that performed an ungated read.
+Confirm with a grep that the deleted symbol has **zero** production callers, not merely few.
+
+## How to apply
+
+- The trigger is a **count**, not a severity: the third occurrence of one class is the signal to
+  stop patching sites and change the shape. Do not wait for the eighth.
+- Hand the design question to whoever holds the code and invite a reasoned refusal (see "Brief the
+  design question" below) — a table is not always proportionate, and "worse than N explicit sites,
+  because X" is a legitimate answer worth hearing.
+- State the resulting property in docs as the STRUCTURAL claim ("a fourth input cannot be wired in
+  without going through the gate"), not the weaker current fact ("all three are gated today"). The
+  weaker phrasing is what lets the next author reintroduce the exemption without noticing.
+- Then attack your own claim: ask whether the defect is genuinely inexpressible or merely
+  inconvenient. Watch for a caller that can construct the operation outside the table entirely, a
+  now-callerless helper left lying around as a loaded gun, and any asymmetry in how table members
+  are treated — every instance of this class in that release lived in an asymmetry.
+
+## Brief the design question, and invite a reasoned refusal
+
+When a review loop lands on the same defect **class** twice, the reflex is to prescribe the
+next fix. Prescribing gets a correct patch and a third round at the next site. What works
+better: hand the teammate the CLASS, the proposed shape, and explicit permission to reject it.
+
+**The wording that earned its keep (2026-07-19, literary-translator 1.11.0):**
+> "Answer the design question first, explicitly, before writing code: can this be made
+> unbypassable by construction rather than by placement? … If you conclude it does NOT hold
+> up, say so with the reason and propose what you think is right instead. I would rather hear
+> a well-argued 'keep the per-site guards, because X' than get a structural change you do not
+> believe in."
+
+The teammate came back having **rejected the naive version of my own suggestion**, with a
+reason I could not have supplied: pushing the check down into the parsing function would have
+required teaching the agent-facing sentinel protocol a third magic string — the highest
+blast-radius surface in that plugin, and the exact surface we had just spent a task repairing.
+It proposed an orchestrator-level check instead, mirroring a pattern the reviewer had already
+confirmed correct. That answer was better than the original brief, and it only existed because
+refusing was framed as an acceptable outcome rather than as non-compliance.
+
+**How to apply:**
+- Name the CLASS in the brief ("any failure path that runs before X converts a tamper into an
+  advisory result"), not just the instance. Cite the rounds it has already appeared in — the
+  recurrence is the argument for redesigning rather than patching.
+- State that each prior fix was CORRECT and confirmed. That is what makes the class insidious:
+  nothing registers as failure, so the patch-again reflex never trips.
+- Propose a shape, then explicitly invite refusal with a reason. Ask for the reasoning, not the
+  verdict.
+- Expect to approve scope EXPANSION that follows from the redesign (here: applying a new hash
+  format to all three stamps, not just the one flagged) — a structural fix applied to one of N
+  sibling sites is a half-measure that reads as done.
+
+**Also verified this session:** when a teammate pushes back on a finding you raised, verify
+their claim before conceding OR insisting. A `None`-comparison was called a latent crash; the
+teammate said it was only a static-narrowing limitation; reading the guards showed they
+returned before any comparison — the teammate was right. Saying so plainly is cheap and makes
+the next pushback more likely, which is the outcome you want.
+
+## When the recurring defect is in the CHECK itself: denylist → allowlist
+
+The same class recurred in the STATIC TEST written to catch the drift, and there rung 4 has a
+specific name. The check began as a **denylist**: enumerate each way a guard could be weakened and
+reject it (a `set()` that collapses duplicates, a `len()` blind to identity, a `list(...)` rebind,
+a hoist, `sorted` shadowed by a name/def/class, an `IfExp` decoy in a raise message...). Six
+rounds, six new weakenings — a denylist can only reject what someone already thought to check, so
+it never converges; by round 16 the reviewer's own prescribed fix was "build a reaching-definition
+analyzer inside a test." The fix that finally held was to **invert it to an allowlist**: require the
+guard to be structurally identical to a small set of canonical AST templates and reject everything
+else. That makes "a weakened guard that still passes" *inexpressible* — it is rung 4 for a checker,
+the exact analogue of "one loop over a table, delete the alternative path." A denylist is the
+checker form of patching sites.
+
+## The symmetric-twin tell
+
+Even after the allowlist, two more rounds each found the SYMMETRIC OTHER HALF of the previous
+round's fix (rounds 17-18): round 17 tightened the FUNCTION-header `sorted`-shadow walk → round 18
+found CLASS headers uncovered; round 17 fixed the MESSAGE-VARIABLE anchor path → round 18 found the
+DIRECT-RAISE path. When a reviewer keeps returning the mirror image of your last fix, you are on
+rung 3 (fixing sites) inside the checker: **unify the split paths into ONE routine that both forms
+dispatch through** (one `_expr_guarantees_anchor` for both raise shapes; one header-walk for
+function+async+class+lambda), and the whole symmetric family closes at once — plus a variant
+nobody asked about (lambda parameter defaults leak into the enclosing scope). Enumerate the axis
+(all def-types; all message-forms) and prove it exhausted, rather than waiting for the next twin.
+
+## Treadmill vs convergent — and surface the call
+
+Distinguish the two failure shapes out loud: a NEW-CLASS finding each round (denylist, unbounded —
+a treadmill) vs a BOUNDED-FACET / symmetric-twin finding (the structural match missing one node
+facet — convergent, severity decaying). When a review loop runs long, characterize which you're in
+and hand the proportionality decision to the user rather than looping silently — especially for a
+defense-in-depth check whose four real guards already have behavioral tests, where the marginal
+value of round N is shrinking. "I predicted a fixed point and was wrong once" is worth saying;
+mispredicting convergence twice is the signal to stop or centralize (one guarded helper would have
+mooted the whole check).
+
+## When a check RECONSTRUCTS a materialized property: read the output
+
+2026-07-22, LT 1.13.0 `orphaned_owners`. A distinct checker-form of rung 3, and the treadmill wore a
+new costume. A diagnostic answered "does this entity have a backlink anywhere?" by RECONSTRUCTING
+the renderer's link decision from upstream models — and every reconstruction diverged from the
+renderer's ACTUAL behavior at an edge where two subsystem definitions disagree (the gate groups by
+casefold `normalize_form`; the renderer keys NFC-exact + drops `sense_translated` + never links a
+target absent from the rendered prose). The predicate walked three reconstruction rungs, each a
+real false-pos/neg a reviewer caught: `no-appendix` (an inline-linked-but-uncovered owner
+false-FLAGGED) → `+require-de-linked` (a `sense_translated` owner, never de-linked yet never linked,
+MISSED) → `+not-in-build_entity_index-map` i.e. linker ELIGIBILITY (a target eligible but never
+occurring in rendered prose → no link emitted, MISSED). The fix that held: stop reconstructing the
+decision; READ THE MATERIALIZED OUTPUT — scan the actual emitted `[[…]]` links from the rendered
+notes (reuse the scan the inline-advisory already runs), symmetric with how the appendix side
+already reads the real Mentions region. **When the system already EMITS the property you're
+checking for, ground the check in that emitted artifact; a reconstruction from N upstream models
+keeps failing at every edge those models reconcile differently.** The count-trigger still applies —
+by the 2nd reconstruction edge, jump to the output instead of patching a 3rd model. Variant-specific
+tell: a static/plausibility reviewer (codex) FALSE-CLEARED the eligibility reconstruction TWICE; the
+reviewer that RUNS THE ACTUAL CASE (the repo bot) is authoritative for emission-vs-eligibility gaps
+— the gap is invisible to shape-tracing (codex-clean≠bot-clean). The reconstruction shares the wrong
+model with the thing it checks — the same blind-spot shape as any check built out of the same
+assumptions as the code it verifies.
+
+## Three sharper moves for rung 4
+
+2026-07-23, LT 1.15.0 — one class closed five times. The class "a hand-maintained parallel list
+drifts from the thing it mirrors" recurred five times in one release (two hint strings, a subset
+tuple, a magic per-mode guard, a forgotten mode). Three refinements to how rung 4 is actually
+reached:
+
+- **Bring the escaping OUTLIER into the table as DATA, not a parallel guard.** The instance that
+  keeps escaping every table-driven guard is usually the one that isn't a table row at all — a
+  fallback/legacy/default path handled by a special case. The legacy bare-`--batch` merge slipped
+  past every guard because it selected no row; the fix was a `dest=None` row plus two-phase
+  selection (flag-rows first, fallback only if none matched), and it closed the class with **zero
+  new guards** — the row inherits every current AND future column. When you catch yourself adding
+  the Nth special-case `if` beside a table, the real fix is almost always "make the outlier a row."
+- **Derive the set by the ACTUAL property, not a PROXY for it.** "Derive the set, don't hard-code
+  it" (rung 2 above) is necessary but not sufficient: a three-layer lock derived its consume-site
+  set from *"functions that call `hasOnlyKeys`"* — the ESTABLISHED PATTERN — so all three layers
+  were blind to a guard that reimplemented the defect WITHOUT calling it (`raw.exit_code !==
+  undefined`, no `in`, no `hasOnlyKeys`). Deriving by a convention only ever protects code that
+  already follows the convention. Derive by the property that actually MAKES it a member (here:
+  "receives an untrusted agent return", determinable at the call site) — or, if that isn't
+  statically decidable, say so in a truthful comment naming the residual rather than shipping the
+  proxy as if it were the real predicate.
+- **A redesign must PRESERVE the property; "simpler" that drops the guarantee is abandonment, not
+  rung 4.** Invoking the count-trigger, replacing a 200-line JS lexer with behavioural tests was
+  proposed — and a reviewer refuted it in one line: *a behavioural test cannot cover a site that
+  does not exist yet, because calling it requires knowing its shape.* The redesign silently dropped
+  the exact property the lexer existed to hold. The real answer was a THIRD layer (roster +
+  execution ON TOP of the static locks), because static and behavioural cover disjoint blind spots —
+  synthesis, not substitution. Before banking a simpler shape, construct the case the old shape
+  caught and prove the new one still catches it. And for a safety LOCK specifically, bias toward
+  false-RED (loud, someone fixes it) over false-GREEN (silent) — a lexer tuned to reduce false
+  alarms by guessing "regex vs division" bought that with a silent bypass, which is the wrong trade
+  for a gate. The proportionality ceiling still holds: measure it (49 raw `in` occurrences vs 1 in
+  code — a non-lexing check is 48:1 noise) before arguing a lock is "too big".
+
+## When rung-2 patching is a REGEX, not a table: drop the accidental anchor
+
+2026-07-24, enduser-handbook #258 citation-audit design. A plan-review loop found "one more
+citation form the matcher misses" **three rounds running** (13 → 27 → 32 → 47 counted instances
+across rounds 1-4) while designing a lint for `(see "X" above/below)`-style doc citations. Each
+round's fix was rung-2 patching wearing a regex costume: round 1 handled only the parenthesized
+form; round 2 added comma-separated and compound (one direction word, multiple quoted targets)
+forms; round 3 dropped the `see` verb requirement entirely after the reviewer found citations with
+no verb at all. Only round 4 came back clean — and the reason wasn't "we finally enumerated every
+sentence template," it's that round 3's fix **deleted the anchor that was never actually part of
+the invariant**. The true structural signal was never "the word `see` precedes a quoted title" —
+it was "a quoted title sits near a direction word," full stop; `see` was an incidental feature of
+most examples, not a defining one, and every round before round 3 was unconsciously treating an
+accident of the first few samples as load-bearing. Once the accidental anchor was dropped (matching
+ANY quoted string immediately followed by `above`/`below`, verb or no verb, comma or no comma), the
+pattern-space this checker needed to cover collapsed from "an open-ended list of sentence shapes"
+to "one proximity relationship" — an instance of rung 4 (inexpressible, not enumerated) applied to
+pattern/regex design specifically, not to a code table. **Tell that you're rung-2-patching a
+regex**: each successive review round names a **new sentence template** your pattern doesn't match,
+not a new edge case within a template you already handle. When that happens twice, stop adding
+alternation branches and ask what the actual invariant is, independent of any verb, noun, or
+punctuation your current samples happen to share. (A useful side effect of the resulting
+over-match: because only quoted strings that exactly match a real heading title get asserted, an
+unrelated quoted-string-near-"above" false match just lands in a tracked "unresolved" allowlist
+rather than corrupting a result — over-matching into a verified bucket is safer here than
+under-matching via one more special case.)
+
+A reviewer's own prescribed fix can carry the very next instance of the class it was meant to
+close — see verify-the-fix.md, "An authoritative fix still needs review".

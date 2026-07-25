@@ -2,6 +2,13 @@
 
 Steps 0–W3a of the plugin are used as-shipped; only the translate dispatch (W5) is replaced by hand. Use this when driving segments yourself instead of the `mass-translate-wf` Workflow, or when the Workflow path does not converge.
 
+## Prove W5 dispatch actually executes — a throwaway smoke test first
+
+Before committing a full book's labor, build a tiny throwaway `durable_root` and drive it end-to-end once, to prove the W5 dispatch mechanics actually execute and converge (the plugin's W5 driver has previously failed to converge for reasons invisible until it is actually run — its white-box tests use a fake node stub, not a live run).
+
+- **Use 2+ segments with real margin, never 1.** `extract.py.template` calls `start_segment` on EVERY `<h2>` (`extract.py.template:845-846`), so h2-count == segment-count. On a 1-segment book, W4 (review) eats the only segment and **W5 (translate) never executes** — the smoke test goes green without testing anything. Size the chapters so the smallest is comfortably (≥28%) short of wherever the review/translate split lands, so which segment ends up in W4 vs W5 cannot flip and invalidate the design.
+- **Never let scaffolding live inside the artifact under test.** Test scaffolds (an agent's self-test copies, your own verification-run copies) landing inside the same `durable_root` the smoke test measures silently contaminate it. Move them out to a sibling directory the moment you notice them there, before trusting any measurement of the scaffold.
+
 ## Do NOT route the translate through `codex:codex-rescue`
 
 The Workflow's `agent(translatePrompt, {agentType:"codex:codex-rescue"})` expects a BLOCKING call that yields a draft, but `codex:codex-rescue` **backgrounds** codex and returns a "waiting on background task" STUB. `draft_ready.py`'s ≤15-min poll then never sees a draft: every segment ends `translate-timeout`, no `segments/<seg>.draft.json` is written, and the ledger stays `in_progress`.
@@ -28,3 +35,12 @@ General principle: reproducing ANY automated orchestrator by hand → transcribe
 The only deliberate deviations from the builders:
 - they hardcode `Effort: high.` in the dispatch prompt → override to `xhigh.` per the translation-effort rule. (This prompt-level effort is a DIFFERENT knob from the profile's const `engine.effort`, which stays `high`. Note the actual SSK run dispatched at Sol@high, and a model×effort bake-off found the config model at high a strong performer — xhigh can over-reach — so weigh the bake-off, but the standing rule for translation dispatch is xhigh.)
 - substitute `PY` → the venv python.
+
+## The bypass generalizes beyond W5 — glossary/W3a batch dispatch too
+
+The `agent(..., {agentType:'codex:codex-rescue'})`-anchors-writes-to-the-session-repo trap and the `task --write --cwd <durable_root>` bypass are not specific to translate/W5 — the SAME fix applies to the glossary Workflow's batch dispatch (W3a), which has the same sandbox problem when its `durable_root` sits in a sibling dir outside the session repo.
+
+- The glossary phase's own poll mechanism is decoupled rather than blocking: each batch writes an `out_{i}.json`, polled via `canon_validate.py --check-batch`. So dispatch each batch with `codex-companion.mjs task --write --background --cwd <durable_root> --json "<prompt>"` — **`--background`, not `--wait`** (the batch script polls the output file itself instead of blocking on the call). `--cwd` is a real flag, resolved via `resolve_codex_companion.py`.
+- Instead of hand-transcribing a builder's prose into literal prompt text, get a byte-exact prompt by literally EVAL-ing the template's own builder function (e.g. the glossary template's `batchDispatchPrompt`) and substituting the template variables — never re-author a builder, and evaling it is a stronger guarantee of verbatim-ness than retyping it by hand.
+- Prove the write path first with a 2-byte sanity write before dispatching the real batch.
+- Once the poll confirms completion, run merge/verify/audit via the plugin's own deterministic scripts directly (e.g. `canon_validate.py --merge-batches`) — these steps are code, not codex, and don't need the bypass at all.

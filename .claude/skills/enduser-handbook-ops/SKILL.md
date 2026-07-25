@@ -1,9 +1,9 @@
 ---
 name: enduser-handbook-ops
-description: Working ON the enduser-handbook plugin — use when modifying its skill, changing publish-target/adapter-filename resolution, writing or debugging grep-based test assertions or enumeration sweeps over its hard-wrapped SKILL.md/references docs, or hardening/auditing its capture-safety surface-audit against PII leaks; covers the multi-surface adapter-resolution drift, the ~95-col hard-wrap grep trap, the positive-whitelist PII-convergence move, and the ped-ant/codex review discipline for this contract-dense reference doc.
+description: Working ON the enduser-handbook plugin — use when modifying its skill, changing publish-target/adapter-filename resolution, changing a link-emission canon (wikilinks/index rows), tracing whether a gate/backstop claim actually catches what it claims to, writing or debugging grep-based test assertions or enumeration sweeps over its hard-wrapped SKILL.md/references docs, writing chapter-paths delimiter/threshold tests, testing reference-assets.test.sh for cross-shell/cross-env (bash) portability, writing a "must-now-fail" self-test, touching citation-audit-lib.mjs's regex matching, designing a completion/convergence check for a halt-driven manual-work recipe, or hardening/auditing its capture-safety surface-audit against PII leaks; covers the multi-surface adapter-resolution drift, the ~95-col hard-wrap grep trap, the positive-whitelist PII-convergence move, the multi-write-site link-emission-canon trap, gate-claim tracing against the actual reject predicate, the EOF-swallow delimiter-test trap, the ped-ant cross-env-portability check, the must-now-fail self-test pattern, the ReDoS-fix-is-not-linearity-fix lesson, the manual-work convergence-fact taxonomy, and the ped-ant/codex review discipline for this contract-dense reference doc.
 ---
 
-The `enduser-handbook` plugin is a **contract-dense reference-doc skill**: the same rule is stated in several `references/*.md` files plus `SKILL.md`, the docs are hard-wrapped, and the runtime steps (`Step 0b`, `W5`) must agree with the prose. Three recurring traps and the review discipline that catches them.
+The `enduser-handbook` plugin is a **contract-dense reference-doc skill**: the same rule is stated in several `references/*.md` files plus `SKILL.md`, the docs are hard-wrapped, and the runtime steps (`Step 0b`, `W5`) must agree with the prose. Recurring traps, the review discipline that catches them, and a technique for designing convergence checks on manual-work recipes.
 
 ## 1. Publish-target adapter resolution drifts across ~5 surfaces
 
@@ -96,6 +96,56 @@ file over.
 `reference-assets.test.sh` has two needle-assertion helpers: `has` (whole-file — the phrase exists SOMEWHERE) and `has_in_section` (fence-aware, bound to a specific `##`/`###` heading). When a new test hardens a claim that's supposed to live at ONE normative site in a multi-section doc (the exact shape of #251/#252-style needle-pinning work), `has` is not sufficient even when the needle string is verified unique — a mutation that deletes the claim from its real site and pastes the identical text into a fenced code block under an UNRELATED heading still satisfies a plain `has`, because `has` never checks which section (or whether fenced-vs-live) the match sits in.
 
 **This survived TWO codex-rescue rounds before the `lazy-ants-reviewer` bot caught it** (2026-07-23, PR #316): both rounds were explicitly asked to verify needle uniqueness and load-bearingness against wording mutations, both confirmed uniqueness correctly, and neither one independently thought to test a *relocation* mutation (move the exact text to the wrong section) — uniqueness and section-binding are orthogonal properties, and a review checklist that only asks about one silently assumes the other. **When writing or reviewing a new needle-pinning assertion for a claim that has ONE correct normative location, default to `has_in_section`** — a doc having no other *legitimate* section for the phrase does NOT make plain `has` sufficient, since an illegitimate fenced copy pasted anywhere still satisfies a whole-file grep; `has_in_section`'s heading+fence binding is what actually rules that out, so plain `has` is essentially never the right choice for a single-normative-site claim. When reviewing (self or via codex), add "relocate the needle into a fenced block under a different heading, confirm the check now FAILS (goes red)" as its own mandatory probe alongside the wording-mutation probes — it is not implied by them, and the expected outcome is the opposite of the wording-mutation probes' baseline (there, an unrelated section passing is fine; here, a relocated needle passing IS the bug).
+
+## 6. A link-emission canon change has multiple write sites — including the manual-recipe prose, not just the machine canon
+
+1.8.0, #294, ped-ant P1. The vault-rel wikilink fix touched the adapter + `revalidation.md`'s "Write-time canon", but `revalidation.md`'s manual group-migration recipe (step 4) still told the operator to WRITE the old bare `[[<slug>]]` form under `wikilinks:true` — a 2nd emission site recreating #294. BOTH codex plan review AND codex working-tree review missed it (a single-tree pass can't see a prose recipe as an emission site); the ped-ant bot caught it.
+
+Two durable moves: (1) **the resolution-only convergence gate is BLIND to a stale canonical spelling** — a bare slug still RESOLVES when the basename is unique, so a wrong-but-resolvable recipe passes CI silently; "does it resolve" cannot catch "is it the canonical spelling". (2) **Class-sweep = grep every `[[` in the doc and classify each hit as a WRITE-instruction vs a recognition/gone-check** — only a WRITE using the stale form is a defect; recognition mentions ("may still carry the old bare form") are correct and expected.
+
+When changing any emission canon here, enumerate ALL write sites (adapter doc + `revalidation.md` write-canon + migration recipe + inbound-link fixers) before declaring done. Sibling of the `_`→`-` adapter-drift trap in §1.
+
+## 7. A gate/backstop "catches X" claim must be traced against its actual reject predicate
+
+1.9.2, #311, ped-ant P2, caught TWICE. The #311 docs claimed a divergent hand-authored path-mode index row is "caught by the link-integrity resolution gate"; codex-pr2 passed it CLEAN, but the ped-ant traced the real workflow: **append-and-retain** — `locateChapterLine` returns `present:false` → static-md step-0 APPENDS the canonical `.md` row → item 5 passes on that appended row while the divergent row is RETAINED; item 2 checks the chapter's OWN relative links, not an index-wide broken-link sweep. "A gate exists nearby" ≠ "this gate rejects THIS state" — read the gate's pass/reject predicate against the concrete failure sequence.
+
+AND after fixing the code comment + JSDoc + `static-md.md` note, the SAME false claim survived in the release-facing **1.9.2 CHANGELOG entry** (and the PR body) — the multi-write-site trap (§6 above) extends to RELEASE COPY; class-sweep the whole diff (`grep 'caught by' / 'backstop'`) when correcting a semantic claim, not just the code/doc sites. Both catches are fresh evidence for the "one clean codex pass ≠ ped-ant-clean on this plugin" lesson below.
+
+## 8. Chapter-paths delimiter tests must prove the RULE, not the EOF-swallow
+
+1.7.1, #254. `findFenceClose`/`findCodeSpanClose` (in `chapter-paths.mjs`) return the text LENGTH (NOT `-1`) when no closer exists — an unterminated fence/span swallows to EOF (documented in their own comments). So a test meant to pin the inline-code exact-length rule (`runLen === openLen`) with a fixture like `` `x`` and [[link]] here `` reaches `false` via the EOF-swallow, NOT the exact-length rule — it enshrines a pre-existing quirk, and a codex code-review (correctly) flags it as pinning a false-negative.
+
+Fix: give the span a GENUINE later exact-length closer — `` `x`` [[link]]` end `` — so `[[link]]` is inert because a real 1-backtick run closes the span, and `false` rests on the `===` rule itself (verify empirically against the real module + confirm it still flips under a `>=` mutant).
+
+General principle for this file's threshold tests (there's an ongoing hardening cadence — #294–#303 and beyond): the fixture must fail for the RIGHT reason — isolate the target property, not an incidental adjacent behavior that yields the same value.
+
+## 9. The ped-ant bot catches cross-env portability that codex + local runs miss
+
+1.7.0, PR #293. After codex reached CLEAN and the local suite passed 466/466 in both shells, the bot flagged a P1: `reference-assets.test.sh`'s new `category_files` used **`sort -z`, a GNU extension older BSD/macOS `sort` vintages lack**.
+
+Two lessons: (1) a local "both shells" pass was misleading — `bash`/`/bin/bash` resolve `sort`/`find` via **PATH to Homebrew GNU tools**; to test portability, force stock tools: `env -i PATH="/usr/bin:/bin" /bin/bash <suite>`. (2) The bot's SPECIFIC claim was wrong for CURRENT macOS (Darwin 25.5 `/usr/bin/sort` = Apple `2.3-Apple(199)` DOES support `-z`; BSD `find` has `-maxdepth`/`-mindepth`) — but it correctly surfaced a real DISTRIBUTION fragility, so verify the bot's claim on the target env AND fix the fragility regardless.
+
+Fix here was a simplification: `sort -z` was never load-bearing (count/presence gate, order-irrelevant), so drop the sort stage entirely. Post-codex-clean is NOT ship-ready on this repo until the ped-ant round passes — budget it (see "Review discipline" below).
+
+## 10. A "must-now-fail" self-test needs a raw exit-code check, not a bare assertion call
+
+1.8.4, #302. `reference-assets.test.sh`'s whole suite exits on `[ "$FAIL" -eq 0 ]`; `ok()`/`bad()` both return `printf`'s exit status, not their own identity. If the fix under test is "an already-broken case must now report `bad`", a plain `hasnt_in_section "..." ...` call would correctly increment the real `FAIL` counter and break the build the moment the fix actually works — you cannot regression-lock a "should fail" case as a normal assertion in this style.
+
+Two working shapes: (1) call the underlying engine directly and read its raw exit code (`if _section_contains ...; then rc=0; else rc=$?; fi`, no `!`/pipeline so `$?` reads cleanly under `pipefail`); (2) isolate the wrapper call inside a **subshell with its own reset `FAIL=0`** (`( FAIL=0; hasnt_in_section ... >/dev/null 2>&1; [ "$FAIL" -eq 1 ] )`) — `bad()`'s `FAIL=$((FAIL+1))` mutation doesn't survive the subshell boundary, so it never touches the real tally, and the subshell's own exit code tells you whether `bad` fired.
+
+Reach for this pattern whenever hardening a "must now correctly fail" case in this file, not just a "still correctly passes" one.
+
+## 11. Fixing ReDoS backtracking does not make a matcher linear — re-benchmark the outer shape at scale
+
+1.9.3, #258, ped-ant caught it in two rounds. `citation-audit-lib.mjs`'s original span regex had two independent bugs stacked on the same line: an adjacent-optional-`\s*` separator was genuinely exponential (fixed first, confirmed by a security-review pass AND codex's own code review independently), but even after that fix, the OUTER shape — one monolithic "one-or-more-quotes-then-direction" regex retried via `matchAll` at every quote-start position — was still quadratic on an undirected run (each of the N quote-starts rescans up to the remaining N-i quotes before failing). The ped-ant bot caught this as a SEPARATE finding on the very next review round, after the exponential fix had already shipped and looked done.
+
+The actual fix required abandoning the single-regex-retried-everywhere approach for a genuine single forward pass: find every quoted title once (cheap, no repeated-group shape), walk that list once growing maximal separator-only chains, check for a trailing direction word only ONCE per chain's endpoint (provably lossless here — an interior gap containing "above"/"below" text would have stopped chain growth there, so no valid boundary can hide inside an already-grown chain).
+
+General lesson: after fixing a catastrophic-backtracking finding, **re-benchmark at scale** (not just re-run the original repro at the size that made it obviously hang) — "no longer exponential" and "linear" are different claims, and a reviewer that already found one perf bug in a matcher is likely to look harder at the fix, not less.
+
+## 12. Designing the completion/convergence check for a halt-driven manual-work recipe
+
+When automation for a step is descoped in favor of "halt + manual recipe + re-run", the **completion VERIFICATION of that manual work becomes the new complexity sink** — it concentrates almost every subsequent review finding. This needs its own fact-soundness taxonomy, halt-as-record discipline, and loop-exit rule; see `references/manual-work-convergence-facts.md` before designing or reviewing any such check (originated in the 1.5.0 group-axis release, #19, codex rounds 6–15).
 
 ## Review discipline for this contract-dense plugin
 

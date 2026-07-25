@@ -1,11 +1,16 @@
 ---
 name: subagent-trust-verification
-description: Techniques for running a parallel-agent/team build and VERIFYING teammate output — write a shared-contract doc before fanning out (exact data shapes, cross-module signatures, file ownership, pre-agreed error strings, an independent tester), verify a completion report on disk rather than trusting its narrative, handle teammate message races and idle≠done pings, recover from a CC restart that wiped the task list and teammate registry, and skip a classifier misfire that blocks a benign stand-down message. Use whenever setting up a parallel team, verifying a teammate's "done"/green report, diffing a cross-owner interface, or resuming after a mid-session restart.
+description: Techniques for running a parallel-agent/team build and VERIFYING teammate output — write a shared-contract doc before fanning out (exact data shapes, cross-module signatures, file ownership, pre-agreed error strings, an independent tester), resolve every OPEN/"lead decides" policy item into a central decisions doc before fan-out, verify a completion report on disk rather than trusting its narrative (including the round-specific-new-symbol check and the idle-with-"[to main]"-means-already-delivered nuance), never fire a correction or superseding instruction off a stale cached read, avoid spawning a duplicate agent onto a live work-unit (reusing a live name, or re-dispatching after misreading a clean disk as agent death), handle teammate message races and idle≠done pings, recover from a CC restart that wiped the task list and teammate registry, and skip a classifier misfire that blocks a benign stand-down message. Use whenever setting up a parallel team, resolving an unpinned decision before dispatch, verifying a teammate's "done"/green report, diffing a cross-owner interface, checking whether a teammate is still alive before re-dispatching, or resuming after a mid-session restart.
 ---
 
 # Running a parallel team and verifying its output
 
 Parallel builds classically fail at drift between teammates who each guessed the interface, and at trusting self-reports that don't match disk. The defenses are: a written contract before fan-out, an independent tester, and verifying every "done" against the filesystem, never the narrative.
+
+Read the reference for the situation you're in:
+
+- **references/pre-dispatch-decisions.md** — resolving every OPEN / "lead decides" / "decide during implementation" item into a single `lead-decisions.md` before fan-out; why a codex-clean plan is not the same as a dispatch-ready one. Read right after the plan is codex-clean, before writing the contract doc.
+- **references/verifying-teammate-state.md** — not firing a correction off a stale cached read (plus the diagnose-before-alarming steps for a file changing under you), the report-lag variant catalog (round-specific-symbol verification, idle-with-`[to main]` meaning already-delivered, harvesting a silent agent's transcript, concurrent-worktree false negatives, the inverse "clean disk ≠ dead teammate" trap), and the duplicate-agent-name gotcha (reusing a live name vs re-dispatching after a wrongly-read clean-disk snapshot). Read before firing a correction, when verifying a teammate's report, or when tempted to re-dispatch work you think died.
 
 ## Contract-first, before dispatching ANY teammate
 
@@ -21,6 +26,8 @@ Write a precise shared CONTRACT doc in the main loop (writing it there keeps the
 **Anchor-verify the contract before fan-out — even a codex-clean plan carries wrong `file:line` cites** (call sites vs def, a reference to edit that doesn't exist, off-by-two counts — codex's own clean verdict can mis-cite too). Run ONE read-only Explore agent that verifies EVERY contract-cited anchor against the live tree pre-dispatch. Bake the corrections into the contract as an explicit overriding section titled "VERIFIED ANCHORS — these override any cite above" so implementers have ONE authority, and brief teammates to **re-locate by SYMBOL, not line** — concurrent teammates shift each other's line numbers mid-build.
 
 **When the contract fights the HOUSE pattern, the house pattern wins — ratify it loudly.** If implementers unanimously deviate toward a codebase convention (e.g. per-script self-anchored defaults instead of a contract-specified import), ratify the deviation explicitly to all affected teammates and mark the contract line superseded. A contract line contradicting the codebase invites each teammate to resolve the conflict differently. Better: surface house patterns in the UNDERSTAND pass so the contract mirrors them from the start.
+
+**An item marked OPEN / "lead decides" / "decide during implementation" is a dispatch BLOCKER, not a deferrable — generalizing the same principle from contract-vs-house conflicts to ALL unpinned behavioral policy.** Parallelism turns one open question into N implementers each silently resolving it into divergent, contract-visible behavior; a codex-clean plan review certifies the plan is SOUND, not that every decision is PINNED — those are different gates, and the lead owns the second one. See **references/pre-dispatch-decisions.md** for the full resolve-into-`lead-decisions.md` procedure.
 
 ### Add an independent tester as a THIRD contract-interpreter
 

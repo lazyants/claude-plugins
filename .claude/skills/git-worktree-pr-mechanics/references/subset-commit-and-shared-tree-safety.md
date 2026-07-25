@@ -11,6 +11,16 @@ When a file has pending unrelated uncommitted edits (someone else's WIP, a queue
 
 Cleaner than `git add -p` when scripted — interactive git isn't available in this env. Prefer this over `git add -A`; commit only your own files.
 
+## A failed pathspec-scoped `stash push` leaves the stack unchanged — the next `pop` grabs a foreign entry
+
+Verified 2026-07-20 (literary-translator 1.11.0, three parallel sessions sharing one worktree). A teammate ran `git stash push -- <paths> -m "..."` with a malformed pathspec. It errored and stashed **nothing** — the stack was untouched. The teammate then ran `git stash pop` expecting to restore its own work, and instead popped `stash@{0}` — an unrelated entry from a **different branch and a different session** — producing `UU` merge conflicts in three files it did not own.
+
+Two things make this dangerous: (1) `stash push` failing is not loud enough to stop a scripted `pop` that follows it — the pair reads as symmetric, it isn't; nothing ties a `pop` to the entry your `push` created. (2) In a shared worktree the stash stack is global and long-lived — that machine had three stashes from three unrelated branches/sessions going back weeks, so `stash@{0}` meant "whatever some other session left there", not "my last push".
+
+- **Never use stash as an undo in a shared tree.** To restore one file to committed state: `git show HEAD:<path> > <path>` — scoped, no stack involvement, no risk to a peer.
+- If you truly must stash, check `git stash list` before AND after the push and confirm your own entry appeared; never `pop` on faith.
+- Recovery is clean if caught immediately: `git checkout HEAD -- <the affected paths>` discards the foreign application, and the original stash entry stays intact on the stack (verify with `git stash list` — nothing should have been dropped).
+
 ## Never run git-state ops concurrently with active subagents in the SHARED cwd
 
 Teammates and Workflow agents share the working tree — worktree isolation does NOT isolate the main tree. Running `git status` / `git add --dry-run` while agents do their own `git` inspection returns transient GARBAGE (observed: `--dry-run` reported 2 of 92 files; a committed file showed as untracked `??`). It settles to correct once agents go idle.

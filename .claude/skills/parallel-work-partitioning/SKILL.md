@@ -1,0 +1,37 @@
+---
+name: parallel-work-partitioning
+description: Planning technique for splitting an issue/change set across two or more parallel sessions, worktrees, or teammates BEFORE dispatch. Use when deciding who owns what ahead of a fan-out, sanity-checking a scout-proposed split, or partitioning a batch of issues/tickets across parallel workers. Covers why the partition is forced by shared FILES rather than topic, why a grep of current code under-detects the right split, cache-bundle membership as a second partitioning axis, shared registration files as merge-time (not dev-time) coordination, and why a scout's fix_approach is not implementability-verified until codex or a reviewer confirms the supporting contract exists.
+---
+
+# Partitioning a set of changes across parallel sessions / worktrees
+
+Forged 2026-07-17 splitting the SSK-audit literary-translator issues into two parallel-session groups (user drives one session, another drives the other). This is a planning technique — apply it BEFORE fanning out, not after.
+
+## The partition is forced by shared FILES, not by topic
+
+Two parallel sessions/worktrees must not edit the **same file** (branches collide at merge; teammates in one session share cwd). So the real constraint is a **file-coupling graph**: issues sharing a file form a connected component that MUST live in one owner — even when they look like distinct features. Example: `render_obsidian.py` coupled **#206 (matcher), #207 (homonym collapse), Phase-3 index_scope, #200 (cross-volume linker), #203 (embedded-language display)** into ONE un-splittable owner, purely because every fix lands in that one renderer. Whole components assign freely to either group; only balance is negotiable, disjointness is not.
+
+## A grep of CURRENT code UNDER-detects the coupling
+
+A first-pass grep for where each issue is *currently mentioned* is not enough — a fix often LANDS in a file the current code doesn't yet reference. In the SSK-audit case, grepping for current mentions put #200/#203 in the extraction group. **Wrong** — a deeper "**where would this fix GO**" read (a scout per cluster) correctly moved #200 (cross-volume backlink resolution) and #203 (embedded-language display) into the renderer group. **Partition by "where the fix lands," not "where the symbol appears."** Grep is a floor, not the answer.
+
+## Cache-bundle membership = a second partitioning axis
+
+Beyond file-disjointness, segregate by **cache blast radius**: put ALL cache-invalidating edits (files in `PLUGIN_BUNDLE_MEMBERS` / `DERIVATION_BUNDLE_MEMBERS` / a `schema_hash` schema) into ONE group so a single release absorbs the single mass re-translation; keep the other group **cache-safe** so it ships freely with zero re-translation. In the SSK-audit split, the renderer group was fully cache-safe (`render_obsidian.py` is in no bundle) while the extraction group carried the derivation-member landmines — a clean split on both axes at once. (Hash-surface facts → skill:literary-translator-ops.)
+
+## Shared REGISTRATION files are merge-time, not dev-time, collisions
+
+The version quartet (plugin.json / marketplace.json / README / CHANGELOG), central schemas, and shared docs (SKILL.md, a cross-referenced adapter doc) get touched by both groups but are **integrator-wired at merge** (sequence the version bumps, e.g. group A→1.8.0, group B→1.9.0). They don't block the split — flag them as coordination, not as a coupling edge.
+
+## A scout's `fix_approach` is NOT implementability-verified — the codex plan-loop still finds the missing contract
+
+An investigation/scout Workflow reliably reports **root cause + fix LOCATION**, but reliably **UNDER-checks whether the fix's supporting CONTRACT exists**. In the SSK-audit case, scouts recommended driving homonym-correct backlinks from `canon_senses` sense-assignment; the codex plan-review then found `canon_senses` carries **no `sense → note_identity` key and no source→target text alignment** — the whole approach was impossible, and the plan shrank hard (index_scope/#206-matcher/#203 all deferred because the contracts they need — a sense→note map, a "which category = person" declaration, a per-node language field — simply don't exist yet). **Do not treat a scout's fix_approach as buildable.** The codex plan-loop is exactly what catches the "this fix needs a mapping/field/alignment that doesn't exist" class — run it even after a thorough investigation.
+
+## The memory INDEX is shared even when code files aren't — defer index rewrites during a live parallel session
+
+The auto-memory dir (`~/.claude*/projects/<slug>/memory/`) is a **whole-dir symlink shared across all profiles**, so two parallel CC sessions write the **same `MEMORY.md` and `index_*.md`** — a coupling the code-file partition above does NOT cover (their repo files can be perfectly disjoint yet both append to the shared index; last-writer-wins clobbers the other's line). So during an active parallel session: (a) **do NOT rewrite/compact a shared index line the other session is editing** — e.g. a size-hook asking to compact `MEMORY.md` while the parallel session just wrote a big pointer line: DEFER the compaction until it's done; (b) capture new learnings in **unique-named memory FILES** (zero clobber) and point them from an EXISTING already-pointed file rather than adding a fresh `MEMORY.md` pointer into the contested index. Same spirit as the code-file rule: find the disjoint surface and stay on it.
+
+## Related
+
+- skill:git-worktree-pr-mechanics — one worktree per parallel session; concurrent-worktree version-collision recovery.
+- skill:subagent-trust-verification — pinning the shared contract before fan-out; integrator wires registration files.

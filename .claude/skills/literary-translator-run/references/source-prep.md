@@ -3,6 +3,7 @@
 ## Contents
 - The adapter gap (why you must EPUB-wrap)
 - Get clean source text (extractor cleanliness is per-PDF — measure garble)
+- Normalization simulations over vocalized Hebrew must be mark-aware
 - EPUB-wrap mechanics
 - Segmentation (marker-snapped)
 - Structure attestation gate (siman lists)
@@ -34,6 +35,18 @@ The `pdftotext`-preferred default above held for the Historiettes/Yiddish-era so
 **No source-fidelity gate exists** — a splitter that drops or duplicates text passes W2 green. This is a real gap; you are the only check on completeness.
 
 **Prove conservation at the CHARACTER level, body-only, to BE that check.** A token-level source-vs-EPUB diff FALSELY fails on two artifacts — split markers (`ב-`+`ג` as two source tokens vs the joined `ב-ג`) and `<title>` text leaking into extraction. Instead compare Hebrew-letters-only (`א`–`ת`), `<body>` only, between the source line-range and the built EPUB — it must be character-exact (54,579 == 54,579 for the SSK 12-chapter slice). Caveat: character conservation proves NO TEXT was lost, NOT that every siman boundary is right — a wrongly-dropped siman marker merges its body into the preceding section, conserving characters while losing a boundary (see the monotonic-filter warning under Structure attestation). So pair the character check with the source-attestation boundary gate; neither alone suffices.
+
+## Normalization simulations over vocalized Hebrew must be mark-aware
+
+When simulating a text-healing/normalization step (e.g. joining a letter to an adjacent ASCII
+connector) over vocalized (pointed) Hebrew, a check for "a Hebrew letter adjacent to the ASCII
+connector" silently under-fires: in pointed text a `Mn` (nonspacing-mark, niqqud) codepoint sits
+BETWEEN the letter and the connector, so an adjacency check that doesn't skip `Mn` marks heals
+almost nothing and can produce a false "the fix made things worse" result. Fix: skip over
+`Mn`-category codepoints when checking adjacency. This kind of contradiction is caught only by
+asking "why does this contradict an already-proven fact?" — always reconcile a new measurement
+against a prior verified finding before reporting it, rather than trusting the new number at face
+value.
 
 ## EPUB-wrap mechanics
 

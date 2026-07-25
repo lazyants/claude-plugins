@@ -13,6 +13,8 @@
 - [A coverage claim needs the same evidence as the thing it covers](#a-coverage-claim-needs-the-same-evidence)
 - [A pin can CEMENT a wrong claim — pinning is not review](#a-pin-can-cement-a-wrong-claim)
 - [Ask which correct behaviours have NO gate at all](#ask-which-correct-behaviours-have-no-gate)
+- [An authoritative fix still needs review](#an-authoritative-fix-still-needs-review)
+- [A bare `assert` guard vanishes under `python -O`](#a-bare-assert-guard-vanishes-under-python--o)
 
 ## Cover the DOMAIN, not the ticket's example
 
@@ -149,3 +151,108 @@ the section boundary that made two other pins *independent* was itself unguarded
 the call one pin protected would have left both green.
 
 A manual probe shows the code is correct now; only a permanent fixture shows it stays correct.
+
+## An authoritative fix still needs review
+
+Verified 2026-07-20 (literary-translator 1.11.0, codex rounds 10→11). Codex prescribed a bounded
+fix in precise terms: build a key→snapshot map inside each digest and compare it against the
+constant tuple "with an exact-key-SET check". That was relayed verbatim; the teammate implemented
+it faithfully; it was verified on disk, measured for digest byte-identity, and committed.
+
+A **set collapses duplicates**. A fourth descriptor reusing an existing key compared equal, passed
+both guards, and caused one input to be stamped and checked twice while the new one was never
+represented at all. That was instance ELEVEN of the same class the fix was written to close (see
+inexpressible-defects.md).
+
+Every link in the chain did its job. Reviewer authored, implementer applied, lead verified — and
+the defect rode through all three, because each link was checking *fidelity to the prescription*
+rather than *whether the prescription was right*.
+
+**Why this is not just "review harder":** the prescription arrived with earned authority — the same
+reviewer had, one round earlier, correctly overruled a refusal and produced a bounded fix that
+dissolved a blast radius that had been wrongly priced as unavoidable. Being right that recently is
+precisely what makes the next instruction land unexamined. The trust was justified; the exemption
+was not.
+
+**How to apply:**
+- **Attack the prescription's data structure, not just its intent.** `set` vs sorted list, `>=` vs
+  `==`, "contains" vs "equals" — the reviewer names a shape in a sentence; the sentence cannot
+  carry its own edge cases. Ask what the chosen structure DISCARDS: a set discards multiplicity, a
+  dict discards order, a count discards identity.
+- **Relaying is not reviewing.** When passing a reviewer's fix to an implementer, the brief should
+  contain your own reading of what could still go wrong, not just the quote. If the relay is
+  verbatim, nobody in the chain has independently thought about it.
+- **A finding can be RIGHT while the mechanism it cites for WHY is wrong — verify the cited fact
+  before repeating it in your fix or docs.** Verified 2026-07-21 (1.11.0, post-merge bot round):
+  codex's P1 on the conservation gate was valid (a `min`-anchor reduction misses interleaving), but
+  its supporting claim — "duplicate `order_index` is separately invalid per the schema" — was
+  false: `manifest.schema.json` only types it `integer>=0` and `validate_extraction.py` never
+  mentions it; the real enforcer is `assemble.py`, which fatally *raises* `duplicate_order_index`.
+  Writing a docstring qualifier citing the schema (as codex named it) would have replaced one false
+  claim with another. Accept/reject the finding on its merits, but grep the codebase for the
+  enforcer it names — a reviewer citing the wrong file is common, and its citation is not evidence.
+- **The verification that was run was real and still insufficient** — byte-identity, zero
+  deletions, `-O` behaviour, suite green. All true, none of it aimed at the guard's discriminating
+  power. Verifying that a fix is *faithfully applied* is a different question from whether it
+  *closes the class*; run both, and say which one was run.
+- Send the fix back through the loop even when its author is the reviewer. A round that only
+  confirms "yes, you did what I said" is cheap; this one returned instance eleven.
+
+## A bare `assert` guard vanishes under `python -O`
+
+Python's `-O` flag strips every `assert` STATEMENT from the bytecode. So a guard written as
+
+```python
+assert set(snapshots) == spec_keys, "..."       # GONE under -O
+```
+
+does not merely stop reporting — it stops existing. The function proceeds as if the invariant
+held. A `raise` is never stripped:
+
+```python
+if sorted(snapshots) != sorted(spec_keys):      # survives -O
+    raise AssertionError("...")
+```
+
+`AssertionError` is still the right exception TYPE for an internal-invariant violation; it is the
+bare `assert` *statement* that is unsafe, not the exception class. Keeping the class means callers
+and tests that expect `AssertionError` are unaffected by the rewrite.
+
+**Why this is worse than an ordinary disabled check:** the failure is silent, mode-dependent, and
+invisible in review — the source reads as guarded, the test suite (which runs without `-O`)
+passes, and only the optimized production path is unprotected. It is the same shape as the
+recurring class in inexpressible-defects.md — a mechanism present but not engaged on the path
+actually taken — with the extra sting that the disengaged path is the one you ship.
+
+**How to apply:**
+- **Any guard whose job is to fail CLOSED gets `if ...: raise`, never a bare `assert`.** Reserve
+  bare `assert` for redundant narrowing that something upstream already guarantees (e.g. narrowing
+  a value argparse's `required=True` mutex group has already made non-None) — there, stripping it
+  costs nothing.
+- **Verify, don't infer.** Load the real module under `python3 -O`, drive the invariant false, and
+  watch it raise. Reading the source cannot distinguish the two forms' runtime behaviour.
+- **Sweep the whole diff, not the site you just wrote.** An AST/grep sweep for `^\s*assert ` across
+  changed production files separates real fail-closed boundaries from harmless narrowing; classify
+  each rather than reporting a count.
+- Pre-existing bare asserts outside your diff are usually narrowing-after-a-dependency-check and
+  not worth expanding scope for — but say so explicitly, so a clean-looking sweep isn't read as "I
+  checked and there was nothing".
+
+Verified 2026-07-20 (literary-translator 1.11.0): a teammate chose `if ...: raise AssertionError`
+deliberately for this reason; confirmed by loading the real module under `-O` with a mutated
+constant and watching it still raise. Had it been a bare `assert`, the release's whole
+frozen-input fail-closed mechanism would have been absent in optimized execution.
+
+**Diagnostic technique: is a wall of `-O` failures pre-existing, or a regression?** When
+`python3 -O -m pytest` on the full suite shows failures unrelated to your own diff (different
+files, different subsystem), don't eyeball-guess "probably pre-existing" from the file list alone —
+prove it: `git worktree add --detach <tmp-path> origin/main`, run the identical `-O` command there,
+and diff the exact sorted `FAILED` test-name sets (not just the counts — a matching count can mask
+one newly-broken + one newly-fixed). Verified 2026-07-23 (literary-translator #282/#283, v1.15.2): a
+58-test `-O` failure wall across `ledger_confirmation_schema.test.py`,
+`mandatory_split_audit_wiring.test.py`, `resume_integrity.test.py`,
+`review_prompt_schema_drift.test.py`, `scaffold_setup.test.py`, `senses_fixture_guard.test.py`
+turned out to be a BYTE-IDENTICAL failure set on `origin/main` before the branch's changes — a
+real, pre-existing bare-assert casualty at scale in this same codebase, not a regression, and safe
+to ship past without blocking the PR on it. Filed as a follow-up rather than fixed inline (out of
+scope for that PR's diff).
