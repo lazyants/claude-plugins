@@ -485,20 +485,29 @@ only when that sentinel's line, after `String.prototype.trim()`, equals the
 sentinel exactly — nothing else may share the line except what `trim()`
 strips. In the realistic failure shape, a reviewer writing its finding and
 then the sentinel on the SAME line, that prose is on the line regardless, so
-ANY glue character hides the sentinel, a plain space included. Measured over
-the 16-character `GLUE_CHARS` table in
-`tests/glossary_citation_review.test.py`, 15 of the 16 hide it in that shape;
-only a line feed puts the sentinel on a line of its own (CRLF is safe for the
-same reason, and is deliberately not in that table).
+ANY glue character hides the sentinel, a plain space included: **15 of 16 over
+`GLUE_CHARS` in `tests/glossary_citation_review.test.py`, prose sharing the
+sentinel's line**. Only a line feed puts the sentinel on a line of its own
+(CRLF is safe for the same reason, and is deliberately not in that table).
 
-With no prose on the line the same table splits, which is worth knowing before
-"simplifying" anything here: `trim()` strips a space, tab, VT, FF, CR, NBSP,
-U+2028 and U+2029, so those still match and still reject correctly. Seven do
-not — the C0 separators U+001C–U+001F, NEL U+0085, a zero-width space, and any
-ordinary character — and those hide the sentinel with or without prose. The end
-state is identical either way: the fail scan skips the sentinel, a trailing
-clean OK line then approves the batch, and a reply carrying BOTH verdicts
-silently resolves to the approving one.
+With the sentinel ALONE on its line the same table splits, which is worth
+knowing before "simplifying" anything here: **7 of 16 over `GLUE_CHARS` in
+`tests/glossary_citation_review.test.py`, sentinel alone on its line**. `trim()`
+reaches a line's two ends and so strips a space, tab, VT, FF, CR, NBSP, U+2028
+and U+2029; those still match and still reject correctly. The 7 survivors — the
+C0 separators U+001C–U+001F, NEL U+0085, a zero-width space, and any ordinary
+character — hide the sentinel with or without prose. Do not reason about that
+set by eye: U+0085 is not `trim()`-strippable in JS while U+2028 and U+2029 are.
+
+**Always publish a gluing count with both its SHAPE and its SET**, naming the
+set by constant and file as above. The same guard measured over a different
+table, or over a different reply shape, yields a different and equally correct
+number — this release ships three — and a bare count reads as a contradiction
+between surfaces that do not actually disagree.
+
+The end state is identical either way: the fail scan skips the sentinel, a
+trailing clean OK line then approves the batch, and a reply carrying BOTH
+verdicts silently resolves to the approving one.
 
 Each of this template's three sites therefore now short-circuits to REJECT when
 `rejectedAnywhere(reply, failSentinel)` finds the fail sentinel anywhere in the
@@ -508,8 +517,12 @@ equality, so the guard can only ADD rejections, never remove one — it moves
 the failure into the fail-safe direction by construction, not by care.
 
 The same guard is applied to `mass-translate-wf.template.js`'s translate and
-review waits, five sites over the two templates; its `DRAFT_MISSING` check
-passes a `null` fail sentinel and so has nothing to hide.
+review waits. Its `DRAFT_MISSING` fix check is guarded too, but in the OPPOSITE
+direction and through a differently-named wrapper: there `DRAFT_MISSING` is the
+OK sentinel, so gluing hides a GENUINE missing-draft report rather than faking a
+pass, and `runRound` keys on `mentionedAnywhere()` — same containment test as
+`rejectedAnywhere()`, which it delegates to, but a hit biases toward ACTING on
+the sentinel instead of rejecting. Six guarded sites over the two templates.
 `skeptic-pass-wf.template.js` mirrors this control flow and is deliberately NOT
 guarded — it sits in no `cache_key.py` bundle and carries its own
 `compute_skeptic_input_digest()`, so editing it would force a fresh skeptic
@@ -532,9 +545,9 @@ in a log:
   make it reachable.
 
 **A false REJECT does not cost the same at every site**, and the difference is
-what to read a failed run against. Of the five, only the two IN-BATCH glossary
-sites recover inside the run; all three waits — this template's and
-mass-translate's two — cost at least a re-run:
+what to read a failed run against. Of the six, only the two IN-BATCH glossary
+sites recover inside the run; the three waits and mass-translate's
+`DRAFT_MISSING` fix site all cost at least a re-run:
 
 - **Citation review** — the batch regenerates to a fresh attempt and is
   reviewed again, bounded by `MAX_CITATION_RETRIES`. Automatic, same run,
@@ -550,12 +563,15 @@ mass-translate's two — cost at least a re-run:
   merge is all-or-nothing it takes the whole pass with it — `merged: false`,
   `reason: "fragment-check-failed"`, nothing merged at all. Recovery here is
   an operator re-invoking the pass, not the template retrying.
-- **Mass-translate's two waits**, for completeness, since they carry the same
-  guard: its review wait blocks that segment for the run
-  (`reason: "review-timeout"`), while its translate wait returns the
-  deliberately non-terminal `reason: "translate-timeout"`, which
-  `select_segments.py` treats as recoverable and auto-redispatches next run —
-  the cheapest false RED of the five.
+- **Mass-translate's three sites**, for completeness, since they carry the same
+  containment test: its review wait blocks that segment for the run
+  (`reason: "review-timeout"`); its translate wait returns the deliberately
+  non-terminal `reason: "translate-timeout"`, which `select_segments.py` treats
+  as recoverable and auto-redispatches next run; and its `DRAFT_MISSING` fix
+  site, on a false hit, probes via `draftPresentAndValid()`, finds the draft
+  present, and returns `reason: "fix-call-failed"` with no terminal ledger
+  write — also auto-redispatched. Those last two are the cheapest false REDs of
+  the six.
 
 Regeneration is bounded by `MAX_CITATION_RETRIES`, and the next attempt's
 dispatch prompt is handed the rejecting reviewer's own findings (minus the

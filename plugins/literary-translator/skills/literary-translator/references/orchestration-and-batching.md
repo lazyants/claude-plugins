@@ -342,7 +342,11 @@ and atomically promotes it.
    colonless infra-sentinel `loc` instead of a real content location),
    `fix-call-failed` (1.3.6/#131 facet A — the fix call came back falsy/
    `DRAFT_MISSING` but the `draftPresentAndValid` probe confirmed the draft
-   is present-and-valid, or the probe call itself failed inconclusively),
+   is present-and-valid, or the probe call itself failed inconclusively;
+   **1.16.0** also reaches here when a fix reply merely MENTIONS
+   `DRAFT_MISSING <seg>` without reporting one, since that site is now keyed
+   on containment via `mentionedAnywhere()` and cannot tell the two apart —
+   the accepted, non-terminal cost of no longer missing a real report),
    `draft-missing`, or `cap` (non-converged after the final confirming
    review). **1.3.6 (#131):** every reason above EXCEPT `draft-missing` and
    `cap` is now recoverable rather than terminal — no ledger write happens
@@ -708,22 +712,29 @@ pipeline(BATCHES, batchStep)
   **Pre-merge citation review**.
 
 **All three of these verdicts are containment-guarded (1.16.0)** — as are
-mass-translate's two waits, five sites over the two templates. Each
-short-circuits to REJECT when `rejectedAnywhere(reply, failSentinel)` finds the
-failure sentinel anywhere in the reply as a substring, before `sentinelVerdict()`
-is consulted. `sentinelVerdict()` alone matches whole LINES, so a fail sentinel
-sharing its line with anything `trim()` does not strip was skipped, and a
-trailing clean OK line then approved. The guard only ever adds rejections.
+mass-translate's two waits and its `DRAFT_MISSING` fix check, six sites over the
+two templates. Each short-circuits when the sentinel is found anywhere in the
+reply as a substring, before `sentinelVerdict()` is consulted.
+`sentinelVerdict()` alone matches whole LINES, so a sentinel sharing its line
+with anything `trim()` does not strip was skipped.
 
-A false reject recovers in-run at only two of the five: the precheck falls
-through to the dispatch it would have run anyway, and the citation review
-regenerates within `MAX_CITATION_RETRIES`. The three WAITS each cost at least a
-re-run — the glossary wait ends the batch and with it the whole pass
+Five of the six take a FAILURE sentinel via `rejectedAnywhere()`, where a hit
+biases toward REJECTING and the guard only ever adds rejections. The
+`DRAFT_MISSING` fix site is the exception and runs the same containment test in
+the opposite direction, through `mentionedAnywhere()`: there the sentinel is the
+OK one, so gluing hid a genuine missing-draft report and the loop silently
+carried on reviewing an absent draft.
+
+A false hit recovers in-run at only two of the six: the precheck falls through
+to the dispatch it would have run anyway, and the citation review regenerates
+within `MAX_CITATION_RETRIES`. The other four cost at least a re-run — the
+glossary wait ends the batch and with it the whole pass
 (`reason:"glossary-pass-null"`), mass-translate's review wait blocks that
-segment (`reason:"review-timeout"`), and its translate wait returns the
-non-terminal `reason:"translate-timeout"`, which `select_segments.py`
-auto-redispatches next run. Full statement of the rule, the measured glue
-table, and the two bounded false REDs:
+segment (`reason:"review-timeout"`), its translate wait returns the non-terminal
+`reason:"translate-timeout"`, and the fix site returns the equally non-terminal
+`reason:"fix-call-failed"`; `select_segments.py` auto-redispatches the last two
+next run. Full statement of the rule, the measured glue counts with their
+shapes and sets, and the bounded false REDs:
 `references/canon-and-glossary.md`'s **Pre-merge citation review**.
 
 Fragment paths are run-scoped (`{{RUN_ID}}` in the path itself), so — unlike

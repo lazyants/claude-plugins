@@ -38,33 +38,55 @@ success line then approved the work anyway.
 - No-op under `glossary.research_mode: offline`, where `basis: "established"` is forbidden outright —
   there is no citation to review, and an offline run pays nothing for the stage.
 
-### Fixed — a failure sentinel glued to prose no longer passes as success (glossary + mass-translate)
+### Fixed — a sentinel glued to prose is no longer missed (glossary + mass-translate)
 
 - `sentinelVerdict()` (introduced by #308, which converted these sites from whole-string exact
   matching to line matching) decides on whole-LINE equality: it treats a reply as a failure only when
   the failure sentinel's line, after `String.prototype.trim()`, equals the sentinel exactly. Nothing
   else may share that line except what `trim()` strips. In the realistic failure shape — an agent
   writing its finding and then the sentinel on the SAME line — the prose is on that line regardless,
-  so any glue character hides the sentinel, a plain space included. Measured over the 16-character
-  `GLUE_CHARS` table in `tests/glossary_citation_review.test.py`, 15 of the 16 hide it in that shape;
-  only a line feed puts the sentinel on a line of its own, CRLF being safe for the same reason. With
-  no prose on the line the table splits: `trim()` strips a space, tab, VT, FF, CR, NBSP, U+2028 and
-  U+2029, so those still reject correctly, while the C0 separators U+001C–U+001F, NEL U+0085, a
-  zero-width space and any ordinary character hide the sentinel either way. The end state is the same
-  — the failure scan skips the sentinel, a trailing clean success line then approves, and a reply
-  carrying BOTH verdicts silently resolves to the approving one.
+  so any glue character hides the sentinel, a plain space included: **15 of 16 over `GLUE_CHARS` in
+  `tests/glossary_citation_review.test.py`, prose sharing the sentinel's line**. Only a line feed puts
+  the sentinel on a line of its own, CRLF being safe for the same reason. With the sentinel ALONE on
+  its line the same table splits — **7 of 16 over `GLUE_CHARS` in
+  `tests/glossary_citation_review.test.py`, sentinel alone on its line** — because `trim()` reaches a
+  line's two ends and strips 9 of the 16 (space, tab, VT, FF, CR, NBSP, U+2028, U+2029, and LF by
+  splitting); the 7 survivors are the C0 separators U+001C–U+001F, NEL U+0085, a zero-width space and
+  any ordinary character. Note U+0085 is NOT `trim()`-strippable in JS while U+2028 and U+2029 ARE, so
+  the strippable set cannot be reasoned about by eye. Every gluing count in this release names both its
+  SHAPE and its SET for that reason: the same guard measured over a different table or a different
+  reply shape yields a different, equally correct number, and a bare count reads as a contradiction.
+  The end state is the same either way — the failure scan skips the sentinel, a trailing clean success
+  line then approves, and a reply carrying BOTH verdicts silently resolves to the approving one.
 - This is the false-GREEN dual of #308, which fixed the false-RED direction of the same comparison
   (a decorated but genuine success reply being read as a timeout). #308 closed over-strictness at
   these sites; this closes the under-strictness that its line-equality rule left open.
-- **Five verdict sites across two templates** now short-circuit to REJECT when
+- **Five of the six guarded sites, across two templates**, short-circuit to REJECT when
   `rejectedAnywhere(reply, failSentinel)` finds the failure sentinel anywhere in the reply as a plain
   substring, evaluated before `sentinelVerdict()` is consulted at all: in `glossary-pass-wf.template.js`
   the resume precheck, the readiness wait and the new citation review; in
   `mass-translate-wf.template.js` the translate wait and the review wait. Substring containment is
   strictly easier to satisfy than line equality, so the guard can only ADD rejections and never remove
-  one; the residual failure direction is fail-safe by construction rather than by care. Mass-translate's
-  `DRAFT_MISSING` check is deliberately left alone — it passes a `null` failure sentinel, so it has no
-  sentinel to hide and `rejectedAnywhere()` returns `false` for it by its own argument guard.
+  one; the residual failure direction is fail-safe by construction rather than by care.
+- **A sixth site, mass-translate's `DRAFT_MISSING` fix check, is guarded in the OPPOSITE direction.**
+  #228 built that site on whole-line equality deliberately, so that a fix reply *discussing*
+  `DRAFT_MISSING` could not be mistaken for a report of one — and measurement confirms that protection
+  did work. It was overturned anyway, because at this site `DRAFT_MISSING` is the OK sentinel, not the
+  failure sentinel. Gluing there does not fake a pass; it makes a GENUINE missing-draft report go
+  unrecognised, so `runRound` falls through to `terminal: false` and the pipeline silently continues
+  reviewing a draft the fix agent just said was absent. `runRound` therefore no longer calls
+  `sentinelVerdict()` at all and is keyed on a new `mentionedAnywhere(reply, sentinel)` wrapper that
+  delegates to `rejectedAnywhere()`. Containment subsumes the old rule — any reply whose last trimmed
+  line equals the sentinel also contains it — so the old check is strictly narrower, not merely
+  redundant. The two directions carry different helper names on purpose: `rejectedAnywhere` takes a
+  FAILURE sentinel, so a hit biases toward REJECTING, while `mentionedAnywhere` takes a sentinel a
+  caller is trying not to MISS, so a hit biases toward ACTING. "Mentioned" rather than "reported"
+  because the check genuinely cannot tell a report from a passing textual mention, and its one caller
+  accepts that collision knowingly. The accepted cost is that false RED: a fix reply that merely
+  discusses the sentinel now lands in the branch too, where `draftPresentAndValid()` probes, finds the
+  draft present, and returns `reason: "fix-call-failed"` with NO terminal ledger write — the
+  `in_progress` fragment stays the durable record and the segment auto-redispatches next run. One
+  wasted segment re-run beats silently reviewing an absent draft, the same trade the wait sites make.
 - Two bounded false REDs are accepted in exchange, both benign relative to the false GREEN. A reply
   that merely mentions the failure sentinel while approving now rejects. And a sentinel can be a
   substring of a longer-indexed sibling — `ABSENT 1` occurs inside `ABSENT 10` — so a precheck or wait
@@ -75,7 +97,9 @@ success line then approved the work anyway.
 - **A false reject costs differently at every site**, which is what to read a failed run against. Only
   the two in-batch glossary sites recover inside the run: the citation review regenerates within
   `MAX_CITATION_RETRIES`, and the precheck forfeits its resume-skip and runs the dispatch + wait it
-  would otherwise have skipped. The three wait sites each cost at least a re-run. The glossary wait
+  would otherwise have skipped. The other four cost at least a re-run — the three waits, plus the
+  `DRAFT_MISSING` fix site, whose `fix-call-failed` return is non-terminal and auto-redispatches. The
+  glossary wait
   returns `{ready: false, reason: "glossary-pass-null"}` straight out of `batchStep`, ending that batch
   and — the merge being all-or-nothing — the whole pass, which reports `merged: false` and merges
   nothing. Mass-translate's review wait returns `{status: "blocked", reason: "review-timeout"}`,
