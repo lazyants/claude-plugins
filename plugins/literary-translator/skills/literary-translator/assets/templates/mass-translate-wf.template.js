@@ -706,13 +706,36 @@ function sentinelVerdict(reply, okSentinel, failSentinel) {
 //
 // An empty or non-string failSentinel returns false rather than matching
 // everything: "".indexOf("") is 0, so an unguarded containment test would
-// reject every reply unconditionally. That also makes the guard a NO-OP by
-// construction at the fix site's `sentinelVerdict(fx, "DRAFT_MISSING " + seg,
-// null)` call, which passes failSentinel === null -- see that site's own
-// comment for the separate, opposite-direction gap it has.
+// reject every reply unconditionally.
+//
+// This guard is NOT used at runRound's fix site. That call has no fail
+// sentinel at all -- "DRAFT_MISSING <seg>" is its OK sentinel -- so a
+// fail-sentinel guard would be a no-op there by construction. Its gap runs the
+// opposite way and is closed by mentionedAnywhere() below instead.
 function rejectedAnywhere(reply, failSentinel) {
   if (typeof failSentinel !== "string" || failSentinel.length === 0) return false
   return String(reply == null ? "" : reply).indexOf(failSentinel) !== -1
+}
+
+// Containment in the OK-SENTINEL direction -- the counterpart to
+// rejectedAnywhere() above, and deliberately NOT that same function. That one
+// takes a FAIL sentinel, so a hit biases toward REJECTING. This one takes a
+// sentinel whose presence a caller is trying not to MISS, so a hit biases
+// toward acting on it. Identical containment test, opposite consequence, which
+// is why it carries its own name instead of reusing one that would be false at
+// the call site.
+//
+// "mentioned" rather than "reported" on purpose: this test cannot tell a
+// genuine report from a passing textual mention, and its one caller has
+// accepted that collision knowingly (see runRound below). A name promising
+// "reported" would be false in exactly the case that matters.
+//
+// Delegates to rejectedAnywhere() so the containment semantics -- including
+// the empty/non-string sentinel guard that stops "".indexOf("") === 0 from
+// matching every reply -- live in one place. That function's body is pinned
+// byte-identical across the workflow templates; this wrapper does not move it.
+function mentionedAnywhere(reply, sentinel) {
+  return rejectedAnywhere(reply, sentinel)
 }
 
 // ---------------------------------------------------------------------------
@@ -1267,34 +1290,44 @@ async function runRound(seg, round, isFinal) {
   // let a dead fix call silently read as an ordinary review round instead of
   // probing for what actually happened.
   //
-  // NOT GUARDED by rejectedAnywhere(), and the reason is structural rather
-  // than an oversight: this is the only sentinelVerdict() call in the file
-  // that passes failSentinel === null, so a fail-sentinel containment guard is
-  // a no-op here by construction. This site's gap runs the OPPOSITE way.
-  // "DRAFT_MISSING <seg>" is the OK sentinel, so gluing does not fake a pass --
-  // it makes a REAL DRAFT_MISSING go unrecognized. Measured over
-  // tests/glossary_citation_review.test.py's GLUE_CHARS with a reply of
-  // prose + GLUE + "DRAFT_MISSING <seg>": 15 of 16 glue characters are MISSED
-  // and fall through to `terminal: false`, i.e. silently continue as an
-  // ordinary review round over a draft the fix agent just said is missing --
-  // exactly the outcome the paragraph above says must not happen. LF alone is
-  // recognized. (Controls, same run: a clean sentinel and an LF-decorated one
-  // both probe correctly, a falsy fx probes, and a mere textual MENTION of the
-  // sentinel in prose correctly does NOT fire.)
+  // #228 DELIBERATELY REVERSED HERE -- read this before "simplifying" it back.
+  // That fix built this site on whole-trimmed-line equality precisely so a fix
+  // reply that DISCUSSES "DRAFT_MISSING <seg>" in its prose could not be
+  // mistaken for a report of one, and that protection did work: measured, a
+  // prose mention did not fire it. It was reversed anyway, on measurement.
   //
-  // Closing it is not free and is deliberately NOT decided here. The only
-  // containment form available in this direction is "DRAFT_MISSING appears
-  // anywhere in the reply", which by construction reintroduces precisely the
-  // #228 mere-mention collision this site was built to avoid -- the control
-  // above proves that protection currently works. The trade is: accept
-  // occasional false DRAFT_MISSING (cost: draftPresentAndValid() probes,
-  // finds the draft fine, returns reason:"fix-call-failed" with no terminal
-  // ledger write, so the segment auto-redispatches next run) in order to stop
-  // silently proceeding on a missing draft. That is the same bounded-false-RED
-  // asymmetry the wait sites above resolved in favour of guarding, but it
-  // overturns an explicit documented decision at this site, so it belongs to
-  // whoever owns that decision, not to this change.
-  if (!fx || sentinelVerdict(fx, "DRAFT_MISSING " + seg, null)) {
+  // What the whole-line rule cost. "DRAFT_MISSING <seg>" is the OK sentinel at
+  // this call, so gluing does not fake a pass -- it makes a REAL report go
+  // UNRECOGNIZED, falling through to `terminal: false` and silently continuing
+  // as an ordinary review round over a draft the fix agent just said was
+  // missing. Measured over tests/glossary_citation_review.test.py's GLUE_CHARS,
+  // in the two shapes a reply can take -- the count is SHAPE-DEPENDENT, which
+  // is easy to get wrong:
+  //   prose on the SAME line as the sentinel ("prose<GLUE>DRAFT_MISSING <seg>")
+  //     -- 15 of 16 missed. trim() only reaches a line's two ends, so it never
+  //     gets a chance at glue sitting between the prose and the sentinel.
+  //   sentinel ALONE on its line ("prose\n<GLUE>DRAFT_MISSING <seg>")
+  //     -- 7 of 16 missed. Here trim() does reach the glue and strips 9 of the
+  //     16; the 7 survivors are U+001C, U+001D, U+001E, U+001F, U+0085, U+200B
+  //     and the ordinary letter "x". Note U+0085 NEL is NOT trim()-strippable
+  //     in JS while U+2028 and U+2029 ARE -- the strippable set is not "the
+  //     characters that look like whitespace", so do not reason about it by eye.
+  //
+  // What the reversal costs. mentionedAnywhere() cannot tell a report from a
+  // mention, so a fix reply that merely discusses the sentinel now lands here
+  // too. That is the false-RED direction and it is bounded:
+  // draftPresentAndValid() probes, finds the draft present, and returns
+  // reason:"fix-call-failed" with NO terminal ledger write, so the in_progress
+  // fragment stays the durable record and the segment auto-redispatches next
+  // run. The whole-line rule's failure, by contrast, was silent and left the
+  // pipeline treating a missing draft as reviewable. One wasted segment re-run
+  // beats that, which is the trade the wait sites above already made.
+  //
+  // Containment SUBSUMES the old check -- any reply whose last trimmed line
+  // equals the sentinel also contains it -- so sentinelVerdict() is not merely
+  // redundant here, it is strictly narrower, and calling both would add nothing.
+  // The `!fx ||` falsy branch above is still not redundant, for its own reason.
+  if (!fx || mentionedAnywhere(fx, "DRAFT_MISSING " + seg)) {
     // #131 facet A: a falsy/DRAFT_MISSING return conflates (a) a genuine
     // missing draft with (b) a hard API/output-token-ceiling error and (c) a
     // classifier block -- both (b) and (c) also yield a falsy fx even though
