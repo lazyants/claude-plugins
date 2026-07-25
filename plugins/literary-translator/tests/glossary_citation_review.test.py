@@ -563,6 +563,15 @@ def test_a_whitespace_char_that_is_not_a_line_terminator_does_not_split(tmp_path
 # THE DEFECT THIS CLOSES, measured on the pre-guard template through this very
 # harness (all three sentinel sites, one run per glue character):
 #
+# Counted over GLUE_CHARS (16 characters, below) in the PROSE shape -- the
+# reply built by _dual_sentinel(): prose + GLUE + FAIL, then the OK sentinel on
+# its own final line. Both halves of that label matter: a gluing count is
+# meaningless without the set it was counted over AND the reply shape it was
+# counted in, because the same character behaves differently in each shape (see
+# tests/mass_translate_sentinel_containment.test.py, which measures both shapes
+# over its own 15-character ALL_GLUES and gets two different numbers). Restating
+# a bare "15 of 16" is how two correct measurements come to look contradictory.
+#
 #     citation-review : 15/16 gluing characters falsely APPROVE
 #     precheck        : 15/16 falsely resume-skip
 #     wait            : 15/16 falsely report READY
@@ -758,7 +767,8 @@ def test_an_approval_that_merely_mentions_the_fail_sentinel_now_rejects(tmp_path
     instructions -- not a shape the pipeline should be tuned to accommodate.
 
     If this ever needs relaxing, the fix is a stricter reply contract, NOT
-    loosening the guard back into a split -- see the 15/16 measurement above."""
+    loosening the guard back into a split -- see the 15-of-16 measurement above,
+    counted over GLUE_CHARS in the prose shape."""
     narrating_approval = (
         "My first read suggested a CITATIONS_REJECTED 0 ATTEMPT 0 verdict, but on "
         "re-fetching both pages they resolve and attest the claimed form.\n"
@@ -804,7 +814,8 @@ def test_a_fail_sentinel_index_prefix_over_matches_and_that_is_accepted(tmp_path
     surprise. If it ever needs closing, the fix is to make the sentinel
     self-delimiting (a trailing marker, or matching on a whole-line-with-
     boundaries basis) -- NOT to weaken containment back toward equality, which
-    is what reopens the 15/16 false approvals.
+    is what reopens the 15-of-16 false approvals counted over GLUE_CHARS in the
+    prose shape (prose shares the sentinel's line).
 
     The fixture has to be built with care to MEAN anything. A reply of bare
     "ABSENT 10" would dispatch with or without the guard -- sentinelVerdict

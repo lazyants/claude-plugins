@@ -534,9 +534,12 @@ def test_check_batch_command_is_composed_once_and_shared_by_all_three_sites():
 #
 # sentinelVerdict() splits on LF only, so a fail sentinel glued to prose by any
 # other character survives whole-line equality and the rejection trigger never
-# fires; measured on the pre-guard template, 15 of 16 gluing characters made all
-# three sites falsely approve (see tests/glossary_citation_review.test.py's
-# containment-guard section, which drives that end to end). The guard is applied
+# fires; measured on the pre-guard template, 15 of 16 gluing characters over
+# GLUE_CHARS in tests/glossary_citation_review.test.py, in the PROSE shape
+# (prose shares the sentinel's line), made all three sites falsely approve --
+# that file's containment-guard section drives it end to end. The shape and the
+# set are both part of the number: the same characters give a different count in
+# the no-prose shape. The guard is applied
 # at the CALL SITES because sentinelVerdict() itself is mirrored byte-for-byte
 # across the three workflow templates and pinned by
 # tests/sentinel_verdict_parity.test.py.
@@ -611,12 +614,20 @@ def test_every_glossary_sentinel_verdict_call_site_is_containment_guarded():
 # would be a no-op. Deriving the exemption from the helper's own contract means
 # a future site with a real sentinel cannot inherit it by being added to a list.
 #
-# That rule currently exempts runRound's DRAFT_MISSING probe, and this file
-# deliberately asserts NOTHING about whether it should stay exempt. Its gluing
-# exposure runs the OPPOSITE direction -- DRAFT_MISSING is that site's OK
-# sentinel, so gluing hides a genuine missing-draft report rather than a
-# rejection -- and the fix would reintroduce a collision the site was built to
-# avoid. That is an open decision, not a settled one.
+# runRound's DRAFT_MISSING site is closed too, but by a DIFFERENT shape, and it
+# gets its own assertion rather than joining the parametrisation below. At the
+# two wait sites the guard is a PRE-CHECK in front of a surviving
+# sentinelVerdict call. At runRound the sentinelVerdict call was REPLACED
+# outright by mentionedAnywhere(), on the reasoning that containment subsumes
+# whole-line equality -- a line that EQUALS the sentinel also CONTAINS it. So
+# there is no "guard precedes sentinelVerdict" pair to assert there, and forcing
+# one would make this file's own failure message describe the code falsely.
+#
+# The direction differs as well: DRAFT_MISSING is that site's OK sentinel, so
+# gluing there hides a GENUINE missing-draft report rather than hiding a
+# rejection. mentionedAnywhere() is a thin wrapper over rejectedAnywhere() for
+# exactly that reason -- same containment test, opposite consequence, so it
+# carries a name that is not false at the call site.
 # ---------------------------------------------------------------------------
 
 MASS_TRANSLATE_GUARDED_FUNCTIONS = ["getVerifiedReview", "reviewFixLoop"]
@@ -640,23 +651,46 @@ def _sentinel_sites_by_function(source):
     return sites
 
 
-def test_mass_translate_sentinel_sites_are_exactly_the_expected_three():
-    """Completeness half: pins WHICH functions carry a sentinel verdict, so a
+def test_mass_translate_sentinel_verdict_sites_are_exactly_the_two_guarded_waits():
+    """Completeness half: pins WHICH functions still call sentinelVerdict, so a
     NEW site cannot appear without this file noticing.
 
-    Deliberately says nothing about runRound's DRAFT_MISSING probe beyond the
-    fact that it exists. That site's sentinel shape -- and whether it should be
-    guarded at all -- is an OPEN product decision: DRAFT_MISSING is the site's
-    OK sentinel rather than its fail sentinel, so gluing there hides a genuine
-    missing-draft report instead of hiding a rejection, and closing it would
-    reintroduce a mere-mention collision the site was built to avoid. Pinning
-    either answer here would prejudge it. When it is settled, the guarded-site
-    parametrisation below is where the outcome belongs."""
+    runRound is deliberately NOT in this set any more: its sentinelVerdict call
+    was replaced by mentionedAnywhere(), so it is covered by its own test below
+    rather than by the guard-precedes-verdict parametrisation."""
     sites = _sentinel_sites_by_function(MASS_TRANSLATE_SOURCE)
-    assert sorted(sites) == sorted(MASS_TRANSLATE_GUARDED_FUNCTIONS + ["runRound"]), (
+    assert sorted(sites) == sorted(MASS_TRANSLATE_GUARDED_FUNCTIONS), (
         f"the set of functions calling sentinelVerdict changed: {sorted(sites)}. A "
         f"new site must be containment-guarded, or justified as not needing it, "
         f"before being added here"
+    )
+
+
+def test_run_round_draft_missing_site_is_containment_keyed_with_no_bare_verdict():
+    """runRound's fix branch, asserted in its OWN shape.
+
+    Two halves, and the second is what makes the first mean anything: the branch
+    must be keyed on mentionedAnywhere(), AND no bare sentinelVerdict call may
+    survive in that function. Asserting only the presence of the containment
+    call would stay green if a sentinelVerdict call were left sitting beside it,
+    which is the drift that would quietly reopen the gap.
+
+    Over code lines only -- runRound's own comment discusses both helpers by
+    name at length, so a raw-slice check would be satisfied by that prose."""
+    code = _normalized_code(extract_function_body(MASS_TRANSLATE_SOURCE, "runRound"))
+
+    assert 'mentionedAnywhere(fx, "DRAFT_MISSING " + seg)' in code, (
+        "runRound's fix branch must be keyed on "
+        'mentionedAnywhere(fx, "DRAFT_MISSING " + seg). DRAFT_MISSING is this '
+        "site's OK sentinel, so a glued report is one that goes UNRECOGNIZED -- "
+        "the round then continues over a draft the fix agent just said is missing"
+    )
+    survivors = _SENTINEL_VERDICT_CALL_RE.findall(code)
+    assert not survivors, (
+        f"runRound still calls sentinelVerdict{survivors}. The DRAFT_MISSING "
+        f"check was REPLACED by containment, not supplemented by it -- a "
+        f"surviving whole-line-equality call here is either dead code or a "
+        f"second, weaker path to the same decision"
     )
 
 
@@ -677,7 +711,10 @@ def test_mass_translate_ready_timeout_site_is_containment_guarded(function_name)
             f"fail={fail_sentinel!r}) is NOT preceded by a "
             f"{GUARD_HELPER}({reply}, {fail_sentinel}) containment check. Without it "
             f"a fail sentinel sharing its line with prose is never seen -- measured "
-            f"at 14 of 15 gluing characters, a plain space among them. Guards "
+            f"at 14 of 15 gluing characters over ALL_GLUES in "
+            f"tests/mass_translate_sentinel_containment.test.py, in the prose "
+            f"shape (prose shares the sentinel's line), a plain space among "
+            f"them. Guards "
             f"actually present: {sorted(guarded)}"
         )
 

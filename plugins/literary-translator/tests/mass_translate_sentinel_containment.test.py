@@ -12,11 +12,17 @@ trigger never fires, and a trailing clean OK line approves the reply. The fix
 templates and pinned by tests/sentinel_verdict_parity.test.py.
 
 THE RULE IS STRUCTURAL, NOT A CHARACTER SET. Measured on the pre-guard template
-through this file's own harness, one full workflow run per case:
+through this file's own harness, one full workflow run per case, over ALL_GLUES
+(15 characters, defined below) -- every count here names that set and its reply
+SHAPE, because neither alone identifies the number:
 
                               prose + GLUE + FAIL      GLUE + FAIL (no prose)
     translate wait                14/15 FALSE-PASS          6/15 FALSE-PASS
     review wait                   14/15 FALSE-PASS          6/15 FALSE-PASS
+
+(tests/glossary_citation_review.test.py reports 15/16 for its own sites: a
+different set -- GLUE_CHARS, 16 flat characters -- measured in the prose shape.
+Neither number is a restatement of the other.)
 
 THE COUNT IS A PROPERTY OF THE SHAPE, NOT OF THE CHARACTER SET, which is why
 both shapes are measured over the SAME 15 characters. ``trim()`` rescues the
@@ -152,7 +158,7 @@ def prose_glued(glue: str) -> str:
     The trailing OK line is load-bearing: without it the reply cannot approve at
     all, so "the run blocked" would say nothing about whether the FAIL sentinel
     was seen. (Measured the hard way -- a first version of this fixture omitted
-    it and reported a reassuring 0/12 across every site.)"""
+    it and reported a reassuring all-clear at every site and every character.)"""
     return PROSE + glue + FAIL_SENTINEL + LF + OK_SENTINEL
 
 
