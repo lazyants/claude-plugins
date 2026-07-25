@@ -5,7 +5,9 @@
 Adds a bounded pre-merge citation-review stage to the W3 glossary pass. Under
 `glossary.research_mode: live`, a batch can now only become READY once the `source` citations
 its `basis: "established"` entries carry have been reviewed — while the fragment is still
-rewritable, before anything reaches `canon.json`.
+rewritable, before anything reaches `canon.json`. Also fixes a false approval in the sentinel
+comparison the new stage shares with the existing precheck and wait: a failure sentinel glued to
+prose could be skipped, and a trailing clean success line then approved the batch.
 
 ### Added — pre-merge citation review gates a glossary batch becoming READY
 
@@ -34,6 +36,41 @@ rewritable, before anything reaches `canon.json`.
   an operator can act on; it never falls through into the merge.
 - No-op under `glossary.research_mode: offline`, where `basis: "established"` is forbidden outright —
   there is no citation to review, and an offline run pays nothing for the stage.
+
+### Fixed — a failure sentinel glued to prose no longer approves the batch
+
+- `sentinelVerdict()` (introduced by #308, which converted these sites from whole-string exact
+  matching to line matching) decides on whole-LINE equality: it treats a reply as a failure only
+  when the failure sentinel is alone on its line, modulo what `String.prototype.trim()` strips.
+  ASCII spaces, a tab and NBSP are trimmed and still matched, but a zero-width space is not
+  whitespace to `trim()`, and neither is a hyphen, a quote, or an ordinary letter. Any of those glued
+  in front of the sentinel left it on a line equal to nothing, the failure scan skipped it, and a
+  trailing clean success line then approved — so a reply carrying BOTH verdicts silently resolved to
+  the approving one. Measured against the shipped function at all three of the glossary template's
+  verdict sites, every non-trimmed glue character tried produced that false approval.
+- This is the false-GREEN dual of #308, which fixed the false-RED direction of the same comparison
+  (a decorated but genuine success reply being read as a timeout). #308 closed over-strictness at
+  these sites; this closes the under-strictness that its line-equality rule left open.
+- All three glossary verdict sites — the resume precheck, the readiness wait, and the new citation
+  review — now short-circuit to REJECT when `rejectedAnywhere(reply, failSentinel)` finds the failure
+  sentinel anywhere in the reply as a plain substring, evaluated before `sentinelVerdict()` is
+  consulted at all. Substring containment is strictly easier to satisfy than line equality, so the
+  guard can only ADD rejections and never remove one; the residual failure direction is fail-safe by
+  construction rather than by care.
+- Two bounded false REDs are accepted in exchange, both benign relative to a frozen fabricated
+  citation. A reply that merely mentions the failure sentinel while approving now rejects. And a
+  sentinel can be a substring of a longer-indexed sibling — `ABSENT 1` occurs inside `ABSENT 10` — so
+  a precheck or wait reply quoting another batch's sentinel takes the reject branch. The citation
+  verdict is not exposed to the second at shipped settings: its sentinels end in ` ATTEMPT <n>`,
+  which terminates the batch index, and the analogous attempt-number collision (`ATTEMPT 1` inside
+  `ATTEMPT 10`) is unreachable at the shipped `MAX_CITATION_RETRIES = 2`.
+- A false reject costs differently per site, which matters when reading a failed run: the citation
+  review regenerates within `MAX_CITATION_RETRIES`, and the precheck simply forfeits its resume-skip
+  and runs the dispatch + wait it would otherwise have skipped — both automatic, same run, same
+  batch. The **wait** does not recover: it returns `{ready: false, reason: "glossary-pass-null"}`
+  straight out of `batchStep`, ending that batch for the run, and because the merge is all-or-nothing
+  the pass then reports `merged: false` and merges nothing. Recovery there is an operator re-invoking
+  the pass.
 
 ### Migration
 

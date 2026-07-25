@@ -696,6 +696,18 @@ pipeline(BATCHES, batchStep)
   the batch counts as ready at all — see `references/canon-and-glossary.md`'s
   **Pre-merge citation review**.
 
+**All three of these verdicts are containment-guarded (1.16.0).** Each site
+short-circuits to REJECT when `rejectedAnywhere(reply, failSentinel)` finds the
+failure sentinel anywhere in the reply as a substring, before `sentinelVerdict()`
+is consulted. `sentinelVerdict()` alone matches whole LINES, so a fail sentinel
+glued to prose by anything `trim()` does not strip — a zero-width space, a
+hyphen, an ordinary letter — was skipped, and a trailing clean OK line then
+approved. The guard only ever adds rejections. Its two bounded false REDs, and
+the fact that a false reject is automatically recovered at the precheck and the
+citation review but **ends the run's batch at the wait**
+(`reason:"glossary-pass-null"`, which stops the whole pass), are set out in
+`references/canon-and-glossary.md`'s **Pre-merge citation review**.
+
 Fragment paths are run-scoped (`{{RUN_ID}}` in the path itself), so — unlike
 the pre-1.2.0 design — **no pre-clean call is needed**: a stale fragment
 from a prior run simply sits at a different, unreferenced path.

@@ -479,6 +479,58 @@ fails to match. A mismatched, malformed, or absent verdict falls to the
 REJECT side: a wrong reject costs one regeneration, a wrong accept costs a
 permanently frozen fabricated citation.
 
+**The containment guard, and why line equality alone was not enough.**
+`sentinelVerdict()` decides on whole-LINE equality, so it sees a fail sentinel
+only when that sentinel is alone on its line, modulo whatever
+`String.prototype.trim()` strips. That is a narrower window than it looks:
+ASCII spaces, a tab and even NBSP are trimmed away and still match, but a
+zero-width space is NOT whitespace to `trim()`, and neither is a hyphen, a
+quote, or an ordinary letter. Any of those glued in front of the sentinel
+leaves it on a line that equals nothing, the fail scan skips it, and a
+trailing clean OK line then approves the batch — a reply carrying BOTH
+verdicts silently resolving to the approving one. Measured against the shipped
+function at all three call sites, every non-trimmed glue character tried
+produced exactly that false approval.
+
+Each of the three sites therefore now short-circuits to REJECT when
+`rejectedAnywhere(reply, failSentinel)` finds the fail sentinel anywhere in the
+reply as a plain substring, evaluated BEFORE `sentinelVerdict()` is consulted
+at all. Substring containment is strictly easier to satisfy than line
+equality, so the guard can only ADD rejections, never remove one — it moves
+the failure into the fail-safe direction by construction, not by care. It buys
+that with two bounded false REDs, both worth recognizing in a log:
+
+- A reply that merely MENTIONS the fail sentinel while approving — "this is
+  not a `CITATIONS_REJECTED 0 ATTEMPT 0` case" — now rejects.
+- A sentinel can be a substring of a longer-indexed sibling: `ABSENT 1` occurs
+  inside `ABSENT 10`. So a precheck or wait reply for batch 1 that quotes
+  batch 10's sentinel takes the reject branch. The citation verdict is NOT
+  exposed to this at shipped settings, because its sentinels end in
+  ` ATTEMPT <n>`, which terminates the batch index —
+  `CITATIONS_REJECTED 1 ATTEMPT 0` is not a substring of
+  `CITATIONS_REJECTED 10 ATTEMPT 0`. The attempt number can collide the same
+  way (`ATTEMPT 1` inside `ATTEMPT 10`), which the shipped
+  `MAX_CITATION_RETRIES = 2` keeps unreachable; raising it to 10 or more would
+  make it reachable.
+
+**A false REJECT does not cost the same at the three sites**, and the
+difference is what to read a failed run against:
+
+- **Citation review** — the batch regenerates to a fresh attempt and is
+  reviewed again, bounded by `MAX_CITATION_RETRIES`. Automatic, same run,
+  same batch.
+- **Precheck** — `resumed` stays false and the batch falls through to the
+  dispatch + wait it would have run had no fragment been on disk. Automatic,
+  same run, same batch; the whole cost is the forfeited resume-skip saving,
+  one codex dispatch plus one poll.
+- **Wait** — NOT automatic, and this is the one that matters. The site returns
+  `{ready: false, reason: "glossary-pass-null"}` immediately, straight out of
+  `batchStep`; the enclosing attempt loop does not catch it, because this is a
+  `return` and not a `continue`. That batch is over for the run, and since the
+  merge is all-or-nothing it takes the whole pass with it — `merged: false`,
+  `reason: "fragment-check-failed"`, nothing merged at all. Recovery here is
+  an operator re-invoking the pass, not the template retrying.
+
 Regeneration is bounded by `MAX_CITATION_RETRIES`, and the next attempt's
 dispatch prompt is handed the rejecting reviewer's own findings (minus the
 verdict sentinel lines) as its regeneration constraint. Dropping those lines

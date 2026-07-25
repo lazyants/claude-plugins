@@ -751,8 +751,13 @@ over the previous attempt, bounded by `MAX_CITATION_RETRIES`; exhausting that
 budget ends the run with `merged: false` and
 `reason: "citation-review-exhausted"` — a distinct reason from
 `fragment-check-failed`, and nothing is merged. Under `offline` the stage is
-a no-op, since `established` is forbidden there outright. Full rationale,
-including why a repair after the merge is not available at all:
+a no-op, since `established` is forbidden there outright. The verdict itself
+is containment-guarded, as are the precheck's and the wait's: a reply carrying
+the failure sentinel ANYWHERE in it rejects, because matching whole lines alone
+let a fail sentinel glued to prose slip past and a trailing clean OK line then
+approve. Full rationale, the guard's two bounded false REDs, why a false
+reject is self-recovering at the precheck and the review but ends the run's
+batch at the wait, and why a repair after the merge is not available at all:
 `references/canon-and-glossary.md`, "Pre-merge citation review".
 
 **Canon human-adjudication audit, categories 1-4 (opt-in rollout gate)** —
