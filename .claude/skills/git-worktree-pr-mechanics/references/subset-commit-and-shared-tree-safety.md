@@ -4,10 +4,13 @@
 
 When a file has pending unrelated uncommitted edits (someone else's WIP, a queued removal elsewhere) but you need just your change committed as a clean isolated commit:
 
-1. `git stash push -- <path>` — reverts THAT ONE file to HEAD, leaving all other churn (other files, untracked) untouched.
-2. Make your change to the now-clean file → `git add <path>` → commit (contains only your change, on top of HEAD).
-3. `git stash pop` — re-applies the stashed churn on top via a 3-way auto-merge; clean when your change and the churn don't overlap (e.g. append at array end vs. a removal elsewhere).
-4. VERIFY: `git show --stat <sha>` touched only intended files; working tree still holds exactly the original churn (`git status --short`).
+1. `git diff -- <path> > <scratch>/churn.patch` — capture the existing churn as a patch OUTSIDE the repo. Confirm it is non-empty (`wc -c`) before continuing.
+2. `git checkout HEAD -- <path>` — reverts THAT ONE file to HEAD, leaving all other churn (other files, untracked) untouched. Safe only because step 1 already saved it.
+3. Make your change to the now-clean file → `git add <path>` → commit (contains only your change, on top of HEAD).
+4. `git apply <scratch>/churn.patch` — re-applies the churn on top; clean when your change and the churn don't overlap (e.g. append at array end vs. a removal elsewhere).
+5. VERIFY: `git show --stat <sha>` touched only intended files; working tree still holds exactly the original churn (`git status --short`).
+
+**Use a patch file, NOT `git stash`, and never a bare `git stash pop`.** The stash stack is repo-global and shared: if the `push` in a stash-based version of this recipe fails (a malformed/non-matching pathspec is the common way), the stack is left untouched and the following `pop` silently applies — and **drops** — a *peer's* entry. Verified 2026-07-25 in a scratch repo: with one foreign entry on the stack, `git stash push -- '<non-matching pathspec>'` exits 1 and stashes nothing, then a bare `git stash pop` **exits 0**, merges the peer's WIP into the working tree, and prints `Dropped refs/stash@{0}` — destroying the peer's only copy while reporting success. A patch file has no shared stack to collide with, so the failure is structurally unreachable. If some situation genuinely forces stash, capture the created entry's SHA (`git rev-parse -q --verify stash@{0}` before AND after the push — an unchanged value means the push created nothing, so ABORT) and later `git stash apply <sha>` + `git stash drop <sha>`; never bare `pop`. See the section below for the full hazard write-up.
 
 Cleaner than `git add -p` when scripted — interactive git isn't available in this env. Prefer this over `git add -A`; commit only your own files.
 
