@@ -841,6 +841,132 @@ def test_a_fail_sentinel_index_prefix_over_matches_and_that_is_accepted(tmp_path
 
 
 # ---------------------------------------------------------------------------
+# rejectedAnywhere() as a UNIT.
+#
+# All three call sites always hand the guard a non-empty string sentinel, so no
+# amount of end-to-end driving reaches its own argument check. That is a reason
+# to test the function DIRECTLY, not a reason to leave it unpinned: slice it out
+# of the real template and execute it under Node. This is the shipped code's
+# behaviour, not a grep on how its condition happens to be worded -- so it does
+# not have the shape of a pin that only ever fires on a benign rewording.
+#
+# The branch is four words long and load-bearing in the worst way. Delete it and
+# "".indexOf("") returns 0, so an EMPTY fail sentinel is contained in every
+# reply: the guard stops guarding and becomes an unconditional REJECT at all
+# three sites, halting every glossary run outright. The failure is silent,
+# unbounded, and nothing else in this suite would notice it.
+# ---------------------------------------------------------------------------
+
+_TOP_LEVEL_FUNCTION_RE = re.compile(r"^(?:async\s+)?function\s+(\w+)\s*\(", re.MULTILINE)
+
+# JSON has no representation for `undefined`, so fixtures carry this instead.
+UNDEFINED = object()
+
+
+def extract_top_level_function(source: str, name: str) -> str:
+    """The full text of one top-level ``function name(...) { ... }``.
+
+    Slices to the first COLUMN-0 closing brace after the declaration: these
+    templates keep every top-level function flat and indent all body lines, so
+    that brace is the function's own. Deliberately does NOT run to the next
+    declaration the way tests/bounded_poll_present.test.py's slicer does -- that
+    one exists to be pattern-matched and keeps trailing comments on purpose,
+    whereas this text is EXECUTED and the trailing comment block is noise."""
+    m = re.search(rf"^(?:async\s+)?function\s+{re.escape(name)}\s*\(", source, re.MULTILINE)
+    assert m is not None, f"function {name!r} not found in glossary-pass-wf.template.js"
+    end = source.find("\n}\n", m.end())
+    assert end != -1, f"could not find a column-0 closing brace for {name!r}"
+    text = source[m.start():end + 3]
+    found = _TOP_LEVEL_FUNCTION_RE.findall(text)
+    assert found == [name], (
+        f"the slice for {name!r} did not isolate exactly that function (found "
+        f"{found}); the template's top-level layout changed:\n{text}"
+    )
+    return text
+
+
+def _js(value) -> str:
+    """A JS expression denoting one fixture value."""
+    if value is UNDEFINED:
+        return "undefined"
+    if value is None:
+        return "null"
+    return json.dumps(value)
+
+
+def run_guard(tmp_path: Path, cases: list) -> list:
+    """Executes the REAL rejectedAnywhere() against ``cases`` (reply, sentinel)
+    pairs and returns its booleans, in order."""
+    fn = extract_top_level_function(
+        GLOSSARY_TEMPLATE.read_text(encoding="utf-8"), "rejectedAnywhere"
+    )
+    calls = ",\n  ".join(f"rejectedAnywhere({_js(r)}, {_js(s)})" for r, s in cases)
+    script = fn + "\nprocess.stdout.write(JSON.stringify([\n  " + calls + "\n]));\n"
+    path = tmp_path / "rejected_anywhere_unit.js"
+    path.write_text(script, encoding="utf-8")
+    assert NODE is not None
+    proc = subprocess.run([NODE, str(path)], capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, (
+        f"the extracted rejectedAnywhere() failed to run under node:\n{proc.stderr}"
+    )
+    return json.loads(proc.stdout)
+
+
+# (label, reply, failSentinel, expected). The first two are POSITIVE CONTROLS:
+# without them a helper stubbed to `return false` would satisfy every remaining
+# row, and one stubbed to `return true` would be caught by only some of them.
+#
+# HONEST READING, measured: deleting the argument-guard line flips exactly the
+# three EMPTY-sentinel rows to true. The null/undefined-SENTINEL rows stay green
+# under that deletion -- indexOf coerces them to the strings "null"/"undefined",
+# which the fixture replies do not contain -- so those rows are not evidence
+# about that line. They pin a different regression: they are what fails if the
+# typeof check is narrowed some other way. The null/undefined-REPLY rows guard
+# the `reply == null` normalisation, whose removal makes the helper THROW, which
+# surfaces as run_guard's "failed to run under node" rather than a wrong verdict.
+GUARD_UNIT_CASES = [
+    ("containment hit", "prose CITATIONS_REJECTED 0 ATTEMPT 0 trailing prose",
+     "CITATIONS_REJECTED 0 ATTEMPT 0", True),
+    ("no containment", "every cited page resolves and attests the form",
+     "CITATIONS_REJECTED 0 ATTEMPT 0", False),
+    ("empty sentinel, non-empty reply", "any reply at all", "", False),
+    ("empty sentinel, empty reply", "", "", False),
+    ("null sentinel", "any reply at all", None, False),
+    ("undefined sentinel", "any reply at all", UNDEFINED, False),
+    ("null reply, real sentinel", None, "ABSENT 0", False),
+    ("undefined reply, real sentinel", UNDEFINED, "ABSENT 0", False),
+    ("null reply, empty sentinel", None, "", False),
+]
+
+
+def test_rejected_anywhere_never_matches_on_a_degenerate_sentinel(tmp_path):
+    """The helper's own argument guard, exercised directly.
+
+    An empty (or non-string) fail sentinel must return false rather than
+    matching everything, and a null/undefined REPLY must be normalised rather
+    than throwing. Both are unreachable from the call sites, and both are the
+    difference between a guard and a total denial of progress."""
+    results = run_guard(tmp_path, [(reply, sent) for _, reply, sent, _ in GUARD_UNIT_CASES])
+    assert len(results) == len(GUARD_UNIT_CASES), (
+        f"expected one verdict per case; got {results}"
+    )
+
+    wrong = [
+        f"  {label}: rejectedAnywhere({_js(reply)}, {_js(sentinel)}) -> "
+        f"{actual}, expected {expected}"
+        for (label, reply, sentinel, expected), actual in zip(GUARD_UNIT_CASES, results)
+        if actual is not expected
+    ]
+    assert not wrong, (
+        "rejectedAnywhere() misjudged a degenerate argument:\n"
+        + "\n".join(wrong)
+        + "\n\nAn empty fail sentinel matching is the dangerous direction: "
+        '"".indexOf("") is 0, so every reply at all three call sites would be '
+        "read as a rejection and no glossary run could ever make progress."
+    )
+
+
+# ---------------------------------------------------------------------------
 # Trap: one fixed out_{index}.json lets a stale attempt satisfy a later one.
 # ---------------------------------------------------------------------------
 
