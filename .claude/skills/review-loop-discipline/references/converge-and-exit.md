@@ -54,6 +54,19 @@ Do not treat the reviewer's "NEEDS-REVISION" verdict as an infinite gate. **Witn
 
 For a SHIPPED-but-NEVER-RUN reference artifact (e.g. a Playwright helper in a repo with no browser CI) there is NO byte-stability/test-suite stop criterion, yet the reviewer keeps escalating into exotic edge cases. Converge by prompting the reviewer to CLASSIFY every finding: category-A (a real logic defect in the DESCRIBED behavior) vs category-B (hypothetical exotica outside the helper's documented scope), and to state "clean modulo category-B" when only B remains. Without an explicit non-gating bucket the reviewer returns NEEDS-REVISION forever. Do this pre-emptively (put the A/B fence in the prompt before the artifact becomes an infinite target), not retrofitted at round 6. Two supporting moves: DOCUMENT the supported scope and FAIL CLOSED (throw) outside it so category-B is handled by CONTRACT not code; and when a category-A finding recurs, prefer a verify-don't-assume REDESIGN (measure → act → RE-MEASURE across the operation) over a cleverer heuristic.
 
+**Scope note — this is NOT just for never-run reference artifacts.** The rule above reads as if it applies
+only to a shipped-but-unrunnable helper, which is why it failed to fire on a plan-review loop and got
+retrofitted at round 6 again (2026-07-25, SSK phase-2 plan, 8 rounds). The general trigger is wider: **any
+review target where some findings are settled better DOWNSTREAM than in the artifact under review.** A plan
+that pre-specifies a code change is the common case in this repo — the change will get its own full code
+review against real code, so its internal constants, sentinel schemas and control-flow details do not belong
+in a plan blocker. Buckets that worked: `[REWORK]` = causes material rework, a false green, or a wrong
+deliverable if executed as written; `[EXECUTION-DETERMINED]` = doing the work settles it and further
+pre-specification adds no safety. Say explicitly in the prompt which downstream gate will catch the second
+bucket, or the reviewer has no reason to trust it. Naming both buckets *and* instructing "do not soften real
+defects to fill the second bucket, and do not inflate execution detail into the first" is what produced a
+3-item verdict after rounds of 5–6.
+
 ## Fencing ratified decisions
 
 Fence the loop, don't just exit it. Encode every ratified decision and deliberately-chosen pattern in the review brief each round: "descope X and Y are RATIFIED maintainer decisions — do not re-litigate"; "this weaker-but-honest pattern is intentionally chosen after N rounds proved mechanical proof unwinnable — flag only concrete unsoundness in its USE, not the pattern." Without the fence an adversarial reviewer treats every design retreat as a defect and the loop never converges.

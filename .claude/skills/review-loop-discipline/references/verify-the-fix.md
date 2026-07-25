@@ -50,7 +50,31 @@ Removing a wrong term X can INTRODUCE a new inaccuracy. A blanket replacement ca
 
 ## A rebuild can regress
 
+**This fires for replacing a MECHANISM or a documented RECIPE, not just a data-producing artifact.** The trigger is any wholesale swap made to close a review finding — the replacement silently inherits the obligation to handle every input state the original handled, and the states the old mechanism covered for free are the ones you will forget. Before swapping, enumerate what the old mechanism handled and check the replacement against each; a state the old one absorbed implicitly will not appear in the finding you are fixing. Verified 2026-07-25: a `git stash push`/`pop` recipe was replaced with a `git diff` + `git apply` patch flow to close a foreign-stash hazard. `stash` covers staged *and* unstaged content; `git diff` is the worktree-vs-index delta, so it silently omits the index — a peer's STAGED edit was destroyed by the following `git checkout HEAD --`, and the patch was non-empty, so the recipe sailed past its own emptiness check. The fix traded a loud shared-stack hazard for a silent data-loss one and needed a whole extra review round.
+
 When you REPLACE a rejected artifact with a "more rigorous" rebuilt pipeline, it can silently REGRESS a dimension the original got right. A fresh independent re-derivation left 126 of 240 entities unresolved (33% coverage) where the rejected original's reused-data path had 97.5%. **When you replace a rejected deliverable, DIFF the new output against the old on EVERY dimension** — a rebuild that fixes complaint A can silently regress dimension B the old one handled. "More rigorous" is not "better" until measured. Prefer REUSING an existing artifact's already-correct data over a from-scratch re-derivation unless you have MEASURED that the re-derivation covers at least as much.
+
+## A measured threshold and its gate must share ONE predicate, as code
+
+When a gate's threshold is calibrated from a measurement ("clean is ~2%, degraded is ~59%, so fail above
+5%"), the gate must reuse the **same predicate code that produced those numbers** — never a prose
+restatement of it. Re-deriving the predicate in words silently drifts from the script that measured the
+band, and the drift is invisible: the sentence reads correct, the threshold looks calibrated, and the gate
+is wrong. Verified 2026-07-25 (SSK phase 2): one integrity gate was specified wrongly **four rounds
+running** — too tight; then inverted (as a rate, `1/27 < 1/20`, so it failed clean text and passed degraded);
+then correct in direction but with `token_count` undefined and a live division-by-zero; then defined with
+predicates that did not match the measuring script at all. Only copying the measuring script's actual
+predicates ended it — and doing so also revealed the corpus was **59% degraded, not the 14%** every prior
+round had reasoned from, because the prose counter used `len(token)==1` where the real one counted Hebrew
+letters *inside* the token.
+
+**How to apply.** State the gate as integer arithmetic over named counters (`20*single <= total`, not "no
+more than 1 per 20" — a rate reading inverts easily); assert the denominator is non-zero before dividing;
+and pin test vectors for the exact cases where the two predicates could diverge, since a behaviour-equivalent
+copy is only kept in step by those vectors. Corollary worth its own reflex: **if a measurement lands between
+your documented bands, suspect your predicate before inventing an intermediate band** — a weak predicate
+manufactures a middle that does not exist. Worked example, with the corrected bands and predicates:
+`skill:literary-translator-run` → `references/source-prep.md`.
 
 ## State what your proof guarantees
 

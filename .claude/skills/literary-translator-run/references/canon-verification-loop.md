@@ -65,7 +65,15 @@ names/works; 292 entities). Round 1 re-review then surfaced three things that sh
    blind adjudicator — which does not know your scope policy — keeps labeling them `genuine_drop`
    (10 of round-1's 45 "real defects"). So the loop is non-convergent even on the ADJUDICATED count
    unless a persistent scope-exclusion list is subtracted from "new real defects." Carry the scope
-   decision forward as a filter, or you loop forever re-discovering God/Messiah.
+   decision forward as a filter, or you loop forever re-discovering God/Messiah. **The same
+   axis-confusion bites in the REMOVE direction too, and there it is SILENT:** when the reviewer
+   proposes deleting a scope-violating entry, the adjudicator rejects it `not_a_defect` — reasoning,
+   correctly, that the entry IS a distinct, explicitly identified entity. Entity-hood and scope are
+   different questions: the adjudicator answers "is this a real distinct entity?", the scope policy
+   answers "does this CATEGORY belong in the canon at all?", and only the user owns the second. So an
+   adjudicator `not_a_defect` must never veto a scope ruling — the applier needs an explicit,
+   per-round **force-apply** override file alongside the force-skip one, or every category the user
+   excluded quietly survives into the final canon while the loop reports itself clean.
 2. **The adjudicator itself has attestation NOISE** — it flagged clearly-present terms ("the Land of
    Israel", "Rosh Hashanah", "Simchat Torah", verified present & attested in the canon) as
    `fabrication`. So a fully-automated stop criterion is UNSAFE; the human eyeball on the adjudicated
@@ -101,6 +109,25 @@ not a reason to grind more automated rounds.
      found **16 were over-corrections** (~55%): 2 real entities wrongly removed + 14 descriptions
      over-stripped, all restored. Only 13 (9 removes + 4 edits) were genuinely correct. A per-chapter
      fix applied without the whole-corpus reject-guard damaged more than half of what it touched.
+
+## Enforcing a scope policy over an already-built canon (whole-canon purge pass)
+
+Sweeping the scope tail one review round at a time is slow: each round only sees the instances inside
+its own chunk, so a newly-added exclusion category takes several more rounds to work through the
+canon. Faster and uniform — once the loop has converged on CONTENT, run a single **whole-canon
+scope-purge pass**: the full entry list (no corpus needed — this is a category judgment, not an
+attestation one) + the complete exclusion policy → `{remove:[{id, en, category}]}`. It is cheap
+(~100 KB prompt, no source text) and applies one rule everywhere at once.
+
+**Never apply a purge pass without this check: compare what it wants to REMOVE against what it KEPT
+of the SAME SHAPE.** A same-shape split is a misclassification, not a judgment call. Concretely: a
+purge proposed deleting five `the rabbi of <town>` entries as `generic_unnamed` while keeping 67
+entries of exactly that shape (including a nameless "the Rabbi of Tcherin") — in this genre the
+toponym IS the personal identifier, so those removals would have silently dropped five recurring real
+people. The removal list read perfectly reasonable on its own; only the comparison against the kept
+set exposed it. Keep a per-round **veto** file so the rejection is auditable, and fold the
+resolved rule back into the policy text (as an explicit KEEP clause) so the next round cannot
+re-propose it.
 
 ## Convergence in practice (SSK, whole-corpus audit loop)
 
@@ -159,6 +186,31 @@ scope-leak → 283 → WC-audit R3 (−2 dedup) → 281 → strip mikveh scope-l
   by telling the USER to run it. Prefer a script-gated condition (Stop-hook `exit 2` = keep going, or
   `/goal "script exits 0"`) so the stop is code-decided, not model-judged. Stop-hooks can't be gated
   by the `if`/matcher field (tool-events only) → gate inside the command via a marker file.
+
+## A MERGED canon row is immutable — every correction step must be PRE-merge
+
+Before planning any canon review, correction, demotion or re-adjudication step, know that once
+`--merge-batches` has run there is **no route back**. Three mechanisms look like they could fix a bad row and
+none of them can:
+
+- `canon_validate.py --verify-merged` is disk-independent, fresh-reads-only and **writes nothing**;
+- re-merging a **different** resolution for the same `source_form` is a fatal cross-run collision, not an
+  update (an *identical* resubmission is a silent no-op);
+- `canon_adjudication_audit.py` never authors a verdict — its own IRON RULE is that it enumerates required
+  sign-offs and cross-checks recorded ones. It can **block delivery**; it cannot repair a row.
+
+And the shipped glossary Workflow runs `pipeline(BATCHES, batchStep)` then `--merge-batches` then
+`--verify-merged` **in one call**, so there is no pause between a fragment passing `--check-batch` and the
+canon being frozen. Correction therefore has exactly one shape: regenerate the batch's fragment and re-run
+`--check-batch` **before** the merge.
+
+**Why this earns a rule:** not knowing it put a citation-review step in three successive wrong places across
+one plan's revisions — after the merge "demoting via `--verify-merged`" (writes nothing), then between
+fragment-generation and merge (no such pause exists) — each costing a review round. It also decides a design
+question outright: under `research_mode: live` the glossary pass invents `source` URIs that nothing reviews,
+and **W5's reviewer cannot be the backstop** — its prompt explicitly puts "correctness of the frozen canon
+decision itself" out of scope and routes suspicion back to the glossary/adjudication route. So a `live` run
+needs a real pre-merge citation review, or it ships uninspected citations permanently.
 
 ## Mechanics
 
