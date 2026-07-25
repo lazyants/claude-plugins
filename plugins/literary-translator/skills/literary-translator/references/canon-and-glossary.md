@@ -480,17 +480,25 @@ REJECT side: a wrong reject costs one regeneration, a wrong accept costs a
 permanently frozen fabricated citation.
 
 **The containment guard, and why line equality alone was not enough.**
-`sentinelVerdict()` decides on whole-LINE equality, so it sees a fail sentinel
-only when that sentinel is alone on its line, modulo whatever
-`String.prototype.trim()` strips. That is a narrower window than it looks:
-ASCII spaces, a tab and even NBSP are trimmed away and still match, but a
-zero-width space is NOT whitespace to `trim()`, and neither is a hyphen, a
-quote, or an ordinary letter. Any of those glued in front of the sentinel
-leaves it on a line that equals nothing, the fail scan skips it, and a
-trailing clean OK line then approves the batch — a reply carrying BOTH
-verdicts silently resolving to the approving one. Measured against the shipped
-function at all three call sites, every non-trimmed glue character tried
-produced exactly that false approval.
+`sentinelVerdict()` decides on whole-LINE equality: it sees a fail sentinel
+only when that sentinel's line, after `String.prototype.trim()`, equals the
+sentinel exactly — nothing else may share the line except what `trim()`
+strips. In the realistic failure shape, a reviewer writing its finding and
+then the sentinel on the SAME line, that prose is on the line regardless, so
+ANY glue character hides the sentinel, a plain space included. Measured over
+the 16-character `GLUE_CHARS` table in
+`tests/glossary_citation_review.test.py`, 15 of the 16 hide it in that shape;
+only a line feed puts the sentinel on a line of its own (CRLF is safe for the
+same reason, and is deliberately not in that table).
+
+With no prose on the line the same table splits, which is worth knowing before
+"simplifying" anything here: `trim()` strips a space, tab, VT, FF, CR, NBSP,
+U+2028 and U+2029, so those still match and still reject correctly. Seven do
+not — the C0 separators U+001C–U+001F, NEL U+0085, a zero-width space, and any
+ordinary character — and those hide the sentinel with or without prose. The end
+state is identical either way: the fail scan skips the sentinel, a trailing
+clean OK line then approves the batch, and a reply carrying BOTH verdicts
+silently resolves to the approving one.
 
 Each of the three sites therefore now short-circuits to REJECT when
 `rejectedAnywhere(reply, failSentinel)` finds the fail sentinel anywhere in the
