@@ -592,7 +592,7 @@ const REPLY_LINE_BREAK = new RegExp("\\r\\n|[\\n\\r\\u2028\\u2029\\u0085]")
 //
 // That hole is now CLOSED -- not by widening any split, but by the containment
 // guard rejectedAnywhere(), applied at all three of this file's sentinelVerdict
-// call sites. See its comment for the measurement (14 of 16 glue characters
+// call sites. See its comment for the measurement (15 of 16 glue characters
 // falsely approved before the guard, 0 of 16 after, at each of the three
 // sites), for why containment beats any wider separator set, and for the
 // false-REJECT cost it pays for that. sentinelVerdict() itself is untouched, so
@@ -710,22 +710,31 @@ function sentinelVerdict(reply, okSentinel, failSentinel) {
 // lines, so its fail-priority scan only sees a fail sentinel that LF (or CRLF,
 // whose LF does the splitting) put on a line of its own. Measured against the
 // shipped function with a reply of prose + GLUE + failSentinel + "\n" +
-// okSentinel, 14 of 16 glue characters defeat that scan and the reply is
-// falsely APPROVED at all three call sites -- 42 of 48 site/character pairs.
-// The 14 are not exotic: a lone CR, TAB, PLAIN SPACE (U+0020), VT, FF, U+0085,
-// NBSP, U+2028, U+2029, ZWSP, U+001C, U+001F, BOM -- and the ordinary letter
-// "x". Only LF and CRLF reject correctly.
+// okSentinel, 15 of 16 glue characters defeat that scan and the reply is
+// falsely APPROVED at all three call sites -- 45 of 48 site/character pairs.
+// The 15 are not exotic: PLAIN SPACE (U+0020), TAB, a lone CR, VT, FF, U+001C,
+// U+001D, U+001E, U+001F, NBSP, U+0085, U+2028, U+2029, ZWSP -- and the
+// ordinary letter "x". LF alone rejects correctly.
+//
+// The 16 are exactly the GLUE_CHARS table in
+// tests/glossary_citation_review.test.py, so every count in this comment is
+// reproducible from that named artifact and the suite measures the same 15/16.
+// CRLF is deliberately NOT in that table and also rejects correctly, for the
+// same reason LF does -- its embedded LF is what splits the sentinel onto a
+// line of its own. So the fully general statement is "LF and CRLF are safe",
+// while the reproducible count over GLUE_CHARS is 15 of 16.
 //
 // So this is NOT a line-separator problem, and that is the whole design point.
 // `split("\n")` breaks on LF and nothing else, so ANY character between prose
 // and the sentinel keeps them on one line and defeats whole-line equality. The
 // defeating alphabet is every character except LF -- unbounded and impossible
-// to enumerate. Widening the split is therefore whack-a-mole: REPLY_LINE_BREAK,
-// the widest separator set in this file, would close 4 of those 14 and leave
-// TAB, SPACE, NBSP, ZWSP, BOM, the C0 separators and every ordinary letter
-// open. DO NOT "simplify" this guard back into a wider split -- that silently
-// reopens all 14. Containment is closed under the whole alphabet at once
-// because it never asks where the sentinel sits.
+// to enumerate. Widening the split is therefore whack-a-mole: measured, a
+// REPLY_LINE_BREAK-widened split (the widest separator set in this file) closes
+// exactly 4 of those 15 -- CR, U+0085, U+2028, U+2029 -- and leaves the other
+// 11 open: SPACE, TAB, VT, FF, U+001C, U+001D, U+001E, U+001F, NBSP, ZWSP and
+// the letter "x". DO NOT "simplify" this guard back into a wider split -- that
+// silently reopens 11 of the 15. Containment is closed under the whole alphabet
+// at once because it never asks where the sentinel sits.
 //
 // Done at the CALL SITES rather than inside sentinelVerdict() because that
 // function's body and comment are mirrored byte-for-byte across all three
@@ -741,12 +750,29 @@ function sentinelVerdict(reply, okSentinel, failSentinel) {
 // ATTEMPT 0 but every citation resolves" -- now takes the fail branch. Plain
 // substring containment also over-matches an index prefix: with failSentinel
 // "ABSENT 1", a reply saying "ABSENT 10" matches. Both are false REDs, the
-// fail-safe direction at all three sites, and each is bounded by machinery that
-// already exists: the citation review regenerates within MAX_CITATION_RETRIES,
-// the precheck simply re-dispatches the batch, and the wait times out and
-// retries. A false GREEN here is unbounded by comparison -- a fabricated
-// citation frozen into canon, or a rejected fragment merged as if approved.
-// The guard buys that asymmetry deliberately; it is not free.
+// fail-safe direction at all three sites -- but what a false RED COSTS differs
+// per site, and the three are NOT alike. Traced through the control flow rather
+// than assumed:
+//   citation review -- automatic, same run. The verdict falls through to
+//     rejectionDetail() and the enclosing `for (let attempt = 0; ; attempt++)`
+//     carries on to attempt+1, bounded by MAX_CITATION_RETRIES.
+//   precheck -- automatic, same run. `resumed` simply goes false, so the loop
+//     body dispatches this batch instead of resume-skipping it. The cost is
+//     redoing work whose fragment was already valid on disk.
+//   wait -- NOT a same-run recovery, and it must not be described as one.
+//     batchWaitPrompt() is a single-shot bounded poll whose agent has ALREADY
+//     run its own 45x20s loop internally, so a false verdict here RETURNS from
+//     batchStep() immediately with ready:false, reason:"glossary-pass-null".
+//     No continue, no attempt increment -- nothing further happens for this
+//     batch in this run. That result lands in notReadyBatches, and the pass as
+//     a whole returns merged:false, reason:"fragment-check-failed", with the
+//     merge never attempted. "Recovery" here means the OPERATOR re-invokes the
+//     workflow; the precheck's resume-skip is what makes the untouched batches
+//     cheap on that second run.
+// A false GREEN is unbounded by comparison -- a fabricated citation frozen into
+// canon, or a rejected fragment merged as if approved -- so even the wait
+// site's heavier cost is the right side to fail on. The guard buys that
+// asymmetry deliberately; it is not free.
 //
 // An empty or non-string failSentinel returns false rather than matching
 // everything: "".indexOf("") is 0, so an unguarded containment test would
@@ -771,6 +797,11 @@ function rejectedAnywhere(reply, failSentinel) {
 //   ENTRY A (resumed):  precheck PRESENT ------------------\
 //   ENTRY B (fresh):    precheck ABSENT -> dispatch -> wait -+-> REVIEW
 //
+//   WAIT not ready                 -> RETURNS from batchStep() on the spot,
+//                                     not ready, reason:"glossary-pass-null".
+//                                     No attempt increment, no second pass:
+//                                     this batch does nothing further in this
+//                                     run, and the pass reports merged:false
 //   REVIEW approved                -> ready, this attempt's path merges
 //   REVIEW rejected, retries left  -> back to ENTRY B at attempt+1,
 //                                     a FRESH path, carrying the reason
@@ -801,10 +832,12 @@ async function batchStep(batch) {
   // contradictory reply regenerates. sentinelVerdict()'s own fail-priority scan
   // catches the contradictory case only when an LF puts ABSENT on a line of its
   // own; the rejectedAnywhere() guard on this call catches it whatever glued it
-  // there -- measured, 14 of 16 glue characters falsely resume-SKIPPED before
-  // the guard, 0 of 16 after. The cost is a bounded false RED: a reply that
-  // merely MENTIONS "ABSENT <i>" while reporting the fragment present now
-  // re-dispatches the batch. See rejectedAnywhere()'s comment.
+  // there -- measured over tests/glossary_citation_review.test.py's GLUE_CHARS,
+  // 15 of 16 glue characters falsely resume-SKIPPED before the guard, 0 of 16
+  // after. The cost is a false RED that recovers automatically within this same
+  // run: a reply merely MENTIONING "ABSENT <i>" while reporting the fragment
+  // present just sends the batch down the ordinary dispatch path below instead
+  // of resume-skipping it. See rejectedAnywhere()'s comment.
   // NOTE: skeptic-pass-wf.template.js's batchStep precheck still mirrors this
   // control flow but is deliberately NOT guarded -- this release's CHANGELOG
   // promises that file is untouched, so the two intentionally diverge here.
@@ -855,11 +888,20 @@ async function batchStep(batch) {
       // contradictory reply times out. As at the precheck above,
       // sentinelVerdict() alone catches the contradictory case only when an LF
       // puts TIMEOUT on a line of its own; the rejectedAnywhere() guard on this
-      // call catches it whatever glued it there -- measured, 14 of 16 glue
+      // call catches it whatever glued it there -- measured over
+      // tests/glossary_citation_review.test.py's GLUE_CHARS, 15 of 16 glue
       // characters were falsely accepted as READY before the guard, 0 of 16
-      // after. Same bounded false RED as there: a reply merely MENTIONING
-      // "TIMEOUT <i>" while reporting success now takes the timeout branch and
-      // retries. See rejectedAnywhere()'s comment.
+      // after.
+      //
+      // The false RED here is NOT the same shape as the precheck's, and the
+      // parallel is worth resisting: a reply merely MENTIONING "TIMEOUT <i>"
+      // while reporting success takes the branch below, which RETURNS from
+      // batchStep() with ready:false, reason:"glossary-pass-null" -- it does
+      // not retry, and no later step revisits this batch in this run. The batch
+      // lands in notReadyBatches and the whole pass reports merged:false. That
+      // is still the correct side to fail on, but it costs an operator
+      // re-invocation rather than an automatic in-run retry. See
+      // rejectedAnywhere()'s comment for the per-site breakdown.
       //
       // The sentinel stays batch-scoped rather than attempt-scoped on purpose:
       // what makes this poll attempt-correct is the attempt-scoped PATH it
