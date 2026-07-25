@@ -278,7 +278,13 @@ and atomically promotes it.
    would otherwise be silently violated the moment a fix step ran against a
    nonexistent/partial/stale-run draft. On timeout (or fail-fast), this branch
    returns `{ seg, converged: false, reason: 'translate-timeout' }` and the loop
-   never reaches a review call at all for this segment.
+   never reaches a review call at all for this segment. **1.16.0:** this wait is
+   containment-guarded — a reply carrying `TIMEOUT <seg>` anywhere in it takes
+   the timeout branch even when glued to prose, which whole-line matching alone
+   would have skipped, proceeding as ready on a reply that said it had timed
+   out. `translate-timeout` is deliberately non-terminal, so a false RED here is
+   the cheapest of the guarded sites: `select_segments.py` picks the segment
+   back up and auto-redispatches it on the next run.
 3. **Review/fix loop**, up to `engine.max_fix_rounds` rounds of review → fix
    → re-review, exiting early the moment a review reports
    `clean && coverage_ok`. Each round's review point is itself the shared
@@ -296,6 +302,11 @@ and atomically promotes it.
      and whose fail-fast is the DISP-named sentinel `[ -f
      segments/.codex_failed.<seg>.<DISP> ]` (no external `timeout` binary).
      `TIMEOUT`/fail-fast → exit immediately as `blocked review-timeout`, no retry.
+     **1.16.0:** containment-guarded — a reply carrying `TIMEOUT <seg>` anywhere
+     in it takes this branch, even glued to prose, where whole-line matching
+     alone would have skipped it and proceeded as ready (see the glossary-pass
+     template section below, and `references/canon-and-glossary.md`). Because
+     there is no retry here, a false RED costs this segment for the run.
    - **`readReviewPrompt` + `verifyReviewArtifactPrompt`** — the two CONSUME calls,
      schema-validated (`REVIEW_SCHEMA`, flat `REVIEW_ARTIFACT_SCHEMA`),
      covered under **one shared retry budget**: read → check; on a `null`
@@ -696,16 +707,23 @@ pipeline(BATCHES, batchStep)
   the batch counts as ready at all — see `references/canon-and-glossary.md`'s
   **Pre-merge citation review**.
 
-**All three of these verdicts are containment-guarded (1.16.0).** Each site
+**All three of these verdicts are containment-guarded (1.16.0)** — as are
+mass-translate's two waits, five sites over the two templates. Each
 short-circuits to REJECT when `rejectedAnywhere(reply, failSentinel)` finds the
 failure sentinel anywhere in the reply as a substring, before `sentinelVerdict()`
 is consulted. `sentinelVerdict()` alone matches whole LINES, so a fail sentinel
-glued to prose by anything `trim()` does not strip — a zero-width space, a
-hyphen, an ordinary letter — was skipped, and a trailing clean OK line then
-approved. The guard only ever adds rejections. Its two bounded false REDs, and
-the fact that a false reject is automatically recovered at the precheck and the
-citation review but **ends the run's batch at the wait**
-(`reason:"glossary-pass-null"`, which stops the whole pass), are set out in
+sharing its line with anything `trim()` does not strip was skipped, and a
+trailing clean OK line then approved. The guard only ever adds rejections.
+
+A false reject recovers in-run at only two of the five: the precheck falls
+through to the dispatch it would have run anyway, and the citation review
+regenerates within `MAX_CITATION_RETRIES`. The three WAITS each cost at least a
+re-run — the glossary wait ends the batch and with it the whole pass
+(`reason:"glossary-pass-null"`), mass-translate's review wait blocks that
+segment (`reason:"review-timeout"`), and its translate wait returns the
+non-terminal `reason:"translate-timeout"`, which `select_segments.py`
+auto-redispatches next run. Full statement of the rule, the measured glue
+table, and the two bounded false REDs:
 `references/canon-and-glossary.md`'s **Pre-merge citation review**.
 
 Fragment paths are run-scoped (`{{RUN_ID}}` in the path itself), so — unlike

@@ -500,13 +500,23 @@ state is identical either way: the fail scan skips the sentinel, a trailing
 clean OK line then approves the batch, and a reply carrying BOTH verdicts
 silently resolves to the approving one.
 
-Each of the three sites therefore now short-circuits to REJECT when
+Each of this template's three sites therefore now short-circuits to REJECT when
 `rejectedAnywhere(reply, failSentinel)` finds the fail sentinel anywhere in the
 reply as a plain substring, evaluated BEFORE `sentinelVerdict()` is consulted
 at all. Substring containment is strictly easier to satisfy than line
 equality, so the guard can only ADD rejections, never remove one — it moves
-the failure into the fail-safe direction by construction, not by care. It buys
-that with two bounded false REDs, both worth recognizing in a log:
+the failure into the fail-safe direction by construction, not by care.
+
+The same guard is applied to `mass-translate-wf.template.js`'s translate and
+review waits, five sites over the two templates; its `DRAFT_MISSING` check
+passes a `null` fail sentinel and so has nothing to hide.
+`skeptic-pass-wf.template.js` mirrors this control flow and is deliberately NOT
+guarded — it sits in no `cache_key.py` bundle and carries its own
+`compute_skeptic_input_digest()`, so editing it would force a fresh skeptic
+RUN_ID that this release does not otherwise pay. See the 1.16.0 CHANGELOG entry.
+
+The guard buys its safety with two bounded false REDs, both worth recognizing
+in a log:
 
 - A reply that merely MENTIONS the fail sentinel while approving — "this is
   not a `CITATIONS_REJECTED 0 ATTEMPT 0` case" — now rejects.
@@ -521,8 +531,10 @@ that with two bounded false REDs, both worth recognizing in a log:
   `MAX_CITATION_RETRIES = 2` keeps unreachable; raising it to 10 or more would
   make it reachable.
 
-**A false REJECT does not cost the same at the three sites**, and the
-difference is what to read a failed run against:
+**A false REJECT does not cost the same at every site**, and the difference is
+what to read a failed run against. Of the five, only the two IN-BATCH glossary
+sites recover inside the run; all three waits — this template's and
+mass-translate's two — cost at least a re-run:
 
 - **Citation review** — the batch regenerates to a fresh attempt and is
   reviewed again, bounded by `MAX_CITATION_RETRIES`. Automatic, same run,
@@ -538,6 +550,12 @@ difference is what to read a failed run against:
   merge is all-or-nothing it takes the whole pass with it — `merged: false`,
   `reason: "fragment-check-failed"`, nothing merged at all. Recovery here is
   an operator re-invoking the pass, not the template retrying.
+- **Mass-translate's two waits**, for completeness, since they carry the same
+  guard: its review wait blocks that segment for the run
+  (`reason: "review-timeout"`), while its translate wait returns the
+  deliberately non-terminal `reason: "translate-timeout"`, which
+  `select_segments.py` treats as recoverable and auto-redispatches next run —
+  the cheapest false RED of the five.
 
 Regeneration is bounded by `MAX_CITATION_RETRIES`, and the next attempt's
 dispatch prompt is handed the rejecting reviewer's own findings (minus the

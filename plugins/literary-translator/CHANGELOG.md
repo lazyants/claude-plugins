@@ -6,8 +6,9 @@ Adds a bounded pre-merge citation-review stage to the W3 glossary pass. Under
 `glossary.research_mode: live`, a batch can now only become READY once the `source` citations
 its `basis: "established"` entries carry have been reviewed — while the fragment is still
 rewritable, before anything reaches `canon.json`. Also fixes a false approval in the sentinel
-comparison the new stage shares with the existing precheck and wait: a failure sentinel glued to
-prose could be skipped, and a trailing clean success line then approved the batch.
+comparison the new stage shares with the glossary pass's precheck and wait and with W5
+mass-translate's two waits: a failure sentinel glued to prose could be skipped, and a trailing clean
+success line then approved the work anyway.
 
 ### Added — pre-merge citation review gates a glossary batch becoming READY
 
@@ -37,50 +38,69 @@ prose could be skipped, and a trailing clean success line then approved the batc
 - No-op under `glossary.research_mode: offline`, where `basis: "established"` is forbidden outright —
   there is no citation to review, and an offline run pays nothing for the stage.
 
-### Fixed — a failure sentinel glued to prose no longer approves the batch
+### Fixed — a failure sentinel glued to prose no longer passes as success (glossary + mass-translate)
 
 - `sentinelVerdict()` (introduced by #308, which converted these sites from whole-string exact
-  matching to line matching) decides on whole-LINE equality: it treats a reply as a failure only
-  when the failure sentinel is alone on its line, modulo what `String.prototype.trim()` strips.
-  ASCII spaces, a tab and NBSP are trimmed and still matched, but a zero-width space is not
-  whitespace to `trim()`, and neither is a hyphen, a quote, or an ordinary letter. Any of those glued
-  in front of the sentinel left it on a line equal to nothing, the failure scan skipped it, and a
-  trailing clean success line then approved — so a reply carrying BOTH verdicts silently resolved to
-  the approving one. Measured against the shipped function at all three of the glossary template's
-  verdict sites, every non-trimmed glue character tried produced that false approval.
+  matching to line matching) decides on whole-LINE equality: it treats a reply as a failure only when
+  the failure sentinel's line, after `String.prototype.trim()`, equals the sentinel exactly. Nothing
+  else may share that line except what `trim()` strips. In the realistic failure shape — an agent
+  writing its finding and then the sentinel on the SAME line — the prose is on that line regardless,
+  so any glue character hides the sentinel, a plain space included. Measured over the 16-character
+  `GLUE_CHARS` table in `tests/glossary_citation_review.test.py`, 15 of the 16 hide it in that shape;
+  only a line feed puts the sentinel on a line of its own, CRLF being safe for the same reason. With
+  no prose on the line the table splits: `trim()` strips a space, tab, VT, FF, CR, NBSP, U+2028 and
+  U+2029, so those still reject correctly, while the C0 separators U+001C–U+001F, NEL U+0085, a
+  zero-width space and any ordinary character hide the sentinel either way. The end state is the same
+  — the failure scan skips the sentinel, a trailing clean success line then approves, and a reply
+  carrying BOTH verdicts silently resolves to the approving one.
 - This is the false-GREEN dual of #308, which fixed the false-RED direction of the same comparison
   (a decorated but genuine success reply being read as a timeout). #308 closed over-strictness at
   these sites; this closes the under-strictness that its line-equality rule left open.
-- All three glossary verdict sites — the resume precheck, the readiness wait, and the new citation
-  review — now short-circuit to REJECT when `rejectedAnywhere(reply, failSentinel)` finds the failure
-  sentinel anywhere in the reply as a plain substring, evaluated before `sentinelVerdict()` is
-  consulted at all. Substring containment is strictly easier to satisfy than line equality, so the
-  guard can only ADD rejections and never remove one; the residual failure direction is fail-safe by
-  construction rather than by care.
-- Two bounded false REDs are accepted in exchange, both benign relative to a frozen fabricated
-  citation. A reply that merely mentions the failure sentinel while approving now rejects. And a
-  sentinel can be a substring of a longer-indexed sibling — `ABSENT 1` occurs inside `ABSENT 10` — so
-  a precheck or wait reply quoting another batch's sentinel takes the reject branch. The citation
-  verdict is not exposed to the second at shipped settings: its sentinels end in ` ATTEMPT <n>`,
-  which terminates the batch index, and the analogous attempt-number collision (`ATTEMPT 1` inside
-  `ATTEMPT 10`) is unreachable at the shipped `MAX_CITATION_RETRIES = 2`.
-- A false reject costs differently per site, which matters when reading a failed run: the citation
-  review regenerates within `MAX_CITATION_RETRIES`, and the precheck simply forfeits its resume-skip
-  and runs the dispatch + wait it would otherwise have skipped — both automatic, same run, same
-  batch. The **wait** does not recover: it returns `{ready: false, reason: "glossary-pass-null"}`
-  straight out of `batchStep`, ending that batch for the run, and because the merge is all-or-nothing
-  the pass then reports `merged: false` and merges nothing. Recovery there is an operator re-invoking
-  the pass.
-- **Scope, stated plainly because the defect is not template-specific.** The guard is applied to
-  `glossary-pass-wf.template.js` only. Four sibling consume sites still compare on line equality
-  alone and remain exposed to the same gluing: `mass-translate-wf.template.js`'s two `READY`/`TIMEOUT`
-  waits, and `skeptic-pass-wf.template.js`'s `PRESENT`/`ABSENT` precheck and `READY`/`TIMEOUT` wait.
-  (A fifth site, mass-translate's `DRAFT_MISSING` check, passes a `null` failure sentinel and so has
-  nothing to hide.) That is a deliberate scope limit, not an oversight: this release's Migration
-  section promises `skeptic-pass-wf.template.js` is untouched, and editing either sibling would flip
-  its bundle hash and falsify that promise. Their exposure is the pre-existing #308 behaviour,
-  unchanged by this release and not worsened by it — but it is live, and closing it is a separate
-  change that should price its own hash migration.
+- **Five verdict sites across two templates** now short-circuit to REJECT when
+  `rejectedAnywhere(reply, failSentinel)` finds the failure sentinel anywhere in the reply as a plain
+  substring, evaluated before `sentinelVerdict()` is consulted at all: in `glossary-pass-wf.template.js`
+  the resume precheck, the readiness wait and the new citation review; in
+  `mass-translate-wf.template.js` the translate wait and the review wait. Substring containment is
+  strictly easier to satisfy than line equality, so the guard can only ADD rejections and never remove
+  one; the residual failure direction is fail-safe by construction rather than by care. Mass-translate's
+  `DRAFT_MISSING` check is deliberately left alone — it passes a `null` failure sentinel, so it has no
+  sentinel to hide and `rejectedAnywhere()` returns `false` for it by its own argument guard.
+- Two bounded false REDs are accepted in exchange, both benign relative to the false GREEN. A reply
+  that merely mentions the failure sentinel while approving now rejects. And a sentinel can be a
+  substring of a longer-indexed sibling — `ABSENT 1` occurs inside `ABSENT 10` — so a precheck or wait
+  reply quoting another unit's sentinel takes the reject branch. The citation verdict is not exposed to
+  the second at shipped settings: its sentinels end in ` ATTEMPT <n>`, which terminates the batch
+  index, and the analogous attempt-number collision (`ATTEMPT 1` inside `ATTEMPT 10`) is unreachable at
+  the shipped `MAX_CITATION_RETRIES = 2`.
+- **A false reject costs differently at every site**, which is what to read a failed run against. Only
+  the two in-batch glossary sites recover inside the run: the citation review regenerates within
+  `MAX_CITATION_RETRIES`, and the precheck forfeits its resume-skip and runs the dispatch + wait it
+  would otherwise have skipped. The three wait sites each cost at least a re-run. The glossary wait
+  returns `{ready: false, reason: "glossary-pass-null"}` straight out of `batchStep`, ending that batch
+  and — the merge being all-or-nothing — the whole pass, which reports `merged: false` and merges
+  nothing. Mass-translate's review wait returns `{status: "blocked", reason: "review-timeout"}`,
+  blocking that segment for the run. Mass-translate's translate wait returns
+  `{converged: false, reason: "translate-timeout"}`, which is deliberately NOT a terminal ledger write:
+  `select_segments.py`'s "any non-terminal status is recoverable" rule picks the segment back up and
+  auto-redispatches it on the next run.
+- **Scope: `skeptic-pass-wf.template.js` is deliberately excluded, and for its own reason.** Its
+  `PRESENT`/`ABSENT` precheck and `READY`/`TIMEOUT` wait mirror the guarded glossary control flow and
+  remain exposed to the same gluing. That is not the same call as mass-translate's. Mass-translate and
+  the glossary template are both listed in `cache_key.py`'s `PLUGIN_BUNDLE_MEMBERS` and so share one
+  combined `plugin_bundle_hash` that this release already flips — guarding the second cost no marginal
+  migration at all. The skeptic template appears nowhere in `cache_key.py`; `skeptic_setup.py` reads
+  its bytes directly into a separate `compute_skeptic_input_digest()`, so touching it would force a
+  fresh skeptic RUN_ID — a third, independent resume domain — and falsify this release's own promise
+  below that the file is untouched. Its exposure is the pre-existing #308 behaviour, unchanged and not
+  worsened here; closing it is a separate change that should price that migration itself.
+- **The Migration section below is unaffected by the mass-translate half of this fix.** Verified rather
+  than assumed: `plugin_bundle_hash` is a single hash over the whole `PLUGIN_BUNDLE_MEMBERS` tuple that
+  already includes both templates, so editing a second member moves nothing new; neither template is in
+  `DERIVATION_BUNDLE_MEMBERS` (`bootstrap_names.py`, `segpack.py`), so consequence 1's "no derivation
+  regeneration" still holds; `plugin_bundle_hash` sits in `compute_input_digest()`'s unconditional
+  `version` block rather than either `kind` branch, so consequence 2 is already stated for both kinds;
+  and consequence 3's preflight estimate is computed in the glossary template alone, where the guard
+  adds no `agent()` call.
 
 ### Migration
 
