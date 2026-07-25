@@ -171,9 +171,11 @@ scope-leak → 283 → WC-audit R3 (−2 dedup) → 281 → strip mikveh scope-l
   smaller than feared and grep-RAG is a more viable big-book compromise than the critique implied —
   BUT hole (2) homonym-contamination is unmeasured and is likely the bigger risk (many entities
   share a surface, e.g. רבי נחמן → 3 people).
-- **Effort = `high`, not xhigh/ultra.** Bakeoff + this loop: more reasoning OVER-reaches (more
-  false-positive "fabrications" to adjudicate); the lever that mattered was whole-corpus context, not
-  effort. Codex facts (verified in models_cache + codex-companion): `high/xhigh/max/ultra` are
+- **Effort — do not restate a tier verdict here.** What this loop actually established is that the
+  lever that mattered was whole-corpus context, NOT effort. No effort tier is validated as a winner:
+  the bake-off that once reported one was measuring noise, and a controlled replication found the
+  tiers indistinguishable. Single home for that evidence and for any tier decision →
+  `skill:codex-runtime-driving` → `references/model-effort-bakeoff.md`. Codex facts (verified in models_cache + codex-companion): `high/xhigh/max/ultra` are
   `supported_reasoning_levels` = thinking-DEPTH tiers of ONE model, NOT an agent swarm (that's Claude
   Code's "ultracode"/Workflow — a different axis). The `--effort` FLAG whitelist caps at `xhigh`;
   `max`/`ultra` are config-only (`model_reasoning_effort`) — don't change the user's global config

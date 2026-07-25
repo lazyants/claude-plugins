@@ -33,7 +33,7 @@ Every guardrail is baked into those builders and comes free with verbatim transc
 General principle: reproducing ANY automated orchestrator by hand → transcribe its builders and substitute the variables; every guardrail you re-derive is one you will miss.
 
 The only deliberate deviations from the builders:
-- they hardcode `Effort: high.` in the dispatch prompt → override to `xhigh.` per the translation-effort rule. (This prompt-level effort is a DIFFERENT knob from the profile's const `engine.effort`, which stays `high`. Note the actual SSK run dispatched at Sol@high, and a model×effort bake-off found the config model at high a strong performer — xhigh can over-reach — so weigh the bake-off, but the standing rule for translation dispatch is xhigh.)
+- they hardcode `Effort: high.` in the dispatch prompt → override to `xhigh.` per the translation-effort rule. (This prompt-level effort is a DIFFERENT knob from the profile's const `engine.effort`, which stays `high`. Note the actual SSK run dispatched at Sol@high. No tier is validated as a winner — for what the model×effort evidence does and does not support, see `skill:codex-runtime-driving` → `references/model-effort-bakeoff.md`, the single home for that question; the standing rule for translation dispatch is xhigh.)
 - substitute `PY` → the venv python.
 
 ## The bypass generalizes beyond W5 — glossary/W3a batch dispatch too

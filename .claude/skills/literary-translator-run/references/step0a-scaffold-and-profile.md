@@ -49,7 +49,7 @@ he→en values:
 - `verse_policy.mode: literal_only`
 - `apparatus_policy: omit_apparatus`
 - `glossary.research_mode: offline`
-- `engine.effort: high` — schema-const (leave as-is); the config model at high was the model×effort bake-off winner, so no override needed here. (This is the plugin's engine field; it is a DIFFERENT knob from the codex-dispatch prompt's `Effort:` line — see `manual-translation-drive.md`.)
+- `engine.effort: high` — schema-const (leave as-is), so there is nothing to override here. (This is the plugin's engine field; it is a DIFFERENT knob from the codex-dispatch prompt's `Effort:` line — see `manual-translation-drive.md`. Do not read this const as a validated tier — no effort tier has been validated as a winner; see `skill:codex-runtime-driving` → `references/model-effort-bakeoff.md`.)
 - `output.v1_scope: assembled_book` + `output.target: obsidian`
 - `max_segment_words: 6000`
 

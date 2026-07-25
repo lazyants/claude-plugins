@@ -84,6 +84,10 @@ bake-off's "xhigh has better mention-recall" claim.
 **Entity scope + homonym-split are PROMPT-DISCIPLINE, not model capability** — with explicit rules
 (exclude God/Messiah; keep distinct namesakes separate; mark `[source]` vs `[external]`) ALL models complied
 and split homonyms correctly. Smoother-but-freer models tend to introduce real mistranslations/reversals;
-only the highest-effort arm reliably flags `uncertain` (better epistemic caution). Takeaway: for faithful
-text work, don't reflexively max out effort — pick the tier a blind bake-off actually validated, and put
-the accuracy-critical constraints in the PROMPT.
+only the highest-effort arm reliably flagged `uncertain` (better epistemic caution) — but that is an
+OBSERVATION from the original single-run bake-off, unreplicated like the Sol-above-Terra half above:
+indicative, and not a validated tier selection. Takeaway: for faithful
+text work, put the accuracy-critical constraints in the PROMPT — that is the lever with demonstrated
+effect. No tier has been validated as a winner (the replication above found high and xhigh
+indistinguishable on fidelity), so choose the tier from the standing policy and the measured latency
+cost, never from a bake-off verdict.
