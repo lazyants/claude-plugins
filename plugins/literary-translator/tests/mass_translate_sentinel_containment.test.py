@@ -146,6 +146,13 @@ NEWLINE_GLUE = ("lf", LF)
 
 ALL_GLUES = TRIM_STRIPPED + TRIM_PRESERVED + [NEWLINE_GLUE]
 
+# Glues that leave the sentinel ALONE on its line in the no-prose shape, by
+# either of the two mechanisms sentinelVerdict() has: LF isolates it by
+# SPLITTING, the rest by being TRIMMED away. Both routes end at the same place --
+# a line that equals the sentinel -- so all of them must block with no guard
+# involved, which is what makes this the negative-control set.
+SENTINEL_ISOLATING = TRIM_STRIPPED + [NEWLINE_GLUE]
+
 SITES = [
     ("translate", TRANSLATE_WAIT_LABEL, TRANSLATE_TIMEOUT_REASON),
     ("review", REVIEW_WAIT_LABEL, REVIEW_TIMEOUT_REASON),
@@ -386,16 +393,21 @@ def test_whitespace_prefixed_timeout_blocks_when_trim_cannot_strip_the_glue(
 
 @pytest.mark.parametrize("site,label,reason", SITES, ids=[s[0] for s in SITES])
 @pytest.mark.parametrize(
-    "glue_name", [n for n, _ in TRIM_STRIPPED], ids=[n for n, _ in TRIM_STRIPPED]
+    "glue_name", [n for n, _ in SENTINEL_ISOLATING], ids=[n for n, _ in SENTINEL_ISOLATING]
 )
-def test_trim_strippable_prefix_blocks_with_or_without_the_guard(
+def test_isolating_prefix_blocks_with_or_without_the_guard(
     outcomes, site, label, reason, glue_name
 ):
     """THE NEGATIVE CONTROL for this whole file.
 
-    A TIMEOUT sentinel preceded only by whitespace trim() strips is alone on its
-    line once trimmed, so sentinelVerdict sees it unaided -- these rows are green
-    on the PRE-guard template too, verified by measurement.
+    A TIMEOUT sentinel left ALONE on its line -- by trim() stripping the glue, or
+    by LF splitting it off -- is seen by sentinelVerdict unaided, so these rows
+    are green on the PRE-guard template too, verified by measurement.
+
+    LF is in this set rather than standing apart: it reaches the same end state
+    by the other of sentinelVerdict's two mechanisms. Including it also stops
+    the LF/no-prose fixtures being generated and executed while no test reads
+    them, which is what they were before.
 
     They are here precisely because they cannot be closed by the guard: they are
     what shows the tests above track the real mechanism -- whole-line equality
@@ -422,6 +434,22 @@ def test_the_same_character_hides_the_sentinel_only_when_prose_shares_its_line(
     outcomes, site, label, reason, glue_name
 ):
     """THE PAIRED CONTROL. One character, two shapes, opposite mechanisms.
+
+    ITS VALUE IS DOCUMENTARY, AND THIS IS NOT THE FIRST LINE OF DEFENCE. Every
+    one of the 32 fixtures it reads is already read, with identical
+    expectations, by test_prose_glued_timeout_still_blocks and
+    test_isolating_prefix_blocks_with_or_without_the_guard -- measured, by
+    recording each test's actual fixture reads rather than by comparing the
+    parametrize lists. So this test can never be the only thing that goes red,
+    and deleting it would lose no detection.
+
+    It is kept anyway, deliberately: it is the ONLY place the shape-dependence
+    is asserted as ONE fact rather than inferred by a reader comparing two test
+    functions with different parameter sets. That inference is exactly what
+    failed earlier in this release, when two correct measurements -- 15/16 and
+    6/15 over different shapes -- were restated without their shapes and read as
+    contradicting each other. A test that states the contrast in a single
+    assertion is the cheapest available guard against repeating that.
 
     Holding the CHARACTER fixed and varying only the SHAPE is what proves these
     tests track ``sentinelVerdict``'s actual rule -- a line is compared to the

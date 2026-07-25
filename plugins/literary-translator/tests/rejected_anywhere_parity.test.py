@@ -192,6 +192,53 @@ def test_the_two_guard_comments_are_deliberately_not_identical():
     )
 
 
+DELEGATOR = "mentionedAnywhere"
+_DELEGATOR_SIGNATURE = f"function {DELEGATOR}(reply, sentinel) {{"
+
+
+def test_mentioned_anywhere_delegates_instead_of_reimplementing_containment():
+    """The OK-direction wrapper must be a delegation, not a second containment
+    implementation.
+
+    ``mentionedAnywhere()`` exists so that runRound's DRAFT_MISSING check reads
+    honestly at its call site: same containment test as ``rejectedAnywhere()``,
+    opposite consequence, so it carries a name that is not false there. Its
+    comment states that delegating is what keeps the containment semantics --
+    including the empty/non-string sentinel guard -- in ONE place.
+
+    Nothing asserted that. Reimplement the body as a whole-line check and every
+    behavioural test in this plugin stays green while runRound's gap silently
+    reopens, because no behavioural test drives that site's reply shapes. This
+    file already forbids a divergent COPY of the guard across templates; this is
+    the same invariant one level in -- a divergent CALLER of it.
+
+    So the assertion is not about drift between copies. It is what makes the
+    deliberate duplication of the NAME safe rather than merely intentional."""
+    source = MASS_TRANSLATE_TEMPLATE.read_text(encoding="utf-8")
+    idx = source.find(_DELEGATOR_SIGNATURE)
+    assert idx != -1, (
+        f"expected `{_DELEGATOR_SIGNATURE}` in {MASS_TRANSLATE_TEMPLATE.name}"
+    )
+    end = source.find("\n}\n", idx)
+    assert end != -1, (
+        f"could not find a column-0 closing brace for {DELEGATOR} in "
+        f"{MASS_TRANSLATE_TEMPLATE.name}"
+    )
+    body = [
+        line.strip()
+        for line in source[idx:end].split(chr(10))[1:]
+        if line.strip() and not line.strip().startswith("//")
+    ]
+    assert body == [f"return {GUARD_HELPER}(reply, sentinel)"], (
+        f"{DELEGATOR}() must delegate to {GUARD_HELPER}() and do nothing else, so "
+        f"containment -- including the empty/non-string sentinel guard that stops "
+        f'"".indexOf("") === 0 from matching every reply -- has exactly ONE '
+        f"implementation. Its body is now:\n  " + "\n  ".join(body) + "\n"
+        f"A reimplementation here reopens runRound's DRAFT_MISSING gluing gap with "
+        f"the whole suite still green: no behavioural test drives that site."
+    )
+
+
 def test_skeptic_template_deliberately_carries_no_guard():
     """The asymmetry, checked rather than assumed.
 
