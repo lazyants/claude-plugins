@@ -671,13 +671,30 @@ function sentinelVerdict(reply, okSentinel, failSentinel) {
 // describes glossary's call sites, counts and recovery paths, none of which
 // are true here.
 //
+// EVERY COUNT BELOW NAMES ITS SHAPE AND ITS SET, and so must any count added
+// later. A bare "15 of 16" is not checkable: the numbers move with the reply
+// shape AND with which glue table was counted, and this codebase deliberately
+// uses two different tables. Concretely, a reader comparing this file's counts
+// against the suite that pins them will otherwise see a contradiction:
+//   GLUE_CHARS (16 items) in tests/glossary_citation_review.test.py -- the set
+//     every count in THIS comment and at this file's call sites is measured
+//     over. Adds U+001D, U+001E, U+001F.
+//   ALL_GLUES (15 items) in tests/mass_translate_sentinel_containment.test.py
+//     -- a different set, partitioned by trim-strippability, which the
+//     mass-translate suite measures and which reports "14 of 15" for this same
+//     property. Adds a HYPHEN and a QUOTE; omits U+001D/U+001E/U+001F.
+// 13 characters are common to both. Both numbers are correct over their own
+// population; neither is a bug, and the two sets are NOT to be unified --
+// A2's partition carries information a flat list does not.
+//
 // Why this exists. sentinelVerdict() splits on "\n" and compares whole trimmed
 // lines, so its fail-priority scan only sees a fail sentinel that an LF put on
-// a line of its own. Measured over the 16-character GLUE_CHARS table in
-// tests/glossary_citation_review.test.py, with a reply of
-// prose + GLUE + "TIMEOUT <seg>" + "\n" + "READY <seg>", 15 of 16 glue
-// characters defeat that scan at BOTH wait sites -- 30 of 32 site/character
-// pairs -- and the segment FALSELY PROCEEDS as ready. LF alone blocks. The 15
+// a line of its own. Measured over GLUE_CHARS (16 items,
+// tests/glossary_citation_review.test.py), shape: the fail sentinel SHARING ITS
+// LINE with prose -- a reply of prose + GLUE + "TIMEOUT <seg>" + "\n" +
+// "READY <seg>" -- 15 of 16 glue characters defeat that scan at BOTH wait
+// sites, so 30 of 32 site/character pairs, and the segment FALSELY PROCEEDS as
+// ready. LF alone blocks. The 15
 // are not exotic: PLAIN SPACE, TAB, a lone CR, VT, FF, U+001C, U+001D, U+001E,
 // U+001F, NBSP, U+0085, U+2028, U+2029, ZWSP -- and the ordinary letter "x".
 // This is not a line-separator problem: `split("\n")` breaks on LF and nothing
@@ -1215,9 +1232,13 @@ async function getVerifiedReview(seg, roundLabel) {
   //
   // sentinelVerdict()'s fail-priority scan only catches a contradictory reply
   // when an LF put "TIMEOUT <seg>" on a line of its own; rejectedAnywhere()
-  // catches it whatever glued it there. Measured over GLUE_CHARS: 15 of 16
-  // glue characters falsely PROCEEDED as ready before the guard, 0 of 16
-  // after. A false RED here blocks the segment for this run with
+  // catches it whatever glued it there. Measured over GLUE_CHARS (16 items,
+  // tests/glossary_citation_review.test.py), shape: the fail sentinel sharing
+  // its line with prose -- 15 of 16 glue characters falsely PROCEEDED as ready
+  // before the guard, 0 of 16 after. (The mass-translate suite pins the same
+  // property over ALL_GLUES, 15 items, and reports 14 of 15 -- a different set,
+  // not a different answer; see rejectedAnywhere()'s comment.)
+  // A false RED here blocks the segment for this run with
   // reason:"review-timeout" -- the fail-safe direction, but not an in-run
   // retry. See rejectedAnywhere()'s comment.
   if (rejectedAnywhere(ready, "TIMEOUT " + seg) ||
@@ -1300,9 +1321,11 @@ async function runRound(seg, round, isFinal) {
   // this call, so gluing does not fake a pass -- it makes a REAL report go
   // UNRECOGNIZED, falling through to `terminal: false` and silently continuing
   // as an ordinary review round over a draft the fix agent just said was
-  // missing. Measured over tests/glossary_citation_review.test.py's GLUE_CHARS,
-  // in the two shapes a reply can take -- the count is SHAPE-DEPENDENT, which
-  // is easy to get wrong:
+  // missing. Measured over GLUE_CHARS (16 items,
+  // tests/glossary_citation_review.test.py -- NOT the 15-item ALL_GLUES the
+  // mass-translate suite uses; see rejectedAnywhere()'s comment for why both
+  // exist), in the two shapes a reply can take. The count is SHAPE-DEPENDENT as
+  // well as set-dependent, which is easy to get wrong:
   //   prose on the SAME line as the sentinel ("prose<GLUE>DRAFT_MISSING <seg>")
   //     -- 15 of 16 missed. trim() only reaches a line's two ends, so it never
   //     gets a chance at glue sitting between the prose and the sentinel.
@@ -1388,7 +1411,9 @@ async function reviewFixLoop(stage1Result, seg) {
   //
   // Being the worst site makes the gluing gap worst here too: sentinelVerdict()
   // alone catches a contradictory reply only when an LF put "TIMEOUT <seg>" on
-  // its own line, and measured over GLUE_CHARS, 15 of 16 glue characters
+  // its own line. Measured over GLUE_CHARS (16 items,
+  // tests/glossary_citation_review.test.py), shape: the fail sentinel sharing
+  // its line with prose -- 15 of 16 glue characters
   // falsely PROCEEDED as ready before rejectedAnywhere() was added here, 0 of
   // 16 after -- i.e. the "worst of the five" consequence above was reachable by
   // gluing the timeout sentinel behind a PLAIN SPACE. A false RED costs one

@@ -592,8 +592,10 @@ const REPLY_LINE_BREAK = new RegExp("\\r\\n|[\\n\\r\\u2028\\u2029\\u0085]")
 //
 // That hole is now CLOSED -- not by widening any split, but by the containment
 // guard rejectedAnywhere(), applied at all three of this file's sentinelVerdict
-// call sites. See its comment for the measurement (15 of 16 glue characters
-// falsely approved before the guard, 0 of 16 after, at each of the three
+// call sites. See its comment for the measurement (over GLUE_CHARS, 16 items,
+// tests/glossary_citation_review.test.py; shape: the fail sentinel sharing its
+// line with prose -- 15 of 16 glue characters falsely approved before the
+// guard, 0 of 16 after, at each of the three
 // sites), for why containment beats any wider separator set, and for the
 // false-REJECT cost it pays for that. sentinelVerdict() itself is untouched, so
 // the parity pin and both sibling templates' bundle hashes still hold.
@@ -708,33 +710,48 @@ function sentinelVerdict(reply, okSentinel, failSentinel) {
 //
 // Why this exists. sentinelVerdict() splits on "\n" and compares whole trimmed
 // lines, so its fail-priority scan only sees a fail sentinel that LF (or CRLF,
-// whose LF does the splitting) put on a line of its own. Measured against the
-// shipped function with a reply of prose + GLUE + failSentinel + "\n" +
-// okSentinel, 15 of 16 glue characters defeat that scan and the reply is
-// falsely APPROVED at all three call sites -- 45 of 48 site/character pairs.
+// whose LF does the splitting) put on a line of its own.
+//
+// EVERY COUNT BELOW NAMES ITS SHAPE AND ITS SET, and so must any count added
+// later. A bare "15 of 16" is not checkable: these numbers move with the reply
+// shape AND with which glue table was counted, and this codebase deliberately
+// keeps two different tables. Every count in THIS file is measured over
+// GLUE_CHARS (16 items, tests/glossary_citation_review.test.py), which is also
+// what that suite itself reports 15/16 against. The mass-translate templates
+// and suite additionally use ALL_GLUES (15 items,
+// tests/mass_translate_sentinel_containment.test.py) -- partitioned by
+// trim-strippability, adding a HYPHEN and a QUOTE and omitting
+// U+001D/U+001E/U+001F -- and it reports "14 of 15" for the same property.
+// 13 characters are common to both. Both are correct over their own
+// population; the two sets are NOT to be unified.
+//
+// Measured against the shipped function over GLUE_CHARS, shape: the fail
+// sentinel SHARING ITS LINE with prose -- a reply of
+// prose + GLUE + failSentinel + "\n" + okSentinel --
+// 15 of 16 glue characters defeat that scan and the reply is
+// falsely APPROVED at all three call sites, so 45 of 48 site/character pairs.
 // The 15 are not exotic: PLAIN SPACE (U+0020), TAB, a lone CR, VT, FF, U+001C,
 // U+001D, U+001E, U+001F, NBSP, U+0085, U+2028, U+2029, ZWSP -- and the
 // ordinary letter "x". LF alone rejects correctly.
 //
-// The 16 are exactly the GLUE_CHARS table in
-// tests/glossary_citation_review.test.py, so every count in this comment is
-// reproducible from that named artifact and the suite measures the same 15/16.
 // CRLF is deliberately NOT in that table and also rejects correctly, for the
 // same reason LF does -- its embedded LF is what splits the sentinel onto a
 // line of its own. So the fully general statement is "LF and CRLF are safe",
-// while the reproducible count over GLUE_CHARS is 15 of 16.
+// while the reproducible count over GLUE_CHARS (16 items) in that same
+// shared-line shape is 15 of 16.
 //
 // So this is NOT a line-separator problem, and that is the whole design point.
 // `split("\n")` breaks on LF and nothing else, so ANY character between prose
 // and the sentinel keeps them on one line and defeats whole-line equality. The
 // defeating alphabet is every character except LF -- unbounded and impossible
-// to enumerate. Widening the split is therefore whack-a-mole: measured, a
+// to enumerate. Widening the split is therefore whack-a-mole: measured over the
+// same 15 failing members of GLUE_CHARS in the same shared-line shape, a
 // REPLY_LINE_BREAK-widened split (the widest separator set in this file) closes
 // exactly 4 of those 15 -- CR, U+0085, U+2028, U+2029 -- and leaves the other
 // 11 open: SPACE, TAB, VT, FF, U+001C, U+001D, U+001E, U+001F, NBSP, ZWSP and
 // the letter "x". DO NOT "simplify" this guard back into a wider split -- that
-// silently reopens 11 of the 15. Containment is closed under the whole alphabet
-// at once because it never asks where the sentinel sits.
+// silently reopens 11 of those 15. Containment is closed under the whole
+// alphabet at once because it never asks where the sentinel sits.
 //
 // Done at the CALL SITES rather than inside sentinelVerdict() because that
 // function's body and comment are mirrored byte-for-byte across all three
@@ -832,8 +849,10 @@ async function batchStep(batch) {
   // contradictory reply regenerates. sentinelVerdict()'s own fail-priority scan
   // catches the contradictory case only when an LF puts ABSENT on a line of its
   // own; the rejectedAnywhere() guard on this call catches it whatever glued it
-  // there -- measured over tests/glossary_citation_review.test.py's GLUE_CHARS,
-  // 15 of 16 glue characters falsely resume-SKIPPED before the guard, 0 of 16
+  // there -- measured over GLUE_CHARS (16 items,
+  // tests/glossary_citation_review.test.py), shape: ABSENT sharing its line
+  // with prose -- 15 of 16 glue characters falsely resume-SKIPPED before the
+  // guard, 0 of 16
   // after. The cost is a false RED that recovers automatically within this same
   // run: a reply merely MENTIONING "ABSENT <i>" while reporting the fragment
   // present just sends the batch down the ordinary dispatch path below instead
@@ -888,8 +907,9 @@ async function batchStep(batch) {
       // contradictory reply times out. As at the precheck above,
       // sentinelVerdict() alone catches the contradictory case only when an LF
       // puts TIMEOUT on a line of its own; the rejectedAnywhere() guard on this
-      // call catches it whatever glued it there -- measured over
-      // tests/glossary_citation_review.test.py's GLUE_CHARS, 15 of 16 glue
+      // call catches it whatever glued it there -- measured over GLUE_CHARS
+      // (16 items, tests/glossary_citation_review.test.py), shape: TIMEOUT
+      // sharing its line with prose -- 15 of 16 glue
       // characters were falsely accepted as READY before the guard, 0 of 16
       // after.
       //
