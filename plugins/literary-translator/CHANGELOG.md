@@ -1,5 +1,71 @@
 # Changelog
 
+## 1.16.0 — 2026-07-25
+
+Adds a bounded pre-merge citation-review stage to the W3 glossary pass. Under
+`glossary.research_mode: live`, a batch can now only become READY once the `source` citations
+its `basis: "established"` entries carry have been reviewed — while the fragment is still
+rewritable, before anything reaches `canon.json`.
+
+### Added — pre-merge citation review gates a glossary batch becoming READY
+
+- Under `glossary.research_mode: live` the glossary pass resolves some names as
+  `basis: "established"` and attaches a `source` URI. Nothing reviewed those citations. The batch's
+  own self-check proves the fragment's shape, the offline backstop, and its exact candidate coverage
+  against the manifest — it does not, and cannot, judge whether a cited source actually supports the
+  resolution it is attached to. The fragment went straight into the merge, so an unreviewed citation
+  was frozen into `canon.json` and the run reported a clean, disk-verified pass: a false green whose
+  green came from checks that were never looking at the citation. `batchStep` now runs a citation
+  review before a batch is allowed to become READY.
+- The review has to be **pre**-merge, because a merged canon row is immutable in practice rather than
+  merely awkward to change. `canon_validate.py --verify-merged` is disk-independent and writes
+  nothing; re-merging a different resolution for the same `source_form` is rejected outright as an
+  `entries{}` collision instead of superseding the old row; and `canon_adjudication_audit.py` only
+  blocks, never repairs. Every post-merge surface can therefore report the problem and none can fix
+  it. The Workflow previously ran every batch and then merged in the same call, so there was no pause
+  anywhere between "the fragment was written" and "the row is frozen" at which anything could
+  intervene.
+- A rejected citation regenerates that batch's fragment to a fresh attempt-scoped path before any
+  merge — so the rejected fragment is never the one that merges, and a retry neither overwrites nor
+  is confused with the artifact that was rejected. Retries are bounded by `MAX_CITATION_RETRIES`.
+- Exhausting that bound returns a distinct `citation-review-exhausted` result and the pass does not
+  merge, joining `batch-too-large` / `glossary-pass-null` / `fragment-check-failed` /
+  `verify-failed` as a named no-merge reason. An unreviewable citation halts the pass with a reason
+  an operator can act on; it never falls through into the merge.
+- No-op under `glossary.research_mode: offline`, where `basis: "established"` is forbidden outright —
+  there is no citation to review, and an offline run pays nothing for the stage.
+
+### Migration
+
+`glossary-pass-wf.template.js` is a `PLUGIN_BUNDLE_MEMBERS` file (`cache_key.py`), so this release
+moves `plugin_bundle_hash`, with the same two bounded consequences 1.15.1 priced when it edited the
+same template (1 and 2 below). This release adds a third, specific to the new stage (3):
+
+1. **Per-segment cache staleness (mass only).** Previously-converged **mass** segments' stored cache
+   keys no longer match and route to `stale`/re-translate at the next Step-0a bundle refresh. There
+   is no derivation regeneration and no mature-project brick: neither `DERIVATION_BUNDLE_MEMBERS`
+   file is touched, so nothing routes to `blocked_needs_regeneration`.
+2. **Run-level resume-identity invalidation (mass AND glossary).** `plugin_bundle_hash` is an
+   unconditional input to `resume_setup.py`'s run-level `compute_input_digest()` — it is not
+   conditional on kind — so an in-flight, not-yet-complete run of **either** kind mints a fresh
+   RUN_ID instead of matching its existing input digest. Fragments already written to disk are
+   unaffected content-wise; the run loses its resume identity.
+3. **The `engine.batch_agent_cap` preflight estimate rises — under `live` only.** Under
+   `research_mode: offline` the estimate is unchanged, `3 * batches + 2`, exactly as before:
+   `canon_validate.py` makes `basis: "established"` fatal under `offline`, so the citation review is
+   a genuine no-op there rather than an optimisation that skips it, and an offline project needs
+   nothing from this item. Under `live` the per-batch worst case becomes
+   `1 + 3 * (MAX_CITATION_RETRIES + 1)`, taking the estimate from `3 * batches + 2` to
+   `10 * batches + 2` at the shipped `MAX_CITATION_RETRIES = 2`. A `live` project whose
+   `engine.batch_agent_cap` was tuned anywhere near the old estimate is therefore refused outright on
+   its next glossary pass with `{merged: false, reason: "batch-too-large"}`. That refusal is hard and
+   legible and lands at the preflight before anything is dispatched — nothing is corrupted, nothing
+   silently degrades, and no partial work is left behind — but the pass does not run until
+   `engine.batch_agent_cap` is raised to at least the new estimate.
+
+No canon, ledger, or source-data content changes. `skeptic-pass-wf.template.js` is not touched, so
+the separate skeptic resume domain is unaffected.
+
 ## 1.15.2 — 2026-07-23
 
 Two related proper-noun-extraction bug fixes for Hebrew source text. Closes #282. Closes #283.

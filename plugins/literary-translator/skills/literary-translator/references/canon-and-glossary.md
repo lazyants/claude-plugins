@@ -106,10 +106,14 @@ Per batch: `batchDispatchPrompt(batch)` is codex, `agentType:'codex:codex-rescue
 `effort: engine.effort` (#197 — a configurable enum, default `high`, dual-injected
 alongside the TASK opener's own `Effort: <value>.` line; see
 `references/ledger-and-resumability.md`'s dual-injection rule), **schema-less**, fire-and-forget — it writes the run-scoped
-fragment `${durable_root}/glossary/runs/{{RUN_ID}}/out_{index}.json`
+fragment `${durable_root}/glossary/runs/{{RUN_ID}}/out_{index}_attempt_{n}.json`
 atomically and self-validates it via `canon_validate.py --check-batch`
 before printing `FRAGMENT {index}`; `batchWaitPrompt(batch)` is Claude,
-bounded-poll, `READY`/`TIMEOUT`. Two final calls run once, after every
+bounded-poll, `READY`/`TIMEOUT`. Under `research_mode: live` a bounded
+citation-review stage then gates whether that batch counts as ready at all,
+still inside `batchStep` — see **Pre-merge citation review** below for the
+stage and for why a citation gets exactly one chance, here, before the
+merge. Two final calls run once, after every
 fragment is `READY`, never per-batch: a merge call
 (`canon_validate.py --merge-batches`, no schema — the single serialized
 writer) and a disk-verify call (`canon_validate.py --verify-merged`,
@@ -407,11 +411,145 @@ something a script silently probes (and potentially gets wrong).
   no `{{MODEL}}` token here — a codex model id does not thread to the
   glossary pass (see `assets/profile.example.yml`).
 
+### Pre-merge citation review
+
+Everything above constrains the SHAPE of a citation, never its truth.
+`canon-entry.schema.json` requires `source` when `basis == "established"`
+and asserts `format: "uri"` plus `minLength: 1` on it; `--check-batch` runs
+that same per-item shape check plus the offline backstop. No path opens the
+URL, and none asks whether the cited reference actually attests the
+`canonical_target_form` it was offered for. A fabricated but well-formed URI
+cleared every check the pipeline had before this stage.
+
+So the glossary pass reviews each `basis: "established"` citation itself,
+**inside `batchStep`, before that batch counts as ready** — and therefore
+before any fragment reaches `--merge-batches`.
+
+**The reviewer is a plain Claude call, deliberately NOT codex** — no
+`agentType`, no schema, sentinel-verdict shaped exactly like the precheck
+and wait steps (a schema-bearing call can wedge the Workflow if the
+forwarder detaches, #97), at `effort: "high"` rather than those steps'
+`"low"`, since this is the one judgment call in the template rather than a
+mechanical relay. Codex is what PRODUCED the citation, so a reviewer running
+under a different model is a genuinely separate opinion rather than the same
+reasoning re-run; `tests/bounded_poll_present.test.py` pins this template's
+codex work-call set to exactly `{batchDispatchPrompt}`, which keeps it that
+way. This does not loosen R1/R4: the stage AUTHORS nothing and repairs
+nothing — its only two powers are approve and reject, every canon resolution
+still comes from codex, and a rejection's only effect is to make codex redo
+the batch. Its `effort` is likewise NOT wired to `{{EFFORT}}`, which stays
+the codex dual-injection knob and nothing else.
+
+Scope is narrow and explicit: only items whose `basis` is exactly
+`established` are examined — every other basis makes no external source
+claim at all — and for each one the reviewer must actually fetch the URL,
+never judge it from its shape, domain reputation, or memory. Three checks:
+it RESOLVES (no 404, dead host, parked domain, content-hiding login wall, or
+redirect to an unrelated page); it is ABOUT THE RIGHT ENTITY (not merely a
+same-named bearer); and it SUPPORTS THE CLAIMED FORM — the page actually
+attests the `canonical_target_form` as an established target-language
+rendering. That third one is the common failure: a page proving only that
+the entity exists, or giving the name only in the source language, does not
+support an `established` claim. A missing, empty, non-URL, or
+search-results/query `source` rejects too, and so does an unreachable
+network — an unverifiable citation is never approved on the grounds that
+verification was unavailable. The verdict is **per batch, not per item**: a
+single failing item rejects the whole fragment, so there is no partial
+verdict to express. A fragment with no `established` items at all passes
+trivially — a live-mode batch that happened to resolve everything by
+transliteration or sense-translation costs one cheap approval, never a
+research round.
+
+**Every attempt gets its own fragment path** — `out_{index}_attempt_{n}.json`
+from attempt 0 onward, where this used to be one fixed `out_{index}.json`.
+That is not tidiness: the single path made a citation rejection
+unenforceable IN PRINCIPLE. A citation-rejected fragment is still perfectly
+valid STRUCTURALLY — its URL is present and URI-shaped, which is exactly why
+`--check-batch` passed it — so the wait step for the regenerated fragment
+would return `READY` against the REJECTED bytes the instant it looked,
+whether or not the agent had rewritten anything yet, and those bytes would
+sail into the merge. Per-attempt paths make that impossible by construction
+rather than by timing: attempt n+1's wait polls a path that does not exist
+until the fresh dispatch atomically renames it into place, and the merge is
+handed only the exact attempt path the review approved. For the same reason
+the verdict sentinels carry the ATTEMPT number, not just the batch index — a
+verdict is a statement about one attempt path, so a stale verdict simply
+fails to match. A mismatched, malformed, or absent verdict falls to the
+REJECT side: a wrong reject costs one regeneration, a wrong accept costs a
+permanently frozen fabricated citation.
+
+Regeneration is bounded by `MAX_CITATION_RETRIES`, and the next attempt's
+dispatch prompt is handed the rejecting reviewer's own findings (minus the
+verdict sentinel lines, so a live sentinel is never echoed into a prompt
+whose reply is itself parsed) as its regeneration constraint. Exhausting the
+budget returns `merged: false` with `reason: "citation-review-exhausted"` —
+deliberately a DISTINCT reason from `fragment-check-failed`, because "a
+fragment never became structurally valid" and "the fragments were valid but
+their citations did not survive review" are different operator problems with
+different remedies. Either way nothing is merged.
+
+Under `research_mode: offline` the stage is a no-op: `established` is
+forbidden outright there (above), so there is no citation to review.
+
+**Why it must be PRE-merge: a merged row cannot be repaired.** This is the
+load-bearing rationale, not a preference for failing early. Once a
+`source_form` is a key in `canon.json`'s `entries{}`, every shipped path
+that could plausibly change it is closed:
+
+- `canon_validate.py` is the only script in the plugin that writes
+  `canon.json` at all, and its single write site is the merge. There is no
+  amend, override, or correct mode — `--init` is create-only, and
+  `--restamp-derivation` moves only the two `generation_hashes` fields.
+- **A conflicting re-merge is fatal, not a fix.** `_merge_batch` raises on a
+  genuine cross-run collision — two different resolutions claimed for the
+  same `source_form` — naming both the old and the new value, and the whole
+  merge is refused. An IDENTICAL re-submission is a silent no-op. So
+  re-running the glossary pass with a corrected citation does not overwrite
+  the wrong one; it fails the merge.
+- **The glossary pass cannot even re-ask.** `glossary_batch_plan.py` drops
+  every candidate already present as an `entries{}` key before the codex
+  pass ever sees it (the Citation cache section below), and `--retry`
+  overrides ONLY the `review_queue` exclusion — it cannot reinstate an
+  already-resolved entry, and says so in its own diagnostic.
+- **`--verify-merged` reports, it does not repair.** It fresh-reads
+  `canon.json` and every named fragment and returns `{verified, missing[]}`.
+  It is disk-independent and writes nothing at all — it can only tell you
+  that the merged canon disagrees with the fragments, never reconcile them.
+- **`canon_adjudication_audit.py` blocks, it does not repair.** Its own IRON
+  RULE is explicit: it mechanically enumerates every item a human or a
+  schema-validated codex workflow must sign off and cross-checks the
+  recorded verdicts against canon.json's current state — and it never writes
+  a verdict or a risk-acceptance itself.
+- **The skeptic pass is post-merge, opt-in, and advisory-only.** Its
+  `established_offline` risk class exists precisely because
+  `canon_validate.py`'s offline backstop only checks INCOMING batches and
+  never re-scans an already-frozen canon — but that class fires only under
+  `offline`, so a `live` `established` citation reaches the skeptic pass at
+  all only through the globally-capped `sampled` class. And no freeze/merge
+  reader ever opens `skeptic_triage.json`; its verdict schema cannot express
+  a confirmation, let alone a repair.
+
+What remains is a hand edit of `canon.json` outside every shipped tool. That
+is a real option for a human, and it is exactly the expensive one this stage
+exists to avoid — see **Retroactive canon edits invalidate precisely** below
+for what it costs: every segment whose `used_terms_hash` covers that term
+goes stale and is re-translated.
+
+**Why in-batch, rather than "after all batches, before the merge".** There
+is no such window. `glossary-pass-wf.template.js` runs
+`pipeline(BATCHES, batchStep)` and then, in the SAME Workflow call, the
+`--merge-batches` and `--verify-merged` steps — nothing pauses between the
+last fragment becoming ready and `canon.json` being written. Pre-merge
+therefore has to mean pre-READY, inside `batchStep`.
+
 ## Citation cache: `canon.json` itself, no new file
 
 `canon.json`'s `entries{}` map is already frozen, hash-versioned, and
 cross-segment — a name once resolved there with `basis: "established"` plus a
-verified `source` URI stays resolved. Before each glossary pass,
+verified `source` URI stays resolved. "Verified" is load-bearing and now
+literal: that URI cleared the pre-merge citation review above before the
+merge ever ran, which is the only point at which it could still have been
+rejected. Before each glossary pass,
 `scripts/glossary_batch_plan.py` (1.3.5) curates `bootstrap_names.py`'s raw
 candidate list against the CURRENT `canon.json`, excluding every candidate
 already resolved there — both an `entries{}` key AND a
@@ -477,6 +615,16 @@ segment's own `canon_names[]` OR `new_names[]`, limited to terms currently prese
 in `canon.json`'s `entries{}`. A name a segment's own translator only ever
 improvised, never yet locked, still counts as "used" by that segment for
 invalidation purposes the moment it is later canonized.
+
+Such an edit is a HAND edit, outside every shipped script — no plugin tool
+rewrites an existing `entries{}` row (see **Pre-merge citation review**
+above: the merge fatals on a conflicting re-resolution, `--retry` cannot
+reinstate a resolved entry, and `--verify-merged` and
+`canon_adjudication_audit.py` are both read-only about the verdict). What
+this section describes is therefore the COST of correcting a frozen
+decision, not a supported correction path: the invalidation is precise, but
+every segment it reaches is re-translated. That cost is why an accuracy
+decision is reviewed BEFORE it is merged, never after.
 
 ## Skeptic pass (RFC #215 Phase 2, opt-in + advisory)
 

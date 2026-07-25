@@ -1317,32 +1317,68 @@ def test_shared_retry_recovers_mid_loop_and_matches_exact_count(tmp_path):
 
 
 # ===========================================================================
-# GLOSSARY-PASS TEMPLATE (issues #101, #95) -- same extract-substitute-wrap-
-# run-under-node harness mechanism as the mass-translate section above, but
-# for glossary-pass-wf.template.js's own, distinct control flow:
+# GLOSSARY-PASS TEMPLATE (issues #101, #95, plus 1.16.0's pre-merge citation
+# review) -- same extract-substitute-wrap-run-under-node harness mechanism as
+# the mass-translate section above, but for glossary-pass-wf.template.js's
+# own, distinct control flow:
 #
-#   * PREFLIGHT COST CAP (#95): `estimatedCalls = 3*BATCHES.length + 2`
-#     (per batch: precheck + dispatch + wait == 3 worst case, plus the fixed
-#     merge + verify pair == 2). If it exceeds engine.batch_agent_cap the
-#     whole run is refused WITHOUT calling pipeline(), mirroring the mass
-#     template's `{merged:false, reason:"batch-too-large", ...}` shape. The
-#     `3*` (not the round-1 `2*`) is the corrected worst case -- a fresh run
-#     with no fragments on disk pays the precheck AND the dispatch AND the
-#     wait for every batch.
+#   * PREFLIGHT COST CAP (#95, re-derived for 1.16.0). The template's own
+#     preflight comment block documents the per-call ladder this whole
+#     section derives its expected counts from -- never the other way round:
+#
+#         1 precheck                                (always, exactly one)
+#       + (dispatch + wait)   per attempt           (2 each)
+#       + (citation review)   per attempt           (1 each, LIVE ONLY)
+#       + merge + verify                            (2, fixed, per run)
+#
+#     with attempts == MAX_CITATION_RETRIES + 1 == 3 in the worst case, so:
+#
+#         live    -- perBatch = 1 + 3*(MAX_CITATION_RETRIES+1) = 1 + 3*3 = 10
+#         offline -- perBatch = 1 + 2 == 3
+#         estimatedCalls = perBatch * BATCHES.length + 2
+#
+#     If that exceeds engine.batch_agent_cap the whole run is refused WITHOUT
+#     calling pipeline(), mirroring the mass template's
+#     `{merged:false, reason:"batch-too-large", ...}` shape.
+#
+#     The OFFLINE branch is exactly the historical 3*N + 2, byte-identically,
+#     and is regression-pinned here on its own: an existing offline project's
+#     engine.batch_agent_cap was tuned against that number, so making the
+#     estimate mode-blind would start refusing runs whose real cost never
+#     changed. Under live the estimate is a worst-case CEILING, not the
+#     observed cost -- a run whose reviews approve on attempt 0 pays 4 per
+#     batch, not 10 -- so the live tests assert the observed count from the
+#     ladder AND that it stays under the ceiling.
 #   * RESUME-SKIP PRECHECK (#101): batchStep runs one single-shot precheck
 #     agent() call first; if it reports the fragment is already present and
-#     valid (PRESENT), the codex dispatch + wait are SKIPPED and the batch
-#     is returned ready straight away. Any other answer (ABSENT -- a missing
-#     OR corrupt fragment, since both fail the same `--check-batch` command)
-#     falls THROUGH to a normal dispatch + wait. Both halves are asserted by
-#     the mocked agent() CALL LABELS directly, not merely the final result.
+#     valid (PRESENT), the codex dispatch + wait are SKIPPED. Any other
+#     answer (ABSENT -- a missing OR corrupt fragment, since both fail the
+#     same `--check-batch` command) falls THROUGH to a normal dispatch +
+#     wait. Both halves are asserted by the mocked agent() CALL LABELS
+#     directly, not merely the final result.
+#   * PRE-MERGE CITATION REVIEW (1.16.0): under research_mode:live, every
+#     attempt's fragment is audited by an independent reviewer BEFORE it
+#     counts as ready; under offline the stage is a total no-op, because
+#     canon_validate.py makes basis:"established" FATAL there -- so there is
+#     provably no citation in existence to review.
+#
+#     SCOPE SPLIT -- this file owns the review only as a term in the COST
+#     ARITHMETIC: it adds one call per attempt, it is what makes the live
+#     ceiling 10 rather than 3, and it is why a resume-skipped batch saves 2
+#     calls and not 3. The review's BEHAVIOUR -- rejection regenerating to a
+#     fresh attempt-scoped path, the resume-skip path reaching the gate at
+#     all, a stale attempt-bound verdict failing to approve a later attempt,
+#     exhaustion reporting its own reason instead of falling into the merge,
+#     the reviewer's findings reaching the regeneration prompt -- is
+#     tests/glossary_citation_review.test.py's subject, and is asserted there
+#     against rendered prompt text this harness does not record.
 #
 # The glossary template drives a SINGLE-stage `pipeline(BATCHES, batchStep)`
 # (not the mass template's two-stage pipeline), and uses its own agent()
-# call labels (glossary:precheck:N / glossary:dispatch:N / glossary:wait:N,
-# plus the batch-level glossary:merge / glossary:verify), so it needs its
-# own instantiate helper + mock harness below; only `_wrap_for_execution`
-# (owner-agnostic) is reused verbatim.
+# call labels (glossary:precheck:N / glossary:dispatch:N / glossary:wait:N /
+# glossary:citation-review:N, plus the batch-level glossary:merge /
+# glossary:verify), so it needs its own instantiate helper + mock harness
+# below; only `_wrap_for_execution` (owner-agnostic) is reused verbatim.
 # ===========================================================================
 
 GLOSSARY_PASS_TEMPLATE = TEMPLATES_DIR / "glossary-pass-wf.template.js"
@@ -1388,6 +1424,15 @@ def instantiate_glossary_pass(
 # Absent keys default to precheck "ABSENT <idx>" (fall through) and wait
 # "READY <idx>" (fragment becomes ready). The batch-level glossary:merge /
 # glossary:verify calls always succeed (verify returns {verified:true}).
+#
+# The citation review (1.16.0) ALWAYS approves here, and there is deliberately
+# no way to script a rejection in this file. Every count below is therefore a
+# first-attempt cost, which is what the cost estimator's own tests need; the
+# retry ladder appears here only as the CEILING the preflight charges for,
+# never as an executed path. Rejection, regeneration, exhaustion, and the
+# stale-verdict case are glossary_citation_review.test.py's subject -- its
+# harness records rendered prompt text, so it can assert what a regeneration
+# actually carries forward, which this harness structurally cannot.
 # ---------------------------------------------------------------------------
 GLOSSARY_HARNESS_TEMPLATE = r"""
 'use strict';
@@ -1399,6 +1444,10 @@ const BATCHES_ARGS = __BATCHES_JSON__;
 const callsLog = [];
 const logLines = [];
 let pipelineCalled = false;
+// Per-batch citation-review call counter. The review runs exactly once per
+// attempt, so this doubles as the attempt number the verdict sentinel must
+// name -- a verdict is a statement about ONE attempt path, not about a batch.
+const reviewCounts = {};
 
 async function agent(promptText, opts) {
   opts = opts || {};
@@ -1421,6 +1470,18 @@ async function agent(promptText, opts) {
   if (kind === "precheck") return (p.precheck !== undefined) ? p.precheck : ("ABSENT " + idx);
   if (kind === "dispatch") return "FRAGMENT " + idx;
   if (kind === "wait") return (p.wait !== undefined) ? p.wait : ("READY " + idx);
+  if (kind === "citation-review") {
+    // ALWAYS approves this attempt. Scripting a rejection -- and with it the
+    // retry ladder, exhaustion, and the stale-verdict case -- belongs to
+    // glossary_citation_review.test.py, whose harness records rendered prompt
+    // text and can therefore assert what a regeneration actually carries. This
+    // file only needs the review to happen so the call ARITHMETIC is right.
+    // The ordinal is tracked rather than hardcoded to 0 so the sentinel stays
+    // attempt-correct by construction.
+    const attempt = reviewCounts[idx] || 0;
+    reviewCounts[idx] = attempt + 1;
+    return "CITATIONS_OK " + idx + " ATTEMPT " + attempt;
+  }
   throw new Error("glossary mock agent(): unrecognized label " + label);
 }
 
@@ -1475,10 +1536,20 @@ def run_glossary_workflow(
     batch_agent_cap: int,
     batches: list,
     plan: dict,
+    research_mode: str = "live",
     timeout: int = 30,
 ) -> dict:
+    """`research_mode` is threaded straight into the template's own
+    {{RESEARCH_MODE}} token, because it is no longer inert as of 1.16.0: it drives
+    CITATION_REVIEW_ENABLED, and through it BOTH the preflight cost formula and
+    whether the citation-review agent call happens at all. The default stays
+    "live" -- the mode that pays the full ladder -- so a test that says nothing
+    about research_mode is exercising the more expensive branch, never the
+    cheaper one by accident."""
     assert NODE is not None, "node executable not found on PATH -- required to run this test file"
-    js_source = instantiate_glossary_pass(batch_agent_cap=batch_agent_cap)
+    js_source = instantiate_glossary_pass(
+        batch_agent_cap=batch_agent_cap, research_mode=research_mode
+    )
     harness_text = build_glossary_harness(js_source, batches, plan)
     harness_path = tmp_path / "glossary_harness.js"
     harness_path.write_text(harness_text, encoding="utf-8")
@@ -1498,33 +1569,91 @@ def run_glossary_workflow(
 
 
 # ---------------------------------------------------------------------------
-# Preflight cost cap (#95): the corrected 3*BATCHES.length + 2 boundary.
+# Per-call ladder constants. These are DERIVED from the template's own
+# preflight comment block (quoted in this section's banner above), never
+# copied out of an observed run -- a count read back from the implementation's
+# actual behaviour would agree with the implementation by construction and so
+# test nothing. test_glossary_citation_retry_bound_is_the_documented_two below
+# pins the one template knob every number here hangs off, so bumping it in the
+# template fails loudly with a message that says to re-derive, instead of
+# scattering unexplained off-by-N count failures across this section.
+# ---------------------------------------------------------------------------
+GLOSSARY_MAX_CITATION_RETRIES = 2          # template: const MAX_CITATION_RETRIES
+GLOSSARY_MAX_ATTEMPTS = GLOSSARY_MAX_CITATION_RETRIES + 1          # 3
+# per batch, worst case: precheck 1 + attempts * (dispatch + wait + review) 3
+GLOSSARY_LIVE_PER_BATCH_CEILING = 1 + 3 * GLOSSARY_MAX_ATTEMPTS    # 10
+# per batch, offline: precheck 1 + the single dispatch + wait pair 2. The
+# review is a no-op there, which ALSO removes the only thing that can reject an
+# attempt -- so the ladder can never advance past attempt 0.
+GLOSSARY_OFFLINE_PER_BATCH = 1 + 2                                 # 3
+# per RUN, either mode: the serialized merge call + the disk-independent verify
+GLOSSARY_FIXED_MERGE_VERIFY = 2
+# per batch, live, when the review approves on the first attempt (the happy
+# path every plan in this file takes unless it scripts a REJECT):
+#   precheck 1 + attempt0 (dispatch + wait + review) 3
+GLOSSARY_LIVE_PER_BATCH_APPROVED_FIRST = 1 + 3                     # 4
+
+
+def test_glossary_citation_retry_bound_is_the_documented_two():
+    """Every expected call count in this section is derived from
+    MAX_CITATION_RETRIES, so it must not drift silently. Read straight out of
+    the template text rather than inferred from a run."""
+    text = GLOSSARY_PASS_TEMPLATE.read_text(encoding="utf-8")
+    assert f"const MAX_CITATION_RETRIES = {GLOSSARY_MAX_CITATION_RETRIES}" in text, (
+        "the template's MAX_CITATION_RETRIES no longer matches this section's "
+        "GLOSSARY_MAX_CITATION_RETRIES -- RE-DERIVE every count in this "
+        "section from the template's own preflight ladder comment, do not "
+        "just patch the numbers until the suite goes green"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Preflight cost cap (#95, re-derived for 1.16.0's citation-review ladder).
+#
+#   live    -- perBatch = 1 + 3*(MAX_CITATION_RETRIES+1) = 10
+#   offline -- perBatch = 1 + 2 = 3   (unchanged from the historical formula)
+#   estimatedCalls = perBatch * N + 2
 # ---------------------------------------------------------------------------
 
 
 def test_glossary_preflight_boundary_exactly_at_cap_permits_dispatch(tmp_path):
     batches = _glossary_batches(2)
-    estimated = 3 * len(batches) + 2  # 8
+    # Derivation (live): perBatch = precheck 1 + 3 attempts * (dispatch +
+    # wait + review) 3 = 10; 2 batches = 20; + merge/verify 2 = 22.
+    estimated = GLOSSARY_LIVE_PER_BATCH_CEILING * len(batches) + GLOSSARY_FIXED_MERGE_VERIFY
+    assert estimated == 22
 
     out = run_glossary_workflow(
         tmp_path=tmp_path,
         batch_agent_cap=estimated,
         batches=batches,
-        plan={},  # every batch default: precheck ABSENT, wait READY
+        plan={},  # every batch default: precheck ABSENT, wait READY, review OK
     )
 
     assert out["pipelineCalled"] is True, (
         "estimatedCalls == cap must NOT trip the gate (the check is '>', not '>=')"
     )
     assert out["result"]["merged"] is True
-    # A fresh run (no fragment present) pays precheck+dispatch+wait (3) per
-    # batch plus the fixed merge+verify pair (2) -- the estimate EXACTLY.
-    assert len(out["calls"]) == estimated
+    # OBSERVED cost, which is no longer the estimate: as of 1.16.0 the live
+    # estimate is a worst-case CEILING (every review rejects until the ladder
+    # is exhausted), while this plan's reviews all approve on attempt 0.
+    # Derivation: per batch precheck 1 + attempt0 dispatch/wait/review 3 = 4;
+    # 2 batches = 8; + merge/verify 2 = 10.
+    expected_observed = (
+        GLOSSARY_LIVE_PER_BATCH_APPROVED_FIRST * len(batches) + GLOSSARY_FIXED_MERGE_VERIFY
+    )
+    assert expected_observed == 10
+    assert len(out["calls"]) == expected_observed
+    # ...and the ceiling really does bound it, which is the whole point of the
+    # preflight refusing on the ceiling rather than on the happy-path cost.
+    assert len(out["calls"]) <= estimated
 
 
 def test_glossary_preflight_one_below_boundary_blocks_dispatch_entirely(tmp_path):
     batches = _glossary_batches(2)
-    estimated = 3 * len(batches) + 2  # 8
+    # Same live derivation as above: 10*2 + 2 = 22.
+    estimated = GLOSSARY_LIVE_PER_BATCH_CEILING * len(batches) + GLOSSARY_FIXED_MERGE_VERIFY
+    assert estimated == 22
 
     out = run_glossary_workflow(
         tmp_path=tmp_path,
@@ -1545,12 +1674,25 @@ def test_glossary_preflight_one_below_boundary_blocks_dispatch_entirely(tmp_path
 
 
 @pytest.mark.parametrize("n_batches", [1, 2, 5, 13])
-def test_glossary_preflight_formula_is_3_batches_plus_2(tmp_path, n_batches):
-    """Locks the CORRECTED formula 3*N + 2 (round-1's 2*N + 2 would compute a
-    different estimatedCalls and fail here). Cheap: the gate trips before
-    pipeline() ever runs, so no PLAN and zero agent calls are needed."""
+def test_glossary_preflight_live_formula_is_10_batches_plus_2(tmp_path, n_batches):
+    """Locks the LIVE formula (1 + 3*(MAX_CITATION_RETRIES+1))*N + 2 == 10*N + 2.
+
+    Three wrong variants this discriminates against, each a plausible partial
+    implementation, with the per-batch term spelled out so the arithmetic can be
+    checked rather than taken on faith:
+      * the historical pre-1.16.0 estimate, review and ladder both uncharged:
+        1 precheck + 1 dispatch + 1 wait                      = 3  -> 3*N + 2
+      * the retry ladder charged but the review itself not:
+        1 + (MAX_CITATION_RETRIES+1) * (dispatch + wait) = 1 + 3*2 = 7  -> 7*N + 2
+      * the review charged ONCE rather than per attempt:
+        1 + 3*2 + 1                                           = 8  -> 8*N + 2
+    Only the full ladder gives 10. Cheap: the gate trips before pipeline() ever
+    runs, so no PLAN and zero agent calls are needed."""
     batches = _glossary_batches(n_batches)
-    expected = 3 * n_batches + 2
+    # Derivation: perBatch = precheck 1 + 3 attempts * (dispatch + wait +
+    # review) 3 = 10, plus the fixed merge + verify pair 2.
+    expected = GLOSSARY_LIVE_PER_BATCH_CEILING * n_batches + GLOSSARY_FIXED_MERGE_VERIFY
+    assert expected == {1: 12, 2: 22, 5: 52, 13: 132}[n_batches]
 
     out = run_glossary_workflow(
         tmp_path=tmp_path,
@@ -1564,6 +1706,52 @@ def test_glossary_preflight_formula_is_3_batches_plus_2(tmp_path, n_batches):
     assert out["result"]["reason"] == "batch-too-large"
     assert out["result"]["estimatedCalls"] == expected
     assert out["result"]["cap"] == expected - 1
+
+
+@pytest.mark.parametrize("n_batches", [1, 2, 5, 13])
+def test_glossary_preflight_offline_formula_stays_3_batches_plus_2(tmp_path, n_batches):
+    """REGRESSION GUARD for existing offline projects (1.16.0). Their
+    engine.batch_agent_cap was tuned against the historical 3*N + 2, and the
+    citation review is a provable no-op under offline (canon_validate.py makes
+    basis:"established" FATAL there, so there is no citation in existence to
+    review). Charging offline for a retry ladder it can never execute would
+    start refusing runs with reason:"batch-too-large" whose real cost did not
+    change at all -- a preflight that refuses runs it should permit is a worse
+    failure than one that is slightly loose.
+
+    Without this test nothing in the suite would notice that regression: every
+    other preflight test here now runs under live."""
+    batches = _glossary_batches(n_batches)
+    # Derivation (offline): perBatch = precheck 1 + the single dispatch + wait
+    # pair 2 = 3 (no review, and therefore no retry ladder), plus the fixed
+    # merge + verify pair 2. Byte-identical to the pre-1.16.0 formula.
+    expected = GLOSSARY_OFFLINE_PER_BATCH * n_batches + GLOSSARY_FIXED_MERGE_VERIFY
+    assert expected == 3 * n_batches + 2
+    assert expected == {1: 5, 2: 8, 5: 17, 13: 41}[n_batches]
+
+    out = run_glossary_workflow(
+        tmp_path=tmp_path,
+        batch_agent_cap=expected - 1,
+        batches=batches,
+        plan={},
+        research_mode="offline",
+    )
+
+    assert out["pipelineCalled"] is False
+    assert out["calls"] == []
+    assert out["result"]["reason"] == "batch-too-large"
+    assert out["result"]["estimatedCalls"] == expected
+    assert out["result"]["cap"] == expected - 1
+
+
+# The BEHAVIOUR half of the offline guarantee -- that an offline run spends no
+# citation-review call at all -- lives in
+# tests/glossary_citation_review.test.py::test_offline_mode_spends_no_review_call.
+# The two are genuinely different assertions, not one test written twice, and
+# each catches a bug the other misses: an estimate left at 3*N+2 while the stage
+# still runs passes THIS test and fails that one; a mode-blind estimate over a
+# stage that correctly no-ops fails THIS test and passes that one. Both were
+# confirmed by scoped template mutation, in both directions.
 
 
 # ---------------------------------------------------------------------------
@@ -1592,8 +1780,12 @@ def test_glossary_resume_skip_trusts_valid_fragment_and_skips_dispatch(tmp_path)
     assert out["result"]["merged"] is True
     assert out["result"]["batches"][0]["ready"] is True
     assert out["result"]["batches"][0]["batchIndex"] == 0
-    # precheck (1) + merge (1) + verify (1) -- no dispatch, no wait.
-    assert len(out["calls"]) == 3
+    # Derivation (live, 1.16.0): precheck 1 + merge 1 + verify 1 = 3, PLUS the
+    # citation review 1 -- the resume-skip saves the dispatch and the wait, but
+    # it is NOT exempt from the review (see the dedicated reachability test
+    # below for why that is load-bearing rather than incidental). = 4.
+    assert len(out["calls"]) == 1 + 1 + GLOSSARY_FIXED_MERGE_VERIFY
+    assert len(out["calls"]) == 4
 
 
 def test_glossary_resume_precheck_absent_falls_through_to_real_dispatch(tmp_path):
@@ -1616,8 +1808,12 @@ def test_glossary_resume_precheck_absent_falls_through_to_real_dispatch(tmp_path
     )
     assert "glossary:wait:0" in labels
     assert out["result"]["merged"] is True
-    # precheck (1) + dispatch (1) + wait (1) + merge (1) + verify (1).
-    assert len(out["calls"]) == 5
+    # Derivation (live, 1.16.0): precheck 1 + attempt0 dispatch/wait/review 3 = 4,
+    # + merge/verify 2 = 6.
+    assert len(out["calls"]) == (
+        GLOSSARY_LIVE_PER_BATCH_APPROVED_FIRST + GLOSSARY_FIXED_MERGE_VERIFY
+    )
+    assert len(out["calls"]) == 6
 
 
 def test_glossary_resume_skip_is_decided_per_batch(tmp_path):
@@ -1640,5 +1836,8 @@ def test_glossary_resume_skip_is_decided_per_batch(tmp_path):
     assert "glossary:dispatch:1" in labels
     assert "glossary:wait:1" in labels
     assert out["result"]["merged"] is True
-    # batch0 precheck (1) + batch1 precheck+dispatch+wait (3) + merge+verify (2).
-    assert len(out["calls"]) == 6
+    # Derivation (live, 1.16.0): batch0 precheck 1 + review 1 = 2 (skipped its
+    # dispatch + wait, but not its review); batch1 precheck 1 + attempt0
+    # dispatch/wait/review 3 = 4; + merge/verify 2 == 8.
+    assert len(out["calls"]) == 2 + GLOSSARY_LIVE_PER_BATCH_APPROVED_FIRST + GLOSSARY_FIXED_MERGE_VERIFY
+    assert len(out["calls"]) == 8

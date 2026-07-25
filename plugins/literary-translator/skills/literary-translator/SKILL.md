@@ -419,9 +419,18 @@ here, follow the linked doc:
   dimension in `references/engine-loop.md`. **1.4.0:** this dimension judges
   the DRAFT's word-sense fidelity to the source, never the correctness of an
   already-frozen canon `basis` decision (including `sense_translated`) — a
-  suspected-wrong canon entry is reopened via the glossary/adjudication route,
-  never flagged in the per-segment review loop (`references/canon-and-glossary.md`,
-  `references/orchestration-and-batching.md`'s reviewer carve-out).
+  suspected-wrong canon entry is RAISED through the glossary/adjudication
+  route, never flagged in the per-segment review loop
+  (`references/canon-and-glossary.md`,
+  `references/orchestration-and-batching.md`'s reviewer carve-out). Raised,
+  not reopened: neither route can rewrite a merged entry.
+  `glossary_batch_plan.py` excludes every `entries{}` key from the next pass
+  and `--retry` overrides only the `review_queue` exclusion;
+  `canon_adjudication_audit.py` never writes a verdict, it blocks. A frozen
+  row is repaired only by a hand edit of `canon.json` that re-translates
+  every segment using that term — which is why an accuracy decision, a
+  citation included, is reviewed BEFORE the merge
+  (`references/canon-and-glossary.md`, "Pre-merge citation review").
 - **R7 — Workflow-script schema requirement**, mixed mechanism by path:
   - **W5 translate/review (1.4.7):** codex stays the sole translate/review
     engine (R1) but is LAUNCHED by the shipped, detached `codex_job.py`
@@ -706,11 +715,13 @@ the shared fire-and-forget dispatch → bounded poll → disk-truth pattern:
 `agent(batchDispatchPrompt(batch), {agentType:'codex:codex-rescue',
 effort: EFFORT})` (`EFFORT` = this project's own `engine.effort`, #197 — a
 configurable enum, default `high`; schema-less, writes the run-scoped fragment
-`glossary/runs/{{RUN_ID}}/out_{index}.json`, self-checks against its own
-manifest) → `batchWaitPrompt` (bounded poll) → once every fragment is
-`READY`, one serialized `canon_validate.py --merge-batches` call plus one
-disk-verify call (`schema: CANON_VERIFY_SCHEMA`) close the pass and freeze
-`canon.json` — see `references/canon-and-glossary.md` for the full
+`glossary/runs/{{RUN_ID}}/out_{index}_attempt_{n}.json` — attempt-scoped, so
+a rejected fragment is never the one a later poll finds — self-checks against
+its own manifest) → `batchWaitPrompt` (bounded poll) → **the pre-merge
+citation review** (see immediately below) → once every
+fragment is `READY`, one serialized `canon_validate.py --merge-batches` call
+plus one disk-verify call (`schema: CANON_VERIFY_SCHEMA`) close the pass and
+freeze `canon.json` — see `references/canon-and-glossary.md` for the full
 mechanics and `references/workflow-schema-validation.md` for why the
 pre-1.2.0 single schema-validated `agent()` call per batch was replaced
 (`#87`/`#88`/`#90`/`#97`). Write `style_contract` sections A–F by hand/
@@ -720,6 +731,28 @@ output. The shipped template already wraps sections A–F in
 delete, duplicate, or reorder them): they define the `style_contract_hash`
 byte-scope, and `scaffold_validate.py` now enforces exactly one of each, in
 order.
+
+**The pre-merge citation review** gates whether a batch counts as ready at
+all. Under `research_mode: live`, every `basis:"established"` item's `source`
+is fetched and reviewed inside `batchStep`, before that batch can reach the
+merge. The reviewer is a plain Claude call at `effort:"high"`, deliberately
+NOT codex — codex wrote the citation, so a different model is a separate
+opinion rather than the same reasoning re-run — and it can only approve or
+reject, never author or repair a canon decision. It checks that the URL
+resolves, documents the right entity, and actually attests the claimed
+`canonical_target_form`; an unreachable network rejects rather than approves.
+Nothing before this stage checks a citation's TRUTH (the schema asserts only
+a non-empty `format:"uri"` string) and nothing after the merge can repair one
+— a merged row is immutable, so this is the last point at which a bad
+citation can still be stopped. A single failing item rejects the whole
+fragment and regenerates that batch to a fresh attempt-scoped path, never
+over the previous attempt, bounded by `MAX_CITATION_RETRIES`; exhausting that
+budget ends the run with `merged: false` and
+`reason: "citation-review-exhausted"` — a distinct reason from
+`fragment-check-failed`, and nothing is merged. Under `offline` the stage is
+a no-op, since `established` is forbidden there outright. Full rationale,
+including why a repair after the merge is not available at all:
+`references/canon-and-glossary.md`, "Pre-merge citation review".
 
 **Canon human-adjudication audit, categories 1-4 (opt-in rollout gate)** —
 `scripts/canon_adjudication_audit.py` enumerates every canon

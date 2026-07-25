@@ -591,9 +591,11 @@ effect on translation output — it is deliberately excluded from
 the cap alone never re-invalidates an already-converged segment's cache key.
 See `references/ledger-and-resumability.md` for the full cache-key
 membership list. **1.3.5:** W3's glossary-pass template reads this SAME
-`engine.batch_agent_cap` field, with its own smaller worst-case formula
-(`estimatedCalls = 3 * BATCHES.length + 2`) and the same refusal shape — see
-the glossary-pass template section below.
+`engine.batch_agent_cap` field, with its own smaller worst-case formula and
+the same refusal shape. **1.16.0:** that formula is now MODE-DEPENDENT — an
+`offline` run keeps the historical `3 * BATCHES.length + 2` unchanged, while
+a `live` run additionally pays for the citation-review retry ladder. See the
+glossary-pass template section below for both branches.
 
 ## The glossary-pass template — a second, smaller `pipeline()` call
 
@@ -629,10 +631,13 @@ session invokes a separate, standalone script —
 `references/canon-and-glossary.md` and `SKILL.md`'s W3 section for the CLI
 contract and remediation. This is deliberately a **plain script, not an
 `agent()` call**, so it is never resume-cached against the `input_digest`
-below, and it does **not** perturb the `estimatedCalls = 3 * BATCHES.length +
-2` cost formula further down this section or add a `{{BATCH_AGENT_CAP}}`-style
-template token — a future reader should not "fix" that estimator to `+3` for
-this step; the gate makes no `agent()` call at all.
+below, and it does **not** perturb the `estimatedCalls` cost formula further
+down this section or add a `{{BATCH_AGENT_CAP}}`-style template token — a
+future reader should not "fix" that estimator to `+3` for this step; the gate
+makes no `agent()` call at all. (That formula is stated once, in the
+**Preflight cost cap** bullet below, and deliberately not restated here — it
+is mode-dependent since 1.16.0 and should never need applying in two
+places.)
 
 **Deterministic PRE-WORKFLOW setup**, run by the orchestrating session
 *before* `pipeline()` is ever called — not itself an unbounded Workflow
@@ -740,14 +745,46 @@ inside it:
   — see `references/canon-and-glossary.md`'s Citation-cache section.
 - **Preflight cost cap** (mirroring W5's estimator): right after
   `const BATCHES = ...`, before dispatching anything, the template computes
-  `estimatedCalls = 3 * BATCHES.length + 2` (per batch: precheck + dispatch +
-  wait; plus the fixed final merge + verify pair) and refuses the whole run
-  with `{merged: false, reason: "batch-too-large", estimatedCalls, cap}` if it
+  `estimatedCalls = perBatchCalls * BATCHES.length + 2` (the `+ 2` is the
+  fixed final merge + verify pair) and refuses the whole run with
+  `{merged: false, reason: "batch-too-large", estimatedCalls, cap}` if it
   exceeds `engine.batch_agent_cap` — the SAME field W5 reads, spliced in as
-  the bare-integer `{{BATCH_AGENT_CAP}}` token. The count is over BATCHES,
-  never candidates-per-batch, so a co-located elision pair nudging one batch a
-  candidate or two over its nominal `--batch-size` never trips it. A refused
-  run re-plans smaller batches (`glossary_batch_plan.py --batch-size`).
+  the bare-integer `{{BATCH_AGENT_CAP}}` token. **1.16.0: `perBatchCalls` is
+  MODE-DEPENDENT**, because the citation-review retry ladder exists only
+  under `live`:
+
+  ```
+  live    -- perBatchCalls = 1 + 3 * (MAX_CITATION_RETRIES + 1)
+             1 precheck, then dispatch + wait + citation review per attempt,
+             with attempts == MAX_CITATION_RETRIES + 1 in the worst case
+             (every review rejects until the ladder is exhausted)
+  offline -- perBatchCalls = 1 + 2 == 3
+             precheck + dispatch + wait, unchanged from 1.15.2
+  ```
+
+  **The offline branch is the historical `3 * BATCHES.length + 2` exactly,
+  and that is deliberate.** Under `offline`, `canon_validate.py` makes
+  `basis:"established"` fatal, so there is provably no citation to review —
+  the stage is not skipped for speed, it has nothing to act on.
+  `CITATION_REVIEW_ENABLED` is therefore false, which also removes the only
+  thing that can REJECT an attempt, so the ladder can never advance past
+  attempt 0 and there is exactly one dispatch + wait pair. Making the
+  estimate mode-blind would have charged every offline project for a ladder
+  it cannot execute, and any existing project whose `engine.batch_agent_cap`
+  was tuned to the old formula would start being refused with
+  `reason:"batch-too-large"` for a run whose real cost did not change at all
+  — a preflight that refuses runs it should permit is a worse failure than
+  one that is slightly loose.
+
+  This is a worst-case CEILING, not a typical-run estimate: under `live`, a
+  batch approved on attempt 0 costs 4 calls, not the full ladder. A resumed
+  batch whose fragment already passes `--check-batch` skips its attempt-0
+  dispatch + wait and so comes in strictly under the ceiling — but it does
+  NOT skip the citation review, which is why that saving is 2 calls and not
+  3. The count is over BATCHES, never candidates-per-batch, so a co-located
+  elision pair nudging one batch a candidate or two over its nominal
+  `--batch-size` never trips it. A refused run re-plans smaller batches
+  (`glossary_batch_plan.py --batch-size`).
 - **Resume-skip precheck** — the `batchPrecheckPrompt` bullet above; a valid
   pre-existing fragment for this `{{RUN_ID}}` is trusted and its dispatch +
   wait skipped, so a resumed run never re-pays the codex dispatch for a batch

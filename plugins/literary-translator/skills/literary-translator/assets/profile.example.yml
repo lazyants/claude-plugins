@@ -167,7 +167,11 @@ engine:
     # Calibration: mass-translate's worst case is 1 + N*(10 + 7*max_fix_rounds) = 1 + N*38 at the shipped
     # max_fix_rounds:4, so 3500 admits a normal ~78-segment batch (1+78*38 = 2965) with headroom. The old
     # default of 1000 refused any batch over 26 segments at max_fix_rounds:4 -- worse than a full novel needs.
-    # Also read by the W3 glossary-pass preflight (estimate 3*BATCHES.length + 2), reusing this one knob.
+    # Also read by the W3 glossary-pass preflight, reusing this one knob -- but ITS estimate is mode-dependent.
+    # offline (glossary.research_mode) -- 3*BATCHES.length + 2, unchanged: basis:"established" is fatal offline,
+    # so the pre-merge citation review has nothing to act on and never runs. live -- 10*BATCHES.length + 2, the
+    # citation-review retry ladder: 1 + 3*(MAX_CITATION_RETRIES+1) = 10 calls per batch at the template's own
+    # shipped MAX_CITATION_RETRIES = 2. Size the cap for the LIVE ladder, or a live run refuses "batch-too-large".
 
 footnotes:
   apparatus_policy: translate_all
