@@ -529,6 +529,74 @@ def test_check_batch_command_is_composed_once_and_shared_by_all_three_sites():
 
 
 # ---------------------------------------------------------------------------
+# 1.16.0 containment guard -- EVERY sentinelVerdict call site is preceded by a
+# rejectedAnywhere() check on the SAME reply and the SAME fail sentinel.
+#
+# sentinelVerdict() splits on LF only, so a fail sentinel glued to prose by any
+# other character survives whole-line equality and the rejection trigger never
+# fires; measured on the pre-guard template, 15 of 16 gluing characters made all
+# three sites falsely approve (see tests/glossary_citation_review.test.py's
+# containment-guard section, which drives that end to end). The guard is applied
+# at the CALL SITES because sentinelVerdict() itself is mirrored byte-for-byte
+# across the three workflow templates and pinned by
+# tests/sentinel_verdict_parity.test.py.
+#
+# All three sites live inside one function (batchStep), so they cannot be proved
+# by three separate function bodies the way the checkBatchCmd sites were. The
+# invariant is expressed structurally instead: PAIR each sentinelVerdict call
+# with a rejectedAnywhere call on the same two expressions. That catches a site
+# left unguarded, a guard watching the wrong reply variable, and a guard
+# checking a different sentinel than the one its sentinelVerdict call uses --
+# none of which a bare "rejectedAnywhere appears 3 times" count would notice.
+# ---------------------------------------------------------------------------
+
+GUARD_HELPER = "rejectedAnywhere"
+
+_SENTINEL_VERDICT_CALL_RE = re.compile(
+    r"sentinelVerdict\(\s*([^(),]+?)\s*,\s*([^(),]+?)\s*,\s*([^(),]+?)\s*\)"
+)
+_GUARD_CALL_RE = re.compile(
+    re.escape(GUARD_HELPER) + r"\(\s*([^(),]+?)\s*,\s*([^(),]+?)\s*\)"
+)
+
+
+def _normalized_code(body):
+    """`body`'s CODE with every whitespace run collapsed to one space, so a call
+    that wraps across lines is matched the same as one that does not."""
+    return re.sub(r"\s+", " ", code_lines(body))
+
+
+def test_every_glossary_sentinel_verdict_call_site_is_containment_guarded():
+    """The 1.16.0 false-approval fix, locked at all three sites at once.
+
+    Runs over code_lines(), never the raw slice: batchStep's own comments
+    discuss both helpers by name at length, and a `GUARD_HELPER in body` check
+    against the raw text would be satisfied by that prose alone -- the exact
+    tautology the checkBatchCmd lock above was found to have."""
+    body = extract_function_body(GLOSSARY_SOURCE, "batchStep")
+    code = _normalized_code(body)
+
+    verdict_calls = _SENTINEL_VERDICT_CALL_RE.findall(code)
+    assert len(verdict_calls) == 3, (
+        f"expected batchStep to hold exactly the three sentinel sites (precheck, "
+        f"wait, citation review); found {len(verdict_calls)}: {verdict_calls}. If "
+        f"a site was added or removed, guard it and update this count -- do not "
+        f"relax the assertion"
+    )
+
+    guarded = {(reply, fail) for reply, fail in _GUARD_CALL_RE.findall(code)}
+    for reply, ok_sentinel, fail_sentinel in verdict_calls:
+        assert (reply, fail_sentinel) in guarded, (
+            f"the sentinelVerdict call on {reply!r} (ok={ok_sentinel!r}, "
+            f"fail={fail_sentinel!r}) is NOT preceded by a "
+            f"{GUARD_HELPER}({reply}, {fail_sentinel}) containment check. Without "
+            f"it, a fail sentinel glued to prose by any character other than a "
+            f"newline survives whole-line equality and this site falsely "
+            f"approves. Guards actually present: {sorted(guarded)}"
+        )
+
+
+# ---------------------------------------------------------------------------
 # EXEMPTION positive control: callFix/fixPrompt (unchanged by #97 AND #198).
 # ---------------------------------------------------------------------------
 

@@ -558,6 +558,289 @@ def test_a_whitespace_char_that_is_not_a_line_terminator_does_not_split(tmp_path
 
 
 # ---------------------------------------------------------------------------
+# CONTAINMENT GUARD -- a fail sentinel ANYWHERE in a reply rejects.
+#
+# THE DEFECT THIS CLOSES, measured on the pre-guard template through this very
+# harness (all three sentinel sites, one run per glue character):
+#
+#     citation-review : 15/16 gluing characters falsely APPROVE
+#     precheck        : 15/16 falsely resume-skip
+#     wait            : 15/16 falsely report READY
+#
+# LF is the only one of the sixteen that behaves. The shape is a dual-sentinel
+# reply -- prose, then the FAIL sentinel welded onto it, then the OK sentinel on
+# its own final line:
+#
+#     I checked the sources and one does not resolve.<GLUE>CITATIONS_REJECTED 0 ATTEMPT 0
+#     CITATIONS_OK 0 ATTEMPT 0
+#
+# sentinelVerdict() splits on LF alone, so any other GLUE leaves the fail
+# sentinel inside the prose line. `if (line === failSentinel) return false` is
+# the REJECTION trigger, so when full-line equality fails there the effect is to
+# NOT reject -- and the trailing OK line then approves.
+#
+# THIS IS NOT A SEPARATOR PROBLEM, and the numbers are what say so: a PLAIN
+# SPACE, a TAB, a ZWSP and the literal letter "x" all do it. Widening the split
+# to a bigger separator class closes 4 of the 15 and is whack-a-mole. The fix is
+# containment at the call site: if the raw reply contains the fail sentinel at
+# all, short-circuit to the fail verdict before delegating. sentinelVerdict()
+# itself is NOT modified -- its byte-for-byte parity across the three workflow
+# templates is pinned by tests/sentinel_verdict_parity.test.py.
+#
+# The glue list deliberately mixes classes so no future reader can re-file this
+# as "exotic Unicode": ordinary whitespace, C0 controls, Unicode separators, a
+# zero-width character, and a plain letter. Built with chr() throughout.
+# ---------------------------------------------------------------------------
+
+GLUE_CHARS = [
+    ("space", chr(0x20)),
+    ("tab", chr(0x09)),
+    ("lf", chr(0x0A)),          # the ONE that already behaved; must keep behaving
+    ("cr", chr(0x0D)),
+    ("vt", chr(0x0B)),
+    ("ff", chr(0x0C)),
+    ("fs_u001c", chr(0x1C)),
+    ("gs_u001d", chr(0x1D)),
+    ("rs_u001e", chr(0x1E)),
+    ("us_u001f", chr(0x1F)),
+    ("nbsp_u00a0", chr(0xA0)),
+    ("nel_u0085", chr(0x85)),
+    ("lsep_u2028", chr(0x2028)),
+    ("psep_u2029", chr(0x2029)),
+    ("zwsp_u200b", chr(0x200B)),
+    ("letter_x", "x"),
+]
+
+GLUE_IDS = [name for name, _ in GLUE_CHARS]
+GLUE_VALUES = [glue for _, glue in GLUE_CHARS]
+
+_GLUE_PROSE = "I checked the sources and one does not resolve."
+
+
+def _dual_sentinel(glue: str, fail: str, ok: str) -> str:
+    """prose + GLUE + FAIL, then OK on its own final line -- the reply shape that
+    falsely approved for 15 of the 16 glue characters before the guard."""
+    return _GLUE_PROSE + glue + fail + chr(0x0A) + ok
+
+
+@pytest.mark.parametrize("glue", GLUE_VALUES, ids=GLUE_IDS)
+def test_glued_rejection_still_rejects_at_the_citation_review(tmp_path, glue):
+    """The highest-stakes of the three sites: a false approval here freezes a
+    fabricated citation into canon permanently."""
+    reply = _dual_sentinel(glue, "CITATIONS_REJECTED 0 ATTEMPT 0", "CITATIONS_OK 0 ATTEMPT 0")
+    plan = {"0": {"precheck": "ABSENT 0", "reviews": [reply, "CITATIONS_OK 0 ATTEMPT 1"]}}
+    res = run(tmp_path=tmp_path, batches=[make_batch(0, ["Ninon"])], plan=plan)
+    assert res["ok"], res["stderr"]
+    out = res["out"]
+
+    assert count_label(out, "glossary:dispatch:0") == 2, (
+        "a reply carrying CITATIONS_REJECTED anywhere in it must REJECT and "
+        "regenerate, however the sentinel is glued to the prose -- approving "
+        "attempt 0 here merges a fragment the reviewer rejected; calls were "
+        f"{labels_of(out)}"
+    )
+    assert out["result"]["batches"][0]["attempt"] == 1, (
+        f"the merged fragment must be the REGENERATED one; got {out['result']['batches'][0]}"
+    )
+
+
+@pytest.mark.parametrize("glue", GLUE_VALUES, ids=GLUE_IDS)
+def test_glued_absent_still_falls_through_at_the_precheck(tmp_path, glue):
+    """A false resume-skip here trusts a fragment whose precheck actually said
+    ABSENT -- i.e. one that never passed --check-batch at all."""
+    reply = _dual_sentinel(glue, "ABSENT 0", "PRESENT 0")
+    res = run(tmp_path=tmp_path, batches=[make_batch(0, ["Ninon"])], plan={"0": {"precheck": reply}})
+    assert res["ok"], res["stderr"]
+    out = res["out"]
+
+    assert "glossary:dispatch:0" in labels_of(out), (
+        "a precheck reply carrying ABSENT anywhere in it must fall through to a "
+        "real dispatch, however the sentinel is glued to the prose -- "
+        "resume-skipping here trusts a fragment the precheck did not vouch for; "
+        f"calls were {labels_of(out)}"
+    )
+
+
+@pytest.mark.parametrize("glue", GLUE_VALUES, ids=GLUE_IDS)
+def test_glued_timeout_still_times_out_at_the_wait(tmp_path, glue):
+    """A false READY here sends a fragment that may not exist on to the citation
+    review and then the merge."""
+    reply = _dual_sentinel(glue, "TIMEOUT 0", "READY 0")
+    plan = {"0": {"precheck": "ABSENT 0", "waits": [reply]}}
+    res = run(tmp_path=tmp_path, batches=[make_batch(0, ["Ninon"])], plan=plan)
+    assert res["ok"], res["stderr"]
+    out = res["out"]
+
+    assert count_label(out, "glossary:citation-review:0") == 0, (
+        "a wait reply carrying TIMEOUT anywhere in it must time out, however the "
+        "sentinel is glued to the prose -- treating it as READY hands an "
+        f"unproven fragment to the review and the merge; calls were {labels_of(out)}"
+    )
+    assert out["result"]["merged"] is False, (
+        f"a timed-out batch must not reach the merge; got {out['result']}"
+    )
+    assert out["result"].get("reason") == "fragment-check-failed", (
+        f"expected reason:'fragment-check-failed'; got {out['result'].get('reason')!r}"
+    )
+
+
+def test_guard_leaves_every_ordinary_verdict_alone(tmp_path):
+    """The control item 2 cannot provide: a guard that rejected EVERYTHING would
+    satisfy all three tests above. Every ordinary path must still work, at all
+    three sites, in one run each.
+
+    The decorated-approval case is the sharp one -- #308's prose-preamble
+    tolerance is exactly what a clumsy containment check breaks."""
+    # Clean live run: ABSENT falls through, READY proceeds, OK approves, merge.
+    clean = run(tmp_path=tmp_path, batches=[make_batch(0, ["Ninon"])])
+    assert clean["ok"], clean["stderr"]
+    out = clean["out"]
+    assert count_label(out, "glossary:dispatch:0") == 1, (
+        f"a clean run must dispatch exactly once; calls were {labels_of(out)}"
+    )
+    assert count_label(out, "glossary:citation-review:0") == 1, (
+        "a clean READY must still reach the citation review -- a guard that "
+        "treats every wait reply as a timeout kills the review stage entirely; "
+        f"calls were {labels_of(out)}"
+    )
+    assert out["result"]["merged"] is True, f"a clean run must merge; got {out['result']}"
+    assert out["result"]["batches"][0]["citationReview"] == "approved", (
+        "a clean CITATIONS_OK must still record an approval; got "
+        f"{out['result']['batches'][0]}"
+    )
+
+    # Clean PRESENT still resume-skips (the precheck's own ordinary path).
+    resumed = run(
+        tmp_path=tmp_path, batches=[make_batch(0, ["Ninon"])],
+        plan={"0": {"precheck": "PRESENT 0"}},
+    )
+    assert resumed["ok"], resumed["stderr"]
+    assert "glossary:dispatch:0" not in labels_of(resumed["out"]), (
+        "a clean PRESENT must still resume-skip -- the guard must not turn every "
+        f"precheck into a dispatch; calls were {labels_of(resumed['out'])}"
+    )
+
+    # A prose-decorated approval (#308) still approves on attempt 0.
+    decorated = run(
+        tmp_path=tmp_path, batches=[make_batch(0, ["Ninon"])],
+        plan={"0": {
+            "precheck": "ABSENT 0",
+            "reviews": ["I fetched both cited pages and each attests the claimed "
+                        "form.\n\nCITATIONS_OK 0 ATTEMPT 0"],
+        }},
+    )
+    assert decorated["ok"], decorated["stderr"]
+    assert count_label(decorated["out"], "glossary:dispatch:0") == 1, (
+        "a decorated approval must still approve on attempt 0 (#308); calls were "
+        f"{labels_of(decorated['out'])}"
+    )
+    assert decorated["out"]["result"]["batches"][0]["attempt"] == 0, (
+        "the decorated approval must be accepted on attempt 0, not merely "
+        f"reached; got {decorated['out']['result']['batches'][0]}"
+    )
+
+
+def test_an_approval_that_merely_mentions_the_fail_sentinel_now_rejects(tmp_path):
+    """THE DOCUMENTED COST OF THE GUARD, pinned as intended behaviour so nobody
+    later "fixes" it.
+
+    Containment cannot distinguish a reviewer who REPORTS a rejection from one
+    who merely NARRATES the word while approving. The reply below is entirely
+    benign -- it approves on its final line -- and it now costs one regeneration.
+
+    That is the fail-safe direction and it is bounded. A wrong reject costs one
+    codex dispatch out of a ladder of three; a wrong accept freezes a fabricated
+    citation into a canon row that is immutable in practice (--verify-merged is
+    disk-independent, re-merging a different resolution is a fatal collision,
+    and canon_adjudication_audit.py only blocks, never repairs). The prompt
+    already tells the reviewer to emit the sentinel only as its own final line
+    and never to decorate it, so a reply like this is a reviewer ignoring its
+    instructions -- not a shape the pipeline should be tuned to accommodate.
+
+    If this ever needs relaxing, the fix is a stricter reply contract, NOT
+    loosening the guard back into a split -- see the 15/16 measurement above."""
+    narrating_approval = (
+        "My first read suggested a CITATIONS_REJECTED 0 ATTEMPT 0 verdict, but on "
+        "re-fetching both pages they resolve and attest the claimed form.\n"
+        "CITATIONS_OK 0 ATTEMPT 0"
+    )
+    plan = {"0": {
+        "precheck": "ABSENT 0",
+        "reviews": [narrating_approval, "CITATIONS_OK 0 ATTEMPT 1"],
+    }}
+    res = run(tmp_path=tmp_path, batches=[make_batch(0, ["Ninon"])], plan=plan)
+    assert res["ok"], res["stderr"]
+    out = res["out"]
+
+    assert count_label(out, "glossary:dispatch:0") == 2, (
+        "an approval that merely mentions the fail sentinel is rejected by the "
+        "containment guard -- this is the accepted, fail-safe cost, and this "
+        "assertion exists so the behaviour is a decision on record rather than a "
+        f"surprise; calls were {labels_of(out)}"
+    )
+    # The pass still converges rather than aborting -- the cost is one dispatch.
+    assert out["result"]["merged"] is True, (
+        "the cost of this rejection must be ONE regeneration, not a dead pass; "
+        f"got {out['result']}"
+    )
+    assert out["result"]["batches"][0]["attempt"] == 1, (
+        f"the regenerated attempt 1 must be what merges; got {out['result']['batches'][0]}"
+    )
+
+
+def test_a_fail_sentinel_index_prefix_over_matches_and_that_is_accepted(tmp_path):
+    """The guard's SECOND documented cost, pinned for the same reason as the
+    first: plain substring containment over-matches an index prefix.
+
+    Batch 1's fail sentinel is "ABSENT 1", and "ABSENT 10" contains it. So a
+    precheck reply naming batch 10 makes batch 1 fall through to a dispatch it
+    did not need. Bounded and fail-safe -- the cost is one redundant codex
+    dispatch, against an unbounded false GREEN (trusting a fragment that never
+    passed --check-batch) -- but it is real, and it grows with batch count
+    rather than being a curiosity: every index that is a prefix of another has
+    it, so a run with 10+ batches has several such pairs.
+
+    Pinned as INTENDED so a future reader meets a decision rather than a
+    surprise. If it ever needs closing, the fix is to make the sentinel
+    self-delimiting (a trailing marker, or matching on a whole-line-with-
+    boundaries basis) -- NOT to weaken containment back toward equality, which
+    is what reopens the 15/16 false approvals.
+
+    The fixture has to be built with care to MEAN anything. A reply of bare
+    "ABSENT 10" would dispatch with or without the guard -- sentinelVerdict
+    rejects it too, since its last line is not the PRESENT sentinel -- so it
+    would pin nothing. The reply below therefore ends with a valid PRESENT
+    sentinel on its own final line: sentinelVerdict alone APPROVES it and
+    resume-skips, and only the containment guard's prefix over-match turns it
+    into a dispatch. That makes this test discriminating in the one direction
+    that matters."""
+    plan = {
+        "0": {"precheck": "ABSENT 0"},
+        # A legitimate PRESENT verdict for batch 1 that happens to mention batch
+        # 10. "ABSENT 1" is a prefix of "ABSENT 10", so containment sees batch
+        # 1's own fail sentinel inside a sentence about a different batch.
+        "1": {"precheck": "Batch 10's fragment is ABSENT 10, but this one is complete.\nPRESENT 1"},
+    }
+    res = run(
+        tmp_path=tmp_path,
+        batches=[make_batch(0, ["Ninon"]), make_batch(1, ["Scudery"])],
+        plan=plan,
+    )
+    assert res["ok"], res["stderr"]
+    out = res["out"]
+
+    assert "glossary:dispatch:1" in labels_of(out), (
+        "batch 1's precheck reply ends with a valid 'PRESENT 1' final line, so "
+        "sentinelVerdict alone would resume-skip it; the containment guard sees "
+        "its own fail sentinel 'ABSENT 1' inside the words 'ABSENT 10' and "
+        "dispatches instead. That over-match is the accepted fail-safe "
+        f"direction -- if this fails, the guard changed shape. Calls: {labels_of(out)}"
+    )
+    # The over-match costs a dispatch, never correctness: the run still merges.
+    assert out["result"]["merged"] is True, f"got {out['result']}"
+
+
+# ---------------------------------------------------------------------------
 # Trap: one fixed out_{index}.json lets a stale attempt satisfy a later one.
 # ---------------------------------------------------------------------------
 
