@@ -15,15 +15,22 @@ THE RULE IS STRUCTURAL, NOT A CHARACTER SET. Measured on the pre-guard template
 through this file's own harness, one full workflow run per case:
 
                               prose + GLUE + FAIL      GLUE + FAIL (no prose)
-    translate wait                11/12 FALSE-PASS          6/12 FALSE-PASS
-    review wait                   11/12 FALSE-PASS          6/12 FALSE-PASS
+    translate wait                14/15 FALSE-PASS          6/15 FALSE-PASS
+    review wait                   14/15 FALSE-PASS          6/15 FALSE-PASS
 
-The two columns differ because ``trim()`` rescues the second shape for whatever
-it strips -- space, tab, CR, NBSP, U+2028, U+2029 -- and nothing rescues the
-first, where prose is on the line regardless. So "any character glues it" is
-true only of the prose shape. U+0085 NEL is NOT stripped by JS ``trim()`` even
-though it reads as a line break, and ZWSP is not whitespace at all; both defeat
-the sentinel in either shape.
+THE COUNT IS A PROPERTY OF THE SHAPE, NOT OF THE CHARACTER SET, which is why
+both shapes are measured over the SAME 15 characters. ``trim()`` rescues the
+second shape for whatever it strips -- space, tab, CR, VT, FF, NBSP, U+2028,
+U+2029 -- and nothing rescues the first, where prose sits on the line
+regardless. So "any character glues it" holds only for the prose shape. Quoting
+either number without its shape is how two correct measurements come to look
+like a contradiction.
+
+Which characters ``trim()`` strips was MEASURED, not eyeballed, and it does not
+follow intuition: U+2028 and U+2029 ARE stripped, while U+0085 NEL -- the
+character one would most naturally reach for as a line boundary -- is NOT in the
+JS WhiteSpace set, and neither is ZWSP. Those three defeat the sentinel in
+BOTH shapes.
 
 WHY BOTH SHAPES ARE TESTED. The second shape's trim-stripped rows are the
 NEGATIVE CONTROL for this whole file: they must block EVEN WITHOUT the guard.
@@ -111,8 +118,11 @@ TRIM_STRIPPED = [
     ("space", chr(0x20)),
     ("tab", chr(0x09)),
     ("cr", chr(0x0D)),
+    ("vt", chr(0x0B)),
+    ("ff", chr(0x0C)),
     ("nbsp_u00a0", chr(0xA0)),
     ("lsep_u2028", chr(0x2028)),
+    ("psep_u2029", chr(0x2029)),
 ]
 
 TRIM_PRESERVED = [
@@ -395,6 +405,51 @@ def test_trim_strippable_prefix_blocks_with_or_without_the_guard(
     )
     assert failure_reason(result) == reason, (
         f"expected reason {reason!r}; got {failure_reason(result)!r}"
+    )
+
+
+@pytest.mark.parametrize("site,label,reason", SITES, ids=[s[0] for s in SITES])
+@pytest.mark.parametrize(
+    "glue_name", [n for n, _ in TRIM_STRIPPED], ids=[n for n, _ in TRIM_STRIPPED]
+)
+def test_the_same_character_hides_the_sentinel_only_when_prose_shares_its_line(
+    outcomes, site, label, reason, glue_name
+):
+    """THE PAIRED CONTROL. One character, two shapes, opposite mechanisms.
+
+    Holding the CHARACTER fixed and varying only the SHAPE is what proves these
+    tests track ``sentinelVerdict``'s actual rule -- a line is compared to the
+    sentinel after ``trim()`` -- rather than merely detecting that a guard
+    exists. Both halves are asserted here together, so the contrast is one fact
+    rather than an inference a reader has to make across two test functions:
+
+      * alone on its line, prefixed only by this character, ``trim()`` removes
+        it and the sentinel is seen WITHOUT any guard;
+      * with prose on that same line, ``trim()`` never touches the character,
+        the line equals nothing, and only the containment guard sees it.
+
+    Restricted to characters ``trim()`` actually strips, which is a measured
+    property and not an eyeball one: U+2028 and U+2029 ARE stripped, while
+    U+0085 NEL -- the character one would most naturally reach for as a line
+    boundary -- is NOT in the JS WhiteSpace set. Building this control on U+0085
+    would make both halves behave identically and prove nothing at all."""
+    ws_only = outcomes[_case_id(site, "wsonly", glue_name)]
+    prose = outcomes[_case_id(site, "prose", glue_name)]
+
+    assert converged_segments(ws_only) == [], (
+        f"unguarded half: a TIMEOUT alone on its line behind {glue_name!r} must "
+        f"be seen by trim()+whole-line equality with no guard involved. This "
+        f"failing means the shared line-reading mechanism regressed. "
+        f"Result: {ws_only}"
+    )
+    assert converged_segments(prose) == [], (
+        f"guarded half: the SAME character {glue_name!r} with prose on the "
+        f"sentinel's line hides it from trim()+equality entirely, so only the "
+        f"containment guard can catch it. Result: {prose}"
+    )
+    assert failure_reason(ws_only) == reason and failure_reason(prose) == reason, (
+        f"both shapes must block with reason {reason!r}; got "
+        f"{failure_reason(ws_only)!r} (alone) and {failure_reason(prose)!r} (with prose)"
     )
 
 

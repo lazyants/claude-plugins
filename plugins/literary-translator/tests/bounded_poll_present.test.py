@@ -605,12 +605,18 @@ def test_every_glossary_sentinel_verdict_call_site_is_containment_guarded():
 # NEW unguarded sentinel site added anywhere goes red too.
 #
 # SCOPE, stated as a rule rather than an exception list: only a call with a
-# NON-NULL fail sentinel is required to be guarded. runRound's DRAFT_MISSING
-# probe passes null, and rejectedAnywhere() returns false for a non-string
-# sentinel by construction (pinned as a unit in
-# tests/glossary_citation_review.test.py), so a guard there would be a no-op.
-# Deriving the exemption from the helper's own contract means a future site
-# with a real sentinel cannot inherit it by being added to a list.
+# NON-NULL fail sentinel is required to be guarded. rejectedAnywhere() returns
+# false for a non-string sentinel by construction (pinned as a unit in
+# tests/glossary_citation_review.test.py), so a guard on a null-sentinel call
+# would be a no-op. Deriving the exemption from the helper's own contract means
+# a future site with a real sentinel cannot inherit it by being added to a list.
+#
+# That rule currently exempts runRound's DRAFT_MISSING probe, and this file
+# deliberately asserts NOTHING about whether it should stay exempt. Its gluing
+# exposure runs the OPPOSITE direction -- DRAFT_MISSING is that site's OK
+# sentinel, so gluing hides a genuine missing-draft report rather than a
+# rejection -- and the fix would reintroduce a collision the site was built to
+# avoid. That is an open decision, not a settled one.
 # ---------------------------------------------------------------------------
 
 MASS_TRANSLATE_GUARDED_FUNCTIONS = ["getVerifiedReview", "reviewFixLoop"]
@@ -636,21 +642,21 @@ def _sentinel_sites_by_function(source):
 
 def test_mass_translate_sentinel_sites_are_exactly_the_expected_three():
     """Completeness half: pins WHICH functions carry a sentinel verdict, so a
-    new site cannot appear without this file noticing. runRound is listed here
-    and deliberately absent from the guarded set below -- its fail sentinel is
-    null."""
+    NEW site cannot appear without this file noticing.
+
+    Deliberately says nothing about runRound's DRAFT_MISSING probe beyond the
+    fact that it exists. That site's sentinel shape -- and whether it should be
+    guarded at all -- is an OPEN product decision: DRAFT_MISSING is the site's
+    OK sentinel rather than its fail sentinel, so gluing there hides a genuine
+    missing-draft report instead of hiding a rejection, and closing it would
+    reintroduce a mere-mention collision the site was built to avoid. Pinning
+    either answer here would prejudge it. When it is settled, the guarded-site
+    parametrisation below is where the outcome belongs."""
     sites = _sentinel_sites_by_function(MASS_TRANSLATE_SOURCE)
     assert sorted(sites) == sorted(MASS_TRANSLATE_GUARDED_FUNCTIONS + ["runRound"]), (
         f"the set of functions calling sentinelVerdict changed: {sorted(sites)}. A "
-        f"new site must be containment-guarded (or carry a null fail sentinel and "
-        f"be justified) before being added here"
-    )
-    null_sites = [
-        (fn, call) for fn, calls in sites.items() for call in calls if call[2] == "null"
-    ]
-    assert [fn for fn, _ in null_sites] == ["runRound"], (
-        f"exactly one sentinel site may pass a null fail sentinel (runRound's "
-        f"DRAFT_MISSING probe); got {null_sites}"
+        f"new site must be containment-guarded, or justified as not needing it, "
+        f"before being added here"
     )
 
 
@@ -671,7 +677,7 @@ def test_mass_translate_ready_timeout_site_is_containment_guarded(function_name)
             f"fail={fail_sentinel!r}) is NOT preceded by a "
             f"{GUARD_HELPER}({reply}, {fail_sentinel}) containment check. Without it "
             f"a fail sentinel sharing its line with prose is never seen -- measured "
-            f"at 11 of 12 gluing characters, a plain space among them. Guards "
+            f"at 14 of 15 gluing characters, a plain space among them. Guards "
             f"actually present: {sorted(guarded)}"
         )
 

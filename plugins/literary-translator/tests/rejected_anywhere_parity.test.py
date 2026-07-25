@@ -126,6 +126,72 @@ def test_extracted_guard_is_the_real_function_not_an_empty_span(mass_guard):
     )
 
 
+def _guard_comment(source: str, template_path: Path) -> str:
+    """The contiguous block of ``//`` lines immediately above the guard."""
+    idx = source.index(f"function {GUARD_HELPER}(reply, failSentinel) {{")
+    start = idx
+    for line in reversed(source[:idx].split(chr(10))[:-1]):
+        if not line.startswith("//"):
+            break
+        start -= len(line) + 1
+    comment = source[start:idx]
+    assert comment.strip(), f"no comment block found above {GUARD_HELPER} in {template_path.name}"
+    return comment
+
+
+# Claims that are TRUE of glossary-pass and FALSE of mass-translate. Any of them
+# appearing in mass-translate's comment means glossary's block was pasted across.
+# Deliberately NOT including "glossary_citation_review": both templates cite that
+# file legitimately, as the home of the guard's unit test, so it would fire on
+# correct prose.
+GLOSSARY_ONLY_CLAIMS = [
+    "all three call sites",
+    "notReadyBatches",
+    "MAX_CITATION_RETRIES",
+]
+
+
+def test_the_two_guard_comments_are_deliberately_not_identical():
+    """The comments must NOT match, and this test exists to say so out loud.
+
+    The obvious way to "fix" a failing parity test is to paste one template's
+    block over the other's. Doing that here would ship prose describing another
+    file's control flow: glossary's comment counts THREE guarded call sites and
+    reasons about the citation review, MAX_CITATION_RETRIES and notReadyBatches,
+    none of which exist in mass-translate, which guards TWO sites with different
+    sentinels and different recovery. Wrong prose about a security guard is the
+    same defect class the guard itself was added to close.
+
+    So the parity contract is deliberately narrow: the FUNCTION BODY is pinned
+    byte-for-byte by the test above; the comment above it is each template's
+    own. (This is where this file diverges from
+    tests/sentinel_verdict_parity.test.py, which is comment-INCLUSIVE because
+    that function's comment is genuinely template-independent.)"""
+    mass_comment = _guard_comment(
+        MASS_TRANSLATE_TEMPLATE.read_text(encoding="utf-8"), MASS_TRANSLATE_TEMPLATE
+    )
+    glossary_comment = _guard_comment(
+        GLOSSARY_PASS_TEMPLATE.read_text(encoding="utf-8"), GLOSSARY_PASS_TEMPLATE
+    )
+
+    assert mass_comment != glossary_comment, (
+        "the two rejectedAnywhere() comments are byte-identical. They must not "
+        "be: each documents its own template's call sites, counts and recovery. "
+        "If this went red because a parity failure was 'fixed' by pasting one "
+        "comment over the other, revert that -- only the FUNCTION BODY is "
+        "required to match"
+    )
+
+    leaked = [claim for claim in GLOSSARY_ONLY_CLAIMS if claim in mass_comment]
+    assert not leaked, (
+        f"mass-translate-wf.template.js's guard comment carries glossary-specific "
+        f"claim(s) {leaked}, which are false in mass-translate: it guards two "
+        f"sites, not three, and has no citation-review retry ladder or "
+        f"notReadyBatches branch. This is what pasting glossary's comment across "
+        f"looks like"
+    )
+
+
 def test_skeptic_template_deliberately_carries_no_guard():
     """The asymmetry, checked rather than assumed.
 
