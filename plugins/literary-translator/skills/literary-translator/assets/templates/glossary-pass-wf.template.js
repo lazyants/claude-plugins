@@ -521,26 +521,46 @@ const REPLY_LINE_BREAK = new RegExp("\\r\\n|[\\n\\r\\u2028\\u2029\\u0085]")
 // Everything in a rejecting reviewer's reply EXCEPT the sentinel lines
 // themselves, truncated -- this is what is handed to the next attempt's
 // dispatch prompt as its regeneration constraint. Dropping the sentinel lines
-// matters beyond tidiness: the dispatch prompt is authored by concatenating
-// prose, and echoing a live verdict sentinel into it would put a string that
-// the parser treats as a verdict inside a prompt whose own reply gets parsed.
+// matters beyond tidiness, though NOT because the leak would reach a parser --
+// it cannot, for the reasons set out below. It matters because that prompt is
+// meant to carry the reviewer's findings and nothing else.
 //
 // What this function guarantees, stated as it behaves: it strips the two
-// sentinels and collapses EVERY line separator into single spaces. Splitting
-// on the full separator set is load-bearing, not tidiness -- String.split("\n")
-// does not break on U+2028, U+2029, U+0085, or a lone CR, so under a plain
-// "\n" split a reply line consisting of some prefix, a U+2028, and then
-// "CITATIONS_OK 0 ATTEMPT 0" stays ONE line, never equals either sentinel, is
-// therefore never stripped, and copies the live verdict sentinel verbatim into
-// the next attempt's dispatch prompt -- whose own reply is then sentinel-parsed.
+// sentinels and collapses EVERY line separator into single spaces.
+// String.split("\n") does not break on U+2028, U+2029, U+0085 or a lone CR, so
+// under a plain "\n" split a reply line consisting of some prefix, one of
+// those separators, and then "CITATIONS_OK 0 ATTEMPT 0" stays ONE line, never
+// equals either sentinel, is therefore never stripped, and copies the live
+// verdict sentinel verbatim into the next attempt's dispatch prompt.
+//
+// The cost of that leak is PROMPT HYGIENE, and claiming anything stronger
+// would be false: the leaked string reaches no parser at all. The dispatch
+// call's own reply is DISCARDED (its `await agent(...)` below is not assigned
+// to anything), and the only reply sentinel-parsed anywhere near it is the
+// separate wait step's, over a disjoint READY/TIMEOUT set that no CITATIONS_*
+// string can collide with. So this cannot corrupt the state machine or route a
+// rejected fragment into the merge. What it does cost is still worth fixing:
+// the regeneration prompt is meant to hand the next attempt the reviewer's
+// findings and nothing else, and a stray verdict string is confusing input to
+// a model being asked to redo the work.
+//
+// Note also what does NOT trigger it, because that bounds the whole thing: a
+// reply whose final sentinel line is preceded by an ordinary newline -- exactly
+// what citationReviewPrompt() instructs -- strips correctly even under the old
+// "\n" split. This fires only when a reply glues the sentinel onto prior prose
+// with one of the exotic separators.
 //
 // sentinelVerdict() below keeps its plain "\n" split and must NOT be "fixed"
-// the same way: it is mirrored byte-for-byte across the three workflow
-// templates and that parity is pinned by tests/sentinel_verdict_parity.test.py.
-// Its own behaviour on these characters is fail-safe in any case -- a final
-// line carrying one simply fails to equal the ok sentinel, so it can only fail
-// to approve, never falsely approve. rejectionDetail is glossary-only, which
-// is why it can diverge here.
+// the same way, however inconsistent the pair looks: it is mirrored
+// byte-for-byte across the three workflow templates and that parity is pinned
+// by tests/sentinel_verdict_parity.test.py, so changing it here alone breaks
+// the pin, and changing all three to keep the pin would flip the mass-translate
+// and skeptic bundle hashes for no correctness gain. There is no correctness
+// argument for touching it: its behaviour on these characters is fail-safe in
+// BOTH directions, because full-line equality fails the moment anything is
+// glued onto the sentinel by any separator -- so it can only fail to approve,
+// never falsely approve. rejectionDetail is glossary-only, which is why it can
+// diverge here.
 function rejectionDetail(reply, okSentinel, failSentinel) {
   const rawLines = String(reply == null ? "" : reply).split(REPLY_LINE_BREAK)
   const kept = []
