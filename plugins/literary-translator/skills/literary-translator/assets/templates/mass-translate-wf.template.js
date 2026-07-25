@@ -660,6 +660,61 @@ function sentinelVerdict(reply, okSentinel, failSentinel) {
   return lines[lines.length - 1] === okSentinel;
 }
 
+// CONTAINMENT GUARD -- the fail-priority backstop for the two WAIT call sites
+// in this file. True iff the raw reply contains failSentinel ANYWHERE, at any
+// offset, on any line, adjacent to anything.
+//
+// The FUNCTION BODY below is byte-identical to glossary-pass-wf.template.js's
+// copy, deliberately: two divergent copies of a security guard are worse than
+// one, for the same reason sentinelVerdict() is mirrored. Do not reformat it.
+// This COMMENT is necessarily this file's own -- the glossary copy's comment
+// describes glossary's call sites, counts and recovery paths, none of which
+// are true here.
+//
+// Why this exists. sentinelVerdict() splits on "\n" and compares whole trimmed
+// lines, so its fail-priority scan only sees a fail sentinel that an LF put on
+// a line of its own. Measured over the 16-character GLUE_CHARS table in
+// tests/glossary_citation_review.test.py, with a reply of
+// prose + GLUE + "TIMEOUT <seg>" + "\n" + "READY <seg>", 15 of 16 glue
+// characters defeat that scan at BOTH wait sites -- 30 of 32 site/character
+// pairs -- and the segment FALSELY PROCEEDS as ready. LF alone blocks. The 15
+// are not exotic: PLAIN SPACE, TAB, a lone CR, VT, FF, U+001C, U+001D, U+001E,
+// U+001F, NBSP, U+0085, U+2028, U+2029, ZWSP -- and the ordinary letter "x".
+// This is not a line-separator problem: `split("\n")` breaks on LF and nothing
+// else, so ANY character between prose and the sentinel keeps them on one line
+// and defeats whole-line equality. That alphabet is unbounded, so widening the
+// split is whack-a-mole; containment is closed under all of it at once because
+// it never asks where the sentinel sits.
+//
+// Why this file matters at least as much as glossary's. The translate-wait
+// site's own comment calls it "the worst of the five sites (#228)": a false
+// pass there sends the ENTIRE review/fix cycle over a draft that never
+// finished translating, and nothing on that path is recorded as recoverable,
+// so the "we'll pick it back up next run" net never fires.
+//
+// THE COST, which differs per site and must not be flattened:
+//   translate wait -- a false RED returns reason:"translate-timeout" WITHOUT a
+//     terminal ledger write. translateStage's in_progress fragment stays the
+//     durable record and select_segments.py's "non-terminal -> recoverable"
+//     rule auto-redispatches the segment next run. Bounded and automatic.
+//   review wait -- a false RED returns status:"blocked", reason:"review-timeout"
+//     for that segment. Also the fail-safe direction, but it ends this run's
+//     work on the segment rather than retrying inside it.
+// Either false RED costs one segment's rework; a false GREEN corrupts the draft
+// the rest of the pipeline treats as finished. The guard buys that asymmetry
+// deliberately; it is not free.
+//
+// An empty or non-string failSentinel returns false rather than matching
+// everything: "".indexOf("") is 0, so an unguarded containment test would
+// reject every reply unconditionally. That also makes the guard a NO-OP by
+// construction at the fix site's `sentinelVerdict(fx, "DRAFT_MISSING " + seg,
+// null)` call, which passes failSentinel === null -- see that site's own
+// comment for the separate, opposite-direction gap it has.
+function rejectedAnywhere(reply, failSentinel) {
+  if (typeof failSentinel !== "string" || failSentinel.length === 0) return false
+  return String(reply == null ? "" : reply).indexOf(failSentinel) !== -1
+}
+
 // ---------------------------------------------------------------------------
 // Prompt-builder functions. All plain JavaScript string interpolation
 // against the constants above -- there is no templating engine at Workflow
@@ -1134,7 +1189,16 @@ async function getVerifiedReview(seg, roundLabel) {
   // of the preamble -- reviewWaitPrompt still instructs the agent to return
   // exactly "READY <seg>"/"TIMEOUT <seg>", this only tolerates decoration
   // around it.
-  if (!sentinelVerdict(ready, "READY " + seg, "TIMEOUT " + seg)) {
+  //
+  // sentinelVerdict()'s fail-priority scan only catches a contradictory reply
+  // when an LF put "TIMEOUT <seg>" on a line of its own; rejectedAnywhere()
+  // catches it whatever glued it there. Measured over GLUE_CHARS: 15 of 16
+  // glue characters falsely PROCEEDED as ready before the guard, 0 of 16
+  // after. A false RED here blocks the segment for this run with
+  // reason:"review-timeout" -- the fail-safe direction, but not an in-run
+  // retry. See rejectedAnywhere()'s comment.
+  if (rejectedAnywhere(ready, "TIMEOUT " + seg) ||
+      !sentinelVerdict(ready, "READY " + seg, "TIMEOUT " + seg)) {
     return { status: "blocked", reason: "review-timeout" };
   }
 
@@ -1202,6 +1266,34 @@ async function runRound(seg, round, isFinal) {
   // inconclusive, never absent (see its comment above). Dropping `!fx` would
   // let a dead fix call silently read as an ordinary review round instead of
   // probing for what actually happened.
+  //
+  // NOT GUARDED by rejectedAnywhere(), and the reason is structural rather
+  // than an oversight: this is the only sentinelVerdict() call in the file
+  // that passes failSentinel === null, so a fail-sentinel containment guard is
+  // a no-op here by construction. This site's gap runs the OPPOSITE way.
+  // "DRAFT_MISSING <seg>" is the OK sentinel, so gluing does not fake a pass --
+  // it makes a REAL DRAFT_MISSING go unrecognized. Measured over
+  // tests/glossary_citation_review.test.py's GLUE_CHARS with a reply of
+  // prose + GLUE + "DRAFT_MISSING <seg>": 15 of 16 glue characters are MISSED
+  // and fall through to `terminal: false`, i.e. silently continue as an
+  // ordinary review round over a draft the fix agent just said is missing --
+  // exactly the outcome the paragraph above says must not happen. LF alone is
+  // recognized. (Controls, same run: a clean sentinel and an LF-decorated one
+  // both probe correctly, a falsy fx probes, and a mere textual MENTION of the
+  // sentinel in prose correctly does NOT fire.)
+  //
+  // Closing it is not free and is deliberately NOT decided here. The only
+  // containment form available in this direction is "DRAFT_MISSING appears
+  // anywhere in the reply", which by construction reintroduces precisely the
+  // #228 mere-mention collision this site was built to avoid -- the control
+  // above proves that protection currently works. The trade is: accept
+  // occasional false DRAFT_MISSING (cost: draftPresentAndValid() probes,
+  // finds the draft fine, returns reason:"fix-call-failed" with no terminal
+  // ledger write, so the segment auto-redispatches next run) in order to stop
+  // silently proceeding on a missing draft. That is the same bounded-false-RED
+  // asymmetry the wait sites above resolved in favour of guarding, but it
+  // overturns an explicit documented decision at this site, so it belongs to
+  // whoever owns that decision, not to this change.
   if (!fx || sentinelVerdict(fx, "DRAFT_MISSING " + seg, null)) {
     // #131 facet A: a falsy/DRAFT_MISSING return conflates (a) a genuine
     // missing draft with (b) a hard API/output-token-ceiling error and (c) a
@@ -1260,7 +1352,17 @@ async function reviewFixLoop(stage1Result, seg) {
   // just because of a preamble -- waitPrompt still instructs the agent to
   // return exactly "READY <seg>"/"TIMEOUT <seg>", this only tolerates
   // decoration around it.
-  if (!sentinelVerdict(ready, "READY " + seg, "TIMEOUT " + seg)) {
+  //
+  // Being the worst site makes the gluing gap worst here too: sentinelVerdict()
+  // alone catches a contradictory reply only when an LF put "TIMEOUT <seg>" on
+  // its own line, and measured over GLUE_CHARS, 15 of 16 glue characters
+  // falsely PROCEEDED as ready before rejectedAnywhere() was added here, 0 of
+  // 16 after -- i.e. the "worst of the five" consequence above was reachable by
+  // gluing the timeout sentinel behind a PLAIN SPACE. A false RED costs one
+  // segment's rework and is automatically recoverable next run (see the
+  // #131 facet C note just below); a false GREEN was the corruption path.
+  if (rejectedAnywhere(ready, "TIMEOUT " + seg) ||
+      !sentinelVerdict(ready, "READY " + seg, "TIMEOUT " + seg)) {
     // #131 facet C: a translate-timeout is transient/mechanical (the codex
     // translator agent died, hit an infra hiccup, or is simply still
     // running past the bounded poll) -- not genuine content
