@@ -490,7 +490,10 @@ function batchWaitPrompt(batch, attempt) {
 // line and treats everything else as not-ok, a mismatched (stale, malformed,
 // or absent) verdict falls to the REJECT side -- the fail-safe direction here,
 // since the cost of a wrong reject is one regeneration and the cost of a wrong
-// accept is a permanently frozen fabricated citation.
+// accept is a permanently frozen fabricated citation. sentinelVerdict() is not
+// the only thing standing between a reply and an approval, though: this
+// verdict's call site short-circuits to REJECT whenever rejectedAnywhere()
+// finds the fail sentinel anywhere in the raw reply, whatever it is glued to.
 // ---------------------------------------------------------------------------
 function citationReviewPrompt(batch, attempt) {
   const outPath = fragmentPath(batch.index, attempt)
@@ -578,33 +581,22 @@ const REPLY_LINE_BREAK = new RegExp("\\r\\n|[\\n\\r\\u2028\\u2029\\u0085]")
 // skeptic-pass-wf.template.js is not touched and the skeptic resume domain is
 // unaffected.
 //
-// That decision stands -- but NOT on the fail-safety argument an earlier
-// version of this comment rested it on. That argument was half true, and the
-// false half is the dangerous one. Measured against the shipped function:
+// An earlier version of this comment justified leaving it alone with a
+// fail-safety claim -- "its behaviour on these characters is fail-safe in BOTH
+// directions ... it can only fail to approve, never falsely approve". That was
+// half true, and the false half was the dangerous one. Gluing the OK sentinel
+// onto prose can only fail to APPROVE, which is genuinely fail-safe; but
+// `if (line === failSentinel) return false` is a REJECTION trigger, so a fail
+// sentinel glued behind anything other than LF escapes the scan entirely, and a
+// trailing clean OK line then approves.
 //
-//   reply = "prose" + SEP + OK_SENTINEL   -- does it approve?
-//     LF and CRLF: true. A lone CR, VT, FF, U+0085, U+2028, U+2029 and
-//     U+001C-U+001F: all false. So gluing the OK sentinel behind an exotic
-//     separator can only fail to APPROVE, which is genuinely fail-safe. This
-//     is the one direction the old claim described correctly.
-//
-//   reply = "prose" + SEP + FAIL_SENTINEL + "\n" + OK_SENTINEL -- approve?
-//     LF and CRLF: false, i.e. correctly rejected. Every other separator
-//     listed above: TRUE -- falsely APPROVED.
-//
-// The asymmetry is structural, not incidental: `if (line === failSentinel)
-// return false` is a REJECTION trigger, so when full-line equality fails
-// THERE, the effect is to not reject. The fail-priority scan is therefore
-// separator-sensitive in the PERMISSIVE direction -- a fail sentinel glued
-// behind an exotic separator escapes the scan, and a trailing clean OK line
-// then approves the batch.
-//
-// So the exposure is real, and it is narrow: reaching it takes a reviewer reply
-// that CONTRADICTS ITSELF, carrying BOTH verdict sentinels -- the fail one
-// glued behind an exotic separator, the ok one alone on the final line. Against
-// that, touching sentinelVerdict() costs the parity pin, two bundle hashes and
-// a published CHANGELOG promise, with certainty. That trade is the whole of the
-// argument for leaving it alone; there is no fail-safety to fall back on.
+// That hole is now CLOSED -- not by widening any split, but by the containment
+// guard rejectedAnywhere(), applied at all three of this file's sentinelVerdict
+// call sites. See its comment for the measurement (14 of 16 glue characters
+// falsely approved before the guard, 0 of 16 after, at each of the three
+// sites), for why containment beats any wider separator set, and for the
+// false-REJECT cost it pays for that. sentinelVerdict() itself is untouched, so
+// the parity pin and both sibling templates' bundle hashes still hold.
 // rejectionDetail is glossary-only, which is why it can diverge here.
 function rejectionDetail(reply, okSentinel, failSentinel) {
   const rawLines = String(reply == null ? "" : reply).split(REPLY_LINE_BREAK)
@@ -710,6 +702,60 @@ function sentinelVerdict(reply, okSentinel, failSentinel) {
   return lines[lines.length - 1] === okSentinel;
 }
 
+// CONTAINMENT GUARD -- the fail-priority backstop for every sentinelVerdict()
+// call site in this file. True iff the raw reply contains failSentinel ANYWHERE,
+// at any offset, on any line, adjacent to anything.
+//
+// Why this exists. sentinelVerdict() splits on "\n" and compares whole trimmed
+// lines, so its fail-priority scan only sees a fail sentinel that LF (or CRLF,
+// whose LF does the splitting) put on a line of its own. Measured against the
+// shipped function with a reply of prose + GLUE + failSentinel + "\n" +
+// okSentinel, 14 of 16 glue characters defeat that scan and the reply is
+// falsely APPROVED at all three call sites -- 42 of 48 site/character pairs.
+// The 14 are not exotic: a lone CR, TAB, PLAIN SPACE (U+0020), VT, FF, U+0085,
+// NBSP, U+2028, U+2029, ZWSP, U+001C, U+001F, BOM -- and the ordinary letter
+// "x". Only LF and CRLF reject correctly.
+//
+// So this is NOT a line-separator problem, and that is the whole design point.
+// `split("\n")` breaks on LF and nothing else, so ANY character between prose
+// and the sentinel keeps them on one line and defeats whole-line equality. The
+// defeating alphabet is every character except LF -- unbounded and impossible
+// to enumerate. Widening the split is therefore whack-a-mole: REPLY_LINE_BREAK,
+// the widest separator set in this file, would close 4 of those 14 and leave
+// TAB, SPACE, NBSP, ZWSP, BOM, the C0 separators and every ordinary letter
+// open. DO NOT "simplify" this guard back into a wider split -- that silently
+// reopens all 14. Containment is closed under the whole alphabet at once
+// because it never asks where the sentinel sits.
+//
+// Done at the CALL SITES rather than inside sentinelVerdict() because that
+// function's body and comment are mirrored byte-for-byte across all three
+// workflow templates and pinned by tests/sentinel_verdict_parity.test.py.
+// Editing it would break the pin, flip the mass-translate and skeptic bundle
+// hashes, and falsify this release's CHANGELOG promise that
+// skeptic-pass-wf.template.js is untouched. Guarding outside it keeps all of
+// that intact, which is exactly why the fix lives here.
+//
+// THE COST, which is real and must not be hidden: containment is strictly
+// EASIER TO REJECT than whole-line equality. A reply that merely MENTIONS the
+// fail sentinel while approving -- "I considered emitting CITATIONS_REJECTED 0
+// ATTEMPT 0 but every citation resolves" -- now takes the fail branch. Plain
+// substring containment also over-matches an index prefix: with failSentinel
+// "ABSENT 1", a reply saying "ABSENT 10" matches. Both are false REDs, the
+// fail-safe direction at all three sites, and each is bounded by machinery that
+// already exists: the citation review regenerates within MAX_CITATION_RETRIES,
+// the precheck simply re-dispatches the batch, and the wait times out and
+// retries. A false GREEN here is unbounded by comparison -- a fabricated
+// citation frozen into canon, or a rejected fragment merged as if approved.
+// The guard buys that asymmetry deliberately; it is not free.
+//
+// An empty or non-string failSentinel returns false rather than matching
+// everything: "".indexOf("") is 0, so an unguarded containment test would
+// reject every reply unconditionally.
+function rejectedAnywhere(reply, failSentinel) {
+  if (typeof failSentinel !== "string" || failSentinel.length === 0) return false
+  return String(reply == null ? "" : reply).indexOf(failSentinel) !== -1
+}
+
 // ---------------------------------------------------------------------------
 // Per-batch precheck -> (dispatch -> wait -> citation review)* sequence.
 // pipeline() runs these concurrently; each batch writes only its own fragment
@@ -751,16 +797,17 @@ async function batchStep(batch) {
   // match closed that direction, but then rejected a benign prose-decorated
   // PRESENT reply as ABSENT (#308). sentinelVerdict() keeps BOTH directions
   // closed at once: a decorated PRESENT (prose preamble, the sentinel as
-  // the reply's own final line) now resume-skips, while a plain ABSENT -- or a
-  // contradictory reply carrying ABSENT on its own ordinary-newline line, the
-  // shape batchPrecheckPrompt() asks for -- still regenerates (see
-  // sentinelVerdict()'s own comment for the exact rule). One measured gap, the
-  // same one rejectionDetail()'s comment analyses at length: a contradictory
-  // reply that glues ABSENT behind an exotic separator (a lone CR, VT, FF,
-  // U+0085, U+2028, U+2029, U+001C-U+001F) and then ends with a clean PRESENT
-  // line escapes the fail-priority scan and resume-SKIPS here. Left open for
-  // the parity reason set out there, not because it cannot happen.
-  // Mirrors skeptic-pass-wf.template.js's own batchStep precheck.
+  // the reply's own final line) now resume-skips, while a plain ABSENT or a
+  // contradictory reply regenerates. sentinelVerdict()'s own fail-priority scan
+  // catches the contradictory case only when an LF puts ABSENT on a line of its
+  // own; the rejectedAnywhere() guard on this call catches it whatever glued it
+  // there -- measured, 14 of 16 glue characters falsely resume-SKIPPED before
+  // the guard, 0 of 16 after. The cost is a bounded false RED: a reply that
+  // merely MENTIONS "ABSENT <i>" while reporting the fragment present now
+  // re-dispatches the batch. See rejectedAnywhere()'s comment.
+  // NOTE: skeptic-pass-wf.template.js's batchStep precheck still mirrors this
+  // control flow but is deliberately NOT guarded -- this release's CHANGELOG
+  // promises that file is untouched, so the two intentionally diverge here.
   // 1.16.0 -- the resume-skip no longer RETURNS; it sets the state machine's
   // entry condition. This is the whole reason the citation review is a loop
   // with two entry points rather than a step bolted on after the wait: a
@@ -770,7 +817,8 @@ async function batchStep(batch) {
   // is exactly as unreviewed as a freshly dispatched one -- the precheck
   // proves it passes --check-batch, and --check-batch is the check that
   // cannot see a fabricated citation in the first place.
-  const resumed = sentinelVerdict(precheck, "PRESENT " + batch.index, "ABSENT " + batch.index)
+  const resumed = !rejectedAnywhere(precheck, "ABSENT " + batch.index) &&
+    sentinelVerdict(precheck, "PRESENT " + batch.index, "ABSENT " + batch.index)
   if (resumed) {
     log("batch " + batch.index + ": resume-skip -- existing attempt-0 fragment already passed --check-batch, not re-dispatching (it is still citation-reviewed below)")
   }
@@ -803,15 +851,15 @@ async function batchStep(batch) {
       // (#228's fix); #228's whole-string cure then rejected a benign
       // prose-decorated READY reply as a timeout (#308). sentinelVerdict()
       // keeps both directions closed -- a decorated READY (prose preamble,
-      // sentinel as the final line) is now accepted, while a plain TIMEOUT --
-      // or a contradictory reply carrying TIMEOUT on its own ordinary-newline
-      // line, the shape batchWaitPrompt() asks for -- still times out (see
-      // sentinelVerdict()'s own comment for the exact rule). Same measured gap
-      // as the precheck above: a contradictory reply gluing TIMEOUT behind an
-      // exotic separator (a lone CR, VT, FF, U+0085, U+2028, U+2029,
-      // U+001C-U+001F) and ending with a clean READY line is accepted as ready
-      // rather than timing out. Left open for the parity reason rejectionDetail
-      // sets out, not because it cannot happen.
+      // sentinel as the final line) is now accepted, while a plain TIMEOUT or a
+      // contradictory reply times out. As at the precheck above,
+      // sentinelVerdict() alone catches the contradictory case only when an LF
+      // puts TIMEOUT on a line of its own; the rejectedAnywhere() guard on this
+      // call catches it whatever glued it there -- measured, 14 of 16 glue
+      // characters were falsely accepted as READY before the guard, 0 of 16
+      // after. Same bounded false RED as there: a reply merely MENTIONING
+      // "TIMEOUT <i>" while reporting success now takes the timeout branch and
+      // retries. See rejectedAnywhere()'s comment.
       //
       // The sentinel stays batch-scoped rather than attempt-scoped on purpose:
       // what makes this poll attempt-correct is the attempt-scoped PATH it
@@ -819,7 +867,8 @@ async function batchStep(batch) {
       // are sequential and awaited within one batchStep, so there is no
       // cross-attempt reply to confuse -- unlike the citation verdict below,
       // which is a judgment ABOUT a specific fragment and so must name it.
-      if (!sentinelVerdict(ready, "READY " + batch.index, "TIMEOUT " + batch.index)) {
+      if (rejectedAnywhere(ready, "TIMEOUT " + batch.index) ||
+          !sentinelVerdict(ready, "READY " + batch.index, "TIMEOUT " + batch.index)) {
         log("batch " + batch.index + ": fragment never became ready (attempt " + attempt + ")")
         return { batchIndex: batch.index, fragmentPath: attemptPath, ready: false, reason: "glossary-pass-null", attempt: attempt }
       }
@@ -838,7 +887,8 @@ async function batchStep(batch) {
     })
     const okSentinel = "CITATIONS_OK " + batch.index + " ATTEMPT " + attempt
     const failSentinel = "CITATIONS_REJECTED " + batch.index + " ATTEMPT " + attempt
-    if (sentinelVerdict(verdict, okSentinel, failSentinel)) {
+    if (!rejectedAnywhere(verdict, failSentinel) &&
+        sentinelVerdict(verdict, okSentinel, failSentinel)) {
       // Approved. Only THIS path may hand a fragment to the merge, and it
       // hands over the exact attempt path the verdict named.
       return { batchIndex: batch.index, fragmentPath: attemptPath, ready: true, attempt: attempt, citationReview: "approved" }
