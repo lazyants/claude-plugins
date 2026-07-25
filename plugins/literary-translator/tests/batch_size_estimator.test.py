@@ -1782,8 +1782,13 @@ def test_glossary_resume_skip_trusts_valid_fragment_and_skips_dispatch(tmp_path)
     assert out["result"]["batches"][0]["batchIndex"] == 0
     # Derivation (live, 1.16.0): precheck 1 + merge 1 + verify 1 = 3, PLUS the
     # citation review 1 -- the resume-skip saves the dispatch and the wait, but
-    # it is NOT exempt from the review (see the dedicated reachability test
-    # below for why that is load-bearing rather than incidental). = 4.
+    # it is NOT exempt from the review. That the review is REACHABLE from this
+    # path at all is load-bearing rather than incidental (a stale, unreviewed
+    # fragment already on disk is precisely the run a review placed only after
+    # dispatch/wait would bypass), and it is asserted in
+    # tests/glossary_citation_review.test.py, by
+    # test_resume_skipped_fragment_is_still_citation_reviewed; here the review
+    # is only the +1 in the count. = 4.
     assert len(out["calls"]) == 1 + 1 + GLOSSARY_FIXED_MERGE_VERIFY
     assert len(out["calls"]) == 4
 

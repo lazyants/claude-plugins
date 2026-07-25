@@ -42,12 +42,13 @@ ESTIMATOR: the live 10*N+2 and offline 3*N+2 preflight formulas, the
 exactly-at-cap boundary, and the shape of the over-cap refusal. This file owns
 the STATE MACHINE the estimate is a model of -- what the review actually does
 to the control flow. The one place the two touch on purpose is formula
-TIGHTNESS (below): a real run measured against the formula, at both the
-worst-case and best-case end, which is the only assertion here that a refusal
-test cannot make. The offline case exists in both files and is NOT a
-duplicate: there it is the estimate (3*N+2), here it is the behaviour (no
-review call is spent at all), and a template can get either one right while
-getting the other wrong.
+TIGHTNESS (below): a real worst-case run measured against the formula, which
+is the only assertion here that a refusal test cannot make, plus the one
+assertion that ties the two files' ladder constants to the template's own
+expression so they cannot drift apart silently. The offline case exists in
+both files and is NOT a duplicate: there it is the estimate (3*N+2), here it
+is the behaviour (no review call is spent at all), and a template can get
+either one right while getting the other wrong.
 
 MECHANISM. Same extract-substitute-wrap-run-under-Node harness as
 tests/glossary_pipeline_e2e.test.py and tests/batch_size_estimator.test.py's
@@ -63,7 +64,9 @@ stale attempt fails to approve a later one.
 """
 from __future__ import annotations
 
+import importlib.util
 import json
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -94,6 +97,16 @@ FIXTURE_TARGET_LANG = "Russian"
 # merely assumed, so a change to the constant fails loudly HERE instead of
 # silently making these fixtures test a different ladder than the one shipped.
 EXPECTED_MAX_CITATION_RETRIES = 2
+
+# This file's copy of the live worst-case per-batch ceiling the preflight
+# charges: precheck 1 + one (dispatch + wait + review) triple per attempt.
+# tests/batch_size_estimator.test.py keeps its own independent copy
+# (GLOSSARY_LIVE_PER_BATCH_CEILING). The two agree today only because both
+# happen to evaluate to 10; what makes that agreement an invariant rather than
+# a coincidence is
+# test_live_per_batch_ceiling_is_pinned_to_the_template_and_the_estimator_file
+# at the end of the formula-tightness section below.
+LIVE_PER_BATCH_CEILING = 1 + 3 * (EXPECTED_MAX_CITATION_RETRIES + 1)  # 10
 
 RUN_DIR = f"{FIXTURE_DURABLE_ROOT}/glossary/runs/{FIXTURE_RUN_ID}"
 
@@ -680,9 +693,20 @@ def test_offline_mode_spends_no_review_call(tmp_path):
 #
 # What stays here is the other question, which needs a real RUN rather than a
 # refusal: does the estimate actually bound what the state machine spends? A
-# formula can be internally consistent and still be wrong about the code. Both
-# ends are measured -- the worst case (exhaustion) and the best (approved on
-# the first attempt).
+# formula can be internally consistent and still be wrong about the code.
+#
+# Only the WORST case is measured, and only here, because it is the one end of
+# the formula the estimator file structurally cannot reach: its harness always
+# approves, so it can never drive the ladder to exhaustion. The BEST case (a
+# batch approved on attempt 0) is deliberately NOT repeated here -- it is
+# first-attempt arithmetic, which the scope note above assigns to the estimator
+# file, and that file already asserts the identical one-batch run as a strict
+# superset (test_glossary_resume_precheck_absent_falls_through_to_real_dispatch
+# asserts the same 6 calls AND the dispatch/wait call labels).
+#
+# The second test closes the seam BETWEEN the two files, which the measurement
+# above cannot: it makes the ceiling this file measures against, the ceiling
+# the estimator file charges, and the template's own expression one fact.
 # ---------------------------------------------------------------------------
 
 def test_live_worst_case_run_does_not_exceed_its_own_estimate(tmp_path):
@@ -690,7 +714,7 @@ def test_live_worst_case_run_does_not_exceed_its_own_estimate(tmp_path):
     Drives one batch all the way to exhaustion -- the most expensive path that
     exists -- and counts the ACTUAL calls against the formula, rather than
     trusting the arithmetic in the comment."""
-    per_batch = 1 + 3 * (EXPECTED_MAX_CITATION_RETRIES + 1)
+    per_batch = LIVE_PER_BATCH_CEILING
     rejections = [
         f"CITATIONS_REJECTED 0 ATTEMPT {n}"
         for n in range(EXPECTED_MAX_CITATION_RETRIES + 1)
@@ -708,14 +732,108 @@ def test_live_worst_case_run_does_not_exceed_its_own_estimate(tmp_path):
     )
 
 
-def test_approved_first_attempt_costs_the_documented_minimum(tmp_path):
-    """The other end: a live batch approved on its first attempt costs precheck
-    + dispatch + wait + review == 4, plus merge + verify."""
-    res = run(tmp_path=tmp_path, batches=[make_batch(0, ["Ninon"])])
-    assert res["ok"], res["stderr"]
-    out = res["out"]
-    assert out["result"]["merged"] is True
-    assert len(out["calls"]) == 4 + 2
+def _load_estimator_module():
+    """Loads tests/batch_size_estimator.test.py under a private module name.
+
+    Every harness in this directory is deliberately self-contained -- each
+    re-implements the template's substitution contract rather than importing a
+    sibling. This is the one deliberate exception, and it is the entire point
+    of the test below: the two files' ladder constants are exactly the pair
+    that must not be allowed to drift apart, so the assertion has to see BOTH
+    of them, not a third local copy of the number.
+
+    `batch_size_estimator.test` is not a legal dotted module name (which is why
+    pytest.ini runs the suite with --import-mode=importlib), so it is loaded by
+    file identity. It is deliberately NOT registered in sys.modules: pytest
+    collects the same file separately, and the two loads must not contend for a
+    name. Executing it is cheap -- module scope is constants, path literals and
+    harness source strings, with no I/O beyond resolving __file__.
+    """
+    path = Path(__file__).resolve().parent / "batch_size_estimator.test.py"
+    assert path.is_file(), f"sibling estimator test not found: {path}"
+    spec = importlib.util.spec_from_file_location("_lt_estimator_seam_probe", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_live_per_batch_ceiling_is_pinned_to_the_template_and_the_estimator_file():
+    """The one assertion that makes the live ceiling a single fact.
+
+    Three copies of it exist: the template's own `perBatchCalls` expression
+    (the only one that is actually EXECUTED, and therefore the only one that is
+    by definition right), this file's LIVE_PER_BATCH_CEILING, and
+    tests/batch_size_estimator.test.py's GLOSSARY_LIVE_PER_BATCH_CEILING. Until
+    this test they were never compared to one another -- they agreed only
+    because all three independently evaluated to 10, and each file's own suite
+    stayed green against its own copy.
+
+    That is a false-green with teeth, because the two files can only see
+    different halves of the problem. The estimator file's formula tests trip
+    the refusal gate BEFORE pipeline() ever runs (deliberately -- zero agent
+    calls needed), so they verify the preflight arithmetic and structurally
+    cannot observe what a real run costs; only
+    test_live_worst_case_run_does_not_exceed_its_own_estimate above drives a
+    genuine exhaustion run and counts real calls. So if the template's real
+    ladder and its preflight expression ever diverge, the red test appears HERE
+    -- and "fixing" it by adjusting this file's expected count until it goes
+    green would leave the preflight silently UNDER-counting, which is the
+    dangerous direction: an estimate that under-counts lets a run start and
+    then blow engine.batch_agent_cap mid-flight, whereas one that over-counts
+    merely refuses early and loudly. Both suites would stay green throughout.
+
+    The ceiling here is read out of the template's source rather than recomputed
+    from either file's constants -- the same way this file's
+    test_max_citation_retries_matches_this_fixture and the estimator file's
+    test_glossary_citation_retry_bound_is_the_documented_two read the real
+    constant -- so changing the ladder in the template, or either file's
+    constant, without updating the others is RED.
+    """
+    source = GLOSSARY_TEMPLATE.read_text(encoding="utf-8")
+
+    retries_match = re.search(r"const\s+MAX_CITATION_RETRIES\s*=\s*(\d+)", source)
+    assert retries_match, (
+        "could not find `const MAX_CITATION_RETRIES = <n>` in the template; the "
+        "ladder constant this whole section is derived from has moved or been "
+        "renamed -- re-derive, do not delete this test"
+    )
+
+    # The template's own live per-batch expression, executed verbatim by the
+    # preflight (glossary-pass-wf.template.js, `const perBatchCalls = ...`).
+    # Parsed rather than mirrored, so the SHAPE of the ladder is pinned too and
+    # not just the retry count: dropping the review, or the wait, would leave
+    # every MAX_CITATION_RETRIES needle test in both files green.
+    ladder_match = re.search(
+        r"const\s+perBatchCalls\s*=\s*CITATION_REVIEW_ENABLED\s*"
+        r"\?\s*(\d+)\s*\+\s*(\d+)\s*\*\s*\(\s*MAX_CITATION_RETRIES\s*\+\s*1\s*\)",
+        source,
+    )
+    assert ladder_match, (
+        "the template's live per-batch preflight expression no longer has the "
+        "shape `1 + <k>*(MAX_CITATION_RETRIES + 1)` that this seam parses -- "
+        "the ladder was restructured, so RE-DERIVE the ceiling in BOTH this "
+        "file and tests/batch_size_estimator.test.py from the template's new "
+        "expression; do not relax this regex to make it pass"
+    )
+
+    retries = int(retries_match.group(1))
+    base, per_attempt = int(ladder_match.group(1)), int(ladder_match.group(2))
+    ceiling_from_template = base + per_attempt * (retries + 1)
+
+    assert ceiling_from_template == LIVE_PER_BATCH_CEILING, (
+        f"the template charges {ceiling_from_template} calls per live batch "
+        f"({base} + {per_attempt}*({retries}+1)) but this file measures real "
+        f"runs against LIVE_PER_BATCH_CEILING={LIVE_PER_BATCH_CEILING}"
+    )
+
+    estimator = _load_estimator_module()
+    assert ceiling_from_template == estimator.GLOSSARY_LIVE_PER_BATCH_CEILING, (
+        f"the template charges {ceiling_from_template} calls per live batch "
+        f"({base} + {per_attempt}*({retries}+1)) but "
+        f"tests/batch_size_estimator.test.py's GLOSSARY_LIVE_PER_BATCH_CEILING "
+        f"is {estimator.GLOSSARY_LIVE_PER_BATCH_CEILING} -- the preflight "
+        f"estimate and the measured cost of a real run have drifted apart"
+    )
 
 
 # ---------------------------------------------------------------------------
