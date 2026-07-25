@@ -597,6 +597,86 @@ def test_every_glossary_sentinel_verdict_call_site_is_containment_guarded():
 
 
 # ---------------------------------------------------------------------------
+# The same containment lock for mass-translate-wf.template.js.
+#
+# Its two READY/TIMEOUT sites sit in DIFFERENT top-level functions, so unlike
+# glossary's they can be proved one function at a time. The scan below walks
+# every top-level function in the file rather than a hand-listed pair, so a
+# NEW unguarded sentinel site added anywhere goes red too.
+#
+# SCOPE, stated as a rule rather than an exception list: only a call with a
+# NON-NULL fail sentinel is required to be guarded. runRound's DRAFT_MISSING
+# probe passes null, and rejectedAnywhere() returns false for a non-string
+# sentinel by construction (pinned as a unit in
+# tests/glossary_citation_review.test.py), so a guard there would be a no-op.
+# Deriving the exemption from the helper's own contract means a future site
+# with a real sentinel cannot inherit it by being added to a list.
+# ---------------------------------------------------------------------------
+
+MASS_TRANSLATE_GUARDED_FUNCTIONS = ["getVerifiedReview", "reviewFixLoop"]
+
+# The helpers' own definitions match the call regexes; skip those functions.
+_HELPER_DEFINITIONS = {"sentinelVerdict", GUARD_HELPER}
+
+
+def _sentinel_sites_by_function(source):
+    """{function_name: [(reply, ok, fail), ...]} for every top-level function
+    that CALLS sentinelVerdict, over code lines only."""
+    names = _TOP_LEVEL_FUNC_RE.findall(source)
+    sites = {}
+    for name in names:
+        if name in _HELPER_DEFINITIONS:
+            continue
+        code = _normalized_code(extract_function_body(source, name))
+        calls = _SENTINEL_VERDICT_CALL_RE.findall(code)
+        if calls:
+            sites[name] = calls
+    return sites
+
+
+def test_mass_translate_sentinel_sites_are_exactly_the_expected_three():
+    """Completeness half: pins WHICH functions carry a sentinel verdict, so a
+    new site cannot appear without this file noticing. runRound is listed here
+    and deliberately absent from the guarded set below -- its fail sentinel is
+    null."""
+    sites = _sentinel_sites_by_function(MASS_TRANSLATE_SOURCE)
+    assert sorted(sites) == sorted(MASS_TRANSLATE_GUARDED_FUNCTIONS + ["runRound"]), (
+        f"the set of functions calling sentinelVerdict changed: {sorted(sites)}. A "
+        f"new site must be containment-guarded (or carry a null fail sentinel and "
+        f"be justified) before being added here"
+    )
+    null_sites = [
+        (fn, call) for fn, calls in sites.items() for call in calls if call[2] == "null"
+    ]
+    assert [fn for fn, _ in null_sites] == ["runRound"], (
+        f"exactly one sentinel site may pass a null fail sentinel (runRound's "
+        f"DRAFT_MISSING probe); got {null_sites}"
+    )
+
+
+@pytest.mark.parametrize("function_name", MASS_TRANSLATE_GUARDED_FUNCTIONS)
+def test_mass_translate_ready_timeout_site_is_containment_guarded(function_name):
+    """Each READY/TIMEOUT site proved on its own, over code_lines() so the
+    template's own prose about the guard cannot satisfy the assertion."""
+    code = _normalized_code(extract_function_body(MASS_TRANSLATE_SOURCE, function_name))
+    verdict_calls = [c for c in _SENTINEL_VERDICT_CALL_RE.findall(code) if c[2] != "null"]
+    assert verdict_calls, (
+        f"expected {function_name} to carry a sentinelVerdict call with a real "
+        f"fail sentinel; found none -- has the site moved?"
+    )
+    guarded = {(reply, fail) for reply, fail in _GUARD_CALL_RE.findall(code)}
+    for reply, ok_sentinel, fail_sentinel in verdict_calls:
+        assert (reply, fail_sentinel) in guarded, (
+            f"{function_name}'s sentinelVerdict call on {reply!r} (ok={ok_sentinel!r}, "
+            f"fail={fail_sentinel!r}) is NOT preceded by a "
+            f"{GUARD_HELPER}({reply}, {fail_sentinel}) containment check. Without it "
+            f"a fail sentinel sharing its line with prose is never seen -- measured "
+            f"at 11 of 12 gluing characters, a plain space among them. Guards "
+            f"actually present: {sorted(guarded)}"
+        )
+
+
+# ---------------------------------------------------------------------------
 # EXEMPTION positive control: callFix/fixPrompt (unchanged by #97 AND #198).
 # ---------------------------------------------------------------------------
 
