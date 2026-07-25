@@ -712,7 +712,8 @@ atomically writes each batch's `manifest_{index}.json` plus the aggregate
 `manifest_all.json`, aborting before any dispatch if any of that fails (see
 `references/orchestration-and-batching.md`). Only then does each batch run
 the shared fire-and-forget dispatch → bounded poll → disk-truth pattern:
-`agent(batchDispatchPrompt(batch), {agentType:'codex:codex-rescue',
+`agent(batchDispatchPrompt(batch, attempt, rejectionReason),
+{agentType:'codex:codex-rescue',
 effort: EFFORT})` (`EFFORT` = this project's own `engine.effort`, #197 — a
 configurable enum, default `high`; schema-less, writes the run-scoped fragment
 `glossary/runs/{{RUN_ID}}/out_{index}_attempt_{n}.json` — attempt-scoped, so

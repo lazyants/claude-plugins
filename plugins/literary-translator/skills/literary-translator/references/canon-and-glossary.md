@@ -102,13 +102,14 @@ canon/realia decisions are exactly as accuracy-load-bearing as review
 findings, and codex accuracy-bearing calls in this plugin are never bare,
 never nested, and never trusted on their own in-turn say-so.
 
-Per batch: `batchDispatchPrompt(batch)` is codex, `agentType:'codex:codex-rescue'`,
+Per batch: `batchDispatchPrompt(batch, attempt, rejectionReason)` is codex,
+`agentType:'codex:codex-rescue'`,
 `effort: engine.effort` (#197 — a configurable enum, default `high`, dual-injected
 alongside the TASK opener's own `Effort: <value>.` line; see
 `references/ledger-and-resumability.md`'s dual-injection rule), **schema-less**, fire-and-forget — it writes the run-scoped
 fragment `${durable_root}/glossary/runs/{{RUN_ID}}/out_{index}_attempt_{n}.json`
 atomically and self-validates it via `canon_validate.py --check-batch`
-before printing `FRAGMENT {index}`; `batchWaitPrompt(batch)` is Claude,
+before printing `FRAGMENT {index}`; `batchWaitPrompt(batch, attempt)` is Claude,
 bounded-poll, `READY`/`TIMEOUT`. Under `research_mode: live` a bounded
 citation-review stage then gates whether that batch counts as ready at all,
 still inside `batchStep` — see **Pre-merge citation review** below for the
@@ -480,8 +481,15 @@ permanently frozen fabricated citation.
 
 Regeneration is bounded by `MAX_CITATION_RETRIES`, and the next attempt's
 dispatch prompt is handed the rejecting reviewer's own findings (minus the
-verdict sentinel lines, so a live sentinel is never echoed into a prompt
-whose reply is itself parsed) as its regeneration constraint. Exhausting the
+verdict sentinel lines) as its regeneration constraint. Dropping those lines
+is PROMPT HYGIENE, and claiming anything stronger would be false: a leaked
+sentinel reaches no parser at all. The dispatch call's own reply is
+DISCARDED — its `await agent(...)` is not assigned to anything — and the only
+reply sentinel-parsed anywhere near it is the separate wait step's, over a
+disjoint `READY`/`TIMEOUT` set that no `CITATIONS_*` string can collide with.
+So a leak cannot corrupt the state machine or route a rejected fragment into
+the merge. It is still worth stripping: that prompt is meant to hand the next
+attempt the reviewer's findings and nothing else. Exhausting the
 budget returns `merged: false` with `reason: "citation-review-exhausted"` —
 deliberately a DISTINCT reason from `fragment-check-failed`, because "a
 fragment never became structurally valid" and "the fragments were valid but
@@ -497,8 +505,11 @@ load-bearing rationale, not a preference for failing early. Once a
 that could plausibly change it is closed:
 
 - `canon_validate.py` is the only script in the plugin that writes
-  `canon.json` at all, and its single write site is the merge. There is no
-  amend, override, or correct mode — `--init` is create-only, and
+  `canon.json` at all, and the merge is the only one of its modes that can
+  write an `entries{}` row. There is no amend, override, or correct mode. The
+  two other writing modes reach the same single `_atomic_write_json` call
+  site but cannot touch a resolved entry: `--init` is create-only (an
+  existing canon.json is left byte-untouched and is not even read), and
   `--restamp-derivation` moves only the two `generation_hashes` fields.
 - **A conflicting re-merge is fatal, not a fix.** `_merge_batch` raises on a
   genuine cross-run collision — two different resolutions claimed for the
@@ -523,11 +534,16 @@ that could plausibly change it is closed:
 - **The skeptic pass is post-merge, opt-in, and advisory-only.** Its
   `established_offline` risk class exists precisely because
   `canon_validate.py`'s offline backstop only checks INCOMING batches and
-  never re-scans an already-frozen canon — but that class fires only under
-  `offline`, so a `live` `established` citation reaches the skeptic pass at
-  all only through the globally-capped `sampled` class. And no freeze/merge
-  reader ever opens `skeptic_triage.json`; its verdict schema cannot express
-  a confirmation, let alone a repair.
+  never re-scans an already-frozen canon — and that class contributes nothing
+  under `live` (`suspicion_scan.py`'s `_established_offline_forms()` returns
+  an empty set unless `research_mode == "offline"`). A `live` `established`
+  entry can still be flagged by the basis-blind classes — `singleton`,
+  `all_citation`, `near_merge`, `merge_participant`, `high_dispersion`,
+  `fold_collision`, `sampled` — whose only scope filter drops
+  `is_proper_name: false` / `basis: "not_a_name"`. None of that repairs
+  anything, which is the point here: no freeze/merge reader ever opens
+  `skeptic_triage.json`, and its verdict schema cannot express a
+  confirmation, let alone a repair.
 
 What remains is a hand edit of `canon.json` outside every shipped tool. That
 is a real option for a human, and it is exactly the expensive one this stage

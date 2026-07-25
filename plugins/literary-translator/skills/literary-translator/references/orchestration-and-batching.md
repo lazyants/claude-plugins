@@ -658,31 +658,43 @@ scaffold pre-creates `glossary/runs/` itself.
 **Per-batch (DISPATCH → WAIT):**
 
 ```js
-pipeline(batches, (batch) => batchDispatchWaitLoop(batch))
+pipeline(BATCHES, batchStep)
 ```
 
 - `batchPrecheckPrompt(batch)` — Claude, `effort:'low'`, no `agentType`, no
   schema, **run FIRST (resume-skip, 1.3.5 #101)**: a single-shot, read-only
   run of the same `--check-batch` invocation `batchWaitPrompt` polls. If a
   prior interrupted run of this SAME `{{RUN_ID}}` already left a valid
-  `out_{index}.json` fragment on disk, the precheck returns `PRESENT` and the
-  batch skips its codex dispatch + wait entirely; any non-`PRESENT` answer (a
+  `out_{index}_attempt_0.json` fragment on disk (the precheck is hard-wired to
+  attempt 0 — `checkBatchCmd(batch.index, 0)`), the precheck returns `PRESENT`
+  and the batch skips its codex dispatch + wait entirely — but NOT, since
+  1.16.0, the `live`-mode citation review below, which a resumed batch still
+  pays exactly like a fresh one; any non-`PRESENT` answer (a
   missing, malformed, or wrong-coverage fragment, or a failed precheck) falls
   THROUGH to the normal dispatch + wait, so a bad fragment is never wrongly
   trusted. Safe because any plugin update flips `plugin_bundle_hash` (this
   template is itself a `PLUGIN_BUNDLE_MEMBERS` entry) → a fresh `RUN_ID` with
   no old fragments on disk, so a fragment that still passes `--check-batch`
   against the CURRENT manifest is genuinely current, never stale.
-- `batchDispatchPrompt(batch)` — codex, `agentType:'codex:codex-rescue'`,
+- `batchDispatchPrompt(batch, attempt, rejectionReason)` — codex,
+  `agentType:'codex:codex-rescue'`,
   `effort: EFFORT` (`engine.effort`, #197), **schema-less**, fire-and-forget: writes the run-scoped
-  fragment `glossary/runs/{{RUN_ID}}/out_{index}.json` **atomically**,
+  fragment `glossary/runs/{{RUN_ID}}/out_{index}_attempt_{n}.json`
+  **atomically**,
   self-validates it via `canon_validate.py --check-batch <frag>
   --research-mode X --expect-source-forms-file
   glossary/runs/{{RUN_ID}}/manifest_{index}.json` (shape **and** exact
   coverage against the trusted manifest — no write), and prints
-  `FRAGMENT {index}`.
-- `batchWaitPrompt(batch)` — Claude, `effort:'low'`, bounded poll of the
-  same `--check-batch` invocation, returning `READY`/`TIMEOUT`.
+  `FRAGMENT {index}`. **1.16.0:** the path is attempt-scoped and
+  `rejectionReason` carries the citation reviewer's own findings into every
+  attempt after the first.
+- `batchWaitPrompt(batch, attempt)` — Claude, `effort:'low'`, bounded poll of
+  the same `--check-batch` invocation, returning `READY`/`TIMEOUT`.
+- `citationReviewPrompt(batch, attempt)` (**1.16.0**) — Claude, `effort:'high'`,
+  no `agentType`, no schema, `live` only; returns
+  `CITATIONS_OK`/`CITATIONS_REJECTED <index> ATTEMPT <n>`. It gates whether
+  the batch counts as ready at all — see `references/canon-and-glossary.md`'s
+  **Pre-merge citation review**.
 
 Fragment paths are run-scoped (`{{RUN_ID}}` in the path itself), so — unlike
 the pre-1.2.0 design — **no pre-clean call is needed**: a stale fragment
