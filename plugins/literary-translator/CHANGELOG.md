@@ -71,6 +71,16 @@ prose could be skipped, and a trailing clean success line then approved the batc
   straight out of `batchStep`, ending that batch for the run, and because the merge is all-or-nothing
   the pass then reports `merged: false` and merges nothing. Recovery there is an operator re-invoking
   the pass.
+- **Scope, stated plainly because the defect is not template-specific.** The guard is applied to
+  `glossary-pass-wf.template.js` only. Four sibling consume sites still compare on line equality
+  alone and remain exposed to the same gluing: `mass-translate-wf.template.js`'s two `READY`/`TIMEOUT`
+  waits, and `skeptic-pass-wf.template.js`'s `PRESENT`/`ABSENT` precheck and `READY`/`TIMEOUT` wait.
+  (A fifth site, mass-translate's `DRAFT_MISSING` check, passes a `null` failure sentinel and so has
+  nothing to hide.) That is a deliberate scope limit, not an oversight: this release's Migration
+  section promises `skeptic-pass-wf.template.js` is untouched, and editing either sibling would flip
+  its bundle hash and falsify that promise. Their exposure is the pre-existing #308 behaviour,
+  unchanged by this release and not worsened by it — but it is live, and closing it is a separate
+  change that should price its own hash migration.
 
 ### Migration
 
