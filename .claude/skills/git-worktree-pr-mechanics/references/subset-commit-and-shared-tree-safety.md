@@ -4,12 +4,29 @@
 
 When a file has pending unrelated uncommitted edits (someone else's WIP, a queued removal elsewhere) but you need just your change committed as a clean isolated commit:
 
-1. `git stash push -- <path>` — reverts THAT ONE file to HEAD, leaving all other churn (other files, untracked) untouched.
-2. Make your change to the now-clean file → `git add <path>` → commit (contains only your change, on top of HEAD).
-3. `git stash pop` — re-applies the stashed churn on top via a 3-way auto-merge; clean when your change and the churn don't overlap (e.g. append at array end vs. a removal elsewhere).
-4. VERIFY: `git show --stat <sha>` touched only intended files; working tree still holds exactly the original churn (`git status --short`).
+0. **GUARD FIRST — abort if any of that path is STAGED:** `git diff --cached --quiet -- <path>`. A non-zero exit means a peer has staged content there; **stop**. Step 2 discards the index *and* the worktree copy, so a staged edit is unrecoverable from a worktree-only patch — and a staged file means someone is mid-commit, which is the worst moment to be committing that path yourself.
+1. `git diff HEAD -- <path> > <scratch>/churn.patch` — capture the churn as a patch OUTSIDE the repo. Use `HEAD`, not a bare `git diff`: a bare `git diff` is the worktree-vs-INDEX delta, so it silently omits anything already staged. Confirm the patch is non-empty (`wc -c`) before continuing.
+2. `git checkout HEAD -- <path>` — reverts THAT ONE file to HEAD, leaving all other churn (other files, untracked) untouched. Safe only because steps 0–1 proved nothing was staged and saved what was there.
+3. Make your change to the now-clean file → `git add <path>` → commit (contains only your change, on top of HEAD).
+4. `git apply --3way <scratch>/churn.patch` — re-applies the churn on top; `--3way` gives the same forgiving auto-merge `stash pop` had, so it stays clean when your change and the churn don't overlap (e.g. append at array end vs. a removal elsewhere) and leaves ordinary conflict markers when they do.
+5. `git restore --staged -- <path>` — `--3way` implies `--index`, so step 4 leaves the restored churn STAGED; this returns it to unstaged, which is the state the peer actually had.
+6. VERIFY: `git show --stat <sha>` touched only intended files; `git status --short <path>` reads ` M` (unstaged), matching the peer's original state, and the churn content is back.
+
+**Use a patch file, NOT `git stash`, and never a bare `git stash pop`.** The stash stack is repo-global and shared: if the `push` in a stash-based version of this recipe fails (a malformed/non-matching pathspec is the common way), the stack is left untouched and the following `pop` silently applies — and **drops** — a *peer's* entry. Verified 2026-07-25 in a scratch repo: with one foreign entry on the stack, `git stash push -- '<non-matching pathspec>'` exits 1 and stashes nothing, then a bare `git stash pop` **exits 0**, merges the peer's WIP into the working tree, and prints `Dropped refs/stash@{0}` — destroying the peer's only copy while reporting success. A patch file has no shared stack to collide with, so the failure is structurally unreachable. If some situation genuinely forces stash, capture the created entry's SHA (`git rev-parse -q --verify stash@{0}` before AND after the push — an unchanged value means the push created nothing, so ABORT) and later `git stash apply <sha>` + `git stash drop <sha>`; never bare `pop`. See the section below for the full hazard write-up.
+
+**The step-0 guard is the load-bearing part, not a formality.** Verified 2026-07-25: with a peer holding a staged edit on line 1 and an unstaged edit on line 30 of the same file, an unguarded `git diff`-based version of this recipe captured only the unstaged delta, `git checkout HEAD --` then discarded both, and re-applying the patch failed outright (`patch does not apply` — its context assumed the staged line-1 edit was present), leaving the file fully reverted to HEAD: **both** peer edits lost, one of them silently. If you genuinely must proceed with staged peer content present, do not use the single-patch flow — capture the two deltas separately (`git diff --cached -- <path>` and `git diff -- <path>`), and restore with `git apply --index <staged>.patch` followed by `git apply <unstaged>.patch` so the index-vs-worktree split survives.
 
 Cleaner than `git add -p` when scripted — interactive git isn't available in this env. Prefer this over `git add -A`; commit only your own files.
+
+## A failed pathspec-scoped `stash push` leaves the stack unchanged — the next `pop` grabs a foreign entry
+
+Verified 2026-07-20 (literary-translator 1.11.0, three parallel sessions sharing one worktree). A teammate ran `git stash push -- <paths> -m "..."` with a malformed pathspec. It errored and stashed **nothing** — the stack was untouched. The teammate then ran `git stash pop` expecting to restore its own work, and instead popped `stash@{0}` — an unrelated entry from a **different branch and a different session** — producing `UU` merge conflicts in three files it did not own.
+
+Two things make this dangerous: (1) `stash push` failing is not loud enough to stop a scripted `pop` that follows it — the pair reads as symmetric, it isn't; nothing ties a `pop` to the entry your `push` created. (2) In a shared worktree the stash stack is global and long-lived — that machine had three stashes from three unrelated branches/sessions going back weeks, so `stash@{0}` meant "whatever some other session left there", not "my last push".
+
+- **Never use stash as an undo in a shared tree.** To restore one file to committed state: `git show HEAD:<path> > <path>` — scoped, no stack involvement, no risk to a peer.
+- If you truly must stash, check `git stash list` before AND after the push and confirm your own entry appeared; never `pop` on faith.
+- Recovery is clean if caught immediately: `git checkout HEAD -- <the affected paths>` discards the foreign application, and the original stash entry stays intact on the stack (verify with `git stash list` — nothing should have been dropped).
 
 ## Never run git-state ops concurrently with active subagents in the SHARED cwd
 

@@ -58,3 +58,15 @@ Run Step 0:
 ```
 python3 <PLUGIN_ROOT>/assets/scripts/profile_validate.py --profile <abs profile>
 ```
+
+## 6. If you hand-build a managed-dir verifier: policy differs by dir, not byte-exactness
+
+A hand-built verifier that checks the scaffolded managed dirs (`scripts/`, `schemas/`, `languages/`)
+against the shipped originals should NOT enforce a blanket byte-exact / no-extra-files rule for
+every dir. The right axis is whether SKILL.md contemplates operator-authored content in that dir:
+`languages/` legitimately holds an operator's `*.local.json` override (e.g. `he.local.json`), so an
+extra file there should be `info`-only; `scripts/` and `schemas/` are never operator-authored, so an
+extra or stale file there is real drift and must `fail`. Note that an extra/stale file sitting in
+`scripts/` provably CANNOT move `plugin_bundle_hash` — `PLUGIN_BUNDLE_MEMBERS` is a literal
+fixed-name allowlist — so an upstream-deleted module can keep sitting in `scripts/`, stay
+importable, and never show up as a hash mismatch; only an explicit extra-file check catches it.

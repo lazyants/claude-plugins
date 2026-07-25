@@ -12,6 +12,12 @@
 - [The loop's exit condition](#the-loops-exit-condition)
 - [When the classifier blocks codex](#when-the-classifier-blocks-codex)
 - [The contrivance gradient — when the evasions outrun the threat model](#the-contrivance-gradient--when-the-evasions-outrun-the-threat-model)
+- [Review rounds are non-monotonic](#review-rounds-are-non-monotonic)
+- [Non-convergent loops: exit, document, escalate](#non-convergent-loops-exit-document-escalate)
+- [Don't engineer around a residual you've already judged acceptable](#dont-engineer-around-a-residual-youve-already-judged-acceptable)
+- [Symmetric scope-calibration: over-adding and under-fixing](#symmetric-scope-calibration-over-adding-and-under-fixing)
+- [Port the diminishing-returns check to the plan-review loop too](#port-the-diminishing-returns-check-to-the-plan-review-loop-too)
+- [Codex alone for plan/code review](#codex-alone-for-plancode-review)
 
 ## Healthy loop vs rabbit hole
 
@@ -159,3 +165,152 @@ assertion survives an author who rewrites its anchors.
 The tell that you are on the gradient rather than converging: each fix is sound, each next finding
 is sound, and yet the adversary in the reviewer's counterexample is getting steadily more
 determined. Convergence looks like *simpler* counterexamples, not more elaborate ones.
+
+## Review rounds are non-monotonic
+
+Incorporating a reviewer's round-N suggestion creates a NEW surface that round-N+1 can flag —
+sometimes flagging the very thing round-N asked for. Concretely (PLAN-213 codex loop): R1 asked to
+"skip a doomed `launch()` when no budget" (an optimization → a tri-state `adopt_pending` with an
+early return was built); R2 flagged that early-return as a **starvation** wedge (never adopt, never
+launch). The fix that satisfied BOTH was the *simplest* design — a bool `adopt_pending` that ALWAYS
+falls through to `launch()` unless it actually promoted — i.e. **drop the optimization the earlier
+round requested.**
+
+**Why:** review rounds are not a monotonically-improving stack. An "avoid the wasteful/doomed X"
+ask is often a short-circuit/early-return/skip, and a skip is exactly what introduces a "then Y
+never happens" failure mode. Treating each round's suggestion as strictly additive thrashes.
+
+**How to apply:** (1) when a reviewer asks for an OPTIMIZATION (skip/short-circuit/early-return/
+"don't bother"), be suspicious it adds a failure mode — reach first for the simplest always-safe
+path (always fall through / always attempt), even if it does one "wasteful" no-op, since a doomed
+fallback that fails harmlessly beats a wedge. (2) Always re-review after incorporating — the
+incorporation is a new surface (this is why the loop must continue to an explicit clean, not stop
+at "incorporated one round"). This is distinct from the "authoritative fix" trap in verify-the-fix.md
+(the reviewer's own prescribed fix can carry the next instance of a defect CLASS) — here the issue
+is that the reviewer's own asks across rounds can be in tension with each other.
+
+## Non-convergent loops: exit, document, escalate
+
+Some loops are NON-CONVERGENT, not just non-monotonic — then "loop until reviewer-clean" is
+UNSATISFIABLE, and the right move is to EXIT, not loop harder. The tell: the reviewer OSCILLATES
+because its asks are MUTUALLY EXCLUSIVE and no design satisfies all of them — round-N flags design
+A, you switch to B, round-N+1 flags B, and a round-N+2 would just re-flag A. Concretely (the #213
+CODE review, same session as the plan loop above): R1 flagged the single-slot always-overwrite
+`_defer_attempt` ("loses a previously-preserved pending"); the token-aware KEEP fix was flagged by
+R3 ("sticks forever on an invalid same-token pending"); no single-slot policy satisfies BOTH "never
+overwrite a preserved attempt" AND "never stick on an invalid one", and a multi-slot queue only
+trades the bounded loss for unbounded disk.
+
+Once you recognize this, do NOT run the reviewer a 4th time (it will re-flag the option you
+reverted to) and do NOT keep "fixing" — instead:
+
+- (a) pick the STRICTLY-SAFER option (here last-writer-wins: self-healing, can never get stuck — a
+  bounded, self-healing residual beats a wedge, mirroring the always-safe-path preference above);
+- (b) DOCUMENT the residual in-code + PR so a future reader/reviewer sees a considered choice, not
+  an oversight;
+- (c) SURFACE the fork to the USER via AskUserQuestion — shipping over a reviewer MAJOR is the
+  user's call, not a solo one, especially on an artifact they care about.
+
+The cost is asymmetric: one question is cheap; silently shipping the wrong side of a genuine
+no-dominating-solution tradeoff is expensive. This REFINES the loop's exit condition above:
+"continue to explicit clean" assumes convergence is achievable; when it provably isn't,
+exit-with-documentation is the terminal state.
+
+## Don't engineer around a residual you've already judged acceptable
+
+Corollary — don't "engineer around" a finding you've ALREADY soundly judged bounded-acceptable;
+escalate the accept instead. There is a tempting THIRD option between accept-with-doc and
+ship-over-it: invent a mechanism that makes the finding moot. On a genuine no-dominating-solution
+tradeoff that is usually an OVER-CORRECTION — the mechanism is unreviewed NEW surface and can be
+strictly worse (the same optimization trap one level up). This is exactly what happened in #213:
+after R1 the single-slot overwrite had ALREADY been reasoned out as a bounded, better-than-status-quo
+residual, then that sound call was abandoned to build the token-aware KEEP fix "so codex can't flag
+it" — and R3 proved the KEEP strictly worse (sticks on invalid), forcing a revert to the original.
+The detour (a whole extra fix+review round) was avoidable: once a residual is SOUNDLY judged
+bounded-acceptable, go straight to document-it-and-escalate rather than trying to satisfy the
+reviewer with a new design. If you DO build the mooting fix anyway, treat it as a full new change
+owing its own red-before-green + review (it is not a free "just make the warning go away").
+
+## Symmetric scope-calibration: over-adding and under-fixing
+
+Symmetric scope-calibration cautions — over-adding AND under-fixing each get caught by the NEXT
+reviewer (LT 1.15.0, PR #304). Two miscalibrations in one release, each flagged by a later lens:
+
+- **Under-fix — do NOT launder a correctness bug as an "accepted residual."** The non-convergent-loop
+  exit above legitimizes documenting a residual for a genuine *no-dominating-solution* tradeoff; the
+  failure is over-applying it to a plain bug. Across 8 codex rounds a validate-only path was
+  ACCEPTED — and documented, in a code comment + the PR body — as silently ignoring
+  `--expect-source-forms-file`, returning `{"success": true}` with the requested coverage check
+  never run. The repo BOT, running the real CLI, rejected that framing and required a fail-loud fix
+  (it was right). **Tell:** a "residual" that is a SILENT-IGNORE / FALSE-SUCCESS /
+  silently-wrong-output is a *bug*, not a tradeoff — there IS a dominating design (fail loud /
+  actually do the check), so the non-convergent-loop precondition does not hold. The reviewer that
+  RUNS THE REAL CASE (the bot) is authoritative on residual-vs-bug; codex rounds signing off a
+  documented residual is NOT clearance (codex-clean ≠ bot-clean — see inexpressible-defects.md).
+  Before writing "accepted residual" anywhere, ask: is there a dominating fix (fail-loud / do-the-
+  check)? If yes it's a bug — fix it now, don't defer it into prose.
+- **Over-add — do NOT fold a reviewer's OPTIONAL / "not-live, worth-knowing" NOTE into the current
+  change as defense-in-depth.** Same trap as the "don't engineer around a residual" section above,
+  milder-sounding: a reviewer's optional `const`→`(?:const|let|var)` widening note got folded into a
+  fix batch; the next round proved it introduced a false-positive, and the resolution was to REVERT
+  it (not forward-fix). **Default: file an optional / not-live note as a FOLLOW-UP issue, don't fold
+  it into the change under review** — every speculative addition is unreviewed new surface owing
+  its own red-before-green, and "not live today" means the only thing it can do right now is
+  regress.
+
+## Port the diminishing-returns check to the plan-review loop too
+
+The CODE-review loop's diminishing-returns/oscillation check ("when the last 2 rounds are entirely
+about one helper function you already fixed, STOP and tell the user") has no counterpart in the
+PLAN-review loop by default — port it over, and pre-register the check BEFORE dispatching the
+round, not after reading its verdict (2026-07-23, enduser-handbook 8-issue `/goal-la` plan, 7
+codex-rescue rounds).
+
+Rounds 1-3 of a plan-review loop found genuinely broad, distinct issues (a needle set, a
+schema-evaluator design, a tab-handling claim). Rounds 4, 5, and 6 then ALL narrowed on the SAME
+sub-mechanism (one evaluator's fail-closed keyword sweep) — each one a REAL, non-trivial gap (not
+codex nitpicking its own prior note, and not a non-convergent oscillation per the section above —
+every round's finding was distinct and each fix genuinely closed it), but 3 rounds running on one
+narrow spot is exactly the diminishing-returns shape, and a plan-review loop with no stated
+stop-check for it would keep dispatching rounds indefinitely as long as SOMETHING narrower kept
+turning up.
+
+Fix: before sending round 6 to codex, the exact stop-condition was written into that round's own
+dispatch instructions for the future turn — "if this round ALSO finds a narrow refinement of the
+same sub-mechanism, do not dispatch round 7; instead use AskUserQuestion with three options
+(accept-as-documented-residual / one-more-fix-then-stop / keep-looping)" — rather than deciding
+reactively once the verdict arrived. **This mattered**: reading round 6's actual NEEDS-REVISION
+verdict in the moment, it would have been easy to rationalize "this one's tiny, just fix it and go"
+(motivated reasoning to end a long loop) or the opposite "this is definitely oscillating, stop now"
+(overcautious, since the sub-mechanism findings kept being real). The pre-registered check made the
+decision mechanical instead of a judgment call under fatigue: it fired, the user was asked, they
+chose "keep looping," and round 7 came back genuinely CLEAN — vindicating that 3-in-a-row on one
+sub-mechanism is a legitimate CHECK-IN point, not automatically a STOP point; the human, not the
+loop's own momentum, gets to decide which.
+
+**How to apply:** in any plan-review loop, track which mechanism/section each round's finding
+targets; the moment 2 consecutive rounds have both narrowed on the SAME one, write the
+round-3-of-that-streak dispatch's own instructions to explicitly check that condition against the
+fresh verdict and checkpoint via `AskUserQuestion` if it still holds — don't wait until you're
+holding the result to decide whether it "feels like" oscillation.
+
+## Codex alone for plan/code review
+
+**What happened (literary-translator #138, 2026-07-12).** During a `/goal-la` plan-hardening loop,
+each round ran BOTH the mandatory `codex:codex-rescue` review AND an independent 16–30-agent
+Workflow review (5 adversarial lenses + a skeptic refutation pass) of the same plan file. Across
+rounds the parallel pass did catch real defects codex missed (empirically running `jsonschema` to
+prove a `source:false` error strips the property name; an `obsidian.md` spec-of-record
+contradiction) and gave high-confidence convergence signal. **But the user stopped it:** each
+parallel pass burned ~1.5–2.8M subagent tokens and ~15–20 min, and the marginal correctness wasn't
+worth that cost at the user's usage tier.
+
+**The rule for this project:**
+- Plan review and code review → **codex (`Agent(subagent_type=codex:codex-rescue)`) ALONE.** It is
+  the required gate; do not pair it with an independent parallel-agent Workflow review by default.
+- Let an already-running parallel review finish (read-only, sunk cost); just launch no more.
+- **Ultracode being on is NOT a licence to double up reviewers.** Ultracode says "token cost is not
+  a constraint" — but a live, explicit user budget instruction overrides that. When the user is
+  watching limits, respect the budget over ultracode's cost-insensitivity.
+- **When the parallel pass IS still fine:** only if the user explicitly asks for it ("cross-check
+  this", "run an independent review too"). Otherwise single-reviewer.

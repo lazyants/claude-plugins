@@ -27,8 +27,9 @@ Two rules dominate every edit here:
 - **references/hash-migration-impact.md** — read before editing ANY schema or script, or before
   editing `canon.json` content: the five hash surfaces (cache_key composite / resume digest /
   render_version / migration-inert / canon-DATA `used_terms_hash`), their very different blast radii,
-  the sidecar rule for enriching canon without re-translating, and the derivation-regen dead-end that
-  BRICKS mature projects.
+  the sidecar rule for enriching canon without re-translating, and the derivation-regen recovery path
+  for a mature/zero-candidate project (`--restamp-derivation`, sanctioned since 1.15.0 — no longer a
+  permanent brick).
 - **references/canon-adjudication-audit.md** — read when porting or adjusting the
   `canon_adjudication_audit.py` gate: the 4 human-adjudication categories mapped onto canon.json's
   entity-less model, the key / fatal / blocking design, and the reusable spec-port methodology.

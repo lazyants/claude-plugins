@@ -11,6 +11,8 @@ Core rule, restated: **squash-merge can ship stale content — verify from `orig
 - Stale-base branch → rebase onto a MOVED main
 - `gh pr merge --delete-branch` local error ≠ merge failure
 - "Already merged" right after a merge-confirm = the user merged via GitHub UI
+- Self-merge classifier also blocks at ScheduleWakeup SCHEDULE time
+- `gh pr create` needs `--head` when the local branch name differs from the pushed remote branch
 - `Closes #a, #b` auto-closes only the FIRST issue
 - Audit "what's genuinely unmerged?" in a SQUASH-merge repo
 - Handling the `lazy-ants-reviewer` (ped-ant) bot
@@ -61,6 +63,14 @@ On a public-marketplace drive the auto-mode classifier blocks a self-authored au
 
 - **Byte-identity of the shipped content** — `git diff --stat <your-local-commit> origin/main` is EMPTY ⇒ main == exactly your committed tree (no stale-squash, no peer contamination). This one check settles "who merged it / is it my content" fastest.
 - Merge commit subject == your PR title + `(#N)`; `gh pr view N --json state,mergedAt,mergeCommit` → `MERGED`; re-grep the version on `origin/main`; the auto-closed issues' `closedAt` matches the merge time.
+
+## Self-merge classifier also blocks at ScheduleWakeup SCHEDULE time
+
+The "needs explicit user OK to merge" rule (the classifier blocking a self-authored auto-merge, above) does not stop at live tool calls: a `ScheduleWakeup` call whose prompt instructed "if checks pass, squash-merge" was itself DENIED by the auto-mode classifier before it ever fired (verified 2026-07-10, PR #113) — it inspects the scheduled prompt's CONTENT for merge intent, not just live tool calls in the moment. So a fully-unattended "wait for the bot then merge" loop via `ScheduleWakeup` is **not buildable** for this repo; always schedule a check-status-ONLY wakeup and resurface to the user once the check resolves.
+
+## `gh pr create` needs `--head` when the local branch name differs from the pushed remote branch
+
+If the local branch was pushed under a different remote name (e.g. `git push origin worktree-foo:fix/foo`), `gh pr create` cannot infer the head ref and errors "you must first push the current branch to a remote, or use the --head flag" even though the push already succeeded. Pass the remote branch name explicitly: `gh pr create --head fix/foo`.
 
 ## `Closes #a, #b` auto-closes only the FIRST issue
 

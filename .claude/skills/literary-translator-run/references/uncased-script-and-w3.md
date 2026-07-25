@@ -42,6 +42,15 @@ The zero-name path above ACCEPTS blindness. To actually surface uncased proper n
 - **The `no_new_candidates` false-signal trap.** `glossary_batch_plan.py` emits `{"no_new_candidates": true}` for BOTH "every candidate is already in canon" (benign) and "the matcher is blind to this script" (a real miss) — identical signal, opposite meanings — and the SKILL.md glossary-skip branch assumes the benign one. So on an uncased script a skipped glossary pass is NOT evidence there are no names; without a `name_inventory` it means the detector never looked. Don't trust a zero a blind detector produced.
 - **Editing Hebrew `name_inventory` forms — bypass the `Edit` tool.** `Edit`'s `old_string` can silently fail to match a Hebrew/RTL block even when copy-pasted verbatim from a preceding `Read` (and retrying with `\uXXXX`-escaped vs. literal forms does not fix it). The moment `Edit` returns "String to replace not found" on an RTL block you just Read, switch to a `python3` script — locate the span via an ASCII marker on either side (`str.index`), build the replacement with explicit `\uXXXX` escapes for every Hebrew char (never a pasted glyph), and `Path.write_text()`. Authoring Hebrew letter-by-letter trades the match risk for a typo risk — a non-final vs. final letter form (regular `מ` where a word-final `ם` is required) that a skim of the surrounding English will NOT catch. So after the script runs, extract every Hebrew span (each string containing a codepoint in U+0590–U+05FF), print the deduped list, and eyeball each for correct final-letter forms (ך/ם/ן/ף/ץ at word-end) before trusting the file.
 
+## Debugging garbled matcher output: isolate config-correctness from input-quality
+
+When the name matcher's candidates look garbled on the real corpus (fragmented 2-3-char pieces),
+don't assume the language config/matcher itself is broken. Re-run the SAME config over a small,
+clean SYNTHETIC Hebrew sample (hand-typed known names in a known context) first. If the synthetic
+run correctly matches the exact expected names, the config is proven correct and the garble is an
+input-quality problem (a corrupted extraction — e.g. a PDF text layer with letters space-split and
+niqqud detached) rather than a matcher bug — fix the extraction, not the config.
+
 ## W3-canon-init
 
 A zero-candidate glossary writes no `canon.json`, which makes W3a's `segpack.py` halt. Seed the canon first, then build segpacks:
