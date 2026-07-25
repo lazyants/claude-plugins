@@ -383,18 +383,82 @@ def test_glossary_batch_dispatch_is_codex_and_schema_less():
     assert not has_schema(options), f"glossary batch dispatch must be schema-less (fire-and-forget): {options}"
 
 
+# The three sites that must issue the --check-batch command
+# character-identically (see checkBatchCmd()'s own comment in the template):
+# the resume precheck, the codex dispatch's own self-check, and the wait poll.
+CHECK_BATCH_CALL_SITES = ("batchPrecheckPrompt", "batchDispatchPrompt", "batchWaitPrompt")
+
+# The command as CODE. The "/scripts/" path prefix is the tell that separates
+# BUILDING the command from merely naming it in prose -- the template's prose
+# always says a bare "canon_validate.py --check-batch", never the script path.
+COMPOSED_CHECK_BATCH_LITERAL = "/scripts/canon_validate.py --check-batch"
+
+
 def test_glossary_batch_wait_is_a_bounded_poll_of_check_batch():
     wait_body = extract_function_body(GLOSSARY_SOURCE, "batchWaitPrompt")
     assert has_seq_poll_loop(wait_body), (
         f"batchWaitPrompt must contain a bounded `for i in $(seq 1 N)` poll:\n{wait_body}"
     )
-    assert "canon_validate.py" in wait_body and "--check-batch" in wait_body
+    # 1.16.0 extracted checkBatchCmd(), so the command's own literals no longer
+    # sit inline here -- follow that indirection rather than grepping this body
+    # for them. The intent is unchanged and asserted as the full CHAIN: the
+    # bounded poll runs the checkBatchCmd()-built command, and that command is
+    # canon_validate.py --check-batch.
+    assert "checkBatchCmd(batch.index, attempt)" in wait_body, (
+        "batchWaitPrompt must build its poll command from checkBatchCmd(), "
+        "scoped to THIS attempt's own fragment path"
+    )
+    poll = line_containing(wait_body, "for i in $(seq 1")
+    assert "checkCmd" in poll, (
+        f"the bounded poll must actually run the checkBatchCmd()-built command, got: {poll}"
+    )
+    cmd_line = line_containing(
+        extract_function_body(GLOSSARY_SOURCE, "checkBatchCmd"), "canon_validate.py"
+    )
+    assert "--check-batch" in cmd_line, (
+        f"the command the wait polls must be canon_validate.py --check-batch, got: {cmd_line}"
+    )
 
     wrapper = extract_function_body(GLOSSARY_SOURCE, "batchStep")
     wait_call_options = extract_agent_call_options(wrapper, "batchWaitPrompt(")
     assert not is_codex_dispatch(wait_call_options), (
         f"the wait POLL must be a Claude call (no agentType), got: {wait_call_options}"
     )
+
+
+def test_check_batch_command_is_composed_once_and_shared_by_all_three_sites():
+    """1.16.0 anti-drift lock -- the whole point of extracting checkBatchCmd().
+    The three sites have to issue this command character-identically (the
+    dispatch prompt literally tells the agent to re-run "exactly the command
+    above"), an invariant previously stated only in prose comments and enforced
+    nowhere. Lock both halves: the helper really IS the canon_validate.py
+    --check-batch command, and every one of the three sites goes THROUGH it
+    instead of composing the command itself."""
+    check_cmd_body = extract_function_body(GLOSSARY_SOURCE, "checkBatchCmd")
+    cmd_line = line_containing(check_cmd_body, "canon_validate.py")
+    assert "--check-batch" in cmd_line, (
+        f"checkBatchCmd must build the canon_validate.py --check-batch command, got: {cmd_line}"
+    )
+
+    composition_sites = GLOSSARY_SOURCE.count(COMPOSED_CHECK_BATCH_LITERAL)
+    assert composition_sites == 1, (
+        f"the --check-batch command must be composed in exactly ONE place, "
+        f"found {composition_sites} composition site(s)"
+    )
+    assert COMPOSED_CHECK_BATCH_LITERAL in check_cmd_body, (
+        "that single composition site must be checkBatchCmd itself"
+    )
+
+    for name in CHECK_BATCH_CALL_SITES:
+        body = extract_function_body(GLOSSARY_SOURCE, name)
+        assert "checkBatchCmd(" in body, (
+            f"{name} must issue the --check-batch command via checkBatchCmd(), "
+            f"never by composing it itself"
+        )
+        assert "/scripts/canon_validate.py" not in body, (
+            f"{name} must not compose a canon_validate.py command itself -- that "
+            f"is exactly the drift checkBatchCmd() exists to make impossible"
+        )
 
 
 # ---------------------------------------------------------------------------
