@@ -152,6 +152,31 @@ def line_containing(body, needle):
     return hits[0]
 
 
+def code_lines(body):
+    """`body` with every WHOLE-LINE `//` comment removed.
+
+    Every assertion below that claims a function DOES something must run
+    against this rather than against the raw slice. extract_function_body()
+    deliberately keeps a TRAILING comment -- the NEXT function's own lead
+    comment -- inside the previous function's slice, and these templates
+    document each helper in prose right above its caller, so the raw slice
+    routinely contains the very identifier the assertion is hunting for.
+    `"checkBatchCmd(" in body` was satisfied for batchDispatchPrompt by the
+    trailing comment "// checkBatchCmd() -- the same command DISPATCH's
+    self-check issues"; the dispatch could drop its self-check entirely and
+    the assertion still passed. A body that happens to have no trailing
+    comment (batchPrecheckPrompt) hides that, which is exactly why the loop
+    below now runs this over ALL THREE sites rather than trusting the one
+    site that was proved by mutation.
+
+    Only whole-line comments go: cutting each line at its first "//" would
+    also cut inside a string literal, and these templates push
+    natural-language prose that carries URLs."""
+    return "\n".join(
+        ln for ln in body.splitlines() if not ln.lstrip().startswith("//")
+    )
+
+
 # Numeric driver-timing consts, read straight off the template so the
 # "elapsed bound >= CODEX_DEADLINE_SEC" check is verified against the real
 # declared values, never a hardcoded guess.
@@ -207,6 +232,30 @@ def test_regression_catcher_helpers_actually_discriminate():
     assert line_containing("a foo b\nc bar d", "foo") == "a foo b"
     with pytest.raises(AssertionError):
         line_containing("foo\nfoo", "foo")
+
+    # code_lines() must drop a whole-line comment that MENTIONS the call while
+    # keeping the call itself -- the precise discrimination the three-site
+    # anti-drift lock below depends on.
+    commented = (
+        "function gamma(x) {\n"
+        "  return helper(x);\n"
+        "}\n"
+        "   // helper() -- gamma() issues it (see that helper)\n"
+    )
+    assert "helper(" in commented  # ...the raw slice cannot tell the two apart
+    stripped = code_lines(commented)
+    assert "return helper(x);" in stripped
+    assert "see that helper" not in stripped
+
+    # The exact false-green shape: the ONLY occurrence is in the trailing
+    # comment, so the raw slice says the call is there and code_lines() does not.
+    comment_only = "function delta() {\n  return 1;\n}\n// delta() issues helper()\n"
+    assert "helper(" in comment_only
+    assert "helper(" not in code_lines(comment_only)
+    # A string literal carrying "//" is code, not a comment, and must survive.
+    assert code_lines('  push("see https://example.invalid/x");') == (
+        '  push("see https://example.invalid/x");'
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -395,7 +444,7 @@ COMPOSED_CHECK_BATCH_LITERAL = "/scripts/canon_validate.py --check-batch"
 
 
 def test_glossary_batch_wait_is_a_bounded_poll_of_check_batch():
-    wait_body = extract_function_body(GLOSSARY_SOURCE, "batchWaitPrompt")
+    wait_body = code_lines(extract_function_body(GLOSSARY_SOURCE, "batchWaitPrompt"))
     assert has_seq_poll_loop(wait_body), (
         f"batchWaitPrompt must contain a bounded `for i in $(seq 1 N)` poll:\n{wait_body}"
     )
@@ -409,11 +458,18 @@ def test_glossary_batch_wait_is_a_bounded_poll_of_check_batch():
         "scoped to THIS attempt's own fragment path"
     )
     poll = line_containing(wait_body, "for i in $(seq 1")
-    assert "checkCmd" in poll, (
-        f"the bounded poll must actually run the checkBatchCmd()-built command, got: {poll}"
+    # Word-anchored, not a bare substring: `"checkCmd" in poll` is satisfied by
+    # any identifier that merely CONTAINS it, so a poll interpolating some
+    # unrelated `checkCmdFallback` would have passed while running a command
+    # this test never inspected.
+    assert re.search(r"\bcheckCmd\b", poll), (
+        f"the bounded poll must interpolate the checkBatchCmd()-built command "
+        f"itself (the exact `checkCmd` binding, not merely an identifier "
+        f"containing that name), got: {poll}"
     )
     cmd_line = line_containing(
-        extract_function_body(GLOSSARY_SOURCE, "checkBatchCmd"), "canon_validate.py"
+        code_lines(extract_function_body(GLOSSARY_SOURCE, "checkBatchCmd")),
+        "canon_validate.py",
     )
     assert "--check-batch" in cmd_line, (
         f"the command the wait polls must be canon_validate.py --check-batch, got: {cmd_line}"
@@ -433,14 +489,24 @@ def test_check_batch_command_is_composed_once_and_shared_by_all_three_sites():
     above"), an invariant previously stated only in prose comments and enforced
     nowhere. Lock both halves: the helper really IS the canon_validate.py
     --check-batch command, and every one of the three sites goes THROUGH it
-    instead of composing the command itself."""
-    check_cmd_body = extract_function_body(GLOSSARY_SOURCE, "checkBatchCmd")
+    instead of composing the command itself.
+
+    Every check here runs over code_lines(), never the raw slice. The prose
+    version of this test was tautological at one of the three sites: the
+    trailing comment carried into batchDispatchPrompt's slice ("//
+    checkBatchCmd() -- the same command DISPATCH's self-check issues") satisfied
+    `"checkBatchCmd(" in body` on its own, so replacing the dispatch's real
+    self-check line with "Then stop. Do not self-check." left this test GREEN --
+    verified by mutation. The lock had been proved on batchPrecheckPrompt, which
+    happens to carry no trailing comment; that one site is not evidence about
+    the other two, so the assertions below are proved separately at each."""
+    check_cmd_body = code_lines(extract_function_body(GLOSSARY_SOURCE, "checkBatchCmd"))
     cmd_line = line_containing(check_cmd_body, "canon_validate.py")
     assert "--check-batch" in cmd_line, (
         f"checkBatchCmd must build the canon_validate.py --check-batch command, got: {cmd_line}"
     )
 
-    composition_sites = GLOSSARY_SOURCE.count(COMPOSED_CHECK_BATCH_LITERAL)
+    composition_sites = code_lines(GLOSSARY_SOURCE).count(COMPOSED_CHECK_BATCH_LITERAL)
     assert composition_sites == 1, (
         f"the --check-batch command must be composed in exactly ONE place, "
         f"found {composition_sites} composition site(s)"
@@ -450,10 +516,11 @@ def test_check_batch_command_is_composed_once_and_shared_by_all_three_sites():
     )
 
     for name in CHECK_BATCH_CALL_SITES:
-        body = extract_function_body(GLOSSARY_SOURCE, name)
+        body = code_lines(extract_function_body(GLOSSARY_SOURCE, name))
         assert "checkBatchCmd(" in body, (
             f"{name} must issue the --check-batch command via checkBatchCmd(), "
-            f"never by composing it itself"
+            f"never by composing it itself -- and must ISSUE it in code, not "
+            f"merely be documented as issuing it in a neighbouring comment"
         )
         assert "/scripts/canon_validate.py" not in body, (
             f"{name} must not compose a canon_validate.py command itself -- that "
