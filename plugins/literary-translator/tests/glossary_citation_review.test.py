@@ -1433,6 +1433,7 @@ def _load_estimator_module():
     path = Path(__file__).resolve().parent / "batch_size_estimator.test.py"
     assert path.is_file(), f"sibling estimator test not found: {path}"
     spec = importlib.util.spec_from_file_location("_lt_estimator_seam_probe", path)
+    assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
