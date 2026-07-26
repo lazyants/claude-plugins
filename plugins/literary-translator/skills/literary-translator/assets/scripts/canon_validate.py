@@ -304,7 +304,7 @@ _COVERAGE_ENFORCED_ELSEWHERE = (
     "--verify-merged for the merged set"
 )
 # --approve-to snapshots the exact bytes of the ONE fragment --check-batch
-# validated, so the citation reviewer audits an immutable copy and the merge
+# validated, so the citation reviewer audits the approved snapshot and the merge
 # consumes that same copy. No other mode reviews a single pre-merge fragment,
 # so honoring --approve-to for one would snapshot bytes nothing reviewed --
 # the same false-success shape the source-forms refusal guards against.
@@ -838,66 +838,37 @@ def _load_batch_bytes(batch_path_str: str):
 
 
 def _write_approved_snapshot(path: Path, raw: bytes) -> None:
-    """CREATE-ONCE publication of the --approve-to snapshot, WITHIN ONE RUN: for
-    as long as the directory entry at `path` exists, exactly one writer's bytes
-    live there, and every other writer -- later OR concurrent -- either matches
-    them (idempotent no-op) or fails closed with them intact. The bound on that
-    guarantee is the entry's own lifetime; the run-start wipe is what ends it,
-    and the run-scope note at the foot of this docstring says what that costs.
+    """Publish `raw` at `path` CREATE-ONCE: write it to a unique tmp name, then
+    os.link() that into place. What this function does, and refuses:
 
-    The snapshot exists so the bytes a citation reviewer audits ARE the bytes the
-    merge later consumes. The reviewer audits approved_{i}_attempt_{n}.json and
-    the merge is pointed at that same path, so a second --approve-to landing
-    DIFFERENT bytes there -- a duplicate STEP-1 call, or two overlapping reviewer
-    dispatches for the same batch/attempt, both recurring orchestration failure
-    modes -- would silently hand the merge a fragment nobody reviewed.
+      * nothing at `path` yet -> the link publishes it;
+      * already there, SAME bytes -> idempotent no-op;
+      * already there, DIFFERENT bytes -> CanonValidationError naming the path,
+        with the bytes already published left untouched.
 
-    THE ATOMICITY IS os.link(), NOT AN EXISTENCE CHECK. A check-then-act guard
-    (`if path.exists(): refuse; else: os.replace(...)`) closes only the
-    SEQUENTIAL duplicate. Concurrent FIRST writers all observe an absent path,
-    all write, the last os.replace() silently wins, and NONE of them is told:
-    reviewer A audits bytes A, B lands bytes B, A returns CITATIONS_OK, and the
-    merge consumes B. What rules that out is os.link()'s create-once semantics
-    below -- NOT the race test. The readiness-handshake race in
-    tests/canon_approve_to.test.py is a probabilistic REGRESSION CHECK, which has
-    caught a check-then-act publish on more than one machine; it is not a proof
-    and nothing here rests on it. Its overlap gate establishes that two writers
-    were inside this function at the same time. It does NOT establish that two of
-    them observed `path` ABSENT, which is the interleaving that actually breaks
-    check-then-act -- and those two are different, because the tmp write below
-    happens BEFORE the publish, so writers can overlap while the publish itself
-    still serialises. Whether a given run reaches the breaking interleaving is
-    scheduling; that test is not deterministic and does not claim to be.
+    os.link() rather than `if path.exists(): refuse; else: os.replace(...)`: a
+    check-then-act guard closes only the SEQUENTIAL duplicate, because two
+    concurrent first writers both observe an absent path, both write, the later
+    os.replace() wins, and neither is told. os.link() puts the decision in the
+    publication itself, raising FileExistsError for the loser whatever it observed
+    beforehand. tests/canon_approve_to.test.py exercises this concurrently as a
+    regression check.
 
-    os.link() moves the decision into the publication itself: it raises
-    FileExistsError for the loser regardless of what anyone observed beforehand,
-    so the reviewer who audited the winning bytes is the reviewer whose bytes the
-    merge reads.
+    tmp-then-link rather than a plain O_CREAT|O_EXCL write to `path`, so the
+    published file is never a half-written fragment. The tmp name carries pid +
+    random bytes so concurrent writers cannot collide on it, and it is always
+    unlinked -- after a successful link the content lives on under `path`.
 
-    Writing the payload to a unique tmp name FIRST and linking it into place
-    keeps the published file all-or-nothing too: `path` never exists holding a
-    half-written fragment, which a plain O_CREAT|O_EXCL write to `path` could not
-    promise. The tmp name carries pid + random bytes so concurrent writers can
-    never collide on it, and it is always unlinked -- after a successful link the
-    content lives on under `path`.
+    SCOPE: create-once lasts only as long as the directory entry does, and
+    resume_setup.py's run-start wipe removes every approved_* file -- deliberately,
+    to stop a run adopting an orphaned dir's stale attempt -- which reopens the
+    slot. So this is bounded to one live run per run DIRECTORY -- directory, not
+    RUN_ID string; the pointer below says why. This function takes no lock and
+    binds no run identity into the snapshot.
 
-    Failing toward the already-published copy is the only safe direction: the
-    duplicate call is a caller defect and is reported as one, naming the path.
-
-    RUN SCOPE. os.link() is create-once only for as long as the directory entry
-    survives, and resume_setup.py's run-start wipe removes every approved_* file
-    on both its branches. That wipe is deliberate and right -- it stops a run from
-    adopting an orphaned run dir's stale attempt -- and it is also what REOPENS
-    this slot, so the guarantee above is bounded to one LIVE run per RUN_ID rather
-    than absolute. This function takes no lock and binds no run identity into the
-    snapshot; it rests on an OPERATIONAL PRECONDITION, the same species as the
-    single-writer note at the top of this module (canon.json, no locking of its
-    own, orchestrator-serialized).
-
-    The full statement -- what the snapshot guarantees, and every precondition it
-    presupposes -- is kept in ONE place and is not restated here: see
-    references/canon-and-glossary.md, "What the approved snapshot guarantees, and
-    the preconditions it rests on".
+    What the snapshot guarantees, and every precondition it rests on, is stated
+    once and not repeated here -- see references/canon-and-glossary.md, "What the
+    approved snapshot guarantees, and the preconditions it rests on".
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = path.parent / f".{path.name}.tmp.{os.getpid()}.{os.urandom(4).hex()}"
@@ -1807,7 +1778,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help=(
             "Only with --check-batch: on a PASS, atomically snapshot the "
             "EXACT validated bytes of the fragment to PATH so the citation "
-            "reviewer audits an immutable copy and the merge consumes that "
+            "reviewer audits the approved snapshot and the merge consumes that "
             "same copy. Writes nothing on failure. Refused in every other "
             "mode."
         ),
