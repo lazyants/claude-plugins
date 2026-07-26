@@ -116,6 +116,12 @@ def attempt_path(index: int, attempt: int) -> str:
     return f"{RUN_DIR}/out_{index}_attempt_{attempt}.json"
 
 
+def approved_path(index: int, attempt: int) -> str:
+    """The IMMUTABLE approved snapshot path -- what the review audits and, under
+    live, what merges (mirrors glossary_snapshot_ordering.test.py's helper)."""
+    return f"{RUN_DIR}/approved_{index}_attempt_{attempt}.json"
+
+
 # Reads the ATTEMPT number back out of any fragment path a rendered prompt
 # names. Lets one prompt's attempt number be compared against another's --
 # which is how the precheck's probe is tied to the retry loop's entry attempt
@@ -367,13 +373,22 @@ def test_rejected_citation_regenerates_then_approves_then_merges(tmp_path):
     assert "reason" not in out["result"]
     assert "glossary:merge" in order and "glossary:verify" in order
 
-    # 4. The merge received the APPROVED attempt's path -- and only it.
+    # 4. The merge received the APPROVED attempt's snapshot -- and only it. Under
+    # live the merge names the immutable snapshot, never the mutable attempt path.
     merge_prompt = prompts_for(out, "glossary:merge")[0]
-    assert attempt_path(0, 1) in merge_prompt, (
-        f"the merge must be handed the approved attempt-1 fragment; prompt was:\n{merge_prompt}"
+    assert approved_path(0, 1) in merge_prompt, (
+        f"the merge must be handed the approved attempt-1 snapshot; prompt was:\n{merge_prompt}"
+    )
+    assert attempt_path(0, 1) not in merge_prompt, (
+        "the live merge must name the approved snapshot, never the mutable "
+        f"attempt-1 fragment path; prompt was:\n{merge_prompt}"
     )
     assert attempt_path(0, 0) not in merge_prompt, (
         "the REJECTED attempt-0 fragment must never reach the merge command"
+    )
+    assert approved_path(0, 0) not in merge_prompt, (
+        "the REJECTED attempt-0 was never snapshotted, so its approved path must "
+        "not appear at the merge either"
     )
 
     # 5. The batch result records the approval, not merely readiness.
@@ -1044,8 +1059,8 @@ def test_stale_attempt_verdict_cannot_approve_a_later_attempt(tmp_path):
     assert out["result"]["merged"] is True
     assert out["result"]["batches"][0]["attempt"] == 2
     merge_prompt = prompts_for(out, "glossary:merge")[0]
-    assert attempt_path(0, 2) in merge_prompt
-    assert attempt_path(0, 1) not in merge_prompt
+    assert approved_path(0, 2) in merge_prompt
+    assert approved_path(0, 1) not in merge_prompt
 
 
 # ---------------------------------------------------------------------------
@@ -1096,10 +1111,12 @@ def test_resume_skipped_fragment_with_bad_citation_is_regenerated(tmp_path):
     )
     assert count_label(out, "glossary:wait:0") == 1
     # The regeneration went to a FRESH path, not back over the resumed bytes.
+    # Dispatch still writes the mutable attempt path; only the merge moved to the
+    # immutable snapshot.
     assert attempt_path(0, 1) in prompts_for(out, "glossary:dispatch:0")[0]
     assert out["result"]["merged"] is True
     assert out["result"]["batches"][0]["attempt"] == 1
-    assert attempt_path(0, 1) in prompts_for(out, "glossary:merge")[0]
+    assert approved_path(0, 1) in prompts_for(out, "glossary:merge")[0]
 
 
 def test_precheck_probes_the_attempt_the_retry_loop_actually_enters_at(tmp_path):
