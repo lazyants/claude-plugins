@@ -602,10 +602,13 @@ concurrent-writer test in `tests/canon_approve_to.test.py` starts eight
 processes that call `_write_approved_snapshot` DIRECTLY, not through
 `--approve-to`, and asserts that exactly one of them wins; it races the helper
 rather than the CLI on purpose, since the window is microseconds wide and full
-CLI runs would sample it only by luck. So it does catch this helper regressing
-to a check-then-act guard, which is what it is for, and it says nothing about
-the CLI. The `--check-batch … --approve-to` path is exercised separately, by
-the sequential tests in the same file. Take each for what it is.
+CLI runs would sample it only by luck. So it CAN catch this helper regressing
+to a check-then-act publish, and has caught one on more than one machine — but
+sampling is what makes such a regression likely to be caught, not certain to
+be. It says nothing about the CLI: that path is covered separately, by the
+sequential `--check-batch … --approve-to` tests for its behaviour, and by a
+wiring test pinning the CLI to publishing THROUGH this helper. Take each for
+what it is.
 
 Fail-closed follows from the snapshot being attempt-scoped as well: if the
 winning attempt was never approved, the `approved_{index}_attempt_{n}.json`
