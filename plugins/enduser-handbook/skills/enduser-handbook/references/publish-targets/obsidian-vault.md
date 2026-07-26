@@ -440,10 +440,38 @@ the one exception to "do all of these" — see its own conditional note below.
        "Found multiple '<group_title>' container bullets in <index_file> — curate the index manually, then re-run."
      - `{kind: 'not-a-list'}` — the index is not in the automatable nested-list subset (see
        "Nested-list automation limits" below): a YAML `nav:`, a bare path table, or a list
-       shape outside the bounded safe subset. Fall back to the existing manual halt, unchanged:
-       "Index <index_file> is not a headings-form file — add a '<group_title>' container and the chapter line for '<slug>' manually, then re-run. The next run recognizes the chapter line as a Markdown list row INDENTED TWO SPACES under the '<group_title>' container bullet, whose wikilink target is exactly '<index_relative_target>' — that is, a '- ' + group_title line followed by a '  - [[' + target + '|' + title + ']]' line; a Markdown link whose destination is that target plus '.md' is recognized too. A row placed at the left margin instead of under the container is reported as misplaced on the next run."
-       The next run's step 0 finds the line you added and proceeds — this convergence is
-       why step 0 always runs first.
+       shape outside the bounded safe subset. **Verify the named form before naming it — a
+       halt is convergent only if the exact pair it prescribes would actually be recognized on
+       the very next run, so check that, rather than promise it:**
+       1. build the candidate as its own two-line array: `- <group_title>`, then on the next
+          line `  - [[` + target + `|` + title + `]]` indented two spaces under it;
+       2. run `locateChapterLine(<candidate>, <index-relative-target>, {wikilink: true})`
+          (`assets/lib/chapter-paths.mjs`) on that two-line array alone, not the real index;
+       3. run the fixed-probe writer predicate on the same array —
+          `wireNestedListChapter(<candidate>, group_title, <fixed probe link>)`;
+       4. **exactly two physical lines, exactly one match, that match sitting on the indented
+          chapter line (not the container line), and the predicate returning
+          `{kind: 'inserted'}`** — the pair is representable — emit the convergent halt naming
+          it exactly:
+          "Index <index_file> is not a headings-form file — add a '<group_title>' container and the chapter line for '<slug>' manually, then re-run. The next run recognizes the chapter line as a Markdown list row INDENTED TWO SPACES under the '<group_title>' container bullet, whose wikilink target is exactly '<index_relative_target>' — that is, a '- ' + group_title line followed by a '  - [[' + target + '|' + title + ']]' line; a Markdown link whose destination is that target plus '.md' is recognized too. A row placed at the left margin instead of under the container is reported as misplaced on the next run."
+          The next run's step 0 finds the line you added and proceeds — but only for a
+          `group_title`, target and title the gate accepts — this convergence is why step 0
+          always runs first.
+       5. **anything else** — the gate rejects the pair — measured causes include an ordinary
+          newline inside the title, `|`/`#`/`^`/`]` in the wikilink target, and a `group_title`
+          the writer's own bullet grammar refuses (padded with extra whitespace, or carrying
+          markup). Emit the plain, unchanged 1.10.0 halt instead, with no named form and no
+          convergence claim:
+          "Index <index_file> is not a headings-form file — add a '<group_title>' container and the chapter line for '<slug>' manually, then re-run."
+          The operator is no worse off than before 1.11.0 here — this halt can repeat verbatim
+          on the next run, exactly as it always has. The gate never names a pair that would not
+          converge, but it also never claims convergence it has not checked.
+          The gate is checked on the candidate's own isolated two-line array; the next run
+          instead scans the pair inside the real index, so the two can still disagree on
+          exactly one axis — an inert region. A representable pair the operator pastes inside a
+          fenced code block or an HTML comment is blanked by the index view and is reported
+          absent again, repeating this same halt rather than converging; it never produces a
+          false completion.
 
    **Manual group migration is a different halt, not part of establishment.** A manifest
    edit that changes a retained entry's `group` or `group_title`, or removes a grouped
