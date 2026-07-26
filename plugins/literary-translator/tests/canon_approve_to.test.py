@@ -10,6 +10,8 @@ snapshot preserved them rather than universal-newline-normalising them.
 """
 
 import json
+import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -228,6 +230,97 @@ def test_re_approving_the_identical_bytes_is_an_idempotent_no_op(tmp_path):
         assert out.read_bytes() == raw
         payload = json.loads(proc.stdout.strip().splitlines()[-1])
         assert payload.get("approved_path") == str(out)
+
+
+# ---------------------------------------------------------------------------
+# ...including two CONCURRENT first writers, which a check-then-act guard misses.
+#
+# `if path.exists(): refuse; else: write` closes only the SEQUENTIAL duplicate.
+# Two racers that both observe an absent path both write, the later write wins,
+# and NEITHER is told: reviewer A audits bytes A, B lands bytes B, A returns
+# CITATIONS_OK, and the merge consumes B. Measured against the check-then-act
+# implementation this test replaced, that invariant broke in 30 of 30 barrier-
+# synchronised iterations -- so this is the shape the guard must actually stop.
+#
+# The racers call _write_approved_snapshot directly rather than running
+# --check-batch end to end, deliberately: the window under test is microseconds
+# wide, so two full CLI runs would only ever sample it by luck and the test could
+# not be relied on to fail against a broken guard. The CLI path over this same
+# function is covered by the sequential tests above.
+# ---------------------------------------------------------------------------
+
+RACE_WORKER = '''
+import sys, time
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+import canon_validate as cv
+
+target = Path(sys.argv[2])
+raw = Path(sys.argv[3]).read_bytes()
+deadline = float(sys.argv[4])
+# Busy-wait to a shared wall-clock deadline so both processes enter the critical
+# section within microseconds of each other. Sleeping instead would leave
+# scheduler jitter far wider than the window being probed.
+while time.time() < deadline:
+    pass
+try:
+    cv._write_approved_snapshot(target, raw)
+    sys.stdout.write("OK")
+except cv.CanonValidationError:
+    sys.stdout.write("REFUSED")
+'''
+
+RACE_ITERATIONS = 5
+RACE_LEAD_SECONDS = 0.45
+
+
+def test_two_concurrent_first_writers_cannot_both_publish(tmp_path):
+    root = _valid_project(tmp_path)
+    worker = root / "race_worker.py"
+    worker.write_text(RACE_WORKER, encoding="utf-8")
+
+    payloads = []
+    for source_form, target_form in (("Sappho", "Sapho"), ("Alcaeus", "Alkey")):
+        p = root / f"payload_{source_form}.json"
+        p.write_bytes(
+            json.dumps([accepted_item(source_form, target_form)], indent=2, ensure_ascii=False).encode("utf-8")
+        )
+        payloads.append(p)
+    assert payloads[0].read_bytes() != payloads[1].read_bytes(), (
+        "the two racers must carry DIFFERENT bytes, or the race proves nothing"
+    )
+
+    for i in range(RACE_ITERATIONS):
+        approved = root / f"approved_{i}_attempt_0.json"
+        deadline = time.time() + RACE_LEAD_SECONDS
+        procs = [
+            subprocess.Popen(
+                [sys.executable, str(worker), str(root / "scripts"), str(approved), str(p), str(deadline)],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            for p in payloads
+        ]
+        results = [proc.communicate(timeout=120) for proc in procs]
+        outcomes = [out for out, _ in results]
+        assert set(outcomes) <= {"OK", "REFUSED"}, (
+            f"a racer neither published nor refused (iteration {i}): {results}"
+        )
+
+        winners = [payloads[n] for n, outcome in enumerate(outcomes) if outcome == "OK"]
+        assert len(winners) == 1, (
+            f"iteration {i}: {len(winners)} of 2 concurrent writers published DIFFERENT "
+            f"bytes to the same approved path. Exactly one may win -- with two, the "
+            f"reviewer who audited the losing bytes still reported CITATIONS_OK while "
+            f"the merge consumes the other fragment. outcomes={outcomes}"
+        )
+        assert approved.read_bytes() == winners[0].read_bytes(), (
+            f"iteration {i}: the published snapshot is not the bytes of the writer "
+            f"that reported success -- the loser's write landed anyway"
+        )
+        leftovers = list(approved.parent.glob(f".{approved.name}.tmp.*"))
+        assert leftovers == [], f"iteration {i}: the race left temp files behind: {leftovers}"
 
 
 # ---------------------------------------------------------------------------

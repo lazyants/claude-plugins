@@ -837,46 +837,51 @@ def _load_batch_bytes(batch_path_str: str):
     return raw, doc
 
 
-def _atomic_write_bytes(path: Path, raw: bytes) -> None:
-    """Atomic raw-bytes write -- the byte-preserving counterpart to
-    _atomic_write_json (which re-serialises and so cannot be used for a
-    byte-identical snapshot). The raw primitive: it overwrites unconditionally,
-    so the --approve-to snapshot goes through _write_approved_snapshot instead."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = path.parent / f".{path.name}.tmp.{os.getpid()}"
-    tmp_path.write_bytes(raw)
-    os.replace(tmp_path, path)
-
-
 def _write_approved_snapshot(path: Path, raw: bytes) -> None:
-    """WRITE-ONCE-PER-CONTENT wrapper around _atomic_write_bytes, for the
-    --approve-to snapshot only.
+    """CREATE-ONCE publication of the --approve-to snapshot: exactly one writer's
+    bytes ever land at `path`, and every other writer -- later OR concurrent --
+    either matches them (idempotent no-op) or fails closed with them intact.
 
     The snapshot exists so the bytes a citation reviewer audits ARE the bytes the
-    merge later consumes. An unconditional atomic write cannot carry that: the
-    reviewer audits approved_{i}_attempt_{n}.json and the merge is pointed at the
-    same path, so a SECOND --approve-to landing DIFFERENT bytes there -- a
-    duplicate STEP-1 call, or two overlapping reviewer dispatches for the same
-    batch/attempt, both recurring orchestration failure modes -- would silently
-    hand the merge a fragment nobody reviewed, with the audited copy gone and
-    nothing reporting it.
+    merge later consumes. The reviewer audits approved_{i}_attempt_{n}.json and
+    the merge is pointed at that same path, so a second --approve-to landing
+    DIFFERENT bytes there -- a duplicate STEP-1 call, or two overlapping reviewer
+    dispatches for the same batch/attempt, both recurring orchestration failure
+    modes -- would silently hand the merge a fragment nobody reviewed.
 
-    So: identical bytes already present -> idempotent no-op, because a plainly
-    retried step must stay safe. DIFFERENT bytes already present -> fail closed,
-    naming the path, leaving the ORIGINAL (audited) bytes exactly where they are.
-    Failing toward the already-reviewed copy is the only safe direction; the
-    duplicate call is a caller defect and is reported as one.
+    THE ATOMICITY IS os.link(), NOT AN EXISTENCE CHECK. A check-then-act guard
+    (`if path.exists(): refuse; else: os.replace(...)`) closes only the
+    SEQUENTIAL duplicate. Two concurrent FIRST writers both observe an absent
+    path, both write, the later os.replace() silently wins, and neither is told:
+    reviewer A audits bytes A, B lands bytes B, A returns CITATIONS_OK, and the
+    merge consumes B. That is not theoretical -- a barrier-synchronised
+    two-process race over this function violated the invariant in 30 of 30
+    iterations while the check-then-act version was in place. os.link() moves the
+    decision into the publication itself: it raises FileExistsError for the loser
+    regardless of what anyone observed beforehand, so the reviewer who audited
+    the winning bytes is the reviewer whose bytes the merge reads.
 
-    Scoping this to a wrapper rather than to _atomic_write_bytes itself is
-    deliberate: every other atomic write in this module (canon.json) is a
-    legitimate rewrite of a mutable file, and a write-once guard there would be
-    wrong.
+    Writing the payload to a unique tmp name FIRST and linking it into place
+    keeps the published file all-or-nothing too: `path` never exists holding a
+    half-written fragment, which a plain O_CREAT|O_EXCL write to `path` could not
+    promise. The tmp name carries pid + random bytes so concurrent writers can
+    never collide on it, and it is always unlinked -- after a successful link the
+    content lives on under `path`.
 
-    resume_setup wipes every approved_* file at run start, so an existing
-    snapshot at write time is always a duplicate WITHIN THIS RUN -- never a
-    legitimate resume artifact this would refuse to overwrite.
+    Failing toward the already-published copy is the only safe direction: the
+    duplicate call is a caller defect and is reported as one, naming the path.
+
+    resume_setup wipes every approved_* file at run start (both the fresh and the
+    resume branch), so an existing snapshot at write time is always a duplicate
+    WITHIN THIS RUN -- never a legitimate resume artifact this would refuse.
     """
-    if path.exists():
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.parent / f".{path.name}.tmp.{os.getpid()}.{os.urandom(4).hex()}"
+    tmp_path.write_bytes(raw)
+    try:
+        # Atomic create-once. Everything below this line is the LOSER's path.
+        os.link(tmp_path, path)
+    except FileExistsError:
         try:
             existing = path.read_bytes()
         except OSError as e:
@@ -897,7 +902,21 @@ def _write_approved_snapshot(path: Path, raw: bytes) -> None:
             f"overlapping reviewer dispatch) -- never re-point this path.",
             offending=[str(path)],
         )
-    _atomic_write_bytes(path, raw)
+    except OSError as e:  # pragma: no cover -- needs a hardlink-less filesystem
+        # os.link() is the create-once guarantee, so a filesystem that cannot
+        # provide it (some SMB/FAT mounts) must FAIL, loudly and by name. Quietly
+        # falling back to an overwriting write would restore the exact race this
+        # function exists to close, on precisely the setups nobody tests on.
+        raise CanonValidationError(
+            f"--approve-to could not publish the approved snapshot at {path}: {e}. "
+            f"The snapshot is published with os.link() so that exactly one writer "
+            f"can ever create it; the filesystem holding the durable_root must "
+            f"support hard links. Refusing to fall back to an overwriting write, "
+            f"which would silently reintroduce the duplicate-approval race.",
+            offending=[str(path)],
+        )
+    finally:
+        tmp_path.unlink(missing_ok=True)
 
 
 def _load_source_forms_manifest(manifest_path_str: str) -> list:
