@@ -9,9 +9,11 @@ for LF content. Only a fragment whose on-disk bytes contain CR proves the
 snapshot preserved them rather than universal-newline-normalising them.
 """
 
+import importlib.util
 import itertools
 import json
 import subprocess
+import uuid
 from pathlib import Path
 
 import pytest
@@ -263,8 +265,13 @@ def test_re_approving_the_identical_bytes_is_an_idempotent_no_op(tmp_path):
 #
 # The racers call _write_approved_snapshot directly rather than running
 # --check-batch end to end, deliberately: the window is microseconds wide, so
-# full CLI runs would only ever sample it by luck. The CLI path over this same
-# function is covered by the sequential tests above.
+# full CLI runs would only ever sample it by luck. Three separate claims live in
+# this file, in three separate tests, and none of them stands in for another: the
+# sequential tests above exercise the CLI's --approve-to BEHAVIOUR (idempotent on
+# identical bytes, fail-closed on different ones); the wiring test below pins that
+# the CLI publishes THROUGH this helper at all, which no behavioural test can see,
+# since a CLI that reimplemented the publish inline would keep them all green; and
+# this test exercises the helper itself under concurrency.
 # ---------------------------------------------------------------------------
 
 RACE_WORKER = '''
@@ -409,6 +416,93 @@ def test_concurrent_first_writers_cannot_both_publish(tmp_path):
         f"weakest ones to run this invariant against, so the budget is spent "
         f"looking for intersecting ones rather than banking whatever turns up."
     )
+
+
+# ---------------------------------------------------------------------------
+# WIRING: the --approve-to CLI path publishes THROUGH _write_approved_snapshot.
+#
+# Everything above tests either the helper's behaviour or the CLI's observable
+# output. Neither pins that the CLI goes through the helper at all, and that gap
+# is load-bearing: reimplement run_check_batch to publish inline with a
+# sequentially-correct check-then-replace, and every sequential test in this file
+# stays green (sequentially, it does still refuse a divergent overwrite) while the
+# concurrent test stays green too (it races the helper, not the CLI). Two
+# independent green signals, and simultaneous real --approve-to calls could
+# overwrite one another. This test is what goes red the moment the CLI stops
+# delegating -- deterministically, from one in-process call, with no timing.
+# ---------------------------------------------------------------------------
+
+def _load_staged_canon_validate(root: Path):
+    """The STAGED canon_validate.py, loaded as a module OBJECT.
+
+    run_check_batch resolves _write_approved_snapshot as a global of its own
+    module, at call time, so a patch has to land on THIS object's attribute.
+    Importing the same file again under a different name would build a second
+    module object whose globals run_check_batch never reads: the patch would
+    silently never fire and the test would pass while asserting nothing."""
+    scripts = root / "scripts"
+    sys.path.insert(0, str(scripts))
+    try:
+        name = f"canon_validate_wiring_{uuid.uuid4().hex}"
+        spec = importlib.util.spec_from_file_location(name, scripts / "canon_validate.py")
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[name] = module
+        spec.loader.exec_module(module)
+        return module
+    finally:
+        sys.path.remove(str(scripts))
+
+
+def test_the_approve_to_cli_path_publishes_through_the_helper(tmp_path, monkeypatch):
+    root = _valid_project(tmp_path)
+    module = _load_staged_canon_validate(root)
+    monkeypatch.chdir(root)
+
+    # The patch target must be the very namespace run_check_batch reads. Asserted
+    # rather than assumed: if this ever stops holding, the recording function
+    # below is never called and every other assertion here becomes vacuous.
+    assert module.run_check_batch.__globals__ is module.__dict__, (
+        "run_check_batch must resolve its globals from THIS module object, or the "
+        "patch lands in a namespace it never reads and this test proves nothing"
+    )
+
+    raw = _valid_fragment_bytes(b"\r\n")
+    frag = root / "frag.json"
+    frag.write_bytes(raw)
+    approved = root / "approved_0_attempt_0.json"
+
+    published = []
+    real_publish = module._write_approved_snapshot
+
+    def recording_publish(path, payload):
+        published.append((Path(path), bytes(payload)))
+        real_publish(path, payload)
+
+    monkeypatch.setattr(module, "_write_approved_snapshot", recording_publish)
+
+    exit_code = module.main([
+        "--research-mode", "offline",
+        "--check-batch", str(frag),
+        "--approve-to", str(approved),
+    ])
+
+    assert exit_code == 0, "the --approve-to CLI call failed"
+    assert len(published) == 1, (
+        f"the --approve-to CLI path must publish through _write_approved_snapshot, "
+        f"but the helper was called {len(published)} times. A run_check_batch that "
+        f"publishes inline keeps every other test in this file green while losing "
+        f"the create-once guarantee for concurrent callers"
+    )
+    called_path, called_bytes = published[0]
+    assert called_path == approved, (
+        f"the helper must be handed the --approve-to path; got {called_path}"
+    )
+    assert called_bytes == raw, (
+        "the helper must be handed the EXACT validated bytes -- the CRLF fragment "
+        "as it sits on disk, not a re-serialisation"
+    )
+    assert approved.read_bytes() == raw
 
 
 # ---------------------------------------------------------------------------
