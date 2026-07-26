@@ -920,8 +920,13 @@ function foldTargetForMatch(target, wikilink) {
  * divergent one alongside it (append-and-retain) — the link-integrity gate does not reject it).
  *
  * The sanitized view `locateChapterLine` scans — name-the-expression pattern (§5, 1.11.0):
- * extracted verbatim from `locateChapterLine` below, no change to that function's output, so the
- * one expression has exactly one implementation and is directly unit-testable in isolation.
+ * extracted verbatim from `locateChapterLine` below, so the one expression has exactly one
+ * implementation and is directly unit-testable in isolation. (The extraction itself changed
+ * nothing; `locateChapterLine`'s return shape later gained `index` on each match record, #330
+ * round-2 review — additive, not "no change": the `.d.mts` publishes the field. Every consumer in
+ * this repo reads `.length`, filters on `.containerTitle`, or reads `.index`, never a closed-shape
+ * compare, which is why nothing broke — but that is a checkable fact about this repo's consumers,
+ * not a property of the return shape itself.)
  * `locateChapterLine` is this export's only production caller; the present-line placement verifier
  * (`verifyNonHeadingPlacement`, #330) reaches the same view transitively, by delegating to
  * `locateChapterLine` itself for its match indices, not by calling this export directly — an
