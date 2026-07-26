@@ -144,6 +144,9 @@ export interface ValidateGroupsOptions {
 /** See chapter-paths.mjs: all D1 manifest-review gates; [1.6.0, #221] a group-free manifest now halts unconditionally on a duplicate flat slug instead of always returning []; [1.9.0, #310] options.perGroupSlugs (default false) scopes slug uniqueness per group. */
 export function validateGroups(entries: ChapterEntry[], options?: ValidateGroupsOptions): string[];
 
+/** See chapter-paths.mjs: [1.11.0] #330 the sanitized view locateChapterLine scans, extracted so verifyNonHeadingPlacement can share the exact same view. */
+export function indexView(indexLines: string[]): string[];
+
 /** See chapter-paths.mjs: the D6 step-0 index-line idempotency check; options.wikilink (default false) folds ONE terminal '.md' off both sides before comparison. */
 export function locateChapterLine(
   indexLines: string[],

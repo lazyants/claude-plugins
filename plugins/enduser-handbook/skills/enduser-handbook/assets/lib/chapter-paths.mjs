@@ -919,6 +919,24 @@ function foldTargetForMatch(target, wikilink) {
  * a divergent path-mode line stays unmatched, so step 0 appends the canonical row and RETAINS the
  * divergent one alongside it (append-and-retain) — the link-integrity gate does not reject it).
  *
+ * §5-#330 (1.11.0): the sanitized view `locateChapterLine` scans, named so `verifyNonHeadingPlacement`
+ * can share the exact same view rather than re-deriving it (a second recognizer is exactly the
+ * drift #330's delegation design exists to prevent). Extracted verbatim from `locateChapterLine`
+ * below — no change to that function's output.
+ *
+ * @param {string[]} indexLines
+ * @returns {string[]}
+ */
+export function indexView(indexLines) {
+  // R4-F2: sanitize the WHOLE index text (not line-by-line — an inert region can itself span
+  // multiple lines) through the shared stripper BEFORE any per-line processing, so a row sitting
+  // inside an HTML comment or a fenced code block can never report present:true (a false
+  // completion — the wiring is declared done when it never actually happened). join/split on '\n'
+  // round-trips exactly because stripInertContexts preserves every newline unmodified.
+  return stripInertContexts(indexLines.join('\n')).split('\n');
+}
+
+/**
  * @param {string[]} indexLines
  * @param {string} expectedTarget
  * @param {{wikilink?: boolean}} [options]
@@ -927,12 +945,7 @@ function foldTargetForMatch(target, wikilink) {
 export function locateChapterLine(indexLines, expectedTarget, options = {}) {
   const { wikilink = false } = options;
   const wanted = foldTargetForMatch(expectedTarget, wikilink);
-  // R4-F2: sanitize the WHOLE index text (not line-by-line — an inert region can itself span
-  // multiple lines) through the shared stripper BEFORE any per-line processing, so a row sitting
-  // inside an HTML comment or a fenced code block can never report present:true (a false
-  // completion — the wiring is declared done when it never actually happened). join/split on '\n'
-  // round-trips exactly because stripInertContexts preserves every newline unmodified.
-  const sanitizedLines = stripInertContexts(indexLines.join('\n')).split('\n');
+  const sanitizedLines = indexView(indexLines);
   const indexForm = classifyIndexForm(sanitizedLines);
   const matches = [];
   let containerTitle = null;

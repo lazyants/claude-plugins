@@ -22,6 +22,7 @@ import {
   legacyStaticEmbedPath,
   staticEmbedPath,
   validateGroups,
+  indexView,
   locateChapterLine,
   currentIndexExpectedTarget,
   classifyChapterWiring,
@@ -854,6 +855,40 @@ test('R7-F1 wrong-container fixture: the line exists but under the WRONG contain
   assert.equal(result.present, true);
   assert.equal(result.containerTitle, 'Billing');
   assert.notEqual(result.containerTitle, 'Admin', 'must not be treated as complete under the wrong container');
+});
+
+// =================================================================================================
+// [1.11.0] #330 prep — indexView, the exported "name the expression" extraction of
+// locateChapterLine's own sanitized view. Direct characterization tests: nothing exercised this
+// expression on its own before extraction, since it lived inline. The claim is "no change to
+// existing locator/writer outputs" (plan Locked scope decision 5), not "adds no behaviour" — this
+// extraction is itself a new public export.
+// =================================================================================================
+
+test('indexView [characterization]: a plain file with no inert content round-trips element-for-element', () => {
+  const indexLines = ['- Admin', '  - [Items](admin/items.md)'];
+  assert.deepEqual(indexView(indexLines), indexLines);
+});
+
+test('indexView [characterization]: an HTML comment spanning its own lines is blanked, matching stripInertContexts', () => {
+  const indexLines = ['<!--', '## Admin', '-->', '## Billing'];
+  const view = indexView(indexLines);
+  assert.equal(view.length, indexLines.length, 'newline-preserving 1:1 — same line count');
+  assert.ok(!/## Admin/.test(view.join('\n')), 'the commented-out heading must not survive the view');
+  assert.ok(/## Billing/.test(view.join('\n')), 'the real heading must survive the view');
+});
+
+test('indexView [parity]: locateChapterLine sees exactly what indexView produces — a match inside a multiline comment never reports present', () => {
+  // Ties the extraction back to its one caller (round-26: sharing the expression is true by
+  // construction, but the shared VIEW must actually be what the caller scans, not a duplicate).
+  const indexLines = ['<!--', '- [Items](admin/items.md)', '-->', '- Billing'];
+  const view = indexView(indexLines);
+  assert.ok(!/admin\/items\.md/.test(view.join('\n')), 'indexView blanks the commented-out target');
+  assert.equal(
+    locateChapterLine(indexLines, 'admin/items.md').present,
+    false,
+    'locateChapterLine must report the same absence indexView implies — one recognizer, not two',
+  );
 });
 
 // =================================================================================================
