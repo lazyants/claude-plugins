@@ -603,7 +603,7 @@ processes that call `_write_approved_snapshot` DIRECTLY, not through
 `--approve-to`, and asserts that exactly one of them wins; it races the helper
 rather than the CLI on purpose, since the window is microseconds wide and full
 CLI runs would sample it only by luck. So it CAN catch this helper regressing
-to a check-then-act publish, and has caught one on more than one machine — but
+to a check-then-act publish, and has caught one across separate runs — but
 sampling is what makes such a regression likely to be caught, not certain to
 be. It says nothing about the CLI: that path is covered separately, by the
 sequential `--check-batch … --approve-to` tests for its behaviour, and by a

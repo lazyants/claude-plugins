@@ -243,8 +243,11 @@ def test_re_approving_the_identical_bytes_is_an_idempotent_no_op(tmp_path):
 # CITATIONS_OK, and the merge consumes B.
 #
 # WHAT THIS TEST IS: a probabilistic regression check over concurrent writers. It
-# has caught a check-then-act publish on more than one machine. The guarantee
-# itself rests on os.link()'s create-once semantics, not on this test -- see
+# has caught a check-then-act publish in separate runs, at different attempt
+# indexes -- which is why the attempt budget below is load-bearing and not
+# decorative: a run where the catch lands on attempt 1 is a run a single-attempt
+# version of this test would have passed. The guarantee itself rests on
+# os.link()'s create-once semantics, not on this test -- see
 # references/canon-and-glossary.md, section:
 # "What the approved snapshot guarantees, and the preconditions it rests on".
 #
