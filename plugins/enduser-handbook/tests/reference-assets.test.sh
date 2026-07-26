@@ -1925,9 +1925,9 @@ has_in_section "static-md: grouped, line-absent, non-heading branch attempts nes
 has_in_section "static-md: nested-list multiple-container-bullets halt" \
   "$SMD" '### Grouped index wiring (`anyGroup` manifests only)' \
   "Found multiple '<group_title>' container bullets in <index_file> — curate the index manually, then re-run."
-has_in_section "static-md: grouped, line-present, non-heading branch narrows present-line placement rationale" \
+has_in_section "static-md: grouped, line-present, non-heading branch NAMES the #330 verifier it calls" \
   "$SMD" '### Grouped index wiring (`anyGroup` manifests only)' \
-  'present-line placement verifier runs on a non-heading index'
+  'verifyNonHeadingPlacement(indexLines, selectedTarget, group_title)'
 has_in_section "static-md: Nested-list automation limits — plain-label allowlist boundary" \
   "$SMD" '### Nested-list automation limits' \
   'a character allowlist cannot prove such a label renders equal'
@@ -1938,9 +1938,9 @@ has_in_section "static-md: Nested-list automation limits — bare-path refusal (
 # obsidian-vault.md — everything below lives directly under the shared H2: unlike static-md.md,
 # there is no intervening H3 for the grouped branch, so "### Nested-list automation limits" is the
 # ONLY child H3 and it comes after all of this content (line order verified against the doc).
-has_in_section "obsidian-vault: non-heading Step-0 branch narrows present-line placement rationale" \
+has_in_section "obsidian-vault: non-heading Step-0 branch NAMES the #330 verifier it calls" \
   "$OMD" '## INDEX wiring (do all of these on every chapter create/update)' \
-  'no present-line placement verifier runs here (placement verification'
+  'call `verifyNonHeadingPlacement(indexLines, selectedTarget, group_title,'
 has_in_section "obsidian-vault: container-resolution scope note (headings-form vs bounded nested-list)" \
   "$OMD" '## INDEX wiring (do all of these on every chapter create/update)' \
   'Container resolution** (headings-form index — resolved by heading here; a bounded'
@@ -1963,9 +1963,9 @@ has_in_section "obsidian-vault: Nested-list automation limits — bare-path refu
 has_in_section "revalidation: manual group-migration recipe step 3 covers a nested-list container bullet" \
   "$REVAL" '### The manual group-migration recipe' \
   'creating the container (a `##` heading, or a bullet for a nested-list index) first'
-has_in_section "revalidation: group_title-changed fact narrows non-heading placement to explicit confirmation" \
+has_in_section "revalidation: group_title-changed fact now names the #330 verifier, not explicit confirmation" \
   "$REVAL" '### Terminal-state convergence checklist' \
-  'no present-line placement verifier runs, and raw string presence is gameable'
+  'the #330 placement verifier (`verifyNonHeadingPlacement`) checks the container labeling'
 
 # Structural pin (independent of the awk has_in_section engine above): parseHeadings/findOwner from
 # assets/lib/md-structure.mjs — the SAME primitive tests/md-structure.test.mjs uses for its 6 real
