@@ -1880,6 +1880,263 @@ test('wireNestedListChapter accept/decline invariance [pins the #330 fixed-probe
 });
 
 // =================================================================================================
+// [1.11.0 round 11] verifyNonHeadingPlacement TITLE-SHAPE x LINK-MODE x PLACEMENT matrix — exists so
+// a false CLAIM about what a construct-bearing chapter-row TITLE does to the verifier's verdict
+// fails a TEST, not merely a reworded needle in reference-assets.test.sh (which only pins that the
+// adapter PROSE didn't drift — it structurally cannot prove the prose TRUE). Four claims about this
+// exact surface were measured false across three review rounds, all three-reviewer-clean:
+//   round 8:  promised `misplaced` unconditionally for a mis-nested row.
+//   round 9:  "a non-plain title is never reported misplaced" — false: a backslash-escaped title
+//             ("A\.B") is DECODED to plain ("A.B") by parseNestedLabel's mdlink branch and IS
+//             reported misplaced in path mode (see the backslashEscape row, path/margin cell).
+//   round 9:  "markup breaking the target halts as inconsistent" — an ADAPTER-level control-flow
+//             claim (the verifier is never CALLED for that input), not a property of
+//             verifyNonHeadingPlacement itself — out of this module's scope, not re-tested here.
+//   round 10: "turns on what the title RENDERS as" — false twice, both isolated below: (a) a
+//             wikilink ALIAS is never escape-decoded (parseNestedLabel's wikilink branch has no
+//             decodeMarkdownEscapes call, unlike its mdlink branch) — the SAME backslash-escaped
+//             title is misplaced in path mode but unverifiable in wikilink mode (backslashEscape
+//             row, path vs wiki columns); (b) an HTML entity is decoded NOWHERE in this module, so
+//             it behaves like a literal stray "&" in BOTH modes, never like the character it would
+//             actually render as (htmlEntity row — unverifiable in both columns, never diverging the
+//             way a real renderer would).
+//
+// Every cell is MEASURED against the real module (a probe script run against the shipped file, not
+// hand-derived) — `target` is whichever selectedTarget makes locateChapterLine report exactly ONE
+// match for that row's real content; four shapes do NOT resolve to the intended chapter destination
+// at all (see each row's own comment) and that divergence is itself part of what this table pins —
+// if any assertion below ever regresses to `{kind:'inconsistent'}`, that means the row's measured
+// `target` stopped matching, which is exactly as informative a failure as a wrong `kind`.
+// `wikilink:false` and `wikilink:true` content is genuinely parallel (the same `label` text, placed
+// as a markdown-link label vs a wikilink alias) so a path/wiki verdict difference in the table is a
+// real MODE difference (the round-10 axis), never an artifact of differently-worded fixtures.
+// =================================================================================================
+
+// One row per row-title shape. `label` is the literal text inside the outer link label (path mode:
+// `[label](guide/items.md)`) or wikilink alias (wiki mode: `[[guide/items|label]]`) — the SAME
+// `label` string drives both modes. `margin`/`nested` record the expected `.kind` at EACH placement,
+// per mode: isPlainLabel is a CONTAINER-only gate (§5.1) — a nested/child row's own title shape
+// almost never changes the verdict (only a MARGIN row's title is ever gated by it), so most rows'
+// `nested` column reads `ok`/`ok` regardless of shape; where it does NOT (inlineCode), that is
+// itself a distinct, separately-documented mechanism, not a copy-paste slip.
+const TITLE_SHAPE_TABLE = [
+  {
+    shape: 'plain',
+    label: 'Items',
+    margin: { path: 'misplaced', wiki: 'misplaced' },
+    nested: { path: 'ok', wiki: 'ok' },
+  },
+  {
+    shape: 'backslashEscape',
+    label: 'A\\.B',
+    // round 9 + round 10(a): path DECODES the escape ("A.B", plain) -> misplaced; wiki does NOT
+    // decode the alias ("A\.B" survives with its literal backslash, non-plain) -> unverifiable.
+    // Red-before-green: a scratch mutant that adds decodeMarkdownEscapes to parseNestedLabel's
+    // wikilink branch flips ONLY the wiki/margin cell here (path/margin and every htmlEntity cell
+    // stay unchanged under that same mutant) — see this teammate's report for the measured run.
+    margin: { path: 'misplaced', wiki: 'unverifiable' },
+    nested: { path: 'ok', wiki: 'ok' },
+  },
+  {
+    shape: 'htmlEntity',
+    label: 'A&#46;B',
+    // round 10(b): decoded in NEITHER mode -> unverifiable in both columns (a literal "&" is always
+    // forbidden, isPlainLabel's own char class). Red-before-green: a scratch mutant that has
+    // isPlainLabel decode a "&#NNN;" run before testing flips ONLY this row's margin cells (both
+    // modes, since isPlainLabel is mode-agnostic) — see this teammate's report for the measured run.
+    margin: { path: 'unverifiable', wiki: 'unverifiable' },
+    nested: { path: 'ok', wiki: 'ok' },
+  },
+  {
+    shape: 'ampersand',
+    label: 'A&B',
+    margin: { path: 'unverifiable', wiki: 'unverifiable' },
+    nested: { path: 'ok', wiki: 'ok' },
+  },
+  {
+    shape: 'emphasis',
+    label: '*A*',
+    margin: { path: 'unverifiable', wiki: 'unverifiable' },
+    nested: { path: 'ok', wiki: 'ok' },
+  },
+  {
+    shape: 'inlineCode',
+    label: '`A`',
+    // A real (balanced) inline-code span anywhere in the file trips prepareIndexLines' own
+    // whole-file inert-content refusal (stripInertContexts blanks the span; the resulting
+    // SAN[i] !== fm[i] mismatch declines the FILE, chapter-paths.mjs step 6) BEFORE isPlainLabel is
+    // ever consulted — unverifiable at BOTH placements, not just margin. Structurally distinct from
+    // every other row here: it is the only one that is unverifiable when correctly nested.
+    margin: { path: 'unverifiable', wiki: 'unverifiable' },
+    nested: { path: 'unverifiable', wiki: 'unverifiable' },
+  },
+  {
+    // extractLineTargets has no nested-bracket support (its own documented limit,
+    // findLinkOpeners/findMarkdownLinkGroups): the FIRST "]...(" pair found becomes THE link, so a
+    // genuine nested link inside the outer label steals the destination — target is 'x' (the
+    // NESTED link's own destination), never 'guide/items.md'/'guide/items'. Once that is accounted
+    // for, the outer label itself falls to the RAW kind (it contains '[' and ']') — non-plain at
+    // margin, irrelevant when nested.
+    shape: 'nestedLink',
+    label: 'A [nested](x) B',
+    target: () => 'x',
+    margin: { path: 'unverifiable', wiki: 'unverifiable' },
+    nested: { path: 'ok', wiki: 'ok' },
+  },
+  {
+    shape: 'nestedImage',
+    label: 'A ![alt](y) B',
+    target: () => 'y',
+    margin: { path: 'unverifiable', wiki: 'unverifiable' },
+    nested: { path: 'ok', wiki: 'ok' },
+  },
+  {
+    // Reference-style "[text][ref]" is not "](" — findMarkdownLinkGroups never opens on it, and
+    // WIKILINK_TARGET_RE cannot span the embedded ']'. Neither link syntax is recognized AT ALL, so
+    // extractLineTargets' bare-YAML fallback takes the WHOLE row content (marker stripped) as the
+    // target — `target` is a function of the actual row content, not a fixed destination string.
+    shape: 'referenceLink',
+    label: 'A [text][1] B',
+    target: (content) => content,
+    margin: { path: 'unverifiable', wiki: 'unverifiable' },
+    nested: { path: 'ok', wiki: 'ok' },
+  },
+  {
+    // Same "no link syntax recognized at all" mechanism as referenceLink above — an unescaped ']'
+    // breaks both findMarkdownLinkGroups' and WIKILINK_TARGET_RE's closing-delimiter search.
+    shape: 'unescapedBracket',
+    label: 'A]B',
+    target: (content) => content,
+    margin: { path: 'unverifiable', wiki: 'unverifiable' },
+    nested: { path: 'ok', wiki: 'ok' },
+  },
+];
+
+for (const row of TITLE_SHAPE_TABLE) {
+  for (const mode of ['path', 'wiki']) {
+    const wikilink = mode === 'wiki';
+    const content = wikilink ? `[[guide/items|${row.label}]]` : `[${row.label}](guide/items.md)`;
+    const target = row.target ? row.target(content) : wikilink ? 'guide/items' : 'guide/items.md';
+    for (const placement of ['margin', 'nested']) {
+      const expectedKind = row[placement][mode];
+      test(`verifyNonHeadingPlacement title-shape matrix [round-11]: ${row.shape} / ${mode} / ${placement} -> ${expectedKind}`, () => {
+        const indexLines = placement === 'margin' ? [`- ${content}`] : ['- Admin', `  - ${content}`];
+        const result = verifyNonHeadingPlacement(indexLines, target, 'Admin', { wikilink });
+        assert.equal(
+          result.kind,
+          expectedKind,
+          `${row.shape}/${mode}/${placement}: expected ${expectedKind}, got ${JSON.stringify(result)}`,
+        );
+        if (expectedKind === 'misplaced') assert.equal(result.foundContainer, null);
+      });
+    }
+  }
+}
+
+// =================================================================================================
+// [1.11.0 round 11-b] adapter composition flow — the duplicate-insert warning (static-md.md /
+// obsidian-vault.md step-4 disclosure paragraph). The title-shape matrix above deliberately drives
+// verifyNonHeadingPlacement with each shape's own MEASURED (sometimes hijacked) target, so it can
+// isolate placement-verification in isolation — that is NOT what the real adapter does. The real
+// adapter always searches for the chapter's REAL expected target. For the four shapes that corrupt
+// destination extraction (a nested link, a nested image, a reference link, or an unescaped ']' in
+// the title), that search finds NOTHING — even when the row already sits correctly nested under
+// the container — so step 0 reports the chapter absent, `wireNestedListChapter` has no membership
+// check of its own, and a SECOND row is inserted; the next run finds the new row and reports `ok`,
+// while the original malformed row lingers as a silent, undetected duplicate (the adapters' own
+// step-4 disclosure paragraph, static-md.md and obsidian-vault.md, "Place such a row correctly
+// under the container ... step 0 still reports the chapter absent"). This section drives that
+// EXACT sequence — step 0, branch, write, effect, re-run — with the real functions and the real
+// (non-hijacked) target; the title-shape matrix above cannot cover it by construction, because it
+// passes the hijacked target on purpose to exercise the isPlainLabel path instead.
+// =================================================================================================
+
+const DUPLICATE_INSERT_SHAPES = {
+  nestedLink: 'A [nested](x) B',
+  nestedImage: 'A ![alt](y) B',
+  referenceLink: 'A [text][1] B',
+  unescapedBracket: 'A]B',
+};
+
+for (const mode of ['path', 'wiki']) {
+  const wikilink = mode === 'wiki';
+  const realTarget = wikilink ? 'guide/items' : 'guide/items.md';
+  const realLink = wikilink ? '[[guide/items|Items]]' : '[Items](guide/items.md)';
+  for (const [shape, label] of Object.entries(DUPLICATE_INSERT_SHAPES)) {
+    const malformedRow = wikilink ? `[[guide/items|${label}]]` : `[${label}](guide/items.md)`;
+    test(`adapter composition flow [round-11-b, mutation-confirmed]: ${shape} / ${mode}, already correctly nested, still silently duplicates`, () => {
+      const indexLines = ['- Admin', `  - ${malformedRow}`];
+
+      // step 0: the adapter searches for the REAL target, never the shape's own hijacked one.
+      const step0 = locateChapterLine(indexLines, realTarget, { wikilink });
+      assert.equal(step0.matches.length, 0, "the malformed row's own corrupted destination must never satisfy the real target");
+
+      // branch: line-absent -> the adapter calls the writer, which has no membership check.
+      const write = wireNestedListChapter(indexLines, 'Admin', realLink);
+      assert.equal(write.kind, 'inserted');
+      assert.equal(write.created, false, 'the "Admin" container already exists — this is a CHILD insert, not a create');
+
+      // effect: row count grew by exactly one, and the OLD malformed row survives verbatim — this
+      // is a DUPLICATE, never a replacement. Mutation-confirmed (scratch-only, never run against
+      // the shared tree): a mutant that gives wireNestedListChapter's single-container branch a
+      // membership check (skip the insert when chapterLink's own destination substring already
+      // appears among the container's existing children) flips every assertion in this test —
+      // `write.newLines` comes back byte-identical to `indexLines` (grew: 0, not 1), the re-run
+      // below finds 0 matches instead of 1, and the verdict comes back `inconsistent` instead of
+      // `ok` — for all 8 (shape × mode) cells in this group. The five contrast fixtures below never
+      // call wireNestedListChapter at all, so that same mutant leaves every one of them unchanged.
+      assert.equal(write.newLines.length, indexLines.length + 1);
+      assert.ok(write.newLines.includes(`  - ${malformedRow}`), 'the original malformed row must survive untouched, not be replaced');
+
+      // re-run: the freshly-inserted row IS found this time and reports ok — completing SILENTLY
+      // on a now-duplicated index; nothing here ever flags the earlier, still-present row.
+      const rerun = locateChapterLine(write.newLines, realTarget, { wikilink });
+      assert.equal(rerun.matches.length, 1);
+      const verdict = verifyNonHeadingPlacement(write.newLines, realTarget, 'Admin', { wikilink });
+      assert.deepEqual(verdict, { kind: 'ok' });
+    });
+  }
+}
+
+// -------------------------------------------------------------------------------------------------
+// Contrast: a title that merely RENDERS non-plain (or decodes to plain in path mode) WITHOUT
+// corrupting its own row's target extraction. Precision note (measured directly here, not taken
+// from the adapter prose as given): these three shapes do NOT share one verdict — path-mode
+// backslashEscape decodes to a plain label and is `misplaced` (round 9's own finding, already
+// pinned by the title-shape matrix above); ampersand/emphasis stay non-plain in both modes and are
+// `unverifiable`. What they DO share, and what this group exists to isolate, is the one property
+// that actually rules out the duplicate-insert bug above: step 0 finds every one of them PRESENT
+// (never absent), because none of their own link destinations were ever corrupted — so the
+// writer's blind-insert branch is never reached at all, regardless of which of the two verdicts
+// placement-verification lands on afterward.
+// -------------------------------------------------------------------------------------------------
+
+const CONTRAST_SHAPES = [
+  { name: 'backslashEscape', mode: 'path', label: 'A\\.B', expected: { kind: 'misplaced', foundContainer: null } },
+  { name: 'ampersand', mode: 'path', label: 'A&B', expected: { kind: 'unverifiable' } },
+  { name: 'ampersand', mode: 'wiki', label: 'A&B', expected: { kind: 'unverifiable' } },
+  { name: 'emphasis', mode: 'path', label: '*A*', expected: { kind: 'unverifiable' } },
+  { name: 'emphasis', mode: 'wiki', label: '*A*', expected: { kind: 'unverifiable' } },
+];
+
+for (const { name, mode, label, expected } of CONTRAST_SHAPES) {
+  const wikilink = mode === 'wiki';
+  const realTarget = wikilink ? 'guide/items' : 'guide/items.md';
+  const row = wikilink ? `[[guide/items|${label}]]` : `[${label}](guide/items.md)`;
+  test(`adapter composition flow [round-11-b]: contrast, ${name} / ${mode}, target still resolves -> found, never duplicated`, () => {
+    const indexLines = [`- ${row}`]; // left margin, matching the adapters' own contrast framing
+    const step0 = locateChapterLine(indexLines, realTarget, { wikilink });
+    assert.equal(
+      step0.matches.length,
+      1,
+      "the row's own target resolves correctly, so it is FOUND -- the writer's blind-insert branch is never reachable from here, regardless of placement verdict",
+    );
+    const verdict = verifyNonHeadingPlacement(indexLines, realTarget, 'Admin', { wikilink });
+    assert.deepEqual(verdict, expected);
+  });
+}
+
+// =================================================================================================
 // D1 — validateGroups
 // =================================================================================================
 

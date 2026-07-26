@@ -2753,6 +2753,12 @@ echo "== #329 convergent halt strings and the inconsistent halt — exact, deriv
 # single quotes), and inside double quotes a bare backtick would open command substitution.
 # Measured when wired: each needle matches exactly ONE line in its adapter (the plain branch), and
 # the convergent line is excluded.
+has "static-md: #329 fallback keeps the UNCHANGED 1.10.0 halt (no convergent suffix)" \
+  "Index <index_file> is not a headings-form file — add a '<group_title>' container and the chapter line for '<slug>' manually, then re-run.\`" "$SMD"
+has "obsidian-vault: #329 fallback keeps the UNCHANGED 1.10.0 halt (no convergent suffix)" \
+  "Index <index_file> is not a headings-form file — add a '<group_title>' container and the chapter line for '<slug>' manually, then re-run.\"" "$OMD"
+
+echo "== #329 step-4 disclosure paragraph — maintained in parallel across both adapters =="
 # The step-4 limits paragraph is maintained in PARALLEL across both adapters. Its shared claims are
 # pinned per-adapter below, so a one-sided edit fails loudly — that is the invariant. Byte-equality
 # is NOT the invariant and must not be asserted: the closing headings-branch disclosure deliberately
@@ -2774,10 +2780,26 @@ GATE_SAFETY_SCOPE='scoped to what this PR governs: on the non-heading branch abo
 GATE_SAFETY_STATEMENT='never lets a MISPLACED row complete silently when it can verify placement'
 has "static-md: step-4 states the gate's limit BY CONSTRUCTION"      "$GATE_CONSTRUCTION_LIMIT" "$SMD"
 has "obsidian-vault: step-4 states the gate's limit BY CONSTRUCTION" "$GATE_CONSTRUCTION_LIMIT" "$OMD"
-has "static-md: step-4 SCOPES the safety statement to this PR's branch"      "$GATE_SAFETY_SCOPE" "$SMD"
-has "static-md: step-4 carries the narrowed safety statement"        "$GATE_SAFETY_STATEMENT" "$SMD"
-has "obsidian-vault: step-4 SCOPES the safety statement to this PR's branch" "$GATE_SAFETY_SCOPE" "$OMD"
-has "obsidian-vault: step-4 carries the narrowed safety statement"   "$GATE_SAFETY_STATEMENT" "$OMD"
+# GATE_SAFETY_SCOPE/GATE_SAFETY_STATEMENT are ONE sentence the house wrap breaks differently per
+# file (~101 columns in static-md.md; a 34-column orphan fragment in obsidian-vault.md) — a `has`
+# (line-based) pin on either half is only as stable as that wrap point, and it broke three times
+# this round. has_joined_in_section collapses the section's whitespace before matching, so the
+# needle can be the whole phrase again regardless of where the adapter wraps it. Each adapter's
+# safety sentence sits under a DIFFERENT heading (verified against the shipped files, not assumed
+# identical): static-md.md nests it under the anyGroup-only subsection; obsidian-vault.md has no
+# such subsection and states it directly under the top-level index-wiring section. Trade-off:
+# joined matching cannot detect that the sentence was split across a PARAGRAPH boundary (a wording
+# regression that inserted a blank line mid-sentence would still read as present) — acceptable
+# here because the two needles already pin the sentence's two HALVES independently, and a
+# paragraph split would still have to land inside the same section to pass at all.
+has_joined_in_section "static-md: step-4 SCOPES the safety statement to this PR's branch" \
+  "$SMD" '### Grouped index wiring (`anyGroup` manifests only)' "$GATE_SAFETY_SCOPE"
+has_joined_in_section "static-md: step-4 carries the narrowed safety statement" \
+  "$SMD" '### Grouped index wiring (`anyGroup` manifests only)' "$GATE_SAFETY_STATEMENT"
+has_joined_in_section "obsidian-vault: step-4 SCOPES the safety statement to this PR's branch" \
+  "$OMD" '## INDEX wiring (do all of these on every chapter create/update)' "$GATE_SAFETY_SCOPE"
+has_joined_in_section "obsidian-vault: step-4 carries the narrowed safety statement" \
+  "$OMD" '## INDEX wiring (do all of these on every chapter create/update)' "$GATE_SAFETY_STATEMENT"
 # The scoping is only honest if the OTHER branch is named. Round 4 refuted the unscoped claim
 # ("this branch never silently completes") with a frontmatter block whose body carries a heading:
 # that lands on the untouched headings branch, which completes with neither verification nor
@@ -2786,10 +2808,6 @@ has "obsidian-vault: step-4 carries the narrowed safety statement"   "$GATE_SAFE
 HEADINGS_BRANCH_DISCLOSURE='The headings branch is unchanged by this PR and already completes silently'
 has "static-md: step-4 names the unchanged headings-branch gap"      "$HEADINGS_BRANCH_DISCLOSURE" "$SMD"
 has "obsidian-vault: step-4 names the unchanged headings-branch gap" "$HEADINGS_BRANCH_DISCLOSURE" "$OMD"
-has "static-md: #329 fallback keeps the UNCHANGED 1.10.0 halt (no convergent suffix)" \
-  "Index <index_file> is not a headings-form file — add a '<group_title>' container and the chapter line for '<slug>' manually, then re-run.\`" "$SMD"
-has "obsidian-vault: #329 fallback keeps the UNCHANGED 1.10.0 halt (no convergent suffix)" \
-  "Index <index_file> is not a headings-form file — add a '<group_title>' container and the chapter line for '<slug>' manually, then re-run.\"" "$OMD"
 #
 # Pinned as EXACT strings so that wording drift is caught rather than absorbed. These began as
 # the strings settled during plan review; 1.11.0 CORRECTED them, so what is pinned now is the
@@ -2807,23 +2825,30 @@ has "obsidian-vault: #329 fallback keeps the UNCHANGED 1.10.0 halt (no convergen
 #   - The revision written to fix that swung the other way: it split on whether the row's RAW
 #     source characters are plain, and claimed markup that breaks the row's own target extraction
 #     reaches a mandatory `inconsistent` halt. Both claims were measured false. isPlainLabel is
-#     checked against the row's DECODED label (parseNestedLabel/extractLabel resolve Markdown
-#     escapes for a bracketed link/wikilink row before the check runs), not its raw characters, so
-#     a title like `A\.B` — non-plain in raw form — decodes to the plain `A.B` and IS reported
-#     misplaced; the rule is about the rendered label, never the source spelling. And
-#     `inconsistent` is not reachable through either shipped adapter's call site at all:
-#     verifyNonHeadingPlacement re-derives its match count via locateChapterLine using the exact
-#     arguments the caller already used to decide the line was present (chapter-paths.mjs) — a >1
-#     match halts earlier in step 0, a 0 match routes to the line-absent branch, so the verifier's
-#     own `matches.length !== 1` rule is a fail-closed guard against an internal contradiction, not
-#     a branch any real index file reaches from here.
+#     checked against the row's DECODED label for a MARKDOWN-LINK row (parseNestedLabel's mdlink
+#     branch calls decodeMarkdownEscapes on the label before the check runs), not its raw
+#     characters, so a title like `A\.B` — non-plain in raw form — decodes to the plain `A.B` and
+#     IS reported misplaced in path mode; the rule is about the rendered label, never the source
+#     spelling. That decode step is MODE-ASYMMETRIC, though (round 11, measured by the title-shape
+#     matrix in chapter-paths.test.mjs): parseNestedLabel's wikilink branch never calls
+#     decodeMarkdownEscapes on the alias, so the SAME `A\.B` title stays non-plain (its literal
+#     backslash survives) and is `unverifiable` instead in wikilink mode — "escape-decoded" is a
+#     path-mode-only fact, not a property of the rule in general. And `inconsistent` is not
+#     reachable through either shipped adapter's call site at all: verifyNonHeadingPlacement
+#     re-derives its match count via locateChapterLine using the exact arguments the caller already
+#     used to decide the line was present (chapter-paths.mjs) — a >1 match halts earlier in step 0,
+#     a 0 match routes to the line-absent branch, so the verifier's own `matches.length !== 1` rule
+#     is a fail-closed guard against an internal contradiction, not a branch any real index file
+#     reaches from here.
 # The rule, stated once, plainly: a left-margin row is reported MISPLACED exactly when its
-# extracted, escape-decoded label is plain in the same sense `group_title` must be; a row whose
-# decoded label still carries live Markdown markup is left `unverifiable` instead (left unverified,
-# not caught); `inconsistent` covers an internal contradiction, not a markup shape a caller can
-# trigger. Do NOT "restore" the plan-review text's unconditional promise, and do not re-add the
-# raw-characters split or the reachable-`inconsistent`-via-markup claim either — both were tried
-# here in turn, and both were measured false.
+# extracted label is plain in the same sense `group_title` must be — escape-decoded for a
+# markdown-link row, but compared in its raw, UNDECODED form for a wikilink alias (mode-asymmetric,
+# see above); a row whose (decoded-or-raw, per mode) label still carries live Markdown markup is
+# left `unverifiable` instead (left unverified, not caught); `inconsistent` covers an internal
+# contradiction, not a markup shape a caller can trigger. Do NOT "restore" the plan-review text's
+# unconditional promise, do not re-add the raw-characters split or the reachable-`inconsistent`-via-
+# markup claim, and do not flatten the decode step back to "escape-decoded" without the path/
+# wikilink qualifier — all three were tried here in turn, and all three were measured false.
 #
 # The old undifferentiated pin for the base 1.10.0 halt text (a plain `has` on the bare sentence,
 # no closing-delimiter anchor) is GONE on this branch, not merely holding alongside these: a
@@ -2835,11 +2860,11 @@ has "obsidian-vault: #329 fallback keeps the UNCHANGED 1.10.0 halt (no convergen
 # undelimited pin for the base sentence — it would silently stop discriminating the two branches
 # again.
 has "static-md: #329 convergent path-mode halt, exact string" \
-  'Index <index_file> is not a headings-form file — add a '\''<group_title>'\'' container and the chapter line for '\''<slug>'\'' manually, then re-run. The next run recognizes the chapter line as a Markdown list row INDENTED TWO SPACES under the '\''<group_title>'\'' container bullet, whose link destination is exactly '\''<index_relative_path>'\'' — that is, a '\''- '\'' + group_title line followed by a '\''  - ['\'' + title + '\''](<'\'' + path + '\''>)'\'' line, with the destination inside angle brackets and any '\'']'\'' in the title escaped as '\''\]'\''. A row placed at the left margin instead of under the container is reported as misplaced on the next run whenever its RENDERED title text is plain in the same sense as '\''group_title'\'' below ("Nested-list automation limits") — this turns on what the title renders as, not its raw source spelling; when the rendered title is not plain, markup that still lets the target resolve to that one line leaves the row unverified instead, like any other file outside the verified class, while markup that keeps the target from resolving at all is reported absent again — repeating this halt, never completing.' "$SMD"
+  'Index <index_file> is not a headings-form file — add a '\''<group_title>'\'' container and the chapter line for '\''<slug>'\'' manually, then re-run. The next run recognizes the chapter line as a Markdown list row INDENTED TWO SPACES under the '\''<group_title>'\'' container bullet, whose link destination is exactly '\''<index_relative_path>'\'' — that is, a '\''- '\'' + group_title line followed by a '\''  - ['\'' + title + '\''](<'\'' + path + '\''>)'\'' line, with the destination inside angle brackets and any '\'']'\'' in the title escaped as '\''\]'\''. Give the row a plain title — no Markdown markup, backslash escapes, or HTML entities in it — or the next run may not be able to confirm its placement; see "Nested-list automation limits" below for exactly what is recognized.' "$SMD"
 has "obsidian-vault: #329 convergent wikilinks-mode halt, exact string" \
-  'Index <index_file> is not a headings-form file — add a '\''<group_title>'\'' container and the chapter line for '\''<slug>'\'' manually, then re-run. The next run recognizes the chapter line as a Markdown list row INDENTED TWO SPACES under the '\''<group_title>'\'' container bullet, whose wikilink target is exactly '\''<index_relative_target>'\'' — that is, a '\''- '\'' + group_title line followed by a '\''  - [['\'' + target + '\''|'\'' + title + '\'']]'\'' line; a Markdown link whose destination is that target plus '\''.md'\'' is recognized too. A row placed at the left margin instead of under the container is reported as misplaced on the next run whenever its RENDERED title text is plain in the same sense as '\''group_title'\'' below ("Nested-list automation limits") — this turns on what the title renders as, not its raw source spelling; when the rendered title is not plain, markup that still lets the target resolve to that one line leaves the row unverified instead, like any other file outside the verified class, while markup that keeps the target from resolving at all is reported absent again — repeating this halt, never completing.' "$OMD"
+  'Index <index_file> is not a headings-form file — add a '\''<group_title>'\'' container and the chapter line for '\''<slug>'\'' manually, then re-run. The next run recognizes the chapter line as a Markdown list row INDENTED TWO SPACES under the '\''<group_title>'\'' container bullet, whose wikilink target is exactly '\''<index_relative_target>'\'' — that is, a '\''- '\'' + group_title line followed by a '\''  - [['\'' + target + '\''|'\'' + title + '\'']]'\'' line; a Markdown link whose destination is that target plus '\''.md'\'' is recognized too. Give the row a plain title — no Markdown markup, backslash escapes, or HTML entities in it — or the next run may not be able to confirm its placement; see "Nested-list automation limits" below for exactly what is recognized.' "$OMD"
 has "obsidian-vault: #329 convergent path-mode halt, exact string" \
-  'Index <index_file> is not a headings-form file — add a '\''<group_title>'\'' container and the chapter line for '\''<slug>'\'' manually, then re-run. The next run recognizes the chapter line as a Markdown list row INDENTED TWO SPACES under the '\''<group_title>'\'' container bullet, whose link destination is exactly '\''<index_relative_target>'\'' — that is, a '\''- '\'' + group_title line followed by a '\''  - ['\'' + title + '\''](<'\'' + target + '\''>)'\'' line, with the destination inside angle brackets and any '\'']'\'' in the title escaped as '\''\]'\''. A row placed at the left margin instead of under the container is reported as misplaced on the next run whenever its RENDERED title text is plain in the same sense as '\''group_title'\'' below ("Nested-list automation limits") — this turns on what the title renders as, not its raw source spelling; when the rendered title is not plain, markup that still lets the target resolve to that one line leaves the row unverified instead, like any other file outside the verified class, while markup that keeps the target from resolving at all is reported absent again — repeating this halt, never completing.' "$OMD"
+  'Index <index_file> is not a headings-form file — add a '\''<group_title>'\'' container and the chapter line for '\''<slug>'\'' manually, then re-run. The next run recognizes the chapter line as a Markdown list row INDENTED TWO SPACES under the '\''<group_title>'\'' container bullet, whose link destination is exactly '\''<index_relative_target>'\'' — that is, a '\''- '\'' + group_title line followed by a '\''  - ['\'' + title + '\''](<'\'' + target + '\''>)'\'' line, with the destination inside angle brackets and any '\'']'\'' in the title escaped as '\''\]'\''. Give the row a plain title — no Markdown markup, backslash escapes, or HTML entities in it — or the next run may not be able to confirm its placement; see "Nested-list automation limits" below for exactly what is recognized.' "$OMD"
 # ONE string covers both causes of `inconsistent` (zero matches and more than one), so nothing is
 # substituted beyond the slug and the file.
 has "static-md: inconsistent halt, one string for both causes" \

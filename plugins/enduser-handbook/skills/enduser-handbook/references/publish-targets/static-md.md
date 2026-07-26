@@ -312,7 +312,8 @@ These outcomes reuse the step-0 result computed above (`containerTitle`, `indexF
   - **`unverifiable`** ⇒ proceed — this file falls outside the verified class (see "Nested-list
     automation limits" below); the check ran and could not conclude — nothing further verifies
     placement, no confirmation is requested, and the run continues unverified, exactly as the
-    shipped 1.10.0 behaviour did on this path.
+    shipped 1.10.0 behaviour did on this path. See the safety statement below for what this does
+    and does not guarantee.
   - **`misplaced`** ⇒ halt reusing the exact headings-form wording above:
     `Chapter '<slug>' is listed in <index_file> under '<found_title>' instead of '<group_title>' — move the line (or curate the index manually), then re-run.`
     (`<found_title>` reads `(none)` when the line sits at the left margin, uncontained.)
@@ -370,7 +371,7 @@ These outcomes reuse the step-0 result computed above (`containerTitle`, `indexF
        `assets/lib/chapter-paths.mjs`) — the indented chapter line, never the container line at
        index 0; and the predicate returning `{kind: 'inserted'}`** ⇒ the pair is representable —
        emit the convergent halt naming it exactly:
-       `Index <index_file> is not a headings-form file — add a '<group_title>' container and the chapter line for '<slug>' manually, then re-run. The next run recognizes the chapter line as a Markdown list row INDENTED TWO SPACES under the '<group_title>' container bullet, whose link destination is exactly '<index_relative_path>' — that is, a '- ' + group_title line followed by a '  - [' + title + '](<' + path + '>)' line, with the destination inside angle brackets and any ']' in the title escaped as '\]'. A row placed at the left margin instead of under the container is reported as misplaced on the next run whenever its RENDERED title text is plain in the same sense as 'group_title' below ("Nested-list automation limits") — this turns on what the title renders as, not its raw source spelling; when the rendered title is not plain, markup that still lets the target resolve to that one line leaves the row unverified instead, like any other file outside the verified class, while markup that keeps the target from resolving at all is reported absent again — repeating this halt, never completing.`
+       `Index <index_file> is not a headings-form file — add a '<group_title>' container and the chapter line for '<slug>' manually, then re-run. The next run recognizes the chapter line as a Markdown list row INDENTED TWO SPACES under the '<group_title>' container bullet, whose link destination is exactly '<index_relative_path>' — that is, a '- ' + group_title line followed by a '  - [' + title + '](<' + path + '>)' line, with the destination inside angle brackets and any ']' in the title escaped as '\]'. Give the row a plain title — no Markdown markup, backslash escapes, or HTML entities in it — or the next run may not be able to confirm its placement; see "Nested-list automation limits" below for exactly what is recognized.`
     5. **anything else** ⇒ the gate rejects the pair — measured causes include an ordinary
        newline inside the title, a trailing `\` or a `>` in the target, and a `group_title` the
        writer's own bullet grammar refuses (padded with extra whitespace, or carrying markup).
@@ -379,21 +380,29 @@ These outcomes reuse the step-0 result computed above (`containerTitle`, `indexF
        `Index <index_file> is not a headings-form file — add a '<group_title>' container and the chapter line for '<slug>' manually, then re-run.`
        The operator is no worse off than before 1.11.0 here — this halt can repeat verbatim on
        the next run, exactly as it always has. The gate never names a pair that would not
-       converge, but it also never claims convergence it has not checked.
+       converge, but it also never claims convergence it has not checked. See below for what
+       either halt does and does not prove once it fires.
 
-    Item 4's convergence promise holds — but only for a `group_title`, target and title the gate
-    accepts: you halt once with instructions, the user adds the container and the chapter line,
-    and the re-run's step 0 finds the line present under the `indexForm: 'non-heading'` branch
-    above and proceeds. One operator-actionable warning belongs here too, and it is
-    narrower than "markup in the title": it applies to a title whose markup keeps the row's own
-    link target from resolving — a nested link, a nested image, a reference link. Place such a
-    row correctly under the container rather than at the left margin and the writer does not
-    refuse it, because step 0 still reports the chapter absent and `wireNestedListChapter` has
-    no membership check of its own, so it inserts a second row; the following run reports `ok`
-    on the newly inserted one while the earlier row lingers as a cosmetic duplicate
-    (pre-existing behaviour, not new in 1.11.0). A title that merely renders non-plain while its
-    target still resolves — an escape like `A\.B`, an ampersand, emphasis — does NOT do this: it
-    is found, and simply left unverified. Use a plain-text title to avoid both.
+    **After either halt — what the gate does and does not prove.** Item 4's convergence promise
+    holds — but only for a `group_title`, target and title the gate accepts: you halt once with
+    instructions, the user adds the container and the chapter line, and the re-run's step 0 finds
+    the line present under the `indexForm: 'non-heading'` branch above and proceeds. One
+    operator-actionable warning belongs here too, and it is narrower than "markup in the title":
+    it applies to a title whose markup keeps the row's own link target from resolving — a nested
+    link, a nested image, a reference link, or an unescaped `]` in the title (the halt above tells
+    the operator to escape it as `\]`; skipping that produces exactly this same failure). Place
+    such a row correctly under the container rather than at the left margin and the writer does
+    not refuse it, because step 0 still reports the chapter absent and `wireNestedListChapter` has
+    no membership check of its own, so it inserts a second row; the following run reports `ok` on
+    the newly inserted one while the earlier row lingers as a cosmetic duplicate (pre-existing
+    behaviour, not new in 1.11.0). A title whose markup still decodes to a plain label does not
+    merely get found: it is verified like any other plain title — `[A\.B](x.md)` decodes to the
+    plain `A.B` and is `misplaced` at the left margin, `ok` correctly nested. A title that stays
+    non-plain even after decoding — an ampersand, emphasis, an HTML entity — is what gets found
+    and simply left unverified: its own left-margin label fails the plain-label check, so the
+    whole scan declines and the adapter proceeds on `unverifiable` (see "Nested-list automation
+    limits" below for the measured table). Use a plain-text title to avoid needing either
+    distinction.
 
     The gate above is checked on the candidate's own isolated two-line array. **By construction,
     that proves only that the candidate pair is well-formed and would be recognized on its own —
@@ -403,9 +412,10 @@ These outcomes reuse the step-0 result computed above (`containerTitle`, `indexF
     - an inert region (a fenced code block, an HTML comment) blanks a representable pair, so it
       is reported absent again — repeating the convergent halt above, never completing;
     - a chapter row that exists only inside leading frontmatter is reported present by the
-      shipped locator and reaches `unverifiable` in the present-line branch above — the same
-      unverified fallback as that branch (see "Grouped index wiring" above): no confirmation is
-      requested (the shipped 1.10.0 writer/locator view disagreement, tracked separately as
+      shipped locator and reaches `unverifiable` under "Grouped entry, line present,
+      `indexForm: 'non-heading'`" above — the same unverified fallback that branch always falls
+      back to; see the safety statement below for what that does and does not guarantee (the
+      shipped 1.10.0 writer/locator view disagreement, tracked separately as
       #337 — see "Nested-list automation limits" below);
     - a real index whose surroundings carry YAML structure, a wildcard, or an ordered list makes
       the writer decline the whole file on the next run too: once the pair is present, step 0
@@ -462,10 +472,13 @@ entity, a **bare** backslash escape, inline code, a leading `#` heading or list 
 of collapsing whitespace — because a character allowlist cannot prove such a label renders equal
 to a plain `group_title`, so matching it could miss a real container or manufacture a
 duplicate. The escape refusal applies to the label's raw, literal spelling only: a whole-content
-markdown link or wikilink wrapper is unwrapped and its escape decoded before the plain-label
-check ever runs, so `Admin\.X` written bare is refused while the same escape written as
-`[Admin\.X](x.md)` decodes to the plain `Admin.X` and is accepted — matching is always against
-what the label renders as, never its source characters. It also refuses a `*`- or `+`-marked
+markdown link or wikilink wrapper is unwrapped before the plain-label check ever runs, but only
+the markdown-link half also decodes its escapes — so `Admin\.X` written bare is refused,
+`[Admin\.X](x.md)` decodes to the plain `Admin.X` and is accepted, while the identical escape
+written as a wikilink alias keeps its literal backslash and is refused just like the bare form:
+matching a markdown-link label is against what it renders as; matching a wikilink alias is
+against its literal, undecoded text. (This adapter never emits wikilinks and this file
+deliberately contains no wikilink syntax — see `obsidian-vault.md` for the spelled-out form.) It also refuses a `*`- or `+`-marked
 bullet whose visible text is a **bare (non-link) path** — one containing a `/` or backslash
 separator, or ending in `.md` — because
 the shipped membership scan only sees `-`-marked bare rows, so wiring such a file could create
@@ -476,6 +489,34 @@ HTML comment or a fenced block anywhere, a mixed or bare-CR line ending, a YAML 
 `group_title` fall outside the subset as well. Worst case for the residual is a cosmetic
 duplicate container the author can see and delete — never data loss. A richer rendering-aware
 matcher is a possible follow-up, not a bug.
+
+**The plain-label predicate, named exactly.** The container-owner scan (`containerOwnerScan`,
+`assets/lib/chapter-paths.mjs`) applies `isPlainLabel` to whatever `extractLabel` returns for a
+row's own content — never to the row's raw source text — and it applies this check to EVERY
+indent-0 bullet in the file, not only the row under test: a single non-plain indent-0 label
+anywhere in the file declines the WHOLE scan (`{kind: 'not-a-list'}`), so an otherwise-clean
+'Admin' container elsewhere in the file cannot rescue a badly-labelled row sitting at the left
+margin. `extractLabel`'s own decoding differs by the label's link syntax: a whole-content
+markdown link decodes backslash escapes before the check runs (`[A\.B](x.md)` becomes the plain
+`A.B`), a whole-content wikilink alias does **not** decode them (the alias keeps its backslash
+and stays non-plain), and an HTML entity is never decoded by either form — so a title
+that LOOKS plain once rendered in a browser can still fall outside the verified class. Measured
+for a row sitting AT THE LEFT MARGIN alongside a clean, correctly-formed 'Admin' container
+elsewhere in the same file:
+
+| Row source                        | `extractLabel`             | `isPlainLabel` | Verdict          |
+|------------------------------------|-----------------------------|----------------|------------------|
+| `- [A.B](<items.md>)`              | `A.B`                       | true           | `misplaced`      |
+| `- [A\.B](<items.md>)`             | `A.B`                       | true           | `misplaced`      |
+| `- [A&#46;B](<items.md>)`          | `A&#46;B`                   | false          | `unverifiable`   |
+| `- [A & B](<items.md>)`            | `A & B`                     | false          | `unverifiable`   |
+| `- [A *b*](<items.md>)`            | `A *b*`                     | false          | `unverifiable`   |
+| `- [See [here][ref]](<items.md>)`  | *(target never resolves)*   | —              | absent at step 0 |
+
+The last row is a different failure mode entirely: a nested link inside the label breaks the
+row's OWN link-target extraction — not `extractLabel`/`isPlainLabel` at all — so step 0 never
+reports the chapter present in the first place; see "Grouped index wiring" above for what a
+target-breaking title does to duplicate insertion instead.
 
 As of 1.11.0, a **present** grouped chapter's placement under this container is also checked,
 but only for a narrow verified class — this exact sentence, reused verbatim everywhere it is
@@ -493,9 +534,9 @@ below). Operators land on `unverifiable` rather than inside the verified class m
 one of: a Markdown nav file using a wildcard, an ordered list, or an explicit `<!--nav-->`
 marker (all ordinary `mkdocs-literate-nav` features); two same-named containers; a chapter row
 sitting inside leading frontmatter; or a **native/YAML MkDocs `nav:` configuration**, which gets
-no placement verification at all — the same unverified completion named above, with no
-confirmation requested. First-class YAML `nav:` container automation remains its own follow-up,
-#328.
+no placement verification at all — the same unverified completion the safety statement above
+(under "Grouped index wiring") describes, with no confirmation requested. First-class YAML
+`nav:` container automation remains its own follow-up, #328.
 
 Three disclosures the operator is owed, not proved away:
 
@@ -510,7 +551,8 @@ Three disclosures the operator is owed, not proved away:
   branch above** — it returns `unverifiable` there, for the reason below, not because it was
   overlooked. On the headings branch (unchanged by this PR), a frontmatter block whose body
   itself carries a heading is a different, unfixed gap: it completes with neither
-  verification nor confirmation — see the safety note in "Grouped index wiring" above.
+  verification nor confirmation — see "The headings branch is unchanged by this PR and already
+  completes silently" above (under "Grouped index wiring") for that gap's own description.
 
 **An index whose frontmatter poisons the view is a known defect, filed as #337 — not fixed
 here.** The writer's own body-preparation view blanks a leading frontmatter block before

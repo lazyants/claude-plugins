@@ -339,7 +339,12 @@ the one exception to "do all of these" — see its own conditional note below.
      structural `indexForm: 'headings' | 'non-heading'` field; key every branch below on
      `indexForm`, never on whether `containerTitle` is `null` — a `null` title occurs both
      for a genuinely non-heading file and for an uncontained match inside a headings-form
-     file, and those two cases need different handling, below.
+     file, and those two cases need different handling, below. Branch on match count
+     first, before keying on `indexForm` at all: **zero** matches ⇒ continue to container
+     resolution below; **exactly one** ⇒ proceed to the placement check immediately below
+     against that one line; **two or more** ⇒ never guess which line is canonical, halt:
+     "Chapter '<slug>' appears multiple times in <index_file> — curate the index manually, then re-run."
+     — the same wording the wikilinks union scan's `duplicate` outcome below uses.
 
      Wikilinks mode instead runs a **union scan**: an installed handbook may still carry
      the pre-1.8.0 bare `[[<slug>]]` spelling for a chapter this run has not yet
@@ -412,10 +417,12 @@ the one exception to "do all of these" — see its own conditional note below.
          "Chapter '<slug>' is listed in <index_file> under '<found_title>' instead of '<group_title>' — move the line (or curate the index manually), then re-run."
          (`<found_title>` reads "(none)" when the line sits at the left margin, uncontained.)
        - **`inconsistent`** ⇒ a defensive contradiction check, not an outcome any documented
-         caller reaches: `canonical`/`legacy` are only reached when `selectedTarget` already
-         matched exactly one line, so re-scanning that same target here should reproduce that
-         same single match — this fires only if some future caller, or a change to the matching
-         logic, ever breaks that invariant. Never guess which match is canonical, halt:
+         caller reaches: Step 0's own two-or-more halt — the wikilinks union scan's `duplicate`
+         outcome above, and the matching two-or-more halt path mode now runs (see "Path mode
+         scans" above) — already guarantees exactly one line matches `selectedTarget` before this
+         branch is ever reached, in either mode, so re-scanning that same target here should
+         reproduce that same single match — this fires only if some future caller, or a change to
+         the matching logic, ever breaks that invariant. Never guess which match is canonical, halt:
          "Chapter '<slug>' does not resolve to exactly one line in <index_file> — curate the index manually, then re-run."
        This replaces the shipped 1.10.0 "no present-line placement verifier runs here" behaviour
        for the verified class only; every other non-heading file still proceeds unverified,
@@ -455,8 +462,10 @@ the one exception to "do all of these" — see its own conditional note below.
           line the profile's own mode-correct chapter link, indented two spaces under it —
           `publish.wikilinks: true`: `  - [[` + target + `|` + title + `]]`;
           `publish.wikilinks: false`: `  - [` + title + `](<` + target + `>)` (destination
-          inside angle brackets, any `]` in the title escaped as `\]` — the same spelling
-          "Wikilinks vs Markdown links" below and the shipped writer both use);
+          inside angle brackets — the same destination-wrapping the "Non-headings index, no
+          existing line" bullet above already uses for this profile's mode-correct chapter
+          link — and any `]` in the title escaped as `\]`, this step's own rule, stated
+          nowhere else in this file);
        2. run `locateChapterLine(<candidate>, <index-relative-target>, {wikilink:
           publish.wikilinks})` (`assets/lib/chapter-paths.mjs`) on that two-line array alone,
           not the real index — the option is the profile's own mode, mirroring the
@@ -473,10 +482,10 @@ the one exception to "do all of these" — see its own conditional note below.
           it exactly, in the profile's own mode:
 
           `publish.wikilinks: true` (Obsidian default):
-          `Index <index_file> is not a headings-form file — add a '<group_title>' container and the chapter line for '<slug>' manually, then re-run. The next run recognizes the chapter line as a Markdown list row INDENTED TWO SPACES under the '<group_title>' container bullet, whose wikilink target is exactly '<index_relative_target>' — that is, a '- ' + group_title line followed by a '  - [[' + target + '|' + title + ']]' line; a Markdown link whose destination is that target plus '.md' is recognized too. A row placed at the left margin instead of under the container is reported as misplaced on the next run whenever its RENDERED title text is plain in the same sense as 'group_title' below ("Nested-list automation limits") — this turns on what the title renders as, not its raw source spelling; when the rendered title is not plain, markup that still lets the target resolve to that one line leaves the row unverified instead, like any other file outside the verified class, while markup that keeps the target from resolving at all is reported absent again — repeating this halt, never completing.`
+          `Index <index_file> is not a headings-form file — add a '<group_title>' container and the chapter line for '<slug>' manually, then re-run. The next run recognizes the chapter line as a Markdown list row INDENTED TWO SPACES under the '<group_title>' container bullet, whose wikilink target is exactly '<index_relative_target>' — that is, a '- ' + group_title line followed by a '  - [[' + target + '|' + title + ']]' line; a Markdown link whose destination is that target plus '.md' is recognized too. Give the row a plain title — no Markdown markup, backslash escapes, or HTML entities in it — or the next run may not be able to confirm its placement; see "Nested-list automation limits" below for exactly what is recognized.`
 
           `publish.wikilinks: false`:
-          `Index <index_file> is not a headings-form file — add a '<group_title>' container and the chapter line for '<slug>' manually, then re-run. The next run recognizes the chapter line as a Markdown list row INDENTED TWO SPACES under the '<group_title>' container bullet, whose link destination is exactly '<index_relative_target>' — that is, a '- ' + group_title line followed by a '  - [' + title + '](<' + target + '>)' line, with the destination inside angle brackets and any ']' in the title escaped as '\]'. A row placed at the left margin instead of under the container is reported as misplaced on the next run whenever its RENDERED title text is plain in the same sense as 'group_title' below ("Nested-list automation limits") — this turns on what the title renders as, not its raw source spelling; when the rendered title is not plain, markup that still lets the target resolve to that one line leaves the row unverified instead, like any other file outside the verified class, while markup that keeps the target from resolving at all is reported absent again — repeating this halt, never completing.`
+          `Index <index_file> is not a headings-form file — add a '<group_title>' container and the chapter line for '<slug>' manually, then re-run. The next run recognizes the chapter line as a Markdown list row INDENTED TWO SPACES under the '<group_title>' container bullet, whose link destination is exactly '<index_relative_target>' — that is, a '- ' + group_title line followed by a '  - [' + title + '](<' + target + '>)' line, with the destination inside angle brackets and any ']' in the title escaped as '\]'. Give the row a plain title — no Markdown markup, backslash escapes, or HTML entities in it — or the next run may not be able to confirm its placement; see "Nested-list automation limits" below for exactly what is recognized.`
        5. **anything else** — the gate rejects the pair — measured causes include an ordinary
           newline inside the title, a delimiter the chosen mode's link syntax cannot carry
           (wikilinks mode: `|`/`#`/`^`/`]` in the target — see "Wikilinks vs Markdown links"
@@ -484,24 +493,38 @@ the one exception to "do all of these" — see its own conditional note below.
           whitespace, or carrying markup). Emit the plain, unchanged 1.10.0 halt instead, with no
           named form and no convergence claim:
           "Index <index_file> is not a headings-form file — add a '<group_title>' container and the chapter line for '<slug>' manually, then re-run."
+          (Double-quote delimited, unlike the backtick-delimited halts above — this delimiter is
+          load-bearing and pinned: a reference-assets test's fallback needle matches this
+          string's closing double quote, so do not "normalize" it to backticks.)
           The operator is no worse off than before 1.11.0 here — this halt can repeat verbatim
           on the next run, exactly as it always has. The gate never names a pair that would not
-          converge, but it also never claims convergence it has not checked.
+          converge, but it also never claims convergence it has not checked. Read on even when
+          the candidate pair converges — one more operator-actionable warning applies
+          regardless of this gate's outcome, described next.
 
-       Item 4's convergence promise holds — but only for a `group_title`, target and title the
-       gate accepts: you halt once with instructions, the user adds the container and the
-       chapter line, and the re-run's step 0 finds the line present under the
+       **Leaving the gate above: one further warning applies whether or not the candidate pair
+       converges.** Item 4's convergence promise holds — but only for a `group_title`, target
+       and title the gate accepts: you halt once with instructions, the user adds the container
+       and the chapter line, and the re-run's step 0 finds the line present under the
        `indexForm: 'non-heading'` branch above and proceeds. One operator-actionable warning
        belongs here too, and it is narrower than "markup in the title": it applies to a title
        whose markup keeps the row's own link target from resolving — a nested link, a nested
-       image, a reference link. Place such a row correctly under the container rather than at
+       image, a reference link, or an unescaped `]` in the title (a `- [A]B](<target>)` path-mode
+       row, or a `- [[target|A]B]]` wikilink alias — both measured to make the target
+       unrecognizable to `locateChapterLine`, exactly like a nested link would). Place such a
+       row correctly under the container rather than at
        the left margin and the writer does not refuse it, because step 0 still reports the
        chapter absent and `wireNestedListChapter` has no membership check of its own, so it
        inserts a second row; the following run reports `ok` on the newly inserted one while the
        earlier row lingers as a cosmetic duplicate (pre-existing behaviour, not new in 1.11.0).
-       A title that merely renders non-plain while its target still resolves — an escape like
-       `A\.B`, an ampersand, emphasis — does NOT do this: it is found, and simply left
-       unverified. Use a plain-text title to avoid both.
+       A title that merely renders non-plain while its target still resolves — an ampersand,
+       emphasis — does NOT do this: it is found, and simply left unverified (measured at the
+       left margin, in both `publish.wikilinks` modes). A bare backslash escape is
+       mode-dependent, not an example of this: measured at the left margin, `A\.B` returns
+       `unverifiable` under `publish.wikilinks: true` (the wikilink form never decodes the
+       escape) but `misplaced` — a halt — under `publish.wikilinks: false` (the markdown-link
+       form decodes it, so the row reads as a plain, uncontained bullet). Use a plain-text
+       title to avoid depending on either behavior.
 
        The gate above is checked on the candidate's own isolated two-line array. **By
        construction, that proves only that the candidate pair is well-formed and would be
@@ -600,10 +623,13 @@ or a run of collapsing whitespace —
 because a character allowlist cannot prove such a label renders equal
 to a plain `group_title`, so matching it could miss a real container or manufacture a
 duplicate. The escape refusal applies to the label's raw, literal spelling only: a
-whole-content markdown link or wikilink wrapper is unwrapped and its escape decoded before the
+whole-content markdown link wrapper is unwrapped and its escape decoded before the
 plain-label check ever runs, so `Admin\.X` written bare is refused while the same escape
-written as `[Admin\.X](x.md)` decodes to the plain `Admin.X` and is accepted — matching is
-always against what the label renders as, never its source characters.
+written as `[Admin\.X](x.md)` decodes to the plain `Admin.X` and is accepted. A whole-content
+wikilink wrapper is unwrapped too, but its escape is left undecoded — `[[Admin\.X]]` still
+carries the literal backslash and is refused exactly like the bare form. Matching is against
+what the label renders as only for the decoded (markdown-link) form; a wikilink's escape is
+never decoded, so its label is compared on its literal source spelling instead.
 It also refuses a `*`- or `+`-marked bullet whose visible text is a **bare
 (non-link) path** — one containing a `/` or backslash separator, or ending in `.md` — because
 the shipped membership scan only sees `-`-marked bare rows, so wiring such a file could create
@@ -614,6 +640,43 @@ HTML comment or a fenced block anywhere, a mixed or bare-CR line ending, a YAML 
 `group_title` fall outside the subset as well. Worst case for the residual is a cosmetic
 duplicate container the author can see and delete — never data loss. A richer rendering-aware
 matcher is a possible follow-up, not a bug.
+
+**The plain-label predicate, named exactly.** The container-owner scan (`containerOwnerScan`,
+`assets/lib/chapter-paths.mjs`) applies `isPlainLabel` to whatever `extractLabel` returns for a
+row's own content — never to the row's raw source text, and never to what it renders as in
+Obsidian — and it applies this check to EVERY indent-0 bullet in the file, not only the row
+under test: a single non-plain indent-0 label anywhere in the file declines the WHOLE scan
+(`{kind: 'not-a-list'}`), so an otherwise-clean 'Admin' container elsewhere in the file cannot
+rescue a badly-labelled row sitting at the left margin. `extractLabel`'s own decoding differs by
+the label's link syntax, and this is the load-bearing half for THIS adapter, whose default is
+`publish.wikilinks: true`: a whole-content markdown link decodes backslash escapes before the
+check runs (`[A\.B](x.md)` becomes the plain `A.B`), but a whole-content **wikilink alias does
+NOT** decode them (`[[x|A\.B]]` keeps its literal backslash and stays non-plain) — the identical
+escape spelling behaves differently depending on which link syntax the profile's mode writes. An
+HTML entity is never decoded by either form, so a title that LOOKS plain once rendered in
+Obsidian can still fall outside the verified class in both modes. Measured for a row sitting AT
+THE LEFT MARGIN alongside a clean, correctly-formed 'Admin' container elsewhere in the same
+file, in both modes:
+
+| Row source                        | Mode      | `extractLabel`      | `isPlainLabel` | Verdict          |
+|------------------------------------|-----------|----------------------|----------------|------------------|
+| `- [A.B](<items.md>)`              | path      | `A.B`                | true           | `misplaced`      |
+| `- [A\.B](<items.md>)`             | path      | `A.B`                | true           | `misplaced`      |
+| `- [A&#46;B](<items.md>)`          | path      | `A&#46;B`            | false          | `unverifiable`   |
+| `- [A & B](<items.md>)`            | path      | `A & B`              | false          | `unverifiable`   |
+| `- [A *b*](<items.md>)`            | path      | `A *b*`              | false          | `unverifiable`   |
+| `- [See [here][ref]](<items.md>)`  | path      | *(never resolves)*   | —              | absent at step 0 |
+| `- [[items|A.B]]`                  | wikilinks | `A.B`                | true           | `misplaced`      |
+| `- [[items|A\.B]]`                 | wikilinks | `A\.B`               | false          | `unverifiable`   |
+| `- [[items|A&#46;B]]`              | wikilinks | `A&#46;B`            | false          | `unverifiable`   |
+| `- [[items|A & B]]`                | wikilinks | `A & B`              | false          | `unverifiable`   |
+| `- [[items|A *b*]]`                | wikilinks | `A *b*`              | false          | `unverifiable`   |
+| `- [[items|A]B]]`                  | wikilinks | *(never resolves)*   | —              | absent at step 0 |
+
+The last row of each mode is a different failure mode entirely: a nested link (path mode) or an
+unescaped `]` in the alias (wikilinks mode) breaks the row's OWN link-target extraction — not
+`extractLabel`/`isPlainLabel` at all — so step 0 never reports the chapter present in the first
+place; see the duplicate-insert warning above for what a target-breaking title does instead.
 
 As of 1.11.0, a **present** grouped chapter's placement under this container is also checked,
 but only for a narrow verified class — this exact sentence, reused verbatim everywhere it is
