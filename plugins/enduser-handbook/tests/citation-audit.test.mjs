@@ -32,7 +32,7 @@ import { auditCorpus, auditText, extractCitations } from './citation-audit-lib.m
 // against source 2026-07-26 (1.11.0 doc edits, #329/#330); the count grew every round of plan review
 // and again with this release's doc prose, so it is pinned to the fresh measurement, never a number
 // quoted in the plan.
-const EXPECTED_TOTAL_CITATIONS = 58;
+const EXPECTED_TOTAL_CITATIONS = 61;
 
 // Every citation whose quoted text does NOT resolve to exactly one heading title in its own file — an
 // over-match, a near-miss (e.g. "INDEX wiring" vs the full parenthetical heading), or a title that
@@ -51,6 +51,14 @@ const EXPECTED_TOTAL_CITATIONS = 58;
 // behind, so this file — whose whole job is pinning re-derived measurements — carried two numbers
 // that matched no citation in the corpus. Nothing went red, because only the table is asserted and
 // the prose is the unasserted half. A file/section reference cannot go stale that way.
+// Round-4 doc scoping added three entries. TWO are the long-standing near-miss shape already
+// represented above (a heading cited by a shortened title whose real heading carries a
+// parenthetical). The THIRD is a DIFFERENT shape and is called out so this list is not read as
+// homogeneous: static-md.md cites "Grouped entry, line present, `indexForm: 'headings'`", which is
+// a BULLET label, not a heading — no heading of that name exists anywhere. The reference points at
+// something real and is more precise for a reader than citing its enclosing heading would be; it is
+// unresolved only because this lint models headings and nothing else. Recorded rather than reworded
+// so the limitation sits with the lint, where it belongs, instead of bending the prose to it.
 const EXPECTED_UNRESOLVED = [
   { file: 'references/diataxis.md', offset: 2877, quotedText: 'When this is the right shape', direction: 'below' },
   { file: 'references/profile-validation.md', offset: 11273, quotedText: '`inline` stays minimal', direction: 'below' },
@@ -62,16 +70,19 @@ const EXPECTED_UNRESOLVED = [
   { file: 'references/publish-targets/obsidian-vault.md', offset: 6700, quotedText: 'INDEX wiring', direction: 'below' },
   { file: 'references/publish-targets/obsidian-vault.md', offset: 9709, quotedText: 'Chapter structure', direction: 'below' },
   { file: 'references/publish-targets/obsidian-vault.md', offset: 27733, quotedText: 'Non-headings index', direction: 'below' },
-  { file: 'references/publish-targets/obsidian-vault.md', offset: 39269, quotedText: 'INDEX wiring', direction: 'above' },
-  { file: 'references/publish-targets/obsidian-vault.md', offset: 44918, quotedText: 'INDEX wiring', direction: 'above' },
-  { file: 'references/publish-targets/obsidian-vault.md', offset: 50145, quotedText: 'INDEX wiring', direction: 'above' },
+  { file: 'references/publish-targets/obsidian-vault.md', offset: 39846, quotedText: 'INDEX wiring', direction: 'above' },
+  { file: 'references/publish-targets/obsidian-vault.md', offset: 41505, quotedText: 'INDEX wiring', direction: 'above' },
+  { file: 'references/publish-targets/obsidian-vault.md', offset: 45778, quotedText: 'INDEX wiring', direction: 'above' },
+  { file: 'references/publish-targets/obsidian-vault.md', offset: 51005, quotedText: 'INDEX wiring', direction: 'above' },
   { file: 'references/publish-targets/static-md.md', offset: 12961, quotedText: 'Chapter path', direction: 'above' },
   { file: 'references/publish-targets/static-md.md', offset: 15014, quotedText: 'Grouped index wiring', direction: 'below' },
   { file: 'references/publish-targets/static-md.md', offset: 15381, quotedText: 'Chapter → index', direction: 'above' },
   { file: 'references/publish-targets/static-md.md', offset: 18937, quotedText: 'Grouped index wiring', direction: 'below' },
   { file: 'references/publish-targets/static-md.md', offset: 19082, quotedText: 'Grouped index wiring', direction: 'below' },
-  { file: 'references/publish-targets/static-md.md', offset: 32013, quotedText: 'Grouped index wiring', direction: 'above' },
-  { file: 'references/publish-targets/static-md.md', offset: 41896, quotedText: 'Grouped index wiring', direction: 'above' },
+  { file: 'references/publish-targets/static-md.md', offset: 27910, quotedText: "Grouped entry, line present, `indexForm: 'headings'`", direction: 'above' },
+  { file: 'references/publish-targets/static-md.md', offset: 32545, quotedText: 'Grouped index wiring', direction: 'above' },
+  { file: 'references/publish-targets/static-md.md', offset: 34212, quotedText: 'Grouped index wiring', direction: 'above' },
+  { file: 'references/publish-targets/static-md.md', offset: 42719, quotedText: 'Grouped index wiring', direction: 'above' },
 ];
 
 // Per-occurrence key. offset alone is already unique; file/quotedText/direction are folded in so a

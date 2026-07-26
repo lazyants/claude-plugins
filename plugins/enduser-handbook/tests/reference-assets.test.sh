@@ -1925,11 +1925,25 @@ has_in_section "static-md: automated grouped wiring's new scope (headings-form +
 # These two needles are the load-bearing halves: the by-construction limit, and the honest safety
 # statement that replaced "never produces a false completion".
 GATE_CONSTRUCTION_LIMIT='it proves nothing about the real index, because it never reads the real index'
-GATE_SAFETY_STATEMENT='this branch never *silently* completes'
+# House style hard-wraps, so the sentence spans two physical lines and `has` is line-based: its
+# two halves need separate needles. That split is substantive, not clerical — round 4 refuted
+# this claim in its UNSCOPED form, so the scoping half is the half that makes it true.
+GATE_SAFETY_SCOPE='scoped to what this PR governs: on the non-heading branch above'
+GATE_SAFETY_STATEMENT='never lets a silent completion through'
 has "static-md: step-4 states the gate's limit BY CONSTRUCTION"      "$GATE_CONSTRUCTION_LIMIT" "$SMD"
 has "obsidian-vault: step-4 states the gate's limit BY CONSTRUCTION" "$GATE_CONSTRUCTION_LIMIT" "$OMD"
+has "static-md: step-4 SCOPES the safety statement to this PR's branch"      "$GATE_SAFETY_SCOPE" "$SMD"
 has "static-md: step-4 carries the narrowed safety statement"        "$GATE_SAFETY_STATEMENT" "$SMD"
+has "obsidian-vault: step-4 SCOPES the safety statement to this PR's branch" "$GATE_SAFETY_SCOPE" "$OMD"
 has "obsidian-vault: step-4 carries the narrowed safety statement"   "$GATE_SAFETY_STATEMENT" "$OMD"
+# The scoping is only honest if the OTHER branch is named. Round 4 refuted the unscoped claim
+# ("this branch never silently completes") with a frontmatter block whose body carries a heading:
+# that lands on the untouched headings branch, which completes with neither verification nor
+# confirmation. Pin the disclosure too, or a later edit could keep the narrow claim and drop the
+# admission that makes it narrow.
+HEADINGS_BRANCH_DISCLOSURE='The headings branch is unchanged by this PR and already completes silently'
+has "static-md: step-4 names the unchanged headings-branch gap"      "$HEADINGS_BRANCH_DISCLOSURE" "$SMD"
+has "obsidian-vault: step-4 names the unchanged headings-branch gap" "$HEADINGS_BRANCH_DISCLOSURE" "$OMD"
 has "static-md: #329 fallback keeps the UNCHANGED 1.10.0 halt (no convergent suffix)" \
   "Index <index_file> is not a headings-form file — add a '<group_title>' container and the chapter line for '<slug>' manually, then re-run.\`" "$SMD"
 has "obsidian-vault: #329 fallback keeps the UNCHANGED 1.10.0 halt (no convergent suffix)" \
