@@ -1993,9 +1993,10 @@ export function chapterHasWikilinkTo(chapterText, slug, oldChapterRelPath) {
 }
 
 // #330 — the fixed probe link the shape-recognition predicate below emits (and discards). Any
-// newline-free chapterLink is accept/decline-equivalent (round-9 HIGH 1: `:1261`'s argument guard
-// reads chapterLink only for embedded newlines; every OTHER read is emission, which the present-line
-// branch never writes) — the literal value is otherwise irrelevant.
+// newline-free chapterLink is accept/decline-equivalent (round-9 HIGH 1: wireNestedListChapter's
+// own groupTitle/chapterLink embedded-newline guard reads chapterLink only for embedded newlines;
+// every OTHER read is emission, which the present-line branch never writes) — the literal value is
+// otherwise irrelevant.
 const NON_HEADING_PLACEMENT_PROBE_LINK = '[probe](__verify-non-heading-placement-probe__.md)';
 
 /**

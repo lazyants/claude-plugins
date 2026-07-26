@@ -378,8 +378,8 @@ These outcomes reuse the step-0 result computed above (`containerTitle`, `indexF
        - a chapter row that exists only inside leading frontmatter is reported present by the
          shipped locator and reaches `unverifiable` in the present-line branch above, where the
          adapter proceeds — explicit confirmation, not verification, is the guard there (the
-         shipped 1.10.0 writer/locator view disagreement, tracked separately — see "Nested-list
-         automation limits" below);
+         shipped 1.10.0 writer/locator view disagreement, tracked separately as #337
+         — see "Nested-list automation limits" below);
        - a real index whose surroundings carry YAML structure, a wildcard, or an ordered list
          makes the writer decline the whole file on the next run too: once the pair is present,
          step 0 routes to the present-line branch above, whose own predicate call declines the
@@ -396,7 +396,7 @@ These outcomes reuse the step-0 result computed above (`containerTitle`, `indexF
        reported `indexForm: 'headings'` with a matching container (see "Grouped entry, line
        present, `indexForm: 'headings'`" above) and completes with neither verification nor
        confirmation — the same shipped 1.10.0 writer/locator view disagreement named above,
-       tracked separately.
+       tracked separately as #337.
     5. **anything else** ⇒ the gate rejects the pair — measured causes include an ordinary
        newline inside the title, a trailing `\` or a `>` in the target, and a `group_title` the
        writer's own bullet grammar refuses (padded with extra whitespace, or carrying markup).
@@ -482,14 +482,14 @@ Three disclosures the operator is owed, not proved away:
   itself carries a heading is a different, unfixed gap: it completes with neither
   verification nor confirmation — see the safety note in "Grouped index wiring" above.
 
-**An index whose frontmatter poisons the view is a known defect, filed as #337 — not fixed here.** The
-writer's own body-preparation view blanks a leading frontmatter block before wiring, while the
-step-0 locator's view does not, so the two sides can disagree about what a frontmatter-embedded
-chapter line means. On a nested-list index this produces both a false "already wired" report and
-a chapter line that duplicates on every subsequent run (the shipped 1.10.0 frontmatter bug,
-#337). `verifyNonHeadingPlacement` above only stops this case from returning a
-false `ok` — a match inside the span returns `unverifiable` instead — it does not repair the
-duplication.
+**An index whose frontmatter poisons the view is a known defect, filed as #337 — not fixed
+here.** The writer's own body-preparation view blanks a leading frontmatter block before
+wiring, while the step-0 locator's view does not, so the two sides can disagree about what a
+frontmatter-embedded chapter line means. On a nested-list index this produces both a false
+"already wired" report and a chapter line that duplicates on every subsequent run (the shipped
+1.10.0 frontmatter bug, #337). `verifyNonHeadingPlacement` above only stops this case from
+returning a false `ok` — a match inside the span returns `unverifiable` instead — it does not
+repair the duplication.
 
 ### Manual group migration
 

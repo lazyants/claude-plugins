@@ -1235,12 +1235,13 @@ test('not-a-list, mask-pair: a file mixing a CRLF-terminated line with a bare-LF
 
 // -------------------------------------------------------------------------------------------------
 // [1.11.0] #330 prep — leadingFrontmatterSpan, the exported test-seam projection of the private
-// prepareIndexLines (extracted from wireNestedListChapter:1245-1257 + :1263-1286, discontiguous —
-// the groupTitle/chapterLink newline guard at the old :1261 reads arguments this helper never
-// receives and stays in the writer). Reaching these four rejection branches through the full
-// writer proves nothing for three of them (a downstream guard masks the branch); reaching them
-// directly through this seam is what actually isolates them — three discriminating direct tests
-// plus one masked rejection test, not one protected test per branch (plan round-30).
+// prepareIndexLines (extracted out of wireNestedListChapter's own line-preparation pass into its
+// own function — see prepareIndexLines's docstring for the step numbering. Step 4, the
+// groupTitle/chapterLink embedded-newline guard, reads arguments this helper never receives and
+// stays in the writer). Reaching these four rejection branches through the full writer proves
+// nothing for three of them (a downstream guard masks the branch); reaching them directly through
+// this seam is what actually isolates them — three discriminating direct tests plus one masked
+// rejection test, not one protected test per branch (plan round-30).
 // -------------------------------------------------------------------------------------------------
 
 test('leadingFrontmatterSpan [isolating]: an unclosed leading "---" block is refused directly through this seam (through the full writer it is masked by !sawTop, so only this seam proves the guard)', () => {
@@ -1447,9 +1448,8 @@ test('wireNestedListChapter is pure: a frozen input array is never mutated, and 
 // owns a line, however many consumers there are (today: wireNestedListChapter here, and
 // verifyNonHeadingPlacement below, whose section also covers the ownerOf/ownerLabelOf fields
 // wireNestedListChapter never reads). The existing MULTIPLE fixture above never involves a heading;
-// this one pins that
-// `containers` collection is independent of the heading-driven currentContainer reset (only child
-// OWNERSHIP resets on a heading, never label-matching membership).
+// this one pins that `containers` collection is independent of the heading-driven currentContainer
+// reset (only child OWNERSHIP resets on a heading, never label-matching membership).
 // -------------------------------------------------------------------------------------------------
 
 test('wireNestedListChapter MULTIPLE, heading-independent: two same-label indent-0 bullets split by an ATX heading still BOTH count', () => {
@@ -1486,15 +1486,14 @@ test('wireNestedListChapter, repeat-invocation isolation: a SINGLE call that pop
 // above: every consumer answers "which container owns this line" by calling the one scan, so no two
 // of them can drift apart (today: wireNestedListChapter and this — however many there come to be).
 // E.g. verifyNonHeadingPlacement(['- Admin', '  - guide/items.md'], 'guide/items.md', 'Admin')
-// returns {kind: 'ok'}, pinned below by the test named
-// "verifyNonHeadingPlacement rule 5: a correctly-nested child under its matching container -> ok".
-// Every
-// fixture's PRECONDITION — match cardinality, frontmatter span, and the fixed-probe predicate's kind
-// — was driven through the real supporting helpers (locateChapterLine/indexView,
-// leadingFrontmatterSpan, wireNestedListChapter) BEFORE the implementation landed, so nothing here
-// rests on an unmeasured setup. Every new gate's [isolating]/[masked] label was then confirmed by a
-// scoped guard-mutation run (Edit-revert, RED-before-green) against the landed implementation — see
-// each fixture's own comment for its specific result.
+// returns {kind: 'ok'}, pinned below by the test named "verifyNonHeadingPlacement rule 5: a
+// correctly-nested child under its matching container -> ok". Every fixture's PRECONDITION — match
+// cardinality, frontmatter span, and the fixed-probe predicate's kind — was driven through the real
+// supporting helpers (locateChapterLine/indexView, leadingFrontmatterSpan, wireNestedListChapter)
+// BEFORE the implementation landed, so nothing here rests on an unmeasured setup. Every new gate's
+// [isolating]/[masked] label was then confirmed by a scoped guard-mutation run (Edit-revert,
+// RED-before-green) against the landed implementation — see each fixture's own comment for its
+// specific result.
 //
 // The five-rule decision table (plan "Decision order is fixed"), in order: 1. zero selected-target
 // matches -> inconsistent; 2. more than one match -> inconsistent; 3. the single match lies inside

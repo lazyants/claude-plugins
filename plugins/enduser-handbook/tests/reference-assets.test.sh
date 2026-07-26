@@ -2167,7 +2167,7 @@ has_in_section "revalidation: recipe step 4 chapter-target and glossary-target l
 #
 # The obsidian-vault.md NEGATIVE half of A4's clause ("no equivalent mandatory index-target link...
 # so this case does not apply there") is deliberately left unpinned. It's a verified fact today,
-# but A4 flagged it as tied to a filed, tracked gap (group-H's Related-block enumeration) — if that
+# but A4 flagged it as tied to a filed, tracked gap (#261, group-H's Related-block enumeration) — if that
 # gap is ever legitimately closed by giving Obsidian's Related block an index member, this exact
 # clause is the line that SHOULD change. Pinning it would fight that future correct edit rather than
 # catch a regression; the asymmetry is stated in prose (static-md.md:15-16's "no backlinks panel"
@@ -2749,9 +2749,11 @@ CPD="$ASSETS/lib/chapter-paths.d.mts"
 # inside the function signature. Each needle therefore carries its declaration keyword, and each
 # gets its own deletion mutant. These pin EXISTENCE only: never compatibility, never syntax.
 # The rule is one needle per declaration this version ADDS, and it is checkable: the needle count
-# below must equal `git diff <prev-tag>..HEAD -- "$CPD" | grep -c '^+export'`. That check is what
-# caught LeadingFrontmatterSpan — six declarations were added and only five were pinned, so deleting
-# the interface outright left the harness at 581/581 while a pinned deletion correctly went red.
+# below must equal `git diff 44545bb..HEAD -- plugins/enduser-handbook/skills/enduser-handbook/assets/lib/chapter-paths.d.mts | grep -c '^+export'`,
+# run from the repository root (44545bb is the 1.10.0 release commit; this repo has no
+# enduser-handbook release tags). That check is what caught LeadingFrontmatterSpan — six
+# declarations were added and only five were pinned, so an unpinned deletion of the interface
+# stayed green while a pinned deletion correctly went red.
 has "chapter-paths.d.mts: declares indexView"                       'export function indexView'                        "$CPD"
 has "chapter-paths.d.mts: declares leadingFrontmatterSpan"          'export function leadingFrontmatterSpan'           "$CPD"
 has "chapter-paths.d.mts: declares LeadingFrontmatterSpan"          'export interface LeadingFrontmatterSpan'          "$CPD"
