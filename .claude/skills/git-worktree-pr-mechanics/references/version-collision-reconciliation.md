@@ -52,7 +52,7 @@ Worked cleanly repeatedly:
 ## Layering CHANGELOG/README entries; peer structural refactors
 
 - CHANGELOG: stack your new version's entry ABOVE the newer already-merged entry (never below/overwriting it) via a small Python script with an `assert count >= N` guard before every string replacement (a plain `sed`/Edit risks silently matching zero times).
-- README historically needed BOTH the cumulative body-PROSE paragraph AND the "what shipped" bullet to carry both versions' sentences stacked (the header/row-vs-body-prose sync gap — see the plugin-version-sync reference for the four-surface checklist).
+- README historically needed BOTH the cumulative body-PROSE paragraph AND the "what shipped" bullet to carry both versions' sentences stacked (the header/row-vs-body-prose sync gap — see `skill:plugin-repo-mechanics` → `references/version-and-surface-sync.md` for the four-surface checklist).
 - **When the peer STRUCTURALLY refactored the conflict file, resolve TOWARD the peer's new structure — do not reconstruct your side's old layout.** If a docs peer reflowed the README section to a new house style (e.g. deleting the cumulative version-log paragraph and relocating history into version-free bullets), take `git show origin/main:README.md` as the base and re-apply only your minimal delta IN THEIR NEW STYLE (bump the row version+anchor, bump the section header, add one bullet). Re-appending your version-log sentence would restore exactly what the peer intentionally removed.
 
 ## Shared-main-tree contamination recovery
