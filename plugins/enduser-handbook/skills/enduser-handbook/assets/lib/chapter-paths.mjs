@@ -860,9 +860,10 @@ function collectContainerHeadings(sanitizedLines) {
   return headings;
 }
 
-// R5-F1/F2: the SHARED headings-form classifier — every caller (`locateChapterLine`'s `indexForm`
-// field, `findContainer`'s non-heading branch) keys on the EXACT same logic, over the EXACT same
-// sanitized view, so no two callers can ever disagree about what kind of file they're looking at.
+// R5-F1/F2: the SHARED headings-form classifier — every caller keys on the EXACT same logic, over
+// the EXACT same sanitized view (today: `locateChapterLine`'s `indexForm` field and
+// `findContainer`'s non-heading branch), so no two callers, however many there are, can ever
+// disagree about what kind of file they're looking at.
 // Headings-form iff the sanitized text has at least one depth >= 2 heading AND no YAML-mapping
 // structure outside frontmatter (R3-F2(b)) — an inert `## Secondary navigation` inside a YAML
 // comment or fenced block never counts either way, since it was already blanked before this runs.
@@ -1444,13 +1445,14 @@ function containerOwnerScan(body, wanted) {
 // (NFC, inner-whitespace collapse) an un-shared copy would keep the old spelling and start emitting
 // false verdicts, with nothing going red.
 //
-// What the key is compared AGAINST is call-path-specific, not a property of this function:
-// `containerOwnerScan`'s `ownerLabelOf` (the nested-list writer/verifier path) records a
-// container's UNTRIMMED parsed label, so that comparison is deliberately asymmetric (round-18
-// HIGH) — trimming the container's own label there would accept a padded label the writer treats
-// as absent. `collectContainerHeadings`' headings-form container titles (the `findContainer` path,
-// `:858`) ARE trimmed, so that comparison is symmetric. Both paths still derive their
-// `group_title`-side key from this one function.
+// What the key is compared AGAINST is call-path-specific, not a property of this function —
+// whatever comparison paths exist, each still derives its `group_title`-side key from here. Two
+// paths exist today, illustrating the point rather than exhausting it: `containerOwnerScan`'s
+// `ownerLabelOf` (the nested-list writer/verifier path) records a container's UNTRIMMED parsed
+// label, so that comparison is deliberately asymmetric (round-18 HIGH) — trimming the container's
+// own label there would accept a padded label the writer treats as absent.
+// `collectContainerHeadings`' headings-form container titles (the `findContainer` path, `:858`)
+// ARE trimmed, so that comparison is symmetric.
 function containerLabelKey(groupTitle) {
   return String(groupTitle).trim();
 }
