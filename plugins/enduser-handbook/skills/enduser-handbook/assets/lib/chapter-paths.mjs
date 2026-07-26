@@ -1948,15 +1948,120 @@ export function chapterHasWikilinkTo(chapterText, slug, oldChapterRelPath) {
   return false;
 }
 
+// #330 — the fixed probe link the shape-recognition predicate below emits (and discards). Any
+// newline-free chapterLink is accept/decline-equivalent (round-9 HIGH 1: `:1261`'s argument guard
+// reads chapterLink only for embedded newlines; every OTHER read is emission, which the present-line
+// branch never writes) — the literal value is otherwise irrelevant.
+const NON_HEADING_PLACEMENT_PROBE_LINK = '[probe](__verify-non-heading-placement-probe__.md)';
+
 /**
- * #330 — present-line placement verification for the nested-list index form.
+ * #330 support: the caller's selected-target match INDICES into `indexView(indexLines)`. Reuses the
+ * exact per-line predicate `locateChapterLine` uses (the same sanitized view, the same
+ * extractLineTargets/foldTargetForMatch primitives, the same heading skip) — not a second
+ * recognizer, because `locateChapterLine`'s own return shape (`LocateChapterLineResult`) never
+ * carries a line INDEX, which the container walk below needs and the frontmatter-span check
+ * (rule 3) needs too. containerTitle bookkeeping is headings-form-only and irrelevant here, so it
+ * is the only thing this loop drops relative to `locateChapterLine`'s.
  *
- * CONTRACT STUB, intentionally unimplemented so the feature tests are red until it is built.
- * The five-rule decision table, the single-match precondition and the verified class sentence live
- * in the plan; the shared helpers this must use (indexView for the match set, containerOwnerScan
- * over the writer's BODY for the container walk) already exist above and must NOT be
- * re-implemented — a second scan is scan-logic drift by construction.
+ * @param {string[]} indexLines
+ * @param {string} selectedTarget
+ * @param {boolean} wikilink
+ * @returns {number[]}
+ */
+function selectedTargetMatchIndices(indexLines, selectedTarget, wikilink) {
+  const wanted = foldTargetForMatch(selectedTarget, wikilink);
+  const sanitizedLines = indexView(indexLines);
+  const indices = [];
+  for (const [index, line] of sanitizedLines.entries()) {
+    if (HEADING_RE.test(line)) continue; // a heading line never carries a target
+    const targets = extractLineTargets(line);
+    if (targets.some((t) => foldTargetForMatch(t, wikilink) === wanted)) {
+      indices.push(index);
+    }
+  }
+  return indices;
+}
+
+/**
+ * #330 — present-line placement verification for the nested-list index form. Five-rule decision
+ * table, first applicable rule wins (rules 1-2 decide on MATCH CARDINALITY alone, so rules 3-5 are
+ * reached only for a file holding exactly one selected-target match):
+ *   1. zero selected-target matches                          -> inconsistent (fail-closed)
+ *   2. more than one selected-target match                   -> inconsistent
+ *   3. the single match lies inside the leading-frontmatter span -> unverifiable
+ *   4. the writer's own predicate declines the shape (not-a-list/multiple) -> unverifiable
+ *   5. otherwise, compare the container the writer itself resolved -> ok / misplaced
+ *
+ * `selectedTarget` is the target the CALLER already selected (the Obsidian adapter's union scan
+ * over the qualified/legacy-bare spellings picks one before placement checking) — using it, not a
+ * bare expected target, lets a legitimately-present legacy row verify instead of a false
+ * `inconsistent`.
+ *
+ * Shape recognition (rule 4) is DELEGATED to the writer's own `wireNestedListChapter` predicate
+ * (fixed probe link, emission discarded) rather than re-implemented — a from-scratch YAML/nav
+ * detector is measurably holed (e.g. `- Admin :` vs a real YAML parser's key), so the writer's own
+ * accepted class is the only sound source of truth. The container walk (rule 5) runs over the
+ * WRITER's own prepared BODY via the shared `containerOwnerScan`, never over `indexView` — the two
+ * arrays have distinct, deliberate jobs: matches come from `indexView` because the verifier must
+ * see exactly what the caller saw; the container walk runs over BODY because it must decide exactly
+ * what the writer decided (a `not-a-list` match is impossible for the walk to see: BODY is
+ * sanitization-stable and index-aligned with `indexView` on every file that reaches rule 5).
+ *
+ * @param {string[]} indexLines
+ * @param {string} selectedTarget
+ * @param {string} groupTitle
+ * @param {{wikilink?: boolean}} [options]
+ * @returns {{kind: 'ok'}
+ *         | {kind: 'misplaced', foundContainer: string|null}
+ *         | {kind: 'inconsistent'}
+ *         | {kind: 'unverifiable'}}
  */
 export function verifyNonHeadingPlacement(indexLines, selectedTarget, groupTitle, options = {}) {
-  throw new Error('verifyNonHeadingPlacement: not implemented (1.11.0 contract stub)');
+  const { wikilink = false } = options;
+
+  // Rules 1-2: cardinality alone, fail-closed. A contradiction (the caller reported present, the
+  // verifier finds zero or several matches for the SAME selected target) is worth a manual halt
+  // regardless of file shape.
+  const matchIndices = selectedTargetMatchIndices(indexLines, selectedTarget, wikilink);
+  if (matchIndices.length !== 1) return { kind: 'inconsistent' };
+  const matchIndex = matchIndices[0];
+
+  // Evaluation-order precondition, not a sixth rule: `prepareIndexLines` can refuse a file that
+  // still holds exactly one match (e.g. a lone stray '\r') — reading `span`/`body` off a refusal
+  // would destructure fields that do not exist. The writer would refuse the SAME file at rule 4
+  // anyway, so this adds no row to the table.
+  const prep = prepareIndexLines(indexLines);
+  if (prep.kind === 'not-a-list') return { kind: 'unverifiable' };
+
+  // Rule 3: a match inside a leading frontmatter block is never verified — the writer's own BODY
+  // blanks frontmatter while `indexView` does not (the shipped 1.10.0 disagreement filed as its own
+  // issue), so a present match there cannot be soundly judged either way.
+  if (prep.span !== null && matchIndex >= prep.span.start && matchIndex < prep.span.endExclusive) {
+    return { kind: 'unverifiable' };
+  }
+
+  // Rule 4: shape recognition, delegated. `groupTitle` is the real value (its own newline guard
+  // must fire identically to the writer's); only `chapterLink` is replaced with a fixed probe.
+  const predicate = wireNestedListChapter(indexLines, groupTitle, NON_HEADING_PLACEMENT_PROBE_LINK);
+  if (predicate.kind === 'not-a-list' || predicate.kind === 'multiple') return { kind: 'unverifiable' };
+
+  // Rule 5: the container comparison, via the writer's own shared scan. Structurally, `scan.kind`
+  // cannot be 'not-a-list' here — `predicate.kind === 'inserted'` already proves the writer's own
+  // internal containerOwnerScan(prep.body, wantedLabel) call succeeded on this exact body/label
+  // (prepareIndexLines is pure, so the writer's internal call reproduces the same `prep.body`) —
+  // but the branch stays, matching this file's own style of checking every `{kind, ...}` result
+  // rather than trusting an invariant, and failing toward the safe direction (unverifiable costs
+  // only verification; never a false `ok`) if it were ever wrong.
+  const wantedLabel = String(groupTitle).trim();
+  const scan = containerOwnerScan(prep.body, wantedLabel);
+  if (scan.kind === 'not-a-list') return { kind: 'unverifiable' };
+
+  const owner = scan.ownerOf[matchIndex];
+  if (owner === -1 || owner === undefined) return { kind: 'misplaced', foundContainer: null };
+  // The writer's own untrimmed parsed label — NEVER re-trimmed for this comparison (round-18 HIGH:
+  // the writer compares `info.label === wanted` with only `wanted` trimmed, so trimming the
+  // container's own label here would accept a padded label the writer itself treats as absent).
+  const ownerLabel = scan.ownerLabelOf[matchIndex];
+  if (ownerLabel === wantedLabel) return { kind: 'ok' };
+  return { kind: 'misplaced', foundContainer: ownerLabel };
 }
