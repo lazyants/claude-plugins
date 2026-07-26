@@ -1,5 +1,5 @@
 """--approve-to: canon_validate.py --check-batch snapshots the EXACT validated
-bytes so the citation reviewer audits an immutable copy and the merge consumes
+bytes so the citation reviewer audits the approved snapshot and the merge consumes
 that same copy (LT 1.16.0, the producer side of "bind the merge to the bytes
 that were reviewed").
 
@@ -240,30 +240,26 @@ def test_re_approving_the_identical_bytes_is_an_idempotent_no_op(tmp_path):
 # and NONE of them is told: reviewer A audits bytes A, B lands bytes B, A returns
 # CITATIONS_OK, and the merge consumes B.
 #
-# WHAT THIS TEST IS: a probabilistic REGRESSION CHECK. It has caught a
-# check-then-act publish on more than one machine, but it does not prove the
-# guarantee and nothing in the module rests on it -- that is os.link()'s
-# create-once semantics, per references/canon-and-glossary.md, "What the approved
-# snapshot guarantees, and the preconditions it rests on". Two mechanisms raise
-# its odds of reaching the breaking interleaving, and neither makes it certain:
+# WHAT THIS TEST IS: a probabilistic regression check over concurrent writers. It
+# has caught a check-then-act publish on more than one machine. The guarantee
+# itself rests on os.link()'s create-once semantics, not on this test -- see
+# references/canon-and-glossary.md, section:
+# "What the approved snapshot guarantees, and the preconditions it rests on".
 #
-# 1. A READINESS HANDSHAKE, not a shared deadline. Every writer announces itself
-#    and then blocks until it has seen every sibling announce, so none can enter
-#    the critical section until all of them are already at its door. A wall-clock
-#    deadline fixed before launch cannot promise even that -- on a slow, loaded or
-#    single-core runner the first writer can complete the whole check-and-write
-#    before the last one even starts, every assertion below still passes, and a
-#    check-then-act guard survives the test untouched.
-# 2. AN OVERLAP CHECK, whose limit is worth stating exactly. Each writer reports
-#    when it entered and left the call, and an attempt only COUNTS once two of
-#    those intervals intersect, so a run that degenerated into sequential calls is
-#    retried rather than banked -- that much closes the vacuity hole. What it
-#    establishes is that two writers were inside the FUNCTION together. It does
-#    NOT establish that two of them observed the target ABSENT, which is the
-#    interleaving that actually breaks check-then-act: the function writes its
-#    temp file BEFORE publishing, so writers can overlap there while the publish
-#    still serialises. Sampling several attempts is what makes the breaking
-#    interleaving likely; nothing here makes it guaranteed.
+# MECHANICALLY, what the code below does:
+#   * each writer announces itself into a per-attempt barrier directory and
+#     blocks until it has seen all N announcements, then calls
+#     _write_approved_snapshot with its own distinct bytes;
+#   * each writer records a wall-clock timestamp before its call and after it
+#     returns;
+#   * an attempt is banked as a sample only if two of those timestamp ranges
+#     intersect, and is otherwise retried, up to the attempt budget;
+#   * the invariant -- exactly one writer publishes, and the file holds that
+#     writer's bytes -- is asserted on EVERY attempt, banked or not.
+#
+# Nothing here characterises what an intersection proves: the timestamps bracket
+# a call from the outside, and sampling repeated attempts is what makes a broken
+# publish likely to be caught, not certain to be.
 #
 # The racers call _write_approved_snapshot directly rather than running
 # --check-batch end to end, deliberately: the window is microseconds wide, so
@@ -314,9 +310,9 @@ BARRIER_TIMEOUT_SECONDS = 60.0
 
 
 def _overlapping_pair(reports):
-    """The ids of two writers that were inside the critical section at the same
-    time -- their [entered, left] intervals intersect -- or None if the writers
-    ran strictly one after another, which proves nothing about concurrency."""
+    """The ids of the first two writers whose [entered, left] timestamp ranges
+    intersect, or None if no two of them do. The ranges bracket each call from
+    the outside; this predicate reports only that they intersect."""
     for a, b in itertools.combinations(reports, 2):
         if a["entered"] < b["left"] and b["entered"] < a["left"]:
             return (a["id"], b["id"])
@@ -407,11 +403,11 @@ def test_concurrent_first_writers_cannot_both_publish(tmp_path):
             degenerate += 1
 
     assert materialised >= RACE_SAMPLES, (
-        f"the concurrent race never materialised: only {materialised} of "
-        f"{RACE_ATTEMPT_BUDGET} attempts had two writers inside the critical section "
-        f"at once ({degenerate} degenerated into sequential writes). The invariant "
-        f"above is not evidence without that overlap -- a strictly sequential run "
-        f"passes against a vulnerable check-then-act guard too."
+        f"no attempt was banked as a sample: only {materialised} of "
+        f"{RACE_ATTEMPT_BUDGET} attempts had two writers' timestamp ranges intersect "
+        f"({degenerate} did not). Attempts whose ranges never intersect are the "
+        f"weakest ones to run this invariant against, so the budget is spent "
+        f"looking for intersecting ones rather than banking whatever turns up."
     )
 
 

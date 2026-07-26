@@ -11,7 +11,7 @@ reviewer auditing that mutable path, the bytes it approved and the bytes
 
 The fix reorders: the reviewer's FIRST act is to run
 `--check-batch <attempt> --approve-to <approved_{index}_attempt_{n}.json>`, which
-re-validates and copies the exact validated bytes to an immutable path; it then
+re-validates and copies the exact validated bytes to the approved snapshot; it then
 audits THAT copy, and under live the merge and the disk-independent verify consume
 it too. Snapshotting AFTER the audit cannot close the race -- the race is between
 the reviewer's read and the copy -- so the ORDER is the guarantee and is what this
@@ -40,6 +40,10 @@ owns --approve-to's byte-exactness and mode refusals, tests/
 glossary_fragment_wipe.test.py owns the wipe rule, and tests/
 glossary_citation_review.test.py owns the review's verdict/containment/retry-ladder
 control flow.
+
+What the snapshot itself guarantees, and the preconditions it rests on, is
+stated once in references/canon-and-glossary.md, "What the approved snapshot
+guarantees, and the preconditions it rests on" -- this file pins the ORDER only.
 """
 from __future__ import annotations
 
@@ -81,8 +85,9 @@ def attempt_path(index: int, attempt: int) -> str:
 
 
 def approved_path(index: int, attempt: int) -> str:
-    """The IMMUTABLE approved snapshot path -- what the review audits and, under
-    live, what merges."""
+    """The approved snapshot path -- what the review audits and, under live,
+    what merges. Nothing in the pass rewrites it after publication, unlike the
+    attempt path the codex loop keeps replacing."""
     return f"{RUN_DIR}/approved_{index}_attempt_{attempt}.json"
 
 
@@ -290,7 +295,7 @@ def test_the_review_reads_the_snapshot_never_the_mutable_attempt_path(tmp_path):
     )
     read_line = read_lines[0]
     assert approved_path(0, 0) in read_line, (
-        "the citation reviewer must be pointed at the immutable approved "
+        "the citation reviewer must be pointed at the approved "
         f"snapshot {approved_path(0, 0)}; its read instruction was: {read_line}"
     )
     assert attempt_path(0, 0) not in read_line, (
