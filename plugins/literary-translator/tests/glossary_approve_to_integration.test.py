@@ -13,8 +13,11 @@ files stay green.
 
 This test drives the REAL template under Node, lifts the approve command it
 ACTUALLY emitted (verbatim -- never reconstructed for the run), and executes
-THAT against the REAL canon_validate.py over a schema-valid fragment. A rename
-on either side of the seam fails here.
+THAT against the REAL canon_validate.py over a schema-valid fragment; it then
+lifts the template's own --merge-batches command and runs it too, so the full
+producer/consumer round-trip -- approve -> snapshot -> merge -> canon.json -- is
+exercised end to end with the banked mergePath proven to be the exact snapshot
+Python wrote. A rename on either side of the seam fails here.
 
 The CRLF line terminator in the fragment bytes is load-bearing, for the same
 reason it is in tests/canon_approve_to.test.py: an LF-only fixture cannot tell
@@ -250,6 +253,19 @@ def emitted_approve_cmd(review: str) -> str:
     return line[line.index("python3 "):]
 
 
+def emitted_merge_cmd(merge_prompt: str) -> str:
+    """The --merge-batches command the template ACTUALLY emitted into the merge
+    prompt -- lifted verbatim, so the merge half of the round-trip runs the
+    template's own command, not a rebuilt one."""
+    lines = [ln for ln in merge_prompt.split("\n") if "--merge-batches" in ln]
+    assert len(lines) == 1, (
+        f"expected exactly one --merge-batches line in the merge prompt, found {len(lines)}"
+    )
+    line = lines[0]
+    assert "python3 " in line, f"the merge line does not begin a python3 command: {line}"
+    return line[line.index("python3 "):]
+
+
 def _crlf_fragment_bytes() -> bytes:
     """One accepted item, pretty-printed, terminated with CRLF. JSON permits
     CR/CRLF as inter-token whitespace, so this stays valid while carrying bytes
@@ -324,4 +340,33 @@ def test_the_emitted_approve_command_snapshots_byte_identically_against_the_real
     assert payload.get("approved_path") == str(approved), (
         f"the script's stdout must name the snapshot it wrote so a caller can "
         f"bank it; got {payload!r}"
+    )
+
+    # The other half of the seam: the mergePath the template BANKED is the exact
+    # path Python just wrote, and the --merge-batches command the template emits
+    # over that snapshot folds the entry into canon.json. This closes the full
+    # producer/consumer round-trip -- approve -> snapshot -> merge -> canon --
+    # with every command lifted from the template, never hand-built.
+    banked_merge_path = out["result"]["batches"][0]["mergePath"]
+    assert banked_merge_path == str(approved), (
+        "the template banked a mergePath that is not the snapshot Python wrote:\n"
+        f"  banked:       {banked_merge_path}\n  python wrote: {approved}"
+    )
+
+    merge_cmd = emitted_merge_cmd(prompts_for(out, "glossary:merge")[0])
+    assert str(approved) in merge_cmd, (
+        f"the emitted merge command does not name the approved snapshot:\n{merge_cmd}"
+    )
+    margv = shlex.split(merge_cmd)
+    assert margv[0] == "python3", f"unexpected interpreter token in merge command: {margv[0]!r}"
+    margv[0] = sys.executable
+    mproc = subprocess.run(margv, capture_output=True, text=True, timeout=120)
+    assert mproc.returncode == 0, (
+        "the template's emitted --merge-batches command failed against the real "
+        f"canon_validate.py:\n{mproc.stdout}\n{mproc.stderr}"
+    )
+    canon = json.loads((root / "canon.json").read_text(encoding="utf-8"))
+    assert list(canon.get("entries", {})) == [SOURCE_FORM], (
+        "the snapshot the template approved must merge into canon.json under its "
+        f"own source_form; canon entries were {list(canon.get('entries', {}))}"
     )

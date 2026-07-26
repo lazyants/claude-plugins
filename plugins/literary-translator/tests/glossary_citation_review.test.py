@@ -391,11 +391,16 @@ def test_rejected_citation_regenerates_then_approves_then_merges(tmp_path):
         "not appear at the merge either"
     )
 
-    # 5. The batch result records the approval, not merely readiness.
+    # 5. The batch result records the approval, not merely readiness -- and what
+    # MERGES is the immutable snapshot, while fragmentPath survives only as the
+    # diagnostic record of which attempt produced the bytes. Pinning fragmentPath
+    # alone says nothing about the merge target, which is the thing this whole
+    # change moves (mirrors glossary_snapshot_ordering.test.py).
     batch_result = out["result"]["batches"][0]
     assert batch_result["ready"] is True
     assert batch_result["citationReview"] == "approved"
     assert batch_result["attempt"] == 1
+    assert batch_result["mergePath"] == approved_path(0, 1)
     assert batch_result["fragmentPath"] == attempt_path(0, 1)
 
 
@@ -1080,11 +1085,27 @@ def test_resume_skipped_fragment_is_still_citation_reviewed(tmp_path):
     # The resume-skip itself still holds: no dispatch, no wait.
     assert "glossary:dispatch:0" not in order
     assert "glossary:wait:0" not in order
-    # ...but the review DID run, against attempt 0's fragment.
+    # ...but the review DID run, and its AUDIT/READ target is the immutable
+    # snapshot, not the mutable attempt path. The attempt path legitimately still
+    # appears in this prompt (inside the STEP 1 approve command), so a bare
+    # "attempt path present" is a false-green -- pin the STEP 2 READ instruction
+    # specifically, the same target glossary_snapshot_ordering.test.py pins.
     assert count_label(out, "glossary:citation-review:0") == 1, (
         f"a resume-skipped fragment must still be citation-reviewed; calls were {order}"
     )
-    assert attempt_path(0, 0) in prompts_for(out, "glossary:citation-review:0")[0]
+    review = prompts_for(out, "glossary:citation-review:0")[0]
+    read_lines = [ln for ln in review.split("\n") if ln.startswith("STEP 2.")]
+    assert len(read_lines) == 1, (
+        f"expected exactly one STEP 2 read instruction, found {len(read_lines)}"
+    )
+    assert approved_path(0, 0) in read_lines[0], (
+        "the resume-skipped batch's reviewer must audit the immutable snapshot "
+        f"{approved_path(0, 0)}; its read instruction was: {read_lines[0]}"
+    )
+    assert attempt_path(0, 0) not in read_lines[0], (
+        "the reviewer must NOT be pointed at the mutable attempt path in its read "
+        f"instruction: {read_lines[0]}"
+    )
     assert out["result"]["merged"] is True
     assert out["result"]["batches"][0]["citationReview"] == "approved"
 
