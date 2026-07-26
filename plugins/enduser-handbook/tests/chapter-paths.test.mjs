@@ -862,9 +862,12 @@ test('R7-F1 wrong-container fixture: the line exists but under the WRONG contain
 // =================================================================================================
 // [1.11.0] #330 prep — indexView, the exported "name the expression" extraction of
 // locateChapterLine's own sanitized view. Direct characterization tests: nothing exercised this
-// expression on its own before extraction, since it lived inline. The claim is "no change to
-// existing locator/writer outputs" (plan Locked scope decision 5), not "adds no behaviour" — this
-// extraction is itself a new public export.
+// expression on its own before extraction, since it lived inline. The extraction ITSELF was
+// behavior-preserving (plan Locked scope decision 5) — that is a different claim from "no change to
+// locateChapterLine's return shape", which stopped being true once that shape later gained `index`
+// on each match record (#330 round-2 review, additive — the .d.mts now publishes it). Collapsing
+// those two claims into one is exactly what made the original wording here go stale; see the
+// library's own corrected docstring above `indexView` for the same fix.
 // =================================================================================================
 
 test('indexView [characterization]: a plain file with no inert content round-trips element-for-element', () => {
@@ -1497,7 +1500,8 @@ test('wireNestedListChapter, repeat-invocation isolation: a SINGLE call that pop
 // already remove every wrong-cardinality file before rules 3-5 ever run.
 
 test('verifyNonHeadingPlacement rule 1 [isolating, mutation-confirmed]: ZERO selected-target matches -> inconsistent, even though the file is an otherwise-perfectly-formed container', () => {
-  // Mutation-confirmed: narrowing the cardinality guard to `matchIndices.length > 1` (dropping
+  // Mutation-confirmed: narrowing the cardinality guard (`const { matches } =
+  // locateChapterLine(...); if (matches.length !== 1) ...`) to `matches.length > 1` (dropping
   // rule 1's own half) flips ONLY this fixture; every other fixture in this suite, including the
   // rule-2 ones just below, stays green.
   const result = verifyNonHeadingPlacement(['- Admin'], 'guide/items.md', 'Admin');
@@ -1508,7 +1512,7 @@ test('verifyNonHeadingPlacement rule 2 [isolating, mutation-confirmed]: TWO sele
   // Measured (plan round-14/round-9 HIGH 1): the writer sees ONE matching container ("Admin") and
   // returns inserted/created:false, while the locator independently reports 2 matches for the
   // selected target — rule 2 must fire on TARGET cardinality regardless of the predicate's own answer.
-  // Mutation-confirmed: narrowing the cardinality guard to `matchIndices.length < 1` (dropping
+  // Mutation-confirmed: narrowing that same cardinality guard to `matches.length < 1` (dropping
   // rule 2's own half) flips ONLY this fixture and the monotonicity fixture below.
   const indexLines = ['- Admin', '- guide/items.md', '- Other', '- guide/items.md'];
   const result = verifyNonHeadingPlacement(indexLines, 'guide/items.md', 'Admin');
