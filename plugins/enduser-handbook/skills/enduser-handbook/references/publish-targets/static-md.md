@@ -482,12 +482,12 @@ Three disclosures the operator is owed, not proved away:
   itself carries a heading is a different, unfixed gap: it completes with neither
   verification nor confirmation — see the safety note in "Grouped index wiring" above.
 
-**An index whose frontmatter poisons the view is a known, filed defect — not fixed here.** The
+**An index whose frontmatter poisons the view is a known defect, filed as #337 — not fixed here.** The
 writer's own body-preparation view blanks a leading frontmatter block before wiring, while the
 step-0 locator's view does not, so the two sides can disagree about what a frontmatter-embedded
 chapter line means. On a nested-list index this produces both a false "already wired" report and
-a chapter line that duplicates on every subsequent run (the shipped 1.10.0 frontmatter bug, filed
-as its own follow-up). `verifyNonHeadingPlacement` above only stops this case from returning a
+a chapter line that duplicates on every subsequent run (the shipped 1.10.0 frontmatter bug,
+#337). `verifyNonHeadingPlacement` above only stops this case from returning a
 false `ok` — a match inside the span returns `unverifiable` instead — it does not repair the
 duplication.
 

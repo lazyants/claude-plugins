@@ -2053,8 +2053,8 @@ export function verifyNonHeadingPlacement(indexLines, selectedTarget, groupTitle
   if (prep.kind === 'not-a-list') return { kind: 'unverifiable' };
 
   // Rule 3: a match inside a leading frontmatter block is never verified — the writer's own BODY
-  // blanks frontmatter while `indexView` does not (the shipped 1.10.0 disagreement filed as its own
-  // issue), so a present match there cannot be soundly judged either way.
+  // blanks frontmatter while `indexView` does not (the shipped 1.10.0 disagreement, filed as #337),
+  // so a present match there cannot be soundly judged either way.
   if (prep.span !== null && matchIndex >= prep.span.start && matchIndex < prep.span.endExclusive) {
     return { kind: 'unverifiable' };
   }
