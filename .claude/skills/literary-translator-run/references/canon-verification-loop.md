@@ -36,8 +36,8 @@ but with a **blind adjudication as the convergence gate**, not raw findings. Est
 
 **"Loop until no findings" is UNSATISFIABLE here and must not be used.** The reviewer perpetually
 re-flags correct general knowledge ("Rebbe Nachman of Breslov" isn't in *this* chapter), so raw
-findings never reach zero. This is the non-convergent case described in the
-`feedback-review-rounds-non-monotonic` memory topic.
+findings never reach zero. This is the non-convergent case described in
+`skill:review-loop-discipline` → `references/converge-and-exit.md`.
 
 - **Stop = no NEW real defects after adjudication** (convergence on the adjudicated set, not raw
   findings), with a **round cap** (the `max_fix_rounds` analog — ~2-3; each round is ~40 agents).
@@ -51,8 +51,8 @@ findings never reach zero. This is the non-convergent case described in the
 
 The blind adjudicator being a different model than a finder does NOT auto-favor that finder: the
 Terra adjudicator rejected MORE of Terra's own findings (51%) than Sol's (41%) — a cross-model judge
-still ranking the other model higher is a strong signal (same logic as the Terra-judge in the
-`technique-codex-model-effort-bakeoff` memory topic). Still finish with a human eyeball on
+still ranking the other model higher is a strong signal (same logic as the Terra-judge in
+`skill:codex-runtime-driving` → `references/model-effort-bakeoff.md`). Still finish with a human eyeball on
 categories/scope — the adjudicated set has scope-vs-defect noise.
 
 ## Refinements from actually RUNNING the loop (SSK, round 0 → round 1)
@@ -221,5 +221,6 @@ Same detached-codex fan-out as the model bakeoff: `codex-companion.mjs task --ba
 `~/.claude*/plugins/data/codex-openai-codex/state/*/jobs/`, wait via Monitor (long background bash
 polls get killed; detached codex jobs survive).
 
-Related memory topics (narrative/evidentiary detail, not required to apply this method):
-`technique-codex-model-effort-bakeoff`, `project-ssk-vol2-en-run`.
+Related (narrative/evidentiary detail, not required to apply this method):
+`skill:codex-runtime-driving` → `references/model-effort-bakeoff.md`, and the `project-ssk-vol2-en-run`
+memory topic.

@@ -495,8 +495,7 @@ def test_correctly_replaced_callout_not_rejected_by_unrelated_later_guéridon_me
     (a pedestal table) a real project's own hand-adapted content can
     legitimately mention elsewhere. A file-wide check would wrongly reject
     a correctly replaced callout forever, the exact over-broad-gate failure
-    class this plugin already got bitten by once (see
-    gotcha-overbroad-freetext-gate-regex in project memory)."""
+    class this plugin already got bitten by once."""
     text = (
         "# Translate task\n\n"
         "<!-- ERA/DOMAIN TRAP EXAMPLE -- replace before your first segment: "
