@@ -29,6 +29,7 @@ import {
   classifyChapterWiring,
   findContainer,
   wireNestedListChapter,
+  verifyNonHeadingPlacement,
   extractLabel,
   isPlainLabel,
   groupChanges,
@@ -1467,6 +1468,376 @@ test('wireNestedListChapter, repeat-invocation isolation: a SINGLE call that pop
   assert.equal(second.kind, 'inserted');
   assert.equal(second.created, true, 'the second call must see NO matched container, unaffected by the first call');
   assert.deepEqual(second.newLines, ['- Intro', '- Admin', '  - [Items](admin/items.md)']);
+});
+
+// =================================================================================================
+// [1.11.0] #330 — verifyNonHeadingPlacement (present-line placement verification, nested-list form)
+// =================================================================================================
+//
+// CONTRACT-FIRST: verifyNonHeadingPlacement is a stub that throws until EH-CORE lands the real
+// implementation (plan goal-la-eh-328-329-330-nonheading.md, "FEATURE 2" + "Tests" item 2), so
+// every fixture below is RED for now. Each fixture's PRECONDITION — match cardinality, frontmatter
+// span, and the fixed-probe predicate's kind — was driven through the REAL, already-shipped
+// supporting helpers (locateChapterLine/indexView, leadingFrontmatterSpan, wireNestedListChapter)
+// before being written here, so only the final verdict is unverified, never the setup. Guard-
+// mutation runs (scoped Edit-revert, RED-before-green) against the landed implementation, and the
+// resulting [isolating]/[masked] labels, are a follow-up pass once EH-CORE commits.
+//
+// The five-rule decision table (plan "Decision order is fixed"), in order: 1. zero selected-target
+// matches -> inconsistent; 2. more than one match -> inconsistent; 3. the single match lies inside
+// the leading frontmatter span -> unverifiable; 4. the fixed-probe predicate declines (not-a-list
+// or multiple) -> unverifiable; 5. otherwise compare the container -> ok / misplaced(label|null).
+// Every "-> unverifiable" fixture below is scoped by the SINGLE-MATCH precondition: rules 1-2
+// already remove every wrong-cardinality file before rules 3-5 ever run.
+
+test('verifyNonHeadingPlacement rule 1 [isolating, mutation-confirmed]: ZERO selected-target matches -> inconsistent, even though the file is an otherwise-perfectly-formed container', () => {
+  // Mutation-confirmed: narrowing the cardinality guard to `matchIndices.length > 1` (dropping
+  // rule 1's own half) flips ONLY this fixture; every other fixture in this suite, including the
+  // rule-2 ones just below, stays green.
+  const result = verifyNonHeadingPlacement(['- Admin'], 'guide/items.md', 'Admin');
+  assert.deepEqual(result, { kind: 'inconsistent' });
+});
+
+test('verifyNonHeadingPlacement rule 2 [isolating, mutation-confirmed]: TWO selected-target matches (a flat file with the target repeated) -> inconsistent, not "pick the first"', () => {
+  // Measured (plan round-14/round-9 HIGH 1): the writer sees ONE matching container ("Admin") and
+  // returns inserted/created:false, while the locator independently reports 2 matches for the
+  // selected target — rule 2 must fire on TARGET cardinality regardless of the predicate's own answer.
+  // Mutation-confirmed: narrowing the cardinality guard to `matchIndices.length < 1` (dropping
+  // rule 2's own half) flips ONLY this fixture and the monotonicity fixture below.
+  const indexLines = ['- Admin', '- guide/items.md', '- Other', '- guide/items.md'];
+  const result = verifyNonHeadingPlacement(indexLines, 'guide/items.md', 'Admin');
+  assert.deepEqual(result, { kind: 'inconsistent' });
+});
+
+test('verifyNonHeadingPlacement rule 3 [isolating, mutation-confirmed]: a single match lying inside a closed leading frontmatter block -> unverifiable', () => {
+  // Measured: leadingFrontmatterSpan reports span {start:0, endExclusive:4} for this file, and the
+  // ONLY occurrence of "guide/items.md" (index 2) lies inside it — indexView does not blank
+  // frontmatter, so locateChapterLine still reports present:true, single match. Mutation-confirmed:
+  // disabling just the frontmatter-span check flips ONLY this fixture (to misplaced(null), since
+  // the blanked container line then has no owner) — no other fixture in this suite depends on it.
+  const indexLines = ['---', '- Admin', '  - guide/items.md', '---', '- Admin'];
+  const result = verifyNonHeadingPlacement(indexLines, 'guide/items.md', 'Admin');
+  assert.deepEqual(result, { kind: 'unverifiable' });
+});
+
+test('verifyNonHeadingPlacement monotonicity [round-15/16 HIGH]: a match BOTH inside AND outside frontmatter is inconsistent (rule 2), never the softer unverifiable (rule 3) — this is what forced rules 2 and 3 to swap order', () => {
+  // Measured: 2 matches total (one inside the {0,4} frontmatter span, one outside) -> rule 2 fires
+  // before rule 3 is ever consulted. Watched against the pre-swap order this must flip to
+  // unverifiable, proving the reorder is load-bearing, not cosmetic.
+  const indexLines = ['---', '- Admin', '  - guide/items.md', '---', '- Admin', '  - guide/items.md'];
+  const result = verifyNonHeadingPlacement(indexLines, 'guide/items.md', 'Admin');
+  assert.deepEqual(result, { kind: 'inconsistent' });
+});
+
+test('verifyNonHeadingPlacement evaluation-order precondition [round-27 IMPORTANT] [isolating, mutation-confirmed]: a single match plus a trailing lone CR (prepareIndexLines declines) -> unverifiable, not a crash reading span/body off a refusal', () => {
+  // Measured: locateChapterLine still finds exactly ONE match (indexView has no CR-awareness), but
+  // prepareIndexLines refuses the file outright (the lone-CR guard) before span/body ever exist —
+  // the verifier must check prep.kind before touching either field. The writer would decline this
+  // file identically, so this is not a sixth rule: it is the same rule-4 outcome reached one step
+  // earlier because rule 3's own precondition (a real span) is unavailable. Mutation-confirmed:
+  // disabling this precondition check flips this fixture too — with `prep.span` undefined on a
+  // refusal, the frontmatter check itself throws reading `.start` off `undefined`, exactly the
+  // crash this precondition exists to prevent. It ALSO flips the "<!--nav-->" marker fixture below
+  // (the two share this exact masking site, confirmed by running both mutants).
+  const indexLines = ['- Admin', '  - guide/items.md', '\r'];
+  const result = verifyNonHeadingPlacement(indexLines, 'guide/items.md', 'Admin');
+  assert.deepEqual(result, { kind: 'unverifiable' });
+});
+
+// -------------------------------------------------------------------------------------------------
+// Rule 4 — the fixed-probe predicate declines. Each fixture is a distinct "nav-form" shape an
+// operator actually hits (plan's automation-limits enumeration), each built with EXACTLY ONE
+// selected-target match so the fixture exercises rule 4, never rule 1.
+// -------------------------------------------------------------------------------------------------
+
+test('verifyNonHeadingPlacement rule 4, native/YAML config [round-9 HIGH 2] [masked by containerOwnerScan\'s own foreign-content guard]: a fully spaced-colon "site_name : / nav : / - Admin :" file escapes the YAML-mapping detector entirely and is STILL refused (foreign content), not falsely verified', () => {
+  // This is the fixture that closes the native/YAML-config case where a text-based YAML detector
+  // cannot: YAML_MAPPING_LINE_RE requires the colon to touch the key, so every line here defeats it
+  // — yet the shape predicate still declines (measured: wireNestedListChapter returns not-a-list),
+  // because "site_name : Handbook" is foreign content on its own (no marker, no ATX heading).
+  // Mutation-confirmed MASKED, not isolating: disabling rule 4's own decline check does NOT flip
+  // this fixture, because rule 5's OWN containerOwnerScan(prep.body, wanted) call independently
+  // rejects "site_name : Handbook" as foreign content before ever reaching a container comparison —
+  // per this file's mask-pair convention, documented rather than claimed isolating.
+  const indexLines = ['site_name : Handbook', 'nav :', '- Admin :', '  - Items : guide/items.md'];
+  const result = verifyNonHeadingPlacement(indexLines, 'guide/items.md', 'Admin');
+  assert.deepEqual(result, { kind: 'unverifiable' });
+});
+
+test('verifyNonHeadingPlacement rule 4, typed-key nav row ["- Yes:" case] [isolating, mutation-confirmed]: a bare YAML-mapping key ("- Yes:") declines, closing the boolean-vs-string ambiguity a text comparator cannot resolve safely', () => {
+  // The plan's own illustration: Psych would parse the key as boolean `true` while a text rule
+  // reads the string "Yes" — a text-based container comparator would falsely say ok. Delegating the
+  // whole shape to the writer's hasYamlMappingStructure guard sidesteps the ambiguity outright.
+  // Mutation-confirmed isolating (unlike the mkdocs.yml fixture above): "- Yes:" IS a perfectly
+  // valid plain-label indent-0 bullet as far as containerOwnerScan is concerned (isPlainLabel("Yes:")
+  // is true) — hasYamlMappingStructure is a WRITER-only pre-loop guard containerOwnerScan never
+  // runs, so disabling rule 4's own check genuinely flips this fixture (to misplaced('Yes:'), not a
+  // crash or a mask) while the mkdocs.yml fixture above stays caught by a different guard.
+  const indexLines = ['- Yes:', '  - Items: guide/items.md'];
+  const result = verifyNonHeadingPlacement(indexLines, 'guide/items.md', 'Yes');
+  assert.deepEqual(result, { kind: 'unverifiable' });
+});
+
+test('verifyNonHeadingPlacement rule 4, literate-nav ordered list [masked by containerOwnerScan\'s own ordered-marker guard]: "1. [Admin](admin.md)" is an ordinary literate-nav feature the writer declines (ordered marker), not a container', () => {
+  // Mutation-confirmed MASKED: disabling rule 4's own decline check does not flip this fixture —
+  // containerOwnerScan's own NESTED_ORDERED_MARKER_RE guard rejects the ordered-list line
+  // independently, the same shared-scan mechanism rule 5 would call anyway.
+  const indexLines = ['1. [Admin](admin.md)', '   - [Items](guide/items.md)'];
+  const result = verifyNonHeadingPlacement(indexLines, 'guide/items.md', 'Admin');
+  assert.deepEqual(result, { kind: 'unverifiable' });
+});
+
+test('verifyNonHeadingPlacement rule 4, literate-nav wildcard [masked by containerOwnerScan\'s own bare-path guard]: "* subdirectory/*.md" is refused by the bare-path guard, not silently treated as a container', () => {
+  // Mutation-confirmed MASKED, same mechanism as the ordered-list fixture above: containerOwnerScan
+  // itself refuses this line via isBarePathBullet before any container comparison would run.
+  const indexLines = ['* subdirectory/*.md', '- [Items](guide/items.md)'];
+  const result = verifyNonHeadingPlacement(indexLines, 'guide/items.md', 'Admin');
+  assert.deepEqual(result, { kind: 'unverifiable' });
+});
+
+test('verifyNonHeadingPlacement rule 4, "<!--nav-->" marker file [masked by the EARLIER prep.kind precondition, not by rule 4 itself]: an inert-content marker line desyncs the identity guard (same mechanism as a stray backtick), so this shape declines too', () => {
+  // Measured: leadingFrontmatterSpan ALSO reports not-a-list for this file — the marker line is
+  // blanked by stripInertContexts while the raw line survives comparison, tripping the identity
+  // guard directly (not the foreign-content guard). Mutation-confirmed: disabling rule 4's own
+  // decline check does NOT flip this fixture (prepareIndexLines already refused it upstream); it
+  // DOES flip together with the lone-CR precondition fixture above when THAT earlier check is
+  // disabled instead — same masking site, confirmed by running both mutants independently.
+  const indexLines = ['<!--nav-->', '- [Items](guide/items.md)'];
+  const result = verifyNonHeadingPlacement(indexLines, 'guide/items.md', 'Admin');
+  assert.deepEqual(result, { kind: 'unverifiable' });
+});
+
+test('verifyNonHeadingPlacement rule 4, exotic path-table row [masked by containerOwnerScan\'s own foreign-content guard]: a pipe-table cell carrying a markdown link is recognized by the locator but the row itself is foreign content to the writer', () => {
+  const indexLines = ['| [Items](guide/items.md) |'];
+  const result = verifyNonHeadingPlacement(indexLines, 'guide/items.md', 'Admin');
+  assert.deepEqual(result, { kind: 'unverifiable' });
+});
+
+test('verifyNonHeadingPlacement rule 4, "multiple" is mapped explicitly [round-9 HIGH 1] [isolating, mutation-confirmed]: TWO indent-0 containers sharing group_title, but exactly ONE selected-target match under one of them, still resolves to unverifiable — not ok, not misplaced', () => {
+  // Isolates the `multiple` mapping from the cardinality rules: matches.length===1 (rules 1/2 pass)
+  // yet the predicate itself returns {kind:'multiple'} (container-ambiguous), which rule 4 must
+  // treat exactly like not-a-list. Mapping only not-a-list here would make the verifier MORE
+  // permissive than the writer on an ambiguous file — the unsafe direction. Mutation-confirmed:
+  // disabling rule 4's own decline check flips this to a false `ok` — unlike the fixtures above,
+  // containerOwnerScan itself has NO concept of "too many matching containers" (that ambiguity is
+  // the WRITER's own post-scan `containers.length >= 2` check, outside the shared scan), so nothing
+  // downstream masks the removal.
+  const indexLines = ['- Admin', '- Admin', '  - guide/items.md'];
+  const result = verifyNonHeadingPlacement(indexLines, 'guide/items.md', 'Admin');
+  assert.deepEqual(result, { kind: 'unverifiable' });
+});
+
+test('verifyNonHeadingPlacement rule 4, heading + INDENTED child [round-20 panel, reproduced] [masked by containerOwnerScan\'s own orphan-child guard]: the writer refuses this at its own orphan-child guard, so the file reaches rule 4, NEVER rule 5 — a heading reset cannot be walked around', () => {
+  // The plan's own correction of an earlier (wrong) credit: a naive nearest-preceding-container scan
+  // would call this misplaced(null), but the real predicate declines the file outright (not-a-list)
+  // before any container comparison happens, so the correct answer here is unverifiable.
+  // Mutation-confirmed MASKED: disabling rule 4's own check does not flip this fixture, since rule
+  // 5's own containerOwnerScan(prep.body, wanted) call hits the SAME orphan-child guard independently
+  // (it is the identical shared function) — a heading reset genuinely cannot be walked around from
+  // either call site.
+  const indexLines = ['- Admin', '# Section', '  - guide/items.md'];
+  const result = verifyNonHeadingPlacement(indexLines, 'guide/items.md', 'Admin');
+  assert.deepEqual(result, { kind: 'unverifiable' });
+});
+
+// -------------------------------------------------------------------------------------------------
+// Rule 5 — the container comparison. `misplaced` carries `foundContainer` (a label string, or null
+// when the matched row is uncontained). Every fixture below has a predicate that ACCEPTS the file
+// (kind:'inserted'), so rule 4 always passes through to the container walk.
+// -------------------------------------------------------------------------------------------------
+
+test('verifyNonHeadingPlacement rule 5: a correctly-nested child under its matching container -> ok', () => {
+  const indexLines = ['- Admin', '  - guide/items.md'];
+  const result = verifyNonHeadingPlacement(indexLines, 'guide/items.md', 'Admin');
+  assert.deepEqual(result, { kind: 'ok' });
+});
+
+test('verifyNonHeadingPlacement rule 5, uncontained [round-15 HIGH] [isolating, mutation-confirmed]: a TOP-LEVEL sibling ("- guide/items.md" at indent 0) is misplaced(null), not ok — the writer treats every indent-0 bullet as its OWN container, never a child', () => {
+  // Mutation-confirmed: narrowing the "owner === -1 || owner === undefined" guard to
+  // "owner === undefined" only flips this fixture (and the heading-reset one below) to
+  // misplaced(undefined) instead of misplaced(null) — the -1 sentinel (a bullet is its own
+  // container, never a child) is genuinely load-bearing, not redundant with the undefined case.
+  const indexLines = ['- Admin', '- guide/items.md'];
+  const result = verifyNonHeadingPlacement(indexLines, 'guide/items.md', 'Admin');
+  assert.deepEqual(result, { kind: 'misplaced', foundContainer: null });
+});
+
+test('verifyNonHeadingPlacement rule 5, uncontained after a heading reset [round-15 HIGH] [isolating, mutation-confirmed — same mutant as the plain-sibling fixture above]: a top-level sibling AFTER an ATX heading is still misplaced(null), same as the plain-sibling case', () => {
+  const indexLines = ['- Admin', '# Section', '- guide/items.md'];
+  const result = verifyNonHeadingPlacement(indexLines, 'guide/items.md', 'Admin');
+  assert.deepEqual(result, { kind: 'misplaced', foundContainer: null });
+});
+
+test('verifyNonHeadingPlacement rule 5, misplaced under a genuinely different container [isolating, mutation-confirmed — see the containerOwnerScan-coverage section below for the paired mutant]: a child correctly nested under "- Other" while groupTitle is "Admin" -> misplaced(\'Other\') — the writer\'s created:true CREATE-a-new-container branch is exactly this case, not unverifiable', () => {
+  // Measured: containers.length===0 ('Other' !== 'Admin'), so the predicate itself returns
+  // inserted/created:true (it would CREATE a new "Admin" container) — proving created:true stays in
+  // the recognized/misplaced class rather than being folded into unverifiable alongside `multiple`.
+  const indexLines = ['- Other', '  - guide/items.md'];
+  const result = verifyNonHeadingPlacement(indexLines, 'guide/items.md', 'Admin');
+  assert.deepEqual(result, { kind: 'misplaced', foundContainer: 'Other' });
+});
+
+test('verifyNonHeadingPlacement rule 5, container label comparison is UNTRIMMED [round-18 panel, mutation guard] [isolating, mutation-confirmed]: an existing "[ Admin ](admin.md)" container (extractLabel returns the untrimmed " Admin ") does not match a trimmed "Admin" groupTitle -> misplaced(\' Admin \'), never ok', () => {
+  // WITH the no-trim comparison (the writer's own containers.length===0 branch already proves
+  // " Admin " !== "Admin" is exactly how the writer itself reads this file — created:true). WITHOUT
+  // it (a mutant that trims ownerLabelOf before comparing): this fixture would wrongly flip to ok,
+  // even though the writer, asked with the SAME groupTitle, says no matching container exists.
+  // Mutation-confirmed: adding `.trim()` to the ownerLabel comparison flips ONLY this fixture — every
+  // other rule-5 fixture in this suite has an already-untrimmed label, so trimming is a no-op there.
+  const indexLines = ['- [ Admin ](admin.md)', '  - guide/items.md'];
+  const result = verifyNonHeadingPlacement(indexLines, 'guide/items.md', 'Admin');
+  assert.deepEqual(result, { kind: 'misplaced', foundContainer: ' Admin ' });
+});
+
+test('verifyNonHeadingPlacement rule 5, CRLF regression [round-18 panel] [isolating, mutation-confirmed]: a correctly-wired CRLF index -> ok, watched failing against a mutant that swaps the shared container walk for a walk over indexView instead of the writer\'s own BODY', () => {
+  // Mutation-confirmed: swapping containerOwnerScan's array argument from prep.body to
+  // indexView(indexLines) flips ONLY this fixture and the codex frontmatter+comment fixture below —
+  // every other rule-5 "ok" fixture (the plain child, the compatibility matrix, ...) has no
+  // BODY/indexView divergence and stays green under that same mutant.
+  const indexLines = ['- Admin\r', '  - guide/items.md'];
+  const result = verifyNonHeadingPlacement(indexLines, 'guide/items.md', 'Admin');
+  assert.deepEqual(result, { kind: 'ok' });
+});
+
+test('verifyNonHeadingPlacement rule 5, codex frontmatter+HTML-comment regression [round-18/19 panel — the decisive counterexample against walking indexView] [isolating, mutation-confirmed — see the CRLF fixture above for the paired mutant]: a chapter freshly wired by the writer into a file whose frontmatter contains an HTML comment spanning into the body -> ok, never a false misplaced(null)', () => {
+  // The writer accepts this file and reports inserted/created:false — by construction it agrees the
+  // inserted row IS correctly nested under "Admin". But indexView (unlike the writer's own BODY)
+  // sanitizes the WHOLE raw text with no frontmatter awareness: the "<!--" opened inside frontmatter
+  // runs all the way to the body's "-->", which BLANKS the "- Admin" container line while leaving the
+  // freshly-inserted chapter row (after the comment closes) untouched and visible. A container walk
+  // over indexView would therefore find no container at all for a row the writer itself just wired —
+  // the exact "second recognizer" drift the shared containerOwnerScan/BODY design exists to prevent.
+  const written = wireNestedListChapter(
+    ['---', 'note: <!--', '---', '- Admin', '  - -->'],
+    'Admin',
+    '[Items](admin/items.md)',
+  );
+  assert.equal(written.kind, 'inserted');
+  assert.equal(written.created, false);
+  const result = verifyNonHeadingPlacement(written.newLines, 'admin/items.md', 'Admin');
+  assert.deepEqual(result, { kind: 'ok' });
+});
+
+// -------------------------------------------------------------------------------------------------
+// Direct coverage of containerOwnerScan's `ownerOf`/`ownerLabelOf` fields (round-22 HIGH), reached
+// through verifyNonHeadingPlacement as their first real consumer — EH-CORE's own characterization of
+// these two fields used a temporary scratch export that was deleted before landing, so nothing in
+// the committed suite exercised them directly until these three fixtures.
+// -------------------------------------------------------------------------------------------------
+
+test('verifyNonHeadingPlacement, containerOwnerScan coverage [isolating, mutation-confirmed]: TWO containers where only ONE matches groupTitle — the NON-matching container\'s own (untrimmed) label is still recorded as the owner label for ITS child, not left undefined', () => {
+  // "Admin" is the only container pushed into `containers` (the writer\'s own match set), yet the
+  // second container "Other" — which never enters that array — must still hand its OWN label to
+  // ownerLabelOf for the child underneath it. If ownerLabelOf were (wrongly) derived FROM the
+  // `containers` array instead of tracked independently, this fixture would misplaced(undefined) or
+  // throw rather than correctly naming "Other". Mutation-confirmed: replacing containerOwnerScan's
+  // per-line `ownerLabelOf[i] = currentContainerLabel` with `ownerLabelOf[i] = wanted` (deriving the
+  // label from the match target instead of tracking it) flips this fixture to a false `ok` — along
+  // with the heading-reset fixture below, the plain "misplaced under Other" fixture above, and the
+  // untrimmed-label fixture above; every ALREADY-`ok` fixture in the suite is unaffected (the mutant
+  // is a no-op whenever the real owner label already equals `wanted`).
+  const indexLines = ['- Admin', '  - a.md', '- Other', '  - guide/items.md'];
+  const result = verifyNonHeadingPlacement(indexLines, 'guide/items.md', 'Admin');
+  assert.deepEqual(result, { kind: 'misplaced', foundContainer: 'Other' });
+});
+
+test('verifyNonHeadingPlacement, containerOwnerScan coverage [isolating, mutation-confirmed — same mutant as the fixture above]: a heading reset between two DIFFERENTLY-labeled containers correctly re-parents a post-reset child to the container that follows the reset, never the one that preceded it', () => {
+  // If the ATX-heading reset of currentContainer were dropped (or misapplied), this child would be
+  // read as still belonging to the PRE-reset "Admin" container and the file would wrongly verify ok.
+  const indexLines = ['- Admin', '# Section', '- Other', '  - guide/items.md'];
+  const result = verifyNonHeadingPlacement(indexLines, 'guide/items.md', 'Admin');
+  assert.deepEqual(result, { kind: 'misplaced', foundContainer: 'Other' });
+});
+
+test('verifyNonHeadingPlacement, containerOwnerScan coverage [characterization, not paired with a dedicated discriminating mutant]: MULTIPLE children under one container — a MIDDLE child (neither first nor last) still resolves to the shared container', () => {
+  // Honest limit, checked rather than assumed: verifyNonHeadingPlacement never surfaces a
+  // container's own BODY index, only its LABEL — a mutant that mis-tracks `ownerOf`'s index (e.g.
+  // "previous bullet" instead of "current container") but leaves `ownerLabelOf` correct is provably
+  // unobservable through this public contract, so no mutation isolates THIS fixture specifically
+  // from the plain single-child "ok" fixture above. Its value is coverage: it proves cardinality
+  // (2+ children under one container) does not itself break the shared resolution.
+  const indexLines = ['- Admin', '  - a.md', '  - guide/items.md', '  - c.md'];
+  const result = verifyNonHeadingPlacement(indexLines, 'guide/items.md', 'Admin');
+  assert.deepEqual(result, { kind: 'ok' });
+});
+
+// -------------------------------------------------------------------------------------------------
+// selectedTarget, not a bare expected target (round-2 HIGH 6) — the Obsidian adapter's union scan
+// over the qualified and legacy-bare spellings SELECTS one before calling this function; the
+// verifier must check placement of whichever target the caller selected, never re-derive it.
+// -------------------------------------------------------------------------------------------------
+
+test('verifyNonHeadingPlacement, legacy-bare target selection [round-2 HIGH 6]: a legitimately-present LEGACY bare wikilink row verifies ok when selectedTarget is the legacy spelling the caller actually selected, never falsely inconsistent against the qualified spelling it did NOT select', () => {
+  const indexLines = ['- Admin', '  - [[items]]'];
+  const result = verifyNonHeadingPlacement(indexLines, 'items', 'Admin', { wikilink: true });
+  assert.deepEqual(result, { kind: 'ok' });
+});
+
+test('verifyNonHeadingPlacement, wikilink ".md" fold: a markdown-link row is still recognized under wikilink mode once the fold removes the row\'s own terminal ".md" from the comparison, same as locateChapterLine\'s own fold', () => {
+  const indexLines = ['- Admin', '  - [Items](guide/items.md)'];
+  const result = verifyNonHeadingPlacement(indexLines, 'guide/items', 'Admin', { wikilink: true });
+  assert.deepEqual(result, { kind: 'ok' });
+});
+
+// -------------------------------------------------------------------------------------------------
+// Compatibility matrix (plan Tests item 2) — a finite, enumerated set of adapter-generated link
+// equivalence classes, every one correctly placed, all converging on ok.
+// -------------------------------------------------------------------------------------------------
+
+test('verifyNonHeadingPlacement compatibility matrix: path mode, flat target -> ok', () => {
+  const result = verifyNonHeadingPlacement(['- Admin', '  - [Items](guide/items.md)'], 'guide/items.md', 'Admin');
+  assert.deepEqual(result, { kind: 'ok' });
+});
+
+test('verifyNonHeadingPlacement compatibility matrix: path mode, grouped (subfolder) target -> ok', () => {
+  const result = verifyNonHeadingPlacement(
+    ['- Admin', '  - [Items](guide/admin/items.md)'],
+    'guide/admin/items.md',
+    'Admin',
+  );
+  assert.deepEqual(result, { kind: 'ok' });
+});
+
+test('verifyNonHeadingPlacement compatibility matrix: wikilink mode, qualified target -> ok', () => {
+  const result = verifyNonHeadingPlacement(['- Admin', '  - [[guide/items|Items]]'], 'guide/items', 'Admin', {
+    wikilink: true,
+  });
+  assert.deepEqual(result, { kind: 'ok' });
+});
+
+test('verifyNonHeadingPlacement compatibility matrix: wikilink mode, legacy-bare target -> ok', () => {
+  const result = verifyNonHeadingPlacement(['- Admin', '  - [[items|Items]]'], 'items', 'Admin', {
+    wikilink: true,
+  });
+  assert.deepEqual(result, { kind: 'ok' });
+});
+
+test('verifyNonHeadingPlacement compatibility matrix: flat bare-path child (no link syntax at all) -> ok', () => {
+  const result = verifyNonHeadingPlacement(['- Admin', '  - items.md'], 'items.md', 'Admin');
+  assert.deepEqual(result, { kind: 'ok' });
+});
+
+// -------------------------------------------------------------------------------------------------
+// The fixed-probe design's own soundness assumption (round-9 HIGH 1): "for any newline-free
+// chapterLink, accept/decline is a function of (indexLines, groupTitle) alone." This is a claim
+// about the EXISTING wireNestedListChapter (unchanged by 1.11.0), pinned here because
+// verifyNonHeadingPlacement's whole delegation design depends on it staying true.
+// -------------------------------------------------------------------------------------------------
+
+test('wireNestedListChapter accept/decline invariance [pins the #330 fixed-probe assumption]: the SAME file/groupTitle accepts (kind + created) identically across a representative repertoire of newline-free chapterLink spellings', () => {
+  const indexLines = ['- Admin'];
+  const links = [
+    '[Items](admin/items.md)',
+    '[[admin/items|Items]]',
+    '[[items]]',
+    'admin/items.md',
+    '[A very different label indeed](admin/other/path/items.md)',
+  ];
+  for (const link of links) {
+    const result = wireNestedListChapter(indexLines, 'Admin', link);
+    assert.equal(result.kind, 'inserted', `expected inserted for link ${JSON.stringify(link)}`);
+    assert.equal(result.created, false, `expected created:false for link ${JSON.stringify(link)}`);
+  }
 });
 
 // =================================================================================================
