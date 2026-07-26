@@ -596,11 +596,16 @@ adopt an orphaned directory's stale attempt. That makes this a bounded
 precondition, not an unnoticed defect.
 
 **Evidence status.** The guarantee rests on `os.link()`'s create-once
-semantics. It does not rest on the concurrent-writer test, which is a
-regression check: `tests/canon_approve_to.test.py` starts eight processes that
-each call `--approve-to` on one fresh path carrying different bytes, and
-asserts that exactly one of them wins. Take that as what it is — a check that
-the invariant still holds on the platform it ran on.
+semantics, not on any test — and the tests around it each touch less than
+their names suggest, so read them for what they actually exercise. The
+concurrent-writer test in `tests/canon_approve_to.test.py` starts eight
+processes that call `_write_approved_snapshot` DIRECTLY, not through
+`--approve-to`, and asserts that exactly one of them wins; it races the helper
+rather than the CLI on purpose, since the window is microseconds wide and full
+CLI runs would sample it only by luck. So it does catch this helper regressing
+to a check-then-act guard, which is what it is for, and it says nothing about
+the CLI. The `--check-batch … --approve-to` path is exercised separately, by
+the sequential tests in the same file. Take each for what it is.
 
 Fail-closed follows from the snapshot being attempt-scoped as well: if the
 winning attempt was never approved, the `approved_{index}_attempt_{n}.json`
