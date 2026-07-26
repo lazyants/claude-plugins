@@ -888,23 +888,24 @@ function sentinelVerdict(reply, okSentinel, failSentinel) {
 // fail-safe direction at all three sites -- but what a false RED COSTS differs
 // per site, and the three are NOT alike. Traced through the control flow rather
 // than assumed:
-//   citation review -- automatic retry, same run, but NOT self-recovering, and
-//     the difference matters. The verdict falls through to rejectionDetail() and
-//     the enclosing `for (let attempt = 0; ; attempt++)` carries on to
-//     attempt+1, bounded by MAX_CITATION_RETRIES. That bound is PER RUN, which
-//     is the whole cost: the trigger here is the REVIEWER'S PHRASING, not the
-//     fragment's data, and every attempt's review is issued the same prompt --
-//     which prints the fail sentinel verbatim in its own instructions. So a
-//     reviewer disposed to narrate that sentinel ("no item failed, so
-//     CITATIONS_REJECTED 0 ATTEMPT 0 is not warranted") does it again on the
-//     next attempt, burns all MAX_CITATION_RETRIES+1 of them, and the pass
-//     returns reason:"citation-review-exhausted". Because the merge is
-//     all-or-nothing, ZERO batches merge. And re-running the pass does not
-//     recover it: nothing about the phrasing is per-run state. Do not describe
-//     this false RED as bounded or self-healing without that qualifier -- it is
-//     bounded within one run and unbounded across runs. The operator message at
-//     the citation-exhaustion return names this as one of the two causes and how
-//     to tell it from the other.
+//   citation review -- automatic retry, same run, but NOT RELIABLY
+//     self-recovering, and the difference matters. The verdict falls through to
+//     rejectionDetail() and the enclosing `for (let attempt = 0; ; attempt++)`
+//     carries on to attempt+1, bounded by MAX_CITATION_RETRIES. That bound is
+//     PER RUN, which is the whole cost: the trigger here is the REVIEWER'S
+//     PHRASING, not the fragment's data, and every attempt's review is issued
+//     the same prompt -- which prints the fail sentinel verbatim in its own
+//     instructions. So a reviewer disposed to narrate that sentinel ("no item
+//     failed, so CITATIONS_REJECTED 0 ATTEMPT 0 is not warranted") is liable
+//     to do it again on the next attempt, burning all MAX_CITATION_RETRIES+1
+//     of them, and the pass returns reason:"citation-review-exhausted". Because
+//     the merge is all-or-nothing, ZERO batches merge. And re-running the pass
+//     is not a reliable recovery: nothing about the phrasing is per-run state
+//     to clear, so a re-run only clears it by chance. Do not describe this
+//     false RED as bounded or self-healing without that qualifier -- it is
+//     bounded within one run and unbounded across runs. The operator message
+//     at the citation-exhaustion return names this as one of the two causes
+//     and how to tell it from the other.
 //   precheck -- automatic, same run. `resumed` simply goes false, so the loop
 //     body dispatches this batch instead of resume-skipping it. The cost is
 //     redoing work whose fragment was already valid on disk.
@@ -1167,13 +1168,14 @@ const citationExhaustedBatches = notReadyBatches.filter((r) => r && r.reason ===
 // reviewer rejected by the containment guard for quoting its own fail sentinel
 // produces exactly the same result against data that is entirely fine. Sending
 // the operator to hand-edit candidates in that case is wrong twice over -- the
-// data is not the problem, and re-running does not help either, because the
-// trigger is the reviewer's phrasing and nothing about it is per-run state.
+// data is not the problem, and re-running is a re-roll rather than a reliable
+// fix: the trigger is the reviewer's phrasing, which a fresh attempt may or may
+// not repeat.
 if (citationExhaustedBatches.length > 0) {
   log(
     "Glossary pass: " + citationExhaustedBatches.length + "/" + BATCHES.length +
     " batch(es) were never approved by the citation review, after " + (MAX_CITATION_RETRIES + 1) +
-    " attempt(s) each; the merge is not attempted, so NO batch merged. Two different causes produce this, and they need opposite responses -- read each batch's lastRejection before doing anything. (1) THE CITATIONS ARE GENUINELY UNVERIFIABLE: lastRejection names specific source_form values with their source URLs and which check each one failed. Fix the data -- route those candidates to disposition:\"review_queue\", or supply real sources -- then re-run. (2) THE REVIEWER REJECTED ITSELF: lastRejection reads as an approval, or discusses the CITATIONS_REJECTED sentinel rather than any citation, or is the fixed no-reason placeholder. The review prompt prints that sentinel verbatim in its own instructions, so a reply that merely quotes or discusses it is caught by the containment guard and rejected whatever else it said. Re-running does NOT help here: the trigger is the reviewer's wording, not the fragment, so every attempt in every run repeats it. Nothing in the data needs editing -- treat it as a review-prompt defect and report it."
+    " attempt(s) each; the merge is not attempted, so NO batch merged. Two different causes produce this, and they need opposite responses -- read each batch's lastRejection before doing anything. (1) THE CITATIONS ARE GENUINELY UNVERIFIABLE: lastRejection names specific source_form values with their source URLs and which check each one failed. Fix the data -- route those candidates to disposition:\"review_queue\", or supply real sources -- then re-run. (2) THE REVIEWER REJECTED ITSELF: lastRejection reads as an approval, or discusses the CITATIONS_REJECTED sentinel rather than any citation, or is the fixed no-reason placeholder. The review prompt prints that sentinel verbatim in its own instructions, so a reply that merely quotes or discusses it is caught by the containment guard and rejected whatever else it said. Re-running is not a reliable fix here: the trigger is the reviewer's wording, not the fragment, so the mis-phrasing is likely to recur, though a fresh attempt may clear it by chance. Nothing in the data needs editing -- treat it as a review-prompt defect and report it."
   )
   return {
     batches: batchResults, merged: false, reason: "citation-review-exhausted",

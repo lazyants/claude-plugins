@@ -62,11 +62,17 @@ success line then approved the work anyway.
 - `canon_validate.py --check-batch <fragment> --approve-to PATH` now snapshots the exact validated
   bytes to an immutable, attempt-scoped `approved_{index}_attempt_{n}.json`, taken from the SAME
   read that validated them — one `read_bytes()` through the new opt-in `_read_json_bytes`, no second
-  read, so no window exists between validating and copying. The copy goes out through a new
-  `_atomic_write_bytes`, the byte-preserving counterpart to `_atomic_write_json` (which
-  re-serialises and therefore cannot produce a byte-identical snapshot). `read_text()` is
+  read, so no window exists between validating and copying. The copy is published CREATE-ONCE: the
+  raw bytes go to a unique temp file, which `os.link()` then atomically links into place, so exactly
+  one writer's bytes can ever land at that path. `_atomic_write_json` is not usable here — it
+  re-serialises, and therefore cannot produce a byte-identical snapshot. `read_text()` is
   deliberately not on this path: its universal-newline translation would snapshot a CRLF fragment
   with bytes it never had on disk. On success the stdout JSON line gains an `approved_path` key.
+- **Create-once is what makes a duplicate approval harmless.** A second `--check-batch --approve-to`
+  at the same path — a repeated call, or two overlapping reviewer dispatches for one batch/attempt —
+  cannot replace bytes a reviewer may already have audited: identical bytes are an idempotent no-op,
+  DIFFERENT bytes fail closed with the audited copy byte-untouched and the offending path named. A
+  filesystem without hard links fails closed too, rather than falling back to an overwriting write.
 - **The ordering is the whole fix.** Snapshotting *after* the audit would close nothing: a producer
   sharing the RUN_ID can replace validated-bytes-A with structurally-valid-bytes-B between the
   reviewer's read and the copy, so the snapshot would capture B while the reviewer approved A. The
@@ -222,8 +228,8 @@ success line then approved the work anyway.
   `lastRejection` that instead reads as an approval, discusses the `CITATIONS_REJECTED` sentinel
   rather than any citation, or is the fixed no-findings placeholder is the guard misfiring: nothing
   in the data needs editing, the attempt fragments and their approved snapshots are on disk to
-  inspect, and the response is to treat it as a review-prompt defect and report it — re-running
-  cannot help, since nothing about the trigger is per-run state.
+  inspect, and the response is to treat it as a review-prompt defect and report it — re-running is a
+  re-roll, not a reliable fix, since nothing about the trigger is per-run state for a re-run to clear.
 - The remaining four, for the cost picture: the glossary wait returns
   `{ready: false, reason: "glossary-pass-null"}` straight out of `batchStep`, ending that batch
   and — the merge being all-or-nothing — the whole pass, which reports `merged: false` and merges

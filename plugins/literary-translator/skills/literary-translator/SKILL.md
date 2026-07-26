@@ -774,11 +774,13 @@ wait's: a reply carrying the failure sentinel ANYWHERE in it rejects, because
 matching whole lines alone let a fail sentinel glued to prose slip past and a
 trailing clean OK line then approve. The cost is a false REJECT on a reply
 that only *discusses* its own fail sentinel, and only ONE of the guarded
-sites recovers from that inside the run — the precheck, which falls through
-to the dispatch it would have run anyway. **The citation review does not
-recover**, however much its retry ladder looks like it should: the ladder
-regenerates the fragment, while what tripped the guard is the reviewer's
-phrasing, so every attempt can burn on the same narration and the run ends
+sites recovers from that DETERMINISTICALLY inside the run — the precheck,
+which falls through to the dispatch it would have run anyway. **The citation
+review does not recover RELIABLY**, however much its retry ladder looks like
+it should: the ladder regenerates the fragment, while what tripped the guard
+is the reviewer's phrasing, so a regenerated attempt clears only if its fresh
+reply happens not to re-trip the guard — a re-roll, not a repair — and every
+attempt can burn on the same narration, ending the run
 `citation-review-exhausted` with nothing merged. Read each batch's
 `lastRejection` before touching any data — one naming specific `source_form`
 values with their `source` URLs and the check each failed is a data problem;

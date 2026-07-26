@@ -616,10 +616,10 @@ to below is the number of attempts, never the cause of the reject.
   make it reachable.
 
 **A false REJECT does not cost the same at every site**, and the difference is
-what to read a failed run against. Of the six, exactly ONE recovers inside the
-run — the precheck. At every other site the trigger is the reply's PHRASING
-rather than the data, so a re-run is another roll of the same die and not a
-repair:
+what to read a failed run against. Of the six, exactly ONE recovers
+DETERMINISTICALLY inside the run — the precheck. At every other site the
+trigger is the reply's PHRASING rather than the data, so a re-run is another
+roll of the same die and not a repair:
 
 - **Precheck** — `resumed` stays false and the batch falls through to the
   dispatch + wait it would have run had no fragment been on disk. Automatic,
@@ -627,19 +627,21 @@ repair:
   one codex dispatch plus one poll. This is the only genuine repair of the
   six, and it is genuine precisely because the fall-through path is correct
   regardless of WHY the precheck reported `ABSENT`.
-- **Citation review — NOT self-recovering, however much its retry ladder
-  looks like it.** The batch does regenerate to a fresh attempt and get
+- **Citation review — NOT RELIABLY self-recovering, however much its retry
+  ladder looks like it.** The batch does regenerate to a fresh attempt and get
   reviewed again, bounded by `MAX_CITATION_RETRIES`. But the ladder varies the
   FRAGMENT while the guard was tripped by the reviewer's WORDING, and every
   prompt that owns a fail sentinel prints that sentinel verbatim in its own
   instructions — so a reviewer reasoning about its verdict in prose is an
   ordinary output, and the next attempt's reviewer reads the same invitation
-  to do it again. Burning all `MAX_CITATION_RETRIES + 1` attempts returns
-  `citation-review-exhausted`, and the merge being all-or-nothing, **zero**
-  batches merge: the run produces nothing while the data may have been fine
-  throughout. What the bound buys is termination, not recovery: nothing about
-  the trigger is per-run state, so a re-invocation of the pass has nothing new
-  to work with.
+  to do it again. It may decline it, and that attempt then merges in the same
+  run — but that is a re-roll landing well, not a repair, since nothing the
+  ladder varies addresses what tripped the guard. Burning all
+  `MAX_CITATION_RETRIES + 1` attempts returns `citation-review-exhausted`, and
+  the merge being all-or-nothing, **zero** batches merge: the run produces
+  nothing while the data may have been fine throughout. What the bound buys is
+  termination, not recovery: nothing about the trigger is per-run state, so
+  re-invoking the pass is another re-roll rather than a reliable repair.
   **Telling the two causes apart is what an operator actually needs**, and it
   is readable off the reply, which is why the exhaustion message states both
   causes instead of one. The reviewer prompt requires a genuine rejection to
