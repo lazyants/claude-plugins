@@ -9,9 +9,9 @@ Operating the plugin on a real book by hand (not the automated `mass-translate-w
 
 ## End-to-end phase order
 
-1. **Scaffold Step 0a + write the profile** — no scaffold script ships; hand-build the `durable_root`, its bundle-hash markers, and the language preset, then validate the profile. → `references/step0a-scaffold-and-profile.md`
+1. **Scaffold Step 0a + write the profile** — no scaffold script ships; hand-build the `durable_root` and its bundle-hash markers, point the profile at the right language preset (authoring one ONLY for a language with none shipped — `he.json` ships), then validate the profile. → `references/step0a-scaffold-and-profile.md`
 2. **Prepare the source** — the `plain_text`/`custom` adapters are unimplemented, so extract clean text and wrap it as a minimal `gutenberg_epub`, then place chapter markers for segmentation. → `references/source-prep.md`
-3. **Onboard the uncased language + pass W3** — name detection finds zero candidates on non-cased scripts; author the language preset and clear the zero-candidate smoke + canon-init. → `references/uncased-script-and-w3.md`
+3. **Onboard the uncased language + pass W3** — name detection finds zero candidates on non-cased scripts; use the shipped `he.json` (override via `he.local.json`, never by editing it) and clear the zero-candidate smoke + canon-init. → `references/uncased-script-and-w3.md`
 4. **Drive translation dispatch by hand** — prove the dispatch actually works with a throwaway smoke test first, then dispatch each segment with a blocking `codex-companion.mjs task --write` (`codex:codex-rescue` backgrounds and never yields a draft), transcribing the Workflow's own prompt builders verbatim. → `references/manual-translation-drive.md`
 5. **(optional) Deposit the converged output** into the genealogy-skills Obsidian book-vault. → `references/vault-deposit.md`
 6. **(optional) Verify the converged canon/translation** — a source-grounded, cross-model-tail, blind-adjudicated convergence loop, with the exact stop condition that keeps it from running forever. → `references/canon-verification-loop.md`
