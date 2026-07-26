@@ -777,11 +777,20 @@ def test_an_approval_that_merely_mentions_the_fail_sentinel_now_rejects(tmp_path
     who merely NARRATES the word while approving. The reply below is entirely
     benign -- it approves on its final line -- and it now costs one regeneration.
 
-    That is the fail-safe direction and it is bounded. A wrong reject costs one
-    codex dispatch out of a ladder of three; a wrong accept freezes a fabricated
-    citation into a canon row that is immutable in practice (--verify-merged is
-    disk-independent, re-merging a different resolution is a fatal collision,
-    and canon_adjudication_audit.py only blocks, never repairs). The prompt
+    That is the fail-safe direction, and the cost is bounded WHEN THE REGENERATED
+    ATTEMPT COMES BACK CLEAN -- which is exactly what the plan below scripts
+    (attempt 1 is a bare approval). So what this test demonstrates is that one
+    narrating reply costs ONE extra dispatch and the pass still merges. It does
+    NOT demonstrate convergence in general: a reviewer that narrated the sentinel
+    on EVERY attempt would exhaust the ladder, and because the merge is
+    all-or-nothing an exhausted batch lands ZERO rows for the whole run, healthy
+    sibling batches included. What makes that case unexpected is the prompt
+    contract, not this test and not the guard.
+
+    A wrong accept, by contrast, freezes a fabricated citation into a canon row
+    that is immutable in practice (--verify-merged is disk-independent,
+    re-merging a different resolution is a fatal collision, and
+    canon_adjudication_audit.py only blocks, never repairs). The prompt
     already tells the reviewer to emit the sentinel only as its own final line
     and never to decorate it, so a reply like this is a reviewer ignoring its
     instructions -- not a shape the pipeline should be tuned to accommodate.
@@ -808,7 +817,10 @@ def test_an_approval_that_merely_mentions_the_fail_sentinel_now_rejects(tmp_path
         "assertion exists so the behaviour is a decision on record rather than a "
         f"surprise; calls were {labels_of(out)}"
     )
-    # The pass still converges rather than aborting -- the cost is one dispatch.
+    # With attempt 1 scripted as a clean approval, the pass still merges: the cost
+    # of this rejection is one extra dispatch, not a dead pass. Convergence here
+    # follows from that scripted approval -- it is not something the guard itself
+    # guarantees for a reviewer that narrates the sentinel every time.
     assert out["result"]["merged"] is True, (
         "the cost of this rejection must be ONE regeneration, not a dead pass; "
         f"got {out['result']}"
@@ -1551,8 +1563,14 @@ def test_citation_review_is_a_claude_call_not_a_second_codex_dispatch(tmp_path):
 
 def test_malformed_review_reply_rejects_rather_than_approves(tmp_path):
     """Fail-safe direction. A verdict that is absent, garbled, or shaped
-    unexpectedly must fall to the REJECT side: a wrong reject costs one
-    regeneration, a wrong accept freezes a fabricated citation permanently."""
+    unexpectedly must fall to the REJECT side, because the two errors are not
+    symmetric: a wrong accept freezes a fabricated citation permanently, while a
+    wrong reject costs one regeneration HERE -- the plan below scripts attempt 1
+    clean. Generalised, the reject side is not that cheap: a misfire recurring up
+    the ladder exhausts it, and since the merge is all-or-nothing an exhausted
+    batch lands ZERO rows for the whole run, healthy siblings included. The
+    asymmetry still points at rejecting -- an unmergeable run can be re-run, a
+    frozen fabricated citation cannot be repaired."""
     plan = {"0": {
         "precheck": "ABSENT 0",
         "reviews": ["I was unable to check the sources.", "CITATIONS_OK 0 ATTEMPT 1"],
