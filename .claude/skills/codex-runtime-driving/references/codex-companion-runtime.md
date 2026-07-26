@@ -373,6 +373,14 @@ driver polling `status` is the reliable shape. The non-obvious correctness rules
 - **Single-writer driver lock = `fcntl.flock(fd, LOCK_EX|LOCK_NB)` held for process lifetime, NOT a
   pid-file.** A pid-file (O_EXCL + liveness + rename-capture) is not compare-and-swap and double-acquires
   under a race; `flock` is kernel-atomic and auto-released on death — no stale-pid logic, no reclaim race.
+- **A health probe must MATCH the workload's SHAPE — effort tier AND payload size — or it reports a
+  false green.** During a backend outage an `--effort low`, one-line probe passed twice in a row while
+  every real `--effort high`, ~250 KB job kept dying on `503 … biscuit_baker_service_me_circuit_open`;
+  re-dispatching on that false green burned three full fan-out cycles before the user cut in. Probe
+  with a job of the SAME tier and roughly the same size, and require 2 consecutive passes before
+  re-dispatching real work. Related: a degraded backend also answers
+  `throttled: too many concurrent requests` — when heavy jobs fail, drop concurrency (≤4, or batches
+  of 2) and re-test before concluding the service is still down.
 - **Run the driver detached** so it survives tool-return and periodic bg-window kills:
   `nohup python3 driver.py > log 2>&1 < /dev/null & disown` from a normal foreground Bash call (`setsid`
   is absent on macOS). Make it RESUMABLE via hash-bound done-markers, and poll it with SHORT re-armed

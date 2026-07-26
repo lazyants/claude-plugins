@@ -6,7 +6,7 @@
 - [Stopping a verifier / gate loop](#stopping-a-verifier--gate-loop)
 - [Mutation-completeness is a receding target](#mutation-completeness-is-a-receding-target)
 - [FREEZE the tree for the deciding round](#freeze-the-tree-for-the-deciding-round)
-- [A/B finding classification for a non-executed artifact](#ab-finding-classification)
+- [A/B finding classification — for ANY target whose findings settle better downstream](#ab-finding-classification-for-downstream-settled-findings)
 - [Fencing ratified decisions](#fencing-ratified-decisions)
 - [Same mechanism patched a 3rd time → reach for the platform primitive](#same-mechanism-third-time)
 - [The loop's exit condition](#the-loops-exit-condition)
@@ -50,9 +50,25 @@ A QA verifier or gate becomes its own codex-review target that loops forever —
 
 Do not treat the reviewer's "NEEDS-REVISION" verdict as an infinite gate. **Witness the specific named scenarios yourself** — construct a RED witness proving the gate now bites, and construct it correctly: a witness that swaps two entities at the SAME partition can yield an identical, correct graph (gate correctly passes and proves nothing); the real test swaps across DIFFERENT partitions.
 
-## A/B finding classification
+## A/B finding classification for downstream-settled findings
 
-For a SHIPPED-but-NEVER-RUN reference artifact (e.g. a Playwright helper in a repo with no browser CI) there is NO byte-stability/test-suite stop criterion, yet the reviewer keeps escalating into exotic edge cases. Converge by prompting the reviewer to CLASSIFY every finding: category-A (a real logic defect in the DESCRIBED behavior) vs category-B (hypothetical exotica outside the helper's documented scope), and to state "clean modulo category-B" when only B remains. Without an explicit non-gating bucket the reviewer returns NEEDS-REVISION forever. Do this pre-emptively (put the A/B fence in the prompt before the artifact becomes an infinite target), not retrofitted at round 6. Two supporting moves: DOCUMENT the supported scope and FAIL CLOSED (throw) outside it so category-B is handled by CONTRACT not code; and when a category-A finding recurs, prefer a verify-don't-assume REDESIGN (measure → act → RE-MEASURE across the operation) over a cleverer heuristic.
+Applies to ANY review target where some findings are settled better downstream — a never-run artifact
+is only the sharpest case, not the boundary (see the scope note below). For a SHIPPED-but-NEVER-RUN
+reference artifact (e.g. a Playwright helper in a repo with no browser CI) there is NO byte-stability/test-suite stop criterion, yet the reviewer keeps escalating into exotic edge cases. Converge by prompting the reviewer to CLASSIFY every finding: category-A (a real logic defect in the DESCRIBED behavior) vs category-B (hypothetical exotica outside the helper's documented scope), and to state "clean modulo category-B" when only B remains. Without an explicit non-gating bucket the reviewer returns NEEDS-REVISION forever. Do this pre-emptively (put the A/B fence in the prompt before the artifact becomes an infinite target), not retrofitted at round 6. Two supporting moves: DOCUMENT the supported scope and FAIL CLOSED (throw) outside it so category-B is handled by CONTRACT not code; and when a category-A finding recurs, prefer a verify-don't-assume REDESIGN (measure → act → RE-MEASURE across the operation) over a cleverer heuristic.
+
+**Scope note — this is NOT just for never-run reference artifacts.** The rule above reads as if it applies
+only to a shipped-but-unrunnable helper, which is why it failed to fire on a plan-review loop and got
+retrofitted at round 6 again (2026-07-25, SSK phase-2 plan, 8 rounds). The general trigger is wider: **any
+review target where some findings are settled better DOWNSTREAM than in the artifact under review.** A plan
+that pre-specifies a code change is the common case in this repo — the change will get its own full code
+review against real code, so its internal constants, sentinel schemas and control-flow details do not belong
+in a plan blocker. Buckets that worked — the SAME category-A/category-B fence above, just relabelled for plan review:
+`[REWORK]` (= category-A) = causes material rework, a false green, or a wrong
+deliverable if executed as written; `[EXECUTION-DETERMINED]` (= category-B) = doing the work settles it
+and further pre-specification adds no safety. Say explicitly in the prompt which downstream gate will catch the second
+bucket, or the reviewer has no reason to trust it. Naming both buckets *and* instructing "do not soften real
+defects to fill the second bucket, and do not inflate execution detail into the first" is what produced a
+3-item verdict after rounds of 5–6.
 
 ## Fencing ratified decisions
 

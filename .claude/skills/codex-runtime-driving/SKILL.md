@@ -25,6 +25,9 @@ Read the reference file that matches the task:
   stall/hang thresholds, and the `/security-review` working-tree diff caveats.
 - **`references/model-effort-bakeoff.md`** — read when benchmarking codex model×effort on a representative
   slice before committing a full translation/quality job (drive N isolated arms via the CLI, blind-adjudicate).
-  Carries the durable finding: **more reasoning ≠ more accuracy** — `xhigh` over-reaches (more elaboration →
-  more hallucination surface), `high` often wins for faithful work, and accuracy constraints belong in the
-  PROMPT, not a higher effort tier.
+  Carries the durable finding: **an n=1 bake-off measures noise.** This one's "`high` won / `xhigh`
+  over-reaches" conclusion did NOT survive a pre-registered replication (3 replicates per cell, blind
+  cross-model judge, counterbalanced) — the tiers came out **indistinguishable on fidelity**, the only
+  robust difference being **`xhigh` ≈2× slower**. So: choose the tier from standing policy (fidelity-risk
+  translation pins `xhigh`) and measured latency, not from a tier-winner claim; and put accuracy
+  constraints in the PROMPT, not in a higher effort tier.

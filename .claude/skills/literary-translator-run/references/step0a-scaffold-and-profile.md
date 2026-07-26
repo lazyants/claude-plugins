@@ -34,9 +34,9 @@ Do the same over the **4 orchestration members** — `draft_ready.py, ledger_mer
 
 `profile_validate` rejects `durable_root` under `/tmp` or a scratchpad dir. Use a real path, e.g. `~/lazy-ants/development/<slug>-run`. (It must ALSO sit inside the codex agent's writable workspace — see `manual-translation-drive.md`; the plugin's house style is `durable_root == the session's project root`.)
 
-## 4. Author the language preset
+## 4. The language preset — author one ONLY if the language has none shipped
 
-No `he.json` (or any Hebrew) preset ships — only `fr`/`de`/`es`/`it`. Author `languages/he.json` as part of scaffolding so Step 0a does not halt on a missing preset later. The contract and rationale are in `uncased-script-and-w3.md`.
+**`he.json` DOES ship** (since 1.9.0, `6fb80ba`/#195) alongside `fr`/`de`/`es`/`it` — do NOT author or hand-edit it. Its `STOPWORDS` is a curated 40-word list and Step 0a **unconditionally overwrites** every shipped `languages/` filename in `durable_root`, so an edit in place is silently reverted on the next scaffold (and authoring an empty stub would destroy the curated preset for that run). To add a `name_inventory` or otherwise override, ship a **`he.local.json`** — the `.local` suffix is load-bearing; see "Getting uncased names via `name_inventory`" in `uncased-script-and-w3.md`. Only a language with NO shipped preset needs authoring from scratch; the contract for every key is in `{{PLUGIN_ROOT}}/assets/languages/README.md`.
 
 ## 5. Write and validate the profile
 
@@ -49,14 +49,14 @@ he→en values:
 - `verse_policy.mode: literal_only`
 - `apparatus_policy: omit_apparatus`
 - `glossary.research_mode: offline`
-- `engine.effort: high` — schema-const (leave as-is); the config model at high was the model×effort bake-off winner, so no override needed here. (This is the plugin's engine field; it is a DIFFERENT knob from the codex-dispatch prompt's `Effort:` line — see `manual-translation-drive.md`.)
+- `engine.effort: high` — schema-const (leave as-is), so there is nothing to override here. (This is the plugin's engine field; it is a DIFFERENT knob from the codex-dispatch prompt's `Effort:` line — see `manual-translation-drive.md`. Do not read this const as a validated tier — no effort tier has been validated as a winner; see `skill:codex-runtime-driving` → `references/model-effort-bakeoff.md`.)
 - `output.v1_scope: assembled_book` + `output.target: obsidian`
 - `max_segment_words: 6000`
 
 Run Step 0:
 
 ```
-python3 <PLUGIN_ROOT>/assets/scripts/profile_validate.py --profile <abs profile>
+python3 {{PLUGIN_ROOT}}/assets/scripts/profile_validate.py --profile <abs profile>
 ```
 
 ## 6. If you hand-build a managed-dir verifier: policy differs by dir, not byte-exactness

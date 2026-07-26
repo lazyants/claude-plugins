@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.16.0 — 2026-07-25
+## 1.16.0 — 2026-07-26
 
 Adds a bounded pre-merge citation-review stage to the W3 glossary pass. Under
 `glossary.research_mode: live`, a batch can now only become READY once the `source` citations
@@ -296,6 +296,38 @@ No canon, ledger, or source-data content changes. The new pre-run wipe deletes n
 `${durable_root}/glossary/runs/<RUN_ID>/` and nothing inside it but `out_*` / `approved_*` fragments;
 a resume keeps the attempt-0 fragments its resume-skip depends on. `skeptic-pass-wf.template.js` is
 not touched, so the separate skeptic resume domain is unaffected.
+## 1.15.3 — 2026-07-26
+
+Version-only release. It ships **no behavior change** — its entire purpose is to make the
+already-merged #333 documentation fix reachable by installed copies, and to close the
+version-identity fork that shipping it unversioned created.
+
+### Fixed — #333's shipped-content fix can now actually propagate
+
+- PR #333 edited two SHIPPED `literary-translator` files without bumping the version:
+  `skills/literary-translator/references/source-format-adapters/gutenberg-epub.md` dropped a
+  citation of `reference_gutenberg_epub_structure.md`, and a `tests/required_fill_gates.test.py`
+  docstring dropped a citation of `gotcha-overbroad-freetext-gate-regex in project memory`. Both
+  named the plugin author's private local memory files, which no plugin user can resolve. The
+  prose and the assertions around them are unchanged; only the unresolvable pointers are gone.
+- With `plugin.json` left at `1.15.2`, `claude plugin update literary-translator@lazyants`
+  resolved the manifest version, matched it against the installed record, short-circuited to
+  `up_to_date`, and copied zero bytes — the fetch/copy step is only reached when the resolved
+  version differs. There is no `--force` on `plugin update`; the only path that skips the
+  short-circuit is a manifest carrying no version at all. So for every already-installed copy the
+  fix was unreachable. All four local config profiles' `1.15.2` caches were confirmed still
+  holding the pre-#333 text.
+- It also forked the version identity: a machine with no `1.15.2` cache entry installs fresh from
+  the marketplace clone at current HEAD and therefore *does* get the fixed text — under the same
+  `1.15.2` label. Two different payloads both self-identifying as `1.15.2`. Bumping the version
+  is what makes the two distinguishable.
+
+### Migration
+
+None. Neither edited file is a `PLUGIN_BUNDLE_MEMBERS` or `DERIVATION_BUNDLE_MEMBERS` member
+(`cache_key.py:103-120`) — one is a skill reference doc, the other a test — so no cache-key field
+moves, nothing routes to `stale` or `blocked_needs_regeneration`, and no segment re-translates.
+Run `claude plugin update literary-translator@lazyants` to pick the corrected content up.
 
 ## 1.15.2 — 2026-07-23
 
