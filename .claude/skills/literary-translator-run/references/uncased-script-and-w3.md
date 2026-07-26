@@ -16,6 +16,8 @@ Four REQUIRED keys (empty lists accepted) plus an OPTIONAL fifth `name_inventory
 
 To make the run actually FIND uncased names instead of accepting zero, supply the fifth key — see "Getting uncased names via `name_inventory`" below.
 
+Before authoring a preset for a new language, read `assets/languages/README.md` — it documents the contract for every key and the per-language reasoning (including why Hebrew's `PARTICLES` is `[]` and why its `STOPWORDS` deliberately omits the single-letter proclitics). Do not reconstruct those rules from memory.
+
 ## W3 zero-candidate smoke
 
 With `bootstrap_names.py` reporting 0 candidates:
