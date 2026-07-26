@@ -310,8 +310,9 @@ These outcomes reuse the step-0 result computed above (`containerTitle`, `indexF
   `selectedTarget` = step 0's own expected link target) and branch on the result:
   - **`ok`** ⇒ placement complete, move to the next chapter.
   - **`unverifiable`** ⇒ proceed — this file falls outside the verified class (see "Nested-list
-    automation limits" below); no placement check runs and no confirmation is requested — the run
-    continues unverified, exactly as the shipped 1.10.0 behaviour did on this path.
+    automation limits" below); the check ran and could not conclude — nothing further verifies
+    placement, no confirmation is requested, and the run continues unverified, exactly as the
+    shipped 1.10.0 behaviour did on this path.
   - **`misplaced`** ⇒ halt reusing the exact headings-form wording above:
     `Chapter '<slug>' is listed in <index_file> under '<found_title>' instead of '<group_title>' — move the line (or curate the index manually), then re-run.`
     (`<found_title>` reads `(none)` when the line sits at the left margin, uncontained.)
@@ -362,7 +363,7 @@ These outcomes reuse the step-0 result computed above (`containerTitle`, `indexF
        `assets/lib/chapter-paths.mjs`) — the indented chapter line, never the container line at
        index 0; and the predicate returning `{kind: 'inserted'}`** ⇒ the pair is representable —
        emit the convergent halt naming it exactly:
-       `Index <index_file> is not a headings-form file — add a '<group_title>' container and the chapter line for '<slug>' manually, then re-run. The next run recognizes the chapter line as a Markdown list row INDENTED TWO SPACES under the '<group_title>' container bullet, whose link destination is exactly '<index_relative_path>' — that is, a '- ' + group_title line followed by a '  - [' + title + '](<' + path + '>)' line, with the destination inside angle brackets and any ']' in the title escaped as '\]'. A row placed at the left margin instead of under the container is reported as misplaced on the next run only when its own title is plain text in the same sense as `group_title` below ("Nested-list automation limits"); a title carrying inline markup instead leaves the row unverified rather than caught, exactly like any other file outside the verified class.`
+       `Index <index_file> is not a headings-form file — add a '<group_title>' container and the chapter line for '<slug>' manually, then re-run. The next run recognizes the chapter line as a Markdown list row INDENTED TWO SPACES under the '<group_title>' container bullet, whose link destination is exactly '<index_relative_path>' — that is, a '- ' + group_title line followed by a '  - [' + title + '](<' + path + '>)' line, with the destination inside angle brackets and any ']' in the title escaped as '\]'. A row placed at the left margin instead of under the container is reported as misplaced on the next run only when its own title is plain text in the same sense as `group_title` below ("Nested-list automation limits"); a non-plain title is never reported misplaced — markup that still lets the target resolve to that one line leaves the row unverified instead, like any other file outside the verified class, while markup that keeps the target from resolving at all halts as inconsistent instead of completing silently.`
        This is what makes the manual flow converge — but only for a `group_title`, target and
        title the gate accepts: you halt once with instructions, the user adds the container and
        the chapter line, and the re-run's step 0 finds the line present under the
@@ -376,10 +377,10 @@ These outcomes reuse the step-0 result computed above (`containerTitle`, `indexF
        - an inert region (a fenced code block, an HTML comment) blanks a representable pair, so
          it is reported absent again — repeating the convergent halt above, never completing;
        - a chapter row that exists only inside leading frontmatter is reported present by the
-         shipped locator and reaches `unverifiable` in the present-line branch above, where the
-         adapter proceeds unverified — no placement check runs and nothing stands in for it (the
-         shipped 1.10.0 writer/locator view disagreement, tracked separately as #337 — see
-         "Nested-list automation limits" below);
+         shipped locator and reaches `unverifiable` in the present-line branch above — the check
+         ran and declined to conclude; nothing further verifies placement and no confirmation is
+         requested, so the adapter proceeds unverified (the shipped 1.10.0 writer/locator view
+         disagreement, tracked separately as #337 — see "Nested-list automation limits" below);
        - a real index whose surroundings carry YAML structure, a wildcard, or an ordered list
          makes the writer decline the whole file on the next run too: once the pair is present,
          step 0 routes to the present-line branch above, whose own predicate call declines the
@@ -388,11 +389,12 @@ These outcomes reuse the step-0 result computed above (`containerTitle`, `indexF
        A future case diverging some other way is expected, not a defect in this documentation —
        the isolated check was never designed to rule any of this out. **The honest safety
        statement, scoped to what this PR governs: on the non-heading branch above, this gate
-       never lets a MISPLACED row complete silently when it can verify placement.** Wherever
-       the machinery cannot verify a real-file property, no placement check runs and no
-       confirmation is requested — the run completes exactly as unverified as it did before
-       1.11.0 on this path; it is not that a false completion cannot occur there, and not that
-       every way it can occur is named above.
+       never lets a MISPLACED row complete silently when it can verify placement.** On that
+       branch, wherever the machinery cannot conclude — whether the check never runs, because
+       the line was never even reported present, or it runs and returns `unverifiable` —
+       nothing further verifies placement and no confirmation is requested: the run completes
+       exactly as unverified as it did before 1.11.0 on this path; it is not that a false
+       completion cannot occur there, and not that every way it can occur is named above.
        **The headings branch is unchanged by this PR and already completes silently:** a
        chapter row inside a valid frontmatter block whose body itself carries a heading is
        reported `indexForm: 'headings'` with a matching container (see "Grouped entry, line
@@ -427,8 +429,8 @@ automation limits" below) is wired by `wireNestedListChapter` per the line-absen
 Every other static index form — an MkDocs YAML `nav:` block, a bare path table, or any list
 shape outside the safe subset — stays **fully manual**: you halt with the non-heading
 instructions above and stop there. First-class YAML `nav:` container automation remains its own
-follow-up, #328. Path-table container automation was examined and closed as not soundly
-automatable rather than deferred — see #340 for the recorded reasoning.
+follow-up, #328. Path-table container automation, by contrast, is not merely deferred: it was
+decided against as not soundly automatable — see #340 for the recorded reasoning.
 
 ### Nested-list automation limits
 
@@ -468,8 +470,8 @@ one of: a Markdown nav file using a wildcard, an ordered list, or an explicit `<
 marker (all ordinary `mkdocs-literate-nav` features); two same-named containers; a chapter row
 sitting inside leading frontmatter; or a **native/YAML MkDocs `nav:` configuration**, which gets
 no placement verification at all — no confirmation is requested either; the run completes
-unverified, exactly as before 1.11.0. MkDocs `nav:` container automation itself is its own
-follow-up, #328.
+unverified, exactly as before 1.11.0. First-class YAML `nav:` container automation remains its
+own follow-up, #328.
 
 Three disclosures the operator is owed, not proved away:
 

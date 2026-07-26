@@ -2783,21 +2783,30 @@ has_joined_in_section "revalidation.md: convergence checklist carries the class 
   "$REVAL" '### Terminal-state convergence checklist' "$CLASS_SENTENCE"
 has "CHANGELOG: 1.11.0 entry carries the class sentence verbatim" "$CLASS_SENTENCE" "$CHLOG"
 
-echo "== #329 convergent halt strings and the inconsistent halt — exact, fixed in the plan (#329/#330) =="
+echo "== #329 convergent halt strings and the inconsistent halt — exact, derived from the adapters =="
 # Pinned as EXACT strings so that wording drift is caught rather than absorbed. These began as
 # the strings settled during plan review; 1.11.0 CORRECTED them, so what is pinned now is the
-# corrected wording and no longer matches the plan-review text. The correction: the halt used to
-# promise, unconditionally, that a left-margin row "is reported as misplaced on the next run".
-# That promise only holds when the row's own title is plain text in the same sense `group_title`
-# must be — containerOwnerScan applies that gate to every indent-0 label, so a title carrying
-# inline markup degrades the outcome to `unverifiable` and the row is left unverified rather than
-# caught. Do NOT "restore" the shorter original: it was measured false, not merely reworded.
+# corrected wording and no longer matches the plan-review text — which is why the pins are
+# regenerated FROM the adapter bytes rather than retyped from the plan.
+# The correction: the halt used to promise, unconditionally, that a left-margin row "is reported
+# as misplaced on the next run". Measured against the shipped implementation, that promise holds
+# only when the row's OWN title is plain text in the same sense `group_title` must be, and a
+# non-plain title splits two ways rather than one. Markup that still lets the target resolve to
+# that single line (an ampersand, emphasis, a backtick) reaches containerOwnerScan, which applies
+# isPlainLabel to every indent-0 label including the row's own, returns not-a-list, and degrades
+# the outcome to `unverifiable` — the row is left unverified rather than caught. Markup that
+# breaks the row's own target extraction (a nested link, a nested image, a reference link) drops
+# the match count to zero, and the cardinality rule inside verifyNonHeadingPlacement fires BEFORE
+# shape recognition is reached at all, so the outcome is `inconsistent` — a mandatory halt, not a
+# silent completion. An earlier revision of this comment and of the halt asserted the first branch
+# universally; that was measured false. Do NOT "restore" the shorter original, and do not collapse
+# the split back into one clause.
 # The two #329 halts EXTEND the shipped not-a-list string rather than replacing it, so
 # the existing not-a-list pin keeps holding alongside these.
 has "static-md: #329 convergent path-mode halt, exact string" \
-  'Index <index_file> is not a headings-form file — add a '\''<group_title>'\'' container and the chapter line for '\''<slug>'\'' manually, then re-run. The next run recognizes the chapter line as a Markdown list row INDENTED TWO SPACES under the '\''<group_title>'\'' container bullet, whose link destination is exactly '\''<index_relative_path>'\'' — that is, a '\''- '\'' + group_title line followed by a '\''  - ['\'' + title + '\''](<'\'' + path + '\''>)'\'' line, with the destination inside angle brackets and any '\'']'\'' in the title escaped as '\''\]'\''. A row placed at the left margin instead of under the container is reported as misplaced on the next run only when its own title is plain text in the same sense as `group_title` below ("Nested-list automation limits"); a title carrying inline markup instead leaves the row unverified rather than caught, exactly like any other file outside the verified class.' "$SMD"
+  'Index <index_file> is not a headings-form file — add a '\''<group_title>'\'' container and the chapter line for '\''<slug>'\'' manually, then re-run. The next run recognizes the chapter line as a Markdown list row INDENTED TWO SPACES under the '\''<group_title>'\'' container bullet, whose link destination is exactly '\''<index_relative_path>'\'' — that is, a '\''- '\'' + group_title line followed by a '\''  - ['\'' + title + '\''](<'\'' + path + '\''>)'\'' line, with the destination inside angle brackets and any '\'']'\'' in the title escaped as '\''\]'\''. A row placed at the left margin instead of under the container is reported as misplaced on the next run only when its own title is plain text in the same sense as `group_title` below ("Nested-list automation limits"); a non-plain title is never reported misplaced — markup that still lets the target resolve to that one line leaves the row unverified instead, like any other file outside the verified class, while markup that keeps the target from resolving at all halts as inconsistent instead of completing silently.' "$SMD"
 has "obsidian-vault: #329 convergent wikilinks-mode halt, exact string" \
-  'Index <index_file> is not a headings-form file — add a '\''<group_title>'\'' container and the chapter line for '\''<slug>'\'' manually, then re-run. The next run recognizes the chapter line as a Markdown list row INDENTED TWO SPACES under the '\''<group_title>'\'' container bullet, whose wikilink target is exactly '\''<index_relative_target>'\'' — that is, a '\''- '\'' + group_title line followed by a '\''  - [['\'' + target + '\''|'\'' + title + '\'']]'\'' line; a Markdown link whose destination is that target plus '\''.md'\'' is recognized too. A row placed at the left margin instead of under the container is reported as misplaced on the next run only when its own title is plain text in the same sense as `group_title` below ("Nested-list automation limits"); a title carrying inline markup instead leaves the row unverified rather than caught, exactly like any other file outside the verified class.' "$OMD"
+  'Index <index_file> is not a headings-form file — add a '\''<group_title>'\'' container and the chapter line for '\''<slug>'\'' manually, then re-run. The next run recognizes the chapter line as a Markdown list row INDENTED TWO SPACES under the '\''<group_title>'\'' container bullet, whose wikilink target is exactly '\''<index_relative_target>'\'' — that is, a '\''- '\'' + group_title line followed by a '\''  - [['\'' + target + '\''|'\'' + title + '\'']]'\'' line; a Markdown link whose destination is that target plus '\''.md'\'' is recognized too. A row placed at the left margin instead of under the container is reported as misplaced on the next run only when its own title is plain text in the same sense as `group_title` below ("Nested-list automation limits"); a non-plain title is never reported misplaced — markup that still lets the target resolve to that one line leaves the row unverified instead, like any other file outside the verified class, while markup that keeps the target from resolving at all halts as inconsistent instead of completing silently.' "$OMD"
 # ONE string covers both causes of `inconsistent` (zero matches and more than one), so nothing is
 # substituted beyond the slug and the file.
 has "static-md: inconsistent halt, one string for both causes" \

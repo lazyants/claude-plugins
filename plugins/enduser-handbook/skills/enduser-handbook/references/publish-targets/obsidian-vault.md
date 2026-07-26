@@ -402,10 +402,10 @@ the one exception to "do all of these" — see its own conditional note below.
        - **`ok`** ⇒ a `canonical` line is already complete and a
          `legacy` line retargets in place unconditionally.
        - **`unverifiable`** ⇒ proceed — this file falls outside the verified class (see
-         "Nested-list automation limits" below); no placement check runs and no confirmation is
-         requested — the run continues unverified, exactly as the shipped 1.10.0 behaviour did on
-         this path — a `canonical` line is already complete and a `legacy` line still retargets
-         in place unconditionally.
+         "Nested-list automation limits" below); the check ran and could not conclude — nothing
+         further verifies placement, no confirmation is requested, and the run continues
+         unverified, exactly as the shipped 1.10.0 behaviour did on this path — a `canonical`
+         line is already complete and a `legacy` line still retargets in place unconditionally.
        - **`misplaced`** ⇒ halt reusing the exact wording above:
          "Chapter '<slug>' is listed in <index_file> under '<found_title>' instead of '<group_title>' — move the line (or curate the index manually), then re-run."
        - **`inconsistent`** ⇒ the selected target resolves to zero lines, or to more than one —
@@ -458,7 +458,7 @@ the one exception to "do all of these" — see its own conditional note below.
           chapter line, never the container line at index 0; and the predicate returning
           `{kind: 'inserted'}`** — the pair is representable — emit the convergent halt naming
           it exactly:
-          "Index <index_file> is not a headings-form file — add a '<group_title>' container and the chapter line for '<slug>' manually, then re-run. The next run recognizes the chapter line as a Markdown list row INDENTED TWO SPACES under the '<group_title>' container bullet, whose wikilink target is exactly '<index_relative_target>' — that is, a '- ' + group_title line followed by a '  - [[' + target + '|' + title + ']]' line; a Markdown link whose destination is that target plus '.md' is recognized too. A row placed at the left margin instead of under the container is reported as misplaced on the next run only when its own title is plain text in the same sense as `group_title` below ("Nested-list automation limits"); a title carrying inline markup instead leaves the row unverified rather than caught, exactly like any other file outside the verified class."
+          `Index <index_file> is not a headings-form file — add a '<group_title>' container and the chapter line for '<slug>' manually, then re-run. The next run recognizes the chapter line as a Markdown list row INDENTED TWO SPACES under the '<group_title>' container bullet, whose wikilink target is exactly '<index_relative_target>' — that is, a '- ' + group_title line followed by a '  - [[' + target + '|' + title + ']]' line; a Markdown link whose destination is that target plus '.md' is recognized too. A row placed at the left margin instead of under the container is reported as misplaced on the next run only when its own title is plain text in the same sense as `group_title` below ("Nested-list automation limits"); a non-plain title is never reported misplaced — markup that still lets the target resolve to that one line leaves the row unverified instead, like any other file outside the verified class, while markup that keeps the target from resolving at all halts as inconsistent instead of completing silently.`
           The next run's step 0 finds the line you added and proceeds — but only for a
           `group_title`, target and title the gate accepts — this convergence is why step 0
           always runs first.
@@ -472,10 +472,11 @@ the one exception to "do all of these" — see its own conditional note below.
             so it is reported absent again — repeating the convergent halt above, never
             completing;
           - a chapter row that exists only inside leading frontmatter is reported present by the
-            shipped locator and reaches `unverifiable` in the present-line branch above, where
-            the adapter proceeds unverified — no placement check runs and nothing stands in for
-            it (the shipped 1.10.0 writer/locator view disagreement, tracked separately as #337
-            — see "Nested-list automation limits" below);
+            shipped locator and reaches `unverifiable` in the present-line branch above — the
+            check ran and declined to conclude; nothing further verifies placement and no
+            confirmation is requested, so the adapter proceeds unverified (the shipped 1.10.0
+            writer/locator view disagreement, tracked separately as #337 — see "Nested-list
+            automation limits" below);
           - a real index whose surroundings carry YAML structure, a wildcard, or an ordered list
             makes the writer decline the whole file on the next run too: once the pair is
             present, step 0 routes to the present-line branch above, whose own predicate call
@@ -486,10 +487,12 @@ the one exception to "do all of these" — see its own conditional note below.
           documentation — the isolated check was never designed to rule any of this out. **The
           honest safety statement, scoped to what this PR governs: on the non-heading branch above,
           this gate never lets a MISPLACED row complete silently when it can verify placement.**
-          Wherever the machinery cannot verify a real-file property, no placement check runs and
-          no confirmation is requested — the run completes exactly as unverified as it did before
-          1.11.0 on this path; it is not that a false completion cannot occur there, and not that
-          every way it can occur is named above.
+          On that branch, wherever the machinery cannot conclude — whether the check never runs,
+          because the line was never even reported present, or it runs and returns
+          `unverifiable` — nothing further verifies placement and no confirmation is requested:
+          the run completes exactly as unverified as it did before 1.11.0 on this path; it is not
+          that a false completion cannot occur there, and not that every way it can occur is
+          named above.
           **The headings branch is unchanged by this PR and already completes silently:** a
           chapter row inside a valid frontmatter block whose body itself carries a heading
           sits under a matching container per the headings-form placement check above
