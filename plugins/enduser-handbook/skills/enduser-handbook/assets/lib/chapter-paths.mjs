@@ -860,9 +860,9 @@ function collectContainerHeadings(sanitizedLines) {
   return headings;
 }
 
-// R5-F1/F2: the SHARED headings-form classifier — locateChapterLine's `indexForm` field and
-// findContainer's non-heading branch key on the EXACT same logic, over the EXACT same sanitized
-// view, so the two functions can never disagree about what kind of file they're looking at.
+// R5-F1/F2: the SHARED headings-form classifier — every caller (`locateChapterLine`'s `indexForm`
+// field, `findContainer`'s non-heading branch) keys on the EXACT same logic, over the EXACT same
+// sanitized view, so no two callers can ever disagree about what kind of file they're looking at.
 // Headings-form iff the sanitized text has at least one depth >= 2 heading AND no YAML-mapping
 // structure outside frontmatter (R3-F2(b)) — an inert `## Secondary navigation` inside a YAML
 // comment or fenced block never counts either way, since it was already blanked before this runs.
@@ -921,17 +921,21 @@ function foldTargetForMatch(target, wikilink) {
  *
  * The sanitized view `locateChapterLine` scans — name-the-expression pattern (§5, 1.11.0):
  * extracted verbatim from `locateChapterLine` below, so the one expression has exactly one
- * implementation and is directly unit-testable in isolation. (The extraction itself changed
- * nothing; `locateChapterLine`'s return shape later gained `index` on each match record, #330
- * round-2 review — additive, not "no change": the `.d.mts` publishes the field. Every consumer in
- * this repo reads `.length`, filters on `.containerTitle`, or reads `.index`, never a closed-shape
- * compare, which is why nothing broke — but that is a checkable fact about this repo's consumers,
- * not a property of the return shape itself.)
- * `locateChapterLine` is this export's only production caller; the present-line placement verifier
- * (`verifyNonHeadingPlacement`, #330) reaches the same view transitively, by delegating to
- * `locateChapterLine` itself for its match indices, not by calling this export directly — an
- * earlier revision did call it directly and re-implemented `locateChapterLine`'s match loop
- * alongside it, which review caught as the second recognizer this pattern exists to prevent.
+ * implementation and is directly unit-testable in isolation. That is what this export buys, stated
+ * as an invariant rather than a caller count (round-3 review: a prior wording named
+ * `locateChapterLine` as the "only" caller, which a later, unrelated fix to a second function made
+ * false): whatever needs this sanitized view reaches it by calling this function, never by
+ * re-deriving the expression inline — true regardless of how many callers exist or which functions
+ * they are. (The extraction itself changed nothing; `locateChapterLine`'s return shape later gained
+ * `index` on each match record, #330 round-2 review — additive, not "no change": the `.d.mts`
+ * publishes the field. Every consumer in this repo reads `.length`, filters on `.containerTitle`, or
+ * reads `.index`, never a closed-shape compare, which is why nothing broke — but that is a checkable
+ * fact about this repo's consumers, not a property of the return shape itself.)
+ * The present-line placement verifier (`verifyNonHeadingPlacement`, #330) reaches the same view
+ * transitively, by delegating to `locateChapterLine` itself for its match indices, not by calling
+ * this export directly — an earlier revision did call it directly and re-implemented
+ * `locateChapterLine`'s match loop alongside it, which review caught as the second recognizer this
+ * pattern exists to prevent.
  *
  * @param {string[]} indexLines
  * @returns {string[]}
@@ -1255,8 +1259,9 @@ function isBarePathBullet(marker, info) {
  * out of wireNestedListChapter so the present-line placement verifier can share it rather than
  * re-implement it — a second recognizer is exactly the drift the delegation design exists to
  * prevent. PRIVATE — not exported, so it stays free to change; the writer consumes every
- * emission-relevant field below and ignores `span`, and `leadingFrontmatterSpan` below is the
- * ONLY exported projection of this same call, reached by tests alone.
+ * emission-relevant field below and ignores `span`. `leadingFrontmatterSpan` below is this call's
+ * one designated public window — by design kept to `{kind, span}` and reached by tests alone, so
+ * this function's other fields never become a compatibility obligation.
  *
  * Deliberately does NOT run step 4 (the groupTitle/chapterLink embedded-newline guard) — that
  * guard reads arguments this helper never receives, so it stays in the writer.
@@ -1314,8 +1319,9 @@ function prepareIndexLines(indexLines) {
 /**
  * The exported NARROW projection of prepareIndexLines — `{kind, span}` only, so it stays a test
  * seam without publishing `logical`/`eol`/`hadTerminalNewline` (the writer's emission internals) as
- * a compatibility obligation. Reached by tests alone; the writer and the #330 verifier both call
- * the private `prepareIndexLines` directly.
+ * a compatibility obligation. Reached by tests alone: every production caller needing this
+ * preparation state calls the private `prepareIndexLines` directly instead, whoever they are —
+ * this narrow shape deliberately withholds the fields their emission logic needs.
  *
  * @param {string[]} indexLines
  * @returns {{kind: 'not-a-list'} | {kind: 'ok', span: {start: 0, endExclusive: number} | null}}
@@ -1426,12 +1432,22 @@ function containerOwnerScan(body, wanted) {
   return { kind: 'ok', containers, childIndent, firstTopMarker, lastBulletIndex, ownerOf, ownerLabelOf };
 }
 
-// The single normalization a manifest group_title must go through before it is compared against a
-// container's own (never-trimmed, see containerOwnerScan's ownerLabelOf) parsed label. Both the
-// writer and the #330 verifier feed containerOwnerScan with this same key — review flagged the
-// un-shared duplicate as a silent-divergence seam: it is one `.trim()` today, but if the writer's
-// normalization ever gained a step (NFC, inner-whitespace collapse) an un-shared copy would keep
-// the old spelling and start emitting false `misplaced` verdicts, with nothing going red.
+// The single normalization every caller must apply to a manifest group_title before comparing it
+// against a container's own label — deriving it here means the same group_title can never be
+// compared under two different spellings, however many callers there are (round-3 review: an
+// earlier wording named exactly two callers and was already under-inclusive by the time it was
+// reviewed). Review flagged an un-shared, independently duplicated `.trim()` at each comparison
+// site as exactly that seam: it is one `.trim()` today, but if the normalization ever gained a step
+// (NFC, inner-whitespace collapse) an un-shared copy would keep the old spelling and start emitting
+// false verdicts, with nothing going red.
+//
+// What the key is compared AGAINST is call-path-specific, not a property of this function:
+// `containerOwnerScan`'s `ownerLabelOf` (the nested-list writer/verifier path) records a
+// container's UNTRIMMED parsed label, so that comparison is deliberately asymmetric (round-18
+// HIGH) — trimming the container's own label there would accept a padded label the writer treats
+// as absent. `collectContainerHeadings`' headings-form container titles (the `findContainer` path,
+// `:858`) ARE trimmed, so that comparison is symmetric. Both paths still derive their
+// `group_title`-side key from this one function.
 function containerLabelKey(groupTitle) {
   return String(groupTitle).trim();
 }

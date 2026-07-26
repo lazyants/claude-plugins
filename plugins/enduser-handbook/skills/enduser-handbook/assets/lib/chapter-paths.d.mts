@@ -148,7 +148,7 @@ export interface ValidateGroupsOptions {
 /** See chapter-paths.mjs: all D1 manifest-review gates; [1.6.0, #221] a group-free manifest now halts unconditionally on a duplicate flat slug instead of always returning []; [1.9.0, #310] options.perGroupSlugs (default false) scopes slug uniqueness per group. */
 export function validateGroups(entries: ChapterEntry[], options?: ValidateGroupsOptions): string[];
 
-/** See chapter-paths.mjs: [1.11.0] #330 the sanitized view locateChapterLine scans, extracted so verifyNonHeadingPlacement can share the exact same view. */
+/** See chapter-paths.mjs: [1.11.0] #330 the sanitized view locateChapterLine scans, extracted so every caller reaches it through this export rather than re-deriving the expression inline. */
 export function indexView(indexLines: string[]): string[];
 
 /** See chapter-paths.mjs: the D6 step-0 index-line idempotency check; options.wikilink (default false) folds ONE terminal '.md' off both sides before comparison. */
@@ -181,7 +181,7 @@ export interface LeadingFrontmatterSpan {
   endExclusive: number;
 }
 
-/** See chapter-paths.mjs: [1.11.0] #330 the narrow test-seam projection of the writer's private line-preparation call (prepareIndexLines) — {kind, span} only; span is null when the index carries no leading frontmatter block. Reached by tests alone; the writer and verifyNonHeadingPlacement both call the private helper directly. */
+/** See chapter-paths.mjs: [1.11.0] #330 the narrow test-seam projection of the writer's private line-preparation call (prepareIndexLines) — {kind, span} only; span is null when the index carries no leading frontmatter block. Reached by tests alone: every production caller needing this preparation state calls the private helper directly instead, whoever they are. */
 export function leadingFrontmatterSpan(
   indexLines: string[],
 ): { kind: 'not-a-list' } | { kind: 'ok'; span: LeadingFrontmatterSpan | null };
