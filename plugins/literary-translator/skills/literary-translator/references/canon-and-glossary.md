@@ -502,8 +502,25 @@ set by eye: U+0085 is not `trim()`-strippable in JS while U+2028 and U+2029 are.
 **Always publish a gluing count with both its SHAPE and its SET**, naming the
 set by constant and file as above. The same guard measured over a different
 table, or over a different reply shape, yields a different and equally correct
-number — this release ships three — and a bare count reads as a contradiction
-between surfaces that do not actually disagree.
+number, and a bare count reads as a contradiction between surfaces that do
+not actually disagree. This release publishes four, one per (set, shape)
+pair — the two above, plus **14 of 15 over `ALL_GLUES` in
+`tests/mass_translate_sentinel_containment.test.py`, prose sharing the
+sentinel's line**, and **6 of 15 over that same set, sentinel alone on its
+line**.
+
+None of the four restates another, because the two sets are genuinely
+different: they share 13 characters, `GLUE_CHARS` adds the C0 separators
+U+001D–U+001F, and `ALL_GLUES` adds an ASCII hyphen and quote. `trim()`
+rescues the same nine characters in each, so the alone-shape counts fall out
+of what each set adds beyond the shared 13 — three unrescued characters
+against two, hence 7 of 16 over `GLUE_CHARS` against 6 of 15 over
+`ALL_GLUES`, both with the sentinel alone on its line.
+
+Enumerate the four rather than asserting how many there are: a count OF the
+release's own published counts is self-referential, goes stale the moment
+another is added, and looks no different from a correct one at a glance —
+which is exactly how "three" survived here past the fourth.
 
 The end state is identical either way: the fail scan skips the sentinel, a
 trailing clean OK line then approves the batch, and a reply carrying BOTH
