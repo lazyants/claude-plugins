@@ -251,6 +251,7 @@ class ModeSpec(NamedTuple):
     dest: "str | None"
     batch_ok: bool
     source_forms_refusal: "str | None"
+    approve_to_refusal: "str | None"
 
 
 # EVERY mode, declared exactly ONCE, carrying the per-mode facts main()'s
@@ -302,23 +303,51 @@ _COVERAGE_ENFORCED_ELSEWHERE = (
     "coverage is enforced by --check-batch per fragment and by "
     "--verify-merged for the merged set"
 )
+# --approve-to snapshots the exact bytes of the ONE fragment --check-batch
+# validated, so the citation reviewer audits an immutable copy and the merge
+# consumes that same copy. No other mode reviews a single pre-merge fragment,
+# so honoring --approve-to for one would snapshot bytes nothing reviewed --
+# the same false-success shape the source-forms refusal guards against.
+_NOT_A_SINGLE_FRAGMENT_REVIEW = (
+    "only --check-batch snapshots the single fragment it reviews pre-merge"
+)
 
 MODE_SPECS = (
-    ModeSpec("--init", "init", batch_ok=False, source_forms_refusal=_READS_NO_FRAGMENT),
+    ModeSpec(
+        "--init",
+        "init",
+        batch_ok=False,
+        source_forms_refusal=_READS_NO_FRAGMENT,
+        approve_to_refusal=_READS_NO_FRAGMENT,
+    ),
     ModeSpec(
         "--restamp-derivation",
         "restamp_derivation",
         batch_ok=False,
         source_forms_refusal=_READS_NO_FRAGMENT,
+        approve_to_refusal=_READS_NO_FRAGMENT,
     ),
-    ModeSpec("--check-batch", "check_batch", batch_ok=False, source_forms_refusal=None),
+    ModeSpec(
+        "--check-batch",
+        "check_batch",
+        batch_ok=False,
+        source_forms_refusal=None,
+        approve_to_refusal=None,
+    ),
     ModeSpec(
         "--merge-batches",
         "merge_batches",
         batch_ok=False,
         source_forms_refusal=_COVERAGE_ENFORCED_ELSEWHERE,
+        approve_to_refusal=_NOT_A_SINGLE_FRAGMENT_REVIEW,
     ),
-    ModeSpec("--verify-merged", "verify_merged", batch_ok=True, source_forms_refusal=None),
+    ModeSpec(
+        "--verify-merged",
+        "verify_merged",
+        batch_ok=True,
+        source_forms_refusal=None,
+        approve_to_refusal=_NOT_A_SINGLE_FRAGMENT_REVIEW,
+    ),
     # The legacy bare-`--batch` merge. batch_ok=True is load-bearing, not
     # cosmetic: `--batch` IS this mode's own selector, so a False here would
     # make the --batch-compatibility guard fire on the mode itself.
@@ -327,6 +356,7 @@ MODE_SPECS = (
         None,
         batch_ok=True,
         source_forms_refusal=_COVERAGE_ENFORCED_ELSEWHERE,
+        approve_to_refusal=_NOT_A_SINGLE_FRAGMENT_REVIEW,
     ),
 )
 
@@ -353,7 +383,15 @@ def _selected_modes(args) -> list:
 # MODE_SPECS across the whole parser. Named here rather than inside the test
 # so the script itself owns the mode/option distinction.
 NON_MODE_DESTS = frozenset(
-    {"help", "research_mode", "batch", "expect_source_forms_file", "canon_path", "senses_path"}
+    {
+        "help",
+        "research_mode",
+        "batch",
+        "expect_source_forms_file",
+        "approve_to",
+        "canon_path",
+        "senses_path",
+    }
 )
 
 
@@ -742,6 +780,50 @@ def _load_batch(batch_path_str: str) -> list:
     if not isinstance(doc, list):
         raise CanonValidationError(f"batch file at {batch_path} does not contain a JSON array")
     return doc
+
+
+def _read_json_bytes(path: Path, what: str):
+    """Opt-in byte-exact variant of _read_json_file. Returns (raw_bytes, doc)
+    from a SINGLE read_bytes(), so a caller that both validates the JSON and
+    copies the file writes the exact bytes it validated -- no second read, no
+    TOCTOU. read_text() must NOT be used for the copy: it applies universal-
+    newline translation, so a CRLF fragment would be snapshotted with different
+    bytes than it had on disk. The three existing _read_json_file callers are
+    deliberately left on the text path; only the --approve-to snapshot needs
+    byte fidelity."""
+    try:
+        raw = path.read_bytes()
+    except FileNotFoundError:
+        raise CanonValidationError(f"{what} not found at {path}")
+    except OSError as e:
+        raise CanonValidationError(f"could not read {what} at {path}: {e}")
+    try:
+        doc = json.loads(raw.decode("utf-8"))
+    except UnicodeDecodeError as e:
+        raise CanonValidationError(f"{what} at {path} is not valid UTF-8: {e}")
+    except json.JSONDecodeError as e:
+        raise CanonValidationError(f"{what} at {path} is not valid JSON: {e}")
+    return raw, doc
+
+
+def _load_batch_bytes(batch_path_str: str):
+    """(raw_bytes, batch_list) for the fragment, mirroring _load_batch's
+    array-shape check but reading bytes so the snapshot is byte-exact."""
+    batch_path = Path(batch_path_str)
+    raw, doc = _read_json_bytes(batch_path, "batch file")
+    if not isinstance(doc, list):
+        raise CanonValidationError(f"batch file at {batch_path} does not contain a JSON array")
+    return raw, doc
+
+
+def _atomic_write_bytes(path: Path, raw: bytes) -> None:
+    """Atomic raw-bytes write -- the byte-preserving counterpart to
+    _atomic_write_json (which re-serialises and so cannot be used for a
+    byte-identical snapshot)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.parent / f".{path.name}.tmp.{os.getpid()}"
+    tmp_path.write_bytes(raw)
+    os.replace(tmp_path, path)
 
 
 def _load_source_forms_manifest(manifest_path_str: str) -> list:
@@ -1352,6 +1434,7 @@ def run_check_batch(
     registry: "Registry",
     senses_path: Path,
     allow_absent_senses: bool,
+    approve_to: "str | None" = None,
 ) -> dict:
     """--check-batch PATH [--expect-source-forms-file M.json]: Pass 1 +
     offline backstop on ONE fragment, NO write. When a manifest is given,
@@ -1363,7 +1446,16 @@ def run_check_batch(
     rejects a doomed fragment at precheck/readiness time (RFC #215 1d),
     not only at the final --merge-batches call.
     """
-    batch = _load_batch(batch_path)
+    # When --approve-to is set we need the fragment's exact bytes to snapshot,
+    # and they must come from the SAME read that is validated -- otherwise a
+    # second read between validation and copy is a TOCTOU. So take the bytes
+    # up front and derive the parsed batch from them; the snapshot below writes
+    # these same bytes, never a re-serialisation.
+    raw_bytes = None
+    if approve_to is not None:
+        raw_bytes, batch = _load_batch_bytes(batch_path)
+    else:
+        batch = _load_batch(batch_path)
     _validate_batch_items(batch, registry)
     _enforce_offline_backstop(batch, research_mode)
     if manifest_path is not None:
@@ -1374,11 +1466,19 @@ def run_check_batch(
     senses = _load_senses_or_raise(senses_path, allow_absent_senses)
     _merge_batch(canon, batch, senses)
 
-    return {
+    result = {
         "success": True,
         "mode": "check_batch",
         "source_forms": len({item.get("source_form") for item in batch if isinstance(item, dict)}),
     }
+    # Snapshot ONLY after every check above has passed, so a rejected fragment
+    # never leaves an approved copy. raw_bytes is exactly what was validated.
+    if approve_to is not None:
+        if raw_bytes is None:  # unreachable: set together with approve_to above
+            raise CanonValidationError("internal: --approve-to set but fragment bytes unread")
+        _atomic_write_bytes(Path(approve_to), raw_bytes)
+        result["approved_path"] = approve_to
+    return result
 
 
 def run_merge_batches(
@@ -1582,6 +1682,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--approve-to",
+        metavar="PATH",
+        default=None,
+        help=(
+            "Only with --check-batch: on a PASS, atomically snapshot the "
+            "EXACT validated bytes of the fragment to PATH so the citation "
+            "reviewer audits an immutable copy and the merge consumes that "
+            "same copy. Writes nothing on failure. Refused in every other "
+            "mode."
+        ),
+    )
+    parser.add_argument(
         "--merge-batches",
         metavar="PATH",
         nargs="+",
@@ -1705,6 +1817,30 @@ def main(argv=None) -> int:
                 "no coverage check. Pass --check-batch or --verify-merged to "
                 "enforce source-forms coverage."
             )
+    # Every mode that refuses --approve-to, with its own reason -- the same
+    # loud-refusal design as --expect-source-forms-file above, so a snapshot is
+    # never silently produced for a mode that reviewed no single fragment.
+    approve_to_refusers = [
+        spec for spec in selected_modes if spec.approve_to_refusal is not None
+    ]
+    if args.approve_to is not None:
+        if approve_to_refusers:
+            parser.error(
+                "; ".join(
+                    f"{spec.flag} does not accept --approve-to "
+                    f"({spec.approve_to_refusal})"
+                    for spec in approve_to_refusers
+                )
+            )
+        elif not selected_modes:
+            # VALIDATE-ONLY (no mode flag) has no MODE_SPECS row, so the
+            # comprehension above never reaches it -- guard it by hand, exactly
+            # as --expect-source-forms-file is guarded. It reviews no fragment,
+            # so honoring --approve-to would snapshot bytes nothing reviewed.
+            parser.error(
+                "validate-only (no mode flag) does not accept --approve-to -- "
+                "it reviews no single fragment to snapshot. Pass --check-batch."
+            )
     if args.verify_merged and not args.batch:
         parser.error("--verify-merged requires one or more --batch PATH")
     if not args.verify_merged and args.batch is not None and len(args.batch) > 1:
@@ -1727,6 +1863,7 @@ def main(argv=None) -> int:
                 registry,
                 senses_path,
                 allow_absent_senses,
+                args.approve_to,
             )
         elif args.merge_batches is not None:
             result = run_merge_batches(
