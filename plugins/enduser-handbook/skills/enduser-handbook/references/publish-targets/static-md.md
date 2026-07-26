@@ -371,7 +371,13 @@ These outcomes reuse the step-0 result computed above (`containerTitle`, `indexF
        scans the pair inside the real index, so the two can still disagree on exactly one axis —
        an inert region. A representable pair the operator pastes inside a fenced code block or
        an HTML comment is blanked by the index view and is reported absent again, repeating the
-       convergent halt above rather than converging; it never produces a false completion.
+       convergent halt above rather than converging — that divergence alone never produces a
+       false completion. A separate, pre-existing gap is not closed by this gate: a chapter row
+       that exists only inside leading frontmatter is reported present by the shipped locator and
+       reaches `unverifiable` in the present-line branch above, where the adapter proceeds —
+       explicit confirmation, not verification, is what stands between that and a silent false
+       completion (the shipped 1.10.0 writer/locator view disagreement, tracked separately — see
+       "Nested-list automation limits" below).
     5. **anything else** ⇒ the gate rejects the pair — measured causes include an ordinary
        newline inside the title, a trailing `\` or a `>` in the target, and a `group_title` the
        writer's own bullet grammar refuses (padded with extra whitespace, or carrying markup).
