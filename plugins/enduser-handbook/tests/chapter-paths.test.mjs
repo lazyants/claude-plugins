@@ -1438,11 +1438,14 @@ test('wireNestedListChapter is pure: a frozen input array is never mutated, and 
 
 // -------------------------------------------------------------------------------------------------
 // [1.11.0] #330 prep — containerOwnerScan extraction (the writer's forward pass lifted, unchanged,
-// into a private helper shared with the future #330 verifier — plan round-21 HIGH). PRIVATE, no
-// exported test seam, so these two tests characterize it through its only current consumer,
-// wireNestedListChapter. The existing MULTIPLE fixture above never involves a heading; this one
-// pins that `containers` collection is independent of the heading-driven currentContainer reset
-// (only child OWNERSHIP resets on a heading, never label-matching membership).
+// into a private helper — plan round-21 HIGH). PRIVATE, no exported test seam, so these two tests
+// characterize it through wireNestedListChapter, its FIRST consumer. verifyNonHeadingPlacement
+// (below) is the SECOND — the whole reason for the extraction is that neither consumer re-implements
+// this scan, so the two can never disagree about which container owns a line (its own coverage,
+// including the ownerOf/ownerLabelOf fields wireNestedListChapter never reads, lives in that
+// section). The existing MULTIPLE fixture above never involves a heading; this one pins that
+// `containers` collection is independent of the heading-driven currentContainer reset (only child
+// OWNERSHIP resets on a heading, never label-matching membership).
 // -------------------------------------------------------------------------------------------------
 
 test('wireNestedListChapter MULTIPLE, heading-independent: two same-label indent-0 bullets split by an ATX heading still BOTH count', () => {
@@ -1474,14 +1477,17 @@ test('wireNestedListChapter, repeat-invocation isolation: a SINGLE call that pop
 // [1.11.0] #330 — verifyNonHeadingPlacement (present-line placement verification, nested-list form)
 // =================================================================================================
 //
-// CONTRACT-FIRST: verifyNonHeadingPlacement is a stub that throws until EH-CORE lands the real
-// implementation (plan goal-la-eh-328-329-330-nonheading.md, "FEATURE 2" + "Tests" item 2), so
-// every fixture below is RED for now. Each fixture's PRECONDITION — match cardinality, frontmatter
-// span, and the fixed-probe predicate's kind — was driven through the REAL, already-shipped
-// supporting helpers (locateChapterLine/indexView, leadingFrontmatterSpan, wireNestedListChapter)
-// before being written here, so only the final verdict is unverified, never the setup. Guard-
-// mutation runs (scoped Edit-revert, RED-before-green) against the landed implementation, and the
-// resulting [isolating]/[masked] labels, are a follow-up pass once EH-CORE commits.
+// verifyNonHeadingPlacement is IMPLEMENTED (EH-CORE, commit 419ef4c) and is containerOwnerScan's
+// SECOND consumer, alongside wireNestedListChapter — the extraction above exists precisely so the
+// two can never disagree about which container owns a line: e.g.
+// verifyNonHeadingPlacement(['- Admin', '  - guide/items.md'], 'guide/items.md', 'Admin') returns
+// {kind: 'ok'} (pinned below at ":1666", "rule 5: a correctly-nested child ... -> ok"). Every
+// fixture's PRECONDITION — match cardinality, frontmatter span, and the fixed-probe predicate's kind
+// — was driven through the real supporting helpers (locateChapterLine/indexView,
+// leadingFrontmatterSpan, wireNestedListChapter) BEFORE the implementation landed, so nothing here
+// rests on an unmeasured setup. Every new gate's [isolating]/[masked] label was then confirmed by a
+// scoped guard-mutation run (Edit-revert, RED-before-green) against the landed implementation — see
+// each fixture's own comment for its specific result.
 //
 // The five-rule decision table (plan "Decision order is fixed"), in order: 1. zero selected-target
 // matches -> inconsistent; 2. more than one match -> inconsistent; 3. the single match lies inside
