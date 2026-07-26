@@ -2,6 +2,20 @@
 
 All notable changes to `lazyants/claude-plugins` are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is per-plugin, not repo-wide.
 
+## [enduser-handbook 1.11.0] — 2026-07-26
+
+Makes the #329 non-heading manual halt convergent and adds present-line placement verification for a bounded non-heading-index subset (#330). Closes #329. Closes #330.
+
+### Added
+- **Present-line placement verification for non-heading indexes** (#330) — a new `verifyNonHeadingPlacement` (`assets/lib/chapter-paths.mjs`, exported alongside `indexView` and `leadingFrontmatterSpan` in `chapter-paths.d.mts`) checks a grouped chapter's already-present index line against the entry's current `group_title`, but only for files for which the fixed-probe writer call returns `kind === 'inserted'` and which hold exactly one selected-target match, that match lying outside the writer-recognized leading-frontmatter span. `ok` proceeds; `misplaced` halts reusing the exact headings-form wording (`foundContainer: null` renders as `(none)` when uncontained); `inconsistent` — the selected target resolves to zero lines, or to more than one — halts naming the chapter and the index, distinct from `misplaced`. Every other non-heading file keeps today's behavior: native/YAML MkDocs configuration, and any Markdown nav file the class excludes (a wildcard, an ordered list, an explicit `<!--nav-->` marker, two same-named containers, or a match sitting inside frontmatter), returns `unverifiable` and proceeds on explicit confirmation, unchanged. MkDocs `nav:` container automation itself remains its own follow-up, #328.
+- **Convergent #329 halt** — the shipped `not-a-list` manual halt in both adapters now also tells the operator exactly what shape the next run recognizes (a Markdown list row indented two spaces under the named container, with the exact link or wikilink target), so one manual edit converges on the very next run instead of risking a second halt for a subtly wrong placement. #329 itself — automating a bare path-table container — is closed as not soundly automatable rather than delivered; this halt improvement is what the issue gets instead.
+
+### Changed
+- Both publish-target adapter docs (`static-md.md`, `obsidian-vault.md`) — the present-line non-heading branch now calls the verifier, and "Nested-list automation limits" names the verified class and its exclusions, including the shipped 1.10.0 leading-frontmatter view disagreement (reproduced, not fixed here) and the literate-nav multi-list `SUMMARY.md` caveat. `revalidation.md`'s non-heading `group_title`-changed fact is narrowed to the same verified class, with explicit user confirmation retained for everything outside it.
+
+### Testing
+- `tests/reference-assets.test.sh`: needles for the new `.d.mts` declarations, the canonical verified-class sentence at all four pinned prose sites (both adapters' limits sections, `revalidation.md`, this changelog entry), and the two convergent #329 halts plus the `inconsistent` halt as the exact strings settled in review.
+
 ## [enduser-handbook 1.10.0] — 2026-07-24
 
 Automates GitBook `SUMMARY.md`-style nested-list index container wiring, so a grouped chapter on a bulleted (non-heading) index no longer always halts for manual container creation. Closes #223.
