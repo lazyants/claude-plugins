@@ -919,10 +919,14 @@ function foldTargetForMatch(target, wikilink) {
  * a divergent path-mode line stays unmatched, so step 0 appends the canonical row and RETAINS the
  * divergent one alongside it (append-and-retain) — the link-integrity gate does not reject it).
  *
- * §5-#330 (1.11.0): the sanitized view `locateChapterLine` scans, named so `verifyNonHeadingPlacement`
- * can share the exact same view rather than re-deriving it (a second recognizer is exactly the
- * drift #330's delegation design exists to prevent). Extracted verbatim from `locateChapterLine`
- * below — no change to that function's output.
+ * The sanitized view `locateChapterLine` scans — name-the-expression pattern (§5, 1.11.0):
+ * extracted verbatim from `locateChapterLine` below, no change to that function's output, so the
+ * one expression has exactly one implementation and is directly unit-testable in isolation.
+ * `locateChapterLine` is this export's only production caller; the present-line placement verifier
+ * (`verifyNonHeadingPlacement`, #330) reaches the same view transitively, by delegating to
+ * `locateChapterLine` itself for its match indices, not by calling this export directly — an
+ * earlier revision did call it directly and re-implemented `locateChapterLine`'s match loop
+ * alongside it, which review caught as the second recognizer this pattern exists to prevent.
  *
  * @param {string[]} indexLines
  * @returns {string[]}
@@ -940,7 +944,7 @@ export function indexView(indexLines) {
  * @param {string[]} indexLines
  * @param {string} expectedTarget
  * @param {{wikilink?: boolean}} [options]
- * @returns {{present: boolean, containerTitle: string|null, multiple: boolean, indexForm: 'headings'|'non-heading', matches: Array<{line: string, containerTitle: string|null}>}}
+ * @returns {{present: boolean, containerTitle: string|null, multiple: boolean, indexForm: 'headings'|'non-heading', matches: Array<{index: number, line: string, containerTitle: string|null}>}}
  */
 export function locateChapterLine(indexLines, expectedTarget, options = {}) {
   const { wikilink = false } = options;
@@ -969,8 +973,12 @@ export function locateChapterLine(indexLines, expectedTarget, options = {}) {
     const targets = extractLineTargets(line);
     if (targets.some((t) => foldTargetForMatch(t, wikilink) === wanted)) {
       // Report the ORIGINAL (unsanitized) line text — `matches[].line` is diagnostic/halt
-      // output, and a reader must see the real file content, never a blanked stand-in.
-      matches.push({ line: indexLines[index], containerTitle });
+      // output, and a reader must see the real file content, never a blanked stand-in. `index`
+      // is this match's position into `indexView(indexLines)` (1.11.0 #330 review fix): the
+      // present-line placement verifier needs a line INDEX (for its frontmatter-span check and
+      // its container-walk lookup) that this return shape did not carry before — adding it here
+      // let the verifier delegate to this loop instead of running a second, parallel one.
+      matches.push({ index, line: indexLines[index], containerTitle });
     }
   }
 
@@ -1413,6 +1421,16 @@ function containerOwnerScan(body, wanted) {
   return { kind: 'ok', containers, childIndent, firstTopMarker, lastBulletIndex, ownerOf, ownerLabelOf };
 }
 
+// The single normalization a manifest group_title must go through before it is compared against a
+// container's own (never-trimmed, see containerOwnerScan's ownerLabelOf) parsed label. Both the
+// writer and the #330 verifier feed containerOwnerScan with this same key — review flagged the
+// un-shared duplicate as a silent-divergence seam: it is one `.trim()` today, but if the writer's
+// normalization ever gained a step (NFC, inner-whitespace collapse) an un-shared copy would keep
+// the old spelling and start emitting false `misplaced` verdicts, with nothing going red.
+function containerLabelKey(groupTitle) {
+  return String(groupTitle).trim();
+}
+
 /**
  * Nested-list grouped index wiring, ABSENT-line path only. Pure: returns the fully-mutated index
  * line array; the runtime persists it. Reached only when findContainer(...) === {kind:'non-heading'}
@@ -1442,7 +1460,7 @@ export function wireNestedListChapter(indexLines, groupTitle, chapterLink) {
   // Immediate guards on BODY.
   // YAML: MkDocs `nav:` / `- key: value` mapping structure (frontmatter already blanked).
   if (hasYamlMappingStructure(BODY)) return { kind: 'not-a-list' };
-  const wanted = String(groupTitle).trim();
+  const wanted = containerLabelKey(groupTitle);
   // Plain-label allowlist on the group_title (both sides — §5.1): a construct-bearing title could
   // emit a container that render-collides with an existing plain one, or fail to match one.
   if (!isPlainLabel(wanted)) return { kind: 'not-a-list' };
@@ -1955,13 +1973,12 @@ export function chapterHasWikilinkTo(chapterText, slug, oldChapterRelPath) {
 const NON_HEADING_PLACEMENT_PROBE_LINK = '[probe](__verify-non-heading-placement-probe__.md)';
 
 /**
- * #330 support: the caller's selected-target match INDICES into `indexView(indexLines)`. Reuses the
- * exact per-line predicate `locateChapterLine` uses (the same sanitized view, the same
- * extractLineTargets/foldTargetForMatch primitives, the same heading skip) — not a second
- * recognizer, because `locateChapterLine`'s own return shape (`LocateChapterLineResult`) never
- * carries a line INDEX, which the container walk below needs and the frontmatter-span check
- * (rule 3) needs too. containerTitle bookkeeping is headings-form-only and irrelevant here, so it
- * is the only thing this loop drops relative to `locateChapterLine`'s.
+ * #330 support: the caller's selected-target match INDICES into `indexView(indexLines)`. A pure
+ * delegation to `locateChapterLine`'s own match loop — not a second recognizer. Review found an
+ * earlier version of this helper re-implementing that loop line-for-line (same view, same
+ * extractLineTargets/foldTargetForMatch primitives, same heading skip), on the grounds that
+ * `LocateChapterLineMatch` carried no line index; the fix was to add the index to that shape
+ * instead of re-deriving it here.
  *
  * @param {string[]} indexLines
  * @param {string} selectedTarget
@@ -1969,17 +1986,7 @@ const NON_HEADING_PLACEMENT_PROBE_LINK = '[probe](__verify-non-heading-placement
  * @returns {number[]}
  */
 function selectedTargetMatchIndices(indexLines, selectedTarget, wikilink) {
-  const wanted = foldTargetForMatch(selectedTarget, wikilink);
-  const sanitizedLines = indexView(indexLines);
-  const indices = [];
-  for (const [index, line] of sanitizedLines.entries()) {
-    if (HEADING_RE.test(line)) continue; // a heading line never carries a target
-    const targets = extractLineTargets(line);
-    if (targets.some((t) => foldTargetForMatch(t, wikilink) === wanted)) {
-      indices.push(index);
-    }
-  }
-  return indices;
+  return locateChapterLine(indexLines, selectedTarget, { wikilink }).matches.map((m) => m.index);
 }
 
 /**
@@ -2042,17 +2049,17 @@ export function verifyNonHeadingPlacement(indexLines, selectedTarget, groupTitle
 
   // Rule 4: shape recognition, delegated. `groupTitle` is the real value (its own newline guard
   // must fire identically to the writer's); only `chapterLink` is replaced with a fixed probe.
-  const predicate = wireNestedListChapter(indexLines, groupTitle, NON_HEADING_PLACEMENT_PROBE_LINK);
-  if (predicate.kind === 'not-a-list' || predicate.kind === 'multiple') return { kind: 'unverifiable' };
+  const shapeVerdict = wireNestedListChapter(indexLines, groupTitle, NON_HEADING_PLACEMENT_PROBE_LINK);
+  if (shapeVerdict.kind === 'not-a-list' || shapeVerdict.kind === 'multiple') return { kind: 'unverifiable' };
 
   // Rule 5: the container comparison, via the writer's own shared scan. Structurally, `scan.kind`
-  // cannot be 'not-a-list' here — `predicate.kind === 'inserted'` already proves the writer's own
+  // cannot be 'not-a-list' here — `shapeVerdict.kind === 'inserted'` already proves the writer's own
   // internal containerOwnerScan(prep.body, wantedLabel) call succeeded on this exact body/label
   // (prepareIndexLines is pure, so the writer's internal call reproduces the same `prep.body`) —
   // but the branch stays, matching this file's own style of checking every `{kind, ...}` result
   // rather than trusting an invariant, and failing toward the safe direction (unverifiable costs
   // only verification; never a false `ok`) if it were ever wrong.
-  const wantedLabel = String(groupTitle).trim();
+  const wantedLabel = containerLabelKey(groupTitle);
   const scan = containerOwnerScan(prep.body, wantedLabel);
   if (scan.kind === 'not-a-list') return { kind: 'unverifiable' };
 

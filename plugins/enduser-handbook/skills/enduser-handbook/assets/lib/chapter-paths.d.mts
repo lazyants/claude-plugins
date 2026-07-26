@@ -29,6 +29,10 @@ export interface ProfileLike extends CaptureProfileLike {
 }
 
 export interface LocateChapterLineMatch {
+  // 1.11.0 #330 review fix: this match's position into indexView(indexLines), so a caller (the
+  // present-line placement verifier) needing a line index can delegate to this loop instead of
+  // re-implementing it.
+  index: number;
   line: string;
   containerTitle: string | null;
 }
