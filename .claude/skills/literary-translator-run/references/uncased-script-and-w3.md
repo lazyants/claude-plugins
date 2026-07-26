@@ -6,9 +6,9 @@
 
 The plugin anticipates this: the W3 mandatory smoke test has a zero-candidate branch. But be honest about what a green result means — see below.
 
-## Author the language preset (`languages/he.json` / `he.local.json`)
+## The language preset contract (`languages/he.json` / `he.local.json`)
 
-Four REQUIRED keys (empty lists accepted) plus an OPTIONAL fifth `name_inventory` — the exact accepted set is `{PARTICLES, STOPWORDS, has_elision, ELISION_RE, name_inventory}` (`bootstrap_names.py`'s `load_language_config`). The zero-name path below uses just the four:
+**Hebrew already has a shipped `he.json`** (since 1.9.0) — the shape below is the CONTRACT, not an instruction to author one over it. Four REQUIRED keys (empty lists accepted) plus an OPTIONAL fifth `name_inventory` — the exact accepted set is `{PARTICLES, STOPWORDS, has_elision, ELISION_RE, name_inventory}` (`bootstrap_names.py`'s `load_language_config`). The zero-name path below uses just the four:
 
 ```json
 {"PARTICLES":[],"STOPWORDS":[],"has_elision":false,"ELISION_RE":null}
@@ -16,7 +16,7 @@ Four REQUIRED keys (empty lists accepted) plus an OPTIONAL fifth `name_inventory
 
 To make the run actually FIND uncased names instead of accepting zero, supply the fifth key — see "Getting uncased names via `name_inventory`" below.
 
-Before authoring a preset for a new language, read `assets/languages/README.md` — it documents the contract for every key and the per-language reasoning (including why Hebrew's `PARTICLES` is `[]` and why its `STOPWORDS` deliberately omits the single-letter proclitics). Do not reconstruct those rules from memory.
+Before authoring a preset for a language that has NO shipped preset, read `{{PLUGIN_ROOT}}/assets/languages/README.md` — it documents the contract for every key and the per-language reasoning (including why Hebrew's `PARTICLES` is `[]` and why its `STOPWORDS` deliberately omits the single-letter proclitics). Do not reconstruct those rules from memory, and do not hand-edit a preset that already ships — Step 0a overwrites it; use a `.local.json` override instead.
 
 ## W3 zero-candidate smoke
 
