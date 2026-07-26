@@ -1907,7 +1907,20 @@ has "static-md: gate #1 is a resolution check, not a spelling check" 'resolution
 has_in_section "static-md: automated grouped wiring's new scope (headings-form + bounded nested-list, #223)" \
   "$SMD" '### Grouped index wiring (`anyGroup` manifests only)' \
   'Automated grouped wiring covers a Markdown-headings-form index and a bounded nested-list'
-has "static-md: non-heading manual-wiring halt" "Index <index_file> is not a headings-form file — add a '<group_title>' container and the chapter line for '<slug>' manually, then re-run." "$SMD"
+# #329 TWO-BRANCH halt. The convergent halt BEGINS with the plain 1.10.0 halt and then continues,
+# and `has` is a line-based fixed-string grep — so a needle carrying only the plain text also
+# matches the CONVERGENT line, and would stay green if the fallback branch were deleted outright:
+# the pin meant to guard the fallback would guard nothing. Each branch therefore gets a needle the
+# other cannot satisfy — the fallback needles below include the closing delimiter, which the
+# convergent line does not carry at that point because it continues past "then re-run.".
+# The delimiter is backslash-escaped because these needles must be double-quoted (they contain
+# single quotes), and inside double quotes a bare backtick would open command substitution.
+# Measured when wired: each needle matches exactly ONE line in its adapter (the plain branch), and
+# the convergent line is excluded.
+has "static-md: #329 fallback keeps the UNCHANGED 1.10.0 halt (no convergent suffix)" \
+  "Index <index_file> is not a headings-form file — add a '<group_title>' container and the chapter line for '<slug>' manually, then re-run.\`" "$SMD"
+has "obsidian-vault: #329 fallback keeps the UNCHANGED 1.10.0 halt (no convergent suffix)" \
+  "Index <index_file> is not a headings-form file — add a '<group_title>' container and the chapter line for '<slug>' manually, then re-run.\"" "$OMD"
 
 echo "== #223: nested-list index container automation (wireNestedListChapter), both adapters =="
 # static-md.md — the flat-entry-absent branch and the new automated subset both sit under the

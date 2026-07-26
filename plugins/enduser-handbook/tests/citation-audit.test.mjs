@@ -57,16 +57,16 @@ const EXPECTED_UNRESOLVED = [
   { file: 'references/publish-targets/obsidian-vault.md', offset: 6700, quotedText: 'INDEX wiring', direction: 'below' },
   { file: 'references/publish-targets/obsidian-vault.md', offset: 9709, quotedText: 'Chapter structure', direction: 'below' },
   { file: 'references/publish-targets/obsidian-vault.md', offset: 27733, quotedText: 'Non-headings index', direction: 'below' },
-  { file: 'references/publish-targets/obsidian-vault.md', offset: 35057, quotedText: 'INDEX wiring', direction: 'above' },
-  { file: 'references/publish-targets/obsidian-vault.md', offset: 40706, quotedText: 'INDEX wiring', direction: 'above' },
-  { file: 'references/publish-targets/obsidian-vault.md', offset: 45933, quotedText: 'INDEX wiring', direction: 'above' },
+  { file: 'references/publish-targets/obsidian-vault.md', offset: 37406, quotedText: 'INDEX wiring', direction: 'above' },
+  { file: 'references/publish-targets/obsidian-vault.md', offset: 43055, quotedText: 'INDEX wiring', direction: 'above' },
+  { file: 'references/publish-targets/obsidian-vault.md', offset: 48282, quotedText: 'INDEX wiring', direction: 'above' },
   { file: 'references/publish-targets/static-md.md', offset: 12961, quotedText: 'Chapter path', direction: 'above' },
   { file: 'references/publish-targets/static-md.md', offset: 15014, quotedText: 'Grouped index wiring', direction: 'below' },
   { file: 'references/publish-targets/static-md.md', offset: 15381, quotedText: 'Chapter → index', direction: 'above' },
   { file: 'references/publish-targets/static-md.md', offset: 18937, quotedText: 'Grouped index wiring', direction: 'below' },
   { file: 'references/publish-targets/static-md.md', offset: 19082, quotedText: 'Grouped index wiring', direction: 'below' },
-  { file: 'references/publish-targets/static-md.md', offset: 27814, quotedText: 'Grouped index wiring', direction: 'above' },
-  { file: 'references/publish-targets/static-md.md', offset: 37697, quotedText: 'Grouped index wiring', direction: 'above' },
+  { file: 'references/publish-targets/static-md.md', offset: 30068, quotedText: 'Grouped index wiring', direction: 'above' },
+  { file: 'references/publish-targets/static-md.md', offset: 39951, quotedText: 'Grouped index wiring', direction: 'above' },
 ];
 
 // Per-occurrence key. offset alone is already unique; file/quotedText/direction are folded in so a
