@@ -1836,8 +1836,16 @@ test('verifyNonHeadingPlacement compatibility matrix: wikilink mode, qualified t
   assert.deepEqual(result, { kind: 'ok' });
 });
 
-test('verifyNonHeadingPlacement compatibility matrix: wikilink mode, legacy-bare target -> ok', () => {
-  const result = verifyNonHeadingPlacement(['- Admin', '  - [[items|Items]]'], 'items', 'Admin', {
+test('verifyNonHeadingPlacement compatibility matrix: wikilink mode, legacy-bare target via a markdown-link row (".md" fold) -> ok', () => {
+  // Distinct from round-2 HIGH 6's own fixture above (['- Admin', '  - [[items]]']): that one is
+  // wikilink SYNTAX and never needs the fold at all. This row is markdown-link syntax carrying a
+  // literal '.md' destination, recognized only because foldTargetForMatch strips one terminal
+  // '.md' under wikilink mode (chapter-paths.mjs, foldTargetForMatch) — the SAME fold the
+  // qualified-target test above (guide/items.md) already covers, exercised here against a BARE
+  // target instead. Confirmed against a mutant that drops the fold (scratch chapter-paths.mjs
+  // with foldTargetForMatch's `wikilink ? … : normalized` collapsed to `normalized`): this
+  // fixture flips to `inconsistent` while the wikilink-syntax fixtures above are unaffected.
+  const result = verifyNonHeadingPlacement(['- Admin', '  - [Items](items.md)'], 'items', 'Admin', {
     wikilink: true,
   });
   assert.deepEqual(result, { kind: 'ok' });

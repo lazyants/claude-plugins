@@ -229,15 +229,15 @@ export function containerTitleMatches(containerTitle: string | null, entry: Chap
 /**
  * Options for verifyNonHeadingPlacement. `wikilink` is the ONLY option, and carries the same
  * meaning as locateChapterLine's (chapter-paths.mjs, the `{ wikilink = false }` destructure):
- * it selects the wikilink target spelling over the path spelling.
+ * it selects the wikilink target spelling over the path spelling. Named rather than reused so this
+ * API is not coupled to LocateChapterLineOptions, which is unrelated.
  */
 export interface VerifyNonHeadingPlacementOptions {
   wikilink?: boolean;
 }
 
 /**
- * Named rather than inlined so each variant is pinnable, and named rather than reused so this API
- * is not coupled to LocateChapterLineOptions, which is unrelated.
+ * Named rather than inlined so each variant is pinnable.
  * `misplaced` is the only variant carrying a payload.
  */
 export type VerifyNonHeadingPlacementResult =
