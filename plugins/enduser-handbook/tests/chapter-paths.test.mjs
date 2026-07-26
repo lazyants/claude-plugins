@@ -1578,6 +1578,23 @@ test('verifyNonHeadingPlacement rule 4, typed-key nav row ["- Yes:" case] [isola
   assert.deepEqual(result, { kind: 'unverifiable' });
 });
 
+test('verifyNonHeadingPlacement rule 4, non-plain groupTitle [EH-CORE finding, isolating, mutation-confirmed]: a construct-bearing groupTitle ("`Admin`", backtick-wrapped) declines through the WRITER-only isPlainLabel(wanted) pre-loop guard, which containerOwnerScan itself never checks', () => {
+  // This is a DIFFERENT guard from the "- Yes:" fixture above: isPlainLabel(wanted) tests the
+  // groupTitle PARAMETER itself (chapter-paths.mjs, wireNestedListChapter's own pre-loop check),
+  // not any label already present in the file — containerOwnerScan's own isPlainLabel call only
+  // ever tests a FILE bullet's `info.label`, never `wanted`, so it has no reach over a malformed
+  // caller-supplied groupTitle at all. EH-CORE measured (relayed by the lead) that disabling rule
+  // 4 entirely turns this into a WRONG `misplaced` rather than `unverifiable` — confirmed here
+  // directly: with rule 4's decline check disabled, containerOwnerScan(prep.body, '`Admin`') runs
+  // to completion undisturbed (the file's own "Admin" label is perfectly plain), and the comparison
+  // against the malformed wantedLabel never matches, producing misplaced('Admin') instead of the
+  // correct unverifiable. Genuinely isolating: unlike the mkdocs.yml/ordered-list/wildcard/table
+  // fixtures above, nothing in containerOwnerScan itself ever inspects `wanted` for plainness.
+  const indexLines = ['- Admin', '  - guide/items.md'];
+  const result = verifyNonHeadingPlacement(indexLines, 'guide/items.md', '`Admin`');
+  assert.deepEqual(result, { kind: 'unverifiable' });
+});
+
 test('verifyNonHeadingPlacement rule 4, literate-nav ordered list [masked by containerOwnerScan\'s own ordered-marker guard]: "1. [Admin](admin.md)" is an ordinary literate-nav feature the writer declines (ordered marker), not a container', () => {
   // Mutation-confirmed MASKED: disabling rule 4's own decline check does not flip this fixture —
   // containerOwnerScan's own NESTED_ORDERED_MARKER_RE guard rejects the ordered-list line
