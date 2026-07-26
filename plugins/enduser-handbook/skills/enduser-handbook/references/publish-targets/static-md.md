@@ -349,19 +349,29 @@ These outcomes reuse the step-0 result computed above (`containerTitle`, `indexF
     convergent only if the exact pair it prescribes would actually be recognized on the very
     next run, so check that, rather than promise it:**
     1. build the candidate as its own two-line array: `- <group_title>`, then on the next line
-       `  - [` + title + `](<` + path + `>)` indented two spaces under it;
+       `  - [` + title (any `]` escaped as `\]`) + `](<` + path + `>)` indented two spaces under
+       it — the same escaping the named halt below promises, so the gate validates the exact
+       spelling the operator is told to type;
     2. run `locateChapterLine(<candidate>, <index-relative-path>)` (`assets/lib/chapter-paths.mjs`,
        no `wikilink` option) on that two-line array alone, not the real index;
     3. run the fixed-probe writer predicate on the same array —
        `wireNestedListChapter(<candidate>, group_title, <fixed probe link>)`;
-    4. **exactly two physical lines, exactly one match, that match sitting on the indented
-       chapter line (not the container line), and the predicate returning `{kind: 'inserted'}`**
-       ⇒ the pair is representable — emit the convergent halt naming it exactly:
+    4. **the candidate's own text, split on newlines, is exactly two physical lines — not merely
+       two array elements, since an embedded newline inside `title` or `path` can add more;
+       exactly one match; that match's `matches[0].index === 1` (`LocateChapterLineMatch.index`,
+       `assets/lib/chapter-paths.mjs`) — the indented chapter line, never the container line at
+       index 0; and the predicate returning `{kind: 'inserted'}`** ⇒ the pair is representable —
+       emit the convergent halt naming it exactly:
        `Index <index_file> is not a headings-form file — add a '<group_title>' container and the chapter line for '<slug>' manually, then re-run. The next run recognizes the chapter line as a Markdown list row INDENTED TWO SPACES under the '<group_title>' container bullet, whose link destination is exactly '<index_relative_path>' — that is, a '- ' + group_title line followed by a '  - [' + title + '](<' + path + '>)' line, with the destination inside angle brackets and any ']' in the title escaped as '\]'. A row placed at the left margin instead of under the container is reported as misplaced on the next run.`
        This is what makes the manual flow converge — but only for a `group_title`, target and
        title the gate accepts: you halt once with instructions, the user adds the container and
        the chapter line, and the re-run's step 0 finds the line present under the
        `indexForm: 'non-heading'` branch above and proceeds.
+       The gate is checked on the candidate's own isolated two-line array; the next run instead
+       scans the pair inside the real index, so the two can still disagree on exactly one axis —
+       an inert region. A representable pair the operator pastes inside a fenced code block or
+       an HTML comment is blanked by the index view and is reported absent again, repeating the
+       convergent halt above rather than converging; it never produces a false completion.
     5. **anything else** ⇒ the gate rejects the pair — measured causes include an ordinary
        newline inside the title, a trailing `\` or a `>` in the target, and a `group_title` the
        writer's own bullet grammar refuses (padded with extra whitespace, or carrying markup).
@@ -371,11 +381,6 @@ These outcomes reuse the step-0 result computed above (`containerTitle`, `indexF
        The operator is no worse off than before 1.11.0 here — this halt can repeat verbatim on
        the next run, exactly as it always has. The gate never names a pair that would not
        converge, but it also never claims convergence it has not checked.
-       The gate is checked on the candidate's own isolated two-line array; the next run instead
-       scans the pair inside the real index, so the two can still disagree on exactly one axis —
-       an inert region. A representable pair the operator pastes inside a fenced code block or
-       an HTML comment is blanked by the index view and is reported absent again, repeating this
-       same halt rather than converging; it never produces a false completion.
 
 **Container resolution** — reached only for a grouped entry on a headings-form index once step 0
 found no existing line. Locate the container by the entry's **current** `group_title`, which is

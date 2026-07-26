@@ -449,14 +449,23 @@ the one exception to "do all of these" — see its own conditional note below.
           (`assets/lib/chapter-paths.mjs`) on that two-line array alone, not the real index;
        3. run the fixed-probe writer predicate on the same array —
           `wireNestedListChapter(<candidate>, group_title, <fixed probe link>)`;
-       4. **exactly two physical lines, exactly one match, that match sitting on the indented
-          chapter line (not the container line), and the predicate returning
+       4. **the candidate's own text, split on newlines, is exactly two physical lines — not
+          merely two array elements, since an embedded newline inside `title` or `target` can
+          add more; exactly one match; that match's `matches[0].index === 1`
+          (`LocateChapterLineMatch.index`, `assets/lib/chapter-paths.mjs`) — the indented
+          chapter line, never the container line at index 0; and the predicate returning
           `{kind: 'inserted'}`** — the pair is representable — emit the convergent halt naming
           it exactly:
           "Index <index_file> is not a headings-form file — add a '<group_title>' container and the chapter line for '<slug>' manually, then re-run. The next run recognizes the chapter line as a Markdown list row INDENTED TWO SPACES under the '<group_title>' container bullet, whose wikilink target is exactly '<index_relative_target>' — that is, a '- ' + group_title line followed by a '  - [[' + target + '|' + title + ']]' line; a Markdown link whose destination is that target plus '.md' is recognized too. A row placed at the left margin instead of under the container is reported as misplaced on the next run."
           The next run's step 0 finds the line you added and proceeds — but only for a
           `group_title`, target and title the gate accepts — this convergence is why step 0
           always runs first.
+          The gate is checked on the candidate's own isolated two-line array; the next run
+          instead scans the pair inside the real index, so the two can still disagree on
+          exactly one axis — an inert region. A representable pair the operator pastes inside a
+          fenced code block or an HTML comment is blanked by the index view and is reported
+          absent again, repeating the convergent halt above rather than converging; it never
+          produces a false completion.
        5. **anything else** — the gate rejects the pair — measured causes include an ordinary
           newline inside the title, `|`/`#`/`^`/`]` in the wikilink target, and a `group_title`
           the writer's own bullet grammar refuses (padded with extra whitespace, or carrying
@@ -466,12 +475,6 @@ the one exception to "do all of these" — see its own conditional note below.
           The operator is no worse off than before 1.11.0 here — this halt can repeat verbatim
           on the next run, exactly as it always has. The gate never names a pair that would not
           converge, but it also never claims convergence it has not checked.
-          The gate is checked on the candidate's own isolated two-line array; the next run
-          instead scans the pair inside the real index, so the two can still disagree on
-          exactly one axis — an inert region. A representable pair the operator pastes inside a
-          fenced code block or an HTML comment is blanked by the index view and is reported
-          absent again, repeating this same halt rather than converging; it never produces a
-          false completion.
 
    **Manual group migration is a different halt, not part of establishment.** A manifest
    edit that changes a retained entry's `group` or `group_title`, or removes a grouped
