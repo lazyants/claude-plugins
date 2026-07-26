@@ -193,22 +193,24 @@ success line then approved the work anyway.
   index, and the analogous attempt-number collision (`ATTEMPT 1` inside `ATTEMPT 10`) is unreachable at
   the shipped `MAX_CITATION_RETRIES = 2`.
 - **A false reject costs differently at every site**, which is what to read a failed run against.
-  **Exactly one of the six recovers inside the run: the precheck.** It forfeits its resume-skip and
-  runs the dispatch + wait it would otherwise have skipped — a genuine repair, because that path is
-  correct regardless of *why* the precheck reported `ABSENT`. The other five cost at least a re-run,
-  and at every one of them the trigger is the reply's PHRASING rather than the data, so a re-run is
-  another roll of the same die and not a fix.
-- **The citation review is NOT self-recovering**, which is the opposite of what its retry ladder
-  suggests. The ladder regenerates the FRAGMENT, while what tripped the guard is how the reviewer
+  **Exactly one of the six recovers *deterministically* inside the run: the precheck.** It forfeits
+  its resume-skip and runs the dispatch + wait it would otherwise have skipped — a genuine repair,
+  because that path is correct regardless of *why* the precheck reported `ABSENT`. The other five cost
+  at least a re-run, and at every one of them the trigger is the reply's PHRASING rather than the data,
+  so a re-run — the operator's or an automatic retry — is another roll of the same die and not a fix.
+- **The citation review is NOT *reliably* self-recovering**, which is weaker than what its retry
+  ladder suggests. The ladder can clear a misfire inside the run — a regenerated attempt whose
+  reviewer reply happens not to re-trip the guard merges normally, on the same run — but only by
+  chance: the ladder regenerates the FRAGMENT, while what tripped the guard is how the reviewer
   worded its reply — two different variables. Every prompt that owns a fail sentinel prints that
   sentinel verbatim in its own instructions, so a reviewer reasoning about the verdict in prose ("no
   item failed, so `CITATIONS_REJECTED 0 ATTEMPT 0` is not warranted") is an ordinary output rather
-  than a freak one, and it rejects the regenerated fragment for exactly the same reason. Burning all
-  `MAX_CITATION_RETRIES + 1` attempts returns `citation-review-exhausted`, and the merge being
+  than a freak one, and it can reject the regenerated fragment for exactly the same reason. Burning
+  all `MAX_CITATION_RETRIES + 1` attempts returns `citation-review-exhausted`, and the merge being
   all-or-nothing, **zero** batches merge: the run produces nothing while the data may have been fine
   throughout. What `MAX_CITATION_RETRIES` bounds is the number of attempts — that the run terminates
-  instead of looping. It does not bound the consequence and does not make this false RED clear
-  itself.
+  instead of looping. It does not bound the consequence and does not make this false RED *reliably*
+  clear itself.
 - **How an operator tells the two apart** — which is what the exhaustion message now states, both
   causes and their opposite responses, instead of asserting the sources could not be verified. A
   genuine rejection must list, above its verdict line, one line per offending item naming that
