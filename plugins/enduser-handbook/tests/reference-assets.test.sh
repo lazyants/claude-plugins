@@ -2695,6 +2695,52 @@ has "surface-diff.md: documents the structural diff key"  'tag / role / name / d
 hasnt "surface-diff: no import type in the .mjs" 'import type' "$SD"
 has "surface-diff: imports matrixLabel from control-inventory" "from './control-inventory.mjs'" "$SD"
 
+echo "== chapter-paths.d.mts — 1.11.0 public surface (#330) =="
+CPD="$ASSETS/lib/chapter-paths.d.mts"
+# Declaration-SHAPED needles (round-15/round-26). `has` is an unscoped fixed-string grep, so a
+# name-only needle for a type stays green after its declaration is deleted — the name survives
+# inside the function signature. Each needle therefore carries its declaration keyword, and each
+# gets its own deletion mutant. These pin EXISTENCE only: never compatibility, never syntax.
+has "chapter-paths.d.mts: declares indexView"                       'export function indexView'                        "$CPD"
+has "chapter-paths.d.mts: declares leadingFrontmatterSpan"          'export function leadingFrontmatterSpan'           "$CPD"
+has "chapter-paths.d.mts: declares verifyNonHeadingPlacement"       'export function verifyNonHeadingPlacement'        "$CPD"
+has "chapter-paths.d.mts: declares VerifyNonHeadingPlacementOptions" 'export interface VerifyNonHeadingPlacementOptions' "$CPD"
+has "chapter-paths.d.mts: declares VerifyNonHeadingPlacementResult"  'export type VerifyNonHeadingPlacementResult'      "$CPD"
+
+echo "== canonical verified-class sentence — verbatim at all four pinned sites (#330) =="
+# ONE sentence, reused verbatim, joined across the ~95-column house wrap. Short independent
+# fragments were rejected during review: they enforce neither wording, order, nor adjacency, so a
+# site could drift into a paraphrase and stay green — which is exactly how an earlier revision came
+# to claim verbatim reuse it did not have. A site may add a labelled gloss BESIDE the sentence; a
+# site carrying only a gloss fails these pins.
+# The contract note is the FIFTH site carrying this sentence and is deliberately NOT pinned: it is
+# the team's hand-off artifact, has no repository path, and requiring a needle in it would force an
+# implementer to invent a file or silently drop a promised pin.
+CLASS_SENTENCE='files for which the fixed-probe writer call returns `kind === '\''inserted'\''` and which hold exactly one selected-target match, that match lying outside the writer-recognized leading-frontmatter span.'
+CHLOG="$PLUGIN_DIR/../../CHANGELOG.md"
+has_joined_in_section "static-md: limits section carries the class sentence verbatim" \
+  "$SMD" '### Nested-list automation limits' "$CLASS_SENTENCE"
+has_joined_in_section "obsidian-vault: limits section carries the class sentence verbatim" \
+  "$OMD" '### Nested-list automation limits' "$CLASS_SENTENCE"
+has_joined_in_section "revalidation.md: convergence checklist carries the class sentence verbatim" \
+  "$REVAL" '### Terminal-state convergence checklist' "$CLASS_SENTENCE"
+has "CHANGELOG: 1.11.0 entry carries the class sentence verbatim" "$CLASS_SENTENCE" "$CHLOG"
+
+echo "== #329 convergent halt strings and the inconsistent halt — exact, fixed in the plan (#329/#330) =="
+# Pinned as the EXACT strings settled during plan review, not as whatever the implementation
+# produces. The two #329 halts EXTEND the shipped not-a-list string rather than replacing it, so
+# the existing not-a-list pin keeps holding alongside these.
+has "static-md: #329 convergent path-mode halt, exact string" \
+  'Index <index_file> is not a headings-form file — add a '\''<group_title>'\'' container and the chapter line for '\''<slug>'\'' manually, then re-run. The next run recognizes the chapter line as a Markdown list row INDENTED TWO SPACES under the '\''<group_title>'\'' container bullet, whose link destination is exactly '\''<index_relative_path>'\'' — that is, a '\''- '\'' + group_title line followed by a '\''  - ['\'' + title + '\''](<'\'' + path + '\''>)'\'' line, with the destination inside angle brackets and any '\'']'\'' in the title escaped as '\''\]'\''. A row placed at the left margin instead of under the container is reported as misplaced on the next run.' "$SMD"
+has "obsidian-vault: #329 convergent wikilinks-mode halt, exact string" \
+  'Index <index_file> is not a headings-form file — add a '\''<group_title>'\'' container and the chapter line for '\''<slug>'\'' manually, then re-run. The next run recognizes the chapter line as a Markdown list row INDENTED TWO SPACES under the '\''<group_title>'\'' container bullet, whose wikilink target is exactly '\''<index_relative_target>'\'' — that is, a '\''- '\'' + group_title line followed by a '\''  - [['\'' + target + '\''|'\'' + title + '\'']]'\'' line; a Markdown link whose destination is that target plus '\''.md'\'' is recognized too. A row placed at the left margin instead of under the container is reported as misplaced on the next run.' "$OMD"
+# ONE string covers both causes of `inconsistent` (zero matches and more than one), so nothing is
+# substituted beyond the slug and the file.
+has "static-md: inconsistent halt, one string for both causes" \
+  'Chapter '\''<slug>'\'' does not resolve to exactly one line in <index_file> — curate the index manually, then re-run.' "$SMD"
+has "obsidian-vault: inconsistent halt, one string for both causes" \
+  'Chapter '\''<slug>'\'' does not resolve to exactly one line in <index_file> — curate the index manually, then re-run.' "$OMD"
+
 TOTAL=$((PASS + FAIL))
 echo "----"
 echo "TOTAL: $PASS/$TOTAL passed, $FAIL failed"

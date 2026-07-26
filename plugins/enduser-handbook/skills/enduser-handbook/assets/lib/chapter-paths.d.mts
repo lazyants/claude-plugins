@@ -221,3 +221,36 @@ export function chapterHasWikilinkTo(chapterText: string, slug: string, oldChapt
 
 /** See chapter-paths.mjs: the trim-safe step-0 "line present under the correct container" comparator. */
 export function containerTitleMatches(containerTitle: string | null, entry: ChapterEntry): boolean;
+
+/**
+ * Options for verifyNonHeadingPlacement. `wikilink` is the ONLY option, and carries the same
+ * meaning as locateChapterLine's (chapter-paths.mjs, the `{ wikilink = false }` destructure):
+ * it selects the wikilink target spelling over the path spelling.
+ */
+export interface VerifyNonHeadingPlacementOptions {
+  wikilink?: boolean;
+}
+
+/**
+ * Named rather than inlined so each variant is pinnable, and named rather than reused so this API
+ * is not coupled to LocateChapterLineOptions, which is unrelated.
+ * `misplaced` is the only variant carrying a payload.
+ */
+export type VerifyNonHeadingPlacementResult =
+  | { kind: 'ok' }
+  | { kind: 'misplaced'; foundContainer: string | null }
+  | { kind: 'inconsistent' }
+  | { kind: 'unverifiable' };
+
+/**
+ * See chapter-paths.mjs: present-line placement verification for the nested-list index form (#330).
+ * `selectedTarget` is the target the CALLER already selected — the Obsidian adapter scans the
+ * qualified and legacy-bare spellings and picks one before placement checking, so passing the
+ * selected one lets a legitimately-present legacy row verify instead of reporting `inconsistent`.
+ */
+export function verifyNonHeadingPlacement(
+  indexLines: string[],
+  selectedTarget: string,
+  groupTitle: string,
+  options?: VerifyNonHeadingPlacementOptions,
+): VerifyNonHeadingPlacementResult;

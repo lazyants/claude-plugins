@@ -1947,3 +1947,16 @@ export function chapterHasWikilinkTo(chapterText, slug, oldChapterRelPath) {
   }
   return false;
 }
+
+/**
+ * #330 — present-line placement verification for the nested-list index form.
+ *
+ * CONTRACT STUB, intentionally unimplemented so the feature tests are red until it is built.
+ * The five-rule decision table, the single-match precondition and the verified class sentence live
+ * in the plan; the shared helpers this must use (indexView for the match set, containerOwnerScan
+ * over the writer's BODY for the container walk) already exist above and must NOT be
+ * re-implemented — a second scan is scan-logic drift by construction.
+ */
+export function verifyNonHeadingPlacement(indexLines, selectedTarget, groupTitle, options = {}) {
+  throw new Error('verifyNonHeadingPlacement: not implemented (1.11.0 contract stub)');
+}
