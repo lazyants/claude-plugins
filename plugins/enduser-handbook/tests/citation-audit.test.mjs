@@ -43,9 +43,14 @@ const EXPECTED_TOTAL_CITATIONS = 56;
 // Re-pinned for 1.11.0 (#329/#330): the doc edits shifted every offset at or after the first insertion
 // point in each touched file, and added two new near-miss citations — both reviewed as legitimate,
 // same pattern as the pre-existing entries for the same headings: obsidian-vault.md's new
-// "Nested-list automation limits" prose cites "INDEX wiring" (above, offset 35057; the heading really
-// is above that point), and static-md.md's equivalent prose cites "Grouped index wiring" (above,
-// offset 27814; the heading really is above that point too).
+// "Nested-list automation limits" prose cites "INDEX wiring" (above), and static-md.md's equivalent
+// prose cites "Grouped index wiring" (above). In both the cited heading really does sit above the
+// citation point.
+// Identified by file and section deliberately, NOT by offset. An earlier revision of this comment
+// named offsets 35057 and 27814; the very next commit re-derived the table below and left the prose
+// behind, so this file — whose whole job is pinning re-derived measurements — carried two numbers
+// that matched no citation in the corpus. Nothing went red, because only the table is asserted and
+// the prose is the unasserted half. A file/section reference cannot go stale that way.
 const EXPECTED_UNRESOLVED = [
   { file: 'references/diataxis.md', offset: 2877, quotedText: 'When this is the right shape', direction: 'below' },
   { file: 'references/profile-validation.md', offset: 11273, quotedText: '`inline` stays minimal', direction: 'below' },
@@ -57,16 +62,16 @@ const EXPECTED_UNRESOLVED = [
   { file: 'references/publish-targets/obsidian-vault.md', offset: 6700, quotedText: 'INDEX wiring', direction: 'below' },
   { file: 'references/publish-targets/obsidian-vault.md', offset: 9709, quotedText: 'Chapter structure', direction: 'below' },
   { file: 'references/publish-targets/obsidian-vault.md', offset: 27733, quotedText: 'Non-headings index', direction: 'below' },
-  { file: 'references/publish-targets/obsidian-vault.md', offset: 37406, quotedText: 'INDEX wiring', direction: 'above' },
-  { file: 'references/publish-targets/obsidian-vault.md', offset: 43055, quotedText: 'INDEX wiring', direction: 'above' },
-  { file: 'references/publish-targets/obsidian-vault.md', offset: 48282, quotedText: 'INDEX wiring', direction: 'above' },
+  { file: 'references/publish-targets/obsidian-vault.md', offset: 37689, quotedText: 'INDEX wiring', direction: 'above' },
+  { file: 'references/publish-targets/obsidian-vault.md', offset: 43338, quotedText: 'INDEX wiring', direction: 'above' },
+  { file: 'references/publish-targets/obsidian-vault.md', offset: 48565, quotedText: 'INDEX wiring', direction: 'above' },
   { file: 'references/publish-targets/static-md.md', offset: 12961, quotedText: 'Chapter path', direction: 'above' },
   { file: 'references/publish-targets/static-md.md', offset: 15014, quotedText: 'Grouped index wiring', direction: 'below' },
   { file: 'references/publish-targets/static-md.md', offset: 15381, quotedText: 'Chapter → index', direction: 'above' },
   { file: 'references/publish-targets/static-md.md', offset: 18937, quotedText: 'Grouped index wiring', direction: 'below' },
   { file: 'references/publish-targets/static-md.md', offset: 19082, quotedText: 'Grouped index wiring', direction: 'below' },
-  { file: 'references/publish-targets/static-md.md', offset: 30068, quotedText: 'Grouped index wiring', direction: 'above' },
-  { file: 'references/publish-targets/static-md.md', offset: 39951, quotedText: 'Grouped index wiring', direction: 'above' },
+  { file: 'references/publish-targets/static-md.md', offset: 30501, quotedText: 'Grouped index wiring', direction: 'above' },
+  { file: 'references/publish-targets/static-md.md', offset: 40384, quotedText: 'Grouped index wiring', direction: 'above' },
 ];
 
 // Per-occurrence key. offset alone is already unique; file/quotedText/direction are folded in so a
