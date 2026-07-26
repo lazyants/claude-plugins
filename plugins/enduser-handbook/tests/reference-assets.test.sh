@@ -94,8 +94,14 @@ has_ci() {
 # be found"), and the engine is now large enough (fence char + length + backtick-info-string +
 # CRLF) that a hand-duplicated second copy is a real drift risk, not just a style preference.
 _section_contains() {
-  local file="$1" heading="$2" needle="$3"
-  awk -v heading="$heading" -v needle="$needle" '
+  local file="$1" heading="$2" needle="$3" joined="${4:-0}"
+  # `joined=1` searches the section's lines JOINED with single spaces and whitespace-collapsed,
+  # instead of testing each physical line. House style hard-wraps prose at ~95 columns, so a
+  # sentence-length needle matches no single line and the default per-line mode cannot pin it.
+  # This is a MODE of the one scanner, deliberately not a second implementation: both modes share
+  # the same fence tracker and the same section boundaries, so a pin can never disagree with the
+  # existing per-line pins about which region it is looking at.
+  awk -v heading="$heading" -v needle="$needle" -v joined="$joined" '
        # #257: this counts SPACE characters only, so a leading TAB reports indent=0 and `rest`
        # (computed below from `indent`) starts AT that unconsumed tab char — whose first
        # character (`fc`) can never equal a fence marker (` or ~), so a tab-prefixed line never
@@ -161,6 +167,7 @@ _section_contains() {
            in_section = 1; found_heading = 1; level = hlevel; next
          }
          if (in_section && hlevel > 0 && hlevel <= level) { in_section = 0 }
+         if (in_section && joined == 1) { buf = buf " " line; next }
          if (in_section && index(line, needle) > 0) { found_needle = 1 }
        }
        END {
@@ -168,6 +175,16 @@ _section_contains() {
          # present heading whose section simply lacks the needle (exit 1), so a negative pin can
          # hard-fail when its heading is renamed/deleted instead of silently passing forever.
          if (!found_heading) exit 2
+         if (joined == 1) {
+           # Join with single spaces, then collapse runs of whitespace, so the needle can be the
+           # whole sentence regardless of where house style wrapped it. Nothing here models
+           # CommonMark: this is a presence pin over the tracker-visible region, and the residual
+           # error modes are documented at the pin sites below.
+           gsub(/[ \t]+/, " ", buf)
+           sub(/^ /, "", buf)
+           if (needle != "" && index(buf, needle) > 0) exit 0
+           exit 1
+         }
          if (needle != "" && found_needle) exit 0
          exit 1
        }
@@ -181,6 +198,40 @@ has_in_section() {
     ok "$msg"
   else
     bad "$msg ('$needle' not found under heading '$heading' in $(basename "$file"))"
+  fi
+}
+
+# Assert a fixed string is present in one Markdown section AFTER joining that section's lines with
+# single spaces and collapsing whitespace runs. Use this, not has_in_section, whenever the needle is
+# longer than the ~95-column house wrap — has_in_section tests each PHYSICAL line, so a wrapped
+# sentence matches nothing and the pin would be green-by-construction.
+#
+# WHAT THIS PROVES, exactly: the sentence occurs in the joined, whitespace-collapsed text of the
+# region the TRACKER treats as the named section. Both qualifiers are load-bearing. It does NOT
+# prove block contiguity, visibility, or prose rendering, and the tracker's section is not the
+# document's section. Known divergences, measured against this function and deliberately accepted:
+#   - fence state: a fence-like line inside an HTML comment or a raw <script> block opens fence
+#     state CommonMark never opens (false RED); fences carrying a container marker on their own
+#     line (`- ```, `> ```) or indented 4+ are missed (false green);
+#   - section boundary: any column-0 `#`-run <= the target's ends the section, unvalidated and
+#     inert-context-blind (false RED); setext headings and 1-3-space-indented ATX are real
+#     boundaries it steps past (false green);
+#   - target acquisition: `line == heading` is byte-exact, so `## X ##` and `  ## X` are not found
+#     at all (exit 2); an inert duplicate of the heading latches the section first.
+# That list is ILLUSTRATIVE, not exhaustive: this models neither CommonMark block structure nor
+# inert contexts, so divergence is possible in either direction. Closing it would mean writing and
+# proving a CommonMark block parser in awk, which is deliberately out of scope.
+#
+# AUTHORING CONSTRAINT for every site pinned this way: never break a wrap inside a hyphenated
+# compound. The join inserts a space, so a break after `leading-` yields `leading -frontmatter` and
+# the pin fails. That failure is loud, which is why the constraint is enforced by the pin itself.
+has_joined_in_section() {
+  local msg="$1" file="$2" heading="$3" needle="$4"
+  if [ ! -f "$file" ]; then bad "$msg (file not found: $(basename "$file"))"; return; fi
+  if _section_contains "$file" "$heading" "$needle" 1; then
+    ok "$msg"
+  else
+    bad "$msg (joined section under '$heading' in $(basename "$file") does not carry the sentence)"
   fi
 }
 
@@ -779,6 +830,64 @@ if ( FAIL=0; hasnt_in_section "self-test: hasnt_in_section hard-fails on a genui
   ok "self-test: hasnt_in_section correctly hard-fails on an absent heading (#302)"
 else
   bad "self-test: hasnt_in_section did not hard-fail on an absent heading (#302 regression)"
+fi
+
+# has_joined_in_section self-tests. Deliberately three, because the contract is deliberately small:
+# one positive proving the whole reason the helper exists, and two negatives proving the single
+# exclusion it claims. Every wider claim about this helper was withdrawn during plan review.
+#
+# 1. POSITIVE — a hard-wrapped sentence must be FOUND. This is the case has_in_section fails: it
+#    tests each physical line, so a sentence wrapped at the house column matches no line at all.
+#    Without this fixture the helper could degrade to per-line matching and every sentence pin
+#    would go silently green-by-nothing.
+cat > "$SELFTEST_DIR/joined-wrapped.md" <<'EOF'
+## Target
+files for which the fixed-probe writer call returns `kind === 'inserted'` and which hold
+exactly one selected-target match, that match lying outside the writer-recognized
+leading-frontmatter span.
+## Next
+EOF
+has_joined_in_section "self-test: a hard-wrapped sentence is found once the section is joined" \
+  "$SELFTEST_DIR/joined-wrapped.md" '## Target' \
+  "files for which the fixed-probe writer call returns \`kind === 'inserted'\` and which hold exactly one selected-target match, that match lying outside the writer-recognized leading-frontmatter span."
+
+# 2/3. NEGATIVES — the sentence inside a fenced code block must NOT satisfy the pin, in BOTH fence
+#    spellings. The tilde case is the one that discriminates: a backtick-only collector answers
+#    "not found" for the backtick fixture too, so the backtick fixture alone cannot tell a correct
+#    implementation from a ~~~-blind one. The live tracker handles both (see the fence-char axis
+#    self-tests above); these fixtures pin that it stays that way.
+cat > "$SELFTEST_DIR/joined-fence-backtick.md" <<'EOF'
+## Target
+```
+files for which the fixed-probe writer call returns `kind === 'inserted'` and which hold
+exactly one selected-target match, that match lying outside the writer-recognized
+leading-frontmatter span.
+```
+## Next
+EOF
+if ( FAIL=0; has_joined_in_section "probe" "$SELFTEST_DIR/joined-fence-backtick.md" '## Target' \
+       "files for which the fixed-probe writer call returns \`kind === 'inserted'\` and which hold exactly one selected-target match, that match lying outside the writer-recognized leading-frontmatter span." \
+       >/dev/null 2>&1; [ "$FAIL" -eq 1 ] ); then
+  ok "self-test: a sentence inside a backtick fence does not satisfy the joined pin"
+else
+  bad "self-test: joined pin accepted a sentence inside a backtick fence (fence exclusion regressed)"
+fi
+
+cat > "$SELFTEST_DIR/joined-fence-tilde.md" <<'EOF'
+## Target
+~~~
+files for which the fixed-probe writer call returns `kind === 'inserted'` and which hold
+exactly one selected-target match, that match lying outside the writer-recognized
+leading-frontmatter span.
+~~~
+## Next
+EOF
+if ( FAIL=0; has_joined_in_section "probe" "$SELFTEST_DIR/joined-fence-tilde.md" '## Target' \
+       "files for which the fixed-probe writer call returns \`kind === 'inserted'\` and which hold exactly one selected-target match, that match lying outside the writer-recognized leading-frontmatter span." \
+       >/dev/null 2>&1; [ "$FAIL" -eq 1 ] ); then
+  ok "self-test: a sentence inside a tilde fence does not satisfy the joined pin (the discriminating spelling)"
+else
+  bad "self-test: joined pin accepted a sentence inside a tilde fence — a backtick-only collector would pass the backtick fixture too"
 fi
 
 echo "== surface-audit.playwright.ts =="
