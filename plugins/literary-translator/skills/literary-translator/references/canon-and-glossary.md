@@ -492,8 +492,12 @@ For the same reason
 the verdict sentinels carry the ATTEMPT number, not just the batch index — a
 verdict is a statement about one attempt path, so a stale verdict simply
 fails to match. A mismatched, malformed, or absent verdict falls to the
-REJECT side: a wrong reject costs one regeneration, a wrong accept costs a
-permanently frozen fabricated citation.
+REJECT side, which is still the right direction but not a cheap one here: a
+wrong reject costs one regeneration if the ladder then clears, and the WHOLE
+RUN if it does not — the attempts exhaust to `citation-review-exhausted` and,
+the merge being all-or-nothing, ZERO batches merge. A wrong accept costs a
+permanently frozen fabricated citation, which is worse and unrepairable,
+so the direction stands; the cost of being wrong is what is bounded loosely.
 
 **What the merge is handed is the approved SNAPSHOT, not the attempt path**
 (**1.16.0**) — because approval binding a path rather than bytes was not
@@ -516,11 +520,67 @@ read, no window — to an immutable `approved_{index}_attempt_{n}.json`, and the
 reviewer then audits THAT. The ordering is the whole fix and cannot be
 reversed: snapshotting *after* the audit leaves a producer free to replace
 validated-bytes-A with structurally-valid-bytes-B between the reviewer's read
-and the copy. On `CITATIONS_OK` the merge consumes the snapshot, so the bytes
-audited, the bytes approved and the bytes merged are one object by identity,
-and a post-snapshot rewrite of `out_*` reaches nothing anyone reads — the
-defect is unrepresentable rather than detected, with no hash to compare and
-no window to keep short.
+and the copy. On `CITATIONS_OK` the merge consumes the snapshot, so within one
+run the bytes audited, the bytes approved and the bytes merged are one object
+by identity, and a post-snapshot rewrite of `out_*` reaches nothing anyone
+reads — the defect is unrepresentable rather than detected, with no hash to
+compare and no window to keep short. That "within one run" is load-bearing and
+rests on preconditions; the next section states them once, and every other
+mention of this guarantee points there instead of restating them.
+
+#### What the approved snapshot guarantees, and the preconditions it rests on
+
+This is the canonical statement of the property, and the only place its
+qualifiers belong. Everywhere else that mentions it — `SKILL.md`, the other
+`references/`, the workflow templates, `canon_validate.py` — states it in
+short form and cites this heading by name instead of re-deriving its own
+qualifiers, because a guarantee restated in six places is a guarantee that
+drifts in six places. Correct it here.
+
+**What holds.** Within one run the snapshot is published CREATE-ONCE: the
+validated bytes go to a unique temp path, which `os.link()` then links into
+place, so while that directory entry exists no writer can replace it. The
+bytes the citation reviewer audits are therefore the bytes the merge consumes.
+A duplicate approval carrying IDENTICAL bytes is an idempotent no-op; one
+carrying DIFFERENT bytes — a repeated `--check-batch --approve-to`, or two
+overlapping reviewer dispatches for the same batch and attempt — fails closed
+and names the path, leaving the already-audited copy byte-untouched.
+
+**Precondition A: one live run per glossary run DIRECTORY** — filesystem
+identity, not string identity, and the two are not the same thing.
+`RUN_ID_RE` is `[A-Za-z0-9][A-Za-z0-9._-]*` and `resolve_run()` returns the
+caller's own spelling unnormalised, so `abc` and `ABC` are both valid and
+distinct as RUN_ID strings; on a case-insensitive filesystem (the macOS
+default) they name ONE `glossary/runs/<RUN_ID>/` directory. A precondition
+worded as "one live run per RUN_ID string" would therefore not be enough: what
+matters is what the filesystem resolves the path to.
+
+**Precondition B: `durable_root` on a hardlink-capable filesystem.**
+`os.link()` IS the guarantee, so a filesystem that cannot provide it (some
+SMB/FAT mounts) makes the publish FAIL, loudly and by name. It deliberately
+does not fall back to an overwriting write, which would silently restore the
+duplicate-approval race on precisely the setups nobody tests on.
+
+**What is NOT claimed.** No lock is taken, and the snapshot carries no
+run-identity binding — nothing in it records which run produced it. The
+property is OPERATIONAL, the same species as `canon.json`'s single-writer note
+in `canon_validate.py`: it holds because the orchestrator runs one glossary
+pass per run directory at a time, not because anything here locks a file. What
+ENDS it is the run-start wipe — `resume_setup.py`'s
+`_wipe_stale_glossary_fragments` unlinks every `approved_*` (its keep rule
+spares `out_*_attempt_0`, and only on a resume) — so a second run starting on
+a live run's directory deletes the audited snapshot and reopens the slot, and
+the first run's already-issued `CITATIONS_OK` would then merge bytes nobody
+audited. The wipe is deliberate and stays: it exists so a fresh run cannot
+adopt an orphaned directory's stale attempt. That makes this a bounded
+precondition, not an unnoticed defect.
+
+**Evidence status.** The guarantee rests on `os.link()`'s create-once
+semantics, not on the concurrent-writer test. That test
+(`tests/canon_approve_to.test.py`, eight racing writers, resampling until it
+observes critical sections that genuinely overlap) is a probabilistic
+regression check: it can show the property has not been broken, and cannot
+establish it.
 
 Fail-closed follows from the snapshot being attempt-scoped as well: if the
 winning attempt was never approved, the `approved_{index}_attempt_{n}.json`

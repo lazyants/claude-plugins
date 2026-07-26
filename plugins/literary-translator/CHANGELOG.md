@@ -75,28 +75,34 @@ success line then approved the work anyway.
   identical bytes are an idempotent no-op, DIFFERENT bytes fail closed with the audited copy
   byte-untouched and the offending path named. A filesystem without hard links fails closed too,
   rather than falling back to an overwriting write.
-- **That guarantee lasts exactly as long as the snapshot does, so ONE LIVE RUN PER `RUN_ID` is an
-  operational precondition.** `os.link()` can only refuse while the directory entry exists, and
-  `resume_setup.py` removes it at start-up: `_wipe_stale_glossary_fragments` unlinks every
-  `approved_*` fragment (its keep rule spares `out_*_attempt_0` only, and only on a resume), while a
-  digest-MATCH resume reuses the SAME `RUN_ID` and therefore the same `glossary/runs/<RUN_ID>/`
-  directory. So a second run started under a live run's `RUN_ID` wipes that run's audited snapshot
-  and reopens the slot for different bytes, which the first run's already-issued `CITATIONS_OK` would
-  then merge. The wipe is deliberate and stays — it exists so a fresh run cannot adopt an orphaned
-  directory's stale attempt. This release scopes the claim rather than adding a lock: exactly as with
-  `canon.json`'s single writer, the property holds by OPERATIONAL PRECONDITION — the orchestrator
-  runs one glossary pass per `RUN_ID` at a time — and no path here does any file locking of its own.
-  Under that precondition the bytes audited are the bytes merged.
+- **That guarantee lasts exactly as long as the snapshot does, so ONE LIVE RUN PER GLOSSARY RUN
+  DIRECTORY is an operational precondition.** `os.link()` can only refuse while the directory entry
+  exists, and `resume_setup.py` removes it at start-up: `_wipe_stale_glossary_fragments` unlinks
+  every `approved_*` fragment (its keep rule spares `out_*_attempt_0` only, and only on a resume),
+  while a digest-MATCH resume reuses the SAME `RUN_ID` and therefore the same
+  `glossary/runs/<RUN_ID>/` directory. So a second run starting on a live run's directory wipes that
+  run's audited snapshot and reopens the slot for different bytes, which the first run's
+  already-issued `CITATIONS_OK` would then merge. The wipe is deliberate and stays — it exists so a
+  fresh run cannot adopt an orphaned directory's stale attempt. This release scopes the claim rather
+  than adding a lock or a run-identity binding: exactly as with `canon.json`'s single writer, the
+  property holds by OPERATIONAL PRECONDITION, and nothing on this path locks a file. Under that
+  precondition the bytes audited are the bytes merged. Stated in full —
+  including why it is the run DIRECTORY rather than the `RUN_ID` string that counts, since two
+  differently-cased ids name one directory on a case-insensitive filesystem — in
+  `references/canon-and-glossary.md`,
+  "What the approved snapshot guarantees, and the preconditions it rests on".
+  That section is canonical; this entry records the change and does not restate its qualifiers.
 - **The ordering is the whole fix.** Snapshotting *after* the audit would close nothing: a producer
   sharing the RUN_ID can replace validated-bytes-A with structurally-valid-bytes-B between the
   reviewer's read and the copy, so the snapshot would capture B while the reviewer approved A. The
   snapshot is therefore taken the moment the fragment validates; the reviewer is pointed at the
   snapshot and never reads the mutable `out_*` attempt path again; on `CITATIONS_OK` the merge
   consumes that same snapshot. The codex rewrite loop targets `out_*_attempt_*` only, so a
-  post-snapshot rewrite reaches nothing anyone reads. Bytes audited, bytes approved and bytes merged
-  are one object by identity: the defect is **unrepresentable, not detected** — no hash to compare,
-  no window to keep short. A `dispatch_token` (the translate path's precedent) cannot do this
-  because the glossary verdict is a chat reply rather than an artifact, so there is no file to carry
+  post-snapshot rewrite reaches nothing anyone reads. Within one run, bytes audited, bytes approved
+  and bytes merged are one object by identity: the defect is **unrepresentable, not detected** — no
+  hash to compare, no window to keep short (on the preconditions above). A `dispatch_token` (the
+  translate path's precedent) cannot do this because the glossary verdict is a chat reply rather
+  than an artifact, so there is no file to carry
   a token; a content hash checked at merge would only report tampering after the fact.
 - **Fail-closed, and this is what attempt-scoping buys.** "No reviewer ever approved the winning
   attempt" means the specific `approved_{index}_attempt_{n}.json` the merge was handed does not

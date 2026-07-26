@@ -443,7 +443,8 @@ function approveBatchCmd(index, attempt) {
 // CORRECTNESS because a resume-skipped fragment is still handed to the
 // citation review like any other (see batchStep). The worst case is therefore
 // that a resumed run re-reviews, and if need be re-generates, a fragment a
-// previous run had already rejected -- work, never a bad citation slipping
+// previous run had already rejected -- rework, up to and including burning the
+// ladder to exhaustion and merging nothing, but never a bad citation slipping
 // through.
 function batchPrecheckPrompt(batch) {
   const checkCmd = checkBatchCmd(batch.index, 0)
@@ -548,7 +549,10 @@ function batchWaitPrompt(batch, attempt) {
 // leaving the reviewer's approval attached to bytes nobody merges and the merge
 // attached to bytes nobody reviewed. Snapshotting first makes the two the same
 // object by identity, so there is nothing left to race: no hash, no window, no
-// re-check at merge time.
+// re-check at merge time. What that buys, what it does NOT buy, and the
+// preconditions it rests on are stated once in
+// references/canon-and-glossary.md's "What the approved snapshot guarantees,
+// and the preconditions it rests on" section -- do not restate them here.
 //
 // The snapshot is taken INSIDE this reviewer's own turn rather than by a step of
 // its own, for two independent reasons. (1) A separate agent() call would add
@@ -593,7 +597,11 @@ function batchWaitPrompt(batch, attempt) {
 // sentinelVerdict() requires the ok sentinel to be the reply's final non-empty
 // line and treats everything else as not-ok, a mismatched (stale, malformed,
 // or absent) verdict falls to the REJECT side -- the fail-safe direction here,
-// since the cost of a wrong reject is one regeneration and the cost of a wrong
+// but not a free one: a wrong reject costs at least one regeneration, and if
+// it recurs up the ladder it costs the whole run, since exhaustion returns
+// reason:"citation-review-exhausted" and the all-or-nothing merge then lands
+// ZERO batches. It is still the right side to fail on, because that cost is
+// rework against data that stays correct on disk, whereas the cost of a wrong
 // accept is a permanently frozen fabricated citation. sentinelVerdict() is not
 // the only thing standing between a reply and an approval, though: this
 // verdict's call site short-circuits to REJECT whenever rejectedAnywhere()

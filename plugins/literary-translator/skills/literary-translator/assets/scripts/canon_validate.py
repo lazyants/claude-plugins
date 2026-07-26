@@ -857,19 +857,17 @@ def _write_approved_snapshot(path: Path, raw: bytes) -> None:
     SEQUENTIAL duplicate. Concurrent FIRST writers all observe an absent path,
     all write, the last os.replace() silently wins, and NONE of them is told:
     reviewer A audits bytes A, B lands bytes B, A returns CITATIONS_OK, and the
-    merge consumes B. That is not theoretical, and the test that shows it does
-    not depend on luck: the readiness-handshake race in
-    tests/canon_approve_to.test.py has eight writers each block until every
-    sibling has announced itself, so all of them are at the door before any one
-    enters, which makes the vulnerable interleaving REACHABLE rather than
-    fortuitous. Against a check-then-act publish, several writers are then
-    observed to publish different bytes to the same path -- on more than one
-    machine, at different attempt indexes. HOW MANY, and on WHICH attempt, is
-    scheduling: it varies by machine and by run, which is exactly why that test
-    samples several attempts and refuses to bank one in which no two writers
-    actually overlapped. A single-attempt version of it can go green against a
-    check-then-act publish; the attempt budget and the overlap gate are what make
-    it a test rather than a coin flip.
+    merge consumes B. What rules that out is os.link()'s create-once semantics
+    below -- NOT the race test. The readiness-handshake race in
+    tests/canon_approve_to.test.py is a probabilistic REGRESSION CHECK, which has
+    caught a check-then-act publish on more than one machine; it is not a proof
+    and nothing here rests on it. Its overlap gate establishes that two writers
+    were inside this function at the same time. It does NOT establish that two of
+    them observed `path` ABSENT, which is the interleaving that actually breaks
+    check-then-act -- and those two are different, because the tmp write below
+    happens BEFORE the publish, so writers can overlap while the publish itself
+    still serialises. Whether a given run reaches the breaking interleaving is
+    scheduling; that test is not deterministic and does not claim to be.
 
     os.link() moves the decision into the publication itself: it raises
     FileExistsError for the loser regardless of what anyone observed beforehand,
@@ -886,27 +884,20 @@ def _write_approved_snapshot(path: Path, raw: bytes) -> None:
     Failing toward the already-published copy is the only safe direction: the
     duplicate call is a caller defect and is reported as one, naming the path.
 
-    RUN SCOPE, AND THE PRECONDITION IT RESTS ON. os.link() is create-once only
-    for as long as the directory entry survives, and resume_setup.py's run-start
-    wipe unlinks every approved_* file on BOTH the fresh and the resume branch
-    (its keep rule spares only kind "out" at attempt 0). That wipe is deliberate
-    and right -- it stops a run from adopting an orphaned run dir's stale attempt
-    -- but it is also the one thing that REOPENS this slot, so the guarantee
-    above is bounded to one LIVE run per RUN_ID rather than absolute. Two runs
-    sharing a RUN_ID (resolve_run() hands back the caller's own
-    resume_from_run_id whenever its recorded digest matches) would have the
-    second wipe the first's audited snapshot and then publish different bytes at
-    that path, while the first run's already-issued CITATIONS_OK still refers to
-    the bytes that were deleted. Nothing this function can observe tells that
-    apart from a legitimate fresh start.
+    RUN SCOPE. os.link() is create-once only for as long as the directory entry
+    survives, and resume_setup.py's run-start wipe removes every approved_* file
+    on both its branches. That wipe is deliberate and right -- it stops a run from
+    adopting an orphaned run dir's stale attempt -- and it is also what REOPENS
+    this slot, so the guarantee above is bounded to one LIVE run per RUN_ID rather
+    than absolute. This function takes no lock and binds no run identity into the
+    snapshot; it rests on an OPERATIONAL PRECONDITION, the same species as the
+    single-writer note at the top of this module (canon.json, no locking of its
+    own, orchestrator-serialized).
 
-    So, by OPERATIONAL PRECONDITION, one RUN_ID has one live run: the
-    orchestrating Workflow runs a single glossary pass per run id and never two
-    concurrently against the same one. This function takes no lock and binds no
-    run identity into the snapshot; it relies on that precondition, the same
-    species of precondition as the single-writer note at the top of this module
-    (canon.json, no locking of its own, orchestrator-serialized). Under it, the
-    bytes the citation reviewer audited are the bytes the merge consumes.
+    The full statement -- what the snapshot guarantees, and every precondition it
+    presupposes -- is kept in ONE place and is not restated here: see
+    references/canon-and-glossary.md, "What the approved snapshot guarantees, and
+    the preconditions it rests on".
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = path.parent / f".{path.name}.tmp.{os.getpid()}.{os.urandom(4).hex()}"
@@ -942,10 +933,10 @@ def _write_approved_snapshot(path: Path, raw: bytes) -> None:
         # function exists to close, on precisely the setups nobody tests on.
         raise CanonValidationError(
             f"--approve-to could not publish the approved snapshot at {path}: {e}. "
-            f"The snapshot is published with os.link() so that exactly one writer "
-            f"can ever create it; the filesystem holding the durable_root must "
-            f"support hard links. Refusing to fall back to an overwriting write, "
-            f"which would silently reintroduce the duplicate-approval race.",
+            f"The snapshot is published with os.link() so that only one writer can "
+            f"create it while it exists; the filesystem holding the durable_root "
+            f"must support hard links. Refusing to fall back to an overwriting "
+            f"write, which would silently reintroduce the duplicate-approval race.",
             offending=[str(path)],
         )
     finally:

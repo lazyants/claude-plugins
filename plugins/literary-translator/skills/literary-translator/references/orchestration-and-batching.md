@@ -777,10 +777,13 @@ depends on wholly and which is citation-reviewed either way.
    `references/canon-and-glossary.md` for the merge algorithm). **1.16.0:**
    under `live` those `<frag>` paths are each batch's approved SNAPSHOT
    (`approved_{index}_attempt_{n}.json`), not the mutable attempt fragment, so
-   what merges is byte-identical to what the citation reviewer audited; under
-   `offline` no reviewer runs and no snapshot exists, so they are the attempt
-   paths, an explicit branch rather than a global rename. The disk-verify below
-   re-checks the same paths the merge was handed.
+   within one run what merges is byte-identical to what the citation reviewer
+   audited — on preconditions stated once in `references/canon-and-glossary.md`,
+   "What the approved snapshot guarantees, and the preconditions it rests on",
+   and deliberately not re-derived here. Under `offline` no reviewer runs and no
+   snapshot exists, so they are the attempt paths, an explicit branch rather
+   than a global rename. The disk-verify below re-checks the same paths the
+   merge was handed.
 2. **Disk-verify** — Claude, `effort:'low'`, no `agentType`,
    `schema: CANON_VERIFY_SCHEMA` (flat, new — see
    `references/workflow-schema-validation.md`) + its own exact-key-set JS

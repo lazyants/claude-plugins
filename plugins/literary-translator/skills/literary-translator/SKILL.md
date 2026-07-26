@@ -764,10 +764,14 @@ snapshot** and never the mutable `out_*` attempt path again, and on approval
 the merge is handed **that snapshot**. The producer is a fire-and-forget
 codex job told to rewrite the attempt path until its own self-check passes, so
 renames onto the reviewed path after the review are expected behaviour, not
-an adversary — and after the snapshot they reach nothing anyone reads. Bytes
-audited, approved and merged are one object by identity. `offline` is the one
-exception: no citation, no reviewer, no snapshot, so the merge consumes the
-attempt path there.
+an adversary — and after the snapshot they reach nothing anyone reads. Within
+one run, bytes audited, approved and merged are one object by identity. That
+holds on stated preconditions — one live run per glossary run directory, and a
+hardlink-capable `durable_root` — which are NOT restated here; see
+`references/canon-and-glossary.md`,
+"What the approved snapshot guarantees, and the preconditions it rests on".
+`offline` is the one exception: no citation, no reviewer, no snapshot, so the
+merge consumes the attempt path there.
 
 The verdict itself is containment-guarded, as are the precheck's and the
 wait's: a reply carrying the failure sentinel ANYWHERE in it rejects, because
