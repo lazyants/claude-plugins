@@ -203,8 +203,8 @@ or, failing that, a content-root-absolute path; a `../`-relative embed is neithe
 renders broken. If this vault publishes through Quartz-`shortest`, either flip that
 vault's config to `markdownLinkResolution: relative` — a per-vault tradeoff the adopter
 owns, since it can also change how bare wikilinks resolve elsewhere in the vault — or
-wait for the co-located-assets follow-up issue, which keeps a grouped chapter's assets in
-the same directory as the chapter so no `../` climb is ever needed. This is documentation
+wait for the co-located-assets follow-up issue (#222), which keeps a grouped chapter's assets
+in the same directory as the chapter so no `../` climb is ever needed. This is documentation
 only: the existing embed-exists and under-vault gates below are unaffected by depth, so
 there is no new gate here.
 
@@ -458,7 +458,7 @@ the one exception to "do all of these" — see its own conditional note below.
           chapter line, never the container line at index 0; and the predicate returning
           `{kind: 'inserted'}`** — the pair is representable — emit the convergent halt naming
           it exactly:
-          "Index <index_file> is not a headings-form file — add a '<group_title>' container and the chapter line for '<slug>' manually, then re-run. The next run recognizes the chapter line as a Markdown list row INDENTED TWO SPACES under the '<group_title>' container bullet, whose wikilink target is exactly '<index_relative_target>' — that is, a '- ' + group_title line followed by a '  - [[' + target + '|' + title + ']]' line; a Markdown link whose destination is that target plus '.md' is recognized too. A row placed at the left margin instead of under the container is reported as misplaced on the next run."
+          "Index <index_file> is not a headings-form file — add a '<group_title>' container and the chapter line for '<slug>' manually, then re-run. The next run recognizes the chapter line as a Markdown list row INDENTED TWO SPACES under the '<group_title>' container bullet, whose wikilink target is exactly '<index_relative_target>' — that is, a '- ' + group_title line followed by a '  - [[' + target + '|' + title + ']]' line; a Markdown link whose destination is that target plus '.md' is recognized too. A row placed at the left margin instead of under the container is reported as misplaced on the next run only when its own title is plain text in the same sense as `group_title` below ("Nested-list automation limits"); a title carrying inline markup instead leaves the row unverified rather than caught, exactly like any other file outside the verified class."
           The next run's step 0 finds the line you added and proceeds — but only for a
           `group_title`, target and title the gate accepts — this convergence is why step 0
           always runs first.
@@ -473,8 +473,8 @@ the one exception to "do all of these" — see its own conditional note below.
             completing;
           - a chapter row that exists only inside leading frontmatter is reported present by the
             shipped locator and reaches `unverifiable` in the present-line branch above, where
-            the adapter proceeds — explicit confirmation, not verification, is the guard there
-            (the shipped 1.10.0 writer/locator view disagreement, tracked separately as #337
+            the adapter proceeds unverified — no placement check runs and nothing stands in for
+            it (the shipped 1.10.0 writer/locator view disagreement, tracked separately as #337
             — see "Nested-list automation limits" below);
           - a real index whose surroundings carry YAML structure, a wildcard, or an ordered list
             makes the writer decline the whole file on the next run too: once the pair is
@@ -482,12 +482,14 @@ the one exception to "do all of these" — see its own conditional note below.
             declines the same way, and the adapter again proceeds on `unverifiable` rather than a
             repeated halt.
 
-          A future case diverging some other way is expected, not a defect in this documentation
-          — the isolated check was never designed to rule any of this out. **The honest safety
-          statement, scoped to what this PR governs: on the non-heading branch above, this gate
-          never lets a silent completion through.** Wherever the machinery cannot verify a
-          real-file property, explicit confirmation is what stands in — it is not that a false
-          completion cannot occur there, and not that every way it can occur is named above.
+          A future case diverging some other way is expected, not a defect in this
+          documentation — the isolated check was never designed to rule any of this out. **The
+          honest safety statement, scoped to what this PR governs: on the non-heading branch above,
+          this gate never lets a MISPLACED row complete silently when it can verify placement.**
+          Wherever the machinery cannot verify a real-file property, no placement check runs and
+          no confirmation is requested — the run completes exactly as unverified as it did before
+          1.11.0 on this path; it is not that a false completion cannot occur there, and not that
+          every way it can occur is named above.
           **The headings branch is unchanged by this PR and already completes silently:** a
           chapter row inside a valid frontmatter block whose body itself carries a heading
           sits under a matching container per the headings-form placement check above
@@ -578,8 +580,8 @@ land on `unverifiable` rather than inside the verified class most often for one 
 nav file using a wildcard, an ordered list, or an explicit `<!--nav-->` marker (all ordinary
 `mkdocs-literate-nav` features); two same-named containers; a chapter row sitting inside leading
 frontmatter; or a **native/YAML MkDocs `nav:` configuration**, which gets no placement
-verification at all — explicit confirmation stands in, exactly as before 1.11.0. MkDocs `nav:`
-container automation itself is its own follow-up, #328.
+verification at all — no confirmation is requested either; the run completes unverified,
+exactly as before 1.11.0. MkDocs `nav:` container automation itself is its own follow-up, #328.
 
 Three disclosures the operator is owed, not proved away:
 
@@ -587,9 +589,9 @@ Three disclosures the operator is owed, not proved away:
   *last* one, while this machinery scans indent-0 bullets across the whole file, so a row can
   verify against a list the tool ignores. The shipped writer already carries this exposure;
   1.11.0 does not widen it.
-- A bullet-only file that also happens to be valid YAML — an `ok` now stands in for the explicit
-  confirmation this PR removes: a Markdown-reading answer about bytes some other consumer may
-  read as YAML.
+- A bullet-only file that also happens to be valid YAML — an `ok` now verifies placement where
+  1.10.0 completed silently with no check at all: a Markdown-reading answer about bytes some
+  other consumer may read as YAML.
 - A chapter row sitting inside leading frontmatter is never verified **on the non-heading
   branch above** — it returns `unverifiable` there, for the reason below, not because it was
   overlooked. On the headings branch (unchanged by this PR), a frontmatter block whose body

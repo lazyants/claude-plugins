@@ -310,8 +310,8 @@ These outcomes reuse the step-0 result computed above (`containerTitle`, `indexF
   `selectedTarget` = step 0's own expected link target) and branch on the result:
   - **`ok`** ⇒ placement complete, move to the next chapter.
   - **`unverifiable`** ⇒ proceed — this file falls outside the verified class (see "Nested-list
-    automation limits" below); explicit confirmation stands in for verification here, exactly as
-    the shipped 1.10.0 behaviour did.
+    automation limits" below); no placement check runs and no confirmation is requested — the run
+    continues unverified, exactly as the shipped 1.10.0 behaviour did on this path.
   - **`misplaced`** ⇒ halt reusing the exact headings-form wording above:
     `Chapter '<slug>' is listed in <index_file> under '<found_title>' instead of '<group_title>' — move the line (or curate the index manually), then re-run.`
     (`<found_title>` reads `(none)` when the line sits at the left margin, uncontained.)
@@ -362,7 +362,7 @@ These outcomes reuse the step-0 result computed above (`containerTitle`, `indexF
        `assets/lib/chapter-paths.mjs`) — the indented chapter line, never the container line at
        index 0; and the predicate returning `{kind: 'inserted'}`** ⇒ the pair is representable —
        emit the convergent halt naming it exactly:
-       `Index <index_file> is not a headings-form file — add a '<group_title>' container and the chapter line for '<slug>' manually, then re-run. The next run recognizes the chapter line as a Markdown list row INDENTED TWO SPACES under the '<group_title>' container bullet, whose link destination is exactly '<index_relative_path>' — that is, a '- ' + group_title line followed by a '  - [' + title + '](<' + path + '>)' line, with the destination inside angle brackets and any ']' in the title escaped as '\]'. A row placed at the left margin instead of under the container is reported as misplaced on the next run.`
+       `Index <index_file> is not a headings-form file — add a '<group_title>' container and the chapter line for '<slug>' manually, then re-run. The next run recognizes the chapter line as a Markdown list row INDENTED TWO SPACES under the '<group_title>' container bullet, whose link destination is exactly '<index_relative_path>' — that is, a '- ' + group_title line followed by a '  - [' + title + '](<' + path + '>)' line, with the destination inside angle brackets and any ']' in the title escaped as '\]'. A row placed at the left margin instead of under the container is reported as misplaced on the next run only when its own title is plain text in the same sense as `group_title` below ("Nested-list automation limits"); a title carrying inline markup instead leaves the row unverified rather than caught, exactly like any other file outside the verified class.`
        This is what makes the manual flow converge — but only for a `group_title`, target and
        title the gate accepts: you halt once with instructions, the user adds the container and
        the chapter line, and the re-run's step 0 finds the line present under the
@@ -377,9 +377,9 @@ These outcomes reuse the step-0 result computed above (`containerTitle`, `indexF
          it is reported absent again — repeating the convergent halt above, never completing;
        - a chapter row that exists only inside leading frontmatter is reported present by the
          shipped locator and reaches `unverifiable` in the present-line branch above, where the
-         adapter proceeds — explicit confirmation, not verification, is the guard there (the
-         shipped 1.10.0 writer/locator view disagreement, tracked separately as #337
-         — see "Nested-list automation limits" below);
+         adapter proceeds unverified — no placement check runs and nothing stands in for it (the
+         shipped 1.10.0 writer/locator view disagreement, tracked separately as #337 — see
+         "Nested-list automation limits" below);
        - a real index whose surroundings carry YAML structure, a wildcard, or an ordered list
          makes the writer decline the whole file on the next run too: once the pair is present,
          step 0 routes to the present-line branch above, whose own predicate call declines the
@@ -388,9 +388,11 @@ These outcomes reuse the step-0 result computed above (`containerTitle`, `indexF
        A future case diverging some other way is expected, not a defect in this documentation —
        the isolated check was never designed to rule any of this out. **The honest safety
        statement, scoped to what this PR governs: on the non-heading branch above, this gate
-       never lets a silent completion through.** Wherever the machinery cannot verify a
-       real-file property, explicit confirmation is what stands in — it is not that a false
-       completion cannot occur there, and not that every way it can occur is named above.
+       never lets a MISPLACED row complete silently when it can verify placement.** Wherever
+       the machinery cannot verify a real-file property, no placement check runs and no
+       confirmation is requested — the run completes exactly as unverified as it did before
+       1.11.0 on this path; it is not that a false completion cannot occur there, and not that
+       every way it can occur is named above.
        **The headings branch is unchanged by this PR and already completes silently:** a
        chapter row inside a valid frontmatter block whose body itself carries a heading is
        reported `indexForm: 'headings'` with a matching container (see "Grouped entry, line
@@ -424,8 +426,9 @@ above; a non-heading index whose shape falls inside that bounded subset (see "Ne
 automation limits" below) is wired by `wireNestedListChapter` per the line-absent branch above.
 Every other static index form — an MkDocs YAML `nav:` block, a bare path table, or any list
 shape outside the safe subset — stays **fully manual**: you halt with the non-heading
-instructions above and stop there. First-class YAML `nav:` and path-table container automation
-remain follow-up issues.
+instructions above and stop there. First-class YAML `nav:` container automation remains its own
+follow-up, #328. Path-table container automation was examined and closed as not soundly
+automatable rather than deferred — see #340 for the recorded reasoning.
 
 ### Nested-list automation limits
 
@@ -464,8 +467,9 @@ below). Operators land on `unverifiable` rather than inside the verified class m
 one of: a Markdown nav file using a wildcard, an ordered list, or an explicit `<!--nav-->`
 marker (all ordinary `mkdocs-literate-nav` features); two same-named containers; a chapter row
 sitting inside leading frontmatter; or a **native/YAML MkDocs `nav:` configuration**, which gets
-no placement verification at all — explicit confirmation stands in, exactly as before 1.11.0.
-MkDocs `nav:` container automation itself is its own follow-up, #328.
+no placement verification at all — no confirmation is requested either; the run completes
+unverified, exactly as before 1.11.0. MkDocs `nav:` container automation itself is its own
+follow-up, #328.
 
 Three disclosures the operator is owed, not proved away:
 
@@ -473,9 +477,9 @@ Three disclosures the operator is owed, not proved away:
   *last* one, while this machinery scans indent-0 bullets across the whole file, so a row can
   verify against a list the tool ignores. The shipped writer already carries this exposure;
   1.11.0 does not widen it.
-- A bullet-only file that also happens to be valid YAML — an `ok` now stands in for the explicit
-  confirmation this PR removes: a Markdown-reading answer about bytes some other consumer may
-  read as YAML.
+- A bullet-only file that also happens to be valid YAML — an `ok` now verifies placement where
+  1.10.0 completed silently with no check at all: a Markdown-reading answer about bytes some
+  other consumer may read as YAML.
 - A chapter row sitting inside leading frontmatter is never verified **on the non-heading
   branch above** — it returns `unverifiable` there, for the reason below, not because it was
   overlooked. On the headings branch (unchanged by this PR), a frontmatter block whose body
