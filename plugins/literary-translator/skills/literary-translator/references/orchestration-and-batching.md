@@ -708,8 +708,15 @@ pipeline(BATCHES, batchStep)
 - `citationReviewPrompt(batch, attempt)` (**1.16.0**) — Claude, `effort:'high'`,
   no `agentType`, no schema, `live` only; returns
   `CITATIONS_OK`/`CITATIONS_REJECTED <index> ATTEMPT <n>`. It gates whether
-  the batch counts as ready at all — see `references/canon-and-glossary.md`'s
-  **Pre-merge citation review**.
+  the batch counts as ready at all. It opens by re-running the fragment's own
+  `--check-batch` validation with `--approve-to`, which snapshots the exact
+  bytes that invocation just validated to an immutable, attempt-scoped
+  `approved_{index}_attempt_{n}.json` — one read, so nothing can change
+  between validating and copying — and it then audits **that snapshot**,
+  never the mutable `out_*` attempt path. The approval therefore binds bytes
+  rather than a path, and it costs no extra `agent()` call because it happens
+  inside this same turn. See `references/canon-and-glossary.md`'s **Pre-merge
+  citation review**.
 
 **All three of these verdicts are containment-guarded (1.16.0)** — as are
 mass-translate's two waits and its `DRAFT_MISSING` fix check, six sites over the
@@ -725,28 +732,52 @@ the opposite direction, through `mentionedAnywhere()`: there the sentinel is the
 OK one, so gluing hid a genuine missing-draft report and the loop silently
 carried on reviewing an absent draft.
 
-A false hit recovers in-run at only two of the six: the precheck falls through
-to the dispatch it would have run anyway, and the citation review regenerates
-within `MAX_CITATION_RETRIES`. The other four cost at least a re-run — the
-glossary wait ends the batch and with it the whole pass
-(`reason:"glossary-pass-null"`), mass-translate's review wait blocks that
+A false hit recovers in-run at exactly ONE of the six: the precheck, which
+falls through to the dispatch it would have run anyway — correct whatever made
+it report `ABSENT`. The other five cost at least a re-run, and since the
+trigger is the reply's phrasing rather than the data, a re-run is a re-roll
+rather than a fix. The **citation review is not** among the recoverers,
+despite its retry ladder: the ladder regenerates the fragment while the
+reviewer's wording is what tripped the guard, so every attempt can burn on the
+same narration and the run ends `citation-review-exhausted` with nothing
+merged (a genuine rejection names each offending item, its `source` URL and the
+check it failed; a `lastRejection` that names none, or reads as an approval, is
+the guard misfiring and a review-prompt defect to report rather than re-run).
+The glossary wait ends the batch and with it the whole
+pass (`reason:"glossary-pass-null"`), mass-translate's review wait blocks that
 segment (`reason:"review-timeout"`), its translate wait returns the non-terminal
 `reason:"translate-timeout"`, and the fix site returns the equally non-terminal
 `reason:"fix-call-failed"`; `select_segments.py` auto-redispatches the last two
 next run. Full statement of the rule, the measured glue counts with their
-shapes and sets, and the bounded false REDs:
+shapes and sets, the two false REDs and the per-site cost of a false reject:
 `references/canon-and-glossary.md`'s **Pre-merge citation review**.
 
-Fragment paths are run-scoped (`{{RUN_ID}}` in the path itself), so — unlike
-the pre-1.2.0 design — **no pre-clean call is needed**: a stale fragment
-from a prior run simply sits at a different, unreferenced path.
+Fragment paths are run-scoped (`{{RUN_ID}}` in the path itself), so a stale
+fragment from a run with a DIFFERENT `RUN_ID` sits at a different,
+unreferenced path — but that alone was never enough, and this is where the
+pre-1.2.0 pre-clean's job actually went. A digest-match resume deliberately
+reuses the SAME `RUN_ID`, so a prior run's fragments sit at exactly the paths
+this run will poll, and `--check-batch` has no mtime, token or freshness
+notion to notice. **1.16.0:** `resume_setup.py`'s `write_run_dir()` therefore
+wipes stale fragments before the run starts, conditioned on the resume flag —
+a fresh run wipes ALL `out_*` and `approved_*` attempts including attempt 0
+(an orphaned `glossary/runs/<RUN_ID>` directory can outlive its identity
+directory, which is all fresh-ID uniqueness checks), a resume wipes `n >= 1`
+plus every snapshot and keeps attempt 0, which the resume-skip optimisation
+depends on wholly and which is citation-reviewed either way.
 
 **After every fragment is `READY`, two final calls, never per-batch:**
 
 1. **Final merge** — Claude, `effort:'low'`, **no** `agentType`, **no**
    `schema`: runs `canon_validate.py --merge-batches <frag1> <frag2> …
    --research-mode X` — the single serialized writer that closes #90 (see
-   `references/canon-and-glossary.md` for the merge algorithm).
+   `references/canon-and-glossary.md` for the merge algorithm). **1.16.0:**
+   under `live` those `<frag>` paths are each batch's approved SNAPSHOT
+   (`approved_{index}_attempt_{n}.json`), not the mutable attempt fragment, so
+   what merges is byte-identical to what the citation reviewer audited; under
+   `offline` no reviewer runs and no snapshot exists, so they are the attempt
+   paths, an explicit branch rather than a global rename. The disk-verify below
+   re-checks the same paths the merge was handed.
 2. **Disk-verify** — Claude, `effort:'low'`, no `agentType`,
    `schema: CANON_VERIFY_SCHEMA` (flat, new — see
    `references/workflow-schema-validation.md`) + its own exact-key-set JS

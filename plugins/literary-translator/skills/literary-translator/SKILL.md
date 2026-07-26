@@ -716,10 +716,11 @@ the shared fire-and-forget dispatch → bounded poll → disk-truth pattern:
 {agentType:'codex:codex-rescue',
 effort: EFFORT})` (`EFFORT` = this project's own `engine.effort`, #197 — a
 configurable enum, default `high`; schema-less, writes the run-scoped fragment
-`glossary/runs/{{RUN_ID}}/out_{index}_attempt_{n}.json` — attempt-scoped, so
-a rejected fragment is never the one a later poll finds — self-checks against
-its own manifest) → `batchWaitPrompt` (bounded poll) → **the pre-merge
-citation review** (see immediately below) → once every
+`glossary/runs/{{RUN_ID}}/out_{index}_attempt_{n}.json` — attempt-scoped, and
+`resume_setup.py` wipes stale attempts before the run starts (**1.16.0**), so
+a later poll never finds an older fragment sitting at the path it waits on —
+self-checks against its own manifest) → `batchWaitPrompt` (bounded poll) →
+**the pre-merge citation review** (see immediately below) → once every
 fragment is `READY`, one serialized `canon_validate.py --merge-batches` call
 plus one disk-verify call (`schema: CANON_VERIFY_SCHEMA`) close the pass and
 freeze `canon.json` — see `references/canon-and-glossary.md` for the full
@@ -751,13 +752,41 @@ over the previous attempt, bounded by `MAX_CITATION_RETRIES`; exhausting that
 budget ends the run with `merged: false` and
 `reason: "citation-review-exhausted"` — a distinct reason from
 `fragment-check-failed`, and nothing is merged. Under `offline` the stage is
-a no-op, since `established` is forbidden there outright. The verdict itself
-is containment-guarded, as are the precheck's and the wait's: a reply carrying
-the failure sentinel ANYWHERE in it rejects, because matching whole lines alone
-let a fail sentinel glued to prose slip past and a trailing clean OK line then
-approve. Full rationale, the guard's two bounded false REDs, why a false
-reject is self-recovering at the precheck and the review but ends the run's
-batch at the wait, and why a repair after the merge is not available at all:
+a no-op, since `established` is forbidden there outright.
+
+**1.16.0: the approval binds the reviewed BYTES, not a path.** Before
+auditing anything the reviewer re-runs the fragment's own `--check-batch`
+validation with `--approve-to` (inside its existing turn, so no extra
+`agent()` call), which copies the exact bytes it just validated — one read,
+nothing can change between validating and copying — to an immutable,
+attempt-scoped `approved_{index}_attempt_{n}.json`. It then audits **the
+snapshot** and never the mutable `out_*` attempt path again, and on approval
+the merge is handed **that snapshot**. The producer is a fire-and-forget
+codex job told to rewrite the attempt path until its own self-check passes, so
+renames onto the reviewed path after the review are expected behaviour, not
+an adversary — and after the snapshot they reach nothing anyone reads. Bytes
+audited, approved and merged are one object by identity. `offline` is the one
+exception: no citation, no reviewer, no snapshot, so the merge consumes the
+attempt path there.
+
+The verdict itself is containment-guarded, as are the precheck's and the
+wait's: a reply carrying the failure sentinel ANYWHERE in it rejects, because
+matching whole lines alone let a fail sentinel glued to prose slip past and a
+trailing clean OK line then approve. The cost is a false REJECT on a reply
+that only *discusses* its own fail sentinel, and only ONE of the guarded
+sites recovers from that inside the run — the precheck, which falls through
+to the dispatch it would have run anyway. **The citation review does not
+recover**, however much its retry ladder looks like it should: the ladder
+regenerates the fragment, while what tripped the guard is the reviewer's
+phrasing, so every attempt can burn on the same narration and the run ends
+`citation-review-exhausted` with nothing merged. Read each batch's
+`lastRejection` before touching any data — one naming specific `source_form`
+values with their `source` URLs and the check each failed is a data problem;
+one that reads as an approval, discusses the `CITATIONS_REJECTED` sentinel
+rather than any citation, or is the fixed no-findings placeholder is the guard
+misfiring, so report it as a review-prompt defect instead of re-running or
+hand-editing candidates. Full rationale, the two false REDs, the per-site cost
+of a false reject, and why a repair after the merge is not available at all:
 `references/canon-and-glossary.md`, "Pre-merge citation review".
 
 **Canon human-adjudication audit, categories 1-4 (opt-in rollout gate)** —

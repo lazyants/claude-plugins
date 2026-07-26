@@ -470,14 +470,67 @@ valid STRUCTURALLY — its URL is present and URI-shaped, which is exactly why
 would return `READY` against the REJECTED bytes the instant it looked,
 whether or not the agent had rewritten anything yet, and those bytes would
 sail into the merge. Per-attempt paths make that impossible by construction
-rather than by timing: attempt n+1's wait polls a path that does not exist
-until the fresh dispatch atomically renames it into place, and the merge is
-handed only the exact attempt path the review approved. For the same reason
+rather than by timing — but only together with the pre-run wipe, and only for
+the WITHIN-run case. Attempt n+1's wait polls a path that does not exist
+until the fresh dispatch atomically renames it into place: inside one run
+because the path is attempt-scoped, and across runs because
+`resume_setup.py` wipes stale fragments before the run starts (**1.16.0**).
+It reuses the same `RUN_ID` on a digest-match resume and nothing deleted
+fragments, so before that wipe a prior run's `out_{index}_attempt_{n}.json`
+sat at exactly the path the new run would poll, and `--check-batch` — which
+has no mtime, no token and no freshness notion at all — passed on those bytes
+at once, so the reviewer audited the previous run's fragment. The wipe is
+conditioned on the resume flag `resume_setup.py` already computes: a
+**fresh** run wipes ALL `out_*` and `approved_*` attempts including attempt 0
+(fresh-ID uniqueness only checks `runs/<RUN_ID>`, so an orphaned
+`glossary/runs/<RUN_ID>` directory can outlive its identity directory and
+collide on the one-second timestamp), while a **resume** wipes `n >= 1` and
+every snapshot but keeps attempt 0, which the resume-skip optimisation
+depends on wholly and which is citation-reviewed either way.
+
+For the same reason
 the verdict sentinels carry the ATTEMPT number, not just the batch index — a
 verdict is a statement about one attempt path, so a stale verdict simply
 fails to match. A mismatched, malformed, or absent verdict falls to the
 REJECT side: a wrong reject costs one regeneration, a wrong accept costs a
 permanently frozen fabricated citation.
+
+**What the merge is handed is the approved SNAPSHOT, not the attempt path**
+(**1.16.0**) — because approval binding a path rather than bytes was not
+enough even inside a single run, and needed no adversary to fail. The
+dispatch is a fire-and-forget `codex:codex-rescue` job whose own prompt tells
+it to rewrite the attempt fragment until that fragment's self-check passes,
+and the codex job outlives the awaited call — which is *why* the wait poll
+exists at all — so several atomic renames onto the reviewed path are ordinary
+expected behaviour. `pipeline()` then waits for every batch before the one
+`--merge-batches`, so an approved fragment sits un-rechecked while its
+siblings climb their retry ladders; `--merge-batches` fresh-reads from disk
+and knows nothing of the citation review, and `--verify-merged` re-reads too
+but checks shape and coverage, never citations.
+
+So the fragment's own `--check-batch` validation is re-run with
+`--approve-to` at the top of the reviewer's turn, which is why the stage still
+costs no extra `agent()` call: that invocation copies the exact bytes it just
+validated — one `read_bytes()` from the read that validated them, no second
+read, no window — to an immutable `approved_{index}_attempt_{n}.json`, and the
+reviewer then audits THAT. The ordering is the whole fix and cannot be
+reversed: snapshotting *after* the audit leaves a producer free to replace
+validated-bytes-A with structurally-valid-bytes-B between the reviewer's read
+and the copy. On `CITATIONS_OK` the merge consumes the snapshot, so the bytes
+audited, the bytes approved and the bytes merged are one object by identity,
+and a post-snapshot rewrite of `out_*` reaches nothing anyone reads — the
+defect is unrepresentable rather than detected, with no hash to compare and
+no window to keep short.
+
+Fail-closed follows from the snapshot being attempt-scoped as well: if the
+winning attempt was never approved, the `approved_{index}_attempt_{n}.json`
+the merge names does not exist and the merge dies on a missing file before
+any `canon.json` write, while a rejected earlier attempt's snapshot sits at a
+path the merge never names and so cannot satisfy it either. Under `offline`
+no `established` item is legal, so no reviewer runs and no snapshot is
+produced — the merge consumes the ATTEMPT path there. That is an explicit
+branch, not a global rename: "the merge always consumes approved paths" would
+make every offline merge fail on a missing file.
 
 **The containment guard, and why line equality alone was not enough.**
 `sentinelVerdict()` decides on whole-LINE equality: it sees a fail sentinel
@@ -545,8 +598,9 @@ guarded — it sits in no `cache_key.py` bundle and carries its own
 `compute_skeptic_input_digest()`, so editing it would force a fresh skeptic
 RUN_ID that this release does not otherwise pay. See the 1.16.0 CHANGELOG entry.
 
-The guard buys its safety with two bounded false REDs, both worth recognizing
-in a log:
+The guard buys its safety with two false REDs, both worth recognizing in a
+log. Neither is *bounded* in the sense that word invites: what a bound applies
+to below is the number of attempts, never the cause of the reject.
 
 - A reply that merely MENTIONS the fail sentinel while approving — "this is
   not a `CITATIONS_REJECTED 0 ATTEMPT 0` case" — now rejects.
@@ -562,17 +616,46 @@ in a log:
   make it reachable.
 
 **A false REJECT does not cost the same at every site**, and the difference is
-what to read a failed run against. Of the six, only the two IN-BATCH glossary
-sites recover inside the run; the three waits and mass-translate's
-`DRAFT_MISSING` fix site all cost at least a re-run:
+what to read a failed run against. Of the six, exactly ONE recovers inside the
+run — the precheck. At every other site the trigger is the reply's PHRASING
+rather than the data, so a re-run is another roll of the same die and not a
+repair:
 
-- **Citation review** — the batch regenerates to a fresh attempt and is
-  reviewed again, bounded by `MAX_CITATION_RETRIES`. Automatic, same run,
-  same batch.
 - **Precheck** — `resumed` stays false and the batch falls through to the
   dispatch + wait it would have run had no fragment been on disk. Automatic,
   same run, same batch; the whole cost is the forfeited resume-skip saving,
-  one codex dispatch plus one poll.
+  one codex dispatch plus one poll. This is the only genuine repair of the
+  six, and it is genuine precisely because the fall-through path is correct
+  regardless of WHY the precheck reported `ABSENT`.
+- **Citation review — NOT self-recovering, however much its retry ladder
+  looks like it.** The batch does regenerate to a fresh attempt and get
+  reviewed again, bounded by `MAX_CITATION_RETRIES`. But the ladder varies the
+  FRAGMENT while the guard was tripped by the reviewer's WORDING, and every
+  prompt that owns a fail sentinel prints that sentinel verbatim in its own
+  instructions — so a reviewer reasoning about its verdict in prose is an
+  ordinary output, and the next attempt's reviewer reads the same invitation
+  to do it again. Burning all `MAX_CITATION_RETRIES + 1` attempts returns
+  `citation-review-exhausted`, and the merge being all-or-nothing, **zero**
+  batches merge: the run produces nothing while the data may have been fine
+  throughout. What the bound buys is termination, not recovery: nothing about
+  the trigger is per-run state, so a re-invocation of the pass has nothing new
+  to work with.
+  **Telling the two causes apart is what an operator actually needs**, and it
+  is readable off the reply, which is why the exhaustion message states both
+  causes instead of one. The reviewer prompt requires a genuine rejection to
+  list, above its verdict line, one line per offending item naming that item's
+  `source_form`, its `source` URL, and which of the three checks it failed and
+  how; `batchStep` hands that reply to the next attempt as its regeneration
+  constraint and returns it as `lastRejection`, so the text is there to read.
+  A `lastRejection` naming specific `source_form` values with their URLs is a
+  data problem — route those candidates to `disposition: "review_queue"` or
+  supply real sources, then re-run. A `lastRejection` that instead reads as an
+  approval, discusses the `CITATIONS_REJECTED` sentinel rather than any
+  citation, or is the fixed no-findings placeholder is the guard misfiring:
+  nothing in the data needs editing, the attempt fragments and their approved
+  snapshots are on disk to inspect, and the right response is to treat it as a
+  review-prompt defect and report it — not to re-run and not to hand-edit
+  candidates.
 - **Wait** — NOT automatic, and this is the one that matters. The site returns
   `{ready: false, reason: "glossary-pass-null"}` immediately, straight out of
   `batchStep`; the enclosing attempt loop does not catch it, because this is a
