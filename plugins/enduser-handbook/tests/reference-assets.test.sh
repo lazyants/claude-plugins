@@ -1917,13 +1917,20 @@ has_in_section "static-md: automated grouped wiring's new scope (headings-form +
 # single quotes), and inside double quotes a bare backtick would open command substitution.
 # Measured when wired: each needle matches exactly ONE line in its adapter (the plain branch), and
 # the convergent line is excluded.
-# The step-4 limits paragraph is byte-identical in BOTH adapters and has been hand-synced across
-# them five times during review. Nothing pinned it, and it is the single paragraph that overclaimed
-# in three consecutive review rounds — so an un-synced edit would let one adapter keep a promise the
-# other had already withdrawn, with nothing going red. Same D3 shared-variable idiom used above for
-# the embed formula: one variable, one `has` per adapter, so a one-sided edit fails loudly.
-# These two needles are the load-bearing halves: the by-construction limit, and the honest safety
-# statement that replaced "never produces a false completion".
+# The step-4 limits paragraph is maintained in PARALLEL across both adapters. Its shared claims are
+# pinned per-adapter below, so a one-sided edit fails loudly — that is the invariant. Byte-equality
+# is NOT the invariant and must not be asserted: the closing headings-branch disclosure deliberately
+# differs, because each adapter cross-references its own section by name. A maintainer told the
+# paragraph was byte-identical would "fix" that difference, or add an equality check that fails at
+# once.
+# Why it is pinned at all: this is the paragraph review kept refuting — an unconditional convergence
+# promise, then "never produces a false completion", then a bounded axis count, then a safety claim
+# that quantified over the untouched headings branch. An un-synced edit would leave one adapter
+# promising what the other had already withdrawn, with nothing red.
+# This comment carried three counts ("byte-identical", "synced five times", "three rounds") and a
+# "two needles" tally. Every one was falsified by a sibling commit in the SAME round that wrote it —
+# the hardening introduced the stale claim it was hardening against. Counts are gone for that
+# reason; what is left is the invariant, which does not go stale.
 GATE_CONSTRUCTION_LIMIT='it proves nothing about the real index, because it never reads the real index'
 # House style hard-wraps, so the sentence spans two physical lines and `has` is line-based: its
 # two halves need separate needles. That split is substantive, not clerical — round 4 refuted
