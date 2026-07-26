@@ -1442,11 +1442,12 @@ test('wireNestedListChapter is pure: a frozen input array is never mutated, and 
 // -------------------------------------------------------------------------------------------------
 // [1.11.0] #330 prep — containerOwnerScan extraction (the writer's forward pass lifted, unchanged,
 // into a private helper — plan round-21 HIGH). PRIVATE, no exported test seam, so these two tests
-// characterize it through wireNestedListChapter, its FIRST consumer. verifyNonHeadingPlacement
-// (below) is the SECOND — the whole reason for the extraction is that neither consumer re-implements
-// this scan, so the two can never disagree about which container owns a line (its own coverage,
-// including the ownerOf/ownerLabelOf fields wireNestedListChapter never reads, lives in that
-// section). The existing MULTIPLE fixture above never involves a heading; this one pins that
+// characterize it through wireNestedListChapter. The extraction's contract is that NO consumer
+// re-implements this scan — each one calls it — so consumers cannot disagree about which container
+// owns a line, however many consumers there are (today: wireNestedListChapter here, and
+// verifyNonHeadingPlacement below, whose section also covers the ownerOf/ownerLabelOf fields
+// wireNestedListChapter never reads). The existing MULTIPLE fixture above never involves a heading;
+// this one pins that
 // `containers` collection is independent of the heading-driven currentContainer reset (only child
 // OWNERSHIP resets on a heading, never label-matching membership).
 // -------------------------------------------------------------------------------------------------
@@ -1480,11 +1481,14 @@ test('wireNestedListChapter, repeat-invocation isolation: a SINGLE call that pop
 // [1.11.0] #330 — verifyNonHeadingPlacement (present-line placement verification, nested-list form)
 // =================================================================================================
 //
-// verifyNonHeadingPlacement is IMPLEMENTED (EH-CORE, commit 419ef4c) and is containerOwnerScan's
-// SECOND consumer, alongside wireNestedListChapter — the extraction above exists precisely so the
-// two can never disagree about which container owns a line: e.g.
-// verifyNonHeadingPlacement(['- Admin', '  - guide/items.md'], 'guide/items.md', 'Admin') returns
-// {kind: 'ok'} (pinned below at ":1666", "rule 5: a correctly-nested child ... -> ok"). Every
+// verifyNonHeadingPlacement is IMPLEMENTED (EH-CORE, commit 419ef4c). It reaches the container walk
+// through containerOwnerScan rather than re-deriving it, which is the whole point of the extraction
+// above: every consumer answers "which container owns this line" by calling the one scan, so no two
+// of them can drift apart (today: wireNestedListChapter and this — however many there come to be).
+// E.g. verifyNonHeadingPlacement(['- Admin', '  - guide/items.md'], 'guide/items.md', 'Admin')
+// returns {kind: 'ok'}, pinned below by the test named
+// "verifyNonHeadingPlacement rule 5: a correctly-nested child under its matching container -> ok".
+// Every
 // fixture's PRECONDITION — match cardinality, frontmatter span, and the fixed-probe predicate's kind
 // — was driven through the real supporting helpers (locateChapterLine/indexView,
 // leadingFrontmatterSpan, wireNestedListChapter) BEFORE the implementation landed, so nothing here
