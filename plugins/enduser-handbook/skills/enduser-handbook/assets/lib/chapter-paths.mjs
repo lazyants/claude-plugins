@@ -928,9 +928,12 @@ function foldTargetForMatch(target, wikilink) {
  * re-deriving the expression inline — true regardless of how many callers exist or which functions
  * they are. (The extraction itself changed nothing; `locateChapterLine`'s return shape later gained
  * `index` on each match record, #330 round-2 review — additive, not "no change": the `.d.mts`
- * publishes the field. Every consumer in this repo reads `.length`, filters on `.containerTitle`, or
- * reads `.index`, never a closed-shape compare, which is why nothing broke — but that is a checkable
- * fact about this repo's consumers, not a property of the return shape itself.)
+ * publishes the field. Nothing broke because no consumer treats the record as a CLOSED shape —
+ * every one reads the fields it needs and ignores the rest, so an additive field is invisible to
+ * all of them. That is the durable statement; the enumeration this sentence used to carry ("reads
+ * `.length`, filters on `.containerTitle`, or reads `.index`") was already incomplete when written,
+ * since `obsidian-vault.md` reads `matches[0].line`. Note it was itself a correction of an earlier
+ * stale claim: a fix can be born stale, so a consumer census is worth no more than a caller one.)
  * The present-line placement verifier (`verifyNonHeadingPlacement`, #330) reaches the same view
  * transitively, by delegating to `locateChapterLine` itself for its match indices, not by calling
  * this export directly — an earlier revision did call it directly and re-implemented
