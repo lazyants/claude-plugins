@@ -305,11 +305,21 @@ step 0 finds them and proceeds without re-halting.
 These outcomes reuse the step-0 result computed above (`containerTitle`, `indexForm`,
 `multiple`) and cover a **grouped** entry only — step 0 above already decided the flat case:
 
-- **Grouped entry, line present, `indexForm: 'non-heading'`** ⇒ wiring complete, proceed — no
-  present-line placement verifier runs on a non-heading index (placement verification is
-  deferred, see `revalidation.md`), so line presence alone is the whole check. The per-chapter
-  line-presence check is deliberately form-agnostic; container verification below applies only
-  when `indexForm: 'headings'`.
+- **Grouped entry, line present, `indexForm: 'non-heading'`** ⇒ call
+  `verifyNonHeadingPlacement(indexLines, selectedTarget, group_title)` (`assets/lib/chapter-paths.mjs`,
+  `selectedTarget` = step 0's own expected link target) and branch on the result:
+  - **`ok`** ⇒ placement complete, move to the next chapter.
+  - **`unverifiable`** ⇒ proceed — this file falls outside the verified class (see "Nested-list
+    automation limits" below); explicit confirmation stands in for verification here, exactly as
+    the shipped 1.10.0 behaviour did.
+  - **`misplaced`** ⇒ halt reusing the exact headings-form wording above:
+    `Chapter '<slug>' is listed in <index_file> under '<found_title>' instead of '<group_title>' — move the line (or curate the index manually), then re-run.`
+    (`<found_title>` reads `(none)` when the line sits at the left margin, uncontained.)
+  - **`inconsistent`** ⇒ the selected target resolves to zero lines, or to more than one — never
+    guess which is canonical, halt:
+    `Chapter '<slug>' does not resolve to exactly one line in <index_file> — curate the index manually, then re-run.`
+  This replaces the shipped 1.10.0 "line presence alone is the whole check" behaviour for the
+  verified class only; every other non-heading file still proceeds unverified, unchanged.
 - **Grouped entry, line present, `indexForm: 'headings'`, and `containerTitleMatches(containerTitle,
   entry)`** (from `assets/lib/chapter-paths.mjs`; titles compare TRIMMED, not raw `===`) ⇒
   placement complete, move to the next chapter.
@@ -336,7 +346,7 @@ These outcomes reuse the step-0 result computed above (`containerTitle`, `indexF
   - **`{kind: 'not-a-list'}`** ⇒ the index is not in the automatable nested-list subset (see
     "Nested-list automation limits" below) — a YAML `nav:`, a bare path table, or a list shape
     outside the bounded safe subset. Fall back to the existing manual halt, unchanged:
-    `Index <index_file> is not a headings-form file — add a '<group_title>' container and the chapter line for '<slug>' manually, then re-run.`
+    `Index <index_file> is not a headings-form file — add a '<group_title>' container and the chapter line for '<slug>' manually, then re-run. The next run recognizes the chapter line as a Markdown list row INDENTED TWO SPACES under the '<group_title>' container bullet, whose link destination is exactly '<index_relative_path>' — that is, a '- ' + group_title line followed by a '  - [' + title + '](<' + path + '>)' line, with the destination inside angle brackets and any ']' in the title escaped as '\]'. A row placed at the left margin instead of under the container is reported as misplaced on the next run.`
     This is what makes the manual flow converge: you halt once with instructions, the user adds
     the container and the chapter line, and the re-run's step 0 finds the line present under the
     `indexForm: 'non-heading'` branch above and proceeds.
@@ -381,6 +391,46 @@ HTML comment or a fenced block anywhere, a mixed or bare-CR line ending, a YAML 
 `group_title` fall outside the subset as well. Worst case for the residual is a cosmetic
 duplicate container the author can see and delete — never data loss. A richer rendering-aware
 matcher is a possible follow-up, not a bug.
+
+As of 1.11.0, a **present** grouped chapter's placement under this container is also checked,
+but only for a narrow verified class — this exact sentence, reused verbatim everywhere it is
+cited (see `revalidation.md`'s "Terminal-state convergence checklist" and the 1.11.0 CHANGELOG
+entry):
+
+files for which the fixed-probe writer call returns `kind === 'inserted'` and which hold exactly
+one selected-target match, that match lying outside the writer-recognized leading-frontmatter
+span.
+
+**In practice:** this is the subset above, minus a selected target that resolves to zero lines
+or to more than one (`inconsistent` — see "Grouped index wiring" above) and minus a match
+sitting inside leading frontmatter (`unverifiable` — the shipped 1.10.0 view disagreement,
+below). Operators land on `unverifiable` rather than inside the verified class most often for
+one of: a Markdown nav file using a wildcard, an ordered list, or an explicit `<!--nav-->`
+marker (all ordinary `mkdocs-literate-nav` features); two same-named containers; a chapter row
+sitting inside leading frontmatter; or a **native/YAML MkDocs `nav:` configuration**, which gets
+no placement verification at all — explicit confirmation stands in, exactly as before 1.11.0.
+MkDocs `nav:` container automation itself is its own follow-up, #328.
+
+Three disclosures the operator is owed, not proved away:
+
+- A `SUMMARY.md` holding more than one Markdown list — `mkdocs-literate-nav` honors only the
+  *last* one, while this machinery scans indent-0 bullets across the whole file, so a row can
+  verify against a list the tool ignores. The shipped writer already carries this exposure;
+  1.11.0 does not widen it.
+- A bullet-only file that also happens to be valid YAML — an `ok` now stands in for the explicit
+  confirmation this PR removes: a Markdown-reading answer about bytes some other consumer may
+  read as YAML.
+- A chapter row sitting inside leading frontmatter is never verified — it returns
+  `unverifiable`, for the reason below, not because it was overlooked.
+
+**An index whose frontmatter poisons the view is a known, filed defect — not fixed here.** The
+writer's own body-preparation view blanks a leading frontmatter block before wiring, while the
+step-0 locator's view does not, so the two sides can disagree about what a frontmatter-embedded
+chapter line means. On a nested-list index this produces both a false "already wired" report and
+a chapter line that duplicates on every subsequent run (the shipped 1.10.0 frontmatter bug, filed
+as its own follow-up). `verifyNonHeadingPlacement` above only stops this case from returning a
+false `ok` — a match inside the span returns `unverifiable` instead — it does not repair the
+duplication.
 
 ### Manual group migration
 
