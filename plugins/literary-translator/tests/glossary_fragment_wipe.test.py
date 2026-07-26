@@ -25,6 +25,7 @@ _RS_PATH = (
 @pytest.fixture(scope="module")
 def rs():
     spec = importlib.util.spec_from_file_location("resume_setup_under_test", _RS_PATH)
+    assert spec is not None and spec.loader is not None, f"could not load spec for {_RS_PATH}"
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -85,10 +86,13 @@ def test_wipe_is_a_noop_on_an_empty_dir(rs, tmp_path):
     assert _names(d) == []
 
 
-def test_write_run_dir_glossary_passes_the_real_resume_flag(rs, tmp_path, monkeypatch):
+@pytest.mark.parametrize("resume", [True, False])
+def test_write_run_dir_glossary_passes_the_real_resume_flag(rs, tmp_path, monkeypatch, resume):
     """Wiring: write_run_dir's glossary branch must invoke the wipe with the
     run's actual resume flag and the run-scoped glossary dir -- a spy proves the
-    call without depending on manifest writing."""
+    call without depending on manifest writing. Both flag values are exercised:
+    a hardcoded `True` at the call site would keep every other test green while
+    silently letting a FRESH run adopt an orphaned dir's attempt 0."""
     monkeypatch.setattr(rs, "DURABLE_ROOT", tmp_path)
     monkeypatch.setattr(rs, "RUNS_DIR", tmp_path / "runs")
     monkeypatch.setattr(rs, "write_glossary_manifests", lambda *a, **k: None)
@@ -99,8 +103,13 @@ def test_write_run_dir_glossary_passes_the_real_resume_flag(rs, tmp_path, monkey
     (tmp_path / "runs").mkdir()
 
     run_id = "20260101T000000Z"
-    rs.write_run_dir(run_id, resume=True, input_digest="d", kind="glossary", payload={"batches": {}})
-    assert calls == [(tmp_path / "glossary" / "runs" / run_id, True)]
+    rs.write_run_dir(
+        run_id, resume=resume, input_digest="d", kind="glossary", payload={"batches": {}}
+    )
+    assert calls == [(tmp_path / "glossary" / "runs" / run_id, resume)], (
+        f"the glossary branch must forward the run's own resume flag ({resume}), not a "
+        f"constant -- otherwise the fresh-vs-resume wipe rule is unreachable. Got: {calls}"
+    )
 
 
 def test_non_glossary_run_does_not_wipe(rs, tmp_path, monkeypatch):
