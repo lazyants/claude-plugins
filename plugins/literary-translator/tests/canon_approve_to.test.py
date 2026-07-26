@@ -9,9 +9,9 @@ for LF content. Only a fragment whose on-disk bytes contain CR proves the
 snapshot preserved them rather than universal-newline-normalising them.
 """
 
+import itertools
 import json
 import subprocess
-import time
 from pathlib import Path
 
 import pytest
@@ -233,94 +233,168 @@ def test_re_approving_the_identical_bytes_is_an_idempotent_no_op(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# ...including two CONCURRENT first writers, which a check-then-act guard misses.
+# ...including CONCURRENT first writers, which a check-then-act guard misses.
 #
 # `if path.exists(): refuse; else: write` closes only the SEQUENTIAL duplicate.
-# Two racers that both observe an absent path both write, the later write wins,
-# and NEITHER is told: reviewer A audits bytes A, B lands bytes B, A returns
-# CITATIONS_OK, and the merge consumes B. Measured against the check-then-act
-# implementation this test replaced, that invariant broke in 30 of 30 barrier-
-# synchronised iterations -- so this is the shape the guard must actually stop.
+# Writers that ALL observe an absent path all write, the last one silently wins,
+# and NONE of them is told: reviewer A audits bytes A, B lands bytes B, A returns
+# CITATIONS_OK, and the merge consumes B.
+#
+# Two properties are what let this test CATCH that rather than hope to:
+#
+# 1. A READINESS HANDSHAKE, not a shared deadline. Every writer announces itself
+#    and then blocks until it has seen every sibling announce, so none can enter
+#    the critical section until all of them are already at its door. A wall-clock
+#    deadline fixed before launch cannot promise that -- on a slow, loaded or
+#    single-core runner the first writer can complete the whole check-and-write
+#    before the last one even starts, every assertion below still passes, and a
+#    check-then-act guard survives the test untouched.
+# 2. AN OVERLAP CHECK. Each writer reports when it entered and left the critical
+#    section, and an attempt only COUNTS once two of those intervals actually
+#    intersect. A run that degenerated into sequential writes is retried, never
+#    silently banked as a pass: a vacuous green here would be the entire defect.
 #
 # The racers call _write_approved_snapshot directly rather than running
-# --check-batch end to end, deliberately: the window under test is microseconds
-# wide, so two full CLI runs would only ever sample it by luck and the test could
-# not be relied on to fail against a broken guard. The CLI path over this same
+# --check-batch end to end, deliberately: the window is microseconds wide, so
+# full CLI runs would only ever sample it by luck. The CLI path over this same
 # function is covered by the sequential tests above.
 # ---------------------------------------------------------------------------
 
 RACE_WORKER = '''
-import sys, time
+import json, sys, time
 from pathlib import Path
 sys.path.insert(0, sys.argv[1])
 import canon_validate as cv
 
 target = Path(sys.argv[2])
 raw = Path(sys.argv[3]).read_bytes()
-deadline = float(sys.argv[4])
-# Busy-wait to a shared wall-clock deadline so both processes enter the critical
-# section within microseconds of each other. Sleeping instead would leave
-# scheduler jitter far wider than the window being probed.
-while time.time() < deadline:
-    pass
+barrier = Path(sys.argv[4])
+me = sys.argv[5]
+expected = int(sys.argv[6])
+deadline = time.time() + float(sys.argv[7])
+
+# Announce readiness, then block until EVERY sibling has announced. Bounded, so a
+# worker that never meets its siblings reports it and fails the test loudly
+# instead of hanging the suite.
+(barrier / ("ready_" + me)).write_bytes(b"")
+while len(list(barrier.glob("ready_*"))) < expected:
+    if time.time() > deadline:
+        sys.stdout.write(json.dumps({"outcome": "BARRIER_TIMEOUT", "id": me}))
+        raise SystemExit(0)
+
+entered = time.time()
 try:
     cv._write_approved_snapshot(target, raw)
-    sys.stdout.write("OK")
+    outcome = "OK"
 except cv.CanonValidationError:
-    sys.stdout.write("REFUSED")
+    outcome = "REFUSED"
+left = time.time()
+sys.stdout.write(json.dumps({"outcome": outcome, "id": me, "entered": entered, "left": left}))
 '''
 
-RACE_ITERATIONS = 5
-RACE_LEAD_SECONDS = 0.45
+RACE_WRITERS = 8
+RACE_SAMPLES = 3
+RACE_ATTEMPT_BUDGET = 12
+BARRIER_TIMEOUT_SECONDS = 60.0
 
 
-def test_two_concurrent_first_writers_cannot_both_publish(tmp_path):
+def _overlapping_pair(reports):
+    """The ids of two writers that were inside the critical section at the same
+    time -- their [entered, left] intervals intersect -- or None if the writers
+    ran strictly one after another, which proves nothing about concurrency."""
+    for a, b in itertools.combinations(reports, 2):
+        if a["entered"] < b["left"] and b["entered"] < a["left"]:
+            return (a["id"], b["id"])
+    return None
+
+
+def test_concurrent_first_writers_cannot_both_publish(tmp_path):
     root = _valid_project(tmp_path)
     worker = root / "race_worker.py"
     worker.write_text(RACE_WORKER, encoding="utf-8")
 
     payloads = []
-    for source_form, target_form in (("Sappho", "Sapho"), ("Alcaeus", "Alkey")):
-        p = root / f"payload_{source_form}.json"
+    for n in range(RACE_WRITERS):
+        p = root / f"payload_{n}.json"
         p.write_bytes(
-            json.dumps([accepted_item(source_form, target_form)], indent=2, ensure_ascii=False).encode("utf-8")
+            json.dumps([accepted_item(f"Sappho{n}", f"Sapho{n}")], indent=2, ensure_ascii=False).encode("utf-8")
         )
         payloads.append(p)
-    assert payloads[0].read_bytes() != payloads[1].read_bytes(), (
-        "the two racers must carry DIFFERENT bytes, or the race proves nothing"
+    assert len({p.read_bytes() for p in payloads}) == RACE_WRITERS, (
+        "every racer must carry DIFFERENT bytes, or the race proves nothing"
     )
 
-    for i in range(RACE_ITERATIONS):
-        approved = root / f"approved_{i}_attempt_0.json"
-        deadline = time.time() + RACE_LEAD_SECONDS
+    materialised = 0
+    degenerate = 0
+    for attempt in range(RACE_ATTEMPT_BUDGET):
+        if materialised >= RACE_SAMPLES:
+            break
+        # A fresh target per attempt: a retry must race to CREATE the snapshot,
+        # not find a previous attempt's already published there.
+        approved = root / f"approved_{attempt}_attempt_0.json"
+        barrier = root / f"barrier_{attempt}"
+        barrier.mkdir()
+
         procs = [
             subprocess.Popen(
-                [sys.executable, str(worker), str(root / "scripts"), str(approved), str(p), str(deadline)],
+                [
+                    sys.executable, str(worker), str(root / "scripts"), str(approved),
+                    str(p), str(barrier), str(n), str(RACE_WRITERS),
+                    str(BARRIER_TIMEOUT_SECONDS),
+                ],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
             )
-            for p in payloads
+            for n, p in enumerate(payloads)
         ]
-        results = [proc.communicate(timeout=120) for proc in procs]
-        outcomes = [out for out, _ in results]
-        assert set(outcomes) <= {"OK", "REFUSED"}, (
-            f"a racer neither published nor refused (iteration {i}): {results}"
+        try:
+            raw_results = [proc.communicate(timeout=BARRIER_TIMEOUT_SECONDS * 2) for proc in procs]
+        finally:
+            # Never leave spinning workers behind if the barrier deadlocked.
+            for proc in procs:
+                if proc.poll() is None:
+                    proc.kill()
+
+        reports = []
+        for out, err in raw_results:
+            assert out, f"attempt {attempt}: a racer produced no report (stderr: {err})"
+            reports.append(json.loads(out))
+        stalled = [r["id"] for r in reports if r["outcome"] == "BARRIER_TIMEOUT"]
+        assert not stalled, (
+            f"attempt {attempt}: {len(stalled)} racer(s) never saw their siblings at "
+            f"the barrier: {stalled}"
         )
 
-        winners = [payloads[n] for n, outcome in enumerate(outcomes) if outcome == "OK"]
+        # The invariant itself -- checked on EVERY attempt, overlapping or not.
+        by_id = {int(r["id"]): r for r in reports}
+        winners = [i for i, r in by_id.items() if r["outcome"] == "OK"]
         assert len(winners) == 1, (
-            f"iteration {i}: {len(winners)} of 2 concurrent writers published DIFFERENT "
-            f"bytes to the same approved path. Exactly one may win -- with two, the "
-            f"reviewer who audited the losing bytes still reported CITATIONS_OK while "
-            f"the merge consumes the other fragment. outcomes={outcomes}"
+            f"attempt {attempt}: {len(winners)} of {RACE_WRITERS} concurrent writers "
+            f"published DIFFERENT bytes to the same approved path. Exactly one may "
+            f"win -- with more, every reviewer that audited a losing fragment still "
+            f"reported CITATIONS_OK while the merge consumes somebody else's bytes. "
+            f"winners={winners}"
         )
-        assert approved.read_bytes() == winners[0].read_bytes(), (
-            f"iteration {i}: the published snapshot is not the bytes of the writer "
-            f"that reported success -- the loser's write landed anyway"
+        assert approved.read_bytes() == payloads[winners[0]].read_bytes(), (
+            f"attempt {attempt}: the published snapshot is not the bytes of the writer "
+            f"that reported success -- a loser's write landed anyway"
         )
         leftovers = list(approved.parent.glob(f".{approved.name}.tmp.*"))
-        assert leftovers == [], f"iteration {i}: the race left temp files behind: {leftovers}"
+        assert leftovers == [], f"attempt {attempt}: the race left temp files behind: {leftovers}"
+
+        if _overlapping_pair(reports) is not None:
+            materialised += 1
+        else:
+            degenerate += 1
+
+    assert materialised >= RACE_SAMPLES, (
+        f"the concurrent race never materialised: only {materialised} of "
+        f"{RACE_ATTEMPT_BUDGET} attempts had two writers inside the critical section "
+        f"at once ({degenerate} degenerated into sequential writes). The invariant "
+        f"above is not evidence without that overlap -- a strictly sequential run "
+        f"passes against a vulnerable check-then-act guard too."
+    )
 
 
 # ---------------------------------------------------------------------------
