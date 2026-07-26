@@ -1435,6 +1435,40 @@ test('wireNestedListChapter is pure: a frozen input array is never mutated, and 
   assert.notEqual(result.newLines, frozen, 'the returned newLines must be a distinct array reference');
 });
 
+// -------------------------------------------------------------------------------------------------
+// [1.11.0] #330 prep — containerOwnerScan extraction (the writer's forward pass lifted, unchanged,
+// into a private helper shared with the future #330 verifier — plan round-21 HIGH). PRIVATE, no
+// exported test seam, so these two tests characterize it through its only current consumer,
+// wireNestedListChapter. The existing MULTIPLE fixture above never involves a heading; this one
+// pins that `containers` collection is independent of the heading-driven currentContainer reset
+// (only child OWNERSHIP resets on a heading, never label-matching membership).
+// -------------------------------------------------------------------------------------------------
+
+test('wireNestedListChapter MULTIPLE, heading-independent: two same-label indent-0 bullets split by an ATX heading still BOTH count', () => {
+  const indexLines = ['- Admin', '# Section', '- Admin', '  - guide/items.md'];
+  const result = wireNestedListChapter(indexLines, 'Admin', '[Items](guide/items.md)');
+  assert.equal(result.kind, 'multiple');
+  assert.deepEqual(result.matches, [
+    { index: 0, label: 'Admin' },
+    { index: 2, label: 'Admin' },
+  ]);
+});
+
+test('wireNestedListChapter, repeat-invocation isolation: a SINGLE call that populates a matched container, followed by an unrelated ZERO-create call, leaks no scan state between calls', () => {
+  // The extraction gave the forward pass its own function-call boundary (containerOwnerScan) —
+  // this pins that `containers` (and the rest of the scan's locals) are call-scoped, not
+  // accidentally hoisted to module scope. The pairing matters: the FIRST call must actually
+  // populate `containers` (a leaked, un-cleared array would silently corrupt the SECOND call,
+  // which expects to see none).
+  const first = wireNestedListChapter(['- Admin', '  - existing.md'], 'Admin', '[Items](admin/items.md)');
+  assert.equal(first.kind, 'inserted');
+  assert.equal(first.created, false);
+  const second = wireNestedListChapter(['- Intro'], 'Admin', '[Items](admin/items.md)');
+  assert.equal(second.kind, 'inserted');
+  assert.equal(second.created, true, 'the second call must see NO matched container, unaffected by the first call');
+  assert.deepEqual(second.newLines, ['- Intro', '- Admin', '  - [Items](admin/items.md)']);
+});
+
 // =================================================================================================
 // D1 — validateGroups
 // =================================================================================================

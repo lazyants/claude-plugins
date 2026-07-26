@@ -1314,6 +1314,106 @@ export function leadingFrontmatterSpan(indexLines) {
 }
 
 /**
+ * §5.1 single forward pass over BODY (1.11.0 #330 extraction): the writer's own container-
+ * resolution scan, lifted UNCHANGED out of wireNestedListChapter — including its `!sawTop`
+ * conclusion and the `childIndent` normalization, so the helper produces its own complete,
+ * declared record rather than a partial one the caller must finish. PRIVATE: there must be
+ * exactly ONE implementation of this scan, so the #330 verifier shares it rather than
+ * re-implementing the `currentContainer` loop (scan-logic drift is exactly the risk sharing only
+ * the prepared BODY array would leave open).
+ *
+ * Total over the forward pass's OWN rejections only — not the pre-loop BODY guards
+ * (hasYamlMappingStructure, isPlainLabel(wanted)), which the caller has already run by the time
+ * this is called.
+ *
+ * `ownerOf`/`ownerLabelOf` are new: `ownerOf[i]` is the owning container's BODY index when line
+ * `i` is a child bullet, `-1` when line `i` is itself an indent-0 bullet (a container is not its
+ * own child), and unset for any other line (blank, or already refused above this call). Every
+ * owner is recorded with its container's own UNTRIMMED parsed label — never a re-derivation —
+ * because `containers` records only indent-0 bullets whose label equals `wanted`, so a mismatched
+ * container's own label would otherwise be lost (round-22 HIGH).
+ *
+ * @param {string[]} body
+ * @param {string} wanted  the trimmed group_title the caller is resolving a container for
+ * @returns {{kind: 'not-a-list'}
+ *         | {kind: 'ok', containers: Array<{index:number, label:string, marker:string}>,
+ *            childIndent: number, firstTopMarker: string|null, lastBulletIndex: number,
+ *            ownerOf: Array<number|undefined>, ownerLabelOf: Array<string|undefined>}}
+ */
+function containerOwnerScan(body, wanted) {
+  let sawTop = false;
+  let currentContainer = null; // index of the last indent-0 bullet; reset by any heading
+  let currentContainerLabel = null; // that bullet's own untrimmed parsed label
+  let childIndentSeen = null; // C: the file's single child indent, if any child bullet exists
+  let firstTopMarker = null; // marker of the FIRST indent-0 bullet (used on ZERO create)
+  let lastBulletIndex = -1; // greatest index that is any bullet (indent 0 or child)
+  const containers = []; // indent-0 bullets whose extracted label === wanted
+  const ownerOf = new Array(body.length);
+  const ownerLabelOf = new Array(body.length);
+
+  for (let i = 0; i < body.length; i += 1) {
+    const line = body[i];
+    if (line.trim() === '') continue; // blank line — tolerated inside/between regions
+
+    // 1. ATX heading — allowed; ends any open list region.
+    if (NESTED_ATX_HEADING_RE.test(line)) {
+      currentContainer = null;
+      currentContainerLabel = null;
+      continue;
+    }
+    // 2. Thematic break at ANY indent (on the trimmed line) — before the bullet branch, because
+    //    `- - -` / `* * *` also match the bullet regex but are horizontal rules, not list parents.
+    if (NESTED_THEMATIC_BREAK_RE.test(line.trim())) return { kind: 'not-a-list' };
+    // 3. Ordered-list marker.
+    if (NESTED_ORDERED_MARKER_RE.test(line)) return { kind: 'not-a-list' };
+
+    // 4/5. Bullet.
+    const m = line.match(NESTED_BULLET_RE);
+    if (!m) return { kind: 'not-a-list' }; // 6. FOREIGN CONTENT (prose, table row, tab line, …)
+
+    const indent = m[1].length;
+    const marker = m[2];
+    const info = parseNestedLabel(m[3]);
+
+    // Bare-path guard applies to indent-0 bullets AND children.
+    if (isBarePathBullet(marker, info)) return { kind: 'not-a-list' };
+
+    if (indent === 0) {
+      if (!isPlainLabel(info.label)) return { kind: 'not-a-list' };
+      sawTop = true;
+      currentContainer = i;
+      currentContainerLabel = info.label;
+      ownerOf[i] = -1;
+      if (firstTopMarker === null) firstTopMarker = marker;
+      lastBulletIndex = i;
+      if (info.label === wanted) containers.push({ index: i, label: info.label, marker });
+    } else {
+      if (currentContainer === null) return { kind: 'not-a-list' }; // orphan child
+      if (childIndentSeen === null) {
+        childIndentSeen = indent;
+        // C-cap: a >= 6-space "bullet" is a CommonMark indented-code line, not a child; the cap
+        // stays below the code-block threshold and matches GitBook's 2/4-space convention.
+        if (childIndentSeen < 2 || childIndentSeen > 4) return { kind: 'not-a-list' };
+      } else if (indent !== childIndentSeen) {
+        return { kind: 'not-a-list' }; // a second, distinct child indent
+      }
+      lastBulletIndex = i;
+      ownerOf[i] = currentContainer;
+      ownerLabelOf[i] = currentContainerLabel;
+    }
+  }
+
+  if (!sawTop) return { kind: 'not-a-list' };
+
+  // §5.4 resolution: a file with no child bullet anywhere defaults C = 2 (GitBook-standard,
+  // within the 2..4 cap); every accepted bullet has a single-space marker, so a container's
+  // content column is indent+2 and a child at C in [2,4] is always a valid sublist.
+  const childIndent = childIndentSeen === null ? 2 : childIndentSeen;
+
+  return { kind: 'ok', containers, childIndent, firstTopMarker, lastBulletIndex, ownerOf, ownerLabelOf };
+}
+
+/**
  * Nested-list grouped index wiring, ABSENT-line path only. Pure: returns the fully-mutated index
  * line array; the runtime persists it. Reached only when findContainer(...) === {kind:'non-heading'}
  * AND step-0 found no existing line. Idempotency is the CALLER's guarantee (step-0 runs first); this
@@ -1347,67 +1447,12 @@ export function wireNestedListChapter(indexLines, groupTitle, chapterLink) {
   // emit a container that render-collides with an existing plain one, or fail to match one.
   if (!isPlainLabel(wanted)) return { kind: 'not-a-list' };
 
-  // §5.1 single forward pass over BODY.
-  let sawTop = false;
-  let currentContainer = null; // index of the last indent-0 bullet; reset by any heading
-  let childIndentSeen = null; // C: the file's single child indent, if any child bullet exists
-  let firstTopMarker = null; // marker of the FIRST indent-0 bullet (used on ZERO create)
-  let lastBulletIndex = -1; // greatest index that is any bullet (indent 0 or child)
-  const containers = []; // indent-0 bullets whose extracted label === wanted
+  // §5.1 single forward pass over BODY, shared with the #330 verifier via the same private scan.
+  const scan = containerOwnerScan(BODY, wanted);
+  if (scan.kind === 'not-a-list') return { kind: 'not-a-list' };
+  const { containers, childIndent, firstTopMarker, lastBulletIndex } = scan;
 
-  for (let i = 0; i < BODY.length; i += 1) {
-    const line = BODY[i];
-    if (line.trim() === '') continue; // blank line — tolerated inside/between regions
-
-    // 1. ATX heading — allowed; ends any open list region.
-    if (NESTED_ATX_HEADING_RE.test(line)) {
-      currentContainer = null;
-      continue;
-    }
-    // 2. Thematic break at ANY indent (on the trimmed line) — before the bullet branch, because
-    //    `- - -` / `* * *` also match the bullet regex but are horizontal rules, not list parents.
-    if (NESTED_THEMATIC_BREAK_RE.test(line.trim())) return { kind: 'not-a-list' };
-    // 3. Ordered-list marker.
-    if (NESTED_ORDERED_MARKER_RE.test(line)) return { kind: 'not-a-list' };
-
-    // 4/5. Bullet.
-    const m = line.match(NESTED_BULLET_RE);
-    if (!m) return { kind: 'not-a-list' }; // 6. FOREIGN CONTENT (prose, table row, tab line, …)
-
-    const indent = m[1].length;
-    const marker = m[2];
-    const info = parseNestedLabel(m[3]);
-
-    // Bare-path guard applies to indent-0 bullets AND children.
-    if (isBarePathBullet(marker, info)) return { kind: 'not-a-list' };
-
-    if (indent === 0) {
-      if (!isPlainLabel(info.label)) return { kind: 'not-a-list' };
-      sawTop = true;
-      currentContainer = i;
-      if (firstTopMarker === null) firstTopMarker = marker;
-      lastBulletIndex = i;
-      if (info.label === wanted) containers.push({ index: i, label: info.label, marker });
-    } else {
-      if (currentContainer === null) return { kind: 'not-a-list' }; // orphan child
-      if (childIndentSeen === null) {
-        childIndentSeen = indent;
-        // C-cap: a >= 6-space "bullet" is a CommonMark indented-code line, not a child; the cap
-        // stays below the code-block threshold and matches GitBook's 2/4-space convention.
-        if (childIndentSeen < 2 || childIndentSeen > 4) return { kind: 'not-a-list' };
-      } else if (indent !== childIndentSeen) {
-        return { kind: 'not-a-list' }; // a second, distinct child indent
-      }
-      lastBulletIndex = i;
-    }
-  }
-
-  if (!sawTop) return { kind: 'not-a-list' };
-
-  // §5.4 resolution + EOL-faithful emission. A file with no child bullet anywhere defaults C = 2
-  // (GitBook-standard, within the 2..4 cap); every accepted bullet has a single-space marker, so a
-  // container's content column is indent+2 and a child at C in [2,4] is always a valid sublist.
-  const childIndent = childIndentSeen === null ? 2 : childIndentSeen;
+  // §5.4 EOL-faithful emission.
   const emit = (outLogical, created) => {
     const out = outLogical.join(EOL) + (hadTerminalNewline ? EOL : '');
     return { kind: 'inserted', created, newLines: out.split('\n') };
