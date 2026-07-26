@@ -240,19 +240,30 @@ def test_re_approving_the_identical_bytes_is_an_idempotent_no_op(tmp_path):
 # and NONE of them is told: reviewer A audits bytes A, B lands bytes B, A returns
 # CITATIONS_OK, and the merge consumes B.
 #
-# Two properties are what let this test CATCH that rather than hope to:
+# WHAT THIS TEST IS: a probabilistic REGRESSION CHECK. It has caught a
+# check-then-act publish on more than one machine, but it does not prove the
+# guarantee and nothing in the module rests on it -- that is os.link()'s
+# create-once semantics, per references/canon-and-glossary.md, "What the approved
+# snapshot guarantees, and the preconditions it rests on". Two mechanisms raise
+# its odds of reaching the breaking interleaving, and neither makes it certain:
 #
 # 1. A READINESS HANDSHAKE, not a shared deadline. Every writer announces itself
 #    and then blocks until it has seen every sibling announce, so none can enter
 #    the critical section until all of them are already at its door. A wall-clock
-#    deadline fixed before launch cannot promise that -- on a slow, loaded or
+#    deadline fixed before launch cannot promise even that -- on a slow, loaded or
 #    single-core runner the first writer can complete the whole check-and-write
 #    before the last one even starts, every assertion below still passes, and a
 #    check-then-act guard survives the test untouched.
-# 2. AN OVERLAP CHECK. Each writer reports when it entered and left the critical
-#    section, and an attempt only COUNTS once two of those intervals actually
-#    intersect. A run that degenerated into sequential writes is retried, never
-#    silently banked as a pass: a vacuous green here would be the entire defect.
+# 2. AN OVERLAP CHECK, whose limit is worth stating exactly. Each writer reports
+#    when it entered and left the call, and an attempt only COUNTS once two of
+#    those intervals intersect, so a run that degenerated into sequential calls is
+#    retried rather than banked -- that much closes the vacuity hole. What it
+#    establishes is that two writers were inside the FUNCTION together. It does
+#    NOT establish that two of them observed the target ABSENT, which is the
+#    interleaving that actually breaks check-then-act: the function writes its
+#    temp file BEFORE publishing, so writers can overlap there while the publish
+#    still serialises. Sampling several attempts is what makes the breaking
+#    interleaving likely; nothing here makes it guaranteed.
 #
 # The racers call _write_approved_snapshot directly rather than running
 # --check-batch end to end, deliberately: the window is microseconds wide, so
@@ -275,12 +286,16 @@ deadline = time.time() + float(sys.argv[7])
 
 # Announce readiness, then block until EVERY sibling has announced. Bounded, so a
 # worker that never meets its siblings reports it and fails the test loudly
-# instead of hanging the suite.
+# instead of hanging the suite. The 0.5ms sleep keeps N spinners from starving
+# each other on a small runner; measured, it does not widen the release skew --
+# it narrows the worst case, because tight spinning is itself what delays the
+# siblings we are waiting for.
 (barrier / ("ready_" + me)).write_bytes(b"")
 while len(list(barrier.glob("ready_*"))) < expected:
     if time.time() > deadline:
         sys.stdout.write(json.dumps({"outcome": "BARRIER_TIMEOUT", "id": me}))
         raise SystemExit(0)
+    time.sleep(0.0005)
 
 entered = time.time()
 try:
@@ -351,10 +366,13 @@ def test_concurrent_first_writers_cannot_both_publish(tmp_path):
         try:
             raw_results = [proc.communicate(timeout=BARRIER_TIMEOUT_SECONDS * 2) for proc in procs]
         finally:
-            # Never leave spinning workers behind if the barrier deadlocked.
+            # Never leave workers behind if the barrier deadlocked -- and REAP
+            # them: kill() only signals, so without the wait() the children stay
+            # zombies until the whole pytest run exits.
             for proc in procs:
                 if proc.poll() is None:
                     proc.kill()
+                proc.wait(timeout=30)
 
         reports = []
         for out, err in raw_results:
