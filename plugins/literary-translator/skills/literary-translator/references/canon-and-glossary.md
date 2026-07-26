@@ -516,7 +516,7 @@ So the fragment's own `--check-batch` validation is re-run with
 `--approve-to` at the top of the reviewer's turn, which is why the stage still
 costs no extra `agent()` call: that invocation copies the exact bytes it just
 validated — one `read_bytes()` from the read that validated them, no second
-read, no window — to an immutable `approved_{index}_attempt_{n}.json`, and the
+read, no window — to a create-once `approved_{index}_attempt_{n}.json`, and the
 reviewer then audits THAT. The ordering is the whole fix and cannot be
 reversed: snapshotting *after* the audit leaves a producer free to replace
 validated-bytes-A with structurally-valid-bytes-B between the reviewer's read
@@ -539,12 +539,19 @@ drifts in six places. Correct it here.
 
 **What holds.** Within one run the snapshot is published CREATE-ONCE: the
 validated bytes go to a unique temp path, which `os.link()` then links into
-place, so while that directory entry exists no writer can replace it. The
-bytes the citation reviewer audits are therefore the bytes the merge consumes.
-A duplicate approval carrying IDENTICAL bytes is an idempotent no-op; one
-carrying DIFFERENT bytes — a repeated `--check-batch --approve-to`, or two
-overlapping reviewer dispatches for the same batch and attempt — fails closed
-and names the path, leaving the already-audited copy byte-untouched.
+place. What that buys is exclusive CREATION and nothing more — a second
+`--approve-to` cannot publish over the entry: IDENTICAL bytes are an
+idempotent no-op, and DIFFERENT bytes — a repeated `--check-batch
+--approve-to`, or two overlapping reviewer dispatches for the same batch and
+attempt — fail closed and name the path, leaving the already-audited copy
+byte-untouched.
+
+It does NOT make the published file immutable. Once created, the snapshot is
+an ordinary writable file; `os.link()` never runs against it again, and any
+process holding the path can truncate or rewrite it in place. "The bytes the
+citation reviewer audits are the bytes the merge consumes" is therefore a
+conclusion drawn FROM the three preconditions below, not something the
+filesystem enforces by itself.
 
 **Precondition A: one live run per glossary run DIRECTORY** — filesystem
 identity, not string identity, and the two are not the same thing.
@@ -556,10 +563,23 @@ worded as "one live run per RUN_ID string" would therefore not be enough: what
 matters is what the filesystem resolves the path to.
 
 **Precondition B: `durable_root` on a hardlink-capable filesystem.**
-`os.link()` IS the guarantee, so a filesystem that cannot provide it (some
-SMB/FAT mounts) makes the publish FAIL, loudly and by name. It deliberately
-does not fall back to an overwriting write, which would silently restore the
-duplicate-approval race on precisely the setups nobody tests on.
+`os.link()` is what makes creation exclusive, so a filesystem that cannot
+provide it (some SMB/FAT mounts) makes the publish FAIL, loudly and by name.
+It deliberately does not fall back to an overwriting write, which would
+silently restore the duplicate-approval race on precisely the setups nobody
+tests on.
+
+**Precondition C: nothing writes the snapshot path out of band.**
+`--approve-to` is the only writer — by INSTRUCTION, not by enforcement, which
+is why it belongs here rather than under what holds. The citation reviewer is
+the process closest to this: it is handed the snapshot path and it audits
+untrusted fetched pages. Its prompt tells it, of the step-1 command, "Writing
+that snapshot is the ONLY change to any file you are permitted to make in this
+task", and again at the end, "Apart from running the one snapshot command in
+step 1, do not modify or write any file". Nothing enforces either sentence. A
+process that rewrites the path AFTER the audit and then returns
+`CITATIONS_OK` defeats the property with preconditions A and B both intact,
+because the merge fresh-reads whatever the path holds at merge time.
 
 **What is NOT claimed.** No lock is taken, and the snapshot carries no
 run-identity binding — nothing in it records which run produced it. The
@@ -576,11 +596,11 @@ adopt an orphaned directory's stale attempt. That makes this a bounded
 precondition, not an unnoticed defect.
 
 **Evidence status.** The guarantee rests on `os.link()`'s create-once
-semantics, not on the concurrent-writer test. That test
-(`tests/canon_approve_to.test.py`, eight racing writers, resampling until it
-observes critical sections that genuinely overlap) is a probabilistic
-regression check: it can show the property has not been broken, and cannot
-establish it.
+semantics. It does not rest on the concurrent-writer test, which is a
+regression check: `tests/canon_approve_to.test.py` starts eight processes that
+each call `--approve-to` on one fresh path carrying different bytes, and
+asserts that exactly one of them wins. Take that as what it is — a check that
+the invariant still holds on the platform it ran on.
 
 Fail-closed follows from the snapshot being attempt-scoped as well: if the
 winning attempt was never approved, the `approved_{index}_attempt_{n}.json`

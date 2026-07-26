@@ -710,7 +710,7 @@ pipeline(BATCHES, batchStep)
   `CITATIONS_OK`/`CITATIONS_REJECTED <index> ATTEMPT <n>`. It gates whether
   the batch counts as ready at all. It opens by re-running the fragment's own
   `--check-batch` validation with `--approve-to`, which snapshots the exact
-  bytes that invocation just validated to an immutable, attempt-scoped
+  bytes that invocation just validated to a create-once, attempt-scoped
   `approved_{index}_attempt_{n}.json` — one read, so nothing can change
   between validating and copying — and it then audits **that snapshot**,
   never the mutable `out_*` attempt path. The approval therefore binds bytes

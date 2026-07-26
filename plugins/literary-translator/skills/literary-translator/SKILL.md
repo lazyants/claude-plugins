@@ -758,16 +758,16 @@ a no-op, since `established` is forbidden there outright.
 auditing anything the reviewer re-runs the fragment's own `--check-batch`
 validation with `--approve-to` (inside its existing turn, so no extra
 `agent()` call), which copies the exact bytes it just validated — one read,
-nothing can change between validating and copying — to an immutable,
+nothing can change between validating and copying — to a create-once,
 attempt-scoped `approved_{index}_attempt_{n}.json`. It then audits **the
 snapshot** and never the mutable `out_*` attempt path again, and on approval
 the merge is handed **that snapshot**. The producer is a fire-and-forget
 codex job told to rewrite the attempt path until its own self-check passes, so
 renames onto the reviewed path after the review are expected behaviour, not
 an adversary — and after the snapshot they reach nothing anyone reads. Within
-one run, bytes audited, approved and merged are one object by identity. That
-holds on stated preconditions — one live run per glossary run directory, and a
-hardlink-capable `durable_root` — which are NOT restated here; see
+one run, bytes audited, approved and merged are one object by identity. That is
+a conclusion from stated preconditions, not a filesystem guarantee, and they
+are deliberately NOT enumerated here — read them in
 `references/canon-and-glossary.md`,
 "What the approved snapshot guarantees, and the preconditions it rests on".
 `offline` is the one exception: no citation, no reviewer, no snapshot, so the

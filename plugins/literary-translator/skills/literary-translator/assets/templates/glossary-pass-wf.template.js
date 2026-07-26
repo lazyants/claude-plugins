@@ -46,7 +46,7 @@
 //     fixed out_{index}.json. See fragmentPath()'s own comment for why a fixed
 //     path makes a citation rejection unenforceable in principle.
 //   * Approval binds BYTES, not a path. The reviewer's FIRST act is to
-//     snapshot the validated fragment to an immutable, attempt-scoped
+//     snapshot the validated fragment to a fresh, attempt-scoped
 //     approved_{index}_attempt_{n}.json and audit THAT copy; under live the
 //     merge is handed the snapshot, never the mutable out_* path the codex job
 //     that produced it may still be rewriting. Auditing the mutable path and
@@ -139,11 +139,11 @@ export const meta = {
   phases: [
     {
       title: "GlossaryPass",
-      detail: "codex resolves each batch of candidates into a canon-batch.schema.json-shaped array and writes it, atomically, to its own run-scoped, ATTEMPT-scoped fragment file, self-validated shape-and-coverage via canon_validate.py --check-batch -- never a shared file, so concurrent batches never race; under research_mode:live each attempt's fragment is then snapshotted to an immutable approved_{index}_attempt_{n}.json and that snapshot -- never the mutable fragment -- goes through a citation review, bounded to MAX_CITATION_RETRIES+1 attempts, that must approve it before the batch counts as ready",
+      detail: "codex resolves each batch of candidates into a canon-batch.schema.json-shaped array and writes it, atomically, to its own run-scoped, ATTEMPT-scoped fragment file, self-validated shape-and-coverage via canon_validate.py --check-batch -- never a shared file, so concurrent batches never race; under research_mode:live each attempt's fragment is then snapshotted to an attempt-scoped approved_{index}_attempt_{n}.json that nothing in the pass rewrites afterwards, and that snapshot -- never the still-mutating fragment -- goes through a citation review, bounded to MAX_CITATION_RETRIES+1 attempts, that must approve it before the batch counts as ready",
     },
     {
       title: "Merge",
-      detail: "one serialized canon_validate.py --merge-batches call folds every ready batch's approved bytes into canon.json in index order -- the citation review's immutable approved_{index}_attempt_{n}.json snapshot under research_mode:live, the attempt fragment itself under offline where no review runs -- then a disk-independent canon_validate.py --verify-merged call re-checks the result straight off disk before this run reports merged:true",
+      detail: "one serialized canon_validate.py --merge-batches call folds every ready batch's approved bytes into canon.json in index order -- the citation review's approved_{index}_attempt_{n}.json snapshot under research_mode:live, the attempt fragment itself under offline where no review runs -- then a disk-independent canon_validate.py --verify-merged call re-checks the result straight off disk before this run reports merged:true",
     },
   ],
 }
@@ -379,7 +379,7 @@ function checkBatchCmd(index, attempt) {
 }
 
 // ---------------------------------------------------------------------------
-// The APPROVED SNAPSHOT of one attempt (1.16.0) -- the immutable bytes the
+// The APPROVED SNAPSHOT of one attempt (1.16.0) -- the bytes the
 // citation review audits and, under live, the exact bytes --merge-batches is
 // handed. ATTEMPT-scoped for the same reason the fragment is, and that scoping
 // is load-bearing rather than symmetrical tidiness: with a single
@@ -535,24 +535,24 @@ function batchWaitPrompt(batch, attempt) {
 // Workflow if the forwarder detaches (#97), and this stage sits on the
 // critical path of every live run.
 //
-// SNAPSHOT FIRST, THEN AUDIT -- and the ORDER is the whole guarantee, not an
-// implementation detail. The reviewer's first instruction is to run
+// SNAPSHOT FIRST, THEN AUDIT -- the ORDER is what this step gets right, and it
+// is not an implementation detail. The reviewer's first instruction is to run
 // approveBatchCmd(), which re-validates the attempt fragment and, from that one
-// read, copies the exact validated bytes to approvedPath(); everything it then
-// audits, and everything the merge later consumes, is that immutable copy. The
-// reverse order does not work and must not be "simplified" back into: the batch
-// dispatch is agentType:"codex:codex-rescue", the codex job outlives the awaited
-// call (that is why the 15-minute wait poll exists at all), and its own prompt
-// instructs an iterate-until-success rewrite loop against the attempt path. So
-// repeated atomic renames over that path are normal, expected behaviour, and a
-// copy taken AFTER the audit captures whatever the producer wrote in between --
-// leaving the reviewer's approval attached to bytes nobody merges and the merge
-// attached to bytes nobody reviewed. Snapshotting first makes the two the same
-// object by identity, so there is nothing left to race: no hash, no window, no
-// re-check at merge time. What that buys, what it does NOT buy, and the
-// preconditions it rests on are stated once in
-// references/canon-and-glossary.md's "What the approved snapshot guarantees,
-// and the preconditions it rests on" section -- do not restate them here.
+// read, copies the validated bytes to approvedPath(); everything it audits
+// afterwards is that copy. The reverse order does not work and must not be
+// "simplified" back into: the batch dispatch is agentType:"codex:codex-rescue",
+// the codex job outlives the awaited call (that is why the 15-minute wait poll
+// exists at all), and its own prompt instructs an iterate-until-success rewrite
+// loop against the attempt path. So repeated atomic renames over that path are
+// normal, expected behaviour, and a copy taken AFTER the audit would capture
+// whatever the producer wrote in between -- leaving the reviewer's approval
+// attached to bytes nobody merges and the merge attached to bytes nobody
+// reviewed.
+//
+// What that ordering does and does not buy, its preconditions, and its limits
+// are stated once in references/canon-and-glossary.md's
+// "What the approved snapshot guarantees, and the preconditions it rests on"
+// section -- do not restate them here.
 //
 // The snapshot is taken INSIDE this reviewer's own turn rather than by a step of
 // its own, for two independent reasons. (1) A separate agent() call would add
@@ -615,7 +615,7 @@ function citationReviewPrompt(batch, attempt) {
   lines.push("STEP 1, before you read or fetch anything at all. Run exactly this one bash command (a single invocation, NOT a polling loop) and read its single line of JSON output: " + approveBatchCmd(batch.index, attempt))
   lines.push("That command re-validates the fragment at " + outPath + " and, only if it still passes, atomically copies those exact bytes to " + snapshotPath + ". Writing that snapshot is the ONLY change to any file you are permitted to make in this task. If the command exits non-zero for ANY reason -- the fragment is missing, is not valid JSON, or fails its shape/offline/coverage checks -- do not audit anything and do not fetch anything: reject this batch immediately with the rejection sentinel below, giving that command's own failure as your reason. A fragment that no longer validates has been rewritten underneath you, and a fresh attempt is the correct answer, never an audit of bytes that failed validation.")
   lines.push("STEP 2. Read this file -- the SNAPSHOT the command above just wrote, never the fragment it copied FROM: " + snapshotPath)
-  lines.push("Everything you judge, quote, or count is about " + snapshotPath + " and nothing else. The process that produced " + outPath + " may still be rewriting it, so its bytes can change under you at any moment; the snapshot's cannot, and that is the entire reason it exists. Do not read, re-check, or quote " + outPath + " after step 1 -- the bytes you approve have to be the bytes a later step merges, and only the snapshot's are.")
+  lines.push("Everything you judge, quote, or count is about " + snapshotPath + " and nothing else. The process that produced " + outPath + " may still be rewriting it, so its bytes can change under you at any moment; nothing in this pass writes to the snapshot after step 1 created it, and that is the entire reason it exists. Do not read, re-check, or quote " + outPath + " after step 1 -- the bytes you approve have to be the bytes a later step merges, and only the snapshot's are.")
   lines.push("It is a JSON array of canon-batch items. Examine ONLY the items whose basis is exactly \"established\". Every other basis value (\"transliterated\", \"sense_translated\", \"title\", \"not_a_name\") makes no external source claim at all and is outside your scope -- do not judge, re-decide, or comment on those items, and never object to an item merely because you would have resolved it differently. Judgment about whether a name was canonicalized WELL belongs to a later human pass; your scope is strictly whether the citations that were claimed are real and on-point.")
   lines.push("For each basis:\"established\" item, verify all three of the following about its \"source\" field. Actually fetch the URL -- do not judge it from its shape, its domain's reputation, or your own memory of what lives at that address:")
   lines.push("1. IT RESOLVES. The URL loads and is not a 404, a dead host, a parked domain, a login wall that hides the whole content, or a redirect to an unrelated page or a site's front page.")
@@ -1107,7 +1107,7 @@ async function batchStep(batch) {
     if (!rejectedAnywhere(verdict, failSentinel) &&
         sentinelVerdict(verdict, okSentinel, failSentinel)) {
       // Approved. Only THIS path may hand a fragment to the merge, and what it
-      // hands over is the immutable SNAPSHOT of the exact attempt the verdict
+      // hands over is the SNAPSHOT of the exact attempt the verdict
       // named -- never attemptPath, which the codex job that wrote it may still
       // be rewriting. fragmentPath stays on the result as the diagnostic record
       // of which attempt produced these bytes; mergePath is what the merge and

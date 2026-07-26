@@ -6,7 +6,7 @@ Adds a bounded pre-merge citation-review stage to the W3 glossary pass. Under
 `glossary.research_mode: live`, a batch can now only become READY once the `source` citations
 its `basis: "established"` entries carry have been reviewed — while the fragment is still
 rewritable, before anything reaches `canon.json`. The approval binds the reviewed **bytes**, not
-the path they sat at: the reviewer audits an immutable, attempt-scoped snapshot taken at the moment
+the path they sat at: the reviewer audits a create-once, attempt-scoped snapshot taken at the moment
 the fragment validated, and the merge consumes that same snapshot — so neither a producer still
 rewriting the attempt path nor a resumed run finding a previous run's fragment there can put
 unreviewed bytes into `canon.json`. Also fixes a false approval in the sentinel
@@ -60,38 +60,22 @@ success line then approved the work anyway.
   fresh-reads from disk and has no notion of the citation review; `--verify-merged` re-reads too,
   but checks shape and coverage, never citations.
 - `canon_validate.py --check-batch <fragment> --approve-to PATH` now snapshots the exact validated
-  bytes to an immutable, attempt-scoped `approved_{index}_attempt_{n}.json`, taken from the SAME
-  read that validated them — one `read_bytes()` through the new opt-in `_read_json_bytes`, no second
-  read, so no window exists between validating and copying. The copy is published CREATE-ONCE: the
-  raw bytes go to a unique temp file, which `os.link()` then atomically links into place, so for as
-  long as that snapshot exists no second writer can land different bytes at its path.
-  `_atomic_write_json` is not usable here — it re-serialises, and therefore cannot produce a
-  byte-identical snapshot. `read_text()` is deliberately not on this path: its universal-newline
-  translation would snapshot a CRLF fragment with bytes it never had on disk. On success the stdout
-  JSON line gains an `approved_path` key.
-- **Create-once is what makes a duplicate approval harmless — within one run.** A second
-  `--check-batch --approve-to` at the same path — a repeated call, or two overlapping reviewer
-  dispatches for one batch/attempt — cannot replace bytes a reviewer may already have audited:
-  identical bytes are an idempotent no-op, DIFFERENT bytes fail closed with the audited copy
-  byte-untouched and the offending path named. A filesystem without hard links fails closed too,
-  rather than falling back to an overwriting write.
-- **That guarantee lasts exactly as long as the snapshot does, so ONE LIVE RUN PER GLOSSARY RUN
-  DIRECTORY is an operational precondition.** `os.link()` can only refuse while the directory entry
-  exists, and `resume_setup.py` removes it at start-up: `_wipe_stale_glossary_fragments` unlinks
-  every `approved_*` fragment (its keep rule spares `out_*_attempt_0` only, and only on a resume),
-  while a digest-MATCH resume reuses the SAME `RUN_ID` and therefore the same
-  `glossary/runs/<RUN_ID>/` directory. So a second run starting on a live run's directory wipes that
-  run's audited snapshot and reopens the slot for different bytes, which the first run's
-  already-issued `CITATIONS_OK` would then merge. The wipe is deliberate and stays — it exists so a
-  fresh run cannot adopt an orphaned directory's stale attempt. This release scopes the claim rather
-  than adding a lock or a run-identity binding: exactly as with `canon.json`'s single writer, the
-  property holds by OPERATIONAL PRECONDITION, and nothing on this path locks a file. Under that
-  precondition the bytes audited are the bytes merged. Stated in full —
-  including why it is the run DIRECTORY rather than the `RUN_ID` string that counts, since two
-  differently-cased ids name one directory on a case-insensitive filesystem — in
+  bytes to an attempt-scoped `approved_{index}_attempt_{n}.json`, taken from the SAME read that
+  validated them — one `read_bytes()` through the new opt-in `_read_json_bytes`, no second read, so
+  no window exists between validating and copying. The copy is published CREATE-ONCE: the raw bytes
+  go to a unique temp file, which `os.link()` then atomically links into place, so a second
+  `--approve-to` cannot publish over it — identical bytes are an idempotent no-op, different bytes
+  fail closed with the audited copy byte-untouched. `_atomic_write_json` is not usable here — it
+  re-serialises, and therefore cannot produce a byte-identical snapshot. `read_text()` is
+  deliberately not on this path: its universal-newline translation would snapshot a CRLF fragment
+  with bytes it never had on disk. On success the stdout JSON line gains an `approved_path` key.
+- **The guarantee is bounded, and this release scopes the claim rather than adding a lock.**
+  `os.link()` makes CREATION exclusive; it does not make the published file immutable. So "the bytes
+  audited are the bytes merged" holds within one run and by OPERATIONAL PRECONDITION — not by any
+  lock and not by a run-identity binding, neither of which this release adds. What those
+  preconditions are, and what ends the guarantee, are stated once, and only once, in
   `references/canon-and-glossary.md`,
   "What the approved snapshot guarantees, and the preconditions it rests on".
-  That section is canonical; this entry records the change and does not restate its qualifiers.
 - **The ordering is the whole fix.** Snapshotting *after* the audit would close nothing: a producer
   sharing the RUN_ID can replace validated-bytes-A with structurally-valid-bytes-B between the
   reviewer's read and the copy, so the snapshot would capture B while the reviewer approved A. The
@@ -100,7 +84,7 @@ success line then approved the work anyway.
   consumes that same snapshot. The codex rewrite loop targets `out_*_attempt_*` only, so a
   post-snapshot rewrite reaches nothing anyone reads. Within one run, bytes audited, bytes approved
   and bytes merged are one object by identity: the defect is **unrepresentable, not detected** — no
-  hash to compare, no window to keep short (on the preconditions above). A `dispatch_token` (the
+  hash to compare, no window to keep short (on the preconditions cited above). A `dispatch_token` (the
   translate path's precedent) cannot do this because the glossary verdict is a chat reply rather
   than an artifact, so there is no file to carry
   a token; a content hash checked at merge would only report tampering after the fact.
