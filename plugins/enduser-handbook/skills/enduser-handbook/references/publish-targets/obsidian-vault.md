@@ -460,18 +460,32 @@ the one exception to "do all of these" — see its own conditional note below.
           The next run's step 0 finds the line you added and proceeds — but only for a
           `group_title`, target and title the gate accepts — this convergence is why step 0
           always runs first.
-          The gate is checked on the candidate's own isolated two-line array; the next run
-          instead scans the pair inside the real index, so the two can still disagree on
-          exactly one axis — an inert region. A representable pair the operator pastes inside a
-          fenced code block or an HTML comment is blanked by the index view and is reported
-          absent again, repeating the convergent halt above rather than converging — that
-          divergence alone never produces a false completion. A separate, pre-existing gap is
-          not closed by this gate: a chapter row that exists only inside leading frontmatter is
-          reported present by the shipped locator and reaches `unverifiable` in the present-line
-          branch above, where the adapter proceeds — explicit confirmation, not verification, is
-          what stands between that and a silent false completion (the shipped 1.10.0
-          writer/locator view disagreement, tracked separately — see "Nested-list automation
-          limits" below).
+          The gate is checked on the candidate's own isolated two-line array. **By construction,
+          that proves only that the candidate pair is well-formed and would be recognized on its
+          own — it proves nothing about the real index, because it never reads the real index.**
+          Any property of the real file that makes the shipped locator or writer decline can
+          still diverge from what the isolated check found; the cases below are measured
+          illustrations, not a closed list:
+          - an inert region (a fenced code block, an HTML comment) blanks a representable pair,
+            so it is reported absent again — repeating the convergent halt above, never
+            completing;
+          - a chapter row that exists only inside leading frontmatter is reported present by the
+            shipped locator and reaches `unverifiable` in the present-line branch above, where
+            the adapter proceeds — explicit confirmation, not verification, is the guard there
+            (the shipped 1.10.0 writer/locator view disagreement, tracked separately — see
+            "Nested-list automation limits" below);
+          - a real index whose surroundings carry YAML structure, a wildcard, or an ordered list
+            makes the writer decline the whole file on the next run too: once the pair is
+            present, step 0 routes to the present-line branch above, whose own predicate call
+            declines the same way, and the adapter again proceeds on `unverifiable` rather than a
+            repeated halt.
+
+          A future case diverging some other way is expected, not a defect in this documentation
+          — the isolated check was never designed to rule any of this out. **The honest safety
+          statement is narrower than either extreme: this branch never *silently* completes.**
+          Wherever the machinery cannot verify a real-file property, explicit confirmation is
+          what stands in — it is not that a false completion cannot occur, and not that every way
+          it can occur is named above.
        5. **anything else** — the gate rejects the pair — measured causes include an ordinary
           newline inside the title, `|`/`#`/`^`/`]` in the wikilink target, and a `group_title`
           the writer's own bullet grammar refuses (padded with extra whitespace, or carrying
