@@ -618,8 +618,9 @@ to below is the number of attempts, never the cause of the reject.
 **A false REJECT does not cost the same at every site**, and the difference is
 what to read a failed run against. Of the six, exactly ONE recovers
 DETERMINISTICALLY inside the run — the precheck. At every other site the
-trigger is the reply's PHRASING rather than the data, so a re-run is another
-roll of the same die and not a repair:
+trigger is the reply's PHRASING rather than the data, so whatever retry the
+site gets — the citation ladder's next attempt in-run, a later run for the
+other four — is another roll of the same die and not a repair:
 
 - **Precheck** — `resumed` stays false and the batch falls through to the
   dispatch + wait it would have run had no fragment been on disk. Automatic,

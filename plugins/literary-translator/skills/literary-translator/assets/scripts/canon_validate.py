@@ -838,9 +838,12 @@ def _load_batch_bytes(batch_path_str: str):
 
 
 def _write_approved_snapshot(path: Path, raw: bytes) -> None:
-    """CREATE-ONCE publication of the --approve-to snapshot: exactly one writer's
-    bytes ever land at `path`, and every other writer -- later OR concurrent --
-    either matches them (idempotent no-op) or fails closed with them intact.
+    """CREATE-ONCE publication of the --approve-to snapshot, WITHIN ONE RUN: for
+    as long as the directory entry at `path` exists, exactly one writer's bytes
+    live there, and every other writer -- later OR concurrent -- either matches
+    them (idempotent no-op) or fails closed with them intact. The bound on that
+    guarantee is the entry's own lifetime; the run-start wipe is what ends it,
+    and the run-scope note at the foot of this docstring says what that costs.
 
     The snapshot exists so the bytes a citation reviewer audits ARE the bytes the
     merge later consumes. The reviewer audits approved_{i}_attempt_{n}.json and
@@ -851,15 +854,27 @@ def _write_approved_snapshot(path: Path, raw: bytes) -> None:
 
     THE ATOMICITY IS os.link(), NOT AN EXISTENCE CHECK. A check-then-act guard
     (`if path.exists(): refuse; else: os.replace(...)`) closes only the
-    SEQUENTIAL duplicate. Two concurrent FIRST writers both observe an absent
-    path, both write, the later os.replace() silently wins, and neither is told:
+    SEQUENTIAL duplicate. Concurrent FIRST writers all observe an absent path,
+    all write, the last os.replace() silently wins, and NONE of them is told:
     reviewer A audits bytes A, B lands bytes B, A returns CITATIONS_OK, and the
-    merge consumes B. That is not theoretical -- a barrier-synchronised
-    two-process race over this function violated the invariant in 30 of 30
-    iterations while the check-then-act version was in place. os.link() moves the
-    decision into the publication itself: it raises FileExistsError for the loser
-    regardless of what anyone observed beforehand, so the reviewer who audited
-    the winning bytes is the reviewer whose bytes the merge reads.
+    merge consumes B. That is not theoretical, and the test that shows it does
+    not depend on luck: the readiness-handshake race in
+    tests/canon_approve_to.test.py has eight writers each block until every
+    sibling has announced itself, so all of them are at the door before any one
+    enters, which makes the vulnerable interleaving REACHABLE rather than
+    fortuitous. Against a check-then-act publish, several writers are then
+    observed to publish different bytes to the same path -- on more than one
+    machine, at different attempt indexes. HOW MANY, and on WHICH attempt, is
+    scheduling: it varies by machine and by run, which is exactly why that test
+    samples several attempts and refuses to bank one in which no two writers
+    actually overlapped. A single-attempt version of it can go green against a
+    check-then-act publish; the attempt budget and the overlap gate are what make
+    it a test rather than a coin flip.
+
+    os.link() moves the decision into the publication itself: it raises
+    FileExistsError for the loser regardless of what anyone observed beforehand,
+    so the reviewer who audited the winning bytes is the reviewer whose bytes the
+    merge reads.
 
     Writing the payload to a unique tmp name FIRST and linking it into place
     keeps the published file all-or-nothing too: `path` never exists holding a
@@ -871,9 +886,27 @@ def _write_approved_snapshot(path: Path, raw: bytes) -> None:
     Failing toward the already-published copy is the only safe direction: the
     duplicate call is a caller defect and is reported as one, naming the path.
 
-    resume_setup wipes every approved_* file at run start (both the fresh and the
-    resume branch), so an existing snapshot at write time is always a duplicate
-    WITHIN THIS RUN -- never a legitimate resume artifact this would refuse.
+    RUN SCOPE, AND THE PRECONDITION IT RESTS ON. os.link() is create-once only
+    for as long as the directory entry survives, and resume_setup.py's run-start
+    wipe unlinks every approved_* file on BOTH the fresh and the resume branch
+    (its keep rule spares only kind "out" at attempt 0). That wipe is deliberate
+    and right -- it stops a run from adopting an orphaned run dir's stale attempt
+    -- but it is also the one thing that REOPENS this slot, so the guarantee
+    above is bounded to one LIVE run per RUN_ID rather than absolute. Two runs
+    sharing a RUN_ID (resolve_run() hands back the caller's own
+    resume_from_run_id whenever its recorded digest matches) would have the
+    second wipe the first's audited snapshot and then publish different bytes at
+    that path, while the first run's already-issued CITATIONS_OK still refers to
+    the bytes that were deleted. Nothing this function can observe tells that
+    apart from a legitimate fresh start.
+
+    So, by OPERATIONAL PRECONDITION, one RUN_ID has one live run: the
+    orchestrating Workflow runs a single glossary pass per run id and never two
+    concurrently against the same one. This function takes no lock and binds no
+    run identity into the snapshot; it relies on that precondition, the same
+    species of precondition as the single-writer note at the top of this module
+    (canon.json, no locking of its own, orchestrator-serialized). Under it, the
+    bytes the citation reviewer audited are the bytes the merge consumes.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = path.parent / f".{path.name}.tmp.{os.getpid()}.{os.urandom(4).hex()}"

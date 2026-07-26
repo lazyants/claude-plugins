@@ -734,17 +734,18 @@ carried on reviewing an absent draft.
 
 A false hit recovers in-run DETERMINISTICALLY at exactly ONE of the six: the
 precheck, which falls through to the dispatch it would have run anyway —
-correct whatever made it report `ABSENT`. The other five cost at least a
-re-run, and since the trigger is the reply's phrasing rather than the data, a
-re-run is a re-roll rather than a fix. The **citation review is not** among the
-DETERMINISTIC recoverers, despite its retry ladder: the ladder regenerates the
-fragment while the reviewer's wording is what tripped the guard, so a
-regenerated attempt merges only if its fresh reply happens not to re-trip the
-guard, and every attempt can burn on the same narration, ending the run
+correct whatever made it report `ABSENT`. Of the other five, only the citation
+review gets a further attempt inside the run — its ladder's — and the remaining
+four cost a later run; since the trigger is the reply's phrasing rather than the
+data, either retry is a re-roll rather than a fix. The **citation review is
+not** among the DETERMINISTIC recoverers, despite its retry ladder: the ladder
+regenerates the fragment while the reviewer's wording is what tripped the guard,
+so a regenerated attempt merges only if its fresh reply happens not to re-trip
+the guard, and every attempt can burn on the same narration, ending the run
 `citation-review-exhausted` with nothing merged (a genuine rejection names each
-offending item, its `source` URL and the check it failed; a `lastRejection`
-that names none, or reads as an approval, is the guard misfiring and a
-review-prompt defect to report rather than re-run).
+offending item, its `source` URL and the check it failed; a `lastRejection` that
+names none, or reads as an approval, is the guard misfiring and a review-prompt
+defect to report rather than re-run).
 The glossary wait ends the batch and with it the whole
 pass (`reason:"glossary-pass-null"`), mass-translate's review wait blocks that
 segment (`reason:"review-timeout"`), its translate wait returns the non-terminal

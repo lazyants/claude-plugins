@@ -63,16 +63,30 @@ success line then approved the work anyway.
   bytes to an immutable, attempt-scoped `approved_{index}_attempt_{n}.json`, taken from the SAME
   read that validated them — one `read_bytes()` through the new opt-in `_read_json_bytes`, no second
   read, so no window exists between validating and copying. The copy is published CREATE-ONCE: the
-  raw bytes go to a unique temp file, which `os.link()` then atomically links into place, so exactly
-  one writer's bytes can ever land at that path. `_atomic_write_json` is not usable here — it
-  re-serialises, and therefore cannot produce a byte-identical snapshot. `read_text()` is
-  deliberately not on this path: its universal-newline translation would snapshot a CRLF fragment
-  with bytes it never had on disk. On success the stdout JSON line gains an `approved_path` key.
-- **Create-once is what makes a duplicate approval harmless.** A second `--check-batch --approve-to`
-  at the same path — a repeated call, or two overlapping reviewer dispatches for one batch/attempt —
-  cannot replace bytes a reviewer may already have audited: identical bytes are an idempotent no-op,
-  DIFFERENT bytes fail closed with the audited copy byte-untouched and the offending path named. A
-  filesystem without hard links fails closed too, rather than falling back to an overwriting write.
+  raw bytes go to a unique temp file, which `os.link()` then atomically links into place, so for as
+  long as that snapshot exists no second writer can land different bytes at its path.
+  `_atomic_write_json` is not usable here — it re-serialises, and therefore cannot produce a
+  byte-identical snapshot. `read_text()` is deliberately not on this path: its universal-newline
+  translation would snapshot a CRLF fragment with bytes it never had on disk. On success the stdout
+  JSON line gains an `approved_path` key.
+- **Create-once is what makes a duplicate approval harmless — within one run.** A second
+  `--check-batch --approve-to` at the same path — a repeated call, or two overlapping reviewer
+  dispatches for one batch/attempt — cannot replace bytes a reviewer may already have audited:
+  identical bytes are an idempotent no-op, DIFFERENT bytes fail closed with the audited copy
+  byte-untouched and the offending path named. A filesystem without hard links fails closed too,
+  rather than falling back to an overwriting write.
+- **That guarantee lasts exactly as long as the snapshot does, so ONE LIVE RUN PER `RUN_ID` is an
+  operational precondition.** `os.link()` can only refuse while the directory entry exists, and
+  `resume_setup.py` removes it at start-up: `_wipe_stale_glossary_fragments` unlinks every
+  `approved_*` fragment (its keep rule spares `out_*_attempt_0` only, and only on a resume), while a
+  digest-MATCH resume reuses the SAME `RUN_ID` and therefore the same `glossary/runs/<RUN_ID>/`
+  directory. So a second run started under a live run's `RUN_ID` wipes that run's audited snapshot
+  and reopens the slot for different bytes, which the first run's already-issued `CITATIONS_OK` would
+  then merge. The wipe is deliberate and stays — it exists so a fresh run cannot adopt an orphaned
+  directory's stale attempt. This release scopes the claim rather than adding a lock: exactly as with
+  `canon.json`'s single writer, the property holds by OPERATIONAL PRECONDITION — the orchestrator
+  runs one glossary pass per `RUN_ID` at a time — and no path here does any file locking of its own.
+  Under that precondition the bytes audited are the bytes merged.
 - **The ordering is the whole fix.** Snapshotting *after* the audit would close nothing: a producer
   sharing the RUN_ID can replace validated-bytes-A with structurally-valid-bytes-B between the
   reviewer's read and the copy, so the snapshot would capture B while the reviewer approved A. The
@@ -201,9 +215,11 @@ success line then approved the work anyway.
 - **A false reject costs differently at every site**, which is what to read a failed run against.
   **Exactly one of the six recovers *deterministically* inside the run: the precheck.** It forfeits
   its resume-skip and runs the dispatch + wait it would otherwise have skipped — a genuine repair,
-  because that path is correct regardless of *why* the precheck reported `ABSENT`. The other five cost
-  at least a re-run, and at every one of them the trigger is the reply's PHRASING rather than the data,
-  so a re-run — the operator's or an automatic retry — is another roll of the same die and not a fix.
+  because that path is correct regardless of *why* the precheck reported `ABSENT`. Of the other five,
+  only the citation review gets a further shot inside the run — its ladder's automatic next attempt —
+  and the remaining four cost a LATER run. At all five the trigger is the reply's PHRASING rather than
+  the data, so whichever retry the site gets, the ladder's or the operator's, is another roll of the
+  same die and not a fix.
 - **The citation review is NOT *reliably* self-recovering**, which is weaker than what its retry
   ladder suggests. The ladder can clear a misfire inside the run — a regenerated attempt whose
   reviewer reply happens not to re-trip the guard merges normally, on the same run — but only by
