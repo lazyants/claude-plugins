@@ -775,10 +775,24 @@ def _load_senses_or_raise(senses_path: Path, allow_absent: bool) -> "SensesResul
 
 
 def _load_batch(batch_path_str: str) -> list:
-    batch_path = Path(batch_path_str)
-    doc = _read_json_file(batch_path, "batch file")
-    if not isinstance(doc, list):
-        raise CanonValidationError(f"batch file at {batch_path} does not contain a JSON array")
+    """The PARSED fragment, for every mode that only reads one (--merge-batches,
+    --verify-merged, legacy --batch, and --check-batch without --approve-to).
+
+    Reads BYTES, via _load_batch_bytes with the raw copy discarded. NOT for
+    byte-identity -- read_text() and read_bytes() parse a fragment to the same
+    document either way, since a raw CR is invalid JSON inside a string and mere
+    inter-token whitespace outside one. The reason is error shape: read_text()
+    raises UnicodeDecodeError on a non-UTF-8 fragment and _read_json_file does
+    not catch it (FileNotFoundError, OSError and JSONDecodeError only --
+    UnicodeDecodeError is a ValueError), so a REACHABLE failure escaped into
+    main()'s defensive catch-all as "unexpected error: 'utf-8' codec can't decode
+    byte ..." instead of this module's own failure naming the offending file.
+
+    Routing every fragment read through one path has a welcome side effect: the
+    bytes the citation reviewer audits and the document the merge parses now come
+    off the same read, so the snapshot invariant needs no caveat.
+    """
+    _, doc = _load_batch_bytes(batch_path_str)
     return doc
 
 
@@ -788,9 +802,16 @@ def _read_json_bytes(path: Path, what: str):
     copies the file writes the exact bytes it validated -- no second read, no
     TOCTOU. read_text() must NOT be used for the copy: it applies universal-
     newline translation, so a CRLF fragment would be snapshotted with different
-    bytes than it had on disk. The three existing _read_json_file callers are
-    deliberately left on the text path; only the --approve-to snapshot needs
-    byte fidelity."""
+    bytes than it had on disk.
+
+    Every FRAGMENT read now comes through here, via _load_batch_bytes: the
+    --approve-to snapshot because it COPIES bytes, and the read-only fragment
+    consumers because read_text() lets a non-UTF-8 fragment escape as an
+    unhandled UnicodeDecodeError instead of a named failure (see _load_batch).
+    _load_canon and _load_source_forms_manifest deliberately stay on the text
+    path -- neither copies bytes. The same UnicodeDecodeError leak is reachable
+    there for a hand-corrupted canon.json or manifest; closing that is separate
+    debt, deliberately not smuggled into this change."""
     try:
         raw = path.read_bytes()
     except FileNotFoundError:
@@ -819,11 +840,64 @@ def _load_batch_bytes(batch_path_str: str):
 def _atomic_write_bytes(path: Path, raw: bytes) -> None:
     """Atomic raw-bytes write -- the byte-preserving counterpart to
     _atomic_write_json (which re-serialises and so cannot be used for a
-    byte-identical snapshot)."""
+    byte-identical snapshot). The raw primitive: it overwrites unconditionally,
+    so the --approve-to snapshot goes through _write_approved_snapshot instead."""
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = path.parent / f".{path.name}.tmp.{os.getpid()}"
     tmp_path.write_bytes(raw)
     os.replace(tmp_path, path)
+
+
+def _write_approved_snapshot(path: Path, raw: bytes) -> None:
+    """WRITE-ONCE-PER-CONTENT wrapper around _atomic_write_bytes, for the
+    --approve-to snapshot only.
+
+    The snapshot exists so the bytes a citation reviewer audits ARE the bytes the
+    merge later consumes. An unconditional atomic write cannot carry that: the
+    reviewer audits approved_{i}_attempt_{n}.json and the merge is pointed at the
+    same path, so a SECOND --approve-to landing DIFFERENT bytes there -- a
+    duplicate STEP-1 call, or two overlapping reviewer dispatches for the same
+    batch/attempt, both recurring orchestration failure modes -- would silently
+    hand the merge a fragment nobody reviewed, with the audited copy gone and
+    nothing reporting it.
+
+    So: identical bytes already present -> idempotent no-op, because a plainly
+    retried step must stay safe. DIFFERENT bytes already present -> fail closed,
+    naming the path, leaving the ORIGINAL (audited) bytes exactly where they are.
+    Failing toward the already-reviewed copy is the only safe direction; the
+    duplicate call is a caller defect and is reported as one.
+
+    Scoping this to a wrapper rather than to _atomic_write_bytes itself is
+    deliberate: every other atomic write in this module (canon.json) is a
+    legitimate rewrite of a mutable file, and a write-once guard there would be
+    wrong.
+
+    resume_setup wipes every approved_* file at run start, so an existing
+    snapshot at write time is always a duplicate WITHIN THIS RUN -- never a
+    legitimate resume artifact this would refuse to overwrite.
+    """
+    if path.exists():
+        try:
+            existing = path.read_bytes()
+        except OSError as e:
+            raise CanonValidationError(
+                f"--approve-to target {path} already exists but could not be "
+                f"read to compare against the fragment just validated: {e}",
+                offending=[str(path)],
+            )
+        if existing == raw:
+            return
+        raise CanonValidationError(
+            f"--approve-to refuses to overwrite the approved snapshot already at "
+            f"{path}: its bytes differ from the fragment just validated, so a "
+            f"second, DIFFERENT fragment is being approved into a slot a citation "
+            f"reviewer may already have audited. The original bytes are left "
+            f"untouched, so the merge still consumes exactly what was reviewed. "
+            f"Fix the duplicate --check-batch --approve-to call (or the "
+            f"overlapping reviewer dispatch) -- never re-point this path.",
+            offending=[str(path)],
+        )
+    _atomic_write_bytes(path, raw)
 
 
 def _load_source_forms_manifest(manifest_path_str: str) -> list:
@@ -1472,11 +1546,13 @@ def run_check_batch(
         "source_forms": len({item.get("source_form") for item in batch if isinstance(item, dict)}),
     }
     # Snapshot ONLY after every check above has passed, so a rejected fragment
-    # never leaves an approved copy. raw_bytes is exactly what was validated.
+    # never leaves an approved copy. raw_bytes is exactly what was validated, and
+    # _write_approved_snapshot refuses to put DIFFERENT bytes over a snapshot a
+    # reviewer may already have audited (write-once per content).
     if approve_to is not None:
         if raw_bytes is None:  # unreachable: set together with approve_to above
             raise CanonValidationError("internal: --approve-to set but fragment bytes unread")
-        _atomic_write_bytes(Path(approve_to), raw_bytes)
+        _write_approved_snapshot(Path(approve_to), raw_bytes)
         result["approved_path"] = approve_to
     return result
 
