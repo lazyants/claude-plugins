@@ -699,6 +699,184 @@ def test_fix_decorated_draft_missing_still_triggers_probe(tmp_path):
     assert out["result"]["converged"] == []
 
 
+# ---------------------------------------------------------------------------
+# 1.16.0 -- site D (runRound's "fix:" + seg + ":r" + round) in its GLUED
+# shapes: the BEHAVIOURAL half of the containment reversal.
+#
+# The five READY/TIMEOUT sites take a FAIL sentinel, so gluing one fakes a
+# PASS. Site D runs the other way round: "DRAFT_MISSING <seg>" is its OK
+# sentinel, so glue cannot fake a pass -- it makes a GENUINE report go
+# UNRECOGNIZED. Under whole-trimmed-line equality the branch is skipped,
+# runRound returns terminal:false, the loop carries on to the mandatory final
+# review, and this harness answers that review CLEAN -- so the segment is
+# reported CONVERGED over a draft the fix agent just said was missing. That
+# false GREEN is the observable this file asserts against.
+#
+# WHY THESE CASES EXIST. Site D's other locks are TEXTUAL, and a rewrite can
+# satisfy every one of them while reopening the gap:
+# tests/bounded_poll_present.test.py pins that the branch is keyed on
+# mentionedAnywhere() and that no sentinelVerdict call survives in runRound;
+# tests/rejected_anywhere_parity.test.py pins that mentionedAnywhere() is a
+# delegation rather than a second containment implementation;
+# tests/transient_failure_recoverable.test.py pins what the branch DOES once
+# entered. All of them hold for a version that keeps a mentionedAnywhere() call
+# in the source and then decides the branch with a hand-rolled whole-line
+# comparison. Until these cases, nothing EXECUTED site D's decision on a glued
+# reply -- the other five sites each had such a case
+# (tests/mass_translate_sentinel_containment.test.py), this one did not.
+#
+# NO COUNT IS PUBLISHED HERE, deliberately, and none should be added: the
+# exhaustive per-character sweeps and their numbers belong to their own named
+# populations -- ALL_GLUES (15 items,
+# tests/mass_translate_sentinel_containment.test.py) and GLUE_CHARS (16 items,
+# tests/glossary_citation_review.test.py). The six characters below are a
+# deliberate SUBSET, three from each side of the trim() partition, chosen so
+# both shapes' opposite mechanisms are exercised; they are not a third
+# population for anyone to quote a ratio over.
+# ---------------------------------------------------------------------------
+
+LF = chr(0x0A)
+
+FIX_PROSE = "I ran draft_ready.py and it reports the canonical is absent."
+DRAFT_MISSING_SEG01 = "DRAFT_MISSING seg01"
+
+# Built with chr() -- never typed as the character itself and never as a
+# backslash-u escape, which a careless paste silently replaces with the
+# character, invisible in every later diff of this file.
+#
+# Partitioned by whether JS trim() strips the character, because that split is
+# exactly what decides the sentinel-alone shape below. MEASURED, not eyeballed:
+# U+2028 IS stripped, while U+0085 NEL -- the character one would most
+# naturally reach for as a line boundary -- is NOT in the JS WhiteSpace set.
+FIX_GLUE_TRIM_STRIPPED = [
+    ("space", chr(0x20)),
+    ("nbsp_u00a0", chr(0xA0)),
+    ("lsep_u2028", chr(0x2028)),
+]
+FIX_GLUE_TRIM_PRESERVED = [
+    ("nel_u0085", chr(0x85)),
+    ("zwsp_u200b", chr(0x200B)),
+    ("letter_x", "x"),
+]
+FIX_GLUE_BOTH = FIX_GLUE_TRIM_STRIPPED + FIX_GLUE_TRIM_PRESERVED
+
+
+def _prose_shares_the_sentinels_line(glue: str) -> str:
+    """prose + GLUE + sentinel -- the everyday shape. trim() only reaches a
+    line's two ends, so it never gets at glue sitting BETWEEN the prose and the
+    sentinel: the line equals nothing and only containment sees the report."""
+    return FIX_PROSE + glue + DRAFT_MISSING_SEG01
+
+
+def _sentinel_alone_on_its_line(glue: str) -> str:
+    """prose + LF + GLUE + sentinel -- the sentinel is alone on its own line, so
+    the outcome turns entirely on whether trim() can strip GLUE."""
+    return FIX_PROSE + LF + glue + DRAFT_MISSING_SEG01
+
+
+def _run_with_fix_reply(tmp_path, reply) -> dict:
+    """Round 1's fix call answered with `reply`; every other call keeps its
+    happy-path default -- including the mandatory final review, which answers
+    CLEAN. That default is load-bearing: it is what turns an unrecognised
+    report into a visible false CONVERGENCE rather than a silent no-op."""
+    res = run(
+        tmp_path=tmp_path, segs=["seg01"],
+        overrides={
+            "review-read:seg01:r1": _non_clean_review(),
+            "artifact-check:seg01:r1": {"match": True},
+            "fix:seg01:r1": reply,
+        },
+    )
+    assert res["ok"], res["stderr"]
+    return res["out"]
+
+
+def _assert_report_reached_the_draft_probe(out: dict, shape_desc: str) -> None:
+    labels = [c["label"] for c in out["calls"]]
+    assert "fix:seg01:r1" in labels, (
+        f"the run never reached round 1's fix call, so this case says nothing "
+        f"about site D -- the overrides or the label shape moved. Calls: {labels}"
+    )
+    assert "draft-probe:seg01" in labels, (
+        f"a genuine DRAFT_MISSING report with {shape_desc} went UNRECOGNIZED: the "
+        f"branch never probed draftPresentAndValid, so runRound returned "
+        f"terminal:false and the loop carried on as an ordinary review round over "
+        f"a draft the fix agent had just said was missing. Calls: {labels}"
+    )
+    assert out["result"]["converged"] == [], (
+        f"the segment must NOT be reported converged. With the report "
+        f"unrecognised the round falls through, the mandatory final review "
+        f"answers clean, and the batch banks a draft that was never there. "
+        f"Result: {out['result']}"
+    )
+    assert out["result"]["failed"] == [
+        {"seg": "seg01", "converged": False, "reason": "fix-call-failed", "rounds": 1}
+    ], (
+        f"expected the transient fix-call-failed end for round 1 (this harness's "
+        f"probe answers present:true, so a recognised report routes there and "
+        f"auto-redispatches next run); got {out['result']}"
+    )
+
+
+@pytest.mark.parametrize("glue_name,glue", FIX_GLUE_BOTH, ids=[n for n, _ in FIX_GLUE_BOTH])
+def test_fix_draft_missing_glued_to_prose_still_reaches_the_probe(tmp_path, glue_name, glue):
+    """Site D, prose sharing the sentinel's line -- CONTAINMENT-ONLY.
+
+    A plain SPACE is enough. split("\\n") breaks on LF and nothing else, so any
+    character between the prose and the sentinel keeps them on one line, and
+    trim() cannot reach it there: whole-line equality misses the report at every
+    one of these characters, on both sides of the trim() partition. Only
+    mentionedAnywhere()'s containment test sees it.
+
+    This is the case codex's mutant reopens -- a mentionedAnywhere() call left
+    in the source to satisfy the structural locks, with the branch actually
+    decided by a hand-rolled whole-line comparison. Every other test in the
+    plugin stays green under it."""
+    out = _run_with_fix_reply(tmp_path, _prose_shares_the_sentinels_line(glue))
+    _assert_report_reached_the_draft_probe(
+        out, f"prose on the sentinel's own line, glued by {glue_name}"
+    )
+
+
+@pytest.mark.parametrize(
+    "glue_name,glue", FIX_GLUE_TRIM_PRESERVED, ids=[n for n, _ in FIX_GLUE_TRIM_PRESERVED]
+)
+def test_fix_draft_missing_alone_behind_unstrippable_glue_still_reaches_the_probe(
+    tmp_path, glue_name, glue
+):
+    """Site D, sentinel alone on its line -- the half that STILL needs
+    containment. The sentinel has its own line, but one character trim() does
+    not strip sits in front of it, so the trimmed line still equals nothing."""
+    out = _run_with_fix_reply(tmp_path, _sentinel_alone_on_its_line(glue))
+    _assert_report_reached_the_draft_probe(
+        out, f"the sentinel alone on its line behind {glue_name}, which trim() does not strip"
+    )
+
+
+@pytest.mark.parametrize(
+    "glue_name,glue", FIX_GLUE_TRIM_STRIPPED, ids=[n for n, _ in FIX_GLUE_TRIM_STRIPPED]
+)
+def test_fix_draft_missing_alone_behind_trimmable_glue_reaches_the_probe_unaided(
+    tmp_path, glue_name, glue
+):
+    """THE NEGATIVE CONTROL for the two tests above -- the same shape, the other
+    side of the trim() partition.
+
+    trim() strips this glue, so the line genuinely EQUALS the sentinel and
+    whole-line equality recognises the report on its own: these rows must be
+    green with the containment call AND without it. They are what shows the
+    cases above track the real mechanism -- whole-line equality modulo trim() --
+    rather than merely detecting that a containment call exists. If a future
+    edit makes these rows depend on containment, the mechanism has changed and
+    the partition this section is built on is no longer true."""
+    out = _run_with_fix_reply(tmp_path, _sentinel_alone_on_its_line(glue))
+    _assert_report_reached_the_draft_probe(
+        out,
+        f"the sentinel alone on its line behind {glue_name} -- which trim() DOES "
+        f"strip, so this row must hold with no containment involved at all",
+    )
+
+
 def test_review_wait_non_terminal_quoted_ready_still_times_out(tmp_path):
     """5a (round-2 codex finding, MAJOR): READY appearing on a NON-final line
     while later prose explicitly disavows it must NOT be accepted. This is

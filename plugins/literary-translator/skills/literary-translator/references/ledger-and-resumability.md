@@ -817,7 +817,11 @@ remain**:
    status anymore.
 1. **Draft-missing** — a fix round's `DRAFT_MISSING` branch fires, AND
    (1.3.6/#131) the `draftPresentAndValid` probe confirms the draft is
-   genuinely absent/invalid (`present === false`):
+   genuinely absent/invalid (`present === false`). **1.16.0:** that branch is
+   entered on CONTAINMENT (`mentionedAnywhere()`), not whole-line equality, so
+   it now also fires on a reply that merely mentions the sentinel — the probe
+   is what keeps this terminal write honest, since it is the probe and not the
+   branch that decides the draft is really gone:
    `recordLedgerPrompt(seg, {status:'blocked', reason:'draft-missing'})`.
    Matches the real reference's own `DRAFT_MISSING` handling, refined by
    1.3.6 to require the probe's confirmation first — a probe result of

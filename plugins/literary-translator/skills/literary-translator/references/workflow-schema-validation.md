@@ -129,7 +129,7 @@ fire-and-forget call:
 ```
 agent(translateDrivePrompt(seg), {effort: 'low'})        // launches codex_job.py --kind translate DETACHED (codex at --effort <engine.effort>); returns "DISPATCHED <seg> <DISP>"
 agent(reviewDrivePrompt(seg, round), {effort: 'low'})    // launches codex_job.py --kind review DETACHED (codex at --effort <engine.effort>)
-agent(batchDispatchPrompt(batch), {agentType: 'codex:codex-rescue', effort: EFFORT})
+agent(batchDispatchPrompt(batch, attempt, rejectionReason), {agentType: 'codex:codex-rescue', effort: EFFORT})
 ```
 
 (`EFFORT` = the template's own `engine.effort` const, #197 — see

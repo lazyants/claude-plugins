@@ -1,5 +1,301 @@
 # Changelog
 
+## 1.16.0 — 2026-07-26
+
+Adds a bounded pre-merge citation-review stage to the W3 glossary pass. Under
+`glossary.research_mode: live`, a batch can now only become READY once the `source` citations
+its `basis: "established"` entries carry have been reviewed — while the fragment is still
+rewritable, before anything reaches `canon.json`. The approval binds the reviewed **bytes**, not
+the path they sat at: the reviewer audits a create-once, attempt-scoped snapshot taken at the moment
+the fragment validated, and the merge consumes that same snapshot — so neither a producer still
+rewriting the attempt path nor a resumed run finding a previous run's fragment there can put
+unreviewed bytes into `canon.json`. Also fixes a false approval in the sentinel
+comparison the new stage shares with the glossary pass's precheck and wait and with W5
+mass-translate's two waits: a failure sentinel glued to prose could be skipped, and a trailing clean
+success line then approved the work anyway.
+
+### Added — pre-merge citation review gates a glossary batch becoming READY
+
+- Under `glossary.research_mode: live` the glossary pass resolves some names as
+  `basis: "established"` and attaches a `source` URI. Nothing reviewed those citations. The batch's
+  own self-check proves the fragment's shape, the offline backstop, and its exact candidate coverage
+  against the manifest — it does not, and cannot, judge whether a cited source actually supports the
+  resolution it is attached to. The fragment went straight into the merge, so an unreviewed citation
+  was frozen into `canon.json` and the run reported a clean, disk-verified pass: a false green whose
+  green came from checks that were never looking at the citation. `batchStep` now runs a citation
+  review before a batch is allowed to become READY.
+- The review has to be **pre**-merge, because a merged canon row is immutable in practice rather than
+  merely awkward to change. `canon_validate.py --verify-merged` is disk-independent and writes
+  nothing; re-merging a different resolution for the same `source_form` is rejected outright as an
+  `entries{}` collision instead of superseding the old row; and `canon_adjudication_audit.py` only
+  blocks, never repairs. Every post-merge surface can therefore report the problem and none can fix
+  it. The Workflow previously ran every batch and then merged in the same call, so there was no pause
+  anywhere between "the fragment was written" and "the row is frozen" at which anything could
+  intervene.
+- A rejected citation regenerates that batch's fragment to a fresh attempt-scoped path before any
+  merge, so a retry neither overwrites nor is confused with the artifact that was rejected. What
+  keeps the rejected bytes out of the merge is not that path, though — it is that the merge is
+  handed only the approved snapshot of an attempt the reviewer passed (next section). A rejected
+  attempt's snapshot is never handed to the merge and sits at a different, attempt-scoped path the
+  merge never names. Retries are bounded by `MAX_CITATION_RETRIES`.
+- Exhausting that bound returns a distinct `citation-review-exhausted` result and the pass does not
+  merge, joining `batch-too-large` / `glossary-pass-null` / `fragment-check-failed` /
+  `verify-failed` as a named no-merge reason. Nothing falls through into the merge, and the operator
+  message for that reason names BOTH causes that can produce it — citations that genuinely could not
+  be verified, and the containment guard tripping on the reviewer's own phrasing — because they need
+  opposite responses (see the false-reject bullets below).
+- No-op under `glossary.research_mode: offline`, where `basis: "established"` is forbidden outright —
+  there is no citation to review, and an offline run pays nothing for the stage.
+
+### Fixed — the merge consumes the exact bytes the reviewer approved, not a path
+
+- As first built, the approval bound a **path**, not the bytes at that path — which defeated the
+  guarantee the stage above exists to make, without any adversary. The batch dispatch is
+  `agentType: "codex:codex-rescue"` and the codex job outlives the awaited call (which is *why* the
+  bounded wait poll exists at all), and its own prompt instructs an iterate-until-success rewrite
+  loop against that exact attempt path — so several atomic renames onto the reviewed path are
+  normal, expected behaviour rather than a freak race. `pipeline()` then waits for EVERY batch
+  before the single `--merge-batches`, so an approved fragment sits un-rechecked while its siblings
+  climb their retry ladders, a window this release lengthens by up to ~3x. `run_merge_batches`
+  fresh-reads from disk and has no notion of the citation review; `--verify-merged` re-reads too,
+  but checks shape and coverage, never citations.
+- `canon_validate.py --check-batch <fragment> --approve-to PATH` now snapshots the exact validated
+  bytes to an attempt-scoped `approved_{index}_attempt_{n}.json`, taken from the SAME read that
+  validated them — one `read_bytes()` through the new opt-in `_read_json_bytes`, no second read, so
+  no window exists between validating and copying. The copy is published CREATE-ONCE: the raw bytes
+  go to a unique temp file, which `os.link()` then atomically links into place, so a second
+  `--approve-to` cannot publish over it — identical bytes are an idempotent no-op, different bytes
+  fail closed with the audited copy byte-untouched. `_atomic_write_json` is not usable here — it
+  re-serialises, and therefore cannot produce a byte-identical snapshot. `read_text()` is
+  deliberately not on this path: its universal-newline translation would snapshot a CRLF fragment
+  with bytes it never had on disk. On success the stdout JSON line gains an `approved_path` key.
+- **The guarantee is bounded, and this release scopes the claim rather than adding a lock.**
+  `os.link()` makes CREATION exclusive; it does not make the published file immutable. So "the bytes
+  audited are the bytes merged" holds within one run and by OPERATIONAL PRECONDITION — not by any
+  lock and not by a run-identity binding, neither of which this release adds. What those
+  preconditions are, and what ends the guarantee, are stated once, and only once, in
+  `references/canon-and-glossary.md`,
+  "What the approved snapshot guarantees, and the preconditions it rests on".
+- **The ordering is the whole fix.** Snapshotting *after* the audit would close nothing: a producer
+  sharing the RUN_ID can replace validated-bytes-A with structurally-valid-bytes-B between the
+  reviewer's read and the copy, so the snapshot would capture B while the reviewer approved A. The
+  snapshot is therefore taken the moment the fragment validates; the reviewer is pointed at the
+  snapshot and never reads the mutable `out_*` attempt path again; on `CITATIONS_OK` the merge
+  consumes that same snapshot. The codex rewrite loop targets `out_*_attempt_*` only, so a
+  post-snapshot rewrite reaches nothing anyone reads. Within one run, bytes audited, bytes approved
+  and bytes merged are one object by identity: the defect is **unrepresentable, not detected** — no
+  hash to compare, no window to keep short (on the preconditions cited above). A `dispatch_token` (the
+  translate path's precedent) cannot do this because the glossary verdict is a chat reply rather
+  than an artifact, so there is no file to carry
+  a token; a content hash checked at merge would only report tampering after the fact.
+- **Fail-closed, and this is what attempt-scoping buys.** "No reviewer ever approved the winning
+  attempt" means the specific `approved_{index}_attempt_{n}.json` the merge was handed does not
+  exist, so the merge dies on a missing file before any `canon.json` write. An earlier, rejected
+  attempt's snapshot sits at a different path the merge never names, so it cannot satisfy the merge
+  either — exactly the hole a single, non-attempt-scoped `approved_{index}` would have left open.
+- `--approve-to` is **refused loudly** by every mode that does not review exactly one pre-merge
+  fragment, through a new `MODE_SPECS` column rather than a second hand-maintained subset:
+  `--merge-batches`, `--verify-merged` and the legacy `--batch` single-fragment merge all carry
+  "only `--check-batch` snapshots the single fragment it reviews pre-merge", `--init` and
+  `--restamp-derivation` carry "it reads no fragment", and validate-only has no `MODE_SPECS` row at
+  all and so carries a hand-written refusal — the same loud-refusal design
+  `--expect-source-forms-file` already uses. Listing it in
+  `NON_MODE_DESTS` instead would have hidden the flag from the drift test rather than rejected it,
+  and a silently ignored `--approve-to` would leave a stale snapshot able to satisfy a later merge.
+- **`offline` is an explicit exception, not a global rename.** Under `research_mode: offline`,
+  `basis: "established"` is forbidden, no citation exists, no reviewer runs and no snapshot is
+  produced — so the merge consumes the **snapshot** path under `live` and the **attempt** path under
+  `offline`. A blanket "the merge always consumes approved paths" would make every offline merge
+  fail on a missing file.
+- The preflight estimate is unaffected: the approval runs inside the citation reviewer's existing
+  turn and adds no `agent()` call, so the per-batch worst case stays
+  `1 + 3 * (MAX_CITATION_RETRIES + 1)` and Migration item 3 below stands as written.
+
+### Fixed — a run no longer audits a previous run's fragment (resume freshness)
+
+- `fragmentPath()`'s comment asserted that attempt n+1's wait "polls a path that does not exist
+  until the fresh dispatch atomically renames it into place". That held within one run and was false
+  across runs: `resume_setup.py` reuses the SAME `RUN_ID` when the input digest matches, `RUN_DIR`
+  derives from `RUN_ID`, and nothing anywhere deleted fragments. A prior run's
+  `out_3_attempt_1.json` therefore sat at exactly the path the new run would poll; `--check-batch`
+  has no mtime, no token and no freshness notion at all, so it passed on those bytes immediately,
+  the wait returned READY before the fresh dispatch had written anything, and the citation reviewer
+  audited the previous run's fragment. The resume door defeated the new stage's guarantee before the
+  stage ever ran.
+- `resume_setup.py`'s `write_run_dir()` glossary branch — the only place that knows
+  `${durable_root}/glossary/runs/<RUN_ID>/` — now wipes stale fragments before the run starts,
+  conditioned on the digest-match `resume` flag it already receives:
+  1. **Fresh run:** wipe ALL `out_*` and `approved_*` attempts, attempt 0 included. Fresh-ID
+     uniqueness only checks `runs/<RUN_ID>`, not the separate `glossary/runs/<RUN_ID>` tree, so an
+     orphaned glossary run directory can outlive its identity directory and then collide on the
+     one-second timestamp. A stale attempt 0 surviving there would be resume-skipped and audited
+     stale, merging canonicalization decisions the citation review — which examines only
+     `established` citations — never looks at. A fresh run trusts nothing on disk.
+  2. **Resume:** wipe `n >= 1` attempts and ALL approved snapshots, keep
+     `out_{index}_attempt_0.json`. The resume-skip optimisation depends wholly on attempt 0
+     surviving, and a resume-skipped attempt-0 fragment is citation-reviewed either way, so keeping
+     it is safe HERE precisely because the `RUN_ID` matched by digest. Snapshots are never kept: the
+     review of whichever fragment wins this run re-produces the one the merge will name.
+- The condition is load-bearing rather than cosmetic — "keep attempt 0 always" turns the fresh-run
+  case red while the resume case stays green. Cost of the fresh-run wipe is at most one re-dispatch
+  per batch on the rare orphan collision, never a wrong result.
+- `references/orchestration-and-batching.md` and `references/canon-and-glossary.md` carried the same
+  false invariant in prose ("a stale fragment from a prior run simply sits at a different,
+  unreferenced path" — true across `RUN_ID`s, false on the digest-match resume that reuses the ID)
+  and are corrected to say what makes the attempt path fresh now.
+
+### Fixed — a sentinel glued to prose is no longer missed (glossary + mass-translate)
+
+- `sentinelVerdict()` (introduced by #308, which converted these sites from whole-string exact
+  matching to line matching) decides on whole-LINE equality: it treats a reply as a failure only when
+  the failure sentinel's line, after `String.prototype.trim()`, equals the sentinel exactly. Nothing
+  else may share that line except what `trim()` strips. In the realistic failure shape — an agent
+  writing its finding and then the sentinel on the SAME line — the prose is on that line regardless,
+  so any glue character hides the sentinel, a plain space included: **15 of 16 over `GLUE_CHARS` in
+  `tests/glossary_citation_review.test.py`, prose sharing the sentinel's line**. Only a line feed puts
+  the sentinel on a line of its own, CRLF being safe for the same reason. With the sentinel ALONE on
+  its line the same table splits — **7 of 16 over `GLUE_CHARS` in
+  `tests/glossary_citation_review.test.py`, sentinel alone on its line** — because `trim()` reaches a
+  line's two ends and strips 9 of the 16 (space, tab, VT, FF, CR, NBSP, U+2028, U+2029, and LF by
+  splitting); the 7 survivors are the C0 separators U+001C–U+001F, NEL U+0085, a zero-width space and
+  any ordinary character. Note U+0085 is NOT `trim()`-strippable in JS while U+2028 and U+2029 ARE, so
+  the strippable set cannot be reasoned about by eye. Every gluing count in this release names both its
+  SHAPE and its SET for that reason: the same guard measured over a different table or a different
+  reply shape yields a different, equally correct number, and a bare count reads as a contradiction.
+  The end state is the same either way — the failure scan skips the sentinel, a trailing clean success
+  line then approves, and a reply carrying BOTH verdicts silently resolves to the approving one.
+- This is the false-GREEN dual of #308, which fixed the false-RED direction of the same comparison
+  (a decorated but genuine success reply being read as a timeout). #308 closed over-strictness at
+  these sites; this closes the under-strictness that its line-equality rule left open.
+- **Five of the six guarded sites, across two templates**, short-circuit to REJECT when
+  `rejectedAnywhere(reply, failSentinel)` finds the failure sentinel anywhere in the reply as a plain
+  substring, evaluated before `sentinelVerdict()` is consulted at all: in `glossary-pass-wf.template.js`
+  the resume precheck, the readiness wait and the new citation review; in
+  `mass-translate-wf.template.js` the translate wait and the review wait. Substring containment is
+  strictly easier to satisfy than line equality, so the guard can only ADD rejections and never remove
+  one; the residual failure direction is fail-safe by construction rather than by care.
+- **A sixth site, mass-translate's `DRAFT_MISSING` fix check, is guarded in the OPPOSITE direction.**
+  #228 built that site on whole-line equality deliberately, so that a fix reply *discussing*
+  `DRAFT_MISSING` could not be mistaken for a report of one — and measurement confirms that protection
+  did work. It was overturned anyway, because at this site `DRAFT_MISSING` is the OK sentinel, not the
+  failure sentinel. Gluing there does not fake a pass; it makes a GENUINE missing-draft report go
+  unrecognised, so `runRound` falls through to `terminal: false` and the pipeline silently continues
+  reviewing a draft the fix agent just said was absent. `runRound` therefore no longer calls
+  `sentinelVerdict()` at all and is keyed on a new `mentionedAnywhere(reply, sentinel)` wrapper that
+  delegates to `rejectedAnywhere()`. Containment subsumes the old rule — any reply whose last trimmed
+  line equals the sentinel also contains it — so the old check is strictly narrower, not merely
+  redundant. The two directions carry different helper names on purpose: `rejectedAnywhere` takes a
+  FAILURE sentinel, so a hit biases toward REJECTING, while `mentionedAnywhere` takes a sentinel a
+  caller is trying not to MISS, so a hit biases toward ACTING. "Mentioned" rather than "reported"
+  because the check genuinely cannot tell a report from a passing textual mention, and its one caller
+  accepts that collision knowingly. The accepted cost is that false RED: a fix reply that merely
+  discusses the sentinel now lands in the branch too, where `draftPresentAndValid()` probes, finds the
+  draft present, and returns `reason: "fix-call-failed"` with NO terminal ledger write — the
+  `in_progress` fragment stays the durable record and the segment auto-redispatches next run. One
+  wasted segment re-run beats silently reviewing an absent draft, the same trade the wait sites make.
+- Two false REDs are accepted in exchange, both benign relative to the false GREEN — but neither is
+  *bounded* in the sense that word suggests: what a bound applies to here is the retry ladder, not
+  the cause, and the two are not the same variable (see the false-reject cost bullets below). A reply
+  that merely mentions the failure sentinel while approving now rejects. And a sentinel can be a
+  substring of a longer-indexed sibling — `ABSENT 1` occurs inside `ABSENT 10` — so a precheck or wait
+  reply quoting another unit's sentinel takes the reject branch. The citation verdict is not exposed to
+  the second at shipped settings: its sentinels end in ` ATTEMPT <n>`, which terminates the batch
+  index, and the analogous attempt-number collision (`ATTEMPT 1` inside `ATTEMPT 10`) is unreachable at
+  the shipped `MAX_CITATION_RETRIES = 2`.
+- **A false reject costs differently at every site**, which is what to read a failed run against.
+  **Exactly one of the six recovers *deterministically* inside the run: the precheck.** It forfeits
+  its resume-skip and runs the dispatch + wait it would otherwise have skipped — a genuine repair,
+  because that path is correct regardless of *why* the precheck reported `ABSENT`. Of the other five,
+  only the citation review gets a further shot inside the run — its ladder's automatic next attempt —
+  and the remaining four cost a LATER run. At all five the trigger is the reply's PHRASING rather than
+  the data, so whichever retry the site gets, the ladder's or the operator's, is another roll of the
+  same die and not a fix.
+- **The citation review is NOT *reliably* self-recovering**, which is weaker than what its retry
+  ladder suggests. The ladder can clear a misfire inside the run — a regenerated attempt whose
+  reviewer reply happens not to re-trip the guard merges normally, on the same run — but only by
+  chance: the ladder regenerates the FRAGMENT, while what tripped the guard is how the reviewer
+  worded its reply — two different variables. Every prompt that owns a fail sentinel prints that
+  sentinel verbatim in its own instructions, so a reviewer reasoning about the verdict in prose ("no
+  item failed, so `CITATIONS_REJECTED 0 ATTEMPT 0` is not warranted") is an ordinary output rather
+  than a freak one, and it can reject the regenerated fragment for exactly the same reason. Burning
+  all `MAX_CITATION_RETRIES + 1` attempts returns `citation-review-exhausted`, and the merge being
+  all-or-nothing, **zero** batches merge: the run produces nothing while the data may have been fine
+  throughout. What `MAX_CITATION_RETRIES` bounds is the number of attempts — that the run terminates
+  instead of looping. It does not bound the consequence and does not make this false RED *reliably*
+  clear itself.
+- **How an operator tells the two apart** — which is what the exhaustion message now states, both
+  causes and their opposite responses, instead of asserting the sources could not be verified. A
+  genuine rejection must list, above its verdict line, one line per offending item naming that
+  item's `source_form`, its `source` URL, and which of the three checks it failed and how; the
+  reviewer prompt requires exactly that, and `batchStep` both carries the rejecting reply into the
+  next attempt as its regeneration constraint and returns it as `lastRejection`. So a
+  `lastRejection` naming specific `source_form` values with their URLs is a data problem: route
+  those candidates to `disposition: "review_queue"` or supply real sources, then re-run. A
+  `lastRejection` that instead reads as an approval, discusses the `CITATIONS_REJECTED` sentinel
+  rather than any citation, or is the fixed no-findings placeholder is the guard misfiring: nothing
+  in the data needs editing, the attempt fragments and their approved snapshots are on disk to
+  inspect, and the response is to treat it as a review-prompt defect and report it — re-running is a
+  re-roll, not a reliable fix, since nothing about the trigger is per-run state for a re-run to clear.
+- The remaining four, for the cost picture: the glossary wait returns
+  `{ready: false, reason: "glossary-pass-null"}` straight out of `batchStep`, ending that batch
+  and — the merge being all-or-nothing — the whole pass, which reports `merged: false` and merges
+  nothing. Mass-translate's review wait returns `{status: "blocked", reason: "review-timeout"}`,
+  blocking that segment for the run. Mass-translate's translate wait returns
+  `{converged: false, reason: "translate-timeout"}`, which is deliberately NOT a terminal ledger write:
+  `select_segments.py`'s "any non-terminal status is recoverable" rule picks the segment back up and
+  auto-redispatches it on the next run. Its `DRAFT_MISSING` fix site returns the equally non-terminal
+  `fix-call-failed` and is auto-redispatched the same way.
+- **Scope: `skeptic-pass-wf.template.js` is deliberately excluded, and for its own reason.** Its
+  `PRESENT`/`ABSENT` precheck and `READY`/`TIMEOUT` wait mirror the guarded glossary control flow and
+  remain exposed to the same gluing. That is not the same call as mass-translate's. Mass-translate and
+  the glossary template are both listed in `cache_key.py`'s `PLUGIN_BUNDLE_MEMBERS` and so share one
+  combined `plugin_bundle_hash` that this release already flips — guarding the second cost no marginal
+  migration at all. The skeptic template appears nowhere in `cache_key.py`; `skeptic_setup.py` reads
+  its bytes directly into a separate `compute_skeptic_input_digest()`, so touching it would force a
+  fresh skeptic RUN_ID — a third, independent resume domain — and falsify this release's own promise
+  below that the file is untouched. Its exposure is the pre-existing #308 behaviour, unchanged and not
+  worsened here; closing it is a separate change that should price that migration itself.
+- **The Migration section below is unaffected by the mass-translate half of this fix.** Verified rather
+  than assumed: `plugin_bundle_hash` is a single hash over the whole `PLUGIN_BUNDLE_MEMBERS` tuple that
+  already includes both templates, so editing a second member moves nothing new; neither template is in
+  `DERIVATION_BUNDLE_MEMBERS` (`bootstrap_names.py`, `segpack.py`), so consequence 1's "no derivation
+  regeneration" still holds; `plugin_bundle_hash` sits in `compute_input_digest()`'s unconditional
+  `version` block rather than either `kind` branch, so consequence 2 is already stated for both kinds;
+  and consequence 3's preflight estimate is computed in the glossary template alone, where the guard
+  adds no `agent()` call.
+
+### Migration
+
+`glossary-pass-wf.template.js` is a `PLUGIN_BUNDLE_MEMBERS` file (`cache_key.py`), so this release
+moves `plugin_bundle_hash`, with the same two bounded consequences 1.15.1 priced when it edited the
+same template (1 and 2 below). This release adds a third, specific to the new stage (3):
+
+1. **Per-segment cache staleness (mass only).** Previously-converged **mass** segments' stored cache
+   keys no longer match and route to `stale`/re-translate at the next Step-0a bundle refresh. There
+   is no derivation regeneration and no mature-project brick: neither `DERIVATION_BUNDLE_MEMBERS`
+   file is touched, so nothing routes to `blocked_needs_regeneration`.
+2. **Run-level resume-identity invalidation (mass AND glossary).** `plugin_bundle_hash` is an
+   unconditional input to `resume_setup.py`'s run-level `compute_input_digest()` — it is not
+   conditional on kind — so an in-flight, not-yet-complete run of **either** kind mints a fresh
+   RUN_ID instead of matching its existing input digest. Fragments already written to disk are
+   unaffected content-wise; the run loses its resume identity.
+3. **The `engine.batch_agent_cap` preflight estimate rises — under `live` only.** Under
+   `research_mode: offline` the estimate is unchanged, `3 * batches + 2`, exactly as before:
+   `canon_validate.py` makes `basis: "established"` fatal under `offline`, so the citation review is
+   a genuine no-op there rather than an optimisation that skips it, and an offline project needs
+   nothing from this item. Under `live` the per-batch worst case becomes
+   `1 + 3 * (MAX_CITATION_RETRIES + 1)`, taking the estimate from `3 * batches + 2` to
+   `10 * batches + 2` at the shipped `MAX_CITATION_RETRIES = 2`. A `live` project whose
+   `engine.batch_agent_cap` was tuned anywhere near the old estimate is therefore refused outright on
+   its next glossary pass with `{merged: false, reason: "batch-too-large"}`. That refusal is hard and
+   legible and lands at the preflight before anything is dispatched — nothing is corrupted, nothing
+   silently degrades, and no partial work is left behind — but the pass does not run until
+   `engine.batch_agent_cap` is raised to at least the new estimate.
+
+No canon, ledger, or source-data content changes. The new pre-run wipe deletes nothing outside
+`${durable_root}/glossary/runs/<RUN_ID>/` and nothing inside it but `out_*` / `approved_*` fragments;
+a resume keeps the attempt-0 fragments its resume-skip depends on. `skeptic-pass-wf.template.js` is
+not touched, so the separate skeptic resume domain is unaffected.
 ## 1.15.3 — 2026-07-26
 
 Version-only release. It ships **no behavior change** — its entire purpose is to make the

@@ -383,6 +383,44 @@ def write_glossary_manifests(glossary_run_dir: Path, batches) -> None:
     _atomic_write_json(glossary_run_dir / "manifest_all.json", sorted(set(all_names)))
 
 
+_GLOSSARY_FRAGMENT_RE = re.compile(r"^(out|approved)_(\d+)_attempt_(\d+)\.json$")
+
+
+def _wipe_stale_glossary_fragments(glossary_run_dir: Path, resume: bool) -> None:
+    """Remove fragments a later wait step could otherwise poll while assuming
+    they are absent, closing the resume-freshness gap (LT 1.16.0).
+
+    Nothing deletes fragments elsewhere, and a MATCH-resume reuses the SAME
+    run_id (so the same glossary_run_dir), so without this a prior run's
+    out_{i}_attempt_{n}.json sits at exactly the path the new run will poll and
+    --check-batch passes on it immediately -- the reviewer then audits stale
+    bytes. The rule is conditioned on `resume`:
+
+    - Fresh run (resume is False): wipe ALL out_* and approved_* attempts,
+      INCLUDING attempt 0. A fresh run must trust nothing on disk: fresh-id
+      uniqueness only checks runs/<id>, not this separate glossary/runs/<id>
+      tree, so an orphaned glossary dir can survive and collide on the
+      one-second timestamp; keeping a stale attempt 0 there is the bug.
+    - Resume (resume is True): wipe out_* for attempt >= 1 and ALL approved_*,
+      but KEEP out_{i}_attempt_0.json. The resume-skip optimisation depends
+      wholly on attempt 0 surviving, and a resume-skipped attempt-0 fragment is
+      still citation-reviewed, so keeping it is safe here because the run_id
+      genuinely matches by digest. Approved snapshots are never kept: they are
+      re-produced by the fresh review of whatever fragment wins this run.
+
+    Cost of the fresh-run wipe is at most one re-dispatch per batch on the rare
+    orphan collision, never a wrong result.
+    """
+    for entry in glossary_run_dir.iterdir():
+        m = _GLOSSARY_FRAGMENT_RE.match(entry.name)
+        if m is None:
+            continue
+        kind_, attempt = m.group(1), int(m.group(3))
+        keep = resume and kind_ == "out" and attempt == 0
+        if not keep:
+            entry.unlink()
+
+
 def write_run_dir(run_id: str, resume: bool, input_digest: str, kind: str, payload: dict) -> Path:
     run_dir = RUNS_DIR / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -415,6 +453,7 @@ def write_run_dir(run_id: str, resume: bool, input_digest: str, kind: str, paylo
         # source-proven end to end.)
         glossary_run_dir = DURABLE_ROOT / "glossary" / "runs" / run_id
         glossary_run_dir.mkdir(parents=True, exist_ok=True)
+        _wipe_stale_glossary_fragments(glossary_run_dir, resume)
         write_glossary_manifests(glossary_run_dir, payload.get("batches"))
 
     return run_dir

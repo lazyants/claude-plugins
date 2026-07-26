@@ -660,6 +660,101 @@ function sentinelVerdict(reply, okSentinel, failSentinel) {
   return lines[lines.length - 1] === okSentinel;
 }
 
+// CONTAINMENT GUARD -- the fail-priority backstop for the two WAIT call sites
+// in this file. True iff the raw reply contains failSentinel ANYWHERE, at any
+// offset, on any line, adjacent to anything.
+//
+// The FUNCTION BODY below is byte-identical to glossary-pass-wf.template.js's
+// copy, deliberately: two divergent copies of a security guard are worse than
+// one, for the same reason sentinelVerdict() is mirrored. Do not reformat it.
+// This COMMENT is necessarily this file's own -- the glossary copy's comment
+// describes glossary's call sites, counts and recovery paths, none of which
+// are true here.
+//
+// EVERY COUNT BELOW NAMES ITS SHAPE AND ITS SET, and so must any count added
+// later. A bare "15 of 16" is not checkable: the numbers move with the reply
+// shape AND with which glue table was counted, and this codebase deliberately
+// uses two different tables. Concretely, a reader comparing this file's counts
+// against the suite that pins them will otherwise see a contradiction:
+//   GLUE_CHARS (16 items) in tests/glossary_citation_review.test.py -- the set
+//     every count in THIS comment and at this file's call sites is measured
+//     over. Adds U+001D, U+001E, U+001F.
+//   ALL_GLUES (15 items) in tests/mass_translate_sentinel_containment.test.py
+//     -- a different set, partitioned by trim-strippability, which the
+//     mass-translate suite measures and which reports "14 of 15" for this same
+//     property. Adds a HYPHEN and a QUOTE; omits U+001D/U+001E/U+001F.
+// 13 characters are common to both. Both numbers are correct over their own
+// population; neither is a bug, and the two sets are NOT to be unified --
+// A2's partition carries information a flat list does not.
+//
+// Why this exists. sentinelVerdict() splits on "\n" and compares whole trimmed
+// lines, so its fail-priority scan only sees a fail sentinel that an LF put on
+// a line of its own. Measured over GLUE_CHARS (16 items,
+// tests/glossary_citation_review.test.py), shape: the fail sentinel SHARING ITS
+// LINE with prose -- a reply of prose + GLUE + "TIMEOUT <seg>" + "\n" +
+// "READY <seg>" -- 15 of 16 glue characters defeat that scan at BOTH wait
+// sites, so 30 of 32 site/character pairs, and the segment FALSELY PROCEEDS as
+// ready. LF alone blocks. The 15
+// are not exotic: PLAIN SPACE, TAB, a lone CR, VT, FF, U+001C, U+001D, U+001E,
+// U+001F, NBSP, U+0085, U+2028, U+2029, ZWSP -- and the ordinary letter "x".
+// This is not a line-separator problem: `split("\n")` breaks on LF and nothing
+// else, so ANY character between prose and the sentinel keeps them on one line
+// and defeats whole-line equality. That alphabet is unbounded, so widening the
+// split is whack-a-mole; containment is closed under all of it at once because
+// it never asks where the sentinel sits.
+//
+// Why this file matters at least as much as glossary's. The translate-wait
+// site's own comment calls it "the worst of the five sites (#228)": a false
+// pass there sends the ENTIRE review/fix cycle over a draft that never
+// finished translating, and nothing on that path is recorded as recoverable,
+// so the "we'll pick it back up next run" net never fires.
+//
+// THE COST, which differs per site and must not be flattened:
+//   translate wait -- a false RED returns reason:"translate-timeout" WITHOUT a
+//     terminal ledger write. translateStage's in_progress fragment stays the
+//     durable record and select_segments.py's "non-terminal -> recoverable"
+//     rule auto-redispatches the segment next run. Bounded and automatic.
+//   review wait -- a false RED returns status:"blocked", reason:"review-timeout"
+//     for that segment. Also the fail-safe direction, but it ends this run's
+//     work on the segment rather than retrying inside it.
+// Either false RED costs one segment's rework; a false GREEN corrupts the draft
+// the rest of the pipeline treats as finished. The guard buys that asymmetry
+// deliberately; it is not free.
+//
+// An empty or non-string failSentinel returns false rather than matching
+// everything: "".indexOf("") is 0, so an unguarded containment test would
+// reject every reply unconditionally.
+//
+// This guard is NOT used at runRound's fix site. That call has no fail
+// sentinel at all -- "DRAFT_MISSING <seg>" is its OK sentinel -- so a
+// fail-sentinel guard would be a no-op there by construction. Its gap runs the
+// opposite way and is closed by mentionedAnywhere() below instead.
+function rejectedAnywhere(reply, failSentinel) {
+  if (typeof failSentinel !== "string" || failSentinel.length === 0) return false
+  return String(reply == null ? "" : reply).indexOf(failSentinel) !== -1
+}
+
+// Containment in the OK-SENTINEL direction -- the counterpart to
+// rejectedAnywhere() above, and deliberately NOT that same function. That one
+// takes a FAIL sentinel, so a hit biases toward REJECTING. This one takes a
+// sentinel whose presence a caller is trying not to MISS, so a hit biases
+// toward acting on it. Identical containment test, opposite consequence, which
+// is why it carries its own name instead of reusing one that would be false at
+// the call site.
+//
+// "mentioned" rather than "reported" on purpose: this test cannot tell a
+// genuine report from a passing textual mention, and its one caller has
+// accepted that collision knowingly (see runRound below). A name promising
+// "reported" would be false in exactly the case that matters.
+//
+// Delegates to rejectedAnywhere() so the containment semantics -- including
+// the empty/non-string sentinel guard that stops "".indexOf("") === 0 from
+// matching every reply -- live in one place. That function's body is pinned
+// byte-identical across the workflow templates; this wrapper does not move it.
+function mentionedAnywhere(reply, sentinel) {
+  return rejectedAnywhere(reply, sentinel)
+}
+
 // ---------------------------------------------------------------------------
 // Prompt-builder functions. All plain JavaScript string interpolation
 // against the constants above -- there is no templating engine at Workflow
@@ -1134,7 +1229,20 @@ async function getVerifiedReview(seg, roundLabel) {
   // of the preamble -- reviewWaitPrompt still instructs the agent to return
   // exactly "READY <seg>"/"TIMEOUT <seg>", this only tolerates decoration
   // around it.
-  if (!sentinelVerdict(ready, "READY " + seg, "TIMEOUT " + seg)) {
+  //
+  // sentinelVerdict()'s fail-priority scan only catches a contradictory reply
+  // when an LF put "TIMEOUT <seg>" on a line of its own; rejectedAnywhere()
+  // catches it whatever glued it there. Measured over GLUE_CHARS (16 items,
+  // tests/glossary_citation_review.test.py), shape: the fail sentinel sharing
+  // its line with prose -- 15 of 16 glue characters falsely PROCEEDED as ready
+  // before the guard, 0 of 16 after. (The mass-translate suite pins the same
+  // property over ALL_GLUES, 15 items, and reports 14 of 15 -- a different set,
+  // not a different answer; see rejectedAnywhere()'s comment.)
+  // A false RED here blocks the segment for this run with
+  // reason:"review-timeout" -- the fail-safe direction, but not an in-run
+  // retry. See rejectedAnywhere()'s comment.
+  if (rejectedAnywhere(ready, "TIMEOUT " + seg) ||
+      !sentinelVerdict(ready, "READY " + seg, "TIMEOUT " + seg)) {
     return { status: "blocked", reason: "review-timeout" };
   }
 
@@ -1202,7 +1310,47 @@ async function runRound(seg, round, isFinal) {
   // inconclusive, never absent (see its comment above). Dropping `!fx` would
   // let a dead fix call silently read as an ordinary review round instead of
   // probing for what actually happened.
-  if (!fx || sentinelVerdict(fx, "DRAFT_MISSING " + seg, null)) {
+  //
+  // #228 DELIBERATELY REVERSED HERE -- read this before "simplifying" it back.
+  // That fix built this site on whole-trimmed-line equality precisely so a fix
+  // reply that DISCUSSES "DRAFT_MISSING <seg>" in its prose could not be
+  // mistaken for a report of one, and that protection did work: measured, a
+  // prose mention did not fire it. It was reversed anyway, on measurement.
+  //
+  // What the whole-line rule cost. "DRAFT_MISSING <seg>" is the OK sentinel at
+  // this call, so gluing does not fake a pass -- it makes a REAL report go
+  // UNRECOGNIZED, falling through to `terminal: false` and silently continuing
+  // as an ordinary review round over a draft the fix agent just said was
+  // missing. Measured over GLUE_CHARS (16 items,
+  // tests/glossary_citation_review.test.py -- NOT the 15-item ALL_GLUES the
+  // mass-translate suite uses; see rejectedAnywhere()'s comment for why both
+  // exist), in the two shapes a reply can take. The count is SHAPE-DEPENDENT as
+  // well as set-dependent, which is easy to get wrong:
+  //   prose on the SAME line as the sentinel ("prose<GLUE>DRAFT_MISSING <seg>")
+  //     -- 15 of 16 missed. trim() only reaches a line's two ends, so it never
+  //     gets a chance at glue sitting between the prose and the sentinel.
+  //   sentinel ALONE on its line ("prose\n<GLUE>DRAFT_MISSING <seg>")
+  //     -- 7 of 16 missed. Here trim() does reach the glue and strips 9 of the
+  //     16; the 7 survivors are U+001C, U+001D, U+001E, U+001F, U+0085, U+200B
+  //     and the ordinary letter "x". Note U+0085 NEL is NOT trim()-strippable
+  //     in JS while U+2028 and U+2029 ARE -- the strippable set is not "the
+  //     characters that look like whitespace", so do not reason about it by eye.
+  //
+  // What the reversal costs. mentionedAnywhere() cannot tell a report from a
+  // mention, so a fix reply that merely discusses the sentinel now lands here
+  // too. That is the false-RED direction and it is bounded:
+  // draftPresentAndValid() probes, finds the draft present, and returns
+  // reason:"fix-call-failed" with NO terminal ledger write, so the in_progress
+  // fragment stays the durable record and the segment auto-redispatches next
+  // run. The whole-line rule's failure, by contrast, was silent and left the
+  // pipeline treating a missing draft as reviewable. One wasted segment re-run
+  // beats that, which is the trade the wait sites above already made.
+  //
+  // Containment SUBSUMES the old check -- any reply whose last trimmed line
+  // equals the sentinel also contains it -- so sentinelVerdict() is not merely
+  // redundant here, it is strictly narrower, and calling both would add nothing.
+  // The `!fx ||` falsy branch above is still not redundant, for its own reason.
+  if (!fx || mentionedAnywhere(fx, "DRAFT_MISSING " + seg)) {
     // #131 facet A: a falsy/DRAFT_MISSING return conflates (a) a genuine
     // missing draft with (b) a hard API/output-token-ceiling error and (c) a
     // classifier block -- both (b) and (c) also yield a falsy fx even though
@@ -1260,7 +1408,19 @@ async function reviewFixLoop(stage1Result, seg) {
   // just because of a preamble -- waitPrompt still instructs the agent to
   // return exactly "READY <seg>"/"TIMEOUT <seg>", this only tolerates
   // decoration around it.
-  if (!sentinelVerdict(ready, "READY " + seg, "TIMEOUT " + seg)) {
+  //
+  // Being the worst site makes the gluing gap worst here too: sentinelVerdict()
+  // alone catches a contradictory reply only when an LF put "TIMEOUT <seg>" on
+  // its own line. Measured over GLUE_CHARS (16 items,
+  // tests/glossary_citation_review.test.py), shape: the fail sentinel sharing
+  // its line with prose -- 15 of 16 glue characters
+  // falsely PROCEEDED as ready before rejectedAnywhere() was added here, 0 of
+  // 16 after -- i.e. the "worst of the five" consequence above was reachable by
+  // gluing the timeout sentinel behind a PLAIN SPACE. A false RED costs one
+  // segment's rework and is automatically recoverable next run (see the
+  // #131 facet C note just below); a false GREEN was the corruption path.
+  if (rejectedAnywhere(ready, "TIMEOUT " + seg) ||
+      !sentinelVerdict(ready, "READY " + seg, "TIMEOUT " + seg)) {
     // #131 facet C: a translate-timeout is transient/mechanical (the codex
     // translator agent died, hit an infra hiccup, or is simply still
     // running past the bounded poll) -- not genuine content
