@@ -54,12 +54,14 @@ SITES. The two are easy to mix up, so they are named by what they wait FOR:
   * REVIEW wait -- ``getVerifiedReview``, label
     ``review-wait:<seg>:r<round>``, blocks with ``reason:"review-timeout"``.
 
-The third ``sentinelVerdict`` call in this template (``runRound``'s
-``DRAFT_MISSING`` probe) passes a NULL fail sentinel, so a containment guard is
-a no-op there by construction -- ``rejectedAnywhere`` returns false for a
-non-string sentinel, pinned in tests/glossary_citation_review.test.py. It is
-deliberately out of scope here; see tests/bounded_poll_present.test.py's
-structural lock, which scopes itself to non-null fail sentinels for that reason.
+``runRound``'s ``DRAFT_MISSING`` probe is not a ``sentinelVerdict`` call at all
+any more: 1.16.0 replaced it with ``mentionedAnywhere(fx, "DRAFT_MISSING " +
+seg)``, an OK-direction containment check (``DRAFT_MISSING`` is that site's OK
+sentinel, so gluing there hides a genuine report rather than a rejection). It is
+out of scope for THIS file, which pins the two fail-sentinel wait sites; its own
+behavioural coverage lives in tests/mass_translate_driver_smoke.test.py, and
+tests/bounded_poll_present.test.py's structural lock scopes itself to non-null
+fail sentinels for that reason.
 
 MECHANISM. Self-contained extract-substitute-wrap-run-under-Node harness, the
 house pattern (see tests/mass_translate_driver_smoke.test.py and
@@ -354,9 +356,11 @@ def test_prose_glued_timeout_still_blocks(outcomes, site, label, reason, glue_na
 
     This is the everyday shape -- an agent that writes one sentence and then the
     sentinel on the same line -- and a plain SPACE is enough to trigger it. On
-    the pre-guard template 11 of these 12 cases per site let the run converge,
-    which at the translate site means the whole review/fix cycle proceeds over a
-    draft that never finished translating."""
+    the pre-guard template 14 of these 15 cases per site (over ``ALL_GLUES``,
+    prose sharing the sentinel's line) let the run converge -- every glue but
+    LF, which alone genuinely ends the line -- which at the translate site means
+    the whole review/fix cycle proceeds over a draft that never finished
+    translating."""
     result = outcomes[_case_id(site, "prose", glue_name)]
     assert converged_segments(result) == [], (
         f"the {site} wait accepted a reply whose TIMEOUT sentinel was glued to "
