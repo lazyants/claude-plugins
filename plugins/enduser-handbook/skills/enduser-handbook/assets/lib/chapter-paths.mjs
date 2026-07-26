@@ -1070,8 +1070,8 @@ export function classifyChapterWiring(qualifiedTarget, legacyBareTarget, qScan, 
  *         | {kind: 'non-heading'}}
  */
 export function findContainer(indexLines, groupTitle) {
-  const wanted = String(groupTitle).trim();
-  const sanitizedLines = stripInertContexts(indexLines.join('\n')).split('\n');
+  const wanted = containerLabelKey(groupTitle);
+  const sanitizedLines = indexView(indexLines);
   if (classifyIndexForm(sanitizedLines) === 'non-heading') return { kind: 'non-heading' };
   const headings = collectContainerHeadings(sanitizedLines);
 
@@ -1973,23 +1973,6 @@ export function chapterHasWikilinkTo(chapterText, slug, oldChapterRelPath) {
 const NON_HEADING_PLACEMENT_PROBE_LINK = '[probe](__verify-non-heading-placement-probe__.md)';
 
 /**
- * #330 support: the caller's selected-target match INDICES into `indexView(indexLines)`. A pure
- * delegation to `locateChapterLine`'s own match loop — not a second recognizer. Review found an
- * earlier version of this helper re-implementing that loop line-for-line (same view, same
- * extractLineTargets/foldTargetForMatch primitives, same heading skip), on the grounds that
- * `LocateChapterLineMatch` carried no line index; the fix was to add the index to that shape
- * instead of re-deriving it here.
- *
- * @param {string[]} indexLines
- * @param {string} selectedTarget
- * @param {boolean} wikilink
- * @returns {number[]}
- */
-function selectedTargetMatchIndices(indexLines, selectedTarget, wikilink) {
-  return locateChapterLine(indexLines, selectedTarget, { wikilink }).matches.map((m) => m.index);
-}
-
-/**
  * #330 — present-line placement verification for the nested-list index form. Five-rule decision
  * table, first applicable rule wins (rules 1-2 decide on MATCH CARDINALITY alone, so rules 3-5 are
  * reached only for a file holding exactly one selected-target match):
@@ -2028,10 +2011,13 @@ export function verifyNonHeadingPlacement(indexLines, selectedTarget, groupTitle
 
   // Rules 1-2: cardinality alone, fail-closed. A contradiction (the caller reported present, the
   // verifier finds zero or several matches for the SAME selected target) is worth a manual halt
-  // regardless of file shape.
-  const matchIndices = selectedTargetMatchIndices(indexLines, selectedTarget, wikilink);
-  if (matchIndices.length !== 1) return { kind: 'inconsistent' };
-  const matchIndex = matchIndices[0];
+  // regardless of file shape. Match indices come straight from locateChapterLine's own loop —
+  // never re-derive them with a second match loop over indexView (round-2 review: an earlier
+  // revision did exactly that, re-implementing locateChapterLine's loop line-for-line, and was
+  // caught as the second recognizer this design exists to prevent).
+  const { matches } = locateChapterLine(indexLines, selectedTarget, { wikilink });
+  if (matches.length !== 1) return { kind: 'inconsistent' };
+  const matchIndex = matches[0].index;
 
   // Evaluation-order precondition, not a sixth rule: `prepareIndexLines` can refuse a file that
   // still holds exactly one match (e.g. a lone stray '\r') — reading `span`/`body` off a refusal
