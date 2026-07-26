@@ -1917,6 +1917,19 @@ has_in_section "static-md: automated grouped wiring's new scope (headings-form +
 # single quotes), and inside double quotes a bare backtick would open command substitution.
 # Measured when wired: each needle matches exactly ONE line in its adapter (the plain branch), and
 # the convergent line is excluded.
+# The step-4 limits paragraph is byte-identical in BOTH adapters and has been hand-synced across
+# them five times during review. Nothing pinned it, and it is the single paragraph that overclaimed
+# in three consecutive review rounds — so an un-synced edit would let one adapter keep a promise the
+# other had already withdrawn, with nothing going red. Same D3 shared-variable idiom used above for
+# the embed formula: one variable, one `has` per adapter, so a one-sided edit fails loudly.
+# These two needles are the load-bearing halves: the by-construction limit, and the honest safety
+# statement that replaced "never produces a false completion".
+GATE_CONSTRUCTION_LIMIT='it proves nothing about the real index, because it never reads the real index'
+GATE_SAFETY_STATEMENT='this branch never *silently* completes'
+has "static-md: step-4 states the gate's limit BY CONSTRUCTION"      "$GATE_CONSTRUCTION_LIMIT" "$SMD"
+has "obsidian-vault: step-4 states the gate's limit BY CONSTRUCTION" "$GATE_CONSTRUCTION_LIMIT" "$OMD"
+has "static-md: step-4 carries the narrowed safety statement"        "$GATE_SAFETY_STATEMENT" "$SMD"
+has "obsidian-vault: step-4 carries the narrowed safety statement"   "$GATE_SAFETY_STATEMENT" "$OMD"
 has "static-md: #329 fallback keeps the UNCHANGED 1.10.0 halt (no convergent suffix)" \
   "Index <index_file> is not a headings-form file — add a '<group_title>' container and the chapter line for '<slug>' manually, then re-run.\`" "$SMD"
 has "obsidian-vault: #329 fallback keeps the UNCHANGED 1.10.0 halt (no convergent suffix)" \
