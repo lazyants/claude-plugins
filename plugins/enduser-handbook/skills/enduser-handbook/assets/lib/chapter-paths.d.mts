@@ -172,6 +172,16 @@ export function classifyChapterWiring(
 /** See chapter-paths.mjs: the D6 container-resolution classifier. */
 export function findContainer(indexLines: string[], groupTitle: string): FindContainerResult;
 
+export interface LeadingFrontmatterSpan {
+  start: 0;
+  endExclusive: number;
+}
+
+/** See chapter-paths.mjs: [1.11.0] #330 the narrow test-seam projection of the writer's private line-preparation call (prepareIndexLines) — {kind, span} only; span is null when the index carries no leading frontmatter block. Reached by tests alone; the writer and verifyNonHeadingPlacement both call the private helper directly. */
+export function leadingFrontmatterSpan(
+  indexLines: string[],
+): { kind: 'not-a-list' } | { kind: 'ok'; span: LeadingFrontmatterSpan | null };
+
 /** See chapter-paths.mjs: #223 [1.10.0] pure nested-list (GitBook SUMMARY.md) grouped-index write automation, absent-line path only — returns the fully-mutated index, a multiple-container halt, or 'not-a-list' (outside the bounded safe subset). */
 export function wireNestedListChapter(
   indexLines: string[],

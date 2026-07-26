@@ -1238,6 +1238,82 @@ function isBarePathBullet(marker, info) {
 }
 
 /**
+ * §5.1 steps 1-3 and 5-6 (1.11.0 #330 extraction): the writer's own line-preparation pass, lifted
+ * out of wireNestedListChapter so the present-line placement verifier can share it rather than
+ * re-implement it — a second recognizer is exactly the drift the delegation design exists to
+ * prevent. PRIVATE — not exported, so it stays free to change; the writer consumes every
+ * emission-relevant field below and ignores `span`, and `leadingFrontmatterSpan` below is the
+ * ONLY exported projection of this same call, reached by tests alone.
+ *
+ * Deliberately does NOT run step 4 (the groupTitle/chapterLink embedded-newline guard) — that
+ * guard reads arguments this helper never receives, so it stays in the writer.
+ *
+ * @param {string[]} indexLines
+ * @returns {{kind: 'not-a-list'}
+ *         | {kind: 'ok', logical: string[], eol: '\n'|'\r\n', hadTerminalNewline: boolean,
+ *            span: {start: 0, endExclusive: number} | null, body: string[]}}
+ */
+function prepareIndexLines(indexLines) {
+  // §5.1 step 1-3: undo the runtime split, detect the EOL, and split logically on it.
+  const original = indexLines.join('\n');
+  // A lone '\r' not part of a '\r\n' pair (old-Mac EOL, or a stray '\r') ⇒ not a list.
+  if (/\r(?!\n)/.test(original)) return { kind: 'not-a-list' };
+  const isCRLF = original.includes('\r\n');
+  // Mixed EOL: after removing every CRLF, a surviving '\n' means bare-LF lines coexist with CRLF.
+  if (isCRLF && original.replace(/\r\n/g, '').includes('\n')) return { kind: 'not-a-list' };
+  const eol = isCRLF ? '\r\n' : '\n';
+
+  const rawLines = original.split(eol);
+  const hadTerminalNewline = rawLines.length > 0 && rawLines[rawLines.length - 1] === '';
+  // The content lines, guaranteed '\r'-free (split on the detected EOL). Never mutated — every
+  // emission below is built from fresh slice/concat arrays, so indexLines is never touched.
+  const logical = hadTerminalNewline ? rawLines.slice(0, -1) : rawLines;
+
+  // §5.1 step 5: blank a leading frontmatter block, with a robust column-0 closer (an EXACT,
+  // untrimmed '---'/'...' — an indented '  ---' inside a block scalar is scalar content, NOT the
+  // closer, so the module's own `.trim()==='---'` test at :843 is deliberately NOT reused). Blanking
+  // here, BEFORE the sanitizer, also stops a backtick inside YAML scalar content from being misread
+  // by stripInertContexts (which has no frontmatter awareness, :675-731).
+  let fm = logical;
+  let span = null;
+  if (logical[0] === '---') {
+    let j = 1;
+    while (j < logical.length && logical[j] !== '---' && logical[j] !== '...') j += 1;
+    if (j >= logical.length) return { kind: 'not-a-list' }; // unclosed frontmatter
+    fm = logical.slice();
+    for (let x = 0; x <= j; x += 1) fm[x] = '';
+    span = { start: 0, endExclusive: j + 1 };
+  }
+
+  // §5.1 step 6 — the load-bearing R3 fix: refuse any file carrying an HTML comment / fenced block /
+  // inline-code span. stripInertContexts is newline-preserving and 1:1 (:610), so SAN[i] === fm[i]
+  // for every line holds EXACTLY when no such inert construct exists — making every non-frontmatter
+  // BODY line byte-identical to its raw form (no sanitized-vs-raw gap on any line we classify or
+  // edit) and keeping our view consistent with the caller's step-0 scan, which also sanitizes.
+  const SAN = stripInertContexts(fm.join('\n')).split('\n');
+  for (let i = 0; i < fm.length; i += 1) {
+    if (SAN[i] !== fm[i]) return { kind: 'not-a-list' };
+  }
+
+  return { kind: 'ok', logical, eol, hadTerminalNewline, span, body: fm };
+}
+
+/**
+ * The exported NARROW projection of prepareIndexLines — `{kind, span}` only, so it stays a test
+ * seam without publishing `logical`/`eol`/`hadTerminalNewline` (the writer's emission internals) as
+ * a compatibility obligation. Reached by tests alone; the writer and the #330 verifier both call
+ * the private `prepareIndexLines` directly.
+ *
+ * @param {string[]} indexLines
+ * @returns {{kind: 'not-a-list'} | {kind: 'ok', span: {start: 0, endExclusive: number} | null}}
+ */
+export function leadingFrontmatterSpan(indexLines) {
+  const prep = prepareIndexLines(indexLines);
+  if (prep.kind === 'not-a-list') return { kind: 'not-a-list' };
+  return { kind: 'ok', span: prep.span };
+}
+
+/**
  * Nested-list grouped index wiring, ABSENT-line path only. Pure: returns the fully-mutated index
  * line array; the runtime persists it. Reached only when findContainer(...) === {kind:'non-heading'}
  * AND step-0 found no existing line. Idempotency is the CALLER's guarantee (step-0 runs first); this
@@ -1254,49 +1330,14 @@ function isBarePathBullet(marker, info) {
  *         | {kind:'not-a-list'}}
  */
 export function wireNestedListChapter(indexLines, groupTitle, chapterLink) {
-  // §5.1 step 1-3: undo the runtime split, detect the EOL, and split logically on it.
-  const original = indexLines.join('\n');
-  // A lone '\r' not part of a '\r\n' pair (old-Mac EOL, or a stray '\r') ⇒ not a list.
-  if (/\r(?!\n)/.test(original)) return { kind: 'not-a-list' };
-  const isCRLF = original.includes('\r\n');
-  // Mixed EOL: after removing every CRLF, a surviving '\n' means bare-LF lines coexist with CRLF.
-  if (isCRLF && original.replace(/\r\n/g, '').includes('\n')) return { kind: 'not-a-list' };
-  const EOL = isCRLF ? '\r\n' : '\n';
-
-  const rawLines = original.split(EOL);
-  const hadTerminalNewline = rawLines.length > 0 && rawLines[rawLines.length - 1] === '';
-  // The content lines, guaranteed '\r'-free (split on the detected EOL). Never mutated — every
-  // emission below is built from fresh slice/concat arrays, so indexLines is never touched.
-  const logical = hadTerminalNewline ? rawLines.slice(0, -1) : rawLines;
-
   // §5.1 step 4: validateGroups permits a multiline group_title/link; embedding a '\r'/'\n' would
   // inject a foreign physical line the validator itself would reject — refuse rather than corrupt.
   if (/[\r\n]/.test(groupTitle) || /[\r\n]/.test(chapterLink)) return { kind: 'not-a-list' };
 
-  // §5.1 step 5: blank a leading frontmatter block, with a robust column-0 closer (an EXACT,
-  // untrimmed '---'/'...' — an indented '  ---' inside a block scalar is scalar content, NOT the
-  // closer, so the module's own `.trim()==='---'` test at :843 is deliberately NOT reused). Blanking
-  // here, BEFORE the sanitizer, also stops a backtick inside YAML scalar content from being misread
-  // by stripInertContexts (which has no frontmatter awareness, :675-731).
-  let fm = logical;
-  if (logical[0] === '---') {
-    let j = 1;
-    while (j < logical.length && logical[j] !== '---' && logical[j] !== '...') j += 1;
-    if (j >= logical.length) return { kind: 'not-a-list' }; // unclosed frontmatter
-    fm = logical.slice();
-    for (let x = 0; x <= j; x += 1) fm[x] = '';
-  }
-
-  // §5.1 step 6 — the load-bearing R3 fix: refuse any file carrying an HTML comment / fenced block /
-  // inline-code span. stripInertContexts is newline-preserving and 1:1 (:610), so SAN[i] === fm[i]
-  // for every line holds EXACTLY when no such inert construct exists — making every non-frontmatter
-  // BODY line byte-identical to its raw form (no sanitized-vs-raw gap on any line we classify or
-  // edit) and keeping our view consistent with the caller's step-0 scan, which also sanitizes.
-  const SAN = stripInertContexts(fm.join('\n')).split('\n');
-  for (let i = 0; i < fm.length; i += 1) {
-    if (SAN[i] !== fm[i]) return { kind: 'not-a-list' };
-  }
-  const BODY = fm;
+  // §5.1 steps 1-3 and 5-6, shared with the #330 verifier via the same private call.
+  const prep = prepareIndexLines(indexLines);
+  if (prep.kind === 'not-a-list') return { kind: 'not-a-list' };
+  const { logical, eol: EOL, hadTerminalNewline, body: BODY } = prep;
 
   // Immediate guards on BODY.
   // YAML: MkDocs `nav:` / `- key: value` mapping structure (frontmatter already blanked).

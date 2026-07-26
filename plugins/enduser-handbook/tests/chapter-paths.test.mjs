@@ -24,6 +24,7 @@ import {
   validateGroups,
   indexView,
   locateChapterLine,
+  leadingFrontmatterSpan,
   currentIndexExpectedTarget,
   classifyChapterWiring,
   findContainer,
@@ -1229,6 +1230,50 @@ test('not-a-list, mask-pair: a file mixing a CRLF-terminated line with a bare-LF
 });
 
 // -------------------------------------------------------------------------------------------------
+// [1.11.0] #330 prep — leadingFrontmatterSpan, the exported test-seam projection of the private
+// prepareIndexLines (extracted from wireNestedListChapter:1245-1257 + :1263-1286, discontiguous —
+// the groupTitle/chapterLink newline guard at the old :1261 reads arguments this helper never
+// receives and stays in the writer). Reaching these four rejection branches through the full
+// writer proves nothing for three of them (a downstream guard masks the branch); reaching them
+// directly through this seam is what actually isolates them — three discriminating direct tests
+// plus one masked rejection test, not one protected test per branch (plan round-30).
+// -------------------------------------------------------------------------------------------------
+
+test('leadingFrontmatterSpan [isolating]: an unclosed leading "---" block is refused directly through this seam (through the full writer it is masked by !sawTop, so only this seam proves the guard)', () => {
+  const indexLines = ['---', 'description: x'];
+  assert.equal(leadingFrontmatterSpan(indexLines).kind, 'not-a-list');
+});
+
+test('leadingFrontmatterSpan [isolating]: a backtick code-span on a CHILD bullet desyncs the identity guard — unlike the existing container-label fixture (masked by isPlainLabel, which only ever sees indent-0 labels and group_title), a child\'s content is never run through isPlainLabel at all', () => {
+  const indexLines = ['- Admin', '  - `child`'];
+  assert.equal(leadingFrontmatterSpan(indexLines).kind, 'not-a-list');
+});
+
+test('leadingFrontmatterSpan [masked by the identity guard, per the mask-pair fixture above]: a mixed-EOL file also returns not-a-list through this seam, but the mixed-EOL guard itself cannot be isolated by any fixture of this shape', () => {
+  const indexLines = ['- Admin\r', '', ''];
+  assert.equal(leadingFrontmatterSpan(indexLines).kind, 'not-a-list');
+});
+
+test('leadingFrontmatterSpan [isolating, permanent — round-10 probe]: a lone CR not part of a CRLF pair is refused (nothing else in this helper catches a bare interior \\r)', () => {
+  const indexLines = ['- Admin', '\r'];
+  assert.equal(leadingFrontmatterSpan(indexLines).kind, 'not-a-list');
+});
+
+test('leadingFrontmatterSpan: no leading frontmatter => span is null', () => {
+  assert.deepEqual(leadingFrontmatterSpan(['- Admin', '  - guide/items.md']), { kind: 'ok', span: null });
+});
+
+test('leadingFrontmatterSpan: a closed "---"/"---" frontmatter block reports the exact blanked span', () => {
+  const indexLines = ['---', 'title: X', '---', '- Admin'];
+  assert.deepEqual(leadingFrontmatterSpan(indexLines), { kind: 'ok', span: { start: 0, endExclusive: 3 } });
+});
+
+test('leadingFrontmatterSpan: a "..." document-end terminator closes the frontmatter block too, same span shape as "---"', () => {
+  const indexLines = ['---', 'title: X', '...', '- Admin'];
+  assert.deepEqual(leadingFrontmatterSpan(indexLines), { kind: 'ok', span: { start: 0, endExclusive: 3 } });
+});
+
+// -------------------------------------------------------------------------------------------------
 // Positive-accept fixtures — guard against over-rejection (a mutant that is TOO strict must also fail)
 // -------------------------------------------------------------------------------------------------
 
@@ -1262,6 +1307,35 @@ test('positive-accept: a CRLF file with NO terminal newline round-trips exactly 
     !result.newLines[result.newLines.length - 1].endsWith('\r'),
     'the final (non-terminated) line must not gain a trailing bare \\r',
   );
+});
+
+// -------------------------------------------------------------------------------------------------
+// [1.11.0] #330 prep — prepareIndexLines parity, through the writer's own newLines output. The
+// 616-test baseline never exercised the "..." terminator or a CRLF file carrying leading
+// frontmatter, so its own green run certifies nothing for those branches of the moved code
+// (plan Tests item 1 / round-24). Each expected newLines value below was measured against the
+// real module, not hand-derived.
+// -------------------------------------------------------------------------------------------------
+
+test('positive-accept, parity: a frontmatter block closed with "..." (not "---") is accepted and survives untouched in the output', () => {
+  const indexLines = ['---', 'title: X', '...', '- Admin'];
+  const result = wireNestedListChapter(indexLines, 'Admin', '[Items](admin/items.md)');
+  assert.equal(result.kind, 'inserted');
+  assert.deepEqual(result.newLines, ['---', 'title: X', '...', '- Admin', '  - [Items](admin/items.md)']);
+});
+
+test('positive-accept, parity: CRLF file WITH leading frontmatter, no terminal newline — round-trips exactly', () => {
+  const indexLines = ['---\r', 'title: X\r', '---\r', '- Admin'];
+  const result = wireNestedListChapter(indexLines, 'Admin', '[Items](admin/items.md)');
+  assert.equal(result.kind, 'inserted');
+  assert.deepEqual(result.newLines, ['---\r', 'title: X\r', '---\r', '- Admin\r', '  - [Items](admin/items.md)']);
+});
+
+test('positive-accept, parity: CRLF file WITH leading frontmatter AND a terminal newline — round-trips exactly, including the final empty element', () => {
+  const indexLines = ['---\r', 'title: X\r', '---\r', '- Admin\r', ''];
+  const result = wireNestedListChapter(indexLines, 'Admin', '[Items](admin/items.md)');
+  assert.equal(result.kind, 'inserted');
+  assert.deepEqual(result.newLines, ['---\r', 'title: X\r', '---\r', '- Admin\r', '  - [Items](admin/items.md)\r', '']);
 });
 
 test('positive-accept, padded group_title on CREATE [R4-4]: the emitted container is the exactly-trimmed label, never the raw padded value', () => {
