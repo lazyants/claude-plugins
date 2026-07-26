@@ -616,9 +616,9 @@ printf '## Target\nNEEDLE_FIRST\n## Target\nNEEDLE_SECOND\n## Next\n' > "$SELFTE
 hasnt_in_section "self-test: a repeated identical heading does not re-open or extend the first section" \
   "$SELFTEST_DIR/rebind.md" '## Target' 'NEEDLE_SECOND'
 
-# Empty-needle rejection (:151, needle != "") is orthogonal to file content, so it reuses the
-# rebind fixture above rather than a dedicated file — the claim under test is about the NEEDLE
-# argument, not anything in the markdown.
+# Empty-needle rejection (_section_contains's `needle != ""` guard) is orthogonal to file content,
+# so it reuses the rebind fixture above rather than a dedicated file — the claim under test is
+# about the NEEDLE argument, not anything in the markdown.
 hasnt_in_section "self-test: an empty needle is always rejected, never a silent pass" \
   "$SELFTEST_DIR/rebind.md" '## Target' ''
 
@@ -1402,7 +1402,8 @@ hasnt "static-md: no dataview block" "$NEEDLE" "$SMD"
 # Requires wikilinks: false for the static target.
 has "static-md: requires wikilinks false" 'wikilinks: false' "$SMD"
 
-# Each halt condition carries its exact quoted message (adapter contract, publish-targets/README.md:31).
+# Each halt condition carries its exact quoted message (adapter contract, publish-targets/
+# README.md's "Halt conditions" bullet — "List the exact halt messages").
 has "static-md: index_file halt message"   'writable table of contents'   "$SMD"
 has "static-md: chapters_dir halt message" 'cannot write chapters'        "$SMD"
 has "static-md: wikilinks halt message"    'do not render on a static site' "$SMD"
@@ -1646,7 +1647,7 @@ if [ "$CR_ANCHOR_COUNT" -eq 1 ] && [ "$c" -eq 1 ] && [ -n "$L" ] && [ -n "$L_GRP
 else
   bad "obsidian-vault: O6 witness FAILED — grouped Step-0's expected-target formula, branch-bound (count=$c line=$L, need count==1 and $L_GRP<L<L_CR=$L_CR)"
 fi
-# Occurrence-level count, deliberately NOT count_fixed (which is LINE-based, per its own :188
+# Occurrence-level count, deliberately NOT count_fixed (which is LINE-based, per its own doc
 # comment — a 3rd bare-formula copy appended onto an EXISTING line would still read as 2 lines).
 # `grep -oF` emits one line per MATCH, so `wc -l` counts occurrences, catching a 3rd copy anywhere,
 # same-line or not.
@@ -2372,11 +2373,11 @@ hasnt "manifest-discipline: no longer frames validateGroups as an optional conve
 # round-15 [adversarial reading, not mutation testing — the prior wording meant a requirement
 # without requiring it]: step 5 said re-run validation "after every edit that touches a slug or a
 # group", so a group_title-only edit (two groups converging on one title — containers are located
-# BY TITLE, obsidian-vault.md:207) let a reader skip the only detector for that collision, silently
-# merging two groups under one nav container. Now keyed to the GENERAL RULE (any field
-# validateGroups inspects), with the slug/group/group_title list explicitly illustrative. Two
-# needles: the general rule governing (not narrowed to slug/group), and the group_title-only
-# scenario that caused the bug specifically.
+# BY TITLE, per obsidian-vault.md's "Container resolution" bullet) let a reader skip the only
+# detector for that collision, silently merging two groups under one nav container. Now keyed to
+# the GENERAL RULE (any field validateGroups inspects), with the slug/group/group_title list
+# explicitly illustrative. Two needles: the general rule governing (not narrowed to slug/group),
+# and the group_title-only scenario that caused the bug specifically.
 has_in_section "manifest-discipline: step 5 re-run rule is NOT narrowed to slug/group only" \
   "$MDISC" '## The discipline: no capture code before review' \
   'never only an edit that touches `slug` or `group`'
@@ -2411,8 +2412,9 @@ has_in_section "obsidian-vault: link integrity gate states its chapter-scope lim
 # Markdown link resolve like an internal .md/glossary target, so a compliant chapter with
 # `[Support](mailto:...)`, an external `https://` link, or a bare `#fragment` would FALSE-HALT.
 # Three needles, one per the three concrete false-halt cases named in the finding: the **relative**
-# scoping is the actual fix (matches static-md.md:407's own wording); the bare-fragment rule and
-# the non-relative exemption class are the two other named cases it was previously silent on.
+# scoping is the actual fix — the "verifies every **relative** standard" sentence pinned directly
+# below; the bare-fragment rule and the non-relative exemption class are the two other named cases
+# it was previously silent on.
 has_in_section "obsidian-vault: link-integrity item 2 scoped to RELATIVE links only (not every link)" \
   "$OMD" '## Link integrity gate before you publish' \
   'this item also verifies every **relative** standard'
@@ -2458,10 +2460,10 @@ has_in_section "obsidian-vault: wikilinks-off glossary-link formula uses dirname
 # #259: both "write-time canon" mentions under this heading (the internal-chapter-link formula)
 # and under "Glossary backlink discipline" (below) previously named the concept without citing
 # where it's actually defined — a reader had no path from the mention to `revalidation.md`'s own
-# "Write-time canon" section (:65) unless they already knew to look there. static-md.md:126 already
-# cites it in exactly this form; these two pins mirror that same citation string at both
-# previously-uncited sites, section-scoped so a future rewrite can't satisfy one and silently drop
-# the other.
+# "Write-time canon" section (:65) unless they already knew to look there. static-md.md already
+# cites it in exactly this form (its "Retained chapters keep whatever spelling already resolves"
+# passage); these two pins mirror that same citation string at both previously-uncited sites,
+# section-scoped so a future rewrite can't satisfy one and silently drop the other.
 has_in_section "obsidian-vault: internal-chapter-link write-time-canon mention cites revalidation.md" \
   "$OMD" '## Wikilinks vs Markdown links' \
   '(see "Write-time canon" in `revalidation.md`)'
@@ -2537,8 +2539,9 @@ has_in_section "obsidian-vault: ...specifically the template's [[…]] Related-b
   "$OMD" '## Chapter structure (Obsidian-flavoured)' \
   "template's \`[[…]]\` Related-block placeholders with the standard Markdown-link form from"
 # A4 renamed this checklist item's parenthetical from "(graph-island check)" to
-# "(outbound-link floor)" (obsidian-vault.md:325) — the old name reasserted a wikilinks-on
-# rationale for a rule that is mode-neutral (the same ≥2-link floor also gates wikilinks-off).
+# "(outbound-link floor)" (obsidian-vault.md's "Link integrity gate before you publish" section,
+# item 3) — the old name reasserted a wikilinks-on rationale for a rule that is mode-neutral (the
+# same ≥2-link floor also gates wikilinks-off).
 # Named mutation this catches: the label drifting/reverting back to a wikilinks-on-flavored
 # name — the exact defect CLASS rounds 7 and 8 fixed, recurring at a third site. Not a collision
 # risk against the legitimate "a graph island" phrase a few lines above (different sentence, no
@@ -2751,8 +2754,8 @@ CPD="$ASSETS/lib/chapter-paths.d.mts"
 # The rule is one needle per declaration this version ADDS, and it is checkable: the needle count
 # below must equal `git diff 44545bb..HEAD -- plugins/enduser-handbook/skills/enduser-handbook/assets/lib/chapter-paths.d.mts | grep -c '^+export'`,
 # run from the repository root (44545bb is the 1.10.0 release commit; this repo has no
-# enduser-handbook release tags). That check is what caught LeadingFrontmatterSpan — six
-# declarations were added and only five were pinned, so an unpinned deletion of the interface
+# enduser-handbook release tags). That check is what caught LeadingFrontmatterSpan: its
+# declaration was added without a matching needle, so an unpinned deletion of the interface
 # stayed green while a pinned deletion correctly went red.
 has "chapter-paths.d.mts: declares indexView"                       'export function indexView'                        "$CPD"
 has "chapter-paths.d.mts: declares leadingFrontmatterSpan"          'export function leadingFrontmatterSpan'           "$CPD"

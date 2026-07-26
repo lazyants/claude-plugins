@@ -394,16 +394,18 @@ the one exception to "do all of these" — see its own conditional note below.
        retarget, never after it.
      - `indexForm === 'non-heading'` (a nested list, an MkDocs-style YAML `nav:`, a bare
        path table, …) — call `verifyNonHeadingPlacement(indexLines, selectedTarget, group_title,
-       {wikilink: true})` (`assets/lib/chapter-paths.mjs`, `selectedTarget` = whichever of the
-       qualified or legacy-bare target that one matching line carried), checking placement
-       BEFORE any retarget, exactly as the headings-form branch above does, and branch on the
-       result:
+       {wikilink: publish.wikilinks})` (`assets/lib/chapter-paths.mjs` — the option is the
+       profile's own mode, mirroring the mode-correct chapter link below, never hardcoded;
+       `selectedTarget` = whichever of the qualified or legacy-bare target that one matching line
+       carried), checking placement BEFORE any retarget, exactly as the headings-form branch
+       above does, and branch on the result:
        - **`ok`** ⇒ a `canonical` line is already complete and a
          `legacy` line retargets in place unconditionally.
        - **`unverifiable`** ⇒ proceed — this file falls outside the verified class (see
-         "Nested-list automation limits" below); explicit confirmation stands in for
-         verification here, exactly as the shipped 1.10.0 behaviour did — a `canonical` line is
-         already complete and a `legacy` line still retargets in place unconditionally.
+         "Nested-list automation limits" below); no placement check runs and no confirmation is
+         requested — the run continues unverified, exactly as the shipped 1.10.0 behaviour did on
+         this path — a `canonical` line is already complete and a `legacy` line still retargets
+         in place unconditionally.
        - **`misplaced`** ⇒ halt reusing the exact wording above:
          "Chapter '<slug>' is listed in <index_file> under '<found_title>' instead of '<group_title>' — move the line (or curate the index manually), then re-run."
        - **`inconsistent`** ⇒ the selected target resolves to zero lines, or to more than one —

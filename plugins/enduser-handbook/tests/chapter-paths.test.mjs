@@ -384,9 +384,10 @@ test('F1: a depth-1 heading never anchors a containerTitle (document title, neve
 });
 
 // Round-13 audit — DELIBERATELY UNTESTED, not a gap: collectContainerHeadings/locateChapterLine's
-// container-anchoring check is `heading[1].length >= 2` (chapter-paths.mjs:814,:875), so nothing
-// in this file distinguishes it from a narrower `=== 2`. No fixture anywhere uses a depth-3 (###)
-// heading. Left unpinned on purpose: the module's own docstring (chapter-paths.mjs:864-865, D6
+// container-anchoring check is `heading[1].length >= 2` (collectContainerHeadings's `m[1].length
+// >= 2` guard and locateChapterLine's own `heading[1].length >= 2` ternary), so nothing in this
+// file distinguishes it from a narrower `=== 2`. No fixture anywhere uses a depth-3 (###)
+// heading. Left unpinned on purpose: collectContainerHeadings's own leading comment (D6
 // convention) states a group container is ALWAYS `##`, so `>= 2`'s extra permissiveness beyond
 // exactly-2 is not something the design currently depends on — pinning a `###` container would
 // assert a behavior nobody has decided to support, not close a real gap. If a future round wants
@@ -1316,7 +1317,7 @@ test('positive-accept: a CRLF file with NO terminal newline round-trips exactly 
 
 // -------------------------------------------------------------------------------------------------
 // [1.11.0] #330 prep — prepareIndexLines parity, through the writer's own newLines output. The
-// 616-test baseline never exercised the "..." terminator or a CRLF file carrying leading
+// pre-existing suite never exercised the "..." terminator or a CRLF file carrying leading
 // frontmatter, so its own green run certifies nothing for those branches of the moved code
 // (plan Tests item 1 / round-24). Each expected newLines value below was measured against the
 // real module, not hand-derived.
@@ -1923,8 +1924,8 @@ test('validateGroups: THREE-occurrence duplicate slug still halts exactly ONCE [
 });
 
 test('validateGroups: duplicate-slug gate sees the FULL entry list in an anyGroup manifest — flat-vs-flat AND grouped-vs-flat pairs [round-18]', () => {
-  // Round-18 finding: `validateGroups`'s grouped branch calls `duplicateSlugHalts(entries, ...)`
-  // on the FULL entry list (chapter-paths.mjs:373) — every existing duplicate-in-a-grouped-
+  // Round-18 finding: `validateGroups`'s grouped branch, gate 3, calls `duplicateSlugHalts(entries,
+  // ...)` on the FULL entry list — every existing duplicate-in-a-grouped-
   // manifest fixture used ONLY grouped entries for the duplicated slug, so a mutant filtering to
   // `entries.filter(e => e.group !== undefined)` before the call stayed fully green. That mutant
   // silently stops checking flat entries in an anyGroup manifest: a grouped-vs-flat slug
