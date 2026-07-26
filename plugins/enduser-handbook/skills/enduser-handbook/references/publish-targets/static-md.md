@@ -387,10 +387,16 @@ These outcomes reuse the step-0 result computed above (`containerTitle`, `indexF
 
        A future case diverging some other way is expected, not a defect in this documentation —
        the isolated check was never designed to rule any of this out. **The honest safety
-       statement is narrower than either extreme: this branch never *silently* completes.**
-       Wherever the machinery cannot verify a real-file property, explicit confirmation is what
-       stands in — it is not that a false completion cannot occur, and not that every way it can
-       occur is named above.
+       statement, scoped to what this PR governs: on the non-heading branch above, this gate
+       never lets a silent completion through.** Wherever the machinery cannot verify a
+       real-file property, explicit confirmation is what stands in — it is not that a false
+       completion cannot occur there, and not that every way it can occur is named above.
+       **The headings branch is unchanged by this PR and already completes silently:** a
+       chapter row inside a valid frontmatter block whose body itself carries a heading is
+       reported `indexForm: 'headings'` with a matching container (see "Grouped entry, line
+       present, `indexForm: 'headings'`" above) and completes with neither verification nor
+       confirmation — the same shipped 1.10.0 writer/locator view disagreement named above,
+       tracked separately.
     5. **anything else** ⇒ the gate rejects the pair — measured causes include an ordinary
        newline inside the title, a trailing `\` or a `>` in the target, and a `group_title` the
        writer's own bullet grammar refuses (padded with extra whitespace, or carrying markup).
@@ -470,8 +476,11 @@ Three disclosures the operator is owed, not proved away:
 - A bullet-only file that also happens to be valid YAML — an `ok` now stands in for the explicit
   confirmation this PR removes: a Markdown-reading answer about bytes some other consumer may
   read as YAML.
-- A chapter row sitting inside leading frontmatter is never verified — it returns
-  `unverifiable`, for the reason below, not because it was overlooked.
+- A chapter row sitting inside leading frontmatter is never verified **on the non-heading
+  branch above** — it returns `unverifiable` there, for the reason below, not because it was
+  overlooked. On the headings branch (unchanged by this PR), a frontmatter block whose body
+  itself carries a heading is a different, unfixed gap: it completes with neither
+  verification nor confirmation — see the safety note in "Grouped index wiring" above.
 
 **An index whose frontmatter poisons the view is a known, filed defect — not fixed here.** The
 writer's own body-preparation view blanks a leading frontmatter block before wiring, while the
