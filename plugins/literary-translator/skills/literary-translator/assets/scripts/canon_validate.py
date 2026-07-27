@@ -446,6 +446,21 @@ def _joined_problems(problems) -> str:
     return "\n  ".join(shown)
 
 
+def _bounded_list(values) -> list:
+    """Bound a reported list in COUNT and in each element's LENGTH.
+
+    The same treatment CanonValidationError.__init__ applies, factored out so a
+    reporting path that never raises can share it rather than reinvent it. That
+    split is what let --verify-merged stay unbounded through two rounds of
+    "everything is bounded now".
+    """
+    extra = len(values) - _MAX_LISTED_PROBLEMS
+    bounded = [_bounded_message(str(v)) for v in list(values)[:_MAX_LISTED_PROBLEMS]]
+    if extra > 0:
+        bounded.append(f"... and {extra} more")
+    return bounded
+
+
 class CanonValidationError(Exception):
     """Raised for any failure that should surface as a FAILURE result.
 
@@ -479,13 +494,13 @@ class CanonValidationError(Exception):
         # has no maxItems. Measured at the shipped DEFAULT_BATCH_SIZE of 40: the
         # message obeyed its own cap while `offending` carried all 40 entries.
         if offending is not None:
-            extra = len(offending) - _MAX_LISTED_PROBLEMS
-            # Per-element too: the count cap alone still let ONE 12 KB
-            # source_form through verbatim as offending[0].
-            offending = [_bounded_message(str(o))
-                         for o in list(offending)[:_MAX_LISTED_PROBLEMS]]
-            if extra > 0:
-                offending = offending + [f"... and {extra} more"]
+            # A BARE STRING is not a list of offenders. list("shortkey") shreds
+            # it into characters -- a regression the previous version of this
+            # block introduced, reachable from canon_senses.py, which raises
+            # with offending=<a single key>. Wrap before bounding.
+            if isinstance(offending, (str, bytes)):
+                offending = [offending]
+            offending = _bounded_list(offending)
         self.offending = offending
 
 
@@ -1064,9 +1079,9 @@ def _citation_source_refusal(value) -> "str | None":
     # identically, but matches neither test below. This file has NO resolver
     # behind it -- it runs on the offline path where nothing ever fetches -- so
     # unlike the fetcher there is no second net here and the miss would be the
-    # whole check. Only one dot: "localhost.." is not a legal name.
-    if host.endswith("."):
-        host = host[:-1]
+    # whole check. rstrip, not one dot: U+2025/U+2026/U+FE30 fold to two, three
+    # and four dots, so a single strip left a name the tests below could not match (see name_for_comparison).
+    host = host.rstrip(".")
     name = _name_for_comparison(host)
     if name == "localhost" or name.endswith(".localhost"):
         return "localhost-name"
@@ -1398,7 +1413,7 @@ def _validate_batch_items(batch: list, registry: "Registry") -> None:
     against canon-batch.schema.json's own discriminated-union item shape
     (canon-batch.schema.json#/items) -- never the bare
     canon-entry.schema.json shape, since a batch item also carries
-    'disposition'. Raises CanonValidationError naming every offending item
+    'disposition'. Raises CanonValidationError naming the offending items (bounded to the first 8)
     (by index and, when present, source_form) if any item fails.
     """
     validator = _validator_for_ref("canon-batch.schema.json#/items", registry)
@@ -1471,7 +1486,7 @@ def _enforce_offline_backstop(batch: list, research_mode: str) -> None:
     if offenders:
         raise CanonValidationError(
             "research_mode=offline forbids basis:\"established\" for every new "
-            "entry, but the batch claims it for: " + ", ".join(repr(o) for o in offenders)
+            "entry, but the batch claims it for: " + ", ".join(_bounded_list(offenders))
             + ". Reassign basis:\"transliterated\" (if mechanical transliteration "
             "suffices), basis:\"sense_translated\" (if a project-specific editorial "
             "sense-rendering fits -- style_bible.md §C -- no external citation "
@@ -1687,7 +1702,7 @@ def _assert_no_entries_review_queue_overlap(canon: dict) -> None:
         raise CanonValidationError(
             "canon.json failed whole-file invariant: source_form(s) present "
             "in both entries{} and review_queue[]: "
-            + ", ".join(repr(o) for o in overlap),
+            + ", ".join(_bounded_list(overlap)),
             offending=overlap,
         )
 
@@ -2138,7 +2153,16 @@ def run_verify_merged(
         missing.extend(sorted(set(expected_forms) - covered_forms))
 
     missing = sorted(set(missing))
-    return {"verified": not missing, "missing": missing}
+    # BOUNDED HERE, because this mode reports failure through a SUCCESS-shaped
+    # payload and therefore never constructs CanonValidationError -- so round 8's
+    # "the one place every failure passes through" was false for exactly this
+    # path. `missing` carries raw fragment-authored source_forms, and
+    # glossaryVerifyPrompt tells an agent to read this line and return `missing`
+    # COPIED VERBATIM, against MANIFEST_ALL (the whole run, not one batch).
+    # Measured before this bound: 196 KB at 40 items and 2.4 MB at 500, linear
+    # in both count and length -- the same magnitude the central bound was added
+    # to close, on the last gate before merged:true.
+    return {"verified": not missing, "missing": _bounded_list(missing)}
 
 
 def run_validate_only(canon_path: Path, research_mode: str, registry: "Registry") -> dict:

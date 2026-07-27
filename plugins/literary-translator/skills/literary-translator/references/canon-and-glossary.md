@@ -392,7 +392,7 @@ something a script silently probes (and potentially gets wrong).
   citable source in `live` mode any more than in `offline` mode.
 - **`scripts/canon_validate.py`'s merge-time backstop FATALLY REJECTS** the whole
   batch merge if ANY entry claims `basis: "established"` while
-  `research_mode == offline`, naming every offending entry — the same
+  `research_mode == offline`, naming the offending entries (bounded to the first 8, with a count of the rest) — the same
   "don't trust the agent's own compliance, independently re-check" discipline
   applied to the URI-format assertion itself.
 - **`--research-mode live|offline` is a REQUIRED CLI argument** to

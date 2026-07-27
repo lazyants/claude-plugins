@@ -542,9 +542,9 @@ def validate_url(url: str) -> tuple[str, str, int, str]:
     # half -- resolve_and_pin() still refused the loopback address it came back
     # with -- but canon_validate.py runs this same decision with NO resolver
     # behind it, so there the miss is the whole check. The two files must agree,
-    # so both strip it. Only one dot: "localhost.." is not a legal name.
-    if host.endswith("."):
-        host = host[:-1]
+    # so both strip it. rstrip, not one dot: U+2025/U+2026/U+FE30 fold to two, three
+    # and four dots, so a single strip left a name the tests below could not match (see name_for_comparison).
+    host = host.rstrip(".")
     name = name_for_comparison(host)
     if name == "localhost" or name.endswith(".localhost"):
         raise _refuse("localhost-name")
@@ -901,6 +901,15 @@ def _fetch_hop(url, current, chain, hop, deadline, allowed_types) -> dict:
     except (Refused, _Redirect):
         raise
     except Exception as exc:                      # noqa: BLE001 -- deliberate, see above
+        # The clock FIRST, here too. validate_url and resolve_and_pin are called
+        # before the inner try, so everything they raise lands on this catch-all
+        # -- and resolve_and_pin takes no deadline at all, so a slow resolver
+        # burns the budget and then the outcome blames something else. Same
+        # argument as the four handlers inside: past the deadline WE are the
+        # cause, and only the three run-fact reasons are ones the judge is told
+        # not to read as a defect in the citation.
+        if _past_deadline(deadline):
+            raise _refuse("read-timeout")
         raise _refuse(f"internal-error:{type(exc).__name__}")
 
 
@@ -1170,7 +1179,8 @@ def run_batch(batch_path: Path, out_dir: Path, *,
             # as EVIDENCE_FAILED, which spends a citation-review retry, and
             # exhausting that ladder merges ZERO batches. One bad citation may
             # cost one entry; it may never cost the run's evidence index.
-            entry["outcome"] = f"refused:internal-error:{type(exc).__name__}"
+            entry["outcome"] = ("refused:read-timeout" if _past_deadline(deadline)
+                                else f"refused:internal-error:{type(exc).__name__}")
             counts["refused"] += 1
             index.append(entry)
             continue
