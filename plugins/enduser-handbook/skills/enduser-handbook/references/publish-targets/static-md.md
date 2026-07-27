@@ -297,8 +297,10 @@ rather than locating the line a second time.
 
 ### Grouped index wiring (`anyGroup` manifests only)
 
-Both shipped adapters wire the index before their link-integrity gate, so every wiring halt
-below must be convergent on re-run: a first run halts with instructions, the container and
+Both shipped adapters wire the index before their link-integrity gate, so a wiring halt below is
+convergent on re-run WHENEVER it names a form — and where one cannot be named it says so instead of
+promising convergence (the unnamed 1.10.0 fallback below is the case, and it can repeat verbatim).
+For the named ones: a first run halts with instructions, the container and
 chapter line get added (by you, or by the user for a non-heading index), and the very next run's
 step 0 finds them and proceeds without re-halting.
 

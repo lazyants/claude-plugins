@@ -115,19 +115,19 @@ const EXPECTED_UNRESOLVED = [
   { file: 'references/publish-targets/static-md.md', offset: 15381, quotedText: 'Chapter → index', direction: 'above' },
   { file: 'references/publish-targets/static-md.md', offset: 18937, quotedText: 'Grouped index wiring', direction: 'below' },
   { file: 'references/publish-targets/static-md.md', offset: 19082, quotedText: 'Grouped index wiring', direction: 'below' },
-  { file: 'references/publish-targets/static-md.md', offset: 26203, quotedText: 'After either halt', direction: 'below' },
-  { file: 'references/publish-targets/static-md.md', offset: 31839, quotedText: 'Grouped index wiring', direction: 'above' },
-  { file: 'references/publish-targets/static-md.md', offset: 34897, quotedText: 'The plain-label predicate, named exactly', direction: 'below' },
-  { file: 'references/publish-targets/static-md.md', offset: 39662, quotedText: 'Grouped entry, line present, `indexForm: \'non-heading\'`', direction: 'above' },
-  { file: 'references/publish-targets/static-md.md', offset: 41320, quotedText: 'Grouped entry, line present, `indexForm: \'headings\'`', direction: 'above' },
-  { file: 'references/publish-targets/static-md.md', offset: 44765, quotedText: 'The plain-label predicate, named exactly', direction: 'below' },
-  { file: 'references/publish-targets/static-md.md', offset: 45823, quotedText: 'The plain-label predicate, named exactly', direction: 'below' },
-  { file: 'references/publish-targets/static-md.md', offset: 47455, quotedText: 'Grouped index wiring', direction: 'above' },
-  { file: 'references/publish-targets/static-md.md', offset: 49060, quotedText: 'After either halt', direction: 'above' },
-  { file: 'references/publish-targets/static-md.md', offset: 51372, quotedText: 'Grouped index wiring', direction: 'above' },
-  { file: 'references/publish-targets/static-md.md', offset: 52289, quotedText: 'Grouped index wiring', direction: 'above' },
-  { file: 'references/publish-targets/static-md.md', offset: 54052, quotedText: 'The headings branch is unchanged by this PR and already completes silently', direction: 'above' },
-  { file: 'references/publish-targets/static-md.md', offset: 62663, quotedText: 'Grouped index wiring', direction: 'above' },
+  { file: 'references/publish-targets/static-md.md', offset: 26391, quotedText: 'After either halt', direction: 'below' },
+  { file: 'references/publish-targets/static-md.md', offset: 32027, quotedText: 'Grouped index wiring', direction: 'above' },
+  { file: 'references/publish-targets/static-md.md', offset: 35085, quotedText: 'The plain-label predicate, named exactly', direction: 'below' },
+  { file: 'references/publish-targets/static-md.md', offset: 39850, quotedText: 'Grouped entry, line present, `indexForm: \'non-heading\'`', direction: 'above' },
+  { file: 'references/publish-targets/static-md.md', offset: 41508, quotedText: 'Grouped entry, line present, `indexForm: \'headings\'`', direction: 'above' },
+  { file: 'references/publish-targets/static-md.md', offset: 44953, quotedText: 'The plain-label predicate, named exactly', direction: 'below' },
+  { file: 'references/publish-targets/static-md.md', offset: 46011, quotedText: 'The plain-label predicate, named exactly', direction: 'below' },
+  { file: 'references/publish-targets/static-md.md', offset: 47643, quotedText: 'Grouped index wiring', direction: 'above' },
+  { file: 'references/publish-targets/static-md.md', offset: 49248, quotedText: 'After either halt', direction: 'above' },
+  { file: 'references/publish-targets/static-md.md', offset: 51560, quotedText: 'Grouped index wiring', direction: 'above' },
+  { file: 'references/publish-targets/static-md.md', offset: 52477, quotedText: 'Grouped index wiring', direction: 'above' },
+  { file: 'references/publish-targets/static-md.md', offset: 54240, quotedText: 'The headings branch is unchanged by this PR and already completes silently', direction: 'above' },
+  { file: 'references/publish-targets/static-md.md', offset: 62851, quotedText: 'Grouped index wiring', direction: 'above' },
 ];
 
 // Per-occurrence key. offset alone is already unique; file/quotedText/direction are folded in so a
@@ -318,13 +318,18 @@ test('extractCitations does not catastrophically backtrack on a long undirected 
   // a single unrepeated pair. Minimising was also unsound in a way the noise hid: it discards a
   // majority, so four slow calls and one fast one are indistinguishable from five fast ones.
   //
-  // THE CEILING IS SET FROM BOTH ENDS, BOTH MEASURED. Healthy tops out at 29.3x above. The retired
-  // quadratic matcher — the actual regression this test exists to catch, run directly rather than
-  // assumed — produces 117.4x at these sizes and takes 38,847ms, NOT the ~256x a textbook n^2 would
-  // suggest. 60x therefore sits 2.0x above the worst healthy sample and 2.0x below the real
-  // regression. Re-measure BOTH ends before changing it, and note which gate is actually decisive:
-  // 38,847ms against a 2,000ms bound is a 19x margin, while the ratio's is 2x. The absolute bound
-  // is the gate; the ratio is the early signal.
+  // THE CEILING IS SET FROM BOTH ENDS, BOTH MEASURED. Healthy tops out at 29.3x. The retired
+  // catastrophic matcher — the actual regression this test exists to catch, recovered and RUN rather
+  // than assumed — measured 117.4x/38,847ms, 228.2x/29,891ms and 256.5x/33,943ms across hosts and
+  // runs, so quote it as a RANGE: it never came close to passing, and the lowest observation is the
+  // one that matters for margin. 60x therefore sits 2.0x above the worst healthy sample and at least
+  // 2.0x below the regression.
+  // Which gate is decisive: ~30 SECONDS against a 2,000ms bound is a ~15x margin, while the ratio's
+  // is 2x. The absolute bound is the gate; the ratio is the early signal, and that ordering is why
+  // the ratio's narrower band is acceptable.
+  // KNOWN BLIND SPOT, stated rather than implied: this catches the catastrophic matcher, not all
+  // superlinearity. A mild n^1.4 curve produces ~48.5x at 16x input and passes. Tightening toward
+  // that would collide with healthy noise at ~29x; closing it needs step-counting, not wall time.
   // Do not tighten toward 16x "because linear should be 16x" — measured, linear is ~20x here.
   const PAIRS = 5;
   const ratios = [];
@@ -344,7 +349,9 @@ test('extractCitations does not catastrophically backtrack on a long undirected 
   );
   assert.ok(
     ratio < 60,
-    `16x input took ${ratio.toFixed(1)}x longer (median of ${PAIRS} paired samples) — ` +
-      'that is quadratic-or-worse scaling, not linear; possible ReDoS regression',
+    `16x input took ${ratio.toFixed(1)}x longer (median of ${PAIRS} paired samples) — that is ` +
+      `n^${(Math.log(ratio) / Math.log(16)).toFixed(2)} scaling, past the 60x safety ceiling ` +
+      '(healthy measures ~n^1.22, the retired catastrophic matcher n^1.72-n^2.00); possible ReDoS ' +
+      'regression, or a loaded machine — re-measure on a quiet box before touching the regex',
   );
 });
