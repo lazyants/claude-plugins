@@ -2925,7 +2925,9 @@ done
 # substituting a TAB for a space all change source bytes with every pin still green. That is
 # deliberate, not a hole: house style hard-wraps at ~95 columns, so a needle that broke on rewrapping
 # would be unusable. A non-ASCII lookalike is a different matter and DOES fire (NBSP for space, a
-# Cyrillic 'с' for 'c'), because collapsing normalizes whitespace only.
+# U+0441 CYRILLIC SMALL LETTER ES for ASCII 'c'), because collapsing normalizes whitespace only.
+# Written as a codepoint deliberately: a literal homoglyph sitting in a shell script is the exact
+# hazard this sentence is about, and U+2028/U+2029 are named the same way everywhere else here.
 # So it detects DELETION and any NON-WHITESPACE MODIFICATION of the pinned text — which is what
 # happened here twice, and why the pins are worth keeping. Precisely, the guarantee is EXISTENTIAL:
 # it fires only when NO unchanged occurrence is left in the section. Measured — duplicate the
