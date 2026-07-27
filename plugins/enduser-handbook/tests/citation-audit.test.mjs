@@ -270,31 +270,39 @@ test('extractCitations does not catastrophically backtrack on a long undirected 
   // A single timing sample cannot distinguish "slow because quadratic" from "slow because preempted".
   // Repeating and taking the MINIMUM can: preemption and GC only ever ADD time, so the minimum of k
   // samples converges on the uncontended cost from above, while genuine quadratic scaling is present
-  // in every sample and survives the min untouched. The absolute `large < 2000` bound below is
-  // deliberately left on a single-sample basis — it has three orders of magnitude of headroom and is
-  // the ReDoS signal that matters even when the box is busy.
+  // in every sample and survives the min untouched.
+  // The two assertions below then read DIFFERENT statistics, on purpose, because they ask different
+  // questions. The SCALING ratio wants the uncontended cost, so it uses the minimum. The ABSOLUTE
+  // blow-up bound wants the worst thing that actually happened, so it uses the maximum. An earlier
+  // revision of this comment said the absolute bound stayed single-sample while `timeFor` returned
+  // only the minimum — that was simply false, and it meant four 2.5-second runs plus one fast one
+  // would sail through a guard whose entire job is noticing that the run took seconds.
   const TIMING_SAMPLES = 5;
   const timeFor = (n) => {
     const decoyRun = '"a" '.repeat(n) + 'end.';
     let best = Infinity;
+    let worst = 0;
     for (let i = 0; i < TIMING_SAMPLES; i += 1) {
       const start = process.hrtime.bigint();
       const recs = extractCitations(decoyRun);
       const elapsedMs = Number(process.hrtime.bigint() - start) / 1e6;
       assert.deepEqual(recs, [], `n=${n}: no trailing above/below means no citation span should match at all`);
       if (elapsedMs < best) best = elapsedMs;
+      if (elapsedMs > worst) worst = elapsedMs;
     }
-    return best;
+    return { best, worst };
   };
-  const small = timeFor(5_000);
-  const large = timeFor(80_000); // 16x the input
+  const small = timeFor(5_000).best;
+  const largeTiming = timeFor(80_000); // 16x the input
+  const large = largeTiming.best;
   // Linear ⇒ ~16x; quadratic ⇒ ~256x; exponential ⇒ unmeasurably larger. A generous 40x ceiling
   // still fails hard on quadratic-or-worse scaling.
   assert.ok(small > 0, `the small run measured ${small}ms — a zero denominator makes the ratio meaningless`);
   const ratio = large / small;
   assert.ok(
-    large < 2000,
-    `expected the 80,000-title run well under 2s, took ${large}ms — possible ReDoS regression`,
+    largeTiming.worst < 2000,
+    `expected EVERY 80,000-title run well under 2s, slowest of ${TIMING_SAMPLES} took ` +
+      `${largeTiming.worst}ms — possible ReDoS regression`,
   );
   assert.ok(
     ratio < 40,

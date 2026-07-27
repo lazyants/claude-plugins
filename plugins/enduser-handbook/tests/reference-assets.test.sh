@@ -2902,17 +2902,28 @@ done
 # before describing them; the earlier revision of this comment claimed two per adapter and was wrong
 # about obsidian.
 #
-# THE TEST THAT FOLLOWS, STATED SO IT IS SATISFIABLE. Extending a needle defends against a rewrite of
-# the claim IN PLACE — a predicate swapped, a negation dropped — which is the edit that actually
-# happened here twice. It does NOT defend against a contradiction APPENDED after the pinned span:
-# '...fall outside the subset as well only in the retired 1.10.0 behavior; 1.11.0 accepts every one
-# of these forms' keeps every needle verbatim and leaves all eight assertions green, and no finite
-# needle can prevent that, because a suffix always exists. An earlier revision of this comment told
-# you to lengthen the needle until no contradiction was possible; that instruction can never be
-# satisfied, and following it would just produce longer brittle pins with the same hole.
-# So: the needle question is 'could someone REWRITE this claim without touching my needle?' — if yes,
-# extend it. The appended-contradiction case is not a needle-length problem at all; it is the
-# token-free residual already named below, and it is bounded by review, not by a string.
+# STOP LOOKING FOR A NEEDLE-LENGTH RULE. THERE ISN'T ONE. Two successive revisions of this comment
+# tried to state a test a needle could pass, and review defeated both by construction:
+#   - append after the span:  '...fall outside the subset as well ONLY IN THE RETIRED 1.10.0
+#     BEHAVIOR; 1.11.0 accepts every one of these forms.'
+#   - prefix before the span: 'IT IS FALSE THAT Inline code, an HTML comment or a fenced block
+#     anywhere ... fall outside the subset as well.'
+# Both keep every needle byte-identical and the `fenc` count at three; all eight assertions stay
+# green over inverted prose. Extending rightward cannot stop a prefix, extending leftward cannot stop
+# a suffix, and neither stops the sentence being moved intact under a "retired claims" heading. Any
+# finite span has a context that reverses it, so "lengthen the needle until it cannot be contradicted"
+# is not a strict instruction — it is an unsatisfiable one, which is worse, because it reads as
+# rigor while delivering longer and more brittle pins with the identical hole.
+#
+# What a fixed-string pin actually answers, and the ONLY thing it answers:
+#     are these exact bytes still present, in this section, as the scanner sees it?
+# That detects DELETION and IN-PLACE MODIFICATION of the pinned bytes — which is what happened here
+# twice, so the pins are worth keeping and worth reaching through the polarity-carrying word. It
+# detects NOTHING about surrounding context, and therefore nothing about whether the document is
+# TRUE. Choose a needle by asking which bytes you want to be told about if they vanish or change.
+# Do not ask whether it can be contradicted; the answer is always yes.
+# Semantic inversion by context is bounded by review and by #341's structure-aware reader, not by
+# any string in this file.
 #
 # These layers still do not decide whether the prose is TRUE. Known live evasions, kept named rather
 # than implied away: a contradiction phrased without any `fenc` token, and the scanner-divergence
