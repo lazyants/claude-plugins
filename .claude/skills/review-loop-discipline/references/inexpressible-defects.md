@@ -149,9 +149,20 @@ rather than argued:
 | negative needle | the retired phrase is absent | a new spelling of the same error |
 | positive pin | the correct mechanism sentence is present | a contradiction **added** beside it — a presence check cannot see an addition |
 | token count | the section holds exactly N `fenc` tokens | a **paired** substitution: remove one truthful occurrence, add one false one, net zero |
-| count + full coverage | every counted occurrence also sits inside a phrase pin | (holds against the above: a removal must break a pin, an addition must move the count) |
+| count + full coverage | every counted occurrence also sits inside a phrase pin | the needle kept VERBATIM inside a sentence asserting the opposite |
 
-Two things generalize.
+That last one is the sharpest and has the cleanest cause. The defeated needle was
+`HTML comment or a fenced block anywhere`, and the mutation was
+`...anywhere is accepted by this automation` — same needle, same token count, meaning inverted.
+**A needle that stops at a noun phrase pins a SUBJECT, and a subject is equally compatible with the
+opposite predicate.** The fix is not a new mechanism: extend each needle through the word that
+carries the claim's polarity (`... fall outside the subset as well`; `can never sit at the ...`).
+The reusable acceptance test, cheap enough to apply to every string pin you ever write:
+
+> Write the sentence that contradicts the claim while keeping your needle verbatim.
+> If you can, the needle is too short.
+
+Three things generalize.
 
 **The design rule: bound the TOKEN, not the spelling — then cover every counted occurrence with a
 phrase pin.** A count alone is a denylist's mirror image: it constrains the total while leaving each
@@ -172,6 +183,14 @@ the code."* No mechanical gate over prose decides whether the prose is TRUE; a g
 the ways a false claim arrives, so the honest artifact is a gate whose description says exactly which
 ways remain. See also [[feedback-red-before-green]] — every rung above was confirmed by watching the
 mutant pass BEFORE the fix and fail after, one file at a time.
+
+**The third thing, and the one that ends the loop: decide where you STOP, and write the stopping
+point down.** A fixed-string pin over prose has no final rung — each round buys one more evasion
+class and the next round finds another. Four rounds in, the honest artifact was not a fifth
+mechanism but a comment naming the gate's remaining evasions explicitly and pointing the class at
+the filed issue for a structure-aware reader. Say "drift detector, never a truth detector" in the
+artifact itself. Otherwise every future reader re-derives the ladder from scratch, and — the actual
+cost here — every round's own comment quietly promises the rung above the one it built.
 
 ## The symmetric-twin tell
 
