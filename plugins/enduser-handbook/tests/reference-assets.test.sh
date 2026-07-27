@@ -2834,7 +2834,7 @@ done
 # `group_title` was at fault was handed a list that could not converge. An exact-string pin cannot
 # catch a wording that is wrong rather than drifted — every claim below is measured by executing the
 # module, and the pin only holds the two adapters to the measured wording once it is chosen.
-UNWRITABLE_HALT="Cannot wire '<slug>' into <index_file>: the lines this run would write are not recognizable to the next run, so nothing was written. Give this chapter a plain <field> in the manifest, then re-run. Measured fatal shapes, by field and by the index's own bullet marker: in a title, a backtick, a fenced-code run, an HTML comment or a U+2028/U+2029 line separator on any marker, plus an unescaped ']' on a '*'/'+'-markered index; in a group_title, a U+2028/U+2029 line separator on any marker, a '/' anywhere or a trailing '.md' on a '*'/'+'-markered index, and a colon straight after the first token or an all-hyphen value on a '-'-markered index. See \"Nested-list automation limits\" below."
+UNWRITABLE_HALT="Cannot wire '<slug>' into <index_file>: the lines this run would write are not recognizable to the next run, so nothing was written. <remedy> Then re-run. Plain here means ordinary text — no backtick, asterisk, underscore, angle bracket, ampersand, tilde, square bracket, exclamation mark or backslash; no HTML comment; and no U+2028/U+2029 line separator. That is deliberately stricter than the parser: which shapes are fatal depends on the link mode and on the bullet marker of the line being written, not on the markers used elsewhere in the file, so this asks for a value that is safe under all of them. See \"Nested-list automation limits\" below for the measured per-marker set."
 for f in "$SMD" "$OMD"; do
   c="$(count_joined_fixed "$UNWRITABLE_HALT" "$f")"
   if [ "$c" -eq 1 ]; then
@@ -2857,8 +2857,16 @@ done
 # Same guard for the second correction. This exact parenthetical is the retired remedy list; two of
 # its six items (backslash escapes, HTML entities) are measured to insert cleanly and never reach
 # this halt, so its return would restore a list that cannot converge for a `group_title` fault. The
-# needle is the FULL parenthetical, not "backslash escapes" alone — the `present` halt below names
-# backslash escapes and HTML entities legitimately, because ITS mechanism really is the target parse.
+# needle is the FULL parenthetical, not "backslash escapes" alone — the `present` halt below also
+# names those two, and is pinned separately.
+#
+# Do NOT read that as an endorsement of the `present` halt's own wording. Measured over 18 cells
+# (6 values x path/wikilink x the row-resolution question step 0 actually asks): an HTML ENTITY in a
+# title never breaks the target parse in either mode — 0 of 18 — and a backslash escape breaks it in
+# exactly ONE cell, `A\]B` in wikilink mode. So the `present` halt names two remedies that are almost
+# never its cause. That is a pre-existing shipped string, out of scope for this commit, and it is
+# tracked rather than silently rewritten here — the point of this comment is to stop the next reader
+# concluding from the needle-scoping above that the other halt was audited and found correct.
 for f in "$SMD" "$OMD"; do
   c="$(count_joined_fixed 'give it a plain value (no Markdown markup, backslash escapes, HTML entities, HTML comments, backticks, or invisible line separators)' "$f")"
   if [ "$c" -eq 0 ]; then

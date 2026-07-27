@@ -355,11 +355,18 @@ These outcomes reuse the step-0 result computed above (`containerTitle`, `indexF
     reader would decline the result. Nothing is written. `field` names the manifest value the
     writer traces the refusal to: `'title'`, `'group_title'`, or `'unknown'` when neither
     stand-in clears it, found by substituting a known-good placeholder for one emitted line at
-    a time and re-reading, so it stays correct for causes not yet catalogued. Render `<field>`
-    in the halt as `title`, as `group_title`, or — for `'unknown'`, which is reachable only
-    when no single emitted line's replacement clears the rejection, i.e. both values are
-    independently at fault — as `title and group_title`. Halt with:
-    `Cannot wire '<slug>' into <index_file>: the lines this run would write are not recognizable to the next run, so nothing was written. Give this chapter a plain <field> in the manifest, then re-run. Measured fatal shapes, by field and by the index's own bullet marker: in a title, a backtick, a fenced-code run, an HTML comment or a U+2028/U+2029 line separator on any marker, plus an unescaped ']' on a '*'/'+'-markered index; in a group_title, a U+2028/U+2029 line separator on any marker, a '/' anywhere or a trailing '.md' on a '*'/'+'-markered index, and a colon straight after the first token or an all-hyphen value on a '-'-markered index. See "Nested-list automation limits" below.`
+    a time and re-reading, so it stays correct for causes not yet catalogued. Render `<remedy>`
+    from `field`. `'unknown'` is reachable only when no single emitted line's replacement clears
+    the rejection, i.e. both values are independently at fault. `group_title` is GROUP-scoped —
+    `validateGroups` requires every entry of a group to carry the same value — so a remedy that
+    tells the operator to change it on THIS chapter alone does not converge: the next run halts
+    on the conflicting-`group_title` gate instead. The three renderings:
+    - `'title'` ⇒ `Give this chapter a plain title in the manifest.`
+    - `'group_title'` ⇒ `Give a plain group_title to EVERY entry of this chapter's group in the manifest — it is group-scoped, so changing it on this chapter alone halts on the conflicting-group_title gate instead.`
+    - `'unknown'` ⇒ `Give this chapter a plain title, and a plain group_title to EVERY entry of its group — group_title is group-scoped, so changing it on this chapter alone halts on the conflicting-group_title gate instead.`
+
+    Halt with:
+    `Cannot wire '<slug>' into <index_file>: the lines this run would write are not recognizable to the next run, so nothing was written. <remedy> Then re-run. Plain here means ordinary text — no backtick, asterisk, underscore, angle bracket, ampersand, tilde, square bracket, exclamation mark or backslash; no HTML comment; and no U+2028/U+2029 line separator. That is deliberately stricter than the parser: which shapes are fatal depends on the link mode and on the bullet marker of the line being written, not on the markers used elsewhere in the file, so this asks for a value that is safe under all of them. See "Nested-list automation limits" below for the measured per-marker set.`
   - **`{kind: 'present', index}`** ⇒ the single matched container already carries a child
     bullet whose content is byte-identical to the chapter link the adapter is about to write —
     the writer's own membership guard, checked directly against the list body and independent

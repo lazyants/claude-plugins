@@ -485,13 +485,20 @@ the one exception to "do all of these" — see its own conditional note below.
        value, so it stays correct for causes nobody has enumerated yet. Deliberately
        conservative: it can decline a value that would in fact have round-tripped safely,
        which is the right direction for a tool rewriting a file it does not own. Render
-       `<field>` in the halt as `title`, as `group_title`, or — for `'unknown'`, which is
-       reachable only when no single emitted line's replacement clears the rejection, i.e.
-       both values are independently at fault — as `title and group_title`. One halt
-       text for both `publish.wikilinks` modes — verified, not assumed: the wording names no
-       link syntax, and every cause measured under "Nested-list automation limits" below
-       reaches this outcome identically in both modes:
-       `Cannot wire '<slug>' into <index_file>: the lines this run would write are not recognizable to the next run, so nothing was written. Give this chapter a plain <field> in the manifest, then re-run. Measured fatal shapes, by field and by the index's own bullet marker: in a title, a backtick, a fenced-code run, an HTML comment or a U+2028/U+2029 line separator on any marker, plus an unescaped ']' on a '*'/'+'-markered index; in a group_title, a U+2028/U+2029 line separator on any marker, a '/' anywhere or a trailing '.md' on a '*'/'+'-markered index, and a colon straight after the first token or an all-hyphen value on a '-'-markered index. See "Nested-list automation limits" below.`
+       `<remedy>` from `field`. `'unknown'` is reachable only when no single emitted line's
+       replacement clears the rejection, i.e. both values are independently at fault.
+       `group_title` is GROUP-scoped — `validateGroups` requires every entry of a group to
+       carry the same value — so a remedy naming only THIS chapter does not converge: the next
+       run halts on the conflicting-`group_title` gate instead. The three renderings:
+       - `'title'` ⇒ `Give this chapter a plain title in the manifest.`
+       - `'group_title'` ⇒ `Give a plain group_title to EVERY entry of this chapter's group in the manifest — it is group-scoped, so changing it on this chapter alone halts on the conflicting-group_title gate instead.`
+       - `'unknown'` ⇒ `Give this chapter a plain title, and a plain group_title to EVERY entry of its group — group_title is group-scoped, so changing it on this chapter alone halts on the conflicting-group_title gate instead.`
+
+       One halt text for both `publish.wikilinks` modes — verified, not assumed: the wording
+       names no link syntax, and the remedy it asks for is safe under both modes, which matters
+       because the fatal SHAPES differ by mode (measured: a backslash-escaped `]` in a title is
+       written in path mode and refused in wikilink mode on `*`/`+`):
+       `Cannot wire '<slug>' into <index_file>: the lines this run would write are not recognizable to the next run, so nothing was written. <remedy> Then re-run. Plain here means ordinary text — no backtick, asterisk, underscore, angle bracket, ampersand, tilde, square bracket, exclamation mark or backslash; no HTML comment; and no U+2028/U+2029 line separator. That is deliberately stricter than the parser: which shapes are fatal depends on the link mode and on the bullet marker of the line being written, not on the markers used elsewhere in the file, so this asks for a value that is safe under all of them. See "Nested-list automation limits" below for the measured per-marker set.`
      - `{kind: 'multiple'}` — two or more container bullets match `group_title`; never guess
        which is canonical, halt:
        "Found multiple '<group_title>' container bullets in <index_file> — curate the index manually, then re-run."
@@ -642,9 +649,9 @@ the one exception to "do all of these" — see its own conditional note below.
        table) — which is found and simply left unverified at the left margin (measured in both
        `publish.wikilinks` modes), but is `ok` if instead correctly nested under its container,
        since `isPlainLabel` is never applied to a child bullet, only to an indent-0 one. That
-       harmlessness does NOT extend to inline code, a fenced block, or an HTML comment in the
-       same nested position: `isPlainLabel` genuinely never touches a child bullet, but a
-       backtick, a tilde run, or `<!--` inside one still reaches `stripInertContexts` on the
+       harmlessness does NOT extend to a backtick or an HTML comment in the same nested
+       position: `isPlainLabel` genuinely never touches a child bullet, but a
+       backtick — any run length, paired or not — or `<!--` inside one still reaches `stripInertContexts` on the
        very next scan — the file-wide sanitizer-identity check (`prepareIndexLines` step 6,
        `assets/lib/chapter-paths.mjs`), not `isPlainLabel`, is what fires, and it degrades the
        WHOLE file, not just this row, to `not-a-list` from that point on (measured; see
@@ -786,9 +793,14 @@ hand-typed bare path. A richer rendering-aware matcher is a possible follow-up, 
 A manifest value that would corrupt this same structural read is refused the same way, before
 it is ever written. The set is per-field, and the two fields do not share it:
 
-- In a **chapter title**, on any marker: inline code, an HTML comment, a fenced-code run, or a
-  U+2028/U+2029 separator. On a `*`/`+`-markered index additionally an unescaped `]`, which on
-  a `-`-markered index is instead the `present` case above.
+- In a **chapter title**, on any marker: a backtick — any run length, paired or not, since the
+  mechanism is an unterminated inline code SPAN and not a fence; a tilde run is measured
+  harmless — an HTML comment, or a U+2028/U+2029 separator. Under a `*`/`+`-marked container
+  additionally anything that keeps the row's own link target from parsing, which then trips
+  `isBarePathBullet` on the grouped target's `/`: in path mode an unescaped `]` or a trailing
+  odd run of backslashes; in wikilink mode a `]` whether or not it is backslash-escaped, since
+  `WIKILINK_TARGET_RE` is not escape-aware. Under a `-`-marked container the same shapes are
+  instead the `present` case above.
 - In a **`group_title`**: a U+2028/U+2029 separator on any marker; on a `-`-markered index, a
   first token followed immediately by a colon (`FAQ: basics`, `Admin:`) or a value that is only
   hyphens (`---`); on a `*`/`+`-markered index, a value containing `/` or ending `.md`
