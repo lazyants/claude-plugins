@@ -2891,16 +2891,18 @@ done
 # is inside one of the positive needles below, so the reviewer's paired substitution has to remove a
 # pinned phrase and fails even though its added contradiction keeps the count at three.
 #
-# A NEEDLE MUST REACH THE WORD THAT CARRIES THE CLAIM'S POLARITY. A needle that stops at a noun
-# phrase pins a SUBJECT, and a subject is equally compatible with the opposite predicate: pinning
+# WHY THESE NEEDLES ARE SHAPED THE WAY THEY ARE — history, not a mandate. A needle that stops at a
+# noun phrase pins a SUBJECT, and a subject is equally compatible with the opposite predicate:
 # 'HTML comment or a fenced block anywhere' left "...anywhere is accepted by this automation" fully
 # green, same needle, same `fenc` count, meaning inverted. Reshaped for that reason: TWO of static's
 # three needles (the refusal list, now running through 'fall outside the subset as well', and the
 # line-start clause, now through 'can never sit at') and ONE of obsidian's (the refusal list) — the
 # adapters are not symmetric here, because obsidian's other two needles already ended in 'not a
 # fence' / 'is never a fence' and carried their own polarity. Count the needles you actually changed
-# before describing them; the earlier revision of this comment claimed two per adapter and was wrong
+# before describing them; an earlier revision of this comment claimed two per adapter and was wrong
 # about obsidian.
+# Reaching through the predicate raised the cost of one specific edit. It is NOT a requirement a
+# needle can be checked against — see the next paragraph, and do not reinstate it as one.
 #
 # STOP LOOKING FOR A NEEDLE-LENGTH RULE. THERE ISN'T ONE. Two successive revisions of this comment
 # tried to state a test a needle could pass, and review defeated both by construction:
@@ -2915,15 +2917,30 @@ done
 # is not a strict instruction — it is an unsatisfiable one, which is worse, because it reads as
 # rigor while delivering longer and more brittle pins with the identical hole.
 #
-# What a fixed-string pin actually answers, and the ONLY thing it answers:
-#     are these exact bytes still present, in this section, as the scanner sees it?
-# That detects DELETION and IN-PLACE MODIFICATION of the pinned bytes — which is what happened here
-# twice, so the pins are worth keeping and worth reaching through the polarity-carrying word. It
-# detects NOTHING about surrounding context, and therefore nothing about whether the document is
-# TRUE. Choose a needle by asking which bytes you want to be told about if they vanish or change.
-# Do not ask whether it can be contradicted; the answer is always yes.
-# Semantic inversion by context is bounded by review and by #341's structure-aware reader, not by
-# any string in this file.
+# What a fixed-string pin actually answers, stated so it survives being executed:
+#     does this section, AS THE SCANNER RENDERS IT, contain this character sequence?
+# "As the scanner renders it" is load-bearing and was got wrong once already: joined mode collapses
+# every run of whitespace to one space before matching, so the needle is not contiguous in the source
+# at all, and MEASURED — re-wrapping the sentence across a line, inserting extra ASCII spaces, or
+# substituting a TAB for a space all change source bytes with every pin still green. That is
+# deliberate, not a hole: house style hard-wraps at ~95 columns, so a needle that broke on rewrapping
+# would be unusable. A non-ASCII lookalike is a different matter and DOES fire (NBSP for space, a
+# Cyrillic 'с' for 'c'), because collapsing normalizes whitespace only.
+# So it detects DELETION and any NON-WHITESPACE MODIFICATION of the pinned text — which is what
+# happened here twice, and why the pins are worth keeping.
+#
+# The two things it does NOT do, and they point in OPPOSITE directions:
+#   - UNDER: it says nothing about text outside the pinned span, hence nothing about whether the
+#     document is TRUE. A prefix, a suffix, an infix negation, or the whole sentence relocated intact
+#     all leave it green.
+#   - OVER: it is not indifferent to context either, and can go RED with the sentence untouched —
+#     measured, renaming the section heading fails closed (exit 2, "unverifiable"), and an identical
+#     heading inside an HTML comment elsewhere in the file fails too. The has_joined_in_section
+#     contract above already documents that boundary; do not read "says nothing about context" as
+#     "cannot be tripped by context".
+# Choose a needle by asking which text you want to be told about if it vanishes or changes. Do not
+# ask whether it can be contradicted; the answer is always yes. Semantic inversion by surrounding
+# context is bounded by review and by #341's structure-aware reader, never by a string in this file.
 #
 # These layers still do not decide whether the prose is TRUE. Known live evasions, kept named rather
 # than implied away: a contradiction phrased without any `fenc` token, and the scanner-divergence

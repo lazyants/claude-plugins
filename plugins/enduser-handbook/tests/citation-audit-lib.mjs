@@ -50,9 +50,13 @@
 // chain's endpoint misses nothing a shorter internal sub-chain could have matched. Each quote is
 // visited O(1) times for chain growth and each chain incurs one bounded direction check, so the
 // whole pass is O(document length) — guarded by the ReDoS regression test in citation-audit.test.mjs,
-// which asserts the non-match AND that runtime grows roughly LINEARLY with input size: 16x input must
-// stay under 40x runtime, which passes linear (~16x) and fails quadratic (~256x) hard. It does not
-// assert constant runtime, and could not — the pass is O(n), not O(1).
+// which asserts the non-match AND bounds how runtime GROWS with input size: 16x input must stay under
+// 40x runtime, so linear (~16x) sits well inside and quadratic (~256x) fails hard. It does not assert
+// constant runtime, and could not — the pass is O(n), not O(1).
+// It is a WALL-CLOCK bound, so it can go falsely red on a loaded machine; that is #343's standing
+// residual, mitigated there (nanosecond clock, minimum of five samples, inputs large enough that one
+// preemption is a small fraction of either) rather than eliminated. Read a failure here as "measure
+// again on a quiet box", never as a proven regression, before touching this regex.
 //
 // Fence handling is NOT reimplemented here: maskFencedRegions is imported from the ONE JS fence
 // engine in assets/lib/md-structure.mjs and reused, so a citation-shaped string inside a ``` fence is

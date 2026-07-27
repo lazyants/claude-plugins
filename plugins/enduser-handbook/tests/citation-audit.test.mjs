@@ -292,8 +292,14 @@ test('extractCitations does not catastrophically backtrack on a long undirected 
     }
     return { best, worst };
   };
-  const small = timeFor(5_000).best;
-  const largeTiming = timeFor(80_000); // 16x the input
+  // Input sizes matter as much as the statistic. At 5,000 the small run was ~0.4ms — 40x shorter
+  // than the large one, so the large run was ~40x more likely to absorb a scheduling event, and the
+  // ratio inflated one-sidedly. Measured after min-of-5 was added: still 1 failure in 20 full-suite
+  // runs, always the ratio, at 44.7x with small=0.42ms and large=18.8ms. Both inputs are now large
+  // enough that a single preemption is a small fraction of either, which attacks the asymmetry
+  // rather than the symptom.
+  const small = timeFor(20_000).best;
+  const largeTiming = timeFor(320_000); // 16x the input
   const large = largeTiming.best;
   // Linear ⇒ ~16x; quadratic ⇒ ~256x; exponential ⇒ unmeasurably larger. A generous 40x ceiling
   // still fails hard on quadratic-or-worse scaling.
