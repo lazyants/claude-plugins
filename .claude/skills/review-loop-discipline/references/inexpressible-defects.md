@@ -157,24 +157,35 @@ That last one is the sharpest and has the cleanest cause. The defeated needle wa
 **A needle that stops at a noun phrase pins a SUBJECT, and a subject is equally compatible with the
 opposite predicate.** The fix is not a new mechanism: extend each needle through the word that
 carries the claim's polarity (`... fall outside the subset as well`; `can never sit at the ...`).
-The reusable acceptance test, cheap enough to apply to every string pin you ever write:
+**Do not go looking for an acceptance test a needle can pass. There isn't one, and two attempts to
+write one were falsified by construction in consecutive review rounds.**
 
-> Could someone REWRITE this claim in place — swap the predicate, drop the negation — without
-> touching my needle? If yes, extend the needle through the word that carries the polarity.
+| shipped rule | defeated by |
+|---|---|
+| "write the sentence that contradicts the claim while keeping your needle verbatim; if you can, the needle is too short" | append after the span: `... fall outside the subset as well ONLY IN THE RETIRED 1.10.0 BEHAVIOR; 1.11.0 accepts every one of these forms.` |
+| "could someone REWRITE this claim in place without touching my needle? if yes, extend it" | prefix before the span: `IT IS FALSE THAT Inline code, an HTML comment or a fenced block anywhere ... fall outside the subset as well.` |
 
-**That wording is the corrected version, and the correction is itself the lesson.** The rule shipped
-first as *"write the sentence that contradicts the claim while keeping your needle verbatim; if you
-can, the needle is too short"* — and the next review round applied it to the needles that same commit
-had just extended, and they failed it. Appending `... only in the retired 1.10.0 behavior; 1.11.0
-accepts every one of these forms` keeps every needle byte-identical and inverts the document. **No
-finite needle passes that test, because a suffix always exists**, so the instruction was
-unsatisfiable — and following it produces nothing but longer, more brittle pins with the identical
-hole. A test that no artifact can pass reads exactly like a demanding one.
+Both mutants keep every needle byte-identical and the pinned token count unchanged, and leave every
+assertion green over inverted prose. Extending rightward cannot stop a prefix, extending leftward
+cannot stop a suffix, and neither stops the sentence being relocated intact under a "retired claims"
+heading. **Any finite span has a context that reverses it.**
 
-The boundary that makes the rule usable: a needle defends against an IN-PLACE rewrite and nothing
-wider. A contradiction appended AFTER the pinned span is not a needle-length problem at all — it is
-the token-free-addition residual, bounded by review rather than by any string. Say which of the two
-you are defending against, or the pin's description will overclaim again.
+That makes both rules *unsatisfiable*, which is worse than lax — an unsatisfiable instruction reads
+as rigor while producing longer, more brittle pins with the identical hole, and it survived a bot
+review and a merge on exactly that appearance. Watch for this shape generally: **a criterion no
+artifact can meet looks indistinguishable from a demanding one, and the tell is that you cannot name
+a single example that passes it.**
+
+What a fixed-string pin actually answers, and the only thing it answers:
+
+> Are these exact bytes still present, in this section, as the scanner sees it?
+
+That covers DELETION and IN-PLACE MODIFICATION of the pinned bytes — both of which really occurred
+here, twice, which is why the pins are worth keeping and worth reaching through the polarity-carrying
+word. It covers nothing about surrounding context and therefore nothing about whether the document is
+TRUE. Choose a needle by asking which bytes you want to be told about if they vanish or change; do
+not ask whether it can be contradicted, because the answer is always yes. Semantic inversion by
+context is bounded by review and by a structure-aware reader, never by a string.
 
 Three things generalize.
 
