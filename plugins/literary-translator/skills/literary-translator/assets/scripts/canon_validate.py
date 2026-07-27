@@ -559,9 +559,34 @@ def _forbidden_keys_for_schema(schema, instance) -> list:
     return sorted(offending)
 
 
+# Longest jsonschema message this script will re-emit. jsonschema builds its
+# message by embedding the OFFENDING INSTANCE VALUE verbatim, so an item whose
+# `basis`/`confidence`/extra key carries a paragraph of fragment prose produces a
+# message containing that paragraph -- measured at 12.4 KB of output from a
+# 6 KB payload, with the injected sentence repeated 120 times across `error` and
+# `offending`. That output is read by the prepare agent, whose whole design
+# premise is that it ingests nothing attacker-authored, and its reply is relayed
+# into the next attempt's dispatch prompt. Round 5 capped `_indexed_item_label`
+# and left this sibling channel in the same output string uncapped.
+_SCHEMA_MESSAGE_MAX_CHARS = 200
+
+
+def _bounded_message(message: str) -> str:
+    """Cap a jsonschema message and strip the line breaks it can contain.
+
+    Newlines matter as much as length: the caller joins problems one per line,
+    so an embedded newline lets a value forge what looks like a separate
+    diagnostic line of its own.
+    """
+    flat = " ".join(str(message).split())
+    if len(flat) > _SCHEMA_MESSAGE_MAX_CHARS:
+        flat = flat[:_SCHEMA_MESSAGE_MAX_CHARS] + " [...truncated]"
+    return flat
+
+
 def _format_single_error(e, prefix: str = "") -> str:
     loc = "/".join(str(p) for p in e.path) or "<root>"
-    return f"{prefix}at '{loc}': {e.message}"
+    return f"{prefix}at '{loc}': {_bounded_message(e.message)}"
 
 
 def _forbidden_keys_message(keys, basis, prefix: str = "") -> str:
@@ -1384,7 +1409,10 @@ def _enforce_citation_source_safety(batch: list) -> None:
         reason = _citation_source_refusal(source)
         if reason is not None:
             problems.append(f"{_indexed_item_label('batch', i, item)}: {reason}")
-            offenders.append(item.get("source_form", f"<item {i}>"))
+            # Bounded for the same reason _indexed_item_label is: this list is
+            # serialized into `offending`, which the prepare agent reads, and
+            # round 5 capped the label while leaving this sibling raw.
+            offenders.append(_bounded_message(item.get("source_form", f"<item {i}>")))
 
     if problems:
         raise CanonValidationError(

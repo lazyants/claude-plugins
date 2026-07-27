@@ -87,6 +87,7 @@ Outcomes recorded per item: "fetched", "refused:<reason>", "http_error:<code>".
 from __future__ import annotations
 
 import argparse
+import contextlib
 import http.client
 import ipaddress
 import json
@@ -94,6 +95,7 @@ import re
 import socket
 import ssl
 import sys
+import threading
 import time
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit, urljoin, quote
@@ -633,7 +635,53 @@ def _encodable(value):
     return value.encode("utf-8", "replace").decode("utf-8")
 
 
-def _read_bounded(resp, deadline: float) -> bytes:
+@contextlib.contextmanager
+def _socket_deadline(sock, deadline: float):
+    """Force `sock` shut when `deadline` passes, for the duration of the block.
+
+    THE ONLY THING THAT ACTUALLY BOUNDS WALL-CLOCK HERE, and it took three tries
+    to find that out, so the two rejected approaches are recorded rather than
+    left to be re-attempted:
+
+    1. Checking the clock BETWEEN read calls. Useless when one call can block
+       forever: on a chunked body, read1() must first parse a chunk-size line,
+       and that readline loops internally until it sees CRLF.
+    2. Re-arming sock.settimeout(remaining) before each read. This looks right
+       and is not: a socket timeout bounds each individual recv, never the total.
+       A server trickling one byte every 2 s under a 3 s timeout satisfies every
+       recv and still runs forever -- measured, 24.1 s against a 3 s deadline,
+       with the socket's own timeout correctly reading 2.998 s the whole time.
+       An attacker simply trickles faster than any threshold.
+
+    A watchdog is out of band, so it does not care how deeply the stdlib is
+    blocked or how many recvs a single call makes. shutdown() rather than
+    close(): close() while another thread is inside recv can hand the fd number
+    to something else. The block must still re-check the deadline afterwards,
+    because a shutdown surfaces as ordinary EOF on most platforms -- otherwise a
+    truncated body would read as a complete one.
+
+    This also covers conn.getresponse(), which parses the status line and
+    headers and has exactly the same unbounded-blocking shape as the body read
+    (http.client will accept megabytes of header before giving up).
+    """
+    def _expire():
+        if sock is None:
+            return
+        try:
+            sock.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass                       # already gone; nothing to interrupt
+
+    timer = threading.Timer(max(0.0, deadline - time.monotonic()), _expire)
+    timer.daemon = True
+    timer.start()
+    try:
+        yield
+    finally:
+        timer.cancel()
+
+
+def _read_bounded(resp, deadline: float, sock=None) -> bytes:
     """Read up to MAX_BYTES + 1 bytes, re-checking the deadline as it goes.
 
     A single resp.read(MAX_BYTES + 1) is bounded by VOLUME and by the socket's
@@ -652,19 +700,46 @@ def _read_bounded(resp, deadline: float) -> bytes:
     deadline is only tested BETWEEN items.
 
     read1() rather than read(): read(n) blocks until n bytes have arrived,
-    which would put the deadline check back out of reach. read1(n) performs at
-    most one underlying recv, so it returns as soon as any bytes land and the
-    loop regains control. The bound is therefore the deadline plus at most one
-    socket-timeout idle period, not the server's whim.
+    which would put the deadline check out of reach entirely.
+
+    But read1() is NOT "at most one recv", and believing it was is how the first
+    version of this function stayed vulnerable to the attack it was written to
+    stop. On a `Transfer-Encoding: chunked` body, http.client must first read a
+    chunk-size LINE, and that readline loops until it sees CRLF. A server that
+    trickles the chunk-size line a byte at a time is never idle long enough to
+    trip the socket timeout and never completes the line, so read1() does not
+    return at all. Measured against the between-calls-only version: a 24 s
+    trickle of the chunk-size line against a 3 s deadline took 24.1 s and still
+    returned `fetched` -- elapsed once again equal to the server's choice.
+
+    So the deadline is enforced on the BLOCKING CALL, not merely between calls:
+    the socket timeout is re-armed to whatever is LEFT of the budget before each
+    read, so any recv that would outlive the deadline raises instead. Checking
+    the clock between iterations cannot bound a single iteration that blocks
+    forever.
     """
     chunks = []
     remaining = MAX_BYTES + 1
     while remaining > 0:
-        if time.monotonic() > deadline:
+        left = deadline - time.monotonic()
+        if left <= 0:
             raise _refuse("read-timeout")
-        chunk = resp.read1(min(READ_CHUNK_BYTES, remaining))
+        if sock is not None:
+            try:
+                sock.settimeout(left)
+            except OSError:
+                pass           # already closed; the read below surfaces it
+        try:
+            chunk = resp.read1(min(READ_CHUNK_BYTES, remaining))
+        except (socket.timeout, TimeoutError):
+            raise _refuse("read-timeout")
         if not chunk:
-            break                      # EOF
+            # EOF -- or the watchdog shutting the socket, which is
+            # indistinguishable from EOF here. Re-check the clock so a body cut
+            # short by the deadline is refused rather than served as complete.
+            if time.monotonic() > deadline:
+                raise _refuse("read-timeout")
+            break
         chunks.append(chunk)
         remaining -= len(chunk)
     return b"".join(chunks)
@@ -759,7 +834,18 @@ def _fetch_hop_inner(url, current, chain, hop, deadline, allowed_types) -> dict:
             "User-Agent": "literary-translator/1.16.1 (+citation-audit)",
             "Accept": "text/html, text/plain, application/xhtml+xml;q=0.9, */*;q=0.1",
         })
-        resp = conn.getresponse()
+        # Captured BEFORE getresponse(): when a response is will_close,
+        # getresponse() calls conn.close(), which sets conn.sock to None. The
+        # socket OBJECT stays usable because the response's file wrapper still
+        # holds a reference (CPython defers the real close while _io_refs > 0),
+        # so the body-phase watchdog below needs this handle rather than a
+        # conn.sock that has already been cleared.
+        sock = conn.sock
+        # The watchdog covers the status line and headers too: http.client will
+        # accept megabytes of them, and a trickled header blocks exactly the way
+        # a trickled chunk-size line does.
+        with _socket_deadline(sock, deadline):
+            resp = conn.getresponse()
         status = resp.status
         location = resp.getheader("Location")
         ctype = (resp.getheader("Content-Type") or "").split(";")[0].strip().lower()
@@ -807,7 +893,8 @@ def _fetch_hop_inner(url, current, chain, hop, deadline, allowed_types) -> dict:
         if ctype and ctype_token == "other":
             raise _refuse("content-type-not-allowed")
 
-        raw = _read_bounded(resp, deadline)
+        with _socket_deadline(sock, deadline):
+            raw = _read_bounded(resp, deadline, sock)
         truncated = len(raw) > MAX_BYTES
         raw = raw[:MAX_BYTES]
         body = raw.decode("utf-8", errors="replace")

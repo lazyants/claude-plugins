@@ -48,6 +48,7 @@ import ast
 import json
 import re
 import socket
+import threading
 import ssl
 import sys
 import time
@@ -79,6 +80,15 @@ PUBLIC_V6 = "2606:4700:4700::1111"
 # --------------------------------------------------------------------------- #
 # offline enforcement
 # --------------------------------------------------------------------------- #
+# The genuine symbols, captured at import time -- BEFORE _no_real_network can
+# replace them. Exactly one test restores these (the real-socket trickle test),
+# and it binds a server to 127.0.0.1 only. See its docstring for why a fake
+# cannot express the property it pins.
+_REAL_SOCKET = socket.socket
+_REAL_CREATE_CONNECTION = socket.create_connection
+_REAL_GETADDRINFO = socket.getaddrinfo
+
+
 @pytest.fixture(autouse=True)
 def _no_real_network(monkeypatch):
     """Make a real connection impossible for the duration of every test.
@@ -1621,6 +1631,92 @@ def test_a_lone_surrogate_in_the_fragment_cannot_destroy_index_json(tmp_path):
     assert rc == 0
     # The surrogate itself must not survive into the file the judge reads.
     assert "\ud800" not in index_path.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("phase", ["status-line", "header", "chunk-size", "body"])
+def test_a_trickling_server_cannot_outlive_the_deadline_over_a_real_socket(monkeypatch, phase):
+    """Round 6. The fake-object tests below prove the read loop's arithmetic and
+    NOTHING about http.client -- which is where every one of these attacks
+    actually lands. A fake exposing an instant read1() cannot express "this call
+    does not return", so it is blind to the whole class by construction.
+
+    Each phase is a place the stdlib blocks unboundedly on a server that is never
+    idle long enough to trip a socket timeout:
+
+      status-line / header  conn.getresponse() parses these before any body, and
+                            http.client will accept megabytes of them.
+      chunk-size            read1() on a chunked body must first read a
+                            chunk-size LINE, and that readline loops internally.
+      body                  the original Content-Length trickle.
+
+    Two earlier fixes passed the body case and failed the rest: checking the
+    clock between read calls, then re-arming settimeout() per call. Only an
+    out-of-band watchdog bounds a single call that never returns.
+    """
+    # Deliberate, narrow opt-out from _no_real_network. That fixture exists so a
+    # test cannot silently reach the network, and it is right; but the defect
+    # class here lives INSIDE http.client's blocking reads, which no fake can
+    # reproduce. Loopback only, and resolve_and_pin is still stubbed below, so
+    # nothing leaves the machine.
+    monkeypatch.setattr(socket, "socket", _REAL_SOCKET)
+    monkeypatch.setattr(socket, "create_connection", _REAL_CREATE_CONNECTION)
+    # getaddrinfo too: create_connection resolves even a literal address, so
+    # without this the connect fails inside the fixture rather than in the code
+    # under test. It only ever resolves "127.0.0.1" here -- resolve_and_pin is
+    # still stubbed below, so no name from a URL reaches a resolver.
+    monkeypatch.setattr(socket, "getaddrinfo", _REAL_GETADDRINFO)
+
+    server = _REAL_SOCKET(socket.AF_INET, socket.SOCK_STREAM)
+    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    server.bind(("127.0.0.1", 0))
+    server.listen(1)
+    port = server.getsockname()[1]
+
+    preamble = {
+        "status-line": b"HTTP/1.1 200 O",
+        "header": b"HTTP/1.1 200 OK\r\nX-Pad: ",
+        "chunk-size": (b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n"
+                       b"Transfer-Encoding: chunked\r\n\r\n"),
+        "body": (b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n"
+                 b"Content-Length: 400\r\n\r\n"),
+    }[phase]
+
+    def serve():
+        try:
+            conn, _ = server.accept()
+            conn.recv(65536)
+            conn.sendall(preamble)
+            for _ in range(30):            # one byte every 0.4 s, never idle
+                try:
+                    conn.sendall(b"0")
+                except OSError:
+                    return
+                time.sleep(0.4)
+        except OSError:
+            return
+        finally:
+            try:
+                conn.close()
+            except (OSError, UnboundLocalError):
+                pass
+
+    thread = threading.Thread(target=serve, daemon=True)
+    thread.start()
+    # Stand in for a public host; the real resolver correctly refuses loopback.
+    monkeypatch.setattr(fc, "resolve_and_pin", lambda host, port_: "127.0.0.1")
+
+    started = time.monotonic()
+    try:
+        with pytest.raises(fc.Refused) as excinfo:
+            fc.fetch_one(f"http://attacker.test:{port}/x", deadline=started + 1.0)
+        elapsed = time.monotonic() - started
+        assert str(excinfo.value) in {"read-timeout", "connect-timeout"}, (
+            f"{phase}: refused with {excinfo.value!r}")
+        # The point of the whole fix: elapsed is a function of OUR deadline, not
+        # of how long the server chose to trickle (it would run ~12 s).
+        assert elapsed < 5.0, f"{phase}: took {elapsed:.1f}s against a 1.0s deadline"
+    finally:
+        server.close()
 
 
 class _TricklingResponse:
