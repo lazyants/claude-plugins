@@ -47,6 +47,7 @@ import ipaddress
 import ast
 import json
 import re
+import http.client
 import socket
 import threading
 import ssl
@@ -2163,6 +2164,13 @@ if __name__ == "__main__":
     OSError(9, "Bad file descriptor"),
     ssl.SSLError("APPLICATION_DATA_AFTER_CLOSE_NOTIFY"),
     socket.timeout("timed out"),
+    # The FOURTH handler. HTTPException is not an OSError, so round 7's fix --
+    # which covered socket.timeout/SSLError/OSError -- did not reach it. Measured
+    # before this row existed: a merely-slow, protocol-correct server came back
+    # as http-protocol-error:BadStatusLine at exactly the deadline, because the
+    # watchdog truncated the status line and http.client blamed the sender.
+    http.client.BadStatusLine("HT"),
+    http.client.IncompleteRead(b"partial"),
 ])
 def test_an_exception_after_the_deadline_is_reported_as_our_timeout(monkeypatch, injected):
     """The watchdog interrupts a blocked call by shutting the socket down, and

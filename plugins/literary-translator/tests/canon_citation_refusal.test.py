@@ -244,6 +244,13 @@ REFUSAL_CASES = [
     ("http://\uff12\uff11\uff13\uff10\uff17\uff10\uff16\uff14\uff13\uff13/x", "ambiguous-numeric-host"),
     ("http://\uff10x\uff17f.0.0.1/x", "ambiguous-numeric-host"),
     ("http://\uff12\uff18\uff15\uff12\uff10\uff13\uff19\uff11\uff16\uff16/x", "ambiguous-numeric-host"),
+    # Codepoints that fold to MORE THAN ONE dot: U+2025 "..", U+2026 "...",
+    # U+FE30 "....". Stripping exactly one trailing dot left "localhost." or
+    # "localhost..", matching neither the equality test nor the ".localhost"
+    # suffix -- the one-dot reasoning stopping one dot short of its own point.
+    ("http://localhost\u2025/x", "localhost-name"),
+    ("http://localhost\u2026/x", "localhost-name"),
+    ("http://localhost\ufe30/x", "localhost-name"),
     ("http://224.0.0.1/x", "multicast-address"),      # is_global is TRUE here
     ("http://100.64.0.1/x", "non-global-address"),    # CGNAT: no named property hits
     ("http://0.0.0.0/x", ANY_ADDRESS_REASON),

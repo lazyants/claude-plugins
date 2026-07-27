@@ -216,7 +216,12 @@ def name_for_comparison(host: str) -> str:
         folded = host.encode("idna").decode("ascii").lower()
     except (UnicodeError, UnicodeDecodeError):
         folded = host.lower()
-    return folded[:-1] if folded.endswith(".") else folded
+    # rstrip, not a single [:-1]: several codepoints fold to MORE than one
+    # dot (U+2025 "..", U+2026 "...", U+FE30 "...."), so stripping exactly one
+    # left "localhost." / "localhost..", which matched neither the equality
+    # test nor the ".localhost" suffix test -- the same one-dot reasoning
+    # this function exists to generalise, stopping one dot short.
+    return folded.rstrip(".")
 
 
 def origin_of(scheme: str, host: str, port: int) -> str:
@@ -757,8 +762,8 @@ def _socket_deadline(sock, deadline: float):
 # nothing legitimate is touched -- but bounded, because these are the only
 # open-ended strings in the file the judge prompt calls locally generated.
 #
-# The asymmetry is what forced this: canon_validate.py caps the SAME source_form
-# at 60 characters on the grounds that "a name long enough to hold a paragraph of
+# The asymmetry is what forced this: canon_validate.py caps the same source_form to 60 chars in its
+# DIAGNOSTIC LABEL (the value itself carries no maxLength in either schema) on the grounds that "a name long enough to hold a paragraph of
 # instructions is not a name", while this file wrote it unbounded into the
 # judge's own evidence index -- measured at ~12 KB per field, i.e. ~500 KB of
 # attacker-authored text at the shipped DEFAULT_BATCH_SIZE. `source` is the worst
@@ -775,13 +780,25 @@ MAX_RECORDED_FIELD_CHARS = {"source_form": 200, "source": 2048, "basis": 64}
 def _recorded(field: str, value):
     """Make a fragment-copied value safe to WRITE and bounded in LENGTH."""
     value = _encodable(value)
+    if not isinstance(value, str):
+        return value
+    # Whitespace FLATTENED, not merely capped. The first version of this
+    # function bounded length only, while its own comment said the hazard was
+    # shape -- measured, a 4,000-char hostile `source` was recorded at 2,062
+    # chars still carrying 82 newlines, i.e. multi-line injected prose in the
+    # file the judge prompt calls locally generated. A refused item never
+    # passed validate_url, so CONTROL_CHAR_RE never applied to it.
+    value = " ".join(value.split())
     cap = MAX_RECORDED_FIELD_CHARS.get(field)
-    if cap is not None and isinstance(value, str) and len(value) > cap:
+    assert cap is not None, (
+        f"no cap declared for recorded field {field!r} -- add one to "
+        "MAX_RECORDED_FIELD_CHARS rather than letting it through unbounded")
+    if len(value) > cap:
         return value[:cap] + "...[truncated]"
     return value
 
 
-def _read_bounded(resp, deadline: float, sock=None) -> bytes:
+def _read_bounded(resp, deadline: float) -> bytes:
     """Read up to MAX_BYTES + 1 bytes, re-checking the deadline as it goes.
 
     A single resp.read(MAX_BYTES + 1) is bounded by VOLUME and by the socket's
@@ -1007,7 +1024,7 @@ def _fetch_hop_inner(url, current, chain, hop, deadline, allowed_types) -> dict:
             raise _refuse("content-type-not-allowed")
 
         with _socket_deadline(sock, deadline):
-            raw = _read_bounded(resp, deadline, sock)
+            raw = _read_bounded(resp, deadline)
         truncated = len(raw) > MAX_BYTES
         raw = raw[:MAX_BYTES]
         body = raw.decode("utf-8", errors="replace")
@@ -1030,6 +1047,15 @@ def _fetch_hop_inner(url, current, chain, hop, deadline, allowed_types) -> dict:
             raise _refuse("read-timeout")
         raise _refuse(f"network-error:{type(exc).__name__}")
     except http.client.HTTPException as exc:
+        # The fourth exit, and the one round 7's fix missed: HTTPException is
+        # not an OSError, so it is a genuinely separate handler. Measured, a
+        # merely-SLOW server that committed no protocol violation came back as
+        # http-protocol-error:BadStatusLine at exactly the deadline -- the
+        # watchdog cut the socket, http.client saw a truncated status line, and
+        # blamed the server. By this fix's own argument that is worse than what
+        # it fixed: the judge reads it as "this citation's server is broken".
+        if _past_deadline(deadline):
+            raise _refuse("read-timeout")
         # http.client has its OWN hierarchy and HTTPException is NOT an
         # OSError -- measured: issubclass(BadStatusLine, OSError) is False.
         # So these escaped every handler above, and run_batch only catches

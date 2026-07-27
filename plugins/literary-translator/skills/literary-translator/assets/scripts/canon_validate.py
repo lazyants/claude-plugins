@@ -454,7 +454,23 @@ class CanonValidationError(Exception):
     caller never has to re-derive that from a bare error string.
     """
 
+    # Total ceiling for one failure payload. Generous: every legitimate
+    # diagnostic in this file is far under it.
+    MAX_MESSAGE_CHARS = 4000
+
     def __init__(self, message, offending=None):
+        # BOUNDED HERE, at the one place every failure passes through, rather
+        # than at each site that happens to build a list. Round 7 capped the two
+        # sites it had measured and left three siblings in this same file
+        # emitting 563 KB at the shipped DEFAULT_BATCH_SIZE and 6 MB at 500
+        # items -- the exact magnitude that commit claimed to have closed,
+        # reproduced one function over. Fixing the three would have been the
+        # same mistake a third time; the guard belongs where it cannot be
+        # missed, so a future raise site inherits it without knowing.
+        message = str(message)
+        if len(message) > self.MAX_MESSAGE_CHARS:
+            message = (message[:self.MAX_MESSAGE_CHARS]
+                       + f"\n  ... [truncated, {len(message)} chars total]")
         super().__init__(message)
         # Bounded in COUNT here, at the one place every failure passes through,
         # rather than at each of the call sites that build a list. Each element
@@ -462,10 +478,14 @@ class CanonValidationError(Exception):
         # payload stayed linear in the batch size, and canon-batch.schema.json
         # has no maxItems. Measured at the shipped DEFAULT_BATCH_SIZE of 40: the
         # message obeyed its own cap while `offending` carried all 40 entries.
-        if offending is not None and len(offending) > _MAX_LISTED_PROBLEMS:
+        if offending is not None:
             extra = len(offending) - _MAX_LISTED_PROBLEMS
-            offending = list(offending[:_MAX_LISTED_PROBLEMS]) + [
-                f"... and {extra} more"]
+            # Per-element too: the count cap alone still let ONE 12 KB
+            # source_form through verbatim as offending[0].
+            offending = [_bounded_message(str(o))
+                         for o in list(offending)[:_MAX_LISTED_PROBLEMS]]
+            if extra > 0:
+                offending = offending + [f"... and {extra} more"]
         self.offending = offending
 
 
@@ -958,7 +978,12 @@ def _name_for_comparison(host: str) -> str:
         folded = host.encode("idna").decode("ascii").lower()
     except (UnicodeError, UnicodeDecodeError):
         folded = host.lower()
-    return folded[:-1] if folded.endswith(".") else folded
+    # rstrip, not a single [:-1]: several codepoints fold to MORE than one
+    # dot (U+2025 "..", U+2026 "...", U+FE30 "...."), so stripping exactly one
+    # left "localhost." / "localhost..", which matched neither the equality
+    # test nor the ".localhost" suffix test -- the same one-dot reasoning
+    # this function exists to generalise, stopping one dot short.
+    return folded.rstrip(".")
 
 
 def _citation_source_refusal(value) -> "str | None":
