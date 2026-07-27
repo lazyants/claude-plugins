@@ -2152,3 +2152,65 @@ def test_the_caps_are_finite():
 
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
+
+
+# =========================================================================== #
+# LAYER 8 -- the CAUSE a timeout is reported as (round 7)
+# =========================================================================== #
+@pytest.mark.parametrize("injected", [
+    BrokenPipeError(32, "Broken pipe"),          # the measured HTTPS shape
+    ConnectionResetError(54, "Connection reset by peer"),
+    OSError(9, "Bad file descriptor"),
+    ssl.SSLError("APPLICATION_DATA_AFTER_CLOSE_NOTIFY"),
+    socket.timeout("timed out"),
+])
+def test_an_exception_after_the_deadline_is_reported_as_our_timeout(monkeypatch, injected):
+    """The watchdog interrupts a blocked call by shutting the socket down, and
+    WHAT the stdlib raises next depends on the scheme. Over plain http the read
+    returns EOF and the clock check names it `read-timeout`. Over https,
+    ssl.SSLSocket.shutdown() clears _sslobj first, so OpenSSL's alert write hits
+    EPIPE and the caller sees BrokenPipeError -- measured, 3 of the 4 trickle
+    phases came back as `network-error:BrokenPipeError`: our own watchdog
+    reported as the remote host misbehaving.
+
+    That is not cosmetic. citationJudgePrompt names exactly two reasons as facts
+    about THIS RUN rather than about the citation (`batch-deadline`,
+    `read-timeout`), so a mislabelled timeout is read as a citation defect and
+    the next attempt is sent hunting a fault nobody has shown to exist -- and
+    citations are overwhelmingly https.
+
+    Past the deadline, WE are the cause whatever the stdlib called it. The
+    shipped real-socket test cannot see this because it speaks http only, which
+    is exactly why this one injects the exception instead.
+    """
+    # The deadline must be in the future when the hop STARTS and past when the
+    # exception is raised -- a deadline already gone refuses at the top of the
+    # hop as `total-timeout` and never reaches the handler under test.
+    clock = _FakeClock()
+    monkeypatch.setattr(fc.time, "monotonic", clock)
+    deadline = clock.now + 10.0
+
+    def boom(*args, **kwargs):
+        clock.advance(30.0)                        # the watchdog has now fired
+        raise injected
+    monkeypatch.setattr(fc, "_read_bounded", boom)
+
+    net = FakeNet(monkeypatch)                     # noqa: F841 -- installs the seams
+    with pytest.raises(fc.Refused) as excinfo:
+        fc.fetch_one("http://example.com/x", deadline=deadline)
+    assert str(excinfo.value) == "read-timeout", (
+        f"a {type(injected).__name__} raised past the deadline was reported as "
+        f"{excinfo.value!r}, which the judge reads as a defect in the citation")
+
+
+def test_before_the_deadline_the_real_cause_is_still_named(monkeypatch):
+    """The control. Attributing everything to a timeout would hide real network
+    faults, so the clock -- not the exception type -- has to be what decides."""
+    def boom(*args, **kwargs):
+        raise BrokenPipeError(32, "Broken pipe")
+    monkeypatch.setattr(fc, "_read_bounded", boom)
+
+    net = FakeNet(monkeypatch)                     # noqa: F841
+    with pytest.raises(fc.Refused) as excinfo:
+        fc.fetch_one("http://example.com/x", deadline=time.monotonic() + 60.0)
+    assert str(excinfo.value) == "network-error:BrokenPipeError"

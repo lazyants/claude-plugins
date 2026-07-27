@@ -685,6 +685,27 @@ def _encodable(value):
     return value.encode("utf-8", "replace").decode("utf-8")
 
 
+def _past_deadline(deadline: float) -> bool:
+    """True when OUR deadline has passed, so the refusal is ours to name.
+
+    The watchdog interrupts a blocked call by shutting the socket down, and what
+    the stdlib then raises depends on the scheme. Over plain HTTP the read
+    returns EOF and _read_bounded's own clock check names it. Over HTTPS,
+    ssl.SSLSocket.shutdown() clears _sslobj before the base shutdown, so
+    OpenSSL's alert write hits EPIPE and the caller sees BrokenPipeError --
+    measured: 3 of 4 trickle phases came back as network-error:BrokenPipeError,
+    i.e. our own watchdog reported as the remote host misbehaving.
+
+    That mattered beyond tidiness. The judge prompt names exactly two reasons as
+    facts about THIS RUN rather than about the citation -- batch-deadline and
+    read-timeout -- so a mislabelled timeout is read as a citation defect, and
+    citations are overwhelmingly HTTPS. The cause is decided by the clock, not by
+    which exception the shutdown happened to produce: past the deadline, WE are
+    the cause, whatever the stdlib called it.
+    """
+    return time.monotonic() > deadline
+
+
 @contextlib.contextmanager
 def _socket_deadline(sock, deadline: float):
     """Force `sock` shut when `deadline` passes, for the duration of the block.
@@ -899,6 +920,16 @@ def _fetch_hop_inner(url, current, chain, hop, deadline, allowed_types) -> dict:
         # a trickled chunk-size line does.
         with _socket_deadline(sock, deadline):
             resp = conn.getresponse()
+        # The re-check _socket_deadline's docstring calls for, on the phase that
+        # lacked it. http.client._read_headers treats EOF as a normal end of
+        # headers, so a watchdog-cut response PARSES as complete -- measured, a
+        # trickled `404 ... X-Pad:` came back as http_error:404 at exactly the
+        # deadline, because the status != 200 branch returns without ever
+        # consulting the clock. The 200 and redirect paths are covered by
+        # _read_bounded's EOF check and the next hop's top-of-hop check; this
+        # was the one exit that was not.
+        if time.monotonic() > deadline:
+            raise _refuse("read-timeout")
         status = resp.status
         location = resp.getheader("Location")
         ctype = (resp.getheader("Content-Type") or "").split(";")[0].strip().lower()
@@ -958,10 +989,16 @@ def _fetch_hop_inner(url, current, chain, hop, deadline, allowed_types) -> dict:
             "truncated": truncated, "outcome": "fetched", "body": body,
         }
     except (socket.timeout, TimeoutError):
+        if _past_deadline(deadline):
+            raise _refuse("read-timeout")
         raise _refuse("connect-timeout")
     except ssl.SSLError as exc:
+        if _past_deadline(deadline):
+            raise _refuse("read-timeout")
         raise _refuse(f"tls-error:{type(exc).__name__}")
     except OSError as exc:
+        if _past_deadline(deadline):
+            raise _refuse("read-timeout")
         raise _refuse(f"network-error:{type(exc).__name__}")
     except http.client.HTTPException as exc:
         # http.client has its OWN hierarchy and HTTPException is NOT an
