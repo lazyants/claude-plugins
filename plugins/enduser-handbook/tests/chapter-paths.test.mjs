@@ -2631,6 +2631,70 @@ for (const row of PRESENT_TRIGGER_TABLE) {
   }
 }
 
+test('present-halt recovery [1.11.0]: the stated positive title class converges in both link modes on every emitted marker', () => {
+  // The old halt said only "no Markdown markup, backslash escapes, or HTML entities". U+2028 and
+  // U+2029 satisfy those words but the re-read postcondition refuses either one in a title. The
+  // replacement states the narrower positive class below. Drive it from a REAL `present` state,
+  // then make a later control child select each possible marker for the recovery row; otherwise a
+  // fresh-index write would miss the state transition whose halt text this test protects.
+  const recoveryTitles = ['Alpha', 'Alpha Beta', 'Title É ٢', 'Title 東 ２０２６', 'Title Ж ٣', 'Title א 42'];
+  const recoveryClass = /^[\p{L}\p{N}]+(?: [\p{L}\p{N}]+)*$/u;
+  const separators = [0x2028, 0x2029];
+
+  for (const mode of ['path', 'wiki']) {
+    const wikilink = mode === 'wiki';
+    const target = wikilink ? 'admin/items' : 'admin/items.md';
+    const formatLink = (title, leaf = 'items') =>
+      wikilink ? `[[admin/${leaf}|${title}]]` : `[${title}](<admin/${leaf}.md>)`;
+    const breakingLink = wikilink ? `[[${target}|A]B]]` : `[A]B](<${target}>)`;
+
+    for (const marker of ['-', '*', '+']) {
+      const seed = [
+        `${marker} Admin`,
+        `  - ${breakingLink}`,
+        `  ${marker} ${formatLink('Overview', 'overview')}`,
+        '',
+      ];
+      assert.equal(
+        wireNestedListChapter(seed, 'Admin', breakingLink).kind,
+        'present',
+        `${mode}/${marker}: the recovery probe must start from the halt it claims to test`,
+      );
+
+      for (const title of recoveryTitles) {
+        assert.match(title, recoveryClass, `${JSON.stringify(title)} must satisfy the stated class`);
+        const chapterLink = formatLink(title);
+        const recovered = wireNestedListChapter(seed, 'Admin', chapterLink);
+        assert.equal(recovered.kind, 'inserted', `${mode}/${marker}/${JSON.stringify(title)}: recovery writes`);
+        assert.ok(
+          recovered.newLines.includes(`  ${marker} ${chapterLink}`),
+          `${mode}/${marker}/${JSON.stringify(title)}: the intended marker is the one measured`,
+        );
+        assert.equal(
+          locateChapterLine(recovered.newLines, target, { wikilink }).matches.length,
+          1,
+          `${mode}/${marker}/${JSON.stringify(title)}: the very next run recognizes exactly one row`,
+        );
+        assert.deepEqual(
+          verifyNonHeadingPlacement(recovered.newLines, target, 'Admin', { wikilink }),
+          { kind: 'ok' },
+          `${mode}/${marker}/${JSON.stringify(title)}: the next run proceeds through verified placement`,
+        );
+      }
+
+      for (const separator of separators) {
+        const title = `Line${String.fromCodePoint(separator)}Separator`;
+        assert.equal(recoveryClass.test(title), false, `U+${separator.toString(16)} is outside the new class`);
+        assert.deepEqual(
+          wireNestedListChapter(seed, 'Admin', formatLink(title)),
+          { kind: 'unwritable', field: 'title' },
+          `${mode}/${marker}/U+${separator.toString(16)}: the old broad wording repeats into unwritable`,
+        );
+      }
+    }
+  }
+});
+
 // =================================================================================================
 // [1.11.0 round 13] BLOCKER 2(c) — the whole-scan-abort claim (obsidian-vault.md / static-md.md,
 // "The plain-label predicate, named exactly."): the container-owner scan applies `isPlainLabel` to

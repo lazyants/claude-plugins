@@ -372,7 +372,7 @@ These outcomes reuse the step-0 result computed above (`containerTitle`, `indexF
     the writer's own membership guard, checked directly against the list body and independent
     of step 0's target parse (see "After either halt" below for why the two can disagree and
     what this bounds). Halt with:
-    `Chapter row for '<slug>' is already present under the '<group_title>' container bullet in <index_file>, but this run could not recognize it — the chapter's own title does not yield a resolvable link destination. Give the chapter a plain title in the manifest — no Markdown markup, backslash escapes, or HTML entities in it — then re-run; see "Nested-list automation limits" below.`
+    `Chapter row for '<slug>' is already present under the '<group_title>' container bullet in <index_file>, but this run could not recognize it — the chapter's own title does not yield a resolvable link destination. For this recovery step, give the chapter a non-empty title in the manifest made only of Unicode letters and numbers, with words separated by single ASCII spaces. That constraint was verified across both link modes and all three bullet markers of the line being written. Then re-run; see "Nested-list automation limits" below.`
   - **`{kind: 'multiple'}`** ⇒ two or more container bullets match `group_title`; never guess
     which is canonical, halt with:
     `Found multiple '<group_title>' container bullets in <index_file> — curate the index manually, then re-run.`

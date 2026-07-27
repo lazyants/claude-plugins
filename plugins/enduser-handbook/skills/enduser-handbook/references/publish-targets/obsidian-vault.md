@@ -473,7 +473,7 @@ the one exception to "do all of these" — see its own conditional note below.
        rather than `present`. A target-side route (a slug whose own text ends in `.md`, since
        `currentIndexExpectedTarget` strips one terminal `.md` in wikilinks mode) converges the
        same ordinary way:
-       `Chapter row for '<slug>' is already present under the '<group_title>' container bullet in <index_file>, but this run could not recognize it — the chapter's own title does not yield a resolvable link destination. Give the chapter a plain title in the manifest — no Markdown markup, backslash escapes, or HTML entities in it — then re-run; see "Nested-list automation limits" below.`
+       `Chapter row for '<slug>' is already present under the '<group_title>' container bullet in <index_file>, but this run could not recognize it — the chapter's own title does not yield a resolvable link destination. For this recovery step, give the chapter a non-empty title in the manifest made only of Unicode letters and numbers, with words separated by single ASCII spaces. That constraint was verified across both link modes and all three bullet markers of the line being written. Then re-run; see "Nested-list automation limits" below.`
      - `{kind: 'unwritable', field}` — [1.11.0] before returning, the writer re-reads the exact
        bytes it is about to hand back through its own reader (`prepareIndexLines`,
        `hasYamlMappingStructure`, `containerOwnerScan`); if that reader would refuse them,

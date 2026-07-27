@@ -94,14 +94,14 @@ has_ci() {
 # be found"), and the engine is now large enough (fence char + length + backtick-info-string +
 # CRLF) that a hand-duplicated second copy is a real drift risk, not just a style preference.
 _section_contains() {
-  local file="$1" heading="$2" needle="$3" joined="${4:-0}"
+  local file="$1" heading="$2" needle="$3" joined="${4:-0}" operation="${5:-contains}"
   # `joined=1` searches the section's lines JOINED with single spaces and whitespace-collapsed,
   # instead of testing each physical line. House style hard-wraps prose at ~95 columns, so a
   # sentence-length needle matches no single line and the default per-line mode cannot pin it.
   # This is a MODE of the one scanner, deliberately not a second implementation: both modes share
   # the same fence tracker and the same section boundaries, so a pin can never disagree with the
   # existing per-line pins about which region it is looking at.
-  awk -v heading="$heading" -v needle="$needle" -v joined="$joined" '
+  awk -v heading="$heading" -v needle="$needle" -v joined="$joined" -v operation="$operation" '
        # #257: this counts SPACE characters only, so a leading TAB reports indent=0 and `rest`
        # (computed below from `indent`) starts AT that unconsumed tab char — whose first
        # character (`fc`) can never equal a fence marker (` or ~), so a tab-prefixed line never
@@ -191,6 +191,23 @@ _section_contains() {
            # copy in this branch had never itself been exercised by that test.
            found_needle = index(buf, needle) > 0
          }
+         if (operation == "count_ci") {
+           haystack = tolower(buf)
+           target = tolower(needle)
+           count = 0
+           start = 1
+           target_len = length(target)
+           haystack_len = length(haystack)
+           if (target_len == 0) { print 0; exit 0 }
+           while (start <= haystack_len) {
+             pos = index(substr(haystack, start), target)
+             if (pos == 0) break
+             count++
+             start = start + pos + target_len - 1
+           }
+           print count
+           exit 0
+         }
          if (needle != "" && found_needle) exit 0
          exit 1
        }
@@ -238,6 +255,23 @@ has_joined_in_section() {
     ok "$msg"
   else
     bad "$msg (joined section under '$heading' in $(basename "$file") does not carry the sentence)"
+  fi
+}
+
+# Assert a case-insensitive fixed token's exact occurrence count within the same tracker-visible,
+# whitespace-collapsed Markdown section used by has_joined_in_section. This is deliberately a count,
+# not a truth detector: additions and removals carrying the token move it; rephrasings that avoid the
+# token do not. A missing file or heading fails closed instead of being misreported as count zero.
+assert_joined_ci_token_count() {
+  local msg="$1" file="$2" heading="$3" token="$4" expected="$5" count rc
+  if [ ! -f "$file" ]; then bad "$msg (file not found: $(basename "$file"))"; return; fi
+  if count="$(_section_contains "$file" "$heading" "$token" 1 count_ci)"; then rc=0; else rc=$?; fi
+  if [ "$rc" -ne 0 ]; then
+    bad "$msg (heading '$heading' not found in $(basename "$file") — token count is unverifiable)"
+  elif [ "$count" -eq "$expected" ]; then
+    ok "$msg"
+  else
+    bad "$msg (case-insensitive '$token' count moved from $expected to $count — re-read the section, confirm the span-not-fence mechanism claim is still correct, then re-pin the count)"
   fi
 }
 
@@ -2847,21 +2881,27 @@ done
 # mechanism. A title's backtick run is an inline code span because the emitted row puts it after
 # indentation and a bullet; it is never a fence. Keep the retired "code fences" wording out.
 #
-# READ THIS BEFORE ADDING ANOTHER NEEDLE HERE. A negative pin forbids a SPELLING, not the error, and
-# this particular error has now come back twice past a negative pin written to stop it: retired as
-# "code fences", it returned as "a fenced code run", and — after a pin was added for THAT phrase —
-# a third time as "a fenced run", predicated of a `group_title`. Each new spelling walked straight
-# through, because the needle held the previous one. Adding a fourth needle buys the fourth spelling
-# and nothing else. So the load-bearing gate is the POSITIVE pair below: each adapter must STATE the
-# mechanism, in the section that defines the refusal set. A rewrite that reintroduces the fence claim
-# has to delete or contradict that sentence, and then this fails however it is spelled. Keep the
-# negatives as the cheap early signal; keep the positives as the actual gate.
+# READ THIS BEFORE ADDING ANOTHER NEEDLE HERE. Each layer has a narrower job:
+#   - the negative pins forbid only the exact retired spellings they name;
+#   - the positive pins catch deletion, rewording, or relocation of the mechanism sentences;
+#   - the case-insensitive `fenc` counts catch additions or removals carrying that token inside the
+#     tracker-visible, whitespace-collapsed limits section.
+# None of those layers decides whether the prose is true. In particular, the positive sentence can
+# coexist with a contradiction, and a contradiction phrased without `fenc` evades the count. The
+# class is not closed: review the section when the count moves, and keep the residual explicit rather
+# than adding another phrase denylist and calling it complete.
 has_joined_in_section \
   "static-md.md: states the span-not-fence mechanism where the refusal set is defined" \
   "$SMD" "### Nested-list automation limits" 'an unterminated inline code span, never a fence'
 has_joined_in_section \
   "obsidian-vault.md: states the span-not-fence mechanism for a group_title" \
   "$OMD" "### Nested-list automation limits" 'a backtick run in a `group_title` is never a fence'
+assert_joined_ci_token_count \
+  "static-md.md: limits section keeps its reviewed case-insensitive 'fenc' token count" \
+  "$SMD" "### Nested-list automation limits" 'fenc' 3
+assert_joined_ci_token_count \
+  "obsidian-vault.md: limits section keeps its reviewed case-insensitive 'fenc' token count" \
+  "$OMD" "### Nested-list automation limits" 'fenc' 3
 for f in "$SMD" "$OMD"; do
   c="$(count_joined_fixed 'code fences, or invisible line separators' "$f")"
   if [ "$c" -eq 0 ]; then
@@ -2899,7 +2939,14 @@ done
 # The `present` halt is a SHARED string. Both adapters must carry it byte-identically: an operator
 # reading either one is told the same thing, and a one-sided edit is exactly the twin drift this
 # suite exists to catch. Defined ONCE here so neither adapter can be the authority for the other.
-PRESENT_HALT="Chapter row for '<slug>' is already present under the '<group_title>' container bullet in <index_file>, but this run could not recognize it — the chapter's own title does not yield a resolvable link destination. Give the chapter a plain title in the manifest — no Markdown markup, backslash escapes, or HTML entities in it — then re-run; see \"Nested-list automation limits\" below."
+# Its recovery class is intentionally narrower than the #329 manual halt's class. Measured against
+# the real writer in both link modes and with each of `-`, `*`, and `+` as the next emitted child:
+# `Line<U+2028>Separator` and `Line<U+2029>Separator` satisfy the old "no markup/escapes/entities"
+# wording but return `unwritable/title` in all 12 cells. The positive class below converged in the
+# same matrix; it states that measured constraint instead of promising that the broader word
+# "plain" is sufficient. The #329 halt stays broader because its separately measured manual rows
+# all reached the next-run present branch (the separator rows proceeded as `unverifiable`).
+PRESENT_HALT="Chapter row for '<slug>' is already present under the '<group_title>' container bullet in <index_file>, but this run could not recognize it — the chapter's own title does not yield a resolvable link destination. For this recovery step, give the chapter a non-empty title in the manifest made only of Unicode letters and numbers, with words separated by single ASCII spaces. That constraint was verified across both link modes and all three bullet markers of the line being written. Then re-run; see \"Nested-list automation limits\" below."
 for f in "$SMD" "$OMD"; do
   c="$(count_joined_fixed "$PRESENT_HALT" "$f")"
   # EXACTLY one, not at-least-one. Measured: one copy per adapter today. `-ge 1` would silently
