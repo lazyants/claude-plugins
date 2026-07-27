@@ -390,19 +390,31 @@ These outcomes reuse the step-0 result computed above (`containerTitle`, `indexF
     operator-actionable warning belongs here too, and it is narrower than "markup in the title":
     it applies to a title whose markup keeps the row's own link target from resolving — a nested
     link, a nested image, a reference link, or an unescaped `]` in the title (the halt above tells
-    the operator to escape it as `\]`; skipping that produces exactly this same failure). Place
-    such a row correctly under the container rather than at the left margin and the writer does
-    not refuse it, because step 0 still reports the chapter absent and `wireNestedListChapter` has
-    no membership check of its own, so it inserts a second row; the following run reports `ok` on
-    the newly inserted one while the earlier row lingers as a cosmetic duplicate (pre-existing
-    behaviour, not new in 1.11.0). A title whose markup still decodes to a plain label does not
-    merely get found: it is verified like any other plain title — `[A\.B](x.md)` decodes to the
-    plain `A.B` and is `misplaced` at the left margin, `ok` correctly nested. A title that stays
-    non-plain even after decoding — an ampersand, emphasis, an HTML entity — is what gets found
-    and simply left unverified: its own left-margin label fails the plain-label check, so the
-    whole scan declines and the adapter proceeds on `unverifiable` (see "Nested-list automation
-    limits" below for the measured table). Use a plain-text title to avoid needing either
-    distinction.
+    the operator to escape it as `\]`; skipping that produces exactly this same failure).
+    Convergence depends on the manifest entry's own `title` — not on whatever row already sits
+    in the index — because that is what the writer rebuilds its inserted row from on every run.
+    If an existing row (operator-typed, or left over from any prior state) does not resolve but
+    the manifest title is clean, the writer's own insert resolves immediately: the earlier,
+    unrecognizable row lingers beside it as a cosmetic duplicate, and the very next run reports
+    `ok` on the clean one — exactly ONE duplicate forms, not zero and not unbounded. Only when
+    the manifest title is ITSELF target-breaking does this fail to converge: place such a row
+    correctly under the container rather than at the left margin and the writer does not refuse
+    it, but step 0 still reports the chapter absent — the row it just inserted is exactly as
+    unrecognizable as the one before it — and `wireNestedListChapter`, which has no membership
+    check of its own, appends another duplicate row on every re-run, without limit; the verifier
+    is never reached, because step 0 never reports the chapter present (pre-existing behaviour,
+    not new in 1.11.0). Measured, all three cases: a row that already resolves inserts nothing;
+    a broken row plus a clean manifest title gives one lingering duplicate then `ok`; a broken
+    row plus a broken manifest title appends without limit. Within the harmless-manifest-title
+    case above, a title whose markup still decodes to a plain label is verified like any
+    other plain title — `[A\.B](x.md)` decodes to the plain `A.B` and is `misplaced` at the left
+    margin, `ok` correctly nested. A title that stays non-plain even after decoding — an
+    ampersand, emphasis, an HTML entity — is harmless too, just not fully verified: at the left
+    margin its own label fails the plain-label check, so the whole scan declines and the adapter
+    proceeds on `unverifiable` (see "Nested-list automation limits" below for the measured
+    table) — but nested under its container it is `ok` regardless, since `isPlainLabel` is never
+    applied to a child bullet, only to an indent-0 one. Use a plain-text title to avoid needing
+    either distinction.
 
     The gate above is checked on the candidate's own isolated two-line array. **By construction,
     that proves only that the candidate pair is well-formed and would be recognized on its own —
@@ -476,11 +488,13 @@ markdown link or wikilink wrapper is unwrapped before the plain-label check ever
 the markdown-link half also decodes its escapes — so `Admin\.X` written bare is refused,
 `[Admin\.X](x.md)` decodes to the plain `Admin.X` and is accepted, while the identical escape
 written as a wikilink alias keeps its literal backslash and is refused just like the bare form:
-matching a markdown-link label is against what it renders as; matching a wikilink alias is
-against its literal, undecoded text. (This adapter never emits wikilinks and this file
-deliberately contains no wikilink syntax — see `obsidian-vault.md` for the spelled-out form.) It also refuses a `*`- or `+`-marked
-bullet whose visible text is a **bare (non-link) path** — one containing a `/` or backslash
-separator, or ending in `.md` — because
+matching a markdown-link label decodes its backslash escape, not what it renders as in full (an
+HTML entity is never decoded either way — see "The plain-label predicate, named exactly" below);
+matching a wikilink alias is against its literal, undecoded text. (This adapter never emits
+wikilinks and this file deliberately contains no wikilink syntax — see `obsidian-vault.md` for
+the spelled-out form.) It also refuses a `*`- or `+`-marked bullet whose visible text is a
+**bare (non-link) path** — one containing a `/` or backslash separator, or ending in `.md` —
+because
 the shipped membership scan only sees `-`-marked bare rows, so wiring such a file could create
 a second container beside a retained phantom row (a legitimate `*`/`+` plain label that happens
 to contain `/` is refused too, a deliberate over-rejection, not corruption). Inline code, an
@@ -490,11 +504,15 @@ HTML comment or a fenced block anywhere, a mixed or bare-CR line ending, a YAML 
 duplicate container the author can see and delete — never data loss. A richer rendering-aware
 matcher is a possible follow-up, not a bug.
 
-**The plain-label predicate, named exactly.** The container-owner scan (`containerOwnerScan`,
+**The plain-label predicate, named exactly.** In short: a plain title is verified; a non-plain
+title that still resolves is found but left unverifiable; a title that breaks its own row's
+link target duplicates instead of ever completing (see the duplicate-insert warning above). The
+mechanism: the container-owner scan (`containerOwnerScan`,
 `assets/lib/chapter-paths.mjs`) applies `isPlainLabel` to whatever `extractLabel` returns for a
-row's own content — never to the row's raw source text — and it applies this check to EVERY
-indent-0 bullet in the file, not only the row under test: a single non-plain indent-0 label
-anywhere in the file declines the WHOLE scan (`{kind: 'not-a-list'}`), so an otherwise-clean
+row's own content — never to the row's raw source text, and never to what it renders as in a
+browser — and it applies this check to EVERY indent-0 bullet in the file, not only the row under
+test: a single non-plain indent-0 label anywhere in the file declines the WHOLE scan
+(`{kind: 'not-a-list'}`), so an otherwise-clean
 'Admin' container elsewhere in the file cannot rescue a badly-labelled row sitting at the left
 margin. `extractLabel`'s own decoding differs by the label's link syntax: a whole-content
 markdown link decodes backslash escapes before the check runs (`[A\.B](x.md)` becomes the plain
@@ -534,9 +552,9 @@ below). Operators land on `unverifiable` rather than inside the verified class m
 one of: a Markdown nav file using a wildcard, an ordered list, or an explicit `<!--nav-->`
 marker (all ordinary `mkdocs-literate-nav` features); two same-named containers; a chapter row
 sitting inside leading frontmatter; or a **native/YAML MkDocs `nav:` configuration**, which gets
-no placement verification at all — the same unverified completion the safety statement above
-(under "Grouped index wiring") describes, with no confirmation requested. First-class YAML
-`nav:` container automation remains its own follow-up, #328.
+no placement verification at all (see the safety statement above under "Grouped index wiring")
+— the run completes unverified, exactly as before 1.11.0, with no confirmation requested.
+First-class YAML `nav:` container automation remains its own follow-up, #328.
 
 Three disclosures the operator is owed, not proved away:
 

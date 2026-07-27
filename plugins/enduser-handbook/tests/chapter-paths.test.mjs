@@ -1925,6 +1925,7 @@ const TITLE_SHAPE_TABLE = [
     label: 'Items',
     margin: { path: 'misplaced', wiki: 'misplaced' },
     nested: { path: 'ok', wiki: 'ok' },
+    marginExtract: { path: { label: 'Items', plain: true }, wiki: { label: 'Items', plain: true } },
   },
   {
     shape: 'backslashEscape',
@@ -1936,6 +1937,7 @@ const TITLE_SHAPE_TABLE = [
     // stay unchanged under that same mutant) — see this teammate's report for the measured run.
     margin: { path: 'misplaced', wiki: 'unverifiable' },
     nested: { path: 'ok', wiki: 'ok' },
+    marginExtract: { path: { label: 'A.B', plain: true }, wiki: { label: 'A\\.B', plain: false } },
   },
   {
     shape: 'htmlEntity',
@@ -1946,18 +1948,21 @@ const TITLE_SHAPE_TABLE = [
     // modes, since isPlainLabel is mode-agnostic) — see this teammate's report for the measured run.
     margin: { path: 'unverifiable', wiki: 'unverifiable' },
     nested: { path: 'ok', wiki: 'ok' },
+    marginExtract: { path: { label: 'A&#46;B', plain: false }, wiki: { label: 'A&#46;B', plain: false } },
   },
   {
     shape: 'ampersand',
     label: 'A&B',
     margin: { path: 'unverifiable', wiki: 'unverifiable' },
     nested: { path: 'ok', wiki: 'ok' },
+    marginExtract: { path: { label: 'A&B', plain: false }, wiki: { label: 'A&B', plain: false } },
   },
   {
     shape: 'emphasis',
     label: '*A*',
     margin: { path: 'unverifiable', wiki: 'unverifiable' },
     nested: { path: 'ok', wiki: 'ok' },
+    marginExtract: { path: { label: '*A*', plain: false }, wiki: { label: '*A*', plain: false } },
   },
   {
     shape: 'inlineCode',
@@ -1969,6 +1974,7 @@ const TITLE_SHAPE_TABLE = [
     // every other row here: it is the only one that is unverifiable when correctly nested.
     margin: { path: 'unverifiable', wiki: 'unverifiable' },
     nested: { path: 'unverifiable', wiki: 'unverifiable' },
+    marginExtract: { path: { label: '`A`', plain: false }, wiki: { label: '`A`', plain: false } },
   },
   {
     // extractLineTargets has no nested-bracket support (its own documented limit,
@@ -1982,6 +1988,12 @@ const TITLE_SHAPE_TABLE = [
     target: () => 'x',
     margin: { path: 'unverifiable', wiki: 'unverifiable' },
     nested: { path: 'ok', wiki: 'ok' },
+    // Whole-content link/wikilink detection fails on the embedded brackets, so extractLabel falls
+    // to the 'raw' branch and returns the ENTIRE row content verbatim (measured, not assumed).
+    marginExtract: {
+      path: { label: '[A [nested](x) B](guide/items.md)', plain: false },
+      wiki: { label: '[[guide/items|A [nested](x) B]]', plain: false },
+    },
   },
   {
     shape: 'nestedImage',
@@ -1989,6 +2001,10 @@ const TITLE_SHAPE_TABLE = [
     target: () => 'y',
     margin: { path: 'unverifiable', wiki: 'unverifiable' },
     nested: { path: 'ok', wiki: 'ok' },
+    marginExtract: {
+      path: { label: '[A ![alt](y) B](guide/items.md)', plain: false },
+      wiki: { label: '[[guide/items|A ![alt](y) B]]', plain: false },
+    },
   },
   {
     // Reference-style "[text][ref]" is not "](" — findMarkdownLinkGroups never opens on it, and
@@ -2000,6 +2016,10 @@ const TITLE_SHAPE_TABLE = [
     target: (content) => content,
     margin: { path: 'unverifiable', wiki: 'unverifiable' },
     nested: { path: 'ok', wiki: 'ok' },
+    marginExtract: {
+      path: { label: '[A [text][1] B](guide/items.md)', plain: false },
+      wiki: { label: '[[guide/items|A [text][1] B]]', plain: false },
+    },
   },
   {
     // Same "no link syntax recognized at all" mechanism as referenceLink above — an unescaped ']'
@@ -2009,25 +2029,94 @@ const TITLE_SHAPE_TABLE = [
     target: (content) => content,
     margin: { path: 'unverifiable', wiki: 'unverifiable' },
     nested: { path: 'ok', wiki: 'ok' },
+    marginExtract: {
+      path: { label: '[A]B](guide/items.md)', plain: false },
+      wiki: { label: '[[guide/items|A]B]]', plain: false },
+    },
   },
 ];
 
+// MEDIUM 5 (round-13): both fixture builders below used to be binary ternaries keyed on their
+// input directly (`mode === 'wiki' ? … : …`, `placement === 'margin' ? … : …`) — silently correct
+// today only because there are exactly two values of each; a third mode/placement added to a loop
+// above would fall through to the ELSE branch and run against another cell's fixture, green and
+// wrong. Keyed maps + an explicit unhandled-key throw close that failure mode structurally.
+function wikilinkForMode(mode) {
+  const WIKILINK_BY_MODE = { path: false, wiki: true };
+  if (!(mode in WIKILINK_BY_MODE)) throw new Error(`TITLE_SHAPE_TABLE: unhandled mode '${mode}'`);
+  return WIKILINK_BY_MODE[mode];
+}
+
+// BLOCKER 2(d) (round-13): the adapters' own tables caption their measurement precisely — "a row
+// sitting AT THE LEFT MARGIN alongside a clean, correctly-formed 'Admin' container elsewhere in the
+// same file" (obsidian-vault.md/static-md.md, "The plain-label predicate, named exactly.") — never
+// reproduced before this round: the plain 'margin' fixture below is a LONE bullet, no other
+// container. 'marginWithContainer' reproduces the adapters' literal fixture. Measured (this
+// teammate, scratch-only, real module): every one of the 20 margin shape/mode cells reports the
+// IDENTICAL verdict with or without the extra container — a separate correctly-formed container
+// never rescues (or worsens) a badly-labelled margin row, consistent with the "cannot rescue" half
+// of the whole-scan-abort claim pinned separately below — so expectedKindFor deliberately maps this
+// placement back onto the SAME `row.margin` expectations rather than a duplicated column.
+function buildTitleShapeFixture(placement, content, mode) {
+  const BUILDERS = {
+    margin: () => [`- ${content}`],
+    marginWithContainer: () => {
+      const cleanChild = mode === 'wiki' ? '  - [[guide/other|Other]]' : '  - [Other](guide/other.md)';
+      return ['- Admin', cleanChild, `- ${content}`];
+    },
+    nested: () => ['- Admin', `  - ${content}`],
+  };
+  if (!(placement in BUILDERS)) throw new Error(`TITLE_SHAPE_TABLE: unhandled placement '${placement}'`);
+  return BUILDERS[placement]();
+}
+
+function expectedKindFor(row, placement, mode) {
+  const KIND_KEY_BY_PLACEMENT = { margin: 'margin', marginWithContainer: 'margin', nested: 'nested' };
+  if (!(placement in KIND_KEY_BY_PLACEMENT)) throw new Error(`TITLE_SHAPE_TABLE: unhandled placement '${placement}'`);
+  return row[KIND_KEY_BY_PLACEMENT[placement]][mode];
+}
+
 for (const row of TITLE_SHAPE_TABLE) {
   for (const mode of ['path', 'wiki']) {
-    const wikilink = mode === 'wiki';
+    const wikilink = wikilinkForMode(mode);
     const content = wikilink ? `[[guide/items|${row.label}]]` : `[${row.label}](guide/items.md)`;
     const target = row.target ? row.target(content) : wikilink ? 'guide/items' : 'guide/items.md';
-    for (const placement of ['margin', 'nested']) {
-      const expectedKind = row[placement][mode];
+    for (const placement of ['margin', 'marginWithContainer', 'nested']) {
+      const expectedKind = expectedKindFor(row, placement, mode);
       test(`verifyNonHeadingPlacement title-shape matrix [round-11]: ${row.shape} / ${mode} / ${placement} -> ${expectedKind}`, () => {
-        const indexLines = placement === 'margin' ? [`- ${content}`] : ['- Admin', `  - ${content}`];
+        const indexLines = buildTitleShapeFixture(placement, content, mode);
         const result = verifyNonHeadingPlacement(indexLines, target, 'Admin', { wikilink });
         assert.equal(
           result.kind,
           expectedKind,
-          `${row.shape}/${mode}/${placement}: expected ${expectedKind}, got ${JSON.stringify(result)}`,
+          `${row.shape}/${mode}/${placement}: expected ${expectedKind}, got ${JSON.stringify(result)} (indexLines=${JSON.stringify(indexLines)})`,
         );
         if (expectedKind === 'misplaced') assert.equal(result.foundContainer, null);
+
+        // HIGH 3 (round-13): the adapters' own tables also publish `extractLabel` and
+        // `isPlainLabel` per row, not just the final verdict — changing the extracted spelling
+        // while keeping it non-plain would leave `result.kind` green and falsify those published
+        // columns silently. Margin placement only: that table is explicitly captioned "Measured
+        // for a row sitting AT THE LEFT MARGIN…", and isPlainLabel is a CONTAINER-only (indent-0)
+        // gate a nested child's own label never reaches (see the whole-scan-abort tests below).
+        // Asserted against MEASURED literals (this teammate, scratch-only, against the real
+        // module), never by calling extractLabel/isPlainLabel again here — re-deriving the
+        // expectation from the same functions under test would make this a tautology no mutant to
+        // either function could ever fail.
+        if (placement === 'margin') {
+          const expectedExtract = row.marginExtract[mode];
+          const actualExtract = extractLabel(content);
+          assert.equal(
+            actualExtract,
+            expectedExtract.label,
+            `${row.shape}/${mode}/margin: extractLabel drifted from the published table (got ${JSON.stringify(actualExtract)})`,
+          );
+          assert.equal(
+            isPlainLabel(actualExtract),
+            expectedExtract.plain,
+            `${row.shape}/${mode}/margin: isPlainLabel drifted from the published table (extractLabel=${JSON.stringify(actualExtract)})`,
+          );
+        }
       });
     }
   }
@@ -2051,20 +2140,26 @@ for (const row of TITLE_SHAPE_TABLE) {
 // passes the hijacked target on purpose to exercise the isPlainLabel path instead.
 // =================================================================================================
 
-const DUPLICATE_INSERT_SHAPES = {
-  nestedLink: 'A [nested](x) B',
-  nestedImage: 'A ![alt](y) B',
-  referenceLink: 'A [text][1] B',
-  unescapedBracket: 'A]B',
-};
+// MEDIUM 5 (round-13): derive shared shape labels from TITLE_SHAPE_TABLE rather than re-typing them
+// here and in CONTRAST_SHAPES below — a hand-duplicated label is exactly the drift risk that let
+// the two groups silently test different inputs for the "same" shape name.
+const LABEL_BY_SHAPE = Object.fromEntries(TITLE_SHAPE_TABLE.map((row) => [row.shape, row.label]));
+
+const DUPLICATE_INSERT_SHAPE_NAMES = ['nestedLink', 'nestedImage', 'referenceLink', 'unescapedBracket'];
 
 for (const mode of ['path', 'wiki']) {
-  const wikilink = mode === 'wiki';
+  const wikilink = wikilinkForMode(mode);
   const realTarget = wikilink ? 'guide/items' : 'guide/items.md';
-  const realLink = wikilink ? '[[guide/items|Items]]' : '[Items](guide/items.md)';
-  for (const [shape, label] of Object.entries(DUPLICATE_INSERT_SHAPES)) {
+  for (const shape of DUPLICATE_INSERT_SHAPE_NAMES) {
+    const label = LABEL_BY_SHAPE[shape];
     const malformedRow = wikilink ? `[[guide/items|${label}]]` : `[${label}](guide/items.md)`;
-    test(`adapter composition flow [round-11-b, mutation-confirmed]: ${shape} / ${mode}, already correctly nested, still silently duplicates`, () => {
+
+    // ARM 1 — harmless writer link: today's documented behaviour (static-md.md/obsidian-vault.md,
+    // "Place such a row correctly under the container ... step 0 still reports the chapter
+    // absent... the following run reports `ok` on the newly inserted one"). True only because
+    // `realLink`'s own display text ('Items') does not itself corrupt its target extraction.
+    test(`adapter composition flow [round-11-b, mutation-confirmed]: ${shape} / ${mode}, already correctly nested, still silently duplicates (writer link harmless)`, () => {
+      const realLink = wikilink ? '[[guide/items|Items]]' : '[Items](guide/items.md)';
       const indexLines = ['- Admin', `  - ${malformedRow}`];
 
       // step 0: the adapter searches for the REAL target, never the shape's own hijacked one.
@@ -2079,13 +2174,20 @@ for (const mode of ['path', 'wiki']) {
       // effect: row count grew by exactly one, and the OLD malformed row survives verbatim — this
       // is a DUPLICATE, never a replacement. Mutation-confirmed (scratch-only, never run against
       // the shared tree): a mutant that gives wireNestedListChapter's single-container branch a
-      // membership check (skip the insert when chapterLink's own destination substring already
-      // appears among the container's existing children) flips every assertion in this test —
-      // `write.newLines` comes back byte-identical to `indexLines` (grew: 0, not 1), the re-run
-      // below finds 0 matches instead of 1, and the verdict comes back `inconsistent` instead of
-      // `ok` — for all 8 (shape × mode) cells in this group. The five contrast fixtures below never
-      // call wireNestedListChapter at all, so that same mutant leaves every one of them unchanged.
-      assert.equal(write.newLines.length, indexLines.length + 1);
+      // destination-substring membership check flips every insert assertion in BOTH this arm and
+      // the target-breaking arm below — measured: the malformed row already contains the REAL
+      // destination text verbatim (it is simply never PARSED as the target), so a substring check
+      // against `realLink`'s destination ('guide/items.md'/'guide/items') matches here too, even
+      // though `realLink`'s own display text ('Items') shares nothing with the malformed row's
+      // label. `write.newLines` comes back byte-identical to `indexLines` (grew: 0, not 1) under
+      // that mutant, the re-run below finds 0 matches instead of 1, and the verdict comes back
+      // `inconsistent` instead of `ok`. The five contrast fixtures below never call
+      // wireNestedListChapter at all, so that same mutant leaves every one of them unchanged.
+      assert.equal(
+        write.newLines.length,
+        indexLines.length + 1,
+        `expected exactly one row inserted, got ${JSON.stringify(write.newLines)}`,
+      );
       assert.ok(write.newLines.includes(`  - ${malformedRow}`), 'the original malformed row must survive untouched, not be replaced');
 
       // re-run: the freshly-inserted row IS found this time and reports ok — completing SILENTLY
@@ -2094,6 +2196,59 @@ for (const mode of ['path', 'wiki']) {
       assert.equal(rerun.matches.length, 1);
       const verdict = verifyNonHeadingPlacement(write.newLines, realTarget, 'Admin', { wikilink });
       assert.deepEqual(verdict, { kind: 'ok' });
+    });
+
+    // ARM 2 — target-breaking writer link (BLOCKER 1, round-13): the adapters build the inserted
+    // child's link from the chapter's manifest `title` (static-md.md: "display text is always the
+    // manifest entry's `title`, never a slug or a hand-typed label") — never from a constant safe
+    // string as ARM 1 above drives it. When that title carries the SAME corrupting shape that
+    // broke the original row — the realistic case, since it is the identical manifest field
+    // driving both the original row and any fresh insert for this chapter — the freshly-inserted
+    // row's own destination extraction is hijacked too, exactly like the original. Measured (this
+    // teammate, real module): step 0 never finds the fresh row either, so a driver following the
+    // documented recipe (obsidian-vault.md/static-md.md, "Non-headings index, no existing line")
+    // takes the line-absent branch AGAIN — never the verifyNonHeadingPlacement branch, which the
+    // recipe only reaches once step 0 already found a matching line. Row growth repeats without
+    // bound; nothing here ever reaches `ok`. The harmless-arm test above cannot cover this by
+    // construction, because it drives the writer with a constant safe link on purpose.
+    test(`adapter composition flow [round-11-b, mutation-confirmed]: ${shape} / ${mode}, already correctly nested, still silently duplicates (writer link target-breaking)`, () => {
+      const breakingLink = malformedRow; // same manifest title drives both the row and the insert
+      const indexLines = ['- Admin', `  - ${malformedRow}`];
+
+      const step0 = locateChapterLine(indexLines, realTarget, { wikilink });
+      assert.equal(step0.matches.length, 0, "the malformed row's own corrupted destination must never satisfy the real target");
+
+      const write1 = wireNestedListChapter(indexLines, 'Admin', breakingLink);
+      assert.equal(write1.kind, 'inserted');
+      assert.equal(write1.created, false, 'the "Admin" container already exists — this is a CHILD insert, not a create');
+      assert.equal(
+        write1.newLines.length,
+        indexLines.length + 1,
+        `expected row growth on the first insert, got ${JSON.stringify(write1.newLines)}`,
+      );
+
+      // The FRESH row's own destination is hijacked exactly like the original — step 0 still
+      // reports the chapter absent. Per the documented recipe, this means verifyNonHeadingPlacement
+      // is never reached: that branch only runs when step 0 already found a matching line to check
+      // placement of; with zero matches, the recipe is back on the SAME "no existing line" branch
+      // that called wireNestedListChapter in the first place.
+      const step0After1 = locateChapterLine(write1.newLines, realTarget, { wikilink });
+      assert.equal(
+        step0After1.matches.length,
+        0,
+        `the freshly-inserted row is ALSO unresolvable, so the verifier branch is never reached here (newLines=${JSON.stringify(write1.newLines)})`,
+      );
+
+      // Row growth is unbounded, not a one-time duplicate: a second pass through the same
+      // line-absent branch inserts a THIRD row, and step 0 still finds nothing.
+      const write2 = wireNestedListChapter(write1.newLines, 'Admin', breakingLink);
+      assert.equal(
+        write2.newLines.length,
+        write1.newLines.length + 1,
+        `expected further row growth on the second insert, got ${JSON.stringify(write2.newLines)}`,
+      );
+      const step0After2 = locateChapterLine(write2.newLines, realTarget, { wikilink });
+      assert.equal(step0After2.matches.length, 0, 'still unresolvable after the second insert — the recipe never converges');
     });
   }
 }
@@ -2112,16 +2267,17 @@ for (const mode of ['path', 'wiki']) {
 // -------------------------------------------------------------------------------------------------
 
 const CONTRAST_SHAPES = [
-  { name: 'backslashEscape', mode: 'path', label: 'A\\.B', expected: { kind: 'misplaced', foundContainer: null } },
-  { name: 'ampersand', mode: 'path', label: 'A&B', expected: { kind: 'unverifiable' } },
-  { name: 'ampersand', mode: 'wiki', label: 'A&B', expected: { kind: 'unverifiable' } },
-  { name: 'emphasis', mode: 'path', label: '*A*', expected: { kind: 'unverifiable' } },
-  { name: 'emphasis', mode: 'wiki', label: '*A*', expected: { kind: 'unverifiable' } },
+  { name: 'backslashEscape', mode: 'path', expected: { kind: 'misplaced', foundContainer: null } },
+  { name: 'ampersand', mode: 'path', expected: { kind: 'unverifiable' } },
+  { name: 'ampersand', mode: 'wiki', expected: { kind: 'unverifiable' } },
+  { name: 'emphasis', mode: 'path', expected: { kind: 'unverifiable' } },
+  { name: 'emphasis', mode: 'wiki', expected: { kind: 'unverifiable' } },
 ];
 
-for (const { name, mode, label, expected } of CONTRAST_SHAPES) {
-  const wikilink = mode === 'wiki';
+for (const { name, mode, expected } of CONTRAST_SHAPES) {
+  const wikilink = wikilinkForMode(mode);
   const realTarget = wikilink ? 'guide/items' : 'guide/items.md';
+  const label = LABEL_BY_SHAPE[name];
   const row = wikilink ? `[[guide/items|${label}]]` : `[${label}](guide/items.md)`;
   test(`adapter composition flow [round-11-b]: contrast, ${name} / ${mode}, target still resolves -> found, never duplicated`, () => {
     const indexLines = [`- ${row}`]; // left margin, matching the adapters' own contrast framing
@@ -2135,6 +2291,53 @@ for (const { name, mode, label, expected } of CONTRAST_SHAPES) {
     assert.deepEqual(verdict, expected);
   });
 }
+
+// =================================================================================================
+// [1.11.0 round 13] BLOCKER 2(c) — the whole-scan-abort claim (obsidian-vault.md / static-md.md,
+// "The plain-label predicate, named exactly."): the container-owner scan applies `isPlainLabel` to
+// EVERY indent-0 bullet in the file, not only the row under test, so a single non-plain indent-0
+// label ANYWHERE in the file declines the WHOLE scan — an otherwise-clean 'Admin' container
+// elsewhere cannot rescue a badly-labelled row sitting at the left margin. Untested before this
+// round: every `not-a-list` fixture elsewhere in this file is a single-bullet file, so nothing
+// proved the claim is about indent-0 specifically rather than about labels in general. Measured
+// directly here (this teammate, real module) and mutation-confirmed: a mutant that narrows the
+// indent-0 plain-label gate to only the candidate matching `wanted` (i.e. checks a row's own
+// labelling only when it could BE the target container, never every other indent-0 bullet) flips
+// ONLY the first test below (from `unverifiable` to `ok`) and leaves the contrast/complement tests
+// unchanged — see this teammate's report for the measured run.
+// =================================================================================================
+
+test('verifyNonHeadingPlacement whole-scan-abort [round-13, BLOCKER 2c]: a non-plain indent-0 label ANYWHERE declines the whole scan, even alongside a clean container', () => {
+  // A clean, correctly-nested 'Admin' container with its own chapter row, PLUS an unrelated
+  // non-plain indent-0 bullet ('*Other*') sitting elsewhere in the same file.
+  const indexLines = ['- Admin', '  - [Items](<guide/items.md>)', '- *Other*'];
+  const verdict = verifyNonHeadingPlacement(indexLines, 'guide/items.md', 'Admin', { wikilink: false });
+  assert.deepEqual(
+    verdict,
+    { kind: 'unverifiable' },
+    `expected the whole scan to decline (an otherwise-clean 'Admin' container cannot rescue this), got ${JSON.stringify(verdict)}`,
+  );
+});
+
+test('verifyNonHeadingPlacement whole-scan-abort [round-13, BLOCKER 2c]: contrast — WITHOUT the extra non-plain row, the same clean container reports ok', () => {
+  const indexLines = ['- Admin', '  - [Items](<guide/items.md>)'];
+  const verdict = verifyNonHeadingPlacement(indexLines, 'guide/items.md', 'Admin', { wikilink: false });
+  assert.deepEqual(verdict, { kind: 'ok' }, `expected ok without the extra row, got ${JSON.stringify(verdict)}`);
+});
+
+test('verifyNonHeadingPlacement whole-scan-abort [round-13, BLOCKER 2c]: the complement — a non-plain CHILD label (not indent-0) does NOT decline the scan', () => {
+  // The chapter's own row is correctly nested under 'Admin'; a SECOND, unrelated child under the
+  // SAME container carries a non-plain label ('*Other Child*') — isPlainLabel is a CONTAINER-only
+  // (indent-0) gate, so a non-plain label at indent 1 must not trigger the whole-scan decline. This
+  // is what makes the claim about indent-0 specifically, not about labels in general.
+  const indexLines = ['- Admin', '  - [Items](<guide/items.md>)', '  - *Other Child*'];
+  const verdict = verifyNonHeadingPlacement(indexLines, 'guide/items.md', 'Admin', { wikilink: false });
+  assert.deepEqual(
+    verdict,
+    { kind: 'ok' },
+    `expected a non-plain CHILD label not to decline the scan, got ${JSON.stringify(verdict)}`,
+  );
+});
 
 // =================================================================================================
 // D1 — validateGroups

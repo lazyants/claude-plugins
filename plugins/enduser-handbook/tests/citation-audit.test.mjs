@@ -33,7 +33,7 @@ import { auditCorpus, auditText, extractCitations } from './citation-audit-lib.m
 // against source 2026-07-26 (1.11.0 doc edits, #329/#330); the count grew every round of plan review
 // and again with this release's doc prose, so it is pinned to the fresh measurement, never a number
 // quoted in the plan.
-const EXPECTED_TOTAL_CITATIONS = 73;
+const EXPECTED_TOTAL_CITATIONS = 75;
 
 // Every citation whose quoted text does NOT resolve to exactly one heading title in its own file — an
 // over-match, a near-miss (e.g. "INDEX wiring" vs the full parenthetical heading), or a title that
@@ -60,6 +60,20 @@ const EXPECTED_TOTAL_CITATIONS = 73;
 // something real and is more precise for a reader than citing its enclosing heading would be; it is
 // unresolved only because this lint models headings and nothing else. Recorded rather than reworded
 // so the limitation sits with the lint, where it belongs, instead of bending the prose to it.
+//
+// 1.11.0 review added six more entries across rounds 9-13, and this comment went stale behind them
+// once already before being caught — the same drift it records above, one layer up. So it no longer
+// enumerates entries at all: the table below is the enumeration, and a count in prose can only
+// disagree with it. Two SHAPES are new and are worth naming, because neither is the
+// heading-with-a-parenthetical case above:
+//   * a citation to the opening words of a PROSE PARAGRAPH rather than to any label
+//     (obsidian-vault.md's "Path mode scans") — weaker than the bullet-label shape, and the only
+//     reason it is tolerable is that the paragraph it names is stable and directly above;
+//   * a citation to a BOLDED SENTENCE used as a paragraph lead-in (static-md.md's "The headings
+//     branch is unchanged by this PR and already completes silently"), which reads as a heading to
+//     a human and as nothing at all to this lint.
+// Every entry's DIRECTION was verified by hand when added, because an unresolved citation is also a
+// direction-unchecked one: the lint cannot compare against a heading it never found.
 const EXPECTED_UNRESOLVED = [
   { file: 'references/diataxis.md', offset: 2877, quotedText: 'When this is the right shape', direction: 'below' },
   { file: 'references/profile-validation.md', offset: 11273, quotedText: '`inline` stays minimal', direction: 'below' },
@@ -73,23 +87,24 @@ const EXPECTED_UNRESOLVED = [
   { file: 'references/publish-targets/obsidian-vault.md', offset: 27629, quotedText: 'Non-headings index, no existing line', direction: 'below' },
   { file: 'references/publish-targets/obsidian-vault.md', offset: 28320, quotedText: 'Path mode scans', direction: 'above' },
   { file: 'references/publish-targets/obsidian-vault.md', offset: 29208, quotedText: 'Non-headings index', direction: 'below' },
-  { file: 'references/publish-targets/obsidian-vault.md', offset: 32576, quotedText: 'The placement check is retained unchanged (D-8)', direction: 'above' },
-  { file: 'references/publish-targets/obsidian-vault.md', offset: 43516, quotedText: 'Container resolution', direction: 'above' },
-  { file: 'references/publish-targets/obsidian-vault.md', offset: 50487, quotedText: 'INDEX wiring', direction: 'above' },
-  { file: 'references/publish-targets/obsidian-vault.md', offset: 52244, quotedText: 'INDEX wiring', direction: 'above' },
-  { file: 'references/publish-targets/obsidian-vault.md', offset: 56503, quotedText: 'INDEX wiring', direction: 'above' },
-  { file: 'references/publish-targets/obsidian-vault.md', offset: 61730, quotedText: 'INDEX wiring', direction: 'above' },
+  { file: 'references/publish-targets/obsidian-vault.md', offset: 32676, quotedText: 'The placement check is retained unchanged (D-8)', direction: 'above' },
+  { file: 'references/publish-targets/obsidian-vault.md', offset: 45120, quotedText: 'Container resolution', direction: 'above' },
+  { file: 'references/publish-targets/obsidian-vault.md', offset: 52417, quotedText: 'INDEX wiring', direction: 'above' },
+  { file: 'references/publish-targets/obsidian-vault.md', offset: 54207, quotedText: 'INDEX wiring', direction: 'above' },
+  { file: 'references/publish-targets/obsidian-vault.md', offset: 58466, quotedText: 'INDEX wiring', direction: 'above' },
+  { file: 'references/publish-targets/obsidian-vault.md', offset: 63693, quotedText: 'INDEX wiring', direction: 'above' },
   { file: 'references/publish-targets/static-md.md', offset: 12961, quotedText: 'Chapter path', direction: 'above' },
   { file: 'references/publish-targets/static-md.md', offset: 15014, quotedText: 'Grouped index wiring', direction: 'below' },
   { file: 'references/publish-targets/static-md.md', offset: 15381, quotedText: 'Chapter → index', direction: 'above' },
   { file: 'references/publish-targets/static-md.md', offset: 18937, quotedText: 'Grouped index wiring', direction: 'below' },
   { file: 'references/publish-targets/static-md.md', offset: 19082, quotedText: 'Grouped index wiring', direction: 'below' },
-  { file: 'references/publish-targets/static-md.md', offset: 29767, quotedText: "Grouped entry, line present, `indexForm: 'non-heading'`", direction: 'above' },
-  { file: 'references/publish-targets/static-md.md', offset: 31425, quotedText: "Grouped entry, line present, `indexForm: 'headings'`", direction: 'above' },
-  { file: 'references/publish-targets/static-md.md', offset: 37756, quotedText: 'Grouped index wiring', direction: 'above' },
-  { file: 'references/publish-targets/static-md.md', offset: 38482, quotedText: 'Grouped index wiring', direction: 'above' },
-  { file: 'references/publish-targets/static-md.md', offset: 40227, quotedText: 'The headings branch is unchanged by this PR and already completes silently', direction: 'above' },
-  { file: 'references/publish-targets/static-md.md', offset: 48838, quotedText: 'Grouped index wiring', direction: 'above' },
+  { file: 'references/publish-targets/static-md.md', offset: 30894, quotedText: "Grouped entry, line present, `indexForm: 'non-heading'`", direction: 'above' },
+  { file: 'references/publish-targets/static-md.md', offset: 32552, quotedText: "Grouped entry, line present, `indexForm: 'headings'`", direction: 'above' },
+  { file: 'references/publish-targets/static-md.md', offset: 35672, quotedText: 'The plain-label predicate, named exactly', direction: 'below' },
+  { file: 'references/publish-targets/static-md.md', offset: 39308, quotedText: 'Grouped index wiring', direction: 'above' },
+  { file: 'references/publish-targets/static-md.md', offset: 40034, quotedText: 'Grouped index wiring', direction: 'above' },
+  { file: 'references/publish-targets/static-md.md', offset: 41797, quotedText: 'The headings branch is unchanged by this PR and already completes silently', direction: 'above' },
+  { file: 'references/publish-targets/static-md.md', offset: 50408, quotedText: 'Grouped index wiring', direction: 'above' },
 ];
 
 // Per-occurrence key. offset alone is already unique; file/quotedText/direction are folded in so a

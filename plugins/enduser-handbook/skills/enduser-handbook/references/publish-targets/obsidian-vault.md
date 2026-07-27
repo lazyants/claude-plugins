@@ -464,8 +464,9 @@ the one exception to "do all of these" — see its own conditional note below.
           `publish.wikilinks: false`: `  - [` + title + `](<` + target + `>)` (destination
           inside angle brackets — the same destination-wrapping the "Non-headings index, no
           existing line" bullet above already uses for this profile's mode-correct chapter
-          link — and any `]` in the title escaped as `\]`, this step's own rule, stated
-          nowhere else in this file);
+          link — and any `]` in the title escaped as `\]`, the same escaping the
+          `publish.wikilinks: false` halt text below promises, so the gate validates the exact
+          spelling the operator is told to type);
        2. run `locateChapterLine(<candidate>, <index-relative-target>, {wikilink:
           publish.wikilinks})` (`assets/lib/chapter-paths.mjs`) on that two-line array alone,
           not the real index — the option is the profile's own mode, mirroring the
@@ -509,22 +510,39 @@ the one exception to "do all of these" — see its own conditional note below.
        `indexForm: 'non-heading'` branch above and proceeds. One operator-actionable warning
        belongs here too, and it is narrower than "markup in the title": it applies to a title
        whose markup keeps the row's own link target from resolving — a nested link, a nested
-       image, a reference link, or an unescaped `]` in the title (a `- [A]B](<target>)` path-mode
-       row, or a `- [[target|A]B]]` wikilink alias — both measured to make the target
-       unrecognizable to `locateChapterLine`, exactly like a nested link would). Place such a
-       row correctly under the container rather than at
-       the left margin and the writer does not refuse it, because step 0 still reports the
-       chapter absent and `wireNestedListChapter` has no membership check of its own, so it
-       inserts a second row; the following run reports `ok` on the newly inserted one while the
-       earlier row lingers as a cosmetic duplicate (pre-existing behaviour, not new in 1.11.0).
-       A title that merely renders non-plain while its target still resolves — an ampersand,
-       emphasis — does NOT do this: it is found, and simply left unverified (measured at the
-       left margin, in both `publish.wikilinks` modes). A bare backslash escape is
-       mode-dependent, not an example of this: measured at the left margin, `A\.B` returns
-       `unverifiable` under `publish.wikilinks: true` (the wikilink form never decodes the
-       escape) but `misplaced` — a halt — under `publish.wikilinks: false` (the markdown-link
-       form decodes it, so the row reads as a plain, uncontained bullet). Use a plain-text
-       title to avoid depending on either behavior.
+       image, a reference link, or a `]` in the title (a `- [A]B](<target>)` path-mode row, or a
+       `- [[target|A]B]]` wikilink alias — both measured to make the target unrecognizable to
+       `locateChapterLine`, exactly like a nested link would). Escaping the bracket fixes this
+       in path mode (`- [A\]B](<target>)` resolves); it does **not** fix wikilink mode —
+       `- [[target|A\]B]]` still fails to resolve (measured), so a `]` anywhere in a
+       wikilink-mode title has no escape that saves it and must simply be avoided.
+
+       Convergence depends on the manifest entry's own `title` — not on whatever row already
+       sits in the index — because that is what the writer rebuilds its inserted row from on
+       every run. If an existing row (operator-typed, or left over from any prior state) does
+       not resolve but the manifest title is clean, the writer's own insert resolves
+       immediately: the earlier, unrecognizable row lingers beside it as a cosmetic duplicate,
+       and the very next run reports `ok` on the clean one — exactly ONE duplicate forms, not
+       zero and not unbounded. Only when the manifest title is ITSELF target-breaking does this
+       fail to converge: place such a row correctly under the container rather than at the left
+       margin and the writer does not refuse it, but step 0 still reports the chapter absent —
+       the row it just inserted is exactly as unrecognizable as the one before it — and
+       `wireNestedListChapter`, which has no membership check of its own, appends another
+       duplicate row on every re-run, without limit; the verifier is never reached, because
+       step 0 never reports the chapter present (pre-existing behaviour, not new in 1.11.0).
+       Measured, all three cases: a row that already resolves inserts nothing; a broken row plus
+       a clean manifest title gives one lingering duplicate then `ok`; a broken row plus a
+       broken manifest title appends without limit. Separately: a
+       title that merely renders non-plain while its target still resolves — an ampersand,
+       emphasis, an HTML entity (see "Nested-list automation limits" below for the measured
+       table) — which is found and simply left unverified at the left margin (measured in both
+       `publish.wikilinks` modes), but is `ok` if instead correctly nested under its container,
+       since `isPlainLabel` is never applied to a child bullet, only to an indent-0 one. A bare
+       backslash escape is mode-dependent, not an example of either case: measured at the left
+       margin, `A\.B` returns `unverifiable` under `publish.wikilinks: true` (the wikilink form
+       never decodes the escape) but `misplaced` — a halt — under `publish.wikilinks: false`
+       (the markdown-link form decodes it, so the row reads as a plain, uncontained bullet). Use
+       a plain-text title to avoid any of this.
 
        The gate above is checked on the candidate's own isolated two-line array. **By
        construction, that proves only that the candidate pair is well-formed and would be
@@ -627,9 +645,10 @@ whole-content markdown link wrapper is unwrapped and its escape decoded before t
 plain-label check ever runs, so `Admin\.X` written bare is refused while the same escape
 written as `[Admin\.X](x.md)` decodes to the plain `Admin.X` and is accepted. A whole-content
 wikilink wrapper is unwrapped too, but its escape is left undecoded — `[[Admin\.X]]` still
-carries the literal backslash and is refused exactly like the bare form. Matching is against
-what the label renders as only for the decoded (markdown-link) form; a wikilink's escape is
-never decoded, so its label is compared on its literal source spelling instead.
+carries the literal backslash and is refused exactly like the bare form. Matching decodes a
+backslash escape only for the markdown-link form — not what the label renders as in full,
+since an HTML entity is never decoded either way (below); a wikilink's escape is never
+decoded, so its label is compared on its literal source spelling instead.
 It also refuses a `*`- or `+`-marked bullet whose visible text is a **bare
 (non-link) path** — one containing a `/` or backslash separator, or ending in `.md` — because
 the shipped membership scan only sees `-`-marked bare rows, so wiring such a file could create
@@ -641,7 +660,10 @@ HTML comment or a fenced block anywhere, a mixed or bare-CR line ending, a YAML 
 duplicate container the author can see and delete — never data loss. A richer rendering-aware
 matcher is a possible follow-up, not a bug.
 
-**The plain-label predicate, named exactly.** The container-owner scan (`containerOwnerScan`,
+**The plain-label predicate, named exactly.** In short: a plain title is verified; a non-plain
+title that still resolves is found but left unverifiable; a title that breaks its own row's
+link target duplicates instead of ever completing (see the duplicate-insert warning above). The
+mechanism: the container-owner scan (`containerOwnerScan`,
 `assets/lib/chapter-paths.mjs`) applies `isPlainLabel` to whatever `extractLabel` returns for a
 row's own content — never to the row's raw source text, and never to what it renders as in
 Obsidian — and it applies this check to EVERY indent-0 bullet in the file, not only the row
@@ -665,13 +687,13 @@ file, in both modes:
 | `- [A&#46;B](<items.md>)`          | path      | `A&#46;B`            | false          | `unverifiable`   |
 | `- [A & B](<items.md>)`            | path      | `A & B`              | false          | `unverifiable`   |
 | `- [A *b*](<items.md>)`            | path      | `A *b*`              | false          | `unverifiable`   |
-| `- [See [here][ref]](<items.md>)`  | path      | *(never resolves)*   | —              | absent at step 0 |
+| `- [See [here][ref]](<items.md>)`  | path      | *(target never resolves)* | —         | absent at step 0 |
 | `- [[items|A.B]]`                  | wikilinks | `A.B`                | true           | `misplaced`      |
 | `- [[items|A\.B]]`                 | wikilinks | `A\.B`               | false          | `unverifiable`   |
 | `- [[items|A&#46;B]]`              | wikilinks | `A&#46;B`            | false          | `unverifiable`   |
 | `- [[items|A & B]]`                | wikilinks | `A & B`              | false          | `unverifiable`   |
 | `- [[items|A *b*]]`                | wikilinks | `A *b*`              | false          | `unverifiable`   |
-| `- [[items|A]B]]`                  | wikilinks | *(never resolves)*   | —              | absent at step 0 |
+| `- [[items|A]B]]`                  | wikilinks | *(target never resolves)* | —         | absent at step 0 |
 
 The last row of each mode is a different failure mode entirely: a nested link (path mode) or an
 unescaped `]` in the alias (wikilinks mode) breaks the row's OWN link-target extraction — not
@@ -695,8 +717,8 @@ nav file using a wildcard, an ordered list, or an explicit `<!--nav-->` marker (
 `mkdocs-literate-nav` features); two same-named containers; a chapter row sitting inside leading
 frontmatter; or a **native/YAML MkDocs `nav:` configuration**, which gets no placement
 verification at all (see the safety statement above under "Non-headings index, no existing
-line"); the run completes unverified, exactly as before 1.11.0. First-class YAML `nav:`
-container automation remains its own follow-up, #328.
+line") — the run completes unverified, exactly as before 1.11.0, with no confirmation
+requested. First-class YAML `nav:` container automation remains its own follow-up, #328.
 
 Three disclosures the operator is owed, not proved away:
 
