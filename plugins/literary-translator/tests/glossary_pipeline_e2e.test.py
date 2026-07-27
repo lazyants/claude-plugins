@@ -66,6 +66,8 @@ def instantiate(*, batch_agent_cap: int) -> str:
     # model knob). Not inspected by this file's dispatch/wait assertions; it
     # only needs to resolve.
     text = text.replace("{{EFFORT}}", "high")
+    # 1.16.1 (#347): empty = fetch_citation.py's shipped default list.
+    text = text.replace("{{CITATION_CONTENT_TYPES}}", "")
     assert "{{" not in text, "fixture instantiation left an unresolved token"
     return text
 

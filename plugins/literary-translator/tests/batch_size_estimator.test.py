@@ -298,6 +298,8 @@ def instantiate_mass_translate(
     # #197 -- engine.effort/engine.model. Neither is inspected by this file's
     # call-counting assertions; they only need to resolve.
     text = text.replace("{{EFFORT}}", "high")
+    # 1.16.1 (#347): empty = fetch_citation.py's shipped default list.
+    text = text.replace("{{CITATION_CONTENT_TYPES}}", "")
     text = text.replace("{{MODEL}}", "")
     assert "{{" not in text, "fixture instantiation left an unresolved token -- fix the fixture, not the assertion below"
     return text
@@ -1663,6 +1665,8 @@ def instantiate_glossary_pass(
     # #197 -- engine.effort. Not inspected by this file's call-counting
     # assertions; it only needs to resolve.
     text = text.replace("{{EFFORT}}", "high")
+    # 1.16.1 (#347): empty = fetch_citation.py's shipped default list.
+    text = text.replace("{{CITATION_CONTENT_TYPES}}", "")
     assert "{{" not in text, (
         "glossary fixture instantiation left an unresolved token -- fix the "
         "fixture, not the assertion"

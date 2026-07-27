@@ -63,8 +63,13 @@ OUTPUT CONTRACT (consumed by the prepare/judge split -- do not change casually).
       shape `canon-batch.schema.json` declares and the exact bytes
       `canon_validate.py --approve-to` publishes. (A `{"items": [...]}` wrapper
       is also accepted, for hand-built fixtures.)
-      Iterates every item carrying a `source` field -- NOT only the ones with
-      `basis: "established"`. The queued branch of canon-batch.schema.json types
+      Iterates every item whose `source` is a NON-EMPTY STRING -- NOT only the
+      ones with `basis: "established"`, and not literally every item that has the
+      key: an empty or non-string `source` is skipped deliberately, because it is
+      not a fetch target and its shape is Pass 1's business. canon_validate.py's
+      offline half skips exactly the same items, and the two must agree on WHICH
+      items they cover, not merely on the checks they run.
+      The queued branch of canon-batch.schema.json types
       `source` as a bare unconstrained string, so a `disposition: "review_queue"`
       item can carry `basis: "established"` plus an arbitrary `source` and pass
       Pass 1 today. Covering the whole field is no harder than covering half.
@@ -123,7 +128,27 @@ EVIDENCE_PREFIX = "citation-"
 # Text-ish only. A citation is a document a human could have read; anything
 # else is either useless to the judge or an attempt to make it ingest something
 # it cannot evaluate.
+#
+# This is the DEFAULT, overridable per project with --allow-content-type (from
+# profile.yml's glossary.citation_content_types). A corpus whose sources are
+# archive scans is the motivating case: `application/pdf` is a document a human
+# could have read, but admitting it for everyone would widen the boundary for
+# projects that never cite one. Widening is therefore an explicit, per-project
+# act, and the closed-set property below holds over whatever list is in force --
+# see content_type_token().
 ALLOWED_CONTENT_PREFIXES = ("text/", "application/xhtml", "application/xml", "application/json")
+
+# A configured prefix is copied verbatim into index.json as a token, so it is
+# constrained to the RFC 9110 type/subtype charset rather than trusted because
+# it arrived on a command line. No parameters (`; charset=...`), no wildcards,
+# no whitespace: this is a prefix for str.startswith, not a media-range.
+#
+# \A and \Z, never ^ and $: Python's `$` also matches immediately BEFORE a
+# trailing newline, so `^...$` would admit "text/html\n" -- which then lands in
+# index.json and breaks the one-token-per-field shape the judge reads. Measured,
+# not assumed: re.match(r"^[a-z/]*$", "text/html\n") returns a match.
+CONTENT_TYPE_PREFIX_RE = re.compile(r"\A[a-z0-9][a-z0-9!#$&^_.+-]*/[a-z0-9!#$&^_.+-]*\Z")
+MAX_CONTENT_TYPE_PREFIXES = 16
 
 # Control characters anywhere in the URL. Also catches the raw CR/LF that make
 # header injection possible.
@@ -185,11 +210,62 @@ def origin_of(scheme: str, host: str, port: int) -> str:
     Diagnostic value kept: which host a hop went to, and how many hops. Lost: the
     exact path, which is recoverable from the run's own logs if ever needed.
     """
+    return f"{scheme}://{authority(scheme, host, port)}"
+
+
+def bracket_host(host: str) -> str:
+    """Put back the brackets urlsplit().hostname strips off an IPv6 literal.
+
+    A registered name can never contain a colon (validate_url takes `hostname`,
+    which has already had any `:port` and `user:pass@` split away), so a colon
+    here means an address literal and nothing else.
+    """
+    return f"[{host}]" if ":" in host else host
+
+
+def authority(scheme: str, host: str, port: int) -> str:
+    """host[:port], with the port present only when it is NOT the scheme default.
+
+    One function for two consumers that must agree: the `Host:` request header
+    and the origin recorded in index.json. They were written separately and
+    drifted -- the header sent a bare hostname for every URL, so an admitted
+    `https://host:8443/` asked the server for the wrong virtual host and an IPv6
+    literal produced a syntactically invalid header (RFC 9110 requires
+    `Host: [::1]:8443`). That is a correctness bug, not a security one: it makes
+    VALID citations fail, which the judge sees as an unreachable source.
+    """
     default = 80 if scheme == "http" else 443
-    return f"{scheme}://{host}" + ("" if port == default else f":{port}")
+    return bracket_host(host) + ("" if port == default else f":{port}")
 
 
-def content_type_token(ctype: str) -> str:
+def parse_content_type_prefixes(values) -> tuple:
+    """Validate an operator-supplied Content-Type allowlist, or fall back to the
+    shipped default when none was given.
+
+    Exits rather than returning a diagnostic: a project that asked for a wider
+    boundary and got the default silently is exactly the failure this release
+    spent an hour of gate time on elsewhere -- a hardcoded value diverging from
+    the profile that was supposed to set it. Fail loudly at preflight instead.
+    """
+    if not values:
+        return ALLOWED_CONTENT_PREFIXES
+    if len(values) > MAX_CONTENT_TYPE_PREFIXES:
+        raise SystemExit(
+            f"fetch_citation: too many --allow-content-type values "
+            f"({len(values)} > {MAX_CONTENT_TYPE_PREFIXES})")
+    for value in values:
+        if not isinstance(value, str) or not CONTENT_TYPE_PREFIX_RE.match(value):
+            # The offending value is NOT echoed: this message can reach an agent's
+            # transcript, and the whole point of the token vocabulary is that no
+            # unvalidated string travels with it.
+            raise SystemExit(
+                "fetch_citation: --allow-content-type takes a bare type/subtype "
+                "prefix (for example text/ or application/pdf) -- no parameters, "
+                "wildcards, uppercase or whitespace")
+    return tuple(values)
+
+
+def content_type_token(ctype: str, allowed=ALLOWED_CONTENT_PREFIXES) -> str:
     """Collapse a server-supplied Content-Type to one of a fixed, closed set of
     tokens. NEVER returns attacker-supplied text.
 
@@ -205,10 +281,15 @@ def content_type_token(ctype: str) -> str:
     The closed set is the allowlist members themselves plus "absent" and
     "other", so the diagnostic value -- which class of type came back -- is
     kept while the free-form half is dropped at the boundary.
+
+    `allowed` may be a per-project list (see parse_content_type_prefixes). The
+    closed-set property is unaffected by that: every member was charset-validated
+    at preflight, so the vocabulary is still fixed before the first byte is
+    fetched -- it is just fixed per run rather than per release.
     """
     if not ctype:
         return "absent"
-    for prefix in ALLOWED_CONTENT_PREFIXES:
+    for prefix in allowed:
         if ctype.startswith(prefix):
             return prefix
     return "other"
@@ -406,7 +487,7 @@ class _PinnedHTTPConnection(http.client.HTTPConnection):
         self.sock = socket.create_connection((self._pinned_ip, self.port), timeout=self.timeout)
 
 
-def fetch_one(url: str, *, deadline: float) -> dict:
+def fetch_one(url: str, *, deadline: float, allowed_types=ALLOWED_CONTENT_PREFIXES) -> dict:
     """Fetch a single URL through the full boundary, following redirects
     manually and revalidating EVERY hop.
 
@@ -446,7 +527,11 @@ def fetch_one(url: str, *, deadline: float) -> dict:
             # check, not a browser session, and sending ambient credentials
             # would recreate the confused-deputy problem from the other side.
             conn.request("GET", path, headers={
-                "Host": host,
+                # authority(), not `host`: the connection goes to the pinned IP,
+                # so this header is the ONLY thing telling the server which site
+                # was asked for. A bare hostname misroutes every non-default-port
+                # URL and is invalid for an IPv6 literal.
+                "Host": authority(scheme, host, port),
                 "User-Agent": "literary-translator/1.16.1 (+citation-audit)",
                 "Accept": "text/html, text/plain, application/xhtml+xml;q=0.9, */*;q=0.1",
             })
@@ -463,7 +548,15 @@ def fetch_one(url: str, *, deadline: float) -> dict:
                 # Resolved against the CURRENT url, then re-validated from
                 # scratch on the next iteration -- a relative Location must not
                 # inherit any trust from the hop it came from.
-                current = urljoin(current, location)
+                #
+                # urljoin PARSES both sides, so it raises ValueError itself on a
+                # malformed Location such as `http://[::1` -- before the guarded
+                # validate_url() call that the next iteration would have made.
+                # The round-2 urlsplit hardening sits one step too late to see it.
+                try:
+                    current = urljoin(current, location)
+                except ValueError:
+                    raise _refuse("unparseable-redirect-location")
                 continue
 
             if status != 200:
@@ -479,7 +572,7 @@ def fetch_one(url: str, *, deadline: float) -> dict:
             # the body is still capped, decoded with errors="replace", and read
             # only through the delimiter -- so "absent" is recorded rather than
             # silently indistinguishable from an allowed type.
-            if ctype and content_type_token(ctype) == "other":
+            if ctype and content_type_token(ctype, allowed_types) == "other":
                 raise _refuse("content-type-not-allowed")
 
             raw = resp.read(MAX_BYTES + 1)
@@ -488,7 +581,8 @@ def fetch_one(url: str, *, deadline: float) -> dict:
             body = raw.decode("utf-8", errors="replace")
             return {
                 "ok": True, "status": status, "url": url, "final_origin": chain[-1]["origin"],
-                "chain": chain, "content_type": content_type_token(ctype), "bytes": len(raw),
+                "chain": chain, "content_type": content_type_token(ctype, allowed_types),
+                "bytes": len(raw),
                 "truncated": truncated, "outcome": "fetched", "body": body,
             }
         except (socket.timeout, TimeoutError):
@@ -497,6 +591,19 @@ def fetch_one(url: str, *, deadline: float) -> dict:
             raise _refuse(f"tls-error:{type(exc).__name__}")
         except OSError as exc:
             raise _refuse(f"network-error:{type(exc).__name__}")
+        except http.client.HTTPException as exc:
+            # http.client has its OWN hierarchy and HTTPException is NOT an
+            # OSError -- measured: issubclass(BadStatusLine, OSError) is False.
+            # So these escaped every handler above, and run_batch only catches
+            # Refused: one malformed status line aborted the whole batch.
+            #
+            # The bigger half is what the traceback CONTAINS. BadStatusLine puts
+            # the server's raw status line in its args, so an escaped exception
+            # printed the server's own text to a stream the prepare agent reads
+            # and is told to report -- the exact channel this release closes for
+            # Content-Type and redirect URLs. Only the stdlib TYPE NAME crosses
+            # the boundary; the instance's text never does.
+            raise _refuse(f"http-protocol-error:{type(exc).__name__}")
         finally:
             conn.close()
 
@@ -537,7 +644,8 @@ def iter_sources(snapshot):
             yield i, item, src
 
 
-def run_batch(batch_path: Path, out_dir: Path) -> int:
+def run_batch(batch_path: Path, out_dir: Path, *,
+              allowed_types=ALLOWED_CONTENT_PREFIXES) -> int:
     # TypeError is caught alongside the I/O and parse errors on purpose: a
     # snapshot of an unexpected SHAPE must surface as the contract's one-line
     # {"success": false, ...} just like an unreadable one. Letting it escape as
@@ -583,7 +691,7 @@ def run_batch(batch_path: Path, out_dir: Path) -> int:
             continue
         deadline = min(time.monotonic() + TOTAL_TIMEOUT_SEC, batch_deadline)
         try:
-            result = fetch_one(src, deadline=deadline)
+            result = fetch_one(src, deadline=deadline, allowed_types=allowed_types)
         except Refused as exc:
             entry["outcome"] = f"refused:{exc}"
             counts["refused"] += 1
@@ -623,10 +731,10 @@ def run_batch(batch_path: Path, out_dir: Path) -> int:
     return 0
 
 
-def run_single(url: str) -> int:
+def run_single(url: str, *, allowed_types=ALLOWED_CONTENT_PREFIXES) -> int:
     deadline = time.monotonic() + TOTAL_TIMEOUT_SEC
     try:
-        result = fetch_one(url, deadline=deadline)
+        result = fetch_one(url, deadline=deadline, allowed_types=allowed_types)
     except Refused as exc:
         print(json.dumps({"success": False, "outcome": f"refused:{exc}", "url": url}))
         return 1
@@ -645,14 +753,19 @@ def main(argv=None) -> int:
     ap.add_argument("url", nargs="?", help="single-URL mode (testing); prints metadata, delimiter, body")
     ap.add_argument("--batch", help="path to a batch snapshot JSON")
     ap.add_argument("--out-dir", help="directory to write evidence files and index.json into")
+    ap.add_argument("--allow-content-type", action="append", metavar="PREFIX",
+                    help="Content-Type prefix to admit, repeatable. Replaces the "
+                         "default list entirely when given. Bare type/subtype only "
+                         "(text/, application/pdf) -- no parameters or wildcards.")
     args = ap.parse_args(argv)
+    allowed_types = parse_content_type_prefixes(args.allow_content_type)
 
     if args.batch:
         if not args.out_dir:
             ap.error("--batch requires --out-dir")
-        return run_batch(Path(args.batch), Path(args.out_dir))
+        return run_batch(Path(args.batch), Path(args.out_dir), allowed_types=allowed_types)
     if args.url:
-        return run_single(args.url)
+        return run_single(args.url, allowed_types=allowed_types)
     ap.error("give either a URL or --batch <snapshot> --out-dir <dir>")
 
 

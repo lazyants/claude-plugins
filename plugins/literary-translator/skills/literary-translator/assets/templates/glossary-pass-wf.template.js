@@ -106,6 +106,19 @@
 //                        historical 3*BATCHES.length + 2 exactly, live pays
 //                        the citation-review retry ladder on top. See the
 //                        preflight block below for the derivation.
+//   {{CITATION_CONTENT_TYPES}}
+//                     -- 1.16.1: glossary.citation_content_types, a
+//                        COMMA-SEPARATED list of Content-Type prefixes the
+//                        citation fetcher may admit, substituted as a plain
+//                        quoted string. Empty string = use fetch_citation.py's
+//                        shipped default (text/, application/xhtml,
+//                        application/xml, application/json). A project citing
+//                        scanned archives sets "text/,application/pdf".
+//                        Substituting nothing here leaves a literal
+//                        {{CITATION_CONTENT_TYPES}} in the script, which throws
+//                        at instantiation -- deliberately: a profile setting
+//                        that silently did not take effect is the failure mode
+//                        this whole release is about.
 //   {{EFFORT}}          -- #197: engine.effort (enum: low/medium/high/xhigh),
 //                        substituted as a plain quoted string, same style as
 //                        {{SOURCE_LANG}} above. Drives BOTH the batch dispatch
@@ -175,6 +188,26 @@ const BATCH_AGENT_CAP = {{BATCH_AGENT_CAP}}
 // and the batchStep codex:codex-rescue agent effort option below, always
 // from this one value. No model knob here (see the header token doc above).
 const EFFORT = "{{EFFORT}}"
+
+// 1.16.1 -- glossary.citation_content_types. Comma-separated, because the
+// substitution contract is one plain quoted string per token. Empty means "use
+// fetch_citation.py's shipped default", which is the only case an existing
+// project has to do nothing about.
+//
+// Validated HERE as well as in the fetcher, and deliberately so: this value is
+// concatenated into a bash command line, so the template is the first place a
+// malformed one can be stopped, and a workflow that throws at instantiation
+// fails louder than one that ships a broken command into a batch step.
+const CITATION_CONTENT_TYPES = "{{CITATION_CONTENT_TYPES}}"
+const CITATION_TYPE_LIST = CITATION_CONTENT_TYPES.split(",")
+  .map(function (t) { return t.trim() })
+  .filter(function (t) { return t.length > 0 })
+for (const t of CITATION_TYPE_LIST) {
+  if (!/^[a-z0-9][a-z0-9!#$&^_.+-]*\/[a-z0-9!#$&^_.+-]*$/.test(t)) {
+    throw new Error("glossary.citation_content_types: '" + t + "' is not a bare " +
+      "type/subtype prefix (for example text/ or application/pdf)")
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Pre-merge citation review (1.16.0). Under research_mode:live the dispatch
@@ -492,7 +525,8 @@ function evidenceIndexPath(index, attempt) {
 function fetchCitationsCmd(index, attempt) {
   return PY + " " + ROOT + "/scripts/fetch_citation.py --batch " +
     approvedPath(index, attempt) +
-    " --out-dir " + evidenceDir(index, attempt)
+    " --out-dir " + evidenceDir(index, attempt) +
+    CITATION_TYPE_LIST.map(function (t) { return " --allow-content-type " + t }).join("")
 }
 
 // ---------------------------------------------------------------------------
@@ -1065,8 +1099,8 @@ function sentinelVerdict(reply, okSentinel, failSentinel) {
 //     to clear, so a re-run only clears it by chance. Do not describe this
 //     false RED as bounded or self-healing without that qualifier -- it is
 //     bounded within one run and unbounded across runs. The operator message
-//     at the citation-exhaustion return names this as one of the two causes
-//     and how to tell it from the other.
+//     at the citation-exhaustion return names this as one of the three causes
+//     and how to tell it from the other two.
 //   citation prepare -- automatic retry, same run, and the SAME per-run bound
 //     and the same across-run caveat as the citation review above, for the same
 //     reason: the trigger is the prepare agent's phrasing, and its prompt prints
@@ -1372,7 +1406,11 @@ const notReadyBatches = batchResults.filter((r) => !r || !r.ready)
 // still listed alongside) because it is the finding that needs a human.
 const citationExhaustedBatches = notReadyBatches.filter((r) => r && r.reason === "citation-review-exhausted")
 
-// The operator message below names BOTH causes on purpose. An earlier version
+// The operator message below names ALL THREE causes on purpose -- two until
+// 1.16.1, when splitting the reviewer into prepare + judge added a third: the
+// evidence step can now fail on its own (a failing --approve-to or
+// fetch_citation.py), which is an environment fault and not a fact about the
+// candidates. An earlier version
 // said only "these batches claimed sources that could not be verified -- resolve
 // the named candidates by hand", which asserts a diagnosis this return cannot
 // support: reaching here means no attempt's verdict was an approval, and a

@@ -181,9 +181,12 @@ engine:
     # shipped MAX_CITATION_RETRIES = 2. Size the cap for the LIVE ladder, or a live run refuses "batch-too-large".
     # The live per-attempt cost rose from 3 to 4 in 1.16.1 (#347): the single agent that both fetched citations
     # and judged them became a prepare call that retrieves without reading and a judge call that reads without
-    # retrieving. Stated at its true width: the judge is given no retrieval INSTRUCTION and no fetched-URL input
-    # it could act on, but it is an ordinary agent and still holds Bash -- what changed is that nothing in its
-    # prompt asks it to fetch, not that the tool was taken away. That is a security boundary,
+    # retrieving. Stated at its true width, narrower than an earlier draft of this note claimed: the judge is given
+    # no retrieval INSTRUCTION and no fragment path, but it DOES receive URLs -- index.json's `source` field is the
+    # cited URL itself, and a fetched body can contain any URL at all. It is an ordinary agent and still holds Bash.
+    # What changed is that nothing in its prompt asks it to fetch and every byte it judges arrived through
+    # fetch_citation.py's checks -- not that URLs were kept away from it, and not that the tool was taken away.
+    # Its prompt therefore marks those fields UNTRUSTED explicitly. That is a security boundary,
     # not extra work -- but it IS extra calls. UPGRADE NOTE: a live project whose cap was tuned near the old
     # 10-per-batch figure will now be refused at preflight with reason:"batch-too-large" -- loud and early rather
     # than mid-run, which is the intended direction, but it means the cap may need raising. The OFFLINE ladder is
@@ -214,6 +217,21 @@ glossary:
                                           # a citable source, in live or offline mode alike. Replace
                                           # with `live` or `offline`, consciously, matching THIS run's own actual
                                           # environment.
+
+  citation_content_types: []               # 1.16.1 (#347). OPTIONAL. Content-Type prefixes the citation fetcher may
+                                          # admit. Empty list = the shipped default: text/, application/xhtml,
+                                          # application/xml, application/json -- "a document a human could have
+                                          # read", which is what a citation is supposed to be.
+                                          # Set it when THIS corpus cites something the default excludes; the
+                                          # motivating case is scanned archives, ["text/", "application/pdf"].
+                                          # Note what widening costs: the judge then ingests bytes it cannot really
+                                          # read as prose, so a PDF that is actually an image scan yields an
+                                          # unreviewable "citation" the judge may still approve. Widen because the
+                                          # corpus needs it, not to make refusals go away.
+                                          # Each entry is a bare type/subtype PREFIX matched with startswith --
+                                          # no parameters (`; charset=...`), no wildcards, no uppercase. A malformed
+                                          # entry is refused at preflight by both the workflow template and
+                                          # fetch_citation.py, never silently ignored.
 
 validation:
   untranslated_sentinel: "нет перевода"

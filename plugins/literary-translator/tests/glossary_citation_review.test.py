@@ -148,7 +148,8 @@ def evidence_index_path(index: int, attempt: int) -> str:
 ATTEMPT_IN_PATH_RE = re.compile(r"/out_\d+_attempt_(\d+)\.json")
 
 
-def instantiate(*, research_mode: str = "live", batch_agent_cap: int = 10_000) -> str:
+def instantiate(*, research_mode: str = "live", batch_agent_cap: int = 10_000,
+                citation_content_types: str = "") -> str:
     """The exact one-time substitution the template's header documents
     (duplicated, not imported, so this file stays self-contained like every
     sibling harness)."""
@@ -160,6 +161,7 @@ def instantiate(*, research_mode: str = "live", batch_agent_cap: int = 10_000) -
     text = text.replace("{{RUN_ID}}", FIXTURE_RUN_ID)
     text = text.replace("{{BATCH_AGENT_CAP}}", str(int(batch_agent_cap)))
     text = text.replace("{{EFFORT}}", "high")
+    text = text.replace("{{CITATION_CONTENT_TYPES}}", citation_content_types)
     assert "{{" not in text, "fixture instantiation left an unresolved token"
     return text
 

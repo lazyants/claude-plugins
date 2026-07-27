@@ -50,7 +50,7 @@ was a subtle bug in the code that existed; both were work the code never did.
   "about 15 minutes" — inside one `agent()` call, against the same measured 600 s clamp, and each
   returns its failure reason immediately on a failed reply with no re-check of the artifact on disk.
   That is issue #348's defect class, unfixed, in two more templates. They are deliberately out of
-  scope here and tracked separately. The reason to write this down rather than leave it implied is
+  scope here and tracked as #352. The reason to write this down rather than leave it implied is
   the same reason this release exists: a fix described as closing a class, when it closed one site
   of three, is the overclaim pattern #348 and #347 were both instances of.
 - What the re-check does and does not guarantee. It runs the canonical gate ONE more time before a
@@ -73,7 +73,21 @@ was a subtle bug in the code that existed; both were work the code never did.
   global-ness — not just the first, which would leave a trivially winnable race. It connects to the
   **resolved IP** while TLS SNI stays bound to the original hostname, so DNS rebinding is closed
   without trading an SSRF hole for a MITM one. Redirects are followed manually and every hop is
-  re-validated from scratch, capped at 5. Caps on total time, response bytes, and content type.
+  re-validated from scratch, capped at 5, and a malformed `Location` is refused rather than raised —
+  `urljoin` parses, so it throws `ValueError` on `http://[::1` one step *before* the guarded
+  re-validation. Caps on response bytes and content type, and two time budgets stated at their real
+  width rather than as "a timeout": a **per-item** 30 s bound checked at the top of each redirect
+  hop, which caps redirect-chain *work* — `getaddrinfo` takes no timeout argument and the bound is
+  not re-checked during the body read — and a **batch-wide** 420 s budget, which exists because the
+  per-item bound alone is not a bound on anything the caller cares about. 40 sources × 30 s = 1200 s
+  inside one Bash call under the same measured 600 s clamp #348 is about, so ~20 dead hosts would
+  have the call killed with no attacker involved; items past the budget now soft-fail as an ordinary
+  `refused:batch-deadline` and the script still writes `index.json` and exits cleanly.
+- The `Host:` header carries the authority actually addressed — `host:port` when the port is not the
+  scheme default, and brackets around an IPv6 literal, which `urlsplit().hostname` strips. It sent a
+  bare hostname before, so an admitted `https://host:8443/` asked the server for the wrong virtual
+  host. A correctness bug rather than a security one: it makes *valid* citations fail, which the
+  judge sees as an unreachable source.
 - Telling the reviewer to fetch "only through the helper" was tried and rejected during review: the
   reviewer is an unrestricted agent that already holds Bash and already ingests page content, so a
   hostile page can simply instruct it to fetch something else. **A rule the attacker can talk the
@@ -85,19 +99,57 @@ was a subtle bug in the code that existed; both were work the code never did.
   exists to close: the judge is given no retrieval INSTRUCTION and no fetched-URL INPUT it could act
   on, but it is an ordinary agent and still holds Bash. The split removes the reason and the input,
   not the tool.
-- Nothing server-supplied reaches `index.json`. A hostile `Content-Type` header used to be recorded
-  verbatim — both as `refused:content-type-not-allowed:<header>` and as the success path's
-  `content_type` — while the judge prompt vouches for that file as locally generated and `outcome`
-  is the field the judge reasons over. That is an instruction channel straight into the approval
-  gate, found by review and reproduced against a hostile local server. Content types are now
-  collapsed at the boundary to a closed token set: the allowlist members themselves plus `absent`
-  and `other`. An absent `Content-Type` is admitted deliberately — ordinary servers omit it — but is
-  now recorded as `absent` rather than being indistinguishable from an allowed type.
+- Nothing server-supplied reaches `index.json`, and it took three review rounds to make that
+  sentence true — each round closed one channel and the next round found the sibling it had missed,
+  which is the honest shape of the fix and is recorded here rather than smoothed over.
+  - **Round 1 — the header.** A hostile `Content-Type` was recorded verbatim, both as
+    `refused:content-type-not-allowed:<header>` and as the success path's `content_type`, while the
+    judge prompt vouches for that file as locally generated and `outcome` is the field the judge
+    reasons over. That is an instruction channel straight into the approval gate, found by review
+    and reproduced against a hostile local server. Content types are now collapsed at the boundary
+    to a closed token set: the allowlist members themselves plus `absent` and `other`. An absent
+    `Content-Type` is admitted deliberately — ordinary servers omit it — but is recorded as `absent`
+    rather than being indistinguishable from an allowed type.
+  - **Round 2 — the sibling FIELDS.** The round-1 fix was scoped to the field the reviewer named
+    while the property is about the whole file. `final_url` and `chain[].url` still carried
+    server-authored bytes: after hop 0 the URL is built from the server's own `Location`, so its
+    path, query and fragment are attacker-written text, and the control-character rejection stops
+    CR/LF and nothing else — ordinary printable separators still spell prose, and U+00A0 survives
+    because headers decode as ISO-8859-1 and a fragment never reaches the request's ASCII encode.
+    Only scheme and host are already constrained, so only those are kept: the record is now
+    `final_origin` plus a chain of `{origin, host, hop, resolved}`. The exact path is dropped rather
+    than escaped, because percent-encoded English is still English to a reader, and the judge is a
+    reader.
+  - **Round 3 — the PARSER, which is not a field at all.** `http.client` raises its own hierarchy
+    and `HTTPException` is not an `OSError` — measured: `issubclass(BadStatusLine, OSError)` is
+    `False` — so a malformed status line escaped every handler, aborted the whole batch, and printed
+    a traceback whose text is the server's own: `BadStatusLine` stores the raw wire line in `args`.
+    The prepare agent is told to report what the command printed, so that traceback was a direct
+    channel from a hostile server into the one agent this split exists to insulate — the same defect
+    as rounds 1 and 2, arriving through the exception system instead of through a dict key. Only the
+    stdlib type name now crosses the boundary, as `refused:http-protocol-error:<TypeName>`.
+- **New optional profile field `glossary.citation_content_types`.** The admitted content types were
+  hardcoded to "text-ish" — reasonable as a default, wrong as a universal rule for a corpus whose
+  sources are scanned archives. The list is now per-project (`["text/", "application/pdf"]`), empty
+  meaning the shipped default. Widening has a real cost, stated in the profile rather than
+  discovered later: the judge then ingests bytes it cannot read as prose, so an image-only PDF
+  yields an unreviewable "citation" it may still approve. Each entry is validated against the same
+  type/subtype pattern in three places — the profile schema at preflight, the workflow template at
+  instantiation, and the fetcher at runtime — and a parity test pins the three together over a
+  shared table, because three copies of one rule is the shape that rots. The trailing-newline row in
+  that table is the one input on which the engines genuinely disagreed: Python's `$` matches before
+  a trailing newline and ECMA-262's does not, which is why the Python copies are `\Z`-anchored and
+  the schema carries `(?![\s\S])`. **Upgrade note:** the substitution token is required, so an
+  existing instantiator that does not supply `{{CITATION_CONTENT_TYPES}}` now fails loudly at
+  instantiation. That is deliberate and is the same failure this release is about — a profile
+  setting that silently did not take effect is worse than one that refuses.
 - The claim this supports, at exactly the width it is true: *in the citation audit path, retrieval
   happens only through `fetch_citation.py`, launched by an agent that never reads the retrieved
-  bytes.* It does **not** make the pipeline SSRF-free. Two residual paths are named rather than
-  quietly covered: the resolver/generation agent still does open web research by design under
-  `research_mode: live`, and the judge still holds a Bash tool. Both are tracked separately.
+  bytes.* The second half of that sentence was not true until round 3: an escaped parser exception
+  put the server's own text in front of the prepare agent. It does **not** make the pipeline
+  SSRF-free. Two residual paths are named rather than quietly covered: the resolver/generation agent
+  still does open web research by design under `research_mode: live`, and the judge still holds a
+  Bash tool. Both are tracked as #353.
 - `canon_validate.py --check-batch` now statically refuses an unsafe citation `source` with no DNS
   and no network, so the offline path — where nothing ever fetches — can still stop one before it is
   frozen into `canon.json`. It is applied to **every item whose `source` is a non-empty string**,

@@ -773,9 +773,15 @@ pipeline(BATCHES, batchStep)
   `CITATIONS_OK`/`CITATIONS_REJECTED <index> ATTEMPT <n>`. It gates whether
   the batch counts as ready at all. It audits the approved snapshot and the
   fetched evidence bodies, and performs no retrieval of its own — it is given no
-  retrieval instruction and no fetched-URL input it could act on. It is still an
-  ordinary agent holding Bash; what the split removes is the *reason* and the
-  *input*, not the tool. The approval binds bytes rather than a path.
+  retrieval instruction and **no fragment path**. Stated narrowly, because an
+  earlier draft of this bullet overclaimed it: the judge *does* receive URLs.
+  `index.json`'s `source` field is the cited URL itself, the judge is asked to
+  name the offending source in its verdict, and a fetched body can contain any
+  URL at all. It is still an ordinary agent holding Bash. What the split removes
+  is the *reason* to fetch and the *provenance* of every byte it judges — not
+  URLs, and not the tool — which is why its prompt marks `source` and
+  `source_form` UNTRUSTED explicitly rather than relying on their absence.
+  The approval binds bytes rather than a path.
   **This pair costs one MORE `agent()` call per attempt than 1.16.0's single
   reviewer** — that is the whole reason the live ladder moved from
   `1 + 3*(MAX_CITATION_RETRIES+1)` to `1 + 4*(MAX_CITATION_RETRIES+1)`; see the

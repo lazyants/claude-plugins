@@ -426,40 +426,83 @@ So the glossary pass reviews each `basis: "established"` citation itself,
 **inside `batchStep`, before that batch counts as ready** — and therefore
 before any fragment reaches `--merge-batches`.
 
-**The reviewer is a plain Claude call, deliberately NOT codex** — no
+**Since 1.16.1 (#347) the stage is TWO calls per attempt, not one.** Until
+then a single agent both fetched every `source` URL and judged what came
+back, which is two defects sharing one call. The SSRF half is closed by
+`scripts/fetch_citation.py` — an http/https scheme allowlist, no embedded
+credentials, every resolved address checked, the connection pinned to the
+address it vetted, every redirect hop re-validated, and caps on time, bytes
+and content type. The PROMPT-INJECTION half cannot be closed the same way,
+and the first attempt to — telling that same agent to fetch only through the
+helper — was rejected in review, correctly: the reviewer holds Bash and
+ingests attacker-authorable page text, so a hostile citation page can simply
+instruct it to curl something else. A rule the attacker can talk the enforcer
+out of is not an enforcement point. So retrieval moved OUT of the judging
+agent rather than being fenced inside it. PREPARE runs exactly two commands —
+the `--approve-to` snapshot below, then `fetch_citation.py --batch` over that
+snapshot — and reads only the one line of locally generated JSON each of them
+prints; it never opens the snapshot or an evidence file, so nothing it
+ingests was authored outside this project, and an agent that reads no
+attacker text cannot be talked out of anything. If the snapshot command fails
+it stops there rather than fetching, and no judge call is spent. The JUDGE
+reads local files only — the snapshot, the evidence `index.json`, and exactly
+the bodies that index names as an `evidence_file` — and needs no network at
+all; it is handed no fragment path, not even inside prose forbidding a read
+of it, because a prompt-injected judge should have to guess that string
+rather than be given it.
+
+**The claim the split supports, and no wider one:** in the citation audit path
+retrieval happens only through `fetch_citation.py`, launched by an agent that
+never reads the retrieved bytes, and the agent that judges performs no
+retrieval at all. It does NOT make the pass SSRF-free. The batch dispatch
+still does open web research by design under `research_mode: live`, and the
+judge still holds a Bash tool — the split removes its REASON to use it and
+tells it not to, which is a different and smaller thing than removing the
+capability. Both remain residual exposures, and overclaiming here would be
+worse than the original bug, because the next reader would stop looking.
+
+**Both halves are plain Claude calls, deliberately NOT codex** — no
 `agentType`, no schema, sentinel-verdict shaped exactly like the precheck
 and wait steps (a schema-bearing call can wedge the Workflow if the
-forwarder detaches, #97), at `effort: "high"` rather than those steps'
-`"low"`, since this is the one judgment call in the template rather than a
-mechanical relay. Codex is what PRODUCED the citation, so a reviewer running
-under a different model is a genuinely separate opinion rather than the same
-reasoning re-run; `tests/bounded_poll_present.test.py` pins this template's
-codex work-call set to exactly `{batchDispatchPrompt}`, which keeps it that
-way. This does not loosen R1/R4: the stage AUTHORS nothing and repairs
-nothing — its only two powers are approve and reject, every canon resolution
-still comes from codex, and a rejection's only effect is to make codex redo
-the batch. Its `effort` is likewise NOT wired to `{{EFFORT}}`, which stays
-the codex dual-injection knob and nothing else.
+forwarder detaches, #97). Codex is what PRODUCED the citation, so a reviewer
+running under a different model is a genuinely separate opinion rather than
+the same reasoning re-run; `tests/bounded_poll_present.test.py` pins this
+template's codex work-call set to exactly `{batchDispatchPrompt}`, which
+keeps it that way. This does not loosen R1/R4: the stage AUTHORS nothing and
+repairs nothing — its only two powers are approve and reject, every canon
+resolution still comes from codex, and a rejection's only effect is to make
+codex redo the batch. The two efforts differ deliberately: PREPARE takes the
+precheck's and wait's `"low"`, being mechanical — run two commands, relay
+which succeeded — while the JUDGE keeps `"high"` as the one judgment call in
+the template. Neither is wired to `{{EFFORT}}`, which stays the codex
+dual-injection knob and nothing else.
 
 Scope is narrow and explicit: only items whose `basis` is exactly
 `established` are examined — every other basis makes no external source
-claim at all — and for each one the reviewer must actually fetch the URL,
-never judge it from its shape, domain reputation, or memory. Three checks:
-it RESOLVES (no 404, dead host, parked domain, content-hiding login wall, or
-redirect to an unrelated page); it is ABOUT THE RIGHT ENTITY (not merely a
+claim at all — and for each one the judge decides from that item's retrieved
+body alone, never from the URL's shape, its domain's reputation, or its own
+memory of what lives at that address. Three checks: it RESOLVES (the index
+records that item's outcome as `fetched` and the body is the reference page
+itself — not a 404, a parked domain, a content-hiding login wall, or plainly
+a different page than the URL promised; an outcome of `refused:<reason>` or
+`http_error:<code>` FAILS this check, because nothing was retrieved and so
+nothing supports the claim); it is ABOUT THE RIGHT ENTITY (not merely a
 same-named bearer); and it SUPPORTS THE CLAIMED FORM — the page actually
 attests the `canonical_target_form` as an established target-language
 rendering. That third one is the common failure: a page proving only that
 the entity exists, or giving the name only in the source language, does not
 support an `established` claim. A missing, empty, non-URL, or
-search-results/query `source` rejects too, and so does an unreachable
-network — an unverifiable citation is never approved on the grounds that
-verification was unavailable. The verdict is **per batch, not per item**: a
-single failing item rejects the whole fragment, so there is no partial
-verdict to express. A fragment with no `established` items at all passes
-trivially — a live-mode batch that happened to resolve everything by
-transliteration or sense-translation costs one cheap approval, never a
-research round.
+search-results/query `source` rejects too, and so does evidence the judge
+cannot read — an unverifiable citation is never approved on the grounds that
+verification was unavailable, and going to fetch the page itself to settle
+it is not an option that task has. `index.json` deliberately covers EVERY
+item carrying a `source`, not only the `established` ones, so entries
+outside the judge's scope are expected rather than a defect. The verdict is
+**per batch, not per item**: a single failing item rejects the whole
+fragment, so there is no partial verdict to express. A fragment with no
+`established` items at all passes trivially — a live-mode batch that
+happened to resolve everything by transliteration or sense-translation costs
+one cheap prepare-and-approve pair, never a research round.
 
 **Every attempt gets its own fragment path** — `out_{index}_attempt_{n}.json`
 from attempt 0 onward, where this used to be one fixed `out_{index}.json`.
@@ -486,7 +529,12 @@ conditioned on the resume flag `resume_setup.py` already computes: a
 `glossary/runs/<RUN_ID>` directory can outlive its identity directory and
 collide on the one-second timestamp), while a **resume** wipes `n >= 1` and
 every snapshot but keeps attempt 0, which the resume-skip optimisation
-depends on wholly and which is citation-reviewed either way.
+depends on wholly and which is citation-reviewed either way. Every
+`evidence_*_attempt_*` DIRECTORY goes unconditionally under both flags,
+attempt 0 included (**1.16.1**): evidence is an OUTPUT of the citation
+review, re-produced by the prepare step before anything judges it, so a
+surviving copy is never useful and is potentially wrong — it follows the
+`approved_*` rule, not the `out_*` one.
 
 For the same reason
 the verdict sentinels carry the ATTEMPT number, not just the batch index — a
@@ -513,20 +561,36 @@ and knows nothing of the citation review, and `--verify-merged` re-reads too
 but checks shape and coverage, never citations.
 
 So the fragment's own `--check-batch` validation is re-run with
-`--approve-to` at the top of the reviewer's turn, which is why the stage still
-costs no extra `agent()` call: that invocation copies the exact bytes it just
-validated — one `read_bytes()` from the read that validated them, no second
-read, no window — to a create-once `approved_{index}_attempt_{n}.json`, and the
-reviewer then audits THAT. The ordering is the whole fix and cannot be
-reversed: snapshotting *after* the audit leaves a producer free to replace
-validated-bytes-A with structurally-valid-bytes-B between the reviewer's read
-and the copy. On `CITATIONS_OK` the merge consumes the snapshot, so within one
-run the bytes audited, the bytes approved and the bytes merged are one object
-by identity, and a post-snapshot rewrite of `out_*` reaches nothing anyone
-reads — the defect is unrepresentable rather than detected, with no hash to
-compare and no window to keep short. That "within one run" is load-bearing and
-rests on preconditions; the next section states them once, and every other
-mention of this guarantee points there instead of restating them.
+`--approve-to` as PREPARE's first command, before anything is fetched and
+long before anything is judged: that invocation copies the exact bytes it
+just validated — one `read_bytes()` from the read that validated them, no
+second read, no window — to a create-once
+`approved_{index}_attempt_{n}.json`, `fetch_citation.py` then takes its URLs
+from THAT, and the judge audits THAT. The ordering is the whole fix and
+cannot be reversed: snapshotting *after* the audit leaves a producer free to
+replace validated-bytes-A with structurally-valid-bytes-B between the
+reviewer's read and the copy, and fetching from the mutable attempt path has
+the same defect one layer out — the URLs retrieved would be ones no reviewer
+ever approved. On `CITATIONS_OK` the merge consumes the snapshot, so within
+one run the bytes audited, the bytes approved and the bytes merged are one
+object by identity, and a post-snapshot rewrite of `out_*` reaches nothing
+anyone reads — the defect is unrepresentable rather than detected, with no
+hash to compare and no window to keep short. That "within one run" is
+load-bearing and rests on preconditions; the next section states them once,
+and every other mention of this guarantee points there instead of restating
+them.
+
+The snapshot stays inside PREPARE's own turn rather than becoming a step of
+its own, but since **1.16.1** the reason is no longer cost: the split already
+spends the extra call, taking the live ceiling from
+`1 + 3*(MAX_CITATION_RETRIES+1)` to `1 + 4*(MAX_CITATION_RETRIES+1)`. What
+survives is the structural reason, which was always the stronger one — this
+is the ONE point both entry points into the review loop converge on. Putting
+the snapshot in the wait step instead would silently skip it on every
+resume-skipped batch, because that path runs neither the dispatch nor the
+wait, and a resumed, never-reviewed fragment is precisely the case this whole
+stage exists for. Prepare sits at that convergence point, so both entry
+points get a snapshot and evidence alike.
 
 #### What the approved snapshot guarantees, and the preconditions it rests on
 
@@ -571,12 +635,16 @@ tests on.
 
 **Precondition C: nothing writes the snapshot path out of band.**
 `--approve-to` is the only writer — by INSTRUCTION, not by enforcement, which
-is why it belongs here rather than under what holds. The citation reviewer is
-the process closest to this: it is handed the snapshot path and it audits
-untrusted fetched pages. Its prompt tells it, of the step-1 command, "Writing
-that snapshot is the ONLY change to any file you are permitted to make in this
-task", and again at the end, "Apart from running the one snapshot command in
-step 1, do not modify or write any file". Nothing enforces either sentence. A
+is why it belongs here rather than under what holds. Two agents hold the
+path since 1.16.1, and neither sentence below is enforced by anything.
+PREPARE runs the command that publishes it and is told "You must not create,
+modify, or delete any file yourself. The only changes this task may produce
+are the ones those two commands make on their own"; it reads no retrieved
+bytes, so nothing it ingests can argue it past that. The JUDGE is the one
+handed the path while reading untrusted fetched pages, and it is told "You
+must not create, modify, or delete any file, in this directory or anywhere
+else" — which the split does not enforce either: it removed the judge's
+REASON to run a command, not its Bash tool. A
 process that rewrites the path AFTER the audit and then returns
 `CITATIONS_OK` defeats the property with preconditions A and B both intact,
 because the merge fresh-reads whatever the path holds at merge time.
@@ -667,9 +735,10 @@ The end state is identical either way: the fail scan skips the sentinel, a
 trailing clean OK line then approves the batch, and a reply carrying BOTH
 verdicts silently resolves to the approving one.
 
-Each of this template's three sites therefore now short-circuits to REJECT when
-`rejectedAnywhere(reply, failSentinel)` finds the fail sentinel anywhere in the
-reply as a plain substring, evaluated BEFORE `sentinelVerdict()` is consulted
+Each of this template's four sites — precheck, wait, prepare and judge —
+therefore now short-circuits to REJECT when `rejectedAnywhere(reply,
+failSentinel)` finds the fail sentinel anywhere in the reply as a plain
+substring, evaluated BEFORE `sentinelVerdict()` is consulted
 at all. Substring containment is strictly easier to satisfy than line
 equality, so the guard can only ADD rejections, never remove one — it moves
 the failure into the fail-safe direction by construction, not by care.
@@ -680,7 +749,7 @@ direction and through a differently-named wrapper: there `DRAFT_MISSING` is the
 OK sentinel, so gluing hides a GENUINE missing-draft report rather than faking a
 pass, and `runRound` keys on `mentionedAnywhere()` — same containment test as
 `rejectedAnywhere()`, which it delegates to, but a hit biases toward ACTING on
-the sentinel instead of rejecting. Six guarded sites over the two templates.
+the sentinel instead of rejecting. Seven guarded sites over the two templates.
 `skeptic-pass-wf.template.js` mirrors this control flow and is deliberately NOT
 guarded — it sits in no `cache_key.py` bundle and carries its own
 `compute_skeptic_input_digest()`, so editing it would force a fresh skeptic
@@ -704,7 +773,7 @@ to below is the number of attempts, never the cause of the reject.
   make it reachable.
 
 **A false REJECT does not cost the same at every site**, and the difference is
-what to read a failed run against. Of the six, exactly ONE recovers
+what to read a failed run against. Of the seven, exactly ONE recovers
 DETERMINISTICALLY inside the run — the precheck. At every other site the
 trigger is the reply's PHRASING rather than the data, so whatever retry the
 site gets — the citation ladder's next attempt in-run, a later run for the
@@ -714,8 +783,15 @@ other four — is another roll of the same die and not a repair:
   dispatch + wait it would have run had no fragment been on disk. Automatic,
   same run, same batch; the whole cost is the forfeited resume-skip saving,
   one codex dispatch plus one poll. This is the only genuine repair of the
-  six, and it is genuine precisely because the fall-through path is correct
+  seven, and it is genuine precisely because the fall-through path is correct
   regardless of WHY the precheck reported `ABSENT`.
+- **Evidence prepare (1.16.1)** — joins the citation ladder below rather than
+  falling through: a false hit on `EVIDENCE_FAILED` skips the judge call
+  entirely, carries prepare's own reply forward as the next attempt's
+  regeneration constraint, and still counts against `MAX_CITATION_RETRIES`,
+  so that attempt costs 3 calls rather than the ladder's 4. Not a repair
+  either, and for the same reason as the review below — the ladder varies the
+  FRAGMENT, while what tripped the guard was prepare's WORDING.
 - **Citation review — NOT RELIABLY self-recovering, however much its retry
   ladder looks like it.** The batch does regenerate to a fresh attempt and get
   reviewed again, bounded by `MAX_CITATION_RETRIES`. But the ladder varies the
@@ -731,9 +807,9 @@ other four — is another roll of the same die and not a repair:
   nothing while the data may have been fine throughout. What the bound buys is
   termination, not recovery: nothing about the trigger is per-run state, so
   re-invoking the pass is another re-roll rather than a reliable repair.
-  **Telling the two causes apart is what an operator actually needs**, and it
-  is readable off the reply, which is why the exhaustion message states both
-  causes instead of one. The reviewer prompt requires a genuine rejection to
+  **Telling the causes apart is what an operator actually needs**, and it
+  is readable off the reply, which is why the exhaustion message states all
+  three instead of one. The judge's prompt requires a genuine rejection to
   list, above its verdict line, one line per offending item naming that item's
   `source_form`, its `source` URL, and which of the three checks it failed and
   how; `batchStep` hands that reply to the next attempt as its regeneration
@@ -746,7 +822,13 @@ other four — is another roll of the same die and not a repair:
   nothing in the data needs editing, the attempt fragments and their approved
   snapshots are on disk to inspect, and the right response is to treat it as a
   review-prompt defect and report it — not to re-run and not to hand-edit
-  candidates.
+  candidates. Since **1.16.1** a third cause reaches this same return: a
+  `lastRejection` quoting a failing command rather than discussing any
+  citation — `canon_validate.py --check-batch --approve-to`, or
+  `scripts/fetch_citation.py` — is an environment or tooling fault, not a
+  fact about the candidates. Run that exact command by hand and read its
+  error; a fetcher that cannot reach the network at all fails every batch
+  identically, which is the quickest way to tell this case from the other two.
 - **Wait** — NOT automatic, and this is the one that matters. The site returns
   `{ready: false, reason: "glossary-pass-null"}` immediately, straight out of
   `batchStep`; the enclosing attempt loop does not catch it, because this is a

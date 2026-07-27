@@ -276,7 +276,7 @@ python3 {{PLUGIN_ROOT}}/assets/scripts/scaffold_setup.py --durable-root ${durabl
 ```
 
 It writes `${durable_root}/runs/.plugin_bundle_hash` (sha1 over the sorted
-concatenated bytes of the 13 `PLUGIN_BUNDLE_MEMBERS` under `scripts/` — read by
+concatenated bytes of the 14 `PLUGIN_BUNDLE_MEMBERS` under `scripts/` — read by
 `cache_key.py` rather than re-hashing the bundle per segment) and
 `${durable_root}/runs/.orchestration_bundle_hash` (sha1 over the four
 orchestration-only scripts — non-gating for convergence, never part of the
@@ -681,7 +681,13 @@ planner's `args` into the Workflow tool and its `batches` into
 `resume_setup.py`'s payload. **#197:** the same instantiation substitutes
 `{{EFFORT}}` (`profile.yml`'s `engine.effort`) alongside every other token —
 there is no `{{MODEL}}` token for this template, since a codex model id
-does not thread to the glossary pass. The resolved `effort` value also
+does not thread to the glossary pass. **1.16.1 (#347):** that token list gained
+`{{CITATION_CONTENT_TYPES}}`, substituted as a COMMA-SEPARATED string inside its
+own quotes from `profile.yml`'s `glossary.citation_content_types` — the empty
+string when the key is absent or empty, meaning `fetch_citation.py`'s shipped
+default. It is REQUIRED, not optional: leaving it unsubstituted throws at
+instantiation rather than silently falling back, because a profile setting that
+quietly did not take effect is the exact failure this release exists to close. The resolved `effort` value also
 belongs in the `subst` object of the payload this session writes for
 `resume_setup.py` below — `resume_setup.py`'s own `SUBST_FIELDS` now
 requires it, and `compute_input_digest` fails loudly
@@ -741,31 +747,45 @@ order.
 **The pre-merge citation review** gates whether a batch counts as ready at
 all. Under `research_mode: live`, every `basis:"established"` item's `source`
 is fetched and reviewed inside `batchStep`, before that batch can reach the
-merge. The reviewer is a plain Claude call at `effort:"high"`, deliberately
-NOT codex — codex wrote the citation, so a different model is a separate
-opinion rather than the same reasoning re-run — and it can only approve or
-reject, never author or repair a canon decision. It checks that the URL
-resolves, documents the right entity, and actually attests the claimed
-`canonical_target_form`; an unreachable network rejects rather than approves.
+merge. **1.16.1** splits that across TWO plain Claude calls per attempt,
+because fetching and judging in one turn is two defects sharing one call: a
+mechanical PREPARE at `effort:"low"` publishes the approved snapshot and then
+retrieves every cited page through `scripts/fetch_citation.py` (scheme and
+address allowlist, connection pinned to the address it vetted, every redirect
+hop re-validated, caps on time/bytes/content-type), reading nothing either
+command wrote; an independent JUDGE at `effort:"high"` then reads only local
+files and retrieves nothing at all. The split is what makes that boundary an
+enforcement point rather than a rule the attacker can argue with — an agent
+that ingests attacker-authored page text can be told by that text to fetch
+something else, so the agent that decides what to fetch is the one that never
+reads it. Neither half is codex — codex wrote the citation, so a different
+model is a separate opinion rather than the same reasoning re-run — and
+neither can author or repair a canon decision. The judge checks, per
+`basis:"established"` item and from the retrieved body alone, that it
+resolved, documents the right entity, and actually attests the claimed
+`canonical_target_form`; a URL the boundary refused, an HTTP error, or
+evidence it cannot read all reject rather than approve.
 Nothing before this stage checks a citation's TRUTH (the schema asserts only
 a non-empty `format:"uri"` string) and nothing after the merge can repair one
 — a merged row is immutable, so this is the last point at which a bad
 citation can still be stopped. A single failing item rejects the whole
 fragment and regenerates that batch to a fresh attempt-scoped path, never
-over the previous attempt, bounded by `MAX_CITATION_RETRIES`; exhausting that
+over the previous attempt, bounded by `MAX_CITATION_RETRIES`; a prepare that
+fails drives that same ladder without spending a judge call. Exhausting that
 budget ends the run with `merged: false` and
 `reason: "citation-review-exhausted"` — a distinct reason from
 `fragment-check-failed`, and nothing is merged. Under `offline` the stage is
 a no-op, since `established` is forbidden there outright.
 
 **1.16.0: the approval binds the reviewed BYTES, not a path.** Before
-auditing anything the reviewer re-runs the fragment's own `--check-batch`
-validation with `--approve-to` (inside its existing turn, so no extra
-`agent()` call), which copies the exact bytes it just validated — one read,
-nothing can change between validating and copying — to a create-once,
-attempt-scoped `approved_{index}_attempt_{n}.json`. It then audits **the
-snapshot** and never the mutable `out_*` attempt path again, and on approval
-the merge is handed **that snapshot**. The producer is a fire-and-forget
+anything is fetched or judged, PREPARE re-runs the fragment's own
+`--check-batch` validation with `--approve-to`, which copies the exact bytes
+it just validated — one read, nothing can change between validating and
+copying — to a create-once, attempt-scoped
+`approved_{index}_attempt_{n}.json`. The fetcher then takes its URLs from
+**that snapshot** and the judge audits **that snapshot**; the mutable `out_*`
+attempt path is never read again, and on approval the merge is handed that
+same snapshot. The producer is a fire-and-forget
 codex job told to rewrite the attempt path until its own self-check passes, so
 renames onto the reviewed path after the review are expected behaviour, not
 an adversary — and after the snapshot they reach nothing anyone reads. Within
@@ -774,30 +794,41 @@ a conclusion from stated preconditions, not a filesystem guarantee, and they
 are deliberately NOT enumerated here — read them in
 `references/canon-and-glossary.md`,
 "What the approved snapshot guarantees, and the preconditions it rests on".
+The snapshot stays inside PREPARE's own turn rather than becoming a step of
+its own, but no longer to save a call: the **1.16.1** split already spends
+one, taking the live ceiling from `1 + 3*(MAX_CITATION_RETRIES+1)` to
+`1 + 4*(MAX_CITATION_RETRIES+1)`. What survives is the structural reason —
+prepare is the one point both entry points into the review loop converge on,
+so a resume-skipped batch, which runs neither the dispatch nor the wait,
+still gets a snapshot and its evidence.
 `offline` is the one exception: no citation, no reviewer, no snapshot, so the
 merge consumes the attempt path there.
 
-The verdict itself is containment-guarded, as are the precheck's and the
-wait's: a reply carrying the failure sentinel ANYWHERE in it rejects, because
-matching whole lines alone let a fail sentinel glued to prose slip past and a
-trailing clean OK line then approve. The cost is a false REJECT on a reply
-that only *discusses* its own fail sentinel, and only ONE of the guarded
-sites recovers from that DETERMINISTICALLY inside the run — the precheck,
-which falls through to the dispatch it would have run anyway. **The citation
-review does not recover RELIABLY**, however much its retry ladder looks like
-it should: the ladder regenerates the fragment, while what tripped the guard
-is the reviewer's phrasing, so a regenerated attempt clears only if its fresh
-reply happens not to re-trip the guard — a re-roll, not a repair — and every
-attempt can burn on the same narration, ending the run
-`citation-review-exhausted` with nothing merged. Read each batch's
-`lastRejection` before touching any data — one naming specific `source_form`
-values with their `source` URLs and the check each failed is a data problem;
-one that reads as an approval, discusses the `CITATIONS_REJECTED` sentinel
-rather than any citation, or is the fixed no-findings placeholder is the guard
-misfiring, so report it as a review-prompt defect instead of re-running or
-hand-editing candidates. Full rationale, the two false REDs, the per-site cost
-of a false reject, and why a repair after the merge is not available at all:
-`references/canon-and-glossary.md`, "Pre-merge citation review".
+The judge's verdict is containment-guarded, as are the precheck's, the
+wait's, and prepare's own: a reply carrying the failure sentinel ANYWHERE in
+it rejects, because matching whole lines alone let a fail sentinel glued to
+prose slip past and a trailing clean OK line then approve. The cost is a
+false REJECT on a reply that only *discusses* its own fail sentinel, and
+only ONE of the guarded sites recovers from that DETERMINISTICALLY inside
+the run — the precheck, which falls through to the dispatch it would have
+run anyway. **The citation review does not recover RELIABLY**, however much
+its retry ladder looks like it should: the ladder regenerates the fragment,
+while what tripped the guard is the phrasing of prepare's or the judge's own
+reply, so a regenerated attempt clears only if its fresh reply happens not
+to re-trip the guard — a re-roll, not a repair — and every attempt can burn
+on the same narration, ending the run `citation-review-exhausted` with
+nothing merged. Read each batch's `lastRejection` before touching any data —
+one naming specific `source_form` values with their `source` URLs and the
+check each failed is a data problem; one that reads as an approval,
+discusses the `CITATIONS_REJECTED` sentinel rather than any citation, or is
+the fixed no-findings placeholder is the guard misfiring, so report it as a
+review-prompt defect instead of re-running or hand-editing candidates; and
+one quoting a failing `--approve-to` or `fetch_citation.py` command is an
+environment or tooling fault rather than anything about the candidates — run
+that command by hand and read its error. Full rationale, the two false REDs,
+the per-site cost of a false reject, and why a repair after the merge is not
+available at all: `references/canon-and-glossary.md`, "Pre-merge citation
+review".
 
 **Canon human-adjudication audit, categories 1-4 (opt-in rollout gate)** —
 `scripts/canon_adjudication_audit.py` enumerates every canon

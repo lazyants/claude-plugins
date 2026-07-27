@@ -197,6 +197,8 @@ def instantiate(*, research_mode: str = "live", batch_agent_cap: int = 10_000) -
     text = text.replace("{{RUN_ID}}", FIXTURE_RUN_ID)
     text = text.replace("{{BATCH_AGENT_CAP}}", str(int(batch_agent_cap)))
     text = text.replace("{{EFFORT}}", "high")
+    # 1.16.1 (#347): empty = fetch_citation.py's shipped default list.
+    text = text.replace("{{CITATION_CONTENT_TYPES}}", "")
     assert "{{" not in text, "fixture instantiation left an unresolved token"
     return text
 

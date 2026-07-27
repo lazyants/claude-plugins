@@ -111,10 +111,15 @@
 // driver validate-before-promotes it -- under a per-seg flock -- to the
 // canonical segments/<seg>.{draft,review}.json: codex writes disk, its own
 // return line is NEVER the verdict. The Workflow's OWN wait poll
-// (waitPrompt/reviewWaitPrompt) is the AUTHORITATIVE independent gate -- an
-// elapsed-time loop (bound = CODEX_DEADLINE_SEC + CODEX_FINALIZE_BUDGET_SEC
-// + CODEX_WAIT_GRACE_SEC = 3450 s, gate-then-deadline-break with NO separate
-// post-loop gate, plus one final finite gate check; NO `timeout` binary)
+// (waitPrompt/reviewWaitPrompt) is the AUTHORITATIVE independent gate -- a
+// POLLING-BUDGET loop (budget = CODEX_DEADLINE_SEC + CODEX_FINALIZE_BUDGET_SEC
+// + CODEX_WAIT_GRACE_SEC = 3450 s), spent since 1.16.1 across WAIT_CHUNKS = 8
+// bounded agent calls rather than inside one, because the agent Bash tool
+// clamps a single call at a measured 600 s regardless of the timeout requested
+// (#348). A failed or exhausted poll is followed by ONE non-polling
+// authoritative re-check before any timeout is declared, so a run that finished
+// while the poll was between chunks is not reported as a timeout; NO `timeout`
+// binary)
 // whose ACCEPT is a FULL re-validation of the CURRENT canonical (translate:
 // draft_ready.py --expect-token AND validate_draft.py; review: review_ready
 // .py --expect-token), never a trust of any driver-written file. Its
@@ -363,9 +368,13 @@ const CODEX_FINALIZE_BUDGET_SEC = 150;
 const FINALIZE_TAIL = 10;
 const PER_CALL_CAP = 90;
 const CODEX_WAIT_GRACE_SEC = 600;
-// The wait poll's elapsed-time outer bound: the driver's deadline plus its
-// finalize budget plus a grace margin, so the Workflow poll never gives up
-// before the driver can promote/finalize. = 2700 + 150 + 600 = 3450 s.
+// The wait poll's POLLING BUDGET -- not an elapsed-time outer bound, and the
+// distinction is load-bearing: the driver's deadline plus its finalize budget
+// plus a grace margin, so the Workflow poll never gives up before the driver
+// can promote/finalize. = 2700 + 150 + 600 = 3450 s. Since 1.16.1 it is spent
+// across WAIT_CHUNKS bounded calls, so total WALL-CLOCK for a wait is this
+// budget plus per-call overhead plus the final authoritative re-check -- the
+// budget bounds how long the workflow POLLS, never how long the wait TAKES.
 const WAIT_BOUND_SEC = CODEX_DEADLINE_SEC + CODEX_FINALIZE_BUDGET_SEC + CODEX_WAIT_GRACE_SEC;
 
 // ---------------------------------------------------------------------------
@@ -1403,8 +1412,11 @@ async function readAndCheck(seg, roundLabel, isRetry) {
 // blocked/review-null (the retry's own read came back null) or
 // blocked/review-artifact-mismatch (the retry's read succeeded but still
 // didn't match) -- never two independent read-retry/check-retry budgets.
-// Call budget for one review point: dispatch(1) + wait(1) + read(1) +
-// check(1) + [retry: read(1) + check(1)] = 6 calls, worst case.
+// Call budget for one review point: dispatch(1) + wait(WAIT_CALLS) + read(1) +
+// check(1) + [retry: read(1) + check(1)] = 5 + WAIT_CALLS calls, worst case.
+// It was a flat 6 before 1.16.1, when a wait was one call; the ladder at the
+// bottom of this file carries the generalised arithmetic and reduces to the
+// old 6 when WAIT_CALLS = 1.
 async function getVerifiedReview(seg, roundLabel) {
   const disp = await callReviewDispatch(seg, roundLabel);
 
