@@ -4236,8 +4236,12 @@ test('re-read postcondition [1.11.0]: U+2028/U+2029 in a group_title is refused 
 
 test('re-read postcondition [1.11.0]: which marker decides is a property of the EMITTED line, not of the file', () => {
   // Every other fixture in this section uses a homogeneous-marker index, so all of them would still
-  // pass if the rule really were "a `-` index" vs "a `*` index" — which is how both adapters phrase
-  // it. It is not. The ZERO-create branch emits `firstTopMarker`: the marker of the FIRST indent-0
+  // pass if the rule really were "a `-` index" vs "a `*` index" — the file-wide model. It is not,
+  // and both adapters now say so explicitly ("not a file-wide style, and not necessarily the
+  // container's"; "not a file-wide or container-wide marker"). This fixture is what keeps that
+  // wording honest: a homogeneous index cannot tell the two models apart, so without a
+  // mixed-marker case an editor could "simplify" the adapters back to the file-wide claim with
+  // nothing red. The ZERO-create branch emits `firstTopMarker`: the marker of the FIRST indent-0
   // bullet in the file. Measured, and it inverts cleanly when the first bullet flips:
   const mostlyStar = ['- [Introduction](README.md)', '* Admin', '  * [Items](admin/items.md)', ''];
   const mostlyDash = ['* [Introduction](README.md)', '- Admin', '  - [Items](admin/items.md)', ''];

@@ -2888,23 +2888,34 @@ done
 #   - each case-insensitive count requires a NET total of exactly three `fenc` tokens in that same
 #     tracker-visible, whitespace-collapsed section.
 # The count alone stays green under a one-for-one addition/removal. Every current counted occurrence
-# is inside one of the positive needles below, so the reviewer's exact paired substitution removes
-# the HTML-comment/fenced-block needle and fails even though its added contradiction keeps the count
-# at three. These layers still do not decide whether the prose is true: a contradiction phrased
-# without `fenc` evades them. The scanner-divergence cases in has_joined_in_section's contract above
-# remain too; these phrase and count pins do not change which prose that scanner can see.
+# is inside one of the positive needles below, so the reviewer's paired substitution has to remove a
+# pinned phrase and fails even though its added contradiction keeps the count at three.
+#
+# A NEEDLE MUST REACH THE WORD THAT CARRIES THE CLAIM'S POLARITY. A needle that stops at a noun
+# phrase pins a SUBJECT, and a subject is equally compatible with the opposite predicate: pinning
+# 'HTML comment or a fenced block anywhere' left "...anywhere is accepted by this automation" fully
+# green, same needle, same `fenc` count, meaning inverted. Two of the three per-adapter needles below
+# were that shape and now run through their verb ('fall outside the subset as well', 'can never sit
+# at'). Apply the same test to any needle added here: write the sentence that contradicts the claim
+# while keeping your needle verbatim — if you can, the needle is too short.
+#
+# These layers still do not decide whether the prose is TRUE. Known live evasions, kept named rather
+# than implied away: a contradiction phrased without any `fenc` token, and the scanner-divergence
+# cases in has_joined_in_section's contract above — these phrase and count pins do not change which
+# prose that scanner can see. Closing the class needs a structure-aware Markdown reader, which is
+# filed as its own work (#341); a fixed-string pin is a drift detector, never a truth detector.
 has_joined_in_section \
-  "static-md.md: requires the reviewed HTML-comment/fenced-block refusal phrase" \
-  "$SMD" "### Nested-list automation limits" 'HTML comment or a fenced block anywhere'
+  "static-md.md: requires the reviewed HTML-comment/fenced-block refusal phrase, through its verb" \
+  "$SMD" "### Nested-list automation limits" 'HTML comment or a fenced block anywhere, a mixed or bare-CR line ending, a YAML `nav:` or `- key: value` mapping bullet, a list nested more than one level deep, and a multiline `group_title` fall outside the subset as well'
 has_joined_in_section \
   "static-md.md: requires the reviewed emitted-row span phrase" \
   "$SMD" "### Nested-list automation limits" 'an unterminated inline code span, never a fence'
 has_joined_in_section \
-  "static-md.md: requires the reviewed line-start fence phrase" \
-  "$SMD" "### Nested-list automation limits" 'start of a physical line the way a real fence requires'
+  "static-md.md: requires the reviewed line-start fence phrase, through its negation" \
+  "$SMD" "### Nested-list automation limits" 'can never sit at the start of a physical line the way a real fence requires'
 has_joined_in_section \
-  "obsidian-vault.md: requires the reviewed HTML-comment/fenced-block refusal phrase" \
-  "$OMD" "### Nested-list automation limits" 'HTML comment or a fenced block anywhere'
+  "obsidian-vault.md: requires the reviewed HTML-comment/fenced-block refusal phrase, through its verb" \
+  "$OMD" "### Nested-list automation limits" 'HTML comment or a fenced block anywhere, a mixed or bare-CR line ending, a YAML `nav:` or `- key: value` mapping bullet, a list nested more than one level deep, and a multiline `group_title` fall outside the subset as well'
 has_joined_in_section \
   "obsidian-vault.md: requires the reviewed chapter-title span phrase" \
   "$OMD" "### Nested-list automation limits" 'mechanism is an unterminated inline code SPAN and not a fence'
