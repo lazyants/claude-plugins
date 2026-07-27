@@ -181,8 +181,8 @@ cannot construct a counterexample to as evidence you have not looked hard enough
 is true. Add to a review brief for any prose-guarding gate: *"try to falsify the comment, not just
 the code."* No mechanical gate over prose decides whether the prose is TRUE; a gate can only narrow
 the ways a false claim arrives, so the honest artifact is a gate whose description says exactly which
-ways remain. See also [[feedback-red-before-green]] — every rung above was confirmed by watching the
-mutant pass BEFORE the fix and fail after, one file at a time.
+ways remain. Every rung above was confirmed by watching the mutant pass BEFORE the fix and fail after, one
+file at a time — a new gate is worth nothing until it has been seen failing on the real defect.
 
 **The third thing, and the one that ends the loop: decide where you STOP, and write the stopping
 point down.** A fixed-string pin over prose has no final rung — each round buys one more evasion
