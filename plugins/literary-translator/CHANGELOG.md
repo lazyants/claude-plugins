@@ -266,6 +266,23 @@ was a subtle bug in the code that existed; both were work the code never did.
     missed rather than closing another instance: a watchdog rather than a clock check, the fold
     applied to every host-shaped test rather than to one, and the bound inside
     `CanonValidationError` rather than at the call sites that happen to build a list.
+  - **Round 9 — a failure that never passes through "the one place every failure passes through".**
+    Round 8 moved the diagnostic bound into `CanonValidationError.__init__` and called it the single
+    choke point for all 36 raise sites. The measurement was right and the scope claim was not:
+    `--verify-merged` reports failure through a **success-shaped** payload — it catches the
+    exception and returns `{"verified": false, "missing": [...]}` on the success path, so the
+    constructor is structurally not on it. `missing` carried raw fragment-authored `source_form`s,
+    unbounded in count and length (196 KB at 40 items, 2.4 MB at 500), and `glossaryVerifyPrompt`
+    tells an agent to read that line and return `missing` **copied verbatim**, against the whole
+    run's manifest rather than one batch — on the last gate before `merged: true`. The bound is now
+    a shared helper both paths call, which is the actual fix: it stayed unbounded through two rounds
+    of "everything is bounded now" because the bound lived inside a constructor a reporting path had
+    no reason to call. Same round: an attacker could **evict the project's own remedy instructions**
+    from a diagnostic, because three messages put static prose *after* an unbounded offender list and
+    the cap keeps the head; three more timeout exits chose an outcome without consulting the clock,
+    including `resolve_and_pin`, which takes no deadline at all; and the "names every offending item"
+    correction had reached one copy of four, with `glossary_TASK.template.md` handing the *same agent
+    in the same dispatch* the contradictory version.
   - **Rounds 6–8, also.** `fec0::/10` was admitted by both address checks (CPython leaves it out of
     `_private_networks`, so `is_private` is False and `is_global` therefore True). A lone surrogate
     copied from a fragment made the `index.json` write raise, losing the whole batch's index one
