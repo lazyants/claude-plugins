@@ -31,7 +31,7 @@ That is the exact claim this file is allowed to support, and no wider one. It
 does NOT make the pipeline SSRF-free: the resolver/generation agent still does
 open web research by design under `research_mode: live`, and the judge still
 holds a Bash tool. Both are named as residual exposures in the release notes
-and tracked separately. Overclaiming here would be worse than the original bug,
+and tracked as #353. Overclaiming here would be worse than the original bug,
 because the next reader would stop looking.
 
 THE CHECKS, and the failure each one closes.
@@ -96,14 +96,27 @@ from urllib.parse import urlsplit, urlunsplit, urljoin
 ALLOWED_SCHEMES = ("http", "https")
 MAX_REDIRECTS = 5
 MAX_BYTES = 2_000_000
-# Checked at the top of each redirect hop, NOT continuously. Two gaps are known
-# and accepted rather than papered over: getaddrinfo() takes no timeout argument,
-# so a pathological resolver can block past this; and the deadline is not
-# re-checked during resp.read(), which is instead bounded by MAX_BYTES and the
-# socket timeout. This caps redirect-chain WORK, not wall-clock latency. Nothing
-# downstream treats it as a latency guarantee, and calling it one in the docs
-# would be the same overclaim this release exists to remove.
+# PER-ITEM budget, checked at the top of each redirect hop, not continuously.
+# Two gaps are known and accepted rather than papered over: getaddrinfo() takes
+# no timeout argument, so a pathological resolver can block past this; and the
+# deadline is not re-checked during resp.read(), which is instead bounded by
+# MAX_BYTES and the socket timeout. So this caps redirect-chain WORK, not
+# wall-clock latency.
+#
+# An earlier version of this comment added "nothing downstream treats it as a
+# latency guarantee". That was itself an overclaim, caught in review: downstream
+# IS a single bash call under a measured hard 600 s clamp (see BATCH_TIMEOUT_SEC
+# and the 1.16.1 CHANGELOG). Wall-clock is exactly what downstream cares about,
+# which is why the batch-wide budget below exists.
 TOTAL_TIMEOUT_SEC = 30.0
+
+# BATCH-WIDE budget for --batch mode. Sized against the agent Bash tool's
+# measured 600 s per-call clamp, the same constant #348 is about, with headroom
+# for process start, JSON I/O and evidence writes. run_batch() must return a
+# usable index.json and exit cleanly rather than being killed mid-write: a killed
+# call is an EVIDENCE_FAILED that spends a retry, and exhausting the retry ladder
+# merges zero batches.
+BATCH_TIMEOUT_SEC = 420.0
 CONNECT_TIMEOUT_SEC = 10.0
 EVIDENCE_PREFIX = "citation-"
 
@@ -127,6 +140,53 @@ class Refused(Exception):
 
 def _refuse(reason: str) -> "Refused":
     return Refused(reason)
+
+
+def name_for_comparison(host: str) -> str:
+    """Fold a host to the ASCII form a RESOLVER will actually use, for NAME
+    comparisons only. Kept byte-identical to canon_validate.py's copy.
+
+    Comparing the raw string is not enough, and the trailing-dot fix alone was
+    not enough either. `encodings.idna` splits labels on the literal set
+    `[.。．｡]`, so U+3002, U+FF0E and U+FF61 are all label separators, and UTS-46
+    folding maps decorated letters home: measured on CPython 3.14.6,
+    "localhost。", "localhost．", "localhost｡" and "ⓛocalhost" all encode to
+    b"localhost." or b"localhost" and all resolve to 127.0.0.1/::1. That is
+    stdlib behaviour, not platform-specific.
+
+    In THIS file that would only be a static false-negative, since resolve_and_pin
+    re-checks every returned address. In canon_validate.py, which runs the same
+    decision with no resolver behind it, it is the whole check -- the same
+    argument that justified stripping one ASCII dot, applied to the spellings
+    that argument missed. A non-ASCII URL is not far-fetched in a corpus whose
+    source language is not English.
+
+    Used for COMPARISON ONLY: the returned value is never what gets resolved,
+    sent as Host: or used for SNI. On any host the codec rejects (an over-long
+    label, for instance) the original is returned, so this can only ever add
+    refusals, never admit something the raw comparison would have caught.
+    """
+    try:
+        folded = host.encode("idna").decode("ascii").lower()
+    except (UnicodeError, UnicodeDecodeError):
+        folded = host.lower()
+    return folded[:-1] if folded.endswith(".") else folded
+
+
+def origin_of(scheme: str, host: str, port: int) -> str:
+    """scheme://host[:port] -- the ONLY shape of a URL that may be recorded in
+    index.json.
+
+    Both components are already constrained by the time this is called: `scheme`
+    passed the ALLOWED_SCHEMES allowlist, and `host` came through urlsplit and
+    the address/name checks. Path, query and fragment are dropped entirely
+    rather than escaped, because escaping preserves readable prose (percent-
+    encoded English is still English to a reader) and the judge is a reader.
+    Diagnostic value kept: which host a hop went to, and how many hops. Lost: the
+    exact path, which is recoverable from the run's own logs if ever needed.
+    """
+    default = 80 if scheme == "http" else 443
+    return f"{scheme}://{host}" + ("" if port == default else f":{port}")
 
 
 def content_type_token(ctype: str) -> str:
@@ -258,7 +318,8 @@ def validate_url(url: str) -> tuple[str, str, int, str]:
     # so both strip it. Only one dot: "localhost.." is not a legal name.
     if host.endswith("."):
         host = host[:-1]
-    if host == "localhost" or host.endswith(".localhost"):
+    name = name_for_comparison(host)
+    if name == "localhost" or name.endswith(".localhost"):
         raise _refuse("localhost-name")
 
     check_address_literal(host)
@@ -360,7 +421,19 @@ def fetch_one(url: str, *, deadline: float) -> dict:
 
         scheme, host, port, path = validate_url(current)
         pinned = resolve_and_pin(host, port)
-        chain.append({"url": current, "host": host, "resolved": pinned})
+        # ORIGIN ONLY -- never `current`. After hop 0 the URL is built from the
+        # server's own Location header, so its path/query/fragment are
+        # attacker-authored text, and this record lands in index.json, the file
+        # the judge prompt vouches for as locally generated. validate_url's
+        # CONTROL_CHAR_RE stops CR/LF/space and nothing else: ordinary printable
+        # separators still spell prose, and U+00A0 survives too because
+        # http.client decodes headers as ISO-8859-1 and a fragment never reaches
+        # conn.request's ASCII encode. Scheme and host are the only two parts
+        # already constrained (allowlist; urlsplit/IDNA), so they are the only
+        # two kept. This is the sibling of the 1.16.1 content_type fix: that one
+        # was scoped to a FIELD when the property is about the whole FILE.
+        chain.append({"origin": origin_of(scheme, host, port), "host": host,
+                      "hop": hop, "resolved": pinned})
 
         remaining = max(1.0, min(CONNECT_TIMEOUT_SEC, deadline - time.monotonic()))
         if scheme == "https":
@@ -394,7 +467,8 @@ def fetch_one(url: str, *, deadline: float) -> dict:
                 continue
 
             if status != 200:
-                return {"ok": False, "status": status, "url": url, "final_url": chain[-1]["url"],
+                return {"ok": False, "status": status, "url": url,
+                        "final_origin": chain[-1]["origin"],
                         "chain": chain, "outcome": f"http_error:{status}"}
 
             # The refused type is reported as a CLOSED token, never the raw
@@ -413,7 +487,7 @@ def fetch_one(url: str, *, deadline: float) -> dict:
             raw = raw[:MAX_BYTES]
             body = raw.decode("utf-8", errors="replace")
             return {
-                "ok": True, "status": status, "url": url, "final_url": chain[-1]["url"],
+                "ok": True, "status": status, "url": url, "final_origin": chain[-1]["origin"],
                 "chain": chain, "content_type": content_type_token(ctype), "bytes": len(raw),
                 "truncated": truncated, "outcome": "fetched", "body": body,
             }
@@ -482,14 +556,32 @@ def run_batch(batch_path: Path, out_dir: Path) -> int:
     index = []
     counts = {"fetched": 0, "refused": 0, "http_error": 0}
 
+    # BATCH-WIDE deadline, on top of each item's own. Without it the per-item
+    # 30 s is not a bound on anything the caller cares about: a glossary batch is
+    # DEFAULT_BATCH_SIZE = 40 sources, and this script runs as ONE bash call
+    # inside ONE agent() call, under the same measured 600 s clamp that #348 is
+    # about. 40 x 30 s = 1200 s, so ~20 slow or dead hosts is enough to have the
+    # whole call killed -- no attacker required. A killed call reports
+    # EVIDENCE_FAILED, which spends a citation-review retry, and exhausting the
+    # ladder returns citation-review-exhausted and merges ZERO batches.
+    # Fail SOFT instead: items past the budget are recorded as a normal refusal,
+    # which the judge already knows how to treat, and the script still prints its
+    # metadata line and exits cleanly.
+    batch_deadline = time.monotonic() + BATCH_TIMEOUT_SEC
+
     for i, item, src in sources:
-        deadline = time.monotonic() + TOTAL_TIMEOUT_SEC
         entry = {
             "item_index": i,
             "source_form": item.get("source_form"),
             "basis": item.get("basis"),
             "source": src,
         }
+        if time.monotonic() > batch_deadline:
+            entry["outcome"] = "refused:batch-deadline"
+            counts["refused"] += 1
+            index.append(entry)
+            continue
+        deadline = min(time.monotonic() + TOTAL_TIMEOUT_SEC, batch_deadline)
         try:
             result = fetch_one(src, deadline=deadline)
         except Refused as exc:
@@ -499,7 +591,7 @@ def run_batch(batch_path: Path, out_dir: Path) -> int:
             continue
 
         entry["outcome"] = result["outcome"]
-        entry["final_url"] = result.get("final_url")
+        entry["final_origin"] = result.get("final_origin")
         entry["chain"] = result.get("chain")
         if result["ok"]:
             name = f"{EVIDENCE_PREFIX}{i:03d}.txt"

@@ -792,6 +792,32 @@ def _non_global_address_reason(ip) -> "str | None":
     return None
 
 
+
+def _name_for_comparison(host: str) -> str:
+    """Fold a host to the ASCII form a RESOLVER would actually use, for NAME
+    comparisons only. Kept behaviourally identical to
+    fetch_citation.name_for_comparison(); see that copy for the measurements.
+
+    `encodings.idna` splits labels on the literal set `[.\u3002\uff0e\uff61]`
+    and UTS-46 folds decorated letters home, so "localhost\u3002",
+    "localhost\uff0e", "localhost\uff61" and "\u24dbocalhost" all fold to
+    "localhost" and all resolve to loopback. In fetch_citation.py missing them
+    would only be a static false-negative, because it re-checks every resolved
+    address. THIS file has no resolver behind it by design -- it runs on the
+    offline path where nothing ever fetches -- so here the miss is the entire
+    check, exactly as it was for the trailing ASCII dot.
+
+    Comparison only: the folded value is never returned to a caller or used as a
+    connection target. Anything the codec rejects falls back to the original, so
+    this can only add refusals.
+    """
+    try:
+        folded = host.encode("idna").decode("ascii").lower()
+    except (UnicodeError, UnicodeDecodeError):
+        folded = host.lower()
+    return folded[:-1] if folded.endswith(".") else folded
+
+
 def _citation_source_refusal(value) -> "str | None":
     """A short, stable machine reason to refuse this citation `source`, or
     None when it is acceptable.
@@ -853,7 +879,8 @@ def _citation_source_refusal(value) -> "str | None":
     # whole check. Only one dot: "localhost.." is not a legal name.
     if host.endswith("."):
         host = host[:-1]
-    if host == "localhost" or host.endswith(".localhost"):
+    name = _name_for_comparison(host)
+    if name == "localhost" or name.endswith(".localhost"):
         return "localhost-name"
 
     # A host that is ALREADY an IP literal never goes through name resolution

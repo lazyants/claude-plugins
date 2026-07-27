@@ -51,8 +51,8 @@ was a subtle bug in the code that existed; both were work the code never did.
   returns its failure reason immediately on a failed reply with no re-check of the artifact on disk.
   That is issue #348's defect class, unfixed, in two more templates. They are deliberately out of
   scope here and tracked separately. The reason to write this down rather than leave it implied is
-  the same reason this release exists: a fix described as closing a class, when it closed one site of
-  three, is the overclaim pattern #348 and #347 were both instances of.
+  the same reason this release exists: a fix described as closing a class, when it closed one site
+  of three, is the overclaim pattern #348 and #347 were both instances of.
 - What the re-check does and does not guarantee. It runs the canonical gate ONE more time before a
   timeout is declared, and its ACCEPT command is the same builder the chunk poll uses, so it can
   never be the weaker gate. It is still an `agent()` call: a null or malformed re-check reply
@@ -87,12 +87,12 @@ was a subtle bug in the code that existed; both were work the code never did.
   not the tool.
 - Nothing server-supplied reaches `index.json`. A hostile `Content-Type` header used to be recorded
   verbatim — both as `refused:content-type-not-allowed:<header>` and as the success path's
-  `content_type` — while the judge prompt vouches for that file as locally generated and `outcome` is
-  the field the judge reasons over. That is an instruction channel straight into the approval gate,
-  found by review and reproduced against a hostile local server. Content types are now collapsed at
-  the boundary to a closed token set: the allowlist members themselves plus `absent` and `other`.
-  An absent `Content-Type` is admitted deliberately — ordinary servers omit it — but is now recorded
-  as `absent` rather than being indistinguishable from an allowed type.
+  `content_type` — while the judge prompt vouches for that file as locally generated and `outcome`
+  is the field the judge reasons over. That is an instruction channel straight into the approval
+  gate, found by review and reproduced against a hostile local server. Content types are now
+  collapsed at the boundary to a closed token set: the allowlist members themselves plus `absent`
+  and `other`. An absent `Content-Type` is admitted deliberately — ordinary servers omit it — but is
+  now recorded as `absent` rather than being indistinguishable from an allowed type.
 - The claim this supports, at exactly the width it is true: *in the citation audit path, retrieval
   happens only through `fetch_citation.py`, launched by an agent that never reads the retrieved
   bytes.* It does **not** make the pipeline SSRF-free. Two residual paths are named rather than
@@ -100,18 +100,49 @@ was a subtle bug in the code that existed; both were work the code never did.
   `research_mode: live`, and the judge still holds a Bash tool. Both are tracked separately.
 - `canon_validate.py --check-batch` now statically refuses an unsafe citation `source` with no DNS
   and no network, so the offline path — where nothing ever fetches — can still stop one before it is
-  frozen into `canon.json`. It is applied to **every item whose `source` is a non-empty string**, not
-  only `basis: "established"` ones: the queued branch of `canon-batch.schema.json` types `source` as a
-  bare unconstrained string, so a `review_queue` item could carry `basis: "established"` plus an
-  arbitrary `source` and pass Pass 1. An empty or non-string `source` is skipped, deliberately and
-  identically in both files — it is not a fetch target and its shape is Pass 1's business. The two
-  must agree on WHICH items they cover, not merely on the checks they run.
+  frozen into `canon.json`. It is applied to **every item whose `source` is a non-empty string**,
+  not only `basis: "established"` ones: the queued branch of `canon-batch.schema.json` types
+  `source` as a bare unconstrained string, so a `review_queue` item could carry `basis:
+  "established"` plus an arbitrary `source` and pass Pass 1. An empty or non-string `source` is
+  skipped, deliberately and identically in both files — it is not a fetch target and its shape is
+  Pass 1's business. The two must agree on WHICH items they cover, not merely on the checks they
+  run.
+- Nothing server-supplied reaches `index.json` in ANY field, not only the two the first review
+  round fixed. A redirect `Location` is as attacker-authored as a `Content-Type`, and it reached
+  `final_url` and `chain[].url` verbatim: `CONTROL_CHAR_RE` stops CR/LF/space and nothing else,
+  and U+00A0 survives too, because `http.client` decodes headers as ISO-8859-1 and a fragment
+  never reaches `conn.request`'s ASCII encode. A single hop could carry a whole sentence into the
+  file the judge prompt vouches for. Hops now record ORIGIN ONLY -- `scheme://host[:port]` plus a
+  hop index -- with path, query and fragment dropped rather than escaped, because percent-encoded
+  English is still English to a reader and the judge is a reader. `final_url` became
+  `final_origin`. Redirects are still followed and still re-validated per hop: the sanitisation
+  was not bought by refusing them.
+- `run_batch()` now has a batch-wide budget (`BATCH_TIMEOUT_SEC`), not only a per-item one. A
+  glossary batch is 40 sources at `DEFAULT_BATCH_SIZE`, this script runs as ONE bash call inside
+  ONE `agent()` call, and 40 x the 30 s per-item deadline is 1200 s against the same measured
+  600 s clamp #348 is about -- roughly 20 slow or dead hosts, with no attacker involved. A killed
+  call reports `EVIDENCE_FAILED`, which spends a citation-review retry, and exhausting the ladder
+  merges zero batches. Items past the budget are recorded as an ordinary
+  `refused:batch-deadline`, which the judge already knows how to treat, and the script still
+  writes a usable index and exits cleanly.
+- The `localhost` name test now folds the host through IDNA before comparing, in both files.
+  `encodings.idna` splits labels on the literal set `[.。．｡]` and UTS-46 folds decorated letters,
+  so `localhost。`, `localhost．`, `localhost｡` and `ⓛocalhost` all resolve to loopback while
+  matching neither `host == "localhost"` nor `.endswith(".localhost")`. Measured on CPython
+  3.14.6, not assumed. Same class as the trailing dot below, with the same asymmetry: in the
+  fetcher it is a static false-negative the address check still catches; in `canon_validate.py`,
+  which has no resolver behind it, it is the entire check.
+- The judge prompt no longer vouches for `index.json` wholesale. Its `source` and `source_form`
+  are COPIED from the fragment and are now named as untrusted alongside the retrieved bodies,
+  while every other field is generated from a closed vocabulary. The prompt also surfaces
+  `truncated`, so a detail missing because the body was cut at the size cap is not read as
+  evidence of absence.
 - One trailing DNS root dot is now stripped before the `localhost` name test in both files.
-  `localhost.` is the fully-qualified spelling of the same name and resolves identically, but matched
-  neither `host == "localhost"` nor `host.endswith(".localhost")`. In the fetcher that was only a
-  static false-negative, since `resolve_and_pin()` still refused the loopback address that came back;
-  in `canon_validate.py`, which runs the same decision with no resolver behind it, the miss was the
-  whole check.
+  `localhost.` is the fully-qualified spelling of the same name and resolves identically, but
+  matched neither `host == "localhost"` nor `host.endswith(".localhost")`. In the fetcher that was
+  only a static false-negative, since `resolve_and_pin()` still refused the loopback address that
+  came back; in `canon_validate.py`, which runs the same decision with no resolver behind it, the
+  miss was the whole check.
 - `fetch_citation.py` joins `PLUGIN_BUNDLE_MEMBERS`. Without that, editing the security boundary
   would move no hash at all, and a durable root scaffolded before the change would keep classifying
   its segments reusable against a plugin that no longer behaves the same way — exactly the

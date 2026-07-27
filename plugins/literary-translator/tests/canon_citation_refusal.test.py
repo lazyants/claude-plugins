@@ -187,6 +187,14 @@ REFUSAL_CASES = [
     ("http://localhost./x", "localhost-name"),
     ("http://LOCALHOST./x", "localhost-name"),
     ("http://anything.localhost./x", "localhost-name"),
+    # Unicode label separators / folded letters -- see fetch_citation.py's
+    # name_for_comparison(). THIS file has no resolver behind it, so unlike the
+    # fetcher there is no second net and the miss would be the whole check.
+    ("http://localhost\u3002/x", "localhost-name"),
+    ("http://localhost\uff0e/x", "localhost-name"),
+    ("http://localhost\uff61/x", "localhost-name"),
+    ("http://\u24dbocalhost/x", "localhost-name"),
+    ("http://anything.localhost\u3002/x", "localhost-name"),
 
     # -- IPv4 literals, one per non-global range.
     ("http://127.0.0.1/x", "loopback-address"),
