@@ -484,11 +484,14 @@ the one exception to "do all of these" — see its own conditional note below.
        emitted line for a known-good stand-in and re-read) rather than by inspecting the
        value, so it stays correct for causes nobody has enumerated yet. Deliberately
        conservative: it can decline a value that would in fact have round-tripped safely,
-       which is the right direction for a tool rewriting a file it does not own. One halt
+       which is the right direction for a tool rewriting a file it does not own. Render
+       `<field>` in the halt as `title`, as `group_title`, or — for `'unknown'`, which is
+       reachable only when no single emitted line's replacement clears the rejection, i.e.
+       both values are independently at fault — as `title and group_title`. One halt
        text for both `publish.wikilinks` modes — verified, not assumed: the wording names no
        link syntax, and every cause measured under "Nested-list automation limits" below
        reaches this outcome identically in both modes:
-       `Cannot wire '<slug>' into <index_file>: the lines this run would write are not recognizable to the next run, so nothing was written. The manifest's <field> for this chapter contains text that changes how the index file parses — give it a plain value (no Markdown markup, backslash escapes, HTML entities, HTML comments, backticks, or invisible line separators), then re-run.`
+       `Cannot wire '<slug>' into <index_file>: the lines this run would write are not recognizable to the next run, so nothing was written. Give this chapter a plain <field> in the manifest, then re-run. Measured fatal shapes, by field and by the index's own bullet marker: in a title, a backtick, a fenced-code run, an HTML comment or a U+2028/U+2029 line separator on any marker, plus an unescaped ']' on a '*'/'+'-markered index; in a group_title, a U+2028/U+2029 line separator on any marker, a '/' anywhere or a trailing '.md' on a '*'/'+'-markered index, and a colon straight after the first token or an all-hyphen value on a '-'-markered index. See "Nested-list automation limits" below.`
      - `{kind: 'multiple'}` — two or more container bullets match `group_title`; never guess
        which is canonical, halt:
        "Found multiple '<group_title>' container bullets in <index_file> — curate the index manually, then re-run."
@@ -781,13 +784,21 @@ the writer refuses before writing anything and halts naming `field: 'title'`, ra
 hand-typed bare path. A richer rendering-aware matcher is a possible follow-up, not a bug.
 
 A manifest value that would corrupt this same structural read is refused the same way, before
-it is ever written: inline code, an HTML comment, a fence, or a U+2028/U+2029 separator
-anywhere in a chapter title or a `group_title`, on any marker; on a `-`-markered index, a
-`group_title` whose first token is followed immediately by a colon (`FAQ: basics`, `Admin:`)
-or that is only hyphens (`---`); or, on a `*`/`+`-markered index, a `group_title` containing
-`/` or ending `.md` (`'Sales/Marketing'`, `'billing.md'`). Every one of these reaches `{kind:
-'unwritable', field}` — see "Non-headings index, no existing line" above for the exact halt
-text — never a written row. Give the chapter or the group a plain value and re-run.
+it is ever written. The set is per-field, and the two fields do not share it:
+
+- In a **chapter title**, on any marker: inline code, an HTML comment, a fenced-code run, or a
+  U+2028/U+2029 separator. On a `*`/`+`-markered index additionally an unescaped `]`, which on
+  a `-`-markered index is instead the `present` case above.
+- In a **`group_title`**: a U+2028/U+2029 separator on any marker; on a `-`-markered index, a
+  first token followed immediately by a colon (`FAQ: basics`, `Admin:`) or a value that is only
+  hyphens (`---`); on a `*`/`+`-markered index, a value containing `/` or ending `.md`
+  (`'Sales/Marketing'`, `'billing.md'`).
+
+Each of those reaches `{kind: 'unwritable', field}` — see "Non-headings index, no existing line"
+above for the exact halt text — never a written row. Inline code, an HTML comment and a fenced
+run are deliberately absent from the `group_title` list: measured 9/9 across `-`, `*` and `+`,
+those short-circuit to `{kind: 'not-a-list'}` before any write is attempted, so they surface as
+the manual halt and never as `unwritable`. Give the chapter or the group a plain value and re-run.
 
 **The plain-label predicate, named exactly.** In short: a plain title is verified; a
 non-plain title that still resolves is found but left unverifiable; a title that breaks its

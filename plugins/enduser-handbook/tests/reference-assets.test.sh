@@ -2825,7 +2825,16 @@ done
 # which mis-names the mechanism for a chapter title (a backtick run in a title is an unterminated
 # code SPAN; a fence needs the run at line start, which an emitted row can never be) and would let
 # an operator conclude a single backtick is safe. It is not.
-UNWRITABLE_HALT="Cannot wire '<slug>' into <index_file>: the lines this run would write are not recognizable to the next run, so nothing was written. The manifest's <field> for this chapter contains text that changes how the index file parses — give it a plain value (no Markdown markup, backslash escapes, HTML entities, HTML comments, backticks, or invisible line separators), then re-run."
+#
+# Corrected a SECOND time before 1.11.0 shipped, and this correction is the load-bearing one: the
+# old remedy list named six shapes, of which TWO — backslash escapes and HTML entities — were
+# measured NOT to reach this halt at all (a title carrying either is written, `inserted`, on every
+# marker; they belong to the `present` halt below, whose mechanism is step 0's target parse, not the
+# re-read). It also named none of the four fatal `group_title` shapes, so an operator whose
+# `group_title` was at fault was handed a list that could not converge. An exact-string pin cannot
+# catch a wording that is wrong rather than drifted — every claim below is measured by executing the
+# module, and the pin only holds the two adapters to the measured wording once it is chosen.
+UNWRITABLE_HALT="Cannot wire '<slug>' into <index_file>: the lines this run would write are not recognizable to the next run, so nothing was written. Give this chapter a plain <field> in the manifest, then re-run. Measured fatal shapes, by field and by the index's own bullet marker: in a title, a backtick, a fenced-code run, an HTML comment or a U+2028/U+2029 line separator on any marker, plus an unescaped ']' on a '*'/'+'-markered index; in a group_title, a U+2028/U+2029 line separator on any marker, a '/' anywhere or a trailing '.md' on a '*'/'+'-markered index, and a colon straight after the first token or an all-hyphen value on a '-'-markered index. See \"Nested-list automation limits\" below."
 for f in "$SMD" "$OMD"; do
   c="$(count_joined_fixed "$UNWRITABLE_HALT" "$f")"
   if [ "$c" -eq 1 ]; then
@@ -2843,6 +2852,19 @@ for f in "$SMD" "$OMD"; do
     ok "$(basename "$f"): the corrected halt wording stays corrected"
   else
     bad "$(basename "$f"): the 'code fences' wording is back in the unwritable halt"
+  fi
+done
+# Same guard for the second correction. This exact parenthetical is the retired remedy list; two of
+# its six items (backslash escapes, HTML entities) are measured to insert cleanly and never reach
+# this halt, so its return would restore a list that cannot converge for a `group_title` fault. The
+# needle is the FULL parenthetical, not "backslash escapes" alone — the `present` halt below names
+# backslash escapes and HTML entities legitimately, because ITS mechanism really is the target parse.
+for f in "$SMD" "$OMD"; do
+  c="$(count_joined_fixed 'give it a plain value (no Markdown markup, backslash escapes, HTML entities, HTML comments, backticks, or invisible line separators)' "$f")"
+  if [ "$c" -eq 0 ]; then
+    ok "$(basename "$f"): the retired unwritable-halt remedy list stays retired"
+  else
+    bad "$(basename "$f"): the retired unwritable-halt remedy list is back ($c occurrence(s))"
   fi
 done
 

@@ -355,8 +355,11 @@ These outcomes reuse the step-0 result computed above (`containerTitle`, `indexF
     reader would decline the result. Nothing is written. `field` names the manifest value the
     writer traces the refusal to: `'title'`, `'group_title'`, or `'unknown'` when neither
     stand-in clears it, found by substituting a known-good placeholder for one emitted line at
-    a time and re-reading, so it stays correct for causes not yet catalogued. Halt with:
-    `Cannot wire '<slug>' into <index_file>: the lines this run would write are not recognizable to the next run, so nothing was written. The manifest's <field> for this chapter contains text that changes how the index file parses — give it a plain value (no Markdown markup, backslash escapes, HTML entities, HTML comments, backticks, or invisible line separators), then re-run.`
+    a time and re-reading, so it stays correct for causes not yet catalogued. Render `<field>`
+    in the halt as `title`, as `group_title`, or — for `'unknown'`, which is reachable only
+    when no single emitted line's replacement clears the rejection, i.e. both values are
+    independently at fault — as `title and group_title`. Halt with:
+    `Cannot wire '<slug>' into <index_file>: the lines this run would write are not recognizable to the next run, so nothing was written. Give this chapter a plain <field> in the manifest, then re-run. Measured fatal shapes, by field and by the index's own bullet marker: in a title, a backtick, a fenced-code run, an HTML comment or a U+2028/U+2029 line separator on any marker, plus an unescaped ']' on a '*'/'+'-markered index; in a group_title, a U+2028/U+2029 line separator on any marker, a '/' anywhere or a trailing '.md' on a '*'/'+'-markered index, and a colon straight after the first token or an all-hyphen value on a '-'-markered index. See "Nested-list automation limits" below.`
   - **`{kind: 'present', index}`** ⇒ the single matched container already carries a child
     bullet whose content is byte-identical to the chapter link the adapter is about to write —
     the writer's own membership guard, checked directly against the list body and independent
@@ -580,7 +583,12 @@ start of a physical line the way a real fence requires — an HTML comment, or a
 line separator. A `group_title` colon straight after its first token, or a `group_title` of two
 or more hyphens, is a different class again: both pass the plain-label check above (colons and
 interior hyphens are allowed there) and are only caught downstream, when `hasYamlMappingStructure`
-or `NESTED_THEMATIC_BREAK_RE` reads the emitted container line back.
+or `NESTED_THEMATIC_BREAK_RE` reads the emitted container line back. **Both of those downstream
+gates are `-`-only** — `hasYamlMappingStructure` strips a leading `-` before testing, and
+`NESTED_THEMATIC_BREAK_RE` matches a run of the same character — so this class is caught only on
+a `-`-markered index. Measured: on a `*`- or `+`-markered index `FAQ: basics`, `Admin:`, `---`
+and `--` all return `inserted` and the container line is written as given. The `*`/`+` fatal
+`group_title` class is the disjoint one directly above: a `/` anywhere, or a trailing `.md`.
 
 **As of 1.11.0, none of these write a poisoned file.** `wireNestedListChapter` re-reads the
 exact bytes it is about to persist through this same reader before returning (see the

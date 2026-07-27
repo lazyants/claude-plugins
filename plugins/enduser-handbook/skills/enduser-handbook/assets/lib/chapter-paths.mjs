@@ -1486,6 +1486,7 @@ function containerLabelKey(groupTitle) {
  *                               wikilink mode). OPAQUE: this fn owns list STRUCTURE, caller owns link FORMAT.
  * @returns {{kind:'inserted', created:boolean, newLines:string[]}
  *         | {kind:'present', index:number}
+ *         | {kind:'unwritable', field:'title'|'group_title'|'unknown'}
  *         | {kind:'multiple', matches:Array<{index:number, label:string}>}
  *         | {kind:'not-a-list'}}
  */
@@ -1583,15 +1584,26 @@ export function wireNestedListChapter(indexLines, groupTitle, chapterLink) {
         // before this walk runs, so such a file answers `not-a-list`. That is a marker x raw-content
         // rule, not a re-markering rule — a re-markered row carrying a normal link never reaches it.
         //
-        // This guard is therefore MARKER-SCOPED, and the difference is blast radius, not diagnostics.
-        // Measured with a title carrying an unescaped `]` (the case this guard exists for): on a `-`
-        // file run 2 answers `present` and one row exists; on a `*`/`+` file the title's raw text
-        // carries a `/`, isBarePathBullet fires, and the WHOLE file answers `not-a-list` — including
-        // for unrelated chapters in unrelated groups, permanently. The guard does not reach that
-        // case, and no wording here should imply it bounds it.
+        // This guard is therefore MARKER-SCOPED, and the markers differ in the OUTCOME, not in the
+        // diagnostics. Measured with a title carrying an unescaped `]` (the case this guard exists
+        // for), emitted as `[Items]Beta](admin/items-beta.md)`: on a `-` file run 1 inserts, run 2
+        // answers `present`, and exactly one row exists. On a `*`/`+` file the emitted row's raw
+        // text carries a path separator, so the re-read postcondition above (`rereadRejects`)
+        // refuses the bytes and EVERY run answers `unwritable`/`title` — nothing is written, and an
+        // unrelated chapter in an unrelated group on that same untouched file still answers
+        // `inserted`. This guard decides nothing there: it finds no match, and the refusal happens
+        // afterwards, at emit.
         //
-        // `present` is a REQUIREMENT on the caller, not a description of one: halt and tell the
-        // operator, never retry. See the `present` contract in chapter-paths.d.mts.
+        // The whole-file lockout is HISTORICAL rather than gone: on an index a 1.10.0 publish
+        // already wrote such a row into, isBarePathBullet fires on the row now ON DISK, so
+        // containerOwnerScan answers `not-a-list` before this walk ever runs — for every chapter and
+        // every group in the file, permanently (measured; a `-` file is unaffected). The
+        // postcondition keeps NEW files out of that state; it cannot repair one already in it. No
+        // wording here should imply this guard bounds either case.
+        //
+        // `present` is a REQUIREMENT on a PUBLISH-PATH caller, not a description of one: halt and
+        // tell the operator, never retry. The in-module probe caller (verifyNonHeadingPlacement) is
+        // deliberately exempt — see the `present` contract in chapter-paths.d.mts for both halves.
         if (bm[3] === chapterLink) return { kind: 'present', index: i };
         insertAt = i + 1;
         childMarker = bm[2];
