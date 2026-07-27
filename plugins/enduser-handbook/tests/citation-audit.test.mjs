@@ -1,5 +1,6 @@
-// Citation-direction lint tests (#258). Runs under Node's built-in runner: `node --test
-// citation-audit.test.mjs` (explicit path — `node --test <dir>` gives a misleading MODULE_NOT_FOUND).
+// Citation-direction lint tests (#258). Runs under Node's built-in runner:
+// `node --test citation-audit.test.mjs` (explicit path — `node --test <dir>` gives a
+// misleading MODULE_NOT_FOUND).
 // The shell suite (reference-assets.test.sh) auto-discovers every tests/*.test.mjs and runs it here,
 // gated on `command -v node`.
 //
@@ -29,9 +30,15 @@ import assert from 'node:assert/strict';
 import { auditCorpus, auditText, extractCitations } from './citation-audit-lib.mjs';
 
 // Total citation occurrences across references/**/*.md + SKILL.md (resolved + unresolved). Re-derived
-// against source 2026-07-24; the count grew every round of plan review, so it is pinned to the fresh
-// measurement, never a number quoted in the plan.
-const EXPECTED_TOTAL_CITATIONS = 52;
+// against source 2026-07-27 after the writer-prose truth pass removed one redundant cross-reference
+// and the present-halt recovery correction shifted the touched adapters' offsets; pinned to the
+// fresh measurement, never a number quoted in a plan. The retired occurrence was a RESOLVED one:
+// obsidian-vault.md's "Nested-list automation limits" (below), which pointed at a heading it really
+// did resolve to. That is why the unresolved allowlist below is unchanged at 42 entries while the
+// total drops by one: a near-miss would have
+// had to leave this list too. Read the two numbers together whenever this pin moves; a total that
+// moves alone is the only shape consistent with a resolved citation being the one that went.
+const EXPECTED_TOTAL_CITATIONS = 94;
 
 // Every citation whose quoted text does NOT resolve to exactly one heading title in its own file — an
 // over-match, a near-miss (e.g. "INDEX wiring" vs the full parenthetical heading), or a title that
@@ -39,6 +46,45 @@ const EXPECTED_TOTAL_CITATIONS = 52;
 // (`What "Obsidian vault" implies`) cannot be cited inside a "…"-delimited citation. Keyed by the
 // absolute character offset of the occurrence, so two same-title citations (even on one line, even
 // with opposite directions) never collapse into one entry.
+// Re-pinned for 1.11.0 (#329/#330): the doc edits shifted every offset at or after the first insertion
+// point in each touched file, and added two new near-miss citations — both reviewed as legitimate,
+// same pattern as the pre-existing entries for the same headings: obsidian-vault.md's new
+// "Nested-list automation limits" prose cites "INDEX wiring" (above), and static-md.md's equivalent
+// prose cites "Grouped index wiring" (above). In both the cited heading really does sit above the
+// citation point.
+// Fix round 2026-07-27: the short operator-facing recovery-class explanation added under
+// "Nested-list automation limits" in both adapters moved each later offset by 325 characters.
+// Composition was proved unchanged before editing any offset: all 94
+// {file, quotedText, direction} records retained SHA-256
+// f12d567b99e00b295e4b2642b78e6c59bd1bd02c0d363a86483a49e184aed6c4, and the 42 unresolved
+// records retained SHA-256 d04f0bd8fe01b058f4d3896881e7cb27c8b565f0711c85421c64d3f205fe6fd0.
+// Identified by file and section deliberately, NOT by offset. An earlier revision of this comment
+// named offsets 35057 and 27814; the very next commit re-derived the table below and left the prose
+// behind, so this file — whose whole job is pinning re-derived measurements — carried two numbers
+// that matched no citation in the corpus. Nothing went red, because only the table is asserted and
+// the prose is the unasserted half. A file/section reference cannot go stale that way.
+// Round-4 doc scoping added three entries. TWO are the long-standing near-miss shape already
+// represented above (a heading cited by a shortened title whose real heading carries a
+// parenthetical). The THIRD is a DIFFERENT shape and is called out so this list is not read as
+// homogeneous: static-md.md cites "Grouped entry, line present, `indexForm: 'headings'`", which is
+// a BULLET label, not a heading — no heading of that name exists anywhere. The reference points at
+// something real and is more precise for a reader than citing its enclosing heading would be; it is
+// unresolved only because this lint models headings and nothing else. Recorded rather than reworded
+// so the limitation sits with the lint, where it belongs, instead of bending the prose to it.
+//
+// 1.11.0 review added six more entries across rounds 9-13, and this comment went stale behind them
+// once already before being caught — the same drift it records above, one layer up. So it no longer
+// enumerates entries at all: the table below is the enumeration, and a count in prose can only
+// disagree with it. Two SHAPES are new and are worth naming, because neither is the
+// heading-with-a-parenthetical case above:
+//   * a citation to the opening words of a PROSE PARAGRAPH rather than to any label
+//     (obsidian-vault.md's "Path mode scans") — weaker than the bullet-label shape, and the only
+//     reason it is tolerable is that the paragraph it names is stable and directly above;
+//   * a citation to a BOLDED SENTENCE used as a paragraph lead-in (static-md.md's "The headings
+//     branch is unchanged by this PR and already completes silently"), which reads as a heading to
+//     a human and as nothing at all to this lint.
+// Every entry's DIRECTION was verified by hand when added, because an unresolved citation is also a
+// direction-unchecked one: the lint cannot compare against a heading it never found.
 const EXPECTED_UNRESOLVED = [
   { file: 'references/diataxis.md', offset: 2877, quotedText: 'When this is the right shape', direction: 'below' },
   { file: 'references/profile-validation.md', offset: 11273, quotedText: '`inline` stays minimal', direction: 'below' },
@@ -46,18 +92,42 @@ const EXPECTED_UNRESOLVED = [
   { file: 'references/publish-targets/obsidian-vault.md', offset: 1544, quotedText: 'Coordinate systems', direction: 'below' },
   { file: 'references/publish-targets/obsidian-vault.md', offset: 3290, quotedText: 'Coordinate systems', direction: 'below' },
   { file: 'references/publish-targets/obsidian-vault.md', offset: 5281, quotedText: 'INDEX wiring', direction: 'below' },
-  { file: 'references/publish-targets/obsidian-vault.md', offset: 6333, quotedText: "What 'Obsidian vault' implies", direction: 'above' },
+  { file: 'references/publish-targets/obsidian-vault.md', offset: 6333, quotedText: 'What \'Obsidian vault\' implies', direction: 'above' },
   { file: 'references/publish-targets/obsidian-vault.md', offset: 6700, quotedText: 'INDEX wiring', direction: 'below' },
   { file: 'references/publish-targets/obsidian-vault.md', offset: 9709, quotedText: 'Chapter structure', direction: 'below' },
-  { file: 'references/publish-targets/obsidian-vault.md', offset: 26397, quotedText: 'Non-headings index', direction: 'below' },
-  { file: 'references/publish-targets/obsidian-vault.md', offset: 36195, quotedText: 'INDEX wiring', direction: 'above' },
-  { file: 'references/publish-targets/obsidian-vault.md', offset: 41422, quotedText: 'INDEX wiring', direction: 'above' },
+  { file: 'references/publish-targets/obsidian-vault.md', offset: 27629, quotedText: 'Non-headings index, no existing line', direction: 'below' },
+  { file: 'references/publish-targets/obsidian-vault.md', offset: 28320, quotedText: 'Path mode scans', direction: 'above' },
+  { file: 'references/publish-targets/obsidian-vault.md', offset: 29208, quotedText: 'Non-headings index', direction: 'below' },
+  { file: 'references/publish-targets/obsidian-vault.md', offset: 38116, quotedText: 'The placement check is retained unchanged (D-8)', direction: 'above' },
+  { file: 'references/publish-targets/obsidian-vault.md', offset: 45114, quotedText: 'Measured, across every placement', direction: 'below' },
+  { file: 'references/publish-targets/obsidian-vault.md', offset: 48360, quotedText: 'Non-headings index, no existing line', direction: 'above' },
+  { file: 'references/publish-targets/obsidian-vault.md', offset: 56684, quotedText: 'Container resolution', direction: 'above' },
+  { file: 'references/publish-targets/obsidian-vault.md', offset: 60377, quotedText: 'INDEX wiring', direction: 'above' },
+  { file: 'references/publish-targets/obsidian-vault.md', offset: 60617, quotedText: 'Non-headings index, no existing line', direction: 'above' },
+  { file: 'references/publish-targets/obsidian-vault.md', offset: 60767, quotedText: 'Measured, across every placement', direction: 'above' },
+  { file: 'references/publish-targets/obsidian-vault.md', offset: 62685, quotedText: 'Non-headings index, no existing line', direction: 'above' },
+  { file: 'references/publish-targets/obsidian-vault.md', offset: 68401, quotedText: 'INDEX wiring', direction: 'above' },
+  { file: 'references/publish-targets/obsidian-vault.md', offset: 70191, quotedText: 'INDEX wiring', direction: 'above' },
+  { file: 'references/publish-targets/obsidian-vault.md', offset: 74450, quotedText: 'INDEX wiring', direction: 'above' },
+  { file: 'references/publish-targets/obsidian-vault.md', offset: 79677, quotedText: 'INDEX wiring', direction: 'above' },
   { file: 'references/publish-targets/static-md.md', offset: 12961, quotedText: 'Chapter path', direction: 'above' },
   { file: 'references/publish-targets/static-md.md', offset: 15014, quotedText: 'Grouped index wiring', direction: 'below' },
   { file: 'references/publish-targets/static-md.md', offset: 15381, quotedText: 'Chapter → index', direction: 'above' },
   { file: 'references/publish-targets/static-md.md', offset: 18937, quotedText: 'Grouped index wiring', direction: 'below' },
   { file: 'references/publish-targets/static-md.md', offset: 19082, quotedText: 'Grouped index wiring', direction: 'below' },
-  { file: 'references/publish-targets/static-md.md', offset: 33611, quotedText: 'Grouped index wiring', direction: 'above' },
+  { file: 'references/publish-targets/static-md.md', offset: 26391, quotedText: 'After either halt', direction: 'below' },
+  { file: 'references/publish-targets/static-md.md', offset: 32027, quotedText: 'Grouped index wiring', direction: 'above' },
+  { file: 'references/publish-targets/static-md.md', offset: 35085, quotedText: 'The plain-label predicate, named exactly', direction: 'below' },
+  { file: 'references/publish-targets/static-md.md', offset: 39850, quotedText: 'Grouped entry, line present, `indexForm: \'non-heading\'`', direction: 'above' },
+  { file: 'references/publish-targets/static-md.md', offset: 41508, quotedText: 'Grouped entry, line present, `indexForm: \'headings\'`', direction: 'above' },
+  { file: 'references/publish-targets/static-md.md', offset: 44953, quotedText: 'The plain-label predicate, named exactly', direction: 'below' },
+  { file: 'references/publish-targets/static-md.md', offset: 46011, quotedText: 'The plain-label predicate, named exactly', direction: 'below' },
+  { file: 'references/publish-targets/static-md.md', offset: 47643, quotedText: 'Grouped index wiring', direction: 'above' },
+  { file: 'references/publish-targets/static-md.md', offset: 49248, quotedText: 'After either halt', direction: 'above' },
+  { file: 'references/publish-targets/static-md.md', offset: 51560, quotedText: 'Grouped index wiring', direction: 'above' },
+  { file: 'references/publish-targets/static-md.md', offset: 52477, quotedText: 'Grouped index wiring', direction: 'above' },
+  { file: 'references/publish-targets/static-md.md', offset: 54240, quotedText: 'The headings branch is unchanged by this PR and already completes silently', direction: 'above' },
+  { file: 'references/publish-targets/static-md.md', offset: 62851, quotedText: 'Grouped index wiring', direction: 'above' },
 ];
 
 // Per-occurrence key. offset alone is already unique; file/quotedText/direction are folded in so a
@@ -187,26 +257,101 @@ test('synthetic: two headings sharing a title make a citation AMBIGUOUS, not sil
 // future change that reintroduces either superlinear shape fails loudly instead of silently
 // reintroducing a hang.
 test('extractCitations does not catastrophically backtrack on a long undirected quoted-title run (ReDoS regression)', () => {
+  // #343: this asserts a RATIO of two wall-clock durations, and BOTH ends were unsound. Measured on
+  // this branch (804 tests) against the 616-test pre-release baseline, so the trigger is suite LOAD,
+  // not the regex — which is untouched across this release.
+  //   1. DENOMINATOR, resolution. `Date.now()` gave the 5,000-title run 0-1ms, and the old
+  //      `Math.max(small, 1)` floor then pinned it at 1, degenerating the "ratio" into the large
+  //      run's absolute duration. Fixed by `process.hrtime.bigint()`, a nanosecond monotonic clock.
+  //   2. NUMERATOR, scheduling. That alone still failed 1 run in 4. The reason is NOT resolution:
+  //      measured on the failures, `small` was a healthy 0.76-1.43ms while `large` inflated to
+  //      57-94ms against a ~16ms baseline — the big run was being descheduled mid-measurement, a
+  //      real 4-6x, so the ratio cleared 40 with nothing wrong.
+  // A single timing sample cannot distinguish "slow because quadratic" from "slow because preempted",
+  // so every number below is repeated. The MINIMUM was tried first and rejected: preemption only adds
+  // time, so a minimum does converge on the uncontended cost — but it also discards a majority, and
+  // four slow calls plus one fast one are then indistinguishable from five fast ones, which is a
+  // false green for any intermittent or cold-path regression staying under the absolute bound.
+  // The two assertions below read DIFFERENT statistics, on purpose, because they ask different
+  // questions. The SCALING ratio wants the TYPICAL cost and takes medians at both levels — the
+  // typical sample within each batch, then the median across paired ratios. The ABSOLUTE blow-up
+  // bound wants the worst thing that actually happened and takes the maximum.
+  // Two earlier revisions of this comment described statistics the code was not using: one said the
+  // absolute bound was single-sample while `timeFor` returned only a minimum, the next still said the
+  // ratio used the minimum after it had moved to medians. If this paragraph and the code below ever
+  // disagree again, the code is what runs.
+  const TIMING_SAMPLES = 5;
   const timeFor = (n) => {
     const decoyRun = '"a" '.repeat(n) + 'end.';
-    const start = Date.now();
-    const recs = extractCitations(decoyRun);
-    const elapsed = Date.now() - start;
-    assert.deepEqual(recs, [], `n=${n}: no trailing above/below means no citation span should match at all`);
-    return elapsed;
+    let best = Infinity;
+    let worst = 0;
+    const samples = [];
+    for (let i = 0; i < TIMING_SAMPLES; i += 1) {
+      const start = process.hrtime.bigint();
+      const recs = extractCitations(decoyRun);
+      const elapsedMs = Number(process.hrtime.bigint() - start) / 1e6;
+      assert.deepEqual(recs, [], `n=${n}: no trailing above/below means no citation span should match at all`);
+      samples.push(elapsedMs);
+      if (elapsedMs < best) best = elapsedMs;
+      if (elapsedMs > worst) worst = elapsedMs;
+    }
+    samples.sort((a, b) => a - b);
+    // TYPICAL, not fastest. The minimum discards a majority: four slow calls and one fast one look
+    // identical to five fast ones, so an intermittent or cold-path superlinear regression staying
+    // under the absolute bound would pass. The median tolerates up to two contaminated samples in
+    // either direction, which is what the scheduling noise actually looks like, and still moves when
+    // most calls are slow.
+    const typical = samples[Math.floor(samples.length / 2)];
+    return { best, worst, typical };
   };
-  const small = timeFor(5_000);
-  const large = timeFor(80_000); // 16x the input
-  // Linear ⇒ ~16x; quadratic ⇒ ~256x; exponential ⇒ unmeasurably larger. A generous 40x ceiling
-  // (allows timer-granularity noise on the small run) still fails hard on quadratic-or-worse scaling.
-  const ratio = large / Math.max(small, 1);
+  // The STATISTIC was the problem, not the input size and not the ceiling. Taking the minimum of
+  // each side SEPARATELY does nothing when one side is inflated across all its samples, and the
+  // noise runs both ways — measured in-suite, single paired ratios at these sizes ranged 3.2x to
+  // 108.7x, the low end meaning the SMALL run was the one that got hit.
+  // Two things were tried and measured before this one, and both are recorded so they are not
+  // retried: enlarging both inputs to 20k/320k made the in-suite median WORSE (56.7x vs 15.8x,
+  // both pairs measured in the same runs) because at 320,000 titles the working set leaves cache
+  // and per-title cost rises; and raising the ceiling to 120x still failed 1 run in 20.
+  // What works is medians at BOTH levels: the typical sample within each batch, and the median of
+  // PAIRS paired ratios across batches. Measured in-suite over 16 full-suite runs each way, that
+  // spans 12.1x-29.3x, against 18.7x-45.1x when each side was minimised instead and 3.2x-108.7x for
+  // a single unrepeated pair. Minimising was also unsound in a way the noise hid: it discards a
+  // majority, so four slow calls and one fast one are indistinguishable from five fast ones.
+  //
+  // THE CEILING IS SET FROM BOTH ENDS, BOTH MEASURED. Healthy tops out at 29.3x. The retired
+  // catastrophic matcher — the actual regression this test exists to catch, recovered and RUN rather
+  // than assumed — measured 117.4x/38,847ms, 228.2x/29,891ms and 256.5x/33,943ms across hosts and
+  // runs, so quote it as a RANGE: it never came close to passing, and the lowest observation is the
+  // one that matters for margin. 60x therefore sits 2.0x above the worst healthy sample and at least
+  // 2.0x below the regression.
+  // Which gate is decisive: ~30 SECONDS against a 2,000ms bound is a ~15x margin, while the ratio's
+  // is 2x. The absolute bound is the gate; the ratio is the early signal, and that ordering is why
+  // the ratio's narrower band is acceptable.
+  // KNOWN BLIND SPOT, stated rather than implied: this catches the catastrophic matcher, not all
+  // superlinearity. A mild n^1.4 curve produces ~48.5x at 16x input and passes. Tightening toward
+  // that would collide with healthy noise at ~29x; closing it needs step-counting, not wall time.
+  // Do not tighten toward 16x "because linear should be 16x" — measured, linear is ~20x here.
+  const PAIRS = 5;
+  const ratios = [];
+  let worstLarge = 0;
+  for (let i = 0; i < PAIRS; i += 1) {
+    const s = timeFor(5_000);
+    const l = timeFor(80_000); // 16x the input
+    ratios.push(l.typical / s.typical);
+    if (l.worst > worstLarge) worstLarge = l.worst;
+  }
+  ratios.sort((a, b) => a - b);
+  const ratio = ratios[Math.floor(ratios.length / 2)];
+  // Linear ⇒ ~16x in theory and ~21x measured; quadratic ⇒ ~256x; exponential ⇒ unmeasurably larger.
   assert.ok(
-    large < 2000,
-    `expected the 80,000-title run well under 2s, took ${large}ms — possible ReDoS regression`,
+    worstLarge < 2000,
+    `expected EVERY 80,000-title run well under 2s, slowest took ${worstLarge}ms — possible ReDoS regression`,
   );
   assert.ok(
-    ratio < 40,
-    `16x input took ${ratio.toFixed(1)}x longer (small=${small}ms, large=${large}ms) — ` +
-      'that is quadratic-or-worse scaling, not linear; possible ReDoS regression',
+    ratio < 60,
+    `16x input took ${ratio.toFixed(1)}x longer (median of ${PAIRS} paired samples) — that is ` +
+      `n^${(Math.log(ratio) / Math.log(16)).toFixed(2)} scaling, past the 60x safety ceiling ` +
+      '(healthy measures ~n^1.22, the retired catastrophic matcher n^1.72-n^2.00); possible ReDoS ' +
+      'regression, or a loaded machine — re-measure on a quiet box before touching the regex',
   );
 });

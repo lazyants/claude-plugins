@@ -49,8 +49,17 @@
 // quote inside a maximal chain can ever be a valid direction-word boundary, and checking only the
 // chain's endpoint misses nothing a shorter internal sub-chain could have matched. Each quote is
 // visited O(1) times for chain growth and each chain incurs one bounded direction check, so the
-// whole pass is O(document length) — verified via the regression test below, which asserts both the
-// non-match AND that runtime doesn't grow with input size.
+// whole pass is O(document length) — guarded by the ReDoS regression test in citation-audit.test.mjs,
+// which asserts the non-match AND bounds runtime two ways: an absolute 2-second budget on the largest
+// single measured run, and a 60x ceiling on how much 16x more input costs. Measured, not assumed:
+// healthy tops out near 29x, and the retired quadratic matcher this test exists to catch produces
+// 117x and 38.8 SECONDS at the same input — so the absolute bound is the decisive gate (19x margin)
+// and the ratio is the early signal (2x). It does not assert constant runtime and could not; the pass
+// is O(n), not O(1).
+// Both are WALL-CLOCK bounds and can go falsely red on a loaded machine — #343's standing residual,
+// mitigated in the test (nanosecond clock, median of five samples per size, median of five paired
+// ratios) rather than eliminated. Read one red as "measure again on a quiet box", never as a proven
+// regression, before touching this regex.
 //
 // Fence handling is NOT reimplemented here: maskFencedRegions is imported from the ONE JS fence
 // engine in assets/lib/md-structure.mjs and reused, so a citation-shaped string inside a ``` fence is

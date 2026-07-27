@@ -22,11 +22,14 @@ import {
   legacyStaticEmbedPath,
   staticEmbedPath,
   validateGroups,
+  indexView,
   locateChapterLine,
+  leadingFrontmatterSpan,
   currentIndexExpectedTarget,
   classifyChapterWiring,
   findContainer,
   wireNestedListChapter,
+  verifyNonHeadingPlacement,
   extractLabel,
   isPlainLabel,
   groupChanges,
@@ -381,9 +384,10 @@ test('F1: a depth-1 heading never anchors a containerTitle (document title, neve
 });
 
 // Round-13 audit — DELIBERATELY UNTESTED, not a gap: collectContainerHeadings/locateChapterLine's
-// container-anchoring check is `heading[1].length >= 2` (chapter-paths.mjs:814,:875), so nothing
-// in this file distinguishes it from a narrower `=== 2`. No fixture anywhere uses a depth-3 (###)
-// heading. Left unpinned on purpose: the module's own docstring (chapter-paths.mjs:864-865, D6
+// container-anchoring check is `heading[1].length >= 2` (collectContainerHeadings's `m[1].length
+// >= 2` guard and locateChapterLine's own `heading[1].length >= 2` ternary), so nothing in this
+// file distinguishes it from a narrower `=== 2`. No fixture anywhere uses a depth-3 (###)
+// heading. Left unpinned on purpose: collectContainerHeadings's own leading comment (D6
 // convention) states a group container is ALWAYS `##`, so `>= 2`'s extra permissiveness beyond
 // exactly-2 is not something the design currently depends on — pinning a `###` container would
 // assert a behavior nobody has decided to support, not close a real gap. If a future round wants
@@ -857,6 +861,43 @@ test('R7-F1 wrong-container fixture: the line exists but under the WRONG contain
 });
 
 // =================================================================================================
+// [1.11.0] #330 prep — indexView, the exported "name the expression" extraction of
+// locateChapterLine's own sanitized view. Direct characterization tests: nothing exercised this
+// expression on its own before extraction, since it lived inline. The extraction ITSELF was
+// behavior-preserving (plan Locked scope decision 5) — that is a different claim from "no change to
+// locateChapterLine's return shape", which stopped being true once that shape later gained `index`
+// on each match record (#330 round-2 review, additive — the .d.mts now publishes it). Collapsing
+// those two claims into one is exactly what made the original wording here go stale; see the
+// library's own corrected docstring above `indexView` for the same fix.
+// =================================================================================================
+
+test('indexView [characterization]: a plain file with no inert content round-trips element-for-element', () => {
+  const indexLines = ['- Admin', '  - [Items](admin/items.md)'];
+  assert.deepEqual(indexView(indexLines), indexLines);
+});
+
+test('indexView [characterization]: an HTML comment spanning its own lines is blanked, matching stripInertContexts', () => {
+  const indexLines = ['<!--', '## Admin', '-->', '## Billing'];
+  const view = indexView(indexLines);
+  assert.equal(view.length, indexLines.length, 'newline-preserving 1:1 — same line count');
+  assert.ok(!/## Admin/.test(view.join('\n')), 'the commented-out heading must not survive the view');
+  assert.ok(/## Billing/.test(view.join('\n')), 'the real heading must survive the view');
+});
+
+test('indexView [parity]: locateChapterLine sees exactly what indexView produces — a match inside a multiline comment never reports present', () => {
+  // Ties the extraction back to its one caller (round-26: sharing the expression is true by
+  // construction, but the shared VIEW must actually be what the caller scans, not a duplicate).
+  const indexLines = ['<!--', '- [Items](admin/items.md)', '-->', '- Billing'];
+  const view = indexView(indexLines);
+  assert.ok(!/admin\/items\.md/.test(view.join('\n')), 'indexView blanks the commented-out target');
+  assert.equal(
+    locateChapterLine(indexLines, 'admin/items.md').present,
+    false,
+    'locateChapterLine must report the same absence indexView implies — one recognizer, not two',
+  );
+});
+
+// =================================================================================================
 // #223 [1.10.0] — wireNestedListChapter (nested-list / GitBook SUMMARY.md write automation)
 // =================================================================================================
 // Reached only when findContainer(...) returned {kind:'non-heading'} AND step 0 found no existing
@@ -1194,6 +1235,51 @@ test('not-a-list, mask-pair: a file mixing a CRLF-terminated line with a bare-LF
 });
 
 // -------------------------------------------------------------------------------------------------
+// [1.11.0] #330 prep — leadingFrontmatterSpan, the exported test-seam projection of the private
+// prepareIndexLines (extracted out of wireNestedListChapter's own line-preparation pass into its
+// own function — see prepareIndexLines's docstring for the step numbering. Step 4, the
+// groupTitle/chapterLink embedded-newline guard, reads arguments this helper never receives and
+// stays in the writer). Reaching these four rejection branches through the full writer proves
+// nothing for three of them (a downstream guard masks the branch); reaching them directly through
+// this seam is what actually isolates them — three discriminating direct tests plus one masked
+// rejection test, not one protected test per branch (plan round-30).
+// -------------------------------------------------------------------------------------------------
+
+test('leadingFrontmatterSpan [isolating]: an unclosed leading "---" block is refused directly through this seam (through the full writer it is masked by !sawTop, so only this seam proves the guard)', () => {
+  const indexLines = ['---', 'description: x'];
+  assert.equal(leadingFrontmatterSpan(indexLines).kind, 'not-a-list');
+});
+
+test('leadingFrontmatterSpan [isolating]: a backtick code-span on a CHILD bullet desyncs the identity guard — unlike the existing container-label fixture (masked by isPlainLabel, which only ever sees indent-0 labels and group_title), a child\'s content is never run through isPlainLabel at all', () => {
+  const indexLines = ['- Admin', '  - `child`'];
+  assert.equal(leadingFrontmatterSpan(indexLines).kind, 'not-a-list');
+});
+
+test('leadingFrontmatterSpan [masked by the identity guard, per the mask-pair fixture above]: a mixed-EOL file also returns not-a-list through this seam, but the mixed-EOL guard itself cannot be isolated by any fixture of this shape', () => {
+  const indexLines = ['- Admin\r', '', ''];
+  assert.equal(leadingFrontmatterSpan(indexLines).kind, 'not-a-list');
+});
+
+test('leadingFrontmatterSpan [isolating, permanent — round-10 probe]: a lone CR not part of a CRLF pair is refused (nothing else in this helper catches a bare interior \\r)', () => {
+  const indexLines = ['- Admin', '\r'];
+  assert.equal(leadingFrontmatterSpan(indexLines).kind, 'not-a-list');
+});
+
+test('leadingFrontmatterSpan: no leading frontmatter => span is null', () => {
+  assert.deepEqual(leadingFrontmatterSpan(['- Admin', '  - guide/items.md']), { kind: 'ok', span: null });
+});
+
+test('leadingFrontmatterSpan: a closed "---"/"---" frontmatter block reports the exact blanked span', () => {
+  const indexLines = ['---', 'title: X', '---', '- Admin'];
+  assert.deepEqual(leadingFrontmatterSpan(indexLines), { kind: 'ok', span: { start: 0, endExclusive: 3 } });
+});
+
+test('leadingFrontmatterSpan: a "..." document-end terminator closes the frontmatter block too, same span shape as "---"', () => {
+  const indexLines = ['---', 'title: X', '...', '- Admin'];
+  assert.deepEqual(leadingFrontmatterSpan(indexLines), { kind: 'ok', span: { start: 0, endExclusive: 3 } });
+});
+
+// -------------------------------------------------------------------------------------------------
 // Positive-accept fixtures — guard against over-rejection (a mutant that is TOO strict must also fail)
 // -------------------------------------------------------------------------------------------------
 
@@ -1227,6 +1313,35 @@ test('positive-accept: a CRLF file with NO terminal newline round-trips exactly 
     !result.newLines[result.newLines.length - 1].endsWith('\r'),
     'the final (non-terminated) line must not gain a trailing bare \\r',
   );
+});
+
+// -------------------------------------------------------------------------------------------------
+// [1.11.0] #330 prep — prepareIndexLines parity, through the writer's own newLines output. The
+// pre-existing suite never exercised the "..." terminator or a CRLF file carrying leading
+// frontmatter, so its own green run certifies nothing for those branches of the moved code
+// (plan Tests item 1 / round-24). Each expected newLines value below was measured against the
+// real module, not hand-derived.
+// -------------------------------------------------------------------------------------------------
+
+test('positive-accept, parity: a frontmatter block closed with "..." (not "---") is accepted and survives untouched in the output', () => {
+  const indexLines = ['---', 'title: X', '...', '- Admin'];
+  const result = wireNestedListChapter(indexLines, 'Admin', '[Items](admin/items.md)');
+  assert.equal(result.kind, 'inserted');
+  assert.deepEqual(result.newLines, ['---', 'title: X', '...', '- Admin', '  - [Items](admin/items.md)']);
+});
+
+test('positive-accept, parity: CRLF file WITH leading frontmatter, no terminal newline — round-trips exactly', () => {
+  const indexLines = ['---\r', 'title: X\r', '---\r', '- Admin'];
+  const result = wireNestedListChapter(indexLines, 'Admin', '[Items](admin/items.md)');
+  assert.equal(result.kind, 'inserted');
+  assert.deepEqual(result.newLines, ['---\r', 'title: X\r', '---\r', '- Admin\r', '  - [Items](admin/items.md)']);
+});
+
+test('positive-accept, parity: CRLF file WITH leading frontmatter AND a terminal newline — round-trips exactly, including the final empty element', () => {
+  const indexLines = ['---\r', 'title: X\r', '---\r', '- Admin\r', ''];
+  const result = wireNestedListChapter(indexLines, 'Admin', '[Items](admin/items.md)');
+  assert.equal(result.kind, 'inserted');
+  assert.deepEqual(result.newLines, ['---\r', 'title: X\r', '---\r', '- Admin\r', '  - [Items](admin/items.md)\r', '']);
 });
 
 test('positive-accept, padded group_title on CREATE [R4-4]: the emitted container is the exactly-trimmed label, never the raw padded value', () => {
@@ -1326,6 +1441,1307 @@ test('wireNestedListChapter is pure: a frozen input array is never mutated, and 
   assert.notEqual(result.newLines, frozen, 'the returned newLines must be a distinct array reference');
 });
 
+// -------------------------------------------------------------------------------------------------
+// [1.11.0] #330 prep — containerOwnerScan extraction (the writer's forward pass lifted, unchanged,
+// into a private helper — plan round-21 HIGH). PRIVATE, no exported test seam, so these two tests
+// characterize it through wireNestedListChapter. The extraction's contract is that NO consumer
+// re-implements this scan — each one calls it — so consumers cannot disagree about which container
+// owns a line, however many consumers there are (today: wireNestedListChapter here, and
+// verifyNonHeadingPlacement below, whose section also covers the ownerOf/ownerLabelOf fields
+// wireNestedListChapter never reads). The existing MULTIPLE fixture above never involves a heading;
+// this one pins that `containers` collection is independent of the heading-driven currentContainer
+// reset (only child OWNERSHIP resets on a heading, never label-matching membership).
+// -------------------------------------------------------------------------------------------------
+
+test('wireNestedListChapter MULTIPLE, heading-independent: two same-label indent-0 bullets split by an ATX heading still BOTH count', () => {
+  const indexLines = ['- Admin', '# Section', '- Admin', '  - guide/items.md'];
+  const result = wireNestedListChapter(indexLines, 'Admin', '[Items](guide/items.md)');
+  assert.equal(result.kind, 'multiple');
+  assert.deepEqual(result.matches, [
+    { index: 0, label: 'Admin' },
+    { index: 2, label: 'Admin' },
+  ]);
+});
+
+test('wireNestedListChapter, repeat-invocation isolation: a SINGLE call that populates a matched container, followed by an unrelated ZERO-create call, leaks no scan state between calls', () => {
+  // The extraction gave the forward pass its own function-call boundary (containerOwnerScan) —
+  // this pins that `containers` (and the rest of the scan's locals) are call-scoped, not
+  // accidentally hoisted to module scope. The pairing matters: the FIRST call must actually
+  // populate `containers` (a leaked, un-cleared array would silently corrupt the SECOND call,
+  // which expects to see none).
+  const first = wireNestedListChapter(['- Admin', '  - existing.md'], 'Admin', '[Items](admin/items.md)');
+  assert.equal(first.kind, 'inserted');
+  assert.equal(first.created, false);
+  const second = wireNestedListChapter(['- Intro'], 'Admin', '[Items](admin/items.md)');
+  assert.equal(second.kind, 'inserted');
+  assert.equal(second.created, true, 'the second call must see NO matched container, unaffected by the first call');
+  assert.deepEqual(second.newLines, ['- Intro', '- Admin', '  - [Items](admin/items.md)']);
+});
+
+// =================================================================================================
+// [1.11.0] #330 — verifyNonHeadingPlacement (present-line placement verification, nested-list form)
+// =================================================================================================
+//
+// verifyNonHeadingPlacement is IMPLEMENTED (EH-CORE, commit 419ef4c). It reaches the container walk
+// through containerOwnerScan rather than re-deriving it, which is the whole point of the extraction
+// above: every consumer answers "which container owns this line" by calling the one scan, so no two
+// of them can drift apart (today: wireNestedListChapter and this — however many there come to be).
+// E.g. verifyNonHeadingPlacement(['- Admin', '  - guide/items.md'], 'guide/items.md', 'Admin')
+// returns {kind: 'ok'}, pinned below by the test named "verifyNonHeadingPlacement rule 5: a
+// correctly-nested child under its matching container -> ok". Every fixture's PRECONDITION — match
+// cardinality, frontmatter span, and the fixed-probe predicate's kind — was driven through the real
+// supporting helpers (locateChapterLine/indexView, leadingFrontmatterSpan, wireNestedListChapter)
+// BEFORE the implementation landed, so nothing here rests on an unmeasured setup. Every new gate's
+// [isolating]/[masked] label was then confirmed by a scoped guard-mutation run (Edit-revert,
+// RED-before-green) against the landed implementation — see each fixture's own comment for its
+// specific result.
+//
+// The five-rule decision table (plan "Decision order is fixed"), in order: 1. zero selected-target
+// matches -> inconsistent; 2. more than one match -> inconsistent; 3. the single match lies inside
+// the leading frontmatter span -> unverifiable; 4. the fixed-probe predicate declines (not-a-list
+// or multiple) -> unverifiable; 5. otherwise compare the container -> ok / misplaced(label|null).
+// Every "-> unverifiable" fixture below is scoped by the SINGLE-MATCH precondition: rules 1-2
+// already remove every wrong-cardinality file before rules 3-5 ever run.
+
+test('verifyNonHeadingPlacement rule 1 [isolating, mutation-confirmed]: ZERO selected-target matches -> inconsistent, even though the file is an otherwise-perfectly-formed container', () => {
+  // Mutation-confirmed: narrowing the cardinality guard (`const { matches } =
+  // locateChapterLine(...); if (matches.length !== 1) ...`) to `matches.length > 1` (dropping
+  // rule 1's own half) flips ONLY this fixture; every other fixture in this suite, including the
+  // rule-2 ones just below, stays green.
+  const result = verifyNonHeadingPlacement(['- Admin'], 'guide/items.md', 'Admin');
+  assert.deepEqual(result, { kind: 'inconsistent' });
+});
+
+test('verifyNonHeadingPlacement rule 2 [isolating, mutation-confirmed]: TWO selected-target matches (a flat file with the target repeated) -> inconsistent, not "pick the first"', () => {
+  // Measured (plan round-14/round-9 HIGH 1): the writer sees ONE matching container ("Admin") and
+  // returns inserted/created:false, while the locator independently reports 2 matches for the
+  // selected target — rule 2 must fire on TARGET cardinality regardless of the predicate's own answer.
+  // Mutation-confirmed: narrowing that same cardinality guard to `matches.length < 1` (dropping
+  // rule 2's own half) flips ONLY this fixture and the monotonicity fixture below.
+  const indexLines = ['- Admin', '- guide/items.md', '- Other', '- guide/items.md'];
+  const result = verifyNonHeadingPlacement(indexLines, 'guide/items.md', 'Admin');
+  assert.deepEqual(result, { kind: 'inconsistent' });
+});
+
+test('verifyNonHeadingPlacement rule 3 [isolating, mutation-confirmed]: a single match lying inside a closed leading frontmatter block -> unverifiable', () => {
+  // Measured: leadingFrontmatterSpan reports span {start:0, endExclusive:4} for this file, and the
+  // ONLY occurrence of "guide/items.md" (index 2) lies inside it — indexView does not blank
+  // frontmatter, so locateChapterLine still reports present:true, single match. Mutation-confirmed:
+  // disabling just the frontmatter-span check flips ONLY this fixture (to misplaced(null), since
+  // the blanked container line then has no owner) — no other fixture in this suite depends on it.
+  const indexLines = ['---', '- Admin', '  - guide/items.md', '---', '- Admin'];
+  const result = verifyNonHeadingPlacement(indexLines, 'guide/items.md', 'Admin');
+  assert.deepEqual(result, { kind: 'unverifiable' });
+});
+
+test('verifyNonHeadingPlacement monotonicity [round-15/16 HIGH]: a match BOTH inside AND outside frontmatter is inconsistent (rule 2), never the softer unverifiable (rule 3) — this is what forced rules 2 and 3 to swap order', () => {
+  // Measured: 2 matches total (one inside the {0,4} frontmatter span, one outside) -> rule 2 fires
+  // before rule 3 is ever consulted. Watched against the pre-swap order this must flip to
+  // unverifiable, proving the reorder is load-bearing, not cosmetic.
+  const indexLines = ['---', '- Admin', '  - guide/items.md', '---', '- Admin', '  - guide/items.md'];
+  const result = verifyNonHeadingPlacement(indexLines, 'guide/items.md', 'Admin');
+  assert.deepEqual(result, { kind: 'inconsistent' });
+});
+
+test('verifyNonHeadingPlacement evaluation-order precondition [round-27 IMPORTANT] [isolating, mutation-confirmed]: a single match plus a trailing lone CR (prepareIndexLines declines) -> unverifiable, not a crash reading span/body off a refusal', () => {
+  // Measured: locateChapterLine still finds exactly ONE match (indexView has no CR-awareness), but
+  // prepareIndexLines refuses the file outright (the lone-CR guard) before span/body ever exist —
+  // the verifier must check prep.kind before touching either field. The writer would decline this
+  // file identically, so this is not a sixth rule: it is the same rule-4 outcome reached one step
+  // earlier because rule 3's own precondition (a real span) is unavailable. Mutation-confirmed:
+  // disabling this precondition check flips this fixture too — with `prep.span` undefined on a
+  // refusal, the frontmatter check itself throws reading `.start` off `undefined`, exactly the
+  // crash this precondition exists to prevent. It ALSO flips the "<!--nav-->" marker fixture below
+  // (the two share this exact masking site, confirmed by running both mutants).
+  const indexLines = ['- Admin', '  - guide/items.md', '\r'];
+  const result = verifyNonHeadingPlacement(indexLines, 'guide/items.md', 'Admin');
+  assert.deepEqual(result, { kind: 'unverifiable' });
+});
+
+// -------------------------------------------------------------------------------------------------
+// Rule 4 — the fixed-probe predicate declines. Each fixture is a distinct "nav-form" shape an
+// operator actually hits (plan's automation-limits enumeration), each built with EXACTLY ONE
+// selected-target match so the fixture exercises rule 4, never rule 1.
+// -------------------------------------------------------------------------------------------------
+
+test('verifyNonHeadingPlacement rule 4, native/YAML config [round-9 HIGH 2] [masked by containerOwnerScan\'s own foreign-content guard]: a fully spaced-colon "site_name : / nav : / - Admin :" file escapes the YAML-mapping detector entirely and is STILL refused (foreign content), not falsely verified', () => {
+  // This is the fixture that closes the native/YAML-config case where a text-based YAML detector
+  // cannot: YAML_MAPPING_LINE_RE requires the colon to touch the key, so every line here defeats it
+  // — yet the shape predicate still declines (measured: wireNestedListChapter returns not-a-list),
+  // because "site_name : Handbook" is foreign content on its own (no marker, no ATX heading).
+  // Mutation-confirmed MASKED, not isolating: disabling rule 4's own decline check does NOT flip
+  // this fixture, because rule 5's OWN containerOwnerScan(prep.body, wanted) call independently
+  // rejects "site_name : Handbook" as foreign content before ever reaching a container comparison —
+  // per this file's mask-pair convention, documented rather than claimed isolating.
+  const indexLines = ['site_name : Handbook', 'nav :', '- Admin :', '  - Items : guide/items.md'];
+  const result = verifyNonHeadingPlacement(indexLines, 'guide/items.md', 'Admin');
+  assert.deepEqual(result, { kind: 'unverifiable' });
+});
+
+test('verifyNonHeadingPlacement rule 4, typed-key nav row ["- Yes:" case] [isolating, mutation-confirmed]: a bare YAML-mapping key ("- Yes:") declines, closing the boolean-vs-string ambiguity a text comparator cannot resolve safely', () => {
+  // The plan's own illustration: Psych would parse the key as boolean `true` while a text rule
+  // reads the string "Yes" — a text-based container comparator would falsely say ok. Delegating the
+  // whole shape to the writer's hasYamlMappingStructure guard sidesteps the ambiguity outright.
+  // Mutation-confirmed isolating (unlike the mkdocs.yml fixture above): "- Yes:" IS a perfectly
+  // valid plain-label indent-0 bullet as far as containerOwnerScan is concerned (isPlainLabel("Yes:")
+  // is true) — hasYamlMappingStructure is a WRITER-only pre-loop guard containerOwnerScan never
+  // runs, so disabling rule 4's own check genuinely flips this fixture (to misplaced('Yes:'), not a
+  // crash or a mask) while the mkdocs.yml fixture above stays caught by a different guard.
+  const indexLines = ['- Yes:', '  - Items: guide/items.md'];
+  const result = verifyNonHeadingPlacement(indexLines, 'guide/items.md', 'Yes');
+  assert.deepEqual(result, { kind: 'unverifiable' });
+});
+
+test('verifyNonHeadingPlacement rule 4, non-plain groupTitle [EH-CORE finding, isolating, mutation-confirmed]: a construct-bearing groupTitle ("`Admin`", backtick-wrapped) declines through the WRITER-only isPlainLabel(wanted) pre-loop guard, which containerOwnerScan itself never checks', () => {
+  // This is a DIFFERENT guard from the "- Yes:" fixture above: isPlainLabel(wanted) tests the
+  // groupTitle PARAMETER itself (chapter-paths.mjs, wireNestedListChapter's own pre-loop check),
+  // not any label already present in the file — containerOwnerScan's own isPlainLabel call only
+  // ever tests a FILE bullet's `info.label`, never `wanted`, so it has no reach over a malformed
+  // caller-supplied groupTitle at all. EH-CORE measured (relayed by the lead) that disabling rule
+  // 4 entirely turns this into a WRONG `misplaced` rather than `unverifiable` — confirmed here
+  // directly: with rule 4's decline check disabled, containerOwnerScan(prep.body, '`Admin`') runs
+  // to completion undisturbed (the file's own "Admin" label is perfectly plain), and the comparison
+  // against the malformed wantedLabel never matches, producing misplaced('Admin') instead of the
+  // correct unverifiable. Genuinely isolating: unlike the mkdocs.yml/ordered-list/wildcard/table
+  // fixtures above, nothing in containerOwnerScan itself ever inspects `wanted` for plainness.
+  const indexLines = ['- Admin', '  - guide/items.md'];
+  const result = verifyNonHeadingPlacement(indexLines, 'guide/items.md', '`Admin`');
+  assert.deepEqual(result, { kind: 'unverifiable' });
+});
+
+test('verifyNonHeadingPlacement rule 4, literate-nav ordered list [masked by containerOwnerScan\'s own ordered-marker guard]: "1. [Admin](admin.md)" is an ordinary literate-nav feature the writer declines (ordered marker), not a container', () => {
+  // Mutation-confirmed MASKED: disabling rule 4's own decline check does not flip this fixture —
+  // containerOwnerScan's own NESTED_ORDERED_MARKER_RE guard rejects the ordered-list line
+  // independently, the same shared-scan mechanism rule 5 would call anyway.
+  const indexLines = ['1. [Admin](admin.md)', '   - [Items](guide/items.md)'];
+  const result = verifyNonHeadingPlacement(indexLines, 'guide/items.md', 'Admin');
+  assert.deepEqual(result, { kind: 'unverifiable' });
+});
+
+test('verifyNonHeadingPlacement rule 4, literate-nav wildcard [masked by containerOwnerScan\'s own bare-path guard]: "* subdirectory/*.md" is refused by the bare-path guard, not silently treated as a container', () => {
+  // Mutation-confirmed MASKED, same mechanism as the ordered-list fixture above: containerOwnerScan
+  // itself refuses this line via isBarePathBullet before any container comparison would run.
+  const indexLines = ['* subdirectory/*.md', '- [Items](guide/items.md)'];
+  const result = verifyNonHeadingPlacement(indexLines, 'guide/items.md', 'Admin');
+  assert.deepEqual(result, { kind: 'unverifiable' });
+});
+
+test('verifyNonHeadingPlacement rule 4, "<!--nav-->" marker file [masked by the EARLIER prep.kind precondition, not by rule 4 itself]: an inert-content marker line desyncs the identity guard (same mechanism as a stray backtick), so this shape declines too', () => {
+  // Measured: leadingFrontmatterSpan ALSO reports not-a-list for this file — the marker line is
+  // blanked by stripInertContexts while the raw line survives comparison, tripping the identity
+  // guard directly (not the foreign-content guard). Mutation-confirmed: disabling rule 4's own
+  // decline check does NOT flip this fixture (prepareIndexLines already refused it upstream); it
+  // DOES flip together with the lone-CR precondition fixture above when THAT earlier check is
+  // disabled instead — same masking site, confirmed by running both mutants independently.
+  const indexLines = ['<!--nav-->', '- [Items](guide/items.md)'];
+  const result = verifyNonHeadingPlacement(indexLines, 'guide/items.md', 'Admin');
+  assert.deepEqual(result, { kind: 'unverifiable' });
+});
+
+test('verifyNonHeadingPlacement rule 4, exotic path-table row [masked by containerOwnerScan\'s own foreign-content guard]: a pipe-table cell carrying a markdown link is recognized by the locator but the row itself is foreign content to the writer', () => {
+  const indexLines = ['| [Items](guide/items.md) |'];
+  const result = verifyNonHeadingPlacement(indexLines, 'guide/items.md', 'Admin');
+  assert.deepEqual(result, { kind: 'unverifiable' });
+});
+
+test('verifyNonHeadingPlacement rule 4, "multiple" is mapped explicitly [round-9 HIGH 1] [isolating, mutation-confirmed]: TWO indent-0 containers sharing group_title, but exactly ONE selected-target match under one of them, still resolves to unverifiable — not ok, not misplaced', () => {
+  // Isolates the `multiple` mapping from the cardinality rules: matches.length===1 (rules 1/2 pass)
+  // yet the predicate itself returns {kind:'multiple'} (container-ambiguous), which rule 4 must
+  // treat exactly like not-a-list. Mapping only not-a-list here would make the verifier MORE
+  // permissive than the writer on an ambiguous file — the unsafe direction. Mutation-confirmed:
+  // disabling rule 4's own decline check flips this to a false `ok` — unlike the fixtures above,
+  // containerOwnerScan itself has NO concept of "too many matching containers" (that ambiguity is
+  // the WRITER's own post-scan `containers.length >= 2` check, outside the shared scan), so nothing
+  // downstream masks the removal.
+  const indexLines = ['- Admin', '- Admin', '  - guide/items.md'];
+  const result = verifyNonHeadingPlacement(indexLines, 'guide/items.md', 'Admin');
+  assert.deepEqual(result, { kind: 'unverifiable' });
+});
+
+test('verifyNonHeadingPlacement rule 4, heading + INDENTED child [round-20 panel, reproduced] [masked by containerOwnerScan\'s own orphan-child guard]: the writer refuses this at its own orphan-child guard, so the file reaches rule 4, NEVER rule 5 — a heading reset cannot be walked around', () => {
+  // The plan's own correction of an earlier (wrong) credit: a naive nearest-preceding-container scan
+  // would call this misplaced(null), but the real predicate declines the file outright (not-a-list)
+  // before any container comparison happens, so the correct answer here is unverifiable.
+  // Mutation-confirmed MASKED: disabling rule 4's own check does not flip this fixture, since rule
+  // 5's own containerOwnerScan(prep.body, wanted) call hits the SAME orphan-child guard independently
+  // (it is the identical shared function) — a heading reset genuinely cannot be walked around from
+  // either call site.
+  const indexLines = ['- Admin', '# Section', '  - guide/items.md'];
+  const result = verifyNonHeadingPlacement(indexLines, 'guide/items.md', 'Admin');
+  assert.deepEqual(result, { kind: 'unverifiable' });
+});
+
+// -------------------------------------------------------------------------------------------------
+// Rule 5 — the container comparison. `misplaced` carries `foundContainer` (a label string, or null
+// when the matched row is uncontained). Every fixture below has a predicate that ACCEPTS the file
+// (kind:'inserted'), so rule 4 always passes through to the container walk.
+// -------------------------------------------------------------------------------------------------
+
+test('verifyNonHeadingPlacement rule 5: a correctly-nested child under its matching container -> ok', () => {
+  const indexLines = ['- Admin', '  - guide/items.md'];
+  const result = verifyNonHeadingPlacement(indexLines, 'guide/items.md', 'Admin');
+  assert.deepEqual(result, { kind: 'ok' });
+});
+
+test('verifyNonHeadingPlacement rule 5, uncontained [round-15 HIGH] [isolating, mutation-confirmed]: a TOP-LEVEL sibling ("- guide/items.md" at indent 0) is misplaced(null), not ok — the writer treats every indent-0 bullet as its OWN container, never a child', () => {
+  // Mutation-confirmed: narrowing the "owner === -1 || owner === undefined" guard to
+  // "owner === undefined" only flips this fixture (and the heading-reset one below) to
+  // misplaced(undefined) instead of misplaced(null) — the -1 sentinel (a bullet is its own
+  // container, never a child) is genuinely load-bearing, not redundant with the undefined case.
+  const indexLines = ['- Admin', '- guide/items.md'];
+  const result = verifyNonHeadingPlacement(indexLines, 'guide/items.md', 'Admin');
+  assert.deepEqual(result, { kind: 'misplaced', foundContainer: null });
+});
+
+test('verifyNonHeadingPlacement rule 5, uncontained after a heading reset [round-15 HIGH] [isolating, mutation-confirmed — same mutant as the plain-sibling fixture above]: a top-level sibling AFTER an ATX heading is still misplaced(null), same as the plain-sibling case', () => {
+  const indexLines = ['- Admin', '# Section', '- guide/items.md'];
+  const result = verifyNonHeadingPlacement(indexLines, 'guide/items.md', 'Admin');
+  assert.deepEqual(result, { kind: 'misplaced', foundContainer: null });
+});
+
+test('verifyNonHeadingPlacement rule 5, misplaced under a genuinely different container [isolating, mutation-confirmed — see the containerOwnerScan-coverage section below for the paired mutant]: a child correctly nested under "- Other" while groupTitle is "Admin" -> misplaced(\'Other\') — the writer\'s created:true CREATE-a-new-container branch is exactly this case, not unverifiable', () => {
+  // Measured: containers.length===0 ('Other' !== 'Admin'), so the predicate itself returns
+  // inserted/created:true (it would CREATE a new "Admin" container) — proving created:true stays in
+  // the recognized/misplaced class rather than being folded into unverifiable alongside `multiple`.
+  const indexLines = ['- Other', '  - guide/items.md'];
+  const result = verifyNonHeadingPlacement(indexLines, 'guide/items.md', 'Admin');
+  assert.deepEqual(result, { kind: 'misplaced', foundContainer: 'Other' });
+});
+
+test('verifyNonHeadingPlacement rule 5, container label comparison is UNTRIMMED [round-18 panel, mutation guard] [isolating, mutation-confirmed]: an existing "[ Admin ](admin.md)" container (extractLabel returns the untrimmed " Admin ") does not match a trimmed "Admin" groupTitle -> misplaced(\' Admin \'), never ok', () => {
+  // WITH the no-trim comparison (the writer's own containers.length===0 branch already proves
+  // " Admin " !== "Admin" is exactly how the writer itself reads this file — created:true). WITHOUT
+  // it (a mutant that trims ownerLabelOf before comparing): this fixture would wrongly flip to ok,
+  // even though the writer, asked with the SAME groupTitle, says no matching container exists.
+  // Mutation-confirmed: adding `.trim()` to the ownerLabel comparison flips ONLY this fixture — every
+  // other rule-5 fixture in this suite has an already-untrimmed label, so trimming is a no-op there.
+  const indexLines = ['- [ Admin ](admin.md)', '  - guide/items.md'];
+  const result = verifyNonHeadingPlacement(indexLines, 'guide/items.md', 'Admin');
+  assert.deepEqual(result, { kind: 'misplaced', foundContainer: ' Admin ' });
+});
+
+test('verifyNonHeadingPlacement rule 5, CRLF regression [round-18 panel] [isolating, mutation-confirmed]: a correctly-wired CRLF index -> ok, watched failing against a mutant that swaps the shared container walk for a walk over indexView instead of the writer\'s own BODY', () => {
+  // Mutation-confirmed: swapping containerOwnerScan's array argument from prep.body to
+  // indexView(indexLines) flips ONLY this fixture and the codex frontmatter+comment fixture below —
+  // every other rule-5 "ok" fixture (the plain child, the compatibility matrix, ...) has no
+  // BODY/indexView divergence and stays green under that same mutant.
+  const indexLines = ['- Admin\r', '  - guide/items.md'];
+  const result = verifyNonHeadingPlacement(indexLines, 'guide/items.md', 'Admin');
+  assert.deepEqual(result, { kind: 'ok' });
+});
+
+test('verifyNonHeadingPlacement rule 5, codex frontmatter+HTML-comment regression [round-18/19 panel — the decisive counterexample against walking indexView] [isolating, mutation-confirmed — see the CRLF fixture above for the paired mutant]: a chapter freshly wired by the writer into a file whose frontmatter contains an HTML comment spanning into the body -> ok, never a false misplaced(null)', () => {
+  // The writer accepts this file and reports inserted/created:false — by construction it agrees the
+  // inserted row IS correctly nested under "Admin". But indexView (unlike the writer's own BODY)
+  // sanitizes the WHOLE raw text with no frontmatter awareness: the "<!--" opened inside frontmatter
+  // runs all the way to the body's "-->", which BLANKS the "- Admin" container line while leaving the
+  // freshly-inserted chapter row (after the comment closes) untouched and visible. A container walk
+  // over indexView would therefore find no container at all for a row the writer itself just wired —
+  // the exact "second recognizer" drift the shared containerOwnerScan/BODY design exists to prevent.
+  const written = wireNestedListChapter(
+    ['---', 'note: <!--', '---', '- Admin', '  - -->'],
+    'Admin',
+    '[Items](admin/items.md)',
+  );
+  assert.equal(written.kind, 'inserted');
+  assert.equal(written.created, false);
+  const result = verifyNonHeadingPlacement(written.newLines, 'admin/items.md', 'Admin');
+  assert.deepEqual(result, { kind: 'ok' });
+});
+
+// -------------------------------------------------------------------------------------------------
+// Direct coverage of containerOwnerScan's `ownerOf`/`ownerLabelOf` fields (round-22 HIGH), reached
+// through verifyNonHeadingPlacement as their first real consumer — EH-CORE's own characterization of
+// these two fields used a temporary scratch export that was deleted before landing, so nothing in
+// the committed suite exercised them directly until these three fixtures.
+// -------------------------------------------------------------------------------------------------
+
+test('verifyNonHeadingPlacement, containerOwnerScan coverage [isolating, mutation-confirmed]: TWO containers where only ONE matches groupTitle — the NON-matching container\'s own (untrimmed) label is still recorded as the owner label for ITS child, not left undefined', () => {
+  // "Admin" is the only container pushed into `containers` (the writer\'s own match set), yet the
+  // second container "Other" — which never enters that array — must still hand its OWN label to
+  // ownerLabelOf for the child underneath it. If ownerLabelOf were (wrongly) derived FROM the
+  // `containers` array instead of tracked independently, this fixture would misplaced(undefined) or
+  // throw rather than correctly naming "Other". Mutation-confirmed: replacing containerOwnerScan's
+  // per-line `ownerLabelOf[i] = currentContainerLabel` with `ownerLabelOf[i] = wanted` (deriving the
+  // label from the match target instead of tracking it) flips this fixture to a false `ok` — along
+  // with the heading-reset fixture below, the plain "misplaced under Other" fixture above, and the
+  // untrimmed-label fixture above; every ALREADY-`ok` fixture in the suite is unaffected (the mutant
+  // is a no-op whenever the real owner label already equals `wanted`).
+  const indexLines = ['- Admin', '  - a.md', '- Other', '  - guide/items.md'];
+  const result = verifyNonHeadingPlacement(indexLines, 'guide/items.md', 'Admin');
+  assert.deepEqual(result, { kind: 'misplaced', foundContainer: 'Other' });
+});
+
+test('verifyNonHeadingPlacement, containerOwnerScan coverage [isolating, mutation-confirmed — same mutant as the fixture above]: a heading reset between two DIFFERENTLY-labeled containers correctly re-parents a post-reset child to the container that follows the reset, never the one that preceded it', () => {
+  // If the ATX-heading reset of currentContainer were dropped (or misapplied), this child would be
+  // read as still belonging to the PRE-reset "Admin" container and the file would wrongly verify ok.
+  const indexLines = ['- Admin', '# Section', '- Other', '  - guide/items.md'];
+  const result = verifyNonHeadingPlacement(indexLines, 'guide/items.md', 'Admin');
+  assert.deepEqual(result, { kind: 'misplaced', foundContainer: 'Other' });
+});
+
+test('verifyNonHeadingPlacement, containerOwnerScan coverage [characterization, not paired with a dedicated discriminating mutant]: MULTIPLE children under one container — a MIDDLE child (neither first nor last) still resolves to the shared container', () => {
+  // Honest limit, checked rather than assumed: verifyNonHeadingPlacement never surfaces a
+  // container's own BODY index, only its LABEL — a mutant that mis-tracks `ownerOf`'s index (e.g.
+  // "previous bullet" instead of "current container") but leaves `ownerLabelOf` correct is provably
+  // unobservable through this public contract, so no mutation isolates THIS fixture specifically
+  // from the plain single-child "ok" fixture above. Its value is coverage: it proves cardinality
+  // (2+ children under one container) does not itself break the shared resolution.
+  const indexLines = ['- Admin', '  - a.md', '  - guide/items.md', '  - c.md'];
+  const result = verifyNonHeadingPlacement(indexLines, 'guide/items.md', 'Admin');
+  assert.deepEqual(result, { kind: 'ok' });
+});
+
+// -------------------------------------------------------------------------------------------------
+// selectedTarget, not a bare expected target (round-2 HIGH 6) — the Obsidian adapter's union scan
+// over the qualified and legacy-bare spellings SELECTS one before calling this function; the
+// verifier must check placement of whichever target the caller selected, never re-derive it.
+// -------------------------------------------------------------------------------------------------
+
+test('verifyNonHeadingPlacement, legacy-bare target selection [round-2 HIGH 6]: a legitimately-present LEGACY bare wikilink row verifies ok when selectedTarget is the legacy spelling the caller actually selected, never falsely inconsistent against the qualified spelling it did NOT select', () => {
+  const indexLines = ['- Admin', '  - [[items]]'];
+  const result = verifyNonHeadingPlacement(indexLines, 'items', 'Admin', { wikilink: true });
+  assert.deepEqual(result, { kind: 'ok' });
+});
+
+test('verifyNonHeadingPlacement, wikilink ".md" fold: a markdown-link row is still recognized under wikilink mode once the fold removes the row\'s own terminal ".md" from the comparison, same as locateChapterLine\'s own fold', () => {
+  const indexLines = ['- Admin', '  - [Items](guide/items.md)'];
+  const result = verifyNonHeadingPlacement(indexLines, 'guide/items', 'Admin', { wikilink: true });
+  assert.deepEqual(result, { kind: 'ok' });
+});
+
+// -------------------------------------------------------------------------------------------------
+// Compatibility matrix (plan Tests item 2) — a finite, enumerated set of adapter-generated link
+// equivalence classes, every one correctly placed, all converging on ok.
+// -------------------------------------------------------------------------------------------------
+
+test('verifyNonHeadingPlacement compatibility matrix: path mode, flat target -> ok', () => {
+  const result = verifyNonHeadingPlacement(['- Admin', '  - [Items](guide/items.md)'], 'guide/items.md', 'Admin');
+  assert.deepEqual(result, { kind: 'ok' });
+});
+
+test('verifyNonHeadingPlacement compatibility matrix: path mode, grouped (subfolder) target -> ok', () => {
+  const result = verifyNonHeadingPlacement(
+    ['- Admin', '  - [Items](guide/admin/items.md)'],
+    'guide/admin/items.md',
+    'Admin',
+  );
+  assert.deepEqual(result, { kind: 'ok' });
+});
+
+test('verifyNonHeadingPlacement compatibility matrix: wikilink mode, qualified target -> ok', () => {
+  const result = verifyNonHeadingPlacement(['- Admin', '  - [[guide/items|Items]]'], 'guide/items', 'Admin', {
+    wikilink: true,
+  });
+  assert.deepEqual(result, { kind: 'ok' });
+});
+
+test('verifyNonHeadingPlacement compatibility matrix: wikilink mode, legacy-bare target via a markdown-link row (".md" fold) -> ok', () => {
+  // Distinct from round-2 HIGH 6's own fixture above (['- Admin', '  - [[items]]']): that one is
+  // wikilink SYNTAX and never needs the fold at all. This row is markdown-link syntax carrying a
+  // literal '.md' destination, recognized only because foldTargetForMatch strips one terminal
+  // '.md' under wikilink mode (chapter-paths.mjs, foldTargetForMatch) — the SAME fold the
+  // qualified-target test above (guide/items.md) already covers, exercised here against a BARE
+  // target instead. Confirmed against a mutant that drops the fold (scratch chapter-paths.mjs
+  // with foldTargetForMatch's `wikilink ? … : normalized` collapsed to `normalized`): this
+  // fixture flips to `inconsistent` while the wikilink-syntax fixtures above are unaffected.
+  const result = verifyNonHeadingPlacement(['- Admin', '  - [Items](items.md)'], 'items', 'Admin', {
+    wikilink: true,
+  });
+  assert.deepEqual(result, { kind: 'ok' });
+});
+
+test('verifyNonHeadingPlacement compatibility matrix: flat bare-path child (no link syntax at all) -> ok', () => {
+  const result = verifyNonHeadingPlacement(['- Admin', '  - items.md'], 'items.md', 'Admin');
+  assert.deepEqual(result, { kind: 'ok' });
+});
+
+// -------------------------------------------------------------------------------------------------
+// The fixed-probe design's soundness assumption (round-9 HIGH 1) was: "for any newline-free
+// chapterLink, accept/decline is a function of (indexLines, groupTitle) alone."
+//
+// [1.11.0] That is NO LONGER TRUE unconditionally, and the fixture below hid it: `['- Admin']` is an
+// EMPTY container, so no child can ever equal chapterLink and the membership guard cannot fire. The
+// invariant now holds exactly while NO child bullet carries the link verbatim; when one does, the
+// same file and groupTitle answer `present` instead of `inserted`. Both halves are pinned below.
+//
+// The fixed-probe design survives this, but for a different reason than the original one: rule 4
+// accepts `inserted` and `present` alike, so the probe's verdict cannot change a placement outcome.
+// The delegation depends on THAT now, not on invariance.
+// -------------------------------------------------------------------------------------------------
+
+test('wireNestedListChapter accept/decline invariance [pins the #330 fixed-probe assumption]: the SAME file/groupTitle accepts (kind + created) identically across a representative repertoire of newline-free chapterLink spellings', () => {
+  const indexLines = ['- Admin'];
+  const links = [
+    '[Items](admin/items.md)',
+    '[[admin/items|Items]]',
+    '[[items]]',
+    'admin/items.md',
+    '[A very different label indeed](admin/other/path/items.md)',
+  ];
+  for (const link of links) {
+    const result = wireNestedListChapter(indexLines, 'Admin', link);
+    assert.equal(result.kind, 'inserted', `expected inserted for link ${JSON.stringify(link)}`);
+    assert.equal(result.created, false, `expected created:false for link ${JSON.stringify(link)}`);
+  }
+});
+
+test('wireNestedListChapter accept/decline invariance [1.11.0]: the invariance above holds only while no child carries the link — a colliding child flips the SAME file/groupTitle to `present`', () => {
+  // The boundary the empty-container fixture above cannot reach. Same groupTitle, same file shape,
+  // and the ONLY difference is whether a child bullet already carries the exact link — which is
+  // precisely the input the round-9 invariant assumed could not matter.
+  const link = '[Items](admin/items.md)';
+  const withoutCollision = ['- Admin', '  - [Something else](admin/other.md)'];
+  const withCollision = ['- Admin', `  - ${link}`];
+
+  assert.equal(wireNestedListChapter(withoutCollision, 'Admin', link).kind, 'inserted');
+  assert.deepEqual(wireNestedListChapter(withCollision, 'Admin', link), { kind: 'present', index: 1 });
+});
+
+// =================================================================================================
+// [1.11.0 round 11] verifyNonHeadingPlacement TITLE-SHAPE x LINK-MODE x PLACEMENT matrix — exists so
+// a false CLAIM about what a construct-bearing chapter-row TITLE does to the verifier's verdict
+// fails a TEST, not merely a reworded needle in reference-assets.test.sh (which only pins that the
+// adapter PROSE didn't drift — it structurally cannot prove the prose TRUE). Four claims about this
+// exact surface were measured false across three review rounds, all three-reviewer-clean:
+//   round 8:  promised `misplaced` unconditionally for a mis-nested row.
+//   round 9:  "a non-plain title is never reported misplaced" — false: a backslash-escaped title
+//             ("A\.B") is DECODED to plain ("A.B") by parseNestedLabel's mdlink branch and IS
+//             reported misplaced in path mode (see the backslashEscape row, path/margin cell).
+//   round 9:  "markup breaking the target halts as inconsistent" — an ADAPTER-level control-flow
+//             claim (the verifier is never CALLED for that input), not a property of
+//             verifyNonHeadingPlacement itself — out of this module's scope, not re-tested here.
+//   round 10: "turns on what the title RENDERS as" — false twice, both isolated below: (a) a
+//             wikilink ALIAS is never escape-decoded (parseNestedLabel's wikilink branch has no
+//             decodeMarkdownEscapes call, unlike its mdlink branch) — the SAME backslash-escaped
+//             title is misplaced in path mode but unverifiable in wikilink mode (backslashEscape
+//             row, path vs wiki columns); (b) an HTML entity is decoded NOWHERE in this module, so
+//             it behaves like a literal stray "&" in BOTH modes, never like the character it would
+//             actually render as (htmlEntity row — unverifiable in both columns, never diverging the
+//             way a real renderer would).
+//
+// Every cell is MEASURED against the real module (a probe script run against the shipped file, not
+// hand-derived) — `target` is whichever selectedTarget makes locateChapterLine report exactly ONE
+// match for that row's real content; four shapes do NOT resolve to the intended chapter destination
+// at all (see each row's own comment) and that divergence is itself part of what this table pins —
+// if any assertion below ever regresses to `{kind:'inconsistent'}`, that means the row's measured
+// `target` stopped matching, which is exactly as informative a failure as a wrong `kind`.
+// `wikilink:false` and `wikilink:true` content is genuinely parallel (the same `label` text, placed
+// as a markdown-link label vs a wikilink alias) so a path/wiki verdict difference in the table is a
+// real MODE difference (the round-10 axis), never an artifact of differently-worded fixtures.
+// =================================================================================================
+
+// One row per row-title shape. `label` is the literal text inside the outer link label (path mode:
+// `[label](guide/items.md)`) or wikilink alias (wiki mode: `[[guide/items|label]]`) — the SAME
+// `label` string drives both modes. `margin`/`nested` record the expected `.kind` at EACH placement,
+// per mode: isPlainLabel is a CONTAINER-only gate (§5.1) — a nested/child row's own title shape
+// almost never changes the verdict (only a MARGIN row's title is ever gated by it), so most rows'
+// `nested` column reads `ok`/`ok` regardless of shape; where it does NOT (inlineCode), that is
+// itself a distinct, separately-documented mechanism, not a copy-paste slip.
+const TITLE_SHAPE_TABLE = [
+  {
+    shape: 'plain',
+    label: 'Items',
+    margin: { path: 'misplaced', wiki: 'misplaced' },
+    nested: { path: 'ok', wiki: 'ok' },
+    marginExtract: { path: { label: 'Items', plain: true }, wiki: { label: 'Items', plain: true } },
+  },
+  {
+    shape: 'backslashEscape',
+    label: 'A\\.B',
+    // round 9 + round 10(a): path DECODES the escape ("A.B", plain) -> misplaced; wiki does NOT
+    // decode the alias ("A\.B" survives with its literal backslash, non-plain) -> unverifiable.
+    // Red-before-green: a scratch mutant that adds decodeMarkdownEscapes to parseNestedLabel's
+    // wikilink branch flips ONLY the wiki/margin cell here (path/margin and every htmlEntity cell
+    // stay unchanged under that same mutant) — see this teammate's report for the measured run.
+    margin: { path: 'misplaced', wiki: 'unverifiable' },
+    nested: { path: 'ok', wiki: 'ok' },
+    marginExtract: { path: { label: 'A.B', plain: true }, wiki: { label: 'A\\.B', plain: false } },
+  },
+  {
+    shape: 'htmlEntity',
+    label: 'A&#46;B',
+    // round 10(b): decoded in NEITHER mode -> unverifiable in both columns (a literal "&" is always
+    // forbidden, isPlainLabel's own char class). Red-before-green: a scratch mutant that has
+    // isPlainLabel decode a "&#NNN;" run before testing flips ONLY this row's margin cells (both
+    // modes, since isPlainLabel is mode-agnostic) — see this teammate's report for the measured run.
+    margin: { path: 'unverifiable', wiki: 'unverifiable' },
+    nested: { path: 'ok', wiki: 'ok' },
+    marginExtract: { path: { label: 'A&#46;B', plain: false }, wiki: { label: 'A&#46;B', plain: false } },
+  },
+  {
+    shape: 'ampersand',
+    label: 'A&B',
+    margin: { path: 'unverifiable', wiki: 'unverifiable' },
+    nested: { path: 'ok', wiki: 'ok' },
+    marginExtract: { path: { label: 'A&B', plain: false }, wiki: { label: 'A&B', plain: false } },
+  },
+  {
+    shape: 'emphasis',
+    label: '*A*',
+    margin: { path: 'unverifiable', wiki: 'unverifiable' },
+    nested: { path: 'ok', wiki: 'ok' },
+    marginExtract: { path: { label: '*A*', plain: false }, wiki: { label: '*A*', plain: false } },
+  },
+  {
+    shape: 'inlineCode',
+    label: '`A`',
+    // A real (balanced) inline-code span anywhere in the file trips prepareIndexLines' own
+    // whole-file inert-content refusal (stripInertContexts blanks the span; the resulting
+    // SAN[i] !== fm[i] mismatch declines the FILE, chapter-paths.mjs step 6) BEFORE isPlainLabel is
+    // ever consulted — unverifiable at BOTH placements, not just margin. Structurally distinct from
+    // every other row here: it is the only one that is unverifiable when correctly nested.
+    margin: { path: 'unverifiable', wiki: 'unverifiable' },
+    nested: { path: 'unverifiable', wiki: 'unverifiable' },
+    marginExtract: { path: { label: '`A`', plain: false }, wiki: { label: '`A`', plain: false } },
+  },
+  {
+    // extractLineTargets has no nested-bracket support (its own documented limit,
+    // findLinkOpeners/findMarkdownLinkGroups): the FIRST "]...(" pair found becomes THE link, so a
+    // genuine nested link inside the outer label steals the destination — target is 'x' (the
+    // NESTED link's own destination), never 'guide/items.md'/'guide/items'. Once that is accounted
+    // for, the outer label itself falls to the RAW kind (it contains '[' and ']') — non-plain at
+    // margin, irrelevant when nested.
+    shape: 'nestedLink',
+    label: 'A [nested](x) B',
+    target: () => 'x',
+    margin: { path: 'unverifiable', wiki: 'unverifiable' },
+    nested: { path: 'ok', wiki: 'ok' },
+    // Whole-content link/wikilink detection fails on the embedded brackets, so extractLabel falls
+    // to the 'raw' branch and returns the ENTIRE row content verbatim (measured, not assumed).
+    marginExtract: {
+      path: { label: '[A [nested](x) B](guide/items.md)', plain: false },
+      wiki: { label: '[[guide/items|A [nested](x) B]]', plain: false },
+    },
+  },
+  {
+    shape: 'nestedImage',
+    label: 'A ![alt](y) B',
+    target: () => 'y',
+    margin: { path: 'unverifiable', wiki: 'unverifiable' },
+    nested: { path: 'ok', wiki: 'ok' },
+    marginExtract: {
+      path: { label: '[A ![alt](y) B](guide/items.md)', plain: false },
+      wiki: { label: '[[guide/items|A ![alt](y) B]]', plain: false },
+    },
+  },
+  {
+    // Reference-style "[text][ref]" is not "](" — findMarkdownLinkGroups never opens on it, and
+    // WIKILINK_TARGET_RE cannot span the embedded ']'. Neither link syntax is recognized AT ALL, so
+    // extractLineTargets' bare-YAML fallback takes the WHOLE row content (marker stripped) as the
+    // target — `target` is a function of the actual row content, not a fixed destination string.
+    shape: 'referenceLink',
+    label: 'A [text][1] B',
+    target: (content) => content,
+    margin: { path: 'unverifiable', wiki: 'unverifiable' },
+    nested: { path: 'ok', wiki: 'ok' },
+    marginExtract: {
+      path: { label: '[A [text][1] B](guide/items.md)', plain: false },
+      wiki: { label: '[[guide/items|A [text][1] B]]', plain: false },
+    },
+  },
+  {
+    // Same "no link syntax recognized at all" mechanism as referenceLink above — an unescaped ']'
+    // breaks both findMarkdownLinkGroups' and WIKILINK_TARGET_RE's closing-delimiter search.
+    shape: 'unescapedBracket',
+    label: 'A]B',
+    target: (content) => content,
+    margin: { path: 'unverifiable', wiki: 'unverifiable' },
+    nested: { path: 'ok', wiki: 'ok' },
+    marginExtract: {
+      path: { label: '[A]B](guide/items.md)', plain: false },
+      wiki: { label: '[[guide/items|A]B]]', plain: false },
+    },
+  },
+];
+
+// MEDIUM 5 (round-13): both fixture builders below used to be binary ternaries keyed on their
+// input directly (`mode === 'wiki' ? … : …`, `placement === 'margin' ? … : …`) — silently correct
+// today only because there are exactly two values of each; a third mode/placement added to a loop
+// above would fall through to the ELSE branch and run against another cell's fixture, green and
+// wrong. Keyed maps + an explicit unhandled-key throw close that failure mode structurally.
+function wikilinkForMode(mode) {
+  const WIKILINK_BY_MODE = { path: false, wiki: true };
+  if (!(mode in WIKILINK_BY_MODE)) throw new Error(`TITLE_SHAPE_TABLE: unhandled mode '${mode}'`);
+  return WIKILINK_BY_MODE[mode];
+}
+
+// BLOCKER 2(d) (round-13): the adapters' own tables caption their measurement precisely — "a row
+// sitting AT THE LEFT MARGIN alongside a clean, correctly-formed 'Admin' container elsewhere in the
+// same file" (obsidian-vault.md/static-md.md, "The plain-label predicate, named exactly.") — never
+// reproduced before this round: the plain 'margin' fixture below is a LONE bullet, no other
+// container. 'marginWithContainer' reproduces the adapters' literal fixture. Measured (this
+// teammate, scratch-only, real module): every one of the 20 margin shape/mode cells reports the
+// IDENTICAL verdict with or without the extra container — a separate correctly-formed container
+// never rescues (or worsens) a badly-labelled margin row, consistent with the "cannot rescue" half
+// of the whole-scan-abort claim pinned separately below — so expectedKindFor deliberately maps this
+// placement back onto the SAME `row.margin` expectations rather than a duplicated column.
+function buildTitleShapeFixture(placement, content, mode) {
+  const BUILDERS = {
+    margin: () => [`- ${content}`],
+    marginWithContainer: () => {
+      const cleanChild = mode === 'wiki' ? '  - [[guide/other|Other]]' : '  - [Other](guide/other.md)';
+      return ['- Admin', cleanChild, `- ${content}`];
+    },
+    nested: () => ['- Admin', `  - ${content}`],
+  };
+  if (!(placement in BUILDERS)) throw new Error(`TITLE_SHAPE_TABLE: unhandled placement '${placement}'`);
+  return BUILDERS[placement]();
+}
+
+function expectedKindFor(row, placement, mode) {
+  const KIND_KEY_BY_PLACEMENT = { margin: 'margin', marginWithContainer: 'margin', nested: 'nested' };
+  if (!(placement in KIND_KEY_BY_PLACEMENT)) throw new Error(`TITLE_SHAPE_TABLE: unhandled placement '${placement}'`);
+  return row[KIND_KEY_BY_PLACEMENT[placement]][mode];
+}
+
+for (const row of TITLE_SHAPE_TABLE) {
+  for (const mode of ['path', 'wiki']) {
+    const wikilink = wikilinkForMode(mode);
+    const content = wikilink ? `[[guide/items|${row.label}]]` : `[${row.label}](guide/items.md)`;
+    const target = row.target ? row.target(content) : wikilink ? 'guide/items' : 'guide/items.md';
+    for (const placement of ['margin', 'marginWithContainer', 'nested']) {
+      const expectedKind = expectedKindFor(row, placement, mode);
+      test(`verifyNonHeadingPlacement title-shape matrix [round-11]: ${row.shape} / ${mode} / ${placement} -> ${expectedKind}`, () => {
+        const indexLines = buildTitleShapeFixture(placement, content, mode);
+        const result = verifyNonHeadingPlacement(indexLines, target, 'Admin', { wikilink });
+        assert.equal(
+          result.kind,
+          expectedKind,
+          `${row.shape}/${mode}/${placement}: expected ${expectedKind}, got ${JSON.stringify(result)} (indexLines=${JSON.stringify(indexLines)})`,
+        );
+        if (expectedKind === 'misplaced') assert.equal(result.foundContainer, null);
+
+        // HIGH 3 (round-13): the adapters' own tables also publish `extractLabel` and
+        // `isPlainLabel` per row, not just the final verdict — changing the extracted spelling
+        // while keeping it non-plain would leave `result.kind` green and falsify those published
+        // columns silently. Margin placement only: that table is explicitly captioned "Measured
+        // for a row sitting AT THE LEFT MARGIN…", and isPlainLabel is a CONTAINER-only (indent-0)
+        // gate a nested child's own label never reaches (see the whole-scan-abort tests below).
+        // Asserted against MEASURED literals (this teammate, scratch-only, against the real
+        // module), never by calling extractLabel/isPlainLabel again here — re-deriving the
+        // expectation from the same functions under test would make this a tautology no mutant to
+        // either function could ever fail.
+        if (placement === 'margin') {
+          const expectedExtract = row.marginExtract[mode];
+          const actualExtract = extractLabel(content);
+          assert.equal(
+            actualExtract,
+            expectedExtract.label,
+            `${row.shape}/${mode}/margin: extractLabel drifted from the published table (got ${JSON.stringify(actualExtract)})`,
+          );
+          assert.equal(
+            isPlainLabel(actualExtract),
+            expectedExtract.plain,
+            `${row.shape}/${mode}/margin: isPlainLabel drifted from the published table (extractLabel=${JSON.stringify(actualExtract)})`,
+          );
+        }
+      });
+    }
+  }
+}
+
+// =================================================================================================
+// [1.11.0 round 11-b] adapter composition flow — the duplicate-insert warning (static-md.md /
+// obsidian-vault.md step-4 disclosure paragraph), UPDATED for the [1.11.0] membership guard added
+// to wireNestedListChapter's single-container branch (chapter-paths.mjs's SINGLE branch, "Refuse to
+// write a row this container already carries"). The title-shape matrix above deliberately drives
+// verifyNonHeadingPlacement with each shape's own MEASURED (sometimes hijacked) target, so it can
+// isolate placement-verification in isolation — that is NOT what the real adapter does. The real
+// adapter always searches for the chapter's REAL expected target. For the four shapes that corrupt
+// destination extraction (a nested link, a nested image, a reference link, or an unescaped ']' in
+// the title), that search finds NOTHING — even when the row already sits correctly nested under
+// the container — so step 0 reports the chapter absent and the adapter falls through to
+// wireNestedListChapter. What happens next now depends on whether the chapterLink the adapter asks
+// the writer to insert is byte-identical to the row already there:
+// - ARM 1 below drives the writer with a harmless, differently-worded link (isolating the general
+//   duplicate-insert risk in the abstract) — the guard cannot recognize two different-content rows
+//   as "the same", so it STILL inserts a second, duplicate row; the next run finds the fresh row
+//   and reports `ok`, while the original malformed row lingers as a silent, undetected duplicate
+//   (measured here against the real functions, and deliberately NOT cited to adapter prose — a
+//   comment quoting a document is a citation nothing re-checks when that document is rewritten).
+//   This arm is unaffected by the guard.
+// - ARM 2 below drives the writer the REALISTIC way (obsidian-vault.md: "display text is always the
+//   manifest entry's `title`") — the SAME manifest title generates the inserted link on every
+//   publish, so the "new" link is byte-identical to the malformed row already present. The guard
+//   now recognizes that and refuses (`{kind:'present'}`) instead of inserting — the unbounded row
+//   growth this section originally existed to document no longer happens for this arm. See the
+//   convergence tests following this loop for the repeated-publish property the fix guarantees.
+// This section drives the EXACT sequence — step 0, branch, write, effect, re-run — with the real
+// functions and the real (non-hijacked) target; the title-shape matrix above cannot cover it by
+// construction, because it passes the hijacked target on purpose to exercise the isPlainLabel path
+// instead.
+// =================================================================================================
+
+// MEDIUM 5 (round-13): derive shared shape labels from TITLE_SHAPE_TABLE rather than re-typing them
+// here and in CONTRAST_SHAPES below — a hand-duplicated label is exactly the drift risk that let
+// the two groups silently test different inputs for the "same" shape name.
+const LABEL_BY_SHAPE = Object.fromEntries(TITLE_SHAPE_TABLE.map((row) => [row.shape, row.label]));
+
+const DUPLICATE_INSERT_SHAPE_NAMES = ['nestedLink', 'nestedImage', 'referenceLink', 'unescapedBracket'];
+
+// Row counter for every duplication/convergence assertion below. Independent of the module's own
+// parse (extractLineTargets/parseNestedLabel) on purpose: a counter built from the functions under
+// test would only re-derive what they already believe, and would agree with a broken one.
+//
+// Exact-content, never a substring: a substring check matches a malformed row that merely CONTAINS
+// the destination text but never parses as it — precisely the laxness this release rejects for the
+// guard itself, and precisely the inputs this suite exists to discriminate.
+const countRowsCarrying = (lines, chapterLink) =>
+  lines.filter((line) => {
+    const bm = line.match(/^ *[-*+] (.*)$/);
+    return bm !== null && bm[1] === chapterLink;
+  }).length;
+
+for (const mode of ['path', 'wiki']) {
+  const wikilink = wikilinkForMode(mode);
+  const realTarget = wikilink ? 'guide/items' : 'guide/items.md';
+  for (const shape of DUPLICATE_INSERT_SHAPE_NAMES) {
+    const label = LABEL_BY_SHAPE[shape];
+    const malformedRow = wikilink ? `[[guide/items|${label}]]` : `[${label}](guide/items.md)`;
+
+    // ARM 1 — harmless writer link. A stale unrecognizable row plus a CLEAN current manifest title:
+    // the writer's own insert resolves, so exactly one lingering duplicate forms and the next run
+    // reports `ok` on the clean row. True only because `realLink`'s own display text ('Items') does
+    // not itself corrupt its target extraction — that is the whole difference from ARM 2 below.
+    //
+    // Asserted against the CODE and the measurement below, deliberately not against a quoted
+    // sentence from the adapter docs.
+    test(`adapter composition flow [round-11-b, mutation-confirmed]: ${shape} / ${mode}, already correctly nested, leaves exactly ONE lingering duplicate then converges (writer link harmless)`, () => {
+      const realLink = wikilink ? '[[guide/items|Items]]' : '[Items](guide/items.md)';
+      const indexLines = ['- Admin', `  - ${malformedRow}`];
+
+      // step 0: the adapter searches for the REAL target, never the shape's own hijacked one.
+      const step0 = locateChapterLine(indexLines, realTarget, { wikilink });
+      assert.equal(step0.matches.length, 0, "the malformed row's own corrupted destination must never satisfy the real target");
+
+      // branch: line-absent -> the adapter calls the writer. Its 1.11.0 membership guard does not
+      // fire here: the guard compares a child's content to `realLink` VERBATIM, and the stale row
+      // carries a different label, so this insert is correct rather than a missed duplicate.
+      const write = wireNestedListChapter(indexLines, 'Admin', realLink);
+      assert.equal(write.kind, 'inserted');
+      assert.equal(write.created, false, 'the "Admin" container already exists — this is a CHILD insert, not a create');
+
+      // effect: row count grew by exactly one, and the OLD malformed row survives verbatim — this
+      // is a DUPLICATE, never a replacement. Mutation-confirmed (scratch-only, never run against
+      // the shared tree): a mutant that gives wireNestedListChapter's single-container branch a
+      // destination-substring membership check flips every insert assertion in BOTH this arm and
+      // the target-breaking arm below — measured: the malformed row already contains the REAL
+      // destination text verbatim (it is simply never PARSED as the target), so a substring check
+      // against `realLink`'s destination ('guide/items.md'/'guide/items') matches here too, even
+      // though `realLink`'s own display text ('Items') shares nothing with the malformed row's
+      // label. `write.newLines` comes back byte-identical to `indexLines` (grew: 0, not 1) under
+      // that mutant, the re-run below finds 0 matches instead of 1, and the verdict comes back
+      // `inconsistent` instead of `ok`. The five contrast fixtures below never call
+      // wireNestedListChapter at all, so that same mutant leaves every one of them unchanged.
+      assert.equal(
+        write.newLines.length,
+        indexLines.length + 1,
+        `expected exactly one row inserted, got ${JSON.stringify(write.newLines)}`,
+      );
+      assert.ok(write.newLines.includes(`  - ${malformedRow}`), 'the original malformed row must survive untouched, not be replaced');
+
+      // re-run: the freshly-inserted row IS found this time and reports ok — completing SILENTLY
+      // on a now-duplicated index; nothing here ever flags the earlier, still-present row.
+      const rerun = locateChapterLine(write.newLines, realTarget, { wikilink });
+      assert.equal(rerun.matches.length, 1);
+      const verdict = verifyNonHeadingPlacement(write.newLines, realTarget, 'Admin', { wikilink });
+      assert.deepEqual(verdict, { kind: 'ok' });
+    });
+
+    // ARM 2 — target-breaking writer link (BLOCKER 1, round-13; CLOSED by the [1.11.0] membership
+    // guard in wireNestedListChapter's SINGLE branch): the adapters build the inserted child's link
+    // from the chapter's manifest `title` (obsidian-vault.md: "display text is always the manifest
+    // entry's `title`, never a slug or a hand-typed label" — that sentence lives in obsidian-vault.md
+    // only, 1x, and has never appeared in static-md.md) — never from a constant safe string as
+    // ARM 1 above drives it. When that title carries the SAME corrupting shape that broke the
+    // original row — the realistic case, since it is the identical manifest field driving both the
+    // original row and any fresh insert for this chapter — the freshly-inserted row's own
+    // destination extraction WOULD be hijacked too, exactly like the original. Before the guard,
+    // step 0 never found the fresh row either, so a driver following the documented recipe took the
+    // line-absent branch again and again, and row growth repeated without bound.
+    //
+    // The guard closes exactly this case: because the SAME manifest title drives the insert on
+    // every publish, the "new" link the writer is asked to write is byte-identical to the malformed
+    // row already sitting there — so the guard's own verbatim content check fires on the very FIRST
+    // call, before any insert happens, and the writer reports `{kind:'present'}` instead. Nothing is
+    // ever written; the file never changes. This is deliberately NOT the same as `ok`: step 0 still
+    // cannot resolve the row (its destination is still corrupted), so a driver would still see this
+    // chapter as unwired and must halt for manual repair — the guard trades unbounded silent growth
+    // for a stable, detectable non-convergence, never a false completion. The harmless-arm test
+    // above is unaffected by design: it drives the writer with a DIFFERENT, constant safe link, so
+    // the two rows' content never matches and the guard never fires. See the convergence tests
+    // following this loop for the repeated-publish property this fix actually guarantees.
+    test(`adapter composition flow [round-11-b, mutation-confirmed]: ${shape} / ${mode}, already correctly nested, writer link target-breaking now converges (present, byte-identical, never duplicates)`, () => {
+      const breakingLink = malformedRow; // same manifest title drives both the row and any insert
+      const indexLines = ['- Admin', `  - ${malformedRow}`];
+
+      const step0 = locateChapterLine(indexLines, realTarget, { wikilink });
+      assert.equal(step0.matches.length, 0, "the malformed row's own corrupted destination must never satisfy the real target");
+
+      // The guard fires on the FIRST call: the existing child's content already equals chapterLink
+      // verbatim (the same manifest title drives both), so the writer refuses instead of inserting
+      // a duplicate that step 0 could never itself have detected.
+      const write1 = wireNestedListChapter(indexLines, 'Admin', breakingLink);
+      assert.equal(write1.kind, 'present', 'the guard must recognize the existing row as this exact chapterLink and refuse to insert');
+      assert.equal(write1.index, 1, 'the existing malformed child sits at index 1 of indexLines');
+      assert.ok(
+        !('newLines' in write1),
+        'a present outcome carries no newLines: this is how the caller tells present apart from inserted without inspecting content',
+      );
+
+      // Convergence: nothing was ever persisted (there is nothing TO persist), so a driver repeating
+      // the identical publish keeps re-presenting the SAME unchanged indexLines — and gets the SAME
+      // present verdict every time, never a second or third insert.
+      for (let i = 0; i < 4; i += 1) {
+        const repeat = wireNestedListChapter(indexLines, 'Admin', breakingLink);
+        assert.deepEqual(repeat, { kind: 'present', index: 1 }, `run ${i + 2}: expected the SAME present verdict, got ${JSON.stringify(repeat)}`);
+      }
+
+      // The guard does not repair the underlying blind spot — it only stops the write loop from
+      // making it WORSE. Step 0 still cannot resolve this row on its own terms, so the caller must
+      // still surface a manual halt (present + step-0-absent), never silently treat this as done.
+      const step0Still = locateChapterLine(indexLines, realTarget, { wikilink });
+      assert.equal(
+        step0Still.matches.length,
+        0,
+        'the underlying target-parse blind spot is unchanged — only the runaway duplication is fixed',
+      );
+    });
+  }
+}
+
+// =================================================================================================
+// [1.11.0] CONVERGENCE — the test whose absence let the unbounded-duplicate-insert bug ship. ARM 2
+// above pins the fix at a SINGLE call (write1.kind === 'present'); it does not by itself prove the
+// bug is CLOSED across repeated publishes — nothing before this test drove the actual adapter loop
+// (step 0 -> absent -> wireNestedListChapter) more than once against an unchanged manifest with a
+// target-breaking title. This section drives exactly that, starting from an EMPTY container (no
+// existing chapter row at all — the realistic first-publish state), for 5 consecutive publishes,
+// and watches the row count directly rather than trusting a single before/after snapshot. Before the
+// guard this would have failed outright: run 1 inserts (row count 1, as expected), but run 2 would
+// insert AGAIN (row count 2, the bug), and every run after that would grow the count further,
+// unbounded. After the guard: run 1 inserts and every run after it reports `present` against the
+// SAME unchanged indexLines (nothing is ever persisted once the guard starts firing), so the row
+// count is exactly 1 from run 1 onward and never grows again.
+// =================================================================================================
+
+for (const mode of ['path', 'wiki']) {
+  const wikilink = wikilinkForMode(mode);
+  const realTarget = wikilink ? 'guide/items' : 'guide/items.md';
+  for (const shape of DUPLICATE_INSERT_SHAPE_NAMES) {
+    const label = LABEL_BY_SHAPE[shape];
+    const chapterLink = wikilink ? `[[guide/items|${label}]]` : `[${label}](guide/items.md)`;
+
+    test(`adapter composition flow convergence [round-11-b follow-up]: ${shape} / ${mode}, 5 publishes of an unchanged manifest converge to exactly ONE row from the first run onward`, () => {
+      let current = ['- Admin']; // empty container, no existing chapter row yet — the first publish
+
+      assert.equal(countRowsCarrying(current, chapterLink), 0, 'sanity: no row exists before the first publish');
+
+      for (let run = 1; run <= 5; run += 1) {
+        // step 0: the adapter's own idempotency check over the REAL target. Always absent here —
+        // this chapter title's own corrupted destination extraction never resolves to realTarget,
+        // neither on the original row nor on any fresh row this shape would ever produce.
+        const step0 = locateChapterLine(current, realTarget, { wikilink });
+        assert.equal(
+          step0.matches.length,
+          0,
+          `run ${run}: step 0 must report absent — that is exactly the blind spot the guard covers, not repairs`,
+        );
+
+        const write = wireNestedListChapter(current, 'Admin', chapterLink);
+        // Only an 'inserted' outcome is ever persisted; a 'present' outcome means the caller writes
+        // nothing back, so `current` stays exactly what it was — itself part of the invariant this
+        // test pins (no silent, unrecorded progress).
+        if (write.kind === 'inserted') current = write.newLines;
+
+        assert.equal(
+          countRowsCarrying(current, chapterLink),
+          1,
+          `run ${run}: expected exactly one row for this chapter, got ${JSON.stringify(current)}`,
+        );
+      }
+    });
+  }
+}
+
+// -------------------------------------------------------------------------------------------------
+// Contrast: a title that merely RENDERS non-plain (or decodes to plain in path mode) WITHOUT
+// corrupting its own row's target extraction. Precision note (measured directly here, not taken
+// from the adapter prose as given): these three shapes do NOT share one verdict — path-mode
+// backslashEscape decodes to a plain label and is `misplaced` (round 9's own finding, already
+// pinned by the title-shape matrix above); ampersand/emphasis stay non-plain in both modes and are
+// `unverifiable`. What they DO share, and what this group exists to isolate, is the one property
+// that actually rules out the duplicate-insert bug above: step 0 finds every one of them PRESENT
+// (never absent), because none of their own link destinations were ever corrupted — so the
+// writer's blind-insert branch is never reached at all, regardless of which of the two verdicts
+// placement-verification lands on afterward.
+// -------------------------------------------------------------------------------------------------
+
+const CONTRAST_SHAPES = [
+  { name: 'backslashEscape', mode: 'path', expected: { kind: 'misplaced', foundContainer: null } },
+  { name: 'ampersand', mode: 'path', expected: { kind: 'unverifiable' } },
+  { name: 'ampersand', mode: 'wiki', expected: { kind: 'unverifiable' } },
+  { name: 'emphasis', mode: 'path', expected: { kind: 'unverifiable' } },
+  { name: 'emphasis', mode: 'wiki', expected: { kind: 'unverifiable' } },
+];
+
+for (const { name, mode, expected } of CONTRAST_SHAPES) {
+  const wikilink = wikilinkForMode(mode);
+  const realTarget = wikilink ? 'guide/items' : 'guide/items.md';
+  const label = LABEL_BY_SHAPE[name];
+  const row = wikilink ? `[[guide/items|${label}]]` : `[${label}](guide/items.md)`;
+  test(`adapter composition flow [round-11-b]: contrast, ${name} / ${mode}, target still resolves -> found, never duplicated`, () => {
+    const indexLines = [`- ${row}`]; // left margin, matching the adapters' own contrast framing
+    const step0 = locateChapterLine(indexLines, realTarget, { wikilink });
+    assert.equal(
+      step0.matches.length,
+      1,
+      "the row's own target resolves correctly, so it is FOUND -- the writer's blind-insert branch is never reachable from here, regardless of placement verdict",
+    );
+    const verdict = verifyNonHeadingPlacement(indexLines, realTarget, 'Admin', { wikilink });
+    assert.deepEqual(verdict, expected);
+  });
+}
+
+// =================================================================================================
+// [1.11.0] membership guard — contrast cases that must NOT regress. The ARM 2 / CONVERGENCE tests
+// above pin what the guard DOES catch (an exact-content resubmission); the cases below pin the
+// guard's SCOPE — every shape of call it must leave alone, asserted explicitly rather than assumed.
+// =================================================================================================
+
+for (const mode of ['path', 'wiki']) {
+  const wikilink = wikilinkForMode(mode);
+  const realTarget = wikilink ? 'guide/items' : 'guide/items.md';
+  const resolvableLink = wikilink ? '[[guide/items|Items]]' : '[Items](guide/items.md)';
+  test(`membership guard contrast [round-11-b]: ${mode}, a chapter link that already resolves is found by step 0 alone -- the writer (and its guard) is never reached`, () => {
+    const indexLines = ['- Admin', `  - ${resolvableLink}`];
+    const step0 = locateChapterLine(indexLines, realTarget, { wikilink });
+    assert.equal(step0.present, true, 'a correctly-resolving row must be found by step 0 alone');
+    assert.equal(step0.matches.length, 1);
+    // Per the documented recipe (obsidian-vault.md/static-md.md), step-0-present short-circuits
+    // straight to placement verification; wireNestedListChapter is never invoked on this path at
+    // all, so there is nothing here for the guard to either catch or miss.
+    const verdict = verifyNonHeadingPlacement(indexLines, realTarget, 'Admin', { wikilink });
+    assert.deepEqual(verdict, { kind: 'ok' }, 'placement verification must confirm ok without ever inserting');
+  });
+}
+
+test('membership guard contrast [round-11-b]: a broken existing row plus a CLEAN manifest title still gets its own resolvable row inserted -- the guard must not suppress an insert when the two rows\' content differs', () => {
+  const brokenRow = '[A [nested](x) B](guide/items.md)'; // nestedLink shape -- corrupts its OWN target
+  const cleanLink = '[Items](guide/items.md)'; // a differently-worded, resolvable insert
+  const indexLines = ['- Admin', `  - ${brokenRow}`];
+
+  const write = wireNestedListChapter(indexLines, 'Admin', cleanLink);
+  assert.equal(
+    write.kind,
+    'inserted',
+    'the guard only refuses an EXACT verbatim resubmission -- a differently-worded clean link must still be inserted',
+  );
+  assert.equal(write.newLines.length, indexLines.length + 1);
+  assert.ok(write.newLines.includes(`  - ${brokenRow}`), 'the broken row must survive untouched, not be replaced');
+  assert.ok(write.newLines.includes(`  - ${cleanLink}`), 'the clean row must be freshly inserted');
+
+  const rerun = locateChapterLine(write.newLines, 'guide/items.md', { wikilink: false });
+  assert.equal(rerun.matches.length, 1, 'only the clean row resolves; the broken row stays invisible to step 0, exactly as documented');
+  const verdict = verifyNonHeadingPlacement(write.newLines, 'guide/items.md', 'Admin', { wikilink: false });
+  assert.deepEqual(verdict, { kind: 'ok' });
+});
+
+test('membership guard contrast [round-11-b]: the ZERO-container CREATE branch is unaffected, even when the exact chapterLink text already exists under an UNRELATED container', () => {
+  const chapterLink = '[Items](guide/items.md)';
+  // The exact link text already exists, but under "Other", not "Admin" -- no "Admin" container
+  // exists at all, so this must fall straight through to the ZERO create path. The guard lives
+  // entirely inside the containers.length === 1 branch (see wireNestedListChapter's SINGLE
+  // branch) and is structurally unreachable here.
+  const indexLines = ['- Other', `  - ${chapterLink}`];
+  const write = wireNestedListChapter(indexLines, 'Admin', chapterLink);
+  assert.equal(write.kind, 'inserted');
+  assert.equal(write.created, true, 'a fresh "Admin" container must be created, not confused with the unrelated "Other" one');
+  assert.ok(write.newLines.includes('- Admin'), 'the new container line must be spliced in');
+  assert.equal(
+    countRowsCarrying(write.newLines, chapterLink),
+    2,
+    'two rows now carry this exact content -- one under Other (untouched), one freshly created under Admin',
+  );
+});
+
+test('membership guard contrast [round-11-b]: the {kind:"multiple"} halt is unaffected -- two "Admin" containers each already carrying this exact chapterLink still halt, never a false present', () => {
+  const chapterLink = '[Items](guide/items.md)';
+  const indexLines = ['- Admin', `  - ${chapterLink}`, '- Admin', `  - ${chapterLink}`];
+  const write = wireNestedListChapter(indexLines, 'Admin', chapterLink);
+  assert.equal(
+    write.kind,
+    'multiple',
+    'container ambiguity must halt BEFORE the single-container membership guard is ever consulted',
+  );
+  assert.equal(write.matches.length, 2);
+});
+
+test('membership guard contrast [round-11-b]: the present path is CRLF-faithful -- a CRLF file with an exact verbatim child still refuses via present, not a false insert', () => {
+  const chapterLink = '[Items](guide/items.md)';
+  // Mirrors the caller's own split('\n') over a CRLF file on disk (chapter-paths.mjs's own contract:
+  // "a CRLF file leaves a trailing '\r' per elem").
+  const raw = ['- Admin', `  - ${chapterLink}`].join('\r\n') + '\r\n';
+  const indexLines = raw.split('\n');
+  const write = wireNestedListChapter(indexLines, 'Admin', chapterLink);
+  assert.equal(write.kind, 'present');
+  assert.equal(write.index, 1);
+  assert.ok(
+    !('newLines' in write),
+    'present carries no newLines -- the caller can tell present apart from inserted without inspecting content',
+  );
+});
+
+test('membership guard contrast [round-11-b]: the present path is terminal-newline-faithful -- a file with NO trailing newline still refuses via present', () => {
+  const chapterLink = '[Items](guide/items.md)';
+  const raw = ['- Admin', `  - ${chapterLink}`].join('\n'); // no trailing newline
+  const indexLines = raw.split('\n');
+  const write = wireNestedListChapter(indexLines, 'Admin', chapterLink);
+  assert.equal(write.kind, 'present');
+  assert.equal(write.index, 1);
+  assert.ok(!('newLines' in write), 'present carries no newLines regardless of the source file\'s terminal-newline shape');
+});
+
+// =================================================================================================
+// [1.11.0] The fixed-probe shape gate accepts `present` as well as `inserted`, and until this test
+// nothing executed that. Adding a fourth writer outcome silently widened the gate: rule 4 was
+// written as a negative list (decline `not-a-list`/`multiple`), so `present` joined the accepted set
+// with no code change and no test change — while the class sentence pinned verbatim in FOUR files
+// still said `inserted` alone. Four green pins, one false claim, exactly the shape this release
+// keeps finding.
+//
+// The fixture is the one the reviewer constructed: an index that already carries the probe row, so
+// the writer's membership guard fires on the probe itself. Accepting it is CORRECT — `present` means
+// the writer recognized the shape and resolved exactly one container, which is all rule 4 asks, and
+// the probe's emission is discarded either way — but it must be asserted, not inherited.
+// =================================================================================================
+
+test('verifyNonHeadingPlacement [1.11.0]: the fixed-probe shape gate accepts a `present` verdict, not only `inserted`', () => {
+  const probeLink = '[probe](__verify-non-heading-placement-probe__.md)';
+  const indexLines = ['- Admin', `  - ${probeLink}`, '  - [Items](guide/items.md)'];
+
+  // Precondition: the probe row really does make the writer answer `present` for this index.
+  // Without this the test could pass while never exercising the widened branch at all.
+  const probeVerdict = wireNestedListChapter(indexLines, 'Admin', probeLink);
+  assert.equal(probeVerdict.kind, 'present', 'fixture must drive the writer to `present`, not `inserted`');
+  assert.equal(probeVerdict.index, 1, 'the probe row is the one recognized');
+
+  // The chapter itself is correctly placed under the container named by group_title, so the verdict
+  // must be `ok` — the gate must not answer `unverifiable` merely because the probe was recognized.
+  const verdict = verifyNonHeadingPlacement(indexLines, 'guide/items.md', 'Admin');
+  assert.deepEqual(verdict, { kind: 'ok' });
+});
+
+test('verifyNonHeadingPlacement [1.11.0]: a `present` probe verdict still reports `misplaced` when the chapter sits elsewhere', () => {
+  // Same widened gate, opposite placement: passing rule 4 must not short-circuit rule 5's comparison.
+  const probeLink = '[probe](__verify-non-heading-placement-probe__.md)';
+  const indexLines = ['- Admin', `  - ${probeLink}`, '- Other', '  - [Items](guide/items.md)'];
+
+  assert.equal(wireNestedListChapter(indexLines, 'Admin', probeLink).kind, 'present');
+  assert.deepEqual(verifyNonHeadingPlacement(indexLines, 'guide/items.md', 'Admin'), {
+    kind: 'misplaced',
+    foundContainer: 'Other',
+  });
+});
+
+// =================================================================================================
+// [1.11.0] The `present` outcome's TRIGGER CONDITION differs by link mode, and obsidian-vault.md now
+// states that difference as fact. Nothing executed it until this table, which is the whole point:
+// the prose in this release has been measured false four times, every time by a probe that varied
+// the obviously-relevant dimension while an unlisted one decided the answer. This one nearly shipped
+// the same way. The lead measured six bracket-mangling titles in wikilinks mode, saw all six
+// recognized by step 0, and briefed a teammate that no wikilinks route to `present` had been found;
+// the teammate refuted it with `A]B`, and the lead reproduced the refutation independently.
+//
+// The dimension the lead's six shapes held fixed, without listing it: WHERE the `]` sits relative to
+// the wikilink terminator. WIKILINK_TARGET_RE (`:482`) is /\[\[([^\]|#^]+)[^\]]*\]\]/ — after the
+// target it accepts only non-`]` characters up to a closing `]]`. So a title containing `]]`, or a
+// `]` adjacent to the closing pair, lets the match terminate early and step 0 still finds the row;
+// an isolated `]` cannot be consumed and the whole match fails. Path mode has no such escape: the
+// destination search stops at the FIRST `]`, so any `]` at all breaks it. Hence titles that break
+// path mode but not wikilinks mode, which is exactly the asymmetry the adapter documents.
+//
+// Expectations below are MEASURED VALUES, hardcoded. They are deliberately not derived at test time
+// from the same regex the code uses — a table that recomputed them would agree with any regex,
+// including a broken one, and would have agreed with the lead's wrong claim too.
+//
+// Red-before-green, measured against two independent baselines (scratch copies, never the shared
+// tree). Against SHIPPED 1.10.0: 13 of the 22 cells go red — every `present` expectation reports
+// `inserted` instead, which is the unbounded-growth defect itself, while all 9 `step0` cells pass
+// unchanged (correct: the guard does not touch the path step 0 already recognizes). Against a mutant
+// that loosens WIKILINK_TARGET_RE's post-target run to accept `]` (`[^\]]*` -> `[\s\S]*?`): exactly
+// the 5 wiki cells asserting `present` flip to step0-recognized, and NOTHING else moves — so those
+// cells pin the mode asymmetry specifically, not merely the guard's existence.
+// =================================================================================================
+
+// Keyed rows rather than positional triples, matching CONTRAST_SHAPES above: `why` is data, so a red
+// cell explains in its own name why that title was expected to break, without opening the table.
+const PRESENT_TRIGGER_TABLE = [
+  { title: 'A]B', path: 'present', wiki: 'present', why: "isolated ']' breaks both" },
+  { title: 'Items]Beta', path: 'present', wiki: 'present', why: "isolated ']' breaks both" },
+  { title: 'X]Y]Z', path: 'present', wiki: 'present', why: "two isolated ']' break both" },
+  { title: '] Items', path: 'present', wiki: 'present', why: "leading ']' breaks both" },
+  { title: 'Items] [Beta]', path: 'present', wiki: 'present', why: "first ']' is isolated" },
+  { title: 'Items [beta]', path: 'present', wiki: 'step0', why: "trailing ']' is adjacent to the wiki terminator" },
+  { title: 'Items ]] beta', path: 'present', wiki: 'step0', why: "contains ']]', terminating the wikilink early" },
+  { title: 'Items ]]]] x', path: 'present', wiki: 'step0', why: "longer ']' run, still terminates early" },
+  { title: 'Items | beta', path: 'step0', wiki: 'step0', why: "no ']' at all" },
+  { title: 'Items [[beta', path: 'step0', wiki: 'step0', why: "no ']' at all" },
+  { title: 'Items', path: 'step0', wiki: 'step0', why: 'plain control' },
+];
+
+for (const row of PRESENT_TRIGGER_TABLE) {
+  for (const mode of ['path', 'wiki']) {
+    const { title, why } = row;
+    const expected = row[mode];
+    test(`present trigger condition [1.11.0]: ${JSON.stringify(title)} / ${mode} -> ${expected} (${why})`, () => {
+      const wikilink = mode === 'wiki';
+      const target = wikilink ? 'admin/items' : 'admin/items.md';
+      const chapterLink = wikilink ? `[[admin/items|${title}]]` : `[${title}](admin/items.md)`;
+      const seed = wikilink
+        ? ['# Summary', '', '- Admin', '  - [[admin/overview|Overview]]', '']
+        : ['# Summary', '', '- Admin', '  - [Overview](admin/overview.md)', ''];
+
+      // Run 1 always inserts: the row is genuinely absent from a fresh index in both modes.
+      const first = wireNestedListChapter(seed, 'Admin', chapterLink);
+      assert.equal(first.kind, 'inserted', 'the first publish always writes the row');
+
+      // Run 2 is the discriminator: either step 0 recognizes what run 1 wrote (and the adapter
+      // never calls the writer), or it does not and the writer's own guard must catch it.
+      const after = first.newLines;
+      const step0 = locateChapterLine(after, target, { wikilink });
+      if (expected === 'step0') {
+        assert.equal(step0.present, true, 'step 0 must recognize the row this title produces');
+      } else {
+        assert.equal(step0.present, false, 'this title must defeat step 0 — otherwise the guard is untested here');
+        const second = wireNestedListChapter(after, 'Admin', chapterLink);
+        assert.equal(second.kind, 'present', 'the writer must refuse to write a second copy');
+      }
+
+      // Run 1 wrote exactly one row. This is NOT the convergence property — that is proven over
+      // five publishes by the CONVERGENCE section above, and claiming it here would overstate what
+      // a single write asserts.
+      assert.equal(
+        countRowsCarrying(after, chapterLink),
+        1,
+        'the first publish writes exactly one row carrying this link',
+      );
+    });
+  }
+}
+
+test('present-halt recovery [1.11.0]: the stated positive title class converges in both link modes on every emitted marker', () => {
+  // The old halt said only "no Markdown markup, backslash escapes, or HTML entities". U+2028 and
+  // U+2029 satisfy those words but the re-read postcondition refuses either one in a title. The
+  // replacement states the narrower positive class below. Drive it from a REAL `present` state,
+  // then make a later control child select each possible marker for the recovery row; otherwise a
+  // fresh-index write would miss the state transition whose halt text this test protects.
+  const recoveryTitles = ['Alpha', 'Alpha Beta', 'Title É ٢', 'Title 東 ２０２６', 'Title Ж ٣', 'Title א 42'];
+  const recoveryClass = /^[\p{L}\p{N}]+(?: [\p{L}\p{N}]+)*$/u;
+  const separators = [0x2028, 0x2029];
+
+  for (const mode of ['path', 'wiki']) {
+    const wikilink = mode === 'wiki';
+    const target = wikilink ? 'admin/items' : 'admin/items.md';
+    const formatLink = (title, leaf = 'items') =>
+      wikilink ? `[[admin/${leaf}|${title}]]` : `[${title}](<admin/${leaf}.md>)`;
+    const breakingLink = wikilink ? `[[${target}|A]B]]` : `[A]B](<${target}>)`;
+
+    for (const marker of ['-', '*', '+']) {
+      const seed = [
+        `${marker} Admin`,
+        `  - ${breakingLink}`,
+        `  ${marker} ${formatLink('Overview', 'overview')}`,
+        '',
+      ];
+      assert.equal(
+        wireNestedListChapter(seed, 'Admin', breakingLink).kind,
+        'present',
+        `${mode}/${marker}: the recovery probe must start from the halt it claims to test`,
+      );
+
+      for (const title of recoveryTitles) {
+        assert.match(title, recoveryClass, `${JSON.stringify(title)} must satisfy the stated class`);
+        const chapterLink = formatLink(title);
+        const recovered = wireNestedListChapter(seed, 'Admin', chapterLink);
+        assert.equal(recovered.kind, 'inserted', `${mode}/${marker}/${JSON.stringify(title)}: recovery writes`);
+        assert.ok(
+          recovered.newLines.includes(`  ${marker} ${chapterLink}`),
+          `${mode}/${marker}/${JSON.stringify(title)}: the intended marker is the one measured`,
+        );
+        assert.equal(
+          locateChapterLine(recovered.newLines, target, { wikilink }).matches.length,
+          1,
+          `${mode}/${marker}/${JSON.stringify(title)}: the very next run recognizes exactly one row`,
+        );
+        assert.deepEqual(
+          verifyNonHeadingPlacement(recovered.newLines, target, 'Admin', { wikilink }),
+          { kind: 'ok' },
+          `${mode}/${marker}/${JSON.stringify(title)}: the next run proceeds through verified placement`,
+        );
+      }
+
+      for (const separator of separators) {
+        const title = `Line${String.fromCodePoint(separator)}Separator`;
+        assert.equal(recoveryClass.test(title), false, `U+${separator.toString(16)} is outside the new class`);
+        assert.deepEqual(
+          wireNestedListChapter(seed, 'Admin', formatLink(title)),
+          { kind: 'unwritable', field: 'title' },
+          `${mode}/${marker}/U+${separator.toString(16)}: the old broad wording repeats into unwritable`,
+        );
+      }
+    }
+  }
+});
+
+// =================================================================================================
+// [1.11.0 round 13] BLOCKER 2(c) — the whole-scan-abort claim (obsidian-vault.md / static-md.md,
+// "The plain-label predicate, named exactly."): the container-owner scan applies `isPlainLabel` to
+// EVERY indent-0 bullet in the file, not only the row under test, so a single non-plain indent-0
+// label ANYWHERE in the file declines the WHOLE scan — an otherwise-clean 'Admin' container
+// elsewhere cannot rescue a badly-labelled row sitting at the left margin. Untested before this
+// round: every `not-a-list` fixture elsewhere in this file is a single-bullet file, so nothing
+// proved the claim is about indent-0 specifically rather than about labels in general. Measured
+// directly here (this teammate, real module) and mutation-confirmed: a mutant that narrows the
+// indent-0 plain-label gate to only the candidate matching `wanted` (i.e. checks a row's own
+// labelling only when it could BE the target container, never every other indent-0 bullet) flips
+// ONLY the first test below (from `unverifiable` to `ok`) and leaves the contrast/complement tests
+// unchanged — see this teammate's report for the measured run.
+// =================================================================================================
+
+test('verifyNonHeadingPlacement whole-scan-abort [round-13, BLOCKER 2c]: a non-plain indent-0 label ANYWHERE declines the whole scan, even alongside a clean container', () => {
+  // A clean, correctly-nested 'Admin' container with its own chapter row, PLUS an unrelated
+  // non-plain indent-0 bullet ('*Other*') sitting elsewhere in the same file.
+  const indexLines = ['- Admin', '  - [Items](<guide/items.md>)', '- *Other*'];
+  const verdict = verifyNonHeadingPlacement(indexLines, 'guide/items.md', 'Admin', { wikilink: false });
+  assert.deepEqual(
+    verdict,
+    { kind: 'unverifiable' },
+    `expected the whole scan to decline (an otherwise-clean 'Admin' container cannot rescue this), got ${JSON.stringify(verdict)}`,
+  );
+});
+
+test('verifyNonHeadingPlacement whole-scan-abort [round-13, BLOCKER 2c]: contrast — WITHOUT the extra non-plain row, the same clean container reports ok', () => {
+  const indexLines = ['- Admin', '  - [Items](<guide/items.md>)'];
+  const verdict = verifyNonHeadingPlacement(indexLines, 'guide/items.md', 'Admin', { wikilink: false });
+  assert.deepEqual(verdict, { kind: 'ok' }, `expected ok without the extra row, got ${JSON.stringify(verdict)}`);
+});
+
+test('verifyNonHeadingPlacement whole-scan-abort [round-13, BLOCKER 2c]: the complement — a non-plain CHILD label (not indent-0) does NOT decline the scan', () => {
+  // The chapter's own row is correctly nested under 'Admin'; a SECOND, unrelated child under the
+  // SAME container carries a non-plain label ('*Other Child*') — isPlainLabel is a CONTAINER-only
+  // (indent-0) gate, so a non-plain label at indent 1 must not trigger the whole-scan decline. This
+  // is what makes the claim about indent-0 specifically, not about labels in general.
+  const indexLines = ['- Admin', '  - [Items](<guide/items.md>)', '  - *Other Child*'];
+  const verdict = verifyNonHeadingPlacement(indexLines, 'guide/items.md', 'Admin', { wikilink: false });
+  assert.deepEqual(
+    verdict,
+    { kind: 'ok' },
+    `expected a non-plain CHILD label not to decline the scan, got ${JSON.stringify(verdict)}`,
+  );
+});
+
 // =================================================================================================
 // D1 — validateGroups
 // =================================================================================================
@@ -1379,8 +2795,8 @@ test('validateGroups: THREE-occurrence duplicate slug still halts exactly ONCE [
 });
 
 test('validateGroups: duplicate-slug gate sees the FULL entry list in an anyGroup manifest — flat-vs-flat AND grouped-vs-flat pairs [round-18]', () => {
-  // Round-18 finding: `validateGroups`'s grouped branch calls `duplicateSlugHalts(entries, ...)`
-  // on the FULL entry list (chapter-paths.mjs:373) — every existing duplicate-in-a-grouped-
+  // Round-18 finding: `validateGroups`'s grouped branch, gate 3, calls `duplicateSlugHalts(entries,
+  // ...)` on the FULL entry list — every existing duplicate-in-a-grouped-
   // manifest fixture used ONLY grouped entries for the duplicated slug, so a mutant filtering to
   // `entries.filter(e => e.group !== undefined)` before the call stayed fully green. That mutant
   // silently stops checking flat entries in an anyGroup manifest: a grouped-vs-flat slug
@@ -2710,4 +4126,263 @@ test('decoy resistance: a commented-out real binding + a non-literal RHS decoy d
   assert.equal(countMatches(new RegExp(bindingAnchorSource(), 'm'), snippet), 1);
   // But the real line's RHS is not chapterAssetDir(, so the RHS pin correctly fails.
   assert.equal(countMatches(new RegExp(bindingRhsSource(), 'm'), snippet), 0);
+});
+
+// =================================================================================================
+// [1.11.0] THE RE-READ POSTCONDITION. Until this release the writer emitted whatever the caller's
+// chapterLink and group_title produced — a plain-label check on the container label, none at all on
+// the child row. A manifest value that is legal everywhere upstream therefore got written into a
+// clean file, and THIS SAME SCANNER refused that file on every later run: nested-list automation
+// died for every chapter and every group in it, permanently, from an index the tool itself wrote.
+//
+// The writer now re-reads the bytes it is about to hand back through its own reader and, if that
+// reader refuses them, writes NOTHING and returns {kind:'unwritable', field}. `field` names the
+// manifest value at fault, derived by substituting a known-good stand-in for one emitted line at a
+// time — not by inspecting the value — so it stays right for causes nobody has enumerated.
+//
+// The tables below were the six causes' defect pins; they are now the refusal's coverage. Every cell
+// was re-measured against the real module after the fix. The marker CONTROLS are the load-bearing
+// part: a postcondition that refused everything would also make these pass, so each group_title is
+// asserted to still WRITE on the markers where it was always harmless. The refusal is exactly as
+// marker-scoped as the defect was.
+// =================================================================================================
+
+const UNWRITABLE_TITLES = [
+  { title: 'Use `--force`', why: 'inline code' },
+  { title: 'Old <!-- x --> notes', why: 'HTML comment' },
+  // NOT a fence, despite how it reads. Measured: a title's backtick run blanks only up to the
+  // matching run on the NEXT line (` tail` survives), which is the code-SPAN rule; a real fence
+  // needs the run at LINE START and swallows to EOF. A title can never be at line start — the row
+  // is always `<indent><marker> [<title>](<target>)`. Same mechanism as the single-backtick row
+  // above, kept as its own case only because the triple run is what an operator recognizes.
+  { title: 'Code ``` here', why: 'a triple backtick run (still a code span, not a fence)' },
+  // Written as escapes on purpose: a literal here would be invisible in this source too, which is
+  // exactly why these two were the last of the six to be found.
+  { title: `Plans${String.fromCodePoint(0x2028)}Beta`, why: 'U+2028 LINE SEPARATOR' },
+  { title: `Plans${String.fromCodePoint(0x2029)}Beta`, why: 'U+2029 PARAGRAPH SEPARATOR' },
+];
+
+// Each value is refused on the markers where it used to poison the file and still WRITES on the
+// others. Both halves are asserted; the second is what proves the postcondition is not a blunt
+// refuse-everything.
+const UNWRITABLE_GROUP_TITLES = [
+  { groupTitle: 'Sales/Marketing', refusedOn: ['*', '+'], writesOn: ['-'], why: 'bare-path bullet (contains /)' },
+  { groupTitle: 'billing.md', refusedOn: ['*', '+'], writesOn: ['-'], why: 'bare-path bullet (ends .md)' },
+  { groupTitle: 'FAQ: basics', refusedOn: ['-'], writesOn: ['*', '+'], why: 'reads back as an MkDocs `- key: value` nav row' },
+  { groupTitle: 'Admin:', refusedOn: ['-'], writesOn: ['*', '+'], why: 'reads back as an MkDocs nav row' },
+  { groupTitle: '---', refusedOn: ['-'], writesOn: ['*', '+'], why: 'reads back as a thematic break' },
+];
+
+for (const { title, why } of UNWRITABLE_TITLES) {
+  test(`re-read postcondition [1.11.0]: a title carrying ${why} is refused outright, on every marker, and nothing is written`, () => {
+    for (const marker of ['-', '*', '+']) {
+      const seed = ['# Summary', '', `${marker} Guides`, `  ${marker} [G](g.md)`, ''];
+      const before = seed.slice();
+      const result = wireNestedListChapter(seed, 'Guides', `[${title}](admin/plans.md)`);
+
+      assert.equal(result.kind, 'unwritable', `${marker}: refused rather than written`);
+      assert.equal(result.field, 'title', `${marker}: the chapter's own title is named as the culprit`);
+      assert.ok(!('newLines' in result), `${marker}: an unwritable outcome carries no index to persist`);
+      // The whole point: the caller has nothing it could persist, so the file cannot be poisoned.
+      assert.deepEqual(seed, before, `${marker}: the input array is untouched`);
+    }
+  });
+}
+
+for (const { groupTitle, refusedOn, writesOn, why } of UNWRITABLE_GROUP_TITLES) {
+  test(`re-read postcondition [1.11.0]: group_title ${JSON.stringify(groupTitle)} is refused on ${refusedOn.join('/')} (${why}) and still writes on ${writesOn.join('/')}`, () => {
+    const chapterLink = '[Items](admin/items.md)';
+    // Both allowlists accept it — that is what made this reachable, and it is unchanged by the fix.
+    assert.equal(isPlainLabel(groupTitle), true, 'the plain-label allowlist still accepts it');
+    assert.deepEqual(validateGroups([{ slug: 'q1', group: 'g', group_title: groupTitle }]), [], 'and so does validateGroups');
+
+    for (const marker of refusedOn) {
+      const seed = ['# Summary', '', `${marker} Other`, `  ${marker} [G](g.md)`, ''];
+      const result = wireNestedListChapter(seed, groupTitle, chapterLink);
+      assert.equal(result.kind, 'unwritable', `${marker}: refused`);
+      assert.equal(result.field, 'group_title', `${marker}: the group_title is named, not the chapter title`);
+      assert.ok(!('newLines' in result), `${marker}: nothing to persist`);
+    }
+
+    // CONTROL — the same value on a marker where it never poisoned anything must still write. This
+    // is what distinguishes a scoped postcondition from a refuse-everything one, and without it
+    // every assertion above would also pass against a writer that had simply stopped working.
+    for (const marker of writesOn) {
+      const seed = ['# Summary', '', `${marker} Other`, `  ${marker} [G](g.md)`, ''];
+      const result = wireNestedListChapter(seed, groupTitle, chapterLink);
+      assert.equal(result.kind, 'inserted', `${marker} control: still writes`);
+      assert.equal(result.created, true, `${marker} control: creates the container`);
+    }
+  });
+}
+
+test('re-read postcondition [1.11.0]: U+2028/U+2029 in a group_title is refused on EVERY marker — the one container cause with no safe marker', () => {
+  // Deliberately not a row in UNWRITABLE_GROUP_TITLES: every row there carries a `writesOn` control,
+  // and this value has none. Keeping it out of the table rather than inventing an empty control is
+  // the point — the table's framing ("harmless on one marker, fatal on another") is true of its five
+  // rows and is NOT a general property, and an unpinned exception is how that framing would have
+  // quietly become a rule. The title half is covered by UNWRITABLE_TITLES; this is the container half.
+  for (const sep of [0x2028, 0x2029]) {
+    const groupTitle = `Sales${String.fromCodePoint(sep)}Ops`;
+    assert.equal(isPlainLabel(groupTitle), true, 'the plain-label allowlist accepts it');
+    for (const marker of ['-', '*', '+']) {
+      const seed = ['# Summary', '', `${marker} Other`, `  ${marker} [G](g.md)`, ''];
+      const result = wireNestedListChapter(seed, groupTitle, '[Items](admin/items.md)');
+      assert.equal(result.kind, 'unwritable', `U+${sep.toString(16)} / ${marker}: refused`);
+      assert.equal(result.field, 'group_title');
+    }
+  }
+});
+
+test('re-read postcondition [1.11.0]: which marker decides is a property of the EMITTED line, not of the file', () => {
+  // Every other fixture in this section uses a homogeneous-marker index, so all of them would still
+  // pass if the rule really were "a `-` index" vs "a `*` index" — the file-wide model. It is not,
+  // and both adapters now say so explicitly ("not a file-wide style, and not necessarily the
+  // container's"; "not a file-wide or container-wide marker"). This fixture is what keeps that
+  // wording honest: a homogeneous index cannot tell the two models apart, so without a
+  // mixed-marker case an editor could "simplify" the adapters back to the file-wide claim with
+  // nothing red. The ZERO-create branch emits `firstTopMarker`: the marker of the FIRST indent-0
+  // bullet in the file. Measured, and it inverts cleanly when the first bullet flips:
+  const mostlyStar = ['- [Introduction](README.md)', '* Admin', '  * [Items](admin/items.md)', ''];
+  const mostlyDash = ['* [Introduction](README.md)', '- Admin', '  - [Items](admin/items.md)', ''];
+  const link = '[Plans](admin/plans.md)';
+
+  // A bare-path-shaped group_title is refused on `*`/`+` — but this file emits `-`, so it is written.
+  const a = wireNestedListChapter(mostlyStar, 'Sales/Marketing', link);
+  assert.equal(a.kind, 'inserted', 'first bullet is `-`, so the emitted container is `- Sales/Marketing`');
+  assert.ok(a.newLines.includes('- Sales/Marketing'));
+
+  // The same value on a mostly-`-` file whose FIRST bullet is `*` is refused.
+  assert.deepEqual(
+    wireNestedListChapter(mostlyDash, 'Sales/Marketing', link),
+    { kind: 'unwritable', field: 'group_title' },
+  );
+
+  // And the hyphen-run cause inverts the other way, for the same reason.
+  assert.deepEqual(
+    wireNestedListChapter(mostlyStar, '---', link),
+    { kind: 'unwritable', field: 'group_title' },
+  );
+  assert.equal(wireNestedListChapter(mostlyDash, '---', link).kind, 'inserted');
+});
+
+test('re-read postcondition [1.11.0]: on a `*`/`+` index the refusal follows the target\'s GROUP PREFIX, not the broken title', () => {
+  // The adapters explain the `*`/`+` case by saying a target-breaking title triggers isBarePathBullet.
+  // That is true of what the adapters EMIT and false as a property of this writer: the `/` does the
+  // work. A grouped chapter's target always carries its group prefix (chapterRelPath returns
+  // `<group>/<slug>.md` whenever `group` is set, and this writer is reached only for grouped
+  // entries), so the raw fallback looks like a bare path. With a slash-free target the identical
+  // title is written and converges normally — pinned so the attribution cannot drift back.
+  const title = 'Plans [Beta]';
+  for (const marker of ['*', '+']) {
+    const seed = [`${marker} Guides`, `  ${marker} [G](g.md)`, ''];
+
+    const grouped = wireNestedListChapter(seed, 'Guides', `[${title}](admin/plans.md)`);
+    assert.equal(grouped.kind, 'unwritable', `${marker}: a group-prefixed target is refused`);
+    assert.equal(grouped.field, 'title');
+
+    const flat = wireNestedListChapter(seed, 'Guides', `[${title}](plans.md)`);
+    assert.equal(flat.kind, 'inserted', `${marker}: the SAME title with a slash-free target writes`);
+    assert.equal(
+      wireNestedListChapter(flat.newLines, 'Guides', `[${title}](plans.md)`).kind,
+      'present',
+      `${marker}: and converges on the next run, so the slash is the variable`,
+    );
+  }
+});
+
+test('re-read postcondition [1.11.0]: the writer never emits a chapter row at indent 0, so a left-margin row is always operator-typed', () => {
+  // Earlier prose in both adapters described a "broken row at the left margin" as something the
+  // WRITER's own insert could land in. It cannot: every child row is emitted at `childIndent`, which
+  // containerOwnerScan caps to 2..4 and defaults to 2, and the only indent-0 line the writer ever
+  // emits is a container whose label passed isPlainLabel first. Pinned because the retired prose was
+  // wrong about the agent, not about the shape — and a future reader could reintroduce it.
+  const cases = [
+    { seed: ['- Admin', '  - [G](g.md)', ''], why: 'existing 2-space child' },
+    { seed: ['- Admin', '    - [G](g.md)', ''], why: 'existing 4-space child' },
+    { seed: ['- Admin', ''], why: 'container with no child' },
+    { seed: ['- Other', '  - [G](g.md)', ''], why: 'ZERO-create branch' },
+  ];
+  for (const { seed, why } of cases) {
+    const result = wireNestedListChapter(seed, 'Admin', '[Items](admin/items.md)');
+    assert.equal(result.kind, 'inserted', why);
+    const row = result.newLines.find((line) => line.includes('admin/items.md'));
+    assert.ok(row.length - row.trimStart().length >= 2, `${why}: the emitted row is never at indent 0`);
+  }
+
+  // The SCENARIO is still real, and still operator-reachable: a hand-typed target-breaking row at the
+  // left margin fails the indent-0 plain-label gate and takes the whole file with it. 1.11.0 does not
+  // change that — the writer's refusal is the correct response to an already-unreadable file, not the
+  // cause of it.
+  const handTyped = ['# Summary', '', '- [Plans [Beta]](admin/plans.md)', '- Admin', '  - [G](g.md)', ''];
+  assert.equal(wireNestedListChapter(handTyped, 'Admin', '[Items](admin/items.md)').kind, 'not-a-list');
+});
+
+test('re-read postcondition [1.11.0]: a clean manifest is unaffected — the fix must not cost a legitimate write', () => {
+  // The counterfactual that matters most operationally. Every ordinary shape still goes through.
+  const cases = [
+    { seed: ['- Admin', '  - [Overview](admin/overview.md)'], group: 'Admin', link: '[Items](admin/items.md)', created: false },
+    { seed: ['- Other', '  - [G](g.md)'], group: 'Admin', link: '[Items](admin/items.md)', created: true },
+    { seed: ['* Admin', '  * [Overview](admin/overview.md)'], group: 'Admin', link: '[Items](admin/items.md)', created: false },
+    { seed: ['- Admin', '  - [[admin/overview|Overview]]'], group: 'Admin', link: '[[admin/items|Items]]', created: false },
+    { seed: ['- Admin', '    - [Overview](admin/overview.md)'], group: 'Admin', link: '[Items](admin/items.md)', created: false },
+  ];
+  for (const { seed, group, link, created } of cases) {
+    const result = wireNestedListChapter(seed, group, link);
+    assert.equal(result.kind, 'inserted', `${JSON.stringify(seed)} + ${link}`);
+    assert.equal(result.created, created);
+    assert.ok(result.newLines.some((line) => line.includes(link)), 'the row is really there');
+  }
+});
+
+// Still unfixed after the re-read postcondition: that check asks "can I read back what I am about
+// to write", and every generation of an edited title IS readable. Measured against the fix, this
+// test stays green while all twelve lockout pins went red — which is the map worth having: the two
+// defects looked like one and are not.
+const PINNED_DEFECT_ACCUMULATION =
+  'PINNED DEFECT [1.11.0] (RED HERE MEANS FIXED — delete this test and retire the accumulation '
+  + 'disclosure in BOTH adapters)';
+
+test(`${PINNED_DEFECT_ACCUMULATION}: a chapter title EDITED between publishes accumulates one dead row per edit, without bound`, () => {
+  // The adapters measured "every placement x title-resolvability combination" with the manifest held
+  // FIXED, and concluded no combination grows without bound. Title EDITS are a third axis. Each edit
+  // produces a different link string, so the membership guard correctly sees a different row and
+  // inserts — the bound is the number of edits, which is not a bound.
+  const target = 'admin/plans.md';
+  let lines = ['- Admin', '  - [Overview](admin/overview.md)', ''];
+  let edit = 0;
+  // Record what every run RETURNS, not just what it writes. The row count alone cannot tell a
+  // `present` halt apart from any other non-`inserted` outcome, because only `inserted` mutates
+  // `lines` — so a module that returned `unwritable` on all 15 non-inserting runs would leave
+  // exactly the same 5 rows and keep this test green. Both adapters describe these 15 runs in
+  // prose, so the distribution is part of what this test pins.
+  const outcomes = [];
+  for (let run = 1; run <= 20; run += 1) {
+    if (run % 4 === 1 && run > 1) edit += 1;
+    const chapterLink = `[Plans [Beta ${edit}]](${target})`; // target-breaking in every generation
+    if (locateChapterLine(lines, target, { wikilink: false }).present) { outcomes.push('step0-present'); continue; }
+    const written = wireNestedListChapter(lines, 'Admin', chapterLink);
+    outcomes.push(written.kind);
+    if (written.kind === 'inserted') lines = written.newLines;
+  }
+  const rows = lines.filter((line) => line.includes(target));
+  assert.equal(
+    rows.length,
+    5,
+    'one dead row per title edit survives — if this count drops, the accumulation is FIXED: delete this test and retire the adapter prose',
+  );
+  const tally = outcomes.reduce((acc, kind) => ({ ...acc, [kind]: (acc[kind] ?? 0) + 1 }), {});
+  assert.deepEqual(
+    tally,
+    { inserted: 5, present: 15 },
+    'the 15 non-inserting runs each raise the `present` halt — the adapters say so in prose; any other '
+      + 'distribution means the prose is stale even though the row count still reads 5',
+  );
+  // Every generation is still there, none replaced: this is accumulation, not churn.
+  for (let generation = 0; generation <= 4; generation += 1) {
+    assert.ok(
+      rows.some((row) => row.includes(`Plans [Beta ${generation}]`)),
+      `generation ${generation} is still in the index`,
+    );
+  }
 });

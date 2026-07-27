@@ -29,6 +29,10 @@ export interface ProfileLike extends CaptureProfileLike {
 }
 
 export interface LocateChapterLineMatch {
+  // 1.11.0 #330 review fix: this match's position into indexView(indexLines), so a caller (the
+  // present-line placement verifier) needing a line index can delegate to this loop instead of
+  // re-implementing it.
+  index: number;
   line: string;
   containerTitle: string | null;
 }
@@ -83,8 +87,33 @@ export interface NestedContainerMatch {
 // (newLines.join('\n') reproduces the exact file bytes, EOL + terminal-newline preserved);
 // 'multiple' lists the >=2 ambiguous container bullets (adapter halts); 'not-a-list' means the
 // index is outside the bounded safe subset (caller keeps today's manual halt, byte-identical).
+// [1.11.0] 'unwritable' means the writer's own reader would REFUSE the bytes the writer was about to
+// hand back, so nothing was written and there is no index to persist. `field` names the manifest
+// value at fault ('title' or 'group_title'; 'unknown' when substituting either stand-in still fails),
+// derived by substitution rather than by inspecting the value, so it stays correct for causes nobody
+// has enumerated. A caller MUST halt and name that field: retrying cannot help, and the previous
+// behaviour — writing the line anyway — left the index permanently unreadable to this module, for
+// every chapter and every group in it, from a manifest value nothing upstream rejects. The check is
+// deliberately conservative: it can decline a value that would in fact have round-tripped, which is
+// the right direction for a tool that rewrites a file it does not own.
+//
+// [1.11.0] 'present' means the resolved container already carries this exact chapter link, so
+// nothing was written and there is no index to persist. `index` is a 0-BASED index into the
+// CALLER's own `indexLines` array, not into any internal view — verified to hold across a leading
+// frontmatter block (which the writer blanks rather than removes) and a CRLF file (whose elements
+// keep their trailing '\r'). Decided by comparing the bullet's CONTENT verbatim against the
+// caller's `chapterLink`, deliberately not through step 0's target parse: that COVERS step 0's
+// blind spot (a row whose own text defeats the target parse) without being CONFINED to it —
+// measured, a row step 0 does recognize still makes the writer answer 'present'.
+// A PUBLISH-PATH caller — one wiring a real chapter link — MUST halt on it: retrying the same
+// unchanged call can only return the same 'present' outcome. The in-module probe caller is
+// deliberately outside that requirement: verifyNonHeadingPlacement's fixed probe link can
+// literally be a row in the index, and its rule-4 accept-list reads 'present' as shape
+// recognition and continues to 'ok'.
 export type WireNestedListChapterResult =
   | { kind: 'inserted'; created: boolean; newLines: string[] }
+  | { kind: 'present'; index: number }
+  | { kind: 'unwritable'; field: 'title' | 'group_title' | 'unknown' }
   | { kind: 'multiple'; matches: NestedContainerMatch[] }
   | { kind: 'not-a-list' };
 
@@ -144,6 +173,9 @@ export interface ValidateGroupsOptions {
 /** See chapter-paths.mjs: all D1 manifest-review gates; [1.6.0, #221] a group-free manifest now halts unconditionally on a duplicate flat slug instead of always returning []; [1.9.0, #310] options.perGroupSlugs (default false) scopes slug uniqueness per group. */
 export function validateGroups(entries: ChapterEntry[], options?: ValidateGroupsOptions): string[];
 
+/** See chapter-paths.mjs: [1.11.0] #330 the sanitized view locateChapterLine scans, extracted so every caller reaches it through this export rather than re-deriving the expression inline. */
+export function indexView(indexLines: string[]): string[];
+
 /** See chapter-paths.mjs: the D6 step-0 index-line idempotency check; options.wikilink (default false) folds ONE terminal '.md' off both sides before comparison. */
 export function locateChapterLine(
   indexLines: string[],
@@ -169,7 +201,17 @@ export function classifyChapterWiring(
 /** See chapter-paths.mjs: the D6 container-resolution classifier. */
 export function findContainer(indexLines: string[], groupTitle: string): FindContainerResult;
 
-/** See chapter-paths.mjs: #223 [1.10.0] pure nested-list (GitBook SUMMARY.md) grouped-index write automation, absent-line path only — returns the fully-mutated index, a multiple-container halt, or 'not-a-list' (outside the bounded safe subset). */
+export interface LeadingFrontmatterSpan {
+  start: 0;
+  endExclusive: number;
+}
+
+/** See chapter-paths.mjs: [1.11.0] #330 the narrow test-seam projection of the writer's private line-preparation call (prepareIndexLines) — {kind, span} only; span is null when the index carries no leading frontmatter block. Reached by tests alone: every production caller needing this preparation state calls the private helper directly instead, whoever they are. */
+export function leadingFrontmatterSpan(
+  indexLines: string[],
+): { kind: 'not-a-list' } | { kind: 'ok'; span: LeadingFrontmatterSpan | null };
+
+/** See chapter-paths.mjs: #223 [1.10.0] pure nested-list (GitBook SUMMARY.md) grouped-index write automation, absent-line path only — returns the fully-mutated index on success, or one of the refusals WireNestedListChapterResult declares and documents above: [1.11.0] 'present' when the container already carries this exact link (literal membership that step 0's target parser cannot provide), [1.11.0] 'unwritable' when the writer's own reader would refuse the bytes it was about to hand back (nothing written; `field` names the manifest value at fault), a multiple-container halt, or 'not-a-list' (outside the bounded safe subset). */
 export function wireNestedListChapter(
   indexLines: string[],
   groupTitle: string,
@@ -208,3 +250,36 @@ export function chapterHasWikilinkTo(chapterText: string, slug: string, oldChapt
 
 /** See chapter-paths.mjs: the trim-safe step-0 "line present under the correct container" comparator. */
 export function containerTitleMatches(containerTitle: string | null, entry: ChapterEntry): boolean;
+
+/**
+ * Options for verifyNonHeadingPlacement. `wikilink` is the ONLY option, and carries the same
+ * meaning as locateChapterLine's (chapter-paths.mjs, the `{ wikilink = false }` destructure):
+ * it selects the wikilink target spelling over the path spelling. Named rather than reused so this
+ * API is not coupled to LocateChapterLineOptions, which is unrelated.
+ */
+export interface VerifyNonHeadingPlacementOptions {
+  wikilink?: boolean;
+}
+
+/**
+ * Named rather than inlined so each variant is pinnable.
+ * `misplaced` is the only variant carrying a payload.
+ */
+export type VerifyNonHeadingPlacementResult =
+  | { kind: 'ok' }
+  | { kind: 'misplaced'; foundContainer: string | null }
+  | { kind: 'inconsistent' }
+  | { kind: 'unverifiable' };
+
+/**
+ * See chapter-paths.mjs: present-line placement verification for the nested-list index form (#330).
+ * `selectedTarget` is the target the CALLER already selected — the Obsidian adapter scans the
+ * qualified and legacy-bare spellings and picks one before placement checking, so passing the
+ * selected one lets a legitimately-present legacy row verify instead of reporting `inconsistent`.
+ */
+export function verifyNonHeadingPlacement(
+  indexLines: string[],
+  selectedTarget: string,
+  groupTitle: string,
+  options?: VerifyNonHeadingPlacementOptions,
+): VerifyNonHeadingPlacementResult;
