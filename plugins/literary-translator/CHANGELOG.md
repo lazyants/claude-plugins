@@ -249,6 +249,33 @@ was a subtle bug in the code that existed; both were work the code never did.
     failure mode: a 17-entry list built a command the fetcher exits on, per batch, burning the
     citation ladder to `citation-review-exhausted` and merging zero batches. It now throws once, at
     instantiation, the way a malformed entry already did.
+  - **Rounds 6–8 — three more rounds, each finding the defect in the one before it.** Recorded at
+    that width deliberately: the pattern is the finding. Round 6 found that round 5's deadline fix
+    bounded the body read and not the three phases that block *inside* one stdlib call — a chunked
+    chunk-size line, the status line, the headers — because `read1()` is not "at most one recv".
+    Two attempts were wrong before the third was right: checking the clock *between* calls, then
+    re-arming `settimeout()` per call, which looks correct and bounds each recv while bounding
+    nothing at all (measured, 24.1 s against a 3 s deadline with the socket timeout correctly
+    reading 2.998 s throughout). The bound is now an out-of-band watchdog that shuts the socket at
+    the deadline. Round 7 found that the numeric-host refusal added in round 6 checked the bytes in
+    the URL while the resolver checks the IDNA-folded form, so seven Unicode spellings passed both
+    static halves — `２８５２０３９１６６` reaching cloud metadata at 169.254.169.254 — in a file that
+    already folded, for this exact reason, one screen away. Round 8 found that round 7's cap on
+    diagnostic output covered the two raise sites that had been measured and left three siblings
+    emitting 563 KB at the shipped batch size. Each fix moved the guard somewhere it cannot be
+    missed rather than closing another instance: a watchdog rather than a clock check, the fold
+    applied to every host-shaped test rather than to one, and the bound inside
+    `CanonValidationError` rather than at the call sites that happen to build a list.
+  - **Rounds 6–8, also.** `fec0::/10` was admitted by both address checks (CPython leaves it out of
+    `_private_networks`, so `is_private` is False and `is_global` therefore True). A lone surrogate
+    copied from a fragment made the `index.json` write raise, losing the whole batch's index one
+    step past the guard that exists to prevent exactly that. Four `getaddrinfo`-valid spellings of
+    127.0.0.1 that `ipaddress` refuses to parse were admitted offline, with a verdict that differs
+    between BSD and glibc. `OUTCOME_RE` described itself as "the enforcement" while being
+    referenced only by its own definition, drifted on eight reason strings. Both AST gates ignored
+    keyword arguments, so `_refuse(reason=…)` bypassed the closed-vocabulary rule they assert. The
+    watchdog reported *itself* as the remote host on HTTPS, where `ssl.SSLSocket.shutdown()` turns
+    it into `BrokenPipeError` — which the judge reads as a defect in the citation.
   - **Round 3 — the PARSER, which is not a field at all.** `http.client` raises its own hierarchy
     and `HTTPException` is not an `OSError` — measured: `issubclass(BadStatusLine, OSError)` is
     `False` — so a malformed status line escaped every handler, aborted the whole batch, and printed
