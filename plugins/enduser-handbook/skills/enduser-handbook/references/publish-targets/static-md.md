@@ -349,6 +349,12 @@ These outcomes reuse the step-0 result computed above (`containerTitle`, `indexF
     persist the returned `newLines` (joined back, they reproduce the exact bytes — EOL and
     terminal newline preserved) and proceed — the container was found or created and the
     chapter line inserted under it, no halt.
+  - **`{kind: 'present', index}`** ⇒ the single matched container already carries a child
+    bullet whose content is byte-identical to the chapter link the adapter is about to write —
+    the writer's own membership guard, checked directly against the list body and independent
+    of step 0's target parse (see "After either halt" below for why the two can disagree and
+    what this bounds). Halt with:
+    `Chapter row for '<slug>' is already present under the '<group_title>' container bullet in <index_file>, but this run could not recognize it — the chapter's own title does not yield a resolvable link destination. Give the chapter a plain title in the manifest — no Markdown markup, backslash escapes, or HTML entities in it — then re-run; see "Nested-list automation limits" below.`
   - **`{kind: 'multiple'}`** ⇒ two or more container bullets match `group_title`; never guess
     which is canonical, halt with:
     `Found multiple '<group_title>' container bullets in <index_file> — curate the index manually, then re-run.`
@@ -393,19 +399,39 @@ These outcomes reuse the step-0 result computed above (`containerTitle`, `indexF
     the operator to escape it as `\]`; skipping that produces exactly this same failure).
     Convergence depends on the manifest entry's own `title` — not on whatever row already sits
     in the index — because that is what the writer rebuilds its inserted row from on every run.
-    If an existing row (operator-typed, or left over from any prior state) does not resolve but
-    the manifest title is clean, the writer's own insert resolves immediately: the earlier,
+    If an existing row (operator-typed, or left over from any prior run) does not resolve but the
+    manifest title is clean, the writer's own insert resolves immediately: the earlier,
     unrecognizable row lingers beside it as a cosmetic duplicate, and the very next run reports
-    `ok` on the clean one — exactly ONE duplicate forms, not zero and not unbounded. Only when
-    the manifest title is ITSELF target-breaking does this fail to converge: place such a row
-    correctly under the container rather than at the left margin and the writer does not refuse
-    it, but step 0 still reports the chapter absent — the row it just inserted is exactly as
-    unrecognizable as the one before it — and `wireNestedListChapter`, which has no membership
-    check of its own, appends another duplicate row on every re-run, without limit; the verifier
-    is never reached, because step 0 never reports the chapter present (pre-existing behaviour,
-    not new in 1.11.0). Measured, all three cases: a row that already resolves inserts nothing;
-    a broken row plus a clean manifest title gives one lingering duplicate then `ok`; a broken
-    row plus a broken manifest title appends without limit. Within the harmless-manifest-title
+    `ok` on the clean one. That is the one combination that converges with a harmless leftover;
+    the other combination — the manifest title ITSELF target-breaking — does not converge the
+    same way, and what it does instead now turns on where the writer's own insert actually sits:
+    - **Nested under its single matched container** (the ordinary case — that is where
+      `wireNestedListChapter` always places its own insert): every later run still finds
+      `containers.length === 1`, and step 0 still reports the chapter absent — the row is exactly
+      as unrecognizable to step 0's target parse as before — but the writer's own membership
+      guard (the `present` outcome above) now recognizes its own prior insert VERBATIM, refuses
+      to write a second copy, and halts instead. Exactly ONE row is ever written here; the
+      shipped 1.10.0 behaviour this retires had no membership check at all and appended another
+      duplicate row on every re-run, without limit.
+    - **At the left margin (indent 0), uncontained** — a broken title's own brackets fail the
+      indent-0 `isPlainLabel` check the same way regardless of what broke them, so
+      `containerOwnerScan` declines the WHOLE scan (`{kind: 'not-a-list'}`) for every container in
+      the file, not just this row. Nothing is ever inserted from here: the plain, unnamed
+      `not-a-list` halt (the "anything else" branch above) just repeats verbatim, forever — zero
+      duplicates form, not one.
+    A `group_title` that is itself non-plain reaches that same zero-growth `not-a-list` halt by a
+    third, independent path: `wireNestedListChapter` checks the group axis before it ever looks at
+    containers or existing rows, so a malformed `group_title` short-circuits there regardless of
+    the chapter title or the row's placement.
+
+    Measured, across every placement × title-resolvability combination that matters here: a row
+    that already resolves inserts nothing further; a stale row alongside a clean current manifest
+    title gives one lingering duplicate then `ok`; a target-breaking current title nested under
+    its container converges on exactly one row, then a `present` halt from the second run onward
+    (new in 1.11.0 — this is the case #330 retires from unbounded); the same target-breaking
+    title sitting at the left margin, or a non-plain `group_title`, converges on zero further
+    rows and a repeating `not-a-list` halt instead (unchanged since 1.10.0). No combination
+    measured here grows without bound. Within the harmless-manifest-title
     case above, a title whose markup still decodes to a plain label is verified like any
     other plain title — `[A\.B](x.md)` decodes to the plain `A.B` and is `misplaced` at the left
     margin, `ok` correctly nested. A title that stays non-plain even after decoding — an
@@ -506,7 +532,8 @@ matcher is a possible follow-up, not a bug.
 
 **The plain-label predicate, named exactly.** In short: a plain title is verified; a non-plain
 title that still resolves is found but left unverifiable; a title that breaks its own row's
-link target duplicates instead of ever completing (see the duplicate-insert warning above). The
+own link target is caught once, by the writer's own membership guard, rather than duplicated
+without limit (see "After either halt" above for the bounded outcome). The
 mechanism: the container-owner scan (`containerOwnerScan`,
 `assets/lib/chapter-paths.mjs`) applies `isPlainLabel` to whatever `extractLabel` returns for a
 row's own content — never to the row's raw source text, and never to what it renders as in a
@@ -534,7 +561,8 @@ elsewhere in the same file:
 The last row is a different failure mode entirely: a nested link inside the label breaks the
 row's OWN link-target extraction — not `extractLabel`/`isPlainLabel` at all — so step 0 never
 reports the chapter present in the first place; see "Grouped index wiring" above for what a
-target-breaking title does to duplicate insertion instead.
+target-breaking title does instead: one insert, then a `present` halt — never unbounded
+duplication.
 
 As of 1.11.0, a **present** grouped chapter's placement under this container is also checked,
 but only for a narrow verified class — this exact sentence, reused verbatim everywhere it is

@@ -1460,9 +1460,16 @@ function containerLabelKey(groupTitle) {
 /**
  * Nested-list grouped index wiring, ABSENT-line path only. Pure: returns the fully-mutated index
  * line array; the runtime persists it. Reached only when findContainer(...) === {kind:'non-heading'}
- * AND step-0 found no existing line. Idempotency is the CALLER's guarantee (step-0 runs first); this
- * is a pure transform with no internal membership check. NEVER mutates the input array; NEVER moves/
- * deletes an existing line (insert-only).
+ * AND step-0 found no existing line. NEVER mutates the input array; NEVER moves/deletes an existing
+ * line (insert-only).
+ *
+ * Step 0 is the caller's IDEMPOTENCY guarantee, and it is not a sufficient one: it recognizes a row
+ * by parsing a link TARGET out of it, so a chapter whose own title breaks that parse (a legal
+ * manifest `title` containing `]`, for instance) is reported absent on every run, and an insert-only
+ * transform that trusted the caller would append the same row again on every publish — unbounded
+ * growth from a legal manifest, with no operator error anywhere. Hence the `present` outcome below:
+ * a LITERAL membership check that deliberately does NOT reuse step 0's target parse, since sharing
+ * that parse would reproduce exactly the blind spot it exists to cover.
  *
  * @param {string[]} indexLines  index file split on '\n' (a CRLF file leaves a trailing '\r' per elem)
  * @param {string}   groupTitle  entry's current group_title (trimmed for comparison)
@@ -1470,6 +1477,7 @@ function containerLabelKey(groupTitle) {
  *                               this profile ('[Items](admin/items.md)' path mode; '[[admin/items|Items]]'
  *                               wikilink mode). OPAQUE: this fn owns list STRUCTURE, caller owns link FORMAT.
  * @returns {{kind:'inserted', created:boolean, newLines:string[]}
+ *         | {kind:'present', index:number}
  *         | {kind:'multiple', matches:Array<{index:number, label:string}>}
  *         | {kind:'not-a-list'}}
  */
@@ -1513,6 +1521,7 @@ export function wireNestedListChapter(indexLines, groupTitle, chapterLink) {
     const containerMarker = containers[0].marker;
     let insertAt = k + 1;
     let childMarker = null; // marker of the LAST existing C-indent child seen in the region, if any
+    let presentAt = -1; // index of a child already carrying THIS chapterLink verbatim, if any
     for (let i = k + 1; i < logical.length; ) {
       const line = logical[i];
       if (line.trim() === '') {
@@ -1521,6 +1530,11 @@ export function wireNestedListChapter(indexLines, groupTitle, chapterLink) {
       }
       const bm = line.match(NESTED_BULLET_RE);
       if (bm && bm[1].length === childIndent) {
+        // Membership on the bullet's CONTENT, compared verbatim against the link the caller is
+        // asking us to write. Content rather than the whole line so a re-indented or re-markered
+        // row still counts as present; verbatim rather than via parseNestedLabel/locateChapterLine
+        // because an unparseable row is precisely the case this guards (see the docblock).
+        if (presentAt < 0 && bm[3] === chapterLink) presentAt = i;
         insertAt = i + 1;
         childMarker = bm[2];
         i += 1;
@@ -1528,6 +1542,12 @@ export function wireNestedListChapter(indexLines, groupTitle, chapterLink) {
       }
       break; // first line that is neither blank nor a C-indent child ends the region
     }
+    // Refuse to write a row this container already carries. Step 0 could not see it (or the caller
+    // would never have reached the writer), so reporting `inserted` here would converge silently on
+    // an index the publisher cannot actually verify. `present` is a REQUIREMENT on the caller, not a
+    // description of one: a caller must halt and tell the operator, never retry — retrying is the
+    // loop this outcome exists to break.
+    if (presentAt >= 0) return { kind: 'present', index: presentAt };
     // Reuse the existing children's marker so the inserted line stays in the SAME list block
     // (CommonMark starts a new list on a marker change); a container with no existing child has
     // no sibling marker to match, so fall back to the container's own marker (first-ever child).

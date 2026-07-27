@@ -87,8 +87,14 @@ export interface NestedContainerMatch {
 // (newLines.join('\n') reproduces the exact file bytes, EOL + terminal-newline preserved);
 // 'multiple' lists the >=2 ambiguous container bullets (adapter halts); 'not-a-list' means the
 // index is outside the bounded safe subset (caller keeps today's manual halt, byte-identical).
+// [1.11.0] 'present' means the resolved container already carries this exact chapter link, so
+// nothing was written and there is no index to persist — a caller MUST halt on it, never retry:
+// it is reachable only when step 0 cannot recognize a row the writer itself wrote, and retrying
+// is the unbounded-growth loop the outcome exists to break. Checked verbatim against bullet
+// CONTENT, deliberately not through step 0's target parse, whose blind spot it covers.
 export type WireNestedListChapterResult =
   | { kind: 'inserted'; created: boolean; newLines: string[] }
+  | { kind: 'present'; index: number }
   | { kind: 'multiple'; matches: NestedContainerMatch[] }
   | { kind: 'not-a-list' };
 
@@ -186,7 +192,7 @@ export function leadingFrontmatterSpan(
   indexLines: string[],
 ): { kind: 'not-a-list' } | { kind: 'ok'; span: LeadingFrontmatterSpan | null };
 
-/** See chapter-paths.mjs: #223 [1.10.0] pure nested-list (GitBook SUMMARY.md) grouped-index write automation, absent-line path only — returns the fully-mutated index, a multiple-container halt, or 'not-a-list' (outside the bounded safe subset). */
+/** See chapter-paths.mjs: #223 [1.10.0] pure nested-list (GitBook SUMMARY.md) grouped-index write automation, absent-line path only — returns the fully-mutated index, a 'present' refusal when the container already carries this exact link ([1.11.0], the unbounded-growth guard step 0 cannot provide), a multiple-container halt, or 'not-a-list' (outside the bounded safe subset). */
 export function wireNestedListChapter(
   indexLines: string[],
   groupTitle: string,

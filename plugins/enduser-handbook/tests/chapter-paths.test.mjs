@@ -2124,20 +2124,34 @@ for (const row of TITLE_SHAPE_TABLE) {
 
 // =================================================================================================
 // [1.11.0 round 11-b] adapter composition flow — the duplicate-insert warning (static-md.md /
-// obsidian-vault.md step-4 disclosure paragraph). The title-shape matrix above deliberately drives
+// obsidian-vault.md step-4 disclosure paragraph), UPDATED for the [1.11.0] membership guard added
+// to wireNestedListChapter's single-container branch (chapter-paths.mjs's SINGLE branch, "Refuse to
+// write a row this container already carries"). The title-shape matrix above deliberately drives
 // verifyNonHeadingPlacement with each shape's own MEASURED (sometimes hijacked) target, so it can
 // isolate placement-verification in isolation — that is NOT what the real adapter does. The real
 // adapter always searches for the chapter's REAL expected target. For the four shapes that corrupt
 // destination extraction (a nested link, a nested image, a reference link, or an unescaped ']' in
 // the title), that search finds NOTHING — even when the row already sits correctly nested under
-// the container — so step 0 reports the chapter absent, `wireNestedListChapter` has no membership
-// check of its own, and a SECOND row is inserted; the next run finds the new row and reports `ok`,
-// while the original malformed row lingers as a silent, undetected duplicate (the adapters' own
-// step-4 disclosure paragraph, static-md.md and obsidian-vault.md, "Place such a row correctly
-// under the container ... step 0 still reports the chapter absent"). This section drives that
-// EXACT sequence — step 0, branch, write, effect, re-run — with the real functions and the real
-// (non-hijacked) target; the title-shape matrix above cannot cover it by construction, because it
-// passes the hijacked target on purpose to exercise the isPlainLabel path instead.
+// the container — so step 0 reports the chapter absent and the adapter falls through to
+// wireNestedListChapter. What happens next now depends on whether the chapterLink the adapter asks
+// the writer to insert is byte-identical to the row already there:
+// - ARM 1 below drives the writer with a harmless, differently-worded link (isolating the general
+//   duplicate-insert risk in the abstract) — the guard cannot recognize two different-content rows
+//   as "the same", so it STILL inserts a second, duplicate row; the next run finds the fresh row
+//   and reports `ok`, while the original malformed row lingers as a silent, undetected duplicate
+//   (the adapters' own step-4 disclosure paragraph, static-md.md and obsidian-vault.md, "Place such
+//   a row correctly under the container ... step 0 still reports the chapter absent"). This arm is
+//   unaffected by the guard.
+// - ARM 2 below drives the writer the REALISTIC way (static-md.md: "display text is always the
+//   manifest entry's `title`") — the SAME manifest title generates the inserted link on every
+//   publish, so the "new" link is byte-identical to the malformed row already present. The guard
+//   now recognizes that and refuses (`{kind:'present'}`) instead of inserting — the unbounded row
+//   growth this section originally existed to document no longer happens for this arm. See the
+//   convergence tests following this loop for the repeated-publish property the fix guarantees.
+// This section drives the EXACT sequence — step 0, branch, write, effect, re-run — with the real
+// functions and the real (non-hijacked) target; the title-shape matrix above cannot cover it by
+// construction, because it passes the hijacked target on purpose to exercise the isPlainLabel path
+// instead.
 // =================================================================================================
 
 // MEDIUM 5 (round-13): derive shared shape labels from TITLE_SHAPE_TABLE rather than re-typing them
@@ -2154,11 +2168,20 @@ for (const mode of ['path', 'wiki']) {
     const label = LABEL_BY_SHAPE[shape];
     const malformedRow = wikilink ? `[[guide/items|${label}]]` : `[${label}](guide/items.md)`;
 
-    // ARM 1 — harmless writer link: today's documented behaviour (static-md.md/obsidian-vault.md,
-    // "Place such a row correctly under the container ... step 0 still reports the chapter
-    // absent... the following run reports `ok` on the newly inserted one"). True only because
-    // `realLink`'s own display text ('Items') does not itself corrupt its target extraction.
-    test(`adapter composition flow [round-11-b, mutation-confirmed]: ${shape} / ${mode}, already correctly nested, still silently duplicates (writer link harmless)`, () => {
+    // ARM 1 — harmless writer link. A stale unrecognizable row plus a CLEAN current manifest title:
+    // the writer's own insert resolves, so exactly one lingering duplicate forms and the next run
+    // reports `ok` on the clean row. True only because `realLink`'s own display text ('Items') does
+    // not itself corrupt its target extraction — that is the whole difference from ARM 2 below.
+    //
+    // Asserted against the CODE and the measurement below, deliberately not against a quoted
+    // sentence from the adapter docs. An earlier version of this comment carried what looked like a
+    // verbatim adapter quote spanning three ellipses; its final clause ("the following run reports
+    // `ok` on the newly inserted one") appears in NEITHER adapter, at this branch's HEAD or at the
+    // shipped 1.10.0 base — checked with whitespace collapsed, so a re-wrap cannot explain it. A
+    // test comment that cites prose is a citation nobody re-verifies when the prose is rewritten,
+    // which is exactly what happened here: the sentences it did quote correctly were retired in
+    // 1.11.0 while the comment stayed.
+    test(`adapter composition flow [round-11-b, mutation-confirmed]: ${shape} / ${mode}, already correctly nested, leaves exactly ONE lingering duplicate then converges (writer link harmless)`, () => {
       const realLink = wikilink ? '[[guide/items|Items]]' : '[Items](guide/items.md)';
       const indexLines = ['- Admin', `  - ${malformedRow}`];
 
@@ -2166,7 +2189,9 @@ for (const mode of ['path', 'wiki']) {
       const step0 = locateChapterLine(indexLines, realTarget, { wikilink });
       assert.equal(step0.matches.length, 0, "the malformed row's own corrupted destination must never satisfy the real target");
 
-      // branch: line-absent -> the adapter calls the writer, which has no membership check.
+      // branch: line-absent -> the adapter calls the writer. Its 1.11.0 membership guard does not
+      // fire here: the guard compares a child's content to `realLink` VERBATIM, and the stale row
+      // carries a different label, so this insert is correct rather than a missed duplicate.
       const write = wireNestedListChapter(indexLines, 'Admin', realLink);
       assert.equal(write.kind, 'inserted');
       assert.equal(write.created, false, 'the "Admin" container already exists — this is a CHILD insert, not a create');
@@ -2198,57 +2223,125 @@ for (const mode of ['path', 'wiki']) {
       assert.deepEqual(verdict, { kind: 'ok' });
     });
 
-    // ARM 2 — target-breaking writer link (BLOCKER 1, round-13): the adapters build the inserted
-    // child's link from the chapter's manifest `title` (static-md.md: "display text is always the
-    // manifest entry's `title`, never a slug or a hand-typed label") — never from a constant safe
-    // string as ARM 1 above drives it. When that title carries the SAME corrupting shape that
-    // broke the original row — the realistic case, since it is the identical manifest field
-    // driving both the original row and any fresh insert for this chapter — the freshly-inserted
-    // row's own destination extraction is hijacked too, exactly like the original. Measured (this
-    // teammate, real module): step 0 never finds the fresh row either, so a driver following the
-    // documented recipe (obsidian-vault.md/static-md.md, "Non-headings index, no existing line")
-    // takes the line-absent branch AGAIN — never the verifyNonHeadingPlacement branch, which the
-    // recipe only reaches once step 0 already found a matching line. Row growth repeats without
-    // bound; nothing here ever reaches `ok`. The harmless-arm test above cannot cover this by
-    // construction, because it drives the writer with a constant safe link on purpose.
-    test(`adapter composition flow [round-11-b, mutation-confirmed]: ${shape} / ${mode}, already correctly nested, still silently duplicates (writer link target-breaking)`, () => {
-      const breakingLink = malformedRow; // same manifest title drives both the row and the insert
+    // ARM 2 — target-breaking writer link (BLOCKER 1, round-13; CLOSED by the [1.11.0] membership
+    // guard in wireNestedListChapter's SINGLE branch): the adapters build the inserted child's link
+    // from the chapter's manifest `title` (static-md.md: "display text is always the manifest
+    // entry's `title`, never a slug or a hand-typed label") — never from a constant safe string as
+    // ARM 1 above drives it. When that title carries the SAME corrupting shape that broke the
+    // original row — the realistic case, since it is the identical manifest field driving both the
+    // original row and any fresh insert for this chapter — the freshly-inserted row's own
+    // destination extraction WOULD be hijacked too, exactly like the original. Before the guard,
+    // step 0 never found the fresh row either, so a driver following the documented recipe took the
+    // line-absent branch again and again, and row growth repeated without bound.
+    //
+    // The guard closes exactly this case: because the SAME manifest title drives the insert on
+    // every publish, the "new" link the writer is asked to write is byte-identical to the malformed
+    // row already sitting there — so the guard's own verbatim content check fires on the very FIRST
+    // call, before any insert happens, and the writer reports `{kind:'present'}` instead. Nothing is
+    // ever written; the file never changes. This is deliberately NOT the same as `ok`: step 0 still
+    // cannot resolve the row (its destination is still corrupted), so a driver would still see this
+    // chapter as unwired and must halt for manual repair — the guard trades unbounded silent growth
+    // for a stable, detectable non-convergence, never a false completion. The harmless-arm test
+    // above is unaffected by design: it drives the writer with a DIFFERENT, constant safe link, so
+    // the two rows' content never matches and the guard never fires. See the convergence tests
+    // following this loop for the repeated-publish property this fix actually guarantees.
+    test(`adapter composition flow [round-11-b, mutation-confirmed]: ${shape} / ${mode}, already correctly nested, writer link target-breaking now converges (present, byte-identical, never duplicates)`, () => {
+      const breakingLink = malformedRow; // same manifest title drives both the row and any insert
       const indexLines = ['- Admin', `  - ${malformedRow}`];
 
       const step0 = locateChapterLine(indexLines, realTarget, { wikilink });
       assert.equal(step0.matches.length, 0, "the malformed row's own corrupted destination must never satisfy the real target");
 
+      // The guard fires on the FIRST call: the existing child's content already equals chapterLink
+      // verbatim (the same manifest title drives both), so the writer refuses instead of inserting
+      // a duplicate that step 0 could never itself have detected.
       const write1 = wireNestedListChapter(indexLines, 'Admin', breakingLink);
-      assert.equal(write1.kind, 'inserted');
-      assert.equal(write1.created, false, 'the "Admin" container already exists — this is a CHILD insert, not a create');
-      assert.equal(
-        write1.newLines.length,
-        indexLines.length + 1,
-        `expected row growth on the first insert, got ${JSON.stringify(write1.newLines)}`,
+      assert.equal(write1.kind, 'present', 'the guard must recognize the existing row as this exact chapterLink and refuse to insert');
+      assert.equal(write1.index, 1, 'the existing malformed child sits at index 1 of indexLines');
+      assert.ok(
+        !('newLines' in write1),
+        'a present outcome carries no newLines: this is how the caller tells present apart from inserted without inspecting content',
       );
 
-      // The FRESH row's own destination is hijacked exactly like the original — step 0 still
-      // reports the chapter absent. Per the documented recipe, this means verifyNonHeadingPlacement
-      // is never reached: that branch only runs when step 0 already found a matching line to check
-      // placement of; with zero matches, the recipe is back on the SAME "no existing line" branch
-      // that called wireNestedListChapter in the first place.
-      const step0After1 = locateChapterLine(write1.newLines, realTarget, { wikilink });
+      // Convergence: nothing was ever persisted (there is nothing TO persist), so a driver repeating
+      // the identical publish keeps re-presenting the SAME unchanged indexLines — and gets the SAME
+      // present verdict every time, never a second or third insert.
+      for (let i = 0; i < 4; i += 1) {
+        const repeat = wireNestedListChapter(indexLines, 'Admin', breakingLink);
+        assert.deepEqual(repeat, { kind: 'present', index: 1 }, `run ${i + 2}: expected the SAME present verdict, got ${JSON.stringify(repeat)}`);
+      }
+
+      // The guard does not repair the underlying blind spot — it only stops the write loop from
+      // making it WORSE. Step 0 still cannot resolve this row on its own terms, so the caller must
+      // still surface a manual halt (present + step-0-absent), never silently treat this as done.
+      const step0Still = locateChapterLine(indexLines, realTarget, { wikilink });
       assert.equal(
-        step0After1.matches.length,
+        step0Still.matches.length,
         0,
-        `the freshly-inserted row is ALSO unresolvable, so the verifier branch is never reached here (newLines=${JSON.stringify(write1.newLines)})`,
+        'the underlying target-parse blind spot is unchanged — only the runaway duplication is fixed',
       );
+    });
+  }
+}
 
-      // Row growth is unbounded, not a one-time duplicate: a second pass through the same
-      // line-absent branch inserts a THIRD row, and step 0 still finds nothing.
-      const write2 = wireNestedListChapter(write1.newLines, 'Admin', breakingLink);
-      assert.equal(
-        write2.newLines.length,
-        write1.newLines.length + 1,
-        `expected further row growth on the second insert, got ${JSON.stringify(write2.newLines)}`,
-      );
-      const step0After2 = locateChapterLine(write2.newLines, realTarget, { wikilink });
-      assert.equal(step0After2.matches.length, 0, 'still unresolvable after the second insert — the recipe never converges');
+// =================================================================================================
+// [1.11.0] CONVERGENCE — the test whose absence let the unbounded-duplicate-insert bug ship. ARM 2
+// above pins the fix at a SINGLE call (write1.kind === 'present'); it does not by itself prove the
+// bug is CLOSED across repeated publishes — nothing before this test drove the actual adapter loop
+// (step 0 -> absent -> wireNestedListChapter) more than once against an unchanged manifest with a
+// target-breaking title. This section drives exactly that, starting from an EMPTY container (no
+// existing chapter row at all — the realistic first-publish state), for 5 consecutive publishes,
+// and watches the row count directly rather than trusting a single before/after snapshot. Before the
+// guard this would have failed outright: run 1 inserts (row count 1, as expected), but run 2 would
+// insert AGAIN (row count 2, the bug), and every run after that would grow the count further,
+// unbounded. After the guard: run 1 inserts and every run after it reports `present` against the
+// SAME unchanged indexLines (nothing is ever persisted once the guard starts firing), so the row
+// count is exactly 1 from run 1 onward and never grows again.
+// =================================================================================================
+
+for (const mode of ['path', 'wiki']) {
+  const wikilink = wikilinkForMode(mode);
+  const realTarget = wikilink ? 'guide/items' : 'guide/items.md';
+  for (const shape of DUPLICATE_INSERT_SHAPE_NAMES) {
+    const label = LABEL_BY_SHAPE[shape];
+    const chapterLink = wikilink ? `[[guide/items|${label}]]` : `[${label}](guide/items.md)`;
+
+    test(`adapter composition flow convergence [round-11-b follow-up]: ${shape} / ${mode}, 5 publishes of an unchanged manifest converge to exactly ONE row from the first run onward`, () => {
+      let current = ['- Admin']; // empty container, no existing chapter row yet — the first publish
+      // Row-counting helper, independent of the module's own parse (extractLineTargets/parseNestedLabel)
+      // on purpose: this test must not become a tautology that only re-derives what the functions
+      // under test already believe. A bullet's raw content, compared verbatim against chapterLink.
+      const countRows = (lines) =>
+        lines.filter((line) => {
+          const bm = line.match(/^ *[-*+] (.*)$/);
+          return bm !== null && bm[1] === chapterLink;
+        }).length;
+
+      assert.equal(countRows(current), 0, 'sanity: no row exists before the first publish');
+
+      for (let run = 1; run <= 5; run += 1) {
+        // step 0: the adapter's own idempotency check over the REAL target. Always absent here —
+        // this chapter title's own corrupted destination extraction never resolves to realTarget,
+        // neither on the original row nor on any fresh row this shape would ever produce.
+        const step0 = locateChapterLine(current, realTarget, { wikilink });
+        assert.equal(
+          step0.matches.length,
+          0,
+          `run ${run}: step 0 must report absent — that is exactly the blind spot the guard covers, not repairs`,
+        );
+
+        const write = wireNestedListChapter(current, 'Admin', chapterLink);
+        // Only an 'inserted' outcome is ever persisted; a 'present' outcome means the caller writes
+        // nothing back, so `current` stays exactly what it was — itself part of the invariant this
+        // test pins (no silent, unrecorded progress).
+        if (write.kind === 'inserted') current = write.newLines;
+
+        assert.equal(
+          countRows(current),
+          1,
+          `run ${run}: expected exactly one row for this chapter, got ${JSON.stringify(current)}`,
+        );
+      }
     });
   }
 }
@@ -2290,6 +2383,184 @@ for (const { name, mode, expected } of CONTRAST_SHAPES) {
     const verdict = verifyNonHeadingPlacement(indexLines, realTarget, 'Admin', { wikilink });
     assert.deepEqual(verdict, expected);
   });
+}
+
+// =================================================================================================
+// [1.11.0] membership guard — contrast cases that must NOT regress. The ARM 2 / CONVERGENCE tests
+// above pin what the guard DOES catch (an exact-content resubmission); the cases below pin the
+// guard's SCOPE — every shape of call it must leave alone, asserted explicitly rather than assumed.
+// =================================================================================================
+
+for (const mode of ['path', 'wiki']) {
+  const wikilink = wikilinkForMode(mode);
+  const realTarget = wikilink ? 'guide/items' : 'guide/items.md';
+  const resolvableLink = wikilink ? '[[guide/items|Items]]' : '[Items](guide/items.md)';
+  test(`membership guard contrast [round-11-b]: ${mode}, a chapter link that already resolves is found by step 0 alone -- the writer (and its guard) is never reached`, () => {
+    const indexLines = ['- Admin', `  - ${resolvableLink}`];
+    const step0 = locateChapterLine(indexLines, realTarget, { wikilink });
+    assert.equal(step0.present, true, 'a correctly-resolving row must be found by step 0 alone');
+    assert.equal(step0.matches.length, 1);
+    // Per the documented recipe (obsidian-vault.md/static-md.md), step-0-present short-circuits
+    // straight to placement verification; wireNestedListChapter is never invoked on this path at
+    // all, so there is nothing here for the guard to either catch or miss.
+    const verdict = verifyNonHeadingPlacement(indexLines, realTarget, 'Admin', { wikilink });
+    assert.deepEqual(verdict, { kind: 'ok' }, 'placement verification must confirm ok without ever inserting');
+  });
+}
+
+test('membership guard contrast [round-11-b]: a broken existing row plus a CLEAN manifest title still gets its own resolvable row inserted -- the guard must not suppress an insert when the two rows\' content differs', () => {
+  const brokenRow = '[A [nested](x) B](guide/items.md)'; // nestedLink shape -- corrupts its OWN target
+  const cleanLink = '[Items](guide/items.md)'; // a differently-worded, resolvable insert
+  const indexLines = ['- Admin', `  - ${brokenRow}`];
+
+  const write = wireNestedListChapter(indexLines, 'Admin', cleanLink);
+  assert.equal(
+    write.kind,
+    'inserted',
+    'the guard only refuses an EXACT verbatim resubmission -- a differently-worded clean link must still be inserted',
+  );
+  assert.equal(write.newLines.length, indexLines.length + 1);
+  assert.ok(write.newLines.includes(`  - ${brokenRow}`), 'the broken row must survive untouched, not be replaced');
+  assert.ok(write.newLines.includes(`  - ${cleanLink}`), 'the clean row must be freshly inserted');
+
+  const rerun = locateChapterLine(write.newLines, 'guide/items.md', { wikilink: false });
+  assert.equal(rerun.matches.length, 1, 'only the clean row resolves; the broken row stays invisible to step 0, exactly as documented');
+  const verdict = verifyNonHeadingPlacement(write.newLines, 'guide/items.md', 'Admin', { wikilink: false });
+  assert.deepEqual(verdict, { kind: 'ok' });
+});
+
+test('membership guard contrast [round-11-b]: the ZERO-container CREATE branch is unaffected, even when the exact chapterLink text already exists under an UNRELATED container', () => {
+  const chapterLink = '[Items](guide/items.md)';
+  // The exact link text already exists, but under "Other", not "Admin" -- no "Admin" container
+  // exists at all, so this must fall straight through to the ZERO create path. The guard lives
+  // entirely inside the containers.length === 1 branch (see wireNestedListChapter's SINGLE
+  // branch) and is structurally unreachable here.
+  const indexLines = ['- Other', `  - ${chapterLink}`];
+  const write = wireNestedListChapter(indexLines, 'Admin', chapterLink);
+  assert.equal(write.kind, 'inserted');
+  assert.equal(write.created, true, 'a fresh "Admin" container must be created, not confused with the unrelated "Other" one');
+  assert.ok(write.newLines.includes('- Admin'), 'the new container line must be spliced in');
+  assert.equal(
+    write.newLines.filter((l) => l === `  - ${chapterLink}`).length,
+    2,
+    'two rows now carry this exact content -- one under Other (untouched), one freshly created under Admin',
+  );
+});
+
+test('membership guard contrast [round-11-b]: the {kind:"multiple"} halt is unaffected -- two "Admin" containers each already carrying this exact chapterLink still halt, never a false present', () => {
+  const chapterLink = '[Items](guide/items.md)';
+  const indexLines = ['- Admin', `  - ${chapterLink}`, '- Admin', `  - ${chapterLink}`];
+  const write = wireNestedListChapter(indexLines, 'Admin', chapterLink);
+  assert.equal(
+    write.kind,
+    'multiple',
+    'container ambiguity must halt BEFORE the single-container membership guard is ever consulted',
+  );
+  assert.equal(write.matches.length, 2);
+});
+
+test('membership guard contrast [round-11-b]: the present path is CRLF-faithful -- a CRLF file with an exact verbatim child still refuses via present, not a false insert', () => {
+  const chapterLink = '[Items](guide/items.md)';
+  // Mirrors the caller's own split('\n') over a CRLF file on disk (chapter-paths.mjs's own contract:
+  // "a CRLF file leaves a trailing '\r' per elem").
+  const raw = ['- Admin', `  - ${chapterLink}`].join('\r\n') + '\r\n';
+  const indexLines = raw.split('\n');
+  const write = wireNestedListChapter(indexLines, 'Admin', chapterLink);
+  assert.equal(write.kind, 'present');
+  assert.equal(write.index, 1);
+  assert.ok(
+    !('newLines' in write),
+    'present carries no newLines -- the caller can tell present apart from inserted without inspecting content',
+  );
+});
+
+test('membership guard contrast [round-11-b]: the present path is terminal-newline-faithful -- a file with NO trailing newline still refuses via present', () => {
+  const chapterLink = '[Items](guide/items.md)';
+  const raw = ['- Admin', `  - ${chapterLink}`].join('\n'); // no trailing newline
+  const indexLines = raw.split('\n');
+  const write = wireNestedListChapter(indexLines, 'Admin', chapterLink);
+  assert.equal(write.kind, 'present');
+  assert.equal(write.index, 1);
+  assert.ok(!('newLines' in write), 'present carries no newLines regardless of the source file\'s terminal-newline shape');
+});
+
+// =================================================================================================
+// [1.11.0] The `present` outcome's TRIGGER CONDITION differs by link mode, and obsidian-vault.md now
+// states that difference as fact. Nothing executed it until this table, which is the whole point:
+// the prose in this release has been measured false four times, every time by a probe that varied
+// the obviously-relevant dimension while an unlisted one decided the answer. This one nearly shipped
+// the same way. The lead measured six bracket-mangling titles in wikilinks mode, saw all six
+// recognized by step 0, and briefed a teammate that no wikilinks route to `present` had been found;
+// the teammate refuted it with `A]B`, and the lead reproduced the refutation independently.
+//
+// The dimension the lead's six shapes held fixed, without listing it: WHERE the `]` sits relative to
+// the wikilink terminator. WIKILINK_TARGET_RE (`:482`) is /\[\[([^\]|#^]+)[^\]]*\]\]/ — after the
+// target it accepts only non-`]` characters up to a closing `]]`. So a title containing `]]`, or a
+// `]` adjacent to the closing pair, lets the match terminate early and step 0 still finds the row;
+// an isolated `]` cannot be consumed and the whole match fails. Path mode has no such escape: the
+// destination search stops at the FIRST `]`, so any `]` at all breaks it. Hence titles that break
+// path mode but not wikilinks mode, which is exactly the asymmetry the adapter documents.
+//
+// Expectations below are MEASURED VALUES, hardcoded. They are deliberately not derived at test time
+// from the same regex the code uses — a table that recomputed them would agree with any regex,
+// including a broken one, and would have agreed with the lead's wrong claim too.
+//
+// Red-before-green, measured against two independent baselines (scratch copies, never the shared
+// tree). Against SHIPPED 1.10.0: 13 of the 22 cells go red — every `present` expectation reports
+// `inserted` instead, which is the unbounded-growth defect itself, while all 9 `step0` cells pass
+// unchanged (correct: the guard does not touch the path step 0 already recognizes). Against a mutant
+// that loosens WIKILINK_TARGET_RE's post-target run to accept `]` (`[^\]]*` -> `[\s\S]*?`): exactly
+// the 5 wiki cells asserting `present` flip to step0-recognized, and NOTHING else moves — so those
+// cells pin the mode asymmetry specifically, not merely the guard's existence.
+// =================================================================================================
+
+const PRESENT_TRIGGER_TABLE = [
+  // title,            path mode,   wiki mode        why
+  ['A]B', 'present', 'present'], //     isolated ']' — breaks both
+  ['Items]Beta', 'present', 'present'], //     isolated ']' — breaks both
+  ['X]Y]Z', 'present', 'present'], //     two isolated ']' — breaks both
+  ['] Items', 'present', 'present'], //     leading ']' — breaks both
+  ['Items] [Beta]', 'present', 'present'], //     first ']' isolated — breaks both
+  ['Items [beta]', 'present', 'step0'], //     trailing ']' adjacent to ']]' in wiki
+  ['Items ]] beta', 'present', 'step0'], //     contains ']]' — terminates the wikilink early
+  ['Items ]]]] x', 'present', 'step0'], //     ditto, longer run
+  ['Items | beta', 'step0', 'step0'], //     no ']' at all — neither mode breaks
+  ['Items [[beta', 'step0', 'step0'], //     no ']' at all — neither mode breaks
+  ['Items', 'step0', 'step0'], //     plain control
+];
+
+for (const [title, expectedPath, expectedWiki] of PRESENT_TRIGGER_TABLE) {
+  for (const mode of ['path', 'wiki']) {
+    const expected = mode === 'path' ? expectedPath : expectedWiki;
+    test(`present trigger condition [1.11.0]: ${JSON.stringify(title)} / ${mode} -> ${expected}`, () => {
+      const wikilink = mode === 'wiki';
+      const target = wikilink ? 'admin/items' : 'admin/items.md';
+      const chapterLink = wikilink ? `[[admin/items|${title}]]` : `[${title}](admin/items.md)`;
+      const seed = wikilink
+        ? ['# Summary', '', '- Admin', '  - [[admin/overview|Overview]]', '']
+        : ['# Summary', '', '- Admin', '  - [Overview](admin/overview.md)', ''];
+
+      // Run 1 always inserts: the row is genuinely absent from a fresh index in both modes.
+      const first = wireNestedListChapter(seed, 'Admin', chapterLink);
+      assert.equal(first.kind, 'inserted', 'the first publish always writes the row');
+
+      // Run 2 is the discriminator: either step 0 recognizes what run 1 wrote (and the adapter
+      // never calls the writer), or it does not and the writer's own guard must catch it.
+      const after = first.newLines;
+      const step0 = locateChapterLine(after, target, wikilink ? { wikilink: true } : {});
+      if (expected === 'step0') {
+        assert.equal(step0.present, true, 'step 0 must recognize the row this title produces');
+      } else {
+        assert.equal(step0.present, false, 'this title must defeat step 0 — otherwise the guard is untested here');
+        const second = wireNestedListChapter(after, 'Admin', chapterLink);
+        assert.equal(second.kind, 'present', 'the writer must refuse to write a second copy');
+      }
+
+      // Either way the index converges: exactly one row carrying this link, never two.
+      const rows = after.filter((l) => l.includes(chapterLink)).length;
+      assert.equal(rows, 1, 'exactly one row is ever written for a given chapter link');
+    });
+  }
 }
 
 // =================================================================================================

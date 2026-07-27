@@ -450,6 +450,31 @@ the one exception to "do all of these" — see its own conditional note below.
        persist the returned `newLines` (joined back, they reproduce the exact bytes — EOL and
        terminal newline preserved) and proceed — the container was found or created and the
        chapter line inserted under it.
+     - `{kind: 'present', index}` — a child bullet under the resolved container already carries
+       this run's own chapter link, verbatim, though step 0 (`locateChapterLine`) still reports
+       the chapter absent: only the chapter's own title can cause that split, by keeping step
+       0's target-parse from ever recognizing the row the writer already wrote. This check
+       compares literal content, never a parsed target, so it catches exactly what step 0
+       cannot; `index` is diagnostic only and is never interpolated into the halt below — an
+       existing follow-up tracks halt-text injection through found-row text as its own defect,
+       and this halt does not repeat it.
+       One halt text for both `publish.wikilinks` modes — it names no link syntax, so nothing
+       in its wording ties it to either mode, and the outcome itself is reachable in both:
+       whenever a title breaks its own row's link/wikilink target parse (see the
+       already-documented wikilink case, `- [[items|A]B]]`, in the plain-label table under
+       "Nested-list automation limits" below), the writer's insert converges at exactly one
+       row, then repeats this halt on every later run — confirmed directly here too (`A]B`,
+       `Items]Beta`, `X]Y]Z` all reach it as a wikilink alias). The two modes differ in which
+       bracket shapes trigger it, not in whether they can: a Markdown link's label sits before
+       its destination, so ANY unescaped `]` inside the title ends the label scan early and
+       breaks the parse; a wikilink's target sits before its `|`, so a `]` merely trailing
+       right up against the alias's own closing `]]` run does NOT break it — `Items]` and
+       several other bracket- or pipe-mangling shapes tried here converge normally in wikilinks
+       mode instead of reaching this halt — only a `]` sitting somewhere short of that closing
+       run does. A target-side route (a slug whose own text ends in `.md`, since
+       `currentIndexExpectedTarget` strips one terminal `.md` in wikilinks mode) converges the
+       same ordinary way:
+       `Chapter row for '<slug>' is already present under the '<group_title>' container bullet in <index_file>, but this run could not recognize it — the chapter's own title does not yield a resolvable link destination. Give the chapter a plain title in the manifest — no Markdown markup, backslash escapes, or HTML entities in it — then re-run; see "Nested-list automation limits" below.`
      - `{kind: 'multiple'}` — two or more container bullets match `group_title`; never guess
        which is canonical, halt:
        "Found multiple '<group_title>' container bullets in <index_file> — curate the index manually, then re-run."
@@ -519,21 +544,50 @@ the one exception to "do all of these" — see its own conditional note below.
 
        Convergence depends on the manifest entry's own `title` — not on whatever row already
        sits in the index — because that is what the writer rebuilds its inserted row from on
-       every run. If an existing row (operator-typed, or left over from any prior state) does
-       not resolve but the manifest title is clean, the writer's own insert resolves
-       immediately: the earlier, unrecognizable row lingers beside it as a cosmetic duplicate,
-       and the very next run reports `ok` on the clean one — exactly ONE duplicate forms, not
-       zero and not unbounded. Only when the manifest title is ITSELF target-breaking does this
-       fail to converge: place such a row correctly under the container rather than at the left
-       margin and the writer does not refuse it, but step 0 still reports the chapter absent —
-       the row it just inserted is exactly as unrecognizable as the one before it — and
-       `wireNestedListChapter`, which has no membership check of its own, appends another
-       duplicate row on every re-run, without limit; the verifier is never reached, because
-       step 0 never reports the chapter present (pre-existing behaviour, not new in 1.11.0).
-       Measured, all three cases: a row that already resolves inserts nothing; a broken row plus
-       a clean manifest title gives one lingering duplicate then `ok`; a broken row plus a
-       broken manifest title appends without limit. Separately: a
-       title that merely renders non-plain while its target still resolves — an ampersand,
+       every run. If an existing row (operator-typed, or left over from any prior run) does not
+       resolve but the manifest title is clean, the writer's own insert resolves immediately:
+       the earlier, unrecognizable row lingers beside it as a cosmetic duplicate, and the very
+       next run reports `ok` on the clean one. That is the one combination that converges with
+       a harmless leftover; the other combination — the manifest title ITSELF target-breaking —
+       does not converge the same way, and what it does instead turns on where the writer's own
+       insert sits, not on `publish.wikilinks` mode:
+
+       - **Nested under its single matched container** (the ordinary case — where
+         `wireNestedListChapter` always places its own insert): every later run still finds
+         `containers.length === 1`, and step 0 still reports the chapter absent — the row is
+         exactly as unrecognizable to step 0's target parse as before — but the writer's own
+         membership guard (the `present` outcome above) recognizes its own prior insert
+         VERBATIM, refuses to write a second copy, and halts instead. Exactly ONE row is ever
+         written here, in either mode; the shipped 1.10.0 behaviour this retires had no
+         membership check at all and appended another duplicate row on every re-run, without
+         limit.
+       - **At the left margin (indent 0), uncontained** — a broken title's own brackets fail
+         the indent-0 `isPlainLabel` check the same way regardless of what broke them or which
+         mode wrote them, so `containerOwnerScan` declines the WHOLE scan (`{kind:
+         'not-a-list'}`) for every container in the file, not just this row. Nothing is ever
+         inserted from here: the plain, unnamed `not-a-list` halt (the "anything else" branch
+         above) just repeats verbatim, forever — zero duplicates form, not one — measured in
+         both modes (a target-breaking wikilink alias at the left margin declines the scan
+         exactly like a target-breaking Markdown-link title does).
+
+       A `group_title` that is itself non-plain reaches that same zero-growth `not-a-list` halt
+       by a third, independent path, also mode-independent: `wireNestedListChapter` checks the
+       group axis before it ever looks at containers or existing rows, so a malformed
+       `group_title` short-circuits there regardless of the chapter title, the row's placement,
+       or `publish.wikilinks`.
+
+       Measured, across every placement × mode × title-resolvability combination that matters
+       here: a row that already resolves inserts nothing further; a stale row alongside a clean
+       current manifest title gives one lingering duplicate then `ok`; a target-breaking
+       current title nested under its container converges on exactly one row, then a `present`
+       halt from the second run onward, in either mode (new in 1.11.0 — this is the case #330
+       retires from unbounded); the same target-breaking title sitting at the left margin, or a
+       non-plain `group_title`, converges on zero further rows and a repeating `not-a-list`
+       halt instead (unchanged since 1.10.0), again in either mode. No combination measured
+       here grows without bound.
+
+       Separately: a title that merely renders non-plain while its target still resolves — an
+       ampersand,
        emphasis, an HTML entity (see "Nested-list automation limits" below for the measured
        table) — which is found and simply left unverified at the left margin (measured in both
        `publish.wikilinks` modes), but is `ok` if instead correctly nested under its container,
@@ -656,13 +710,19 @@ a second container beside a retained phantom row (a legitimate `*`/`+` plain lab
 to contain `/` is refused too, a deliberate over-rejection, not corruption). Inline code, an
 HTML comment or a fenced block anywhere, a mixed or bare-CR line ending, a YAML `nav:` or
 `- key: value` mapping bullet, a list nested more than one level deep, and a multiline
-`group_title` fall outside the subset as well. Worst case for the residual is a cosmetic
-duplicate container the author can see and delete — never data loss. A richer rendering-aware
-matcher is a possible follow-up, not a bug.
+`group_title` fall outside the subset as well. Worst case for the residual (a file the guards
+above decline) is a cosmetic duplicate container an operator might introduce by hand while
+following the manual halt instructions — visible and deletable, never data loss. Within the
+automated subset itself, the writer's own worst case is now bounded the same way: a
+target-breaking title converges on exactly one duplicate chapter row, then halts rather than
+writing a second (see "INDEX wiring" above for the measured bound) — the shipped 1.10.0
+writer's unbounded per-re-run growth is retired, not merely described as harmless. A richer
+rendering-aware matcher is a possible follow-up, not a bug.
 
 **The plain-label predicate, named exactly.** In short: a plain title is verified; a non-plain
 title that still resolves is found but left unverifiable; a title that breaks its own row's
-link target duplicates instead of ever completing (see the duplicate-insert warning above). The
+link target is caught once, by the writer's own membership guard, rather than duplicated
+without limit (see the bounded-outcome discussion under INDEX wiring above). The
 mechanism: the container-owner scan (`containerOwnerScan`,
 `assets/lib/chapter-paths.mjs`) applies `isPlainLabel` to whatever `extractLabel` returns for a
 row's own content — never to the row's raw source text, and never to what it renders as in
@@ -698,7 +758,8 @@ file, in both modes:
 The last row of each mode is a different failure mode entirely: a nested link (path mode) or an
 unescaped `]` in the alias (wikilinks mode) breaks the row's OWN link-target extraction — not
 `extractLabel`/`isPlainLabel` at all — so step 0 never reports the chapter present in the first
-place; see the duplicate-insert warning above for what a target-breaking title does instead.
+place; see the bounded-outcome discussion under INDEX wiring above for what a target-breaking
+title does instead: one inserted row, then a `present` halt — never unbounded duplication.
 
 As of 1.11.0, a **present** grouped chapter's placement under this container is also checked,
 but only for a narrow verified class — this exact sentence, reused verbatim everywhere it is

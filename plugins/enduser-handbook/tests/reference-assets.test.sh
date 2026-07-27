@@ -2776,6 +2776,70 @@ has_joined_in_section "revalidation.md: convergence checklist carries the class 
   "$REVAL" '### Terminal-state convergence checklist' "$CLASS_SENTENCE"
 has "CHANGELOG: 1.11.0 entry carries the class sentence verbatim" "$CLASS_SENTENCE" "$CHLOG"
 
+echo "== [1.11.0] wireNestedListChapter membership guard — retired claims, and the shared halt =="
+# ANTI-ROT, and deliberately NEGATIVE. The sentences forbidden below were never pinned at all, which
+# is how four successive revisions of the duplicate-hazard paragraph shipped green while each was
+# later measured FALSE: an exact-string pin proves prose did not DRIFT and structurally cannot prove
+# prose is TRUE. So the only honest thing a pin can do about a retired false claim is forbid its
+# return. What the guard actually DOES is verified by EXECUTING it — the convergence tests in
+# chapter-paths.test.mjs go red when the code regresses, not when the wording moves. Do not add a
+# positive pin here restating the guard's behaviour; that would recreate the exact false-green this
+# block exists to end.
+#
+# Wrap-safe by construction (count_joined_fixed, not count_fixed): every needle here is long enough
+# to house-wrap, and a PHYSICAL-line count would silently miss a re-wrapped copy — a failure mode
+# this suite has already been bitten by. Scope is the two adapters ONLY: CHANGELOG.md deliberately
+# retains the 1.10.0 wording inside an explicitly historical framing, so a repo-wide ban would fire
+# on a sentence that is correct precisely because it is quoted as superseded.
+RETIRED_CLAIMS=(
+  'which has no membership check of its own'
+  'not zero and not unbounded'
+)
+for claim in "${RETIRED_CLAIMS[@]}"; do
+  for f in "$SMD" "$OMD"; do
+    c="$(count_joined_fixed "$claim" "$f")"
+    if [ "$c" = "0" ]; then
+      ok "$(basename "$f"): retired claim stays retired — '$claim'"
+    else
+      bad "$(basename "$f"): retired claim is back ($c occurrence(s)) — '$claim'"
+    fi
+  done
+done
+
+# The `present` halt is a SHARED string. Both adapters must carry it byte-identically: an operator
+# reading either one is told the same thing, and a one-sided edit is exactly the twin drift this
+# suite exists to catch. Defined ONCE here so neither adapter can be the authority for the other.
+PRESENT_HALT="Chapter row for '<slug>' is already present under the '<group_title>' container bullet in <index_file>, but this run could not recognize it — the chapter's own title does not yield a resolvable link destination. Give the chapter a plain title in the manifest — no Markdown markup, backslash escapes, or HTML entities in it — then re-run; see \"Nested-list automation limits\" below."
+for f in "$SMD" "$OMD"; do
+  c="$(count_joined_fixed "$PRESENT_HALT" "$f")"
+  if [ "$c" -ge 1 ]; then
+    ok "$(basename "$f"): carries the shared 'present' halt verbatim ($c occurrence(s))"
+  else
+    bad "$(basename "$f"): shared 'present' halt missing or altered"
+  fi
+done
+# The `present` halt names only manifest- and profile-derived values (<slug>, <group_title>,
+# <index_file>), and deliberately does NOT quote back the row it found: that text is INDEX content,
+# and interpolating it into a halt is the halt-text injection shape recorded as an open follow-up.
+#
+# The pin below is a no-NEW-SITE count, not a ban, and the distinction is the honest part. Each
+# adapter already carries FOUR `<found_title>` occurrences — the misplaced-halt string and its
+# "(none)" explanation, twice per adapter (static-md.md:318/319 and :338/339; obsidian-vault.md:
+# :391/392 and :417/418) — and that placeholder DOES interpolate index content. Those sites are
+# pre-existing and out of scope here; a pin asserting zero would be a false claim about the file,
+# and "fixing" them to satisfy it would be an unreviewed change to shipped halt wording. So the
+# count is pinned at its measured value: adding a new interpolation site goes red, removing one
+# goes red too (deliberate — retiring one is a real change that belongs in a release note).
+FOUND_TITLE_SITES=4
+for f in "$SMD" "$OMD"; do
+  c="$(count_joined_fixed '<found_title>' "$f")"
+  if [ "$c" = "$FOUND_TITLE_SITES" ]; then
+    ok "$(basename "$f"): no new found-row interpolation site ($c, the pre-existing misplaced-halt pair)"
+  else
+    bad "$(basename "$f"): found-row interpolation sites changed ($c, expected $FOUND_TITLE_SITES)"
+  fi
+done
+
 echo "== #329 convergent halt strings and the inconsistent halt — exact, derived from the adapters =="
 # #329 TWO-BRANCH halt. The convergent halt BEGINS with the plain 1.10.0 halt and then continues,
 # and `has` is a line-based fixed-string grep — so a needle carrying only the plain text also
