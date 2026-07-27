@@ -136,7 +136,8 @@ HTML_OK = http_response(200, {"Content-Type": "text/html; charset=utf-8"}, b"<p>
 class _CountingBytesIO(io.BytesIO):
     """A wire that counts what was pulled off it.
 
-    The byte cap is applied to the READ (`resp.read(MAX_BYTES + 1)`), so a
+    The byte cap is applied as the body is read (`_read_bounded`'s `read1()`
+    loop, bounded by MAX_BYTES + 1), so a
     version that read the whole body and truncated afterwards returns a
     byte-identical result -- the difference exists only in how much came off the
     wire, and this counter is the only place a test can see it.
@@ -519,13 +520,21 @@ def test_resolve_refuses_an_unparseable_answer(monkeypatch):
     assert refusal(fc.resolve_and_pin, "weird.example", 80) == "unparseable-resolved-address"
 
 
-def test_a_decimal_ip_host_is_caught_at_resolution_not_statically(monkeypatch):
-    """`http://2130706433/` is 127.0.0.1 in decimal form. `ipaddress` cannot
-    parse it, so the literal check lets it through -- and the resolution pass is
-    what catches it. Defence in depth, asserted rather than assumed."""
-    assert fc.validate_url("http://2130706433/") == ("http", "2130706433", 80, "/")
-    FakeNet(monkeypatch, dns={"2130706433": ["127.0.0.1"]})
-    assert refusal(fc.resolve_and_pin, "2130706433", 80) == "loopback-address"
+def test_a_decimal_ip_host_is_refused_statically_and_at_resolution(monkeypatch):
+    """`http://2130706433/` is 127.0.0.1 in decimal form.
+
+    Until round 6 this asserted the WEAKER property -- that the static check let
+    it through and only resolution caught it. That was true, and it was also the
+    whole hole in canon_validate.py, which runs the same static decision with no
+    resolver behind it: there, "caught at resolution" means not caught at all,
+    and the address went into canon.json. Both layers refuse it now, and this
+    test pins BOTH rather than replacing one claim with the other -- the
+    resolution pass is still the backstop for a NAME that resolves to loopback,
+    which no static check can ever see.
+    """
+    assert refusal(fc.validate_url, "http://2130706433/") == "ambiguous-numeric-host"
+    FakeNet(monkeypatch, dns={"evil.example": ["127.0.0.1"]})
+    assert refusal(fc.resolve_and_pin, "evil.example", 80) == "loopback-address"
 
 
 # =========================================================================== #
@@ -1486,6 +1495,7 @@ OUTCOME_RE = re.compile(
     r"|unparseable-redirect-location|content-type-not-allowed|connect-timeout"
     r"|loopback-address|private-address|link-local-address|multicast-address"
     r"|site-local-address|reserved-address|unspecified-address|dns-empty|empty-url"
+    r"|ambiguous-numeric-host"
     r"|host-not-idna-encodable|non-global-address|unparseable-resolved-address"
     r"|scheme-not-allowed:[a-z]+"
     r"|redirect-without-location:\d{3}"
@@ -1509,9 +1519,11 @@ def _emitted_refusal_reasons():
     reasons = set()
     for node in ast.walk(tree):
         if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
-                and node.func.id == "_refuse" and node.args):
+                and node.func.id == "_refuse"):
             continue
-        arg = node.args[0]
+        args = [a for a in node.args] + [kw.value for kw in node.keywords]
+        assert args, f"line {node.lineno}: _refuse() called with no reason at all"
+        arg = args[0]
         if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
             reasons.add(arg.value)
         elif isinstance(arg, ast.JoinedStr):
@@ -1529,6 +1541,13 @@ def _emitted_refusal_reasons():
                     )
                     parts.append(samples[expr])
             reasons.add("".join(parts))
+        else:
+            raise AssertionError(
+                f"line {node.lineno}: _refuse(...) is given a {type(arg).__name__}; "
+                "this helper derives the emitted vocabulary from the AST, so a shape "
+                "it cannot read must fail rather than vanish from the set. (Round 6: "
+                "the sibling gate was fixed for exactly this and this copy was not, "
+                "which left it correct only by the other test's grace.)")
     return reasons
 
 
@@ -1544,16 +1563,40 @@ def test_the_documented_outcome_vocabulary_matches_what_the_module_emits():
     silently drifted on eight strings.
     """
     reasons = _emitted_refusal_reasons()
-    assert len(reasons) >= 20, f"expected >=20 refusal reasons, found {len(reasons)}"
+    assert len(reasons) >= 28, (
+        f"expected >=28 refusal reasons, found {len(reasons)}. The module emits 31; a floor of 20 let eleven disappear unnoticed.")
 
     unmatched = sorted(r for r in reasons if not OUTCOME_RE.match("refused:" + r))
     assert not unmatched, (
         "OUTCOME_RE does not admit reasons the module emits: " + ", ".join(unmatched))
 
     # The outcomes composed OUTSIDE _refuse(), which the AST walk cannot see.
+    composed_elsewhere = {"batch-deadline", "internal-error"}
     for outcome in ("fetched", "http_error:404", "refused:batch-deadline",
                     "refused:internal-error:MemoryError"):
         assert OUTCOME_RE.match(outcome), f"OUTCOME_RE rejects {outcome!r}"
+
+    # THE OTHER DIRECTION, which this test lacked until round 6. Checking only
+    # "everything emitted is admitted" catches a reason the module GAINS and
+    # never one it LOSES -- and the lost kind is the one that leaves the judge
+    # prompt documenting an outcome that can no longer occur, which is how the
+    # eight stale spellings survived here unnoticed in the first place.
+    emitted_prefixes = {r.split(":", 1)[0] for r in reasons} | composed_elsewhere
+    # Only the PLAIN alternatives of the refused:(?:...) group -- the bare
+    # reason words. Anything containing a regex metacharacter is a shape
+    # (scheme-not-allowed:[a-z]+, dns-failure:-?\d+), already covered by the
+    # forward direction, and is skipped rather than crudely tokenised: an
+    # earlier version of this split `http_error:\d{3}` into "http" and "error"
+    # and reported both as stale.
+    body = OUTCOME_RE.pattern.split("refused:(?:", 1)[1]
+    documented = {alt for alt in body.split("|")
+                  if alt and not set(alt) & set("()[]{}?*+\\:.$^")}
+    stale = sorted(d for d in documented if d not in emitted_prefixes)
+    assert not stale, (
+        "OUTCOME_RE documents outcomes the module no longer emits: "
+        + ", ".join(stale)
+        + ". Remove them here and from citationJudgePrompt's outcome list, or the "
+          "judge keeps being told to expect something that cannot happen.")
 
 
 @pytest.mark.parametrize("injected", [
@@ -2060,7 +2103,11 @@ def test_every_refusal_reason_in_the_module_is_closed_vocabulary():
                 and isinstance(node.func, ast.Name)
                 and node.func.id == "_refuse"):
             continue
-        for arg in node.args:
+        # node.args AND node.keywords: iterating only args let
+        # `_refuse(reason=f"...{exc}")` through in silence, which is the same
+        # silent-skip this gate was rewritten to stop. A gate that covers one
+        # calling convention is a gate with a documented bypass.
+        for arg in [a for a in node.args] + [kw.value for kw in node.keywords]:
             if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
                 continue                             # a plain str is closed by construction
             assert isinstance(arg, ast.JoinedStr), (

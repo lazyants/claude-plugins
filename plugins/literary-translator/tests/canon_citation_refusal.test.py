@@ -220,6 +220,14 @@ REFUSAL_CASES = [
     # of ipaddress._private_networks, so is_private is False and is_global is
     # True, and it was the one disqualifying property neither function named.
     ("http://[fec0::1]/x", "site-local-address"),
+    # getaddrinfo-valid spellings of 127.0.0.1 that ipaddress.ip_address()
+    # rejects, so the literal check never saw them. Refused outright rather than
+    # normalised: 0177.0.0.1 is 177.0.0.1 under BSD inet_aton and 127.0.0.1
+    # under glibc, so normalising would make the verdict platform-dependent.
+    ("http://2130706433/x", "ambiguous-numeric-host"),
+    ("http://0x7f.0x0.0x0.0x1/x", "ambiguous-numeric-host"),
+    ("http://017700000001/x", "ambiguous-numeric-host"),
+    ("http://127.1/x", "ambiguous-numeric-host"),
     ("http://224.0.0.1/x", "multicast-address"),      # is_global is TRUE here
     ("http://100.64.0.1/x", "non-global-address"),    # CGNAT: no named property hits
     ("http://0.0.0.0/x", ANY_ADDRESS_REASON),

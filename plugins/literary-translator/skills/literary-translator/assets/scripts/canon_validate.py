@@ -824,6 +824,36 @@ def _citation_scheme_token(scheme: str) -> str:
 _CITATION_CONTROL_CHAR_RE = re.compile(r"[\x00-\x20\x7f]")
 
 
+# A host whose every label is a bare integer or an 0x-hex integer, and which is
+# NOT already a canonical IP literal. getaddrinfo accepts these as addresses --
+# measured: 2130706433, 0x7f.0x0.0x0.0x1, 017700000001 and 127.1 all resolve to
+# 127.0.0.1 -- while ipaddress.ip_address() rejects every one of them, so the
+# literal check upstream simply does not see them. In fetch_citation.py that was
+# only a static miss (resolve_and_pin still refuses the loopback address it comes
+# back with); in canon_validate.py, which has no resolver, it was the WHOLE
+# check, and a `source` naming loopback in one of these spellings was frozen into
+# canon.json.
+#
+# Refused outright rather than normalised, because normalising means picking a
+# platform: 0177.0.0.1 resolves to 177.0.0.1 under BSD's inet_aton (measured
+# here) and to 127.0.0.1 under glibc's, so the SAME fragment gets different
+# verdicts on macOS and Linux. A citation never legitimately cites a decimal,
+# octal or hex-spelled address, and a real DNS name cannot have an all-numeric
+# final label, so refusing costs nothing real. Verified against example.com,
+# 1.example.com, 0x.com and archive.org, all still admitted.
+_NUMERIC_LABEL_RE = re.compile(r"\A(?:0[xX][0-9a-fA-F]+|[0-9]+)\Z")
+
+
+def _is_ambiguous_numeric_host(host: str) -> bool:
+    try:
+        ipaddress.ip_address(host)
+        return False              # a canonical literal; the address checks own it
+    except ValueError:
+        pass
+    labels = host.rstrip(".").split(".")
+    return bool(labels) and all(_NUMERIC_LABEL_RE.match(l) for l in labels)
+
+
 def _non_global_address_reason(ip) -> "str | None":
     """The reason this IP literal is not a legitimate citation host, or None.
 
@@ -948,6 +978,8 @@ def _citation_source_refusal(value) -> "str | None":
         return "embedded-credentials"
     if not host:
         return "no-host"
+    if _is_ambiguous_numeric_host(host):
+        return "ambiguous-numeric-host"
 
     host = host.lower()
     # `localhost` and anything under it are refused BY NAME, before any

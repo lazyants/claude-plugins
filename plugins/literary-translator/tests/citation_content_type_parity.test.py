@@ -238,6 +238,26 @@ def test_the_schema_maxitems_matches_the_scripts_cap():
     assert node["maxItems"] == fc.MAX_CONTENT_TYPE_PREFIXES
 
 
+def test_the_workflow_template_pins_the_same_count_cap_as_the_other_two_engines():
+    """The COUNT cap is a three-way constant with, until round 6, a two-way test.
+
+    fetch_citation.py's MAX_CONTENT_TYPE_PREFIXES and profile.schema.json's
+    maxItems were pinned to each other; the template's own guard was a bare
+    literal that nothing checked, while its error message asserts agreement with
+    both. Bump the Python constant and the schema follows it here -- the template
+    would have gone on refusing at the old number, which is a preflight gate
+    disagreeing with the runtime gate, the exact thing the schema's own
+    description calls "worse than no preflight gate".
+    """
+    src = TEMPLATE_PATH.read_text(encoding="utf-8")
+    caps = [int(n) for n in re.findall(r"CITATION_TYPE_LIST\.length > (\d+)", src)]
+    assert caps, "no count cap found in the workflow template"
+    for cap in caps:
+        assert cap == fc.MAX_CONTENT_TYPE_PREFIXES, (
+            f"template caps the list at {cap}, fetch_citation.py at "
+            f"{fc.MAX_CONTENT_TYPE_PREFIXES}")
+
+
 if __name__ == "__main__":
     import sys
     sys.exit(pytest.main([__file__, "-v"]))
