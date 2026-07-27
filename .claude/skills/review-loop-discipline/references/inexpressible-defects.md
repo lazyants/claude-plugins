@@ -112,6 +112,86 @@ else. That makes "a weakened guard that still passes" *inexpressible* — it is 
 the exact analogue of "one loop over a table, delete the alternative path." A denylist is the
 checker form of patching sites.
 
+**The cheapest instance of this is a one-string anti-rot pin, and it is easy to miss because it
+looks like a guard rather than a denylist.** After a review retires a wrong wording, the natural
+guard is a negative pin asserting the retired phrase never comes back. That pin forbids a
+*spelling*, not the *error*. Measured 2026-07-27 (`enduser-handbook`): a round retired "code
+fences" from an operator halt because a backtick run in a title is an unterminated inline code
+SPAN, never a fence; a later round — same author, same file — reintroduced exactly that error as
+"a fenced-code run", and the pin stayed green because its needle was the old exact phrase. The
+suite reported 606/606 over a defect it had been written to prevent, and the error shipped in a
+commit. Same shape as the AST denylist, one rung cheaper to fix:
+
+- **Pin the CLASS, not the retired string** — forbid the concept ("fence", "fenced", any spelling)
+  where the mechanism makes it wrong, or
+- better, **pair every negative pin with a POSITIVE assertion of the correct mechanism** ("the halt
+  says *span*, and says it names any run length"). A positive pin fails on a synonym; a negative
+  pin cannot.
+- The tell that you need this: you are writing a pin whose justification is "round N decided this
+  wording was wrong." That justification is about a concept; a string needle cannot carry it.
+
+The same reasoning applies to the PROSE the pin guards. When an enumeration of a behaviour matrix
+has been measured wrong more than twice, stop enumerating and state a positive constraint that is
+safe over the whole matrix — deliberately stricter than the code if necessary, and *labelled* as
+stricter. Then verify the constraint by searching for a counterexample rather than by re-reading
+the list: enumerations fail by omission, and omission is exactly what re-reading cannot see.
+
+### The rung you land on is fine; the SENTENCE describing it is what keeps failing
+
+The escalation above was then run to its end in the same file, and the durable finding is not the
+final gate — it is that **every rung's mechanism was a genuine improvement while every rung's
+COMMENT claimed the class was closed.** Measured across four consecutive rounds, 2026-07-27,
+`enduser-handbook` `reference-assets.test.sh`, each defeat demonstrated by executing the mutation
+rather than argued:
+
+| rung | what it asserts | how it was defeated |
+|---|---|---|
+| negative needle | the retired phrase is absent | a new spelling of the same error |
+| positive pin | the correct mechanism sentence is present | a contradiction **added** beside it — a presence check cannot see an addition |
+| token count | the section holds exactly N `fenc` tokens | a **paired** substitution: remove one truthful occurrence, add one false one, net zero |
+| count + full coverage | every counted occurrence also sits inside a phrase pin | the needle kept VERBATIM inside a sentence asserting the opposite |
+
+That last one is the sharpest and has the cleanest cause. The defeated needle was
+`HTML comment or a fenced block anywhere`, and the mutation was
+`...anywhere is accepted by this automation` — same needle, same token count, meaning inverted.
+**A needle that stops at a noun phrase pins a SUBJECT, and a subject is equally compatible with the
+opposite predicate.** The fix is not a new mechanism: extend each needle through the word that
+carries the claim's polarity (`... fall outside the subset as well`; `can never sit at the ...`).
+The reusable acceptance test, cheap enough to apply to every string pin you ever write:
+
+> Write the sentence that contradicts the claim while keeping your needle verbatim.
+> If you can, the needle is too short.
+
+Three things generalize.
+
+**The design rule: bound the TOKEN, not the spelling — then cover every counted occurrence with a
+phrase pin.** A count alone is a denylist's mirror image: it constrains the total while leaving each
+individual occurrence free to be swapped. Coverage is what closes the pair, and it is checkable
+mechanically — sum the token occurrences inside the pinned needles and require it to equal the
+section's total. Check it per file: two sibling documents describing the same mechanism had
+*different* sentence sets (one had a single unpinned occurrence, the other two), so a pin list
+copied from one to the other silently leaves a hole.
+
+**The review rule, which is worth more: at each rung the round shipped a comment asserting more
+coverage than the mechanism had, and each next round found the gap by attacking the sentence rather
+than the code.** The habit that finally converged was to write the residual INTO the comment in a
+form falsifiable by execution — "the count detects only a NET change; a paired addition and removal
+cancel; a contradiction phrased without the token still evades" — and to treat any sentence you
+cannot construct a counterexample to as evidence you have not looked hard enough, not as evidence it
+is true. Add to a review brief for any prose-guarding gate: *"try to falsify the comment, not just
+the code."* No mechanical gate over prose decides whether the prose is TRUE; a gate can only narrow
+the ways a false claim arrives, so the honest artifact is a gate whose description says exactly which
+ways remain. Every rung above was confirmed by watching the mutant pass BEFORE the fix and fail after, one
+file at a time — a new gate is worth nothing until it has been seen failing on the real defect.
+
+**The third thing, and the one that ends the loop: decide where you STOP, and write the stopping
+point down.** A fixed-string pin over prose has no final rung — each round buys one more evasion
+class and the next round finds another. Four rounds in, the honest artifact was not a fifth
+mechanism but a comment naming the gate's remaining evasions explicitly and pointing the class at
+the filed issue for a structure-aware reader. Say "drift detector, never a truth detector" in the
+artifact itself. Otherwise every future reader re-derives the ladder from scratch, and — the actual
+cost here — every round's own comment quietly promises the rung above the one it built.
+
 ## The symmetric-twin tell
 
 Even after the allowlist, two more rounds each found the SYMMETRIC OTHER HALF of the previous
