@@ -58,7 +58,10 @@ path. Payload shape:
         "research_mode": "...", "verse_policy": "...",
         "source_lang": "...", "target_lang": "...",
         "max_fix_rounds": N, "batch_agent_cap": N,
-        "effort": "low|medium|high|xhigh"        # #197; NOT "model" (see SUBST_FIELDS)
+        "effort": "low|medium|high|xhigh",       # #197; NOT "model" (see SUBST_FIELDS)
+        "citation_content_types": "text/,application/pdf"   # 1.16.1 (#347);
+                                                 # "" when the profile key is
+                                                 # absent, but REQUIRED even then
       },
       "resume_from_run_id": "<candidate RUN_ID>" | null,   # optional
       "segs": ["seg01", "seg02", ...],           # required for kind="mass"
@@ -131,6 +134,16 @@ CACHE_KEY_SCRIPT = SCRIPTS_DIR / "cache_key.py"
 SUBST_FIELDS = frozenset({
     "research_mode", "verse_policy", "source_lang", "target_lang",
     "max_fix_rounds", "batch_agent_cap", "effort",
+    # 1.16.1 (#347). It changes the prepare step's actual command line, so it
+    # changes what a cached citation-review result MEANS: widening the list from
+    # ["text/"] to ["text/", "application/pdf"] makes the boundary admit pages it
+    # previously refused, and a resumed run would otherwise reuse verdicts taken
+    # under the OLD policy while reporting them as current. Omitting it was
+    # caught by codex in the 1.16.1 round-3 review, which measured two identical
+    # digests across that exact change -- and it would have recreated this
+    # release's own stated anti-goal: a profile setting that silently does not
+    # take effect.
+    "citation_content_types",
 })
 # NOT "model": the mass digest already carries engine.model via each
 # segment's own cache_key/agent_config_hash; the glossary pass has no model

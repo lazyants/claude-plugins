@@ -137,6 +137,11 @@ BASE_SUBST = {
     "max_fix_rounds": 3,
     "batch_agent_cap": 5,
     "effort": "high",
+    # 1.16.1 (#347). Empty = fetch_citation.py's shipped default list. REQUIRED
+    # even when empty: the value is what the template actually burned in, and a
+    # digest that omitted it would let a resumed run reuse citation verdicts
+    # taken under a DIFFERENT retrieval policy.
+    "citation_content_types": "",
 }
 
 

@@ -536,7 +536,7 @@
           "description": "1.16.1 (#347). Content-Type prefixes fetch_citation.py may admit for a cited source, substituted into glossary-pass-wf as {{CITATION_CONTENT_TYPES}}. An empty array (or an absent key) means the fetcher's shipped default: text/, application/xhtml, application/xml, application/json. Set it only when THIS corpus cites something the default excludes -- scanned archives are the motivating case. Each entry is a bare type/subtype PREFIX matched with startswith, so parameters, wildcards and uppercase are rejected here rather than being silently ignored downstream. The trailing (?![\\s\\S]) is a true end-of-string anchor, NOT decoration: jsonschema evaluates `pattern` with Python's `re`, whose `$` also matches before a trailing newline, so `...$` would admit \"text/pdf\\n\" here while fetch_citation.py's own \\Z-anchored copy refuses it -- a preflight gate that disagrees with the runtime gate is worse than no preflight gate. A parity test pins all three copies together.",
           "items": {
             "type": "string",
-            "pattern": "^[a-z0-9][a-z0-9!#$&^_.+-]*/[a-z0-9!#$&^_.+-]*(?![\\s\\S])"
+            "pattern": "^[a-z0-9][a-z0-9.+-]*/[a-z0-9.+-]*(?![\\s\\S])"
           },
           "maxItems": 16,
           "uniqueItems": true

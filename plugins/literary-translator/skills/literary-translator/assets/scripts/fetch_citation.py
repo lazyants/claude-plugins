@@ -96,9 +96,17 @@ import ssl
 import sys
 import time
 from pathlib import Path
-from urllib.parse import urlsplit, urlunsplit, urljoin
+from urllib.parse import urlsplit, urlunsplit, urljoin, quote
 
 ALLOWED_SCHEMES = ("http", "https")
+
+# Schemes worth NAMING in a refusal, so `outcome` still says which kind of unsafe
+# URL was attempted. Everything outside this set collapses to "other" -- see
+# scheme_token(). This is a diagnostic vocabulary, NOT a denylist: refusal is
+# decided by ALLOWED_SCHEMES above and nothing here widens it.
+KNOWN_SCHEMES = ("file", "ftp", "ftps", "data", "javascript", "gopher", "ws", "wss",
+                 "mailto", "tel", "about", "blob", "chrome", "jar", "ldap", "dict",
+                 "sftp", "smb", "nfs", "redis", "gemini")
 MAX_REDIRECTS = 5
 MAX_BYTES = 2_000_000
 # PER-ITEM budget, checked at the top of each redirect hop, not continuously.
@@ -147,7 +155,7 @@ ALLOWED_CONTENT_PREFIXES = ("text/", "application/xhtml", "application/xml", "ap
 # trailing newline, so `^...$` would admit "text/html\n" -- which then lands in
 # index.json and breaks the one-token-per-field shape the judge reads. Measured,
 # not assumed: re.match(r"^[a-z/]*$", "text/html\n") returns a match.
-CONTENT_TYPE_PREFIX_RE = re.compile(r"\A[a-z0-9][a-z0-9!#$&^_.+-]*/[a-z0-9!#$&^_.+-]*\Z")
+CONTENT_TYPE_PREFIX_RE = re.compile(r"\A[a-z0-9][a-z0-9.+-]*/[a-z0-9.+-]*\Z")
 MAX_CONTENT_TYPE_PREFIXES = 16
 
 # Control characters anywhere in the URL. Also catches the raw CR/LF that make
@@ -169,7 +177,9 @@ def _refuse(reason: str) -> "Refused":
 
 def name_for_comparison(host: str) -> str:
     """Fold a host to the ASCII form a RESOLVER will actually use, for NAME
-    comparisons only. Kept byte-identical to canon_validate.py's copy.
+    comparisons only. Kept BODY-identical to canon_validate.py's copy (the
+    definitions differ by a leading underscore, and nothing tests source
+    identity -- the enforced parity is behavioural, via the shared URL table).
 
     Comparing the raw string is not enough, and the trailing-dot fix alone was
     not enough either. `encodings.idna` splits labels on the literal set
@@ -223,19 +233,48 @@ def bracket_host(host: str) -> str:
     return f"[{host}]" if ":" in host else host
 
 
-def authority(scheme: str, host: str, port: int) -> str:
-    """host[:port], with the port present only when it is NOT the scheme default.
+def _port_suffix(scheme: str, port: int) -> str:
+    """":port", or "" when it is the scheme default.
 
-    One function for two consumers that must agree: the `Host:` request header
-    and the origin recorded in index.json. They were written separately and
-    drifted -- the header sent a bare hostname for every URL, so an admitted
-    `https://host:8443/` asked the server for the wrong virtual host and an IPv6
-    literal produced a syntactically invalid header (RFC 9110 requires
-    `Host: [::1]:8443`). That is a correctness bug, not a security one: it makes
-    VALID citations fail, which the judge sees as an unreachable source.
+    The ONE piece the wire authority and the recorded origin must agree on, and
+    the piece they had actually drifted on before 1.16.1 round 3: the header sent
+    a bare hostname for every URL, so an admitted `https://host:8443/` asked the
+    server for the wrong virtual host, and an IPv6 literal produced a
+    syntactically invalid header (RFC 9110 requires `Host: [::1]:8443`).
     """
     default = 80 if scheme == "http" else 443
-    return bracket_host(host) + ("" if port == default else f":{port}")
+    return "" if port == default else f":{port}"
+
+
+def wire_authority(scheme: str, host: str, port: int) -> str:
+    """The `Host:` header value: an ASCII A-LABEL authority.
+
+    Round 3 merged this with origin_of()'s authority because they had drifted on
+    the port/bracket rule. Round 4 splits the HOST FORM back out, because the two
+    consumers genuinely need different things and merging them papered over a
+    second bug: http.client encodes the request as ASCII, so a Unicode hostname
+    is either mis-sent or fatal. Measured -- `éxample.com` went out as raw
+    Latin-1 where its A-label is `xn--xample-9ua.com`, and `例え.テスト` raised
+    UnicodeEncodeError. The shared part (_port_suffix) still cannot drift.
+
+    An unencodable host is REFUSED rather than sent mangled: a host the IDNA
+    codec rejects is not a host this boundary can honestly claim it vetted.
+    """
+    try:
+        ascii_host = host.encode("idna").decode("ascii")
+    except (UnicodeError, UnicodeDecodeError):
+        raise _refuse("host-not-idna-encodable")
+    return bracket_host(ascii_host) + _port_suffix(scheme, port)
+
+
+def authority(scheme: str, host: str, port: int) -> str:
+    """host[:port] in DISPLAY form, for the origin recorded in index.json.
+
+    Deliberately NOT the A-label: this value is read by a human operator
+    diagnosing a citation, and `例え.テスト` is more useful to them than
+    `xn--r8jz45g.xn--zckzah`. It is never sent on the wire -- see wire_authority.
+    """
+    return bracket_host(host) + _port_suffix(scheme, port)
 
 
 def parse_content_type_prefixes(values) -> tuple:
@@ -263,6 +302,21 @@ def parse_content_type_prefixes(values) -> tuple:
                 "prefix (for example text/ or application/pdf) -- no parameters, "
                 "wildcards, uppercase or whitespace")
     return tuple(values)
+
+
+def scheme_token(scheme: str) -> str:
+    """Collapse a rejected URL scheme to a token from a FIXED vocabulary.
+
+    Sibling of content_type_token(), and it exists for the same reason: the value
+    is written into index.json's `outcome`, the field the judge reasons over and
+    is told carries no server text. The named schemes are the ones worth keeping
+    for diagnosis -- they say WHICH kind of unsafe URL a citation tried -- and
+    everything else, including the unbounded prose a redirect can supply, becomes
+    "other".
+    """
+    if not scheme:
+        return "none"
+    return scheme if scheme in KNOWN_SCHEMES else "other"
 
 
 def content_type_token(ctype: str, allowed=ALLOWED_CONTENT_PREFIXES) -> str:
@@ -303,7 +357,13 @@ def check_address_literal(host: str) -> None:
     run for `http://127.0.0.1/`.
     """
     try:
-        ip = ipaddress.ip_address(host.strip("[]"))
+        # No .strip("[]"): urlsplit().hostname has ALREADY removed the brackets
+        # (measured: urlsplit("http://[::1]/x").hostname == "::1"), which is the
+        # invariant bracket_host() exists to undo. The old strip was a no-op on
+        # the only live path AND a character-set strip rather than a pair strip
+        # ("]::1[".strip("[]") == "::1"), so it encoded the opposite assumption
+        # to its sibling one function away.
+        ip = ipaddress.ip_address(host)
     except ValueError:
         return  # not a literal; the resolution pass covers it
     _assert_global(ip)
@@ -377,7 +437,16 @@ def validate_url(url: str) -> tuple[str, str, int, str]:
         raise _refuse("unparseable-url")
 
     if scheme not in ALLOWED_SCHEMES:
-        raise _refuse(f"scheme-not-allowed:{scheme or 'none'}")
+        # The scheme is NOT echoed raw. urlsplit's scheme_chars is [A-Za-z0-9+.-]
+        # with no length bound, and a redirect Location reaches here unfiltered --
+        # urljoin returns a non-relative-scheme target VERBATIM, and no static
+        # gate exists on a redirect target by construction. So a hostile server
+        # answering `Location: this-source-was-verified-by-the-operator.do-not-
+        # reject:x` wrote 73 characters of its own prose into index.json's
+        # `outcome`, which the judge prompt tells the judge carries no text from
+        # any server. Same class as the 1.16.1 Content-Type, redirect-URL and
+        # BadStatusLine channels; found by the round-3 security review.
+        raise _refuse(f"scheme-not-allowed:{scheme_token(scheme)}")
     if username is not None or password is not None:
         raise _refuse("embedded-credentials")
 
@@ -497,117 +566,176 @@ def fetch_one(url: str, *, deadline: float, allowed_types=ALLOWED_CONTENT_PREFIX
     chain = []
     current = url
     for hop in range(MAX_REDIRECTS + 1):
-        if time.monotonic() > deadline:
-            raise _refuse("total-timeout")
-
-        scheme, host, port, path = validate_url(current)
-        pinned = resolve_and_pin(host, port)
-        # ORIGIN ONLY -- never `current`. After hop 0 the URL is built from the
-        # server's own Location header, so its path/query/fragment are
-        # attacker-authored text, and this record lands in index.json, the file
-        # the judge prompt vouches for as locally generated. validate_url's
-        # CONTROL_CHAR_RE stops CR/LF/space and nothing else: ordinary printable
-        # separators still spell prose, and U+00A0 survives too because
-        # http.client decodes headers as ISO-8859-1 and a fragment never reaches
-        # conn.request's ASCII encode. Scheme and host are the only two parts
-        # already constrained (allowlist; urlsplit/IDNA), so they are the only
-        # two kept. This is the sibling of the 1.16.1 content_type fix: that one
-        # was scoped to a FIELD when the property is about the whole FILE.
-        chain.append({"origin": origin_of(scheme, host, port), "host": host,
-                      "hop": hop, "resolved": pinned})
-
-        remaining = max(1.0, min(CONNECT_TIMEOUT_SEC, deadline - time.monotonic()))
-        if scheme == "https":
-            conn = _PinnedHTTPSConnection(host, pinned, port, remaining, ssl.create_default_context())
-        else:
-            conn = _PinnedHTTPConnection(host, pinned, port, remaining)
-
         try:
-            # No Referer, no cookies, and an honest UA: this is a citation
-            # check, not a browser session, and sending ambient credentials
-            # would recreate the confused-deputy problem from the other side.
-            conn.request("GET", path, headers={
-                # authority(), not `host`: the connection goes to the pinned IP,
-                # so this header is the ONLY thing telling the server which site
-                # was asked for. A bare hostname misroutes every non-default-port
-                # URL and is invalid for an IPv6 literal.
-                "Host": authority(scheme, host, port),
-                "User-Agent": "literary-translator/1.16.1 (+citation-audit)",
-                "Accept": "text/html, text/plain, application/xhtml+xml;q=0.9, */*;q=0.1",
-            })
-            resp = conn.getresponse()
-            status = resp.status
-            location = resp.getheader("Location")
-            ctype = (resp.getheader("Content-Type") or "").split(";")[0].strip().lower()
-
-            if status in (301, 302, 303, 307, 308):
-                if not location:
-                    raise _refuse(f"redirect-without-location:{status}")
-                if hop >= MAX_REDIRECTS:
-                    raise _refuse("too-many-redirects")
-                # Resolved against the CURRENT url, then re-validated from
-                # scratch on the next iteration -- a relative Location must not
-                # inherit any trust from the hop it came from.
-                #
-                # urljoin PARSES both sides, so it raises ValueError itself on a
-                # malformed Location such as `http://[::1` -- before the guarded
-                # validate_url() call that the next iteration would have made.
-                # The round-2 urlsplit hardening sits one step too late to see it.
-                try:
-                    current = urljoin(current, location)
-                except ValueError:
-                    raise _refuse("unparseable-redirect-location")
-                continue
-
-            if status != 200:
-                return {"ok": False, "status": status, "url": url,
-                        "final_origin": chain[-1]["origin"],
-                        "chain": chain, "outcome": f"http_error:{status}"}
-
-            # The refused type is reported as a CLOSED token, never the raw
-            # header: this reason string is written into index.json's `outcome`,
-            # which the judge reads and the judge prompt calls locally
-            # generated. See content_type_token(). An absent Content-Type is
-            # admitted deliberately -- plenty of ordinary servers omit it, and
-            # the body is still capped, decoded with errors="replace", and read
-            # only through the delimiter -- so "absent" is recorded rather than
-            # silently indistinguishable from an allowed type.
-            if ctype and content_type_token(ctype, allowed_types) == "other":
-                raise _refuse("content-type-not-allowed")
-
-            raw = resp.read(MAX_BYTES + 1)
-            truncated = len(raw) > MAX_BYTES
-            raw = raw[:MAX_BYTES]
-            body = raw.decode("utf-8", errors="replace")
-            return {
-                "ok": True, "status": status, "url": url, "final_origin": chain[-1]["origin"],
-                "chain": chain, "content_type": content_type_token(ctype, allowed_types),
-                "bytes": len(raw),
-                "truncated": truncated, "outcome": "fetched", "body": body,
-            }
-        except (socket.timeout, TimeoutError):
-            raise _refuse("connect-timeout")
-        except ssl.SSLError as exc:
-            raise _refuse(f"tls-error:{type(exc).__name__}")
-        except OSError as exc:
-            raise _refuse(f"network-error:{type(exc).__name__}")
-        except http.client.HTTPException as exc:
-            # http.client has its OWN hierarchy and HTTPException is NOT an
-            # OSError -- measured: issubclass(BadStatusLine, OSError) is False.
-            # So these escaped every handler above, and run_batch only catches
-            # Refused: one malformed status line aborted the whole batch.
-            #
-            # The bigger half is what the traceback CONTAINS. BadStatusLine puts
-            # the server's raw status line in its args, so an escaped exception
-            # printed the server's own text to a stream the prepare agent reads
-            # and is told to report -- the exact channel this release closes for
-            # Content-Type and redirect URLs. Only the stdlib TYPE NAME crosses
-            # the boundary; the instance's text never does.
-            raise _refuse(f"http-protocol-error:{type(exc).__name__}")
-        finally:
-            conn.close()
-
+            return _fetch_hop(url, current, chain, hop, deadline, allowed_types)
+        except _Redirect as redirect:
+            current = redirect.target
     raise _refuse("too-many-redirects")
+
+
+class _Redirect(Exception):
+    """Internal control flow: one hop resolved to another URL."""
+
+    def __init__(self, target: str):
+        super().__init__(target)
+        self.target = target
+
+
+def _fetch_hop(url, current, chain, hop, deadline, allowed_types) -> dict:
+    """ONE redirect hop. Every exit is a dict, a Refused, or a _Redirect.
+
+    THE TOTALITY RULE, and why this wrapper exists at all. Four review rounds of
+    1.16.1 each found one exception escaping this boundary as itself, and each
+    fix closed that one instance:
+        round 1  ValueError      from urlsplit on `http://[::1`
+        round 3  HTTPException   from a malformed status line
+        round 4  UnicodeEncodeError from getaddrinfo on a bad IDNA label
+        round 4  UnicodeEncodeError from conn.request on a non-ASCII path
+    Every one of them aborted the whole batch, because run_batch only catches
+    Refused -- and index.json was then never written at all, which is strictly
+    worse than a per-item refusal. Chasing a fifth instance would be the same
+    mistake a fifth time, so the boundary is now TOTAL: anything that is not
+    already a Refused becomes one, carrying the exception's stdlib TYPE NAME and
+    never its text. An unexpected exception type is a bug to fix, but it must
+    cost one citation, never the run's entire evidence index.
+    """
+    if time.monotonic() > deadline:
+        raise _refuse("total-timeout")
+    try:
+        return _fetch_hop_inner(url, current, chain, hop, deadline, allowed_types)
+    except (Refused, _Redirect):
+        raise
+    except Exception as exc:                      # noqa: BLE001 -- deliberate, see above
+        raise _refuse(f"internal-error:{type(exc).__name__}")
+
+
+def _fetch_hop_inner(url, current, chain, hop, deadline, allowed_types) -> dict:
+    scheme, host, port, path = validate_url(current)
+    # INSIDE the guarded region, unlike before: getaddrinfo raises a bare
+    # UnicodeError (a ValueError, not a gaierror and not an OSError) for a
+    # malformed IDNA label such as `a..example.com` -- an ordinary typo, no
+    # attacker needed -- and this call used to sit outside every handler.
+    pinned = resolve_and_pin(host, port)
+    # ORIGIN ONLY -- never `current`. After hop 0 the URL is built from the
+    # server's own Location header, so its path/query/fragment are
+    # attacker-authored text, and this record lands in index.json, the file
+    # the judge prompt vouches for as locally generated. validate_url's
+    # CONTROL_CHAR_RE stops CR/LF/space and nothing else: ordinary printable
+    # separators still spell prose, and U+00A0 survives too because
+    # http.client decodes headers as ISO-8859-1 and a fragment never reaches
+    # conn.request's ASCII encode. Scheme and host are the only two parts
+    # already constrained (allowlist; urlsplit/IDNA), so they are the only
+    # two kept. This is the sibling of the 1.16.1 content_type fix: that one
+    # was scoped to a FIELD when the property is about the whole FILE.
+    chain.append({"origin": origin_of(scheme, host, port), "host": host,
+                  "hop": hop, "resolved": pinned})
+
+    remaining = max(1.0, min(CONNECT_TIMEOUT_SEC, deadline - time.monotonic()))
+    if scheme == "https":
+        conn = _PinnedHTTPSConnection(host, pinned, port, remaining, ssl.create_default_context())
+    else:
+        conn = _PinnedHTTPConnection(host, pinned, port, remaining)
+
+    try:
+        # No Referer, no cookies, and an honest UA: this is a citation
+        # check, not a browser session, and sending ambient credentials
+        # would recreate the confused-deputy problem from the other side.
+        # PERCENT-ENCODED, because http.client does `request.encode('ascii')` and
+        # raises UnicodeEncodeError on any non-ASCII byte. Not hypothetical:
+        # headers decode as ISO-8859-1, so one byte >= 0x80 in a Location makes
+        # the joined path non-ASCII, and CONTROL_CHAR_RE only covers
+        # [\x00-\x20\x7f]. It also fires on entirely BENIGN input -- a raw
+        # non-ASCII citation URL, which for this plugin's Hebrew and Yiddish
+        # corpora is the normal case, not the edge case. Encoding is the
+        # correctness fix; _fetch_hop's totality rule is only the backstop.
+        # `safe` keeps the sub-delimiters already legal in a request-target, and
+        # keeps `%` so an already-encoded path is not double-encoded.
+        conn.request("GET", quote(path, safe="/?=&%:@+$,;~!*'()[]"), headers={
+            # authority(), not `host`: the connection goes to the pinned IP,
+            # so this header is the ONLY thing telling the server which site
+            # was asked for. A bare hostname misroutes every non-default-port
+            # URL and is invalid for an IPv6 literal.
+            "Host": wire_authority(scheme, host, port),
+            "User-Agent": "literary-translator/1.16.1 (+citation-audit)",
+            "Accept": "text/html, text/plain, application/xhtml+xml;q=0.9, */*;q=0.1",
+        })
+        resp = conn.getresponse()
+        status = resp.status
+        location = resp.getheader("Location")
+        ctype = (resp.getheader("Content-Type") or "").split(";")[0].strip().lower()
+
+        if status in (301, 302, 303, 307, 308):
+            if not location:
+                raise _refuse(f"redirect-without-location:{status}")
+            if hop >= MAX_REDIRECTS:
+                raise _refuse("too-many-redirects")
+            # Resolved against the CURRENT url, then re-validated from
+            # scratch on the next iteration -- a relative Location must not
+            # inherit any trust from the hop it came from.
+            #
+            # urljoin PARSES both sides, so it raises ValueError itself on a
+            # malformed Location such as `http://[::1` -- before the guarded
+            # validate_url() call that the next iteration would have made.
+            # The round-2 urlsplit hardening sits one step too late to see it.
+            try:
+                target = urljoin(current, location)
+            except ValueError:
+                raise _refuse("unparseable-redirect-location")
+            raise _Redirect(target)
+
+        if status != 200:
+            return {"ok": False, "status": status, "url": url,
+                    "final_origin": chain[-1]["origin"],
+                    "chain": chain, "outcome": f"http_error:{status}"}
+
+        # The refused type is reported as a CLOSED token, never the raw
+        # header: this reason string is written into index.json's `outcome`,
+        # which the judge reads and the judge prompt calls locally
+        # generated. See content_type_token(). An absent Content-Type is
+        # admitted deliberately -- plenty of ordinary servers omit it, and
+        # the body is still capped, decoded with errors="replace", and read
+        # only through the delimiter -- so "absent" is recorded rather than
+        # silently indistinguishable from an allowed type.
+        # ONE evaluation, bound to a local: the guard below and the value
+        # recorded in index.json must be the SAME decision. Calling the
+        # function twice let a future edit widen one and not the other with
+        # nothing red -- on the one field whose closed-set property is the
+        # entire point of the 1.16.1 round-1 fix.
+        ctype_token = content_type_token(ctype, allowed_types)
+        if ctype and ctype_token == "other":
+            raise _refuse("content-type-not-allowed")
+
+        raw = resp.read(MAX_BYTES + 1)
+        truncated = len(raw) > MAX_BYTES
+        raw = raw[:MAX_BYTES]
+        body = raw.decode("utf-8", errors="replace")
+        return {
+            "ok": True, "status": status, "url": url, "final_origin": chain[-1]["origin"],
+            "chain": chain, "content_type": ctype_token,
+            "bytes": len(raw),
+            "truncated": truncated, "outcome": "fetched", "body": body,
+        }
+    except (socket.timeout, TimeoutError):
+        raise _refuse("connect-timeout")
+    except ssl.SSLError as exc:
+        raise _refuse(f"tls-error:{type(exc).__name__}")
+    except OSError as exc:
+        raise _refuse(f"network-error:{type(exc).__name__}")
+    except http.client.HTTPException as exc:
+        # http.client has its OWN hierarchy and HTTPException is NOT an
+        # OSError -- measured: issubclass(BadStatusLine, OSError) is False.
+        # So these escaped every handler above, and run_batch only catches
+        # Refused: one malformed status line aborted the whole batch.
+        #
+        # The bigger half is what the traceback CONTAINS. BadStatusLine puts
+        # the server's raw status line in its args, so an escaped exception
+        # printed the server's own text to a stream the prepare agent reads
+        # and is told to report -- the exact channel this release closes for
+        # Content-Type and redirect URLs. Only the stdlib TYPE NAME crosses
+        # the boundary; the instance's text never does.
+        raise _refuse(f"http-protocol-error:{type(exc).__name__}")
+    finally:
+        conn.close()
 
 
 def iter_sources(snapshot):
@@ -694,6 +822,21 @@ def run_batch(batch_path: Path, out_dir: Path, *,
             result = fetch_one(src, deadline=deadline, allowed_types=allowed_types)
         except Refused as exc:
             entry["outcome"] = f"refused:{exc}"
+            counts["refused"] += 1
+            index.append(entry)
+            continue
+        except Exception as exc:                  # noqa: BLE001 -- see below
+            # SECOND, independent guard. _fetch_hop's totality rule should make
+            # this unreachable, and the test suite asserts it is -- but the two
+            # guards fail differently, which is the whole point: this one holds
+            # even if a future edit introduces a raise OUTSIDE _fetch_hop's try
+            # (which is exactly how the round-4 getaddrinfo defect arose -- the
+            # call sat outside the guarded region, not inside a hole in it).
+            # index.json MUST be written: the prepare agent reports its absence
+            # as EVIDENCE_FAILED, which spends a citation-review retry, and
+            # exhausting that ladder merges ZERO batches. One bad citation may
+            # cost one entry; it may never cost the run's evidence index.
+            entry["outcome"] = f"refused:internal-error:{type(exc).__name__}"
             counts["refused"] += 1
             index.append(entry)
             continue

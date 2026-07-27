@@ -687,11 +687,19 @@ own quotes from `profile.yml`'s `glossary.citation_content_types` — the empty
 string when the key is absent or empty, meaning `fetch_citation.py`'s shipped
 default. It is REQUIRED, not optional: leaving it unsubstituted throws at
 instantiation rather than silently falling back, because a profile setting that
-quietly did not take effect is the exact failure this release exists to close. The resolved `effort` value also
+quietly did not take effect is the exact failure this release exists to close.
+The resolved `effort` value also
 belongs in the `subst` object of the payload this session writes for
 `resume_setup.py` below — `resume_setup.py`'s own `SUBST_FIELDS` now
 requires it, and `compute_input_digest` fails loudly
-(`missing required field(s): ['effort']`) if it's omitted. **1.4.0:** on that same non-empty-candidates
+(`missing required field(s): ['effort']`) if it's omitted. **The same is true of
+`citation_content_types` since 1.16.1**, and for a reason worth stating rather
+than pattern-matching: it changes the prepare step's actual command line, so it
+changes what a cached citation verdict MEANS. Widening the list makes the
+boundary admit pages it previously refused, and a resumed run that reused those
+verdicts would be reporting decisions taken under the OLD policy as current.
+Pass it even when it is the empty string — the empty string is itself the
+statement "this run used the shipped default". **1.4.0:** on that same non-empty-candidates
 path, after `glossary_batch_plan.py` and strictly before `resume_setup.py`
 runs (and before any dispatch), invoke the glossary staleness preflight:
 
