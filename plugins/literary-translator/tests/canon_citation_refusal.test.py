@@ -52,6 +52,7 @@ and the REAL canon-*.schema.json files into an isolated tmp_path root and drive
 it exactly as production does, so its self-anchored SCHEMAS_DIR resolves
 against the fixture and never against this repo's assets tree.
 """
+import importlib.util
 import json
 import shutil
 import socket
@@ -177,6 +178,15 @@ REFUSAL_CASES = [
     ("http://LOCALHOST/x", "localhost-name"),
     ("http://anything.localhost/x", "localhost-name"),
     ("http://deep.nested.localhost/x", "localhost-name"),
+    # A terminal DNS root dot. "localhost." is the fully-qualified spelling of
+    # the same name and resolves identically, but matches neither
+    # host == "localhost" nor host.endswith(".localhost"). THIS file is the half
+    # with no resolver behind it -- it runs on the offline path where nothing
+    # ever fetches -- so unlike the fetcher there was no second net here and the
+    # miss was the entire check. One dot is stripped, in both files.
+    ("http://localhost./x", "localhost-name"),
+    ("http://LOCALHOST./x", "localhost-name"),
+    ("http://anything.localhost./x", "localhost-name"),
 
     # -- IPv4 literals, one per non-global range.
     ("http://127.0.0.1/x", "loopback-address"),
@@ -244,6 +254,62 @@ def test_citation_source_refusal_refuses(url, expected):
 def test_citation_source_refusal_admits_legitimate_urls(url):
     reason = canon_validate._citation_source_refusal(url)
     assert reason is None, f"{url!r} must be admitted but was refused as {reason!r}"
+
+
+# =========================================================================== #
+# PARITY with fetch_citation.validate_url
+#
+# canon_validate._citation_source_refusal() and fetch_citation.validate_url()
+# implement the SAME static decision in two files on purpose: --check-batch has
+# to stay offline-safe and importable without the networking module, so the
+# duplication is accepted. Both files carry a "change one, change the other"
+# comment -- and until the 1.16.1 review NOTHING ENFORCED IT. Each suite tested
+# its own file against its own table, so a weakening edit to either passed green.
+# That is the shape the trailing-root-dot miss actually had.
+#
+# This compares BEHAVIOUR over a shared table rather than comparing source
+# strings: a literal-set comparison would pass two functions that agree on their
+# vocabulary and disagree on which inputs map to which word.
+# =========================================================================== #
+_FETCH_SRC = SCRIPTS_SRC / "fetch_citation.py"
+assert _FETCH_SRC.is_file(), f"fetch_citation.py not found at {_FETCH_SRC}"
+_fc_spec = importlib.util.spec_from_file_location("fetch_citation_parity", str(_FETCH_SRC))
+assert _fc_spec is not None and _fc_spec.loader is not None
+_fc = importlib.util.module_from_spec(_fc_spec)
+_fc_spec.loader.exec_module(_fc)
+
+
+def _fetch_verdict(url):
+    """fetch_citation's static half, normalised to canon_validate's shape:
+    a reason string, or None when admitted."""
+    try:
+        _fc.validate_url(url)
+    except _fc.Refused as exc:
+        return str(exc)
+    return None
+
+
+@pytest.mark.parametrize("url,expected", REFUSAL_CASES, ids=[c[0] or "<empty>" for c in REFUSAL_CASES])
+def test_both_files_refuse_the_same_urls_for_the_same_reason(url, expected):
+    canon_reason = canon_validate._citation_source_refusal(url)
+    fetch_reason = _fetch_verdict(url)
+    assert fetch_reason is not None, (
+        f"{url!r} is refused by canon_validate as {canon_reason!r} but ADMITTED by "
+        "fetch_citation.validate_url -- the two static halves have diverged"
+    )
+    assert canon_reason == fetch_reason, (
+        f"{url!r}: canon_validate says {canon_reason!r}, fetch_citation says "
+        f"{fetch_reason!r} -- same decision, two different words"
+    )
+
+
+@pytest.mark.parametrize("url", ADMITTED_CASES)
+def test_both_files_admit_the_same_urls(url):
+    fetch_reason = _fetch_verdict(url)
+    assert fetch_reason is None, (
+        f"{url!r} is admitted by canon_validate but REFUSED by "
+        f"fetch_citation.validate_url as {fetch_reason!r} -- the two have diverged"
+    )
 
 
 def test_refusal_reason_never_echoes_attacker_text():

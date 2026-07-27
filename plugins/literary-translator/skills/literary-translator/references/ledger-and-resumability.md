@@ -225,7 +225,7 @@ per-dispatch `DISP` nonce travels only via the drive agent's `DISPATCHED <seg>
 **Wait bound.** The driver bounds itself to `abs_ceiling = deadline + 150 s`
 (`CODEX_DEADLINE_SEC=2700` poll window + `CODEX_FINALIZE_BUDGET_SEC=150`), and the
 Workflow's own poll adds `CODEX_WAIT_GRACE_SEC=600`, so the total W5
-translate/review wait is bounded at `2700 + 150 + 600 = 3450 s` elapsed plus one
+translate/review wait is bounded at `2700 + 150 + 600 = 3450 s` of polling plus one
 final finite on-disk gate check — never an unbounded hang (the #198 failure mode).
 **1.16.1 (#348):** that bound is UNCHANGED; what changed is that it is now SPENT
 ACROSS AGENT CALLS rather than inside one. The agent's Bash tool clamps any single
@@ -233,7 +233,14 @@ call at `BASH_CALL_CAP_SEC = 600 s` no matter what timeout the agent asks for, s
 the Workflow poll runs up to `WAIT_CHUNKS = 8` chunk calls, one per
 `WAIT_CHUNK_SEC = 480 s` slice. Each chunk polls only what is LEFT of the 3450 s,
 so chunks 1–7 take 480 s and chunk 8 takes the remaining 90 s, summing to exactly
-3450 — the chunks SPEND the declared bound, they never extend it. After them
+3450 — the chunks SPEND the declared POLLING budget, they never extend it.
+Read that as a polling budget, not a wall-clock guarantee: 3450 s is the total
+time the loop spends *polling*, and the elapsed time of a full wait is
+necessarily somewhat longer, because eight chunk calls mean eight agent handoffs
+and each chunk's final acceptance-gate invocation may straddle its own deadline.
+Nothing here bounds wall-clock elapsed time to 3450 s, and the pre-1.16.1 single
+call did not either. What the bound guarantees is termination — no unbounded
+hang, the #198 failure mode — not a deadline. After them
 comes ONE authoritative, non-polling
 re-check of the canonical artifact (`WAIT_CALLS = WAIT_CHUNKS + 1 = 9` calls per
 wait, worst case), so a job that finishes after the last chunk's poll ended is

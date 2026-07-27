@@ -842,6 +842,16 @@ function mentionedAnywhere(reply, sentinel) {
 // own seg. tests/wait_chunking.test.py pins the behaviour so it stays recorded.
 function waitChunkVerdict(reply, seg) {
   if (rejectedAnywhere(reply, "FAILED " + seg)) return "failed";
+  // rejectedAnywhere() for PENDING too, and deliberately so, though PENDING is
+  // not strictly a FAILURE sentinel: the 1.16.1 review proposed mentionedAnywhere()
+  // here on naming grounds -- the two share one body, so it is behaviour-identical --
+  // and it was NOT taken. tests/bounded_poll_present.test.py's
+  // test_wait_chunk_verdict_runs_both_guards_before_the_whole_line_ready_test
+  // pins BOTH guards by helper NAME and additionally checks they read the same
+  // reply variable and sit positionally before the whole-line READY test. Buying
+  // a naming nicety by widening that regex would trade a real structural guard on
+  // a false-green boundary for cosmetics. What PENDING means here is "a hit biases
+  // AWAY from READY", which is the same direction rejectedAnywhere() is named for.
   if (rejectedAnywhere(reply, "PENDING " + seg)) return "pending";
   if (sentinelVerdict(reply, "READY " + seg, null)) return "ready";
   return "pending";

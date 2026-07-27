@@ -181,7 +181,9 @@ engine:
     # shipped MAX_CITATION_RETRIES = 2. Size the cap for the LIVE ladder, or a live run refuses "batch-too-large".
     # The live per-attempt cost rose from 3 to 4 in 1.16.1 (#347): the single agent that both fetched citations
     # and judged them became a prepare call that retrieves without reading and a judge call that reads without
-    # retrieving, so no agent both holds the network and ingests what it returned. That is a security boundary,
+    # retrieving. Stated at its true width: the judge is given no retrieval INSTRUCTION and no fetched-URL input
+    # it could act on, but it is an ordinary agent and still holds Bash -- what changed is that nothing in its
+    # prompt asks it to fetch, not that the tool was taken away. That is a security boundary,
     # not extra work -- but it IS extra calls. UPGRADE NOTE: a live project whose cap was tuned near the old
     # 10-per-batch figure will now be refused at preflight with reason:"batch-too-large" -- loud and early rather
     # than mid-run, which is the intended direction, but it means the cap may need raising. The OFFLINE ladder is

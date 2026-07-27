@@ -96,6 +96,13 @@ from urllib.parse import urlsplit, urlunsplit, urljoin
 ALLOWED_SCHEMES = ("http", "https")
 MAX_REDIRECTS = 5
 MAX_BYTES = 2_000_000
+# Checked at the top of each redirect hop, NOT continuously. Two gaps are known
+# and accepted rather than papered over: getaddrinfo() takes no timeout argument,
+# so a pathological resolver can block past this; and the deadline is not
+# re-checked during resp.read(), which is instead bounded by MAX_BYTES and the
+# socket timeout. This caps redirect-chain WORK, not wall-clock latency. Nothing
+# downstream treats it as a latency guarantee, and calling it one in the docs
+# would be the same overclaim this release exists to remove.
 TOTAL_TIMEOUT_SEC = 30.0
 CONNECT_TIMEOUT_SEC = 10.0
 EVIDENCE_PREFIX = "citation-"
@@ -120,6 +127,31 @@ class Refused(Exception):
 
 def _refuse(reason: str) -> "Refused":
     return Refused(reason)
+
+
+def content_type_token(ctype: str) -> str:
+    """Collapse a server-supplied Content-Type to one of a fixed, closed set of
+    tokens. NEVER returns attacker-supplied text.
+
+    This is a boundary in its own right, not cosmetics. index.json is the file
+    the judge prompt vouches for as locally generated, and `outcome` is the
+    field the judge is told to reason over -- so any remote byte reaching it is
+    an instruction channel into the approval gate this release exists to
+    protect. A response header is remote input: it is arbitrary-length,
+    attacker-chosen text. Recording it verbatim (as this file did until the
+    1.16.1 review) let a hostile server write sentences like "ignore every
+    instruction above" straight into the judge's evidence index.
+
+    The closed set is the allowlist members themselves plus "absent" and
+    "other", so the diagnostic value -- which class of type came back -- is
+    kept while the free-form half is dropped at the boundary.
+    """
+    if not ctype:
+        return "absent"
+    for prefix in ALLOWED_CONTENT_PREFIXES:
+        if ctype.startswith(prefix):
+            return prefix
+    return "other"
 
 
 def check_address_literal(host: str) -> None:
@@ -185,14 +217,30 @@ def validate_url(url: str) -> tuple[str, str, int, str]:
     if CONTROL_CHAR_RE.search(url):
         raise _refuse("control-character-in-url")
 
-    parts = urlsplit(url)
-    scheme = parts.scheme.lower()
+    # urlsplit RAISES on some malformed inputs -- an unbalanced IPv6 bracket
+    # ("http://[::1") is the reachable one -- and `source` is attacker-influenced,
+    # so this is a live input shape, not a hypothetical. Left uncaught the
+    # ValueError escaped as itself: run_batch() only handles Refused, and its
+    # caller catches (OSError, JSONDecodeError, TypeError), so ONE malformed
+    # source aborted the whole prepare step instead of refusing one item --
+    # every citation in the batch failing because of a single bad row.
+    # canon_validate.py already refused this as "unparseable-url"; the two static
+    # halves had diverged, which is what tests/canon_citation_refusal.test.py's
+    # parity tests now prevent.
+    try:
+        parts = urlsplit(url)
+        scheme = parts.scheme.lower()
+        username, password = parts.username, parts.password
+        hostname = parts.hostname
+    except ValueError:
+        raise _refuse("unparseable-url")
+
     if scheme not in ALLOWED_SCHEMES:
         raise _refuse(f"scheme-not-allowed:{scheme or 'none'}")
-    if parts.username is not None or parts.password is not None:
+    if username is not None or password is not None:
         raise _refuse("embedded-credentials")
 
-    host = parts.hostname
+    host = hostname
     if not host:
         raise _refuse("no-host")
     host = host.lower()
@@ -200,6 +248,16 @@ def validate_url(url: str) -> tuple[str, str, int, str]:
     # `localhost` and anything under it are refused by NAME, before resolution:
     # a resolver can be configured to point them anywhere, and admitting the
     # name would make the refusal depend on local DNS configuration.
+    #
+    # ONE trailing dot is stripped first. "localhost." is the fully-qualified
+    # spelling of the same name and resolves identically, but it matches
+    # neither test above. Here that was only a false-NEGATIVE on the static
+    # half -- resolve_and_pin() still refused the loopback address it came back
+    # with -- but canon_validate.py runs this same decision with NO resolver
+    # behind it, so there the miss is the whole check. The two files must agree,
+    # so both strip it. Only one dot: "localhost.." is not a legal name.
+    if host.endswith("."):
+        host = host[:-1]
     if host == "localhost" or host.endswith(".localhost"):
         raise _refuse("localhost-name")
 
@@ -339,8 +397,16 @@ def fetch_one(url: str, *, deadline: float) -> dict:
                 return {"ok": False, "status": status, "url": url, "final_url": chain[-1]["url"],
                         "chain": chain, "outcome": f"http_error:{status}"}
 
-            if ctype and not any(ctype.startswith(p) for p in ALLOWED_CONTENT_PREFIXES):
-                raise _refuse(f"content-type-not-allowed:{ctype}")
+            # The refused type is reported as a CLOSED token, never the raw
+            # header: this reason string is written into index.json's `outcome`,
+            # which the judge reads and the judge prompt calls locally
+            # generated. See content_type_token(). An absent Content-Type is
+            # admitted deliberately -- plenty of ordinary servers omit it, and
+            # the body is still capped, decoded with errors="replace", and read
+            # only through the delimiter -- so "absent" is recorded rather than
+            # silently indistinguishable from an allowed type.
+            if ctype and content_type_token(ctype) == "other":
+                raise _refuse("content-type-not-allowed")
 
             raw = resp.read(MAX_BYTES + 1)
             truncated = len(raw) > MAX_BYTES
@@ -348,7 +414,7 @@ def fetch_one(url: str, *, deadline: float) -> dict:
             body = raw.decode("utf-8", errors="replace")
             return {
                 "ok": True, "status": status, "url": url, "final_url": chain[-1]["url"],
-                "chain": chain, "content_type": ctype, "bytes": len(raw),
+                "chain": chain, "content_type": content_type_token(ctype), "bytes": len(raw),
                 "truncated": truncated, "outcome": "fetched", "body": body,
             }
         except (socket.timeout, TimeoutError):

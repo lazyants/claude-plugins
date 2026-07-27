@@ -45,6 +45,21 @@ was a subtle bug in the code that existed; both were work the code never did.
   re-create #348.
 - Blocked reason strings are deliberately unchanged (`translate-timeout` / `review-timeout`):
   `select_segments.py`'s "non-terminal → recoverable" rule and every recovery doc key off them.
+- **Scope, stated rather than implied: this fixes the W5 mass-translate waits ONLY.** The glossary
+  pass and the skeptic pass each still poll `45 × (check + sleep 20)` — roughly 900 s, advertised as
+  "about 15 minutes" — inside one `agent()` call, against the same measured 600 s clamp, and each
+  returns its failure reason immediately on a failed reply with no re-check of the artifact on disk.
+  That is issue #348's defect class, unfixed, in two more templates. They are deliberately out of
+  scope here and tracked separately. The reason to write this down rather than leave it implied is
+  the same reason this release exists: a fix described as closing a class, when it closed one site of
+  three, is the overclaim pattern #348 and #347 were both instances of.
+- What the re-check does and does not guarantee. It runs the canonical gate ONE more time before a
+  timeout is declared, and its ACCEPT command is the same builder the chunk poll uses, so it can
+  never be the weaker gate. It is still an `agent()` call: a null or malformed re-check reply
+  resolves to PENDING and the wait then reports its timeout, and an artifact landing after the
+  re-check's own gate invocation returns is not seen. The guarantee is "one final authoritative
+  check", not "a timeout can never coexist with a finished artifact" — the latter is not achievable
+  through an agent-mediated poll, and claiming it would repeat the defect being fixed.
 
 ### Fixed — citation retrieval happens only through a validated boundary (#347)
 
@@ -62,11 +77,22 @@ was a subtle bug in the code that existed; both were work the code never did.
 - Telling the reviewer to fetch "only through the helper" was tried and rejected during review: the
   reviewer is an unrestricted agent that already holds Bash and already ingests page content, so a
   hostile page can simply instruct it to fetch something else. **A rule the attacker can talk the
-  enforcer out of is not an enforcement point.** Retrieval therefore moved out of the judging agent
-  entirely. The citation review is now two agents: a **prepare** agent that runs the fetcher and
+  enforcer out of is not an enforcement point.** Retrieval therefore moved out of the judging agent.
+  The citation review is now two agents: a **prepare** agent that runs the fetcher and
   reads only the single locally-generated metadata line it prints, and a **judge** agent that reads
-  local files only and performs no retrieval at all. The judge is handed no fragment path anywhere
-  in its prompt.
+  local files only and performs no retrieval. The judge is handed no mutable fragment path anywhere
+  in its prompt. Said precisely, because the imprecise version is the defect class this release
+  exists to close: the judge is given no retrieval INSTRUCTION and no fetched-URL INPUT it could act
+  on, but it is an ordinary agent and still holds Bash. The split removes the reason and the input,
+  not the tool.
+- Nothing server-supplied reaches `index.json`. A hostile `Content-Type` header used to be recorded
+  verbatim — both as `refused:content-type-not-allowed:<header>` and as the success path's
+  `content_type` — while the judge prompt vouches for that file as locally generated and `outcome` is
+  the field the judge reasons over. That is an instruction channel straight into the approval gate,
+  found by review and reproduced against a hostile local server. Content types are now collapsed at
+  the boundary to a closed token set: the allowlist members themselves plus `absent` and `other`.
+  An absent `Content-Type` is admitted deliberately — ordinary servers omit it — but is now recorded
+  as `absent` rather than being indistinguishable from an allowed type.
 - The claim this supports, at exactly the width it is true: *in the citation audit path, retrieval
   happens only through `fetch_citation.py`, launched by an agent that never reads the retrieved
   bytes.* It does **not** make the pipeline SSRF-free. Two residual paths are named rather than
@@ -74,10 +100,18 @@ was a subtle bug in the code that existed; both were work the code never did.
   `research_mode: live`, and the judge still holds a Bash tool. Both are tracked separately.
 - `canon_validate.py --check-batch` now statically refuses an unsafe citation `source` with no DNS
   and no network, so the offline path — where nothing ever fetches — can still stop one before it is
-  frozen into `canon.json`. It is applied to **every item carrying a `source`**, not only
-  `basis: "established"` ones: the queued branch of `canon-batch.schema.json` types `source` as a
+  frozen into `canon.json`. It is applied to **every item whose `source` is a non-empty string**, not
+  only `basis: "established"` ones: the queued branch of `canon-batch.schema.json` types `source` as a
   bare unconstrained string, so a `review_queue` item could carry `basis: "established"` plus an
-  arbitrary `source` and pass Pass 1.
+  arbitrary `source` and pass Pass 1. An empty or non-string `source` is skipped, deliberately and
+  identically in both files — it is not a fetch target and its shape is Pass 1's business. The two
+  must agree on WHICH items they cover, not merely on the checks they run.
+- One trailing DNS root dot is now stripped before the `localhost` name test in both files.
+  `localhost.` is the fully-qualified spelling of the same name and resolves identically, but matched
+  neither `host == "localhost"` nor `host.endswith(".localhost")`. In the fetcher that was only a
+  static false-negative, since `resolve_and_pin()` still refused the loopback address that came back;
+  in `canon_validate.py`, which runs the same decision with no resolver behind it, the miss was the
+  whole check.
 - `fetch_citation.py` joins `PLUGIN_BUNDLE_MEMBERS`. Without that, editing the security boundary
   would move no hash at all, and a durable root scaffolded before the change would keep classifying
   its segments reusable against a plugin that no longer behaves the same way — exactly the

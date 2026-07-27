@@ -412,8 +412,9 @@ sequence, per `references/workflow-schema-validation.md`.
 `verifyReviewArtifactPrompt` keeps its pre-1.2.0 name but is now dispatched as
 a separate call after `readReviewPrompt` returns, rather than immediately after
 the old single `reviewPrompt` call.) `glossary-pass-wf.template.js` defines its own,
-smaller set of six: `batchPrecheckPrompt`, `batchDispatchPrompt`,
-`batchWaitPrompt`, `citationReviewPrompt` (1.16.0, `live` only),
+smaller set of seven: `batchPrecheckPrompt`, `batchDispatchPrompt`,
+`batchWaitPrompt`, `citationPreparePrompt` and `citationJudgePrompt` (1.16.1,
+`live` only — the pair that replaced 1.16.0's single `citationReviewPrompt`),
 `mergeBatchesPrompt`, and `glossaryVerifyPrompt` (`CANON_VERIFY_SCHEMA`) — see
 `references/canon-and-glossary.md`. Its `batchWaitPrompt` is NOT the shape
 W5's two waits use — see `references/workflow-schema-validation.md`'s WAIT
@@ -758,28 +759,53 @@ pipeline(BATCHES, batchStep)
   attempt after the first.
 - `batchWaitPrompt(batch, attempt)` — Claude, `effort:'low'`, bounded poll of
   the same `--check-batch` invocation, returning `READY`/`TIMEOUT`.
-- `citationReviewPrompt(batch, attempt)` (**1.16.0**) — Claude, `effort:'high'`,
+- `citationPreparePrompt(batch, attempt)` (**1.16.1**, replacing 1.16.0's single
+  `citationReviewPrompt`) — Claude, `effort:'low'`, `live` only; returns
+  `EVIDENCE_READY`/`EVIDENCE_FAILED <index> ATTEMPT <n>`. It opens by re-running
+  the fragment's own `--check-batch` validation with `--approve-to`, which
+  snapshots the exact bytes that invocation just validated to a create-once,
+  attempt-scoped `approved_{index}_attempt_{n}.json` — one read, so nothing can
+  change between validating and copying. It then runs `fetch_citation.py` over
+  **that snapshot** and reads only the single locally-generated metadata line the
+  script prints. It never reads a retrieved body.
+- `citationJudgePrompt(batch, attempt)` (**1.16.1**) — Claude, `effort:'high'`,
   no `agentType`, no schema, `live` only; returns
   `CITATIONS_OK`/`CITATIONS_REJECTED <index> ATTEMPT <n>`. It gates whether
-  the batch counts as ready at all. It opens by re-running the fragment's own
-  `--check-batch` validation with `--approve-to`, which snapshots the exact
-  bytes that invocation just validated to a create-once, attempt-scoped
-  `approved_{index}_attempt_{n}.json` — one read, so nothing can change
-  between validating and copying — and it then audits **that snapshot**,
-  never the mutable `out_*` attempt path. The approval therefore binds bytes
-  rather than a path, and it costs no extra `agent()` call because it happens
-  inside this same turn. See `references/canon-and-glossary.md`'s **Pre-merge
-  citation review**.
+  the batch counts as ready at all. It audits the approved snapshot and the
+  fetched evidence bodies, and performs no retrieval of its own — it is given no
+  retrieval instruction and no fetched-URL input it could act on. It is still an
+  ordinary agent holding Bash; what the split removes is the *reason* and the
+  *input*, not the tool. The approval binds bytes rather than a path.
+  **This pair costs one MORE `agent()` call per attempt than 1.16.0's single
+  reviewer** — that is the whole reason the live ladder moved from
+  `1 + 3*(MAX_CITATION_RETRIES+1)` to `1 + 4*(MAX_CITATION_RETRIES+1)`; see the
+  batch_agent_cap section above. See `references/canon-and-glossary.md`'s
+  **Pre-merge citation review**.
 
-**All three of these verdicts are containment-guarded (1.16.0)** — as are
-mass-translate's two waits and its `DRAFT_MISSING` fix check, six sites over the
-two templates. Each short-circuits when the sentinel is found anywhere in the
+**All four of these verdicts are containment-guarded** — the precheck, the wait,
+and (1.16.1) both halves of the citation pair — as are mass-translate's
+`waitChunkVerdict()` and its `DRAFT_MISSING` fix check, **six sites over the two
+templates**. The total is unchanged from 1.16.0 but its composition is not: the
+glossary side went from three to four when the citation reviewer split in two,
+and the mass-translate side went from three to two when 1.16.1 (#348) collapsed
+the two separate wait verdicts into the single `waitChunkVerdict()` parse site
+that now serves both chunked wait loops. Counting *call sites in the templates*
+rather than *waits in the pipeline* is what makes those two movements cancel.
+Each short-circuits when the sentinel is found anywhere in the
 reply as a substring, before `sentinelVerdict()` is consulted.
 `sentinelVerdict()` alone matches whole LINES, so a sentinel sharing its line
 with anything `trim()` does not strip was skipped.
 
 Five of the six take a FAILURE sentinel via `rejectedAnywhere()`, where a hit
-biases toward REJECTING and the guard only ever adds rejections. The
+biases toward REJECTING and the guard only ever adds rejections.
+`waitChunkVerdict()` is the one site that runs it TWICE — once for `FAILED` and
+once for `PENDING`. `PENDING` is not strictly a failure sentinel, but it biases
+in the same direction the helper is named for: away from `READY`. Spelling that
+second guard `mentionedAnywhere()` was proposed in the 1.16.1 review and
+deliberately not taken; the two helpers share one body, so it would have been
+behaviour-identical, but `bounded_poll_present.test.py` pins both guards by
+helper NAME, and widening that regex would trade a structural guard on a
+false-green boundary for a naming nicety. The
 `DRAFT_MISSING` fix site is the exception and runs the same containment test in
 the opposite direction, through `mentionedAnywhere()`: there the sentinel is the
 OK one, so gluing hid a genuine missing-draft report and the loop silently

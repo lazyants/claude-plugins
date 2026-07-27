@@ -462,15 +462,19 @@ function approveBatchCmd(index, attempt) {
 // snapshot is the one artifact whose bytes are pinned for the rest of the
 // attempt, so it is the only correct input.
 //
-// Note what this directory is NOT covered by: resume_setup.py's
-// _wipe_stale_glossary_fragments() removes stale out_*_attempt_* fragments and
-// every approved_* snapshot, and it knows nothing about these directories. A
-// resumed run of the same run_id can therefore find a previous run's evidence
-// bodies already sitting here. That is contained from the prompt side rather
-// than assumed away: every prepare rewrites index.json wholesale, and the judge
-// is told to read ONLY the files index.json names as evidence_file -- so a
-// leftover body whose item this run refused is never opened. It is still worth
-// closing at the wipe, and is tracked as a follow-up.
+// Stale bodies from a previous run of the same run_id are closed on disk, not
+// merely contained by prompt wording: resume_setup.py's
+// _wipe_stale_glossary_fragments() removes every evidence_*_attempt_* directory
+// unconditionally -- fresh and resume alike, attempt 0 included -- alongside the
+// stale out_*_attempt_* fragments and approved_* snapshots it already handled.
+// They are DIRECTORIES, so the fragment regex could not see them and unlink()
+// could not have removed them; that took its own regex and an rmtree branch
+// (1.16.1, #347). tests/glossary_fragment_wipe.test.py pins it under both flags.
+//
+// The prompt-side containment remains as defence in depth, not as the only
+// defence: every prepare rewrites index.json wholesale, and the judge is told to
+// read ONLY the files index.json names as evidence_file, so a leftover body
+// whose item this run refused is never opened even if a wipe were skipped.
 // ---------------------------------------------------------------------------
 function evidenceDir(index, attempt) {
   return RUN_DIR + "/evidence_" + index + "_attempt_" + attempt

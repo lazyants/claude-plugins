@@ -844,6 +844,15 @@ def _citation_source_refusal(value) -> "str | None":
     # `localhost` and anything under it are refused BY NAME, before any
     # resolution: a resolver can be configured to point them anywhere, and
     # admitting the name would make the refusal depend on local DNS config.
+    #
+    # ONE trailing dot is stripped first, matching fetch_citation.py exactly.
+    # "localhost." is the fully-qualified spelling of the same name and resolves
+    # identically, but matches neither test below. This file has NO resolver
+    # behind it -- it runs on the offline path where nothing ever fetches -- so
+    # unlike the fetcher there is no second net here and the miss would be the
+    # whole check. Only one dot: "localhost.." is not a legal name.
+    if host.endswith("."):
+        host = host[:-1]
     if host == "localhost" or host.endswith(".localhost"):
         return "localhost-name"
 
