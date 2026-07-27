@@ -504,7 +504,9 @@ input_digest = sha256(canonical_json({
   kind: "mass" | "glossary",
   args: <the full ordered args this invocation was given>,
   subst: {research_mode, verse_policy, source_lang, target_lang,
-          max_fix_rounds, batch_agent_cap, effort},   // resolved profile substitutions (#197: effort added)
+          max_fix_rounds, batch_agent_cap, effort,
+          citation_content_types},   // resolved profile substitutions
+                                     // (#197: effort added; #347: citation_content_types added)
   domain: mass: {seg: <cache_key.py's 15-field composite per seg>}
         | glossary: {glossary_rule, canon_hash},
   version: {plugin_bundle_hash: <runs/.plugin_bundle_hash>,

@@ -745,6 +745,31 @@ def _uri_format_checker() -> "jsonschema.FormatChecker":
 
 CITATION_ALLOWED_SCHEMES = ("http", "https")
 
+# Schemes worth NAMING in a refusal, so the reason still says which kind of
+# unsafe URL was attempted. Everything outside this set collapses to "other".
+# A diagnostic vocabulary, NOT a denylist: refusal is decided by
+# CITATION_ALLOWED_SCHEMES above and nothing here widens it.
+#
+# Byte-identical to fetch_citation.py's KNOWN_SCHEMES / scheme_token(), and
+# pinned that way by canon_citation_refusal.test.py's shared table. The reason
+# this exists at all: urlsplit accepts a scheme of [A-Za-z0-9+.-] with no
+# length bound, so interpolating the raw scheme let a `source` write its own
+# refusal reason -- the exact thing this function's docstring promises never
+# happens. Four review rounds missed it because every scheme in that shared
+# table was a KNOWN member, and for those the token equals the scheme, so the
+# two engines agreed and the divergence was invisible.
+CITATION_KNOWN_SCHEMES = ("file", "ftp", "ftps", "data", "javascript", "gopher", "ws", "wss",
+                          "mailto", "tel", "about", "blob", "chrome", "jar", "ldap", "dict",
+                          "sftp", "smb", "nfs", "redis", "gemini")
+
+
+def _citation_scheme_token(scheme: str) -> str:
+    """Collapse a scheme to a closed vocabulary: a KNOWN member, `none` for an
+    absent scheme, or `other`. Mirrors fetch_citation.scheme_token()."""
+    if not scheme:
+        return "none"
+    return scheme if scheme in CITATION_KNOWN_SCHEMES else "other"
+
 # Control characters anywhere in the URL. Also catches the raw CR/LF that make
 # request/header splitting possible; \x20 (space) is inside the range on
 # purpose, since a space is enough to carry a second request line.
@@ -770,6 +795,13 @@ def _non_global_address_reason(ip) -> "str | None":
         return "loopback-address"
     if ip.is_link_local:
         return "link-local-address"      # includes 169.254.169.254
+    # fec0::/10, IPv6 site-local. getattr because IPv4Address has no such
+    # property. Deprecated by RFC 3879, still routed on legacy networks, and
+    # covered by nothing around it: CPython leaves fec0::/10 out of
+    # ipaddress._private_networks, so is_private is False and is_global is
+    # consequently True. Kept byte-identical to fetch_citation._assert_global.
+    if getattr(ip, "is_site_local", False):
+        return "site-local-address"
     if ip.is_private:
         return "private-address"
     if ip.is_multicast:
@@ -857,8 +889,11 @@ def _citation_source_refusal(value) -> "str | None":
 
     if scheme not in CITATION_ALLOWED_SCHEMES:
         # An allowlist, never a denylist -- the set of schemes a URL library
-        # will accept is open-ended and grows with the runtime.
-        return f"scheme-not-allowed:{scheme or 'none'}"
+        # will accept is open-ended and grows with the runtime. The scheme is
+        # collapsed to a closed token before it reaches the reason string: it
+        # is part of the offending URL, so echoing it raw would break this
+        # function's own no-URL-in-the-reason contract.
+        return f"scheme-not-allowed:{_citation_scheme_token(scheme)}"
     if username is not None or password is not None:
         # `user:pw@host` shifts which host is really contacted depending on
         # who parses it.
@@ -887,7 +922,15 @@ def _citation_source_refusal(value) -> "str | None":
     # at all, so the fetcher's resolution-time check would simply not run for
     # it -- this is the half that has to be caught statically.
     try:
-        ip = ipaddress.ip_address(host.strip("[]"))
+        # No .strip("[]"): urlsplit().hostname has ALREADY removed the brackets
+        # (measured: urlsplit("http://[::1]/x").hostname == "::1"), and a URL
+        # whose brackets are unbalanced raises out of urlsplit above rather than
+        # reaching here. The old strip was a no-op on the only live path AND a
+        # character-set strip rather than a pair strip
+        # ("]::1[".strip("[]") == "::1"), so it encoded the opposite assumption
+        # to its twin. Removed in fetch_citation.py in round 4; this is the same
+        # removal in the sibling that the round-4 fix did not reach.
+        ip = ipaddress.ip_address(host)
     except ValueError:
         ip = None       # a name, not a literal; the fetcher owns that half
     if ip is not None:

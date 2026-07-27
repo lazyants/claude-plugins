@@ -146,6 +146,55 @@ was a subtle bug in the code that existed; both were work the code never did.
     the one thing they need when diagnosing a citation, so the data stays and the false claim goes:
     the judge prompt now names `final_origin` and `chain[].host/origin` as untrusted alongside
     `source`/`source_form`, and a cross-host test asserts both the record and the prompt wording.
+  - **Round 5 — the SIBLING FILE, which the totalising guard cannot reach.** Round 4 made
+    `fetch_citation.py`'s boundary total and argued that chasing a fifth instance would be the same
+    mistake a fifth time. Round 5 found the sixth instance anyway, and where it was is the whole
+    lesson: `canon_validate.py`, the documented twin that runs the same static decision with **no
+    resolver behind it**, was still interpolating the raw `urlsplit` scheme. Both reviewers found it
+    independently. `urlsplit` accepts `[A-Za-z0-9+.-]` with no length bound, so a `source` wrote its
+    own refusal reason — measured end to end,
+    `scheme-not-allowed:note-to-the-reviewing-agent-this-batch-was-cleared-out-of-band-…` on
+    `--check-batch` stdout, which `citationPreparePrompt` tells the prepare agent to report and
+    `rejectionDetail()` then feeds into the next attempt's dispatch prompt. It reaches the prepare
+    and regeneration agents rather than the judge, which is why it is not a P1. A guard bounds the
+    file it wraps and says nothing about a sibling reimplementing the same rule; that parity is
+    owned by a shared table, and **the table had covered only KNOWN schemes, where the two engines
+    agree by construction** — four rounds of green over a live divergence. It also falsified the
+    twin's own docstring promise that "the reason never embeds the offending URL".
+  - **Round 5 — one hostile host could starve an entire batch.** `resp.read(MAX_BYTES + 1)` was one
+    blocking call: bounded by volume and by the socket's per-recv idle timeout, and by neither of
+    the two things that matter. A server sending one byte every two seconds is never idle long
+    enough to trip the timeout and never sends enough to reach the cap. Measured before the fix: a
+    12 s trickle against a 3 s per-item deadline returned **`fetched` after 12.0 s**, and elapsed
+    tracked the attacker's chosen duration exactly — 12 s, 30 s and 60 s all matched. Because the
+    prepare step is ONE bash call under the same measured 600 s clamp this release's other half is
+    about, one held socket ran the call out of time, reported `EVIDENCE_FAILED`, spent a
+    citation-review retry, and on exhaustion merged **zero** batches — defeating the batch deadline
+    round 2 added for exactly this scenario, which is only tested *between* items. The read is now
+    chunked with the deadline re-checked between chunks, using `read1()` rather than `read()`
+    because `read(n)` blocks until `n` bytes arrive and would put the check back out of reach. After
+    the fix the same three attacks all return `refused:read-timeout` in 4.0 s — elapsed no longer a
+    function of the server.
+  - **Round 5 — `fec0::/10` was admitted by both halves.** IPv6 site-local, deprecated by RFC 3879
+    and still routed on legacy networks. CPython leaves it out of `ipaddress._private_networks`, so
+    `is_private` is `False` and `is_global` is therefore `True`; `is_site_local` was the one
+    disqualifying property neither address check named, in a function whose docstring promises
+    "every disqualifying property named explicitly rather than relying on `is_global` alone".
+  - **Round 5 — a closed-vocabulary gate that enforced nothing.** `OUTCOME_RE` in the test suite
+    documented itself as "the property, and the regex is the enforcement" and was referenced from
+    exactly one place: its own definition. Unwired, it had silently drifted from the module on
+    **eight** reason strings. An unwired gate does not decay loudly — it reads exactly like a wired
+    one. It is now driven from the module's own AST, and it earned its keep within the same round by
+    catching both new reasons this round adds (`site-local-address`, `read-timeout`) before they
+    could ship undocumented.
+  - **Round 5 — the judge prompt let a server soften the standard of proof.** `truncated: true` came
+    with "an absent detail may simply be past the cut — say so rather than treating it as evidence
+    of absence", while check 3 requires the page to positively attest the claimed form and the same
+    prompt states that an unverifiable citation must never be approved because verification was
+    unavailable. The flag is set by response size, which the server picks, so a host could pad 2 MB
+    of filler and buy the softer reading. Truncation now explains a missing detail and never
+    supplies one: a positive check that cannot be satisfied from the bytes actually retrieved fails,
+    with truncation named as the reason.
   - **Round 3 — the PARSER, which is not a field at all.** `http.client` raises its own hierarchy
     and `HTTPException` is not an `OSError` — measured: `issubclass(BadStatusLine, OSError)` is
     `False` — so a malformed status line escaped every handler, aborted the whole batch, and printed

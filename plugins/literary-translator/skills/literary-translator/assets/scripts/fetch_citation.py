@@ -100,6 +100,10 @@ from urllib.parse import urlsplit, urlunsplit, urljoin, quote
 
 ALLOWED_SCHEMES = ("http", "https")
 
+# The default port per scheme, in ONE place. Read by validate_url (to fill in an
+# absent port) and by _port_suffix (to decide whether to write it out).
+DEFAULT_PORTS = {"http": 80, "https": 443}
+
 # Schemes worth NAMING in a refusal, so `outcome` still says which kind of unsafe
 # URL was attempted. Everything outside this set collapses to "other" -- see
 # scheme_token(). This is a diagnostic vocabulary, NOT a denylist: refusal is
@@ -109,12 +113,17 @@ KNOWN_SCHEMES = ("file", "ftp", "ftps", "data", "javascript", "gopher", "ws", "w
                  "sftp", "smb", "nfs", "redis", "gemini")
 MAX_REDIRECTS = 5
 MAX_BYTES = 2_000_000
-# PER-ITEM budget, checked at the top of each redirect hop, not continuously.
-# Two gaps are known and accepted rather than papered over: getaddrinfo() takes
-# no timeout argument, so a pathological resolver can block past this; and the
-# deadline is not re-checked during resp.read(), which is instead bounded by
-# MAX_BYTES and the socket timeout. So this caps redirect-chain WORK, not
-# wall-clock latency.
+# One recv's worth of body per deadline check. Small enough that the check is
+# frequent, large enough that a 2 MB page is not read in thousands of slices.
+READ_CHUNK_BYTES = 65_536
+# PER-ITEM budget, checked at the top of each redirect hop AND between body
+# chunks (see _read_bounded). ONE gap is known and accepted rather than papered
+# over: getaddrinfo() takes no timeout argument, so a pathological resolver can
+# block past this. The body read used to be a second such gap -- bounded by
+# MAX_BYTES and the socket's per-recv idle timeout, neither of which bounds
+# ELAPSED time against a server that trickles. Round 5 closed it, because the
+# consequence was not slowness: the prepare step is one bash call under a
+# measured 600 s clamp, so a single held socket ran the whole batch out of time.
 #
 # An earlier version of this comment added "nothing downstream treats it as a
 # latency guarantee". That was itself an overclaim, caught in review: downstream
@@ -242,8 +251,13 @@ def _port_suffix(scheme: str, port: int) -> str:
     server for the wrong virtual host, and an IPv6 literal produced a
     syntactically invalid header (RFC 9110 requires `Host: [::1]:8443`).
     """
-    default = 80 if scheme == "http" else 443
-    return "" if port == default else f":{port}"
+    # DEFAULT_PORTS, not an inline conditional: this function and validate_url
+    # spelled the same two-entry table with OPPOSITE polarity ("80 if http else
+    # 443" here, "443 if https else 80" there). Both are correct for http/https
+    # and they disagree for anything else, which is the shape a drift takes when
+    # the allowlist is ever widened. A missing scheme yields None, which no port
+    # equals, so the port is written out rather than silently dropped.
+    return "" if port == DEFAULT_PORTS.get(scheme) else f":{port}"
 
 
 def wire_authority(scheme: str, host: str, port: int) -> str:
@@ -383,6 +397,14 @@ def _assert_global(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> None:
         raise _refuse("loopback-address")
     if ip.is_link_local:
         raise _refuse("link-local-address")      # includes 169.254.169.254
+    # fec0::/10, IPv6 site-local. getattr because IPv4Address has no such
+    # property. Deprecated by RFC 3879, still routed on legacy networks -- and
+    # it is NOT covered by any check around it: CPython leaves fec0::/10 out of
+    # ipaddress._private_networks, so is_private is False and is_global is
+    # consequently True. It was the one disqualifying property this function's
+    # docstring promised to name and did not (round 5).
+    if getattr(ip, "is_site_local", False):
+        raise _refuse("site-local-address")
     if ip.is_private:
         raise _refuse("private-address")
     if ip.is_multicast:
@@ -479,7 +501,8 @@ def validate_url(url: str) -> tuple[str, str, int, str]:
     except ValueError:
         raise _refuse("invalid-port")
     if port is None:
-        port = 443 if scheme == "https" else 80
+        # scheme is guaranteed to be in ALLOWED_SCHEMES by the check above.
+        port = DEFAULT_PORTS[scheme]
     if not (0 < port < 65536):
         raise _refuse("invalid-port")
 
@@ -570,6 +593,13 @@ def fetch_one(url: str, *, deadline: float, allowed_types=ALLOWED_CONTENT_PREFIX
             return _fetch_hop(url, current, chain, hop, deadline, allowed_types)
         except _Redirect as redirect:
             current = redirect.target
+    # UNREACHABLE BY CONSTRUCTION, and kept deliberately. _fetch_hop_inner
+    # refuses with this same reason at `hop >= MAX_REDIRECTS` before it can
+    # raise _Redirect, so the final iteration never loops round and the
+    # function always leaves from inside the loop. Deleting this line would
+    # make the function fall off the end and return None the moment that
+    # invariant is disturbed -- a silent success carrying no body -- so it
+    # stays as the structural backstop rather than as live code.
     raise _refuse("too-many-redirects")
 
 
@@ -581,15 +611,52 @@ class _Redirect(Exception):
         self.target = target
 
 
+def _read_bounded(resp, deadline: float) -> bytes:
+    """Read up to MAX_BYTES + 1 bytes, re-checking the deadline as it goes.
+
+    A single resp.read(MAX_BYTES + 1) is bounded by VOLUME and by the socket's
+    PER-RECV idle timeout, and by neither of the two things that matter here.
+    A server that sends one byte every few seconds is never idle long enough to
+    trip the socket timeout and never sends enough to hit the cap, so the call
+    blocks for exactly as long as the server chooses. Measured before this fix:
+    a 12 s trickle against a 3 s per-item deadline returned `fetched` after
+    12.0 s -- elapsed time equal to the attacker's chosen duration.
+
+    That is not merely slow. The whole prepare step is ONE bash call under a
+    measured 600 s clamp (the same clamp #348 is about), so one held socket
+    runs the call out of time, which reports EVIDENCE_FAILED, spends a
+    citation-review retry, and on exhaustion merges ZERO batches -- defeating
+    the batch deadline that round 2 added for this exact scenario, since that
+    deadline is only tested BETWEEN items.
+
+    read1() rather than read(): read(n) blocks until n bytes have arrived,
+    which would put the deadline check back out of reach. read1(n) performs at
+    most one underlying recv, so it returns as soon as any bytes land and the
+    loop regains control. The bound is therefore the deadline plus at most one
+    socket-timeout idle period, not the server's whim.
+    """
+    chunks = []
+    remaining = MAX_BYTES + 1
+    while remaining > 0:
+        if time.monotonic() > deadline:
+            raise _refuse("read-timeout")
+        chunk = resp.read1(min(READ_CHUNK_BYTES, remaining))
+        if not chunk:
+            break                      # EOF
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    return b"".join(chunks)
+
+
 def _fetch_hop(url, current, chain, hop, deadline, allowed_types) -> dict:
     """ONE redirect hop. Every exit is a dict, a Refused, or a _Redirect.
 
-    THE TOTALITY RULE, and why this wrapper exists at all. Four review rounds of
-    1.16.1 each found one exception escaping this boundary as itself, and each
-    fix closed that one instance:
+    THE TOTALITY RULE, and why this wrapper exists at all. Four instances of one
+    class turned up across three of 1.16.1's review rounds (round 2 found none),
+    each escaping this boundary as itself, and each fix closed that one instance:
         round 1  ValueError      from urlsplit on `http://[::1`
         round 3  HTTPException   from a malformed status line
-        round 4  UnicodeEncodeError from getaddrinfo on a bad IDNA label
+        round 4  UnicodeError    from getaddrinfo on a bad IDNA label
         round 4  UnicodeEncodeError from conn.request on a non-ASCII path
     Every one of them aborted the whole batch, because run_batch only catches
     Refused -- and index.json was then never written at all, which is strictly
@@ -598,6 +665,17 @@ def _fetch_hop(url, current, chain, hop, deadline, allowed_types) -> dict:
     already a Refused becomes one, carrying the exception's stdlib TYPE NAME and
     never its text. An unexpected exception type is a bug to fix, but it must
     cost one citation, never the run's entire evidence index.
+
+    Round 5 is the coda, and it is the reason this docstring says WHAT the guard
+    covers rather than that the class is closed. The sixth instance was real but
+    out of this wrapper's reach entirely: canon_validate.py, the documented twin
+    that runs the same static decision with no resolver behind it, was still
+    interpolating a raw urlsplit scheme into its refusal reason. A totalising
+    guard bounds the file it wraps; it says nothing about a sibling that
+    reimplements the same rule. That parity is owned by
+    canon_citation_refusal.test.py's shared table -- which missed it for four
+    rounds because every scheme row was a KNOWN member, where the two engines
+    agree by construction.
     """
     if time.monotonic() > deadline:
         raise _refuse("total-timeout")
@@ -676,7 +754,9 @@ def _fetch_hop_inner(url, current, chain, hop, deadline, allowed_types) -> dict:
             # urljoin PARSES both sides, so it raises ValueError itself on a
             # malformed Location such as `http://[::1` -- before the guarded
             # validate_url() call that the next iteration would have made.
-            # The round-2 urlsplit hardening sits one step too late to see it.
+            # The round-1 urlsplit hardening sits one step too late to see it.
+            # (Round 1, not round 2: `unparseable-url` enters this file in
+            # 7e714fe. Round 3's commit message says round 2 and is wrong.)
             try:
                 target = urljoin(current, location)
             except ValueError:
@@ -705,7 +785,7 @@ def _fetch_hop_inner(url, current, chain, hop, deadline, allowed_types) -> dict:
         if ctype and ctype_token == "other":
             raise _refuse("content-type-not-allowed")
 
-        raw = resp.read(MAX_BYTES + 1)
+        raw = _read_bounded(resp, deadline)
         truncated = len(raw) > MAX_BYTES
         raw = raw[:MAX_BYTES]
         body = raw.decode("utf-8", errors="replace")

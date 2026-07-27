@@ -378,6 +378,14 @@ HOSTILE_URLS = [
     ("http://192.168.1.1/", {"private-address"}),
     ("http://172.16.0.1/", {"private-address"}),
     ("http://[fc00::1]/", {"private-address"}),
+    # fec0::/10, IPv6 site-local. Deprecated by RFC 3879 but still carried on
+    # legacy networks, and the ONE disqualifying property `_assert_global` did
+    # not name -- despite its docstring promising every property is named. It
+    # slips through every other test because Python's `ipaddress` leaves fec0::/10
+    # out of `_private_networks`, so is_private is False and is_global is
+    # therefore True. Measured on CPython 3.14.6 before the fix: ADMITTED.
+    ("http://[fec0::1]/", {"site-local-address"}),
+    ("http://[fecf:ffff::1]/", {"site-local-address"}),
     ("http://0.0.0.0/", {"private-address", "unspecified-address", "non-global-address"}),
     ("http://[::]/", {"private-address", "unspecified-address", "reserved-address"}),
     ("http://224.0.0.1/", {"multicast-address"}),
@@ -1443,22 +1451,185 @@ def test_an_absent_override_leaves_the_shipped_default_in_place():
 
 # Every `outcome` value the boundary may write. A CLOSED vocabulary -- that is the
 # property, and the regex is the enforcement.
+#
+# Round 5: it was enforcing nothing. Defined here and referenced NOWHERE, it had
+# drifted from the module on EIGHT of its reason strings (`control-characters` for
+# `control-character-in-url`, `bad-port` for `invalid-port`, `linklocal-address`
+# for `link-local-address`, `no-addresses` for `dns-empty`, and four reasons it
+# never learned at all). An unwired gate does not decay loudly -- it reads exactly
+# like a wired one. It is now driven by
+# test_the_documented_outcome_vocabulary_matches_what_the_module_emits below,
+# which derives the emitted set from the module's own AST rather than from a copy
+# maintained by hand, so the next added reason either matches this regex or fails.
+#
+# This covers the half the closed-vocabulary AST gate does NOT: that gate checks
+# what interpolating _refuse() calls may INTERPOLATE, this one checks that every
+# reason STRING is one the judge prompt documents. Neither subsumes the other.
 OUTCOME_RE = re.compile(
     r"\A(?:"
     r"fetched"
     r"|http_error:\d{3}"
     r"|refused:(?:"
-    r"total-timeout|batch-deadline|unparseable-url|embedded-credentials|no-host"
-    r"|localhost-name|control-characters|bad-port|too-many-redirects"
+    r"total-timeout|batch-deadline|read-timeout|unparseable-url"
+    r"|embedded-credentials|no-host"
+    r"|localhost-name|control-character-in-url|invalid-port|too-many-redirects"
     r"|unparseable-redirect-location|content-type-not-allowed|connect-timeout"
-    r"|loopback-address|private-address|linklocal-address|multicast-address"
-    r"|reserved-address|unspecified-address|no-addresses"
+    r"|loopback-address|private-address|link-local-address|multicast-address"
+    r"|site-local-address|reserved-address|unspecified-address|dns-empty|empty-url"
+    r"|host-not-idna-encodable|non-global-address|unparseable-resolved-address"
     r"|scheme-not-allowed:[a-z]+"
     r"|redirect-without-location:\d{3}"
     r"|dns-failure:-?\d+"
     r"|(?:tls-error|network-error|http-protocol-error|internal-error):[A-Za-z_]+"
     r")"
     r")\Z")
+
+
+def _emitted_refusal_reasons():
+    """Every reason string fetch_citation.py can pass to _refuse(), read from
+    the module's AST. Interpolated segments become a representative sample so
+    the whole composed string can be matched, not just its prefix."""
+    tree = ast.parse(FETCH_SRC.read_text(encoding="utf-8"))
+    samples = {
+        "scheme_token(scheme)": "other",
+        "exc.errno": "-2",
+        "status": "302",
+        "type(exc).__name__": "ValueError",
+    }
+    reasons = set()
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                and node.func.id == "_refuse" and node.args):
+            continue
+        arg = node.args[0]
+        if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+            reasons.add(arg.value)
+        elif isinstance(arg, ast.JoinedStr):
+            parts = []
+            for value in arg.values:
+                if isinstance(value, ast.Constant):
+                    parts.append(value.value)
+                else:
+                    assert isinstance(value, ast.FormattedValue), (
+                        f"unexpected f-string part {type(value).__name__} in a _refuse call")
+                    expr = ast.unparse(value.value)
+                    assert expr in samples, (
+                        f"_refuse interpolates {expr!r}, which this test has no sample for. "
+                        "Add one (and check the closed-vocabulary gate still admits it)."
+                    )
+                    parts.append(samples[expr])
+            reasons.add("".join(parts))
+    return reasons
+
+
+def test_the_documented_outcome_vocabulary_matches_what_the_module_emits():
+    """OUTCOME_RE must admit every reason the module actually emits.
+
+    The point is drift, not correctness-in-the-abstract: `outcome` is the field
+    citationJudgePrompt tells the judge to reason over, and it enumerates the
+    outcome shapes for the judge. A reason the judge prompt does not describe
+    arrives as an unknown token at an approval gate.
+
+    Derived from the AST, never from a hand-kept list -- a hand-kept list is what
+    silently drifted on eight strings.
+    """
+    reasons = _emitted_refusal_reasons()
+    assert len(reasons) >= 20, f"expected >=20 refusal reasons, found {len(reasons)}"
+
+    unmatched = sorted(r for r in reasons if not OUTCOME_RE.match("refused:" + r))
+    assert not unmatched, (
+        "OUTCOME_RE does not admit reasons the module emits: " + ", ".join(unmatched))
+
+    # The outcomes composed OUTSIDE _refuse(), which the AST walk cannot see.
+    for outcome in ("fetched", "http_error:404", "refused:batch-deadline",
+                    "refused:internal-error:MemoryError"):
+        assert OUTCOME_RE.match(outcome), f"OUTCOME_RE rejects {outcome!r}"
+
+
+class _TricklingResponse:
+    """A response that never goes idle and never finishes.
+
+    Models the real hazard exactly: each read1() yields ONE byte and consumes
+    `per_chunk` seconds of the (fake) clock. The socket is never idle long
+    enough for a per-recv timeout to fire and the volume cap is never
+    approached, so the only thing that can stop it is the deadline.
+    """
+
+    def __init__(self, clock, per_chunk=2.0):
+        self._clock = clock
+        self._per_chunk = per_chunk
+        self.calls = 0
+
+    def read1(self, n):
+        self.calls += 1
+        self._clock.advance(self._per_chunk)
+        return b"x"
+
+    def read(self, n=-1):                      # pragma: no cover -- must not be used
+        raise AssertionError(
+            "_read_bounded must use read1(): read(n) blocks until n bytes arrive, "
+            "which puts the deadline check out of reach for a trickling server.")
+
+
+class _FakeClock:
+    def __init__(self, start=1000.0):
+        self.now = start
+
+    def advance(self, seconds):
+        self.now += seconds
+
+    def __call__(self):
+        return self.now
+
+
+def test_a_trickling_body_cannot_outlive_the_deadline(monkeypatch):
+    """The round-5 availability fix.
+
+    Before it, the body read was one blocking resp.read(MAX_BYTES + 1): bounded
+    by VOLUME and by the socket's per-recv idle timeout, and by neither of the
+    two things that matter. Measured against a real socket at the time: a 12 s
+    trickle against a 3 s deadline returned `fetched` after 12.0 s, and elapsed
+    tracked the server's chosen duration exactly (12/30/60 s all matched).
+
+    That is an availability attack on the whole batch, not one citation: the
+    prepare step is ONE bash call under a measured 600 s clamp, so a single held
+    socket runs it out of time, reports EVIDENCE_FAILED, spends a citation-review
+    retry, and on exhaustion merges zero batches.
+    """
+    clock = _FakeClock()
+    monkeypatch.setattr(fc.time, "monotonic", clock)
+    resp = _TricklingResponse(clock, per_chunk=2.0)
+    deadline = clock.now + 6.0
+
+    with pytest.raises(fc.Refused) as excinfo:
+        fc._read_bounded(resp, deadline)
+
+    assert str(excinfo.value) == "read-timeout"
+    # Bounded by the DEADLINE, not by the server: ~3 chunks of 2 s to cross 6 s.
+    assert resp.calls <= 5, f"read loop ran {resp.calls} times for a 6 s budget"
+    assert clock.now - (deadline - 6.0) < 10.0, "elapsed must not track the server"
+
+
+def test_a_bounded_body_still_reads_to_completion(monkeypatch):
+    """The control: the deadline guard must not truncate an honest response.
+
+    A guard that refused everything would pass the test above while breaking
+    every real citation, so this pins the other direction.
+    """
+    clock = _FakeClock()
+    monkeypatch.setattr(fc.time, "monotonic", clock)
+
+    class _NormalResponse:
+        def __init__(self):
+            self.payload = [b"hello ", b"world", b""]
+            self.i = 0
+
+        def read1(self, n):
+            chunk = self.payload[self.i]
+            self.i += 1
+            return chunk
+
+    assert fc._read_bounded(_NormalResponse(), clock.now + 30.0) == b"hello world"
 
 
 @pytest.mark.parametrize("injected", [
