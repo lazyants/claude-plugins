@@ -1449,16 +1449,18 @@ function containerOwnerScan(body, wanted) {
 // whatever comparison paths exist, each still derives its `group_title`-side key from here. Two
 // paths exist today, illustrating the point rather than exhausting it: `containerOwnerScan`'s
 // `ownerLabelOf` (the nested-list writer/verifier path), and `collectContainerHeadings`' headings-form
-// container titles (the `findContainer` path, `:858`). BOTH are trimmed, so both comparisons are
-// symmetric.
+// container titles (the `findContainer` path, `:858`). The headings side is trimmed.
 //
-// [1.11.0 correction] An earlier version of this comment described the `ownerLabelOf` side as
-// recording an UNTRIMMED label and called that comparison "deliberately asymmetric (round-18 HIGH)".
-// It is not: `parseNestedLabel` opens with `String(content).trim()` (`:1143`), so the label reaching
-// `ownerLabelOf` is already trimmed. Measured: an index whose container bullet is `- Admin  ` matches
-// `group_title: 'Admin'` — the writer inserts and `verifyNonHeadingPlacement` returns `ok`, where the
-// asymmetry the comment described would have made both treat the container as absent. The comment was
-// wrong, not the code; anyone repairing round-18 from it would have "fixed" working behaviour.
+// `ownerLabelOf` is trimmed on the RAW and WIKILINK branches but NOT on `mdlink`, and the difference
+// is easy to misread: `parseNestedLabel` trims the bullet's CONTENT at `:1143`, then the mdlink branch
+// returns the link TEXT slice verbatim (`:1189`), so `- [ Admin ](admin.md)` yields ' Admin '.
+// Measured, all three container spellings against `group_title: 'Admin'`:
+//     `- Admin  `                -> ok          (raw, trimmed)
+//     `- [[admin| Admin ]]`      -> ok          (wikilink, trimmed)
+//     `- [ Admin ](admin.md)`    -> misplaced, foundContainer ' Admin '   (mdlink, NOT trimmed)
+// That asymmetry is deliberate and load-bearing (round-18 HIGH): the writer reads the same label, so
+// trimming it here would accept a container the writer itself treats as absent. It is pinned by the
+// rule-5 UNTRIMMED test in chapter-paths.test.mjs — check that test before "simplifying" this.
 function containerLabelKey(groupTitle) {
   return String(groupTitle).trim();
 }
@@ -1536,15 +1538,24 @@ export function wireNestedListChapter(indexLines, groupTitle, chapterLink) {
       const bm = line.match(NESTED_BULLET_RE);
       if (bm && bm[1].length === childIndent) {
         // Membership on the bullet's CONTENT, compared verbatim against the link the caller is
-        // asking us to write. Content rather than the whole line, so a re-indented row still counts
-        // as present — but NOT a re-markered one, and an earlier version of this comment claimed
-        // otherwise: on a `*`/`+`-markered file the malformed rows this guard exists to catch are
-        // refused by isBarePathBullet (`:1255`) before the walk is ever reached, so the file answers
-        // `not-a-list` rather than `present`. Bounded either way; the diagnostic differs.
-        // Returning here rather than recording and continuing: nothing
-        // the rest of the walk computes (`insertAt`, `childMarker`) can affect this path, and
-        // `present` is a REQUIREMENT on the caller, not a description of one — halt and tell the
-        // operator, never retry, since retrying is the loop this outcome exists to break.
+        // asking us to write. Content rather than the whole line, so a re-indented OR re-markered row
+        // still counts as present — measured: a `-` file whose child row an operator re-markered to
+        // `*` or `+` still answers `present`.
+        //
+        // Independently, and easy to conflate with the above: a `*`/`+` bullet whose content is a
+        // BARE PATH is refused by isBarePathBullet (`:1257`, which requires `info.kind === 'raw'`)
+        // before this walk runs, so such a file answers `not-a-list`. That is a marker x raw-content
+        // rule, not a re-markering rule — a re-markered row carrying a normal link never reaches it.
+        //
+        // This guard is therefore MARKER-SCOPED, and the difference is blast radius, not diagnostics.
+        // Measured with a title carrying an unescaped `]` (the case this guard exists for): on a `-`
+        // file run 2 answers `present` and one row exists; on a `*`/`+` file the title's raw text
+        // carries a `/`, isBarePathBullet fires, and the WHOLE file answers `not-a-list` — including
+        // for unrelated chapters in unrelated groups, permanently. The guard does not reach that
+        // case, and no wording here should imply it bounds it.
+        //
+        // `present` is a REQUIREMENT on the caller, not a description of one: halt and tell the
+        // operator, never retry. See the `present` contract in chapter-paths.d.mts.
         if (bm[3] === chapterLink) return { kind: 'present', index: i };
         insertAt = i + 1;
         childMarker = bm[2];
@@ -2112,10 +2123,8 @@ export function verifyNonHeadingPlacement(indexLines, selectedTarget, groupTitle
   const owner = scan.ownerOf[matchIndex];
   if (owner === -1 || owner === undefined) return { kind: 'misplaced', foundContainer: null };
   // The writer's own parsed label, reused rather than re-derived, so the verifier can never disagree
-  // with the writer about what a container is called. (It is already trimmed — `parseNestedLabel`
-  // trims at `:1143`. An earlier comment here described it as untrimmed and the comparison as
-  // deliberately asymmetric; see the containerLabelKey note above for the measurement that refutes
-  // that. Nothing about the comparison changes — only the reason given for it was wrong.)
+  // with the writer about what a container is called. NEVER re-trim it here — see the trimming note
+  // above containerLabelKey for which parse branches trim and why the mdlink one deliberately does not.
   const ownerLabel = scan.ownerLabelOf[matchIndex];
   if (ownerLabel === wantedLabel) return { kind: 'ok' };
   return { kind: 'misplaced', foundContainer: ownerLabel };

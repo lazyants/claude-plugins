@@ -1857,10 +1857,17 @@ test('verifyNonHeadingPlacement compatibility matrix: flat bare-path child (no l
 });
 
 // -------------------------------------------------------------------------------------------------
-// The fixed-probe design's own soundness assumption (round-9 HIGH 1): "for any newline-free
-// chapterLink, accept/decline is a function of (indexLines, groupTitle) alone." This is a claim
-// about the EXISTING wireNestedListChapter (unchanged by 1.11.0), pinned here because
-// verifyNonHeadingPlacement's whole delegation design depends on it staying true.
+// The fixed-probe design's soundness assumption (round-9 HIGH 1) was: "for any newline-free
+// chapterLink, accept/decline is a function of (indexLines, groupTitle) alone."
+//
+// [1.11.0] That is NO LONGER TRUE unconditionally, and the fixture below hid it: `['- Admin']` is an
+// EMPTY container, so no child can ever equal chapterLink and the membership guard cannot fire. The
+// invariant now holds exactly while NO child bullet carries the link verbatim; when one does, the
+// same file and groupTitle answer `present` instead of `inserted`. Both halves are pinned below.
+//
+// The fixed-probe design survives this, but for a different reason than the original one: rule 4
+// accepts `inserted` and `present` alike, so the probe's verdict cannot change a placement outcome.
+// The delegation depends on THAT now, not on invariance.
 // -------------------------------------------------------------------------------------------------
 
 test('wireNestedListChapter accept/decline invariance [pins the #330 fixed-probe assumption]: the SAME file/groupTitle accepts (kind + created) identically across a representative repertoire of newline-free chapterLink spellings', () => {
@@ -1877,6 +1884,18 @@ test('wireNestedListChapter accept/decline invariance [pins the #330 fixed-probe
     assert.equal(result.kind, 'inserted', `expected inserted for link ${JSON.stringify(link)}`);
     assert.equal(result.created, false, `expected created:false for link ${JSON.stringify(link)}`);
   }
+});
+
+test('wireNestedListChapter accept/decline invariance [1.11.0]: the invariance above holds only while no child carries the link — a colliding child flips the SAME file/groupTitle to `present`', () => {
+  // The boundary the empty-container fixture above cannot reach. Same groupTitle, same file shape,
+  // and the ONLY difference is whether a child bullet already carries the exact link — which is
+  // precisely the input the round-9 invariant assumed could not matter.
+  const link = '[Items](admin/items.md)';
+  const withoutCollision = ['- Admin', '  - [Something else](admin/other.md)'];
+  const withCollision = ['- Admin', `  - ${link}`];
+
+  assert.equal(wireNestedListChapter(withoutCollision, 'Admin', link).kind, 'inserted');
+  assert.deepEqual(wireNestedListChapter(withCollision, 'Admin', link), { kind: 'present', index: 1 });
 });
 
 // =================================================================================================
@@ -2139,14 +2158,9 @@ for (const row of TITLE_SHAPE_TABLE) {
 //   duplicate-insert risk in the abstract) — the guard cannot recognize two different-content rows
 //   as "the same", so it STILL inserts a second, duplicate row; the next run finds the fresh row
 //   and reports `ok`, while the original malformed row lingers as a silent, undetected duplicate
-//   (measured directly here against the real functions, deliberately NOT cited to adapter prose:
-//   an earlier version of this line quoted "place such a row correctly under the container ... step
-//   0 still reports the chapter absent" as a live adapter sentence. That quote WAS accurate when it
-//   was written — the phrase existed in both adapters at 746d935 — and became false the moment the
-//   1.11.0 rewrite retired the paragraph, with nothing to catch it, since a comment is guarded by
-//   nothing. The half-sentence "step 0 still reports the chapter absent" does survive; the leading
-//   half does not, in either adapter, at HEAD or at the 1.10.0 base). This arm is unaffected by
-//   the guard.
+//   (measured here against the real functions, and deliberately NOT cited to adapter prose — a
+//   comment quoting a document is a citation nothing re-checks when that document is rewritten).
+//   This arm is unaffected by the guard.
 // - ARM 2 below drives the writer the REALISTIC way (obsidian-vault.md: "display text is always the
 //   manifest entry's `title`") — the SAME manifest title generates the inserted link on every
 //   publish, so the "new" link is byte-identical to the malformed row already present. The guard
@@ -2170,12 +2184,9 @@ const DUPLICATE_INSERT_SHAPE_NAMES = ['nestedLink', 'nestedImage', 'referenceLin
 // parse (extractLineTargets/parseNestedLabel) on purpose: a counter built from the functions under
 // test would only re-derive what they already believe, and would agree with a broken one.
 //
-// Module-scope rather than per-test because the alternative was measured worse: this file briefly
-// carried TWO counters for the same job — this exact-content one, and a `line.includes(chapterLink)`
-// substring version 250 lines away. Substring matching is precisely the laxness this release
-// rejected for the guard itself (a substring check matches a malformed row that merely CONTAINS the
-// destination text but never parses as it), so the two counters disagreed on exactly the inputs the
-// suite exists to discriminate. One definition, exact-content, used everywhere.
+// Exact-content, never a substring: a substring check matches a malformed row that merely CONTAINS
+// the destination text but never parses as it — precisely the laxness this release rejects for the
+// guard itself, and precisely the inputs this suite exists to discriminate.
 const countRowsCarrying = (lines, chapterLink) =>
   lines.filter((line) => {
     const bm = line.match(/^ *[-*+] (.*)$/);
@@ -2195,13 +2206,7 @@ for (const mode of ['path', 'wiki']) {
     // not itself corrupt its target extraction — that is the whole difference from ARM 2 below.
     //
     // Asserted against the CODE and the measurement below, deliberately not against a quoted
-    // sentence from the adapter docs. An earlier version of this comment carried what looked like a
-    // verbatim adapter quote spanning three ellipses; its final clause ("the following run reports
-    // `ok` on the newly inserted one") appears in NEITHER adapter, at this branch's HEAD or at the
-    // shipped 1.10.0 base — checked with whitespace collapsed, so a re-wrap cannot explain it. A
-    // test comment that cites prose is a citation nobody re-verifies when the prose is rewritten,
-    // which is exactly what happened here: the sentences it did quote correctly were retired in
-    // 1.11.0 while the comment stayed.
+    // sentence from the adapter docs.
     test(`adapter composition flow [round-11-b, mutation-confirmed]: ${shape} / ${mode}, already correctly nested, leaves exactly ONE lingering duplicate then converges (writer link harmless)`, () => {
       const realLink = wikilink ? '[[guide/items|Items]]' : '[Items](guide/items.md)';
       const indexLines = ['- Admin', `  - ${malformedRow}`];
@@ -2455,7 +2460,7 @@ test('membership guard contrast [round-11-b]: the ZERO-container CREATE branch i
   assert.equal(write.created, true, 'a fresh "Admin" container must be created, not confused with the unrelated "Other" one');
   assert.ok(write.newLines.includes('- Admin'), 'the new container line must be spliced in');
   assert.equal(
-    write.newLines.filter((l) => l === `  - ${chapterLink}`).length,
+    countRowsCarrying(write.newLines, chapterLink),
     2,
     'two rows now carry this exact content -- one under Other (untouched), one freshly created under Admin',
   );
@@ -4071,18 +4076,45 @@ test('decoy resistance: a commented-out real binding + a non-literal RHS decoy d
 // must be retired in the same change. A green suite must never be compatible with both a defect and
 // its fix.
 //
-// Measured on this branch AND on the shipped 1.10.0 base (2ed39d8): identical. Not introduced by the
-// membership guard; the guard simply does not reach these inputs.
+// Measured on this branch AND on the shipped 1.10.0 base (2ed39d8): identical for every LOCKOUT
+// assertion below — not introduced by the membership guard, which simply does not reach these
+// inputs. The `-`-marker CONTROL in the second test is deliberately NOT identical: the base returns
+// `inserted` there and this branch returns `present`, which is the guard working as intended.
 // =================================================================================================
+
+// Prefix every pinned-defect test so a RED run explains itself without opening this file. `node
+// --test` prints only the test name and the assertion message, never the banner above, so the
+// contract has to live in those two strings or it is not communicated at all.
+const PINNED_DEFECT =
+  'PINNED DEFECT [1.11.0] (RED HERE MEANS FIXED — delete this test and retire the matching '
+  + '"Nested-list automation limits" prose in BOTH adapters)';
 
 const FILE_LOCKOUT_TITLES = [
   { title: 'Use `--force`', why: 'inline code' },
   { title: 'Old <!-- x --> notes', why: 'HTML comment' },
   { title: 'Code ``` here', why: 'fence' },
+  // U+2028/U+2029 are the worst of the set and were found last: invisible in an editor, effective on
+  // EVERY marker, and reachable from either input field. NESTED_BULLET_RE has no `s` flag, so `.`
+  // never matches them and the emitted row stops being a bullet at all; the writer's own newline
+  // guard checks only \r and \n. Written as escapes on purpose — a literal here would be invisible
+  // in this source too, which is the whole point.
+  { title: `Plans${String.fromCodePoint(0x2028)}Beta`, why: 'U+2028 LINE SEPARATOR' },
+  { title: `Plans${String.fromCodePoint(0x2029)}Beta`, why: 'U+2029 PARAGRAPH SEPARATOR' },
+];
+
+// The same permanent lockout, reached through the CONTAINER line the ZERO-create branch emits. Each
+// row carries its own marker scope, because that is what makes these hard to find: the SAME
+// group_title is harmless on one marker and fatal on another, in both directions.
+const CONTAINER_LOCKOUT_GROUP_TITLES = [
+  { groupTitle: 'Sales/Marketing', markers: ['*', '+'], safeMarkers: ['-'], why: 'bare-path bullet (contains /)' },
+  { groupTitle: 'billing.md', markers: ['*', '+'], safeMarkers: ['-'], why: 'bare-path bullet (ends .md)' },
+  { groupTitle: 'FAQ: basics', markers: ['-'], safeMarkers: ['*', '+'], why: 'reads back as an MkDocs `- key: value` nav row' },
+  { groupTitle: 'Admin:', markers: ['-'], safeMarkers: ['*', '+'], why: 'reads back as an MkDocs nav row' },
+  { groupTitle: '---', markers: ['-'], safeMarkers: ['*', '+'], why: 'reads back as a thematic break' },
 ];
 
 for (const { title, why } of FILE_LOCKOUT_TITLES) {
-  test(`known limitation [1.11.0]: a legal manifest title carrying ${why} locks the WHOLE index file on the next run`, () => {
+  test(`${PINNED_DEFECT}: a legal manifest title carrying ${why} locks the WHOLE index file on the next run`, () => {
     const seed = ['- Guides', '  - [G](g.md)', ''];
     const chapterLink = `[${title}](admin/items.md)`;
 
@@ -4099,20 +4131,123 @@ for (const { title, why } of FILE_LOCKOUT_TITLES) {
     assert.equal(
       wireNestedListChapter(after, 'Guides', chapterLink).kind,
       'not-a-list',
-      'the writer no longer recognizes the file it just wrote',
+      'the writer no longer recognizes the file it just wrote — if this is now `inserted`, the defect is FIXED: delete this test and retire the adapter prose',
     );
 
-    // The load-bearing half: an UNRELATED chapter, in an UNRELATED group, is locked out too. This is
-    // what makes it a file-wide defect rather than a bad row, and it is the part the docs assert.
+    // The load-bearing half: an unrelated chapter in a DIFFERENT group is locked out too — that is
+    // what makes this file-wide rather than a bad row, and it is the part the docs assert. An earlier
+    // version of this assertion passed 'Guides' here, so it only ever proved "another chapter in the
+    // SAME group" while its message claimed a different group.
     assert.equal(
-      wireNestedListChapter(after, 'Guides', '[Unrelated](other/thing.md)').kind,
+      wireNestedListChapter(after, 'Reference', '[Unrelated](other/thing.md)').kind,
       'not-a-list',
       'automation is dead for every chapter in this file, not just the one whose title caused it',
+    );
+    // Control: the verdict above must be caused by the POISONED FILE, not by 'Reference' being a
+    // group the index does not contain. On a clean file that same unknown group creates its
+    // container and returns `inserted`, so `not-a-list` cannot be attributed to the group.
+    assert.equal(
+      wireNestedListChapter(seed, 'Reference', '[Unrelated](other/thing.md)').kind,
+      'inserted',
+      'control: an unknown group on a CLEAN file inserts — so the lockout above is the file, not the group',
     );
   });
 }
 
-test('known limitation [1.11.0]: the ZERO-create branch writes a container its own bare-path guard then refuses — but only on `*`/`+` files', () => {
+
+test(`${PINNED_DEFECT}: on a \`*\`/\`+\` index it is the target's GROUP PREFIX, not the broken title, that locks the file`, () => {
+  // The adapters explain the `*`/`+` lockout by saying a target-breaking title makes isBarePathBullet
+  // fire. That is true for what the adapters EMIT and false as a property of this writer, and the
+  // difference is a `/`: a grouped chapter's target always carries its group prefix (chapterRelPath
+  // returns `<group>/<slug>.md` whenever `group` is set, and this writer is only reached for grouped
+  // entries), and it is that slash — not the unparseable title — that makes the raw fallback look
+  // like a bare path. Pinned because a reader who tests the writer with a slash-free target finds
+  // `present` and would conclude the documentation is wrong.
+  const title = 'Plans [Beta]'; // identical, target-breaking, in every case below
+  const cases = [
+    { link: `[${title}](admin/plans.md)`, expected: 'not-a-list', why: 'path mode, group-prefixed target' },
+    { link: `[${title}](plans.md)`, expected: 'present', why: 'path mode, slash-free target' },
+    { link: `[[admin/plans|${title}]]`, expected: 'not-a-list', why: 'wikilinks mode, group-prefixed target' },
+    { link: `[[plans|${title}]]`, expected: 'present', why: 'wikilinks mode, slash-free target' },
+  ];
+  for (const marker of ['*', '+']) {
+    for (const { link, expected, why: reason } of cases) {
+      const seed = [`${marker} Admin`, `  ${marker} [G](g.md)`, ''];
+      const first = wireNestedListChapter(seed, 'Admin', link);
+      assert.equal(first.kind, 'inserted', `${marker} / ${reason}: run 1 always writes`);
+      assert.equal(
+        wireNestedListChapter(first.newLines, 'Admin', link).kind,
+        expected,
+        `${marker} / ${reason}: the slash decides, not the title`,
+      );
+    }
+  }
+});
+
+for (const { groupTitle, markers, safeMarkers, why } of CONTAINER_LOCKOUT_GROUP_TITLES) {
+  test(`${PINNED_DEFECT}: group_title ${JSON.stringify(groupTitle)} locks a ${markers.join('/')} index (${why})`, () => {
+    const chapterLink = '[Items](admin/items.md)';
+    assert.equal(isPlainLabel(groupTitle), true, 'the allowlist accepts it — that is what makes this reachable');
+    assert.deepEqual(validateGroups([{ slug: 'q1', group: 'g', group_title: groupTitle }]), [], 'and so does validateGroups');
+
+    for (const marker of markers) {
+      const seed = ['# Summary', '', `${marker} [Introduction](README.md)`, `${marker} Admin`, `  ${marker} [Items](admin/items.md)`, ''];
+      const first = wireNestedListChapter(seed, groupTitle, chapterLink);
+      assert.equal(first.kind, 'inserted', `${marker}: the container is created`);
+      // The load-bearing assertion: an UNRELATED chapter in an UNRELATED group is locked out too.
+      assert.equal(
+        wireNestedListChapter(first.newLines, 'Admin', '[Orders](admin/orders.md)').kind,
+        'not-a-list',
+        `${marker} / ${groupTitle}: the whole file is locked — if this is no longer 'not-a-list', the defect is FIXED: delete this test and retire the adapter prose`,
+      );
+    }
+
+    // Marker controls. Without these the test reads as "this group_title is broken", which is not
+    // what was measured — every one of these values is harmless on some other marker.
+    for (const marker of safeMarkers) {
+      const seed = ['# Summary', '', `${marker} [Introduction](README.md)`, `${marker} Admin`, `  ${marker} [Items](admin/items.md)`, ''];
+      const first = wireNestedListChapter(seed, groupTitle, chapterLink);
+      assert.equal(first.kind, 'inserted', `${marker} control: still writes`);
+      assert.notEqual(
+        wireNestedListChapter(first.newLines, 'Admin', '[Orders](admin/orders.md)').kind,
+        'not-a-list',
+        `${marker} control: this marker is NOT locked by ${groupTitle} — the cause is marker-scoped`,
+      );
+    }
+  });
+}
+
+test(`${PINNED_DEFECT}: a chapter title EDITED between publishes accumulates one dead row per edit, without bound`, () => {
+  // The adapters measured "every placement x title-resolvability combination" with the manifest held
+  // FIXED, and concluded no combination grows without bound. Title EDITS are a third axis. Each edit
+  // produces a different link string, so the membership guard correctly sees a different row and
+  // inserts — the bound is the number of edits, which is not a bound.
+  const target = 'admin/plans.md';
+  let lines = ['- Admin', '  - [Overview](admin/overview.md)', ''];
+  let edit = 0;
+  for (let run = 1; run <= 20; run += 1) {
+    if (run % 4 === 1 && run > 1) edit += 1;
+    const chapterLink = `[Plans [Beta ${edit}]](${target})`; // target-breaking in every generation
+    if (locateChapterLine(lines, target, { wikilink: false }).present) continue;
+    const written = wireNestedListChapter(lines, 'Admin', chapterLink);
+    if (written.kind === 'inserted') lines = written.newLines;
+  }
+  const rows = lines.filter((line) => line.includes(target));
+  assert.equal(
+    rows.length,
+    5,
+    'one dead row per title edit survives — if this count drops, the accumulation is FIXED: delete this test and retire the adapter prose',
+  );
+  // Every generation is still there, none replaced: this is accumulation, not churn.
+  for (let generation = 0; generation <= 4; generation += 1) {
+    assert.ok(
+      rows.some((row) => row.includes(`Plans [Beta ${generation}]`)),
+      `generation ${generation} is still in the index`,
+    );
+  }
+});
+
+test(`${PINNED_DEFECT}: the ZERO-create branch writes a container its own bare-path guard then refuses — but only on \`*\`/\`+\` files`, () => {
   const chapterLink = '[Items](admin/items.md)';
   // isPlainLabel accepts both of these group_titles; that is the surprising part.
   for (const groupTitle of ['Sales/Marketing', 'billing.md']) {
@@ -4129,7 +4264,7 @@ test('known limitation [1.11.0]: the ZERO-create branch writes a container its o
       assert.equal(
         wireNestedListChapter(first.newLines, groupTitle, chapterLink).kind,
         'not-a-list',
-        `${marker} / ${groupTitle}: the created container is immediately unrecognizable`,
+        `${marker} / ${groupTitle}: the created container is immediately unrecognizable — if this is now \`present\`, the defect is FIXED: delete this test and retire the adapter prose`,
       );
     }
 

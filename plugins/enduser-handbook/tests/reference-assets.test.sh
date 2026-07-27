@@ -2848,10 +2848,8 @@ done
 # a new interpolation site goes red, removing one goes red too (deliberate — retiring one is a real
 # change that belongs in a release note).
 #
-# Sites are described by their CONTENT, not by line number, on purpose: an earlier draft of this
-# comment listed four line numbers per adapter in a file that took a +100-line edit in the same
-# commit, while arguing that citations nobody re-verifies are how false claims survive. The count
-# is the pin; the halt string is enough to find them.
+# Sites are described by their CONTENT, not by line number, on purpose: the count is the pin, and
+# the halt string is enough to find them. A line number in a file this size rots on the next edit.
 FOUND_TITLE_SITES=4
 for f in "$SMD" "$OMD"; do
   c="$(count_joined_fixed '<found_title>' "$f")"
