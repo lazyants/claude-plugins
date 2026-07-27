@@ -4058,3 +4058,91 @@ test('decoy resistance: a commented-out real binding + a non-literal RHS decoy d
   // But the real line's RHS is not chapterAssetDir(, so the RHS pin correctly fails.
   assert.equal(countMatches(new RegExp(bindingRhsSource(), 'm'), snippet), 0);
 });
+
+// =================================================================================================
+// [1.11.0] KNOWN, UNFIXED, PRE-EXISTING: the writer can persist a row (or a container) that its own
+// scanner then refuses, which disables nested-list automation for the WHOLE index file, permanently.
+// Both adapters now document this. Nothing executed it until here — and this release has repeatedly
+// found that a documented claim guarded only by an exact-string pin is a claim guarded by nothing.
+//
+// These tests pin the CURRENT, DEFECTIVE behaviour on purpose. They are not an endorsement of it.
+// The moment someone constrains the emitted child row and container line, every assertion below goes
+// red — which is exactly the signal wanted, because the adapter prose describing this limitation
+// must be retired in the same change. A green suite must never be compatible with both a defect and
+// its fix.
+//
+// Measured on this branch AND on the shipped 1.10.0 base (2ed39d8): identical. Not introduced by the
+// membership guard; the guard simply does not reach these inputs.
+// =================================================================================================
+
+const FILE_LOCKOUT_TITLES = [
+  { title: 'Use `--force`', why: 'inline code' },
+  { title: 'Old <!-- x --> notes', why: 'HTML comment' },
+  { title: 'Code ``` here', why: 'fence' },
+];
+
+for (const { title, why } of FILE_LOCKOUT_TITLES) {
+  test(`known limitation [1.11.0]: a legal manifest title carrying ${why} locks the WHOLE index file on the next run`, () => {
+    const seed = ['- Guides', '  - [G](g.md)', ''];
+    const chapterLink = `[${title}](admin/items.md)`;
+
+    // The title is legal: nothing upstream rejects it, and the writer inserts it as designed.
+    const first = wireNestedListChapter(seed, 'Guides', chapterLink);
+    assert.equal(first.kind, 'inserted', 'the first publish accepts the title and writes the row');
+    const after = first.newLines;
+    assert.ok(
+      after.some((line) => line.includes(title)),
+      'the markup is persisted verbatim into the index — this is the input to the next run',
+    );
+
+    // Same chapter: the row the writer itself just wrote is now unrecognizable.
+    assert.equal(
+      wireNestedListChapter(after, 'Guides', chapterLink).kind,
+      'not-a-list',
+      'the writer no longer recognizes the file it just wrote',
+    );
+
+    // The load-bearing half: an UNRELATED chapter, in an UNRELATED group, is locked out too. This is
+    // what makes it a file-wide defect rather than a bad row, and it is the part the docs assert.
+    assert.equal(
+      wireNestedListChapter(after, 'Guides', '[Unrelated](other/thing.md)').kind,
+      'not-a-list',
+      'automation is dead for every chapter in this file, not just the one whose title caused it',
+    );
+  });
+}
+
+test('known limitation [1.11.0]: the ZERO-create branch writes a container its own bare-path guard then refuses — but only on `*`/`+` files', () => {
+  const chapterLink = '[Items](admin/items.md)';
+  // isPlainLabel accepts both of these group_titles; that is the surprising part.
+  for (const groupTitle of ['Sales/Marketing', 'billing.md']) {
+    assert.equal(isPlainLabel(groupTitle), true, `${groupTitle} passes the plain-label allowlist`);
+
+    for (const marker of ['*', '+']) {
+      const seed = [`${marker} Guides`, `  ${marker} [G](g.md)`, ''];
+      const first = wireNestedListChapter(seed, groupTitle, chapterLink);
+      assert.equal(first.kind, 'inserted', `${marker} / ${groupTitle}: the container is created`);
+      assert.ok(
+        first.newLines.includes(`${marker} ${groupTitle}`),
+        `${marker} / ${groupTitle}: the created container line carries the raw group_title`,
+      );
+      assert.equal(
+        wireNestedListChapter(first.newLines, groupTitle, chapterLink).kind,
+        'not-a-list',
+        `${marker} / ${groupTitle}: the created container is immediately unrecognizable`,
+      );
+    }
+
+    // CONTROL — the same group_title on a '-' file is fine. isBarePathBullet is marker-scoped, so
+    // this is specific to '*'/'+', not a property of the group_title alone. Without this control the
+    // tests above would read as "these group_titles are broken", which is not what was measured.
+    const dashSeed = ['- Guides', '  - [G](g.md)', ''];
+    const dashFirst = wireNestedListChapter(dashSeed, groupTitle, chapterLink);
+    assert.equal(dashFirst.kind, 'inserted');
+    assert.equal(
+      wireNestedListChapter(dashFirst.newLines, groupTitle, chapterLink).kind,
+      'present',
+      `- / ${groupTitle}: converges normally, so the lockout is marker-specific`,
+    );
+  }
+});

@@ -591,12 +591,19 @@ the one exception to "do all of these" — see its own conditional note below.
        emphasis, an HTML entity (see "Nested-list automation limits" below for the measured
        table) — which is found and simply left unverified at the left margin (measured in both
        `publish.wikilinks` modes), but is `ok` if instead correctly nested under its container,
-       since `isPlainLabel` is never applied to a child bullet, only to an indent-0 one. A bare
-       backslash escape is mode-dependent, not an example of either case: measured at the left
-       margin, `A\.B` returns `unverifiable` under `publish.wikilinks: true` (the wikilink form
-       never decodes the escape) but `misplaced` — a halt — under `publish.wikilinks: false`
-       (the markdown-link form decodes it, so the row reads as a plain, uncontained bullet). Use
-       a plain-text title to avoid any of this.
+       since `isPlainLabel` is never applied to a child bullet, only to an indent-0 one. That
+       harmlessness does NOT extend to inline code, a fenced block, or an HTML comment in the
+       same nested position: `isPlainLabel` genuinely never touches a child bullet, but a
+       backtick, a tilde run, or `<!--` inside one still reaches `stripInertContexts` on the
+       very next scan — the file-wide sanitizer-identity check (`prepareIndexLines` step 6,
+       `assets/lib/chapter-paths.mjs`), not `isPlainLabel`, is what fires, and it degrades the
+       WHOLE file, not just this row, to `not-a-list` from that point on (measured; see
+       "Nested-list automation limits" below for the worst case). A bare backslash escape is
+       mode-dependent, not an example of either case: measured at the left margin, `A\.B`
+       returns `unverifiable` under `publish.wikilinks: true` (the wikilink form never decodes
+       the escape) but `misplaced` — a halt — under `publish.wikilinks: false` (the
+       markdown-link form decodes it, so the row reads as a plain, uncontained bullet). Use a
+       plain-text title to avoid any of this.
 
        The gate above is checked on the candidate's own isolated two-line array. **By
        construction, that proves only that the candidate pair is well-formed and would be
@@ -713,11 +720,39 @@ HTML comment or a fenced block anywhere, a mixed or bare-CR line ending, a YAML 
 `group_title` fall outside the subset as well. Worst case for the residual (a file the guards
 above decline) is a cosmetic duplicate container an operator might introduce by hand while
 following the manual halt instructions — visible and deletable, never data loss. Within the
-automated subset itself, the writer's own worst case is now bounded the same way: a
-target-breaking title converges on exactly one duplicate chapter row, then halts rather than
-writing a second (see "INDEX wiring" above for the measured bound) — the shipped 1.10.0
-writer's unbounded per-re-run growth is retired, not merely described as harmless. A richer
-rendering-aware matcher is a possible follow-up, not a bug.
+automated subset itself, the writer's own worst case for a target-breaking title (a `]` that
+defeats the row's own link/wikilink parse) is bounded the same way: it converges on exactly
+one duplicate chapter row, then halts rather than writing a second (see "INDEX wiring" above
+for the measured bound) — the shipped 1.10.0 writer's unbounded per-re-run growth is retired,
+not merely described as harmless. A richer rendering-aware matcher is a possible follow-up,
+not a bug.
+
+**A separate, worse failure mode is measured, and is NOT fixed in 1.11.0.** A legal manifest
+title carrying inline code, an HTML comment, or a fence — `` Use `--force` ``, `Old <!-- x
+--> notes`, `` Code ``` here `` — passes every gate above: `validateGroups` never inspects a
+chapter's own `title` field, and `isPlainLabel` is applied only to container labels and
+`group_title`, never to a child row. The writer inserts the row once, exactly as designed —
+but that persisted row now carries the same markup, and the very next run's
+`prepareIndexLines` step-6 sanitizer-identity check (`assets/lib/chapter-paths.mjs`) blanks
+it via `stripInertContexts` and finds the sanitized line no longer byte-identical to the raw
+one. The WHOLE file, not just this row, answers `not-a-list` from that point on — every other
+chapter and every other container loses automation too, permanently, and the operator sees
+only the generic manual-halt text above, which names no row and gives no hint what caused it.
+Measured identical in both `publish.wikilinks` modes, and it reaches an unrelated chapter in
+the same file just as surely as the one whose title caused it. This is a different defect
+from the target-breaking-title case just above: that one breaks only its own row's
+link/wikilink parse and stays bounded to one duplicate row; this one poisons the file-wide
+sanitizer check regardless of which row wrote the markup, and the bound above does not repair
+it. A `group_title` reaches the same lockout by an independent path, on a `*`/`+`-markered
+index only: `isPlainLabel` accepts both `'Sales/Marketing'` and `'billing.md'` as plain —
+neither `/` nor a trailing `.md` sits in its denylist — so the ZERO-create branch writes the
+container line unchallenged; but that same container line, read back on the next scan, trips
+`isBarePathBullet` (a `*`/`+` bullet whose raw label contains `/` or ends `.md`), locking the
+whole file the same way. A `-`-markered index is untouched — `isBarePathBullet` only ever
+fires on a `*`/`+` marker. It is a known, unfixed, pre-existing limitation on shipped write
+behaviour, not something 1.11.0 closes — the one thing that helps today: keep manifest titles
+free of backticks, HTML comments, and fences, and keep a `*`/`+`-markered index's
+`group_title` free of `/` and a trailing `.md`.
 
 **The plain-label predicate, named exactly.** In short: a plain title is verified; a non-plain
 title that still resolves is found but left unverifiable; a title that breaks its own row's

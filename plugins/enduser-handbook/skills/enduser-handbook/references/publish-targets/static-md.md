@@ -439,8 +439,14 @@ These outcomes reuse the step-0 result computed above (`containerTitle`, `indexF
     margin its own label fails the plain-label check, so the whole scan declines and the adapter
     proceeds on `unverifiable` (see "Nested-list automation limits" below for the measured
     table) — but nested under its container it is `ok` regardless, since `isPlainLabel` is never
-    applied to a child bullet, only to an indent-0 one. Use a plain-text title to avoid needing
-    either distinction.
+    applied to a child bullet, only to an indent-0 one. That list is representative, not
+    exhaustive, and deliberately excludes a backtick, an HTML comment, or a fence: `isPlainLabel`
+    skipping the child bullet does not mean nothing else reads it there. Those three open a real
+    inert construct in the persisted file, so a separate, file-wide check catches them regardless
+    of indent — never harmless nested, unlike the markup above (see "Nested-list automation
+    limits" below for what that costs the whole file, not just this row). Use a plain-text title
+    — free of backticks, HTML comments and fences above all — to avoid needing any of these
+    distinctions.
 
     The gate above is checked on the candidate's own isolated two-line array. **By construction,
     that proves only that the candidate pair is well-formed and would be recognized on its own —
@@ -526,9 +532,19 @@ a second container beside a retained phantom row (a legitimate `*`/`+` plain lab
 to contain `/` is refused too, a deliberate over-rejection, not corruption). Inline code, an
 HTML comment or a fenced block anywhere, a mixed or bare-CR line ending, a YAML `nav:` or
 `- key: value` mapping bullet, a list nested more than one level deep, and a multiline
-`group_title` fall outside the subset as well. Worst case for the residual is a cosmetic
-duplicate container the author can see and delete — never data loss. A richer rendering-aware
-matcher is a possible follow-up, not a bug.
+`group_title` fall outside the subset as well. **Worst case for the residual is never data
+loss — that much holds — but it is not a cosmetic duplicate container either.** No plain-label
+check gates the chapter title itself (only the container label and `group_title` above are
+checked — see "The plain-label predicate, named exactly" below), so a legal manifest title
+containing a backtick, an HTML comment, or a fence writes exactly such a construct into a file
+that was clean a moment earlier. That persisted row then trips the writer's own whole-body
+sanitizer-identity check on every later run: the measured worst case is a permanently
+non-automatable index file — the same chapter falls back to unverified completion forever, and
+every OTHER chapter or group in the file stops wiring automatically too, with the operator
+seeing only the generic, unnamed halt and no indication which row caused it. This is a known,
+unfixed limitation on shipped write behaviour, not addressed in 1.11.0 — keep manifest titles
+free of backticks, HTML comments and fences to avoid it. A richer rendering-aware matcher is a
+possible follow-up for the container-label and `group_title` refusals above, not for this gap.
 
 **The plain-label predicate, named exactly.** In short: a plain title is verified; a non-plain
 title that still resolves is found but left unverifiable; a title that breaks its own row's
