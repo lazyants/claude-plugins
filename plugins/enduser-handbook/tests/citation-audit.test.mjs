@@ -267,30 +267,42 @@ test('extractCitations does not catastrophically backtrack on a long undirected 
   //      measured on the failures, `small` was a healthy 0.76-1.43ms while `large` inflated to
   //      57-94ms against a ~16ms baseline — the big run was being descheduled mid-measurement, a
   //      real 4-6x, so the ratio cleared 40 with nothing wrong.
-  // A single timing sample cannot distinguish "slow because quadratic" from "slow because preempted".
-  // Repeating and taking the MINIMUM can: preemption and GC only ever ADD time, so the minimum of k
-  // samples converges on the uncontended cost from above, while genuine quadratic scaling is present
-  // in every sample and survives the min untouched.
-  // The two assertions below then read DIFFERENT statistics, on purpose, because they ask different
-  // questions. The SCALING ratio wants the uncontended cost, so it uses the minimum. The ABSOLUTE
-  // blow-up bound wants the worst thing that actually happened, so it uses the maximum. An earlier
-  // revision of this comment said the absolute bound stayed single-sample while `timeFor` returned
-  // only the minimum — that was simply false, and it meant four 2.5-second runs plus one fast one
-  // would sail through a guard whose entire job is noticing that the run took seconds.
+  // A single timing sample cannot distinguish "slow because quadratic" from "slow because preempted",
+  // so every number below is repeated. The MINIMUM was tried first and rejected: preemption only adds
+  // time, so a minimum does converge on the uncontended cost — but it also discards a majority, and
+  // four slow calls plus one fast one are then indistinguishable from five fast ones, which is a
+  // false green for any intermittent or cold-path regression staying under the absolute bound.
+  // The two assertions below read DIFFERENT statistics, on purpose, because they ask different
+  // questions. The SCALING ratio wants the TYPICAL cost and takes medians at both levels — the
+  // typical sample within each batch, then the median across paired ratios. The ABSOLUTE blow-up
+  // bound wants the worst thing that actually happened and takes the maximum.
+  // Two earlier revisions of this comment described statistics the code was not using: one said the
+  // absolute bound was single-sample while `timeFor` returned only a minimum, the next still said the
+  // ratio used the minimum after it had moved to medians. If this paragraph and the code below ever
+  // disagree again, the code is what runs.
   const TIMING_SAMPLES = 5;
   const timeFor = (n) => {
     const decoyRun = '"a" '.repeat(n) + 'end.';
     let best = Infinity;
     let worst = 0;
+    const samples = [];
     for (let i = 0; i < TIMING_SAMPLES; i += 1) {
       const start = process.hrtime.bigint();
       const recs = extractCitations(decoyRun);
       const elapsedMs = Number(process.hrtime.bigint() - start) / 1e6;
       assert.deepEqual(recs, [], `n=${n}: no trailing above/below means no citation span should match at all`);
+      samples.push(elapsedMs);
       if (elapsedMs < best) best = elapsedMs;
       if (elapsedMs > worst) worst = elapsedMs;
     }
-    return { best, worst };
+    samples.sort((a, b) => a - b);
+    // TYPICAL, not fastest. The minimum discards a majority: four slow calls and one fast one look
+    // identical to five fast ones, so an intermittent or cold-path superlinear regression staying
+    // under the absolute bound would pass. The median tolerates up to two contaminated samples in
+    // either direction, which is what the scheduling noise actually looks like, and still moves when
+    // most calls are slow.
+    const typical = samples[Math.floor(samples.length / 2)];
+    return { best, worst, typical };
   };
   // The STATISTIC was the problem, not the input size and not the ceiling. Taking the minimum of
   // each side SEPARATELY does nothing when one side is inflated across all its samples, and the
@@ -300,20 +312,27 @@ test('extractCitations does not catastrophically backtrack on a long undirected 
   // retried: enlarging both inputs to 20k/320k made the in-suite median WORSE (56.7x vs 15.8x,
   // both pairs measured in the same runs) because at 320,000 titles the working set leaves cache
   // and per-title cost rises; and raising the ceiling to 120x still failed 1 run in 20.
-  // What works is a ratio that is itself robust: take PAIRS paired (small, large) measurements and
-  // use the MEDIAN of the ratios, so one contaminated pair cannot move the verdict in either
-  // direction. Measured in-suite over 16 full-suite runs, the median-of-five statistic ranged
-  // 18.7x-45.1x where the single-sample one reached 108.7x. The 100x ceiling sits 2.2x above the
-  // worst healthy sample seen and 2.6x below the ~256x a quadratic regression produces at 16x
-  // input. Re-measure that distribution before changing the number; do not tighten it toward 16x
-  // "because linear should be 16x" — measured, it is not.
+  // What works is medians at BOTH levels: the typical sample within each batch, and the median of
+  // PAIRS paired ratios across batches. Measured in-suite over 16 full-suite runs each way, that
+  // spans 12.1x-29.3x, against 18.7x-45.1x when each side was minimised instead and 3.2x-108.7x for
+  // a single unrepeated pair. Minimising was also unsound in a way the noise hid: it discards a
+  // majority, so four slow calls and one fast one are indistinguishable from five fast ones.
+  //
+  // THE CEILING IS SET FROM BOTH ENDS, BOTH MEASURED. Healthy tops out at 29.3x above. The retired
+  // quadratic matcher — the actual regression this test exists to catch, run directly rather than
+  // assumed — produces 117.4x at these sizes and takes 38,847ms, NOT the ~256x a textbook n^2 would
+  // suggest. 60x therefore sits 2.0x above the worst healthy sample and 2.0x below the real
+  // regression. Re-measure BOTH ends before changing it, and note which gate is actually decisive:
+  // 38,847ms against a 2,000ms bound is a 19x margin, while the ratio's is 2x. The absolute bound
+  // is the gate; the ratio is the early signal.
+  // Do not tighten toward 16x "because linear should be 16x" — measured, linear is ~20x here.
   const PAIRS = 5;
   const ratios = [];
   let worstLarge = 0;
   for (let i = 0; i < PAIRS; i += 1) {
     const s = timeFor(5_000);
     const l = timeFor(80_000); // 16x the input
-    ratios.push(l.best / s.best);
+    ratios.push(l.typical / s.typical);
     if (l.worst > worstLarge) worstLarge = l.worst;
   }
   ratios.sort((a, b) => a - b);
@@ -324,7 +343,7 @@ test('extractCitations does not catastrophically backtrack on a long undirected 
     `expected EVERY 80,000-title run well under 2s, slowest took ${worstLarge}ms — possible ReDoS regression`,
   );
   assert.ok(
-    ratio < 100,
+    ratio < 60,
     `16x input took ${ratio.toFixed(1)}x longer (median of ${PAIRS} paired samples) — ` +
       'that is quadratic-or-worse scaling, not linear; possible ReDoS regression',
   );
