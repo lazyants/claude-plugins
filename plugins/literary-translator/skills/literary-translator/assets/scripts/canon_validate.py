@@ -568,6 +568,8 @@ def _forbidden_keys_for_schema(schema, instance) -> list:
 # premise is that it ingests nothing attacker-authored, and its reply is relayed
 # into the next attempt's dispatch prompt. Round 5 capped `_indexed_item_label`
 # and left this sibling channel in the same output string uncapped.
+# The SLICE length. The emitted string can be 15 chars longer, because
+# ' [...truncated]' is appended after slicing -- 215 is the real ceiling.
 _SCHEMA_MESSAGE_MAX_CHARS = 200
 
 
@@ -835,8 +837,9 @@ _CITATION_CONTROL_CHAR_RE = re.compile(r"[\x00-\x20\x7f]")
 # canon.json.
 #
 # Refused outright rather than normalised, because normalising means picking a
-# platform: 0177.0.0.1 resolves to 177.0.0.1 under BSD's inet_aton (measured
-# here) and to 127.0.0.1 under glibc's, so the SAME fragment gets different
+# platform: 0177.0.0.1 resolves to 177.0.0.1 under getaddrinfo on BSD (measured
+# here; inet_aton is the one API that does NOT diverge, returning 127.0.0.1 on
+# both) and to 127.0.0.1 under glibc, so the SAME fragment gets different
 # verdicts on macOS and Linux. A citation never legitimately cites a decimal,
 # octal or hex-spelled address, and a real DNS name cannot have an all-numeric
 # final label, so refusing costs nothing real. Verified against example.com,

@@ -376,8 +376,9 @@ def content_type_token(ctype: str, allowed=ALLOWED_CONTENT_PREFIXES) -> str:
 # canon.json.
 #
 # Refused outright rather than normalised, because normalising means picking a
-# platform: 0177.0.0.1 resolves to 177.0.0.1 under BSD's inet_aton (measured
-# here) and to 127.0.0.1 under glibc's, so the SAME fragment gets different
+# platform: 0177.0.0.1 resolves to 177.0.0.1 under getaddrinfo on BSD (measured
+# here; inet_aton is the one API that does NOT diverge, returning 127.0.0.1 on
+# both) and to 127.0.0.1 under glibc, so the SAME fragment gets different
 # verdicts on macOS and Linux. A citation never legitimately cites a decimal,
 # octal or hex-spelled address, and a real DNS name cannot have an all-numeric
 # final label, so refusing costs nothing real. Verified against example.com,
@@ -744,11 +745,19 @@ def _read_bounded(resp, deadline: float, sock=None) -> bytes:
     trickle of the chunk-size line against a 3 s deadline took 24.1 s and still
     returned `fetched` -- elapsed once again equal to the server's choice.
 
-    So the deadline is enforced on the BLOCKING CALL, not merely between calls:
-    the socket timeout is re-armed to whatever is LEFT of the budget before each
-    read, so any recv that would outlive the deadline raises instead. Checking
-    the clock between iterations cannot bound a single iteration that blocks
-    forever.
+    Checking the clock between iterations cannot bound a single iteration that
+    blocks forever -- and neither can re-arming the socket timeout, which is
+    rejected approach #2 in _socket_deadline's docstring. An earlier version of
+    THIS docstring taught that re-arm as the working mechanism while the sibling
+    docstring recorded it as disproven, and the code kept executing it: measured,
+    deleting it changed no phase and no elapsed time.
+
+    The bound comes from _socket_deadline, which the caller wraps around this
+    call. What this loop owes it is the EOF re-check below -- a shutdown arrives
+    as ordinary EOF, so without that check a body cut short by the deadline is
+    returned as a complete one (measured: the chunked phase returns `fetched`
+    with the check removed). Both are load-bearing and neither subsumes the
+    other; removing either fails a different phase.
     """
     chunks = []
     remaining = MAX_BYTES + 1
@@ -756,11 +765,6 @@ def _read_bounded(resp, deadline: float, sock=None) -> bytes:
         left = deadline - time.monotonic()
         if left <= 0:
             raise _refuse("read-timeout")
-        if sock is not None:
-            try:
-                sock.settimeout(left)
-            except OSError:
-                pass           # already closed; the read below surfaces it
         try:
             chunk = resp.read1(min(READ_CHUNK_BYTES, remaining))
         except (socket.timeout, TimeoutError):
