@@ -2927,7 +2927,10 @@ done
 # would be unusable. A non-ASCII lookalike is a different matter and DOES fire (NBSP for space, a
 # Cyrillic 'с' for 'c'), because collapsing normalizes whitespace only.
 # So it detects DELETION and any NON-WHITESPACE MODIFICATION of the pinned text — which is what
-# happened here twice, and why the pins are worth keeping.
+# happened here twice, and why the pins are worth keeping. Precisely, the guarantee is EXISTENTIAL:
+# it fires only when NO unchanged occurrence is left in the section. Measured — duplicate the
+# sentence, edit one copy, and the pin stays green. Fine for a section that carries each claim once,
+# which is the case here; not a guarantee that every copy is intact.
 #
 # The two things it does NOT do, and they point in OPPOSITE directions:
 #   - UNDER: it says nothing about text outside the pinned span, hence nothing about whether the
@@ -2938,8 +2941,10 @@ done
 #     heading inside an HTML comment elsewhere in the file fails too. The has_joined_in_section
 #     contract above already documents that boundary; do not read "says nothing about context" as
 #     "cannot be tripped by context".
-# Choose a needle by asking which text you want to be told about if it vanishes or changes. Do not
-# ask whether it can be contradicted; the answer is always yes. Semantic inversion by surrounding
+# When picking a needle, the useful question is which text you want to be told about if it vanishes
+# or changes — a heuristic for choosing what to pin, NOT a criterion a needle passes or fails, and
+# not a replacement for the rule the paragraph above says does not exist. In particular do not ask
+# whether it can be contradicted; the answer is always yes, for every needle. Semantic inversion by surrounding
 # context is bounded by review and by #341's structure-aware reader, never by a string in this file.
 #
 # These layers still do not decide whether the prose is TRUE. Known live evasions, kept named rather
