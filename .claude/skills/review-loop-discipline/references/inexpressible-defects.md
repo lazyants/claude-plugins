@@ -159,8 +159,22 @@ opposite predicate.** The fix is not a new mechanism: extend each needle through
 carries the claim's polarity (`... fall outside the subset as well`; `can never sit at the ...`).
 The reusable acceptance test, cheap enough to apply to every string pin you ever write:
 
-> Write the sentence that contradicts the claim while keeping your needle verbatim.
-> If you can, the needle is too short.
+> Could someone REWRITE this claim in place — swap the predicate, drop the negation — without
+> touching my needle? If yes, extend the needle through the word that carries the polarity.
+
+**That wording is the corrected version, and the correction is itself the lesson.** The rule shipped
+first as *"write the sentence that contradicts the claim while keeping your needle verbatim; if you
+can, the needle is too short"* — and the next review round applied it to the needles that same commit
+had just extended, and they failed it. Appending `... only in the retired 1.10.0 behavior; 1.11.0
+accepts every one of these forms` keeps every needle byte-identical and inverts the document. **No
+finite needle passes that test, because a suffix always exists**, so the instruction was
+unsatisfiable — and following it produces nothing but longer, more brittle pins with the identical
+hole. A test that no artifact can pass reads exactly like a demanding one.
+
+The boundary that makes the rule usable: a needle defends against an IN-PLACE rewrite and nothing
+wider. A contradiction appended AFTER the pinned span is not a needle-length problem at all — it is
+the token-free-addition residual, bounded by review rather than by any string. Say which of the two
+you are defending against, or the pin's description will overclaim again.
 
 Three things generalize.
 
