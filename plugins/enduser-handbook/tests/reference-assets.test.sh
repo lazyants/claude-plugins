@@ -260,8 +260,9 @@ has_joined_in_section() {
 
 # Assert a case-insensitive fixed token's exact occurrence count within the same tracker-visible,
 # whitespace-collapsed Markdown section used by has_joined_in_section. This is deliberately a count,
-# not a truth detector: additions and removals carrying the token move it; rephrasings that avoid the
-# token do not. A missing file or heading fails closed instead of being misreported as count zero.
+# not a truth detector: it detects only a NET change in the token total. A paired addition and
+# removal can cancel, and a rephrasing that avoids the token does not affect the count. A missing
+# file or heading fails closed instead of being misreported as count zero.
 assert_joined_ci_token_count() {
   local msg="$1" file="$2" heading="$3" token="$4" expected="$5" count rc
   if [ ! -f "$file" ]; then bad "$msg (file not found: $(basename "$file"))"; return; fi
@@ -2883,18 +2884,32 @@ done
 #
 # READ THIS BEFORE ADDING ANOTHER NEEDLE HERE. Each layer has a narrower job:
 #   - the negative pins forbid only the exact retired spellings they name;
-#   - the positive pins catch deletion, rewording, or relocation of the mechanism sentences;
-#   - the case-insensitive `fenc` counts catch additions or removals carrying that token inside the
-#     tracker-visible, whitespace-collapsed limits section.
-# None of those layers decides whether the prose is true. In particular, the positive sentence can
-# coexist with a contradiction, and a contradiction phrased without `fenc` evades the count. The
-# class is not closed: review the section when the count moves, and keep the residual explicit rather
-# than adding another phrase denylist and calling it complete.
+#   - each positive pin requires its fixed needle in tracker-visible text under the limits heading;
+#   - each case-insensitive count requires a NET total of exactly three `fenc` tokens in that same
+#     tracker-visible, whitespace-collapsed section.
+# The count alone stays green under a one-for-one addition/removal. Every current counted occurrence
+# is inside one of the positive needles below, so the reviewer's exact paired substitution removes
+# the HTML-comment/fenced-block needle and fails even though its added contradiction keeps the count
+# at three. These layers still do not decide whether the prose is true: a contradiction phrased
+# without `fenc` evades them. The scanner-divergence cases in has_joined_in_section's contract above
+# remain too; these phrase and count pins do not change which prose that scanner can see.
 has_joined_in_section \
-  "static-md.md: states the span-not-fence mechanism where the refusal set is defined" \
+  "static-md.md: requires the reviewed HTML-comment/fenced-block refusal phrase" \
+  "$SMD" "### Nested-list automation limits" 'HTML comment or a fenced block anywhere'
+has_joined_in_section \
+  "static-md.md: requires the reviewed emitted-row span phrase" \
   "$SMD" "### Nested-list automation limits" 'an unterminated inline code span, never a fence'
 has_joined_in_section \
-  "obsidian-vault.md: states the span-not-fence mechanism for a group_title" \
+  "static-md.md: requires the reviewed line-start fence phrase" \
+  "$SMD" "### Nested-list automation limits" 'start of a physical line the way a real fence requires'
+has_joined_in_section \
+  "obsidian-vault.md: requires the reviewed HTML-comment/fenced-block refusal phrase" \
+  "$OMD" "### Nested-list automation limits" 'HTML comment or a fenced block anywhere'
+has_joined_in_section \
+  "obsidian-vault.md: requires the reviewed chapter-title span phrase" \
+  "$OMD" "### Nested-list automation limits" 'mechanism is an unterminated inline code SPAN and not a fence'
+has_joined_in_section \
+  "obsidian-vault.md: requires the reviewed group_title span phrase" \
   "$OMD" "### Nested-list automation limits" 'a backtick run in a `group_title` is never a fence'
 assert_joined_ci_token_count \
   "static-md.md: limits section keeps its reviewed case-insensitive 'fenc' token count" \

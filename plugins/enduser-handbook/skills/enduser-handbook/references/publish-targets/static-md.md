@@ -564,8 +564,13 @@ decided against as not soundly automatable — see #340 for the recorded reasoni
 ### Nested-list automation limits
 
 `wireNestedListChapter` automates only a **bounded, conservative** nested-list subset and
-defers everything else to the manual `not-a-list` halt above — safety over reach. It wires an
-index only when it is a plain bullet list whose container labels **and** the entry's
+defers everything else to the manual `not-a-list` halt above — safety over reach.
+The two recovery classes referenced from the halts above differ deliberately: the #329 manual
+rows reach the next run's proceeding branch, with
+U+2028/U+2029 separators proceeding as `unverifiable`. A `present` recovery must also survive
+the writer's re-read of the bytes it would emit, so its title constraint is narrower.
+
+It wires an index only when it is a plain bullet list whose container labels **and** the entry's
 `group_title` are plain-text: it refuses any label or `group_title` carrying inline markup or
 a leading block trigger — emphasis, a link inside the visible text, an image, raw HTML, an
 entity, a **bare** backslash escape, inline code, a leading `#` heading or list marker, or a run
