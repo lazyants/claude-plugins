@@ -33,7 +33,7 @@ import { auditCorpus, auditText, extractCitations } from './citation-audit-lib.m
 // against source 2026-07-26 (1.11.0 doc edits, #329/#330); the count grew every round of plan review
 // and again with this release's doc prose, so it is pinned to the fresh measurement, never a number
 // quoted in the plan.
-const EXPECTED_TOTAL_CITATIONS = 87;
+const EXPECTED_TOTAL_CITATIONS = 88;
 
 // Every citation whose quoted text does NOT resolve to exactly one heading title in its own file — an
 // over-match, a near-miss (e.g. "INDEX wiring" vs the full parenthetical heading), or a title that
@@ -89,13 +89,14 @@ const EXPECTED_UNRESOLVED = [
   { file: 'references/publish-targets/obsidian-vault.md', offset: 29208, quotedText: 'Non-headings index', direction: 'below' },
   { file: 'references/publish-targets/obsidian-vault.md', offset: 35158, quotedText: 'The placement check is retained unchanged (D-8)', direction: 'above' },
   { file: 'references/publish-targets/obsidian-vault.md', offset: 41812, quotedText: 'Measured, across every placement', direction: 'below' },
-  { file: 'references/publish-targets/obsidian-vault.md', offset: 52322, quotedText: 'Container resolution', direction: 'above' },
-  { file: 'references/publish-targets/obsidian-vault.md', offset: 55728, quotedText: 'INDEX wiring', direction: 'above' },
-  { file: 'references/publish-targets/obsidian-vault.md', offset: 57980, quotedText: 'INDEX wiring', direction: 'above' },
-  { file: 'references/publish-targets/obsidian-vault.md', offset: 66432, quotedText: 'INDEX wiring', direction: 'above' },
-  { file: 'references/publish-targets/obsidian-vault.md', offset: 68222, quotedText: 'INDEX wiring', direction: 'above' },
-  { file: 'references/publish-targets/obsidian-vault.md', offset: 72481, quotedText: 'INDEX wiring', direction: 'above' },
-  { file: 'references/publish-targets/obsidian-vault.md', offset: 77708, quotedText: 'INDEX wiring', direction: 'above' },
+  { file: 'references/publish-targets/obsidian-vault.md', offset: 52916, quotedText: 'Container resolution', direction: 'above' },
+  { file: 'references/publish-targets/obsidian-vault.md', offset: 56322, quotedText: 'INDEX wiring', direction: 'above' },
+  { file: 'references/publish-targets/obsidian-vault.md', offset: 56716, quotedText: 'Measured, across every placement', direction: 'above' },
+  { file: 'references/publish-targets/obsidian-vault.md', offset: 58927, quotedText: 'INDEX wiring', direction: 'above' },
+  { file: 'references/publish-targets/obsidian-vault.md', offset: 67379, quotedText: 'INDEX wiring', direction: 'above' },
+  { file: 'references/publish-targets/obsidian-vault.md', offset: 69169, quotedText: 'INDEX wiring', direction: 'above' },
+  { file: 'references/publish-targets/obsidian-vault.md', offset: 73428, quotedText: 'INDEX wiring', direction: 'above' },
+  { file: 'references/publish-targets/obsidian-vault.md', offset: 78655, quotedText: 'INDEX wiring', direction: 'above' },
   { file: 'references/publish-targets/static-md.md', offset: 12961, quotedText: 'Chapter path', direction: 'above' },
   { file: 'references/publish-targets/static-md.md', offset: 15014, quotedText: 'Grouped index wiring', direction: 'below' },
   { file: 'references/publish-targets/static-md.md', offset: 15381, quotedText: 'Chapter → index', direction: 'above' },

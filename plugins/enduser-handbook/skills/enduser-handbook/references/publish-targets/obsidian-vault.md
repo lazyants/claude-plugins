@@ -780,8 +780,10 @@ poisoning case instead poisons the file-wide sanitizer check regardless of which
 markup, and the bound above does not repair it. On a `*`- or `+`-markered index, though, the
 target-breaking-title case is not a fourth, always-bounded mechanism — it converges onto THIS
 SAME `isBarePathBullet` guard the next sentence describes, reached through the row's own raw
-fallback text (which carries the link target's `/`) rather than a hand-typed bare path (see
-"INDEX wiring" above for the measured marker split). A `group_title` reaches the identical
+fallback text carrying the GROUPED target's `/` — the group prefix `chapterRelPath` always
+adds, not the broken title in isolation (a flat-style, slash-free target with the identical
+title reaches `present` instead) — rather than a hand-typed bare path (see "INDEX wiring"
+above for the measured marker split). A `group_title` reaches the identical
 `isBarePathBullet` lockout by an independent route, on a `*`/`+`-markered index only:
 `isPlainLabel` accepts both `'Sales/Marketing'` and `'billing.md'` as plain —
 neither `/` nor a trailing `.md` sits in its denylist — so the ZERO-create branch writes the
