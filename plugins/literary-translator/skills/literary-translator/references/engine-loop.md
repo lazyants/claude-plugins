@@ -156,7 +156,14 @@ steps below:
    complete, current-run-tokened file. This specifically prevents a Claude
    fix-agent from ever ending up authoring a missing translation, since
    "codex only translates" would otherwise be silently violated the moment a
-   fix step ran against a nonexistent/partial/stale-run draft.
+   fix step ran against a nonexistent/partial/stale-run draft. **1.16.1
+   (#348):** the wait's 3450 s bound is unchanged but is now SPENT across up to
+   `WAIT_CHUNKS = 8` bounded chunk calls (the Bash tool clamps any single call
+   at 600 s), followed by ONE authoritative non-polling re-check of the
+   canonical draft — `WAIT_CALLS = 9` per wait, worst case. See
+   `references/orchestration-and-batching.md` and
+   `references/ledger-and-resumability.md` for the chunk arithmetic and its
+   cost to the `batch_agent_cap` estimator.
 3. Up to `engine.max_fix_rounds` rounds of **review point (detached-driver dispatch
    → bounded wait → schema-validated consume; the DISPATCH half is now the
    `codex_job.py --kind review` driver launched by a plain-Claude drive agent, NOT
@@ -168,7 +175,8 @@ steps below:
    `codex_job.py --kind review` driver, schema-less; the driver validates the
    isolated review attempt via `review_ready.py --candidate-file` before atomically
    promoting `review_path(seg)` with `dispatch_token`) → `reviewWaitPrompt` (Claude,
-   bounded poll) → `readReviewPrompt` (Claude, `schema: REVIEW_SCHEMA`) →
+   bounded poll, chunked across up to 8 calls plus one re-check since 1.16.1/#348)
+   → `readReviewPrompt` (Claude, `schema: REVIEW_SCHEMA`) →
    `verifyReviewArtifactPrompt` (Claude, flat `schema: REVIEW_ARTIFACT_SCHEMA`) — see
    `references/orchestration-and-batching.md` for the exact call shapes.
    `REVIEW_SCHEMA` matches `review.schema.json`'s four verdict fields:
@@ -181,8 +189,16 @@ steps below:
    `sha1sum`. See `references/workflow-schema-validation.md` for the full
    shipped schema.
    - **Timeout and shared-retry handling** (1.2.0): `reviewWaitPrompt`
-     timing out exits immediately as `blocked review-timeout`, no retry — a
-     genuine failure to even get a dispatched review to complete. Once
+     exhausting its bound exits as `blocked review-timeout` — a genuine
+     failure to even get a dispatched review to complete. **1.16.1 (#348):**
+     before that verdict is taken, ONE authoritative non-polling re-check
+     (`reviewWaitRecheckPrompt`) runs the canonical
+     `review_ready.py --expect-token` gate a final time, catching a review that
+     landed after the last wait chunk's poll ended; it runs on the driver's
+     fail-sentinel path too, since a valid canonical always outranks a
+     sentinel. That is a second look at disk, **not** a retry: the review job is
+     never re-dispatched, no round is repeated, and the `review-timeout` reason
+     string is unchanged. Once
      `READY`, the CONSUME pair (`readReviewPrompt` + `verifyReviewArtifactPrompt`)
      shares **one retry budget**: a null read OR a `match:false` check
      retries the SAME `(read, check)` pair once, fresh; still failing →

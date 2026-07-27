@@ -1,5 +1,120 @@
 # Changelog
 
+## 1.16.1 — 2026-07-27
+
+Two independent fixes, both about a boundary that was described more strongly than it was
+written. In W5, the mass-translate wait spent its whole 3450 s budget inside one agent call — but
+the agent's Bash tool clamps a single call at 600 000 ms regardless of the timeout requested, so
+every long wait was killed mid-poll and reported as a timeout while a finished, valid artifact sat
+unread on disk. In W3, the citation reviewer fetched `source` URLs with no scheme or address
+validation at all, so a `source` could point at cloud metadata, loopback, or `file:///`. Neither
+was a subtle bug in the code that existed; both were work the code never did.
+
+### Fixed — the W5 wait is spent across calls, and a finished artifact is re-read (#348)
+
+- `WAIT_BOUND_SEC` (2700 + 150 + 600 = 3450 s) was polled inside a single `agent()` call. Measured,
+  not inferred: the failing call requested `timeout: 3600000` and still came back
+  `Exit code 143 / Command timed out after 10m 0s`. The 600 s clamp is hard, so "raise the timeout"
+  does not exist as a fix. Observed on the release gate, all three `seg03` waits of one run: 511 s →
+  READY, 311 s → READY, 611 s → **TIMEOUT** — the last leaving a complete, schema-valid
+  `seg03.review.json` on disk beside a ledger saying `in_progress`. Across that whole run the
+  correlation is exact: of 10 polling waits, the one that exceeded 600 s is the only one that
+  failed, and every wait under the clamp returned READY.
+- The wait is now spent across `WAIT_CHUNKS` (8) bounded chunk calls. Chunk *i* polls for whatever
+  is LEFT of the bound rather than a flat `WAIT_CHUNK_SEC`, so chunks 1–7 are 480 s, chunk 8 is
+  90 s, and they sum to exactly 3450 s. Flat chunks would not have *spent* the declared bound, they
+  would have silently **extended** it to 3840 s, falsifying every doc that quotes it.
+- The actual defect was never the chunk length. After the chunk budget is exhausted — or a chunk
+  reports the driver's fail sentinel — one non-polling **authoritative re-check** runs the same
+  canonical gate once more before any timeout is declared. Chunking alone would have turned the
+  observed 611 s failure into a success by accident while leaving the real hole open: *a finished
+  artifact is never re-read*. The re-check runs on the fail-sentinel path too, because the sentinel
+  means the driver did not promote, and this file's own rule is that a valid canonical always wins
+  over any sentinel.
+- The wait ACCEPT gate is now composed once per site and shared by both the chunk poll and the
+  re-check, so the re-check can never drift into a weaker gate than the poll it backs up — that
+  drift would be a false GREEN, the one direction this pipeline cannot recover from.
+- Wait replies use a three-sentinel grammar (`READY` / `FAILED` / `PENDING`; `TIMEOUT` is gone from
+  these two sites) parsed in exactly one place, `waitChunkVerdict()`. Both `rejectedAnywhere()`
+  containment guards still run BEFORE the whole-line READY test, so every #228/#308 property is
+  preserved: a fail sentinel glued behind any character still rejects, and a quoted-then-disavowed
+  success line is still not a success. Anything unparseable, null, or cut short is PENDING — never
+  READY.
+- Startup assertions now fail loudly if `WAIT_CHUNK_TOOL_TIMEOUT_MS` exceeds the measured clamp or
+  `WAIT_CHUNK_SEC` leaves no headroom under it, so a future constant change cannot silently
+  re-create #348.
+- Blocked reason strings are deliberately unchanged (`translate-timeout` / `review-timeout`):
+  `select_segments.py`'s "non-terminal → recoverable" rule and every recovery doc key off them.
+
+### Fixed — citation retrieval happens only through a validated boundary (#347)
+
+- The W3 citation reviewer fetched each `source` URL itself with no validation. A `source` is
+  attacker-influenced in the only sense that matters — an LLM produces it from source text a hostile
+  document can seed — so `http://169.254.169.254/latest/meta-data/`, `http://127.0.0.1:6379/` and
+  `file:///etc/passwd` were all reachable from a "citation".
+- New shipped script `fetch_citation.py` (standard library only) is the sole sanctioned retrieval:
+  scheme allowlist (`http`/`https`), rejection of embedded credentials and control characters,
+  `localhost`/`*.localhost` refused by name, and every address returned by `getaddrinfo` checked for
+  global-ness — not just the first, which would leave a trivially winnable race. It connects to the
+  **resolved IP** while TLS SNI stays bound to the original hostname, so DNS rebinding is closed
+  without trading an SSRF hole for a MITM one. Redirects are followed manually and every hop is
+  re-validated from scratch, capped at 5. Caps on total time, response bytes, and content type.
+- Telling the reviewer to fetch "only through the helper" was tried and rejected during review: the
+  reviewer is an unrestricted agent that already holds Bash and already ingests page content, so a
+  hostile page can simply instruct it to fetch something else. **A rule the attacker can talk the
+  enforcer out of is not an enforcement point.** Retrieval therefore moved out of the judging agent
+  entirely. The citation review is now two agents: a **prepare** agent that runs the fetcher and
+  reads only the single locally-generated metadata line it prints, and a **judge** agent that reads
+  local files only and performs no retrieval at all. The judge is handed no fragment path anywhere
+  in its prompt.
+- The claim this supports, at exactly the width it is true: *in the citation audit path, retrieval
+  happens only through `fetch_citation.py`, launched by an agent that never reads the retrieved
+  bytes.* It does **not** make the pipeline SSRF-free. Two residual paths are named rather than
+  quietly covered: the resolver/generation agent still does open web research by design under
+  `research_mode: live`, and the judge still holds a Bash tool. Both are tracked separately.
+- `canon_validate.py --check-batch` now statically refuses an unsafe citation `source` with no DNS
+  and no network, so the offline path — where nothing ever fetches — can still stop one before it is
+  frozen into `canon.json`. It is applied to **every item carrying a `source`**, not only
+  `basis: "established"` ones: the queued branch of `canon-batch.schema.json` types `source` as a
+  bare unconstrained string, so a `review_queue` item could carry `basis: "established"` plus an
+  arbitrary `source` and pass Pass 1.
+- `fetch_citation.py` joins `PLUGIN_BUNDLE_MEMBERS`. Without that, editing the security boundary
+  would move no hash at all, and a durable root scaffolded before the change would keep classifying
+  its segments reusable against a plugin that no longer behaves the same way — exactly the
+  false-green `plugin_bundle_hash` exists to detect.
+- `resume_setup.py` now wipes stale citation evidence directories. They are directories, so the
+  existing fragment regex could not see them and `unlink()` could not have removed them; a previous
+  run's fetched page bodies would have survived at exactly the paths a resumed run writes.
+
+### Migration
+
+No profile change is required, and no durable root needs rebuilding. Two operational notes:
+
+1. **W5 batch sizing.** A wait now costs up to 9 calls instead of 1, so the per-segment worst case
+   goes from `10 + 7*max_fix_rounds` to `8 + 2*9 + max_fix_rounds*(6 + 9)` — 38 → 86 calls at the
+   shipped `max_fix_rounds: 4`. At `batch_agent_cap: 3500` a batch therefore admits at most 40
+   segments (`1 + 40*86 = 3441`) where it previously admitted many more. A batch that is now too
+   large is refused at preflight with `reason: "batch-too-large"` before any work starts, never
+   mid-run.
+2. **W3 live batch sizing.** The citation prepare/judge split adds one call per attempt, so the
+   live ladder goes from `10*BATCHES.length + 2` to `13*BATCHES.length + 2`
+   (`1 + 4*(MAX_CITATION_RETRIES + 1)`). The **offline** ladder is byte-identical at
+   `3*BATCHES.length + 2`, so no offline project's tuned cap starts refusing. A live project whose
+   `engine.batch_agent_cap` was tuned near the old figure may need it raised; it will say so at
+   preflight rather than failing part-way through.
+
+Existing durable roots keep resuming normally, and nothing about them changes just because the
+plugin was upgraded: a root carries its own copies of the scripts under `<durable_root>/scripts/`,
+and `plugin_bundle_hash` is read from the `runs/.plugin_bundle_hash` marker that Step 0a wrote when
+that root was scaffolded. An old root therefore keeps running the bytes it holds until it is
+re-scaffolded.
+
+When you DO re-scaffold a 1.16.0 root with 1.16.1, Step 0a copies the new scripts and recomputes the
+marker. `fetch_citation.py` is now a bundle member, so the hash moves and that root's segments
+re-classify as `stale` and re-dispatch. That is the intended behaviour — it is the staleness signal
+working, not data loss — but it means the upgrade costs a re-translate for any root you re-scaffold
+mid-book. Finish a book on the plugin version it was started on where you can.
+
 ## 1.16.0 — 2026-07-26
 
 Adds a bounded pre-merge citation-review stage to the W3 glossary pass. Under

@@ -23,13 +23,38 @@ Each of translate and review is a THREE-piece shape:
     `codex_job.py` DETACHED (`nohup ... </dev/null >/dev/null 2>&1 &`, NO
     `setsid`, NO external `timeout` binary), returning `DISPATCHED <seg>
     <DISP>` immediately (codex writes disk, its return is not the verdict);
-  * a WAIT prompt-builder (waitPrompt / reviewWaitPrompt) whose generated
-    bash is an ELAPSED-TIME poll (`end=$((SECONDS + WAIT_BOUND_SEC))`, NOT
-    the old `for i in $(seq 1 N)` loop) that ACCEPTs by re-validating the
-    CANONICAL directly (translate: draft_ready.py --expect-token AND
-    validate_draft.py; review: review_ready.py --expect-token), whose OWN
-    `agent()` call site (in reviewFixLoop / getVerifiedReview) is a plain
-    Claude call (no agentType).
+  * a WAIT, whose generated bash is an ELAPSED-TIME poll (`end=$((SECONDS +
+    ...))`, NOT the old `for i in $(seq 1 N)` loop) that ACCEPTs by
+    re-validating the CANONICAL directly (translate: draft_ready.py
+    --expect-token AND validate_draft.py; review: review_ready.py
+    --expect-token), whose OWN `agent()` call sites (in reviewFixLoop /
+    getVerifiedReview) are plain Claude calls (no agentType).
+
+## 1.16.1 (#348): the wait is CHUNKED, and this file follows the extraction
+
+A wait was ONE agent call running ONE poll of the whole WAIT_BOUND_SEC. The
+Bash tool clamps a single call at 600 000 ms regardless of the timeout asked
+for, so long waits were killed and reported as timeouts with a clean artifact
+sitting unread on disk. A wait is now up to WAIT_CHUNKS bounded chunk calls
+followed by ONE authoritative non-polling re-check.
+
+That moved code, so several checks below had to move with it -- re-expressed,
+never dropped:
+
+  * the poll's bash left waitPrompt / reviewWaitPrompt for the SHARED builders
+    waitChunkPrompt / waitRecheckPromptFor. The #198 poll-shape assertions are
+    therefore proved ONCE against the shared builder; asserting them against a
+    wrapper that no longer contains any bash would assert nothing.
+  * each site's ACCEPT command moved into translateAcceptCmd / reviewAcceptCmd,
+    composed once and spliced by both the poll and the re-check. The per-site
+    half becomes an anti-drift lock in glossary's checkBatchCmd idiom -- if the
+    re-check could compose its own gate it could drift into a WEAKER one, and a
+    re-check weaker than the poll it backs up is a false GREEN.
+  * the wait-reply parse moved into waitChunkVerdict, the single parse site.
+    1.16.0's per-call-site containment guard is re-expressed around it below.
+
+tests/wait_chunking.test.py is the behavioural half of #348 (the real template
+under Node); this file stays the source-shape half.
 
 On origin/main (old fire-and-forget shape) the mass-translate assertions
 below FAIL -- there is no translateDrivePrompt/reviewDrivePrompt, the
@@ -324,31 +349,209 @@ def test_translate_drive_prompt_launches_detached_codex_job():
     assert "timeout" not in launch and "gtimeout" not in launch, "no external timeout binary"
 
 
-def test_translate_wait_is_elapsed_canonical_gate_poll():
-    wait_body = extract_function_body(MASS_TRANSLATE_SOURCE, "waitPrompt")
-    assert has_elapsed_poll_loop(wait_body), (
-        f"#198: waitPrompt must be an elapsed-time poll, not a seq loop:\n{wait_body}"
-    )
-    assert not has_seq_poll_loop(wait_body), "the old `for i in $(seq 1 N)` loop must be gone"
+# #348 -- the poll bash and the re-check bash each live in ONE shared builder
+# now, spliced by both wait sites. Proved once here, then tied back to each site
+# by the anti-drift lock further below.
+WAIT_CHUNK_BUILDER = "waitChunkPrompt"
+WAIT_RECHECK_BUILDER = "waitRecheckPromptFor"
 
-    poll = line_containing(wait_body, "end=$((SECONDS +")
-    assert "draft_ready.py" in poll and "--expect-token" in poll, (
-        "translate ACCEPT must run draft_ready.py --expect-token on the canonical"
+# The gate commands as CODE. As with glossary's COMPOSED_CHECK_BATCH_LITERAL,
+# the "/scripts/" path prefix is the tell that separates BUILDING a command from
+# naming it in prose -- this template's prose says a bare "draft_ready.py".
+GATE_SCRIPT_PATHS = (
+    "/scripts/draft_ready.py",
+    "/scripts/validate_draft.py",
+    "/scripts/review_ready.py",
+)
+
+
+def test_wait_chunk_poll_keeps_the_198_elapsed_gate_shape():
+    """#198's poll grammar, unchanged by #348 except for the elapsed bound (this
+    chunk's slice, not the whole run's) and the terminal markers. Proved on the
+    shared builder, which is where the bash now lives."""
+    body = code_lines(extract_function_body(MASS_TRANSLATE_SOURCE, WAIT_CHUNK_BUILDER))
+    assert has_elapsed_poll_loop(body), (
+        f"#198: the chunk poll must be an elapsed-time poll, not a seq loop:\n{body}"
     )
-    assert "validate_draft.py" in poll, (
-        "translate ACCEPT must ALSO run validate_draft.py (the six quality checks)"
+    assert not has_seq_poll_loop(body), "the old `for i in $(seq 1 N)` loop must be gone"
+
+    poll = line_containing(body, "end=$((SECONDS +")
+
+    # The ACCEPT gate arrives as the acceptCmd PARAMETER -- composed by
+    # translateAcceptCmd/reviewAcceptCmd and locked below -- and the redirect
+    # sits between it and `&& exit 0`. That redirect is LOAD-BEARING, not
+    # tidiness: without it the gate prints one `{"ready": false, ...}` line per
+    # iteration, so "the marker is the last line" would be a claim about the
+    # tail of a noisy stream. Asserted as one contiguous string so a redirect
+    # moved elsewhere on the line cannot satisfy it.
+    assert '+ acceptCmd + " >/dev/null 2>&1 && exit 0;"' in poll, (
+        f"the in-loop ACCEPT gate must be the spliced acceptCmd with its output "
+        f"suppressed immediately before `&& exit 0`, got: {poll}"
     )
     assert "[ $SECONDS -ge $end ] && break" in poll, "gate-then-deadline-break inside the loop"
-    assert "timeout" not in poll and "gtimeout" not in poll, "no external timeout binary in the poll"
-    assert "WAIT_BOUND_SEC" in poll, "the elapsed bound must be the WAIT_BOUND_SEC const"
-    # fail-fast is the DISP-named sentinel, present in the body's failFast const
-    assert ".codex_failed." in wait_body, "the fail-fast sentinel presence check must be present"
+    assert "[ $slp -gt 20 ] && slp=20" in poll, "the sleep must stay clamped"
 
-    # the wait POLL's own agent() call site (in reviewFixLoop) is a plain Claude call
-    wrapper = extract_function_body(MASS_TRANSLATE_SOURCE, "reviewFixLoop")
-    wait_call_options = extract_agent_call_options(wrapper, "waitPrompt(")
-    assert not is_codex_dispatch(wait_call_options), (
-        f"the wait POLL must be a Claude call (no agentType), got: {wait_call_options}"
+    # ORDER: gate, then the deadline break, then the clamped sleep. A break
+    # ahead of the gate would skip the final evaluation at the bound.
+    accept_at = poll.index("+ acceptCmd +")
+    break_at = poll.index("[ $SECONDS -ge $end ] && break")
+    sleep_at = poll.index("sleep $slp")
+    assert accept_at < break_at < sleep_at, (
+        f"the chunk poll's gate -> deadline-break -> clamped-sleep order is broken: {poll}"
+    )
+
+    # NO separate post-loop gate INSIDE the chunk command, so exactly one gate
+    # straddles this chunk's deadline (#198's rule, unchanged).
+    tail = poll[poll.index("done;"):]
+    assert "acceptCmd" not in tail and not any(p in tail for p in GATE_SCRIPT_PATHS), (
+        f"the chunk command runs a second gate after the loop; #198 allows exactly "
+        f"one gate straddling the deadline, got tail: {tail}"
+    )
+    assert "LT_CHUNK_BOUND" in tail, "an exhausted chunk must print its bound marker"
+
+    assert "timeout" not in poll and "gtimeout" not in poll, "no external timeout binary in the poll"
+    # fail-fast is the DISP-named sentinel, present in the body's failFast const
+    assert ".codex_failed." in body, "the fail-fast sentinel presence check must be present"
+
+    # The elapsed bound is this chunk's own slice, never a literal -- and
+    # waitChunkSec() derives it from WAIT_BOUND_SEC, so the poll's bound still
+    # traces back to the same const the pre-#348 one-shot poll named directly.
+    assert '"end=$((SECONDS + " + waitChunkSec(chunkIndex) + ")); while true; do "' in poll, (
+        f"the chunk's elapsed bound must be waitChunkSec(chunkIndex), got: {poll}"
+    )
+    chunk_sec_body = code_lines(extract_function_body(MASS_TRANSLATE_SOURCE, "waitChunkSec"))
+    assert "WAIT_BOUND_SEC" in chunk_sec_body and "WAIT_CHUNK_SEC" in chunk_sec_body, (
+        f"waitChunkSec must derive each chunk's bound from WAIT_BOUND_SEC and "
+        f"WAIT_CHUNK_SEC, never from a fresh literal: {chunk_sec_body}"
+    )
+
+
+def test_wait_recheck_is_a_single_non_polling_gate_evaluation():
+    """#348's actual fix. A polling re-check would just be a ninth chunk and
+    could itself hit the per-call cap, so this one must have no loop at all --
+    and it must run the gate it was handed, not one of its own."""
+    body = code_lines(extract_function_body(MASS_TRANSLATE_SOURCE, WAIT_RECHECK_BUILDER))
+    assert not has_elapsed_poll_loop(body), f"the re-check polls:\n{body}"
+    assert not has_seq_poll_loop(body), f"the re-check polls:\n{body}"
+    assert "while true" not in body, f"the re-check loops:\n{body}"
+    assert "sleep" not in body, f"the re-check sleeps:\n{body}"
+    gate = line_containing(body, "acceptCmd +")
+    assert 'acceptCmd + " >/dev/null 2>&1"' in gate, (
+        f"the re-check must run the spliced acceptCmd with its output suppressed, got: {gate}"
+    )
+
+
+def test_translate_accept_gate_revalidates_the_canonical_draft():
+    """The translate ACCEPT gate's content, at its single composition site."""
+    body = code_lines(extract_function_body(MASS_TRANSLATE_SOURCE, "translateAcceptCmd"))
+    assert "draft_ready.py" in body and "--expect-token" in body, (
+        "translate ACCEPT must run draft_ready.py --expect-token on the canonical"
+    )
+    assert "validate_draft.py" in body, (
+        "translate ACCEPT must ALSO run validate_draft.py (the six quality checks)"
+    )
+    assert "timeout" not in body and "gtimeout" not in body, "no external timeout binary"
+
+
+def test_review_accept_gate_revalidates_the_canonical_review():
+    body = code_lines(extract_function_body(MASS_TRANSLATE_SOURCE, "reviewAcceptCmd"))
+    assert "review_ready.py" in body and "--expect-token" in body, (
+        "review ACCEPT must run review_ready.py --expect-token on the canonical"
+    )
+    assert "timeout" not in body and "gtimeout" not in body, "no external timeout binary"
+
+
+# Every wait-path prompt builder, with the shared bash builder and the ACCEPT
+# composer it must go THROUGH. The re-check entries are the point: a re-check
+# that composed its own gate could drift into a WEAKER one than the poll it
+# backs up, and a re-check weaker than the poll is a false GREEN -- the one
+# direction this pipeline cannot recover from.
+WAIT_SITE_WIRING = [
+    ("waitPrompt", WAIT_CHUNK_BUILDER, "translateAcceptCmd(seg)"),
+    ("waitRecheckPrompt", WAIT_RECHECK_BUILDER, "translateAcceptCmd(seg)"),
+    ("reviewWaitPrompt", WAIT_CHUNK_BUILDER, "reviewAcceptCmd(seg, roundLabel)"),
+    ("reviewWaitRecheckPrompt", WAIT_RECHECK_BUILDER, "reviewAcceptCmd(seg, roundLabel)"),
+]
+
+
+@pytest.mark.parametrize("site,shared_builder,accept_call", WAIT_SITE_WIRING)
+def test_wait_site_goes_through_the_shared_builder_and_its_accept_composer(
+    site, shared_builder, accept_call
+):
+    """1.16.1 anti-drift lock, in glossary's checkBatchCmd idiom and for the same
+    reason: the poll and the re-check of one kind must issue the ACCEPT command
+    character-identically, an invariant otherwise stated only in prose.
+
+    Over code_lines(), never the raw slice -- these builders sit under long
+    comments that name both the shared builder and the gate scripts, and a
+    raw-slice check would be satisfied by that prose alone (the exact tautology
+    the checkBatchCmd lock below was found by mutation to have had)."""
+    body = code_lines(extract_function_body(MASS_TRANSLATE_SOURCE, site))
+    assert shared_builder + "(" in body, (
+        f"{site} must build its bash via {shared_builder}(), so the two wait sites "
+        f"cannot drift apart in poll shape -- and must CALL it in code, not merely "
+        f"be documented as calling it in a neighbouring comment"
+    )
+    assert accept_call in body, (
+        f"{site} must splice the shared {accept_call}, never retype the command"
+    )
+    for path in GATE_SCRIPT_PATHS:
+        assert path not in body, (
+            f"{site} composes a {path} command itself -- that is exactly the drift "
+            f"translateAcceptCmd()/reviewAcceptCmd() exist to make impossible"
+        )
+
+
+@pytest.mark.parametrize("builder", [WAIT_CHUNK_BUILDER, WAIT_RECHECK_BUILDER])
+def test_shared_wait_builder_never_composes_an_accept_command(builder):
+    """The other half of the lock: the shared builders take the gate as a
+    parameter and must not know any script path. Without this, a gate hardcoded
+    in the shared builder would satisfy every per-site check above while
+    ignoring what each site passed in."""
+    body = code_lines(extract_function_body(MASS_TRANSLATE_SOURCE, builder))
+    assert "acceptCmd" in body, f"{builder} must splice its acceptCmd parameter"
+    for path in GATE_SCRIPT_PATHS:
+        assert path not in body, (
+            f"{builder} composes a {path} command itself instead of using the "
+            f"acceptCmd its caller passed"
+        )
+
+
+def test_review_ready_gate_is_composed_in_exactly_one_place():
+    """Scope, stated rather than assumed: review_ready.py is a WAIT-ONLY gate, so
+    its composition count is a whole-file property. draft_ready.py and
+    validate_draft.py deliberately are NOT -- the fixer (fixPrompt) and the draft
+    probe (draftProbePrompt) each legitimately compose their own -- so for those
+    two the single-composer lock is the per-site one above, not a file-wide
+    count."""
+    composed = code_lines(MASS_TRANSLATE_SOURCE).count("/scripts/review_ready.py")
+    assert composed == 1, (
+        f"the review ACCEPT command must be composed in exactly ONE place, found "
+        f"{composed} composition site(s)"
+    )
+    assert "/scripts/review_ready.py" in code_lines(
+        extract_function_body(MASS_TRANSLATE_SOURCE, "reviewAcceptCmd")
+    ), "that single composition site must be reviewAcceptCmd itself"
+
+
+# Both wait sites' agent() call sites, chunk AND re-check, are plain Claude calls
+# (no agentType) -- the re-check entries are new in 1.16.1 and would otherwise be
+# an unwatched place for a codex dispatch to reappear.
+WAIT_CALL_SITES = [
+    ("reviewFixLoop", "waitPrompt("),
+    ("reviewFixLoop", "waitRecheckPrompt("),
+    ("getVerifiedReview", "reviewWaitPrompt("),
+    ("getVerifiedReview", "reviewWaitRecheckPrompt("),
+]
+
+
+@pytest.mark.parametrize("wrapper_name,builder_call", WAIT_CALL_SITES)
+def test_wait_agent_call_site_is_a_plain_claude_call(wrapper_name, builder_call):
+    wrapper = extract_function_body(MASS_TRANSLATE_SOURCE, wrapper_name)
+    options = extract_agent_call_options(wrapper, builder_call)
+    assert not is_codex_dispatch(options), (
+        f"{wrapper_name}'s {builder_call} call must be a Claude call (no "
+        f"agentType), got: {options}"
     )
 
 
@@ -382,27 +585,20 @@ def test_review_drive_prompt_launches_detached_codex_job():
     assert "timeout" not in launch and "gtimeout" not in launch, "no external timeout binary"
 
 
-def test_review_wait_is_elapsed_canonical_gate_poll():
-    wait_body = extract_function_body(MASS_TRANSLATE_SOURCE, "reviewWaitPrompt")
-    assert has_elapsed_poll_loop(wait_body), (
-        f"#198: reviewWaitPrompt must be an elapsed-time poll, not a seq loop:\n{wait_body}"
-    )
-    assert not has_seq_poll_loop(wait_body), "the old `for i in $(seq 1 N)` loop must be gone"
-
-    poll = line_containing(wait_body, "end=$((SECONDS +")
-    assert "review_ready.py" in poll and "--expect-token" in poll, (
-        "review ACCEPT must run review_ready.py --expect-token on the canonical"
-    )
-    assert "[ $SECONDS -ge $end ] && break" in poll, "gate-then-deadline-break inside the loop"
-    assert "timeout" not in poll and "gtimeout" not in poll, "no external timeout binary in the poll"
-    assert "WAIT_BOUND_SEC" in poll, "the elapsed bound must be the WAIT_BOUND_SEC const"
-    assert ".codex_failed." in wait_body, "the fail-fast sentinel presence check must be present"
-
-    wrapper = extract_function_body(MASS_TRANSLATE_SOURCE, "getVerifiedReview")
-    wait_call_options = extract_agent_call_options(wrapper, "reviewWaitPrompt(")
-    assert not is_codex_dispatch(wait_call_options), (
-        f"the wait POLL must be a Claude call (no agentType), got: {wait_call_options}"
-    )
+# The review WAIT had its own copy of the translate wait's assertions until
+# 1.16.1. #348 made the two sites share one poll builder and one re-check
+# builder, so a second copy would now be re-asserting the same lines of bash
+# twice while proving nothing about the review site specifically. Every half of
+# it survives, above, in the shape the code now has:
+#   poll shape / fail-fast / no-timeout-binary / elapsed bound
+#       -> test_wait_chunk_poll_keeps_the_198_elapsed_gate_shape (shared builder)
+#   review_ready.py --expect-token as the ACCEPT gate
+#       -> test_review_accept_gate_revalidates_the_canonical_review
+#   reviewWaitPrompt/reviewWaitRecheckPrompt really USE that builder and that
+#   gate, rather than composing either themselves
+#       -> test_wait_site_goes_through_the_shared_builder_and_its_accept_composer
+#   the wait agent() call sites are plain Claude calls
+#       -> test_wait_agent_call_site_is_a_plain_claude_call
 
 
 def test_mass_translate_wait_bound_is_at_least_the_codex_deadline():
@@ -570,21 +766,31 @@ def _normalized_code(body):
 
 
 def test_every_glossary_sentinel_verdict_call_site_is_containment_guarded():
-    """The 1.16.0 false-approval fix, locked at all three sites at once.
+    """The 1.16.0 false-approval fix, locked at all FOUR sites at once.
 
     Runs over code_lines(), never the raw slice: batchStep's own comments
     discuss both helpers by name at length, and a `GUARD_HELPER in body` check
     against the raw text would be satisfied by that prose alone -- the exact
-    tautology the checkBatchCmd lock above was found to have."""
+    tautology the checkBatchCmd lock above was found to have.
+
+    1.16.1 (#347): three sites became four. The single citation-review agent
+    that both fetched and judged was split into a PREPARE agent (runs the
+    validated fetcher, ingests no page content) and a JUDGE agent (reads local
+    files, retrieves nothing), so prepare contributes its own
+    EVIDENCE_READY/EVIDENCE_FAILED sentinel pair. The count moved rather than
+    the assertion relaxing, exactly as this test's own failure message
+    instructs -- and the count is not the protection. The pairing loop below is:
+    it re-checks EVERY site, so raising the number is what lets the new site be
+    verified at all, and a prepare site added without a guard fails there."""
     body = extract_function_body(GLOSSARY_SOURCE, "batchStep")
     code = _normalized_code(body)
 
     verdict_calls = _SENTINEL_VERDICT_CALL_RE.findall(code)
-    assert len(verdict_calls) == 3, (
-        f"expected batchStep to hold exactly the three sentinel sites (precheck, "
-        f"wait, citation review); found {len(verdict_calls)}: {verdict_calls}. If "
-        f"a site was added or removed, guard it and update this count -- do not "
-        f"relax the assertion"
+    assert len(verdict_calls) == 4, (
+        f"expected batchStep to hold exactly the four sentinel sites (precheck, "
+        f"wait, citation prepare, citation judge); found {len(verdict_calls)}: "
+        f"{verdict_calls}. If a site was added or removed, guard it and update "
+        f"this count -- do not relax the assertion"
     )
 
     guarded = {(reply, fail) for reply, fail in _GUARD_CALL_RE.findall(code)}
@@ -600,28 +806,47 @@ def test_every_glossary_sentinel_verdict_call_site_is_containment_guarded():
 
 
 # ---------------------------------------------------------------------------
-# The same containment lock for mass-translate-wf.template.js.
+# The same containment lock for mass-translate-wf.template.js -- re-expressed in
+# 1.16.1 around #348's SINGLE PARSE SITE.
 #
-# Its two READY/TIMEOUT sites sit in DIFFERENT top-level functions, so unlike
-# glossary's they can be proved one function at a time. The scan below walks
-# every top-level function in the file rather than a hand-listed pair, so a
-# NEW unguarded sentinel site added anywhere goes red too.
+# Until 1.16.1 each wait site parsed its own reply, so the invariant was stated
+# per call site: every sentinelVerdict call is preceded by a rejectedAnywhere()
+# check on the SAME reply and the SAME fail sentinel. #348 centralised the
+# reading into waitChunkVerdict(). That is a STRONGER shape -- one place to get
+# wrong instead of two -- but it invalidates the old CHECK, not merely its
+# strings: neither wait function calls sentinelVerdict any more, so a per-site
+# pairing assertion is vacuous there, and the completeness scan would report the
+# guard as "moved" when it was centralised.
 #
-# SCOPE, stated as a rule rather than an exception list: only a call with a
-# NON-NULL fail sentinel is required to be guarded. rejectedAnywhere() returns
-# false for a non-string sentinel by construction (pinned as a unit in
-# tests/glossary_citation_review.test.py), so a guard on a null-sentinel call
-# would be a no-op. Deriving the exemption from the helper's own contract means
-# a future site with a real sentinel cannot inherit it by being added to a list.
+# So the property is re-expressed in three halves, and all three are needed:
+#   (a) waitChunkVerdict is the ONLY function in the file that parses a wait
+#       reply -- pinned by the same whole-file scan as before, so a NEW parse
+#       site appearing anywhere still goes red;
+#   (b) inside it, BOTH containment guards run BEFORE the whole-line READY test,
+#       on the SAME reply that test reads. That ORDER is the entire property: it
+#       preserves #228 (a fail sentinel glued behind ANY character still
+#       rejects, because rejectedAnywhere is raw indexOf and never asks where
+#       the sentinel sits) TOGETHER WITH #308 (READY stays whole-line equality
+#       via sentinelVerdict, so a quoted-but-disavowed success form is still not
+#       a success). Reversed, the guards would be dead code;
+#   (c) both wait loops delegate every reply to it and neither re-implements any
+#       part of the reading -- the drift that would quietly reopen the gap at
+#       one site while the other stayed closed.
+#
+# TIMEOUT is gone from this grammar: the sentinels are READY/FAILED/PENDING, and
+# the fail sentinel handed to sentinelVerdict is null, because fail-priority now
+# lives in the containment guards ahead of it rather than inside sentinelVerdict.
+# (a) is what keeps that from being a hidden weakening -- a null fail sentinel is
+# only safe while nothing ELSE parses a reply.
 #
 # runRound's DRAFT_MISSING site is closed too, but by a DIFFERENT shape, and it
-# gets its own assertion rather than joining the parametrisation below. At the
-# two wait sites the guard is a PRE-CHECK in front of a surviving
-# sentinelVerdict call. At runRound the sentinelVerdict call was REPLACED
-# outright by mentionedAnywhere(), on the reasoning that containment subsumes
-# whole-line equality -- a line that EQUALS the sentinel also CONTAINS it. So
-# there is no "guard precedes sentinelVerdict" pair to assert there, and forcing
-# one would make this file's own failure message describe the code falsely.
+# gets its own assertion rather than joining the tests below. At the wait sites
+# the guards are PRE-CHECKS in front of a surviving sentinelVerdict call. At
+# runRound the sentinelVerdict call was REPLACED outright by mentionedAnywhere(),
+# on the reasoning that containment subsumes whole-line equality -- a line that
+# EQUALS the sentinel also CONTAINS it. So there is no "guard precedes
+# sentinelVerdict" pair to assert there, and forcing one would make this file's
+# own failure message describe the code falsely.
 #
 # The direction differs as well: DRAFT_MISSING is that site's OK sentinel, so
 # gluing there hides a GENUINE missing-draft report rather than hiding a
@@ -630,7 +855,13 @@ def test_every_glossary_sentinel_verdict_call_site_is_containment_guarded():
 # carries a name that is not false at the call site.
 # ---------------------------------------------------------------------------
 
-MASS_TRANSLATE_GUARDED_FUNCTIONS = ["getVerifiedReview", "reviewFixLoop"]
+# #348's single wait-reply parse site, and the two loops that must delegate to it.
+WAIT_PARSE_SITE = "waitChunkVerdict"
+WAIT_LOOP_FUNCTIONS = ["getVerifiedReview", "reviewFixLoop"]
+
+# The parse helpers a wait loop must NOT call itself -- every one of them is a
+# way to re-implement part of the reading beside the shared site.
+WAIT_REPLY_PARSE_HELPERS = ("sentinelVerdict(", GUARD_HELPER + "(", "mentionedAnywhere(")
 
 # The helpers' own definitions match the call regexes; skip those functions.
 _HELPER_DEFINITIONS = {"sentinelVerdict", GUARD_HELPER}
@@ -651,18 +882,21 @@ def _sentinel_sites_by_function(source):
     return sites
 
 
-def test_mass_translate_sentinel_verdict_sites_are_exactly_the_two_guarded_waits():
-    """Completeness half: pins WHICH functions still call sentinelVerdict, so a
-    NEW site cannot appear without this file noticing.
+def test_wait_reply_parsing_lives_only_in_the_single_parse_site():
+    """(a) Completeness half, unchanged in method and re-pointed by #348: pins
+    WHICH functions call sentinelVerdict, so a NEW parse site cannot appear
+    without this file noticing. The two wait functions left this set in 1.16.1
+    by delegating (proved in (c) below), not by dropping the check.
 
-    runRound is deliberately NOT in this set any more: its sentinelVerdict call
-    was replaced by mentionedAnywhere(), so it is covered by its own test below
-    rather than by the guard-precedes-verdict parametrisation."""
+    runRound is deliberately NOT in this set either: its sentinelVerdict call was
+    replaced by mentionedAnywhere(), so it is covered by its own test below."""
     sites = _sentinel_sites_by_function(MASS_TRANSLATE_SOURCE)
-    assert sorted(sites) == sorted(MASS_TRANSLATE_GUARDED_FUNCTIONS), (
-        f"the set of functions calling sentinelVerdict changed: {sorted(sites)}. A "
-        f"new site must be containment-guarded, or justified as not needing it, "
-        f"before being added here"
+    assert sorted(sites) == [WAIT_PARSE_SITE], (
+        f"the set of functions calling sentinelVerdict changed: {sorted(sites)}. "
+        f"Since #348 there is exactly ONE wait-reply parse site, and its "
+        f"containment guards are what make a null fail sentinel safe there -- a "
+        f"new site must carry its own guards, or be justified as not needing "
+        f"them, before being added here"
     )
 
 
@@ -694,28 +928,84 @@ def test_run_round_draft_missing_site_is_containment_keyed_with_no_bare_verdict(
     )
 
 
-@pytest.mark.parametrize("function_name", MASS_TRANSLATE_GUARDED_FUNCTIONS)
-def test_mass_translate_ready_timeout_site_is_containment_guarded(function_name):
-    """Each READY/TIMEOUT site proved on its own, over code_lines() so the
-    template's own prose about the guard cannot satisfy the assertion."""
-    code = _normalized_code(extract_function_body(MASS_TRANSLATE_SOURCE, function_name))
-    verdict_calls = [c for c in _SENTINEL_VERDICT_CALL_RE.findall(code) if c[2] != "null"]
-    assert verdict_calls, (
-        f"expected {function_name} to carry a sentinelVerdict call with a real "
-        f"fail sentinel; found none -- has the site moved?"
+def test_wait_chunk_verdict_runs_both_guards_before_the_whole_line_ready_test():
+    """(b) The 1.16.0 false-approval fix, now proved where the reading lives.
+
+    The old per-site version paired each sentinelVerdict call with a
+    rejectedAnywhere() call on the same reply and the same fail sentinel. That
+    pairing survives here in a strictly tighter form -- ONE verdict call, TWO
+    guards, all three on the SAME reply, and the guards positionally BEFORE the
+    verdict call -- which additionally catches the reversal the old set-based
+    pairing could not see: guards that exist but run too late are dead code, and
+    the site falls back to whole-line equality exactly as it did pre-1.16.0.
+
+    Over code_lines(), never the raw slice: this function's neighbouring prose
+    names both helpers at length, and a raw-slice check would be satisfied by
+    that prose alone -- the exact tautology the checkBatchCmd lock was found by
+    mutation to have had."""
+    code = _normalized_code(extract_function_body(MASS_TRANSLATE_SOURCE, WAIT_PARSE_SITE))
+
+    verdict_calls = _SENTINEL_VERDICT_CALL_RE.findall(code)
+    assert len(verdict_calls) == 1, (
+        f"expected {WAIT_PARSE_SITE} to hold exactly ONE sentinelVerdict call (the "
+        f"whole-line READY test); found {len(verdict_calls)}: {verdict_calls}"
     )
-    guarded = {(reply, fail) for reply, fail in _GUARD_CALL_RE.findall(code)}
-    for reply, ok_sentinel, fail_sentinel in verdict_calls:
-        assert (reply, fail_sentinel) in guarded, (
-            f"{function_name}'s sentinelVerdict call on {reply!r} (ok={ok_sentinel!r}, "
-            f"fail={fail_sentinel!r}) is NOT preceded by a "
-            f"{GUARD_HELPER}({reply}, {fail_sentinel}) containment check. Without it "
-            f"a fail sentinel sharing its line with prose is never seen -- measured "
-            f"at 14 of 15 gluing characters over ALL_GLUES in "
-            f"tests/mass_translate_sentinel_containment.test.py, in the prose "
-            f"shape (prose shares the sentinel's line), a plain space among "
-            f"them. Guards "
-            f"actually present: {sorted(guarded)}"
+    reply, ok_sentinel, fail_sentinel = verdict_calls[0]
+    assert ok_sentinel == '"READY " + seg', (
+        f"the whole-line test must be the READY direction, got ok={ok_sentinel!r}"
+    )
+    assert fail_sentinel == "null", (
+        f"the READY test must pass a null fail sentinel (got {fail_sentinel!r}): "
+        f"fail-priority moved OUT of sentinelVerdict into the containment guards "
+        f"ahead of it, and a second fail path here would be the weaker one"
+    )
+
+    guards = _GUARD_CALL_RE.findall(code)
+    assert {sentinel for _r, sentinel in guards} == {'"FAILED " + seg', '"PENDING " + seg'}, (
+        f"{WAIT_PARSE_SITE} must containment-guard BOTH non-ready sentinels of the "
+        f"READY/FAILED/PENDING grammar; found guards on {sorted(s for _r, s in guards)}"
+    )
+    for guard_reply, sentinel in guards:
+        assert guard_reply == reply, (
+            f"the {GUARD_HELPER}(..., {sentinel}) guard watches {guard_reply!r} while "
+            f"the READY test reads {reply!r} -- a guard on the wrong reply variable "
+            f"never fires, and the site silently falls back to whole-line equality"
+        )
+
+    # ORDER IS THE PROPERTY. Last guard before first verdict call.
+    assert code.rindex(GUARD_HELPER + "(") < code.index("sentinelVerdict("), (
+        f"a {GUARD_HELPER}() containment guard runs AFTER the whole-line READY test "
+        f"in {WAIT_PARSE_SITE}. Reversed, the guards are dead code for any reply the "
+        f"READY test already accepts, and a fail sentinel sharing its line with prose "
+        f"is never seen -- measured at 14 of 15 gluing characters over ALL_GLUES in "
+        f"tests/mass_translate_sentinel_containment.test.py, in the prose shape "
+        f"(prose shares the sentinel's line), a plain space among them"
+    )
+
+
+@pytest.mark.parametrize("function_name", WAIT_LOOP_FUNCTIONS)
+def test_wait_loop_delegates_every_reply_to_the_single_parse_site(function_name):
+    """(c) Each wait loop proved on its own, over code_lines() so the template's
+    own prose about the shared parse cannot satisfy the assertion.
+
+    Both of a wait's replies -- the chunk's and the post-exhaustion re-check's --
+    must go through the guarded site. A re-check parsed inline would be a second,
+    unguarded reading of exactly the reply that decides whether a landed artifact
+    is found, which is the decision #348 exists to get right."""
+    code = _normalized_code(extract_function_body(MASS_TRANSLATE_SOURCE, function_name))
+
+    parse_calls = code.count(WAIT_PARSE_SITE + "(")
+    assert parse_calls == 2, (
+        f"expected {function_name} to parse exactly two wait replies through "
+        f"{WAIT_PARSE_SITE}() -- the chunk reply and the re-check reply -- found "
+        f"{parse_calls}. If the wait gained or lost a reply, route it through the "
+        f"same site and update this count -- do not relax the assertion"
+    )
+    for helper in WAIT_REPLY_PARSE_HELPERS:
+        assert helper not in code, (
+            f"{function_name} calls {helper}) itself instead of delegating to "
+            f"{WAIT_PARSE_SITE}(). #348 centralised the reading precisely so the "
+            f"guard order cannot be right at one wait site and wrong at the other"
         )
 
 

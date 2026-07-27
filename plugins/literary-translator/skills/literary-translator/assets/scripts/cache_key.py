@@ -68,7 +68,7 @@ except ImportError:  # pragma: no cover - exercised only when PyYAML is absent
 
 DURABLE_ROOT = Path(__file__).resolve().parents[1]
 
-# The eleven scripts (+ two workflow templates) that make up plugin_bundle_hash.
+# The twelve scripts (+ two workflow templates) that make up plugin_bundle_hash.
 # NEVER bootstrap_names.py/segpack.py (their own derivation_bundle_hash) and
 # NEVER the four orchestration-only scripts (orchestration_bundle_hash).
 # review_ready.py and resume_setup.py (1.2.0) join this list rather than
@@ -100,6 +100,20 @@ DURABLE_ROOT = Path(__file__).resolve().parents[1]
 # literal byte-hash allowlist, so a transitive import is otherwise invisible
 # to it. Not DERIVATION_BUNDLE_MEMBERS (it isn't bootstrap_names.py/
 # segpack.py's kind of source-derivation state).
+# fetch_citation.py (#347) belongs here because it IS the validated retrieval
+# boundary for W3's pre-merge citation audit: under research_mode: live, every
+# byte the judging agent ever sees about a cited `source` URI arrived through
+# this file's scheme allowlist, its resolve-every-address check, and its manual
+# per-hop redirect re-validation -- so its bytes shape what gets frozen into
+# canon.json exactly as directly as glossary_batch_plan.py's curation does.
+# Omitting it would be precisely the false-green plugin_bundle_hash exists to
+# prevent: WEAKENING the security boundary would not move the hash, so a
+# durable root scaffolded before the change would go on classifying its
+# converged segments as reusable against a plugin that no longer behaves the
+# same way. Not the orchestration bucket -- this is not a diagnostic poll, and
+# its output is consumed as evidence rather than as logging. (Step 0a already
+# copies it: SKILL.md's copy pass takes every assets/scripts/*.py except the
+# five plugin-path-only scripts, which this is not.)
 PLUGIN_BUNDLE_MEMBERS = (
     "validate_draft.py",
     "canon_validate.py",
@@ -112,6 +126,7 @@ PLUGIN_BUNDLE_MEMBERS = (
     "glossary_batch_plan.py",
     "codex_job.py",
     "canon_senses.py",
+    "fetch_citation.py",
     "mass-translate-wf.template.js",
     "glossary-pass-wf.template.js",
 )

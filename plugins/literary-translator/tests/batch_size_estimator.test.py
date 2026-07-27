@@ -330,10 +330,14 @@ def _wrap_for_execution(js_source: str) -> str:
 # globals they call.
 #
 # Per-segment PLAN shape: {
-#   "wait": <translate's own wait:* response, e.g. "READY seg"/"TIMEOUT seg">,
-#   "reviewWaits": [<one review-wait:* response per review point, in round
-#                     order -- NOT per retry; the shared retry re-runs only
-#                     read+check, never dispatch/wait>, ...],
+#   "wait": <translate's own wait:* response, e.g. "READY seg"/"PENDING seg" --
+#             re-read by EVERY chunk call of that wait, see #348 below>,
+#   "waitRecheck": <optional wait-recheck:* response; default "PENDING <seg>">,
+#   "reviewWaits": [<one review-wait:* response per review POINT, in round
+#                     order -- NOT per retry and NOT per chunk; the shared
+#                     retry re-runs only read+check, never dispatch/wait>, ...],
+#   "reviewWaitRecheck": <optional review-wait-recheck:* response, used at
+#                          EVERY review point; default "PENDING <seg>">,
 #   "reviews": [<one review-read:* response per read call, in call order --
 #                a round with a shared retry contributes TWO entries here>,
 #               ...],
@@ -344,6 +348,26 @@ def _wrap_for_execution(js_source: str) -> str:
 #   "fixes": [<one fix:* response per non-final round that reaches a fix
 #               call, in round order>, ...],
 # }
+#
+# #348 -- A WAIT IS NO LONGER ONE agent() CALL, and that changes what this
+# harness must do, not just what it counts. Each wait site makes up to
+# WAIT_CHUNKS bounded chunk calls REUSING its existing label ("wait:<seg>" /
+# "review-wait:<seg>:r<round>"), then ONE authoritative non-polling re-check
+# under a new label containing "-recheck:".
+#
+# THE TRAP, spelled out because it fails SILENTLY: `reviewWaits` is a queue
+# holding one entry per review POINT. Chunk calls repeat the point's label, so
+# a naive shift-per-call would let a single PENDING review point eat the entries
+# meant for every LATER point -- every subsequent verdict shifts by one, the
+# fixture still "passes", and it exercises a flow it never meant to. Chunk
+# answers are therefore MEMOIZED BY LABEL: the queue is shifted once per review
+# point (the label carries :r<round>, so each point has its own), and every
+# further chunk of that point re-reads the same answer. translate's own `wait`
+# was never a queue and needs no memo -- every chunk simply re-reads it.
+#
+# A re-check the PLAN does not script answers "PENDING <seg>": the fail-safe
+# default, so a fixture that forgets it can only make a wait FAIL, never
+# falsely converge.
 # ---------------------------------------------------------------------------
 HARNESS_TEMPLATE = r"""
 'use strict';
@@ -369,6 +393,22 @@ for (const seg of Object.keys(PLAN)) {
 function segFromLabel(label) {
   const parts = label.split(":");
   return parts[1];
+}
+
+// #348 -- one scripted chunk answer per review POINT, keyed by that point's own
+// label. See the "THE TRAP" note above the harness: without this, repeated
+// chunk calls drain the per-review-point queue.
+const reviewWaitByLabel = {};
+
+// A wait call is a RE-CHECK iff its label CONTAINS "-recheck:"; every other
+// wait-shaped label is a chunk. Containment, not a prefix test: the review
+// site's re-check label is "review-wait-recheck:<seg>:r<round>", which a prefix
+// test written for the translate site ("wait-recheck:") would misclassify as a
+// chunk -- and the fixture would silently answer the wrong thing.
+function waitKind(label) {
+  if (label.indexOf("-recheck:") !== -1) return "recheck";
+  if (label.indexOf("wait:") === 0 || label.indexOf("review-wait:") === 0) return "chunk";
+  return null;
 }
 
 async function agent(promptText, opts) {
@@ -421,12 +461,24 @@ async function agent(promptText, opts) {
   // mock's wait branches return READY/TIMEOUT directly rather than running
   // the poll bash -- so a fixed hex DISP is sufficient.
   if (label.indexOf("translate:") === 0) return "DISPATCHED " + seg + " a1b2c3";
-  if (label.indexOf("wait:") === 0) return (PLAN[seg] || {}).wait;
   if (label.indexOf("review-dispatch:") === 0) return "DISPATCHED " + seg + " d4e5f6";
-  if (label.indexOf("review-wait:") === 0) {
-    const q = queues[seg].reviewWaits;
-    if (q.length === 0) throw new Error("PLAN reviewWaits queue exhausted for " + seg + " label=" + label);
-    return q.shift();
+  const kind = waitKind(label);
+  if (kind !== null) {
+    const p = PLAN[seg] || {};
+    // Both re-check labels start with their site's own prefix, so "review-wait"
+    // separates the two sites for chunks AND re-checks alike.
+    const isReview = label.indexOf("review-wait") === 0;
+    if (kind === "recheck") {
+      const scripted = isReview ? p.reviewWaitRecheck : p.waitRecheck;
+      return scripted === undefined || scripted === null ? "PENDING " + seg : scripted;
+    }
+    if (!isReview) return p.wait;
+    if (!Object.prototype.hasOwnProperty.call(reviewWaitByLabel, label)) {
+      const q = queues[seg].reviewWaits;
+      if (q.length === 0) throw new Error("PLAN reviewWaits queue exhausted for " + seg + " label=" + label);
+      reviewWaitByLabel[label] = q.shift();
+    }
+    return reviewWaitByLabel[label];
   }
   if (label.indexOf("review-read:") === 0) {
     const q = queues[seg].reviews;
@@ -527,6 +579,24 @@ def run_workflow(
 
 
 # ---------------------------------------------------------------------------
+# #348 -- the wait-call ladder, restated as INDEPENDENT literals.
+#
+# Deriving these from the template would make every arithmetic assertion below
+# tautological: the file would agree with whatever the template computed, which
+# is precisely what it exists not to do. As literals they are a lock -- a chunk
+# count changed in the template without changing the documented cost model
+# fails here loudly, which is the point.
+#
+# WAIT_CHUNKS is Math.ceil(WAIT_BOUND_SEC / WAIT_CHUNK_SEC) = ceil(3450/480) = 8
+# in the shipped template; WAIT_CALLS adds the ONE authoritative non-polling
+# re-check that runs after the chunk budget is spent (or a chunk reported the
+# driver's fail sentinel). tests/wait_chunking.test.py owns the per-chunk
+# bound/sum properties; this file owns only what they cost.
+WAIT_CHUNKS = 8
+WAIT_CALLS = WAIT_CHUNKS + 1  # 9 -- the WORST case for one wait, not its cost
+
+
+# ---------------------------------------------------------------------------
 # Response-object builders -- shapes matching REVIEW_SCHEMA / REVIEW_ARTIFACT_
 # SCHEMA closely enough to drive the real script's own branching
 # (`rev.clean`, `rev.coverage_ok`, `rev.findings`, `art.match`,
@@ -576,7 +646,8 @@ def match_false(detail: str = "artifact mismatch") -> dict:
     return {"match": False, "mismatch_detail": detail}
 
 
-def converged_worst_case_plan(seg: str, max_fix_rounds: int, *, final_clean: bool) -> dict:
+def converged_worst_case_plan(seg: str, max_fix_rounds: int, *, final_clean: bool,
+                              waits_exhaust_every_chunk: bool = False) -> dict:
     """The worst-case-within-the-converged/non-converged-at-cap branch: every
     one of the `max_fix_rounds` normal rounds AND the final confirming round
     forces its review point through the true 6-call shared-retry worst case
@@ -587,14 +658,28 @@ def converged_worst_case_plan(seg: str, max_fix_rounds: int, *, final_clean: boo
     early); `final_clean` selects between the branch's two possible terminal
     statuses (`converged` vs `non_converged`/`cap`) on the final round --
     both cost exactly the same number of calls, which is the entire point
-    of the template's own comment calling this one combined branch."""
+    of the template's own comment calling this one combined branch.
+
+    #348 -- `waits_exhaust_every_chunk` selects how expensive each WAIT on that
+    branch is, which after #348 is a second, independent worst-case axis:
+
+      False (default) -- every wait answers READY on its first chunk, so a wait
+        costs 1 call. This is the realistic path and what the pre-#348 fixtures
+        implicitly measured.
+      True -- every chunk answers PENDING and the artifact lands only at the
+        authoritative re-check, so a wait costs the full WAIT_CALLS. This is
+        the frozen ssk-w5-smoke-116 shape (#348's actual defect: a clean
+        artifact landing after the last poll ended) applied to EVERY wait at
+        once, i.e. the true ceiling the estimator budgets for. The run still
+        CONVERGES -- that is the fix -- it just pays the maximum."""
+    ready = f"PENDING {seg}" if waits_exhaust_every_chunk else f"READY {seg}"
     review_waits: list = []
     reviews: list = []
     artifact_checks: list = []
     fixes: list = []
 
     for i in range(1, max_fix_rounds + 1):
-        review_waits.append(f"READY {seg}")
+        review_waits.append(ready)
         reviews.append(review_obj(clean=False))
         artifact_checks.append(match_false(f"round {i} first attempt mismatch"))
         reviews.append(review_obj(clean=False))
@@ -603,19 +688,27 @@ def converged_worst_case_plan(seg: str, max_fix_rounds: int, *, final_clean: boo
 
     # Final confirming round -- also forced through the shared retry (worst
     # case); no fix call follows it regardless of clean/non-clean outcome.
-    review_waits.append(f"READY {seg}")
+    review_waits.append(ready)
     reviews.append(review_obj(clean=False))
     artifact_checks.append(match_false("final round first attempt mismatch"))
     reviews.append(review_obj(clean=final_clean, coverage_ok=True))
     artifact_checks.append(match_true())
 
-    return {
-        "wait": f"READY {seg}",
+    plan = {
+        "wait": ready,
         "reviewWaits": review_waits,
         "reviews": reviews,
         "artifactChecks": artifact_checks,
         "fixes": fixes,
     }
+    if waits_exhaust_every_chunk:
+        # The artifact lands after the last chunk's poll ended -- the ONE thing
+        # #348 fixed. Without these the run would time out at the first wait
+        # instead of paying the full ladder, and this fixture would silently
+        # measure a 3-call segment.
+        plan["waitRecheck"] = f"READY {seg}"
+        plan["reviewWaitRecheck"] = f"READY {seg}"
+    return plan
 
 
 # Sentinel distinct from True/False/None: signals that `blocked_plan` should
@@ -726,11 +819,19 @@ def blocked_plan(seg: str, max_fix_rounds: int, terminal_kind: str) -> dict:
         reviews.append(review_obj_fabricated_loc())
         artifact_checks.append(match_true())
     elif terminal_kind == "review-timeout":
-        # getVerifiedReview's own bounded review-wait poll times out on the
-        # very first attempt -- 2 calls (dispatch + wait); the read/check/
-        # fix machinery is never reached at all. #131 facet B -- NO terminal
-        # ledger write (recoverable).
-        review_waits.append(f"TIMEOUT {seg}")
+        # getVerifiedReview's own bounded review-wait poll never reports READY;
+        # the read/check/fix machinery is never reached at all. #131 facet B --
+        # NO terminal ledger write (recoverable).
+        #
+        # #348 -- this is the one terminating kind whose COST moved. A timing-
+        # out wait no longer costs 1 call but the full ladder: every one of the
+        # WAIT_CHUNKS chunks answers PENDING, then the authoritative re-check
+        # runs (harness default: PENDING) -- 1 + WAIT_CALLS for the point.
+        # PENDING, not the retired TIMEOUT: the chunk prompts ask for exactly
+        # this sentinel now, and an unrecognized reply would reach the same
+        # verdict through waitChunkVerdict's fallthrough instead of through the
+        # branch this fixture means to drive.
+        review_waits.append(f"PENDING {seg}")
     else:
         raise ValueError(f"unknown terminal_kind {terminal_kind!r}")
 
@@ -749,32 +850,56 @@ def blocked_plan(seg: str, max_fix_rounds: int, terminal_kind: str) -> dict:
 
 
 def timeout_plan(seg: str) -> dict:
-    """The translator never delivers READY in time -- reviewFixLoop's own
-    `ready.indexOf("READY") === -1` check fires on the very first wait call,
-    before a single review call is ever made."""
-    return {"wait": f"TIMEOUT {seg}", "reviewWaits": [], "reviews": [], "artifactChecks": [], "fixes": []}
+    """The translator never delivers READY in time -- reviewFixLoop's wait
+    never reaches a READY verdict, so not a single review call is ever made.
+
+    #348 -- "never" now means the whole ladder: every chunk answers PENDING and
+    the authoritative re-check (harness default, also PENDING) confirms nothing
+    landed. The branch is unchanged; what it costs is not."""
+    return {"wait": f"PENDING {seg}", "reviewWaits": [], "reviews": [], "artifactChecks": [], "fixes": []}
 
 
-def blocked_branch_total(max_fix_rounds: int, terminating_cost: int, *, ledger_write: bool = True) -> int:
-    """3 (fixed) + 7*(max_fix_rounds-1) (completed WORST-CASE-RECOVERED
-    normal rounds -- review point with a forced shared retry (6) + fix (1)
-    == 7 each, matching the estimator's own per-round assumption) +
-    terminating_cost + (1 if ledger_write else 0) (terminal ledger write --
-    #131 SKIPS this write entirely for every transient/recoverable
-    terminating reason: review-null, review-artifact-mismatch,
+def blocked_branch_total(max_fix_rounds: int, terminating_cost: int, *, ledger_write: bool = True,
+                         wait_calls: int = 1) -> int:
+    """(2 + wait_calls) (fixed: in_progress ledger + translate dispatch +
+    translate's own wait) + (6 + wait_calls)*(max_fix_rounds-1) (completed
+    WORST-CASE-RECOVERED normal rounds -- review point with a forced shared
+    retry (5 + its wait) + fix (1), matching the estimator's own per-round
+    assumption) + terminating_cost + (1 if ledger_write else 0) (terminal
+    ledger write -- #131 SKIPS this write entirely for every transient/
+    recoverable terminating reason: review-null, review-artifact-mismatch,
     review-timeout, review-fabricated-loc, and fix-call-failed. Only
     draft-missing, a genuine anomaly, still writes -- `ledger_write`
-    defaults to True/unchanged for callers that don't pass it."""
-    return 3 + 7 * (max_fix_rounds - 1) + terminating_cost + (1 if ledger_write else 0)
+    defaults to True/unchanged for callers that don't pass it.
+
+    #348 -- `wait_calls` is what a wait COSTS on the path a fixture actually
+    drives, which is NOT the same number as the estimator's WAIT_CALLS
+    ceiling: a wait whose first chunk answers READY costs 1. It defaults to 1
+    because every fixture below scripts READY-on-the-first-chunk waits for the
+    rounds LEADING UP TO the terminating one. The terminating round's own wait
+    cost lives in `terminating_cost`, which its caller computes -- a fixture
+    that times a wait OUT there pays 1 + WAIT_CALLS for that review point (all
+    chunks plus the re-check), not 2."""
+    return ((2 + wait_calls) + (6 + wait_calls) * (max_fix_rounds - 1)
+            + terminating_cost + (1 if ledger_write else 0))
 
 
-def converged_branch_total(max_fix_rounds: int) -> int:
-    """The converged/non-converged-at-cap branch total: 3 (fixed) +
-    7*max_fix_rounds (all MAXFIX normal rounds, each a 6-call worst-case
-    review point + 1 fix) + 6 (final confirming review point, worst case,
-    no fix) + 1 (terminal ledger write) == 3*... == 10 + 7*max_fix_rounds,
-    exactly the `10 + 7*MAXFIX` per-segment term inside estimatedCalls."""
-    return 3 + 7 * max_fix_rounds + 6 + 1
+def converged_branch_total(max_fix_rounds: int, *, wait_calls: int = 1) -> int:
+    """The converged/non-converged-at-cap branch total: (2 + wait_calls)
+    (fixed: in_progress ledger + translate dispatch + translate's wait) +
+    max_fix_rounds*(6 + wait_calls) (all MAXFIX normal rounds, each a
+    worst-case review point -- dispatch + wait + read + check + read + check
+    -- plus 1 fix) + (5 + wait_calls) (final confirming review point, worst
+    case, no fix) + 1 (terminal ledger write)
+    == 8 + 2*wait_calls + max_fix_rounds*(6 + wait_calls).
+
+    That is the template's own per-segment term verbatim. At wait_calls=1 it
+    collapses to the pre-#348 `10 + 7*max_fix_rounds`, which is the arithmetic
+    proof that #348 generalised the estimator rather than rewriting it -- and
+    at wait_calls=WAIT_CALLS it IS the estimator's per-segment ceiling. The two
+    uses are deliberately the same function: a ceiling that could drift from
+    the observed-cost formula is the bug this file exists to prevent."""
+    return (2 + wait_calls) + max_fix_rounds * (6 + wait_calls) + (5 + wait_calls) + 1
 
 
 def bucket_calls_by_segment(calls: list[dict]) -> tuple[dict[str, list[dict]], list[dict]]:
@@ -801,7 +926,8 @@ def bucket_calls_by_segment(calls: list[dict]) -> tuple[dict[str, list[dict]], l
 def test_estimator_boundary_exactly_at_cap_permits_dispatch_and_converges(tmp_path):
     max_fix_rounds = 2
     segs = ["seg01", "seg02"]
-    estimated = 1 + len(segs) * (10 + 7 * max_fix_rounds)  # 1 + 2*24 = 49
+    # 1 + 2*(8 + 2*9 + 2*(6+9)) = 1 + 2*56 = 113
+    estimated = 1 + len(segs) * converged_branch_total(max_fix_rounds, wait_calls=WAIT_CALLS)
 
     plan = {seg: converged_worst_case_plan(seg, max_fix_rounds, final_clean=True) for seg in segs}
     out = run_workflow(
@@ -819,21 +945,35 @@ def test_estimator_boundary_exactly_at_cap_permits_dispatch_and_converges(tmp_pa
     assert sorted(r["seg"] for r in result["converged"]) == segs
     assert result["failed"] == []
 
-    # The real total number of agent() calls made must equal the formula's
-    # own estimate exactly at this configuration -- not merely be "close".
-    assert len(out["calls"]) == estimated
+    # #348 -- THE ESTIMATE IS A CEILING, AND THIS ASSERTION SAYS SO. Before the
+    # chunked wait a wait was exactly one call, so the worst-case run's real
+    # total EQUALLED the estimate and this line read `==`. It cannot now: this
+    # plan answers READY on every wait's FIRST chunk, so each of its waits costs
+    # 1 of the 9 the estimator budgets. Restating that as `<=` is not a
+    # weakening -- "never exceeds the preflight bound" is the property the cap
+    # actually needs, and it is asserted here on a converging run and again,
+    # as strict equality, against the true worst case in
+    # test_worst_case_wait_ladder_costs_exactly_the_estimate below.
+    assert len(out["calls"]) <= estimated, (
+        f"a converging worst-case-review batch made {len(out['calls'])} calls, above the "
+        f"preflight estimate of {estimated} -- the cap this gate enforces would be unsound"
+    )
 
     per_seg, batch_level = bucket_calls_by_segment(out["calls"])
     assert len(batch_level) == 1, "exactly one mandatory batch-level mergeLedgerPrompt call"
     for seg in segs:
-        assert len(per_seg[seg]) == converged_branch_total(max_fix_rounds)
+        # Exact, on the path this plan actually drives: every wait READY on its
+        # first chunk. At wait_calls=1 the term is the pre-#348 10 + 7*MAXFIX
+        # verbatim, which is what makes this a regression lock and not a
+        # re-baselining -- the observed cost of this branch never moved.
+        assert len(per_seg[seg]) == converged_branch_total(max_fix_rounds, wait_calls=1)
         assert len(per_seg[seg]) == 10 + 7 * max_fix_rounds
 
 
 def test_estimator_one_below_boundary_blocks_dispatch_entirely(tmp_path):
     max_fix_rounds = 2
     segs = ["seg01", "seg02"]
-    estimated = 1 + len(segs) * (10 + 7 * max_fix_rounds)  # 49
+    estimated = 1 + len(segs) * converged_branch_total(max_fix_rounds, wait_calls=WAIT_CALLS)  # 113
 
     # Same configuration as the boundary-permits test above, but the cap is
     # one less -- deliberately reuse a plan that WOULD converge if pipeline()
@@ -860,6 +1000,79 @@ def test_estimator_one_below_boundary_blocks_dispatch_entirely(tmp_path):
         "cap": estimated - 1,
     }
     assert any("Batch too large" in line and str(estimated) in line for line in out["log"])
+
+
+# ---------------------------------------------------------------------------
+# 1b (NEW, #348): the strict-equality half the boundary fixture above gave up.
+#
+# Once a wait can cost anywhere from 1 to WAIT_CALLS calls, "real == estimate"
+# stops being true of ANY single run -- the estimate became a ceiling. Asserting
+# only `<=` would leave the ceiling unpinned from BELOW: an estimator that
+# budgeted ten times too much would satisfy every `<=` in this file, and the
+# batch_agent_cap gate's whole job is to be tight enough to still permit real
+# batches. So this fixture builds the run that actually costs the maximum --
+# every chunk PENDING at every wait, the artifact landing only at the
+# authoritative re-check, all MAXFIX rounds plus the final confirming one, each
+# review point through the 6-call shared retry -- and demands EXACT equality.
+#
+# It doubles as the end-to-end proof of #348's fix at full scale: this is the
+# frozen ssk-w5-smoke-116 shape (a clean artifact landing after the last poll
+# ended) at EVERY wait in the run, and it CONVERGES. On the unfixed template
+# the same plan reports translate-timeout at the very first wait.
+# ---------------------------------------------------------------------------
+
+
+def test_worst_case_wait_ladder_costs_exactly_the_estimate(tmp_path):
+    max_fix_rounds = 2
+    segs = ["seg01", "seg02"]
+    estimated = 1 + len(segs) * converged_branch_total(max_fix_rounds, wait_calls=WAIT_CALLS)
+
+    plan = {
+        seg: converged_worst_case_plan(
+            seg, max_fix_rounds, final_clean=True, waits_exhaust_every_chunk=True,
+        )
+        for seg in segs
+    }
+    out = run_workflow(
+        tmp_path=tmp_path,
+        max_fix_rounds=max_fix_rounds,
+        batch_agent_cap=estimated,
+        segs=segs,
+        plan=plan,
+    )
+
+    assert out["pipelineCalled"] is True
+    result = out["result"]
+    assert sorted(r["seg"] for r in result["converged"]) == segs, (
+        "a run whose artifacts all land at the re-check must still converge -- "
+        f"that is what #348 fixed; got {result}"
+    )
+    assert result["failed"] == []
+
+    # The whole point: at the true worst case the estimate is not merely an
+    # upper bound, it is EXACTLY the cost. A ceiling that can never be reached
+    # would be silently over-budgeting every batch.
+    assert len(out["calls"]) == estimated
+
+    per_seg, batch_level = bucket_calls_by_segment(out["calls"])
+    assert len(batch_level) == 1
+    for seg in segs:
+        assert len(per_seg[seg]) == converged_branch_total(max_fix_rounds, wait_calls=WAIT_CALLS)
+
+        # ...and the cost is where the formula says it is. Without this, a
+        # segment could hit the same total for the wrong reason (e.g. extra
+        # review rounds paired with cheap waits) and the equality above would
+        # still hold. One wait per translate + one per review point (MAXFIX
+        # normal rounds + the final confirming one), each spending its full
+        # ladder of WAIT_CHUNKS chunks plus exactly one re-check.
+        n_waits = 1 + (max_fix_rounds + 1)
+        wait_calls = [c for c in per_seg[seg] if "wait" in c["label"]]
+        rechecks = [c for c in wait_calls if "-recheck:" in c["label"]]
+        assert len(wait_calls) == n_waits * WAIT_CALLS
+        assert len(rechecks) == n_waits, (
+            "exactly one authoritative re-check per wait -- a re-check that polled "
+            "would be a ninth chunk and could itself hit the Bash per-call cap"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1101,7 +1314,20 @@ def test_blocked_review_timeout_terminating_subcase(tmp_path):
 
     per_seg, batch_level = bucket_calls_by_segment(out["calls"])
     assert len(batch_level) == 1
-    assert len(per_seg[seg]) == blocked_branch_total(max_fix_rounds, terminating_cost=2, ledger_write=False)
+    # #348 -- the terminating review point now costs dispatch + the FULL wait
+    # ladder (WAIT_CHUNKS chunks, all PENDING, then the authoritative re-check),
+    # where it used to cost dispatch + 1. The branch and its reason string are
+    # unchanged; only the wait's own price moved.
+    assert len(per_seg[seg]) == blocked_branch_total(
+        max_fix_rounds, terminating_cost=1 + WAIT_CALLS, ledger_write=False,
+    )
+    n_review_wait_calls = sum(
+        1 for c in per_seg[seg] if c["label"].startswith("review-wait")
+    )
+    assert n_review_wait_calls == max_fix_rounds - 1 + WAIT_CALLS, (
+        "a timing-out review point must spend its whole chunk budget AND the "
+        "re-check; the prior rounds' waits each answer on chunk 1"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1130,11 +1356,21 @@ def test_timeout_branch(tmp_path):
 
     per_seg, batch_level = bucket_calls_by_segment(out["calls"])
     assert len(batch_level) == 1
-    # 1 in_progress ledger write + 1 translate call + 1 wait call == 3,
+    # 1 in_progress ledger write + 1 translate call + the translate wait,
     # independent of max_fix_rounds. #131 facet C: NO terminal
     # "ledger:timeout:*" write anymore -- the segment stays in_progress and
     # recoverable instead of a terminal non_converged/translate-timeout.
-    assert len(per_seg[seg]) == 3
+    # #348 -- the wait is the full ladder here (WAIT_CHUNKS PENDING chunks +
+    # the authoritative re-check), so 2 + WAIT_CALLS where it used to be 3.
+    assert len(per_seg[seg]) == 2 + WAIT_CALLS
+    n_wait_calls = sum(1 for c in per_seg[seg] if c["label"].startswith("wait"))
+    assert n_wait_calls == WAIT_CALLS, (
+        f"a translate wait that never lands must spend all {WAIT_CHUNKS} chunks and then "
+        f"the authoritative re-check, got {n_wait_calls} wait calls"
+    )
+    assert sum(1 for c in per_seg[seg] if c["label"] == f"wait-recheck:{seg}") == 1, (
+        "the re-check runs exactly once, after the chunk budget is spent (#348)"
+    )
     assert not any(c["label"].startswith("ledger:timeout:") for c in per_seg[seg]), (
         "translate-timeout must NOT write a terminal ledger entry (#131 facet C) "
         "-- only the in_progress write from translateStage should appear"
@@ -1166,7 +1402,9 @@ def test_review_artifact_mismatch_actual_calls_never_exceed_formula_bound(tmp_pa
 
     per_seg, _ = bucket_calls_by_segment(out["calls"])
     actual_calls = len(per_seg[seg])
-    per_segment_bound = 10 + 7 * max_fix_rounds  # the exact term estimatedCalls sizes per segment
+    # the exact term estimatedCalls sizes per segment (#348: 8 + 2*WAIT_CALLS
+    # + MAXFIX*(6 + WAIT_CALLS), which at WAIT_CALLS=1 is the old 10 + 7*MAXFIX)
+    per_segment_bound = converged_branch_total(max_fix_rounds, wait_calls=WAIT_CALLS)
 
     assert actual_calls == blocked_branch_total(max_fix_rounds, terminating_cost=6, ledger_write=False)
     assert actual_calls <= per_segment_bound, (
@@ -1191,7 +1429,10 @@ def test_review_artifact_mismatch_actual_calls_never_exceed_formula_bound(tmp_pa
 )
 def test_estimator_formula_matches_closed_form(tmp_path, n_segs, max_fix_rounds):
     segs = [f"seg{idx:03d}" for idx in range(n_segs)]
-    expected = 1 + n_segs * (10 + 7 * max_fix_rounds)
+    # Written out rather than routed through converged_branch_total: this row
+    # is the one place the closed form is restated INDEPENDENTLY of the helper
+    # every other assertion shares, so a wrong helper cannot agree with itself.
+    expected = 1 + n_segs * (8 + 2 * WAIT_CALLS + max_fix_rounds * (6 + WAIT_CALLS))
 
     out = run_workflow(
         tmp_path=tmp_path,
@@ -1322,20 +1563,29 @@ def test_shared_retry_recovers_mid_loop_and_matches_exact_count(tmp_path):
 # the mass-translate section above, but for glossary-pass-wf.template.js's
 # own, distinct control flow:
 #
-#   * PREFLIGHT COST CAP (#95, re-derived for 1.16.0). The template's own
+#   * PREFLIGHT COST CAP (#95, re-derived for 1.16.0's citation review and
+#     again for 1.16.1's prepare/judge split, #347). The template's own
 #     preflight comment block documents the per-call ladder this whole
 #     section derives its expected counts from -- never the other way round:
 #
 #         1 precheck                                (always, exactly one)
-#       + (dispatch + wait)   per attempt           (2 each)
-#       + (citation review)   per attempt           (1 each, LIVE ONLY)
+#       + (dispatch + wait)          per attempt    (2 each)
+#       + (citation prepare + judge) per attempt    (2 each, LIVE ONLY)
 #       + merge + verify                            (2, fixed, per run)
 #
 #     with attempts == MAX_CITATION_RETRIES + 1 == 3 in the worst case, so:
 #
-#         live    -- perBatch = 1 + 3*(MAX_CITATION_RETRIES+1) = 1 + 3*3 = 10
+#         live    -- perBatch = 1 + 4*(MAX_CITATION_RETRIES+1) = 1 + 4*3 = 13
 #         offline -- perBatch = 1 + 2 == 3
 #         estimatedCalls = perBatch * BATCHES.length + 2
+#
+#     The live term went 10 -> 13 in 1.16.1 and NOT because the pass does more
+#     work: #347 split the single fetch-and-judge reviewer into a prepare call
+#     that runs the validated fetcher while ingesting no page content, and a
+#     judge call that reads only local files. One review point, two calls. The
+#     OFFLINE term did not move by one call, and every offline assertion in this
+#     section must stay byte-identical in meaning -- an offline run has no
+#     reviewer to split.
 #
 #     If that exceeds engine.batch_agent_cap the whole run is refused WITHOUT
 #     calling pipeline(), mirroring the mass template's
@@ -1346,8 +1596,8 @@ def test_shared_retry_recovers_mid_loop_and_matches_exact_count(tmp_path):
 #     engine.batch_agent_cap was tuned against that number, so making the
 #     estimate mode-blind would start refusing runs whose real cost never
 #     changed. Under live the estimate is a worst-case CEILING, not the
-#     observed cost -- a run whose reviews approve on attempt 0 pays 4 per
-#     batch, not 10 -- so the live tests assert the observed count from the
+#     observed cost -- a run whose reviews approve on attempt 0 pays 5 per
+#     batch, not 13 -- so the live tests assert the observed count from the
 #     ladder AND that it stays under the ceiling.
 #   * RESUME-SKIP PRECHECK (#101): batchStep runs one single-shot precheck
 #     agent() call first; if it reports the fragment is already present and
@@ -1363,9 +1613,12 @@ def test_shared_retry_recovers_mid_loop_and_matches_exact_count(tmp_path):
 #     provably no citation in existence to review.
 #
 #     SCOPE SPLIT -- this file owns the review only as a term in the COST
-#     ARITHMETIC: it adds one call per attempt, it is what makes the live
-#     ceiling 10 rather than 3, and it is why a resume-skipped batch saves 2
-#     calls and not 3. The review's BEHAVIOUR -- rejection regenerating to a
+#     ARITHMETIC: since 1.16.1 it adds TWO calls per attempt (prepare + judge),
+#     it is what makes the live ceiling 13 rather than 3, and it is why a
+#     resume-skipped batch saves 2 calls and not 4 -- the skip drops the
+#     dispatch and the wait, never the review, so the split widened the gap
+#     between what a resume saves and what a batch costs rather than the saving
+#     itself. The review's BEHAVIOUR -- rejection regenerating to a
 #     fresh attempt-scoped path, the resume-skip path reaching the gate at
 #     all, a stale attempt-bound verdict failing to approve a later attempt,
 #     exhaustion reporting its own reason instead of falling into the merge,
@@ -1376,8 +1629,9 @@ def test_shared_retry_recovers_mid_loop_and_matches_exact_count(tmp_path):
 # The glossary template drives a SINGLE-stage `pipeline(BATCHES, batchStep)`
 # (not the mass template's two-stage pipeline), and uses its own agent()
 # call labels (glossary:precheck:N / glossary:dispatch:N / glossary:wait:N /
-# glossary:citation-review:N, plus the batch-level glossary:merge /
-# glossary:verify), so it needs its own instantiate helper + mock harness
+# glossary:citation-prepare:N / glossary:citation-review:N, plus the
+# batch-level glossary:merge / glossary:verify), so it needs its own
+# instantiate helper + mock harness
 # below; only `_wrap_for_execution` (owner-agnostic) is reused verbatim.
 # ===========================================================================
 
@@ -1425,14 +1679,22 @@ def instantiate_glossary_pass(
 # "READY <idx>" (fragment becomes ready). The batch-level glossary:merge /
 # glossary:verify calls always succeed (verify returns {verified:true}).
 #
-# The citation review (1.16.0) ALWAYS approves here, and there is deliberately
-# no way to script a rejection in this file. Every count below is therefore a
+# The citation prepare (1.16.1) ALWAYS reports its evidence ready and the
+# citation review (1.16.0) ALWAYS approves, and there is deliberately no way to
+# script a failure of either in this file. Every count below is therefore a
 # first-attempt cost, which is what the cost estimator's own tests need; the
 # retry ladder appears here only as the CEILING the preflight charges for,
-# never as an executed path. Rejection, regeneration, exhaustion, and the
-# stale-verdict case are glossary_citation_review.test.py's subject -- its
-# harness records rendered prompt text, so it can assert what a regeneration
-# actually carries forward, which this harness structurally cannot.
+# never as an executed path. Rejection, regeneration, exhaustion, the
+# stale-verdict case, and (1.16.1) a prepare failure short-circuiting before the
+# judge are glossary_citation_review.test.py's subject -- its harness records
+# rendered prompt text, so it can assert what a regeneration actually carries
+# forward, which this harness structurally cannot. That file also owns the one
+# MEASURED exhaustion run (its test_live_worst_case_run_does_not_exceed_its_own_
+# estimate), which is what pins the ceiling below from BELOW -- this file's
+# harness always approves and so structurally cannot reach it. The two constants
+# are made one fact by that file's own cross-file seam assertion,
+# test_live_per_batch_ceiling_is_pinned_to_the_template_and_the_estimator_file,
+# which reads GLOSSARY_LIVE_PER_BATCH_CEILING below out of this module.
 # ---------------------------------------------------------------------------
 GLOSSARY_HARNESS_TEMPLATE = r"""
 'use strict';
@@ -1448,6 +1710,13 @@ let pipelineCalled = false;
 // attempt, so this doubles as the attempt number the verdict sentinel must
 // name -- a verdict is a statement about ONE attempt path, not about a batch.
 const reviewCounts = {};
+// #347/1.16.1 -- the prepare step gets its OWN counter rather than sharing the
+// review's. They run once each per attempt and so hold the same value on every
+// path this file drives, but only because prepare always succeeds here: a
+// prepare failure short-circuits before the judge, and a shared counter would
+// then have the judge's sentinel naming the wrong attempt. Two counters keep
+// the harness honest about a path it does not itself script.
+const prepareCounts = {};
 
 async function agent(promptText, opts) {
   opts = opts || {};
@@ -1470,6 +1739,18 @@ async function agent(promptText, opts) {
   if (kind === "precheck") return (p.precheck !== undefined) ? p.precheck : ("ABSENT " + idx);
   if (kind === "dispatch") return "FRAGMENT " + idx;
   if (kind === "wait") return (p.wait !== undefined) ? p.wait : ("READY " + idx);
+  if (kind === "citation-prepare") {
+    // #347/1.16.1 -- the fetch step, split out of the reviewer so the agent that
+    // decides what to fetch never reads a retrieved byte. It ALWAYS reports its
+    // evidence ready here: an attempt whose prepare FAILS short-circuits before
+    // the judge and spends 3 calls rather than 4, so scripting a failure would
+    // measure a cheaper path than any count in this section is about. That path
+    // is glossary_citation_review.test.py's
+    // test_prepare_failure_can_exhaust_the_ladder_under_its_own_reason.
+    const attempt = prepareCounts[idx] || 0;
+    prepareCounts[idx] = attempt + 1;
+    return "EVIDENCE_READY " + idx + " ATTEMPT " + attempt;
+  }
   if (kind === "citation-review") {
     // ALWAYS approves this attempt. Scripting a rejection -- and with it the
     // retry ladder, exhaustion, and the stale-verdict case -- belongs to
@@ -1580,18 +1861,28 @@ def run_glossary_workflow(
 # ---------------------------------------------------------------------------
 GLOSSARY_MAX_CITATION_RETRIES = 2          # template: const MAX_CITATION_RETRIES
 GLOSSARY_MAX_ATTEMPTS = GLOSSARY_MAX_CITATION_RETRIES + 1          # 3
-# per batch, worst case: precheck 1 + attempts * (dispatch + wait + review) 3
-GLOSSARY_LIVE_PER_BATCH_CEILING = 1 + 3 * GLOSSARY_MAX_ATTEMPTS    # 10
+# per batch, worst case: precheck 1 + attempts * (dispatch + wait + citation
+# prepare + citation judge) 4. The per-attempt term is 4 and not 3 as of 1.16.1
+# (#347): the reviewer split into a prepare call that runs the validated fetcher
+# without ingesting page content and a judge call that reads only local files.
+GLOSSARY_LIVE_PER_BATCH_CEILING = 1 + 4 * GLOSSARY_MAX_ATTEMPTS    # 13
 # per batch, offline: precheck 1 + the single dispatch + wait pair 2. The
 # review is a no-op there, which ALSO removes the only thing that can reject an
-# attempt -- so the ladder can never advance past attempt 0.
+# attempt -- so the ladder can never advance past attempt 0. UNCHANGED by
+# #347's split, which is the whole reason it is a separate constant: there is no
+# reviewer to split under offline, so an offline project's tuned
+# engine.batch_agent_cap must keep working across this release untouched.
 GLOSSARY_OFFLINE_PER_BATCH = 1 + 2                                 # 3
 # per RUN, either mode: the serialized merge call + the disk-independent verify
 GLOSSARY_FIXED_MERGE_VERIFY = 2
 # per batch, live, when the review approves on the first attempt (the happy
 # path every plan in this file takes unless it scripts a REJECT):
-#   precheck 1 + attempt0 (dispatch + wait + review) 3
-GLOSSARY_LIVE_PER_BATCH_APPROVED_FIRST = 1 + 3                     # 4
+#   precheck 1 + attempt0 (dispatch + wait + prepare + judge) 4
+GLOSSARY_LIVE_PER_BATCH_APPROVED_FIRST = 1 + 4                     # 5
+# per batch, live, when the precheck resume-skips a valid fragment: precheck 1 +
+# (prepare + judge) 2. The skip drops the dispatch and the wait; it is NOT
+# exempt from the review, which is exactly why the saving is 2 and not 4.
+GLOSSARY_LIVE_PER_BATCH_RESUME_SKIPPED = 1 + 2                     # 3
 
 
 def test_glossary_citation_retry_bound_is_the_documented_two():
@@ -1607,10 +1898,51 @@ def test_glossary_citation_retry_bound_is_the_documented_two():
     )
 
 
+def test_glossary_live_per_attempt_term_is_the_template_own_multiplier():
+    """The OTHER knob every live count here hangs off: how many calls one
+    attempt costs. #347 moved it from 3 to 4 (the reviewer split into prepare +
+    judge) and nothing in this file would have noticed -- the ceiling is a
+    Python arithmetic expression, so a template that went back to 3, or on to 5,
+    would leave every assertion below internally consistent and wrong.
+
+    The authoritative comparison of the three copies (template expression, this
+    file's constant, glossary_citation_review.test.py's) is that file's
+    test_live_per_batch_ceiling_is_pinned_to_the_template_and_the_estimator_file,
+    which imports this module and reads the constant out of it. This assertion
+    is the local tripwire, and it is not redundant with the seam: it names the
+    per-attempt MULTIPLIER specifically, so a drift reports as "the ladder
+    changed shape" here rather than only as "two totals disagree" there."""
+    text = GLOSSARY_PASS_TEMPLATE.read_text(encoding="utf-8")
+    per_attempt, remainder = divmod(
+        GLOSSARY_LIVE_PER_BATCH_CEILING - 1, GLOSSARY_MAX_ATTEMPTS
+    )
+    # Carries its own message rather than being a bare assert: this fires FIRST,
+    # so a bare one would report a stale ceiling as an unexplained AssertionError
+    # and bury the very diagnostic this test exists to give.
+    assert remainder == 0 and per_attempt == 4, (
+        f"GLOSSARY_LIVE_PER_BATCH_CEILING ({GLOSSARY_LIVE_PER_BATCH_CEILING}) is no "
+        f"longer 1 precheck + {GLOSSARY_MAX_ATTEMPTS} attempts * 4 calls. Either the "
+        f"ladder changed and every count in this section needs re-deriving from the "
+        f"template's preflight comment and from the labels a real run emits, or the "
+        f"constant was patched to silence a failure -- which is the move this test "
+        f"exists to stop"
+    )
+    assert f"1 + {per_attempt} * (MAX_CITATION_RETRIES + 1)" in text, (
+        f"the template's live perBatchCalls expression is no longer "
+        f"`1 + {per_attempt} * (MAX_CITATION_RETRIES + 1)`. An attempt now costs a "
+        f"different number of calls than the {per_attempt} "
+        f"(dispatch + wait + citation prepare + citation judge) this section's "
+        f"GLOSSARY_LIVE_PER_BATCH_CEILING is built from -- RE-DERIVE the ladder "
+        f"from the template's own preflight comment and from the labels a real "
+        f"run emits, do not patch the constant until the suite goes green"
+    )
+
+
 # ---------------------------------------------------------------------------
-# Preflight cost cap (#95, re-derived for 1.16.0's citation-review ladder).
+# Preflight cost cap (#95, re-derived for 1.16.0's citation-review ladder and
+# again for 1.16.1's prepare/judge split, #347).
 #
-#   live    -- perBatch = 1 + 3*(MAX_CITATION_RETRIES+1) = 10
+#   live    -- perBatch = 1 + 4*(MAX_CITATION_RETRIES+1) = 13
 #   offline -- perBatch = 1 + 2 = 3   (unchanged from the historical formula)
 #   estimatedCalls = perBatch * N + 2
 # ---------------------------------------------------------------------------
@@ -1619,9 +1951,10 @@ def test_glossary_citation_retry_bound_is_the_documented_two():
 def test_glossary_preflight_boundary_exactly_at_cap_permits_dispatch(tmp_path):
     batches = _glossary_batches(2)
     # Derivation (live): perBatch = precheck 1 + 3 attempts * (dispatch +
-    # wait + review) 3 = 10; 2 batches = 20; + merge/verify 2 = 22.
+    # wait + citation prepare + citation judge) 4 = 13; 2 batches = 26;
+    # + merge/verify 2 = 28.
     estimated = GLOSSARY_LIVE_PER_BATCH_CEILING * len(batches) + GLOSSARY_FIXED_MERGE_VERIFY
-    assert estimated == 22
+    assert estimated == 28
 
     out = run_glossary_workflow(
         tmp_path=tmp_path,
@@ -1637,12 +1970,12 @@ def test_glossary_preflight_boundary_exactly_at_cap_permits_dispatch(tmp_path):
     # OBSERVED cost, which is no longer the estimate: as of 1.16.0 the live
     # estimate is a worst-case CEILING (every review rejects until the ladder
     # is exhausted), while this plan's reviews all approve on attempt 0.
-    # Derivation: per batch precheck 1 + attempt0 dispatch/wait/review 3 = 4;
-    # 2 batches = 8; + merge/verify 2 = 10.
+    # Derivation: per batch precheck 1 + attempt0 dispatch/wait/prepare/judge
+    # 4 = 5; 2 batches = 10; + merge/verify 2 = 12.
     expected_observed = (
         GLOSSARY_LIVE_PER_BATCH_APPROVED_FIRST * len(batches) + GLOSSARY_FIXED_MERGE_VERIFY
     )
-    assert expected_observed == 10
+    assert expected_observed == 12
     assert len(out["calls"]) == expected_observed
     # ...and the ceiling really does bound it, which is the whole point of the
     # preflight refusing on the ceiling rather than on the happy-path cost.
@@ -1651,9 +1984,9 @@ def test_glossary_preflight_boundary_exactly_at_cap_permits_dispatch(tmp_path):
 
 def test_glossary_preflight_one_below_boundary_blocks_dispatch_entirely(tmp_path):
     batches = _glossary_batches(2)
-    # Same live derivation as above: 10*2 + 2 = 22.
+    # Same live derivation as above: 13*2 + 2 = 28.
     estimated = GLOSSARY_LIVE_PER_BATCH_CEILING * len(batches) + GLOSSARY_FIXED_MERGE_VERIFY
-    assert estimated == 22
+    assert estimated == 28
 
     out = run_glossary_workflow(
         tmp_path=tmp_path,
@@ -1674,10 +2007,10 @@ def test_glossary_preflight_one_below_boundary_blocks_dispatch_entirely(tmp_path
 
 
 @pytest.mark.parametrize("n_batches", [1, 2, 5, 13])
-def test_glossary_preflight_live_formula_is_10_batches_plus_2(tmp_path, n_batches):
-    """Locks the LIVE formula (1 + 3*(MAX_CITATION_RETRIES+1))*N + 2 == 10*N + 2.
+def test_glossary_preflight_live_formula_is_13_batches_plus_2(tmp_path, n_batches):
+    """Locks the LIVE formula (1 + 4*(MAX_CITATION_RETRIES+1))*N + 2 == 13*N + 2.
 
-    Three wrong variants this discriminates against, each a plausible partial
+    Four wrong variants this discriminates against, each a plausible partial
     implementation, with the per-batch term spelled out so the arithmetic can be
     checked rather than taken on faith:
       * the historical pre-1.16.0 estimate, review and ladder both uncharged:
@@ -1686,13 +2019,20 @@ def test_glossary_preflight_live_formula_is_10_batches_plus_2(tmp_path, n_batche
         1 + (MAX_CITATION_RETRIES+1) * (dispatch + wait) = 1 + 3*2 = 7  -> 7*N + 2
       * the review charged ONCE rather than per attempt:
         1 + 3*2 + 1                                           = 8  -> 8*N + 2
-    Only the full ladder gives 10. Cheap: the gate trips before pipeline() ever
-    runs, so no PLAN and zero agent calls are needed."""
+      * the 1.16.0 figure -- the full ladder, but the reviewer still counted as
+        ONE call per attempt rather than #347's prepare + judge pair:
+        1 + 3*(dispatch + wait + review) = 1 + 3*3            = 10 -> 10*N + 2
+    Only the split ladder gives 13, and that last variant is the one this
+    release can actually regress into: it is what the file asserted before
+    #347, so any count left un-re-derived lands exactly there. Cheap: the gate
+    trips before pipeline() ever runs, so no PLAN and zero agent calls are
+    needed."""
     batches = _glossary_batches(n_batches)
     # Derivation: perBatch = precheck 1 + 3 attempts * (dispatch + wait +
-    # review) 3 = 10, plus the fixed merge + verify pair 2.
+    # citation prepare + citation judge) 4 = 13, plus the fixed merge + verify
+    # pair 2.
     expected = GLOSSARY_LIVE_PER_BATCH_CEILING * n_batches + GLOSSARY_FIXED_MERGE_VERIFY
-    assert expected == {1: 12, 2: 22, 5: 52, 13: 132}[n_batches]
+    assert expected == {1: 15, 2: 28, 5: 67, 13: 171}[n_batches]
 
     out = run_glossary_workflow(
         tmp_path=tmp_path,
@@ -1780,17 +2120,23 @@ def test_glossary_resume_skip_trusts_valid_fragment_and_skips_dispatch(tmp_path)
     assert out["result"]["merged"] is True
     assert out["result"]["batches"][0]["ready"] is True
     assert out["result"]["batches"][0]["batchIndex"] == 0
-    # Derivation (live, 1.16.0): precheck 1 + merge 1 + verify 1 = 3, PLUS the
-    # citation review 1 -- the resume-skip saves the dispatch and the wait, but
-    # it is NOT exempt from the review. That the review is REACHABLE from this
-    # path at all is load-bearing rather than incidental (a stale, unreviewed
-    # fragment already on disk is precisely the run a review placed only after
-    # dispatch/wait would bypass), and it is asserted in
-    # tests/glossary_citation_review.test.py, by
+    # Derivation (live, 1.16.1): precheck 1 + merge 1 + verify 1 = 3, PLUS the
+    # citation review's TWO calls (prepare + judge) -- the resume-skip saves the
+    # dispatch and the wait, but it is NOT exempt from the review. That the
+    # review is REACHABLE from this path at all is load-bearing rather than
+    # incidental (a stale, unreviewed fragment already on disk is precisely the
+    # run a review placed only after dispatch/wait would bypass), and it is
+    # asserted in tests/glossary_citation_review.test.py, by
     # test_resume_skipped_fragment_is_still_citation_reviewed; here the review
-    # is only the +1 in the count. = 4.
-    assert len(out["calls"]) == 1 + 1 + GLOSSARY_FIXED_MERGE_VERIFY
-    assert len(out["calls"]) == 4
+    # is only the +2 in the count. = 5.
+    assert len(out["calls"]) == GLOSSARY_LIVE_PER_BATCH_RESUME_SKIPPED + GLOSSARY_FIXED_MERGE_VERIFY
+    assert len(out["calls"]) == 5
+    # The saving is stated as a saving, not just as a total: #347 raised what a
+    # fresh batch costs, and a resume that quietly stopped skipping anything
+    # would still satisfy the equality above once the constants moved with it.
+    assert (
+        GLOSSARY_LIVE_PER_BATCH_APPROVED_FIRST - GLOSSARY_LIVE_PER_BATCH_RESUME_SKIPPED == 2
+    ), "the resume-skip must save exactly the dispatch + wait pair, and nothing else"
 
 
 def test_glossary_resume_precheck_absent_falls_through_to_real_dispatch(tmp_path):
@@ -1813,12 +2159,12 @@ def test_glossary_resume_precheck_absent_falls_through_to_real_dispatch(tmp_path
     )
     assert "glossary:wait:0" in labels
     assert out["result"]["merged"] is True
-    # Derivation (live, 1.16.0): precheck 1 + attempt0 dispatch/wait/review 3 = 4,
-    # + merge/verify 2 = 6.
+    # Derivation (live, 1.16.1): precheck 1 + attempt0
+    # dispatch/wait/prepare/judge 4 = 5, + merge/verify 2 = 7.
     assert len(out["calls"]) == (
         GLOSSARY_LIVE_PER_BATCH_APPROVED_FIRST + GLOSSARY_FIXED_MERGE_VERIFY
     )
-    assert len(out["calls"]) == 6
+    assert len(out["calls"]) == 7
 
 
 def test_glossary_resume_skip_is_decided_per_batch(tmp_path):
@@ -1841,8 +2187,12 @@ def test_glossary_resume_skip_is_decided_per_batch(tmp_path):
     assert "glossary:dispatch:1" in labels
     assert "glossary:wait:1" in labels
     assert out["result"]["merged"] is True
-    # Derivation (live, 1.16.0): batch0 precheck 1 + review 1 = 2 (skipped its
+    # Derivation (live, 1.16.1): batch0 precheck 1 + review 2 = 3 (skipped its
     # dispatch + wait, but not its review); batch1 precheck 1 + attempt0
-    # dispatch/wait/review 3 = 4; + merge/verify 2 == 8.
-    assert len(out["calls"]) == 2 + GLOSSARY_LIVE_PER_BATCH_APPROVED_FIRST + GLOSSARY_FIXED_MERGE_VERIFY
-    assert len(out["calls"]) == 8
+    # dispatch/wait/prepare/judge 4 = 5; + merge/verify 2 == 10.
+    assert len(out["calls"]) == (
+        GLOSSARY_LIVE_PER_BATCH_RESUME_SKIPPED
+        + GLOSSARY_LIVE_PER_BATCH_APPROVED_FIRST
+        + GLOSSARY_FIXED_MERGE_VERIFY
+    )
+    assert len(out["calls"]) == 10

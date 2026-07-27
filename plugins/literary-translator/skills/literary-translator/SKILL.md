@@ -443,8 +443,12 @@ here, follow the linked doc:
     gates on the deterministic on-disk validators — translate: `draft_ready.py`
     AND `validate_draft.py`; review: `review_ready.py` — as the SOLE
     acceptance authority (never the driver's own return or joblog), consuming
-    the verdict off disk. No `agent()` schema param is involved on this path;
-    the deterministic validators are the check.
+    the verdict off disk. **1.16.1 (#348):** that WAIT poll is spent as up to
+    8 bounded chunk `agent()` calls plus ONE authoritative non-polling
+    re-check of the canonical artifact — the Bash tool clamps any single call
+    at 600 s — while the 3450 s wait bound itself is unchanged. No `agent()`
+    schema param is involved on this path; the deterministic validators are
+    the check.
   - **Glossary/canon-pass batches (unchanged, §6):** each batch is still a
     **schema-less, fire-and-forget DISPATCH** — `agentType:'codex:codex-rescue'`,
     no `schema` param — that writes its verdict to a `{{RUN_ID}}`-scoped disk

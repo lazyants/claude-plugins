@@ -9,6 +9,27 @@ the bytes that were reviewed"). The rule is conditioned on `resume`:
 Nothing else deletes fragments and a MATCH-resume reuses the same run_id, so on
 a fresh-id collision with an orphaned glossary dir a surviving attempt 0 would
 be audited stale -- which is why a fresh run keeps nothing.
+
+LT 1.16.1 (#347) adds a THIRD kind of stale artifact, with its own rule:
+
+  evidence_{i}_attempt_{n}/ -- wiped UNCONDITIONALLY, fresh and resume alike,
+  attempt 0 included.
+
+The asymmetry with out_* is the point, and this file locks it as such. Evidence
+directories follow the approved_* rule: they are an OUTPUT of the citation
+review, re-produced by the prepare step that runs before anything judges them,
+so a surviving copy is never useful and is potentially wrong. Keeping attempt
+0's FRAGMENT is what the resume-skip optimisation depends on; keeping attempt
+0's EVIDENCE buys nothing and would leave a prior run's fetched page bodies at
+exactly the paths this run writes.
+
+Two traps this file is shaped around. First, the pre-#347 wipe could not have
+removed these even if its regex had matched: they are DIRECTORIES and the
+fragment path calls entry.unlink(). Second, and less obvious: an EMPTY
+directory is removed by a bare rmdir() too, so a test seeding one would stay
+green against an implementation that silently fails on real content -- which is
+the only content an evidence dir ever has. Every evidence dir seeded here is
+non-empty and nested.
 """
 
 import importlib.util
@@ -31,21 +52,70 @@ def rs():
     return module
 
 
+_FRAGMENTS = (
+    "out_0_attempt_0.json",
+    "out_0_attempt_1.json",
+    "out_1_attempt_0.json",
+    "out_2_attempt_3.json",
+    "approved_0_attempt_0.json",
+    "approved_1_attempt_2.json",
+)
+
+# The only two fragments a RESUME keeps.
+_RESUME_SURVIVING_FRAGMENTS = ("out_0_attempt_0.json", "out_1_attempt_0.json")
+
+# #347 evidence directories, named exactly as the code that writes them names
+# them: glossary-pass-wf.template.js's evidenceDir() builds
+# RUN_DIR + "/evidence_" + index + "_attempt_" + attempt, and fetch_citation.py
+# fills it with one body file per admitted url plus index.json. Seeded from the
+# writer's own convention rather than from prose, so a rename there surfaces
+# here as a red test instead of a test that quietly stops describing anything.
+_EVIDENCE_DIRS = (
+    "evidence_0_attempt_0",
+    "evidence_0_attempt_1",
+    "evidence_2_attempt_3",
+)
+
+# Entries the wipe must never touch, under EITHER flag. The evidence_* ones are
+# NEAR MISSES on purpose -- a file whose name merely ends in the attempt-dir
+# form, a non-numeric index, a bare prefix. Without them a regex loosened to
+# `evidence_.*` would be indistinguishable from the real anchored one, and the
+# blast radius of that mistake is somebody else's directory.
+_UNTOUCHED_FILES = (
+    "manifest_0.json",
+    "manifest_all.json",
+    "input.digest",
+    "evidence_0_attempt_0.json",
+    "evidence_all.json",
+)
+_UNTOUCHED_DIRS = (
+    "evidence_x_attempt_0",
+    "evidence_summary",
+)
+_UNTOUCHED = tuple(sorted(_UNTOUCHED_FILES + _UNTOUCHED_DIRS))
+
+
+def _seed_evidence_dir(path: Path) -> None:
+    """One evidence directory with realistic, NON-EMPTY, nested content.
+
+    Non-empty is load-bearing: rmdir() removes an empty directory just as
+    rmtree() does, so an empty fixture would pass against an implementation
+    that fails on every directory this ever actually has."""
+    (path / "nested").mkdir(parents=True, exist_ok=True)
+    (path / "index.json").write_text('{"entries": []}', encoding="utf-8")
+    (path / "body_0.html").write_text("<html>stale fetched page</html>", encoding="utf-8")
+    (path / "nested" / "deeper.txt").write_text("x", encoding="utf-8")
+
+
 def _seed(dirpath: Path) -> None:
     dirpath.mkdir(parents=True, exist_ok=True)
-    for name in (
-        "out_0_attempt_0.json",
-        "out_0_attempt_1.json",
-        "out_1_attempt_0.json",
-        "out_2_attempt_3.json",
-        "approved_0_attempt_0.json",
-        "approved_1_attempt_2.json",
-        # non-fragment files that must never be touched:
-        "manifest_0.json",
-        "manifest_all.json",
-        "input.digest",
-    ):
+    for name in _FRAGMENTS + _UNTOUCHED_FILES:
         (dirpath / name).write_text("x", encoding="utf-8")
+    for name in _UNTOUCHED_DIRS:
+        (dirpath / name).mkdir()
+        (dirpath / name / "keep.txt").write_text("x", encoding="utf-8")
+    for name in _EVIDENCE_DIRS:
+        _seed_evidence_dir(dirpath / name)
 
 
 def _names(dirpath: Path):
@@ -56,9 +126,9 @@ def test_fresh_run_wipes_every_attempt_including_zero(rs, tmp_path):
     d = tmp_path / "glossary" / "runs" / "R"
     _seed(d)
     rs._wipe_stale_glossary_fragments(d, resume=False)
-    assert _names(d) == ["input.digest", "manifest_0.json", "manifest_all.json"], (
-        "a fresh run must trust nothing on disk -- every out_* and approved_* "
-        f"attempt, including attempt 0, must go. Survivors: {_names(d)}"
+    assert _names(d) == list(_UNTOUCHED), (
+        "a fresh run must trust nothing on disk -- every out_*, approved_* and "
+        f"evidence_* attempt, including attempt 0, must go. Survivors: {_names(d)}"
     )
 
 
@@ -66,16 +136,107 @@ def test_resume_keeps_attempt_zero_but_wipes_the_rest(rs, tmp_path):
     d = tmp_path / "glossary" / "runs" / "R"
     _seed(d)
     rs._wipe_stale_glossary_fragments(d, resume=True)
-    assert _names(d) == [
-        "input.digest",
-        "manifest_0.json",
-        "manifest_all.json",
-        "out_0_attempt_0.json",
-        "out_1_attempt_0.json",
-    ], (
+    assert _names(d) == sorted(_UNTOUCHED + _RESUME_SURVIVING_FRAGMENTS), (
         "a resume keeps out_{i}_attempt_0 (the resume-skip optimisation depends "
         "on it and it is still citation-reviewed) but must wipe every attempt "
-        f">=1 and every approved_* snapshot. Survivors: {_names(d)}"
+        ">=1, every approved_* snapshot and every evidence_* directory. "
+        f"Survivors: {_names(d)}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# #347 -- evidence directories. The exact-list assertions above already carry
+# these transitively; the tests below state each half on its own so a failure
+# names the property that broke rather than printing a directory diff.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("resume", [False, True])
+def test_every_evidence_directory_is_wiped_under_either_flag(rs, tmp_path, resume):
+    """The unconditional rule, both flags exercised from one body so neither can
+    drift green while the other rots. Parametrised rather than duplicated
+    because the assertion is identical -- that is the whole claim."""
+    d = tmp_path / "glossary" / "runs" / "R"
+    _seed(d)
+    rs._wipe_stale_glossary_fragments(d, resume=resume)
+    survivors = [n for n in _names(d) if n in _EVIDENCE_DIRS]
+    assert survivors == [], (
+        f"evidence directories survived a resume={resume} wipe: {survivors}. They are "
+        f"an OUTPUT of the citation review, re-produced by the prepare step before "
+        f"anything judges them, so a survivor is never useful and sits at exactly "
+        f"the path this run writes"
+    )
+
+
+def test_resume_keeps_fragment_attempt_zero_but_never_its_evidence(rs, tmp_path):
+    """THE asymmetry, asserted as one pair so it cannot be read as an oversight.
+
+    Same batch, same attempt 0, opposite fates: out_0_attempt_0.json stays
+    because the resume-skip optimisation depends wholly on it, and
+    evidence_0_attempt_0/ goes because evidence follows the approved_* rule.
+    The plausible-looking wrong implementation -- treating evidence like out_*
+    and sparing attempt 0 on a resume -- passes every other test in this file."""
+    d = tmp_path / "glossary" / "runs" / "R"
+    _seed(d)
+    rs._wipe_stale_glossary_fragments(d, resume=True)
+
+    assert (d / "out_0_attempt_0.json").is_file(), (
+        "a resume must KEEP the attempt-0 fragment -- the resume-skip "
+        "optimisation depends wholly on it"
+    )
+    assert not (d / "evidence_0_attempt_0").exists(), (
+        "a resume must WIPE attempt 0's evidence directory even though it keeps "
+        "attempt 0's fragment. Evidence follows the approved_* rule, not the out_* "
+        "one: sparing it buys nothing and leaves a previous run's fetched page "
+        "bodies at exactly the paths this run writes"
+    )
+
+
+@pytest.mark.parametrize("resume", [False, True])
+def test_evidence_wipe_removes_a_non_empty_nested_directory(rs, tmp_path, resume):
+    """Property 4, isolated. An empty directory falls to rmdir() as readily as to
+    rmtree(), so this is the only test here that can tell the two apart -- and a
+    real evidence directory is never empty."""
+    d = tmp_path / "glossary" / "runs" / "R"
+    d.mkdir(parents=True)
+    target = d / "evidence_7_attempt_2"
+    _seed_evidence_dir(target)
+    assert (target / "nested" / "deeper.txt").is_file(), "fixture did not seed real content"
+
+    rs._wipe_stale_glossary_fragments(d, resume=resume)
+
+    assert not target.exists(), (
+        "a NON-EMPTY evidence directory survived the wipe. rmdir() refuses a "
+        "populated directory and unlink() refuses a directory outright -- either "
+        "would leave every real evidence dir on disk while an empty-dir test "
+        "stayed green"
+    )
+    assert _names(d) == [], f"unexpected leftovers: {_names(d)}"
+
+
+@pytest.mark.parametrize("resume", [False, True])
+def test_a_plain_file_named_like_an_evidence_dir_does_not_break_the_wipe(rs, tmp_path, resume):
+    """The is_dir() guard, and why it is not decoration.
+
+    shutil.rmtree() raises NotADirectoryError on a plain file. Without the
+    guard, one stray file matching the evidence name form would abort the wipe
+    MID-ITERATION -- leaving the run half-wiped, which is worse than not wiping
+    at all, because the surviving half looks deliberately kept."""
+    d = tmp_path / "glossary" / "runs" / "R"
+    _seed(d)
+    (d / "evidence_9_attempt_9").write_text("a file, not a directory", encoding="utf-8")
+
+    rs._wipe_stale_glossary_fragments(d, resume=resume)  # must not raise
+
+    expected = sorted(
+        _UNTOUCHED
+        + ("evidence_9_attempt_9",)
+        + (_RESUME_SURVIVING_FRAGMENTS if resume else ())
+    )
+    assert _names(d) == expected, (
+        f"a plain file named like an evidence directory must be left alone (it "
+        f"matches no fragment pattern) and must not stop the rest of the wipe. "
+        f"Survivors: {_names(d)}"
     )
 
 

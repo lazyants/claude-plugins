@@ -62,7 +62,7 @@ def extract_guard_function(source: str, template_path: Path) -> str:
     that brace is the function's own. The BODY is what has to be identical --
     the leading comment above it is deliberately NOT included, because each
     template's comment reasons about its own call sites (glossary names its
-    three, mass-translate names the DRAFT_MISSING site it leaves unguarded) and
+    four, mass-translate names the DRAFT_MISSING site it leaves unguarded) and
     forcing those to match would be forcing them to be wrong."""
     m = _SIGNATURE_RE.search(source)
     assert m is not None, (
@@ -144,11 +144,62 @@ def _guard_comment(source: str, template_path: Path) -> str:
 # Deliberately NOT including "glossary_citation_review": both templates cite that
 # file legitimately, as the home of the guard's unit test, so it would fire on
 # correct prose.
+#
+# EVERY ENTRY MUST STILL OCCUR IN GLOSSARY'S OWN COMMENT, and
+# test_glossary_only_claims_still_occur_in_the_glossary_comment below is what
+# makes that a checked property rather than an assumption. The reason is the
+# failure this list actually suffered: it read "all three call sites" until
+# #347's prepare/judge split made glossary's comment say four, at which point the
+# needle occurred in NEITHER template. The absence assertion below went on
+# passing -- it asserts absence from mass-translate, and a string that exists
+# nowhere is absent from everything -- so a paste detector that had silently
+# stopped detecting anything looked exactly like a healthy one. A needle that
+# quotes prose is the fragile kind on purpose: it is the only kind that catches
+# a paste of prose, so the fragility is paid for with the guard, not avoided by
+# picking weaker needles.
 GLOSSARY_ONLY_CLAIMS = [
-    "all three call sites",
+    # #347/1.16.1 -- glossary guards FOUR sites (precheck, wait, citation
+    # prepare, citation judge); mass-translate guards two waits. Verified
+    # against both comments, not inferred from the site count.
+    "at all four sites",
     "notReadyBatches",
     "MAX_CITATION_RETRIES",
 ]
+
+
+def test_glossary_only_claims_still_occur_in_the_glossary_comment():
+    """The anti-rot guard for the list above, and the reason this file did not
+    notice #347 on its own.
+
+    ``test_the_two_guard_comments_are_deliberately_not_identical`` asserts these
+    claims are ABSENT from mass-translate. That assertion is vacuously true of
+    any string nobody writes -- so once glossary's own prose moves, the needle
+    stops matching the source it exists to detect pastes FROM, and the paste
+    detector degrades to a no-op while staying green. That is the same
+    false-green shape as a divergent copy of the guard: a check that cannot
+    fail, indistinguishable in the log from one that has nothing to report.
+
+    So the pairing is the point. The other test says "this claim must not appear
+    over there"; this one says "it must still appear over here". Neither is
+    sufficient alone, and only together do they mean "a paste would be caught".
+
+    If this goes red, the fix is to re-read glossary's guard comment and requote
+    the claim it makes NOW -- never to delete the entry, and never to relax it to
+    something both templates say (which would break the other test instead)."""
+    glossary_comment = _guard_comment(
+        GLOSSARY_PASS_TEMPLATE.read_text(encoding="utf-8"), GLOSSARY_PASS_TEMPLATE
+    )
+    missing = [claim for claim in GLOSSARY_ONLY_CLAIMS if claim not in glossary_comment]
+    assert not missing, (
+        f"GLOSSARY_ONLY_CLAIMS entries {missing} no longer occur in "
+        f"glossary-pass-wf.template.js's rejectedAnywhere() comment. They are the "
+        f"needles test_the_two_guard_comments_are_deliberately_not_identical uses "
+        f"to detect that comment being pasted over mass-translate's -- a needle "
+        f"absent from the SOURCE matches nothing anywhere, so that test would keep "
+        f"passing while detecting nothing at all. Re-read the glossary comment and "
+        f"requote the claim it makes now; do not delete the entry, and do not "
+        f"replace it with something mass-translate also says"
+    )
 
 
 def test_the_two_guard_comments_are_deliberately_not_identical():
@@ -156,9 +207,10 @@ def test_the_two_guard_comments_are_deliberately_not_identical():
 
     The obvious way to "fix" a failing parity test is to paste one template's
     block over the other's. Doing that here would ship prose describing another
-    file's control flow: glossary's comment counts THREE guarded call sites and
-    reasons about the citation review, MAX_CITATION_RETRIES and notReadyBatches,
-    none of which exist in mass-translate, which guards TWO sites with different
+    file's control flow: glossary's comment counts FOUR guarded call sites (#347
+    split its citation reviewer into a prepare call and a judge call) and reasons
+    about the citation review, MAX_CITATION_RETRIES and notReadyBatches, none of
+    which exist in mass-translate, which guards TWO sites with different
     sentinels and different recovery. Wrong prose about a security guard is the
     same defect class the guard itself was added to close.
 
@@ -186,7 +238,7 @@ def test_the_two_guard_comments_are_deliberately_not_identical():
     assert not leaked, (
         f"mass-translate-wf.template.js's guard comment carries glossary-specific "
         f"claim(s) {leaked}, which are false in mass-translate: it guards two "
-        f"sites, not three, and has no citation-review retry ladder or "
+        f"sites, not four, and has no citation-review retry ladder or "
         f"notReadyBatches branch. This is what pasting glossary's comment across "
         f"looks like"
     )

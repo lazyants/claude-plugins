@@ -111,6 +111,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -385,6 +386,11 @@ def write_glossary_manifests(glossary_run_dir: Path, batches) -> None:
 
 _GLOSSARY_FRAGMENT_RE = re.compile(r"^(out|approved)_(\d+)_attempt_(\d+)\.json$")
 
+# #347 -- the citation audit's prepare step writes a DIRECTORY per batch attempt
+# (fetched evidence bodies plus index.json), not a file, so the fragment regex
+# above cannot see it and entry.unlink() could not remove it anyway.
+_GLOSSARY_EVIDENCE_DIR_RE = re.compile(r"^evidence_(\d+)_attempt_(\d+)$")
+
 
 def _wipe_stale_glossary_fragments(glossary_run_dir: Path, resume: bool) -> None:
     """Remove fragments a later wait step could otherwise poll while assuming
@@ -410,8 +416,25 @@ def _wipe_stale_glossary_fragments(glossary_run_dir: Path, resume: bool) -> None
 
     Cost of the fresh-run wipe is at most one re-dispatch per batch on the rare
     orphan collision, never a wrong result.
+
+    EVIDENCE DIRECTORIES (#347) are wiped UNCONDITIONALLY -- fresh run and
+    resume alike, attempt 0 included. They follow the `approved_*` rule, not the
+    `out_*` one, and for the same reason: evidence is an OUTPUT of the citation
+    review, re-produced by the prepare step that runs before anything judges it,
+    so a surviving copy is never useful and is potentially wrong. It is the
+    stronger reading of the resume rule, and the asymmetry with `out_*` is
+    deliberate: keeping attempt 0's FRAGMENT is what the resume-skip
+    optimisation depends on, whereas keeping attempt 0's EVIDENCE buys nothing
+    and would leave a previous run's fetched page bodies sitting at exactly the
+    paths this run writes. The judge is separately instructed to read only the
+    files this run's `index.json` names, so this is defence in depth rather than
+    the sole protection -- but a stale body reachable at a live path is the kind
+    of thing that outlives the prompt that currently makes it harmless.
     """
     for entry in glossary_run_dir.iterdir():
+        if _GLOSSARY_EVIDENCE_DIR_RE.match(entry.name) and entry.is_dir():
+            shutil.rmtree(entry)
+            continue
         m = _GLOSSARY_FRAGMENT_RE.match(entry.name)
         if m is None:
             continue

@@ -155,13 +155,15 @@ callers (the glossary-pass Workflow, tests) should read stdout, not rely
 on the exit code alone.
 """
 import argparse
+import ipaddress
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
 from typing import NamedTuple
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlsplit
 
 try:
     import jsonschema
@@ -713,6 +715,160 @@ def _uri_format_checker() -> "jsonschema.FormatChecker":
 
 
 # ---------------------------------------------------------------------------
+# Citation `source` safety -- the STATIC half of the #347 fetch boundary
+# ---------------------------------------------------------------------------
+#
+# NOTE ON _is_uri, DIRECTLY ABOVE: it was deliberately NOT widened to do this
+# job. It is the generic `format: "uri"` checker, wired through
+# _check_uri_format -> _uri_format_checker into EVERY validator this script
+# builds, so teaching it about loopback addresses would silently redefine what
+# `format: "uri"` means on every field of every canon schema -- including
+# fields that have nothing to do with citations. `http://127.0.0.1/x` IS a
+# well-formed URI; it is an unacceptable CITATION. Those are two different
+# questions and they stay in two different functions.
+#
+# DELIBERATE DUPLICATION with fetch_citation.py's `validate_url`, which
+# implements this same static decision (its module docstring points back
+# here). Not consolidated into a shared import, for two load-bearing reasons:
+#
+#   1. --check-batch must stay offline-safe and importable WITHOUT the
+#      fetcher. fetch_citation.py owns sockets, TLS and DNS; this file is the
+#      gate that also runs on the offline path, and must not grow an import
+#      edge to a networking module to perform a check that touches no network.
+#   2. A static rejection that fired only at fetch time would not close the
+#      hole at all on that offline path -- nothing ever fetches there, so an
+#      unsafe `source` would reach canon.json's frozen, hash-versioned bytes
+#      completely unexamined.
+#
+# So: same reasons, same strings, two call sites. Change one, change the
+# other, and keep tests/canon_citation_refusal.test.py's table in step.
+
+CITATION_ALLOWED_SCHEMES = ("http", "https")
+
+# Control characters anywhere in the URL. Also catches the raw CR/LF that make
+# request/header splitting possible; \x20 (space) is inside the range on
+# purpose, since a space is enough to carry a second request line.
+_CITATION_CONTROL_CHAR_RE = re.compile(r"[\x00-\x20\x7f]")
+
+
+def _non_global_address_reason(ip) -> "str | None":
+    """The reason this IP literal is not a legitimate citation host, or None.
+
+    Every disqualifying property is named explicitly rather than leaning on
+    `is_global` alone, and every reason ends in "-address" so a caller can
+    recognise the family without matching the exact member.
+
+    `is_global` is the right primary test, but it is neither sufficient nor
+    stable. Not sufficient: 224.0.0.1 reports `is_global` TRUE while being
+    multicast. Not stable: its answer has moved across Python versions
+    (notably for 0.0.0.0/8 and several IPv6 ranges), and this gate must behave
+    identically on whatever interpreter an operator happens to have. The
+    checks therefore overlap deliberately -- WHICH one fires first for a given
+    address is not a contract, only the refusal itself is.
+    """
+    if ip.is_loopback:
+        return "loopback-address"
+    if ip.is_link_local:
+        return "link-local-address"      # includes 169.254.169.254
+    if ip.is_private:
+        return "private-address"
+    if ip.is_multicast:
+        return "multicast-address"
+    if ip.is_reserved:
+        return "reserved-address"
+    if ip.is_unspecified:
+        return "unspecified-address"
+    if not ip.is_global:
+        return "non-global-address"      # e.g. CGNAT 100.64/10, which trips no named property
+    # An IPv4-mapped or 6to4 IPv6 address can smuggle a private v4 address
+    # past every check above, because all of them evaluate the WRAPPER rather
+    # than the payload. Recurse into the payload.
+    mapped = getattr(ip, "ipv4_mapped", None)
+    if mapped is not None:
+        return _non_global_address_reason(mapped)
+    sixtofour = getattr(ip, "sixtofour", None)
+    if sixtofour is not None:
+        return _non_global_address_reason(sixtofour)
+    return None
+
+
+def _citation_source_refusal(value) -> "str | None":
+    """A short, stable machine reason to refuse this citation `source`, or
+    None when it is acceptable.
+
+    STATIC ONLY -- no DNS, no connection, no I/O of any kind. `--check-batch`
+    runs on the offline path and has to stay usable there, so this closes
+    exactly the checks decidable from the URL text alone. The resolve-time
+    half (require EVERY resolved address to be global, connect to the pinned
+    IP, revalidate every redirect hop) lives in fetch_citation.py and cannot
+    be done here. A NAME that resolves to 127.0.0.1 is therefore admitted by
+    this function and refused later by the fetcher: that split is the design,
+    not a gap in it.
+
+    The reason never embeds the offending URL. It goes into an operator-facing
+    message that a retry agent also reads, and a `source` is attacker-
+    authorable in the one sense that matters -- an LLM produced it from source
+    text a hostile document can seed.
+    """
+    if not isinstance(value, str) or not value:
+        return "empty-url"
+    if _CITATION_CONTROL_CHAR_RE.search(value):
+        return "control-character-in-url"
+
+    try:
+        parts = urlsplit(value)
+        scheme = (parts.scheme or "").lower()
+        host = parts.hostname
+        username = parts.username
+        password = parts.password
+    except ValueError:
+        # urlsplit itself raises on e.g. an unbalanced IPv6 bracket
+        # ("http://[::1"). Guarded because this script's contract is ONE line
+        # of JSON on stdout -- an escaping ValueError would replace that with
+        # a traceback in the middle of a merge gate, which reads to an
+        # operator as a broken tool rather than a rejected fragment.
+        return "unparseable-url"
+
+    if scheme not in CITATION_ALLOWED_SCHEMES:
+        # An allowlist, never a denylist -- the set of schemes a URL library
+        # will accept is open-ended and grows with the runtime.
+        return f"scheme-not-allowed:{scheme or 'none'}"
+    if username is not None or password is not None:
+        # `user:pw@host` shifts which host is really contacted depending on
+        # who parses it.
+        return "embedded-credentials"
+    if not host:
+        return "no-host"
+
+    host = host.lower()
+    # `localhost` and anything under it are refused BY NAME, before any
+    # resolution: a resolver can be configured to point them anywhere, and
+    # admitting the name would make the refusal depend on local DNS config.
+    if host == "localhost" or host.endswith(".localhost"):
+        return "localhost-name"
+
+    # A host that is ALREADY an IP literal never goes through name resolution
+    # at all, so the fetcher's resolution-time check would simply not run for
+    # it -- this is the half that has to be caught statically.
+    try:
+        ip = ipaddress.ip_address(host.strip("[]"))
+    except ValueError:
+        ip = None       # a name, not a literal; the fetcher owns that half
+    if ip is not None:
+        reason = _non_global_address_reason(ip)
+        if reason is not None:
+            return reason
+
+    try:
+        port = parts.port
+    except ValueError:
+        return "invalid-port"
+    if port is not None and not (0 < port < 65536):
+        return "invalid-port"
+    return None
+
+
+# ---------------------------------------------------------------------------
 # canon.json I/O
 # ---------------------------------------------------------------------------
 
@@ -1083,6 +1239,64 @@ def _enforce_offline_backstop(batch: list, research_mode: str) -> None:
             "needed), or disposition:\"review_queue\" with a note carrying the "
             "literal prefix \"SOURCE_UNAVAILABLE:\" instead -- the whole batch "
             "merge is rejected, canon.json is unchanged.",
+            offending=offenders,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Citation-source backstop (#347)
+# ---------------------------------------------------------------------------
+
+
+def _enforce_citation_source_safety(batch: list) -> None:
+    """FATALLY rejects the whole batch if ANY item carries a `source` the
+    static citation boundary refuses. Nothing is written when this fires.
+
+    SCOPE -- every item carrying a `source`, NOT only basis:"established".
+    This is not defensive over-reach, it is forced by the schema:
+    canon-batch.schema.json's QUEUED branch types `source` as a bare
+    unconstrained string (no `format`, no `minLength`, no conditional) and its
+    `basis` enum still admits "established", so a
+    `disposition: "review_queue"` item can carry `basis: "established"` plus
+    an entirely arbitrary `source` and pass Pass 1 untouched. Narrowing this
+    to the ACCEPTED branch would leave that door open. The ACCEPTED branch's
+    own `format: "uri"` conditional is NOT a substitute either: it asks
+    whether the string is a well-formed URI, and `http://169.254.169.254/` is
+    a perfectly well-formed URI.
+
+    Item selection mirrors fetch_citation.py's `iter_sources` exactly -- a
+    missing, empty or non-string `source` is skipped here, because it is not a
+    fetch target and its shape is Pass 1's business, not the boundary's. The
+    two files must agree on WHICH items they cover, not merely on the checks
+    they run; a divergence there would be a hole neither file's tests would
+    show.
+    """
+    problems = []
+    offenders = []
+    for i, item in enumerate(batch):
+        if not isinstance(item, dict):
+            continue
+        source = item.get("source")
+        if not isinstance(source, str) or not source:
+            continue
+        reason = _citation_source_refusal(source)
+        if reason is not None:
+            problems.append(f"{_indexed_item_label('batch', i, item)}: {reason}")
+            offenders.append(item.get("source_form", f"<item {i}>"))
+
+    if problems:
+        raise CanonValidationError(
+            "batch carries an unsafe citation source:\n  " + "\n  ".join(problems)
+            + "\nA citation `source` must be an ordinary public http(s) URL. This is "
+            "refused STATICALLY here, before anything fetches it, because "
+            "--check-batch also runs on the offline path where nothing ever "
+            "fetches -- so this is the only place such a `source` can be stopped "
+            "before it is frozen into canon.json (#347; see fetch_citation.py's "
+            "module docstring for the full boundary). Fix the fragment upstream: "
+            "cite a real public page, or drop the `source` and route the item to "
+            "disposition:\"review_queue\" with a note explaining why no citation "
+            "is available -- never by loosening this check. The whole batch is "
+            "rejected; canon.json is unchanged.",
             offending=offenders,
         )
 
@@ -1491,6 +1705,7 @@ def run_merge(
     senses = _load_senses_or_raise(senses_path, allow_absent_senses)
 
     _validate_batch_items(batch, registry)
+    _enforce_citation_source_safety(batch)
     _enforce_offline_backstop(batch, research_mode)
     merged = _merge_batch(canon, batch, senses)
 
@@ -1545,6 +1760,11 @@ def run_check_batch(
     else:
         batch = _load_batch(batch_path)
     _validate_batch_items(batch, registry)
+    # After Pass 1 (so a structurally broken item is reported as broken rather
+    # than as an unsafe citation) but before the offline backstop: an unsafe
+    # `source` is unsafe in BOTH research modes, so it must not be reportable
+    # only in the mode that happens to reject the item for another reason.
+    _enforce_citation_source_safety(batch)
     _enforce_offline_backstop(batch, research_mode)
     if manifest_path is not None:
         expected_forms = _load_source_forms_manifest(manifest_path)
@@ -1587,6 +1807,7 @@ def run_merge_batches(
     batches = [_load_batch(p) for p in batch_paths]
     for batch in batches:
         _validate_batch_items(batch, registry)
+        _enforce_citation_source_safety(batch)
         _enforce_offline_backstop(batch, research_mode)
 
     canon = _load_canon(canon_path)
