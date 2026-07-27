@@ -87,6 +87,16 @@ export interface NestedContainerMatch {
 // (newLines.join('\n') reproduces the exact file bytes, EOL + terminal-newline preserved);
 // 'multiple' lists the >=2 ambiguous container bullets (adapter halts); 'not-a-list' means the
 // index is outside the bounded safe subset (caller keeps today's manual halt, byte-identical).
+// [1.11.0] 'unwritable' means the writer's own reader would REFUSE the bytes the writer was about to
+// hand back, so nothing was written and there is no index to persist. `field` names the manifest
+// value at fault ('title' or 'group_title'; 'unknown' when substituting either stand-in still fails),
+// derived by substitution rather than by inspecting the value, so it stays correct for causes nobody
+// has enumerated. A caller MUST halt and name that field: retrying cannot help, and the previous
+// behaviour — writing the line anyway — left the index permanently unreadable to this module, for
+// every chapter and every group in it, from a manifest value nothing upstream rejects. The check is
+// deliberately conservative: it can decline a value that would in fact have round-tripped, which is
+// the right direction for a tool that rewrites a file it does not own.
+//
 // [1.11.0] 'present' means the resolved container already carries this exact chapter link, so
 // nothing was written and there is no index to persist. `index` is a 0-BASED index into the
 // CALLER's own `indexLines` array, not into any internal view — verified to hold across a leading
@@ -98,6 +108,7 @@ export interface NestedContainerMatch {
 export type WireNestedListChapterResult =
   | { kind: 'inserted'; created: boolean; newLines: string[] }
   | { kind: 'present'; index: number }
+  | { kind: 'unwritable'; field: 'title' | 'group_title' | 'unknown' }
   | { kind: 'multiple'; matches: NestedContainerMatch[] }
   | { kind: 'not-a-list' };
 

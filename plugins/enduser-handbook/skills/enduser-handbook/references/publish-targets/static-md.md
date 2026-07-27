@@ -349,6 +349,14 @@ These outcomes reuse the step-0 result computed above (`containerTitle`, `indexF
     persist the returned `newLines` (joined back, they reproduce the exact bytes — EOL and
     terminal newline preserved) and proceed — the container was found or created and the
     chapter line inserted under it, no halt.
+  - **`{kind: 'unwritable', field}`** ⇒ before returning, the writer re-reads the exact bytes
+    it is about to hand back through its own reader — the same `prepareIndexLines` /
+    `hasYamlMappingStructure` / `containerOwnerScan` pipeline a later run would use — and that
+    reader would decline the result. Nothing is written. `field` names the manifest value the
+    writer traces the refusal to: `'title'`, `'group_title'`, or `'unknown'` when neither
+    stand-in clears it, found by substituting a known-good placeholder for one emitted line at
+    a time and re-reading, so it stays correct for causes not yet catalogued. Halt with:
+    `Cannot wire '<slug>' into <index_file>: the lines this run would write are not recognizable to the next run, so nothing was written. The manifest's <field> for this chapter contains text that changes how the index file parses — give it a plain value (no Markdown markup, backslash escapes, HTML entities, HTML comments, backticks, or invisible line separators), then re-run.`
   - **`{kind: 'present', index}`** ⇒ the single matched container already carries a child
     bullet whose content is byte-identical to the chapter link the adapter is about to write —
     the writer's own membership guard, checked directly against the list body and independent
@@ -403,44 +411,41 @@ These outcomes reuse the step-0 result computed above (`containerTitle`, `indexF
     manifest title is clean, the writer's own insert resolves immediately: the earlier,
     unrecognizable row lingers beside it as a cosmetic duplicate, and the very next run reports
     `ok` on the clean one. That is the one combination that converges with a harmless leftover;
-    the other combination — the manifest title ITSELF target-breaking — does not converge the
-    same way, and what it does instead now turns on where the writer's own insert actually sits:
+    the other combination — the manifest title ITSELF target-breaking — used to diverge by
+    marker, before 1.11.0's re-read postcondition on `wireNestedListChapter` (see the
+    `unwritable` outcome under "Grouped index wiring" above):
     - **Nested under its single matched container, on a `-`-marked file** (the ordinary case —
-      that is where `wireNestedListChapter` always places its own insert): every later run still
-      finds `containers.length === 1`, and step 0 still reports the chapter absent — the row is
-      exactly as unrecognizable to step 0's target parse as before — but the writer's own
-      membership guard (the `present` outcome above) now recognizes its own prior insert
-      VERBATIM, refuses to write a second copy, and halts instead. Exactly ONE row is ever
-      written here; the shipped 1.10.0 behaviour this retires had no membership check at all and
-      appended another duplicate row on every re-run, without limit.
-    - **The same nested placement, but on a `*`- or `+`-marked file** ⇒ the bounded outcome above
-      does NOT hold, for a GROUPED entry emitted the way this adapter's own grouped index wiring
-      emits it. `chapterRelPath` (`chapter-paths.mjs:168-172`) always joins the entry's `group`
-      onto its `slug` — `<group>/<slug>.md` — whenever `group` is set, and that joined target is
-      what this adapter always hands `wireNestedListChapter` inside the chapter link. So whenever
-      a title breaks its own link parse, `parseNestedLabel` falls to the `raw` branch over the
-      WHOLE bullet content — link syntax included — and, because the embedded target itself
-      carries the group prefix, that raw text contains a `/`. `isBarePathBullet` refuses exactly
-      that shape on a `*`/`+` marker, so the file declines with `{kind: 'not-a-list'}` on the very
-      next run, before the membership guard above is ever reached. The group prefix is
-      load-bearing here, not incidental: called directly with a SLASH-FREE target (a flat
-      destination, or a wikilink alias naming no group segment), `wireNestedListChapter` does
-      NOT lock on `*`/`+` — it converges to `present`, exactly like a `-`-marked file, because
-      `isBarePathBullet` only fires when the raw content itself contains a `/` (or backslash) or
-      ends in `.md`. This converges on ZERO further rows and a repeating `not-a-list` halt — the
-      same terminal state as the left-margin case below, not the one-row-then-`present` outcome
-      above — and, like the left-margin case, it takes the WHOLE file down: unrelated chapters and
-      groups included, not just this row.
-    - **At the left margin (indent 0), uncontained** — a broken title's own brackets fail the
-      indent-0 `isPlainLabel` check the same way regardless of what broke them, so
-      `containerOwnerScan` declines the WHOLE scan (`{kind: 'not-a-list'}`) for every container in
-      the file, not just this row. Nothing is ever inserted from here: the plain, unnamed
-      `not-a-list` halt (the "anything else" branch above) just repeats verbatim, forever — zero
-      duplicates form, not one.
-    A `group_title` that is itself non-plain reaches that same zero-growth `not-a-list` halt by a
-    third, independent path: `wireNestedListChapter` checks the group axis before it ever looks at
-    containers or existing rows, so a malformed `group_title` short-circuits there regardless of
-    the chapter title or the row's placement.
+      that is where `wireNestedListChapter` always places its own insert) is unaffected by the
+      postcondition for THIS class of title — a `]` that breaks the row's own link parse but
+      leaves the line an ordinary bullet. A `-`-marked child row is not exempt in general:
+      measured, a backtick, an HTML comment or a U+2028 in the same position is refused on a
+      `-`-marked file exactly as it is on `*`/`+`, because those change how the line itself
+      parses rather than only how its target does. For the `]` class, though: every later
+      run still finds `containers.length === 1`, and step 0 still reports the chapter absent —
+      the row is exactly as unrecognizable to step 0's target parse as before — but the
+      writer's own membership guard (the `present` outcome above) now recognizes its own prior
+      insert VERBATIM, refuses to write a second copy, and halts instead. Exactly ONE row is
+      ever written here; the shipped 1.10.0 behaviour this retires had no membership check at
+      all and appended another duplicate row on every re-run, without limit.
+    - **The same nested placement, but on a `*`- or `+`-marked file** used to lock the whole
+      file out on the NEXT run instead: `chapterRelPath` (`chapter-paths.mjs:168-172`) always
+      joins the entry's `group` onto its `slug` — `<group>/<slug>.md` — whenever `group` is
+      set, so a title that breaks its own link parse leaves that group-prefixed `/` sitting in
+      the raw bullet content, and `isBarePathBullet` refuses exactly that shape on a `*`/`+`
+      marker. **As of 1.11.0, the writer catches this on the SAME run instead**, because the
+      re-read postcondition runs that identical check over its own output before returning: the
+      write is refused — `{kind: 'unwritable', field: 'title'}` — and nothing is persisted, so
+      there is no poisoned file left for a later run to trip over.
+
+    A `group_title` that is itself non-plain is refused immediately, before the writer ever
+    looks at containers or existing rows — `wireNestedListChapter` checks the group axis first,
+    so a malformed `group_title` returns `not-a-list` right away, regardless of the chapter
+    title or the row's placement, on every run, with nothing ever written. This is unchanged
+    since 1.10.0: it was never a silent-write case to begin with. A hand-typed row already
+    sitting at the left margin (indent 0), uncontained — its own label failing that same
+    indent-0 plain-label check (see "The plain-label predicate, named exactly" below) — locks
+    the whole file out the same way, for the same reason: the writer's refusal to add anything
+    to such a file is the correct response to it, not something 1.11.0 either causes or fixes.
 
     Measured, across every placement × title-resolvability combination that matters here, with
     the manifest's chapter `title` held FIXED across every run: a row that already resolves
@@ -448,10 +453,9 @@ These outcomes reuse the step-0 result computed above (`containerTitle`, `indexF
     lingering duplicate then `ok`; a target-breaking current title nested under its container, on
     a `-`-marked file, converges on exactly one row, then a `present` halt from the second run
     onward (new in 1.11.0 — this is the case #330 retires from unbounded); the same title nested
-    under its container on a `*`- or `+`-marked file, the same title sitting at the left margin on
-    any marker, or a non-plain `group_title` on any marker, all converge on zero further rows and
-    a repeating `not-a-list` halt instead (the bullets above cover the marker split; the
-    left-margin and non-plain-`group_title` cases are unchanged since 1.10.0). No combination
+    under its container on a `*`- or `+`-marked file now returns `unwritable` on the very first
+    attempt, before any row exists (also new in 1.11.0); a non-plain `group_title` on any marker
+    is refused immediately, before any row exists, unchanged since 1.10.0. No combination
     measured here, with the title held fixed, grows without bound.
     **That fixed-title scope is load-bearing, not incidental: letting the title itself change
     across runs reopens unbounded growth even on the ordinary `-`-marked, nested-under-container
@@ -471,13 +475,17 @@ These outcomes reuse the step-0 result computed above (`containerTitle`, `indexF
     proceeds on `unverifiable` (see "Nested-list automation limits" below for the measured
     table) — but nested under its container it is `ok` regardless, since `isPlainLabel` is never
     applied to a child bullet, only to an indent-0 one. That list is representative, not
-    exhaustive, and deliberately excludes a backtick, an HTML comment, or a fence: `isPlainLabel`
-    skipping the child bullet does not mean nothing else reads it there. Those three open a real
-    inert construct in the persisted file, so a separate, file-wide check catches them regardless
-    of indent — never harmless nested, unlike the markup above (see "Nested-list automation
-    limits" below for what that costs the whole file, not just this row). Use a plain-text title
-    — free of backticks, HTML comments and fences above all — to avoid needing any of these
-    distinctions.
+    exhaustive, and deliberately excludes a run of backticks or an HTML comment: `isPlainLabel`
+    skipping the child bullet does not mean nothing else reads it there. A backtick run — any
+    length, a single backtick and a triple run are the same mechanism — opens an unterminated
+    inline code span, never a fence: a fence needs the run at the very start of a physical line,
+    which an emitted chapter row (`<indent><marker> [<title>](<target>)`) can never be. Both it
+    and an HTML comment open a real inert construct in the persisted file, so a separate,
+    file-wide check catches them regardless of indent — never harmless nested, unlike the
+    markup above (see "Nested-list automation limits" below — the writer itself now refuses to
+    write either; a hand-typed one in the index still costs the whole file the same way). Use a
+    plain-text title — free of backticks and HTML comments above all — to avoid needing any of
+    these distinctions.
 
     The gate above is checked on the candidate's own isolated two-line array. **By construction,
     that proves only that the candidate pair is well-formed and would be recognized on its own —
@@ -563,58 +571,29 @@ a second container beside a retained phantom row (a legitimate `*`/`+` plain lab
 to contain `/` is refused too, a deliberate over-rejection, not corruption). Inline code, an
 HTML comment or a fenced block anywhere, a mixed or bare-CR line ending, a YAML `nav:` or
 `- key: value` mapping bullet, a list nested more than one level deep, and a multiline
-`group_title` fall outside the subset as well. **Worst case for the residual is never data
-loss — that much holds — but it is not a cosmetic duplicate container either.** No plain-label
-check gates the chapter title itself (only the container label and `group_title` above are
-checked — see "The plain-label predicate, named exactly" below), so a legal manifest title
-containing a backtick, an HTML comment, or a fence writes exactly such a construct into a file
-that was clean a moment earlier. That persisted row then trips the writer's own whole-body
-sanitizer-identity check on every later run: the measured worst case is a permanently
-non-automatable index file — the same chapter falls back to unverified completion forever, and
-every OTHER chapter or group in the file stops wiring automatically too, with the operator
-seeing only the generic, unnamed halt and no indication which row caused it. This is a known,
-unfixed limitation on shipped write behaviour, not addressed in 1.11.0 — keep manifest titles
-free of backticks, HTML comments and fences to avoid it. A richer rendering-aware matcher is a
-possible follow-up for the container-label and `group_title` refusals above, not for this gap.
+`group_title` fall outside the subset as well. No plain-label check gates the chapter title
+itself (only the container label and `group_title` above are checked — see "The plain-label
+predicate, named exactly" below), so nothing here stops a legal manifest title from carrying a
+run of backticks — any length, a single backtick and a triple run are the same mechanism: an
+unterminated inline code span, never a fence, since an emitted chapter row can never sit at the
+start of a physical line the way a real fence requires — an HTML comment, or a U+2028/U+2029
+line separator. A `group_title` colon straight after its first token, or a `group_title` of two
+or more hyphens, is a different class again: both pass the plain-label check above (colons and
+interior hyphens are allowed there) and are only caught downstream, when `hasYamlMappingStructure`
+or `NESTED_THEMATIC_BREAK_RE` reads the emitted container line back.
 
-**Further known lockout causes, not exhaustive.** The backtick/comment/fence gap above is not the
-only way a legal-looking manifest value silently takes the whole index file down; these three are
-also measured on this branch, unfixed, and belong to the same class — a shape `isPlainLabel` and
-`isBarePathBullet` were never built to catch. In every case below the offending run itself
-completes silently (`inserted`, no halt); the lockout only surfaces on the NEXT run, which may
-touch an unrelated chapter or group, so the cause is not obvious from the halt alone.
-
-- **U+2028 (LINE SEPARATOR) or U+2029 (PARAGRAPH SEPARATOR) anywhere in a chapter `title` or a
-  `group_title`, on ANY marker.** `NESTED_BULLET_RE`'s trailing `(.*)$` carries no `s` flag, and
-  JavaScript's `.` never matches a line-terminator character — a set that includes both of these,
-  not only `\r`/`\n`. `wireNestedListChapter`'s own step-4 guard checks only `\r` and `\n` before
-  writing, so a title or `group_title` carrying either character is written through unchecked. The
-  persisted row (which contains no real newline) then fails the bullet regex on every later run
-  regardless of marker, and `containerOwnerScan` declines the whole file. Neither character
-  renders visibly in an editor, so the cause stays invisible at the point of failure.
-- **A `group_title` whose first token is followed by a colon** (`FAQ: basics`, `Admin:`), **on
-  `-`-marked files only.** The emitted container line reads back, on the very next run, as an
-  MkDocs `- key: value` nav mapping row: `hasYamlMappingStructure`'s own line test strips a
-  leading `- ` before checking for a bare `key:` pattern, and only the `-` marker happens to BE
-  that literal prefix — a `*`- or `+`-marked line is untouched by the strip, and the leftover
-  marker character defeats the `key:` pattern's own character class, so it never matches there.
-  Measured: a space before the colon defeats it on every marker (`Getting started: basics` is
-  fine), because the YAML-mapping key class has no room for an embedded space.
-- **A `group_title` of two or more hyphens** (`--`, `---`, …), **on `-`-marked files only.**
-  `isPlainLabel` allows leading and interior hyphens, so the title itself passes unchanged. The
-  emitted container line is `<marker> <group_title>`; on a `-`-marked file that line is made
-  entirely of `-` characters and spaces (`- ---`), which `NESTED_THEMATIC_BREAK_RE` reads back as
-  a Markdown thematic break on the very next run, declining the whole file before the bullet
-  branch is ever reached. On a `*`- or `+`-marked file the container line mixes the marker with
-  the group_title's hyphens (`* ---`), and the thematic-break test requires every repetition to be
-  the SAME character as the first — a mixed line never satisfies it, so the file parses fine.
-
-This is a known, unfixed limitation on shipped write behaviour, not addressed in 1.11.0 — the list
-above is illustrative, not exhaustive, and a future case failing some other way is expected rather
-than a documentation gap. Keep every `group_title` and chapter `title` to plain ASCII punctuation
-and ordinary spaces, with no embedded U+2028/U+2029, no bare colon straight after its first word,
-and no run of two or more hyphens, alongside the backtick/HTML-comment/fence avoidance above, to
-steer clear of every cause named on this branch.
+**As of 1.11.0, none of these write a poisoned file.** `wireNestedListChapter` re-reads the
+exact bytes it is about to persist through this same reader before returning (see the
+`{kind: 'unwritable', field}` outcome under "Grouped index wiring" above), and any value that
+would leave the file unrecognizable to a later run fails that re-read. The write is refused
+outright — nothing is persisted — instead of succeeding once and leaving every later run, for
+every chapter and group in the file, to fall back to unverified completion or a repeating,
+unnamed halt. This refusal is conservative, not rendering-aware: it can decline a title or
+`group_title` that would in fact have rendered and parsed fine, because it checks structure, not
+rendered output. The remedy is a plain manifest value, not an index edit — give the chapter a
+plain title or `group_title` and re-run. A richer rendering-aware matcher remains a possible
+follow-up for the container-label and `group_title` refusals earlier in this section, not for
+this gap.
 
 **The plain-label predicate, named exactly.** In short: a plain title is verified; a non-plain
 title that still resolves is found but left unverifiable; a title that breaks its own row's

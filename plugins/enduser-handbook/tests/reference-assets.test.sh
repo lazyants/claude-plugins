@@ -2819,6 +2819,33 @@ for claim in "${RETIRED_CLAIMS[@]}"; do
   done
 done
 
+# The `unwritable` halt [1.11.0] is the second SHARED string, pinned the same way and for the same
+# reason: it is defined ONCE here so neither adapter can become the authority for the other, and it
+# lands byte-identically in both. Its wording was corrected once already — it said "code fences",
+# which mis-names the mechanism for a chapter title (a backtick run in a title is an unterminated
+# code SPAN; a fence needs the run at line start, which an emitted row can never be) and would let
+# an operator conclude a single backtick is safe. It is not.
+UNWRITABLE_HALT="Cannot wire '<slug>' into <index_file>: the lines this run would write are not recognizable to the next run, so nothing was written. The manifest's <field> for this chapter contains text that changes how the index file parses — give it a plain value (no Markdown markup, backslash escapes, HTML entities, HTML comments, backticks, or invisible line separators), then re-run."
+for f in "$SMD" "$OMD"; do
+  c="$(count_joined_fixed "$UNWRITABLE_HALT" "$f")"
+  if [ "$c" -eq 1 ]; then
+    ok "$(basename "$f"): carries the shared 'unwritable' halt verbatim, exactly once"
+  else
+    bad "$(basename "$f"): shared 'unwritable' halt count drifted from 1 (got $c)"
+  fi
+done
+# The halt must not tell an operator to avoid something measured harmless. A tilde run in a title is
+# written without complaint (only backticks get code-span treatment), so naming it would be a false
+# instruction, and "code fences" was the wording that implied it.
+for f in "$SMD" "$OMD"; do
+  c="$(count_joined_fixed 'code fences, or invisible line separators' "$f")"
+  if [ "$c" -eq 0 ]; then
+    ok "$(basename "$f"): the corrected halt wording stays corrected"
+  else
+    bad "$(basename "$f"): the 'code fences' wording is back in the unwritable halt"
+  fi
+done
+
 # The `present` halt is a SHARED string. Both adapters must carry it byte-identically: an operator
 # reading either one is told the same thing, and a one-sided edit is exactly the twin drift this
 # suite exists to catch. Defined ONCE here so neither adapter can be the authority for the other.

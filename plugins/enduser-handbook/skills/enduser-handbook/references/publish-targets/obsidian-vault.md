@@ -475,6 +475,20 @@ the one exception to "do all of these" — see its own conditional note below.
        `currentIndexExpectedTarget` strips one terminal `.md` in wikilinks mode) converges the
        same ordinary way:
        `Chapter row for '<slug>' is already present under the '<group_title>' container bullet in <index_file>, but this run could not recognize it — the chapter's own title does not yield a resolvable link destination. Give the chapter a plain title in the manifest — no Markdown markup, backslash escapes, or HTML entities in it — then re-run; see "Nested-list automation limits" below.`
+     - `{kind: 'unwritable', field}` — [1.11.0] before returning, the writer re-reads the exact
+       bytes it is about to hand back through its own reader (`prepareIndexLines`,
+       `hasYamlMappingStructure`, `containerOwnerScan`); if that reader would refuse them,
+       nothing is written and this outcome fires instead of `inserted`. `field` — `'title'`,
+       `'group_title'`, or `'unknown'` when substituting either stand-in still fails to clear
+       the rejection — names the manifest value at fault, computed by substitution (swap the
+       emitted line for a known-good stand-in and re-read) rather than by inspecting the
+       value, so it stays correct for causes nobody has enumerated yet. Deliberately
+       conservative: it can decline a value that would in fact have round-tripped safely,
+       which is the right direction for a tool rewriting a file it does not own. One halt
+       text for both `publish.wikilinks` modes — verified, not assumed: the wording names no
+       link syntax, and every cause measured under "Nested-list automation limits" below
+       reaches this outcome identically in both modes:
+       `Cannot wire '<slug>' into <index_file>: the lines this run would write are not recognizable to the next run, so nothing was written. The manifest's <field> for this chapter contains text that changes how the index file parses — give it a plain value (no Markdown markup, backslash escapes, HTML entities, HTML comments, backticks, or invisible line separators), then re-run.`
      - `{kind: 'multiple'}` — two or more container bullets match `group_title`; never guess
        which is canonical, halt:
        "Found multiple '<group_title>' container bullets in <index_file> — curate the index manually, then re-run."
@@ -597,14 +611,17 @@ the one exception to "do all of these" — see its own conditional note below.
        that `/` is what trips `isBarePathBullet` ("Nested-list automation limits" below),
        not the broken title in isolation: measured, an otherwise-identical flat-style,
        slash-free target reaches `present` instead, so do not generalize this to "a
-       target-breaking title always locks on `*`/`+`". For THIS adapter's own grouped
-       emission the prefix is unavoidable, so the split above holds in practice; before the
-       membership check ever runs, the file reaches the SAME permanent `not-a-list` lockout
-       the left-margin case above describes, reaching an unrelated chapter in the same file
-       just as surely (measured in both link modes). The membership guard is what #330 adds; on
-       `*`/`+` the pre-existing `isBarePathBullet` guard (unchanged since 1.10.0) intercepts
-       the row first, so #330 changes nothing there — that marker already answered
-       `not-a-list`, never unbounded growth, before this release.
+       target-breaking title is always unwritable on `*`/`+`". For THIS adapter's own
+       grouped emission the prefix is unavoidable, so the split above holds in practice: the
+       [1.11.0] re-read postcondition (`{kind: 'unwritable', field}`, "Non-headings index, no
+       existing line" above) is what a `*`/`+`-markered index reaches here, because
+       `isBarePathBullet` fires on the very bytes the writer is about to persist — so nothing
+       is ever written and the run halts naming `field: 'title'`, before the membership check
+       #330 adds ever gets a chance to run. On that marker the pre-existing
+       `isBarePathBullet` guard (unchanged since 1.10.0) is exactly what the postcondition now
+       runs pre-emptively, so #330 changes nothing there — the guard already answered
+       `not-a-list` before this release; the postcondition is what turns that into a named,
+       never-written refusal instead of a lockout discovered a run later.
 
        Every claim above holds the manifest `title` FIXED between runs — none of it was
        measured against an EDITED one. When the operator instead edits a target-breaking title
@@ -755,88 +772,30 @@ defeats the row's own link/wikilink parse) is bounded the same way ONLY on a `-`
 index: it converges on exactly one duplicate chapter row, then halts rather than writing a
 second (see "INDEX wiring" above for the measured marker split and the title-EDIT growth
 caveat) — the shipped 1.10.0 writer's unbounded per-re-run growth is retired, on that marker.
-A `*`- or `+`-markered index reaches the SAME `isBarePathBullet` lockout the group_title case
-below describes, via the row's own raw fallback text carrying the GROUPED target's `/` —
-not via the broken title by itself (see "Measured, across every placement" above for the
-group-prefix mechanism and the flat-target counter-example) — rather than a hand-typed bare
-path. A richer rendering-aware matcher is a possible follow-up, not a bug.
+A `*`- or `+`-markered index instead reaches the [1.11.0] re-read postcondition (`{kind:
+'unwritable', field}`, "Non-headings index, no existing line" above): the row's own raw
+fallback text carries the GROUPED target's `/` — not the broken title by itself (see
+"Measured, across every placement" above for the group-prefix mechanism and the flat-target
+counter-example) — which trips `isBarePathBullet` on the very bytes about to be persisted, so
+the writer refuses before writing anything and halts naming `field: 'title'`, rather than a
+hand-typed bare path. A richer rendering-aware matcher is a possible follow-up, not a bug.
 
-**A separate, worse failure mode is measured, and is NOT fixed in 1.11.0.** A legal manifest
-title carrying inline code, an HTML comment, or a fence — `` Use `--force` ``, `Old <!-- x
---> notes`, `` Code ``` here `` — passes every gate above: `validateGroups` never inspects a
-chapter's own `title` field, and `isPlainLabel` is applied only to container labels and
-`group_title`, never to a child row. The writer inserts the row once, exactly as designed —
-but that persisted row now carries the same markup, and the very next run's
-`prepareIndexLines` step-6 sanitizer-identity check (`assets/lib/chapter-paths.mjs`) blanks
-it via `stripInertContexts` and finds the sanitized line no longer byte-identical to the raw
-one. The WHOLE file, not just this row, answers `not-a-list` from that point on — every other
-chapter and every other container loses automation too, permanently, and the operator sees
-only the generic manual-halt text above, which names no row and gives no hint what caused it.
-Measured identical in both `publish.wikilinks` modes, and it reaches an unrelated chapter in
-the same file just as surely as the one whose title caused it. This is a different defect
-from the target-breaking-title case just above: on a `-`-markered index, that one breaks only
-its own row's link/wikilink parse and stays bounded to one duplicate row; this markup-
-poisoning case instead poisons the file-wide sanitizer check regardless of which row wrote the
-markup, and the bound above does not repair it. On a `*`- or `+`-markered index, though, the
-target-breaking-title case is not a fourth, always-bounded mechanism — it converges onto THIS
-SAME `isBarePathBullet` guard the next sentence describes, reached through the row's own raw
-fallback text carrying the GROUPED target's `/` — the group prefix `chapterRelPath` always
-adds, not the broken title in isolation (a flat-style, slash-free target with the identical
-title reaches `present` instead) — rather than a hand-typed bare path (see "INDEX wiring"
-above for the measured marker split). A `group_title` reaches the identical
-`isBarePathBullet` lockout by an independent route, on a `*`/`+`-markered index only:
-`isPlainLabel` accepts both `'Sales/Marketing'` and `'billing.md'` as plain —
-neither `/` nor a trailing `.md` sits in its denylist — so the ZERO-create branch writes the
-container line unchallenged; but that same container line, read back on the next scan, trips
-`isBarePathBullet` (a `*`/`+` bullet whose raw label contains `/` or ends `.md`), locking the
-whole file the same way. A `-`-markered index is untouched — `isBarePathBullet` only ever
-fires on a `*`/`+` marker. It is a known, unfixed, pre-existing limitation on shipped write
-behaviour, not something 1.11.0 closes — the one thing that helps today: keep manifest titles
-free of backticks, HTML comments, and fences, and keep a `*`/`+`-markered index's
-`group_title` free of `/` and a trailing `.md`.
-
-**These are not the only measured causes, and this enumeration is not exhaustive.** Three
-more, measured on this branch, reach the same permanent whole-file lockout by yet other
-routes:
-
-- **U+2028 (LINE SEPARATOR) or U+2029 (PARAGRAPH SEPARATOR) anywhere in a chapter title OR a
-  `group_title`, on ANY marker** — invisible in an editor, and NOT excluded by `isPlainLabel`'s
-  denylist. `NESTED_BULLET_RE`'s `(.*)$` carries no `s` (dotAll) flag, so `.` cannot match
-  either character (JavaScript's own line-terminator set for `.`), and the writer's own
-  multiline guard (`wireNestedListChapter`'s `[\r\n]` check) tests only `\r`/`\n`, never these
-  two. The row containing it fails the bullet regex outright — FOREIGN CONTENT, not a bare-path
-  or non-plain-label rejection — and `containerOwnerScan` declines the whole file the same way.
-  Measured identical on `-`, `*`, and `+`, in both `publish.wikilinks` modes, whether the
-  character sits in the chapter title or the `group_title`.
-- **A `group_title` whose first token is followed immediately by a colon** (`FAQ: basics`,
-  `Admin:`), **on a `-`-markered index only** — `isPlainLabel` has no colon in its denylist, so
-  the ZERO-create branch writes the container line unchallenged, but the emitted
-  `- FAQ: basics` line reads back, on the very next scan, as an MkDocs `- key: value` nav
-  mapping row: `hasYamlMappingStructure`'s check strips only a leading `-` marker before
-  testing for `key:`-shaped content, so a `*`/`+`-markered container (`* FAQ: basics`) is
-  untouched — the leading marker is never stripped for those, and that stripped-vs-not
-  distinction is exactly why this is `-`-marker-only. A SPACE before the colon defeats it
-  (`Getting started: basics` is fine on every marker) because the YAML-mapping check requires
-  the colon to sit directly against the preceding token.
-- **A `group_title` of two or more hyphens** (`--`, `---`, …), **on a `-`-markered index only**
-  — the emitted container line (`- ---`) reads back as a thematic break: the marker's own `-`
-  and the label's hyphen run are the SAME character, so the whole trimmed line satisfies the
-  thematic-break pattern's repeated-character test. A `*`- or `+`-markered container with the
-  identical label (`* ---`) does not trip it, since the break test requires every repeated
-  character to match the FIRST one, and the marker and the label hyphens then disagree.
-
-Keep manifest titles and `group_title` values free of embedded line/paragraph separators in
-addition to the markup already named above; on a `-`-markered index also keep a `group_title`
-from starting with a bare `word:` and from being only hyphens. None of this is fixed in
-1.11.0 either — it is the same known, unfixed, pre-existing limitation on shipped write
-behaviour named just above, not something this release closes.
+A manifest value that would corrupt this same structural read is refused the same way, before
+it is ever written: inline code, an HTML comment, a fence, or a U+2028/U+2029 separator
+anywhere in a chapter title or a `group_title`, on any marker; on a `-`-markered index, a
+`group_title` whose first token is followed immediately by a colon (`FAQ: basics`, `Admin:`)
+or that is only hyphens (`---`); or, on a `*`/`+`-markered index, a `group_title` containing
+`/` or ending `.md` (`'Sales/Marketing'`, `'billing.md'`). Every one of these reaches `{kind:
+'unwritable', field}` — see "Non-headings index, no existing line" above for the exact halt
+text — never a written row. Give the chapter or the group a plain value and re-run.
 
 **The plain-label predicate, named exactly.** In short: a plain title is verified; a
 non-plain title that still resolves is found but left unverifiable; a title that breaks its
 own row's link target is caught — by the writer's own membership guard on a `-`-markered
-index, or by the pre-existing `isBarePathBullet` lockout on a `*`/`+`-markered one — rather
-than duplicated without limit on either marker (see the marker-scoped bounded-outcome
-discussion under INDEX wiring above). The mechanism: the container-owner scan
+index (a `present` halt), or by the [1.11.0] re-read postcondition on a `*`/`+`-markered one
+(an `unwritable` refusal naming the title) — rather than duplicated without limit on either
+marker (see the marker-scoped bounded-outcome discussion under INDEX wiring above). The
+mechanism: the container-owner scan
 (`containerOwnerScan`,
 `assets/lib/chapter-paths.mjs`) applies `isPlainLabel` to whatever `extractLabel` returns for a
 row's own content — never to the row's raw source text, and never to what it renders as in
@@ -874,8 +833,8 @@ unescaped `]` in the alias (wikilinks mode) breaks the row's OWN link-target ext
 `extractLabel`/`isPlainLabel` at all — so step 0 never reports the chapter present in the first
 place; see the marker-scoped bounded-outcome discussion under INDEX wiring above for what a
 target-breaking title does instead: one inserted row, then a `present` halt on a `-`-markered
-index or a permanent `not-a-list` lockout on a `*`/`+`-markered one — never SILENT unbounded
-duplication, on either marker.
+index, or an `unwritable` refusal — naming the title, nothing ever written — on a
+`*`/`+`-markered one — never SILENT unbounded duplication, on either marker.
 
 As of 1.11.0, a **present** grouped chapter's placement under this container is also checked,
 but only for a narrow verified class — this exact sentence, reused verbatim everywhere it is

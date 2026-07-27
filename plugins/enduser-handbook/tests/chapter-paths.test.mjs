@@ -4065,159 +4065,217 @@ test('decoy resistance: a commented-out real binding + a non-literal RHS decoy d
 });
 
 // =================================================================================================
-// [1.11.0] KNOWN, UNFIXED, PRE-EXISTING: the writer can persist a row (or a container) that its own
-// scanner then refuses, which disables nested-list automation for the WHOLE index file, permanently.
-// Both adapters now document this. Nothing executed it until here — and this release has repeatedly
-// found that a documented claim guarded only by an exact-string pin is a claim guarded by nothing.
+// [1.11.0] THE RE-READ POSTCONDITION. Until this release the writer emitted whatever the caller's
+// chapterLink and group_title produced — a plain-label check on the container label, none at all on
+// the child row. A manifest value that is legal everywhere upstream therefore got written into a
+// clean file, and THIS SAME SCANNER refused that file on every later run: nested-list automation
+// died for every chapter and every group in it, permanently, from an index the tool itself wrote.
 //
-// These tests pin the CURRENT, DEFECTIVE behaviour on purpose. They are not an endorsement of it.
-// The moment someone constrains the emitted child row and container line, every assertion below goes
-// red — which is exactly the signal wanted, because the adapter prose describing this limitation
-// must be retired in the same change. A green suite must never be compatible with both a defect and
-// its fix.
+// The writer now re-reads the bytes it is about to hand back through its own reader and, if that
+// reader refuses them, writes NOTHING and returns {kind:'unwritable', field}. `field` names the
+// manifest value at fault, derived by substituting a known-good stand-in for one emitted line at a
+// time — not by inspecting the value — so it stays right for causes nobody has enumerated.
 //
-// Measured on this branch AND on the shipped 1.10.0 base (2ed39d8): identical for every LOCKOUT
-// assertion below — not introduced by the membership guard, which simply does not reach these
-// inputs. The `-`-marker CONTROL in the second test is deliberately NOT identical: the base returns
-// `inserted` there and this branch returns `present`, which is the guard working as intended.
+// The tables below were the six causes' defect pins; they are now the refusal's coverage. Every cell
+// was re-measured against the real module after the fix. The marker CONTROLS are the load-bearing
+// part: a postcondition that refused everything would also make these pass, so each group_title is
+// asserted to still WRITE on the markers where it was always harmless. The refusal is exactly as
+// marker-scoped as the defect was.
 // =================================================================================================
 
-// Prefix every pinned-defect test so a RED run explains itself without opening this file. `node
-// --test` prints only the test name and the assertion message, never the banner above, so the
-// contract has to live in those two strings or it is not communicated at all.
-const PINNED_DEFECT =
-  'PINNED DEFECT [1.11.0] (RED HERE MEANS FIXED — delete this test and retire the matching '
-  + '"Nested-list automation limits" prose in BOTH adapters)';
-
-const FILE_LOCKOUT_TITLES = [
+const UNWRITABLE_TITLES = [
   { title: 'Use `--force`', why: 'inline code' },
   { title: 'Old <!-- x --> notes', why: 'HTML comment' },
-  { title: 'Code ``` here', why: 'fence' },
-  // U+2028/U+2029 are the worst of the set and were found last: invisible in an editor, effective on
-  // EVERY marker, and reachable from either input field. NESTED_BULLET_RE has no `s` flag, so `.`
-  // never matches them and the emitted row stops being a bullet at all; the writer's own newline
-  // guard checks only \r and \n. Written as escapes on purpose — a literal here would be invisible
-  // in this source too, which is the whole point.
+  // NOT a fence, despite how it reads. Measured: a title's backtick run blanks only up to the
+  // matching run on the NEXT line (` tail` survives), which is the code-SPAN rule; a real fence
+  // needs the run at LINE START and swallows to EOF. A title can never be at line start — the row
+  // is always `<indent><marker> [<title>](<target>)`. Same mechanism as the single-backtick row
+  // above, kept as its own case only because the triple run is what an operator recognizes.
+  { title: 'Code ``` here', why: 'a triple backtick run (still a code span, not a fence)' },
+  // Written as escapes on purpose: a literal here would be invisible in this source too, which is
+  // exactly why these two were the last of the six to be found.
   { title: `Plans${String.fromCodePoint(0x2028)}Beta`, why: 'U+2028 LINE SEPARATOR' },
   { title: `Plans${String.fromCodePoint(0x2029)}Beta`, why: 'U+2029 PARAGRAPH SEPARATOR' },
 ];
 
-// The same permanent lockout, reached through the CONTAINER line the ZERO-create branch emits. Each
-// row carries its own marker scope, because that is what makes these hard to find: the SAME
-// group_title is harmless on one marker and fatal on another, in both directions.
-const CONTAINER_LOCKOUT_GROUP_TITLES = [
-  { groupTitle: 'Sales/Marketing', markers: ['*', '+'], safeMarkers: ['-'], why: 'bare-path bullet (contains /)' },
-  { groupTitle: 'billing.md', markers: ['*', '+'], safeMarkers: ['-'], why: 'bare-path bullet (ends .md)' },
-  { groupTitle: 'FAQ: basics', markers: ['-'], safeMarkers: ['*', '+'], why: 'reads back as an MkDocs `- key: value` nav row' },
-  { groupTitle: 'Admin:', markers: ['-'], safeMarkers: ['*', '+'], why: 'reads back as an MkDocs nav row' },
-  { groupTitle: '---', markers: ['-'], safeMarkers: ['*', '+'], why: 'reads back as a thematic break' },
+// Each value is refused on the markers where it used to poison the file and still WRITES on the
+// others. Both halves are asserted; the second is what proves the postcondition is not a blunt
+// refuse-everything.
+const UNWRITABLE_GROUP_TITLES = [
+  { groupTitle: 'Sales/Marketing', refusedOn: ['*', '+'], writesOn: ['-'], why: 'bare-path bullet (contains /)' },
+  { groupTitle: 'billing.md', refusedOn: ['*', '+'], writesOn: ['-'], why: 'bare-path bullet (ends .md)' },
+  { groupTitle: 'FAQ: basics', refusedOn: ['-'], writesOn: ['*', '+'], why: 'reads back as an MkDocs `- key: value` nav row' },
+  { groupTitle: 'Admin:', refusedOn: ['-'], writesOn: ['*', '+'], why: 'reads back as an MkDocs nav row' },
+  { groupTitle: '---', refusedOn: ['-'], writesOn: ['*', '+'], why: 'reads back as a thematic break' },
 ];
 
-for (const { title, why } of FILE_LOCKOUT_TITLES) {
-  test(`${PINNED_DEFECT}: a legal manifest title carrying ${why} locks the WHOLE index file on the next run`, () => {
-    const seed = ['- Guides', '  - [G](g.md)', ''];
-    const chapterLink = `[${title}](admin/items.md)`;
+for (const { title, why } of UNWRITABLE_TITLES) {
+  test(`re-read postcondition [1.11.0]: a title carrying ${why} is refused outright, on every marker, and nothing is written`, () => {
+    for (const marker of ['-', '*', '+']) {
+      const seed = ['# Summary', '', `${marker} Guides`, `  ${marker} [G](g.md)`, ''];
+      const before = seed.slice();
+      const result = wireNestedListChapter(seed, 'Guides', `[${title}](admin/plans.md)`);
 
-    // The title is legal: nothing upstream rejects it, and the writer inserts it as designed.
-    const first = wireNestedListChapter(seed, 'Guides', chapterLink);
-    assert.equal(first.kind, 'inserted', 'the first publish accepts the title and writes the row');
-    const after = first.newLines;
-    assert.ok(
-      after.some((line) => line.includes(title)),
-      'the markup is persisted verbatim into the index — this is the input to the next run',
-    );
-
-    // Same chapter: the row the writer itself just wrote is now unrecognizable.
-    assert.equal(
-      wireNestedListChapter(after, 'Guides', chapterLink).kind,
-      'not-a-list',
-      'the writer no longer recognizes the file it just wrote — if this is now `inserted`, the defect is FIXED: delete this test and retire the adapter prose',
-    );
-
-    // The load-bearing half: an unrelated chapter in a DIFFERENT group is locked out too — that is
-    // what makes this file-wide rather than a bad row, and it is the part the docs assert. An earlier
-    // version of this assertion passed 'Guides' here, so it only ever proved "another chapter in the
-    // SAME group" while its message claimed a different group.
-    assert.equal(
-      wireNestedListChapter(after, 'Reference', '[Unrelated](other/thing.md)').kind,
-      'not-a-list',
-      'automation is dead for every chapter in this file, not just the one whose title caused it',
-    );
-    // Control: the verdict above must be caused by the POISONED FILE, not by 'Reference' being a
-    // group the index does not contain. On a clean file that same unknown group creates its
-    // container and returns `inserted`, so `not-a-list` cannot be attributed to the group.
-    assert.equal(
-      wireNestedListChapter(seed, 'Reference', '[Unrelated](other/thing.md)').kind,
-      'inserted',
-      'control: an unknown group on a CLEAN file inserts — so the lockout above is the file, not the group',
-    );
+      assert.equal(result.kind, 'unwritable', `${marker}: refused rather than written`);
+      assert.equal(result.field, 'title', `${marker}: the chapter's own title is named as the culprit`);
+      assert.ok(!('newLines' in result), `${marker}: an unwritable outcome carries no index to persist`);
+      // The whole point: the caller has nothing it could persist, so the file cannot be poisoned.
+      assert.deepEqual(seed, before, `${marker}: the input array is untouched`);
+    }
   });
 }
 
+for (const { groupTitle, refusedOn, writesOn, why } of UNWRITABLE_GROUP_TITLES) {
+  test(`re-read postcondition [1.11.0]: group_title ${JSON.stringify(groupTitle)} is refused on ${refusedOn.join('/')} (${why}) and still writes on ${writesOn.join('/')}`, () => {
+    const chapterLink = '[Items](admin/items.md)';
+    // Both allowlists accept it — that is what made this reachable, and it is unchanged by the fix.
+    assert.equal(isPlainLabel(groupTitle), true, 'the plain-label allowlist still accepts it');
+    assert.deepEqual(validateGroups([{ slug: 'q1', group: 'g', group_title: groupTitle }]), [], 'and so does validateGroups');
 
-test(`${PINNED_DEFECT}: on a \`*\`/\`+\` index it is the target's GROUP PREFIX, not the broken title, that locks the file`, () => {
-  // The adapters explain the `*`/`+` lockout by saying a target-breaking title makes isBarePathBullet
-  // fire. That is true for what the adapters EMIT and false as a property of this writer, and the
-  // difference is a `/`: a grouped chapter's target always carries its group prefix (chapterRelPath
-  // returns `<group>/<slug>.md` whenever `group` is set, and this writer is only reached for grouped
-  // entries), and it is that slash — not the unparseable title — that makes the raw fallback look
-  // like a bare path. Pinned because a reader who tests the writer with a slash-free target finds
-  // `present` and would conclude the documentation is wrong.
-  const title = 'Plans [Beta]'; // identical, target-breaking, in every case below
-  const cases = [
-    { link: `[${title}](admin/plans.md)`, expected: 'not-a-list', why: 'path mode, group-prefixed target' },
-    { link: `[${title}](plans.md)`, expected: 'present', why: 'path mode, slash-free target' },
-    { link: `[[admin/plans|${title}]]`, expected: 'not-a-list', why: 'wikilinks mode, group-prefixed target' },
-    { link: `[[plans|${title}]]`, expected: 'present', why: 'wikilinks mode, slash-free target' },
-  ];
-  for (const marker of ['*', '+']) {
-    for (const { link, expected, why: reason } of cases) {
-      const seed = [`${marker} Admin`, `  ${marker} [G](g.md)`, ''];
-      const first = wireNestedListChapter(seed, 'Admin', link);
-      assert.equal(first.kind, 'inserted', `${marker} / ${reason}: run 1 always writes`);
-      assert.equal(
-        wireNestedListChapter(first.newLines, 'Admin', link).kind,
-        expected,
-        `${marker} / ${reason}: the slash decides, not the title`,
-      );
+    for (const marker of refusedOn) {
+      const seed = ['# Summary', '', `${marker} Other`, `  ${marker} [G](g.md)`, ''];
+      const result = wireNestedListChapter(seed, groupTitle, chapterLink);
+      assert.equal(result.kind, 'unwritable', `${marker}: refused`);
+      assert.equal(result.field, 'group_title', `${marker}: the group_title is named, not the chapter title`);
+      assert.ok(!('newLines' in result), `${marker}: nothing to persist`);
+    }
+
+    // CONTROL — the same value on a marker where it never poisoned anything must still write. This
+    // is what distinguishes a scoped postcondition from a refuse-everything one, and without it
+    // every assertion above would also pass against a writer that had simply stopped working.
+    for (const marker of writesOn) {
+      const seed = ['# Summary', '', `${marker} Other`, `  ${marker} [G](g.md)`, ''];
+      const result = wireNestedListChapter(seed, groupTitle, chapterLink);
+      assert.equal(result.kind, 'inserted', `${marker} control: still writes`);
+      assert.equal(result.created, true, `${marker} control: creates the container`);
+    }
+  });
+}
+
+test('re-read postcondition [1.11.0]: U+2028/U+2029 in a group_title is refused on EVERY marker — the one container cause with no safe marker', () => {
+  // Deliberately not a row in UNWRITABLE_GROUP_TITLES: every row there carries a `writesOn` control,
+  // and this value has none. Keeping it out of the table rather than inventing an empty control is
+  // the point — the table's framing ("harmless on one marker, fatal on another") is true of its five
+  // rows and is NOT a general property, and an unpinned exception is how that framing would have
+  // quietly become a rule. The title half is covered by UNWRITABLE_TITLES; this is the container half.
+  for (const sep of [0x2028, 0x2029]) {
+    const groupTitle = `Sales${String.fromCodePoint(sep)}Ops`;
+    assert.equal(isPlainLabel(groupTitle), true, 'the plain-label allowlist accepts it');
+    for (const marker of ['-', '*', '+']) {
+      const seed = ['# Summary', '', `${marker} Other`, `  ${marker} [G](g.md)`, ''];
+      const result = wireNestedListChapter(seed, groupTitle, '[Items](admin/items.md)');
+      assert.equal(result.kind, 'unwritable', `U+${sep.toString(16)} / ${marker}: refused`);
+      assert.equal(result.field, 'group_title');
     }
   }
 });
 
-for (const { groupTitle, markers, safeMarkers, why } of CONTAINER_LOCKOUT_GROUP_TITLES) {
-  test(`${PINNED_DEFECT}: group_title ${JSON.stringify(groupTitle)} locks a ${markers.join('/')} index (${why})`, () => {
-    const chapterLink = '[Items](admin/items.md)';
-    assert.equal(isPlainLabel(groupTitle), true, 'the allowlist accepts it — that is what makes this reachable');
-    assert.deepEqual(validateGroups([{ slug: 'q1', group: 'g', group_title: groupTitle }]), [], 'and so does validateGroups');
+test('re-read postcondition [1.11.0]: which marker decides is a property of the EMITTED line, not of the file', () => {
+  // Every other fixture in this section uses a homogeneous-marker index, so all of them would still
+  // pass if the rule really were "a `-` index" vs "a `*` index" — which is how both adapters phrase
+  // it. It is not. The ZERO-create branch emits `firstTopMarker`: the marker of the FIRST indent-0
+  // bullet in the file. Measured, and it inverts cleanly when the first bullet flips:
+  const mostlyStar = ['- [Introduction](README.md)', '* Admin', '  * [Items](admin/items.md)', ''];
+  const mostlyDash = ['* [Introduction](README.md)', '- Admin', '  - [Items](admin/items.md)', ''];
+  const link = '[Plans](admin/plans.md)';
 
-    for (const marker of markers) {
-      const seed = ['# Summary', '', `${marker} [Introduction](README.md)`, `${marker} Admin`, `  ${marker} [Items](admin/items.md)`, ''];
-      const first = wireNestedListChapter(seed, groupTitle, chapterLink);
-      assert.equal(first.kind, 'inserted', `${marker}: the container is created`);
-      // The load-bearing assertion: an UNRELATED chapter in an UNRELATED group is locked out too.
-      assert.equal(
-        wireNestedListChapter(first.newLines, 'Admin', '[Orders](admin/orders.md)').kind,
-        'not-a-list',
-        `${marker} / ${groupTitle}: the whole file is locked — if this is no longer 'not-a-list', the defect is FIXED: delete this test and retire the adapter prose`,
-      );
-    }
+  // A bare-path-shaped group_title is refused on `*`/`+` — but this file emits `-`, so it is written.
+  const a = wireNestedListChapter(mostlyStar, 'Sales/Marketing', link);
+  assert.equal(a.kind, 'inserted', 'first bullet is `-`, so the emitted container is `- Sales/Marketing`');
+  assert.ok(a.newLines.includes('- Sales/Marketing'));
 
-    // Marker controls. Without these the test reads as "this group_title is broken", which is not
-    // what was measured — every one of these values is harmless on some other marker.
-    for (const marker of safeMarkers) {
-      const seed = ['# Summary', '', `${marker} [Introduction](README.md)`, `${marker} Admin`, `  ${marker} [Items](admin/items.md)`, ''];
-      const first = wireNestedListChapter(seed, groupTitle, chapterLink);
-      assert.equal(first.kind, 'inserted', `${marker} control: still writes`);
-      assert.notEqual(
-        wireNestedListChapter(first.newLines, 'Admin', '[Orders](admin/orders.md)').kind,
-        'not-a-list',
-        `${marker} control: this marker is NOT locked by ${groupTitle} — the cause is marker-scoped`,
-      );
-    }
-  });
-}
+  // The same value on a mostly-`-` file whose FIRST bullet is `*` is refused.
+  assert.deepEqual(
+    wireNestedListChapter(mostlyDash, 'Sales/Marketing', link),
+    { kind: 'unwritable', field: 'group_title' },
+  );
 
-test(`${PINNED_DEFECT}: a chapter title EDITED between publishes accumulates one dead row per edit, without bound`, () => {
+  // And the hyphen-run cause inverts the other way, for the same reason.
+  assert.deepEqual(
+    wireNestedListChapter(mostlyStar, '---', link),
+    { kind: 'unwritable', field: 'group_title' },
+  );
+  assert.equal(wireNestedListChapter(mostlyDash, '---', link).kind, 'inserted');
+});
+
+test('re-read postcondition [1.11.0]: on a `*`/`+` index the refusal follows the target\'s GROUP PREFIX, not the broken title', () => {
+  // The adapters explain the `*`/`+` case by saying a target-breaking title triggers isBarePathBullet.
+  // That is true of what the adapters EMIT and false as a property of this writer: the `/` does the
+  // work. A grouped chapter's target always carries its group prefix (chapterRelPath returns
+  // `<group>/<slug>.md` whenever `group` is set, and this writer is reached only for grouped
+  // entries), so the raw fallback looks like a bare path. With a slash-free target the identical
+  // title is written and converges normally — pinned so the attribution cannot drift back.
+  const title = 'Plans [Beta]';
+  for (const marker of ['*', '+']) {
+    const seed = [`${marker} Guides`, `  ${marker} [G](g.md)`, ''];
+
+    const grouped = wireNestedListChapter(seed, 'Guides', `[${title}](admin/plans.md)`);
+    assert.equal(grouped.kind, 'unwritable', `${marker}: a group-prefixed target is refused`);
+    assert.equal(grouped.field, 'title');
+
+    const flat = wireNestedListChapter(seed, 'Guides', `[${title}](plans.md)`);
+    assert.equal(flat.kind, 'inserted', `${marker}: the SAME title with a slash-free target writes`);
+    assert.equal(
+      wireNestedListChapter(flat.newLines, 'Guides', `[${title}](plans.md)`).kind,
+      'present',
+      `${marker}: and converges on the next run, so the slash is the variable`,
+    );
+  }
+});
+
+test('re-read postcondition [1.11.0]: the writer never emits a chapter row at indent 0, so a left-margin row is always operator-typed', () => {
+  // Earlier prose in both adapters described a "broken row at the left margin" as something the
+  // WRITER's own insert could land in. It cannot: every child row is emitted at `childIndent`, which
+  // containerOwnerScan caps to 2..4 and defaults to 2, and the only indent-0 line the writer ever
+  // emits is a container whose label passed isPlainLabel first. Pinned because the retired prose was
+  // wrong about the agent, not about the shape — and a future reader could reintroduce it.
+  const cases = [
+    { seed: ['- Admin', '  - [G](g.md)', ''], why: 'existing 2-space child' },
+    { seed: ['- Admin', '    - [G](g.md)', ''], why: 'existing 4-space child' },
+    { seed: ['- Admin', ''], why: 'container with no child' },
+    { seed: ['- Other', '  - [G](g.md)', ''], why: 'ZERO-create branch' },
+  ];
+  for (const { seed, why } of cases) {
+    const result = wireNestedListChapter(seed, 'Admin', '[Items](admin/items.md)');
+    assert.equal(result.kind, 'inserted', why);
+    const row = result.newLines.find((line) => line.includes('admin/items.md'));
+    assert.ok(row.length - row.trimStart().length >= 2, `${why}: the emitted row is never at indent 0`);
+  }
+
+  // The SCENARIO is still real, and still operator-reachable: a hand-typed target-breaking row at the
+  // left margin fails the indent-0 plain-label gate and takes the whole file with it. 1.11.0 does not
+  // change that — the writer's refusal is the correct response to an already-unreadable file, not the
+  // cause of it.
+  const handTyped = ['# Summary', '', '- [Plans [Beta]](admin/plans.md)', '- Admin', '  - [G](g.md)', ''];
+  assert.equal(wireNestedListChapter(handTyped, 'Admin', '[Items](admin/items.md)').kind, 'not-a-list');
+});
+
+test('re-read postcondition [1.11.0]: a clean manifest is unaffected — the fix must not cost a legitimate write', () => {
+  // The counterfactual that matters most operationally. Every ordinary shape still goes through.
+  const cases = [
+    { seed: ['- Admin', '  - [Overview](admin/overview.md)'], group: 'Admin', link: '[Items](admin/items.md)', created: false },
+    { seed: ['- Other', '  - [G](g.md)'], group: 'Admin', link: '[Items](admin/items.md)', created: true },
+    { seed: ['* Admin', '  * [Overview](admin/overview.md)'], group: 'Admin', link: '[Items](admin/items.md)', created: false },
+    { seed: ['- Admin', '  - [[admin/overview|Overview]]'], group: 'Admin', link: '[[admin/items|Items]]', created: false },
+    { seed: ['- Admin', '    - [Overview](admin/overview.md)'], group: 'Admin', link: '[Items](admin/items.md)', created: false },
+  ];
+  for (const { seed, group, link, created } of cases) {
+    const result = wireNestedListChapter(seed, group, link);
+    assert.equal(result.kind, 'inserted', `${JSON.stringify(seed)} + ${link}`);
+    assert.equal(result.created, created);
+    assert.ok(result.newLines.some((line) => line.includes(link)), 'the row is really there');
+  }
+});
+
+// Still unfixed after the re-read postcondition: that check asks "can I read back what I am about
+// to write", and every generation of an edited title IS readable. Measured against the fix, this
+// test stays green while all twelve lockout pins went red — which is the map worth having: the two
+// defects looked like one and are not.
+const PINNED_DEFECT_ACCUMULATION =
+  'PINNED DEFECT [1.11.0] (RED HERE MEANS FIXED — delete this test and retire the accumulation '
+  + 'disclosure in BOTH adapters)';
+
+test(`${PINNED_DEFECT_ACCUMULATION}: a chapter title EDITED between publishes accumulates one dead row per edit, without bound`, () => {
   // The adapters measured "every placement x title-resolvability combination" with the manifest held
   // FIXED, and concluded no combination grows without bound. Title EDITS are a third axis. Each edit
   // produces a different link string, so the membership guard correctly sees a different row and
@@ -4243,41 +4301,6 @@ test(`${PINNED_DEFECT}: a chapter title EDITED between publishes accumulates one
     assert.ok(
       rows.some((row) => row.includes(`Plans [Beta ${generation}]`)),
       `generation ${generation} is still in the index`,
-    );
-  }
-});
-
-test(`${PINNED_DEFECT}: the ZERO-create branch writes a container its own bare-path guard then refuses — but only on \`*\`/\`+\` files`, () => {
-  const chapterLink = '[Items](admin/items.md)';
-  // isPlainLabel accepts both of these group_titles; that is the surprising part.
-  for (const groupTitle of ['Sales/Marketing', 'billing.md']) {
-    assert.equal(isPlainLabel(groupTitle), true, `${groupTitle} passes the plain-label allowlist`);
-
-    for (const marker of ['*', '+']) {
-      const seed = [`${marker} Guides`, `  ${marker} [G](g.md)`, ''];
-      const first = wireNestedListChapter(seed, groupTitle, chapterLink);
-      assert.equal(first.kind, 'inserted', `${marker} / ${groupTitle}: the container is created`);
-      assert.ok(
-        first.newLines.includes(`${marker} ${groupTitle}`),
-        `${marker} / ${groupTitle}: the created container line carries the raw group_title`,
-      );
-      assert.equal(
-        wireNestedListChapter(first.newLines, groupTitle, chapterLink).kind,
-        'not-a-list',
-        `${marker} / ${groupTitle}: the created container is immediately unrecognizable — if this is now \`present\`, the defect is FIXED: delete this test and retire the adapter prose`,
-      );
-    }
-
-    // CONTROL — the same group_title on a '-' file is fine. isBarePathBullet is marker-scoped, so
-    // this is specific to '*'/'+', not a property of the group_title alone. Without this control the
-    // tests above would read as "these group_titles are broken", which is not what was measured.
-    const dashSeed = ['- Guides', '  - [G](g.md)', ''];
-    const dashFirst = wireNestedListChapter(dashSeed, groupTitle, chapterLink);
-    assert.equal(dashFirst.kind, 'inserted');
-    assert.equal(
-      wireNestedListChapter(dashFirst.newLines, groupTitle, chapterLink).kind,
-      'present',
-      `- / ${groupTitle}: converges normally, so the lockout is marker-specific`,
     );
   }
 });

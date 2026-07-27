@@ -1512,10 +1512,46 @@ export function wireNestedListChapter(indexLines, groupTitle, chapterLink) {
   if (scan.kind === 'not-a-list') return { kind: 'not-a-list' };
   const { containers, childIndent, firstTopMarker, lastBulletIndex } = scan;
 
-  // §5.4 EOL-faithful emission.
-  const emit = (outLogical, created) => {
+  // §5.4 EOL-faithful emission, gated by a RE-READ POSTCONDITION [1.11.0].
+  //
+  // The writer used to emit whatever the caller's chapterLink and group_title produced, with a
+  // plain-label check on the container label and none at all on the child row. A manifest value that
+  // is legal everywhere upstream — a backtick, an HTML comment, a fence, a U+2028, a `Token:` prefix,
+  // a run of hyphens, a `/` on a `*`/`+` file — therefore got written into a file that was clean a
+  // moment earlier, and THIS SAME SCANNER refused that file on every later run: nested-list
+  // automation died for every chapter and every group in it, permanently, and the operator saw only
+  // the generic manual halt naming no row.
+  //
+  // So the postcondition is not a list of forbidden characters — enumerating the scanner's rules
+  // here would be a second copy that drifts, and a copy of a rule cannot notice a rule it never
+  // copied. It RUNS the real gates over the real bytes about to be persisted: if our own reader
+  // would reject what our own writer is about to hand back, we hand back nothing.
+  const rereadRejects = (candidateLines) => {
+    const re = prepareIndexLines(candidateLines);
+    if (re.kind === 'not-a-list') return true;
+    if (hasYamlMappingStructure(re.body)) return true;
+    return containerOwnerScan(re.body, wanted).kind === 'not-a-list';
+  };
+
+  // Attribution, computed only on the failure path: swap ONE emitted line for a known-recognizable
+  // stand-in and re-read. If that clears the rejection, that line is the culprit — which tells the
+  // caller which MANIFEST FIELD to name in its halt. Derived by substitution rather than by parsing
+  // the value, so it stays correct for causes nobody has found yet.
+  const blame = (outLogical, emitted) => {
+    for (const { index, standIn, field } of emitted) {
+      const probe = outLogical.slice();
+      probe[index] = standIn;
+      const probeOut = probe.join(EOL) + (hadTerminalNewline ? EOL : '');
+      if (!rereadRejects(probeOut.split('\n'))) return field;
+    }
+    return 'unknown';
+  };
+
+  const emit = (outLogical, created, emitted) => {
     const out = outLogical.join(EOL) + (hadTerminalNewline ? EOL : '');
-    return { kind: 'inserted', created, newLines: out.split('\n') };
+    const newLines = out.split('\n');
+    if (rereadRejects(newLines)) return { kind: 'unwritable', field: blame(outLogical, emitted) };
+    return { kind: 'inserted', created, newLines };
   };
 
   if (containers.length >= 2) {
@@ -1567,8 +1603,14 @@ export function wireNestedListChapter(indexLines, groupTitle, chapterLink) {
     // Reuse the existing children's marker so the inserted line stays in the SAME list block
     // (CommonMark starts a new list on a marker change); a container with no existing child has
     // no sibling marker to match, so fall back to the container's own marker (first-ever child).
-    const childLine = ' '.repeat(childIndent) + (childMarker ?? containerMarker) + ' ' + chapterLink;
-    return emit(logical.slice(0, insertAt).concat([childLine], logical.slice(insertAt)), false);
+    const childMarkerUsed = childMarker ?? containerMarker;
+    const childLine = ' '.repeat(childIndent) + childMarkerUsed + ' ' + chapterLink;
+    return emit(logical.slice(0, insertAt).concat([childLine], logical.slice(insertAt)), false, [
+      // Only the child row is new here, so it is the only line that can be blamed. The stand-in is a
+      // minimal row this scanner is known to accept, so a clean re-read means the real line's own
+      // content — i.e. the chapter's manifest title — is what the reader rejected.
+      { index: insertAt, standIn: ' '.repeat(childIndent) + childMarkerUsed + ' [x](x.md)', field: 'title' },
+    ]);
   }
 
   // ZERO — create a bare-label container + child spliced immediately after the last bullet. The
@@ -1580,6 +1622,14 @@ export function wireNestedListChapter(indexLines, groupTitle, chapterLink) {
   return emit(
     logical.slice(0, lastBulletIndex + 1).concat([containerLine, childLine], logical.slice(lastBulletIndex + 1)),
     true,
+    // TWO new lines here, so blame must distinguish them. Container first: a container line that the
+    // reader refuses (a bare-path shape on a `*`/`+` marker, a `Token:` prefix, a run of hyphens)
+    // makes the child's own indent meaningless, so attributing to `group_title` is both the earlier
+    // cause and the one whose repair fixes the other.
+    [
+      { index: lastBulletIndex + 1, standIn: firstTopMarker + ' x', field: 'group_title' },
+      { index: lastBulletIndex + 2, standIn: ' '.repeat(childIndent) + firstTopMarker + ' [x](x.md)', field: 'title' },
+    ],
   );
 }
 
