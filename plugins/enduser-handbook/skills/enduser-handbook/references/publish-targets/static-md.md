@@ -614,8 +614,13 @@ outright — nothing is persisted — instead of succeeding once and leaving eve
 every chapter and group in the file, to fall back to unverified completion or a repeating,
 unnamed halt. This refusal is conservative, not rendering-aware: it can decline a title or
 `group_title` that would in fact have rendered and parsed fine, because it checks structure, not
-rendered output. The remedy is a plain manifest value, not an index edit — give the chapter a
-plain title or `group_title` and re-run. A richer rendering-aware matcher remains a possible
+rendered output. The remedy is a manifest value, not an index edit — and it is the recovery class
+the halt itself states, not the parser's broader plain-label class: Unicode letters and numbers,
+single ASCII spaces between words, applied to the chapter's title or to EVERY entry of its group.
+Do not read "plain" here as the predicate named below. That predicate accepts `FAQ: basics`,
+`Sales/Marketing` and `billing.md`, each of which is refused by some emitted marker, so an operator
+who satisfies it and re-runs can meet the identical halt again. A richer rendering-aware matcher
+remains a possible
 follow-up for the container-label and `group_title` refusals earlier in this section, not for
 this gap.
 

@@ -814,10 +814,16 @@ it is ever written. The set is per-field, and the two fields do not share it:
   indent-0 bullet, not inferred from a file-wide style.
 
 Each of those reaches `{kind: 'unwritable', field}` — see "Non-headings index, no existing line"
-above for the exact halt text — never a written row. Inline code, an HTML comment and a fenced
-run are deliberately absent from the `group_title` list: measured 9/9 across `-`, `*` and `+`,
-those short-circuit to `{kind: 'not-a-list'}` before any write is attempted, so they surface as
-the manual halt and never as `unwritable`. Give the chapter or the group a plain value and re-run.
+above for the exact halt text — never a written row. Inline code, an HTML comment and a run of
+several backticks are deliberately absent from the `group_title` list: measured 9/9 across `-`,
+`*` and `+`, those short-circuit to `{kind: 'not-a-list'}` before any write is attempted, so they
+surface as the manual halt and never as `unwritable`. Note what that rules out: a backtick run in
+a `group_title` is never a fence. The container line is emitted as the marker, a space, then the
+value, so the run cannot start its own line — and in these cases the value never reaches emission
+at all. Recover with a value in the halt's own recovery class — Unicode letters and numbers,
+single ASCII spaces between words — applied to the chapter, or to EVERY entry of its group, then
+re-run. The plain-label predicate named below is BROADER than that class and satisfying it alone
+can meet the identical halt again.
 
 **The plain-label predicate, named exactly.** In short: a plain title is verified; a
 non-plain title that still resolves is found but left unverifiable; a title that breaks its

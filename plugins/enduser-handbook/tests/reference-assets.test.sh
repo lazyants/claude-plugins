@@ -2846,12 +2846,36 @@ done
 # A recovery constraint may deliberately exclude harmless spellings, but it must not misstate the
 # mechanism. A title's backtick run is an inline code span because the emitted row puts it after
 # indentation and a bullet; it is never a fence. Keep the retired "code fences" wording out.
+#
+# READ THIS BEFORE ADDING ANOTHER NEEDLE HERE. A negative pin forbids a SPELLING, not the error, and
+# this particular error has now come back twice past a negative pin written to stop it: retired as
+# "code fences", it returned as "a fenced code run", and — after a pin was added for THAT phrase —
+# a third time as "a fenced run", predicated of a `group_title`. Each new spelling walked straight
+# through, because the needle held the previous one. Adding a fourth needle buys the fourth spelling
+# and nothing else. So the load-bearing gate is the POSITIVE pair below: each adapter must STATE the
+# mechanism, in the section that defines the refusal set. A rewrite that reintroduces the fence claim
+# has to delete or contradict that sentence, and then this fails however it is spelled. Keep the
+# negatives as the cheap early signal; keep the positives as the actual gate.
+has_joined_in_section \
+  "static-md.md: states the span-not-fence mechanism where the refusal set is defined" \
+  "$SMD" "### Nested-list automation limits" 'an unterminated inline code span, never a fence'
+has_joined_in_section \
+  "obsidian-vault.md: states the span-not-fence mechanism for a group_title" \
+  "$OMD" "### Nested-list automation limits" 'a backtick run in a `group_title` is never a fence'
 for f in "$SMD" "$OMD"; do
   c="$(count_joined_fixed 'code fences, or invisible line separators' "$f")"
   if [ "$c" -eq 0 ]; then
     ok "$(basename "$f"): the corrected halt wording stays corrected"
   else
     bad "$(basename "$f"): the 'code fences' wording is back in the unwritable halt"
+  fi
+done
+for f in "$SMD" "$OMD"; do
+  c="$(count_joined_fixed 'a fenced run' "$f")"
+  if [ "$c" -eq 0 ]; then
+    ok "$(basename "$f"): the third fence spelling stays out"
+  else
+    bad "$(basename "$f"): 'a fenced run' is back — see the positive pins above for why a needle is not the gate"
   fi
 done
 # Same guard for the earlier negative enumeration. It was neither a complete fatal set nor a safe
