@@ -257,19 +257,41 @@ test('synthetic: two headings sharing a title make a citation AMBIGUOUS, not sil
 // future change that reintroduces either superlinear shape fails loudly instead of silently
 // reintroducing a hang.
 test('extractCitations does not catastrophically backtrack on a long undirected quoted-title run (ReDoS regression)', () => {
+  // #343: this asserts a RATIO of two wall-clock durations, and BOTH ends were unsound. Measured on
+  // this branch (804 tests) against the 616-test pre-release baseline, so the trigger is suite LOAD,
+  // not the regex — which is untouched across this release.
+  //   1. DENOMINATOR, resolution. `Date.now()` gave the 5,000-title run 0-1ms, and the old
+  //      `Math.max(small, 1)` floor then pinned it at 1, degenerating the "ratio" into the large
+  //      run's absolute duration. Fixed by `process.hrtime.bigint()`, a nanosecond monotonic clock.
+  //   2. NUMERATOR, scheduling. That alone still failed 1 run in 4. The reason is NOT resolution:
+  //      measured on the failures, `small` was a healthy 0.76-1.43ms while `large` inflated to
+  //      57-94ms against a ~16ms baseline — the big run was being descheduled mid-measurement, a
+  //      real 4-6x, so the ratio cleared 40 with nothing wrong.
+  // A single timing sample cannot distinguish "slow because quadratic" from "slow because preempted".
+  // Repeating and taking the MINIMUM can: preemption and GC only ever ADD time, so the minimum of k
+  // samples converges on the uncontended cost from above, while genuine quadratic scaling is present
+  // in every sample and survives the min untouched. The absolute `large < 2000` bound below is
+  // deliberately left on a single-sample basis — it has three orders of magnitude of headroom and is
+  // the ReDoS signal that matters even when the box is busy.
+  const TIMING_SAMPLES = 5;
   const timeFor = (n) => {
     const decoyRun = '"a" '.repeat(n) + 'end.';
-    const start = Date.now();
-    const recs = extractCitations(decoyRun);
-    const elapsed = Date.now() - start;
-    assert.deepEqual(recs, [], `n=${n}: no trailing above/below means no citation span should match at all`);
-    return elapsed;
+    let best = Infinity;
+    for (let i = 0; i < TIMING_SAMPLES; i += 1) {
+      const start = process.hrtime.bigint();
+      const recs = extractCitations(decoyRun);
+      const elapsedMs = Number(process.hrtime.bigint() - start) / 1e6;
+      assert.deepEqual(recs, [], `n=${n}: no trailing above/below means no citation span should match at all`);
+      if (elapsedMs < best) best = elapsedMs;
+    }
+    return best;
   };
   const small = timeFor(5_000);
   const large = timeFor(80_000); // 16x the input
   // Linear ⇒ ~16x; quadratic ⇒ ~256x; exponential ⇒ unmeasurably larger. A generous 40x ceiling
-  // (allows timer-granularity noise on the small run) still fails hard on quadratic-or-worse scaling.
-  const ratio = large / Math.max(small, 1);
+  // still fails hard on quadratic-or-worse scaling.
+  assert.ok(small > 0, `the small run measured ${small}ms — a zero denominator makes the ratio meaningless`);
+  const ratio = large / small;
   assert.ok(
     large < 2000,
     `expected the 80,000-title run well under 2s, took ${large}ms — possible ReDoS regression`,

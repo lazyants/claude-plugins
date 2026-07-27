@@ -2894,10 +2894,25 @@ done
 # A NEEDLE MUST REACH THE WORD THAT CARRIES THE CLAIM'S POLARITY. A needle that stops at a noun
 # phrase pins a SUBJECT, and a subject is equally compatible with the opposite predicate: pinning
 # 'HTML comment or a fenced block anywhere' left "...anywhere is accepted by this automation" fully
-# green, same needle, same `fenc` count, meaning inverted. Two of the three per-adapter needles below
-# were that shape and now run through their verb ('fall outside the subset as well', 'can never sit
-# at'). Apply the same test to any needle added here: write the sentence that contradicts the claim
-# while keeping your needle verbatim — if you can, the needle is too short.
+# green, same needle, same `fenc` count, meaning inverted. Reshaped for that reason: TWO of static's
+# three needles (the refusal list, now running through 'fall outside the subset as well', and the
+# line-start clause, now through 'can never sit at') and ONE of obsidian's (the refusal list) — the
+# adapters are not symmetric here, because obsidian's other two needles already ended in 'not a
+# fence' / 'is never a fence' and carried their own polarity. Count the needles you actually changed
+# before describing them; the earlier revision of this comment claimed two per adapter and was wrong
+# about obsidian.
+#
+# THE TEST THAT FOLLOWS, STATED SO IT IS SATISFIABLE. Extending a needle defends against a rewrite of
+# the claim IN PLACE — a predicate swapped, a negation dropped — which is the edit that actually
+# happened here twice. It does NOT defend against a contradiction APPENDED after the pinned span:
+# '...fall outside the subset as well only in the retired 1.10.0 behavior; 1.11.0 accepts every one
+# of these forms' keeps every needle verbatim and leaves all eight assertions green, and no finite
+# needle can prevent that, because a suffix always exists. An earlier revision of this comment told
+# you to lengthen the needle until no contradiction was possible; that instruction can never be
+# satisfied, and following it would just produce longer brittle pins with the same hole.
+# So: the needle question is 'could someone REWRITE this claim without touching my needle?' — if yes,
+# extend it. The appended-contradiction case is not a needle-length problem at all; it is the
+# token-free residual already named below, and it is bounded by review, not by a string.
 #
 # These layers still do not decide whether the prose is TRUE. Known live evasions, kept named rather
 # than implied away: a contradiction phrased without any `fenc` token, and the scanner-divergence
