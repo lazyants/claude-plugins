@@ -152,6 +152,31 @@ def line_containing(body, needle):
     return hits[0]
 
 
+def code_lines(body):
+    """`body` with every WHOLE-LINE `//` comment removed.
+
+    Every assertion below that claims a function DOES something must run
+    against this rather than against the raw slice. extract_function_body()
+    deliberately keeps a TRAILING comment -- the NEXT function's own lead
+    comment -- inside the previous function's slice, and these templates
+    document each helper in prose right above its caller, so the raw slice
+    routinely contains the very identifier the assertion is hunting for.
+    `"checkBatchCmd(" in body` was satisfied for batchDispatchPrompt by the
+    trailing comment "// checkBatchCmd() -- the same command DISPATCH's
+    self-check issues"; the dispatch could drop its self-check entirely and
+    the assertion still passed. A body that happens to have no trailing
+    comment (batchPrecheckPrompt) hides that, which is exactly why the loop
+    below now runs this over ALL THREE sites rather than trusting the one
+    site that was proved by mutation.
+
+    Only whole-line comments go: cutting each line at its first "//" would
+    also cut inside a string literal, and these templates push
+    natural-language prose that carries URLs."""
+    return "\n".join(
+        ln for ln in body.splitlines() if not ln.lstrip().startswith("//")
+    )
+
+
 # Numeric driver-timing consts, read straight off the template so the
 # "elapsed bound >= CODEX_DEADLINE_SEC" check is verified against the real
 # declared values, never a hardcoded guess.
@@ -207,6 +232,30 @@ def test_regression_catcher_helpers_actually_discriminate():
     assert line_containing("a foo b\nc bar d", "foo") == "a foo b"
     with pytest.raises(AssertionError):
         line_containing("foo\nfoo", "foo")
+
+    # code_lines() must drop a whole-line comment that MENTIONS the call while
+    # keeping the call itself -- the precise discrimination the three-site
+    # anti-drift lock below depends on.
+    commented = (
+        "function gamma(x) {\n"
+        "  return helper(x);\n"
+        "}\n"
+        "   // helper() -- gamma() issues it (see that helper)\n"
+    )
+    assert "helper(" in commented  # ...the raw slice cannot tell the two apart
+    stripped = code_lines(commented)
+    assert "return helper(x);" in stripped
+    assert "see that helper" not in stripped
+
+    # The exact false-green shape: the ONLY occurrence is in the trailing
+    # comment, so the raw slice says the call is there and code_lines() does not.
+    comment_only = "function delta() {\n  return 1;\n}\n// delta() issues helper()\n"
+    assert "helper(" in comment_only
+    assert "helper(" not in code_lines(comment_only)
+    # A string literal carrying "//" is code, not a comment, and must survive.
+    assert code_lines('  push("see https://example.invalid/x");') == (
+        '  push("see https://example.invalid/x");'
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -383,18 +432,291 @@ def test_glossary_batch_dispatch_is_codex_and_schema_less():
     assert not has_schema(options), f"glossary batch dispatch must be schema-less (fire-and-forget): {options}"
 
 
+# The three sites that must issue the --check-batch command
+# character-identically (see checkBatchCmd()'s own comment in the template):
+# the resume precheck, the codex dispatch's own self-check, and the wait poll.
+CHECK_BATCH_CALL_SITES = ("batchPrecheckPrompt", "batchDispatchPrompt", "batchWaitPrompt")
+
+# The command as CODE. The "/scripts/" path prefix is the tell that separates
+# BUILDING the command from merely naming it in prose -- the template's prose
+# always says a bare "canon_validate.py --check-batch", never the script path.
+COMPOSED_CHECK_BATCH_LITERAL = "/scripts/canon_validate.py --check-batch"
+
+
 def test_glossary_batch_wait_is_a_bounded_poll_of_check_batch():
-    wait_body = extract_function_body(GLOSSARY_SOURCE, "batchWaitPrompt")
+    wait_body = code_lines(extract_function_body(GLOSSARY_SOURCE, "batchWaitPrompt"))
     assert has_seq_poll_loop(wait_body), (
         f"batchWaitPrompt must contain a bounded `for i in $(seq 1 N)` poll:\n{wait_body}"
     )
-    assert "canon_validate.py" in wait_body and "--check-batch" in wait_body
+    # 1.16.0 extracted checkBatchCmd(), so the command's own literals no longer
+    # sit inline here -- follow that indirection rather than grepping this body
+    # for them. The intent is unchanged and asserted as the full CHAIN: the
+    # bounded poll runs the checkBatchCmd()-built command, and that command is
+    # canon_validate.py --check-batch.
+    assert "checkBatchCmd(batch.index, attempt)" in wait_body, (
+        "batchWaitPrompt must build its poll command from checkBatchCmd(), "
+        "scoped to THIS attempt's own fragment path"
+    )
+    poll = line_containing(wait_body, "for i in $(seq 1")
+    # Word-anchored, not a bare substring: `"checkCmd" in poll` is satisfied by
+    # any identifier that merely CONTAINS it, so a poll interpolating some
+    # unrelated `checkCmdFallback` would have passed while running a command
+    # this test never inspected.
+    assert re.search(r"\bcheckCmd\b", poll), (
+        f"the bounded poll must interpolate the checkBatchCmd()-built command "
+        f"itself (the exact `checkCmd` binding, not merely an identifier "
+        f"containing that name), got: {poll}"
+    )
+    cmd_line = line_containing(
+        code_lines(extract_function_body(GLOSSARY_SOURCE, "checkBatchCmd")),
+        "canon_validate.py",
+    )
+    assert "--check-batch" in cmd_line, (
+        f"the command the wait polls must be canon_validate.py --check-batch, got: {cmd_line}"
+    )
 
     wrapper = extract_function_body(GLOSSARY_SOURCE, "batchStep")
     wait_call_options = extract_agent_call_options(wrapper, "batchWaitPrompt(")
     assert not is_codex_dispatch(wait_call_options), (
         f"the wait POLL must be a Claude call (no agentType), got: {wait_call_options}"
     )
+
+
+def test_check_batch_command_is_composed_once_and_shared_by_all_three_sites():
+    """1.16.0 anti-drift lock -- the whole point of extracting checkBatchCmd().
+    The three sites have to issue this command character-identically (the
+    dispatch prompt literally tells the agent to re-run "exactly the command
+    above"), an invariant previously stated only in prose comments and enforced
+    nowhere. Lock both halves: the helper really IS the canon_validate.py
+    --check-batch command, and every one of the three sites goes THROUGH it
+    instead of composing the command itself.
+
+    Every check here runs over code_lines(), never the raw slice. The prose
+    version of this test was tautological at one of the three sites: the
+    trailing comment carried into batchDispatchPrompt's slice ("//
+    checkBatchCmd() -- the same command DISPATCH's self-check issues") satisfied
+    `"checkBatchCmd(" in body` on its own, so replacing the dispatch's real
+    self-check line with "Then stop. Do not self-check." left this test GREEN --
+    verified by mutation. The lock had been proved on batchPrecheckPrompt, which
+    happens to carry no trailing comment; that one site is not evidence about
+    the other two, so the assertions below are proved separately at each."""
+    check_cmd_body = code_lines(extract_function_body(GLOSSARY_SOURCE, "checkBatchCmd"))
+    cmd_line = line_containing(check_cmd_body, "canon_validate.py")
+    assert "--check-batch" in cmd_line, (
+        f"checkBatchCmd must build the canon_validate.py --check-batch command, got: {cmd_line}"
+    )
+
+    composition_sites = code_lines(GLOSSARY_SOURCE).count(COMPOSED_CHECK_BATCH_LITERAL)
+    assert composition_sites == 1, (
+        f"the --check-batch command must be composed in exactly ONE place, "
+        f"found {composition_sites} composition site(s)"
+    )
+    assert COMPOSED_CHECK_BATCH_LITERAL in check_cmd_body, (
+        "that single composition site must be checkBatchCmd itself"
+    )
+
+    for name in CHECK_BATCH_CALL_SITES:
+        body = code_lines(extract_function_body(GLOSSARY_SOURCE, name))
+        assert "checkBatchCmd(" in body, (
+            f"{name} must issue the --check-batch command via checkBatchCmd(), "
+            f"never by composing it itself -- and must ISSUE it in code, not "
+            f"merely be documented as issuing it in a neighbouring comment"
+        )
+        assert "/scripts/canon_validate.py" not in body, (
+            f"{name} must not compose a canon_validate.py command itself -- that "
+            f"is exactly the drift checkBatchCmd() exists to make impossible"
+        )
+
+
+# ---------------------------------------------------------------------------
+# 1.16.0 containment guard -- EVERY sentinelVerdict call site is preceded by a
+# rejectedAnywhere() check on the SAME reply and the SAME fail sentinel.
+#
+# sentinelVerdict() splits on LF only, so a fail sentinel glued to prose by any
+# other character survives whole-line equality and the rejection trigger never
+# fires; measured on the pre-guard template, 15 of 16 gluing characters over
+# GLUE_CHARS in tests/glossary_citation_review.test.py, in the PROSE shape
+# (prose shares the sentinel's line), made all three sites falsely approve --
+# that file's containment-guard section drives it end to end. The shape and the
+# set are both part of the number: the same characters give a different count in
+# the no-prose shape. The guard is applied
+# at the CALL SITES because sentinelVerdict() itself is mirrored byte-for-byte
+# across the three workflow templates and pinned by
+# tests/sentinel_verdict_parity.test.py.
+#
+# All three sites live inside one function (batchStep), so they cannot be proved
+# by three separate function bodies the way the checkBatchCmd sites were. The
+# invariant is expressed structurally instead: PAIR each sentinelVerdict call
+# with a rejectedAnywhere call on the same two expressions. That catches a site
+# left unguarded, a guard watching the wrong reply variable, and a guard
+# checking a different sentinel than the one its sentinelVerdict call uses --
+# none of which a bare "rejectedAnywhere appears 3 times" count would notice.
+# ---------------------------------------------------------------------------
+
+GUARD_HELPER = "rejectedAnywhere"
+
+_SENTINEL_VERDICT_CALL_RE = re.compile(
+    r"sentinelVerdict\(\s*([^(),]+?)\s*,\s*([^(),]+?)\s*,\s*([^(),]+?)\s*\)"
+)
+_GUARD_CALL_RE = re.compile(
+    re.escape(GUARD_HELPER) + r"\(\s*([^(),]+?)\s*,\s*([^(),]+?)\s*\)"
+)
+
+
+def _normalized_code(body):
+    """`body`'s CODE with every whitespace run collapsed to one space, so a call
+    that wraps across lines is matched the same as one that does not."""
+    return re.sub(r"\s+", " ", code_lines(body))
+
+
+def test_every_glossary_sentinel_verdict_call_site_is_containment_guarded():
+    """The 1.16.0 false-approval fix, locked at all three sites at once.
+
+    Runs over code_lines(), never the raw slice: batchStep's own comments
+    discuss both helpers by name at length, and a `GUARD_HELPER in body` check
+    against the raw text would be satisfied by that prose alone -- the exact
+    tautology the checkBatchCmd lock above was found to have."""
+    body = extract_function_body(GLOSSARY_SOURCE, "batchStep")
+    code = _normalized_code(body)
+
+    verdict_calls = _SENTINEL_VERDICT_CALL_RE.findall(code)
+    assert len(verdict_calls) == 3, (
+        f"expected batchStep to hold exactly the three sentinel sites (precheck, "
+        f"wait, citation review); found {len(verdict_calls)}: {verdict_calls}. If "
+        f"a site was added or removed, guard it and update this count -- do not "
+        f"relax the assertion"
+    )
+
+    guarded = {(reply, fail) for reply, fail in _GUARD_CALL_RE.findall(code)}
+    for reply, ok_sentinel, fail_sentinel in verdict_calls:
+        assert (reply, fail_sentinel) in guarded, (
+            f"the sentinelVerdict call on {reply!r} (ok={ok_sentinel!r}, "
+            f"fail={fail_sentinel!r}) is NOT preceded by a "
+            f"{GUARD_HELPER}({reply}, {fail_sentinel}) containment check. Without "
+            f"it, a fail sentinel glued to prose by any character other than a "
+            f"newline survives whole-line equality and this site falsely "
+            f"approves. Guards actually present: {sorted(guarded)}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# The same containment lock for mass-translate-wf.template.js.
+#
+# Its two READY/TIMEOUT sites sit in DIFFERENT top-level functions, so unlike
+# glossary's they can be proved one function at a time. The scan below walks
+# every top-level function in the file rather than a hand-listed pair, so a
+# NEW unguarded sentinel site added anywhere goes red too.
+#
+# SCOPE, stated as a rule rather than an exception list: only a call with a
+# NON-NULL fail sentinel is required to be guarded. rejectedAnywhere() returns
+# false for a non-string sentinel by construction (pinned as a unit in
+# tests/glossary_citation_review.test.py), so a guard on a null-sentinel call
+# would be a no-op. Deriving the exemption from the helper's own contract means
+# a future site with a real sentinel cannot inherit it by being added to a list.
+#
+# runRound's DRAFT_MISSING site is closed too, but by a DIFFERENT shape, and it
+# gets its own assertion rather than joining the parametrisation below. At the
+# two wait sites the guard is a PRE-CHECK in front of a surviving
+# sentinelVerdict call. At runRound the sentinelVerdict call was REPLACED
+# outright by mentionedAnywhere(), on the reasoning that containment subsumes
+# whole-line equality -- a line that EQUALS the sentinel also CONTAINS it. So
+# there is no "guard precedes sentinelVerdict" pair to assert there, and forcing
+# one would make this file's own failure message describe the code falsely.
+#
+# The direction differs as well: DRAFT_MISSING is that site's OK sentinel, so
+# gluing there hides a GENUINE missing-draft report rather than hiding a
+# rejection. mentionedAnywhere() is a thin wrapper over rejectedAnywhere() for
+# exactly that reason -- same containment test, opposite consequence, so it
+# carries a name that is not false at the call site.
+# ---------------------------------------------------------------------------
+
+MASS_TRANSLATE_GUARDED_FUNCTIONS = ["getVerifiedReview", "reviewFixLoop"]
+
+# The helpers' own definitions match the call regexes; skip those functions.
+_HELPER_DEFINITIONS = {"sentinelVerdict", GUARD_HELPER}
+
+
+def _sentinel_sites_by_function(source):
+    """{function_name: [(reply, ok, fail), ...]} for every top-level function
+    that CALLS sentinelVerdict, over code lines only."""
+    names = _TOP_LEVEL_FUNC_RE.findall(source)
+    sites = {}
+    for name in names:
+        if name in _HELPER_DEFINITIONS:
+            continue
+        code = _normalized_code(extract_function_body(source, name))
+        calls = _SENTINEL_VERDICT_CALL_RE.findall(code)
+        if calls:
+            sites[name] = calls
+    return sites
+
+
+def test_mass_translate_sentinel_verdict_sites_are_exactly_the_two_guarded_waits():
+    """Completeness half: pins WHICH functions still call sentinelVerdict, so a
+    NEW site cannot appear without this file noticing.
+
+    runRound is deliberately NOT in this set any more: its sentinelVerdict call
+    was replaced by mentionedAnywhere(), so it is covered by its own test below
+    rather than by the guard-precedes-verdict parametrisation."""
+    sites = _sentinel_sites_by_function(MASS_TRANSLATE_SOURCE)
+    assert sorted(sites) == sorted(MASS_TRANSLATE_GUARDED_FUNCTIONS), (
+        f"the set of functions calling sentinelVerdict changed: {sorted(sites)}. A "
+        f"new site must be containment-guarded, or justified as not needing it, "
+        f"before being added here"
+    )
+
+
+def test_run_round_draft_missing_site_is_containment_keyed_with_no_bare_verdict():
+    """runRound's fix branch, asserted in its OWN shape.
+
+    Two halves, and the second is what makes the first mean anything: the branch
+    must be keyed on mentionedAnywhere(), AND no bare sentinelVerdict call may
+    survive in that function. Asserting only the presence of the containment
+    call would stay green if a sentinelVerdict call were left sitting beside it,
+    which is the drift that would quietly reopen the gap.
+
+    Over code lines only -- runRound's own comment discusses both helpers by
+    name at length, so a raw-slice check would be satisfied by that prose."""
+    code = _normalized_code(extract_function_body(MASS_TRANSLATE_SOURCE, "runRound"))
+
+    assert 'mentionedAnywhere(fx, "DRAFT_MISSING " + seg)' in code, (
+        "runRound's fix branch must be keyed on "
+        'mentionedAnywhere(fx, "DRAFT_MISSING " + seg). DRAFT_MISSING is this '
+        "site's OK sentinel, so a glued report is one that goes UNRECOGNIZED -- "
+        "the round then continues over a draft the fix agent just said is missing"
+    )
+    survivors = _SENTINEL_VERDICT_CALL_RE.findall(code)
+    assert not survivors, (
+        f"runRound still calls sentinelVerdict{survivors}. The DRAFT_MISSING "
+        f"check was REPLACED by containment, not supplemented by it -- a "
+        f"surviving whole-line-equality call here is either dead code or a "
+        f"second, weaker path to the same decision"
+    )
+
+
+@pytest.mark.parametrize("function_name", MASS_TRANSLATE_GUARDED_FUNCTIONS)
+def test_mass_translate_ready_timeout_site_is_containment_guarded(function_name):
+    """Each READY/TIMEOUT site proved on its own, over code_lines() so the
+    template's own prose about the guard cannot satisfy the assertion."""
+    code = _normalized_code(extract_function_body(MASS_TRANSLATE_SOURCE, function_name))
+    verdict_calls = [c for c in _SENTINEL_VERDICT_CALL_RE.findall(code) if c[2] != "null"]
+    assert verdict_calls, (
+        f"expected {function_name} to carry a sentinelVerdict call with a real "
+        f"fail sentinel; found none -- has the site moved?"
+    )
+    guarded = {(reply, fail) for reply, fail in _GUARD_CALL_RE.findall(code)}
+    for reply, ok_sentinel, fail_sentinel in verdict_calls:
+        assert (reply, fail_sentinel) in guarded, (
+            f"{function_name}'s sentinelVerdict call on {reply!r} (ok={ok_sentinel!r}, "
+            f"fail={fail_sentinel!r}) is NOT preceded by a "
+            f"{GUARD_HELPER}({reply}, {fail_sentinel}) containment check. Without it "
+            f"a fail sentinel sharing its line with prose is never seen -- measured "
+            f"at 14 of 15 gluing characters over ALL_GLUES in "
+            f"tests/mass_translate_sentinel_containment.test.py, in the prose "
+            f"shape (prose shares the sentinel's line), a plain space among "
+            f"them. Guards "
+            f"actually present: {sorted(guarded)}"
+        )
 
 
 # ---------------------------------------------------------------------------

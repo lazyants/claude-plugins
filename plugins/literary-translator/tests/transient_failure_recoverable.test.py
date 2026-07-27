@@ -151,8 +151,14 @@ def test_verified_review_blocked_branch_has_no_ledger_write(run_round_body):
 # ---------------------------------------------------------------------------
 
 def test_fix_call_branch_probes_before_concluding_draft_missing(run_round_body):
+    # 1.16.0 re-anchor: this branch's condition moved from
+    # `sentinelVerdict(fx, "DRAFT_MISSING " + seg, null)` to
+    # `mentionedAnywhere(fx, "DRAFT_MISSING " + seg)`. The sentinelVerdict call
+    # was REPLACED, not merely guarded -- containment subsumes whole-line
+    # equality, since a line that equals the sentinel also contains it. Only the
+    # anchor is stale; everything this test asserts about the branch still holds.
     branch = _extract_if_block(
-        run_round_body, 'sentinelVerdict(fx, "DRAFT_MISSING " + seg, null)', context="runRound"
+        run_round_body, 'mentionedAnywhere(fx, "DRAFT_MISSING " + seg)', context="runRound"
     )
     assert "draftPresentAndValid(seg)" in branch, (
         "the fix-call branch must probe draftPresentAndValid(seg) before concluding "

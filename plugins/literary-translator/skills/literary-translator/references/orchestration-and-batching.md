@@ -278,7 +278,13 @@ and atomically promotes it.
    would otherwise be silently violated the moment a fix step ran against a
    nonexistent/partial/stale-run draft. On timeout (or fail-fast), this branch
    returns `{ seg, converged: false, reason: 'translate-timeout' }` and the loop
-   never reaches a review call at all for this segment.
+   never reaches a review call at all for this segment. **1.16.0:** this wait is
+   containment-guarded — a reply carrying `TIMEOUT <seg>` anywhere in it takes
+   the timeout branch even when glued to prose, which whole-line matching alone
+   would have skipped, proceeding as ready on a reply that said it had timed
+   out. `translate-timeout` is deliberately non-terminal, so a false RED here is
+   the cheapest of the guarded sites: `select_segments.py` picks the segment
+   back up and auto-redispatches it on the next run.
 3. **Review/fix loop**, up to `engine.max_fix_rounds` rounds of review → fix
    → re-review, exiting early the moment a review reports
    `clean && coverage_ok`. Each round's review point is itself the shared
@@ -296,6 +302,11 @@ and atomically promotes it.
      and whose fail-fast is the DISP-named sentinel `[ -f
      segments/.codex_failed.<seg>.<DISP> ]` (no external `timeout` binary).
      `TIMEOUT`/fail-fast → exit immediately as `blocked review-timeout`, no retry.
+     **1.16.0:** containment-guarded — a reply carrying `TIMEOUT <seg>` anywhere
+     in it takes this branch, even glued to prose, where whole-line matching
+     alone would have skipped it and proceeded as ready (see the glossary-pass
+     template section below, and `references/canon-and-glossary.md`). Because
+     there is no retry here, a false RED costs this segment for the run.
    - **`readReviewPrompt` + `verifyReviewArtifactPrompt`** — the two CONSUME calls,
      schema-validated (`REVIEW_SCHEMA`, flat `REVIEW_ARTIFACT_SCHEMA`),
      covered under **one shared retry budget**: read → check; on a `null`
@@ -331,7 +342,11 @@ and atomically promotes it.
    colonless infra-sentinel `loc` instead of a real content location),
    `fix-call-failed` (1.3.6/#131 facet A — the fix call came back falsy/
    `DRAFT_MISSING` but the `draftPresentAndValid` probe confirmed the draft
-   is present-and-valid, or the probe call itself failed inconclusively),
+   is present-and-valid, or the probe call itself failed inconclusively;
+   **1.16.0** also reaches here when a fix reply merely MENTIONS
+   `DRAFT_MISSING <seg>` without reporting one, since that site is now keyed
+   on containment via `mentionedAnywhere()` and cannot tell the two apart —
+   the accepted, non-terminal cost of no longer missing a real report),
    `draft-missing`, or `cap` (non-converged after the final confirming
    review). **1.3.6 (#131):** every reason above EXCEPT `draft-missing` and
    `cap` is now recoverable rather than terminal — no ledger write happens
@@ -591,9 +606,11 @@ effect on translation output — it is deliberately excluded from
 the cap alone never re-invalidates an already-converged segment's cache key.
 See `references/ledger-and-resumability.md` for the full cache-key
 membership list. **1.3.5:** W3's glossary-pass template reads this SAME
-`engine.batch_agent_cap` field, with its own smaller worst-case formula
-(`estimatedCalls = 3 * BATCHES.length + 2`) and the same refusal shape — see
-the glossary-pass template section below.
+`engine.batch_agent_cap` field, with its own smaller worst-case formula and
+the same refusal shape. **1.16.0:** that formula is now MODE-DEPENDENT — an
+`offline` run keeps the historical `3 * BATCHES.length + 2` unchanged, while
+a `live` run additionally pays for the citation-review retry ladder. See the
+glossary-pass template section below for both branches.
 
 ## The glossary-pass template — a second, smaller `pipeline()` call
 
@@ -629,10 +646,13 @@ session invokes a separate, standalone script —
 `references/canon-and-glossary.md` and `SKILL.md`'s W3 section for the CLI
 contract and remediation. This is deliberately a **plain script, not an
 `agent()` call**, so it is never resume-cached against the `input_digest`
-below, and it does **not** perturb the `estimatedCalls = 3 * BATCHES.length +
-2` cost formula further down this section or add a `{{BATCH_AGENT_CAP}}`-style
-template token — a future reader should not "fix" that estimator to `+3` for
-this step; the gate makes no `agent()` call at all.
+below, and it does **not** perturb the `estimatedCalls` cost formula further
+down this section or add a `{{BATCH_AGENT_CAP}}`-style template token — a
+future reader should not "fix" that estimator to `+3` for this step; the gate
+makes no `agent()` call at all. (That formula is stated once, in the
+**Preflight cost cap** bullet below, and deliberately not restated here — it
+is mode-dependent since 1.16.0 and should never need applying in two
+places.)
 
 **Deterministic PRE-WORKFLOW setup**, run by the orchestrating session
 *before* `pipeline()` is ever called — not itself an unbounded Workflow
@@ -653,42 +673,117 @@ scaffold pre-creates `glossary/runs/` itself.
 **Per-batch (DISPATCH → WAIT):**
 
 ```js
-pipeline(batches, (batch) => batchDispatchWaitLoop(batch))
+pipeline(BATCHES, batchStep)
 ```
 
 - `batchPrecheckPrompt(batch)` — Claude, `effort:'low'`, no `agentType`, no
   schema, **run FIRST (resume-skip, 1.3.5 #101)**: a single-shot, read-only
   run of the same `--check-batch` invocation `batchWaitPrompt` polls. If a
   prior interrupted run of this SAME `{{RUN_ID}}` already left a valid
-  `out_{index}.json` fragment on disk, the precheck returns `PRESENT` and the
-  batch skips its codex dispatch + wait entirely; any non-`PRESENT` answer (a
+  `out_{index}_attempt_0.json` fragment on disk (the precheck is hard-wired to
+  attempt 0 — `checkBatchCmd(batch.index, 0)`), the precheck returns `PRESENT`
+  and the batch skips its codex dispatch + wait entirely — but NOT, since
+  1.16.0, the `live`-mode citation review below, which a resumed batch still
+  pays exactly like a fresh one; any non-`PRESENT` answer (a
   missing, malformed, or wrong-coverage fragment, or a failed precheck) falls
   THROUGH to the normal dispatch + wait, so a bad fragment is never wrongly
   trusted. Safe because any plugin update flips `plugin_bundle_hash` (this
   template is itself a `PLUGIN_BUNDLE_MEMBERS` entry) → a fresh `RUN_ID` with
   no old fragments on disk, so a fragment that still passes `--check-batch`
   against the CURRENT manifest is genuinely current, never stale.
-- `batchDispatchPrompt(batch)` — codex, `agentType:'codex:codex-rescue'`,
+- `batchDispatchPrompt(batch, attempt, rejectionReason)` — codex,
+  `agentType:'codex:codex-rescue'`,
   `effort: EFFORT` (`engine.effort`, #197), **schema-less**, fire-and-forget: writes the run-scoped
-  fragment `glossary/runs/{{RUN_ID}}/out_{index}.json` **atomically**,
+  fragment `glossary/runs/{{RUN_ID}}/out_{index}_attempt_{n}.json`
+  **atomically**,
   self-validates it via `canon_validate.py --check-batch <frag>
   --research-mode X --expect-source-forms-file
   glossary/runs/{{RUN_ID}}/manifest_{index}.json` (shape **and** exact
   coverage against the trusted manifest — no write), and prints
-  `FRAGMENT {index}`.
-- `batchWaitPrompt(batch)` — Claude, `effort:'low'`, bounded poll of the
-  same `--check-batch` invocation, returning `READY`/`TIMEOUT`.
+  `FRAGMENT {index}`. **1.16.0:** the path is attempt-scoped and
+  `rejectionReason` carries the citation reviewer's own findings into every
+  attempt after the first.
+- `batchWaitPrompt(batch, attempt)` — Claude, `effort:'low'`, bounded poll of
+  the same `--check-batch` invocation, returning `READY`/`TIMEOUT`.
+- `citationReviewPrompt(batch, attempt)` (**1.16.0**) — Claude, `effort:'high'`,
+  no `agentType`, no schema, `live` only; returns
+  `CITATIONS_OK`/`CITATIONS_REJECTED <index> ATTEMPT <n>`. It gates whether
+  the batch counts as ready at all. It opens by re-running the fragment's own
+  `--check-batch` validation with `--approve-to`, which snapshots the exact
+  bytes that invocation just validated to a create-once, attempt-scoped
+  `approved_{index}_attempt_{n}.json` — one read, so nothing can change
+  between validating and copying — and it then audits **that snapshot**,
+  never the mutable `out_*` attempt path. The approval therefore binds bytes
+  rather than a path, and it costs no extra `agent()` call because it happens
+  inside this same turn. See `references/canon-and-glossary.md`'s **Pre-merge
+  citation review**.
 
-Fragment paths are run-scoped (`{{RUN_ID}}` in the path itself), so — unlike
-the pre-1.2.0 design — **no pre-clean call is needed**: a stale fragment
-from a prior run simply sits at a different, unreferenced path.
+**All three of these verdicts are containment-guarded (1.16.0)** — as are
+mass-translate's two waits and its `DRAFT_MISSING` fix check, six sites over the
+two templates. Each short-circuits when the sentinel is found anywhere in the
+reply as a substring, before `sentinelVerdict()` is consulted.
+`sentinelVerdict()` alone matches whole LINES, so a sentinel sharing its line
+with anything `trim()` does not strip was skipped.
+
+Five of the six take a FAILURE sentinel via `rejectedAnywhere()`, where a hit
+biases toward REJECTING and the guard only ever adds rejections. The
+`DRAFT_MISSING` fix site is the exception and runs the same containment test in
+the opposite direction, through `mentionedAnywhere()`: there the sentinel is the
+OK one, so gluing hid a genuine missing-draft report and the loop silently
+carried on reviewing an absent draft.
+
+A false hit recovers in-run DETERMINISTICALLY at exactly ONE of the six: the
+precheck, which falls through to the dispatch it would have run anyway —
+correct whatever made it report `ABSENT`. Of the other five, only the citation
+review gets a further attempt inside the run — its ladder's — and the remaining
+four cost a later run; since the trigger is the reply's phrasing rather than the
+data, either retry is a re-roll rather than a fix. The **citation review is
+not** among the DETERMINISTIC recoverers, despite its retry ladder: the ladder
+regenerates the fragment while the reviewer's wording is what tripped the guard,
+so a regenerated attempt merges only if its fresh reply happens not to re-trip
+the guard, and every attempt can burn on the same narration, ending the run
+`citation-review-exhausted` with nothing merged (a genuine rejection names each
+offending item, its `source` URL and the check it failed; a `lastRejection` that
+names none, or reads as an approval, is the guard misfiring and a review-prompt
+defect to report rather than re-run).
+The glossary wait ends the batch and with it the whole
+pass (`reason:"glossary-pass-null"`), mass-translate's review wait blocks that
+segment (`reason:"review-timeout"`), its translate wait returns the non-terminal
+`reason:"translate-timeout"`, and the fix site returns the equally non-terminal
+`reason:"fix-call-failed"`; `select_segments.py` auto-redispatches the last two
+next run. Full statement of the rule, the measured glue counts with their
+shapes and sets, the two false REDs and the per-site cost of a false reject:
+`references/canon-and-glossary.md`'s **Pre-merge citation review**.
+
+Fragment paths are run-scoped (`{{RUN_ID}}` in the path itself), so a stale
+fragment from a run with a DIFFERENT `RUN_ID` sits at a different,
+unreferenced path — but that alone was never enough, and this is where the
+pre-1.2.0 pre-clean's job actually went. A digest-match resume deliberately
+reuses the SAME `RUN_ID`, so a prior run's fragments sit at exactly the paths
+this run will poll, and `--check-batch` has no mtime, token or freshness
+notion to notice. **1.16.0:** `resume_setup.py`'s `write_run_dir()` therefore
+wipes stale fragments before the run starts, conditioned on the resume flag —
+a fresh run wipes ALL `out_*` and `approved_*` attempts including attempt 0
+(an orphaned `glossary/runs/<RUN_ID>` directory can outlive its identity
+directory, which is all fresh-ID uniqueness checks), a resume wipes `n >= 1`
+plus every snapshot and keeps attempt 0, which the resume-skip optimisation
+depends on wholly and which is citation-reviewed either way.
 
 **After every fragment is `READY`, two final calls, never per-batch:**
 
 1. **Final merge** — Claude, `effort:'low'`, **no** `agentType`, **no**
    `schema`: runs `canon_validate.py --merge-batches <frag1> <frag2> …
    --research-mode X` — the single serialized writer that closes #90 (see
-   `references/canon-and-glossary.md` for the merge algorithm).
+   `references/canon-and-glossary.md` for the merge algorithm). **1.16.0:**
+   under `live` those `<frag>` paths are each batch's approved SNAPSHOT
+   (`approved_{index}_attempt_{n}.json`), not the mutable attempt fragment, so
+   within one run what merges is byte-identical to what the citation reviewer
+   audited — on preconditions stated once in `references/canon-and-glossary.md`,
+   "What the approved snapshot guarantees, and the preconditions it rests on",
+   and deliberately not re-derived here. Under `offline` no reviewer runs and no
+   snapshot exists, so they are the attempt paths, an explicit branch rather
+   than a global rename. The disk-verify below re-checks the same paths the
+   merge was handed.
 2. **Disk-verify** — Claude, `effort:'low'`, no `agentType`,
    `schema: CANON_VERIFY_SCHEMA` (flat, new — see
    `references/workflow-schema-validation.md`) + its own exact-key-set JS
@@ -740,14 +835,46 @@ inside it:
   — see `references/canon-and-glossary.md`'s Citation-cache section.
 - **Preflight cost cap** (mirroring W5's estimator): right after
   `const BATCHES = ...`, before dispatching anything, the template computes
-  `estimatedCalls = 3 * BATCHES.length + 2` (per batch: precheck + dispatch +
-  wait; plus the fixed final merge + verify pair) and refuses the whole run
-  with `{merged: false, reason: "batch-too-large", estimatedCalls, cap}` if it
+  `estimatedCalls = perBatchCalls * BATCHES.length + 2` (the `+ 2` is the
+  fixed final merge + verify pair) and refuses the whole run with
+  `{merged: false, reason: "batch-too-large", estimatedCalls, cap}` if it
   exceeds `engine.batch_agent_cap` — the SAME field W5 reads, spliced in as
-  the bare-integer `{{BATCH_AGENT_CAP}}` token. The count is over BATCHES,
-  never candidates-per-batch, so a co-located elision pair nudging one batch a
-  candidate or two over its nominal `--batch-size` never trips it. A refused
-  run re-plans smaller batches (`glossary_batch_plan.py --batch-size`).
+  the bare-integer `{{BATCH_AGENT_CAP}}` token. **1.16.0: `perBatchCalls` is
+  MODE-DEPENDENT**, because the citation-review retry ladder exists only
+  under `live`:
+
+  ```
+  live    -- perBatchCalls = 1 + 3 * (MAX_CITATION_RETRIES + 1)
+             1 precheck, then dispatch + wait + citation review per attempt,
+             with attempts == MAX_CITATION_RETRIES + 1 in the worst case
+             (every review rejects until the ladder is exhausted)
+  offline -- perBatchCalls = 1 + 2 == 3
+             precheck + dispatch + wait, unchanged from 1.15.2
+  ```
+
+  **The offline branch is the historical `3 * BATCHES.length + 2` exactly,
+  and that is deliberate.** Under `offline`, `canon_validate.py` makes
+  `basis:"established"` fatal, so there is provably no citation to review —
+  the stage is not skipped for speed, it has nothing to act on.
+  `CITATION_REVIEW_ENABLED` is therefore false, which also removes the only
+  thing that can REJECT an attempt, so the ladder can never advance past
+  attempt 0 and there is exactly one dispatch + wait pair. Making the
+  estimate mode-blind would have charged every offline project for a ladder
+  it cannot execute, and any existing project whose `engine.batch_agent_cap`
+  was tuned to the old formula would start being refused with
+  `reason:"batch-too-large"` for a run whose real cost did not change at all
+  — a preflight that refuses runs it should permit is a worse failure than
+  one that is slightly loose.
+
+  This is a worst-case CEILING, not a typical-run estimate: under `live`, a
+  batch approved on attempt 0 costs 4 calls, not the full ladder. A resumed
+  batch whose fragment already passes `--check-batch` skips its attempt-0
+  dispatch + wait and so comes in strictly under the ceiling — but it does
+  NOT skip the citation review, which is why that saving is 2 calls and not
+  3. The count is over BATCHES, never candidates-per-batch, so a co-located
+  elision pair nudging one batch a candidate or two over its nominal
+  `--batch-size` never trips it. A refused run re-plans smaller batches
+  (`glossary_batch_plan.py --batch-size`).
 - **Resume-skip precheck** — the `batchPrecheckPrompt` bullet above; a valid
   pre-existing fragment for this `{{RUN_ID}}` is trusted and its dispatch +
   wait skipped, so a resumed run never re-pays the codex dispatch for a batch

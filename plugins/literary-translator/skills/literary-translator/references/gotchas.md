@@ -45,7 +45,12 @@ calibration, not a warning to work around.
 3. **`engine.batch_agent_cap`'s preflight call-count estimator.** The real
    reference script has no such estimator anywhere — it simply pipelines
    whatever `SEGS` it's given. (1.3.5: W3's glossary-pass template now shares
-   this same cap with its own `3*BATCHES.length + 2` worst-case formula.)
+   this same cap with its own worst-case formula, smaller than
+   mass-translate's — and mode-dependent since 1.16.0:
+   `3*BATCHES.length + 2` under `research_mode: offline`, plus the
+   citation-review retry ladder under `live`. See
+   `references/orchestration-and-batching.md`'s **Preflight cost cap** bullet
+   for both branches.)
 4. **The glossary-pass workflow template.** The real project ran its
    glossary pass as ad hoc `glossary/TASK.md` + codex batches producing
    `glossary/out_*.json` files — not a schema-validated Workflow script. The

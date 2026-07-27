@@ -34,6 +34,11 @@ Table of contents:
 - **Engine is HARDCODED, not a profile knob:** codex (`codex:codex-rescue`) does BOTH translate AND
   review; Claude does only the fix pass. Wanting Claude-translate is a plugin change, not config. The
   `engine:` block only tunes `effort` / `max_fix_rounds` / `batch_agent_cap`.
+- **Source-occurrence scans: ONE pass per text, grouping spans — never re-tokenize per form.**
+  `occ_index.index_manifest` is the reference implementation and the pattern to copy for any new
+  source-occurrence scan. The naive shape (`for form in forms: for text in texts: scan`) is
+  `O(texts×forms)` and was escalated to a blocking P1 by the repo's review bot on 1.8.0; tokenize each
+  text once and group the resulting spans by form instead.
 - **Segmentation cuts a NEW segment on every `<h2>`** ("files ≠ chapters" — the adapter never treats a
   spine file as one segment). A "long novella" is usually many `<h2>` segments; measure real
   per-`<h2>` word counts before worrying about size.

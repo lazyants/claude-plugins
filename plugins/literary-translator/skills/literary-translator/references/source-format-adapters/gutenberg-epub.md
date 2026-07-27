@@ -58,9 +58,8 @@ misclassify convergent or split chapters.
 
 ## `classify_spine_item` — classify by content, never by filename
 
-Source-plan contract, generalized from `reference_gutenberg_epub_structure.md`
-and the real `extract.py` logic: classify each spine item by content signals,
-not by filename.
+Source-plan contract, generalized from the real `extract.py` logic: classify
+each spine item by content signals, not by filename.
 
 - **`body`** — body-content structure: heading signal plus footnote-anchor
   signal. Do not reduce this to "any XHTML file" or to filename patterns, and
