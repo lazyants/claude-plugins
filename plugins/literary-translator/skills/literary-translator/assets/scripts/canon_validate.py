@@ -426,6 +426,26 @@ CANON_ENTRY_FIELDS = (
 )
 
 
+# Most problems worth listing in one failure. The per-message cap bounds each
+# ENTRY; nothing bounded the COUNT, and canon-batch.schema.json has no maxItems,
+# so output stayed linear in the batch size: measured, 40 items (the shipped
+# DEFAULT_BATCH_SIZE) produced 14 KB carrying an injected sentence 80 times, each
+# copy individually within its 200-char cap. Round 6's claim that the cap made
+# output "no longer a function of the attacker's input" was measured on a
+# ONE-item batch and was true only there. An operator does not need 40 near
+# identical diagnostics to act, and the prepare agent should not be handed them.
+_MAX_LISTED_PROBLEMS = 8
+
+
+def _joined_problems(problems) -> str:
+    """Join problems one per line, bounded in COUNT as well as in each entry."""
+    shown = problems[:_MAX_LISTED_PROBLEMS]
+    if len(problems) > _MAX_LISTED_PROBLEMS:
+        shown = shown + [f"... and {len(problems) - _MAX_LISTED_PROBLEMS} more "
+                         f"(showing the first {_MAX_LISTED_PROBLEMS} of {len(problems)})"]
+    return "\n  ".join(shown)
+
+
 class CanonValidationError(Exception):
     """Raised for any failure that should surface as a FAILURE result.
 
@@ -436,6 +456,16 @@ class CanonValidationError(Exception):
 
     def __init__(self, message, offending=None):
         super().__init__(message)
+        # Bounded in COUNT here, at the one place every failure passes through,
+        # rather than at each of the call sites that build a list. Each element
+        # is already length-capped by _bounded_message; without a count bound the
+        # payload stayed linear in the batch size, and canon-batch.schema.json
+        # has no maxItems. Measured at the shipped DEFAULT_BATCH_SIZE of 40: the
+        # message obeyed its own cap while `offending` carried all 40 entries.
+        if offending is not None and len(offending) > _MAX_LISTED_PROBLEMS:
+            extra = len(offending) - _MAX_LISTED_PROBLEMS
+            offending = list(offending[:_MAX_LISTED_PROBLEMS]) + [
+                f"... and {extra} more"]
         self.offending = offending
 
 
@@ -1355,7 +1385,7 @@ def _validate_batch_items(batch: list, registry: "Registry") -> None:
             problems.append(f"{label}: {_format_errors(errors, instance=item)}")
     if problems:
         raise CanonValidationError(
-            "batch failed per-item schema validation:\n  " + "\n  ".join(problems),
+            "batch failed per-item schema validation:\n  " + _joined_problems(problems),
             offending=problems,
         )
 
@@ -1384,7 +1414,7 @@ def _validate_existing_entries(canon: dict, registry: "Registry") -> None:
 
     if problems:
         raise CanonValidationError(
-            "canon.json failed per-item schema validation:\n  " + "\n  ".join(problems),
+            "canon.json failed per-item schema validation:\n  " + _joined_problems(problems),
             offending=problems,
         )
 
@@ -1473,7 +1503,7 @@ def _enforce_citation_source_safety(batch: list) -> None:
 
     if problems:
         raise CanonValidationError(
-            "batch carries an unsafe citation source:\n  " + "\n  ".join(problems)
+            "batch carries an unsafe citation source:\n  " + _joined_problems(problems)
             + "\nA citation `source` must be an ordinary public http(s) URL. This is "
             "refused STATICALLY here, before anything fetches it, because "
             "--check-batch also runs on the offline path where nothing ever "

@@ -752,6 +752,35 @@ def _socket_deadline(sock, deadline: float):
         timer.cancel()
 
 
+# Caps for the three fragment-copied fields recorded in index.json. Generous by
+# design -- a real source_form is a name and a real URL is far under 2 KB, so
+# nothing legitimate is touched -- but bounded, because these are the only
+# open-ended strings in the file the judge prompt calls locally generated.
+#
+# The asymmetry is what forced this: canon_validate.py caps the SAME source_form
+# at 60 characters on the grounds that "a name long enough to hold a paragraph of
+# instructions is not a name", while this file wrote it unbounded into the
+# judge's own evidence index -- measured at ~12 KB per field, i.e. ~500 KB of
+# attacker-authored text at the shipped DEFAULT_BATCH_SIZE. `source` is the worst
+# of the three: for a REFUSED item it never passed validate_url, so CONTROL_CHAR_RE
+# never applied and it could carry newlines and multi-line prose.
+#
+# The judge prompt already names all three untrusted, so this is defence in depth
+# rather than the barrier -- but the barrier should not be prompt wording on one
+# side of a boundary and a hard cap on the other. item_index, not source_form,
+# is the field that authoritatively identifies an entry.
+MAX_RECORDED_FIELD_CHARS = {"source_form": 200, "source": 2048, "basis": 64}
+
+
+def _recorded(field: str, value):
+    """Make a fragment-copied value safe to WRITE and bounded in LENGTH."""
+    value = _encodable(value)
+    cap = MAX_RECORDED_FIELD_CHARS.get(field)
+    if cap is not None and isinstance(value, str) and len(value) > cap:
+        return value[:cap] + "...[truncated]"
+    return value
+
+
 def _read_bounded(resp, deadline: float, sock=None) -> bytes:
     """Read up to MAX_BYTES + 1 bytes, re-checking the deadline as it goes.
 
@@ -1087,9 +1116,9 @@ def run_batch(batch_path: Path, out_dir: Path, *,
     for i, item, src in sources:
         entry = {
             "item_index": i,
-            "source_form": _encodable(item.get("source_form")),
-            "basis": _encodable(item.get("basis")),
-            "source": _encodable(src),
+            "source_form": _recorded("source_form", item.get("source_form")),
+            "basis": _recorded("basis", item.get("basis")),
+            "source": _recorded("source", src),
         }
         if time.monotonic() > batch_deadline:
             entry["outcome"] = "refused:batch-deadline"
