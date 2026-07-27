@@ -2139,10 +2139,15 @@ for (const row of TITLE_SHAPE_TABLE) {
 //   duplicate-insert risk in the abstract) — the guard cannot recognize two different-content rows
 //   as "the same", so it STILL inserts a second, duplicate row; the next run finds the fresh row
 //   and reports `ok`, while the original malformed row lingers as a silent, undetected duplicate
-//   (the adapters' own step-4 disclosure paragraph, static-md.md and obsidian-vault.md, "Place such
-//   a row correctly under the container ... step 0 still reports the chapter absent"). This arm is
-//   unaffected by the guard.
-// - ARM 2 below drives the writer the REALISTIC way (static-md.md: "display text is always the
+//   (measured directly here against the real functions, deliberately NOT cited to adapter prose:
+//   an earlier version of this line quoted "place such a row correctly under the container ... step
+//   0 still reports the chapter absent" as a live adapter sentence. That quote WAS accurate when it
+//   was written — the phrase existed in both adapters at 746d935 — and became false the moment the
+//   1.11.0 rewrite retired the paragraph, with nothing to catch it, since a comment is guarded by
+//   nothing. The half-sentence "step 0 still reports the chapter absent" does survive; the leading
+//   half does not, in either adapter, at HEAD or at the 1.10.0 base). This arm is unaffected by
+//   the guard.
+// - ARM 2 below drives the writer the REALISTIC way (obsidian-vault.md: "display text is always the
 //   manifest entry's `title`") — the SAME manifest title generates the inserted link on every
 //   publish, so the "new" link is byte-identical to the malformed row already present. The guard
 //   now recognizes that and refuses (`{kind:'present'}`) instead of inserting — the unbounded row
@@ -2160,6 +2165,22 @@ for (const row of TITLE_SHAPE_TABLE) {
 const LABEL_BY_SHAPE = Object.fromEntries(TITLE_SHAPE_TABLE.map((row) => [row.shape, row.label]));
 
 const DUPLICATE_INSERT_SHAPE_NAMES = ['nestedLink', 'nestedImage', 'referenceLink', 'unescapedBracket'];
+
+// Row counter for every duplication/convergence assertion below. Independent of the module's own
+// parse (extractLineTargets/parseNestedLabel) on purpose: a counter built from the functions under
+// test would only re-derive what they already believe, and would agree with a broken one.
+//
+// Module-scope rather than per-test because the alternative was measured worse: this file briefly
+// carried TWO counters for the same job — this exact-content one, and a `line.includes(chapterLink)`
+// substring version 250 lines away. Substring matching is precisely the laxness this release
+// rejected for the guard itself (a substring check matches a malformed row that merely CONTAINS the
+// destination text but never parses as it), so the two counters disagreed on exactly the inputs the
+// suite exists to discriminate. One definition, exact-content, used everywhere.
+const countRowsCarrying = (lines, chapterLink) =>
+  lines.filter((line) => {
+    const bm = line.match(/^ *[-*+] (.*)$/);
+    return bm !== null && bm[1] === chapterLink;
+  }).length;
 
 for (const mode of ['path', 'wiki']) {
   const wikilink = wikilinkForMode(mode);
@@ -2225,8 +2246,9 @@ for (const mode of ['path', 'wiki']) {
 
     // ARM 2 — target-breaking writer link (BLOCKER 1, round-13; CLOSED by the [1.11.0] membership
     // guard in wireNestedListChapter's SINGLE branch): the adapters build the inserted child's link
-    // from the chapter's manifest `title` (static-md.md: "display text is always the manifest
-    // entry's `title`, never a slug or a hand-typed label") — never from a constant safe string as
+    // from the chapter's manifest `title` (obsidian-vault.md: "display text is always the manifest
+    // entry's `title`, never a slug or a hand-typed label" — that sentence lives in obsidian-vault.md
+    // only, 1x, and has never appeared in static-md.md) — never from a constant safe string as
     // ARM 1 above drives it. When that title carries the SAME corrupting shape that broke the
     // original row — the realistic case, since it is the identical manifest field driving both the
     // original row and any fresh insert for this chapter — the freshly-inserted row's own
@@ -2308,16 +2330,8 @@ for (const mode of ['path', 'wiki']) {
 
     test(`adapter composition flow convergence [round-11-b follow-up]: ${shape} / ${mode}, 5 publishes of an unchanged manifest converge to exactly ONE row from the first run onward`, () => {
       let current = ['- Admin']; // empty container, no existing chapter row yet — the first publish
-      // Row-counting helper, independent of the module's own parse (extractLineTargets/parseNestedLabel)
-      // on purpose: this test must not become a tautology that only re-derives what the functions
-      // under test already believe. A bullet's raw content, compared verbatim against chapterLink.
-      const countRows = (lines) =>
-        lines.filter((line) => {
-          const bm = line.match(/^ *[-*+] (.*)$/);
-          return bm !== null && bm[1] === chapterLink;
-        }).length;
 
-      assert.equal(countRows(current), 0, 'sanity: no row exists before the first publish');
+      assert.equal(countRowsCarrying(current, chapterLink), 0, 'sanity: no row exists before the first publish');
 
       for (let run = 1; run <= 5; run += 1) {
         // step 0: the adapter's own idempotency check over the REAL target. Always absent here —
@@ -2337,7 +2351,7 @@ for (const mode of ['path', 'wiki']) {
         if (write.kind === 'inserted') current = write.newLines;
 
         assert.equal(
-          countRows(current),
+          countRowsCarrying(current, chapterLink),
           1,
           `run ${run}: expected exactly one row for this chapter, got ${JSON.stringify(current)}`,
         );
@@ -2485,6 +2499,48 @@ test('membership guard contrast [round-11-b]: the present path is terminal-newli
 });
 
 // =================================================================================================
+// [1.11.0] The fixed-probe shape gate accepts `present` as well as `inserted`, and until this test
+// nothing executed that. Adding a fourth writer outcome silently widened the gate: rule 4 was
+// written as a negative list (decline `not-a-list`/`multiple`), so `present` joined the accepted set
+// with no code change and no test change — while the class sentence pinned verbatim in FOUR files
+// still said `inserted` alone. Four green pins, one false claim, exactly the shape this release
+// keeps finding.
+//
+// The fixture is the one the reviewer constructed: an index that already carries the probe row, so
+// the writer's membership guard fires on the probe itself. Accepting it is CORRECT — `present` means
+// the writer recognized the shape and resolved exactly one container, which is all rule 4 asks, and
+// the probe's emission is discarded either way — but it must be asserted, not inherited.
+// =================================================================================================
+
+test('verifyNonHeadingPlacement [1.11.0]: the fixed-probe shape gate accepts a `present` verdict, not only `inserted`', () => {
+  const probeLink = '[probe](__verify-non-heading-placement-probe__.md)';
+  const indexLines = ['- Admin', `  - ${probeLink}`, '  - [Items](guide/items.md)'];
+
+  // Precondition: the probe row really does make the writer answer `present` for this index.
+  // Without this the test could pass while never exercising the widened branch at all.
+  const probeVerdict = wireNestedListChapter(indexLines, 'Admin', probeLink);
+  assert.equal(probeVerdict.kind, 'present', 'fixture must drive the writer to `present`, not `inserted`');
+  assert.equal(probeVerdict.index, 1, 'the probe row is the one recognized');
+
+  // The chapter itself is correctly placed under the container named by group_title, so the verdict
+  // must be `ok` — the gate must not answer `unverifiable` merely because the probe was recognized.
+  const verdict = verifyNonHeadingPlacement(indexLines, 'guide/items.md', 'Admin');
+  assert.deepEqual(verdict, { kind: 'ok' });
+});
+
+test('verifyNonHeadingPlacement [1.11.0]: a `present` probe verdict still reports `misplaced` when the chapter sits elsewhere', () => {
+  // Same widened gate, opposite placement: passing rule 4 must not short-circuit rule 5's comparison.
+  const probeLink = '[probe](__verify-non-heading-placement-probe__.md)';
+  const indexLines = ['- Admin', `  - ${probeLink}`, '- Other', '  - [Items](guide/items.md)'];
+
+  assert.equal(wireNestedListChapter(indexLines, 'Admin', probeLink).kind, 'present');
+  assert.deepEqual(verifyNonHeadingPlacement(indexLines, 'guide/items.md', 'Admin'), {
+    kind: 'misplaced',
+    foundContainer: 'Other',
+  });
+});
+
+// =================================================================================================
 // [1.11.0] The `present` outcome's TRIGGER CONDITION differs by link mode, and obsidian-vault.md now
 // states that difference as fact. Nothing executed it until this table, which is the whole point:
 // the prose in this release has been measured false four times, every time by a probe that varied
@@ -2514,25 +2570,27 @@ test('membership guard contrast [round-11-b]: the present path is terminal-newli
 // cells pin the mode asymmetry specifically, not merely the guard's existence.
 // =================================================================================================
 
+// Keyed rows rather than positional triples, matching CONTRAST_SHAPES above: `why` is data, so a red
+// cell explains in its own name why that title was expected to break, without opening the table.
 const PRESENT_TRIGGER_TABLE = [
-  // title,            path mode,   wiki mode        why
-  ['A]B', 'present', 'present'], //     isolated ']' — breaks both
-  ['Items]Beta', 'present', 'present'], //     isolated ']' — breaks both
-  ['X]Y]Z', 'present', 'present'], //     two isolated ']' — breaks both
-  ['] Items', 'present', 'present'], //     leading ']' — breaks both
-  ['Items] [Beta]', 'present', 'present'], //     first ']' isolated — breaks both
-  ['Items [beta]', 'present', 'step0'], //     trailing ']' adjacent to ']]' in wiki
-  ['Items ]] beta', 'present', 'step0'], //     contains ']]' — terminates the wikilink early
-  ['Items ]]]] x', 'present', 'step0'], //     ditto, longer run
-  ['Items | beta', 'step0', 'step0'], //     no ']' at all — neither mode breaks
-  ['Items [[beta', 'step0', 'step0'], //     no ']' at all — neither mode breaks
-  ['Items', 'step0', 'step0'], //     plain control
+  { title: 'A]B', path: 'present', wiki: 'present', why: "isolated ']' breaks both" },
+  { title: 'Items]Beta', path: 'present', wiki: 'present', why: "isolated ']' breaks both" },
+  { title: 'X]Y]Z', path: 'present', wiki: 'present', why: "two isolated ']' break both" },
+  { title: '] Items', path: 'present', wiki: 'present', why: "leading ']' breaks both" },
+  { title: 'Items] [Beta]', path: 'present', wiki: 'present', why: "first ']' is isolated" },
+  { title: 'Items [beta]', path: 'present', wiki: 'step0', why: "trailing ']' is adjacent to the wiki terminator" },
+  { title: 'Items ]] beta', path: 'present', wiki: 'step0', why: "contains ']]', terminating the wikilink early" },
+  { title: 'Items ]]]] x', path: 'present', wiki: 'step0', why: "longer ']' run, still terminates early" },
+  { title: 'Items | beta', path: 'step0', wiki: 'step0', why: "no ']' at all" },
+  { title: 'Items [[beta', path: 'step0', wiki: 'step0', why: "no ']' at all" },
+  { title: 'Items', path: 'step0', wiki: 'step0', why: 'plain control' },
 ];
 
-for (const [title, expectedPath, expectedWiki] of PRESENT_TRIGGER_TABLE) {
+for (const row of PRESENT_TRIGGER_TABLE) {
   for (const mode of ['path', 'wiki']) {
-    const expected = mode === 'path' ? expectedPath : expectedWiki;
-    test(`present trigger condition [1.11.0]: ${JSON.stringify(title)} / ${mode} -> ${expected}`, () => {
+    const { title, why } = row;
+    const expected = row[mode];
+    test(`present trigger condition [1.11.0]: ${JSON.stringify(title)} / ${mode} -> ${expected} (${why})`, () => {
       const wikilink = mode === 'wiki';
       const target = wikilink ? 'admin/items' : 'admin/items.md';
       const chapterLink = wikilink ? `[[admin/items|${title}]]` : `[${title}](admin/items.md)`;
@@ -2547,7 +2605,7 @@ for (const [title, expectedPath, expectedWiki] of PRESENT_TRIGGER_TABLE) {
       // Run 2 is the discriminator: either step 0 recognizes what run 1 wrote (and the adapter
       // never calls the writer), or it does not and the writer's own guard must catch it.
       const after = first.newLines;
-      const step0 = locateChapterLine(after, target, wikilink ? { wikilink: true } : {});
+      const step0 = locateChapterLine(after, target, { wikilink });
       if (expected === 'step0') {
         assert.equal(step0.present, true, 'step 0 must recognize the row this title produces');
       } else {
@@ -2556,9 +2614,14 @@ for (const [title, expectedPath, expectedWiki] of PRESENT_TRIGGER_TABLE) {
         assert.equal(second.kind, 'present', 'the writer must refuse to write a second copy');
       }
 
-      // Either way the index converges: exactly one row carrying this link, never two.
-      const rows = after.filter((l) => l.includes(chapterLink)).length;
-      assert.equal(rows, 1, 'exactly one row is ever written for a given chapter link');
+      // Run 1 wrote exactly one row. This is NOT the convergence property — that is proven over
+      // five publishes by the CONVERGENCE section above, and claiming it here would overstate what
+      // a single write asserts.
+      assert.equal(
+        countRowsCarrying(after, chapterLink),
+        1,
+        'the first publish writes exactly one row carrying this link',
+      );
     });
   }
 }

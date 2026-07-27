@@ -288,6 +288,12 @@ count_fixed() {
 # everywhere else. An empty needle returns 0 (an infinite loop on a zero-length match is impossible
 # by construction: `index()` on an empty needle would otherwise return 1 every time without
 # advancing `start`).
+#
+# CAVEAT for future needles: the needle reaches awk via `-v needle="$1"`, and `awk -v` processes
+# ESCAPE SEQUENCES in the assigned value. Every needle used today is safe (the shell resolves `\"`
+# to a plain `"` before awk ever sees it), but a needle carrying a LITERAL backslash — `\]`, `\n`,
+# a Windows path — would be silently transformed rather than rejected, and the count would be wrong
+# with nothing going red. Pass such a needle through a file or ENVIRON instead of `-v`.
 count_joined_fixed() {
   local needle="$1" file="$2"
   if [ -z "$needle" ] || [ ! -f "$file" ]; then printf '0\n'; return; fi
@@ -2766,7 +2772,14 @@ echo "== canonical verified-class sentence — verbatim at all four pinned sites
 # for a needle to target. A hand-off/planning document outside the repo may carry the same sentence
 # too; that copy has no such path, so it is out of scope for this gate rather than an oversight, and
 # requiring a needle in it would force an implementer to invent a file just to keep the count.
-CLASS_SENTENCE='files for which the fixed-probe writer call returns `kind === '\''inserted'\''` and which hold exactly one selected-target match, that match lying outside the writer-recognized leading-frontmatter span.'
+# [1.11.0] The accepted-outcome list grew from one kind to two. The sentence said `inserted` alone
+# while `verifyNonHeadingPlacement` declined only `not-a-list`/`multiple` (a negative list), so the
+# new `present` outcome silently joined the accepted set and this pin — reused verbatim in four
+# places — asserted a false class in all four, staying green in every one, because a verbatim pin
+# tracks drift and cannot track truth. Reproduced before correcting: an index already carrying the
+# probe row makes the writer answer `present`, and the verifier returns `ok`, not `unverifiable`.
+# The gate is now written as a positive accept-list so the next added outcome fails it instead.
+CLASS_SENTENCE='files for which the fixed-probe writer call returns `kind === '\''inserted'\''` or `kind === '\''present'\''` and which hold exactly one selected-target match, that match lying outside the writer-recognized leading-frontmatter span.'
 CHLOG="$PLUGIN_DIR/../../CHANGELOG.md"
 has_joined_in_section "static-md: limits section carries the class sentence verbatim" \
   "$SMD" '### Nested-list automation limits' "$CLASS_SENTENCE"
@@ -2798,7 +2811,7 @@ RETIRED_CLAIMS=(
 for claim in "${RETIRED_CLAIMS[@]}"; do
   for f in "$SMD" "$OMD"; do
     c="$(count_joined_fixed "$claim" "$f")"
-    if [ "$c" = "0" ]; then
+    if [ "$c" -eq 0 ]; then
       ok "$(basename "$f"): retired claim stays retired — '$claim'"
     else
       bad "$(basename "$f"): retired claim is back ($c occurrence(s)) — '$claim'"
@@ -2812,10 +2825,14 @@ done
 PRESENT_HALT="Chapter row for '<slug>' is already present under the '<group_title>' container bullet in <index_file>, but this run could not recognize it — the chapter's own title does not yield a resolvable link destination. Give the chapter a plain title in the manifest — no Markdown markup, backslash escapes, or HTML entities in it — then re-run; see \"Nested-list automation limits\" below."
 for f in "$SMD" "$OMD"; do
   c="$(count_joined_fixed "$PRESENT_HALT" "$f")"
-  if [ "$c" -ge 1 ]; then
-    ok "$(basename "$f"): carries the shared 'present' halt verbatim ($c occurrence(s))"
+  # EXACTLY one, not at-least-one. Measured: one copy per adapter today. `-ge 1` would silently
+  # accept a second copy — in a release whose entire subject is a duplicate that shipped green,
+  # and against this block's own claim that the halt is defined once. Matches the uniqueness pins
+  # elsewhere in this file, which all use -eq 1.
+  if [ "$c" -eq 1 ]; then
+    ok "$(basename "$f"): carries the shared 'present' halt verbatim, exactly once"
   else
-    bad "$(basename "$f"): shared 'present' halt missing or altered"
+    bad "$(basename "$f"): shared 'present' halt count drifted from 1 (got $c — missing, altered, or duplicated)"
   fi
 done
 # The `present` halt names only manifest- and profile-derived values (<slug>, <group_title>,
@@ -2824,17 +2841,22 @@ done
 #
 # The pin below is a no-NEW-SITE count, not a ban, and the distinction is the honest part. Each
 # adapter already carries FOUR `<found_title>` occurrences — the misplaced-halt string and its
-# "(none)" explanation, twice per adapter (static-md.md:318/319 and :338/339; obsidian-vault.md:
-# :391/392 and :417/418) — and that placeholder DOES interpolate index content. Those sites are
-# pre-existing and out of scope here; a pin asserting zero would be a false claim about the file,
-# and "fixing" them to satisfy it would be an unreviewed change to shipped halt wording. So the
-# count is pinned at its measured value: adding a new interpolation site goes red, removing one
-# goes red too (deliberate — retiring one is a real change that belongs in a release note).
+# "(none)" explanation, one such pair in the grouped branch and one in the flat branch — and that
+# placeholder DOES interpolate index content. Those sites are pre-existing and out of scope here; a
+# pin asserting zero would be a false claim about the file, and "fixing" them to satisfy it would be
+# an unreviewed change to shipped halt wording. So the count is pinned at its measured value: adding
+# a new interpolation site goes red, removing one goes red too (deliberate — retiring one is a real
+# change that belongs in a release note).
+#
+# Sites are described by their CONTENT, not by line number, on purpose: an earlier draft of this
+# comment listed four line numbers per adapter in a file that took a +100-line edit in the same
+# commit, while arguing that citations nobody re-verifies are how false claims survive. The count
+# is the pin; the halt string is enough to find them.
 FOUND_TITLE_SITES=4
 for f in "$SMD" "$OMD"; do
   c="$(count_joined_fixed '<found_title>' "$f")"
-  if [ "$c" = "$FOUND_TITLE_SITES" ]; then
-    ok "$(basename "$f"): no new found-row interpolation site ($c, the pre-existing misplaced-halt pair)"
+  if [ "$c" -eq "$FOUND_TITLE_SITES" ]; then
+    ok "$(basename "$f"): no new found-row interpolation site ($c, the pre-existing misplaced-halt pairs)"
   else
     bad "$(basename "$f"): found-row interpolation sites changed ($c, expected $FOUND_TITLE_SITES)"
   fi

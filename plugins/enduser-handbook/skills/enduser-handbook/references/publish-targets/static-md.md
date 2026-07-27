@@ -569,9 +569,9 @@ but only for a narrow verified class — this exact sentence, reused verbatim ev
 cited (see `revalidation.md`'s "Terminal-state convergence checklist" and the 1.11.0 CHANGELOG
 entry):
 
-files for which the fixed-probe writer call returns `kind === 'inserted'` and which hold exactly
-one selected-target match, that match lying outside the writer-recognized leading-frontmatter
-span.
+files for which the fixed-probe writer call returns `kind === 'inserted'` or `kind ===
+'present'` and which hold exactly one selected-target match, that match lying outside the
+writer-recognized leading-frontmatter span.
 
 **In practice:** this is the subset above, minus a selected target that resolves to zero lines
 or to more than one (`inconsistent` — see "Grouped index wiring" above) and minus a match

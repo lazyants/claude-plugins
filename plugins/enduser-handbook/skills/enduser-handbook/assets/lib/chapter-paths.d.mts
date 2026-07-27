@@ -88,7 +88,10 @@ export interface NestedContainerMatch {
 // 'multiple' lists the >=2 ambiguous container bullets (adapter halts); 'not-a-list' means the
 // index is outside the bounded safe subset (caller keeps today's manual halt, byte-identical).
 // [1.11.0] 'present' means the resolved container already carries this exact chapter link, so
-// nothing was written and there is no index to persist — a caller MUST halt on it, never retry:
+// nothing was written and there is no index to persist. `index` is a 0-BASED index into the
+// CALLER's own `indexLines` array, not into any internal view — verified to hold across a leading
+// frontmatter block (which the writer blanks rather than removes) and a CRLF file (whose elements
+// keep their trailing '\r'). A caller MUST halt on it, never retry:
 // it is reachable only when step 0 cannot recognize a row the writer itself wrote, and retrying
 // is the unbounded-growth loop the outcome exists to break. Checked verbatim against bullet
 // CONTENT, deliberately not through step 0's target parse, whose blind spot it covers.

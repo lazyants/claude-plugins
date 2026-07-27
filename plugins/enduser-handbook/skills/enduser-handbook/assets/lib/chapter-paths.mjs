@@ -1448,11 +1448,17 @@ function containerOwnerScan(body, wanted) {
 // What the key is compared AGAINST is call-path-specific, not a property of this function —
 // whatever comparison paths exist, each still derives its `group_title`-side key from here. Two
 // paths exist today, illustrating the point rather than exhausting it: `containerOwnerScan`'s
-// `ownerLabelOf` (the nested-list writer/verifier path) records a container's UNTRIMMED parsed
-// label, so that comparison is deliberately asymmetric (round-18 HIGH) — trimming the container's
-// own label there would accept a padded label the writer treats as absent.
-// `collectContainerHeadings`' headings-form container titles (the `findContainer` path, `:858`)
-// ARE trimmed, so that comparison is symmetric.
+// `ownerLabelOf` (the nested-list writer/verifier path), and `collectContainerHeadings`' headings-form
+// container titles (the `findContainer` path, `:858`). BOTH are trimmed, so both comparisons are
+// symmetric.
+//
+// [1.11.0 correction] An earlier version of this comment described the `ownerLabelOf` side as
+// recording an UNTRIMMED label and called that comparison "deliberately asymmetric (round-18 HIGH)".
+// It is not: `parseNestedLabel` opens with `String(content).trim()` (`:1143`), so the label reaching
+// `ownerLabelOf` is already trimmed. Measured: an index whose container bullet is `- Admin  ` matches
+// `group_title: 'Admin'` — the writer inserts and `verifyNonHeadingPlacement` returns `ok`, where the
+// asymmetry the comment described would have made both treat the container as absent. The comment was
+// wrong, not the code; anyone repairing round-18 from it would have "fixed" working behaviour.
 function containerLabelKey(groupTitle) {
   return String(groupTitle).trim();
 }
@@ -1521,7 +1527,6 @@ export function wireNestedListChapter(indexLines, groupTitle, chapterLink) {
     const containerMarker = containers[0].marker;
     let insertAt = k + 1;
     let childMarker = null; // marker of the LAST existing C-indent child seen in the region, if any
-    let presentAt = -1; // index of a child already carrying THIS chapterLink verbatim, if any
     for (let i = k + 1; i < logical.length; ) {
       const line = logical[i];
       if (line.trim() === '') {
@@ -1531,10 +1536,16 @@ export function wireNestedListChapter(indexLines, groupTitle, chapterLink) {
       const bm = line.match(NESTED_BULLET_RE);
       if (bm && bm[1].length === childIndent) {
         // Membership on the bullet's CONTENT, compared verbatim against the link the caller is
-        // asking us to write. Content rather than the whole line so a re-indented or re-markered
-        // row still counts as present; verbatim rather than via parseNestedLabel/locateChapterLine
-        // because an unparseable row is precisely the case this guards (see the docblock).
-        if (presentAt < 0 && bm[3] === chapterLink) presentAt = i;
+        // asking us to write. Content rather than the whole line, so a re-indented row still counts
+        // as present — but NOT a re-markered one, and an earlier version of this comment claimed
+        // otherwise: on a `*`/`+`-markered file the malformed rows this guard exists to catch are
+        // refused by isBarePathBullet (`:1255`) before the walk is ever reached, so the file answers
+        // `not-a-list` rather than `present`. Bounded either way; the diagnostic differs.
+        // Returning here rather than recording and continuing: nothing
+        // the rest of the walk computes (`insertAt`, `childMarker`) can affect this path, and
+        // `present` is a REQUIREMENT on the caller, not a description of one — halt and tell the
+        // operator, never retry, since retrying is the loop this outcome exists to break.
+        if (bm[3] === chapterLink) return { kind: 'present', index: i };
         insertAt = i + 1;
         childMarker = bm[2];
         i += 1;
@@ -1542,12 +1553,6 @@ export function wireNestedListChapter(indexLines, groupTitle, chapterLink) {
       }
       break; // first line that is neither blank nor a C-indent child ends the region
     }
-    // Refuse to write a row this container already carries. Step 0 could not see it (or the caller
-    // would never have reached the writer), so reporting `inserted` here would converge silently on
-    // an index the publisher cannot actually verify. `present` is a REQUIREMENT on the caller, not a
-    // description of one: a caller must halt and tell the operator, never retry — retrying is the
-    // loop this outcome exists to break.
-    if (presentAt >= 0) return { kind: 'present', index: presentAt };
     // Reuse the existing children's marker so the inserted line stays in the SAME list block
     // (CommonMark starts a new list on a marker change); a container with no existing child has
     // no sibling marker to match, so fall back to the container's own marker (first-ever child).
@@ -2012,11 +2017,16 @@ export function chapterHasWikilinkTo(chapterText, slug, oldChapterRelPath) {
   return false;
 }
 
-// #330 — the fixed probe link the shape-recognition predicate below emits (and discards). Any
-// newline-free chapterLink is accept/decline-equivalent (round-9 HIGH 1: wireNestedListChapter's
-// own groupTitle/chapterLink embedded-newline guard reads chapterLink only for embedded newlines;
-// every OTHER read is emission, which the present-line branch never writes) — the literal value is
-// otherwise irrelevant.
+// #330 — the fixed probe link the shape-recognition predicate below emits (and discards).
+//
+// [1.11.0] The round-9 justification for this constant said any newline-free chapterLink is
+// accept/decline-equivalent, because the writer read chapterLink ONLY for embedded newlines and for
+// emission. The membership guard added in 1.11.0 makes that false: chapterLink is now also compared
+// against existing child bullets. So the probe's value IS observable — an index that already carries
+// a row whose bullet content equals this exact string makes the writer answer `present` instead of
+// `inserted`. Reproduced, not hypothesised. Rule 4 below therefore accepts BOTH outcomes explicitly:
+// both mean "the writer recognized this shape and resolved exactly one container", which is the only
+// question rule 4 asks, and the probe's emission is discarded either way.
 const NON_HEADING_PLACEMENT_PROBE_LINK = '[probe](__verify-non-heading-placement-probe__.md)';
 
 /**
@@ -2083,11 +2093,14 @@ export function verifyNonHeadingPlacement(indexLines, selectedTarget, groupTitle
   // Rule 4: shape recognition, delegated. `groupTitle` is the real value (its own newline guard
   // must fire identically to the writer's); only `chapterLink` is replaced with a fixed probe.
   const shapeVerdict = wireNestedListChapter(indexLines, groupTitle, NON_HEADING_PLACEMENT_PROBE_LINK);
-  if (shapeVerdict.kind === 'not-a-list' || shapeVerdict.kind === 'multiple') return { kind: 'unverifiable' };
+  // Written as a positive accept-list, not as a negative decline-list. The negative form silently
+  // acquired a third accepted outcome when 1.11.0 added `present`, and nothing went red; a future
+  // outcome must fail this gate until someone decides it belongs here.
+  if (shapeVerdict.kind !== 'inserted' && shapeVerdict.kind !== 'present') return { kind: 'unverifiable' };
 
   // Rule 5: the container comparison, via the writer's own shared scan. Structurally, `scan.kind`
-  // cannot be 'not-a-list' here — `shapeVerdict.kind === 'inserted'` already proves the writer's own
-  // internal containerOwnerScan(prep.body, wantedLabel) call succeeded on this exact body/label
+  // cannot be 'not-a-list' here — an `inserted` or `present` shapeVerdict already proves the writer's
+  // own internal containerOwnerScan(prep.body, wantedLabel) call succeeded on this exact body/label
   // (prepareIndexLines is pure, so the writer's internal call reproduces the same `prep.body`) —
   // but the branch stays, matching this file's own style of checking every `{kind, ...}` result
   // rather than trusting an invariant, and failing toward the safe direction (unverifiable costs
@@ -2098,9 +2111,11 @@ export function verifyNonHeadingPlacement(indexLines, selectedTarget, groupTitle
 
   const owner = scan.ownerOf[matchIndex];
   if (owner === -1 || owner === undefined) return { kind: 'misplaced', foundContainer: null };
-  // The writer's own untrimmed parsed label — NEVER re-trimmed for this comparison (round-18 HIGH:
-  // the writer compares `info.label === wanted` with only `wanted` trimmed, so trimming the
-  // container's own label here would accept a padded label the writer itself treats as absent).
+  // The writer's own parsed label, reused rather than re-derived, so the verifier can never disagree
+  // with the writer about what a container is called. (It is already trimmed — `parseNestedLabel`
+  // trims at `:1143`. An earlier comment here described it as untrimmed and the comparison as
+  // deliberately asymmetric; see the containerLabelKey note above for the measurement that refutes
+  // that. Nothing about the comparison changes — only the reason given for it was wrong.)
   const ownerLabel = scan.ownerLabelOf[matchIndex];
   if (ownerLabel === wantedLabel) return { kind: 'ok' };
   return { kind: 'misplaced', foundContainer: ownerLabel };

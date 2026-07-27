@@ -90,10 +90,10 @@ const EXPECTED_UNRESOLVED = [
   { file: 'references/publish-targets/obsidian-vault.md', offset: 35158, quotedText: 'The placement check is retained unchanged (D-8)', direction: 'above' },
   { file: 'references/publish-targets/obsidian-vault.md', offset: 49613, quotedText: 'Container resolution', direction: 'above' },
   { file: 'references/publish-targets/obsidian-vault.md', offset: 52932, quotedText: 'INDEX wiring', direction: 'above' },
-  { file: 'references/publish-targets/obsidian-vault.md', offset: 57543, quotedText: 'INDEX wiring', direction: 'above' },
-  { file: 'references/publish-targets/obsidian-vault.md', offset: 59333, quotedText: 'INDEX wiring', direction: 'above' },
-  { file: 'references/publish-targets/obsidian-vault.md', offset: 63592, quotedText: 'INDEX wiring', direction: 'above' },
-  { file: 'references/publish-targets/obsidian-vault.md', offset: 68819, quotedText: 'INDEX wiring', direction: 'above' },
+  { file: 'references/publish-targets/obsidian-vault.md', offset: 57567, quotedText: 'INDEX wiring', direction: 'above' },
+  { file: 'references/publish-targets/obsidian-vault.md', offset: 59357, quotedText: 'INDEX wiring', direction: 'above' },
+  { file: 'references/publish-targets/obsidian-vault.md', offset: 63616, quotedText: 'INDEX wiring', direction: 'above' },
+  { file: 'references/publish-targets/obsidian-vault.md', offset: 68843, quotedText: 'INDEX wiring', direction: 'above' },
   { file: 'references/publish-targets/static-md.md', offset: 12961, quotedText: 'Chapter path', direction: 'above' },
   { file: 'references/publish-targets/static-md.md', offset: 15014, quotedText: 'Grouped index wiring', direction: 'below' },
   { file: 'references/publish-targets/static-md.md', offset: 15381, quotedText: 'Chapter → index', direction: 'above' },
@@ -105,9 +105,9 @@ const EXPECTED_UNRESOLVED = [
   { file: 'references/publish-targets/static-md.md', offset: 38076, quotedText: 'The plain-label predicate, named exactly', direction: 'below' },
   { file: 'references/publish-targets/static-md.md', offset: 39494, quotedText: 'After either halt', direction: 'above' },
   { file: 'references/publish-targets/static-md.md', offset: 41784, quotedText: 'Grouped index wiring', direction: 'above' },
-  { file: 'references/publish-targets/static-md.md', offset: 42552, quotedText: 'Grouped index wiring', direction: 'above' },
-  { file: 'references/publish-targets/static-md.md', offset: 44315, quotedText: 'The headings branch is unchanged by this PR and already completes silently', direction: 'above' },
-  { file: 'references/publish-targets/static-md.md', offset: 52926, quotedText: 'Grouped index wiring', direction: 'above' },
+  { file: 'references/publish-targets/static-md.md', offset: 42576, quotedText: 'Grouped index wiring', direction: 'above' },
+  { file: 'references/publish-targets/static-md.md', offset: 44339, quotedText: 'The headings branch is unchanged by this PR and already completes silently', direction: 'above' },
+  { file: 'references/publish-targets/static-md.md', offset: 52950, quotedText: 'Grouped index wiring', direction: 'above' },
 ];
 
 // Per-occurrence key. offset alone is already unique; file/quotedText/direction are folded in so a
