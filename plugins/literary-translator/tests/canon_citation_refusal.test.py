@@ -233,6 +233,17 @@ REFUSAL_CASES = [
     # The trailing dot is also the exact shape that made these two files diverge
     # in round 2, so a table that cannot see it has the same blind spot twice.
     ("http://2130706433./x", "ambiguous-numeric-host"),
+    # UNICODE spellings. The static checks read the RAW host; the resolver reads
+    # the IDNA-FOLDED one, whose nameprep pass NFKC-folds fullwidth digits and
+    # whose label split accepts U+3002/U+FF0E/U+FF61 as dots. Measured before the
+    # fix: all seven passed BOTH halves, and the last one resolves to cloud IMDS.
+    ("http://\uff11\uff12\uff17.\uff10.\uff10.\uff11/x", "loopback-address"),
+    ("http://127\u30020\u30020\u30021/x", "loopback-address"),
+    ("http://127\uff0e0\uff0e0\uff0e1/x", "loopback-address"),
+    ("http://127\uff610\uff610\uff611/x", "loopback-address"),
+    ("http://\uff12\uff11\uff13\uff10\uff17\uff10\uff16\uff14\uff13\uff13/x", "ambiguous-numeric-host"),
+    ("http://\uff10x\uff17f.0.0.1/x", "ambiguous-numeric-host"),
+    ("http://\uff12\uff18\uff15\uff12\uff10\uff13\uff19\uff11\uff16\uff16/x", "ambiguous-numeric-host"),
     ("http://224.0.0.1/x", "multicast-address"),      # is_global is TRUE here
     ("http://100.64.0.1/x", "non-global-address"),    # CGNAT: no named property hits
     ("http://0.0.0.0/x", ANY_ADDRESS_REASON),

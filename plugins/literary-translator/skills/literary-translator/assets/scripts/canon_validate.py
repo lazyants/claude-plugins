@@ -981,7 +981,22 @@ def _citation_source_refusal(value) -> "str | None":
         return "embedded-credentials"
     if not host:
         return "no-host"
-    if _is_ambiguous_numeric_host(host):
+    # Against the FOLDED host as well as the raw one. The resolver does not see
+    # the bytes written in the URL: getaddrinfo applies the IDNA codec, whose
+    # nameprep pass NFKC-folds fullwidth digits to ASCII and whose label split
+    # accepts [.\u3002\uff0e\uff61] as separators. So "\uff12\uff18\uff15\uff12\uff10\uff13\uff19\uff11\uff16\uff16" -- which this
+    # check reads as a non-numeric name and ipaddress refuses to parse -- is
+    # b"2852039166" to the resolver, i.e. 169.254.169.254. Measured: seven such
+    # spellings passed BOTH static halves, one of them straight to cloud IMDS.
+    #
+    # This file already folds for the localhost NAME test a few lines below, and
+    # for exactly this reason; round 7 is that same reasoning finally applied to
+    # the numeric and literal checks, which sit ABOVE the fold. Folding alone is
+    # not enough either: the four dot-separator spellings fold into a CANONICAL
+    # literal, which _is_ambiguous_numeric_host deliberately passes, so the
+    # literal check has to see the folded form too.
+    folded_host = _name_for_comparison(host)
+    if _is_ambiguous_numeric_host(host) or _is_ambiguous_numeric_host(folded_host):
         return "ambiguous-numeric-host"
 
     host = host.lower()
@@ -1015,7 +1030,14 @@ def _citation_source_refusal(value) -> "str | None":
         # removal in the sibling that the round-4 fix did not reach.
         ip = ipaddress.ip_address(host)
     except ValueError:
-        ip = None       # a name, not a literal; the fetcher owns that half
+        # The FOLDED form too: the four Unicode dot separators fold a spelling
+        # like 127。0。0。1 into the canonical literal a resolver
+        # sees, and ipaddress rejects the raw form outright. Without this the
+        # address checks never run on exactly the inputs that reach the network.
+        try:
+            ip = ipaddress.ip_address(folded_host)
+        except ValueError:
+            ip = None   # a name, not a literal; the fetcher owns that half
     if ip is not None:
         reason = _non_global_address_reason(ip)
         if reason is not None:
@@ -1352,7 +1374,7 @@ def _validate_existing_entries(canon: dict, registry: "Registry") -> None:
         errors = _sorted_errors(entry_validator, entry)
         if errors:
             formatted = _format_errors(errors, instance=entry, root_schema=entry_validator.schema)
-            problems.append(f"entries[{source_form!r}]: {formatted}")
+            problems.append(f"entries[{_bounded_message(repr(source_form))}]: {formatted}")
 
     for i, item in enumerate(canon.get("review_queue", [])):
         errors = _sorted_errors(queued_validator, item)

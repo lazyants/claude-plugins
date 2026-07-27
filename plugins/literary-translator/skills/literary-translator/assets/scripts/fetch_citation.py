@@ -508,7 +508,22 @@ def validate_url(url: str) -> tuple[str, str, int, str]:
     host = hostname
     if not host:
         raise _refuse("no-host")
-    if _is_ambiguous_numeric_host(host):
+    # Against the FOLDED host as well as the raw one. The resolver does not see
+    # the bytes written in the URL: getaddrinfo applies the IDNA codec, whose
+    # nameprep pass NFKC-folds fullwidth digits to ASCII and whose label split
+    # accepts [.\u3002\uff0e\uff61] as separators. So "\uff12\uff18\uff15\uff12\uff10\uff13\uff19\uff11\uff16\uff16" -- which this
+    # check reads as a non-numeric name and ipaddress refuses to parse -- is
+    # b"2852039166" to the resolver, i.e. 169.254.169.254. Measured: seven such
+    # spellings passed BOTH static halves, one of them straight to cloud IMDS.
+    #
+    # This file already folds for the localhost NAME test a few lines below, and
+    # for exactly this reason; round 7 is that same reasoning finally applied to
+    # the numeric and literal checks, which sit ABOVE the fold. Folding alone is
+    # not enough either: the four dot-separator spellings fold into a CANONICAL
+    # literal, which _is_ambiguous_numeric_host deliberately passes, so the
+    # literal check has to see the folded form too.
+    folded_host = name_for_comparison(host)
+    if _is_ambiguous_numeric_host(host) or _is_ambiguous_numeric_host(folded_host):
         raise _refuse("ambiguous-numeric-host")
     host = host.lower()
 
@@ -530,6 +545,8 @@ def validate_url(url: str) -> tuple[str, str, int, str]:
         raise _refuse("localhost-name")
 
     check_address_literal(host)
+    if folded_host != host:
+        check_address_literal(folded_host)
 
     try:
         port = parts.port
