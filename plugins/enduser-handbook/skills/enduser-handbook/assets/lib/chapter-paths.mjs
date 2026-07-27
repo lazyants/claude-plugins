@@ -1471,13 +1471,15 @@ function containerLabelKey(groupTitle) {
  * AND step-0 found no existing line. NEVER mutates the input array; NEVER moves/deletes an existing
  * line (insert-only).
  *
- * Step 0 is the caller's IDEMPOTENCY guarantee, and it is not a sufficient one: it recognizes a row
- * by parsing a link TARGET out of it, so a chapter whose own title breaks that parse (a legal
- * manifest `title` containing `]`, for instance) is reported absent on every run, and an insert-only
- * transform that trusted the caller would append the same row again on every publish — unbounded
- * growth from a legal manifest, with no operator error anywhere. Hence the `present` outcome below:
- * a LITERAL membership check that deliberately does NOT reuse step 0's target parse, since sharing
- * that parse would reproduce exactly the blind spot it exists to cover.
+ * Step 0 is the caller's IDEMPOTENCY guarantee, and it is not sufficient when a row's link text
+ * defeats its target parse. When the child row this function emits uses `-`, an insert-only
+ * transform that trusted step 0 would append that same target-breaking link on every publish; the
+ * literal `present` check below bounds that case. With a `*`/`+` child carrying a grouped target,
+ * the re-read postcondition refuses the raw-fallback row before it is written instead. The marker
+ * is the new row's (`childMarkerUsed`), not a property of the file or necessarily of its container.
+ * The literal check deliberately does NOT reuse step 0's target parse, since sharing that parse
+ * would reproduce the `-` child blind spot; it can also return `present` for an ordinary exact link
+ * when this function is called directly.
  *
  * @param {string[]} indexLines  index file split on '\n' (a CRLF file leaves a trailing '\r' per elem)
  * @param {string}   groupTitle  entry's current group_title (trimmed for comparison)
@@ -1517,8 +1519,8 @@ export function wireNestedListChapter(indexLines, groupTitle, chapterLink) {
   //
   // The writer used to emit whatever the caller's chapterLink and group_title produced, with a
   // plain-label check on the container label and none at all on the child row. A manifest value that
-  // is legal everywhere upstream — a backtick, an HTML comment, a fence, a U+2028, a `Token:` prefix,
-  // a run of hyphens, a `/` on a `*`/`+` file — therefore got written into a file that was clean a
+  // is legal everywhere upstream — a backtick run, an HTML comment, a U+2028, a `Token:` prefix,
+  // a run of hyphens, a `/` on a line emitted with `*`/`+` — therefore got written into a file that was clean a
   // moment earlier, and THIS SAME SCANNER refused that file on every later run: nested-list
   // automation died for every chapter and every group in it, permanently, and the operator saw only
   // the generic manual halt naming no row.
@@ -1586,8 +1588,8 @@ export function wireNestedListChapter(indexLines, groupTitle, chapterLink) {
         //
         // This guard is therefore MARKER-SCOPED, and the markers differ in the OUTCOME, not in the
         // diagnostics. Measured with a title carrying an unescaped `]` (the case this guard exists
-        // for), emitted as `[Items]Beta](admin/items-beta.md)`: on a `-` file run 1 inserts, run 2
-        // answers `present`, and exactly one row exists. On a `*`/`+` file the emitted row's raw
+        // for), emitted as `[Items]Beta](admin/items-beta.md)`: when the new child marker is `-`,
+        // run 1 inserts, run 2 answers `present`, and exactly one row exists. When it is `*`/`+`, the emitted row's raw
         // text carries a path separator, so the re-read postcondition above (`rereadRejects`)
         // refuses the bytes and EVERY run answers `unwritable`/`title` — nothing is written, and an
         // unrelated chapter in an unrelated group on that same untouched file still answers
@@ -1595,9 +1597,9 @@ export function wireNestedListChapter(indexLines, groupTitle, chapterLink) {
         // afterwards, at emit.
         //
         // The whole-file lockout is HISTORICAL rather than gone: on an index a 1.10.0 publish
-        // already wrote such a row into, isBarePathBullet fires on the row now ON DISK, so
+        // already wrote such a `*`/`+` row into, isBarePathBullet fires on the row now ON DISK, so
         // containerOwnerScan answers `not-a-list` before this walk ever runs — for every chapter and
-        // every group in the file, permanently (measured; a `-` file is unaffected). The
+        // every group in the file, permanently (measured; the corresponding `-` row is unaffected). The
         // postcondition keeps NEW files out of that state; it cannot repair one already in it. No
         // wording here should imply this guard bounds either case.
         //

@@ -4283,11 +4283,18 @@ test(`${PINNED_DEFECT_ACCUMULATION}: a chapter title EDITED between publishes ac
   const target = 'admin/plans.md';
   let lines = ['- Admin', '  - [Overview](admin/overview.md)', ''];
   let edit = 0;
+  // Record what every run RETURNS, not just what it writes. The row count alone cannot tell a
+  // `present` halt apart from any other non-`inserted` outcome, because only `inserted` mutates
+  // `lines` — so a module that returned `unwritable` on all 15 non-inserting runs would leave
+  // exactly the same 5 rows and keep this test green. Both adapters describe these 15 runs in
+  // prose, so the distribution is part of what this test pins.
+  const outcomes = [];
   for (let run = 1; run <= 20; run += 1) {
     if (run % 4 === 1 && run > 1) edit += 1;
     const chapterLink = `[Plans [Beta ${edit}]](${target})`; // target-breaking in every generation
-    if (locateChapterLine(lines, target, { wikilink: false }).present) continue;
+    if (locateChapterLine(lines, target, { wikilink: false }).present) { outcomes.push('step0-present'); continue; }
     const written = wireNestedListChapter(lines, 'Admin', chapterLink);
+    outcomes.push(written.kind);
     if (written.kind === 'inserted') lines = written.newLines;
   }
   const rows = lines.filter((line) => line.includes(target));
@@ -4295,6 +4302,13 @@ test(`${PINNED_DEFECT_ACCUMULATION}: a chapter title EDITED between publishes ac
     rows.length,
     5,
     'one dead row per title edit survives — if this count drops, the accumulation is FIXED: delete this test and retire the adapter prose',
+  );
+  const tally = outcomes.reduce((acc, kind) => ({ ...acc, [kind]: (acc[kind] ?? 0) + 1 }), {});
+  assert.deepEqual(
+    tally,
+    { inserted: 5, present: 15 },
+    'the 15 non-inserting runs each raise the `present` halt — the adapters say so in prose; any other '
+      + 'distribution means the prose is stale even though the row count still reads 5',
   );
   // Every generation is still there, none replaced: this is accumulation, not churn.
   for (let generation = 0; generation <= 4; generation += 1) {

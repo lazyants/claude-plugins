@@ -105,9 +105,9 @@ export interface NestedContainerMatch {
 // caller's `chapterLink`, deliberately not through step 0's target parse: that COVERS step 0's
 // blind spot (a row whose own text defeats the target parse) without being CONFINED to it —
 // measured, a row step 0 does recognize still makes the writer answer 'present'.
-// A PUBLISH-PATH caller — one wiring a real chapter link — MUST halt on it and MUST NOT retry:
-// retrying is the unbounded-growth loop the outcome exists to break. The in-module probe caller
-// is deliberately outside that requirement: verifyNonHeadingPlacement's fixed probe link can
+// A PUBLISH-PATH caller — one wiring a real chapter link — MUST halt on it: retrying the same
+// unchanged call can only return the same 'present' outcome. The in-module probe caller is
+// deliberately outside that requirement: verifyNonHeadingPlacement's fixed probe link can
 // literally be a row in the index, and its rule-4 accept-list reads 'present' as shape
 // recognition and continues to 'ok'.
 export type WireNestedListChapterResult =
@@ -211,7 +211,7 @@ export function leadingFrontmatterSpan(
   indexLines: string[],
 ): { kind: 'not-a-list' } | { kind: 'ok'; span: LeadingFrontmatterSpan | null };
 
-/** See chapter-paths.mjs: #223 [1.10.0] pure nested-list (GitBook SUMMARY.md) grouped-index write automation, absent-line path only — returns the fully-mutated index on success, or one of the refusals WireNestedListChapterResult declares and documents above: [1.11.0] 'present' when the container already carries this exact link (the unbounded-growth guard step 0 cannot provide), [1.11.0] 'unwritable' when the writer's own reader would refuse the bytes it was about to hand back (nothing written; `field` names the manifest value at fault), a multiple-container halt, or 'not-a-list' (outside the bounded safe subset). */
+/** See chapter-paths.mjs: #223 [1.10.0] pure nested-list (GitBook SUMMARY.md) grouped-index write automation, absent-line path only — returns the fully-mutated index on success, or one of the refusals WireNestedListChapterResult declares and documents above: [1.11.0] 'present' when the container already carries this exact link (literal membership that step 0's target parser cannot provide), [1.11.0] 'unwritable' when the writer's own reader would refuse the bytes it was about to hand back (nothing written; `field` names the manifest value at fault), a multiple-container halt, or 'not-a-list' (outside the bounded safe subset). */
 export function wireNestedListChapter(
   indexLines: string[],
   groupTitle: string,

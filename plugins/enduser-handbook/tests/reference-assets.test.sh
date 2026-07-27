@@ -2826,15 +2826,15 @@ done
 # code SPAN; a fence needs the run at line start, which an emitted row can never be) and would let
 # an operator conclude a single backtick is safe. It is not.
 #
-# Corrected a SECOND time before 1.11.0 shipped, and this correction is the load-bearing one: the
-# old remedy list named six shapes, of which TWO — backslash escapes and HTML entities — were
-# measured NOT to reach this halt at all (a title carrying either is written, `inserted`, on every
-# marker; they belong to the `present` halt below, whose mechanism is step 0's target parse, not the
-# re-read). It also named none of the four fatal `group_title` shapes, so an operator whose
-# `group_title` was at fault was handed a list that could not converge. An exact-string pin cannot
-# catch a wording that is wrong rather than drifted — every claim below is measured by executing the
-# module, and the pin only holds the two adapters to the measured wording once it is chosen.
-UNWRITABLE_HALT="Cannot wire '<slug>' into <index_file>: the lines this run would write are not recognizable to the next run, so nothing was written. <remedy> Then re-run. Plain here means ordinary text — no backtick, asterisk, underscore, angle bracket, ampersand, tilde, square bracket, exclamation mark or backslash; no HTML comment; and no U+2028/U+2029 line separator. That is deliberately stricter than the parser: which shapes are fatal depends on the link mode and on the bullet marker of the line being written, not on the markers used elsewhere in the file, so this asks for a value that is safe under all of them. See \"Nested-list automation limits\" below for the measured per-marker set."
+# The safe recovery language is a POSITIVE constraint rather than another fatal-shape enumeration.
+# The previous negative list omitted legal-looking `group_title` values that still re-halt:
+# `Sales/Marketing` and `billing.md` when the emitted marker is `*`/`+`, and `FAQ: basics` and
+# `---` when it is `-`. Following that halt literally therefore did not converge. The replacement
+# rule was measured by calling the writer for all three emitted markers in both link modes; its
+# group_title remedy also says EVERY entry because validateGroups makes that field group-scoped.
+# An exact-string pin cannot catch wording that is wrong rather than drifted — execution supplies
+# the truth, and the pin only keeps both adapters on the same measured wording.
+UNWRITABLE_HALT="Cannot wire '<slug>' into <index_file>: the lines this run would write are not recognizable to the next run, so nothing was written. <remedy> Then re-run. For this recovery step, use a non-empty value made only of Unicode letters and numbers, with words separated by single ASCII spaces. That positive constraint is deliberately narrower than the parser's full accepted language; it was verified across both link modes and all three bullet markers of the line being written, regardless of markers elsewhere in the file. See \"Nested-list automation limits\" below for the measured per-marker set."
 for f in "$SMD" "$OMD"; do
   c="$(count_joined_fixed "$UNWRITABLE_HALT" "$f")"
   if [ "$c" -eq 1 ]; then
@@ -2843,9 +2843,9 @@ for f in "$SMD" "$OMD"; do
     bad "$(basename "$f"): shared 'unwritable' halt count drifted from 1 (got $c)"
   fi
 done
-# The halt must not tell an operator to avoid something measured harmless. A tilde run in a title is
-# written without complaint (only backticks get code-span treatment), so naming it would be a false
-# instruction, and "code fences" was the wording that implied it.
+# A recovery constraint may deliberately exclude harmless spellings, but it must not misstate the
+# mechanism. A title's backtick run is an inline code span because the emitted row puts it after
+# indentation and a bullet; it is never a fence. Keep the retired "code fences" wording out.
 for f in "$SMD" "$OMD"; do
   c="$(count_joined_fixed 'code fences, or invisible line separators' "$f")"
   if [ "$c" -eq 0 ]; then
@@ -2854,19 +2854,15 @@ for f in "$SMD" "$OMD"; do
     bad "$(basename "$f"): the 'code fences' wording is back in the unwritable halt"
   fi
 done
-# Same guard for the second correction. This exact parenthetical is the retired remedy list; two of
-# its six items (backslash escapes, HTML entities) are measured to insert cleanly and never reach
-# this halt, so its return would restore a list that cannot converge for a `group_title` fault. The
-# needle is the FULL parenthetical, not "backslash escapes" alone — the `present` halt below also
-# names those two, and is pinned separately.
+# Same guard for the earlier negative enumeration. It was neither a complete fatal set nor a safe
+# recovery rule: marker-specific `group_title` failures sat outside it. The needle is the FULL
+# parenthetical, not "backslash escapes" alone — the `present` halt below also names those words
+# and is pinned separately.
 #
-# Do NOT read that as an endorsement of the `present` halt's own wording. Measured over 18 cells
-# (6 values x path/wikilink x the row-resolution question step 0 actually asks): an HTML ENTITY in a
-# title never breaks the target parse in either mode — 0 of 18 — and a backslash escape breaks it in
-# exactly ONE cell, `A\]B` in wikilink mode. So the `present` halt names two remedies that are almost
-# never its cause. That is a pre-existing shipped string, out of scope for this commit, and it is
-# tracked rather than silently rewritten here — the point of this comment is to stop the next reader
-# concluding from the needle-scoping above that the other halt was audited and found correct.
+# Do NOT read that as an endorsement of the `present` halt's cause list. HTML entities do not break
+# target extraction in the measured modes, while backslash behavior depends on syntax and bracket
+# position. The present halt's stricter instruction still converges; this comment only prevents the
+# negative needle below from being mistaken for a claim that every named spelling caused that halt.
 for f in "$SMD" "$OMD"; do
   c="$(count_joined_fixed 'give it a plain value (no Markdown markup, backslash escapes, HTML entities, HTML comments, backticks, or invisible line separators)' "$f")"
   if [ "$c" -eq 0 ]; then

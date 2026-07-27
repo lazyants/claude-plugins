@@ -458,20 +458,19 @@ the one exception to "do all of these" — see its own conditional note below.
        cannot; `index` is diagnostic only and is never interpolated into the halt below — an
        existing follow-up tracks halt-text injection through found-row text as its own defect,
        and this halt does not repeat it.
-       One halt text for both `publish.wikilinks` modes — it names no link syntax, so nothing
-       in its wording ties it to either mode, and the outcome itself is reachable in both:
-       whenever a title breaks its own row's link/wikilink target parse (see the
-       already-documented wikilink case, `- [[items|A]B]]`, in the plain-label table under
-       "Nested-list automation limits" below), the writer's insert converges at exactly one
-       row, then repeats this halt on every later run — confirmed directly here too (`A]B`,
-       `Items]Beta`, `X]Y]Z` all reach it as a wikilink alias). The two modes differ in which
-       bracket shapes trigger it, not in whether they can: a Markdown link's label sits before
-       its destination, so ANY unescaped `]` inside the title ends the label scan early and
-       breaks the parse; a wikilink's target sits before its `|`, so a `]` merely trailing
-       right up against the alias's own closing `]]` run does NOT break it — `Items]` and
-       several other bracket- or pipe-mangling shapes tried here converge normally in wikilinks
-       mode instead of reaching this halt — only a `]` sitting somewhere short of that closing
-       run does. A target-side route (a slug whose own text ends in `.md`, since
+       One halt text serves both `publish.wikilinks` modes — it names no link syntax, and the
+       adapter reaches the outcome in either mode when the exact child row uses `-` and its title
+       keeps step 0 from parsing the target. (`wireNestedListChapter` itself will also return
+       `present` for an ordinary exact child if called directly, but this adapter's step 0 already
+       handles that row and never calls it.) The title rule differs by syntax. In path mode an
+       unescaped `]` closes the label early, while `\]` leaves the target resolvable. In wikilinks
+       mode an interior `]` followed by more alias text keeps `WIKILINK_TARGET_RE` from reaching
+       the row's closing brackets; a terminal run of `]` can instead be consumed as part of those
+       closers and the target still resolves. A backslash does not escape `]` for that regex.
+       Thus `A]B` reaches this halt after one `-` child is written in either mode, while a
+       wikilink alias ending in `A]` does not. When the emitted child marker is `*` or `+`, a
+       target-breaking grouped row reaches the re-read refusal below before anything is written,
+       rather than `present`. A target-side route (a slug whose own text ends in `.md`, since
        `currentIndexExpectedTarget` strips one terminal `.md` in wikilinks mode) converges the
        same ordinary way:
        `Chapter row for '<slug>' is already present under the '<group_title>' container bullet in <index_file>, but this run could not recognize it — the chapter's own title does not yield a resolvable link destination. Give the chapter a plain title in the manifest — no Markdown markup, backslash escapes, or HTML entities in it — then re-run; see "Nested-list automation limits" below.`
@@ -498,7 +497,7 @@ the one exception to "do all of these" — see its own conditional note below.
        names no link syntax, and the remedy it asks for is safe under both modes, which matters
        because the fatal SHAPES differ by mode (measured: a backslash-escaped `]` in a title is
        written in path mode and refused in wikilink mode on `*`/`+`):
-       `Cannot wire '<slug>' into <index_file>: the lines this run would write are not recognizable to the next run, so nothing was written. <remedy> Then re-run. Plain here means ordinary text — no backtick, asterisk, underscore, angle bracket, ampersand, tilde, square bracket, exclamation mark or backslash; no HTML comment; and no U+2028/U+2029 line separator. That is deliberately stricter than the parser: which shapes are fatal depends on the link mode and on the bullet marker of the line being written, not on the markers used elsewhere in the file, so this asks for a value that is safe under all of them. See "Nested-list automation limits" below for the measured per-marker set.`
+       `Cannot wire '<slug>' into <index_file>: the lines this run would write are not recognizable to the next run, so nothing was written. <remedy> Then re-run. For this recovery step, use a non-empty value made only of Unicode letters and numbers, with words separated by single ASCII spaces. That positive constraint is deliberately narrower than the parser's full accepted language; it was verified across both link modes and all three bullet markers of the line being written, regardless of markers elsewhere in the file. See "Nested-list automation limits" below for the measured per-marker set.`
      - `{kind: 'multiple'}` — two or more container bullets match `group_title`; never guess
        which is canonical, halt:
        "Found multiple '<group_title>' container bullets in <index_file> — curate the index manually, then re-run."
@@ -559,12 +558,14 @@ the one exception to "do all of these" — see its own conditional note below.
        `indexForm: 'non-heading'` branch above and proceeds. One operator-actionable warning
        belongs here too, and it is narrower than "markup in the title": it applies to a title
        whose markup keeps the row's own link target from resolving — a nested link, a nested
-       image, a reference link, or a `]` in the title (a `- [A]B](<target>)` path-mode row, or a
-       `- [[target|A]B]]` wikilink alias — both measured to make the target unrecognizable to
-       `locateChapterLine`, exactly like a nested link would). Escaping the bracket fixes this
-       in path mode (`- [A\]B](<target>)` resolves); it does **not** fix wikilink mode —
-       `- [[target|A\]B]]` still fails to resolve (measured), so a `]` anywhere in a
-       wikilink-mode title has no escape that saves it and must simply be avoided.
+       image, a reference link, or an interior `]` followed by more title text (a
+       `- [A]B](<target>)` path-mode row, or a `- [[target|A]B]]` wikilink alias — both measured
+       to make the target unrecognizable to `locateChapterLine`, exactly like a nested link
+       would). Escaping the bracket fixes this in path mode (`- [A\]B](<target>)` resolves); a
+       backslash does **not** escape it for `WIKILINK_TARGET_RE`, so
+       `- [[target|A\]B]]` still fails. The wikilink rule is positional, not "any `]`": when
+       the title ends in a run of `]`, that run can be consumed as part of the row's closing
+       brackets and the target resolves.
 
        Convergence depends on the manifest entry's own `title` — not on whatever row already
        sits in the index — because that is what the writer rebuilds its inserted row from on
@@ -573,18 +574,20 @@ the one exception to "do all of these" — see its own conditional note below.
        the earlier, unrecognizable row lingers beside it as a cosmetic duplicate, and the very
        next run reports `ok` on the clean one. That is the one combination that converges with
        a harmless leftover; the other combination — the manifest title ITSELF target-breaking —
-       does not converge the same way, and what it does instead turns on where the writer's own
-       insert sits, not on `publish.wikilinks` mode:
+       does not converge the same way. Its result turns on the marker of the child row the writer
+       is about to emit, not a file-wide or container-wide marker: it reuses the last existing
+       child's marker and falls back to the container marker only when there is no child. Link
+       mode still decides which title spellings break step 0, as described above.
 
        - **Nested under its single matched container** (the ordinary case — where
          `wireNestedListChapter` always places its own insert): every later run still finds
          `containers.length === 1`, and step 0 still reports the chapter absent — the row is
-         exactly as unrecognizable to step 0's target parse as before — but on a `-`-markered
-         index, the writer's own membership guard (the `present` outcome above) recognizes its
+         exactly as unrecognizable to step 0's target parse as before — but when the new child
+         uses `-`, the writer's own membership guard (the `present` outcome above) recognizes its
          own prior insert VERBATIM, refuses to write a second copy, and halts instead. Exactly
          ONE row is ever written here, in either mode, on that marker; the shipped 1.10.0
          behaviour this retires had no membership check at all and appended another duplicate
-         row on every re-run, without limit. A `*`- or `+`-markered index does not reach this
+         row on every re-run, without limit. A new child using `*` or `+` does not reach this
          guard at all — see "Measured, across every placement" below for what it hits instead.
        - **At the left margin (indent 0), uncontained** — a broken title's own brackets fail
          the indent-0 `isPlainLabel` check the same way regardless of what broke them or which
@@ -608,10 +611,10 @@ the one exception to "do all of these" — see its own conditional note below.
        same target-breaking title sitting at the left margin, or a non-plain `group_title`,
        converges on zero further rows and a repeating `not-a-list` halt instead (unchanged
        since 1.10.0), in either mode, regardless of marker. A target-breaking current title
-       nested under its container is the one outcome that splits by MARKER, not just mode: on
-       a `-`-markered index it converges on exactly one row, then a `present` halt from the
+       nested under its container is the one outcome that splits by the EMITTED ROW'S MARKER,
+       not just mode: when that marker is `-`, it converges on exactly one row, then a `present` halt from the
        second run onward, in either link mode (new in 1.11.0 — this is the case #330 retires
-       from unbounded, on that marker). On a `*`- or `+`-markered index the identical
+       from unbounded, on that marker). When that marker is `*` or `+`, the identical
        placement does not reach `present` at all — but the cause is the TARGET, not the
        broken title by itself: `parseNestedLabel` falls to its `raw` branch on the same
        broken title, and that raw text is the row's WHOLE unparsed content, including the
@@ -624,7 +627,7 @@ the one exception to "do all of these" — see its own conditional note below.
        target-breaking title is always unwritable on `*`/`+`". For THIS adapter's own
        grouped emission the prefix is unavoidable, so the split above holds in practice: the
        [1.11.0] re-read postcondition (`{kind: 'unwritable', field}`, "Non-headings index, no
-       existing line" above) is what a `*`/`+`-markered index reaches here, because
+       existing line" above) is what the `*`/`+` child reaches here, because
        `isBarePathBullet` fires on the very bytes the writer is about to persist — so nothing
        is ever written and the run halts naming `field: 'title'`, before the membership check
        #330 adds ever gets a chance to run. On that marker the pre-existing
@@ -635,11 +638,13 @@ the one exception to "do all of these" — see its own conditional note below.
 
        Every claim above holds the manifest `title` FIXED between runs — none of it was
        measured against an EDITED one. When the operator instead edits a target-breaking title
-       on a `-`-markered index (a new title yields a new display string, hence a new
+       while the emitted child uses `-` (a new title yields a new display string, hence a new
        `chapterLink` the membership guard has never seen), that guard cannot recognize the
        edited row as the same chapter and inserts it as a fresh child every time: measured, 20
        publishes with the title edited on every fourth run accumulate 5 rows — one per distinct
-       edit, none ever removed, no halt ever raised. The `present` bound above is per TITLE
+       edit, none ever removed. The run is not silent: the other 15 publishes each return
+       `present` and the adapter halts on it. No halt names the orphaned rows, though, which is
+       what leaves the growth unreported. The `present` bound above is per TITLE
        STRING, not per chapter — it is bounded only by how many times the title is edited, a
        count this file has no way to bound.
 
@@ -777,12 +782,11 @@ HTML comment or a fenced block anywhere, a mixed or bare-CR line ending, a YAML 
 `group_title` fall outside the subset as well. Worst case for the residual (a file the guards
 above decline) is a cosmetic duplicate container an operator might introduce by hand while
 following the manual halt instructions — visible and deletable, never data loss. Within the
-automated subset itself, the writer's own worst case for a target-breaking title (a `]` that
-defeats the row's own link/wikilink parse) is bounded the same way ONLY on a `-`-markered
-index: it converges on exactly one duplicate chapter row, then halts rather than writing a
-second (see "INDEX wiring" above for the measured marker split and the title-EDIT growth
-caveat) — the shipped 1.10.0 writer's unbounded per-re-run growth is retired, on that marker.
-A `*`- or `+`-markered index instead reaches the [1.11.0] re-read postcondition (`{kind:
+automated subset itself, the writer's target-breaking-title outcome follows the marker of the
+child it is about to emit. With `-`, a title shape that defeats step 0 converges on exactly one
+chapter row, then halts rather than writing a second (see "INDEX wiring" above for the
+title-EDIT growth caveat). The shipped 1.10.0 writer's unbounded per-re-run growth is retired
+for that marker. With `*` or `+`, the [1.11.0] re-read postcondition instead returns (`{kind:
 'unwritable', field}`, "Non-headings index, no existing line" above): the row's own raw
 fallback text carries the GROUPED target's `/` — not the broken title by itself (see
 "Measured, across every placement" above for the group-prefix mechanism and the flat-target
@@ -793,18 +797,21 @@ hand-typed bare path. A richer rendering-aware matcher is a possible follow-up, 
 A manifest value that would corrupt this same structural read is refused the same way, before
 it is ever written. The set is per-field, and the two fields do not share it:
 
-- In a **chapter title**, on any marker: a backtick — any run length, paired or not, since the
+- In a **chapter title**, on any emitted child marker: a backtick — any run length, paired or not, since the
   mechanism is an unterminated inline code SPAN and not a fence; a tilde run is measured
-  harmless — an HTML comment, or a U+2028/U+2029 separator. Under a `*`/`+`-marked container
-  additionally anything that keeps the row's own link target from parsing, which then trips
-  `isBarePathBullet` on the grouped target's `/`: in path mode an unescaped `]` or a trailing
-  odd run of backslashes; in wikilink mode a `]` whether or not it is backslash-escaped, since
-  `WIKILINK_TARGET_RE` is not escape-aware. Under a `-`-marked container the same shapes are
-  instead the `present` case above.
-- In a **`group_title`**: a U+2028/U+2029 separator on any marker; on a `-`-markered index, a
-  first token followed immediately by a colon (`FAQ: basics`, `Admin:`) or a value that is only
-  hyphens (`---`); on a `*`/`+`-markered index, a value containing `/` or ending `.md`
-  (`'Sales/Marketing'`, `'billing.md'`).
+  harmless — an HTML comment, or a U+2028/U+2029 separator. When the child marker is `*` or
+  `+`, the path-mode row also falls to raw content after an unescaped `]` or a trailing odd run
+  of backslashes. In wikilinks mode its whole-content label unwrap falls to raw content for any
+  `]` in the alias, escaped or not; the grouped target's `/` then trips `isBarePathBullet`.
+  This writer-side unwrap rule is broader than step 0's `WIKILINK_TARGET_RE`: step 0 still
+  recognizes a terminal run of `]` as part of the closers. When the child marker is `-`, the
+  writer permits these bracket/backslash shapes; only those that also defeat step 0 lead to the
+  later `present` halt.
+- In a **`group_title`**: a U+2028/U+2029 separator on any newly-created container marker; when
+  that marker is `-`, a first token followed immediately by a colon (`FAQ: basics`, `Admin:`)
+  or a value that is only hyphens (`---`); when it is `*`/`+`, a value containing `/` or ending
+  `.md` (`'Sales/Marketing'`, `'billing.md'`). On creation this marker is copied from the first
+  indent-0 bullet, not inferred from a file-wide style.
 
 Each of those reaches `{kind: 'unwritable', field}` — see "Non-headings index, no existing line"
 above for the exact halt text — never a written row. Inline code, an HTML comment and a fenced
@@ -814,8 +821,8 @@ the manual halt and never as `unwritable`. Give the chapter or the group a plain
 
 **The plain-label predicate, named exactly.** In short: a plain title is verified; a
 non-plain title that still resolves is found but left unverifiable; a title that breaks its
-own row's link target is caught — by the writer's own membership guard on a `-`-markered
-index (a `present` halt), or by the [1.11.0] re-read postcondition on a `*`/`+`-markered one
+own row's link target is caught — by the writer's own membership guard when the emitted child
+uses `-` (a `present` halt), or by the [1.11.0] re-read postcondition when it uses `*`/`+`
 (an `unwritable` refusal naming the title) — rather than duplicated without limit on either
 marker (see the marker-scoped bounded-outcome discussion under INDEX wiring above). The
 mechanism: the container-owner scan
@@ -855,9 +862,9 @@ The last row of each mode is a different failure mode entirely: a nested link (p
 unescaped `]` in the alias (wikilinks mode) breaks the row's OWN link-target extraction — not
 `extractLabel`/`isPlainLabel` at all — so step 0 never reports the chapter present in the first
 place; see the marker-scoped bounded-outcome discussion under INDEX wiring above for what a
-target-breaking title does instead: one inserted row, then a `present` halt on a `-`-markered
-index, or an `unwritable` refusal — naming the title, nothing ever written — on a
-`*`/`+`-markered one — never SILENT unbounded duplication, on either marker.
+target-breaking title does instead: one inserted row, then a `present` halt when the child uses
+`-`, or an `unwritable` refusal — naming the title, nothing ever written — on a
+`*`/`+` child — never SILENT unbounded duplication for a fixed title, on either marker.
 
 As of 1.11.0, a **present** grouped chapter's placement under this container is also checked,
 but only for a narrow verified class — this exact sentence, reused verbatim everywhere it is
