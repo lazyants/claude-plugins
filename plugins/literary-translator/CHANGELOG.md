@@ -102,9 +102,17 @@ was a subtle bug in the code that existed; both were work the code never did.
   the cited URL itself, it is asked to name the offending source in its verdict, and a fetched body
   can contain any URL at all. It is an ordinary agent and still holds Bash. What the split removes
   is the *reason* to fetch and the *provenance* of every byte judged — not URLs, and not the tool.
-- Nothing server-supplied reaches `index.json`, and it took three review rounds to make that
-  sentence true — each round closed one channel and the next round found the sibling it had missed,
-  which is the honest shape of the fix and is recorded here rather than smoothed over.
+- No server-supplied **free text** reaches `index.json`, and every field that still carries a
+  server-chosen value is named as untrusted in the judge prompt. That is the claim at its true
+  width, and getting to it took five review rounds — each closing one channel and the next finding
+  the sibling it had missed, which is the honest shape of the fix and is recorded here rather than
+  smoothed over. The earlier, stronger wording ("nothing server-supplied reaches `index.json`") was
+  false while it stood: a redirect lets the server choose the next hop's host, so `final_origin` and
+  `chain[].host/origin` carry an attacker-authored **hostname** by design — bounded to a hostname's
+  shape, never a path, query or fragment, and deliberately retained because an operator diagnosing a
+  citation needs it. Round 4 fixed the judge prompt and left this summary asserting the absolute it
+  had just retired; round 5 caught the leftover. A release about prose outrunning code should not
+  ship a headline doing it.
   - **Round 1 — the header.** A hostile `Content-Type` was recorded verbatim, both as
     `refused:content-type-not-allowed:<header>` and as the success path's `content_type`, while the
     judge prompt vouches for that file as locally generated and `outcome` is the field the judge
@@ -195,6 +203,52 @@ was a subtle bug in the code that existed; both were work the code never did.
     of filler and buy the softer reading. Truncation now explains a missing detail and never
     supplies one: a positive check that cannot be satisfied from the bytes actually retrieved fails,
     with truncation named as the reason.
+  - **Round 5 (cont.) — the totality guard stopped one step short of the WRITE.** `json.loads`
+    accepts `\ud800` and returns a lone surrogate, which UTF-8 cannot encode. The entry dict copies
+    `source`/`source_form`/`basis` verbatim from the fragment, and the `index.json` write sits
+    OUTSIDE both of `run_batch`'s guards — so one such string made the whole batch escape with no
+    index at all, which is precisely the outcome the round-4 guard exists to prevent, arriving just
+    past its reach. Two reviewers had cleared the neighbouring path correctly: retrieved bodies go
+    through `decode(errors="replace")` and cannot emit a surrogate. The provenance here is the
+    fragment, not the wire — the same sink reached by an input nobody had traced. Fragment-copied
+    strings are now made encodable before they are recorded.
+  - **Round 5 (cont.) — the closed-vocabulary gate skipped what it could not read.** Round 4's AST
+    walk ignored any `_refuse()` argument that was not an f-string, while its docstring claimed it
+    covered "a reason built into a variable first". So
+    `reason = f"http-protocol-error:{exc}"; raise _refuse(reason)` restored raw `BadStatusLine` text
+    with the structural suite still green. The gate now REFUSES an argument shape it cannot analyse
+    instead of skipping it: an unanalysable reason is a failure, not an absence. Verified by
+    applying that exact bypass and watching the gate name it.
+  - **Round 5 (cont.) — the prepare agent's diagnostic channel.** An unsafe-source failure puts the
+    item's `source_form` — free text an LLM wrote from corpus text — into `error`/`offending`, and
+    the prepare agent is told to read that output and describe the failure, whose reply is then
+    relayed into the next attempt's dispatch prompt. The refusal REASON was closed earlier this
+    round; this is the label beside it. The excerpt is now `repr()`-escaped and hard-capped at 60
+    characters (repr bounds the charset, nothing bounded the length), and the prepare prompt is told
+    the command's output is DATA — report the command, its exit status, the machine reason and the
+    item INDEX, never free text copied back verbatim.
+  - **Round 5 (cont.) — release prose still asserting the absolute the code had retired.** README
+    and this file both still said "nothing server-supplied reaches `index.json`" while round 4 had
+    deliberately kept the redirect-selected hostname and named it untrusted in the judge prompt.
+    Both now state the claim at its true width. A release about prose outrunning code should not
+    ship a headline doing it.
+  - **Round 5 (cont.) — template comments.** The bullet describing the snapshot said "the
+    reviewer's FIRST act" after the act moved to the prepare step; `waitPrompt`/`reviewWaitPrompt`
+    still described a single full-bound poll though both now build ONE chunk, mentioning neither
+    `chunkIndex` nor the authoritative re-check; a header parenthetical opened before an inserted
+    sentence and closed after it, orphaning the clause that followed; and the per-segment cost note
+    claimed a batch "drops from ~78 segments to ~40" — the real pre-#348 ceiling is **92**
+    (`1 + 92*38 = 3497`), while ~78 is a historical repro SIZE quoted from a passage whose point was
+    that it fitted with headroom. Also corrected: "the other four" inline schemas (there are five),
+    "Three structural points" above four bullets, and a precheck naming the pre-1.16.0 fixed
+    fragment path that the next paragraph of the same comment already contradicted.
+  - **Round 5 (cont.) — the content-type COUNT cap existed in two engines of three.** The workflow
+    template validated each entry's charset but not the list's length or uniqueness, which
+    `fetch_citation.py` and `profile.schema.json` both bound at 16. Not a safety hole — every entry
+    is still charset-validated, so nothing unquotable reaches the shell — but it chose the worst
+    failure mode: a 17-entry list built a command the fetcher exits on, per batch, burning the
+    citation ladder to `citation-review-exhausted` and merging zero batches. It now throws once, at
+    instantiation, the way a malformed entry already did.
   - **Round 3 — the PARSER, which is not a field at all.** `http.client` raises its own hierarchy
     and `HTTPException` is not an `OSError` — measured: `issubclass(BadStatusLine, OSError)` is
     `False` — so a malformed status line escaped every handler, aborted the whole batch, and printed

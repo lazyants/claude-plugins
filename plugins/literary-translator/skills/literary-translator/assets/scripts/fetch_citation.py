@@ -611,6 +611,28 @@ class _Redirect(Exception):
         self.target = target
 
 
+def _encodable(value):
+    """Make a fragment-copied string safe to WRITE, not merely safe to read.
+
+    The totality guard around each item stops at the last `except`. The
+    index.json write happens after it, so a value that survives every refusal
+    and then cannot be encoded destroys the whole batch's index -- the exact
+    outcome the guard exists to prevent, arriving one step past its reach.
+
+    json.loads accepts "\\ud800" and hands back a lone surrogate, which UTF-8
+    cannot encode, so ONE such `source` in an otherwise valid approved fragment
+    raised UnicodeEncodeError out of Path.write_text and left no index at all.
+    Note this is a FRAGMENT channel, not a wire one: retrieved bodies already
+    pass through decode(errors="replace"), which can never emit a surrogate.
+
+    Non-strings pass through untouched -- the schema constrains those, and
+    silently stringifying them here would hide a shape bug rather than fix one.
+    """
+    if not isinstance(value, str):
+        return value
+    return value.encode("utf-8", "replace").decode("utf-8")
+
+
 def _read_bounded(resp, deadline: float) -> bytes:
     """Read up to MAX_BYTES + 1 bytes, re-checking the deadline as it goes.
 
@@ -888,9 +910,9 @@ def run_batch(batch_path: Path, out_dir: Path, *,
     for i, item, src in sources:
         entry = {
             "item_index": i,
-            "source_form": item.get("source_form"),
-            "basis": item.get("basis"),
-            "source": src,
+            "source_form": _encodable(item.get("source_form")),
+            "basis": _encodable(item.get("basis")),
+            "source": _encodable(src),
         }
         if time.monotonic() > batch_deadline:
             entry["outcome"] = "refused:batch-deadline"

@@ -113,16 +113,16 @@
 // return line is NEVER the verdict. The Workflow's OWN wait poll
 // (waitPrompt/reviewWaitPrompt) is the AUTHORITATIVE independent gate -- a
 // POLLING-BUDGET loop (budget = CODEX_DEADLINE_SEC + CODEX_FINALIZE_BUDGET_SEC
-// + CODEX_WAIT_GRACE_SEC = 3450 s), spent since 1.16.1 across WAIT_CHUNKS = 8
+// + CODEX_WAIT_GRACE_SEC = 3450 s, spent since 1.16.1 across WAIT_CHUNKS = 8
 // bounded agent calls rather than inside one, because the agent Bash tool
 // clamps a single call at a measured 600 s regardless of the timeout requested
-// (#348). A failed or exhausted poll is followed by ONE non-polling
-// authoritative re-check before any timeout is declared, so a run that finished
-// while the poll was between chunks is not reported as a timeout; NO `timeout`
-// binary)
+// (#348); NO `timeout` binary)
 // whose ACCEPT is a FULL re-validation of the CURRENT canonical (translate:
 // draft_ready.py --expect-token AND validate_draft.py; review: review_ready
-// .py --expect-token), never a trust of any driver-written file. Its
+// .py --expect-token), never a trust of any driver-written file.
+// A failed or exhausted poll is followed by ONE non-polling authoritative
+// re-check before any timeout is declared, so a run that finished while the
+// poll was between chunks is not reported as a timeout. Its
 // optional fail-fast is a pure presence check on the DISP-named sentinel
 // segments/.codex_failed.<seg>.<DISP> (the driver writes it only when it did
 // NOT promote), evaluated ONLY AFTER the ACCEPT gate did not pass this
@@ -1083,14 +1083,17 @@ function waitRecheckPromptFor(seg, acceptCmd, whatPhrase, dontClause) {
 // this poll re-validates the CANONICAL review artifact directly (never
 // trusts any driver-written file). ACCEPT = review_ready.py <seg>
 // --expect-token <tok> exit 0 (full schema + draft_sha1 freshness + this
-// round's dispatch_token). Elapsed-time loop, gate-then-deadline-break, NO
-// separate post-loop gate (so exactly ONE gate can straddle the deadline).
-// The optional fail-fast (only when disp is non-empty) is a pure presence
-// check on the DISP-named sentinel the driver writes when it did NOT
-// promote, evaluated ONLY AFTER the ACCEPT gate did not pass this iteration
-// -- a valid canonical always wins over any sentinel; an empty disp disables
-// fail-fast and simply polls to the bound (safe degradation). No external
-// `timeout` binary anywhere. roundLabel derives the token internally
+// round's dispatch_token).
+//
+// Since 1.16.1 (#348) this builds ONE CHUNK of the chunked wait, not the whole
+// poll: chunkIndex selects the slice, and the bash grammar, the chunk bound and
+// the fail-fast semantics all live in waitChunkPrompt() -- see its comment
+// rather than duplicating them here, which is how this header came to describe
+// a single full-bound poll that no longer exists. The chunk loop and the ONE
+// non-polling authoritative re-check that follows an exhausted or failed poll
+// belong to the CALL SITE (getVerifiedReview/reviewFixLoop); an exhausted chunk
+// is not a timeout on its own. What is genuinely this wrapper's own is the
+// ACCEPT gate named above; roundLabel derives the token internally
 // (RUN_ID:seg:r<label>).
 function reviewWaitPrompt(seg, roundLabel, disp, chunkIndex) {
   return waitChunkPrompt(seg, reviewAcceptCmd(seg, roundLabel), disp, chunkIndex,
@@ -1128,12 +1131,14 @@ function readReviewPrompt(seg) {
 // --expect-token <tok> exit 0 (token + delivery -- so an old-run straggler
 // translator's draft with a stale token is never accepted) AND
 // validate_draft.py <seg> prints OK (the six quality checks -- so a
-// structurally-complete but content-defective draft is REJECTED). Elapsed-
-// time loop, gate-then-deadline-break, NO separate post-loop gate. The
-// optional fail-fast (only when disp is non-empty) is a pure presence check
-// on the DISP-named sentinel, evaluated ONLY AFTER the ACCEPT gate did not
-// pass this iteration (a valid canonical always wins; an empty disp disables
-// it -- safe degradation). No external `timeout` binary.
+// structurally-complete but content-defective draft is REJECTED).
+//
+// Since 1.16.1 (#348) this builds ONE CHUNK of the chunked wait, not the whole
+// poll: chunkIndex selects the slice, and the bash grammar, the chunk bound and
+// the fail-fast semantics live in waitChunkPrompt(). The chunk loop and the ONE
+// non-polling authoritative re-check that follows an exhausted or failed poll
+// belong to the CALL SITE, so an exhausted chunk is not a timeout on its own.
+// The ACCEPT gate above is what is genuinely this wrapper's own.
 function waitPrompt(seg, disp, chunkIndex) {
   return waitChunkPrompt(seg, translateAcceptCmd(seg), disp, chunkIndex,
     "translator for segment " + seg,
@@ -1717,10 +1722,19 @@ async function translateStage(seg) {
 //
 // OPERATIONAL CONSEQUENCE, stated rather than hidden: at WAIT_CALLS = 9 and
 // MAXFIX = 4 a segment budgets 86 calls, up from 38. At the shipped
-// engine.batch_agent_cap: 3500 a normal batch therefore drops from ~78
-// segments to ~40. profile.example.yml and
-// references/orchestration-and-batching.md carry the same arithmetic and are
-// kept in step with this comment.
+// engine.batch_agent_cap: 3500 a normal batch therefore drops from 92 segments
+// to 40 -- both re-derived here rather than quoted: 1 + 92*38 = 3497 and
+// 1 + 40*86 = 3441, with 93 and 41 the first values to exceed the cap.
+// This said "~78 segments" until round 5. That number is a batch SIZE, not a
+// ceiling: it is the ~78-segment repro in
+// references/orchestration-and-batching.md's note on 1.3.5 raising this cap
+// from 1000, where the whole point is that 1 + 78*38 = 2965 fitted under 3500
+// WITH HEADROOM. Quoting it here turned a repro size into a capacity and then
+// compared it against a real ceiling.
+// profile.example.yml states the post-#348 figure (40, and 26 at cap 1000);
+// neither it nor references/orchestration-and-batching.md ever carried a
+// before/after capacity pair, so the claim that they "carry the same
+// arithmetic" was describing agreement that did not exist.
 //
 // #131's draftPresentAndValid probe does NOT change this formula: it fires
 // only from runRound's fix-call-failed terminal branch, which ENDS the

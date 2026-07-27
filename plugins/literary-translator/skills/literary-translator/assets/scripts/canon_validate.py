@@ -668,11 +668,34 @@ def _format_errors(errors, instance=None, root_schema=None) -> str:
     return "; ".join(parts)
 
 
+# Longest source_form excerpt a failure label may carry. A real name is far
+# shorter; the cap exists so the label cannot become a delivery vehicle for
+# prose aimed at whoever reads the failure.
+_ITEM_LABEL_MAX_CHARS = 60
+
+
 def _indexed_item_label(kind: str, index: int, item) -> str:
     """Builds a "kind[i]" or "kind[i] ('source_form')" label for a batch or
-    review_queue item, so a Pass-1 failure names exactly which item broke."""
+    review_queue item, so a Pass-1 failure names exactly which item broke.
+
+    The INDEX is the identifier; the source_form is a convenience for whoever
+    reads the failure. It is also free text the pipeline does not control -- an
+    LLM wrote it from source text a hostile document can seed -- and this label
+    lands in `error`/`offending`, which the prepare agent is told to read and
+    describe. So it is bounded rather than passed through whole: repr() first
+    (which escapes quotes, control characters and newlines, so the label cannot
+    break out of its own line), then a hard length cap, because repr bounds the
+    CHARSET and nothing bounds the LENGTH. A name long enough to hold a
+    paragraph of instructions is not a name. The reader still has the index and
+    the fragment when the excerpt is not enough.
+    """
     source_form = item.get("source_form") if isinstance(item, dict) else None
-    return f"{kind}[{index}]" + (f" ({source_form!r})" if source_form else "")
+    if not source_form:
+        return f"{kind}[{index}]"
+    shown = repr(source_form)
+    if len(shown) > _ITEM_LABEL_MAX_CHARS:
+        shown = shown[:_ITEM_LABEL_MAX_CHARS] + "...'"
+    return f"{kind}[{index}] ({shown})"
 
 
 def _is_uri(value: str) -> bool:
