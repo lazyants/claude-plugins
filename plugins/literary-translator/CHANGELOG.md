@@ -43,8 +43,12 @@ was a subtle bug in the code that existed; both were work the code never did.
 - Startup assertions now fail loudly if `WAIT_CHUNK_TOOL_TIMEOUT_MS` exceeds the measured clamp or
   `WAIT_CHUNK_SEC` leaves no headroom under it, so a future constant change cannot silently
   re-create #348.
-- Blocked reason strings are deliberately unchanged (`translate-timeout` / `review-timeout`):
-  `select_segments.py`'s "non-terminal → recoverable" rule and every recovery doc key off them.
+- Blocked reason strings are deliberately unchanged (`translate-timeout` / `review-timeout`), but
+  the reason they are safe to leave alone is not the one an earlier draft of this line gave.
+  `select_segments.py` never reads either string — measured, zero occurrences. Recovery keys off
+  the ABSENCE of a terminal ledger write: neither path records one, so translateStage's
+  `in_progress` fragment stays the durable record and `HUMAN_ESCALATION_STATUSES` is never
+  reached. Both segments auto-redispatch on the next run either way.
 - **Scope, stated rather than implied: this fixes the W5 mass-translate waits ONLY.** The glossary
   pass and the skeptic pass each still poll `45 × (check + sleep 20)` — roughly 900 s, advertised as
   "about 15 minutes" — inside one `agent()` call, against the same measured 600 s clamp, and each
@@ -365,8 +369,10 @@ was a subtle bug in the code that existed; both were work the code never did.
   skipped, deliberately and identically in both files — it is not a fetch target and its shape is
   Pass 1's business. The two must agree on WHICH items they cover, not merely on the checks they
   run.
-- Nothing server-supplied reaches `index.json` in ANY field, not only the two the first review
-  round fixed. A redirect `Location` is as attacker-authored as a `Content-Type`, and it reached
+- No server-supplied FREE TEXT reaches `index.json` in any field, not only the two the first
+  review round fixed — and the fields that still carry a server-CHOSEN value are named untrusted
+  in the judge prompt rather than claimed clean. A redirect `Location` is as attacker-authored
+  as a `Content-Type`, and it reached
   `final_url` and `chain[].url` verbatim: `CONTROL_CHAR_RE` stops CR/LF/space and nothing else,
   and U+00A0 survives too, because `http.client` decodes headers as ISO-8859-1 and a fragment
   never reaches `conn.request`'s ASCII encode. A single hop could carry a whole sentence into the
@@ -374,7 +380,10 @@ was a subtle bug in the code that existed; both were work the code never did.
   hop index -- with path, query and fragment dropped rather than escaped, because percent-encoded
   English is still English to a reader and the judge is a reader. `final_url` became
   `final_origin`. Redirects are still followed and still re-validated per hop: the sanitisation
-  was not bought by refusing them.
+  was not bought by refusing them. What a hop still records is the HOSTNAME the server chose,
+  which is bounded in shape and not in trust — `final_origin` and `chain[].host/origin` are
+  listed as untrusted in `citationJudgePrompt` for exactly that reason, and the absolute
+  version of this bullet was the leftover round 5 caught.
 - `run_batch()` now has a batch-wide budget (`BATCH_TIMEOUT_SEC`), not only a per-item one. A
   glossary batch is 40 sources at `DEFAULT_BATCH_SIZE`, this script runs as ONE bash call inside
   ONE `agent()` call, and 40 x the 30 s per-item deadline is 1200 s against the same measured

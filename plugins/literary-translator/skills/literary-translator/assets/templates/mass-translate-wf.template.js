@@ -1407,9 +1407,14 @@ async function readAndCheck(seg, roundLabel, isRetry) {
 // of the DETACHED codex_job.py review job (translateStage's own #198 pattern
 // -- codex writes disk, its return is not the verdict); this function never
 // trusts the dispatcher's return except to capture DISP, only the on-disk
-// canonical artifact the bounded poll below re-validates. TIMEOUT ends the
-// point immediately as blocked/review-timeout -- no read/check is attempted
-// against an artifact that may still be mid-write.
+// canonical artifact the bounded poll below re-validates. An EXHAUSTED wait no
+// longer ends the point immediately: since #348 one non-polling authoritative
+// re-check runs first, and only if that also fails is the point blocked as
+// review-timeout -- so a run that finished while the poll was between chunks is
+// not reported as a timeout. The TIMEOUT sentinel itself is gone from these two
+// sites; the round-5 comment sweep named waitPrompt/reviewWaitPrompt and missed
+// this one. No read/check is attempted against an artifact that may still be
+// mid-write.
 //
 // After a successful wait, ONE shared retry budget covers the read and
 // the check together: a null read OR a match:false check retries the
