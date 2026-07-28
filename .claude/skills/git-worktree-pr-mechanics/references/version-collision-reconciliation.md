@@ -62,7 +62,14 @@ A concurrent session whose cwd is the SAME main dir can have its edits appear IN
 - Do NOT `git stash` to "clean up" — it would pocket and clobber the other session's uncommitted work.
 - Attribute by CONTENT, not filename: with two sessions in one tree, `git status` filename attribution is unreliable. Grep YOUR change's symbols and check `git show HEAD:<file>` before calling a "foreign-looking" file the peer's pollution — a combined file (e.g. estimator + glossary tests) may hold original content that only looks foreign.
 
-**Recovery = patch-to-clean-worktree isolation:**
+**FIRST establish what the churn's BASE is. If the tree holding it sits BEHIND current `origin/main`, step 1's `git diff origin/main` is the wrong capture and will silently REVERT upstream work.** That form produces a patch relative to today's main, so every upstream commit that touched those paths since the churn was written comes back as a reversal — and nothing about the operation looks like a revert. Verified 2026-07-27: four orphaned WIP files in a shared main tree several commits behind, two of which had been modified upstream in between; committing or copying them wholesale would have undone a merged peer commit. Same shape as a release-table README conflict "resolved" by side-select, which is usually how it reaches a reviewer rather than being caught first.
+
+- Check it per path before capturing: `git log <tree-HEAD>..origin/main -- <path>`. Non-empty means the naive capture is unsafe for that file.
+- Capture relative to the churn's OWN base — plain `git diff` in the tree that holds it — never against a ref it was not written on.
+- Land it with `git apply --3way <patch>` onto a worktree at current `origin/main`, so the two sets MERGE rather than one replacing the other.
+- Then PROVE the merge kept both: for each file, every non-blank line the upstream version has must still be present afterwards. A clean `git apply` and a plausible byte count prove nothing about direction — a silent revert applies perfectly cleanly.
+
+**Recovery = patch-to-clean-worktree isolation** (when the tree IS current — otherwise use the base-aware form above):
 1. `git diff origin/main -- <only MY files>` → a patch that by construction EXCLUDES the contamination. List your paths explicitly on ONE command line; do NOT use `git add -A`/stash. (Gotcha: a multi-line shell var with backslash-continuations inside double quotes keeps the literal backslashes → mangled paths → empty patch.) Copy any new untracked files aside — and remember the `cp -i` alias silently declines overwrites, so use `/bin/cp -f` and `grep` your symbols to confirm the copy landed.
 2. `git worktree add <clean> -b <new-branch> origin/main` — a fresh, contamination-free base (a NEW branch name sidesteps the two-worktrees-same-branch rule).
 3. `git apply --index` the patch + copy the new files in.
