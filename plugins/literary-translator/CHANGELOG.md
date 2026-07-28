@@ -80,9 +80,12 @@ was a subtle bug in the code that existed; both were work the code never did.
   re-validated from scratch, capped at 5, and a malformed `Location` is refused rather than raised —
   `urljoin` parses, so it throws `ValueError` on `http://[::1` one step *before* the guarded
   re-validation. Caps on response bytes and content type, and two time budgets stated at their real
-  width rather than as "a timeout": a **per-item** 30 s bound checked at the top of each redirect
-  hop, which caps redirect-chain *work* — `getaddrinfo` takes no timeout argument and the bound is
-  not re-checked during the body read — and a **batch-wide** 420 s budget, which exists because the
+  width rather than as "a timeout": a **per-item** 30 s bound checked at the top of
+  each redirect hop, before the status line and headers are parsed, and between body chunks, with
+  an out-of-band watchdog that shuts the socket when it expires — so it bounds elapsed time and not
+  merely work. One documented gap remains: `getaddrinfo` takes no timeout argument, so a
+  pathological resolver can still block past it. And a **batch-wide** 420 s budget, which exists
+  because the
   per-item bound alone is not a bound on anything the caller cares about. 40 sources × 30 s = 1200 s
   inside one Bash call under the same measured 600 s clamp #348 is about, so ~20 dead hosts would
   have the call killed with no attacker involved; items past the budget now soft-fail as an ordinary
