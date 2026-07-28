@@ -32,6 +32,13 @@ of closing it. Round 6's own fix produced instance seven **against itself, withi
    structural. It isn't — each call site must still remember to call it, so a site that routes
    around the helper is still writable. Instance eight was exactly this: canon and senses went
    through the new gate; manifest kept a hand-written call to the old ungated comparator.
+   **And the parity test written to protect it inherits the same blind spot.** A test asserting the
+   helper is byte-identical across its copies is green precisely while a call site never calls it —
+   the bytes agree, the behaviour does not. Verified: a containment guard was byte-identical across
+   two templates the whole time, which told nobody that a third template's wait site never invoked
+   it, and the divergence sat on a false-GREEN verdict boundary. Compare the copies' bytes and you
+   have measured the helper; drive a shared table of inputs through each site's REAL entry point and
+   compare the outputs, and you have measured what the reader assumed the first test proved.
 4. **Make the defect inexpressible.** A table/tuple of the things to handle, iterated by ONE loop
    that is the only code performing the guarded operation. A new member can only be added as a
    table entry; there is no code shape that reaches the unguarded path.

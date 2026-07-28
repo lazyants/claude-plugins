@@ -19,6 +19,28 @@ A first-pass grep for where each issue is *currently mentioned* is not enough �
 
 Beyond file-disjointness, segregate by **cache blast radius**: put ALL cache-invalidating edits (files in `PLUGIN_BUNDLE_MEMBERS` / `DERIVATION_BUNDLE_MEMBERS` / a `schema_hash` schema) into ONE group so a single release absorbs the single mass re-translation; keep the other group **cache-safe** so it ships freely with zero re-translation. In the SSK-audit split, the renderer group was fully cache-safe (`render_obsidian.py` is in no bundle) while the extraction group carried the derivation-member landmines — a clean split on both axes at once. (Hash-surface facts → skill:literary-translator-ops.)
 
+## Disjoint FILES are not disjoint CLAIMS — a comment about a sibling file is a shared surface
+
+A file-level partition does not protect a claim whose subject is another lane's file. Two lanes edit
+non-overlapping files; lane A's comment states a fact about lane B's file; lane B's edit falsifies it
+in the same round. Nothing collides, every lane is correct on its own file, and the false claim
+ships.
+
+Verified twice in one round, the second time in the *replacement* for the first: a comment asserted
+the sibling template "contains no `rejectedAnywhere` at all" while the same working tree had two —
+written while another lane was porting exactly that. Both versions read true when authored and were
+false within the hour.
+
+**Why single-file review structurally cannot catch it:** a claim about file B has no edit in file A
+that can invalidate it. Reviewing A never surfaces it, and B's reviewer never opens A. That is the
+mechanism, and it is why the failure repeats rather than being a slip.
+
+- At dispatch: name it. Ask whoever edits a file to grep the others for assertions *about* it — the
+  cheap guard, and the one no file partition provides.
+- In the fix: do not update the claim, **delete it**. Replace an observation about another file with
+  a citation of the check that ENFORCES the agreement. A pointer to an enforcing test stays true as
+  long as the test exists and fails loudly when it does not; a remembered fact rots silently.
+
 ## Shared REGISTRATION files are merge-time, not dev-time, collisions
 
 The version quartet (plugin.json / marketplace.json / README / CHANGELOG), central schemas, and shared docs (SKILL.md, a cross-referenced adapter doc) get touched by both groups but are **integrator-wired at merge** (sequence the version bumps, e.g. group A→1.8.0, group B→1.9.0). They don't block the split — flag them as coordination, not as a coupling edge.
