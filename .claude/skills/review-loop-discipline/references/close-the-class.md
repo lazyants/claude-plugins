@@ -9,7 +9,7 @@ When an adversarial reviewer returns ~1 finding/round that is a new INSTANCE of 
 - [Verify the gate itself — it's code](#verify-the-gate-itself)
 - [Algorithm-internal dedup: a "claimed" bitmap is the tell](#algorithm-internal-dedup)
 - [Swapping a core data structure drops implicit behaviors](#swapping-a-core-data-structure)
-- [Symbolic refs, not line numbers](#symbolic-refs-not-line-numbers)
+- [Symbolic refs, not line numbers — and the wider class: never state a CENSUS in prose](#symbolic-refs-not-line-numbers--and-the-wider-class-never-state-a-census-in-prose)
 - [Fixing catastrophic backtracking is not fixing complexity](#fixing-catastrophic-backtracking-is-not-fixing-complexity)
 
 ## Enumerate the set + state the invariant
@@ -52,9 +52,35 @@ The whack-a-mole also happens INSIDE one algorithm. A per-item "claimed"/"used"/
 
 ANY core-structure swap (bitmap→set, linear-scan→trie, list→heap) can silently drop an IMPLICIT behavior the old structure encoded — a trie walk naturally tracks only the deepest terminal, dropping a longest-first linear scan's "when the longest match is an exact duplicate, fall back to the next-shorter FRESH form at the same position" semantic, a real regression a green suite misses because no test exercised that exact case. Before swapping the core data structure of a matching/selection/dedup algorithm, ENUMERATE every behavior the old structure encoded implicitly — longest-first-fallback, first-match-wins, one-unit-advance, stable order — and pin each with a test BEFORE the swap. An "equivalent rewrite" is only equivalent on the cases a test forces it to be. Watch the sibling perf-class too: an expensive full-scan call nested inside a per-item loop is its own class — sweep every site at once.
 
-## Symbolic refs, not line numbers
+## Symbolic refs, not line numbers — and the wider class: never state a CENSUS in prose
 
 Any fix that inserts/removes lines staleizes every doc line-number reference below it, and a green suite never catches it (line-refs live in prose). Don't chase the number (it re-shifts on the next edit) — make the ref SYMBOLIC ("its format gate", no line number). That eliminates the drift CLASS, not the instance. Prefer symbolic/anchor refs over line numbers in any prose that points into an edited file.
+
+**Line numbers are one instance of a bigger class: any MECHANICALLY CHECKABLE fact stated in prose will rot, because nothing gates prose.** Caller lists ("X is this export's only production caller"), consumer enumerations ("every consumer reads `.length`, `.containerTitle` or `.index`"), sync counts ("hand-synced five times"), round counts, needle tallies, and equality claims ("byte-identical in both adapters") all fail the same way — and a green suite is structurally incapable of catching any of them. Verified over five consecutive review rounds on one branch (enduser-handbook 1.11.0), a different file each round; every round's fix changed code that some *other* comment described, which manufactured the next round's finding. Patching instances is a treadmill.
+
+The test to apply, per claim: is it true **by construction** or true **by census**? Leave the first, rewrite the second into the invariant it was trying to express — "callers reach this view through this export rather than re-deriving the expression" survives any number of callers; "the only caller is X" does not. A claim you can verify with one `grep` belongs in a test or nowhere; it is exactly the claim that will be wrong next month. The good comment states DESIGN INTENT ("reached by tests alone", "there must be exactly ONE implementation of this scan") — that stays true because it constrains the future rather than describing the present.
+
+Two refinements that cost a round each to learn:
+
+- **Rot-proof does not mean nameless.** Deleting the caller names entirely ("however many they are") is rot-proof but strictly less navigable than the correct form: *names PLUS an explicit hedge* — "(today: A and B) — however many there are". Keep the illustration, mark it as illustration.
+- **Apply the test to the CORRECTIONS, not only the inherited claims.** A fix can be born stale. Same session: a consumer enumeration written *as the fix* for a previous stale claim was already incomplete on the day it landed (it omitted a consumer in another file), and a pin comment written to guard cross-file drift itself asserted "byte-identical" — measured false, and actively misleading, because the two copies deliberately differ in their closing cross-reference. The hardening introduced the stale claim it was hardening against.
+
+### The remediation comment is the single most likely place to write a fresh census
+
+The refinement above was written with an end-of-sweep trigger ("re-run the test over the comments the sweep just wrote") and it did **not** fire — three more instances landed after it, in the same branch, inside the comments whose only purpose was to close this class. The trigger is wrong, not the content. The failure mode has a mechanism, and knowing it is what makes the rule fire:
+
+**Justifying a removed count pulls you toward stating counts.** To explain *why* the old number was wrong you reach for the corrected number, the measurement that disproved it, and the suite total proving the new gate works. Every one of those is a fresh census, written by someone who at that exact moment believes they are the person who understands this failure mode best. Measured instances, all three verified after the rule above already existed:
+
+- a *narrower* replacement for a false "byte-identical" claim, which was also false — it named one cause of divergence when the two paragraphs diverge in mechanism wording throughout (2298 vs 2325 chars, first divergence 300 chars before the end);
+- a hard-coded suite total, `581/581`, in a comment documenting a newly added gate — stale on write, because the gate being documented *is* the 582nd test;
+- a "mechanically checkable" rule citing `git diff <prev-tag>..HEAD -- "$CPD"` in a repo that has no version tag for that plugin, where `$CPD` is a script-local variable expanding to empty for any reader who pastes the command.
+
+So, at write time rather than at sweep end:
+
+- **The moment a sentence exists to justify a removed number, it is the highest-risk sentence in the diff.** If the justification needs figures to persuade, they go in the commit message — immutable, dated, and never read as a present-tense fact about the file.
+- **Never quote a suite total, pass count, or round count in a comment.** These look like evidence and are the fastest-rotting facts you can write; the commit that adds one test invalidates every one of them.
+- **A cited command is a claim too — run it from the READER's position.** A command that only works with the author's cwd, script-local variables, or a tag that does not exist is a rule nobody can apply, which is worse than no rule because it reads as enforced.
+- **A paragraph explaining why enumeration was removed must not itself enumerate.** "It carried three counts and a two-needle tally" is a census about a census. Say what the invariant now is; the history is the commit's job.
 
 ## Enumerate inputs, never outcomes
 

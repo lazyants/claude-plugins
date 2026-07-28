@@ -108,6 +108,30 @@ structurally).
 Five consecutive rounds attacking one test helper each found a real survivor (enduser-handbook,
 rounds 20-24). Without the boundary note, round 25 would have found a sixth.
 
+**The survivor is usually the PARTIALLY-CORRECT implementation, not the absent-rule one — and that
+makes the enumeration derivable instead of open-ended.** Four more rounds on a different test helper
+(enduser-handbook, rounds 32-35) repeated the pattern, and every survivor was a *subset* of the rule
+rather than its absence: a fence rule handling backticks but not tildes, a list rule handling bullets
+but not ordered markers, a comment scanner handling the first span only and then one capped at two
+spans, an indent rule with a prefix denylist instead of column arithmetic. A fixture credited against
+the mutant that LACKS the rule is not credited against these — both the correct collector and the
+subset one answer FAIL, so the fixture is green against a declining stub. **Credit a discrimination
+fixture only against the subset implementations of its rule, enumerated from the rule's own degrees
+of freedom** (which delimiter characters, which anchoring, which state carried across lines, which
+boundary conditions, which ordering between rules) — and treat any "each was measured against the
+mutant that lacks its fix" claim as exactly as strong as the mutant set behind it, no stronger.
+
+**Change the QUESTION to converge, then be ready for the answer to be "don't build this".** Asking
+each round to find more survivors is a treadmill — it returns one or two and terminates, so the loop
+never ends. Ask instead for the **complete** degree-derived enumeration in one pass, and require the
+reviewer to NAME the degrees of freedom it covered so the completeness claim is auditable (a CLEAN
+verdict is only ever scoped to the mutants that reviewer actually built — one returned CLEAN here
+while a survivor a different mutant would have caught was sitting in the fixture set). Then read the
+size of the answer as a design signal: 11 surviving classes plus half the rule-orderings unconstrained
+meant the component could not be *proven* at proportionate cost, and the honest exit was not another
+fixture but taking the scope decision to the user — who descoped the whole component to its own
+issue. **When the enumeration comes back large, the finding is about the design, not the tests.**
+
 ## Freeze the tree for the deciding round
 
 Dispatching fixes and committing WHILE a review round runs is good throughput and quietly fatal to

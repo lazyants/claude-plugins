@@ -215,6 +215,23 @@ reports a PHANTOM exit-0 "success" with no verdict file.
   this file documents under "never resume-last across rounds," now reachable even from a fresh dispatch.
 
 ## Polling, monitoring & stall/hang detection
+- **A poll whose budget lives INSIDE one agent Bash call is silently capped by the ~600 s tool ceiling,
+  and the TIMEOUT it then reports is a FALSE NEGATIVE you will believe.** The ceiling is documented above
+  as a recovery problem (a dead-end Bash id); this is the expensive form — a *truthful-looking negative
+  verdict that discards completed work*. Verified 2026-07-27 (literary-translator 1.16.0, W5
+  mass-translate): the workflow budgeted ONE bash poll at `WAIT_BOUND_SEC` = 3450 s; the wait-agent quit
+  at **610 s** and returned exactly the `TIMEOUT <seg>` sentinel its own prompt specified, so the caller
+  — which by design performs no read after a timeout sentinel ("the artifact may still be mid-write") —
+  marked the segment blocked. The detached job then wrote a **clean, correctly-tokened** artifact **2 s
+  later**, and the run continued for 10 more minutes without ever re-checking. Same run, same stage:
+  waits of 511 s and 311 s returned READY; only the one past ~600 s "timed out". Nothing was wrong with
+  the job, and no failure sentinel was ever written.
+  **Tell:** a timeout verdict whose artifact mtime is seconds AFTER the give-up — compare the two before
+  believing any wait. **Two rules:** (1) never put a multi-minute wait in a single tool call — chunk it
+  across several calls and loop in the caller, so the budget written in the script is the budget that
+  actually runs; (2) after ANY timeout verdict, re-check the artifact ONCE with its own
+  readiness/identity validator before treating it as failure — "it may be mid-write" is precisely what
+  that validator answers, so refusing to look is not the safe direction, it is the lossy one.
 - **The Bash background ID ≠ the Codex job id** (`review-…`/`task-…`). `result <bash-id>` → "No job found".
   Get the job id from `status --all`.
 - **`result <job-id>` returns "No job found" while the job is still RUNNING** — `result` only works on
