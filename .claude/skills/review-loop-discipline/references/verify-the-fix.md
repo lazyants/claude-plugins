@@ -122,22 +122,32 @@ what surfaced them.
   the pre-release SHA, so a single-baseline set cannot express them and presence-before fails on
   correct rows.
 - **That second baseline lives only on the feature branch, so it silently makes the MERGE METHOD
-  load-bearing.** Squash and rebase both destroy it — a squash writes one new commit whose parent is
-  the target's tip and never references the branch's commits at all; a rebase replays the content
-  under a fresh SHA. Either way the pinned SHA is no longer an ancestor, the ancestor assertion goes
-  red on the target branch, and — the part that makes it expensive — there is no commit to re-point
-  at, so no code change fixes it. Recovery means re-deriving every affected row against whatever
-  commit ended up holding the pre-fix tree.
+  load-bearing.** Both squash and rebase invalidate the pinned SHA — it stops being an ancestor of
+  the target and the ancestor assertion goes red — but their recovery costs are not the same, and
+  conflating them overstates the rebase case. Measured on a throwaway repo rather than reasoned:
+
+  - **Rebase is recoverable.** The intermediate commit is replayed onto the new base under a fresh
+    SHA carrying the same content, so a commit holding the pre-fix tree still exists on the target.
+    Re-point the constant at it — locate it by message and patch identity, and diff its tree against
+    the old one rather than trusting the message, since a rebase that resolved a conflict can alter
+    the very content the rows measure. One constant changes; no row is re-derived.
+  - **Squash is not.** The squash writes one new commit whose parent is the target's tip, holding the
+    branch's FINAL tree and never referencing its intermediate commits at all. Verified by walking
+    every commit reachable from the target: none carries the intermediate tree. There is nothing to
+    re-point at, so no constant edit fixes it, and recovery means re-deriving every affected row
+    against whatever commit ends up holding the pre-fix state — reachable only via reflog or
+    `git fsck --unreachable`, and only until those expire.
 
   Check it before merging, not after: `git merge-base --is-ancestor <pinned-sha> origin/<target>`
   answering false means the SHA is branch-only, and `gh api repos/<owner>/<repo> --jq
-  '{squash:.allow_squash_merge, merge:.allow_merge_commit, rebase:.allow_rebase_merge}'` says whether
-  the destructive route is even reachable. Repo practice is not protection — a repo that has always
-  merged with merge commits will still offer squash in the UI.
+  '{squash:.allow_squash_merge, merge:.allow_merge_commit, rebase:.allow_rebase_merge}'` says which
+  routes are even reachable — squash being the unrecoverable one. Repo practice is not protection —
+  a repo that has always merged with merge commits will still offer squash in the UI.
 
   Then remove the silence, because a constraint nobody can see is the actual defect: state it on the
   pinned constant itself, and branch the assertion's failure text on *which* baseline failed so the
-  branch-only one names the squash/rebase signature and the remedy instead of a generic "history was
+  branch-only one names the squash/rebase signature and its own remedy — re-point at the replayed
+  commit after a rebase, re-derive the rows after a squash — instead of a generic "history was
   rewritten". Verify that text actually renders — an `assert`'s message is evaluated only on failure,
   so a passing run never executes it; force the failure against a real non-ancestor commit in a
   throwaway worktree, not a garbage SHA.
