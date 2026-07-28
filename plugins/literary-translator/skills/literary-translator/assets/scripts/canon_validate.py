@@ -655,7 +655,12 @@ def _bounded_message(message: str) -> str:
 
 
 def _format_single_error(e, prefix: str = "") -> str:
-    loc = "/".join(str(p) for p in e.path) or "<root>"
+    # loc too, not only the message. For an entries{} error the path IS the
+    # entries key -- a fragment-authored source_form -- so bounding one half of
+    # this f-string and not the other left the site unbounded. Measured:
+    # 32,826 chars generated, 4,037 delivered head-truncated, injected sentence
+    # x59, saturating at n=8 rather than needing a large batch.
+    loc = _bounded_message("/".join(str(p) for p in e.path)) or "<root>"
     return f"{prefix}at '{loc}': {_bounded_message(e.message)}"
 
 
@@ -760,7 +765,9 @@ def _format_errors(errors, instance=None, root_schema=None) -> str:
                 parts.append(_format_single_error(e))
         else:
             parts.append(_format_single_error(e))
-    return "; ".join(parts)
+    # COUNT-bounded as well: one item can carry arbitrarily many schema errors,
+    # so a short list of problems could still be an enormous string.
+    return "; ".join(_bounded_list(parts))
 
 
 # Longest source_form excerpt a failure label may carry. A real name is far
@@ -1342,10 +1349,41 @@ def _load_source_forms_manifest(manifest_path_str: str) -> list:
     return doc
 
 
+def _labelled_sides(missing, extra) -> list:
+    """Bound two offender lists into one reported list, keeping BOTH sides
+    identifiable and spending the whole budget when only one side is populated.
+
+    The first version split the budget 4-and-4 unconditionally. That defended
+    the two-sided case by halving the common one -- a batch agent that dropped
+    or added items produces a ONE-sided discrepancy, and it reported 4 names
+    where the unbounded version reported 8. It also dropped the "... and N more"
+    overflow marker (appended at index 8, discarded by the [:4] slice) and left
+    the entries unlabelled, so a reader could not tell which side a name was on.
+    """
+    def _side(label, values):
+        # The overflow marker _bounded_list appends is not an offender, so it
+        # must not inherit a side prefix.
+        bounded = _bounded_list(values)
+        return [x if x.startswith("... and ") else f"{label}: {x}" for x in bounded]
+
+    if not missing:
+        return _side("extra", extra)
+    if not extra:
+        return _side("missing", missing)
+    half = _MAX_LISTED_PROBLEMS // 2
+    out = [f"missing: {x}" for x in _bounded_list(missing)[:half]]
+    out += [f"extra: {x}" for x in _bounded_list(extra)[:half]]
+    dropped = max(0, len(missing) - half) + max(0, len(extra) - half)
+    if dropped:
+        out.append(f"... and {dropped} more")
+    return out
+
+
 def _assert_exact_source_form_coverage(items: list, expected_forms: list) -> None:
     """Asserts the set of source_form values across `items` EXACTLY equals
     `expected_forms` -- no missing, no extra. Raises CanonValidationError
-    naming both sides of any discrepancy (mirrors the naming discipline of
+    naming both sides of any discrepancy, each side bounded to the
+    first few entries with a count of the rest (mirrors the naming discipline of
     every other CanonValidationError raised in this module)."""
     got = {item.get("source_form") for item in items if isinstance(item, dict)}
     want = set(expected_forms)
@@ -1370,7 +1408,7 @@ def _assert_exact_source_form_coverage(items: list, expected_forms: list) -> Non
             # Both sides, interleaved, so the count cap cannot spend all 8
             # slots on `missing` and report none of the attacker-authored
             # `extra` -- which is what it did, measured n=9 maxlen=16.
-            offending=_bounded_list(missing)[:4] + _bounded_list(extra)[:4],
+            offending=_labelled_sides(missing, extra),
         )
 
 

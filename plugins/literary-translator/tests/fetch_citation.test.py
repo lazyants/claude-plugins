@@ -2270,7 +2270,10 @@ def test_a_real_name_and_url_are_recorded_untouched(tmp_path):
 @pytest.mark.parametrize("reason,expected", [
     ("dns-failure:-3", "read-timeout"),                  # ours: a slow resolver
     ("dns-empty", "read-timeout"),
-    ("unparseable-resolved-address", "read-timeout"),
+    # NOT re-attributed: the resolver answered, with a sockaddr ipaddress
+    # refused to parse. Timing is not what happened, and renaming it would
+    # erase the only signal that the resolver returned a non-address.
+    ("unparseable-resolved-address", "unparseable-resolved-address"),
     ("loopback-address", "loopback-address"),            # theirs: NEVER laundered
     ("link-local-address", "link-local-address"),
     ("scheme-not-allowed:other", "scheme-not-allowed:other"),

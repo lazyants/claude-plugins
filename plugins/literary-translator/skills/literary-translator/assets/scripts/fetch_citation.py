@@ -694,8 +694,13 @@ def _encodable(value):
 # identically, so past the deadline they are ours rather than the citation's.
 # Deliberately closed and deliberately small: every other refusal -- above all
 # the address and scheme ones -- keeps its own name no matter how late it fires.
+# `unparseable-resolved-address` is deliberately NOT a member, though the first
+# version of this set included it: the resolver ANSWERED, with a sockaddr that
+# ipaddress refused to parse. Timing has nothing to do with it, so renaming it
+# past the deadline would erase the only signal that the resolver returned a
+# non-address -- a member that did not satisfy the set's own stated rule.
 _RESOLUTION_TIMING_REASONS = frozenset({
-    "dns-failure", "dns-empty", "unparseable-resolved-address",
+    "dns-failure", "dns-empty",
 })
 
 
