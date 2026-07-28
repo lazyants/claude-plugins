@@ -133,10 +133,17 @@ what surfaced them.
     the very content the rows measure. One constant changes; no row is re-derived.
   - **Squash is not.** The squash writes one new commit whose parent is the target's tip, holding the
     branch's FINAL tree and never referencing its intermediate commits at all. Verified by walking
-    every commit reachable from the target: none carries the intermediate tree. There is nothing to
-    re-point at, so no constant edit fixes it, and recovery means re-deriving every affected row
-    against whatever commit ends up holding the pre-fix state — reachable only via reflog or
-    `git fsck --unreachable`, and only until those expire.
+    every commit reachable from the target: none carries the intermediate tree, so no re-point
+    satisfies the gate and no constant edit fixes it.
+
+    Keep two problems apart here, because conflating them sends you hunting for the wrong thing.
+    *Finding the object* is usually easy — the intermediate commit survives on the feature branch,
+    and a deleted branch of a merged PR can be restored from the PR page; reflog and
+    `git fsck --unreachable` are the last resort, not the first. *Satisfying the gate* is the part
+    that has no fix: the assertion demands an ancestor of the TARGET, and after a squash no such
+    commit carries the pre-fix tree, however easily you can still read that tree elsewhere. So the
+    cost is re-deriving every affected row against whatever commit does hold the pre-fix state — or
+    changing what the gate asserts, which is a larger decision than this bullet covers.
 
   Check it before merging, not after: `git merge-base --is-ancestor <pinned-sha> origin/<target>`
   answering false means the SHA is branch-only, and `gh api repos/<owner>/<repo> --jq
