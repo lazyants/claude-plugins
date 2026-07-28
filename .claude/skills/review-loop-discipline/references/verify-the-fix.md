@@ -121,6 +121,26 @@ what surfaced them.
 - Claims introduced *by* the release under review need their own baseline — they occur zero times at
   the pre-release SHA, so a single-baseline set cannot express them and presence-before fails on
   correct rows.
+- **That second baseline lives only on the feature branch, so it silently makes the MERGE METHOD
+  load-bearing.** Squash and rebase both destroy it — a squash writes one new commit whose parent is
+  the target's tip and never references the branch's commits at all; a rebase replays the content
+  under a fresh SHA. Either way the pinned SHA is no longer an ancestor, the ancestor assertion goes
+  red on the target branch, and — the part that makes it expensive — there is no commit to re-point
+  at, so no code change fixes it. Recovery means re-deriving every affected row against whatever
+  commit ended up holding the pre-fix tree.
+
+  Check it before merging, not after: `git merge-base --is-ancestor <pinned-sha> origin/<target>`
+  answering false means the SHA is branch-only, and `gh api repos/<owner>/<repo> --jq
+  '{squash:.allow_squash_merge, merge:.allow_merge_commit, rebase:.allow_rebase_merge}'` says whether
+  the destructive route is even reachable. Repo practice is not protection — a repo that has always
+  merged with merge commits will still offer squash in the UI.
+
+  Then remove the silence, because a constraint nobody can see is the actual defect: state it on the
+  pinned constant itself, and branch the assertion's failure text on *which* baseline failed so the
+  branch-only one names the squash/rebase signature and the remedy instead of a generic "history was
+  rewritten". Verify that text actually renders — an `assert`'s message is evaluated only on failure,
+  so a passing run never executes it; force the failure against a real non-ancestor commit in a
+  throwaway worktree, not a garbage SHA.
 
 ## A staged RED gate must be satisfiable
 
