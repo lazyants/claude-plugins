@@ -803,10 +803,14 @@ def _recorded(field: str, value):
     # file the judge prompt calls locally generated. A refused item never
     # passed validate_url, so CONTROL_CHAR_RE never applied to it.
     value = " ".join(value.split())
-    cap = MAX_RECORDED_FIELD_CHARS.get(field)
-    assert cap is not None, (
-        f"no cap declared for recorded field {field!r} -- add one to "
-        "MAX_RECORDED_FIELD_CHARS rather than letting it through unbounded")
+    # NOT an assert. `python -O` strips asserts, which would leave `cap` None,
+    # make `len(value) > cap` raise TypeError from run_batch -- outside every
+    # handler -- and destroy index.json, the one outcome this file says must
+    # never happen. A guard that disappears under an interpreter flag is not a
+    # guard. Falling back to the STRICTEST declared cap keeps an undeclared
+    # field bounded rather than unbounded or fatal; the suite enforces the
+    # declaration itself, where being loud costs nothing at runtime.
+    cap = MAX_RECORDED_FIELD_CHARS.get(field, min(MAX_RECORDED_FIELD_CHARS.values()))
     if len(value) > cap:
         return value[:cap] + "...[truncated]"
     return value

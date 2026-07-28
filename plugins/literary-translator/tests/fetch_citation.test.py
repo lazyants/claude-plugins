@@ -2338,3 +2338,33 @@ def test_a_hop_entered_past_the_deadline_still_names_a_security_refusal(
     with pytest.raises(fc.Refused) as excinfo:
         fc._fetch_hop(target, target, [], 1, deadline, fc.ALLOWED_CONTENT_PREFIXES)
     assert str(excinfo.value) == expected
+
+
+def test_every_field_recorded_in_index_json_declares_its_own_cap():
+    """The declaration check the runtime assert used to make -- moved here,
+    where being loud costs nothing and `python -O` cannot strip it.
+
+    _recorded() now falls back to the strictest declared cap for an unlisted
+    field, so an omission is bounded rather than fatal. This is what makes the
+    omission visible.
+    """
+    tree = ast.parse(FETCH_SRC.read_text(encoding="utf-8"))
+    recorded = {
+        node.args[0].value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+        and node.func.id == "_recorded" and node.args
+        and isinstance(node.args[0], ast.Constant)
+    }
+    assert recorded, "no _recorded() call sites found -- the walk is broken"
+    undeclared = sorted(recorded - set(fc.MAX_RECORDED_FIELD_CHARS))
+    assert not undeclared, (
+        f"recorded into index.json with no declared cap: {undeclared}. Add each to "
+        "MAX_RECORDED_FIELD_CHARS -- the runtime fallback bounds it, but silently.")
+
+
+def test_an_undeclared_field_is_bounded_rather_than_fatal():
+    """Under -O the old assert vanished and the next line raised TypeError from
+    run_batch, outside every handler, destroying index.json."""
+    out = fc._recorded("a-field-nobody-declared", "x" * 5000)
+    assert len(out) <= min(fc.MAX_RECORDED_FIELD_CHARS.values()) + len("...[truncated]")
