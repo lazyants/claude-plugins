@@ -2265,3 +2265,41 @@ def test_a_real_name_and_url_are_recorded_untouched(tmp_path):
     assert entry["source_form"] == "חיים"
     assert entry["source"] == "https://www.sefaria.org/Genesis.1?lang=he"
     assert "truncated" not in str(entry["source_form"])
+
+
+@pytest.mark.parametrize("reason,expected", [
+    ("dns-failure:-3", "read-timeout"),                  # ours: a slow resolver
+    ("dns-empty", "read-timeout"),
+    ("unparseable-resolved-address", "read-timeout"),
+    ("loopback-address", "loopback-address"),            # theirs: NEVER laundered
+    ("link-local-address", "link-local-address"),
+    ("scheme-not-allowed:other", "scheme-not-allowed:other"),
+    ("ambiguous-numeric-host", "ambiguous-numeric-host"),
+    ("embedded-credentials", "embedded-credentials"),
+])
+def test_only_resolution_timing_refusals_are_re_attributed_past_the_deadline(
+        monkeypatch, reason, expected):
+    """resolve_and_pin raises Refused, and that handler sits BEFORE the
+    catch-all -- so its tokens never reached the clock check, which that
+    check's own comment predicted. Measured: a resolver overrunning a 0.5 s
+    budget recorded dns-failure, which is not one of the judge's run-fact
+    reasons, so our own timeout read as "this host does not resolve".
+
+    The closed set is the load-bearing half. Re-attributing a SECURITY refusal
+    would hide an SSRF attempt behind a timeout at exactly the moment it
+    matters, so every address and scheme reason keeps its own name however late
+    it fires.
+    """
+    clock = _FakeClock()
+    monkeypatch.setattr(fc.time, "monotonic", clock)
+    deadline = clock.now + 10.0
+
+    def boom(*args, **kwargs):
+        clock.advance(30.0)
+        raise fc._refuse(reason)
+    monkeypatch.setattr(fc, "resolve_and_pin", boom)
+
+    net = FakeNet(monkeypatch)                     # noqa: F841
+    with pytest.raises(fc.Refused) as excinfo:
+        fc.fetch_one("http://example.com/x", deadline=deadline)
+    assert str(excinfo.value) == expected

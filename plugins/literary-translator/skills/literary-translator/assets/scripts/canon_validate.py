@@ -439,7 +439,10 @@ _MAX_LISTED_PROBLEMS = 8
 
 def _joined_problems(problems) -> str:
     """Join problems one per line, bounded in COUNT as well as in each entry."""
-    shown = problems[:_MAX_LISTED_PROBLEMS]
+    # Each element too, not only the count: a single item's schema errors are
+    # joined with no count bound of their own upstream, so one problem could be
+    # arbitrarily long while the list stayed short.
+    shown = [_bounded_message(str(x)) for x in problems[:_MAX_LISTED_PROBLEMS]]
     if len(problems) > _MAX_LISTED_PROBLEMS:
         shown = shown + [f"... and {len(problems) - _MAX_LISTED_PROBLEMS} more "
                          f"(showing the first {_MAX_LISTED_PROBLEMS} of {len(problems)})"]
@@ -1350,14 +1353,24 @@ def _assert_exact_source_form_coverage(items: list, expected_forms: list) -> Non
     extra = sorted(got - want)
     if missing or extra:
         parts = []
+        # _bounded_list on BOTH sides. Round 9 bounded the sites spelled
+        # `", ".join(repr(o) for o in ...)` and missed this one because it
+        # spells the same thing as an f-string list interpolation -- searching
+        # for a SPELLING rather than for the property. Measured unbounded: a
+        # 17,134-char message delivered as 4,037 chars with the injected
+        # sentence 61 times, and the `extra` half -- the entirely
+        # fragment-authored half -- evicted by the head-keeping cap.
         if missing:
-            parts.append(f"missing from batch: {missing}")
+            parts.append("missing from batch: " + ", ".join(_bounded_list(missing)))
         if extra:
-            parts.append(f"unexpected extra in batch: {extra}")
+            parts.append("unexpected extra in batch: " + ", ".join(_bounded_list(extra)))
         raise CanonValidationError(
             "batch does not exactly cover the expected source_form "
             "manifest (" + "; ".join(parts) + ")",
-            offending=missing + extra,
+            # Both sides, interleaved, so the count cap cannot spend all 8
+            # slots on `missing` and report none of the attacker-authored
+            # `extra` -- which is what it did, measured n=9 maxlen=16.
+            offending=_bounded_list(missing)[:4] + _bounded_list(extra)[:4],
         )
 
 
@@ -1663,7 +1676,7 @@ def _merge_batch(canon: dict, batch: list, senses: "SensesResult") -> dict:
     if collisions:
         raise CanonValidationError(
             "batch merge rejected due to entries{} collision(s):\n  "
-            + "\n  ".join(collisions),
+            + "\n  ".join(_bounded_list(collisions)),
             offending=collisions,
         )
 

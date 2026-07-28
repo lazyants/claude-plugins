@@ -690,6 +690,15 @@ def _encodable(value):
     return value.encode("utf-8", "replace").decode("utf-8")
 
 
+# Refusals that a SLOW resolver and a genuinely unresolvable host produce
+# identically, so past the deadline they are ours rather than the citation's.
+# Deliberately closed and deliberately small: every other refusal -- above all
+# the address and scheme ones -- keeps its own name no matter how late it fires.
+_RESOLUTION_TIMING_REASONS = frozenset({
+    "dns-failure", "dns-empty", "unparseable-resolved-address",
+})
+
+
 def _past_deadline(deadline: float) -> bool:
     """True when OUR deadline has passed, so the refusal is ours to name.
 
@@ -898,7 +907,24 @@ def _fetch_hop(url, current, chain, hop, deadline, allowed_types) -> dict:
         raise _refuse("total-timeout")
     try:
         return _fetch_hop_inner(url, current, chain, hop, deadline, allowed_types)
-    except (Refused, _Redirect):
+    except _Redirect:
+        raise
+    except Refused as refusal:
+        # resolve_and_pin raises Refused, and this handler sits BEFORE the
+        # catch-all -- so its tokens never reached the clock check added last
+        # round, which that check's own comment predicted ("resolve_and_pin
+        # takes no deadline at all"). Measured: a resolver overrunning a 0.5 s
+        # budget by 0.7 s recorded refused:dns-failure:-3, which is not one of
+        # the judge's three run-fact reasons, so our own timeout reads as "this
+        # citation's host does not resolve".
+        #
+        # ONLY the resolution-timing tokens are re-attributed, and the closed
+        # set is the point: relabelling a SECURITY refusal would be far worse
+        # than the mislabel it fixes. `loopback-address` past the deadline is
+        # still `loopback-address` -- an SSRF attempt that reported itself as a
+        # timeout would be hidden exactly when it matters.
+        if _past_deadline(deadline) and str(refusal).split(":", 1)[0] in _RESOLUTION_TIMING_REASONS:
+            raise _refuse("read-timeout")
         raise
     except Exception as exc:                      # noqa: BLE001 -- deliberate, see above
         # The clock FIRST, here too. validate_url and resolve_and_pin are called
