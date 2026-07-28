@@ -2306,3 +2306,35 @@ def test_only_resolution_timing_refusals_are_re_attributed_past_the_deadline(
     with pytest.raises(fc.Refused) as excinfo:
         fc.fetch_one("http://example.com/x", deadline=deadline)
     assert str(excinfo.value) == expected
+
+
+@pytest.mark.parametrize("target,expected", [
+    ("http://127.0.0.1:6379/", "loopback-address"),
+    ("http://169.254.169.254/latest/meta-data/", "link-local-address"),
+    ("file:///etc/passwd", "scheme-not-allowed:file"),
+    ("http://2130706433/", "ambiguous-numeric-host"),
+    ("https://example.com/ok", "total-timeout"),          # nothing wrong with it
+])
+def test_a_hop_entered_past_the_deadline_still_names_a_security_refusal(
+        monkeypatch, target, expected):
+    """Round 11 left this open; closing it.
+
+    The deadline guard sat at the TOP of the hop, before validate_url ran, so a
+    hop entered late returned `total-timeout` without ever computing the static
+    verdict. An attacker who burns the per-item budget on hop 0 and then answers
+    `302 Location: http://127.0.0.1:6379/` got the loopback attempt recorded as a
+    run fact -- one of the three reasons the judge is told NOT to read as a
+    defect in the source. It never flipped the gate (any refused:* fails check 1)
+    but the evidence named our clock instead of their redirect.
+
+    The static checks are pure string work, so being late is no reason to skip
+    them. A URL with nothing wrong with it still reports total-timeout.
+    """
+    clock = _FakeClock()
+    monkeypatch.setattr(fc.time, "monotonic", clock)
+    net = FakeNet(monkeypatch)                     # noqa: F841
+    deadline = clock.now - 1.0                     # already past
+
+    with pytest.raises(fc.Refused) as excinfo:
+        fc._fetch_hop(target, target, [], 1, deadline, fc.ALLOWED_CONTENT_PREFIXES)
+    assert str(excinfo.value) == expected

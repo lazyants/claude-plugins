@@ -908,6 +908,20 @@ def _fetch_hop(url, current, chain, hop, deadline, allowed_types) -> dict:
     rounds because every scheme row was a KNOWN member, where the two engines
     agree by construction.
     """
+    # THE STATIC CHECKS FIRST, then the clock. They are pure string work -- no
+    # DNS, no socket -- so being late is no reason to skip them, and skipping
+    # them cost the one thing this file exists to report. Measured before this
+    # order: a hop entered past the deadline returned `total-timeout` without
+    # ever running validate_url, so an attacker who burns the budget on hop 0
+    # and then answers `302 Location: http://127.0.0.1:6379/` gets the loopback
+    # attempt recorded as a run fact -- one of the three reasons the judge is
+    # explicitly told NOT to read as a defect in the source. The gate did not
+    # flip (any refused:* fails the judge's first check either way), but the
+    # evidence named our clock instead of their redirect.
+    #
+    # validate_url raises Refused, which the caller's handler keeps under its
+    # own name: a security refusal computed late is still a security refusal.
+    validate_url(current)
     if time.monotonic() > deadline:
         raise _refuse("total-timeout")
     try:
