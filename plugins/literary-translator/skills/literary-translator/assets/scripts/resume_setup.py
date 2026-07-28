@@ -402,7 +402,13 @@ _GLOSSARY_FRAGMENT_RE = re.compile(r"^(out|approved)_(\d+)_attempt_(\d+)\.json$"
 # #347 -- the citation audit's prepare step writes a DIRECTORY per batch attempt
 # (fetched evidence bodies plus index.json), not a file, so the fragment regex
 # above cannot see it and entry.unlink() could not remove it anyway.
-_GLOSSARY_EVIDENCE_DIR_RE = re.compile(r"^evidence_(\d+)_attempt_(\d+)$")
+# \A...\Z, not ^...$: Python's `$` also matches BEFORE a trailing newline, so
+# `^...$` admits "evidence_0_attempt_1\n" -- a directory name POSIX allows.
+# This regex gates a shutil.rmtree, so a name that matches by accident is
+# deleted by accident. Same anchor defect this release already fixed once in
+# the content-type gate (round 3); the sibling in a DESTRUCTIVE path had kept
+# the loose form.
+_GLOSSARY_EVIDENCE_DIR_RE = re.compile(r"\Aevidence_(\d+)_attempt_(\d+)\Z")
 
 
 def _wipe_stale_glossary_fragments(glossary_run_dir: Path, resume: bool) -> None:

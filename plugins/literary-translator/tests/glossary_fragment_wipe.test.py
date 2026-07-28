@@ -283,3 +283,17 @@ def test_non_glossary_run_does_not_wipe(rs, tmp_path, monkeypatch):
     (tmp_path / "runs").mkdir()
     rs.write_run_dir("20260101T000000Z", resume=False, input_digest="d", kind="mass", payload={})
     assert calls == []
+
+
+def test_a_trailing_newline_name_is_not_wiped(rs):
+    """The anchor matters because this regex gates a shutil.rmtree.
+
+    Python's `$` also matches BEFORE a trailing newline, so `^...$` admitted
+    "evidence_0_attempt_1\\n" -- a directory name POSIX allows -- and a name that
+    matches by accident is deleted by accident. Same anchor defect this release
+    fixed once in the content-type gate; the sibling in the DESTRUCTIVE path had
+    kept the loose form.
+    """
+    assert rs._GLOSSARY_EVIDENCE_DIR_RE.match("evidence_0_attempt_1")
+    assert not rs._GLOSSARY_EVIDENCE_DIR_RE.match("evidence_0_attempt_1\n")
+    assert not rs._GLOSSARY_EVIDENCE_DIR_RE.match("xevidence_0_attempt_1")
