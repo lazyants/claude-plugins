@@ -87,11 +87,31 @@ Keep the load IN-PROCESS if the test needs to monkeypatch the loaded module — 
 
 **Meta rule:** a `*.test.py` file passing alone (even paired with the suspect) proves nothing about the full run. Only `pytest tests/` at 0 failures is the trustworthy gate before shipping — re-run the FULL suite yourself; never bank an isolation pass.
 
+**But do NOT read that rule as "the full run is always the true one" — the converse case exists and points the opposite way.** A test can pass in isolation and fail in the full run because the full run is SLOWER, not because it is more honest. Measured 2026-07-27 (`enduser-handbook`): a ReDoS-regression test asserts a RATIO between a large-input and a small-input duration, and the small one is timed at millisecond resolution. Under full-suite load the small measurement rounds to `1ms`, so the ratio explodes (`small=1ms, large=72ms` → "42x scaling, possible ReDoS regression") and the assertion fails. It passed 5/5 in isolation and failed 1-in-3 in the full suite — **at the unchanged parent commit as well as the current one, the same 1-in-3.** A duration-ratio assertion whose denominator can round to the timer's resolution is flaky BY CONSTRUCTION; the tell is a huge ratio with a tiny `small`.
+
+Two rules follow, and the first is the expensive one:
+
+- **Attribute a suite-only failure by running the BASELINE commit N times, not by reasoning about your change.** Isolation-vs-suite tells you nothing about authorship — both a real order-dependent defect and a load-sensitive flake produce exactly that pattern. `git checkout -f --detach <parent>` in a throwaway worktree, run the full suite 3+ times, and compare failure RATES. One green baseline run is not a baseline: had I stopped at the single 803/803 I had already observed at the parent, I would have concluded my own commit caused it.
+- **A green suite run is a SAMPLE, not a property, and a commit message that states it as a bare count converts one into the other.** "803/803 exit 0" was true of every run that produced it and still misdescribed the suite. When a known-flaky assertion is in scope, state the rate (`1 failure in 3 full runs, same at the parent commit`) rather than the count — the count is what a future reader will treat as a regression baseline. A verdict stated without its strength — the sample size, the margin, how it was blinded — inflates on every restatement, so carry the number and the way to re-derive it alongside the conclusion.
+
 ## 4. `node --test <dir>` fails with a misleading MODULE_NOT_FOUND
 
 `node --test plugins/enduser-handbook/tests/` (seen on Node v26.3.0) does NOT discover-and-run the suite — it treats the bare directory positional as a script entry point and throws `Error: Cannot find module '.../tests' … code: 'MODULE_NOT_FOUND'`, then reports a bogus `tests 1 / pass 0 / fail 1`. The error points at a missing import, which is misleading — nothing is wrong with the tests (each runs green when named explicitly).
 
 **Fix:** pass explicit test FILE paths, e.g. `node --test plugins/enduser-handbook/tests/control-inventory.test.mjs plugins/enduser-handbook/tests/capture-guard-policy.test.mjs`.
+
+**A crashed file's specific error line is easy to MISS in this runner's output — but the summary counters and the exit code both report the failure correctly.** Rely on the latter two, and do not rely on the shape of the diagnostic: the diagnostic varies by Node version AND by which failure shape you hit, so anything you remember about "what it looks like" is the least portable part.
+
+**A claim retracted here, because the retraction is the lesson.** An earlier revision asserted the counters stay *pristine* (`# pass 433 / # fail 0`) while the process exits 1. That does not reproduce anywhere it has been checked. Measured 2026-07-27, twelve passing tests plus one faulting test per file:
+
+| shape | Node v22.23.1 (measured here) | v26.3.0 (measured by `lazy-ants-reviewer`) |
+|---|---|---|
+| module-scope `ReferenceError` (a `test()` title interpolating a deleted `const`) | `tests 13 / pass 12 / fail 1`, exit 1; emits the "resource generated asynchronous activity" line; no `failing tests:` section | `fail 1`, exit 1; immediate stack trace **and** a trailing `failing tests:` section, no async-activity line |
+| `ReferenceError` thrown asynchronously after a test ended | `tests 14 / pass 13 / fail 1`, exit 1; async-activity line; no `failing tests:` section | `fail 1`, exit 1; async-activity line **and** a `failing tests:` section |
+
+Counters and exit status agreed in all four runs — so the retracted claim was wrong on the only thing it asserted. Two things to take from it. **Whatever produced the original `433 / 0` was not the runner**, and because the figure was written down with no command and no version beside it, nobody could tell whether it came from Node, a wrapper, or a misread — an unfalsifiable measurement is worse than none, because it gets cited. And **the diagnostic text is version-dependent while the exit code is not**, which is the real argument for the rule below.
+
+**Apply: bank a `node --test` result on its EXIT CODE.** `node --test <file> >/dev/null 2>&1; echo $?` is the whole check, it costs nothing, and it is immune to how the output happens to be laid out — which is why a wrapper that branches on the status (`if node --test "$t"; then ok; else bad; fi`) is the right shape regardless of what the counters do. Pair it with the shell trap in §5(a) below, where a `FAIL` printed while the suite exited 0: **counters and exit status are independent signals and either can be the honest one; require both to agree, and investigate any disagreement rather than picking the one you prefer.**
 
 This is `.mjs`-ONLY (the zero-dependency `node:test` suites). It does NOT apply to `literary-translator`, whose tests are Python named `tests/*.test.py` and run with pytest — `cd plugins/literary-translator && python3 -m pytest` (full) or `... python3 -m pytest tests/<name>.test.py` (focused); its `pytest.ini` sets `python_files = *.test.py` and `--import-mode=importlib`. `node --test` SyntaxErrors on those (the Python triple-quoted docstrings). Don't reach for the node rule when editing pytest `.test.py` files.
 

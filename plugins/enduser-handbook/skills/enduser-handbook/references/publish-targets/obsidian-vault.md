@@ -203,8 +203,8 @@ or, failing that, a content-root-absolute path; a `../`-relative embed is neithe
 renders broken. If this vault publishes through Quartz-`shortest`, either flip that
 vault's config to `markdownLinkResolution: relative` — a per-vault tradeoff the adopter
 owns, since it can also change how bare wikilinks resolve elsewhere in the vault — or
-wait for the co-located-assets follow-up issue, which keeps a grouped chapter's assets in
-the same directory as the chapter so no `../` climb is ever needed. This is documentation
+wait for the co-located-assets follow-up issue (#222), which keeps a grouped chapter's assets
+in the same directory as the chapter so no `../` climb is ever needed. This is documentation
 only: the existing embed-exists and under-vault gates below are unaffected by depth, so
 there is no new gate here.
 
@@ -339,7 +339,12 @@ the one exception to "do all of these" — see its own conditional note below.
      structural `indexForm: 'headings' | 'non-heading'` field; key every branch below on
      `indexForm`, never on whether `containerTitle` is `null` — a `null` title occurs both
      for a genuinely non-heading file and for an uncontained match inside a headings-form
-     file, and those two cases need different handling, below.
+     file, and those two cases need different handling, below. Branch on match count
+     first, before keying on `indexForm` at all: **zero** matches ⇒ continue to container
+     resolution below; **exactly one** ⇒ proceed to the placement check immediately below
+     against that one line; **two or more** ⇒ never guess which line is canonical, halt:
+     "Chapter '<slug>' appears multiple times in <index_file> — curate the index manually, then re-run."
+     — the same wording the wikilinks union scan's `duplicate` outcome below uses.
 
      Wikilinks mode instead runs a **union scan**: an installed handbook may still carry
      the pre-1.8.0 bare `[[<slug>]]` spelling for a chapter this run has not yet
@@ -393,9 +398,35 @@ the one exception to "do all of these" — see its own conditional note below.
        here, before any retarget is attempted — placement is checked before the in-place
        retarget, never after it.
      - `indexForm === 'non-heading'` (a nested list, an MkDocs-style YAML `nav:`, a bare
-       path table, …) — no present-line placement verifier runs here (placement verification
-       is deferred, see `revalidation.md`): a `canonical` line is already complete and a
-       `legacy` line retargets in place unconditionally.
+       path table, …) — call `verifyNonHeadingPlacement(indexLines, selectedTarget, group_title,
+       {wikilink: publish.wikilinks})` (`assets/lib/chapter-paths.mjs` — the option is the
+       profile's own mode, mirroring the mode-correct chapter link below, never hardcoded;
+       `selectedTarget` = whichever of the qualified or legacy-bare target that one matching line
+       carried), checking placement BEFORE any retarget, exactly as the headings-form branch
+       above does, and branch on the result:
+       - **`ok`** ⇒ a `canonical` line is already complete and a
+         `legacy` line retargets in place unconditionally.
+       - **`unverifiable`** ⇒ proceed — this file falls outside the verified class (see
+         "Nested-list automation limits" below); the check ran and could not conclude — nothing
+         further verifies placement, no confirmation is requested, and the run continues
+         unverified, exactly as the shipped 1.10.0 behaviour did on this path — a `canonical`
+         line is already complete and a `legacy` line still retargets in place unconditionally.
+         See the safety statement under "Non-headings index, no existing line" below for what
+         that does and does not guarantee.
+       - **`misplaced`** ⇒ halt reusing the exact wording above:
+         "Chapter '<slug>' is listed in <index_file> under '<found_title>' instead of '<group_title>' — move the line (or curate the index manually), then re-run."
+         (`<found_title>` reads "(none)" when the line sits at the left margin, uncontained.)
+       - **`inconsistent`** ⇒ a defensive contradiction check, not an outcome any documented
+         caller reaches: Step 0's own two-or-more halt — the wikilinks union scan's `duplicate`
+         outcome above, and the matching two-or-more halt path mode now runs (see "Path mode
+         scans" above) — already guarantees exactly one line matches `selectedTarget` before this
+         branch is ever reached, in either mode, so re-scanning that same target here should
+         reproduce that same single match — this fires only if some future caller, or a change to
+         the matching logic, ever breaks that invariant. Never guess which match is canonical, halt:
+         "Chapter '<slug>' does not resolve to exactly one line in <index_file> — curate the index manually, then re-run."
+       This replaces the shipped 1.10.0 "no present-line placement verifier runs here" behaviour
+       for the verified class only; every other non-heading file still proceeds unverified,
+       unchanged.
    - **Container resolution** (headings-form index — resolved by heading here; a bounded
      nested-list index is instead wired by `wireNestedListChapter`, "Non-headings index"
      below). Look for a heading whose text equals the entry's `group_title` — containers are
@@ -419,15 +450,259 @@ the one exception to "do all of these" — see its own conditional note below.
        persist the returned `newLines` (joined back, they reproduce the exact bytes — EOL and
        terminal newline preserved) and proceed — the container was found or created and the
        chapter line inserted under it.
+     - `{kind: 'present', index}` — a child bullet under the resolved container already carries
+       this run's own chapter link, verbatim, though step 0 (`locateChapterLine`) still reports
+       the chapter absent: only the chapter's own title can cause that split, by keeping step
+       0's target-parse from ever recognizing the row the writer already wrote. This check
+       compares literal content, never a parsed target, so it catches exactly what step 0
+       cannot; `index` is diagnostic only and is never interpolated into the halt below — an
+       existing follow-up tracks halt-text injection through found-row text as its own defect,
+       and this halt does not repeat it.
+       One halt text serves both `publish.wikilinks` modes — it names no link syntax, and the
+       adapter reaches the outcome in either mode when the exact child row uses `-` and its title
+       keeps step 0 from parsing the target. (`wireNestedListChapter` itself will also return
+       `present` for an ordinary exact child if called directly, but this adapter's step 0 already
+       handles that row and never calls it.) The title rule differs by syntax. In path mode an
+       unescaped `]` closes the label early, while `\]` leaves the target resolvable. In wikilinks
+       mode an interior `]` followed by more alias text keeps `WIKILINK_TARGET_RE` from reaching
+       the row's closing brackets; a terminal run of `]` can instead be consumed as part of those
+       closers and the target still resolves. A backslash does not escape `]` for that regex.
+       Thus `A]B` reaches this halt after one `-` child is written in either mode, while a
+       wikilink alias ending in `A]` does not. When the emitted child marker is `*` or `+`, a
+       target-breaking grouped row reaches the re-read refusal below before anything is written,
+       rather than `present`. A target-side route (a slug whose own text ends in `.md`, since
+       `currentIndexExpectedTarget` strips one terminal `.md` in wikilinks mode) converges the
+       same ordinary way:
+       `Chapter row for '<slug>' is already present under the '<group_title>' container bullet in <index_file>, but this run could not recognize it — the chapter's own title does not yield a resolvable link destination. For this recovery step, give the chapter a non-empty title in the manifest made only of Unicode letters and numbers, with words separated by single ASCII spaces. That constraint was verified across both link modes and all three bullet markers of the line being written. Then re-run; see "Nested-list automation limits" below.`
+     - `{kind: 'unwritable', field}` — [1.11.0] before returning, the writer re-reads the exact
+       bytes it is about to hand back through its own reader (`prepareIndexLines`,
+       `hasYamlMappingStructure`, `containerOwnerScan`); if that reader would refuse them,
+       nothing is written and this outcome fires instead of `inserted`. `field` — `'title'`,
+       `'group_title'`, or `'unknown'` when substituting either stand-in still fails to clear
+       the rejection — names the manifest value at fault, computed by substitution (swap the
+       emitted line for a known-good stand-in and re-read) rather than by inspecting the
+       value, so it stays correct for causes nobody has enumerated yet. Deliberately
+       conservative: it can decline a value that would in fact have round-tripped safely,
+       which is the right direction for a tool rewriting a file it does not own. Render
+       `<remedy>` from `field`. `'unknown'` is reachable only when no single emitted line's
+       replacement clears the rejection, i.e. both values are independently at fault.
+       `group_title` is GROUP-scoped — `validateGroups` requires every entry of a group to
+       carry the same value — so a remedy naming only THIS chapter does not converge: the next
+       run halts on the conflicting-`group_title` gate instead. The three renderings:
+       - `'title'` ⇒ `Give this chapter a plain title in the manifest.`
+       - `'group_title'` ⇒ `Give a plain group_title to EVERY entry of this chapter's group in the manifest — it is group-scoped, so changing it on this chapter alone halts on the conflicting-group_title gate instead.`
+       - `'unknown'` ⇒ `Give this chapter a plain title, and a plain group_title to EVERY entry of its group — group_title is group-scoped, so changing it on this chapter alone halts on the conflicting-group_title gate instead.`
+
+       One halt text for both `publish.wikilinks` modes — verified, not assumed: the wording
+       names no link syntax, and the remedy it asks for is safe under both modes, which matters
+       because the fatal SHAPES differ by mode (measured: a backslash-escaped `]` in a title is
+       written in path mode and refused in wikilink mode on `*`/`+`):
+       `Cannot wire '<slug>' into <index_file>: the lines this run would write are not recognizable to the next run, so nothing was written. <remedy> Then re-run. For this recovery step, use a non-empty value made only of Unicode letters and numbers, with words separated by single ASCII spaces. That positive constraint is deliberately narrower than the parser's full accepted language; it was verified across both link modes and all three bullet markers of the line being written, regardless of markers elsewhere in the file. See "Nested-list automation limits" below for the measured per-marker set.`
      - `{kind: 'multiple'}` — two or more container bullets match `group_title`; never guess
        which is canonical, halt:
        "Found multiple '<group_title>' container bullets in <index_file> — curate the index manually, then re-run."
      - `{kind: 'not-a-list'}` — the index is not in the automatable nested-list subset (see
        "Nested-list automation limits" below): a YAML `nav:`, a bare path table, or a list
-       shape outside the bounded safe subset. Fall back to the existing manual halt, unchanged:
-       "Index <index_file> is not a headings-form file — add a '<group_title>' container and the chapter line for '<slug>' manually, then re-run."
-       The next run's step 0 finds the line you added and proceeds — this convergence is
-       why step 0 always runs first.
+       shape outside the bounded safe subset. **Verify the named form before naming it — a
+       halt is convergent only if the exact pair it prescribes would actually be recognized on
+       the very next run, so check that, rather than promise it:**
+       1. build the candidate as its own two-line array: `- <group_title>`, then on the next
+          line the profile's own mode-correct chapter link, indented two spaces under it —
+          `publish.wikilinks: true`: `  - [[` + target + `|` + title + `]]`;
+          `publish.wikilinks: false`: `  - [` + title + `](<` + target + `>)` (destination
+          inside angle brackets — the same destination-wrapping the "Non-headings index, no
+          existing line" bullet above already uses for this profile's mode-correct chapter
+          link — and any `]` in the title escaped as `\]`, the same escaping the
+          `publish.wikilinks: false` halt text below promises, so the gate validates the exact
+          spelling the operator is told to type);
+       2. run `locateChapterLine(<candidate>, <index-relative-target>, {wikilink:
+          publish.wikilinks})` (`assets/lib/chapter-paths.mjs`) on that two-line array alone,
+          not the real index — the option is the profile's own mode, mirroring the
+          mode-correct chapter link above, never hardcoded (the same rule "The placement check
+          is retained unchanged (D-8)" above states for the shipped verifier call);
+       3. run the fixed-probe writer predicate on the same array —
+          `wireNestedListChapter(<candidate>, group_title, <fixed probe link>)`;
+       4. **the candidate's own text, split on newlines, is exactly two physical lines — not
+          merely two array elements, since an embedded newline inside `title` or `target` can
+          add more; exactly one match; that match's `matches[0].index === 1`
+          (`LocateChapterLineMatch.index`, `assets/lib/chapter-paths.mjs`) — the indented
+          chapter line, never the container line at index 0; and the predicate returning
+          `{kind: 'inserted'}`** — the pair is representable — emit the convergent halt naming
+          it exactly, in the profile's own mode:
+
+          `publish.wikilinks: true` (Obsidian default):
+          `Index <index_file> is not a headings-form file — add a '<group_title>' container and the chapter line for '<slug>' manually, then re-run. The next run recognizes the chapter line as a Markdown list row INDENTED TWO SPACES under the '<group_title>' container bullet, whose wikilink target is exactly '<index_relative_target>' — that is, a '- ' + group_title line followed by a '  - [[' + target + '|' + title + ']]' line; a Markdown link whose destination is that target plus '.md' is recognized too. Give the row a plain title — no Markdown markup, backslash escapes, or HTML entities in it — or the next run may not be able to confirm its placement; see "Nested-list automation limits" below for exactly what is recognized.`
+
+          `publish.wikilinks: false`:
+          `Index <index_file> is not a headings-form file — add a '<group_title>' container and the chapter line for '<slug>' manually, then re-run. The next run recognizes the chapter line as a Markdown list row INDENTED TWO SPACES under the '<group_title>' container bullet, whose link destination is exactly '<index_relative_target>' — that is, a '- ' + group_title line followed by a '  - [' + title + '](<' + target + '>)' line, with the destination inside angle brackets and any ']' in the title escaped as '\]'. Give the row a plain title — no Markdown markup, backslash escapes, or HTML entities in it — or the next run may not be able to confirm its placement; see "Nested-list automation limits" below for exactly what is recognized.`
+       5. **anything else** — the gate rejects the pair — measured causes include an ordinary
+          newline inside the title, a delimiter the chosen mode's link syntax cannot carry
+          (wikilinks mode: `|`/`#`/`^`/`]` in the target — see "Wikilinks vs Markdown links"
+          below), and a `group_title` the writer's own bullet grammar refuses (padded with extra
+          whitespace, or carrying markup). Emit the plain, unchanged 1.10.0 halt instead, with no
+          named form and no convergence claim:
+          "Index <index_file> is not a headings-form file — add a '<group_title>' container and the chapter line for '<slug>' manually, then re-run."
+          (Double-quote delimited, unlike the backtick-delimited halts above — this delimiter is
+          load-bearing and pinned: a reference-assets test's fallback needle matches this
+          string's closing double quote, so do not "normalize" it to backticks.)
+          The operator is no worse off than before 1.11.0 here — this halt can repeat verbatim
+          on the next run, exactly as it always has. The gate never names a pair that would not
+          converge, but it also never claims convergence it has not checked. Read on even when
+          the candidate pair converges — one more operator-actionable warning applies
+          regardless of this gate's outcome, described next.
+
+       **Leaving the gate above: one further warning applies whether or not the candidate pair
+       converges.** Item 4's convergence promise holds — but only for a `group_title`, target
+       and title the gate accepts: you halt once with instructions, the user adds the container
+       and the chapter line, and the re-run's step 0 finds the line present under the
+       `indexForm: 'non-heading'` branch above and proceeds. One operator-actionable warning
+       belongs here too, and it is narrower than "markup in the title": it applies to a title
+       whose markup keeps the row's own link target from resolving — a nested link, a nested
+       image, a reference link, or an interior `]` followed by more title text (a
+       `- [A]B](<target>)` path-mode row, or a `- [[target|A]B]]` wikilink alias — both measured
+       to make the target unrecognizable to `locateChapterLine`, exactly like a nested link
+       would). Escaping the bracket fixes this in path mode (`- [A\]B](<target>)` resolves); a
+       backslash does **not** escape it for `WIKILINK_TARGET_RE`, so
+       `- [[target|A\]B]]` still fails. The wikilink rule is positional, not "any `]`": when
+       the title ends in a run of `]`, that run can be consumed as part of the row's closing
+       brackets and the target resolves.
+
+       Convergence depends on the manifest entry's own `title` — not on whatever row already
+       sits in the index — because that is what the writer rebuilds its inserted row from on
+       every run. If an existing row (operator-typed, or left over from any prior run) does not
+       resolve but the manifest title is clean, the writer's own insert resolves immediately:
+       the earlier, unrecognizable row lingers beside it as a cosmetic duplicate, and the very
+       next run reports `ok` on the clean one. That is the one combination that converges with
+       a harmless leftover; the other combination — the manifest title ITSELF target-breaking —
+       does not converge the same way. Its result turns on the marker of the child row the writer
+       is about to emit, not a file-wide or container-wide marker: it reuses the last existing
+       child's marker and falls back to the container marker only when there is no child. Link
+       mode still decides which title spellings break step 0, as described above.
+
+       - **Nested under its single matched container** (the ordinary case — where
+         `wireNestedListChapter` always places its own insert): every later run still finds
+         `containers.length === 1`, and step 0 still reports the chapter absent — the row is
+         exactly as unrecognizable to step 0's target parse as before — but when the new child
+         uses `-`, the writer's own membership guard (the `present` outcome above) recognizes its
+         own prior insert VERBATIM, refuses to write a second copy, and halts instead. Exactly
+         ONE row is ever written here, in either mode, on that marker; the shipped 1.10.0
+         behaviour this retires had no membership check at all and appended another duplicate
+         row on every re-run, without limit. A new child using `*` or `+` does not reach this
+         guard at all — see "Measured, across every placement" below for what it hits instead.
+       - **At the left margin (indent 0), uncontained** — a broken title's own brackets fail
+         the indent-0 `isPlainLabel` check the same way regardless of what broke them or which
+         mode wrote them, so `containerOwnerScan` declines the WHOLE scan (`{kind:
+         'not-a-list'}`) for every container in the file, not just this row. Nothing is ever
+         inserted from here: the plain, unnamed `not-a-list` halt (the "anything else" branch
+         above) just repeats verbatim, forever — zero duplicates form, not one — measured in
+         both modes (a target-breaking wikilink alias at the left margin declines the scan
+         exactly like a target-breaking Markdown-link title does).
+
+       A `group_title` that is itself non-plain reaches that same zero-growth `not-a-list` halt
+       by a third, independent path, also mode-independent: `wireNestedListChapter` checks the
+       group axis before it ever looks at containers or existing rows, so a malformed
+       `group_title` short-circuits there regardless of the chapter title, the row's placement,
+       or `publish.wikilinks`.
+
+       Measured, across every placement × mode × title-resolvability combination that matters
+       here, holding the manifest entry's `title` FIXED across runs (the next paragraph lifts
+       that condition): a row that already resolves inserts nothing further; a stale row
+       alongside a clean current manifest title gives one lingering duplicate then `ok`; the
+       same target-breaking title sitting at the left margin, or a non-plain `group_title`,
+       converges on zero further rows and a repeating `not-a-list` halt instead (unchanged
+       since 1.10.0), in either mode, regardless of marker. A target-breaking current title
+       nested under its container is the one outcome that splits by the EMITTED ROW'S MARKER,
+       not just mode: when that marker is `-`, it converges on exactly one row, then a `present` halt from the
+       second run onward, in either link mode (new in 1.11.0 — this is the case #330 retires
+       from unbounded, on that marker). When that marker is `*` or `+`, the identical
+       placement does not reach `present` at all — but the cause is the TARGET, not the
+       broken title by itself: `parseNestedLabel` falls to its `raw` branch on the same
+       broken title, and that raw text is the row's WHOLE unparsed content, including the
+       link target. `wireNestedListChapter` is reached only for a GROUPED entry, and a
+       grouped entry's target always carries its group prefix (`chapterRelPath`,
+       `chapter-paths.mjs:168-172`, returns `<group>/<slug>.md` whenever `group` is set) —
+       that `/` is what trips `isBarePathBullet` ("Nested-list automation limits" below),
+       not the broken title in isolation: measured, an otherwise-identical flat-style,
+       slash-free target reaches `present` instead, so do not generalize this to "a
+       target-breaking title is always unwritable on `*`/`+`". For THIS adapter's own
+       grouped emission the prefix is unavoidable, so the split above holds in practice: the
+       [1.11.0] re-read postcondition (`{kind: 'unwritable', field}`, "Non-headings index, no
+       existing line" above) is what the `*`/`+` child reaches here, because
+       `isBarePathBullet` fires on the very bytes the writer is about to persist — so nothing
+       is ever written and the run halts naming `field: 'title'`, before the membership check
+       #330 adds ever gets a chance to run. On that marker the pre-existing
+       `isBarePathBullet` guard (unchanged since 1.10.0) is exactly what the postcondition now
+       runs pre-emptively, so #330 changes nothing there — the guard already answered
+       `not-a-list` before this release; the postcondition is what turns that into a named,
+       never-written refusal instead of a lockout discovered a run later.
+
+       Every claim above holds the manifest `title` FIXED between runs — none of it was
+       measured against an EDITED one. When the operator instead edits a target-breaking title
+       while the emitted child uses `-` (a new title yields a new display string, hence a new
+       `chapterLink` the membership guard has never seen), that guard cannot recognize the
+       edited row as the same chapter and inserts it as a fresh child every time: measured, 20
+       publishes with the title edited on every fourth run accumulate 5 rows — one per distinct
+       edit, none ever removed. The run is not silent: the other 15 publishes each return
+       `present` and the adapter halts on it. No halt names the orphaned rows, though, which is
+       what leaves the growth unreported. The `present` bound above is per TITLE
+       STRING, not per chapter — it is bounded only by how many times the title is edited, a
+       count this file has no way to bound.
+
+       Separately: a title that merely renders non-plain while its target still resolves — an
+       ampersand,
+       emphasis, an HTML entity (see "Nested-list automation limits" below for the measured
+       table) — which is found and simply left unverified at the left margin (measured in both
+       `publish.wikilinks` modes), but is `ok` if instead correctly nested under its container,
+       since `isPlainLabel` is never applied to a child bullet, only to an indent-0 one. That
+       harmlessness does NOT extend to a backtick or an HTML comment in the same nested
+       position: `isPlainLabel` genuinely never touches a child bullet, but a
+       backtick — any run length, paired or not — or `<!--` inside one still reaches `stripInertContexts` on the
+       very next scan — the file-wide sanitizer-identity check (`prepareIndexLines` step 6,
+       `assets/lib/chapter-paths.mjs`), not `isPlainLabel`, is what fires, and it degrades the
+       WHOLE file, not just this row, to `not-a-list` from that point on (measured; see
+       "Nested-list automation limits" below for the worst case). A bare backslash escape is
+       mode-dependent, not an example of either case: measured at the left margin, `A\.B`
+       returns `unverifiable` under `publish.wikilinks: true` (the wikilink form never decodes
+       the escape) but `misplaced` — a halt — under `publish.wikilinks: false` (the
+       markdown-link form decodes it, so the row reads as a plain, uncontained bullet). Use a
+       plain-text title to avoid any of this.
+
+       The gate above is checked on the candidate's own isolated two-line array. **By
+       construction, that proves only that the candidate pair is well-formed and would be
+       recognized on its own —
+       it proves nothing about the real index, because it never reads the real index.**
+       Any property of the real file that makes the shipped locator or writer
+       decline can still diverge from what the isolated check found; the cases below are
+       measured illustrations, not a closed list:
+       - an inert region (a fenced code block, an HTML comment) blanks a representable pair, so
+         it is reported absent again — repeating the convergent halt above, never completing;
+       - a chapter row that exists only inside leading frontmatter is reported present by the
+         shipped locator and reaches `unverifiable` in the present-line branch above — the check
+         ran and declined to conclude (see the safety statement below for what that does and
+         does not guarantee); the adapter proceeds unverified (the shipped 1.10.0 writer/locator
+         view disagreement, tracked separately as #337 — see "Nested-list automation limits"
+         below);
+       - a real index whose surroundings carry YAML structure, a wildcard, or an ordered list
+         makes the writer decline the whole file on the next run too: once the pair is present,
+         step 0 routes to the present-line branch above, whose own predicate call declines the
+         same way, and the adapter again proceeds on `unverifiable` rather than a repeated halt.
+
+       A future case diverging some other way is expected, not a defect in this documentation —
+       the isolated check was never designed to rule any of this out.
+
+       **The honest safety statement, scoped to what this PR governs: on the non-heading branch above,
+       this gate never lets a MISPLACED row complete silently when it can verify placement.**
+       Wherever it cannot conclude — the check never runs, because the line was never even
+       reported present, or it runs and returns `unverifiable` — the run falls back to the same
+       unverified completion named just above: it is not that a false completion cannot occur
+       there, and not that every way it can occur is named above.
+
+       **The headings branch is unchanged by this PR and already completes silently:** a
+       chapter row inside a valid frontmatter block whose body itself carries a heading sits
+       under a matching container per the headings-form placement check above
+       (`indexForm === 'headings'`, "The placement check is retained unchanged (D-8)") and
+       completes with neither verification nor confirmation — the same shipped 1.10.0
+       writer/locator view disagreement named above, tracked separately as #337.
 
    **Manual group migration is a different halt, not part of establishment.** A manifest
    edit that changes a retained entry's `group` or `group_title`, or removes a grouped
@@ -466,26 +741,185 @@ the one exception to "do all of these" — see its own conditional note below.
    future Claude Code sessions (and the `obsidian-project-vault` skill if installed)
    that the directory is owned by this skill and not by general note-taking.
 
+**Automated grouped wiring covers a Markdown-headings-form index and a bounded nested-list
+(GitBook `SUMMARY.md`) container subset.** A headings-form index resolves its container via
+"Container resolution" above; a non-heading index whose shape falls inside that bounded subset
+(see "Nested-list automation limits" below) is wired by `wireNestedListChapter` per the
+line-absent branch above. Every other non-heading index form — an MkDocs YAML `nav:` block, a
+bare path table, or any list shape outside the safe subset — stays fully manual: you halt with
+the non-heading instructions above and stop there. First-class YAML `nav:` container automation
+remains its own follow-up, #328. Path-table container automation, by contrast, is not merely
+deferred: it was decided against as not soundly automatable — see #340 for the recorded
+reasoning.
+
 ### Nested-list automation limits
 
 `wireNestedListChapter` automates only a **bounded, conservative** nested-list subset and
-defers everything else to the manual `not-a-list` halt above — safety over reach. It wires an
-index only when it is a plain bullet list whose container labels **and** the entry's
+defers everything else to the manual `not-a-list` halt above — safety over reach.
+The two recovery classes referenced from the halts above differ deliberately: the #329 manual
+rows reach the next run's proceeding branch, with
+U+2028/U+2029 separators proceeding as `unverifiable`. A `present` recovery must also survive
+the writer's re-read of the bytes it would emit, so its title constraint is narrower.
+
+It wires an index only when it is a plain bullet list whose container labels **and** the entry's
 `group_title` are plain-text: it refuses any label or `group_title` carrying inline markup or
 a leading block trigger — emphasis, a link inside the visible text, an image, raw HTML, an
-entity, a backslash escape, inline code, a leading `#` heading or list marker, or a run of
-collapsing whitespace — because a character allowlist cannot prove such a label renders equal
+entity, a **bare** backslash escape, inline code, a leading `#` heading or list marker,
+or a run of collapsing whitespace —
+because a character allowlist cannot prove such a label renders equal
 to a plain `group_title`, so matching it could miss a real container or manufacture a
-duplicate. It also refuses a `*`- or `+`-marked bullet whose visible text is a **bare
+duplicate. The escape refusal applies to the label's raw, literal spelling only: a
+whole-content markdown link wrapper is unwrapped and its escape decoded before the
+plain-label check ever runs, so `Admin\.X` written bare is refused while the same escape
+written as `[Admin\.X](x.md)` decodes to the plain `Admin.X` and is accepted. A whole-content
+wikilink wrapper is unwrapped too, but its escape is left undecoded — `[[Admin\.X]]` still
+carries the literal backslash and is refused exactly like the bare form. Matching decodes a
+backslash escape only for the markdown-link form — not what the label renders as in full,
+since an HTML entity is never decoded either way (below); a wikilink's escape is never
+decoded, so its label is compared on its literal source spelling instead.
+It also refuses a `*`- or `+`-marked bullet whose visible text is a **bare
 (non-link) path** — one containing a `/` or backslash separator, or ending in `.md` — because
 the shipped membership scan only sees `-`-marked bare rows, so wiring such a file could create
 a second container beside a retained phantom row (a legitimate `*`/`+` plain label that happens
 to contain `/` is refused too, a deliberate over-rejection, not corruption). Inline code, an
 HTML comment or a fenced block anywhere, a mixed or bare-CR line ending, a YAML `nav:` or
 `- key: value` mapping bullet, a list nested more than one level deep, and a multiline
-`group_title` fall outside the subset as well. Worst case for the residual is a cosmetic
-duplicate container the author can see and delete — never data loss. A richer rendering-aware
-matcher is a possible follow-up, not a bug.
+`group_title` fall outside the subset as well. Worst case for the residual (a file the guards
+above decline) is a cosmetic duplicate container an operator might introduce by hand while
+following the manual halt instructions — visible and deletable, never data loss. Within the
+automated subset itself, the writer's target-breaking-title outcome follows the marker of the
+child it is about to emit. With `-`, a title shape that defeats step 0 converges on exactly one
+chapter row, then halts rather than writing a second (see "INDEX wiring" above for the
+title-EDIT growth caveat). The shipped 1.10.0 writer's unbounded per-re-run growth is retired
+for that marker. With `*` or `+`, the [1.11.0] re-read postcondition instead returns (`{kind:
+'unwritable', field}`, "Non-headings index, no existing line" above): the row's own raw
+fallback text carries the GROUPED target's `/` — not the broken title by itself (see
+"Measured, across every placement" above for the group-prefix mechanism and the flat-target
+counter-example) — which trips `isBarePathBullet` on the very bytes about to be persisted, so
+the writer refuses before writing anything and halts naming `field: 'title'`, rather than a
+hand-typed bare path. A richer rendering-aware matcher is a possible follow-up, not a bug.
+
+A manifest value that would corrupt this same structural read is refused the same way, before
+it is ever written. The set is per-field, and the two fields do not share it:
+
+- In a **chapter title**, on any emitted child marker: a backtick — any run length, paired or not, since the
+  mechanism is an unterminated inline code SPAN and not a fence; a tilde run is measured
+  harmless — an HTML comment, or a U+2028/U+2029 separator. When the child marker is `*` or
+  `+`, the path-mode row also falls to raw content after an unescaped `]` or a trailing odd run
+  of backslashes. In wikilinks mode its whole-content label unwrap falls to raw content for any
+  `]` in the alias, escaped or not; the grouped target's `/` then trips `isBarePathBullet`.
+  This writer-side unwrap rule is broader than step 0's `WIKILINK_TARGET_RE`: step 0 still
+  recognizes a terminal run of `]` as part of the closers. When the child marker is `-`, the
+  writer permits these bracket/backslash shapes; only those that also defeat step 0 lead to the
+  later `present` halt.
+- In a **`group_title`**: a U+2028/U+2029 separator on any newly-created container marker; when
+  that marker is `-`, a first token followed immediately by a colon (`FAQ: basics`, `Admin:`)
+  or a value that is only hyphens (`---`); when it is `*`/`+`, a value containing `/` or ending
+  `.md` (`'Sales/Marketing'`, `'billing.md'`). On creation this marker is copied from the first
+  indent-0 bullet, not inferred from a file-wide style.
+
+Each of those reaches `{kind: 'unwritable', field}` — see "Non-headings index, no existing line"
+above for the exact halt text — never a written row. Inline code, an HTML comment and a run of
+several backticks are deliberately absent from the `group_title` list: measured 9/9 across `-`,
+`*` and `+`, those short-circuit to `{kind: 'not-a-list'}` before any write is attempted, so they
+surface as the manual halt and never as `unwritable`. Note what that rules out: a backtick run in
+a `group_title` is never a fence. The container line is emitted as the marker, a space, then the
+value, so the run cannot start its own line — and in these cases the value never reaches emission
+at all. Recover with a value in the halt's own recovery class — Unicode letters and numbers,
+single ASCII spaces between words — applied to the chapter, or to EVERY entry of its group, then
+re-run. The plain-label predicate named below is BROADER than that class and satisfying it alone
+can meet the identical halt again.
+
+**The plain-label predicate, named exactly.** In short: a plain title is verified; a
+non-plain title that still resolves is found but left unverifiable; a title that breaks its
+own row's link target is caught — by the writer's own membership guard when the emitted child
+uses `-` (a `present` halt), or by the [1.11.0] re-read postcondition when it uses `*`/`+`
+(an `unwritable` refusal naming the title) — rather than duplicated without limit on either
+marker (see the marker-scoped bounded-outcome discussion under INDEX wiring above). The
+mechanism: the container-owner scan
+(`containerOwnerScan`,
+`assets/lib/chapter-paths.mjs`) applies `isPlainLabel` to whatever `extractLabel` returns for a
+row's own content — never to the row's raw source text, and never to what it renders as in
+Obsidian — and it applies this check to EVERY indent-0 bullet in the file, not only the row
+under test: a single non-plain indent-0 label anywhere in the file declines the WHOLE scan
+(`{kind: 'not-a-list'}`), so an otherwise-clean 'Admin' container elsewhere in the file cannot
+rescue a badly-labelled row sitting at the left margin. `extractLabel`'s own decoding differs by
+the label's link syntax, and this is the load-bearing half for THIS adapter, whose default is
+`publish.wikilinks: true`: a whole-content markdown link decodes backslash escapes before the
+check runs (`[A\.B](x.md)` becomes the plain `A.B`), but a whole-content **wikilink alias does
+NOT** decode them (`[[x|A\.B]]` keeps its literal backslash and stays non-plain) — the identical
+escape spelling behaves differently depending on which link syntax the profile's mode writes. An
+HTML entity is never decoded by either form, so a title that LOOKS plain once rendered in
+Obsidian can still fall outside the verified class in both modes. Measured for a row sitting AT
+THE LEFT MARGIN alongside a clean, correctly-formed 'Admin' container elsewhere in the same
+file, in both modes:
+
+| Row source                        | Mode      | `extractLabel`      | `isPlainLabel` | Verdict          |
+|------------------------------------|-----------|----------------------|----------------|------------------|
+| `- [A.B](<items.md>)`              | path      | `A.B`                | true           | `misplaced`      |
+| `- [A\.B](<items.md>)`             | path      | `A.B`                | true           | `misplaced`      |
+| `- [A&#46;B](<items.md>)`          | path      | `A&#46;B`            | false          | `unverifiable`   |
+| `- [A & B](<items.md>)`            | path      | `A & B`              | false          | `unverifiable`   |
+| `- [A *b*](<items.md>)`            | path      | `A *b*`              | false          | `unverifiable`   |
+| `- [See [here][ref]](<items.md>)`  | path      | *(target never resolves)* | —         | absent at step 0 |
+| `- [[items|A.B]]`                  | wikilinks | `A.B`                | true           | `misplaced`      |
+| `- [[items|A\.B]]`                 | wikilinks | `A\.B`               | false          | `unverifiable`   |
+| `- [[items|A&#46;B]]`              | wikilinks | `A&#46;B`            | false          | `unverifiable`   |
+| `- [[items|A & B]]`                | wikilinks | `A & B`              | false          | `unverifiable`   |
+| `- [[items|A *b*]]`                | wikilinks | `A *b*`              | false          | `unverifiable`   |
+| `- [[items|A]B]]`                  | wikilinks | *(target never resolves)* | —         | absent at step 0 |
+
+The last row of each mode is a different failure mode entirely: a nested link (path mode) or an
+unescaped `]` in the alias (wikilinks mode) breaks the row's OWN link-target extraction — not
+`extractLabel`/`isPlainLabel` at all — so step 0 never reports the chapter present in the first
+place; see the marker-scoped bounded-outcome discussion under INDEX wiring above for what a
+target-breaking title does instead: one inserted row, then a `present` halt when the child uses
+`-`, or an `unwritable` refusal — naming the title, nothing ever written — on a
+`*`/`+` child — never SILENT unbounded duplication for a fixed title, on either marker.
+
+As of 1.11.0, a **present** grouped chapter's placement under this container is also checked,
+but only for a narrow verified class — this exact sentence, reused verbatim everywhere it is
+cited (see `revalidation.md`'s "Terminal-state convergence checklist" and the 1.11.0 CHANGELOG
+entry):
+
+files for which the fixed-probe writer call returns `kind === 'inserted'` or `kind ===
+'present'` and which hold exactly one selected-target match, that match lying outside the
+writer-recognized leading-frontmatter span.
+
+**In practice:** this is the subset above, minus a selected target that resolves to zero lines
+or to more than one (`inconsistent` — see "INDEX wiring" above) and minus a match sitting inside
+leading frontmatter (`unverifiable` — the shipped 1.10.0 view disagreement, below). Operators
+land on `unverifiable` rather than inside the verified class most often for one of: a Markdown
+nav file using a wildcard, an ordered list, or an explicit `<!--nav-->` marker (all ordinary
+`mkdocs-literate-nav` features); two same-named containers; a chapter row sitting inside leading
+frontmatter; or a **native/YAML MkDocs `nav:` configuration**, which gets no placement
+verification at all (see the safety statement above under "Non-headings index, no existing
+line") — the run completes unverified, exactly as before 1.11.0, with no confirmation
+requested. First-class YAML `nav:` container automation remains its own follow-up, #328.
+
+Three disclosures the operator is owed, not proved away:
+
+- A `SUMMARY.md` holding more than one Markdown list — `mkdocs-literate-nav` honors only the
+  *last* one, while this machinery scans indent-0 bullets across the whole file, so a row can
+  verify against a list the tool ignores. The shipped writer already carries this exposure;
+  1.11.0 does not widen it.
+- A bullet-only file that also happens to be valid YAML — an `ok` now verifies placement where
+  1.10.0 completed silently with no check at all: a Markdown-reading answer about bytes some
+  other consumer may read as YAML.
+- A chapter row sitting inside leading frontmatter is never verified **on the non-heading
+  branch above** — it returns `unverifiable` there, for the reason below, not because it was
+  overlooked. On the headings branch (unchanged by this PR), a frontmatter block whose body
+  itself carries a heading is a different, unfixed gap: it completes with neither
+  verification nor confirmation — see the safety note in "INDEX wiring" above.
+
+**An index whose frontmatter poisons the view is a known defect, filed as #337 — not fixed
+here.** The writer's own body-preparation view blanks a leading frontmatter block before
+wiring, while the step-0 locator's view does not, so the two sides can disagree about what a
+frontmatter-embedded chapter line means. On a nested-list index this produces both a false
+"already wired" report and a chapter line that duplicates on every subsequent run (the shipped
+1.10.0 frontmatter bug, #337). `verifyNonHeadingPlacement` above only stops this case from
+returning a false `ok` — a match inside the span returns `unverifiable` instead — it does not
+repair the duplication.
 
 ## Wikilinks vs Markdown links
 

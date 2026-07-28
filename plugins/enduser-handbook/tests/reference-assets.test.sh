@@ -94,8 +94,14 @@ has_ci() {
 # be found"), and the engine is now large enough (fence char + length + backtick-info-string +
 # CRLF) that a hand-duplicated second copy is a real drift risk, not just a style preference.
 _section_contains() {
-  local file="$1" heading="$2" needle="$3"
-  awk -v heading="$heading" -v needle="$needle" '
+  local file="$1" heading="$2" needle="$3" joined="${4:-0}" operation="${5:-contains}"
+  # `joined=1` searches the section's lines JOINED with single spaces and whitespace-collapsed,
+  # instead of testing each physical line. House style hard-wraps prose at ~95 columns, so a
+  # sentence-length needle matches no single line and the default per-line mode cannot pin it.
+  # This is a MODE of the one scanner, deliberately not a second implementation: both modes share
+  # the same fence tracker and the same section boundaries, so a pin can never disagree with the
+  # existing per-line pins about which region it is looking at.
+  awk -v heading="$heading" -v needle="$needle" -v joined="$joined" -v operation="$operation" '
        # #257: this counts SPACE characters only, so a leading TAB reports indent=0 and `rest`
        # (computed below from `indent`) starts AT that unconsumed tab char — whose first
        # character (`fc`) can never equal a fence marker (` or ~), so a tab-prefixed line never
@@ -161,6 +167,7 @@ _section_contains() {
            in_section = 1; found_heading = 1; level = hlevel; next
          }
          if (in_section && hlevel > 0 && hlevel <= level) { in_section = 0 }
+         if (in_section && joined == 1) { buf = buf " " line; next }
          if (in_section && index(line, needle) > 0) { found_needle = 1 }
        }
        END {
@@ -168,6 +175,39 @@ _section_contains() {
          # present heading whose section simply lacks the needle (exit 1), so a negative pin can
          # hard-fail when its heading is renamed/deleted instead of silently passing forever.
          if (!found_heading) exit 2
+         if (joined == 1) {
+           # Join with single spaces, then collapse runs of whitespace, so the needle can be the
+           # whole sentence regardless of where house style wrapped it. Nothing here models
+           # CommonMark: this is a presence pin over the tracker-visible region, and the residual
+           # error modes are documented at the pin sites below.
+           gsub(/[ \t]+/, " ", buf)
+           sub(/^ /, "", buf)
+           # `found_needle` is unset here (the per-line accumulation two lines below never runs in
+           # joined mode: the `next` in the `joined == 1` branch of the main rule skips it), so
+           # overwriting it with the joined verdict is safe — there is no per-line value it could
+           # clobber. Computing it here rather than exiting directly lets both modes share ONE
+           # `needle != "" && found_needle` decision instead of keeping two copies of that guard —
+           # the empty-needle self-test below drives per-line mode only, and a hand-duplicated
+           # copy in this branch had never itself been exercised by that test.
+           found_needle = index(buf, needle) > 0
+         }
+         if (operation == "count_ci") {
+           haystack = tolower(buf)
+           target = tolower(needle)
+           count = 0
+           start = 1
+           target_len = length(target)
+           haystack_len = length(haystack)
+           if (target_len == 0) { print 0; exit 0 }
+           while (start <= haystack_len) {
+             pos = index(substr(haystack, start), target)
+             if (pos == 0) break
+             count++
+             start = start + pos + target_len - 1
+           }
+           print count
+           exit 0
+         }
          if (needle != "" && found_needle) exit 0
          exit 1
        }
@@ -181,6 +221,58 @@ has_in_section() {
     ok "$msg"
   else
     bad "$msg ('$needle' not found under heading '$heading' in $(basename "$file"))"
+  fi
+}
+
+# Assert a fixed string is present in one Markdown section AFTER joining that section's lines with
+# single spaces and collapsing whitespace runs. Use this, not has_in_section, whenever the needle is
+# longer than the ~95-column house wrap — has_in_section tests each PHYSICAL line, so a wrapped
+# sentence matches nothing and the pin would be green-by-construction.
+#
+# WHAT THIS PROVES, exactly: the sentence occurs in the joined, whitespace-collapsed text of the
+# region the TRACKER treats as the named section. Both qualifiers are load-bearing. It does NOT
+# prove block contiguity, visibility, or prose rendering, and the tracker's section is not the
+# document's section. Known divergences, measured against this function and deliberately accepted:
+#   - fence state: a fence-like line inside an HTML comment or a raw <script> block opens fence
+#     state CommonMark never opens (false RED); fences carrying a container marker on their own
+#     line (`- ```, `> ```) or indented 4+ are missed (false green);
+#   - section boundary: any column-0 `#`-run <= the target's ends the section, unvalidated and
+#     inert-context-blind (false RED); setext headings and 1-3-space-indented ATX are real
+#     boundaries it steps past (false green);
+#   - target acquisition: `line == heading` is byte-exact, so `## X ##` and `  ## X` are not found
+#     at all (exit 2); an inert duplicate of the heading latches the section first.
+# That list is ILLUSTRATIVE, not exhaustive: this models neither CommonMark block structure nor
+# inert contexts, so divergence is possible in either direction. Closing it would mean writing and
+# proving a CommonMark block parser in awk, which is deliberately out of scope.
+#
+# AUTHORING CONSTRAINT for every site pinned this way: never break a wrap inside a hyphenated
+# compound. The join inserts a space, so a break after `leading-` yields `leading -frontmatter` and
+# the pin fails. That failure is loud, which is why the constraint is enforced by the pin itself.
+has_joined_in_section() {
+  local msg="$1" file="$2" heading="$3" needle="$4"
+  if [ ! -f "$file" ]; then bad "$msg (file not found: $(basename "$file"))"; return; fi
+  if _section_contains "$file" "$heading" "$needle" 1; then
+    ok "$msg"
+  else
+    bad "$msg (joined section under '$heading' in $(basename "$file") does not carry the sentence)"
+  fi
+}
+
+# Assert a case-insensitive fixed token's exact occurrence count within the same tracker-visible,
+# whitespace-collapsed Markdown section used by has_joined_in_section. This is deliberately a count,
+# not a truth detector: it detects only a NET change in the token total. A paired addition and
+# removal can cancel, and a rephrasing that avoids the token does not affect the count. A missing
+# file or heading fails closed instead of being misreported as count zero.
+assert_joined_ci_token_count() {
+  local msg="$1" file="$2" heading="$3" token="$4" expected="$5" count rc
+  if [ ! -f "$file" ]; then bad "$msg (file not found: $(basename "$file"))"; return; fi
+  if count="$(_section_contains "$file" "$heading" "$token" 1 count_ci)"; then rc=0; else rc=$?; fi
+  if [ "$rc" -ne 0 ]; then
+    bad "$msg (heading '$heading' not found in $(basename "$file") — token count is unverifiable)"
+  elif [ "$count" -eq "$expected" ]; then
+    ok "$msg"
+  else
+    bad "$msg (case-insensitive '$token' count moved from $expected to $count — re-read the section, confirm the span-not-fence mechanism claim is still correct, then re-pin the count)"
   fi
 }
 
@@ -218,6 +310,46 @@ count_fixed() {
   local c
   c="$(grep -cF -- "$1" "$2" 2>/dev/null || true)"
   printf '%s\n' "${c:-0}"
+}
+
+# Count occurrences of a fixed (non-regex) string in a file AFTER collapsing all whitespace runs
+# (including newlines) to single spaces — the whole-file counterpart to _section_contains'
+# `joined=1` mode (round-13, HIGH 4). Needed because neither `count_fixed` (line-based `grep -cF`)
+# nor `grep -oF | wc -l` (occurrence-based but still per-PHYSICAL-line) can see an occurrence that
+# house-wrap split across a line break — exactly the gap that let a wrapped SECOND copy of a
+# sentence hide behind the first, unwrapped one and stay invisible to a plain `has`/`count_fixed`
+# pin. Uses `index()` in a loop (fixed-substring search), never a regex match, so a needle
+# containing grep/awk metacharacters still counts literally, matching this file's `-F` discipline
+# everywhere else. An empty needle returns 0 (an infinite loop on a zero-length match is impossible
+# by construction: `index()` on an empty needle would otherwise return 1 every time without
+# advancing `start`).
+#
+# CAVEAT for future needles: the needle reaches awk via `-v needle="$1"`, and `awk -v` processes
+# ESCAPE SEQUENCES in the assigned value. Every needle used today is safe (the shell resolves `\"`
+# to a plain `"` before awk ever sees it), but a needle carrying a LITERAL backslash — `\]`, `\n`,
+# a Windows path — would be silently transformed rather than rejected, and the count would be wrong
+# with nothing going red. Pass such a needle through a file or ENVIRON instead of `-v`.
+count_joined_fixed() {
+  local needle="$1" file="$2"
+  if [ -z "$needle" ] || [ ! -f "$file" ]; then printf '0\n'; return; fi
+  awk -v needle="$needle" '
+    { buf = buf $0 " " }
+    END {
+      gsub(/[ \t]+/, " ", buf)
+      sub(/^ /, "", buf)
+      n = 0
+      start = 1
+      nlen = length(needle)
+      blen = length(buf)
+      while (start <= blen) {
+        p = index(substr(buf, start), needle)
+        if (p == 0) break
+        n++
+        start = start + p + nlen - 1
+      }
+      print n
+    }
+  ' "$file"
 }
 
 # Line number of the first match of a fixed string, or empty if absent.
@@ -565,9 +697,9 @@ printf '## Target\nNEEDLE_FIRST\n## Target\nNEEDLE_SECOND\n## Next\n' > "$SELFTE
 hasnt_in_section "self-test: a repeated identical heading does not re-open or extend the first section" \
   "$SELFTEST_DIR/rebind.md" '## Target' 'NEEDLE_SECOND'
 
-# Empty-needle rejection (:151, needle != "") is orthogonal to file content, so it reuses the
-# rebind fixture above rather than a dedicated file — the claim under test is about the NEEDLE
-# argument, not anything in the markdown.
+# Empty-needle rejection (_section_contains's `needle != ""` guard) is orthogonal to file content,
+# so it reuses the rebind fixture above rather than a dedicated file — the claim under test is
+# about the NEEDLE argument, not anything in the markdown.
 hasnt_in_section "self-test: an empty needle is always rejected, never a silent pass" \
   "$SELFTEST_DIR/rebind.md" '## Target' ''
 
@@ -779,6 +911,64 @@ if ( FAIL=0; hasnt_in_section "self-test: hasnt_in_section hard-fails on a genui
   ok "self-test: hasnt_in_section correctly hard-fails on an absent heading (#302)"
 else
   bad "self-test: hasnt_in_section did not hard-fail on an absent heading (#302 regression)"
+fi
+
+# has_joined_in_section self-tests. Deliberately three, because the contract is deliberately small:
+# one positive proving the whole reason the helper exists, and two negatives proving the single
+# exclusion it claims (fenced content, both fence spellings) — no wider claim about this helper.
+#
+# 1. POSITIVE — a hard-wrapped sentence must be FOUND. This is the case has_in_section fails: it
+#    tests each physical line, so a sentence wrapped at the house column matches no line at all.
+#    Without this fixture the helper could degrade to per-line matching and every sentence pin
+#    would go silently green-by-nothing.
+cat > "$SELFTEST_DIR/joined-wrapped.md" <<'EOF'
+## Target
+files for which the fixed-probe writer call returns `kind === 'inserted'` and which hold
+exactly one selected-target match, that match lying outside the writer-recognized
+leading-frontmatter span.
+## Next
+EOF
+has_joined_in_section "self-test: a hard-wrapped sentence is found once the section is joined" \
+  "$SELFTEST_DIR/joined-wrapped.md" '## Target' \
+  "files for which the fixed-probe writer call returns \`kind === 'inserted'\` and which hold exactly one selected-target match, that match lying outside the writer-recognized leading-frontmatter span."
+
+# 2/3. NEGATIVES — the sentence inside a fenced code block must NOT satisfy the pin, in BOTH fence
+#    spellings. The tilde case is the one that discriminates: a backtick-only collector answers
+#    "not found" for the backtick fixture too, so the backtick fixture alone cannot tell a correct
+#    implementation from a ~~~-blind one. The live tracker handles both (see the fence-char axis
+#    self-tests above); these fixtures pin that it stays that way.
+cat > "$SELFTEST_DIR/joined-fence-backtick.md" <<'EOF'
+## Target
+```
+files for which the fixed-probe writer call returns `kind === 'inserted'` and which hold
+exactly one selected-target match, that match lying outside the writer-recognized
+leading-frontmatter span.
+```
+## Next
+EOF
+if ( FAIL=0; has_joined_in_section "probe" "$SELFTEST_DIR/joined-fence-backtick.md" '## Target' \
+       "files for which the fixed-probe writer call returns \`kind === 'inserted'\` and which hold exactly one selected-target match, that match lying outside the writer-recognized leading-frontmatter span." \
+       >/dev/null 2>&1; [ "$FAIL" -eq 1 ] ); then
+  ok "self-test: a sentence inside a backtick fence does not satisfy the joined pin"
+else
+  bad "self-test: joined pin accepted a sentence inside a backtick fence (fence exclusion regressed)"
+fi
+
+cat > "$SELFTEST_DIR/joined-fence-tilde.md" <<'EOF'
+## Target
+~~~
+files for which the fixed-probe writer call returns `kind === 'inserted'` and which hold
+exactly one selected-target match, that match lying outside the writer-recognized
+leading-frontmatter span.
+~~~
+## Next
+EOF
+if ( FAIL=0; has_joined_in_section "probe" "$SELFTEST_DIR/joined-fence-tilde.md" '## Target' \
+       "files for which the fixed-probe writer call returns \`kind === 'inserted'\` and which hold exactly one selected-target match, that match lying outside the writer-recognized leading-frontmatter span." \
+       >/dev/null 2>&1; [ "$FAIL" -eq 1 ] ); then
+  ok "self-test: a sentence inside a tilde fence does not satisfy the joined pin (the discriminating spelling)"
+else
+  bad "self-test: joined pin accepted a sentence inside a tilde fence — a backtick-only collector would pass the backtick fixture too"
 fi
 
 echo "== surface-audit.playwright.ts =="
@@ -1293,7 +1483,8 @@ hasnt "static-md: no dataview block" "$NEEDLE" "$SMD"
 # Requires wikilinks: false for the static target.
 has "static-md: requires wikilinks false" 'wikilinks: false' "$SMD"
 
-# Each halt condition carries its exact quoted message (adapter contract, publish-targets/README.md:31).
+# Each halt condition carries its exact quoted message (adapter contract, publish-targets/
+# README.md's "Halt conditions" bullet — "List the exact halt messages").
 has "static-md: index_file halt message"   'writable table of contents'   "$SMD"
 has "static-md: chapters_dir halt message" 'cannot write chapters'        "$SMD"
 has "static-md: wikilinks halt message"    'do not render on a static site' "$SMD"
@@ -1537,7 +1728,7 @@ if [ "$CR_ANCHOR_COUNT" -eq 1 ] && [ "$c" -eq 1 ] && [ -n "$L" ] && [ -n "$L_GRP
 else
   bad "obsidian-vault: O6 witness FAILED — grouped Step-0's expected-target formula, branch-bound (count=$c line=$L, need count==1 and $L_GRP<L<L_CR=$L_CR)"
 fi
-# Occurrence-level count, deliberately NOT count_fixed (which is LINE-based, per its own :188
+# Occurrence-level count, deliberately NOT count_fixed (which is LINE-based, per its own doc
 # comment — a 3rd bare-formula copy appended onto an EXISTING line would still read as 2 lines).
 # `grep -oF` emits one line per MATCH, so `wc -l` counts occurrences, catching a 3rd copy anywhere,
 # same-line or not.
@@ -1798,7 +1989,6 @@ has "static-md: gate #1 is a resolution check, not a spelling check" 'resolution
 has_in_section "static-md: automated grouped wiring's new scope (headings-form + bounded nested-list, #223)" \
   "$SMD" '### Grouped index wiring (`anyGroup` manifests only)' \
   'Automated grouped wiring covers a Markdown-headings-form index and a bounded nested-list'
-has "static-md: non-heading manual-wiring halt" "Index <index_file> is not a headings-form file — add a '<group_title>' container and the chapter line for '<slug>' manually, then re-run." "$SMD"
 
 echo "== #223: nested-list index container automation (wireNestedListChapter), both adapters =="
 # static-md.md — the flat-entry-absent branch and the new automated subset both sit under the
@@ -1816,9 +2006,9 @@ has_in_section "static-md: grouped, line-absent, non-heading branch attempts nes
 has_in_section "static-md: nested-list multiple-container-bullets halt" \
   "$SMD" '### Grouped index wiring (`anyGroup` manifests only)' \
   "Found multiple '<group_title>' container bullets in <index_file> — curate the index manually, then re-run."
-has_in_section "static-md: grouped, line-present, non-heading branch narrows present-line placement rationale" \
+has_in_section "static-md: grouped, line-present, non-heading branch NAMES the #330 verifier it calls" \
   "$SMD" '### Grouped index wiring (`anyGroup` manifests only)' \
-  'present-line placement verifier runs on a non-heading index'
+  'verifyNonHeadingPlacement(indexLines, selectedTarget, group_title)'
 has_in_section "static-md: Nested-list automation limits — plain-label allowlist boundary" \
   "$SMD" '### Nested-list automation limits' \
   'a character allowlist cannot prove such a label renders equal'
@@ -1829,9 +2019,9 @@ has_in_section "static-md: Nested-list automation limits — bare-path refusal (
 # obsidian-vault.md — everything below lives directly under the shared H2: unlike static-md.md,
 # there is no intervening H3 for the grouped branch, so "### Nested-list automation limits" is the
 # ONLY child H3 and it comes after all of this content (line order verified against the doc).
-has_in_section "obsidian-vault: non-heading Step-0 branch narrows present-line placement rationale" \
+has_in_section "obsidian-vault: non-heading Step-0 branch NAMES the #330 verifier it calls" \
   "$OMD" '## INDEX wiring (do all of these on every chapter create/update)' \
-  'no present-line placement verifier runs here (placement verification'
+  'call `verifyNonHeadingPlacement(indexLines, selectedTarget, group_title,'
 has_in_section "obsidian-vault: container-resolution scope note (headings-form vs bounded nested-list)" \
   "$OMD" '## INDEX wiring (do all of these on every chapter create/update)' \
   'Container resolution** (headings-form index — resolved by heading here; a bounded'
@@ -1854,9 +2044,9 @@ has_in_section "obsidian-vault: Nested-list automation limits — bare-path refu
 has_in_section "revalidation: manual group-migration recipe step 3 covers a nested-list container bullet" \
   "$REVAL" '### The manual group-migration recipe' \
   'creating the container (a `##` heading, or a bullet for a nested-list index) first'
-has_in_section "revalidation: group_title-changed fact narrows non-heading placement to explicit confirmation" \
+has_in_section "revalidation: group_title-changed fact now names the #330 verifier, not explicit confirmation" \
   "$REVAL" '### Terminal-state convergence checklist' \
-  'no present-line placement verifier runs, and raw string presence is gameable'
+  'the #330 placement verifier (`verifyNonHeadingPlacement`) checks the container labeling'
 
 # Structural pin (independent of the awk has_in_section engine above): parseHeadings/findOwner from
 # assets/lib/md-structure.mjs — the SAME primitive tests/md-structure.test.mjs uses for its 6 real
@@ -2011,7 +2201,7 @@ has_in_section "revalidation: recipe step 4 chapter-target and glossary-target l
 #
 # The obsidian-vault.md NEGATIVE half of A4's clause ("no equivalent mandatory index-target link...
 # so this case does not apply there") is deliberately left unpinned. It's a verified fact today,
-# but A4 flagged it as tied to a filed, tracked gap (group-H's Related-block enumeration) — if that
+# but A4 flagged it as tied to a filed, tracked gap (#261, group-H's Related-block enumeration) — if that
 # gap is ever legitimately closed by giving Obsidian's Related block an index member, this exact
 # clause is the line that SHOULD change. Pinning it would fight that future correct edit rather than
 # catch a regression; the asymmetry is stated in prose (static-md.md:15-16's "no backlinks panel"
@@ -2216,11 +2406,11 @@ hasnt "manifest-discipline: no longer frames validateGroups as an optional conve
 # round-15 [adversarial reading, not mutation testing — the prior wording meant a requirement
 # without requiring it]: step 5 said re-run validation "after every edit that touches a slug or a
 # group", so a group_title-only edit (two groups converging on one title — containers are located
-# BY TITLE, obsidian-vault.md:207) let a reader skip the only detector for that collision, silently
-# merging two groups under one nav container. Now keyed to the GENERAL RULE (any field
-# validateGroups inspects), with the slug/group/group_title list explicitly illustrative. Two
-# needles: the general rule governing (not narrowed to slug/group), and the group_title-only
-# scenario that caused the bug specifically.
+# BY TITLE, per obsidian-vault.md's "Container resolution" bullet) let a reader skip the only
+# detector for that collision, silently merging two groups under one nav container. Now keyed to
+# the GENERAL RULE (any field validateGroups inspects), with the slug/group/group_title list
+# explicitly illustrative. Two needles: the general rule governing (not narrowed to slug/group),
+# and the group_title-only scenario that caused the bug specifically.
 has_in_section "manifest-discipline: step 5 re-run rule is NOT narrowed to slug/group only" \
   "$MDISC" '## The discipline: no capture code before review' \
   'never only an edit that touches `slug` or `group`'
@@ -2255,8 +2445,9 @@ has_in_section "obsidian-vault: link integrity gate states its chapter-scope lim
 # Markdown link resolve like an internal .md/glossary target, so a compliant chapter with
 # `[Support](mailto:...)`, an external `https://` link, or a bare `#fragment` would FALSE-HALT.
 # Three needles, one per the three concrete false-halt cases named in the finding: the **relative**
-# scoping is the actual fix (matches static-md.md:407's own wording); the bare-fragment rule and
-# the non-relative exemption class are the two other named cases it was previously silent on.
+# scoping is the actual fix — the "verifies every **relative** standard" sentence pinned directly
+# below; the bare-fragment rule and the non-relative exemption class are the two other named cases
+# it was previously silent on.
 has_in_section "obsidian-vault: link-integrity item 2 scoped to RELATIVE links only (not every link)" \
   "$OMD" '## Link integrity gate before you publish' \
   'this item also verifies every **relative** standard'
@@ -2302,10 +2493,10 @@ has_in_section "obsidian-vault: wikilinks-off glossary-link formula uses dirname
 # #259: both "write-time canon" mentions under this heading (the internal-chapter-link formula)
 # and under "Glossary backlink discipline" (below) previously named the concept without citing
 # where it's actually defined — a reader had no path from the mention to `revalidation.md`'s own
-# "Write-time canon" section (:65) unless they already knew to look there. static-md.md:126 already
-# cites it in exactly this form; these two pins mirror that same citation string at both
-# previously-uncited sites, section-scoped so a future rewrite can't satisfy one and silently drop
-# the other.
+# "Write-time canon" section (:65) unless they already knew to look there. static-md.md already
+# cites it in exactly this form (its "Retained chapters keep whatever spelling already resolves"
+# passage); these two pins mirror that same citation string at both previously-uncited sites,
+# section-scoped so a future rewrite can't satisfy one and silently drop the other.
 has_in_section "obsidian-vault: internal-chapter-link write-time-canon mention cites revalidation.md" \
   "$OMD" '## Wikilinks vs Markdown links' \
   '(see "Write-time canon" in `revalidation.md`)'
@@ -2381,8 +2572,9 @@ has_in_section "obsidian-vault: ...specifically the template's [[…]] Related-b
   "$OMD" '## Chapter structure (Obsidian-flavoured)' \
   "template's \`[[…]]\` Related-block placeholders with the standard Markdown-link form from"
 # A4 renamed this checklist item's parenthetical from "(graph-island check)" to
-# "(outbound-link floor)" (obsidian-vault.md:325) — the old name reasserted a wikilinks-on
-# rationale for a rule that is mode-neutral (the same ≥2-link floor also gates wikilinks-off).
+# "(outbound-link floor)" (obsidian-vault.md's "Link integrity gate before you publish" section,
+# item 3) — the old name reasserted a wikilinks-on rationale for a rule that is mode-neutral (the
+# same ≥2-link floor also gates wikilinks-off).
 # Named mutation this catches: the label drifting/reverting back to a wikilinks-on-flavored
 # name — the exact defect CLASS rounds 7 and 8 fixed, recurring at a third site. Not a collision
 # risk against the legitimate "a graph island" phrase a few lines above (different sentence, no
@@ -2585,6 +2777,521 @@ has "surface-diff.md: single-role remains the default"   'single-role' "$SDDOC"
 has "surface-diff.md: documents the structural diff key"  'tag / role / name / data-testid' "$SDDOC"
 hasnt "surface-diff: no import type in the .mjs" 'import type' "$SD"
 has "surface-diff: imports matrixLabel from control-inventory" "from './control-inventory.mjs'" "$SD"
+
+echo "== chapter-paths.d.mts — 1.11.0 public surface (#330) =="
+CPD="$ASSETS/lib/chapter-paths.d.mts"
+# Declaration-SHAPED needles (round-15/round-26). `has` is an unscoped fixed-string grep, so a
+# name-only needle for a type stays green after its declaration is deleted — the name survives
+# inside the function signature. Each needle therefore carries its declaration keyword, and each
+# gets its own deletion mutant. These pin EXISTENCE only: never compatibility, never syntax.
+# The rule is one needle per declaration this version ADDS, and it is checkable: the needle count
+# below must equal `git diff 44545bb..HEAD -- plugins/enduser-handbook/skills/enduser-handbook/assets/lib/chapter-paths.d.mts | grep -c '^+export'`,
+# run from the repository root (44545bb is the 1.10.0 release commit; this repo has no
+# enduser-handbook release tags). That check is what caught LeadingFrontmatterSpan: its
+# declaration was added without a matching needle, so an unpinned deletion of the interface
+# stayed green while a pinned deletion correctly went red.
+has "chapter-paths.d.mts: declares indexView"                       'export function indexView'                        "$CPD"
+has "chapter-paths.d.mts: declares leadingFrontmatterSpan"          'export function leadingFrontmatterSpan'           "$CPD"
+has "chapter-paths.d.mts: declares LeadingFrontmatterSpan"          'export interface LeadingFrontmatterSpan'          "$CPD"
+has "chapter-paths.d.mts: declares verifyNonHeadingPlacement"       'export function verifyNonHeadingPlacement'        "$CPD"
+has "chapter-paths.d.mts: declares VerifyNonHeadingPlacementOptions" 'export interface VerifyNonHeadingPlacementOptions' "$CPD"
+has "chapter-paths.d.mts: declares VerifyNonHeadingPlacementResult"  'export type VerifyNonHeadingPlacementResult'      "$CPD"
+
+echo "== canonical verified-class sentence — verbatim at all four pinned sites (#330) =="
+# ONE sentence, reused verbatim, joined across the ~95-column house wrap. Short independent
+# fragments were rejected during review: they enforce neither wording, order, nor adjacency, so a
+# site could drift into a paraphrase and stay green — which is exactly how an earlier revision came
+# to claim verbatim reuse it did not have. A site may add a labelled gloss BESIDE the sentence; a
+# site carrying only a gloss fails these pins.
+# These four are the complete set this suite pins — the only sites with a stable repository path
+# for a needle to target. A hand-off/planning document outside the repo may carry the same sentence
+# too; that copy has no such path, so it is out of scope for this gate rather than an oversight, and
+# requiring a needle in it would force an implementer to invent a file just to keep the count.
+# [1.11.0] The accepted-outcome list grew from one kind to two. The sentence said `inserted` alone
+# while `verifyNonHeadingPlacement` declined only `not-a-list`/`multiple` (a negative list), so the
+# new `present` outcome silently joined the accepted set and this pin — reused verbatim in four
+# places — asserted a false class in all four, staying green in every one, because a verbatim pin
+# tracks drift and cannot track truth. Reproduced before correcting: an index already carrying the
+# probe row makes the writer answer `present`, and the verifier returns `ok`, not `unverifiable`.
+# The gate is now written as a positive accept-list so the next added outcome fails it instead.
+CLASS_SENTENCE='files for which the fixed-probe writer call returns `kind === '\''inserted'\''` or `kind === '\''present'\''` and which hold exactly one selected-target match, that match lying outside the writer-recognized leading-frontmatter span.'
+CHLOG="$PLUGIN_DIR/../../CHANGELOG.md"
+has_joined_in_section "static-md: limits section carries the class sentence verbatim" \
+  "$SMD" '### Nested-list automation limits' "$CLASS_SENTENCE"
+has_joined_in_section "obsidian-vault: limits section carries the class sentence verbatim" \
+  "$OMD" '### Nested-list automation limits' "$CLASS_SENTENCE"
+has_joined_in_section "revalidation.md: convergence checklist carries the class sentence verbatim" \
+  "$REVAL" '### Terminal-state convergence checklist' "$CLASS_SENTENCE"
+has "CHANGELOG: 1.11.0 entry carries the class sentence verbatim" "$CLASS_SENTENCE" "$CHLOG"
+
+echo "== [1.11.0] wireNestedListChapter membership guard — retired claims, and the shared halt =="
+# ANTI-ROT, and deliberately NEGATIVE. The sentences forbidden below were never pinned at all, which
+# is how four successive revisions of the duplicate-hazard paragraph shipped green while each was
+# later measured FALSE: an exact-string pin proves prose did not DRIFT and structurally cannot prove
+# prose is TRUE. So the only honest thing a pin can do about a retired false claim is forbid its
+# return. What the guard actually DOES is verified by EXECUTING it — the convergence tests in
+# chapter-paths.test.mjs go red when the code regresses, not when the wording moves. Do not add a
+# positive pin here restating the guard's behaviour; that would recreate the exact false-green this
+# block exists to end.
+#
+# Wrap-safe by construction (count_joined_fixed, not count_fixed): every needle here is long enough
+# to house-wrap, and a PHYSICAL-line count would silently miss a re-wrapped copy — a failure mode
+# this suite has already been bitten by. Scope is the two adapters ONLY: CHANGELOG.md deliberately
+# retains the 1.10.0 wording inside an explicitly historical framing, so a repo-wide ban would fire
+# on a sentence that is correct precisely because it is quoted as superseded.
+RETIRED_CLAIMS=(
+  'which has no membership check of its own'
+  'not zero and not unbounded'
+)
+for claim in "${RETIRED_CLAIMS[@]}"; do
+  for f in "$SMD" "$OMD"; do
+    c="$(count_joined_fixed "$claim" "$f")"
+    if [ "$c" -eq 0 ]; then
+      ok "$(basename "$f"): retired claim stays retired — '$claim'"
+    else
+      bad "$(basename "$f"): retired claim is back ($c occurrence(s)) — '$claim'"
+    fi
+  done
+done
+
+# The `unwritable` halt [1.11.0] is the second SHARED string, pinned the same way and for the same
+# reason: it is defined ONCE here so neither adapter can become the authority for the other, and it
+# lands byte-identically in both. Its wording was corrected once already — it said "code fences",
+# which mis-names the mechanism for a chapter title (a backtick run in a title is an unterminated
+# code SPAN; a fence needs the run at line start, which an emitted row can never be) and would let
+# an operator conclude a single backtick is safe. It is not.
+#
+# The safe recovery language is a POSITIVE constraint rather than another fatal-shape enumeration.
+# The previous negative list omitted legal-looking `group_title` values that still re-halt:
+# `Sales/Marketing` and `billing.md` when the emitted marker is `*`/`+`, and `FAQ: basics` and
+# `---` when it is `-`. Following that halt literally therefore did not converge. The replacement
+# rule was measured by calling the writer for all three emitted markers in both link modes; its
+# group_title remedy also says EVERY entry because validateGroups makes that field group-scoped.
+# An exact-string pin cannot catch wording that is wrong rather than drifted — execution supplies
+# the truth, and the pin only keeps both adapters on the same measured wording.
+UNWRITABLE_HALT="Cannot wire '<slug>' into <index_file>: the lines this run would write are not recognizable to the next run, so nothing was written. <remedy> Then re-run. For this recovery step, use a non-empty value made only of Unicode letters and numbers, with words separated by single ASCII spaces. That positive constraint is deliberately narrower than the parser's full accepted language; it was verified across both link modes and all three bullet markers of the line being written, regardless of markers elsewhere in the file. See \"Nested-list automation limits\" below for the measured per-marker set."
+for f in "$SMD" "$OMD"; do
+  c="$(count_joined_fixed "$UNWRITABLE_HALT" "$f")"
+  if [ "$c" -eq 1 ]; then
+    ok "$(basename "$f"): carries the shared 'unwritable' halt verbatim, exactly once"
+  else
+    bad "$(basename "$f"): shared 'unwritable' halt count drifted from 1 (got $c)"
+  fi
+done
+# A recovery constraint may deliberately exclude harmless spellings, but it must not misstate the
+# mechanism. A title's backtick run is an inline code span because the emitted row puts it after
+# indentation and a bullet; it is never a fence. Keep the retired "code fences" wording out.
+#
+# READ THIS BEFORE ADDING ANOTHER NEEDLE HERE. Each layer has a narrower job:
+#   - the negative pins forbid only the exact retired spellings they name;
+#   - each positive pin requires its fixed needle in tracker-visible text under the limits heading;
+#   - each case-insensitive count requires a NET total of exactly three `fenc` tokens in that same
+#     tracker-visible, whitespace-collapsed section.
+# The count alone stays green under a one-for-one addition/removal. Every current counted occurrence
+# is inside one of the positive needles below, so the reviewer's paired substitution has to remove a
+# pinned phrase and fails even though its added contradiction keeps the count at three.
+#
+# WHY THESE NEEDLES ARE SHAPED THE WAY THEY ARE — history, not a mandate. A needle that stops at a
+# noun phrase pins a SUBJECT, and a subject is equally compatible with the opposite predicate:
+# 'HTML comment or a fenced block anywhere' left "...anywhere is accepted by this automation" fully
+# green, same needle, same `fenc` count, meaning inverted. Reshaped for that reason: TWO of static's
+# three needles (the refusal list, now running through 'fall outside the subset as well', and the
+# line-start clause, now through 'can never sit at') and ONE of obsidian's (the refusal list) — the
+# adapters are not symmetric here, because obsidian's other two needles already ended in 'not a
+# fence' / 'is never a fence' and carried their own polarity. Count the needles you actually changed
+# before describing them; an earlier revision of this comment claimed two per adapter and was wrong
+# about obsidian.
+# Reaching through the predicate raised the cost of one specific edit. It is NOT a requirement a
+# needle can be checked against — see the next paragraph, and do not reinstate it as one.
+#
+# STOP LOOKING FOR A NEEDLE-LENGTH RULE. THERE ISN'T ONE. Two successive revisions of this comment
+# tried to state a test a needle could pass, and review defeated both by construction:
+#   - append after the span:  '...fall outside the subset as well ONLY IN THE RETIRED 1.10.0
+#     BEHAVIOR; 1.11.0 accepts every one of these forms.'
+#   - prefix before the span: 'IT IS FALSE THAT Inline code, an HTML comment or a fenced block
+#     anywhere ... fall outside the subset as well.'
+# Both keep every needle byte-identical and the `fenc` count at three; all eight assertions stay
+# green over inverted prose. Extending rightward cannot stop a prefix, extending leftward cannot stop
+# a suffix, and neither stops the sentence being moved intact under a "retired claims" heading. Any
+# finite span has a context that reverses it, so "lengthen the needle until it cannot be contradicted"
+# is not a strict instruction — it is an unsatisfiable one, which is worse, because it reads as
+# rigor while delivering longer and more brittle pins with the identical hole.
+#
+# What a fixed-string pin actually answers, stated so it survives being executed:
+#     does this section, AS THE SCANNER RENDERS IT, contain this character sequence?
+# "As the scanner renders it" is load-bearing and was got wrong once already: joined mode collapses
+# every run of whitespace to one space before matching, so the needle is not contiguous in the source
+# at all, and MEASURED — re-wrapping the sentence across a line, inserting extra ASCII spaces, or
+# substituting a TAB for a space all change source bytes with every pin still green. That is
+# deliberate, not a hole: house style hard-wraps at ~95 columns, so a needle that broke on rewrapping
+# would be unusable. A non-ASCII lookalike is a different matter and DOES fire (NBSP for space, a
+# U+0441 CYRILLIC SMALL LETTER ES for ASCII 'c'), because collapsing normalizes whitespace only.
+# Written as a codepoint deliberately: a literal homoglyph sitting in a shell script is the exact
+# hazard this sentence is about, and U+2028/U+2029 are named the same way everywhere else here.
+# So it detects DELETION and any NON-WHITESPACE MODIFICATION of the pinned text — which is what
+# happened here twice, and why the pins are worth keeping. Precisely, the guarantee is EXISTENTIAL:
+# it fires only when NO unchanged occurrence is left in the section. Measured — duplicate the
+# sentence, edit one copy, and the pin stays green. Fine for a section that carries each claim once,
+# which is the case here; not a guarantee that every copy is intact.
+#
+# The two things it does NOT do, and they point in OPPOSITE directions:
+#   - UNDER: it says nothing about text outside the pinned span, hence nothing about whether the
+#     document is TRUE. A prefix, a suffix, an infix negation, or the whole sentence relocated intact
+#     all leave it green.
+#   - OVER: it is not indifferent to context either, and can go RED with the sentence untouched —
+#     measured, renaming the section heading fails closed (exit 2, "unverifiable"), and an identical
+#     heading inside an HTML comment elsewhere in the file fails too. The has_joined_in_section
+#     contract above already documents that boundary; do not read "says nothing about context" as
+#     "cannot be tripped by context".
+# When picking a needle, the useful question is which text you want to be told about if it vanishes
+# or changes — a heuristic for choosing what to pin, NOT a criterion a needle passes or fails, and
+# not a replacement for the rule the paragraph above says does not exist. In particular do not ask
+# whether it can be contradicted; the answer is always yes, for every needle. Semantic inversion by surrounding
+# context is bounded by review and by #341's structure-aware reader, never by a string in this file.
+#
+# These layers still do not decide whether the prose is TRUE. Known live evasions, kept named rather
+# than implied away: a contradiction phrased without any `fenc` token, and the scanner-divergence
+# cases in has_joined_in_section's contract above — these phrase and count pins do not change which
+# prose that scanner can see. Closing the class needs a structure-aware Markdown reader, which is
+# filed as its own work (#341); a fixed-string pin is a drift detector, never a truth detector.
+has_joined_in_section \
+  "static-md.md: requires the reviewed HTML-comment/fenced-block refusal phrase, through its verb" \
+  "$SMD" "### Nested-list automation limits" 'HTML comment or a fenced block anywhere, a mixed or bare-CR line ending, a YAML `nav:` or `- key: value` mapping bullet, a list nested more than one level deep, and a multiline `group_title` fall outside the subset as well'
+has_joined_in_section \
+  "static-md.md: requires the reviewed emitted-row span phrase" \
+  "$SMD" "### Nested-list automation limits" 'an unterminated inline code span, never a fence'
+has_joined_in_section \
+  "static-md.md: requires the reviewed line-start fence phrase, through its negation" \
+  "$SMD" "### Nested-list automation limits" 'can never sit at the start of a physical line the way a real fence requires'
+has_joined_in_section \
+  "obsidian-vault.md: requires the reviewed HTML-comment/fenced-block refusal phrase, through its verb" \
+  "$OMD" "### Nested-list automation limits" 'HTML comment or a fenced block anywhere, a mixed or bare-CR line ending, a YAML `nav:` or `- key: value` mapping bullet, a list nested more than one level deep, and a multiline `group_title` fall outside the subset as well'
+has_joined_in_section \
+  "obsidian-vault.md: requires the reviewed chapter-title span phrase" \
+  "$OMD" "### Nested-list automation limits" 'mechanism is an unterminated inline code SPAN and not a fence'
+has_joined_in_section \
+  "obsidian-vault.md: requires the reviewed group_title span phrase" \
+  "$OMD" "### Nested-list automation limits" 'a backtick run in a `group_title` is never a fence'
+assert_joined_ci_token_count \
+  "static-md.md: limits section keeps its reviewed case-insensitive 'fenc' token count" \
+  "$SMD" "### Nested-list automation limits" 'fenc' 3
+assert_joined_ci_token_count \
+  "obsidian-vault.md: limits section keeps its reviewed case-insensitive 'fenc' token count" \
+  "$OMD" "### Nested-list automation limits" 'fenc' 3
+for f in "$SMD" "$OMD"; do
+  c="$(count_joined_fixed 'code fences, or invisible line separators' "$f")"
+  if [ "$c" -eq 0 ]; then
+    ok "$(basename "$f"): the corrected halt wording stays corrected"
+  else
+    bad "$(basename "$f"): the 'code fences' wording is back in the unwritable halt"
+  fi
+done
+for f in "$SMD" "$OMD"; do
+  c="$(count_joined_fixed 'a fenced run' "$f")"
+  if [ "$c" -eq 0 ]; then
+    ok "$(basename "$f"): the third fence spelling stays out"
+  else
+    bad "$(basename "$f"): 'a fenced run' is back — see the positive pins above for why a needle is not the gate"
+  fi
+done
+# Same guard for the earlier negative enumeration. It was neither a complete fatal set nor a safe
+# recovery rule: marker-specific `group_title` failures sat outside it. The needle is the FULL
+# parenthetical, not "backslash escapes" alone — the `present` halt below also names those words
+# and is pinned separately.
+#
+# Do NOT read that as an endorsement of the `present` halt's cause list. HTML entities do not break
+# target extraction in the measured modes, while backslash behavior depends on syntax and bracket
+# position. The present halt's stricter instruction still converges; this comment only prevents the
+# negative needle below from being mistaken for a claim that every named spelling caused that halt.
+for f in "$SMD" "$OMD"; do
+  c="$(count_joined_fixed 'give it a plain value (no Markdown markup, backslash escapes, HTML entities, HTML comments, backticks, or invisible line separators)' "$f")"
+  if [ "$c" -eq 0 ]; then
+    ok "$(basename "$f"): the retired unwritable-halt remedy list stays retired"
+  else
+    bad "$(basename "$f"): the retired unwritable-halt remedy list is back ($c occurrence(s))"
+  fi
+done
+
+# The `present` halt is a SHARED string. Both adapters must carry it byte-identically: an operator
+# reading either one is told the same thing, and a one-sided edit is exactly the twin drift this
+# suite exists to catch. Defined ONCE here so neither adapter can be the authority for the other.
+# Its recovery class is intentionally narrower than the #329 manual halt's class. Measured against
+# the real writer in both link modes and with each of `-`, `*`, and `+` as the next emitted child:
+# `Line<U+2028>Separator` and `Line<U+2029>Separator` satisfy the old "no markup/escapes/entities"
+# wording but return `unwritable/title` in all 12 cells. The positive class below converged in the
+# same matrix; it states that measured constraint instead of promising that the broader word
+# "plain" is sufficient. The #329 halt stays broader because its separately measured manual rows
+# all reached the next-run present branch (the separator rows proceeded as `unverifiable`).
+PRESENT_HALT="Chapter row for '<slug>' is already present under the '<group_title>' container bullet in <index_file>, but this run could not recognize it — the chapter's own title does not yield a resolvable link destination. For this recovery step, give the chapter a non-empty title in the manifest made only of Unicode letters and numbers, with words separated by single ASCII spaces. That constraint was verified across both link modes and all three bullet markers of the line being written. Then re-run; see \"Nested-list automation limits\" below."
+for f in "$SMD" "$OMD"; do
+  c="$(count_joined_fixed "$PRESENT_HALT" "$f")"
+  # EXACTLY one, not at-least-one. Measured: one copy per adapter today. `-ge 1` would silently
+  # accept a second copy — in a release whose entire subject is a duplicate that shipped green,
+  # and against this block's own claim that the halt is defined once. Matches the uniqueness pins
+  # elsewhere in this file, which all use -eq 1.
+  if [ "$c" -eq 1 ]; then
+    ok "$(basename "$f"): carries the shared 'present' halt verbatim, exactly once"
+  else
+    bad "$(basename "$f"): shared 'present' halt count drifted from 1 (got $c — missing, altered, or duplicated)"
+  fi
+done
+# The `present` halt names only manifest- and profile-derived values (<slug>, <group_title>,
+# <index_file>), and deliberately does NOT quote back the row it found: that text is INDEX content,
+# and interpolating it into a halt is the halt-text injection shape recorded as an open follow-up.
+#
+# The pin below is a no-NEW-SITE count, not a ban, and the distinction is the honest part. Each
+# adapter already carries FOUR `<found_title>` occurrences — the misplaced-halt string and its
+# "(none)" explanation, one such pair in the grouped branch and one in the flat branch — and that
+# placeholder DOES interpolate index content. Those sites are pre-existing and out of scope here; a
+# pin asserting zero would be a false claim about the file, and "fixing" them to satisfy it would be
+# an unreviewed change to shipped halt wording. So the count is pinned at its measured value: adding
+# a new interpolation site goes red, removing one goes red too (deliberate — retiring one is a real
+# change that belongs in a release note).
+#
+# Sites are described by their CONTENT, not by line number, on purpose: the count is the pin, and
+# the halt string is enough to find them. A line number in a file this size rots on the next edit.
+FOUND_TITLE_SITES=4
+for f in "$SMD" "$OMD"; do
+  c="$(count_joined_fixed '<found_title>' "$f")"
+  if [ "$c" -eq "$FOUND_TITLE_SITES" ]; then
+    ok "$(basename "$f"): no new found-row interpolation site ($c, the pre-existing misplaced-halt pairs)"
+  else
+    bad "$(basename "$f"): found-row interpolation sites changed ($c, expected $FOUND_TITLE_SITES)"
+  fi
+done
+
+echo "== #329 convergent halt strings and the inconsistent halt — exact, derived from the adapters =="
+# #329 TWO-BRANCH halt. The convergent halt BEGINS with the plain 1.10.0 halt and then continues,
+# and `has` is a line-based fixed-string grep — so a needle carrying only the plain text also
+# matches the CONVERGENT line, and would stay green if the fallback branch were deleted outright:
+# the pin meant to guard the fallback would guard nothing. Each branch therefore gets a needle the
+# other cannot satisfy — the fallback needles below include the closing delimiter, which the
+# convergent line does not carry at that point because it continues past "then re-run.".
+# The delimiter is backslash-escaped because these needles must be double-quoted (they contain
+# single quotes), and inside double quotes a bare backtick would open command substitution.
+# Measured when wired: each needle matches exactly ONE line in its adapter (the plain branch), and
+# the convergent line is excluded.
+has "static-md: #329 fallback keeps the UNCHANGED 1.10.0 halt (no convergent suffix)" \
+  "Index <index_file> is not a headings-form file — add a '<group_title>' container and the chapter line for '<slug>' manually, then re-run.\`" "$SMD"
+has "obsidian-vault: #329 fallback keeps the UNCHANGED 1.10.0 halt (no convergent suffix)" \
+  "Index <index_file> is not a headings-form file — add a '<group_title>' container and the chapter line for '<slug>' manually, then re-run.\"" "$OMD"
+
+echo "== #329 step-4 disclosure paragraph — maintained in parallel across both adapters =="
+# The step-4 limits paragraph is maintained in PARALLEL across both adapters. Its shared claims are
+# pinned per-adapter below, so a one-sided edit fails loudly — that is the invariant. Byte-equality
+# is NOT the invariant and must not be asserted: the closing headings-branch disclosure deliberately
+# differs, because each adapter cross-references its own section by name. A maintainer told the
+# paragraph was byte-identical would "fix" that difference, or add an equality check that fails at
+# once.
+# Why it is pinned at all: this is the paragraph review kept refuting — an unconditional convergence
+# promise, then "never produces a false completion", then a bounded axis count, then a safety claim
+# that quantified over the untouched headings branch. An un-synced edit would leave one adapter
+# promising what the other had already withdrawn, with nothing red.
+# No counts pinned in this comment (byte-identical / synced-N-times / round-N tallies) — counts go
+# stale the moment a sibling commit in the same round changes what they claim to measure; what is
+# left is the invariant above, which does not.
+# round-13 (ALSO item): GATE_CONSTRUCTION_LIMIT used to be matched with plain `has` (line-based),
+# and obsidian-vault.md kept a short orphan line ("...recognized on its own —") solely so the
+# sentence would land on its own physical line rather than wrap naturally at the house ~95-column
+# width — a rewrap the adapters' owner is holding on this exact conversion. Converted to
+# has_joined_in_section, exactly like the two GATE_SAFETY needles below, so the sentence can be the
+# whole phrase regardless of where the file wraps it, freeing the owner to rewrap the orphan away.
+# Verified wrap-independence the same way GATE_SAFETY was verified: reshaped in a scratch copy
+# (split mid-sentence at a different column) — the old `has` form failed, has_joined_in_section
+# still passed.
+GATE_CONSTRUCTION_LIMIT='it proves nothing about the real index, because it never reads the real index'
+# House style hard-wraps, so the sentence spans two physical lines and `has` is line-based: its
+# two halves need separate needles. That split is substantive, not clerical — round 4 refuted
+# this claim in its UNSCOPED form, so the scoping half is the half that makes it true.
+GATE_SAFETY_SCOPE='scoped to what this PR governs: on the non-heading branch above'
+GATE_SAFETY_STATEMENT='never lets a MISPLACED row complete silently when it can verify placement'
+has_joined_in_section "static-md: step-4 states the gate's limit BY CONSTRUCTION" \
+  "$SMD" '### Grouped index wiring (`anyGroup` manifests only)' "$GATE_CONSTRUCTION_LIMIT"
+has_joined_in_section "obsidian-vault: step-4 states the gate's limit BY CONSTRUCTION" \
+  "$OMD" '## INDEX wiring (do all of these on every chapter create/update)' "$GATE_CONSTRUCTION_LIMIT"
+# GATE_SAFETY_SCOPE/GATE_SAFETY_STATEMENT are ONE sentence the house wrap breaks differently per
+# file (round-13 CORRECTED — the comment here had the two files BACKWARDS: it said "~101 columns in
+# static-md.md; a 34-column orphan fragment in obsidian-vault.md". Measured, not assumed: it is the
+# other way around — obsidian-vault.md states the whole "scoped to ... branch above," opening on
+# ONE ~102-column physical line, while static-md.md's own opening line is the short "**The honest
+# safety statement," orphan (34 columns) with the rest of the sentence continuing below it. Whoever
+# "fixed" the wrap by that description would have edited the wrong file) — a `has` (line-based) pin
+# on either half is only as stable as that wrap point, and it broke three times this round. Do not
+# re-derive this from a specific line number: the adapters are actively edited and line numbers
+# drift; re-grep 'scoped to what this PR governs' in both files to re-verify before trusting either
+# column count again. has_joined_in_section collapses the
+# section's whitespace before matching, so the needle can be the whole phrase again regardless of
+# where the adapter wraps it. Each adapter's safety sentence sits under a DIFFERENT heading
+# (verified against the shipped files, not assumed identical): static-md.md nests it under the
+# anyGroup-only subsection; obsidian-vault.md has no such subsection and states it directly under
+# the top-level index-wiring section. Trade-off: joined matching cannot detect that the sentence
+# was split across a PARAGRAPH boundary (a wording regression that inserted a blank line
+# mid-sentence would still read as present) — acceptable here because the two needles already pin
+# the sentence's two HALVES independently, and a paragraph split would still have to land inside
+# the same section to pass at all.
+has_joined_in_section "static-md: step-4 SCOPES the safety statement to this PR's branch" \
+  "$SMD" '### Grouped index wiring (`anyGroup` manifests only)' "$GATE_SAFETY_SCOPE"
+has_joined_in_section "static-md: step-4 carries the narrowed safety statement" \
+  "$SMD" '### Grouped index wiring (`anyGroup` manifests only)' "$GATE_SAFETY_STATEMENT"
+has_joined_in_section "obsidian-vault: step-4 SCOPES the safety statement to this PR's branch" \
+  "$OMD" '## INDEX wiring (do all of these on every chapter create/update)' "$GATE_SAFETY_SCOPE"
+has_joined_in_section "obsidian-vault: step-4 carries the narrowed safety statement" \
+  "$OMD" '## INDEX wiring (do all of these on every chapter create/update)' "$GATE_SAFETY_STATEMENT"
+# The scoping is only honest if the OTHER branch is named. Round 4 refuted the unscoped claim
+# ("this branch never silently completes") with a frontmatter block whose body carries a heading:
+# that lands on the untouched headings branch, which completes with neither verification nor
+# confirmation. Pin the disclosure too, or a later edit could keep the narrow claim and drop the
+# admission that makes it narrow.
+HEADINGS_BRANCH_DISCLOSURE='The headings branch is unchanged by this PR and already completes silently'
+has "static-md: step-4 names the unchanged headings-branch gap"      "$HEADINGS_BRANCH_DISCLOSURE" "$SMD"
+has "obsidian-vault: step-4 names the unchanged headings-branch gap" "$HEADINGS_BRANCH_DISCLOSURE" "$OMD"
+# HIGH 4 (round-13): the two `has` pins above need only ONE hit each, but static-md.md carries this
+# sentence TWICE — the primary statement plus a cross-reference elsewhere that quotes it verbatim
+# ("see '...' above ... for that gap's own description") — while obsidian-vault.md carries it once.
+# Measured wrap-safe (count_joined_fixed, whitespace-collapsed — the cross-reference itself wraps
+# across a line break, so a naive `grep -oF | wc -l` undercounts it same as `has` does). Deleting
+# static-md.md's PRIMARY statement would leave the cross-reference's quoted copy behind, and the
+# plain `has` pins above would stay green throughout — the defect the primary statement discloses
+# would silently return with the suite still fully green. Pinning the occurrence COUNT (2 for
+# static-md.md, 1 for obsidian-vault.md, re-verify both before trusting either number again — the
+# adapters are actively edited) makes that deletion fail loudly instead.
+SMD_HEADINGS_DISCLOSURE_COUNT="$(count_joined_fixed "$HEADINGS_BRANCH_DISCLOSURE" "$SMD")"
+if [ "$SMD_HEADINGS_DISCLOSURE_COUNT" -eq 2 ]; then
+  ok "static-md: unchanged headings-branch gap occurs exactly twice (primary statement + cross-reference)"
+else
+  bad "static-md: unchanged headings-branch gap occurrence count drifted from 2 (found $SMD_HEADINGS_DISCLOSURE_COUNT) — the primary statement or its cross-reference may have been deleted"
+fi
+OMD_HEADINGS_DISCLOSURE_COUNT="$(count_joined_fixed "$HEADINGS_BRANCH_DISCLOSURE" "$OMD")"
+if [ "$OMD_HEADINGS_DISCLOSURE_COUNT" -eq 1 ]; then
+  ok "obsidian-vault: unchanged headings-branch gap occurs exactly once (no cross-reference copy)"
+else
+  bad "obsidian-vault: unchanged headings-branch gap occurrence count drifted from 1 (found $OMD_HEADINGS_DISCLOSURE_COUNT)"
+fi
+#
+# Pinned as EXACT strings so that wording drift is caught rather than absorbed. These began as
+# the strings settled during plan review; 1.11.0 CORRECTED them, so what is pinned now is the
+# corrected wording and no longer matches the plan-review text — which is why the pins are
+# regenerated FROM the adapter bytes rather than retyped from the plan.
+#
+# This comment's own prose has now been measured false TWICE, in OPPOSITE directions — recorded so
+# a future round does not overcorrect back toward either one:
+#   - The plan-review text promised, UNCONDITIONALLY, that a left-margin row "is reported as
+#     misplaced on the next run" for any row at all. That over-promises: containerOwnerScan runs
+#     isPlainLabel on every indent-0 label including the row's own, and a row whose label still
+#     carries live Markdown rendering (an unescaped ampersand, real emphasis, a genuine backtick
+#     span, …) fails that check — the whole scan then declines with not-a-list, which
+#     verifyNonHeadingPlacement reports as `unverifiable`, never `misplaced`.
+#   - The revision written to fix that swung the other way: it split on whether the row's RAW
+#     source characters are plain, and claimed markup that breaks the row's own target extraction
+#     reaches a mandatory `inconsistent` halt. Both claims were measured false. isPlainLabel is
+#     checked against the row's DECODED label for a MARKDOWN-LINK row (parseNestedLabel's mdlink
+#     branch calls decodeMarkdownEscapes on the label before the check runs), not its raw
+#     characters, so a title like `A\.B` — non-plain in raw form — decodes to the plain `A.B` and
+#     IS reported misplaced in path mode; the rule is about the rendered label, never the source
+#     spelling. That decode step is MODE-ASYMMETRIC, though (round 11, measured by the title-shape
+#     matrix in chapter-paths.test.mjs): parseNestedLabel's wikilink branch never calls
+#     decodeMarkdownEscapes on the alias, so the SAME `A\.B` title stays non-plain (its literal
+#     backslash survives) and is `unverifiable` instead in wikilink mode — "escape-decoded" is a
+#     path-mode-only fact, not a property of the rule in general. And `inconsistent` is not
+#     reachable through either shipped adapter's call site at all: verifyNonHeadingPlacement
+#     re-derives its match count via locateChapterLine using the exact arguments the caller already
+#     used to decide the line was present (chapter-paths.mjs) — a >1 match halts earlier in step 0,
+#     a 0 match routes to the line-absent branch, so the verifier's own `matches.length !== 1` rule
+#     is a fail-closed guard against an internal contradiction, not a branch any real index file
+#     reaches from here.
+# The rule, stated once, plainly: a left-margin row is reported MISPLACED exactly when its
+# extracted label is plain in the same sense `group_title` must be — escape-decoded for a
+# markdown-link row, but compared in its raw, UNDECODED form for a wikilink alias (mode-asymmetric,
+# see above); a row whose (decoded-or-raw, per mode) label still carries live Markdown markup is
+# left `unverifiable` instead (left unverified, not caught); `inconsistent` covers an internal
+# contradiction, not a markup shape a caller can trigger. Do NOT "restore" the plan-review text's
+# unconditional promise, do not re-add the raw-characters split or the reachable-`inconsistent`-via-
+# markup claim, and do not flatten the decode step back to "escape-decoded" without the path/
+# wikilink qualifier — all three were tried here in turn, and all three were measured false.
+#
+# The old undifferentiated pin for the base 1.10.0 halt text (a plain `has` on the bare sentence,
+# no closing-delimiter anchor) is GONE on this branch, not merely holding alongside these: a
+# fixed-string `has` on that sentence also matches the convergent line's own prefix, so it could
+# never have told the two branches apart once the convergent continuation existed. It is replaced
+# by the delimiter-anchored fallback pins above ("#329 fallback keeps the UNCHANGED 1.10.0 halt (no
+# convergent suffix)"), which prove the un-extended text survives byte-for-byte; the two pins below
+# prove the convergent branch's own continuation was added on top of it. Do not reintroduce an
+# undelimited pin for the base sentence — it would silently stop discriminating the two branches
+# again.
+has "static-md: #329 convergent path-mode halt, exact string" \
+  'Index <index_file> is not a headings-form file — add a '\''<group_title>'\'' container and the chapter line for '\''<slug>'\'' manually, then re-run. The next run recognizes the chapter line as a Markdown list row INDENTED TWO SPACES under the '\''<group_title>'\'' container bullet, whose link destination is exactly '\''<index_relative_path>'\'' — that is, a '\''- '\'' + group_title line followed by a '\''  - ['\'' + title + '\''](<'\'' + path + '\''>)'\'' line, with the destination inside angle brackets and any '\'']'\'' in the title escaped as '\''\]'\''. Give the row a plain title — no Markdown markup, backslash escapes, or HTML entities in it — or the next run may not be able to confirm its placement; see "Nested-list automation limits" below for exactly what is recognized.' "$SMD"
+has "obsidian-vault: #329 convergent wikilinks-mode halt, exact string" \
+  'Index <index_file> is not a headings-form file — add a '\''<group_title>'\'' container and the chapter line for '\''<slug>'\'' manually, then re-run. The next run recognizes the chapter line as a Markdown list row INDENTED TWO SPACES under the '\''<group_title>'\'' container bullet, whose wikilink target is exactly '\''<index_relative_target>'\'' — that is, a '\''- '\'' + group_title line followed by a '\''  - [['\'' + target + '\''|'\'' + title + '\'']]'\'' line; a Markdown link whose destination is that target plus '\''.md'\'' is recognized too. Give the row a plain title — no Markdown markup, backslash escapes, or HTML entities in it — or the next run may not be able to confirm its placement; see "Nested-list automation limits" below for exactly what is recognized.' "$OMD"
+has "obsidian-vault: #329 convergent path-mode halt, exact string" \
+  'Index <index_file> is not a headings-form file — add a '\''<group_title>'\'' container and the chapter line for '\''<slug>'\'' manually, then re-run. The next run recognizes the chapter line as a Markdown list row INDENTED TWO SPACES under the '\''<group_title>'\'' container bullet, whose link destination is exactly '\''<index_relative_target>'\'' — that is, a '\''- '\'' + group_title line followed by a '\''  - ['\'' + title + '\''](<'\'' + target + '\''>)'\'' line, with the destination inside angle brackets and any '\'']'\'' in the title escaped as '\''\]'\''. Give the row a plain title — no Markdown markup, backslash escapes, or HTML entities in it — or the next run may not be able to confirm its placement; see "Nested-list automation limits" below for exactly what is recognized.' "$OMD"
+# ONE string covers both causes of `inconsistent` (zero matches and more than one), so nothing is
+# substituted beyond the slug and the file.
+has "static-md: inconsistent halt, one string for both causes" \
+  'Chapter '\''<slug>'\'' does not resolve to exactly one line in <index_file> — curate the index manually, then re-run.' "$SMD"
+has "obsidian-vault: inconsistent halt, one string for both causes" \
+  'Chapter '\''<slug>'\'' does not resolve to exactly one line in <index_file> — curate the index manually, then re-run.' "$OMD"
+
+echo "== BLOCKER 2(a) (round-13): obsidian-vault's grouped PATH-MODE two-or-more-matches halt =="
+# obsidian-vault.md's grouped Step 0 runs the two-or-more-matches halt TWICE with the identical
+# wording — once on the NEW path-mode single-target scan (the sentence that makes `inconsistent`
+# unreachable from a real call site in path mode), and once on the pre-existing wikilinks-mode
+# union scan's `duplicate` outcome. Before this round, every "appears multiple times" pin in this
+# suite targeted static-md.md only (which has no wikilinks mode, hence no second copy) — nothing
+# proved the path-mode copy exists at all. Because the two copies are byte-identical text, a plain
+# `has`/`has_in_section` pin cannot tell "both present" from "only the old wikilinks one survived":
+# delete the path-mode copy and a presence-only pin stays green forever. Pin the OCCURRENCE COUNT
+# instead (2, not merely >=1), plus a placement bound proving the FIRST copy sits before the
+# wikilinks-mode union-scan branch begins — the path-mode copy is the earlier one in file order.
+OMD_DUPLICATE_HALT="Chapter '<slug>' appears multiple times in <index_file> — curate the index manually, then re-run."
+OMD_DUP_COUNT="$(count_fixed "$OMD_DUPLICATE_HALT" "$OMD")"
+OMD_UNION_SCAN_ANCHOR='Wikilinks mode instead runs a **union scan**'
+L_UNION_SCAN="$(line_of "$OMD_UNION_SCAN_ANCHOR" "$OMD")"
+L_DUP_FIRST="$(line_of "$OMD_DUPLICATE_HALT" "$OMD")"
+if [ "$OMD_DUP_COUNT" -eq 2 ] && [ -n "$L_UNION_SCAN" ] && [ -n "$L_DUP_FIRST" ] && [ "$L_DUP_FIRST" -lt "$L_UNION_SCAN" ]; then
+  ok "obsidian-vault: the grouped PATH-MODE two-or-more-matches halt is pinned distinctly from the pre-existing wikilinks-mode one (occurs twice total, first copy at line=$L_DUP_FIRST, before the union-scan branch at line=$L_UNION_SCAN)"
+else
+  bad "obsidian-vault: grouped path-mode duplicate-halt pin FAILED (count=$OMD_DUP_COUNT, first-line=$L_DUP_FIRST, union-scan-anchor=$L_UNION_SCAN) — the round-11 path-mode halt may have been deleted, leaving only the older wikilinks-mode copy"
+fi
+
+echo "== BLOCKER 2(b) (round-13): the plain-label predicate paragraph + its table, per adapter =="
+# "The plain-label predicate, named exactly." paragraph and its measurement table (obsidian-vault.md
+# / static-md.md, "Nested-list automation limits") had NO pin at all before this round, unlike the
+# step-4 disclosure paragraph beside it (GATE_CONSTRUCTION_LIMIT/GATE_SAFETY_*/HEADINGS_BRANCH_
+# DISCLOSURE above), which is pinned per-adapter precisely so a one-sided edit fails loudly. Pinning
+# the INVARIANT part only — the two sentences below are verified byte-identical (whitespace
+# collapsed) across both adapters today, so a single needle covers both, the same discipline
+# CLASS_SENTENCE above uses for a verbatim-shared sentence. The wording AROUND them differs per
+# adapter (Obsidian- vs browser-specific asides, an extra Mode column in obsidian-vault.md's table)
+# and is deliberately NOT pinned here — asserting it would either duplicate CLASS_SENTENCE-style
+# brittleness for no shared benefit, or force byte-identity where none is intended.
+WHOLE_SCAN_ABORT_SENTENCE="and it applies this check to EVERY indent-0 bullet in the file, not only the row under test: a single non-plain indent-0 label anywhere in the file declines the WHOLE scan (\`{kind: 'not-a-list'}\`), so an otherwise-clean 'Admin' container elsewhere in the file cannot rescue a badly-labelled row sitting at the left margin."
+MARGIN_FIXTURE_CAPTION="Measured for a row sitting AT THE LEFT MARGIN alongside a clean, correctly-formed 'Admin' container elsewhere in the same file"
+has_joined_in_section "static-md: plain-label predicate — whole-scan-abort invariant sentence" \
+  "$SMD" '### Nested-list automation limits' "$WHOLE_SCAN_ABORT_SENTENCE"
+has_joined_in_section "obsidian-vault: plain-label predicate — whole-scan-abort invariant sentence" \
+  "$OMD" '### Nested-list automation limits' "$WHOLE_SCAN_ABORT_SENTENCE"
+has_joined_in_section "static-md: plain-label predicate table — margin+other-container fixture caption" \
+  "$SMD" '### Nested-list automation limits' "$MARGIN_FIXTURE_CAPTION"
+has_joined_in_section "obsidian-vault: plain-label predicate table — margin+other-container fixture caption" \
+  "$OMD" '### Nested-list automation limits' "$MARGIN_FIXTURE_CAPTION"
+# The table itself (not just its caption): "absent at step 0" is the distinctive verdict text for
+# the nested-link/reference-link/unescaped-bracket rows and appears ONLY in this table, nowhere else
+# in either file's prose — proving it survives under the section proves the table survives, not
+# merely the surrounding paragraph. obsidian-vault.md carries it twice (one row per mode); static-md
+# carries it once (path mode only, no wikilinks mode) — this asymmetry is itself worth guarding, so
+# the count is asserted exactly rather than as a bare presence check.
+SMD_TABLE_ROW_COUNT="$(count_fixed 'absent at step 0' "$SMD")"
+if [ "$SMD_TABLE_ROW_COUNT" -eq 1 ]; then
+  ok "static-md: plain-label predicate table survives (1 'absent at step 0' row, path-mode only)"
+else
+  bad "static-md: plain-label predicate table row count drifted from 1 (found $SMD_TABLE_ROW_COUNT)"
+fi
+OMD_TABLE_ROW_COUNT="$(count_fixed 'absent at step 0' "$OMD")"
+if [ "$OMD_TABLE_ROW_COUNT" -eq 2 ]; then
+  ok "obsidian-vault: plain-label predicate table survives (2 'absent at step 0' rows, path + wikilinks mode)"
+else
+  bad "obsidian-vault: plain-label predicate table row count drifted from 2 (found $OMD_TABLE_ROW_COUNT)"
+fi
 
 TOTAL=$((PASS + FAIL))
 echo "----"

@@ -860,9 +860,10 @@ function collectContainerHeadings(sanitizedLines) {
   return headings;
 }
 
-// R5-F1/F2: the SHARED headings-form classifier — locateChapterLine's `indexForm` field and
-// findContainer's non-heading branch key on the EXACT same logic, over the EXACT same sanitized
-// view, so the two functions can never disagree about what kind of file they're looking at.
+// R5-F1/F2: the SHARED headings-form classifier — every caller keys on the EXACT same logic, over
+// the EXACT same sanitized view (today: `locateChapterLine`'s `indexForm` field and
+// `findContainer`'s non-heading branch), so no two callers, however many there are, can ever
+// disagree about what kind of file they're looking at.
 // Headings-form iff the sanitized text has at least one depth >= 2 heading AND no YAML-mapping
 // structure outside frontmatter (R3-F2(b)) — an inert `## Secondary navigation` inside a YAML
 // comment or fenced block never counts either way, since it was already blanked before this runs.
@@ -919,20 +920,49 @@ function foldTargetForMatch(target, wikilink) {
  * a divergent path-mode line stays unmatched, so step 0 appends the canonical row and RETAINS the
  * divergent one alongside it (append-and-retain) — the link-integrity gate does not reject it).
  *
+ * The sanitized view `locateChapterLine` scans — name-the-expression pattern (§5, 1.11.0):
+ * extracted verbatim from `locateChapterLine` below, so the one expression has exactly one
+ * implementation and is directly unit-testable in isolation. That is what this export buys, stated
+ * as an invariant rather than a caller count (round-3 review: a prior wording named
+ * `locateChapterLine` as the "only" caller, which a later, unrelated fix to a second function made
+ * false): whatever needs this sanitized view reaches it by calling this function, never by
+ * re-deriving the expression inline — true regardless of how many callers exist or which functions
+ * they are. (The extraction itself changed nothing; `locateChapterLine`'s return shape later gained
+ * `index` on each match record, #330 round-2 review — additive, not "no change": the `.d.mts`
+ * publishes the field. Nothing broke because no consumer treats the record as a CLOSED shape —
+ * every one reads the fields it needs and ignores the rest, so an additive field is invisible to
+ * all of them. That is the durable statement; the enumeration this sentence used to carry ("reads
+ * `.length`, filters on `.containerTitle`, or reads `.index`") was already incomplete when written,
+ * since `obsidian-vault.md` reads `matches[0].line`. Note it was itself a correction of an earlier
+ * stale claim: a fix can be born stale, so a consumer census is worth no more than a caller one.)
+ * The present-line placement verifier (`verifyNonHeadingPlacement`, #330) reaches the same view
+ * transitively, by delegating to `locateChapterLine` itself for its match indices, not by calling
+ * this export directly — an earlier revision did call it directly and re-implemented
+ * `locateChapterLine`'s match loop alongside it, which review caught as the second recognizer this
+ * pattern exists to prevent.
+ *
  * @param {string[]} indexLines
- * @param {string} expectedTarget
- * @param {{wikilink?: boolean}} [options]
- * @returns {{present: boolean, containerTitle: string|null, multiple: boolean, indexForm: 'headings'|'non-heading', matches: Array<{line: string, containerTitle: string|null}>}}
+ * @returns {string[]}
  */
-export function locateChapterLine(indexLines, expectedTarget, options = {}) {
-  const { wikilink = false } = options;
-  const wanted = foldTargetForMatch(expectedTarget, wikilink);
+export function indexView(indexLines) {
   // R4-F2: sanitize the WHOLE index text (not line-by-line — an inert region can itself span
   // multiple lines) through the shared stripper BEFORE any per-line processing, so a row sitting
   // inside an HTML comment or a fenced code block can never report present:true (a false
   // completion — the wiring is declared done when it never actually happened). join/split on '\n'
   // round-trips exactly because stripInertContexts preserves every newline unmodified.
-  const sanitizedLines = stripInertContexts(indexLines.join('\n')).split('\n');
+  return stripInertContexts(indexLines.join('\n')).split('\n');
+}
+
+/**
+ * @param {string[]} indexLines
+ * @param {string} expectedTarget
+ * @param {{wikilink?: boolean}} [options]
+ * @returns {{present: boolean, containerTitle: string|null, multiple: boolean, indexForm: 'headings'|'non-heading', matches: Array<{index: number, line: string, containerTitle: string|null}>}}
+ */
+export function locateChapterLine(indexLines, expectedTarget, options = {}) {
+  const { wikilink = false } = options;
+  const wanted = foldTargetForMatch(expectedTarget, wikilink);
+  const sanitizedLines = indexView(indexLines);
   const indexForm = classifyIndexForm(sanitizedLines);
   const matches = [];
   let containerTitle = null;
@@ -956,8 +986,12 @@ export function locateChapterLine(indexLines, expectedTarget, options = {}) {
     const targets = extractLineTargets(line);
     if (targets.some((t) => foldTargetForMatch(t, wikilink) === wanted)) {
       // Report the ORIGINAL (unsanitized) line text — `matches[].line` is diagnostic/halt
-      // output, and a reader must see the real file content, never a blanked stand-in.
-      matches.push({ line: indexLines[index], containerTitle });
+      // output, and a reader must see the real file content, never a blanked stand-in. `index`
+      // is this match's position into `indexView(indexLines)` (1.11.0 #330 review fix): the
+      // present-line placement verifier needs a line INDEX (for its frontmatter-span check and
+      // its container-walk lookup) that this return shape did not carry before — adding it here
+      // let the verifier delegate to this loop instead of running a second, parallel one.
+      matches.push({ index, line: indexLines[index], containerTitle });
     }
   }
 
@@ -1049,8 +1083,8 @@ export function classifyChapterWiring(qualifiedTarget, legacyBareTarget, qScan, 
  *         | {kind: 'non-heading'}}
  */
 export function findContainer(indexLines, groupTitle) {
-  const wanted = String(groupTitle).trim();
-  const sanitizedLines = stripInertContexts(indexLines.join('\n')).split('\n');
+  const wanted = containerLabelKey(groupTitle);
+  const sanitizedLines = indexView(indexLines);
   if (classifyIndexForm(sanitizedLines) === 'non-heading') return { kind: 'non-heading' };
   const headings = collectContainerHeadings(sanitizedLines);
 
@@ -1225,22 +1259,23 @@ function isBarePathBullet(marker, info) {
 }
 
 /**
- * Nested-list grouped index wiring, ABSENT-line path only. Pure: returns the fully-mutated index
- * line array; the runtime persists it. Reached only when findContainer(...) === {kind:'non-heading'}
- * AND step-0 found no existing line. Idempotency is the CALLER's guarantee (step-0 runs first); this
- * is a pure transform with no internal membership check. NEVER mutates the input array; NEVER moves/
- * deletes an existing line (insert-only).
+ * §5.1 steps 1-3 and 5-6 (1.11.0 #330 extraction): the writer's own line-preparation pass, lifted
+ * out of wireNestedListChapter so the present-line placement verifier can share it rather than
+ * re-implement it — a second recognizer is exactly the drift the delegation design exists to
+ * prevent. PRIVATE — not exported, so it stays free to change; the writer consumes every
+ * emission-relevant field below and ignores `span`. `leadingFrontmatterSpan` below is this call's
+ * one designated public window — by design kept to `{kind, span}` and reached by tests alone, so
+ * this function's other fields never become a compatibility obligation.
  *
- * @param {string[]} indexLines  index file split on '\n' (a CRLF file leaves a trailing '\r' per elem)
- * @param {string}   groupTitle  entry's current group_title (trimmed for comparison)
- * @param {string}   chapterLink the fully-formatted, MODE-CORRECT link the adapter already uses for
- *                               this profile ('[Items](admin/items.md)' path mode; '[[admin/items|Items]]'
- *                               wikilink mode). OPAQUE: this fn owns list STRUCTURE, caller owns link FORMAT.
- * @returns {{kind:'inserted', created:boolean, newLines:string[]}
- *         | {kind:'multiple', matches:Array<{index:number, label:string}>}
- *         | {kind:'not-a-list'}}
+ * Deliberately does NOT run step 4 (the groupTitle/chapterLink embedded-newline guard) — that
+ * guard reads arguments this helper never receives, so it stays in the writer.
+ *
+ * @param {string[]} indexLines
+ * @returns {{kind: 'not-a-list'}
+ *         | {kind: 'ok', logical: string[], eol: '\n'|'\r\n', hadTerminalNewline: boolean,
+ *            span: {start: 0, endExclusive: number} | null, body: string[]}}
  */
-export function wireNestedListChapter(indexLines, groupTitle, chapterLink) {
+function prepareIndexLines(indexLines) {
   // §5.1 step 1-3: undo the runtime split, detect the EOL, and split logically on it.
   const original = indexLines.join('\n');
   // A lone '\r' not part of a '\r\n' pair (old-Mac EOL, or a stray '\r') ⇒ not a list.
@@ -1248,17 +1283,13 @@ export function wireNestedListChapter(indexLines, groupTitle, chapterLink) {
   const isCRLF = original.includes('\r\n');
   // Mixed EOL: after removing every CRLF, a surviving '\n' means bare-LF lines coexist with CRLF.
   if (isCRLF && original.replace(/\r\n/g, '').includes('\n')) return { kind: 'not-a-list' };
-  const EOL = isCRLF ? '\r\n' : '\n';
+  const eol = isCRLF ? '\r\n' : '\n';
 
-  const rawLines = original.split(EOL);
+  const rawLines = original.split(eol);
   const hadTerminalNewline = rawLines.length > 0 && rawLines[rawLines.length - 1] === '';
   // The content lines, guaranteed '\r'-free (split on the detected EOL). Never mutated — every
   // emission below is built from fresh slice/concat arrays, so indexLines is never touched.
   const logical = hadTerminalNewline ? rawLines.slice(0, -1) : rawLines;
-
-  // §5.1 step 4: validateGroups permits a multiline group_title/link; embedding a '\r'/'\n' would
-  // inject a foreign physical line the validator itself would reject — refuse rather than corrupt.
-  if (/[\r\n]/.test(groupTitle) || /[\r\n]/.test(chapterLink)) return { kind: 'not-a-list' };
 
   // §5.1 step 5: blank a leading frontmatter block, with a robust column-0 closer (an EXACT,
   // untrimmed '---'/'...' — an indented '  ---' inside a block scalar is scalar content, NOT the
@@ -1266,12 +1297,14 @@ export function wireNestedListChapter(indexLines, groupTitle, chapterLink) {
   // here, BEFORE the sanitizer, also stops a backtick inside YAML scalar content from being misread
   // by stripInertContexts (which has no frontmatter awareness, :675-731).
   let fm = logical;
+  let span = null;
   if (logical[0] === '---') {
     let j = 1;
     while (j < logical.length && logical[j] !== '---' && logical[j] !== '...') j += 1;
     if (j >= logical.length) return { kind: 'not-a-list' }; // unclosed frontmatter
     fm = logical.slice();
     for (let x = 0; x <= j; x += 1) fm[x] = '';
+    span = { start: 0, endExclusive: j + 1 };
   }
 
   // §5.1 step 6 — the load-bearing R3 fix: refuse any file carrying an HTML comment / fenced block /
@@ -1283,31 +1316,72 @@ export function wireNestedListChapter(indexLines, groupTitle, chapterLink) {
   for (let i = 0; i < fm.length; i += 1) {
     if (SAN[i] !== fm[i]) return { kind: 'not-a-list' };
   }
-  const BODY = fm;
 
-  // Immediate guards on BODY.
-  // YAML: MkDocs `nav:` / `- key: value` mapping structure (frontmatter already blanked).
-  if (hasYamlMappingStructure(BODY)) return { kind: 'not-a-list' };
-  const wanted = String(groupTitle).trim();
-  // Plain-label allowlist on the group_title (both sides — §5.1): a construct-bearing title could
-  // emit a container that render-collides with an existing plain one, or fail to match one.
-  if (!isPlainLabel(wanted)) return { kind: 'not-a-list' };
+  return { kind: 'ok', logical, eol, hadTerminalNewline, span, body: fm };
+}
 
-  // §5.1 single forward pass over BODY.
+/**
+ * The exported NARROW projection of prepareIndexLines — `{kind, span}` only, so it stays a test
+ * seam without publishing `logical`/`eol`/`hadTerminalNewline` (the writer's emission internals) as
+ * a compatibility obligation. Reached by tests alone: every production caller needing this
+ * preparation state calls the private `prepareIndexLines` directly instead, whoever they are —
+ * this narrow shape deliberately withholds the fields their emission logic needs.
+ *
+ * @param {string[]} indexLines
+ * @returns {{kind: 'not-a-list'} | {kind: 'ok', span: {start: 0, endExclusive: number} | null}}
+ */
+export function leadingFrontmatterSpan(indexLines) {
+  const prep = prepareIndexLines(indexLines);
+  if (prep.kind === 'not-a-list') return { kind: 'not-a-list' };
+  return { kind: 'ok', span: prep.span };
+}
+
+/**
+ * §5.1 single forward pass over BODY (1.11.0 #330 extraction): the writer's own container-
+ * resolution scan, lifted UNCHANGED out of wireNestedListChapter — including its `!sawTop`
+ * conclusion and the `childIndent` normalization, so the helper produces its own complete,
+ * declared record rather than a partial one the caller must finish. PRIVATE: there must be
+ * exactly ONE implementation of this scan, so the #330 verifier shares it rather than
+ * re-implementing the `currentContainer` loop (scan-logic drift is exactly the risk sharing only
+ * the prepared BODY array would leave open).
+ *
+ * Total over the forward pass's OWN rejections only — not the pre-loop BODY guards
+ * (hasYamlMappingStructure, isPlainLabel(wanted)), which the caller has already run by the time
+ * this is called.
+ *
+ * `ownerOf`/`ownerLabelOf` are new: `ownerOf[i]` is the owning container's BODY index when line
+ * `i` is a child bullet, `-1` when line `i` is itself an indent-0 bullet (a container is not its
+ * own child), and unset for any other line (blank, or already refused above this call). Every
+ * owner is recorded with its container's own UNTRIMMED parsed label — never a re-derivation —
+ * because `containers` records only indent-0 bullets whose label equals `wanted`, so a mismatched
+ * container's own label would otherwise be lost (round-22 HIGH).
+ *
+ * @param {string[]} body
+ * @param {string} wanted  the trimmed group_title the caller is resolving a container for
+ * @returns {{kind: 'not-a-list'}
+ *         | {kind: 'ok', containers: Array<{index:number, label:string, marker:string}>,
+ *            childIndent: number, firstTopMarker: string|null, lastBulletIndex: number,
+ *            ownerOf: Array<number|undefined>, ownerLabelOf: Array<string|undefined>}}
+ */
+function containerOwnerScan(body, wanted) {
   let sawTop = false;
   let currentContainer = null; // index of the last indent-0 bullet; reset by any heading
+  let currentContainerLabel = null; // that bullet's own untrimmed parsed label
   let childIndentSeen = null; // C: the file's single child indent, if any child bullet exists
   let firstTopMarker = null; // marker of the FIRST indent-0 bullet (used on ZERO create)
   let lastBulletIndex = -1; // greatest index that is any bullet (indent 0 or child)
   const containers = []; // indent-0 bullets whose extracted label === wanted
+  const ownerOf = new Array(body.length);
+  const ownerLabelOf = new Array(body.length);
 
-  for (let i = 0; i < BODY.length; i += 1) {
-    const line = BODY[i];
+  for (let i = 0; i < body.length; i += 1) {
+    const line = body[i];
     if (line.trim() === '') continue; // blank line — tolerated inside/between regions
 
     // 1. ATX heading — allowed; ends any open list region.
     if (NESTED_ATX_HEADING_RE.test(line)) {
       currentContainer = null;
+      currentContainerLabel = null;
       continue;
     }
     // 2. Thematic break at ANY indent (on the trimmed line) — before the bullet branch, because
@@ -1331,6 +1405,8 @@ export function wireNestedListChapter(indexLines, groupTitle, chapterLink) {
       if (!isPlainLabel(info.label)) return { kind: 'not-a-list' };
       sawTop = true;
       currentContainer = i;
+      currentContainerLabel = info.label;
+      ownerOf[i] = -1;
       if (firstTopMarker === null) firstTopMarker = marker;
       lastBulletIndex = i;
       if (info.label === wanted) containers.push({ index: i, label: info.label, marker });
@@ -1345,18 +1421,140 @@ export function wireNestedListChapter(indexLines, groupTitle, chapterLink) {
         return { kind: 'not-a-list' }; // a second, distinct child indent
       }
       lastBulletIndex = i;
+      ownerOf[i] = currentContainer;
+      ownerLabelOf[i] = currentContainerLabel;
     }
   }
 
   if (!sawTop) return { kind: 'not-a-list' };
 
-  // §5.4 resolution + EOL-faithful emission. A file with no child bullet anywhere defaults C = 2
-  // (GitBook-standard, within the 2..4 cap); every accepted bullet has a single-space marker, so a
-  // container's content column is indent+2 and a child at C in [2,4] is always a valid sublist.
+  // §5.4 resolution: a file with no child bullet anywhere defaults C = 2 (GitBook-standard,
+  // within the 2..4 cap); every accepted bullet has a single-space marker, so a container's
+  // content column is indent+2 and a child at C in [2,4] is always a valid sublist.
   const childIndent = childIndentSeen === null ? 2 : childIndentSeen;
-  const emit = (outLogical, created) => {
+
+  return { kind: 'ok', containers, childIndent, firstTopMarker, lastBulletIndex, ownerOf, ownerLabelOf };
+}
+
+// The single normalization every caller must apply to a manifest group_title before comparing it
+// against a container's own label — deriving it here means the same group_title can never be
+// compared under two different spellings, however many callers there are (round-3 review: an
+// earlier wording named exactly two callers and was already under-inclusive by the time it was
+// reviewed). Review flagged an un-shared, independently duplicated `.trim()` at each comparison
+// site as exactly that seam: it is one `.trim()` today, but if the normalization ever gained a step
+// (NFC, inner-whitespace collapse) an un-shared copy would keep the old spelling and start emitting
+// false verdicts, with nothing going red.
+//
+// What the key is compared AGAINST is call-path-specific, not a property of this function —
+// whatever comparison paths exist, each still derives its `group_title`-side key from here. Two
+// paths exist today, illustrating the point rather than exhausting it: `containerOwnerScan`'s
+// `ownerLabelOf` (the nested-list writer/verifier path), and `collectContainerHeadings`' headings-form
+// container titles (the `findContainer` path, `:858`). The headings side is trimmed.
+//
+// `ownerLabelOf` is trimmed on the RAW and WIKILINK branches but NOT on `mdlink`, and the difference
+// is easy to misread: `parseNestedLabel` trims the bullet's CONTENT at `:1143`, then the mdlink branch
+// returns the link TEXT slice verbatim (`:1189`), so `- [ Admin ](admin.md)` yields ' Admin '.
+// Measured, all three container spellings against `group_title: 'Admin'`:
+//     `- Admin  `                -> ok          (raw, trimmed)
+//     `- [[admin| Admin ]]`      -> ok          (wikilink, trimmed)
+//     `- [ Admin ](admin.md)`    -> misplaced, foundContainer ' Admin '   (mdlink, NOT trimmed)
+// That asymmetry is deliberate and load-bearing (round-18 HIGH): the writer reads the same label, so
+// trimming it here would accept a container the writer itself treats as absent. It is pinned by the
+// rule-5 UNTRIMMED test in chapter-paths.test.mjs — check that test before "simplifying" this.
+function containerLabelKey(groupTitle) {
+  return String(groupTitle).trim();
+}
+
+/**
+ * Nested-list grouped index wiring, ABSENT-line path only. Pure: returns the fully-mutated index
+ * line array; the runtime persists it. Reached only when findContainer(...) === {kind:'non-heading'}
+ * AND step-0 found no existing line. NEVER mutates the input array; NEVER moves/deletes an existing
+ * line (insert-only).
+ *
+ * Step 0 is the caller's IDEMPOTENCY guarantee, and it is not sufficient when a row's link text
+ * defeats its target parse. When the child row this function emits uses `-`, an insert-only
+ * transform that trusted step 0 would append that same target-breaking link on every publish; the
+ * literal `present` check below bounds that case. With a `*`/`+` child carrying a grouped target,
+ * the re-read postcondition refuses the raw-fallback row before it is written instead. The marker
+ * is the new row's (`childMarkerUsed`), not a property of the file or necessarily of its container.
+ * The literal check deliberately does NOT reuse step 0's target parse, since sharing that parse
+ * would reproduce the `-` child blind spot; it can also return `present` for an ordinary exact link
+ * when this function is called directly.
+ *
+ * @param {string[]} indexLines  index file split on '\n' (a CRLF file leaves a trailing '\r' per elem)
+ * @param {string}   groupTitle  entry's current group_title (trimmed for comparison)
+ * @param {string}   chapterLink the fully-formatted, MODE-CORRECT link the adapter already uses for
+ *                               this profile ('[Items](admin/items.md)' path mode; '[[admin/items|Items]]'
+ *                               wikilink mode). OPAQUE: this fn owns list STRUCTURE, caller owns link FORMAT.
+ * @returns {{kind:'inserted', created:boolean, newLines:string[]}
+ *         | {kind:'present', index:number}
+ *         | {kind:'unwritable', field:'title'|'group_title'|'unknown'}
+ *         | {kind:'multiple', matches:Array<{index:number, label:string}>}
+ *         | {kind:'not-a-list'}}
+ */
+export function wireNestedListChapter(indexLines, groupTitle, chapterLink) {
+  // §5.1 step 4: validateGroups permits a multiline group_title/link; embedding a '\r'/'\n' would
+  // inject a foreign physical line the validator itself would reject — refuse rather than corrupt.
+  if (/[\r\n]/.test(groupTitle) || /[\r\n]/.test(chapterLink)) return { kind: 'not-a-list' };
+
+  // §5.1 steps 1-3 and 5-6, shared with the #330 verifier via the same private call.
+  const prep = prepareIndexLines(indexLines);
+  if (prep.kind === 'not-a-list') return { kind: 'not-a-list' };
+  const { logical, eol: EOL, hadTerminalNewline, body: BODY } = prep;
+
+  // Immediate guards on BODY.
+  // YAML: MkDocs `nav:` / `- key: value` mapping structure (frontmatter already blanked).
+  if (hasYamlMappingStructure(BODY)) return { kind: 'not-a-list' };
+  const wanted = containerLabelKey(groupTitle);
+  // Plain-label allowlist on the group_title (both sides — §5.1): a construct-bearing title could
+  // emit a container that render-collides with an existing plain one, or fail to match one.
+  if (!isPlainLabel(wanted)) return { kind: 'not-a-list' };
+
+  // §5.1 single forward pass over BODY, shared with the #330 verifier via the same private scan.
+  const scan = containerOwnerScan(BODY, wanted);
+  if (scan.kind === 'not-a-list') return { kind: 'not-a-list' };
+  const { containers, childIndent, firstTopMarker, lastBulletIndex } = scan;
+
+  // §5.4 EOL-faithful emission, gated by a RE-READ POSTCONDITION [1.11.0].
+  //
+  // The writer used to emit whatever the caller's chapterLink and group_title produced, with a
+  // plain-label check on the container label and none at all on the child row. A manifest value that
+  // is legal everywhere upstream — a backtick run, an HTML comment, a U+2028, a `Token:` prefix,
+  // a run of hyphens, a `/` on a line emitted with `*`/`+` — therefore got written into a file that was clean a
+  // moment earlier, and THIS SAME SCANNER refused that file on every later run: nested-list
+  // automation died for every chapter and every group in it, permanently, and the operator saw only
+  // the generic manual halt naming no row.
+  //
+  // So the postcondition is not a list of forbidden characters — enumerating the scanner's rules
+  // here would be a second copy that drifts, and a copy of a rule cannot notice a rule it never
+  // copied. It RUNS the real gates over the real bytes about to be persisted: if our own reader
+  // would reject what our own writer is about to hand back, we hand back nothing.
+  const rereadRejects = (candidateLines) => {
+    const re = prepareIndexLines(candidateLines);
+    if (re.kind === 'not-a-list') return true;
+    if (hasYamlMappingStructure(re.body)) return true;
+    return containerOwnerScan(re.body, wanted).kind === 'not-a-list';
+  };
+
+  // Attribution, computed only on the failure path: swap ONE emitted line for a known-recognizable
+  // stand-in and re-read. If that clears the rejection, that line is the culprit — which tells the
+  // caller which MANIFEST FIELD to name in its halt. Derived by substitution rather than by parsing
+  // the value, so it stays correct for causes nobody has found yet.
+  const blame = (outLogical, emitted) => {
+    for (const { index, standIn, field } of emitted) {
+      const probe = outLogical.slice();
+      probe[index] = standIn;
+      const probeOut = probe.join(EOL) + (hadTerminalNewline ? EOL : '');
+      if (!rereadRejects(probeOut.split('\n'))) return field;
+    }
+    return 'unknown';
+  };
+
+  const emit = (outLogical, created, emitted) => {
     const out = outLogical.join(EOL) + (hadTerminalNewline ? EOL : '');
-    return { kind: 'inserted', created, newLines: out.split('\n') };
+    const newLines = out.split('\n');
+    if (rereadRejects(newLines)) return { kind: 'unwritable', field: blame(outLogical, emitted) };
+    return { kind: 'inserted', created, newLines };
   };
 
   if (containers.length >= 2) {
@@ -1378,6 +1576,37 @@ export function wireNestedListChapter(indexLines, groupTitle, chapterLink) {
       }
       const bm = line.match(NESTED_BULLET_RE);
       if (bm && bm[1].length === childIndent) {
+        // Membership on the bullet's CONTENT, compared verbatim against the link the caller is
+        // asking us to write. Content rather than the whole line, so a re-indented OR re-markered row
+        // still counts as present — measured: a `-` file whose child row an operator re-markered to
+        // `*` or `+` still answers `present`.
+        //
+        // Independently, and easy to conflate with the above: a `*`/`+` bullet whose content is a
+        // BARE PATH is refused by isBarePathBullet (`:1257`, which requires `info.kind === 'raw'`)
+        // before this walk runs, so such a file answers `not-a-list`. That is a marker x raw-content
+        // rule, not a re-markering rule — a re-markered row carrying a normal link never reaches it.
+        //
+        // This guard is therefore MARKER-SCOPED, and the markers differ in the OUTCOME, not in the
+        // diagnostics. Measured with a title carrying an unescaped `]` (the case this guard exists
+        // for), emitted as `[Items]Beta](admin/items-beta.md)`: when the new child marker is `-`,
+        // run 1 inserts, run 2 answers `present`, and exactly one row exists. When it is `*`/`+`, the emitted row's raw
+        // text carries a path separator, so the re-read postcondition above (`rereadRejects`)
+        // refuses the bytes and EVERY run answers `unwritable`/`title` — nothing is written, and an
+        // unrelated chapter in an unrelated group on that same untouched file still answers
+        // `inserted`. This guard decides nothing there: it finds no match, and the refusal happens
+        // afterwards, at emit.
+        //
+        // The whole-file lockout is HISTORICAL rather than gone: on an index a 1.10.0 publish
+        // already wrote such a `*`/`+` row into, isBarePathBullet fires on the row now ON DISK, so
+        // containerOwnerScan answers `not-a-list` before this walk ever runs — for every chapter and
+        // every group in the file, permanently (measured; the corresponding `-` row is unaffected). The
+        // postcondition keeps NEW files out of that state; it cannot repair one already in it. No
+        // wording here should imply this guard bounds either case.
+        //
+        // `present` is a REQUIREMENT on a PUBLISH-PATH caller, not a description of one: halt and
+        // tell the operator, never retry. The in-module probe caller (verifyNonHeadingPlacement) is
+        // deliberately exempt — see the `present` contract in chapter-paths.d.mts for both halves.
+        if (bm[3] === chapterLink) return { kind: 'present', index: i };
         insertAt = i + 1;
         childMarker = bm[2];
         i += 1;
@@ -1388,8 +1617,14 @@ export function wireNestedListChapter(indexLines, groupTitle, chapterLink) {
     // Reuse the existing children's marker so the inserted line stays in the SAME list block
     // (CommonMark starts a new list on a marker change); a container with no existing child has
     // no sibling marker to match, so fall back to the container's own marker (first-ever child).
-    const childLine = ' '.repeat(childIndent) + (childMarker ?? containerMarker) + ' ' + chapterLink;
-    return emit(logical.slice(0, insertAt).concat([childLine], logical.slice(insertAt)), false);
+    const childMarkerUsed = childMarker ?? containerMarker;
+    const childLine = ' '.repeat(childIndent) + childMarkerUsed + ' ' + chapterLink;
+    return emit(logical.slice(0, insertAt).concat([childLine], logical.slice(insertAt)), false, [
+      // Only the child row is new here, so it is the only line that can be blamed. The stand-in is a
+      // minimal row this scanner is known to accept, so a clean re-read means the real line's own
+      // content — i.e. the chapter's manifest title — is what the reader rejected.
+      { index: insertAt, standIn: ' '.repeat(childIndent) + childMarkerUsed + ' [x](x.md)', field: 'title' },
+    ]);
   }
 
   // ZERO — create a bare-label container + child spliced immediately after the last bullet. The
@@ -1401,6 +1636,14 @@ export function wireNestedListChapter(indexLines, groupTitle, chapterLink) {
   return emit(
     logical.slice(0, lastBulletIndex + 1).concat([containerLine, childLine], logical.slice(lastBulletIndex + 1)),
     true,
+    // TWO new lines here, so blame must distinguish them. Container first: a container line that the
+    // reader refuses (a bare-path shape on a `*`/`+` marker, a `Token:` prefix, a run of hyphens)
+    // makes the child's own indent meaningless, so attributing to `group_title` is both the earlier
+    // cause and the one whose repair fixes the other.
+    [
+      { index: lastBulletIndex + 1, standIn: firstTopMarker + ' x', field: 'group_title' },
+      { index: lastBulletIndex + 2, standIn: ' '.repeat(childIndent) + firstTopMarker + ' [x](x.md)', field: 'title' },
+    ],
   );
 }
 
@@ -1847,4 +2090,106 @@ export function chapterHasWikilinkTo(chapterText, slug, oldChapterRelPath) {
     if (isComponentSuffixMatch(targetComponents, oldComponents)) return true;
   }
   return false;
+}
+
+// #330 — the fixed probe link the shape-recognition predicate below emits (and discards).
+//
+// [1.11.0] The round-9 justification for this constant said any newline-free chapterLink is
+// accept/decline-equivalent, because the writer read chapterLink ONLY for embedded newlines and for
+// emission. The membership guard added in 1.11.0 makes that false: chapterLink is now also compared
+// against existing child bullets. So the probe's value IS observable — an index that already carries
+// a row whose bullet content equals this exact string makes the writer answer `present` instead of
+// `inserted`. Reproduced, not hypothesised. Rule 4 below therefore accepts BOTH outcomes explicitly:
+// both mean "the writer recognized this shape and resolved exactly one container", which is the only
+// question rule 4 asks, and the probe's emission is discarded either way.
+const NON_HEADING_PLACEMENT_PROBE_LINK = '[probe](__verify-non-heading-placement-probe__.md)';
+
+/**
+ * #330 — present-line placement verification for the nested-list index form. Five-rule decision
+ * table, first applicable rule wins (rules 1-2 decide on MATCH CARDINALITY alone, so rules 3-5 are
+ * reached only for a file holding exactly one selected-target match):
+ *   1. zero selected-target matches                          -> inconsistent (fail-closed)
+ *   2. more than one selected-target match                   -> inconsistent
+ *   3. the single match lies inside the leading-frontmatter span -> unverifiable
+ *   4. the writer's own predicate declines the shape (not-a-list/multiple) -> unverifiable
+ *   5. otherwise, compare the container the writer itself resolved -> ok / misplaced
+ *
+ * `selectedTarget` is the target the CALLER already selected (the Obsidian adapter's union scan
+ * over the qualified/legacy-bare spellings picks one before placement checking) — using it, not a
+ * bare expected target, lets a legitimately-present legacy row verify instead of a false
+ * `inconsistent`.
+ *
+ * Shape recognition (rule 4) is DELEGATED to the writer's own `wireNestedListChapter` predicate
+ * (fixed probe link, emission discarded) rather than re-implemented — a from-scratch YAML/nav
+ * detector is measurably holed (e.g. `- Admin :` vs a real YAML parser's key), so the writer's own
+ * accepted class is the only sound source of truth. The container walk (rule 5) runs over the
+ * WRITER's own prepared BODY via the shared `containerOwnerScan`, never over `indexView` — the two
+ * arrays have distinct, deliberate jobs: matches come from `indexView` because the verifier must
+ * see exactly what the caller saw; the container walk runs over BODY because it must decide exactly
+ * what the writer decided (a `not-a-list` match is impossible for the walk to see: BODY is
+ * sanitization-stable and index-aligned with `indexView` on every file that reaches rule 5).
+ *
+ * @param {string[]} indexLines
+ * @param {string} selectedTarget
+ * @param {string} groupTitle
+ * @param {{wikilink?: boolean}} [options]
+ * @returns {{kind: 'ok'}
+ *         | {kind: 'misplaced', foundContainer: string|null}
+ *         | {kind: 'inconsistent'}
+ *         | {kind: 'unverifiable'}}
+ */
+export function verifyNonHeadingPlacement(indexLines, selectedTarget, groupTitle, options = {}) {
+  const { wikilink = false } = options;
+
+  // Rules 1-2: cardinality alone, fail-closed. A contradiction (the caller reported present, the
+  // verifier finds zero or several matches for the SAME selected target) is worth a manual halt
+  // regardless of file shape. Match indices come straight from locateChapterLine's own loop —
+  // never re-derive them with a second match loop over indexView (round-2 review: an earlier
+  // revision did exactly that, re-implementing locateChapterLine's loop line-for-line, and was
+  // caught as the second recognizer this design exists to prevent).
+  const { matches } = locateChapterLine(indexLines, selectedTarget, { wikilink });
+  if (matches.length !== 1) return { kind: 'inconsistent' };
+  const matchIndex = matches[0].index;
+
+  // Evaluation-order precondition, not a sixth rule: `prepareIndexLines` can refuse a file that
+  // still holds exactly one match (e.g. a lone stray '\r') — reading `span`/`body` off a refusal
+  // would destructure fields that do not exist. The writer would refuse the SAME file at rule 4
+  // anyway, so this adds no row to the table.
+  const prep = prepareIndexLines(indexLines);
+  if (prep.kind === 'not-a-list') return { kind: 'unverifiable' };
+
+  // Rule 3: a match inside a leading frontmatter block is never verified — the writer's own BODY
+  // blanks frontmatter while `indexView` does not (the shipped 1.10.0 disagreement, filed as #337),
+  // so a present match there cannot be soundly judged either way.
+  if (prep.span !== null && matchIndex >= prep.span.start && matchIndex < prep.span.endExclusive) {
+    return { kind: 'unverifiable' };
+  }
+
+  // Rule 4: shape recognition, delegated. `groupTitle` is the real value (its own newline guard
+  // must fire identically to the writer's); only `chapterLink` is replaced with a fixed probe.
+  const shapeVerdict = wireNestedListChapter(indexLines, groupTitle, NON_HEADING_PLACEMENT_PROBE_LINK);
+  // Written as a positive accept-list, not as a negative decline-list. The negative form silently
+  // acquired a third accepted outcome when 1.11.0 added `present`, and nothing went red; a future
+  // outcome must fail this gate until someone decides it belongs here.
+  if (shapeVerdict.kind !== 'inserted' && shapeVerdict.kind !== 'present') return { kind: 'unverifiable' };
+
+  // Rule 5: the container comparison, via the writer's own shared scan. Structurally, `scan.kind`
+  // cannot be 'not-a-list' here — an `inserted` or `present` shapeVerdict already proves the writer's
+  // own internal containerOwnerScan(prep.body, wantedLabel) call succeeded on this exact body/label
+  // (prepareIndexLines is pure, so the writer's internal call reproduces the same `prep.body`) —
+  // but the branch stays, matching this file's own style of checking every `{kind, ...}` result
+  // rather than trusting an invariant, and failing toward the safe direction (unverifiable costs
+  // only verification; never a false `ok`) if it were ever wrong.
+  const wantedLabel = containerLabelKey(groupTitle);
+  const scan = containerOwnerScan(prep.body, wantedLabel);
+  if (scan.kind === 'not-a-list') return { kind: 'unverifiable' };
+
+  const owner = scan.ownerOf[matchIndex];
+  if (owner === -1 || owner === undefined) return { kind: 'misplaced', foundContainer: null };
+  // The writer's own parsed label, reused rather than re-derived, so the verifier can never disagree
+  // with the writer about what a container is called. NEVER re-trim it here — see the trimming note
+  // above containerLabelKey for which parse branches trim and why the mdlink one deliberately does not.
+  const ownerLabel = scan.ownerLabelOf[matchIndex];
+  if (ownerLabel === wantedLabel) return { kind: 'ok' };
+  return { kind: 'misplaced', foundContainer: ownerLabel };
 }
