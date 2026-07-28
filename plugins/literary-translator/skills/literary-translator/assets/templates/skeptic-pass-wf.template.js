@@ -347,8 +347,9 @@ function checkCommand(batch) {
 // count only ever counts VERDICT changes (skeptic_ready.py:740-741), and the
 // verdict does not change on that second pass, so it stays 0.
 //
-// Fixing that non-idempotence is OUT of scope for #352 and is filed
-// separately; what this comment must not do is keep asserting the opposite.
+// Fixing that non-idempotence is OUT of scope for #352, and it is NOT filed --
+// as of 1.16.2 no issue tracks it. What this comment must not do is keep
+// asserting the opposite of what the code does.
 // The practical consequence for THIS file is the discipline stated on
 // checkCommand() above and enforced at the wait site below: every splice of
 // the ACCEPT command runs it exactly once per decision, and a READY verdict
@@ -579,15 +580,46 @@ function sentinelVerdict(reply, okSentinel, failSentinel) {
   return lines[lines.length - 1] === okSentinel;
 }
 
+// Containment guard for the FAIL direction, ported into this template in
+// 1.16.2. Its body is pinned byte-identical to the copies in
+// mass-translate-wf.template.js and glossary-pass-wf.template.js; only this
+// comment is this file's own, because the call site it protects is.
+//
+// WHY sentinelVerdict() ALONE IS NOT ENOUGH HERE. That function recognises a
+// fail sentinel only when the sentinel is ALONE on its LF-delimited line after
+// trim(). Anything sharing that line -- a parenthetical, a trailing clause --
+// defeats the rejection while a later clean OK line still approves the reply.
+// The concrete divergence, measured against the glossary sibling before this
+// port: "PENDING 0 (not READY)\nREADY 0" read as READY here and as pending
+// there. That sits exactly on the false-GREEN boundary, and this template was
+// the permissive side.
+//
+// It matters MORE here than the single-reply arithmetic suggests. Before
+// 1.16.2 one reply per batch was read this way; #352 spends the wait across
+// WAIT_CALLS replies, so the same permissive read now gets up to three chances
+// per batch to manufacture a READY out of a reply that was reporting the
+// opposite.
+//
+// An empty or non-string failSentinel returns false rather than matching
+// everything: "".indexOf("") is 0, so an unguarded containment test would
+// reject every reply unconditionally.
+function rejectedAnywhere(reply, failSentinel) {
+  if (typeof failSentinel !== "string" || failSentinel.length === 0) return false
+  return String(reply == null ? "" : reply).indexOf(failSentinel) !== -1
+}
+
 // #352 -- the ONE reader of every wait reply at the wait site below, chunk and
 // re-check alike. Two verdicts only, because a skeptic wait chunk has only two
 // outcomes: this template dispatches codex through a direct agent() call rather
-// than a detached codex_job.py driver, so there is no fail sentinel for a chunk
-// to report (see batchWaitChunkPrompt()).
+// than a detached codex_job.py driver, so there is no third, driver-failure
+// token for a chunk to report (see batchWaitChunkPrompt()).
 //
-// "ready" is sentinelVerdict()'s own rule, used unchanged: no line of the reply
-// is a bare PENDING for this batch, AND the reply's LAST non-empty line is
-// exactly READY for this batch.
+// GUARD ORDER IS THE POINT, and it is the sibling templates' order exactly:
+// the PENDING guard runs FIRST and by CONTAINMENT, so a stray PENDING anywhere
+// in the reply biases AWAY from READY; only then is READY tested, by WHOLE-LINE
+// equality, so a READY can never be manufactured out of a mention. Asymmetric
+// on purpose -- the two directions have different costs, and the cheap one is
+// polling a little longer.
 //
 // EVERYTHING ELSE IS "pending", and that default is the load-bearing half. A
 // null reply, an unparseable one, or one from a chunk the tool killed mid-call
@@ -596,8 +628,20 @@ function sentinelVerdict(reply, okSentinel, failSentinel) {
 // terminal, so a single ambiguous reply ended the whole wait and lost the
 // batch; now it costs one chunk, the remaining chunks still poll, and the
 // authoritative re-check still runs at the end.
+//
+// KNOWN COLLISION, recorded rather than closed, and identical to the one the
+// glossary sibling documents: batch indices are bare integers, so one can
+// prefix another (1 / 10), and raw containment means "PENDING 10" trips batch
+// 1's guard. FALSE-RED ONLY -- READY stays whole-line, so no false green can
+// come of it -- and the same exposure already existed for TIMEOUT before
+// 1.16.2. Its cost is that batch 1 may abandon its remaining chunk budget
+// early; the authoritative re-check still runs, so a fragment that genuinely
+// landed is still found. Unreachable in practice: each wait agent's prompt
+// names only its own batch.
 function waitChunkVerdict(reply, index) {
-  return sentinelVerdict(reply, "READY " + index, "PENDING " + index) ? "ready" : "pending"
+  if (rejectedAnywhere(reply, "PENDING " + index)) return "pending"
+  if (sentinelVerdict(reply, "READY " + index, null)) return "ready"
+  return "pending"
 }
 
 // ---------------------------------------------------------------------------
@@ -666,10 +710,12 @@ async function batchStep(batch) {
   }
   // Every reply at this site -- chunk or re-check -- is read by
   // waitChunkVerdict() and nothing else; this call site deliberately does not
-  // re-implement any part of the reading. The #308 line-oriented properties it
-  // inherits from sentinelVerdict() are the same ones the precheck above
-  // relies on: a prose-decorated READY (sentinel as the reply's final line) is
-  // accepted, while "PENDING 0 (not READY)" is not.
+  // re-implement any part of the reading. Both of its guards matter here: the
+  // #308 whole-line READY test (inherited from sentinelVerdict(), so a
+  // prose-decorated READY with the sentinel as the reply's final line is
+  // accepted) and the containment PENDING guard ahead of it (so a glued
+  // "PENDING 0 (not READY)" still reads as pending even when a clean READY
+  // line follows it).
   if (verdict !== "ready") {
     log("batch " + batch.index + ": fragment never became ready")
     return { batchIndex: batch.index, fragmentPath: fragmentPath(batch.index), ready: false, reason: "skeptic-pass-null" }

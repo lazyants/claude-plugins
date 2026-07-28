@@ -1971,7 +1971,7 @@ def test_glossary_live_per_attempt_term_is_the_template_own_multiplier():
         f"constant was patched to silence a failure -- which is the move this test "
         f"exists to stop"
     )
-    assert "1 + (3 + WAIT_CALLS) * (MAX_CITATION_RETRIES + 1)" in text, (
+    assert " ".join("1 + (3 + WAIT_CALLS) * (MAX_CITATION_RETRIES + 1)".split()) in " ".join(text.split()), (
         f"the template's live perBatchCalls expression is no longer "
         f"`1 + (3 + WAIT_CALLS) * (MAX_CITATION_RETRIES + 1)`. An attempt now costs a "
         f"different number of calls than the {per_attempt} (dispatch 1 + wait "
@@ -2014,10 +2014,10 @@ def test_glossary_wait_calls_term_is_the_template_own_chunk_count():
     # The template must still compute it the same way, not merely happen to
     # agree at these values: a hard-coded `const WAIT_CALLS = 3` would satisfy
     # the arithmetic above and then silently stop tracking WAIT_CHUNK_SEC.
-    assert "const WAIT_CHUNKS = Math.ceil(WAIT_BOUND_SEC / WAIT_CHUNK_SEC)" in text, (
+    assert " ".join("const WAIT_CHUNKS = Math.ceil(WAIT_BOUND_SEC / WAIT_CHUNK_SEC)".split()) in " ".join(text.split()), (
         "the template no longer derives WAIT_CHUNKS from its own bound and chunk size"
     )
-    assert "const WAIT_CALLS = WAIT_CHUNKS + 1" in text, (
+    assert " ".join("const WAIT_CALLS = WAIT_CHUNKS + 1".split()) in " ".join(text.split()), (
         "the template no longer derives WAIT_CALLS as WAIT_CHUNKS + 1 (the chunks "
         "plus the one authoritative re-check)"
     )

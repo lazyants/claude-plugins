@@ -48,8 +48,10 @@ The offline move deserves its own note, because a shipped comment argued against
 comment held the offline branch byte-identical to the historical `3*BATCHES.length + 2` on the
 principle that "a preflight that refuses runs it should permit is a worse failure than one that is
 slightly loose". The principle is applied here, not abandoned: charging offline for a retry ladder
-it can NEVER execute would have been a false refusal, whereas the extra wait calls are work every
-offline run performs on every batch. Any project with a tuned `batch_agent_cap` can now be refused
+it can NEVER execute would have been a false refusal, whereas the extra wait calls are work an
+offline run CAN spend on any batch — unlike a ladder it can never enter at all. Worst case, not
+typical: a `READY` in the first chunk ends the wait at one call, and the estimator charges the
+ceiling because a preflight gate must. Any project with a tuned `batch_agent_cap` can now be refused
 with `reason:"batch-too-large"` in a mode that was previously unaffected.
 
 Documentation corrected where it was stronger than the code — the defect class 1.16.1 was also
@@ -69,15 +71,35 @@ made worse by this release: the loss completes at invocation 2, which happens on
 path, and the re-check this release adds is a later invocation against an already-stable value. The
 comment claiming the opposite does not ship.
 
-A shipped test now pins the wording this release retired: for each corrected site, the retired
-literal must be absent and its replacement present, matched over whole-file whitespace-normalized
-text against a FROZEN pre-release commit. Its guarantee is deliberately narrow and stated in its own
-docstring — it holds a fixed list of `(file, literal, count)` predicates, and does not claim that a
-stale claim cannot return in different words or in a file the list does not name.
+A shipped test now pins the wording this release retired: each retired literal must have occurred
+exactly once at a FROZEN pre-release commit and must occur zero times now, matched over whole-file
+whitespace-normalized text. The frozen baseline is a 40-hex SHA rather than `HEAD`, and the test
+asserts it is still an ANCESTOR of the current commit — a baseline that tracks `HEAD` inverts on the
+release commit and goes permanently red, and one that merely resolves survives a rebase that has
+already voided every row's provenance.
 
-Suite: 4178 → 4284 passed, 1 skipped, 2 xfailed. Every new gate was watched failing against the
-pre-fix tree first: 108 failures, all 108 inside the ten test files this release touches, zero
-outside them.
+Each row also pins the REPLACEMENT: the corrected wording must be present at its expected count,
+absent at the baseline, and — the part that makes the row mean something — present in the ADDED
+side of `git diff -U0 <baseline>` for that file. Without that hunk binding, an unrelated literal
+copied out of the current file carries a correct file-level count while the intended correction was
+never installed anywhere. One row of fourteen declares no one-to-one replacement, because its
+sentence was deleted rather than reworded; a separate assertion pins that count at exactly one, so
+the exemption is countable and widening it is a deliberate act.
+
+Its guarantee is deliberately narrow and stated in its own docstring: a fixed list of
+`(file, literal)` predicates, with no claim that a stale statement cannot return in different words
+or in a file the list does not name.
+
+Suite: 4178 → **4339 passed, 2 skipped, 2 xfailed**. Both skips are named rather than incidental:
+one pre-existing placeholder, and the pin row that declares no replacement.
+
+Every new gate was watched failing against the pre-fix tree first — and that evidence is
+EXECUTABLE rather than a claim in these notes. Four gates re-read both templates at a frozen
+pre-release SHA and assert they still fail there, so the #352 defect stays reproducible in CI
+instead of living only in a commit message. The frozen SHA matters: an earlier draft read `HEAD`,
+which was the pre-fix tree while this work was uncommitted and became the POST-fix tree the moment
+it was committed — at which point those four gates degraded from red evidence into silent skips,
+still green, reporting nothing.
 
 ## 1.16.1 — 2026-07-27
 

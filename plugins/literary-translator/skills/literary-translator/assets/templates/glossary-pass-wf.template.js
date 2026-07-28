@@ -1088,10 +1088,19 @@ const REPLY_LINE_BREAK = new RegExp("\\r\\n|[\\n\\r\\u2028\\u2029\\u0085]")
 // byte-for-byte across the three workflow templates and that parity is pinned
 // by tests/sentinel_verdict_parity.test.py (which pins the comment block too,
 // not just the body), so changing it here alone breaks the pin, and changing
-// all three to keep the pin would flip the mass-translate and skeptic bundle
-// hashes and falsify this release's own CHANGELOG promise that
-// skeptic-pass-wf.template.js is not touched and the skeptic resume domain is
-// unaffected.
+// all three to keep the pin would flip the mass-translate and glossary bundle
+// hashes -- both are cache_key.py PLUGIN_BUNDLE_MEMBERS entries, so that is a
+// forced re-translation, which is the cost worth avoiding.
+//
+// An earlier version of this passage gave a THIRD reason that was false twice
+// over: that the change would also flip the SKEPTIC bundle hash and break a
+// CHANGELOG promise that skeptic-pass-wf.template.js was untouched. That file is
+// not a PLUGIN_BUNDLE_MEMBERS entry at all, so editing it forces a fresh skeptic
+// RUN_ID but no re-translation; and 1.16.2 modified it substantially, so the
+// promise being invoked had already been spent by the release invoking it. The
+// surviving reasons above are checkable from this repo; the retired one rested
+// on a release-scope claim about another file, which is the one kind of reason
+// no reviewer of THIS file can ever see go stale.
 //
 // An earlier version of this comment justified leaving it alone with a
 // fail-safety claim -- "its behaviour on these characters is fail-safe in BOTH
@@ -1301,10 +1310,12 @@ function sentinelVerdict(reply, okSentinel, failSentinel) {
 // Done at the CALL SITES rather than inside sentinelVerdict() because that
 // function's body and comment are mirrored byte-for-byte across all three
 // workflow templates and pinned by tests/sentinel_verdict_parity.test.py.
-// Editing it would break the pin, flip the mass-translate and skeptic bundle
-// hashes, and falsify this release's CHANGELOG promise that
-// skeptic-pass-wf.template.js is untouched. Guarding outside it keeps all of
-// that intact, which is exactly why the fix lives here.
+// Editing it would break the pin and flip the mass-translate and glossary
+// bundle hashes -- both are cache_key.py PLUGIN_BUNDLE_MEMBERS entries, so it
+// would force a re-translation. Guarding outside it keeps all of that intact,
+// which is exactly why the fix lives here. (This passage also used to cite a
+// skeptic bundle hash and a CHANGELOG promise that the skeptic template was
+// untouched; both were false -- see the longer note above rejectionDetail().)
 //
 // THE COST, which is real and must not be hidden: containment is strictly
 // EASIER TO REJECT than whole-line equality. A reply that merely MENTIONS the
@@ -1512,9 +1523,28 @@ async function batchStep(batch) {
   // run: a reply merely MENTIONING "ABSENT <i>" while reporting the fragment
   // present just sends the batch down the ordinary dispatch path below instead
   // of resume-skipping it. See rejectedAnywhere()'s comment.
-  // NOTE: skeptic-pass-wf.template.js's batchStep precheck still mirrors this
-  // control flow but is deliberately NOT guarded -- this release's CHANGELOG
-  // promises that file is untouched, so the two intentionally diverge here.
+  // NOTE: skeptic-pass-wf.template.js's batchStep precheck mirrors this control
+  // flow. Whether it carries this containment guard is a fact about THAT file --
+  // read its own precheck, and never infer it from here.
+  //
+  // For the WAIT verdict -- not this precheck -- that agreement is ENFORCED
+  // rather than described: tests/rejected_anywhere_parity.test.py drives a table
+  // of reply shapes through all three templates' real waitChunkVerdict()
+  // functions and asserts they return identical verdicts, and separately asserts
+  // the skeptic template defines the guard helper at all. Cite that test, which
+  // fails loudly if it stops being true, rather than a remembered state.
+  //
+  // TWO EARLIER VERSIONS OF THIS NOTE WERE FALSE, in the same way, and the shape
+  // of the mistake is worth more than either correction. The first justified a
+  // divergence by what the release's CHANGELOG promised about the skeptic
+  // template. The second replaced that with a measured observation of what the
+  // skeptic template contained. Both read true when written and were false
+  // within the hour -- the second because a parallel change landed the guard
+  // there while this very comment was being edited. A claim about ANOTHER file
+  // rots by construction: no edit to THIS file can invalidate it, so neither
+  // this file's diff nor any reviewer reading this file will ever catch it going
+  // stale. Name a mechanism, or name a test that enforces the agreement; never
+  // record what another file currently contains.
   // 1.16.0 -- the resume-skip no longer RETURNS; it sets the state machine's
   // entry condition. This is the whole reason the citation review is a loop
   // with two entry points rather than a step bolted on after the wait: a

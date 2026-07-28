@@ -172,9 +172,11 @@ detached `codex_job.py` driver's own fail sentinel. **These waits have no
 equivalent and must not pretend to** — they poll a fragment on disk written by
 an agent, with no external driver to report its own failure.
 
-`PENDING` rather than `NOTREADY` is also deliberate: it keeps the option of
-guarding the `READY` direction by containment, and it avoids a reader-facing
-trap in which two of the vocabulary's tokens differ only by a prefix.
+`PENDING` rather than `NOTREADY` is also deliberate: guarding the `READY`
+direction by containment stays available under that spelling — and since
+**1.16.2** that option is TAKEN, not merely kept open, in every template — and
+it avoids a reader-facing trap in which two of the vocabulary's tokens differ
+only by a prefix.
 
 **Read the verdict in the right direction.** The parse is asymmetric on
 purpose: `PENDING {index}` is tested FIRST and by CONTAINMENT (a hit anywhere
@@ -183,6 +185,18 @@ equality. That is false-RED-only by construction — a stray mention of
 `PENDING` biases away from `READY`, and `READY` can never be manufactured by
 a reply that merely discusses it. A description that says "the reply is
 checked for `READY`" has the direction backwards.
+
+**All three templates now share that ordering**, which they did not before
+**1.16.2**: the skeptic pass read its wait through a bare whole-line
+`sentinelVerdict()` with no containment guard, so a reply of
+`PENDING 0 (not READY)` followed by a clean `READY 0` line resolved to
+`ready` there while resolving to `pending` in the glossary — the skeptic was
+the permissive side of a false-GREEN boundary. Porting `rejectedAnywhere()`
+into it closed that, and the two now return identical verdicts on that reply
+and on every other case in the guard's own test set. The stake rose with the
+chunking rather than staying flat: before 1.16.2 one reply per batch was read
+this way, and a wait now reads up to `WAIT_CALLS` of them, so a permissive
+parse would get three chances at the same batch instead of one.
 
 The re-check runs on exactly ONE condition: **the chunk loop ended with a
 verdict that is not `ready`** — the budget was spent, or a reply was ambiguous,
@@ -1116,4 +1130,4 @@ decision is reviewed BEFORE it is merged, never after.
 
 The skeptic pass is an **opt-in, advisory-only** addition (`glossary.skeptic_pass.enabled`, default `false`): a deterministic `suspicion_scan.py` surfaces structurally-risky canon entries (over-merge participants, offline-established entries, singletons, high-dispersion names, citation-only figures, near-spelling pairs, and a globally-capped sample), then a scoped codex pass -- cloning the glossary dispatch control flow, never its identity-decision authority -- is fed bounded, whole-block windows for each flagged entity and adversarially asked to find a contradicting sentence or a genuine homonym split. Its verdict schema (`skeptic-triage.schema.json`) can express only `adverse` / `propose_split` / `propose_rescope` / `insufficient_window` -- there is deliberately no confirmation value, and no freeze/merge reader ever opens the resulting `skeptic_triage.json`. Every actual confirmation still flows through the unchanged human/codex `canon_adjudications.json` / `canon_senses.json` paths. `skeptic_report.py` is a separate, read-only advisory command that renders `skeptic_triage.json` for a human reviewer (per-entity risk context, the verdict, a quote derived fresh from the stored offsets, and evidence coverage) -- it is not a gate, it never blocks, and it runs strictly after `canon_adjudication_audit.py`, which is unchanged byte-for-byte by the skeptic pass's presence (see `tests/audit_unchanged_regression.test.py`).
 
-Two scoping limits carry through to this reporting layer. First, **verse evidence stays block-only**: `evidence_verify` (and therefore any skeptic citation) can only authenticate an offset against `manifest.blocks{}`, never `verse.store[]` -- a citation whose window is an embedded-verse node can never byte-verify, so `skeptic_ready.py` DROPS it upstream and `skeptic_report.py` never needs to (and cannot) derive a quote from verse text. Dropping the citation is not the same as coercing the record, and the difference matters for what the report renders: `adverse`/`propose_rescope` lose their single required citation and the record really does coerce to `insufficient_window`, but a `propose_split` merely loses that referent and KEEPS its verdict as long as >=2 byte-verified referents survive, with `evidence_coverage` recording the partial count. Either way every referent the report can still see is block-anchored and byte-verified, which is what makes the quote derivation safe. Second, **`all_citation` is adapter-safe**: for `source.format` values with no configured citation-block-type set (i.e. anything other than `gutenberg_epub`/`plain_text` -- any `custom` adapter), the risk class is disabled fail-safe rather than guessed from tag spelling, annotated `citation_classification_unavailable` in the worklist; this never blocks the skeptic pass itself, it only means that one risk signal is honestly reported as unavailable for that project's format.
+Two scoping limits carry through to this reporting layer. First, **verse evidence stays block-only**: `evidence_verify` (and therefore any skeptic citation) can only authenticate an offset against `manifest.blocks{}`, never `verse.store[]` -- a citation whose window is an embedded-verse node can never byte-verify, so `skeptic_ready.py` DROPS it upstream and `skeptic_report.py` never needs to (and cannot) derive a quote from verse text. Dropping the citation is not the same as coercing the record, and the difference matters for what the report renders: `adverse`/`propose_rescope` lose their single required citation and the record really does coerce to `insufficient_window`, but a `propose_split` merely loses that referent and KEEPS its verdict as long as >=2 byte-verified referents survive. `evidence_coverage` does NOT durably record that pruning: `cited` is recomputed from the referent list as it stands at each invocation, and `--validate-fragment` rewrites the fragment in place, so a second validation of an already-pruned fragment yields `cited == verified` — and the normal path validates at least twice. Do not read a `2/2` here as proof nothing was dropped. Either way every referent the report can still see is block-anchored and byte-verified, which is what makes the quote derivation safe. Second, **`all_citation` is adapter-safe**: for `source.format` values with no configured citation-block-type set (i.e. anything other than `gutenberg_epub`/`plain_text` -- any `custom` adapter), the risk class is disabled fail-safe rather than guessed from tag spelling, annotated `citation_classification_unavailable` in the worklist; this never blocks the skeptic pass itself, it only means that one risk signal is honestly reported as unavailable for that project's format.

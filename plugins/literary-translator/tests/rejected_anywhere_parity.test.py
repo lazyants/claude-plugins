@@ -10,14 +10,34 @@ the rejection trigger while a trailing clean OK line approves the reply. The
 guard is applied at the CALL SITES precisely because ``sentinelVerdict`` itself
 must stay byte-identical across all three templates.
 
-TWO templates carry the guard -- ``glossary-pass-wf.template.js`` and
-``mass-translate-wf.template.js``. ``skeptic-pass-wf.template.js`` deliberately
-does NOT: it is outside this release's bundle-hash move (``cache_key.py``'s
-``PLUGIN_BUNDLE_MEMBERS`` lists the other two and never mentions skeptic), and
-adding it there would flip a hash this release promises is untouched. That
-asymmetry is checked below rather than merely described, so "skeptic was left
-out" stays a recorded decision instead of drifting into an oversight nobody
-can distinguish from one.
+ALL THREE templates carry the guard as of 1.16.2 (#352) --
+``mass-translate-wf.template.js``, ``glossary-pass-wf.template.js`` and
+``skeptic-pass-wf.template.js``.
+
+Until 1.16.2 skeptic did not, and this file asserted that absence as a
+deliberate decision. THE RATIONALE IT RECORDED WAS FALSE, and correcting it
+matters more than the flipped assertion does. It said guarding skeptic "would
+flip a bundle hash this release promises is untouched". Measured against the
+release: ``skeptic-pass-wf.template.js`` is indeed absent from ``cache_key.py``'s
+``PLUGIN_BUNDLE_MEMBERS`` (14 entries, none of them skeptic), so editing it
+triggers no re-translation -- but it IS inside the skeptic code closure, so it
+forces a fresh skeptic RUN_ID, and 1.16.2 changed 234 lines in that file
+anyway. The cost the docstring was protecting had already been paid by the same
+release that was invoking it as a reason not to pay it.
+
+What the unguarded skeptic copy actually cost, measured before the port: a
+``PENDING`` sentinel glued to prose by any non-newline character was overridden
+by a trailing ``READY`` in 6 of 6 probe characters for skeptic and 0 of 6 for
+glossary -- a false GREEN carrying an unproven fragment into the merge.
+
+So the check below is INVERTED rather than deleted: it now asserts the three
+copies AGREE. It is also strengthened from textual to BEHAVIOURAL, because
+text-identity is the weak form -- it cannot see two differently-written
+functions that behave the same, and more importantly it cannot see two
+call-sites that wire an identical guard differently. The parity run executes
+each template's REAL ``waitChunkVerdict()`` over one shared table of reply
+shapes and requires identical verdicts, with the glued-``PENDING`` case that
+was the real defect among them.
 
 WHY THIS FILE EXISTS AT ALL. Two independently-maintained copies of a security
 guard are worse than one: the copies can drift, and the weaker copy is then the
@@ -32,7 +52,10 @@ tests/frozen_input_path_state_parity.test.py).
 """
 from __future__ import annotations
 
+import json
 import re
+import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -91,18 +114,36 @@ def glossary_guard() -> str:
     )
 
 
-def test_rejected_anywhere_is_byte_identical_across_both_templates(mass_guard, glossary_guard):
-    """The whole point of this file: one guard, two copies, no drift.
+@pytest.fixture(scope="module")
+def skeptic_guard() -> str:
+    return extract_guard_function(
+        SKEPTIC_PASS_TEMPLATE.read_text(encoding="utf-8"), SKEPTIC_PASS_TEMPLATE
+    )
+
+
+def test_rejected_anywhere_is_byte_identical_across_all_three_templates(
+    mass_guard, glossary_guard, skeptic_guard
+):
+    """The whole point of this file: one guard, three copies, no drift.
 
     A divergence is invisible to every other test -- each template's own suite
     exercises only its own copy -- and the weaker copy would silently become the
-    one deciding whether a rejected verdict is honoured."""
-    assert mass_guard == glossary_guard, (
-        "mass-translate-wf.template.js's rejectedAnywhere() has drifted from "
-        "glossary-pass-wf.template.js's. Both templates guard sentinel sites with "
-        "this function and neither imports the other (standalone template files, "
-        "no runtime imports), so the two copies must stay byte-identical:\n\n"
-        f"mass-translate:\n{mass_guard}\n\nglossary-pass:\n{glossary_guard}"
+    one deciding whether a rejected verdict is honoured.
+
+    Extended from two copies to three in 1.16.2 (#352), which is exactly what
+    this test's own pre-1.16.2 sibling instructed whoever ported the guard into
+    skeptic to do."""
+    copies = {
+        MASS_TRANSLATE_TEMPLATE.name: mass_guard,
+        GLOSSARY_PASS_TEMPLATE.name: glossary_guard,
+        SKEPTIC_PASS_TEMPLATE.name: skeptic_guard,
+    }
+    assert len(set(copies.values())) == 1, (
+        "the templates' rejectedAnywhere() copies have drifted. All three guard "
+        "sentinel sites with this function and none imports another (standalone "
+        "template files, no runtime imports), so the copies must stay "
+        "byte-identical:\n\n"
+        + "\n\n".join(f"{name}:\n{text}" for name, text in copies.items())
     )
 
 
@@ -285,27 +326,133 @@ def test_mentioned_anywhere_delegates_instead_of_reimplementing_containment():
         f"{DELEGATOR}() must delegate to {GUARD_HELPER}() and do nothing else, so "
         f"containment -- including the empty/non-string sentinel guard that stops "
         f'"".indexOf("") === 0 from matching every reply -- has exactly ONE '
-        f"implementation. Its body is now:\n  " + "\n  ".join(body) + "\n"
-        f"A reimplementation here reopens runRound's DRAFT_MISSING gluing gap with "
-        f"the whole suite still green: no behavioural test drives that site."
+        "implementation. Its body is now:\n  " + "\n  ".join(body) + "\n"
+        "A reimplementation here reopens runRound's DRAFT_MISSING gluing gap with "
+        "the whole suite still green: no behavioural test drives that site."
     )
 
 
-def test_skeptic_template_deliberately_carries_no_guard():
-    """The asymmetry, checked rather than assumed.
+def test_skeptic_template_carries_the_guard_too():
+    """1.16.2 (#352): the asymmetry is gone, and its absence is now the thing
+    checked.
 
-    skeptic-pass-wf.template.js is outside this release's PLUGIN_BUNDLE_MEMBERS
-    hash move, so guarding it would flip a bundle hash the release states is
-    untouched. If the guard is ever added there, this test is the prompt to
-    re-price that decision and extend the parity check above to three copies --
-    it is NOT a reason to delete this test."""
+    This test used to assert the opposite. Inverting it rather than deleting it
+    keeps the decision recorded: if skeptic ever loses the guard again, the
+    reply shapes in the parity run below stop agreeing and BOTH tests report
+    it -- one structurally, one behaviourally."""
     source = SKEPTIC_PASS_TEMPLATE.read_text(encoding="utf-8")
-    assert GUARD_HELPER not in source, (
-        f"skeptic-pass-wf.template.js now mentions {GUARD_HELPER}. That is a "
-        f"deliberate scope change, not a routine edit: it moves a template that "
-        f"this release promises is untouched. Re-price the bundle-hash cost, then "
-        f"extend test_rejected_anywhere_is_byte_identical_across_both_templates to "
-        f"cover all three copies"
+    assert GUARD_HELPER in source, (
+        f"skeptic-pass-wf.template.js no longer defines {GUARD_HELPER}. Its "
+        f"waitChunkVerdict then falls back to sentinelVerdict's whole-line "
+        f"equality, and a PENDING sentinel sharing its line with prose is "
+        f"overridden by a trailing READY -- measured at 6 of 6 gluing characters "
+        f"before the guard was ported, against 0 of 6 for glossary. That is a "
+        f"false GREEN: an unproven fragment reaches the merge"
+    )
+
+
+# ---------------------------------------------------------------------------
+# BEHAVIOURAL parity: the three real waitChunkVerdict() functions, one shared
+# table of reply shapes, identical verdicts required.
+#
+# Strictly stronger than the text comparison above, and it is what would have
+# caught the skeptic divergence. Text identity of rejectedAnywhere() was TRUE of
+# mass-translate and glossary throughout, and told nobody that skeptic's wait
+# site never called it -- the drift was at the CALL SITE, which no comparison of
+# the helper's own bytes can reach.
+#
+# Executed rather than parsed, for the same reason the wait tests read emitted
+# prompts instead of helper arithmetic: a correct-but-uncalled guard is exactly
+# the shape that passes every structural check and ships the bug.
+# ---------------------------------------------------------------------------
+
+NODE = shutil.which("node")
+
+# `<idx>` is substituted with the batch index the verdict is asked about, so one
+# table drives all three templates whatever they call their index variable.
+PARITY_REPLY_SHAPES = {
+    "clean_ready": "READY <idx>",
+    "clean_pending": "PENDING <idx>",
+    "decorated_ready": "The poll confirmed the fragment (exit 0).\n\nREADY <idx>",
+    # THE DEFECT. A PENDING sentinel glued to prose by a non-newline character,
+    # with a trailing clean READY. Whole-line equality misses the PENDING; raw
+    # containment catches it. This row is the one that used to diverge.
+    "glued_pending_space": "the chunk was cut short PENDING <idx>\nREADY <idx>",
+    "glued_pending_tab": "the chunk was cut short\tPENDING <idx>\nREADY <idx>",
+    "glued_pending_cr": "the chunk was cut short\rPENDING <idx>\nREADY <idx>",
+    "glued_pending_nbsp": "the chunk was cut short\xa0PENDING <idx>\nREADY <idx>",
+    "glued_pending_zwsp": "the chunk was cut short​PENDING <idx>\nREADY <idx>",
+    "glued_pending_letter": "cut shortxPENDING <idx>\nREADY <idx>",
+    "fail_priority_lf": "PENDING <idx>\nREADY <idx>",
+    "quoted_disavowed_ready": (
+        "Quoting the requested success form:\nREADY <idx>\nThat is not my verdict."
+    ),
+    "other_batch_ready": "READY 7",
+    "empty": "",
+    "whitespace_only": "   \n\n  ",
+    "tool_killed": "Exit code 143\nCommand timed out after 10m 0s",
+    "unparseable": "I ran the command but I am not sure what it printed.",
+}
+
+_VERDICT_FNS = ("sentinelVerdict", "rejectedAnywhere", "waitChunkVerdict")
+
+
+def extract_named_function(source: str, name: str, template_path: Path) -> str:
+    """One top-level `function <name>(...) {` through its own column-0 brace."""
+    m = re.search(rf"^function {re.escape(name)}\(", source, re.MULTILINE)
+    assert m is not None, f"expected `function {name}(` in {template_path.name}"
+    end = source.find("\n}\n", m.end())
+    assert end != -1, (
+        f"could not find a column-0 closing brace for {name} in {template_path.name}"
+    )
+    return source[m.start():end + 3]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not found on PATH")
+@pytest.mark.parametrize("shape", sorted(PARITY_REPLY_SHAPES), ids=sorted(PARITY_REPLY_SHAPES))
+def test_all_three_wait_verdicts_agree_on_every_reply_shape(shape, tmp_path):
+    """Each template's REAL wait-reply reader, over the same reply, must return
+    the same verdict.
+
+    Note what is NOT asserted: which verdict is correct. That belongs to each
+    template's own behavioural suite. What this file owns is that the three
+    cannot DISAGREE -- because a disagreement is invisible to all three of those
+    suites, each of which passes against its own copy."""
+    reply = PARITY_REPLY_SHAPES[shape]
+    verdicts = {}
+    for path in (MASS_TRANSLATE_TEMPLATE, GLOSSARY_PASS_TEMPLATE, SKEPTIC_PASS_TEMPLATE):
+        source = path.read_text(encoding="utf-8")
+        fns = "\n".join(
+            extract_named_function(source, n, path)
+            for n in _VERDICT_FNS
+            if re.search(rf"^function {n}\(", source, re.MULTILINE)
+        )
+        # mass-translate's index variable is a seg id; the other two use a batch
+        # index. The shared table names neither -- it asks each function about
+        # the index it is handed.
+        harness = (
+            fns
+            + "\nconst reply = " + json.dumps(reply.replace("<idx>", "0"))
+            + ";\nprocess.stdout.write(String(waitChunkVerdict(reply, \"0\")));\n"
+        )
+        p = tmp_path / f"parity_{path.stem}_{shape}.js"
+        p.write_text(harness, encoding="utf-8")
+        assert NODE is not None
+        proc = subprocess.run([NODE, str(p)], capture_output=True, text=True, timeout=30)
+        assert proc.returncode == 0, (
+            f"{path.name}'s waitChunkVerdict threw on {shape}: {proc.stderr}"
+        )
+        verdicts[path.name] = proc.stdout.strip()
+
+    assert len(set(verdicts.values())) == 1, (
+        f"the three templates' waitChunkVerdict() DISAGREE on reply shape "
+        f"{shape!r}: {verdicts}\n"
+        f"Reply: {reply!r}\n"
+        f"A divergence here is invisible to every other test in the suite -- each "
+        f"template's own behavioural tests pass against its own copy -- and the "
+        f"weakest copy is the one that decides whether an unproven fragment "
+        f"reaches the merge. This is the exact shape that let skeptic read a "
+        f"glued PENDING as READY until 1.16.2."
     )
 
 

@@ -336,6 +336,20 @@ class Target:
         return f"<Target {self.name}>"
 
 
+# Inverts the fail-safe default of waitChunkVerdict, so an ambiguous or
+# cut-short reply resolves to READY instead of PENDING.
+#
+# ONE table for both targets since 1.16.2's post-review round ported the
+# containment guard into the skeptic template: its waitChunkVerdict stopped
+# being a ternary over sentinelVerdict's own fail sentinel and became the same
+# guard-then-whole-line-READY shape glossary has, with the fail-safe default as
+# an explicit trailing return. Per-target literals were right while the shapes
+# genuinely differed and are wrong now -- two copies of one string is a drift
+# waiting to happen, and mutate() asserting exactly one match is what turned the
+# stale copy into a loud failure rather than a silent no-op mutation.
+PENDING_DEFAULT_MUTATION = ('  return "pending"\n}', '  return "ready"\n}')
+
+
 def _glossary_proceeded(out: dict) -> bool:
     """The glossary batch reached the citation review AND the merge."""
     labels = [c["label"] for c in out["calls"]]
@@ -360,7 +374,7 @@ GLOSSARY = Target(
     ready_label="glossary:citation-review:0",
     proceeded=_glossary_proceeded,
     not_ready_reason="glossary-pass-null",
-    ready_mutation=('  return "pending"\n}', '  return "ready"\n}'),
+    ready_mutation=PENDING_DEFAULT_MUTATION,
 )
 
 SKEPTIC = Target(
@@ -372,10 +386,7 @@ SKEPTIC = Target(
     ready_label="skeptic:merge",
     proceeded=_skeptic_proceeded,
     not_ready_reason="skeptic-pass-null",
-    ready_mutation=(
-        'return sentinelVerdict(reply, "READY " + index, "PENDING " + index) ? "ready" : "pending"',
-        'return sentinelVerdict(reply, "READY " + index, "PENDING " + index) ? "ready" : "ready"',
-    ),
+    ready_mutation=PENDING_DEFAULT_MUTATION,
 )
 
 TARGETS = [GLOSSARY, SKEPTIC]
@@ -390,18 +401,39 @@ def read_template(target: Target) -> str:
     return target.template.read_text(encoding="utf-8")
 
 
-def read_template_at_head(target: Target) -> str:
-    """The template's PRE-CHANGE content, straight out of the last commit.
+# The 1.16.1 release merge (#359) -- the last commit BEFORE #352. FROZEN, and
+# for the same reason tests/retired_wording_pins.test.py's baseline is frozen.
+#
+# This read said `HEAD:` until a review round caught it. That was correct for
+# exactly as long as 1.16.2 stayed uncommitted, and then quietly stopped being a
+# pre-fix read at all: HEAD became the release commit, read_template_at_head()
+# started returning POST-fix content, and the four red-evidence tests below
+# degraded into skips -- still green, still reporting nothing. A reference that
+# MOVES WITH THE THING UNDER TEST is not a baseline, whichever file it lives in.
+#
+# Frozen, those tests RUN permanently instead of skipping, and the red evidence
+# for #352 stays executable rather than living only in a commit message.
+PRE_RELEASE_BASELINE = "4343994b9de4f6fe979e6e5af711ed9ab11c4381"
 
-    Used only by the red-evidence self-tests at the bottom of this file. It
-    reads git's object store, never the working tree, so it stays correct (and
-    harmless) while teammates hold uncommitted edits to the same paths."""
+
+def read_template_at_baseline(target: Target) -> str:
+    """The template's PRE-#352 content, out of git's object store at the frozen
+    baseline.
+
+    Never the working tree and never a symbolic ref: teammates hold uncommitted
+    edits to these paths, and HEAD advances past the change the moment it lands.
+    """
     rel = target.template.relative_to(REPO_ROOT)
     proc = subprocess.run(
-        ["git", "-C", str(REPO_ROOT), "show", f"HEAD:{rel.as_posix()}"],
-        capture_output=True, text=True, timeout=30,
+        ["git", "-C", str(REPO_ROOT), "show", f"{PRE_RELEASE_BASELINE}:{rel.as_posix()}"],
+        capture_output=True, text=True, encoding="utf-8", timeout=30, check=False,
     )
-    assert proc.returncode == 0, f"git show failed for {rel}: {proc.stderr}"
+    assert proc.returncode == 0, (
+        f"git show failed for {rel} at the frozen baseline "
+        f"{PRE_RELEASE_BASELINE[:12]}: {proc.stderr}\n"
+        f"Do NOT re-point this at HEAD to make it pass -- that is the defect this "
+        f"constant was frozen to remove."
+    )
     return proc.stdout
 
 
@@ -454,11 +486,61 @@ def run(target: Target, *, tmp_path: Path, chunk_replies, recheck_reply,
 # arithmetic re-implemented in Python.
 # ---------------------------------------------------------------------------
 
+CHUNK_ACCEPT_PATTERN = r"while true; do (.*?) >/dev/null 2>&1 && exit 0;"
+
+# Every test file that needs to lift a chunk's ACCEPT gate back out of a
+# rendered prompt carries its OWN copy of this pattern. That is deliberate and
+# it is this project's stated convention (pytest.ini's own note, plus the
+# "duplicated here, not imported, so this file stays self-contained" comment in
+# a dozen siblings) -- a shared helper would mean one wrong edit silently
+# changes what four files assert, and the independent copies are what make a
+# drift visible at all.
+#
+# A review round proposed centralising it in tests/conftest.py instead. That is
+# a real trade rather than an obvious win, so it is recorded rather than taken:
+# conftest IS importable (the convention's stated reason -- `*.test.py` files
+# are not importable by dotted name under --import-mode=importlib -- does not
+# apply to it), but centralising removes the redundancy that makes drift
+# detectable, in exchange for removing four lines of duplication.
+#
+# The parity test below is this repo's own answer to that trade, and the same
+# one tests/sentinel_verdict_parity.test.py and
+# tests/rejected_anywhere_parity.test.py already give for duplicated template
+# code: keep the copies, and assert they agree.
+CHUNK_ACCEPT_COPIES = (
+    Path(__file__).resolve().parent / "wait_chunking.test.py",
+    Path(__file__).resolve().parent / "glossary_approve_to_integration.test.py",
+    Path(__file__).resolve().parent / "glossary_snapshot_ordering.test.py",
+)
+
+
+def test_every_copy_of_the_chunk_accept_pattern_agrees():
+    """One grammar, four copies, no drift.
+
+    The pattern encodes the emitted chunk poll's shape. A copy that drifts stops
+    extracting the ACCEPT gate correctly in its own file -- and does so
+    SILENTLY, because a regex that matches nothing makes its test fail with
+    "no suppressed ACCEPT gate" rather than "your pattern is stale", which reads
+    like a template regression and sends the reader to the wrong file."""
+    missing = [p.name for p in CHUNK_ACCEPT_COPIES if not p.is_file()]
+    assert not missing, f"expected sibling test files not found: {missing}"
+
+    for path in CHUNK_ACCEPT_COPIES:
+        text = path.read_text(encoding="utf-8")
+        assert CHUNK_ACCEPT_PATTERN in text, (
+            f"{path.name} no longer carries the chunk-ACCEPT pattern this file "
+            f"pins:\n  {CHUNK_ACCEPT_PATTERN}\n"
+            f"If the emitted chunk grammar really changed, update EVERY copy "
+            f"together -- they are independent by convention, so a partial update "
+            f"leaves the un-updated files silently extracting nothing."
+        )
+
+
 POLL_RE = re.compile(r"^end=\$\(\(SECONDS \+ (\d+)\)\);")
 # The chunk's ACCEPT gate: everything between the loop head and the suppressed
 # `&& exit 0`. The `>/dev/null 2>&1` is part of the emitted POLL, not of the
 # gate contract, so it is matched rather than captured.
-ACCEPT_RE = re.compile(r"while true; do (.*?) >/dev/null 2>&1 && exit 0;")
+ACCEPT_RE = re.compile(CHUNK_ACCEPT_PATTERN)
 # The bound the chunk prompt's own PROSE declares ("...this batch's total 900s
 # wait..."), read back out so the declared bound and the spent bound can be
 # compared without either being taken on trust.
@@ -548,15 +630,22 @@ def test_emitted_chunk_bounds_sum_to_exactly_the_declared_wait_bound(target, tmp
 
 @pytest.mark.parametrize("target", TARGETS, ids=TARGET_IDS)
 def test_the_declared_bound_the_prompt_states_is_the_bound_it_spends(target, tmp_path):
-    """`WAIT_BOUND_SEC` pinned INDEPENDENTLY, at three points that must agree:
-    this file's literal, the number each chunk prompt TELLS THE AGENT it is a
-    slice of, and the sum of what the chunks actually poll for.
+    """`WAIT_BOUND_SEC` pinned INDEPENDENTLY, at the two points the test above
+    does not reach: the number each chunk prompt TELLS THE AGENT it is a slice
+    of, and the number the re-check tells the agent has been spent.
 
-    Separate from the sum test above rather than folded into it. That one proves
-    the chunks spend 900 s; this one proves 900 s is also what the prompt claims
-    and what this file expects. A template that changed its bound consistently
-    everywhere would pass the sum test forever -- the prose and the emitted
-    bounds would simply agree with each other at the new value."""
+    The third point of agreement -- the sum of what the chunks actually poll for
+    -- is asserted once, in test_emitted_chunk_bounds_sum_to_exactly_the_declared
+    _wait_bound above, against this same literal. It was duplicated here until a
+    review round pointed out that a second copy adds no discrimination: both
+    compare the same emitted durations to the same constant, so the copy can
+    only ever fail alongside the original.
+
+    Separate from that test rather than folded into it. That one proves the
+    chunks SPEND 900 s; this one proves 900 s is also what the prompts CLAIM. A
+    template that changed its bound consistently everywhere would pass the sum
+    test forever -- the prose and the emitted bounds would simply agree with
+    each other at the new value, and only the independent literal notices."""
     out = exhausted_run(target, tmp_path)
     chunk_prompts = prompts(out, target.chunk_label)
 
@@ -565,7 +654,6 @@ def test_the_declared_bound_the_prompt_states_is_the_bound_it_spends(target, tmp
         f"{target.name}'s chunk prompts state the total wait as {sorted(stated)}s, "
         f"not {EXPECTED_WAIT_BOUND_SEC}s"
     )
-    assert sum(chunk_seconds(p) for p in chunk_prompts) == EXPECTED_WAIT_BOUND_SEC
 
     # The re-check names it too, and must name the SAME number: its whole
     # message to the agent is "that budget is spent, look once more".
@@ -598,14 +686,13 @@ def test_each_chunk_polls_for_what_is_left_of_the_budget_not_a_flat_slice(target
     while remaining > 0:
         expected.append(min(chunk_size, remaining))
         remaining -= expected[-1]
+    # List equality covers the chunk COUNT as well as the per-chunk bounds: two
+    # sequences of different length are never equal. An explicit length check
+    # sat here until a review round pointed out it could not fail.
     assert durations == expected, (
-        f"{target.name}'s chunks poll {durations}, not the remaining-budget "
-        f"sequence {expected} implied by a {chunk_size}s chunk against a "
-        f"{EXPECTED_WAIT_BOUND_SEC}s bound"
-    )
-    assert len(durations) == len(expected), (
-        f"{target.name} emits {len(durations)} chunk(s) where a {chunk_size}s slice "
-        f"of {EXPECTED_WAIT_BOUND_SEC}s needs {len(expected)}"
+        f"{target.name}'s chunks poll {durations} ({len(durations)} chunk(s)), not "
+        f"the remaining-budget sequence {expected} ({len(expected)} chunk(s)) "
+        f"implied by a {chunk_size}s chunk against a {EXPECTED_WAIT_BOUND_SEC}s bound"
     )
 
 
@@ -809,10 +896,13 @@ def test_a_ready_chunk_stops_the_wait_at_every_chunk_index(target, tmp_path):
             f"preflight charges for the exhaustion path, never what an ordinary "
             f"wait costs; calls={labels(out)}"
         )
-        assert spent < EXPECTED_WAIT_CALLS or k == EXPECTED_WAIT_CALLS - 1, (
-            f"{target.name}: a wait answered by a chunk must cost strictly less "
-            f"than the {EXPECTED_WAIT_CALLS}-call ceiling"
-        )
+        # A "spent < ceiling" disjunct sat here and could not fail: the
+        # assertion above already pins spent == k, and k only ranges over the
+        # chunk indices, every one of which is below the ceiling by
+        # construction. The property it was reaching for -- that the ordinary
+        # path really is cheaper than exhaustion -- is asserted where it can
+        # actually fail, in test_the_full_wait_cost_ladder_is_one_two_or_three_calls,
+        # which measures the exhaustion path alongside the chunk paths.
         assert target.proceeded(out), (
             f"{target.name}: a READY at chunk {k} did not let the batch proceed; "
             f"result={out['result']}"
@@ -1059,6 +1149,23 @@ def test_the_shipped_constants_sit_inside_both_guards(target, tmp_path):
 # 7. ESTIMATOR ARITHMETIC AT ALL THREE GATES.
 # ===========================================================================
 
+def source_carries(source: str, expression: str) -> bool:
+    """Is `expression` present in `source`, ignoring how it is WRAPPED?
+
+    Every declaration this file pins is a source expression, and a source
+    expression can be re-wrapped without changing meaning -- black/prettier do
+    it, and so does a human widening a line. An exact-substring pin turns that
+    cosmetic edit into a red test whose message says the estimator has "drifted
+    from skeptic_setup.py", which would be false and would send whoever hits it
+    looking for a bug that does not exist.
+
+    Whitespace-collapsing both sides keeps the pin (the tokens and their order
+    still have to match exactly) and drops the part that was never the point.
+    Mirrors tests/retired_wording_pins.test.py's normalize()."""
+    flat = " ".join(source.split())
+    return " ".join(expression.split()) in flat
+
+
 def _template_wait_calls(source: str) -> int:
     """WAIT_CALLS as the template itself derives it, from its own two declared
     constants -- never from a rendered literal, which a hand-edited
@@ -1069,10 +1176,10 @@ def _template_wait_calls(source: str) -> int:
         m = re.search(rf"^const {name} = (\d+)", source, re.MULTILINE)
         assert m, f"template no longer declares a const {name}"
         consts[name] = int(m.group(1))
-    assert "const WAIT_CHUNKS = Math.ceil(WAIT_BOUND_SEC / WAIT_CHUNK_SEC)" in source, (
+    assert source_carries(source, "const WAIT_CHUNKS = Math.ceil(WAIT_BOUND_SEC / WAIT_CHUNK_SEC)"), (
         "template no longer derives WAIT_CHUNKS from its own bound and chunk size"
     )
-    assert "const WAIT_CALLS = WAIT_CHUNKS + 1" in source, (
+    assert source_carries(source, "const WAIT_CALLS = WAIT_CHUNKS + 1"), (
         "template no longer derives WAIT_CALLS as WAIT_CHUNKS + 1"
     )
     return -(-consts["WAIT_BOUND_SEC"] // consts["WAIT_CHUNK_SEC"]) + 1
@@ -1154,14 +1261,14 @@ def test_skeptic_setup_estimator_matches_the_template_and_the_shipped_ladder():
         m = re.search(rf"^{name} = (\d+)", setup_src, re.MULTILINE)
         assert m, f"skeptic_setup.py no longer declares {name}"
         setup_consts[name] = int(m.group(1))
-    assert "WAIT_CHUNKS = (WAIT_BOUND_SEC + WAIT_CHUNK_SEC - 1) // WAIT_CHUNK_SEC" in setup_src, (
+    assert source_carries(setup_src, "WAIT_CHUNKS = (WAIT_BOUND_SEC + WAIT_CHUNK_SEC - 1) // WAIT_CHUNK_SEC"), (
         "skeptic_setup.py no longer derives WAIT_CHUNKS by ceil-div from its own constants"
     )
-    assert "WAIT_CALLS = WAIT_CHUNKS + 1" in setup_src
-    assert "PER_BATCH_CALLS = 2 + WAIT_CALLS" in setup_src, (
+    assert source_carries(setup_src, "WAIT_CALLS = WAIT_CHUNKS + 1")
+    assert source_carries(setup_src, "PER_BATCH_CALLS = 2 + WAIT_CALLS"), (
         "skeptic_setup.py's per-batch term is no longer precheck + dispatch + wait"
     )
-    assert "FIXED_RUN_CALLS = 2" in setup_src
+    assert source_carries(setup_src, "FIXED_RUN_CALLS = 2")
 
     setup_wait_calls = (
         -(-setup_consts["WAIT_BOUND_SEC"] // setup_consts["WAIT_CHUNK_SEC"]) + 1
@@ -1173,7 +1280,8 @@ def test_skeptic_setup_estimator_matches_the_template_and_the_shipped_ladder():
         f"expects {EXPECTED_WAIT_CALLS}"
     )
     # ...and the template's own preflight expression really is the same term.
-    assert "const estimatedCalls = (2 + WAIT_CALLS) * BATCHES.length + 2" in read_template(SKEPTIC), (
+    assert source_carries(read_template(SKEPTIC),
+                          "const estimatedCalls = (2 + WAIT_CALLS) * BATCHES.length + 2"), (
         "the skeptic template's preflight is no longer (2 + WAIT_CALLS)*N + 2, so it "
         "has drifted from skeptic_setup.py's PER_BATCH_CALLS/FIXED_RUN_CALLS"
     )
@@ -1296,9 +1404,15 @@ def test_the_shipped_cap_still_admits_the_documented_batch_count(ladder):
 # SKIPS, loudly, the moment HEAD already chunks.
 # ===========================================================================
 
-def _head_is_prefix(target: Target) -> bool:
-    """True while HEAD still carries the pre-#352 single-shot poll."""
-    return "batchWaitChunkPrompt" not in read_template_at_head(target)
+def _baseline_is_prefix(target: Target) -> bool:
+    """The frozen baseline must still carry the pre-#352 single-shot poll.
+
+    Asserted rather than used as a skip condition. Under the old moving `HEAD:`
+    read this was a real question -- HEAD advanced past the change and the reds
+    below had to stand down. Frozen, a False here does not mean "this red is now
+    historical", it means the baseline SHA is wrong, and skipping on it would
+    hide exactly that."""
+    return "batchWaitChunkPrompt" not in read_template_at_baseline(target)
 
 
 @pytest.mark.parametrize("target", TARGETS, ids=TARGET_IDS)
@@ -1308,12 +1422,12 @@ def test_red_the_pre_fix_template_emits_a_poll_over_the_clamp(target, tmp_path):
     The pre-1.16.2 wait emitted ONE `seq 1 45` x `sleep 20` poll: 900 s in a
     single bash call, against a measured 600 s clamp. That is #352, and it is
     what this file's cap assertions must reject."""
-    if not _head_is_prefix(target):
-        pytest.skip(
-            f"HEAD's {target.name} template already chunks its wait -- this red is "
-            f"now historical and lives in the commit that introduced it"
-        )
-    src = target.instantiate(read_template_at_head(target))
+    assert _baseline_is_prefix(target), (
+        f"the frozen baseline {PRE_RELEASE_BASELINE[:12]} already chunks "
+        f"{target.name}'s wait, so it is not the pre-#352 tree and every red in "
+        f"this section is about the wrong commit"
+    )
+    src = target.instantiate(read_template_at_baseline(target))
     over_cap = [
         (int(iters), int(sleep_s))
         for iters, sleep_s in re.findall(r"seq 1 (\d+)\).*?sleep (\d+)", src)
@@ -1332,13 +1446,12 @@ def test_red_the_pre_fix_template_loses_a_late_landing_fragment(target, tmp_path
     Every chunk PENDING, the fragment landing only in time for a re-check that
     does not exist yet. The pre-fix template reports the batch not-ready over a
     complete, gate-valid fragment -- the exact loss #352 describes."""
-    if not _head_is_prefix(target):
-        pytest.skip(
-            f"HEAD's {target.name} template already has the authoritative re-check -- "
-            f"this red is now historical and lives in the commit that introduced it"
-        )
+    assert _baseline_is_prefix(target), (
+        f"the frozen baseline {PRE_RELEASE_BASELINE[:12]} already has the "
+        f"authoritative re-check, so it is not the pre-#352 tree"
+    )
     res = run(target, tmp_path=tmp_path, chunk_replies=["PENDING <idx>"],
-              recheck_reply="READY <idx>", source=read_template_at_head(target))
+              recheck_reply="READY <idx>", source=read_template_at_baseline(target))
     assert res["ok"], f"pre-fix run threw: {res['stderr']}"
     out = res["out"]
     assert target.recheck_label not in labels(out), (
