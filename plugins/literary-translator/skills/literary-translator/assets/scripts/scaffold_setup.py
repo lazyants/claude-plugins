@@ -34,7 +34,7 @@ member. Two consequences worth stating outright so a later reader does not
     cache_key.py itself -- cache_key.py is a PLUGIN_BUNDLE_MEMBER, so a byte
     change there would flip plugin_bundle_hash.
 
-  * All 13 PLUGIN_BUNDLE_MEMBERS (the 11 *.py AND the two *.template.js) hash
+  * All 14 PLUGIN_BUNDLE_MEMBERS (the 12 *.py AND the two *.template.js) hash
     uniformly at ${durable_root}/scripts/<name> -- the two workflow templates
     get the same scripts/-style placement in the durable tree (there is no
     scripts/templates/ subdir), so this mirrors cache_key.py's own

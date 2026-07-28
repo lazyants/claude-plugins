@@ -79,10 +79,14 @@ inventing a second discipline for them:
    `references/ledger-and-resumability.md` for the `{{RUN_ID}}`/token
    mechanics this closes (#90, the resume-integrity gate).
 2. **WAIT** — Claude, `effort:'low'`, **no** `agentType`, **no** `schema`: a
-   **bounded** bash polling loop (the same shape `waitPrompt`/
-   `draft_ready.py` already used for translate) against a readiness script
-   that fully validates the on-disk artifact, including its run-scoped
-   token. Returns `READY`/`TIMEOUT` as plain text.
+   **bounded** bash polling loop against a readiness script that fully
+   validates the on-disk artifact, including its run-scoped token. What 1.2.0
+   generalized from translate here is the DISCIPLINE, not the loop shape: the
+   two have since diverged, and the loop and the sentinel set both differ by
+   path. The glossary batch wait polls a fixed iteration count and returns
+   `READY`/`TIMEOUT`; W5's two waits poll elapsed time and return
+   `READY`/`FAILED`/`PENDING` per chunk since 1.16.1/#348. See the WAIT
+   section below for each.
 3. **CONSUME** — Claude, schema-validated: reads the artifact and returns it
    (`readReviewPrompt` → `REVIEW_SCHEMA`), then a **separate**
    schema-validated call runs the deterministic cross-check script against
@@ -138,11 +142,25 @@ agent(batchDispatchPrompt(batch, attempt, rejectionReason), {agentType: 'codex:c
 ### WAIT calls — Claude, schema-less, bounded poll
 
 `waitPrompt` (translate), `reviewWaitPrompt`, `batchWaitPrompt` (glossary).
-Plain Claude, `effort:'low'`, no `agentType`, no `schema` — a bounded
-`for i in $(seq 1 45)`-shaped bash polling loop against a readiness script
-(`draft_ready.py --expect-token`, `review_ready.py --expect-token`,
-`canon_validate.py --check-batch`), returning `READY`/`TIMEOUT` as plain
-text.
+Plain Claude, `effort:'low'`, no `agentType`, no `schema` — a bounded bash
+polling loop against a readiness script (`draft_ready.py --expect-token`,
+`review_ready.py --expect-token`, `canon_validate.py --check-batch`). The
+loop SHAPE and the sentinel set differ by path, and have since #198:
+
+- **Glossary (`batchWaitPrompt`)** — the historical
+  `for i in $(seq 1 45)`-shaped iteration-count loop, returning
+  `READY`/`TIMEOUT` as plain text. Untouched by #198 and by #348.
+- **W5 (`waitPrompt`, `reviewWaitPrompt`)** — an ELAPSED-TIME loop
+  (`end=$((SECONDS + <bound>))`), never an iteration count;
+  `tests/bounded_poll_present.test.py` actively forbids the `seq` shape at
+  these two sites. **1.16.1 (#348):** each of these waits is CHUNKED across
+  up to `WAIT_CHUNKS = 8` `agent()` calls, because the Bash tool clamps any
+  single call at `BASH_CALL_CAP_SEC = 600 s` regardless of the timeout the
+  agent asks for. Each chunk returns `READY`/`FAILED`/`PENDING <seg>` as
+  plain text — `TIMEOUT` is gone from these two sites — and ONE
+  authoritative non-polling re-check of the canonical artifact follows the
+  chunks, for `WAIT_CALLS = 9` calls per wait, worst case. See
+  `references/orchestration-and-batching.md`'s estimator section.
 
 ### CONSUME calls — Claude, schema-validated
 
@@ -496,15 +514,18 @@ ledger path, not a worse one.
 
 ### Null-review and the shared retry budget
 
-`getVerifiedReview(seg, round)` runs: DISPATCH → WAIT (`TIMEOUT` → `blocked
-review-timeout`, no retry) → **one shared retry budget** covering both
+`getVerifiedReview(seg, round)` runs: DISPATCH → WAIT (chunk budget spent, or
+the driver's fail sentinel, and then the one authoritative non-polling
+re-check also fails → `blocked review-timeout`; the review job is never
+re-dispatched) → **one shared retry budget** covering both
 CONSUME calls together: `read → check`; if the read comes back `null` **or**
 the check reports `match:false`, retry the *same* `(read, check)` pair
 **once** — never retrying read and check independently of each other. Still
 failing after the retry → `blocked review-null` (persistent null read) or
 `blocked review-artifact-mismatch` (persistent mismatch), whichever
 triggered it. This caps one review point's worst case at
-`dispatch + wait + 2×(read + check) = 6` calls — see
+`dispatch + wait + 2×(read + check) = 5 + WAIT_CALLS` calls — 6 before
+1.16.1/#348, 14 at the shipped `WAIT_CALLS = 9` — see
 `references/orchestration-and-batching.md`'s estimator section for how this
 feeds `estimatedCalls`.
 

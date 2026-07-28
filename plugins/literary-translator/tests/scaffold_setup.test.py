@@ -86,7 +86,7 @@ def _load_module(name, path):
 cache_key = _load_module("cache_key", CACHE_KEY_SRC)
 resume_setup = _load_module("resume_setup", RESUME_SETUP_SRC)
 
-# The 13 plugin-bundle members (11 *.py + 2 *.template.js) and the 4
+# The 14 plugin-bundle members (12 *.py + 2 *.template.js) and the 4
 # orchestration-bundle members. The plugin set is the AUTHORITATIVE constant
 # from cache_key.py itself (drift-catcher: if scaffold_setup.py ever hashes a
 # different set, the independent-recompute assertions below diverge). The
@@ -328,7 +328,7 @@ def test_scaffold_member_set_matches_cache_key(tmp_path):
     declares (a *.template.js -- the pair most at risk of being silently
     dropped from the scaffold's set) and confirming the scaffold-written
     marker still tracks the independent recompute over the canonical set. If
-    scaffold hashed a NARROWER set (e.g. the 11 *.py only), the marker would
+    scaffold hashed a NARROWER set (e.g. the 12 *.py only), the marker would
     NOT move when a template's bytes change, and this assertion would fail."""
     template_members = [m for m in PLUGIN_BUNDLE_MEMBERS if m.endswith(".template.js")]
     assert template_members, (

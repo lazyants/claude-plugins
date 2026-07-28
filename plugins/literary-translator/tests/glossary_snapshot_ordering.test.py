@@ -1,5 +1,5 @@
-"""tests/glossary_snapshot_ordering.test.py -- LT 1.16.0, the snapshot-then-audit
-ORDERING in glossary-pass-wf.template.js.
+"""tests/glossary_snapshot_ordering.test.py -- LT 1.16.x, the
+snapshot-then-fetch-then-audit ORDERING in glossary-pass-wf.template.js.
 
 Approval used to bind a PATH. The batch dispatch is
 agentType:"codex:codex-rescue", the codex job outlives the awaited call (which is
@@ -9,27 +9,54 @@ renames over out_{index}_attempt_{n}.json are normal, expected behaviour. With t
 reviewer auditing that mutable path, the bytes it approved and the bytes
 --merge-batches later fresh-read off disk were only incidentally the same object.
 
-The fix reorders: the reviewer's FIRST act is to run
+The fix reorders: the FIRST act of the citation-review stage is to run
 `--check-batch <attempt> --approve-to <approved_{index}_attempt_{n}.json>`, which
-re-validates and copies the exact validated bytes to the approved snapshot; it then
-audits THAT copy, and under live the merge and the disk-independent verify consume
-it too. Snapshotting AFTER the audit cannot close the race -- the race is between
-the reviewer's read and the copy -- so the ORDER is the guarantee and is what this
-file pins.
+re-validates and copies the exact validated bytes to the approved snapshot;
+everything downstream -- the retrieval of the cited URLs, the audit, and under live
+the merge and the disk-independent verify -- consumes THAT copy. Snapshotting AFTER
+the audit cannot close the race -- the race is between the read and the copy -- so
+the ORDER is the guarantee and is what this file pins.
+
+WHY EVERY ANCHOR IN THIS FILE MOVED IN 1.16.1 (#347), given none of the properties
+did. The citation review used to be ONE agent that ran the approve command,
+fetched every cited URL itself, and judged what came back. Retrieval has moved out
+of the judging agent, so the stage is two calls:
+  * PREPARE (label glossary:citation-prepare:{index}, effort low) runs the approve
+    command as its STEP 1 and scripts/fetch_citation.py as its STEP 2, and ingests
+    nothing but the one JSON line each command prints;
+  * JUDGE (label glossary:citation-review:{index}, unchanged) reads local files
+    only -- the snapshot, the evidence index, and the bodies that index names.
+Consequently the approve command is asserted against the PREPARE prompt rather
+than the review's; "the snapshot precedes every read and fetch" is now partly an
+INTRA-prompt fact (prepare's STEP 1 before its STEP 2) and partly a CROSS-CALL one
+(prepare before judge in the recorded call order); there is no "fetch the URL"
+INSTRUCTION left anywhere, because retrieval is a script invocation, so the fetch
+anchor is fetch_citation.py's own --batch argument; and the failure branch ("stop,
+never audit bytes that failed validation") moved into the prepare prompt, where it
+routes to EVIDENCE_FAILED instead of to a rejection verdict.
+
+Anchors are structural (a `STEP <n>.` line prefix, an emitted command string, the
+recorded call order) rather than phrase-matched wherever there was a choice: the
+surrounding prose is edited far more often than the shape is, and a test that
+fails on a rewording teaches the next reader to weaken it.
 
 What this file asserts, and why each one needs the real template under Node rather
 than a source grep:
-  * the reviewer's READ TARGET is the snapshot, and the snapshot command precedes
-    every read/fetch instruction in the rendered prompt (ordering is a property of
-    the assembled prompt, not of any one string);
+  * the JUDGE's read target is the snapshot, and the judge's prompt names no
+    fragment path at all; the FETCHER's --batch argument is the snapshot too;
+  * the snapshot command precedes both -- prepare's STEP 1 before its STEP 2, and
+    prepare before judge (ordering is a property of the assembled prompt and of
+    the call sequence, not of any one string);
+  * a prepare that reports failure spends no judge call, and its attempt's
+    snapshot never reaches the merge;
   * the emitted approve command is checkBatchCmd() plus --approve-to APPENDED, so
     the three character-identical --check-batch sites keep issuing that prefix
-    verbatim and none of them acquires --approve-to;
+    verbatim, and PREPARE is the only call in the file that carries --approve-to;
   * under LIVE the merge and verify consume approved_{i}_attempt_{n}.json for the
     approved attempt, and no rejected attempt's snapshot is ever named;
   * under OFFLINE they consume the ATTEMPT path and name no snapshot at all --
-    offline runs no reviewer, so a global rename to approved_* paths would fail
-    every offline merge on a missing file;
+    offline runs neither half of the review, so a global rename to approved_*
+    paths would fail every offline merge on a missing file;
   * the resume-skip entry point (which runs neither dispatch nor wait) still
     produces and merges its own snapshot;
   * the emitted snapshot BASENAME is one resume_setup.py's wipe actually matches,
@@ -85,10 +112,37 @@ def attempt_path(index: int, attempt: int) -> str:
 
 
 def approved_path(index: int, attempt: int) -> str:
-    """The approved snapshot path -- what the review audits and, under live,
-    what merges. Nothing in the pass rewrites it after publication, unlike the
-    attempt path the codex loop keeps replacing."""
+    """The approved snapshot path -- what the fetcher retrieves from, what the
+    judge audits and, under live, what merges. Nothing in the pass rewrites it
+    after publication, unlike the attempt path the codex loop keeps replacing."""
     return f"{RUN_DIR}/approved_{index}_attempt_{attempt}.json"
+
+
+def evidence_dir(index: int, attempt: int) -> str:
+    """Where fetch_citation.py writes this attempt's retrieved bodies plus its
+    index.json (1.16.1, #347). ATTEMPT-scoped like the snapshot, so attempt n+1's
+    judge cannot be handed attempt n's pages."""
+    return f"{RUN_DIR}/evidence_{index}_attempt_{attempt}"
+
+
+def step_line(prompt: str, step: int) -> tuple:
+    """The one `STEP <n>.` line of a rendered prompt, with its line index.
+
+    Both halves of the split review are STEP-numbered, and that numbering is the
+    anchor this file leans on: the prose around each step is reworded far more
+    often than the step structure changes, so matching a phrase would make these
+    tests fail on edits that break nothing. Asserting exactly one line per step
+    number is itself part of the check -- a duplicated STEP line is an
+    ambiguous instruction, and an ordering assertion over an ambiguous
+    instruction proves nothing.
+    """
+    prefix = f"STEP {step}."
+    hits = [(i, ln) for i, ln in enumerate(prompt.split("\n")) if ln.startswith(prefix)]
+    assert len(hits) == 1, (
+        f"expected exactly one line opening with {prefix!r} in this prompt, "
+        f"found {len(hits)}"
+    )
+    return hits[0]
 
 
 def check_cmd_from_wait(out: dict, index: int, attempt: int = 0) -> str:
@@ -143,6 +197,8 @@ def instantiate(*, research_mode: str = "live", batch_agent_cap: int = 10_000) -
     text = text.replace("{{RUN_ID}}", FIXTURE_RUN_ID)
     text = text.replace("{{BATCH_AGENT_CAP}}", str(int(batch_agent_cap)))
     text = text.replace("{{EFFORT}}", "high")
+    # 1.16.1 (#347): empty = fetch_citation.py's shipped default list.
+    text = text.replace("{{CITATION_CONTENT_TYPES}}", "")
     assert "{{" not in text, "fixture instantiation left an unresolved token"
     return text
 
@@ -168,7 +224,9 @@ def make_batch(index: int, names: list) -> dict:
 
 # Records every call's label and rendered prompt IN ORDER, appending per label
 # because one label fires once per attempt. PLAN is keyed by the batch's own
-# string index; `reviews` is consumed positionally, one entry per attempt.
+# string index; `prepares` and `reviews` are each consumed positionally, one
+# entry per call of that label (see the citation-review branch below for the one
+# case where a review's position is NOT its attempt number).
 HARNESS = r"""
 'use strict';
 __WRAPPED_SOURCE__
@@ -212,8 +270,27 @@ async function agent(promptText, opts) {
   }
   if (kind === "dispatch") return "FRAGMENT " + idx;
   if (kind === "wait") return "READY " + idx;
+  // 1.16.1 (#347) -- the citation review became TWO calls, and this branch is
+  // what the whole file's live path now hangs on: the JUDGE runs only if PREPARE
+  // reported EVIDENCE_READY, so a harness that leaves this label unanswered
+  // sends every live batch up the retry ladder to exhaustion, records no review
+  // prompt at all, and merges nothing. That is exactly how these tests failed
+  // before this branch existed -- not on the property each one guards.
+  if (kind === "citation-prepare") {
+    return nth(p.prepares, ordinal, "EVIDENCE_READY " + idx + " ATTEMPT " + ordinal);
+  }
   if (kind === "citation-review") {
-    return nth(p.reviews, ordinal, "CITATIONS_OK " + idx + " ATTEMPT " + ordinal);
+    // The judge's own ordinal counts JUDGED attempts, which stops being the
+    // attempt NUMBER as soon as a prepare fails -- a failed prepare spends no
+    // judge call, so attempt 1's judge is still ordinal 0. The verdict sentinel
+    // carries the attempt and a stale one is rejected by design, so the DEFAULT
+    // verdict derives the attempt from how many prepares this batch has had:
+    // exactly one per attempt, always issued before that attempt's judge. A
+    // PLAN-supplied review is still taken by ordinal and spells its own
+    // sentinel out, so a plan that exercises a prepare failure must count
+    // judged attempts, not attempts.
+    const prepared = seenCount["glossary:citation-prepare:" + idx] || 1;
+    return nth(p.reviews, ordinal, "CITATIONS_OK " + idx + " ATTEMPT " + (prepared - 1));
   }
   // Deliberately non-throwing: an unrecognized label must surface as a failed
   // ASSERTION with readable context, not an opaque harness crash. RED runs
@@ -265,6 +342,25 @@ def prompts_for(out: dict, label: str) -> list:
     return out["promptsByLabel"].get(label, [])
 
 
+def sole_prompt(out: dict, label: str) -> str:
+    """The one prompt recorded for a label that must fire exactly once.
+
+    Worth a helper rather than a bare [0]: the failure mode this file most needs
+    to read clearly is a call that stopped happening at all -- a review bypassed
+    on the resume path, a prepare deleted -- and `prompts_for(...)[0]` reports
+    that as `IndexError: list index out of range`, which reads like a broken
+    harness rather than a missing gate. Measured while mutation-testing this
+    file: exempting resumed batches from the review produced exactly that opaque
+    error until this helper existed.
+    """
+    prompts = prompts_for(out, label)
+    assert len(prompts) == 1, (
+        f"expected exactly one {label} call, got {len(prompts)}; the calls this "
+        f"run actually made were {labels_of(out)}"
+    )
+    return prompts[0]
+
+
 def labels_of(out: dict) -> list:
     return [c["label"] for c in out["calls"]]
 
@@ -274,81 +370,165 @@ def one_batch_run(tmp_path: Path, **kwargs) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# 1. The reviewer's READ TARGET, and the ordering that makes it meaningful.
+# 1. What the stage READS AND RETRIEVES FROM -- one target per half since the
+#    1.16.1 split -- and the ordering that makes both meaningful.
 # ---------------------------------------------------------------------------
 
 def test_the_review_reads_the_snapshot_never_the_mutable_attempt_path(tmp_path):
     """The whole reorder, stated as the one assertion that fails on the old code.
 
-    The attempt path legitimately still APPEARS in this prompt -- inside the
-    approve command, and in the prose forbidding a later read of it -- so
-    "attempt path absent" is the wrong assertion and would be un-RED-able. What
-    must hold is that the line naming the file to READ names the snapshot.
+    ANCHOR MOVED IN 1.16.1, and the property got STRONGER rather than weaker.
+    Before the split this had to be written narrowly -- only the READ line could
+    be checked -- because the attempt path legitimately appeared elsewhere in
+    this same prompt, inside the approve command and in the prose forbidding a
+    later read of it, so "attempt path absent" was the wrong assertion and would
+    have been un-RED-able. The judge now runs no command and is handed no
+    fragment path at all, deliberately (see citationJudgePrompt(): a
+    prompt-injected judge should have to GUESS that string rather than be given
+    it). So the read-line check is KEPT -- it is what fails if the read is
+    repointed -- and the whole-prompt absence check is ADDED on top, which is
+    what fails if the fragment path leaks back into the judge's prompt at all.
     """
     out = one_batch_run(tmp_path)
-    review = prompts_for(out, "glossary:citation-review:0")[0]
+    review = sole_prompt(out, "glossary:citation-review:0")
 
-    read_lines = [ln for ln in review.split("\n") if ln.startswith("STEP 2.")]
-    assert len(read_lines) == 1, (
-        "expected exactly one STEP 2 read instruction in the citation-review "
-        f"prompt, found {len(read_lines)}"
-    )
-    read_line = read_lines[0]
+    _, read_line = step_line(review, 2)
     assert approved_path(0, 0) in read_line, (
-        "the citation reviewer must be pointed at the approved "
+        "the citation judge must be pointed at the approved "
         f"snapshot {approved_path(0, 0)}; its read instruction was: {read_line}"
     )
     assert attempt_path(0, 0) not in read_line, (
-        "the citation reviewer must NOT be pointed at the mutable attempt path "
+        "the citation judge must NOT be pointed at the mutable attempt path "
         f"{attempt_path(0, 0)} -- a still-running codex job rewrites it. Its "
         f"read instruction was: {read_line}"
+    )
+    # The stem rather than one attempt's full path: repointing the judge at a
+    # DIFFERENT attempt's fragment is the same defect and must fail here too.
+    assert "out_0_attempt_" not in review, (
+        "the citation judge's prompt must not name any attempt fragment path, "
+        "not even inside prose forbidding a read of it -- it is given the "
+        f"snapshot and nothing else. Prompt was:\n{review}"
+    )
+
+
+def test_the_retrieval_reads_the_snapshot_never_the_mutable_attempt_path(tmp_path):
+    """The other half of the same invariant, which 1.16.1 moved into its own call.
+
+    Until the split, one agent both fetched and judged, so "the review consumes
+    the snapshot" was one assertion over one prompt. Retrieval is now
+    fetch_citation.py, launched from PREPARE, so the invariant needs two
+    assertions over two prompts. Dropping this half would leave the fetcher free
+    to retrieve URLs off the mutable attempt path -- the same race the snapshot
+    closes, one layer out: the URLs fetched would be ones no judge ever approved
+    and no merge ever sees.
+    """
+    out = one_batch_run(tmp_path)
+    prepare = sole_prompt(out, "glossary:citation-prepare:0")
+    _, fetch_line = step_line(prepare, 2)
+
+    assert "fetch_citation.py" in fetch_line, (
+        f"prepare's STEP 2 is no longer the retrieval boundary: {fetch_line}"
+    )
+    assert " --batch " + approved_path(0, 0) in fetch_line, (
+        "the fetcher must be pointed at the approved snapshot "
+        f"{approved_path(0, 0)}; its invocation was: {fetch_line}"
+    )
+    assert attempt_path(0, 0) not in fetch_line, (
+        "the fetcher must NOT retrieve from the mutable attempt path "
+        f"{attempt_path(0, 0)}; its invocation was: {fetch_line}"
+    )
+    assert " --out-dir " + evidence_dir(0, 0) in fetch_line, (
+        "the evidence directory must be attempt-scoped, so a later attempt's "
+        f"judge cannot read an earlier attempt's pages: {fetch_line}"
     )
 
 
 def test_the_snapshot_command_precedes_every_read_and_fetch_instruction(tmp_path):
-    """Ordering, asserted on the assembled prompt rather than on any one string.
+    """Ordering, which since 1.16.1 spans a prompt AND a call boundary.
 
     Snapshotting after the audit does not close the race -- the race is between
-    the reviewer's read and the copy -- so the approve command has to come first,
-    and "first" is a fact about line positions in the rendered prompt.
+    the read and the copy -- so the approve command has to come first. "First"
+    used to be entirely a fact about line positions in one rendered prompt; it is
+    now two facts, and BOTH have to hold: prepare's STEP 1 (the approve command)
+    precedes its STEP 2 (the fetch), and prepare precedes the judge in the
+    recorded call order. Checking only the first would leave a judge that runs
+    before any snapshot exists looking perfectly healthy.
     """
     out = one_batch_run(tmp_path)
-    review = prompts_for(out, "glossary:citation-review:0")[0]
+    prepare = sole_prompt(out, "glossary:citation-prepare:0")
     approve_cmd = approve_cmd_for(check_cmd_from_wait(out, 0), 0, 0)
-    lines = review.split("\n")
+    lines = prepare.split("\n")
 
     approve_idx = [i for i, ln in enumerate(lines) if approve_cmd in ln]
     assert len(approve_idx) == 1, (
         f"expected exactly one approve-command line, found {len(approve_idx)}"
     )
-    read_idx = [i for i, ln in enumerate(lines) if ln.startswith("STEP 2.")]
-    fetch_idx = [i for i, ln in enumerate(lines) if "Actually fetch the URL" in ln]
-    assert read_idx and fetch_idx, "prompt lost its read or its fetch instruction"
-
-    assert approve_idx[0] < read_idx[0], (
-        "the snapshot command must precede the read instruction: approve at line "
-        f"{approve_idx[0]}, read at line {read_idx[0]}"
+    step1_idx, _ = step_line(prepare, 1)
+    fetch_idx, _ = step_line(prepare, 2)
+    assert approve_idx[0] == step1_idx, (
+        "the approve command must BE prepare's STEP 1, not merely appear "
+        f"somewhere in its prompt: approve at line {approve_idx[0]}, STEP 1 at "
+        f"line {step1_idx}"
     )
-    assert approve_idx[0] < fetch_idx[0], (
-        "the snapshot command must precede the fetch instruction: approve at line "
-        f"{approve_idx[0]}, fetch at line {fetch_idx[0]}"
+    assert step1_idx < fetch_idx, (
+        "the snapshot command must precede the fetch: approve at line "
+        f"{step1_idx}, fetch at line {fetch_idx}"
     )
 
+    # The cross-call half. Walked over the recorded order rather than looked up
+    # by index so that it stays meaningful up the retry ladder, where several of
+    # each label fire: at no point may a judge have run that its own attempt's
+    # prepare had not already preceded.
+    seen_prepare = 0
+    for i, label in enumerate(labels_of(out)):
+        if label == "glossary:citation-prepare:0":
+            seen_prepare += 1
+        elif label == "glossary:citation-review:0":
+            assert seen_prepare > 0, (
+                "a citation judge ran before any prepare had taken the snapshot "
+                f"it reads (call {i} of {labels_of(out)})"
+            )
 
-def test_the_reviewer_is_told_to_reject_when_the_snapshot_command_fails(tmp_path):
+
+def test_the_prepare_step_is_told_to_stop_when_the_snapshot_command_fails(tmp_path):
     """A fragment that no longer passes --check-batch was rewritten underneath
-    the reviewer. The correct answer is a fresh attempt, never an audit of bytes
-    that failed validation -- so the failure branch must route to the rejection
-    sentinel, not to a best-effort audit."""
+    us. The correct answer is a fresh attempt, never an audit of bytes that
+    failed validation -- so the failure branch must stop the stage dead rather
+    than carry on to a best-effort audit.
+
+    ANCHOR MOVED IN 1.16.1: the approve command is run by PREPARE now, so this
+    instruction lives in the prepare prompt and routes to EVIDENCE_FAILED rather
+    than to a rejection verdict. (Named test_the_reviewer_is_told_to_reject_...
+    until then; renamed because the agent that runs the command is no longer the
+    one that reviews. The property is unchanged.) The control-flow consequence --
+    that a failed prepare really does spend no judge call -- is asserted
+    separately below, because prose alone cannot prove it.
+    """
     out = one_batch_run(tmp_path)
-    review = prompts_for(out, "glossary:citation-review:0")[0]
-    fail_lines = [ln for ln in review.split("\n") if "exits non-zero" in ln]
+    prepare = sole_prompt(out, "glossary:citation-prepare:0")
+    lines = prepare.split("\n")
+
+    fail_lines = [(i, ln) for i, ln in enumerate(lines) if "exits non-zero" in ln]
     assert len(fail_lines) == 1, (
         f"expected one snapshot-command failure instruction, found {len(fail_lines)}"
     )
-    assert "reject" in fail_lines[0].lower(), (
-        "a failed snapshot command must reject the batch rather than proceed to "
-        f"an audit; the instruction was: {fail_lines[0]}"
+    fail_idx, fail_line = fail_lines[0]
+    step1_idx, _ = step_line(prepare, 1)
+    step2_idx, _ = step_line(prepare, 2)
+    assert step1_idx < fail_idx < step2_idx, (
+        "the failure branch must be stated with STEP 1, before STEP 2 is even "
+        f"introduced: STEP 1 at {step1_idx}, failure branch at {fail_idx}, "
+        f"STEP 2 at {step2_idx}"
+    )
+
+    low = fail_line.lower()
+    assert "stop" in low and "step 2" in low, (
+        "a failed snapshot command must stop the stage before the fetch, not "
+        f"proceed; the instruction was: {fail_line}"
+    )
+    assert "EVIDENCE_FAILED 0 ATTEMPT 0" in prepare, (
+        "prepare must have an attempt-scoped failure sentinel to route that stop "
+        f"into; its prompt was:\n{prepare}"
     )
 
 
@@ -360,32 +540,50 @@ def test_the_approve_command_is_the_check_batch_contract_plus_approve_to(tmp_pat
     """--approve-to is APPENDED, never interleaved. The dispatch prompt tells
     codex to re-run "exactly the command above", so the --check-batch prefix has
     to stay reproducible from the dispatch side, with --research-mode still ahead
-    of --expect-source-forms-file."""
+    of --expect-source-forms-file.
+
+    ANCHOR MOVED IN 1.16.1: the command is issued by PREPARE now. The comparison
+    is unchanged -- still against the string the wait poll really emitted, never
+    against a local transcription of it.
+    """
     out = one_batch_run(tmp_path)
-    review = prompts_for(out, "glossary:citation-review:0")[0]
+    prepare = sole_prompt(out, "glossary:citation-prepare:0")
     expected = approve_cmd_for(check_cmd_from_wait(out, 0), 0, 0)
-    assert expected in review, (
-        "the citation-review prompt must issue the wait poll's own --check-batch "
+    assert expected in prepare, (
+        "the citation-prepare prompt must issue the wait poll's own --check-batch "
         f"command with --approve-to appended:\n  expected: {expected}\n"
-        f"  review prompt was:\n{review}"
+        f"  prepare prompt was:\n{prepare}"
     )
 
 
 @pytest.mark.parametrize("label", [
     "glossary:precheck:0", "glossary:dispatch:0", "glossary:wait:0",
+    "glossary:citation-review:0",
 ])
-def test_no_plain_check_batch_site_ever_issues_approve_to(tmp_path, label):
-    """The three sites that must issue checkBatchCmd() character-identically keep
-    issuing it bare. A precheck or a wait poll that snapshotted would write an
-    approved copy of bytes nobody has reviewed; a dispatch self-check that did it
-    would let the producer approve its own output."""
+def test_only_the_prepare_call_ever_issues_the_approve_command(tmp_path, label):
+    """PREPARE is the one call in the file that may snapshot, and the reasons
+    differ per label rather than being one rule repeated.
+
+    The three --check-batch sites (precheck, dispatch self-check, wait poll) must
+    issue checkBatchCmd() character-identically, so none of them may acquire the
+    flag: a precheck or wait poll that snapshotted would write an approved copy of
+    bytes nobody has reviewed, and a dispatch self-check that did it would let the
+    producer approve its own output.
+
+    The JUDGE is here for a different reason and was added in 1.16.1 (the test was
+    named test_no_plain_check_batch_site_ever_issues_approve_to when it covered
+    only the first three). It is not a --check-batch site at all; what it must not
+    do is re-take the snapshot AFTER the evidence was retrieved from the first
+    one, which would leave the audited bytes and the fetched-from bytes as two
+    different objects -- the very split this file exists to prevent.
+    """
     out = one_batch_run(tmp_path)
     prompts = prompts_for(out, label)
     assert prompts, f"no prompt recorded for {label}"
     for prompt in prompts:
         assert "--approve-to" not in prompt, (
-            f"{label} must not carry --approve-to -- only the citation review "
-            "snapshots"
+            f"{label} must not carry --approve-to -- only the citation prepare "
+            "call snapshots"
         )
 
 
@@ -440,42 +638,112 @@ def test_a_rejected_attempts_snapshot_never_reaches_the_merge(tmp_path):
 
 
 def test_each_attempt_snapshots_to_its_own_path(tmp_path):
-    """Every attempt's review issues its own attempt-scoped approve command, so a
-    later attempt can never re-approve an earlier attempt's snapshot."""
+    """Every attempt snapshots its own fragment to its own path, so a later
+    attempt can never re-approve an earlier attempt's snapshot.
+
+    ANCHOR MOVED IN 1.16.1: the approve command is prepare's, so the per-attempt
+    scoping is asserted over the PREPARE prompts. The judge is checked in the
+    same loop rather than dropped -- it is still the call that must not be
+    handed a neighbouring attempt's snapshot or evidence, and asserting only the
+    prepare side would leave a judge reading attempt 0's evidence while attempt 2
+    merges.
+    """
     out = one_batch_run(tmp_path, plan={"0": {"reviews": [
         "bad source\nCITATIONS_REJECTED 0 ATTEMPT 0",
         "bad source again\nCITATIONS_REJECTED 0 ATTEMPT 1",
         "CITATIONS_OK 0 ATTEMPT 2",
     ]}})
+    prepares = prompts_for(out, "glossary:citation-prepare:0")
     reviews = prompts_for(out, "glossary:citation-review:0")
+    assert len(prepares) == 3, f"expected three prepare calls, got {len(prepares)}"
     assert len(reviews) == 3, f"expected three review calls, got {len(reviews)}"
-    for attempt, prompt in enumerate(reviews):
+
+    for attempt, prompt in enumerate(prepares):
         expected = approve_cmd_for(check_cmd_from_wait(out, 0, attempt), 0, attempt)
         assert expected in prompt, (
-            f"attempt {attempt}'s review must snapshot that attempt's own "
+            f"attempt {attempt}'s prepare must snapshot that attempt's own "
             f"fragment to {approved_path(0, attempt)}:\n  expected: {expected}"
         )
-        for other in range(3):
-            if other == attempt:
-                continue
-            assert approved_path(0, other) not in prompt, (
-                f"attempt {attempt}'s review names another attempt's snapshot "
-                f"{approved_path(0, other)}"
-            )
+        assert evidence_dir(0, attempt) in prompt, (
+            f"attempt {attempt}'s prepare must retrieve into its own evidence "
+            f"directory {evidence_dir(0, attempt)}"
+        )
+
+    for attempt, prompt in enumerate(reviews):
+        assert approved_path(0, attempt) in prompt, (
+            f"attempt {attempt}'s judge must audit that attempt's own snapshot "
+            f"{approved_path(0, attempt)}"
+        )
+        assert evidence_dir(0, attempt) in prompt, (
+            f"attempt {attempt}'s judge must read that attempt's own evidence "
+            f"directory {evidence_dir(0, attempt)}"
+        )
+
+    for kind, prompts in (("prepare", prepares), ("judge", reviews)):
+        for attempt, prompt in enumerate(prompts):
+            for other in range(3):
+                if other == attempt:
+                    continue
+                assert approved_path(0, other) not in prompt, (
+                    f"attempt {attempt}'s {kind} names another attempt's "
+                    f"snapshot {approved_path(0, other)}"
+                )
+                assert evidence_dir(0, other) not in prompt, (
+                    f"attempt {attempt}'s {kind} names another attempt's "
+                    f"evidence directory {evidence_dir(0, other)}"
+                )
+
+
+def test_a_failed_prepare_spends_no_judge_call_and_never_merges_its_attempt(tmp_path):
+    """The rejection cause 1.16.1 added, and the one no prose assertion reaches.
+
+    A prepare that reports EVIDENCE_FAILED means there is either no trustworthy
+    snapshot or no evidence, so there is nothing to judge: spending the judge call
+    anyway would ask an agent to audit files that may not exist. It joins the same
+    retry ladder a citation rejection does, which makes this the same invariant as
+    "a rejected attempt's snapshot never reaches the merge" -- through the second
+    door, and the door that did not exist before the split.
+    """
+    out = one_batch_run(tmp_path, plan={"0": {"prepares": [
+        "step 1 exited 2: the fragment failed its coverage check\n"
+        "EVIDENCE_FAILED 0 ATTEMPT 0",
+    ]}})
+    prepares = prompts_for(out, "glossary:citation-prepare:0")
+    reviews = prompts_for(out, "glossary:citation-review:0")
+    assert len(prepares) == 2, f"expected a second attempt to be prepared, got {len(prepares)}"
+    assert len(reviews) == 1, (
+        "a failed prepare must spend no judge call -- exactly one judge call "
+        f"should have run, for attempt 1; got {len(reviews)}"
+    )
+    assert approved_path(0, 1) in reviews[0], (
+        "the one judge call must be attempt 1's, the attempt whose evidence was "
+        "actually prepared"
+    )
+
+    merge = prompts_for(out, "glossary:merge")[0]
+    assert approved_path(0, 1) in merge
+    assert approved_path(0, 0) not in merge, (
+        f"the unprepared attempt's snapshot {approved_path(0, 0)} must never be "
+        "handed to the merge -- nothing ever audited it"
+    )
+    assert out["result"]["batches"][0]["mergePath"] == approved_path(0, 1)
 
 
 def test_offline_merge_consumes_the_attempt_path_and_names_no_snapshot(tmp_path):
     """The explicit live/offline branch, not a global rename.
 
-    Offline forbids basis:"established" outright, so no reviewer runs and nothing
-    ever issues an approve command. A merge that always consumed approved_* paths
-    would name a file that cannot exist and every offline run would die at the
-    merge on a missing file.
+    Offline forbids basis:"established" outright, so neither half of the citation
+    stage runs and nothing ever issues an approve command. A merge that always
+    consumed approved_* paths would name a file that cannot exist and every
+    offline run would die at the merge on a missing file.
     """
     out = one_batch_run(tmp_path, research_mode="offline")
-    assert "glossary:citation-review:0" not in labels_of(out), (
-        "offline must spend no citation-review call"
-    )
+    # BOTH halves of the split stage, since 1.16.1. Checking only the judge would
+    # miss an offline run that still ran the prepare -- which would take a
+    # snapshot and, worse, hit the network through the fetcher, in the one mode
+    # whose whole point is that it makes no external claim at all.
+    for label in ("glossary:citation-prepare:0", "glossary:citation-review:0"):
+        assert label not in labels_of(out), f"offline must spend no {label} call"
     merge = prompts_for(out, "glossary:merge")[0]
     verify = prompts_for(out, "glossary:verify")[0]
 
@@ -496,20 +764,33 @@ def test_offline_merge_consumes_the_attempt_path_and_names_no_snapshot(tmp_path)
 
 def test_the_resume_skip_entry_point_still_produces_its_own_snapshot(tmp_path):
     """ENTRY A runs neither the dispatch nor the wait, which is exactly why the
-    snapshot is taken inside the reviewer's turn rather than in the wait step: a
-    wait-side snapshot would be skipped on every resumed batch, and a resumed,
-    never-reviewed fragment is the case this whole stage exists for."""
+    snapshot is taken inside the prepare call's own turn rather than in the wait
+    step: a wait-side snapshot would be skipped on every resumed batch, and a
+    resumed, never-reviewed fragment is the case this whole stage exists for.
+
+    ANCHOR MOVED IN 1.16.1: the snapshot is prepare's STEP 1, so PREPARE is what
+    has to sit at the convergence point of the two entry points. The judge is
+    asserted alongside it because the resumed batch must be REVIEWED, not merely
+    snapshotted -- a prepare that ran while the judge was skipped would satisfy
+    the snapshot half of this test and still merge unreviewed bytes.
+    """
     out = one_batch_run(tmp_path, plan={"0": {"precheck": "PRESENT 0"}})
     order = labels_of(out)
     assert "glossary:dispatch:0" not in order, "fixture did not take the resume-skip path"
     assert "glossary:wait:0" not in order, "fixture did not take the resume-skip path"
 
-    review = prompts_for(out, "glossary:citation-review:0")[0]
+    prepare = sole_prompt(out, "glossary:citation-prepare:0")
     expected = approve_cmd_for(check_cmd_from_precheck(out, 0), 0, 0)
-    assert expected in review, (
+    assert expected in prepare, (
         "a resume-skipped batch must still snapshot its own fragment:\n"
         f"  expected: {expected}"
     )
+    review = prompts_for(out, "glossary:citation-review:0")
+    assert len(review) == 1, (
+        "a resume-skipped batch must still be judged, exactly once, over the "
+        f"snapshot its prepare took; got {len(review)} judge call(s)"
+    )
+    assert approved_path(0, 0) in review[0]
     merge = prompts_for(out, "glossary:merge")[0]
     assert approved_path(0, 0) in merge
     assert attempt_path(0, 0) not in merge

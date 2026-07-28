@@ -276,15 +276,29 @@ and atomically promotes it.
    waiting out the whole bound. This specifically prevents a Claude fix-agent from
    ever ending up authoring a missing translation, since "codex only translates"
    would otherwise be silently violated the moment a fix step ran against a
-   nonexistent/partial/stale-run draft. On timeout (or fail-fast), this branch
-   returns `{ seg, converged: false, reason: 'translate-timeout' }` and the loop
-   never reaches a review call at all for this segment. **1.16.0:** this wait is
-   containment-guarded — a reply carrying `TIMEOUT <seg>` anywhere in it takes
-   the timeout branch even when glued to prose, which whole-line matching alone
-   would have skipped, proceeding as ready on a reply that said it had timed
-   out. `translate-timeout` is deliberately non-terminal, so a false RED here is
-   the cheapest of the guarded sites: `select_segments.py` picks the segment
-   back up and auto-redispatches it on the next run.
+   nonexistent/partial/stale-run draft. **1.16.1 (#348):** this wait is no longer
+   ONE `agent()` call. The Bash tool clamps any single call at
+   `BASH_CALL_CAP_SEC = 600 s` regardless of the timeout the agent asks for, so
+   the 3450 s bound is SPENT across up to `WAIT_CHUNKS = 8` chunk calls
+   (`WAIT_CHUNK_SEC = 480 s` each, chunk 8 shortened to the 90 s that remain, so
+   the chunks sum to exactly 3450), each returning `READY <seg>`,
+   `FAILED <seg>` or `PENDING <seg>`. Whenever the chunk loop ends anything
+   other than READY — budget exhausted OR a chunk reported the driver's fail
+   sentinel — ONE authoritative, non-polling re-check of the canonical draft
+   runs before a timeout is declared, because a job that finishes after the last
+   chunk's poll ended leaves a valid draft that nothing would otherwise read.
+   Only if that re-check also fails does this branch return
+   `{ seg, converged: false, reason: 'translate-timeout' }`, and the loop never
+   reaches a review call at all for this segment. The reason string is
+   deliberately unchanged: `select_segments.py`'s "non-terminal → recoverable"
+   rule and every recovery doc key off it. **1.16.0:** this wait is
+   containment-guarded — a reply carrying the fail sentinel (`FAILED <seg>`
+   since 1.16.1, `TIMEOUT <seg>` before it) anywhere in it leaves the READY path
+   even when glued to prose, which whole-line matching alone would have skipped,
+   proceeding as ready on a reply that said it had failed. `translate-timeout`
+   is deliberately non-terminal, so a false RED here is the cheapest of the
+   guarded sites: `select_segments.py` picks the segment back up and
+   auto-redispatches it on the next run.
 3. **Review/fix loop**, up to `engine.max_fix_rounds` rounds of review → fix
    → re-review, exiting early the moment a review reports
    `clean && coverage_ok`. Each round's review point is itself the shared
@@ -301,12 +315,19 @@ and atomically promotes it.
      runs `review_ready.py {seg} --expect-token <RUN_ID:seg:rN>` on the canonical
      and whose fail-fast is the DISP-named sentinel `[ -f
      segments/.codex_failed.<seg>.<DISP> ]` (no external `timeout` binary).
-     `TIMEOUT`/fail-fast → exit immediately as `blocked review-timeout`, no retry.
-     **1.16.0:** containment-guarded — a reply carrying `TIMEOUT <seg>` anywhere
-     in it takes this branch, even glued to prose, where whole-line matching
+     **1.16.1 (#348):** chunked exactly like the translate wait above — up to
+     `WAIT_CHUNKS = 8` chunk calls spending the same 3450 s bound, each returning
+     `READY`/`FAILED`/`PENDING <seg>`, then ONE authoritative non-polling
+     re-check (`reviewWaitRecheckPrompt`) of the canonical review artifact,
+     running on the fail-fast path too. Budget exhausted or fail-fast, with that
+     re-check also failing → `blocked review-timeout`. The review JOB is never
+     re-dispatched; the re-check is a second look at disk, not a retry.
+     **1.16.0:** containment-guarded — a reply carrying the fail sentinel
+     (`FAILED <seg>` since 1.16.1, `TIMEOUT <seg>` before it) anywhere in it
+     leaves the READY path, even glued to prose, where whole-line matching
      alone would have skipped it and proceeded as ready (see the glossary-pass
      template section below, and `references/canon-and-glossary.md`). Because
-     there is no retry here, a false RED costs this segment for the run.
+     the segment is not re-reviewed here, a false RED costs it for the run.
    - **`readReviewPrompt` + `verifyReviewArtifactPrompt`** — the two CONSUME calls,
      schema-validated (`REVIEW_SCHEMA`, flat `REVIEW_ARTIFACT_SCHEMA`),
      covered under **one shared retry budget**: read → check; on a `null`
@@ -370,11 +391,17 @@ W4).
 
 ## Prompt functions — generated from the profile at instantiation time
 
-`mass-translate-wf.template.js` defines twelve prompt functions:
-`translatePrompt`, `translateDrivePrompt`, `waitPrompt`,
+`mass-translate-wf.template.js` defines sixteen prompt functions:
+`translatePrompt`, `translateDrivePrompt`, `waitPrompt`, `waitRecheckPrompt`,
 `reviewDispatchPrompt`, `reviewDrivePrompt`, `reviewWaitPrompt`,
+`reviewWaitRecheckPrompt`, `waitChunkPrompt`, `waitRecheckPromptFor`,
 `readReviewPrompt`, `verifyReviewArtifactPrompt`, `fixPrompt`,
-`draftProbePrompt`, `recordLedgerPrompt`, `mergeLedgerPrompt`. The #198 drive
+`draftProbePrompt`, `recordLedgerPrompt`, `mergeLedgerPrompt`. Four of those
+are 1.16.1/#348 additions, all wait-side: `waitChunkPrompt` and
+`waitRecheckPromptFor` are the shared builders both wait sites splice, while
+`waitRecheckPrompt` and `reviewWaitRecheckPrompt` are the per-site
+authoritative re-checks. `waitPrompt`/`reviewWaitPrompt` keep their names but
+now build ONE chunk each, taking a `chunkIndex`. The #198 drive
 prompts `translateDrivePrompt`/`reviewDrivePrompt` are the plain-Claude
 dispatchers that launch the detached `codex_job.py` driver (returning
 `DISPATCHED <seg> <DISP>`); `translatePrompt`/`reviewDispatchPrompt` remain,
@@ -385,9 +412,13 @@ sequence, per `references/workflow-schema-validation.md`.
 `verifyReviewArtifactPrompt` keeps its pre-1.2.0 name but is now dispatched as
 a separate call after `readReviewPrompt` returns, rather than immediately after
 the old single `reviewPrompt` call.) `glossary-pass-wf.template.js` defines its own,
-smaller set: `batchDispatchPrompt`, `batchWaitPrompt`, a final-merge prompt,
-and `glossaryVerifyPrompt` (`CANON_VERIFY_SCHEMA`) — see
-`references/canon-and-glossary.md`.
+smaller set of seven: `batchPrecheckPrompt`, `batchDispatchPrompt`,
+`batchWaitPrompt`, `citationPreparePrompt` and `citationJudgePrompt` (1.16.1,
+`live` only — the pair that replaced 1.16.0's single `citationReviewPrompt`),
+`mergeBatchesPrompt`, and `glossaryVerifyPrompt` (`CANON_VERIFY_SCHEMA`) — see
+`references/canon-and-glossary.md`. Its `batchWaitPrompt` is NOT the shape
+W5's two waits use — see `references/workflow-schema-validation.md`'s WAIT
+section.
 
 **There is no templating engine at Workflow-runtime.** Every prompt function
 is plain JavaScript string interpolation against constants the orchestrating
@@ -473,7 +504,9 @@ input_digest = sha256(canonical_json({
   kind: "mass" | "glossary",
   args: <the full ordered args this invocation was given>,
   subst: {research_mode, verse_policy, source_lang, target_lang,
-          max_fix_rounds, batch_agent_cap, effort},   // resolved profile substitutions (#197: effort added)
+          max_fix_rounds, batch_agent_cap, effort,
+          citation_content_types},   // resolved profile substitutions
+                                     // (#197: effort added; #347: citation_content_types added)
   domain: mass: {seg: <cache_key.py's 15-field composite per seg>}
         | glossary: {glossary_rule, canon_hash},
   version: {plugin_bundle_hash: <runs/.plugin_bundle_hash>,
@@ -520,10 +553,17 @@ Before `pipeline()` is ever called, the workflow template computes a
 worst-case estimate of how many total `agent()` calls this batch could make,
 and refuses to start if that estimate exceeds `engine.batch_agent_cap`
 (`profile.yml`'s `engine.batch_agent_cap: 3500` in the shipped example — see
-`assets/profile.example.yml`; 1.3.5 raised this default from 1000, which the
-`1 + N*38`-at-`max_fix_rounds:4` formula below made refuse any mass batch over
-26 segments — 3500 admits the issue's ~78-segment repro, `1 + 78*38 = 2965`,
-with headroom). **This estimator is new plugin hardening, not
+`assets/profile.example.yml`). 1.3.5 raised this default from 1000, which the
+then-current `1 + N*38`-at-`max_fix_rounds:4` formula made refuse any mass batch
+over 26 segments; 3500 admitted the issue's ~78-segment repro,
+`1 + 78*38 = 2965`, with headroom. **1.16.1 (#348) more than doubled the
+per-segment cost:** a WAIT is now up to 9 calls rather than 1, so the formula
+below yields `1 + N*86` at `max_fix_rounds:4`, and the SAME 3500 cap now admits
+at most **40 segments** (`1 + 40*86 = 3441`; 41 segments would need 3527 and the
+run refuses to start). A 40-segment book batch therefore now sits just under the
+ceiling, where before #348 the same batch carried roughly 2000 calls of margin
+(`1 + 40*38 = 1521`). Whether to raise the cap for a given project is the
+operator's call, not this plugin's. **This estimator is new plugin hardening, not
 itself source-proven** — the real reference script has no such check
 anywhere; it simply pipelines whatever `SEGS` it's given. Treat it with the
 same "carefully designed, unproven at scale" confidence
@@ -537,25 +577,35 @@ what used to need a clean-slate wipe). It still comes from enumerating every
 mutually-exclusive per-segment branch and taking the true worst case, not
 from padding a flat guess:
 
-- **A review point, worst case, is exactly 6 calls**: the review DISPATCH
-  drive agent `reviewDrivePrompt` (1 — it launches the detached
+**1.16.1 (#348) — a WAIT is no longer one call.** The Bash tool clamps any
+single call at 600 s, so each wait is spent as up to `WAIT_CHUNKS = 8` bounded
+chunk calls followed by ONE authoritative non-polling re-check:
+`WAIT_CALLS = WAIT_CHUNKS + 1 = 9`, worst case. Every "+1 WAIT" below is really
+"+`WAIT_CALLS`". Substituting `WAIT_CALLS = 1` recovers the pre-#348 arithmetic
+verbatim, so this is a generalisation of the derivation below, not a rewrite of
+it.
+
+- **A review point, worst case, is exactly `5 + WAIT_CALLS` calls** (6 before
+  #348, 14 now): the review DISPATCH drive agent
+  `reviewDrivePrompt` (1 — it launches the detached
   `codex_job.py --kind review` driver; #198 replaces the old
   `reviewDispatchPrompt` codex `agent()` call 1:1, so the count is unchanged) +
-  `reviewWaitPrompt` (1) + the CONSUME pair under its **one shared retry
+  the review WAIT (`WAIT_CALLS`) + the CONSUME pair under its **one shared retry
   budget** — `readReviewPrompt` + `verifyReviewArtifactPrompt` run once, then
   (worst case) the identical pair retried once more = 4 — for
-  `1 + 1 + 2×(1 + 1) = 6`. This is a single number now, not a set of
-  mutually-exclusive terminating sub-cases: `reviewWaitPrompt` timing out is
-  the only way a review point resolves in fewer than 6 calls, and that
+  `1 + WAIT_CALLS + 2×(1 + 1)`. This is a single number, not a set of
+  mutually-exclusive terminating sub-cases: the review wait failing is
+  the only way a review point resolves in fewer calls, and that
   terminates the segment immediately (see below), so it is never the
   binding case for the worst-case estimate.
 - **Every segment, unconditionally, before any review point is even
   reached:** 1 `in_progress` ledger write + 1 translate DISPATCH + 1
-  translate WAIT = **3 fixed calls**.
+  translate WAIT = **`2 + WAIT_CALLS` fixed calls** (3 before #348, 11 now).
 - **A NORMAL round** (one that neither converges nor terminates the loop):
-  one review point (6) + one fix call (1) = **7 calls**.
+  one review point (`5 + WAIT_CALLS`) + one fix call (1) =
+  **`6 + WAIT_CALLS` calls**.
 - **The final confirming review** (always runs, even after the round cap):
-  one review point = **6 calls**, no fix call attached to it.
+  one review point = **`5 + WAIT_CALLS` calls**, no fix call attached to it.
 - **+1 terminal ledger write**, whichever terminal status fires
   (`converged`/`non_converged`/`blocked`).
 
@@ -569,12 +619,18 @@ those reasons except `draft-missing`, which only shortens those paths
 further and does not change which branch is binding):
 
 ```
-perSegment = 3 (fixed) + 7 * maxFixRounds (normal rounds) + 6 (final review) + 1 (terminal ledger)
-           = 10 + 7 * maxFixRounds
+perSegment = (2 + WAIT_CALLS)                    (fixed)
+           + maxFixRounds * (6 + WAIT_CALLS)     (normal rounds)
+           + (5 + WAIT_CALLS)                    (final review)
+           + 1                                   (terminal ledger)
+           = 8 + 2*WAIT_CALLS + maxFixRounds * (6 + WAIT_CALLS)
+           = 86 at the shipped WAIT_CALLS = 9, maxFixRounds = 4
+             (it was 10 + 7*maxFixRounds = 38 before #348)
 ```
 
 ```
-estimatedCalls = 1 + SEGS.length * (10 + 7 * maxFixRounds)
+estimatedCalls = 1 + SEGS.length * (8 + 2*WAIT_CALLS + maxFixRounds * (6 + WAIT_CALLS))
+               = 1 + SEGS.length * 86  at WAIT_CALLS = 9, max_fix_rounds: 4
 ```
 
 The leading `+1` is the one mandatory, **batch-level** (not per-segment)
@@ -705,28 +761,59 @@ pipeline(BATCHES, batchStep)
   attempt after the first.
 - `batchWaitPrompt(batch, attempt)` — Claude, `effort:'low'`, bounded poll of
   the same `--check-batch` invocation, returning `READY`/`TIMEOUT`.
-- `citationReviewPrompt(batch, attempt)` (**1.16.0**) — Claude, `effort:'high'`,
+- `citationPreparePrompt(batch, attempt)` (**1.16.1**, replacing 1.16.0's single
+  `citationReviewPrompt`) — Claude, `effort:'low'`, `live` only; returns
+  `EVIDENCE_READY`/`EVIDENCE_FAILED <index> ATTEMPT <n>`. It opens by re-running
+  the fragment's own `--check-batch` validation with `--approve-to`, which
+  snapshots the exact bytes that invocation just validated to a create-once,
+  attempt-scoped `approved_{index}_attempt_{n}.json` — one read, so nothing can
+  change between validating and copying. It then runs `fetch_citation.py` over
+  **that snapshot** and reads only the single locally-generated metadata line the
+  script prints. It never reads a retrieved body.
+- `citationJudgePrompt(batch, attempt)` (**1.16.1**) — Claude, `effort:'high'`,
   no `agentType`, no schema, `live` only; returns
   `CITATIONS_OK`/`CITATIONS_REJECTED <index> ATTEMPT <n>`. It gates whether
-  the batch counts as ready at all. It opens by re-running the fragment's own
-  `--check-batch` validation with `--approve-to`, which snapshots the exact
-  bytes that invocation just validated to a create-once, attempt-scoped
-  `approved_{index}_attempt_{n}.json` — one read, so nothing can change
-  between validating and copying — and it then audits **that snapshot**,
-  never the mutable `out_*` attempt path. The approval therefore binds bytes
-  rather than a path, and it costs no extra `agent()` call because it happens
-  inside this same turn. See `references/canon-and-glossary.md`'s **Pre-merge
-  citation review**.
+  the batch counts as ready at all. It audits the approved snapshot and the
+  fetched evidence bodies, and performs no retrieval of its own — it is given no
+  retrieval instruction and **no fragment path**. Stated narrowly, because an
+  earlier draft of this bullet overclaimed it: the judge *does* receive URLs.
+  `index.json`'s `source` field is the cited URL itself, the judge is asked to
+  name the offending source in its verdict, and a fetched body can contain any
+  URL at all. It is still an ordinary agent holding Bash. What the split removes
+  is the *reason* to fetch and the *provenance* of every byte it judges — not
+  URLs, and not the tool — which is why its prompt marks `source` and
+  `source_form` UNTRUSTED explicitly rather than relying on their absence.
+  The approval binds bytes rather than a path.
+  **This pair costs one MORE `agent()` call per attempt than 1.16.0's single
+  reviewer** — that is the whole reason the live ladder moved from
+  `1 + 3*(MAX_CITATION_RETRIES+1)` to `1 + 4*(MAX_CITATION_RETRIES+1)`; see the
+  batch_agent_cap section above. See `references/canon-and-glossary.md`'s
+  **Pre-merge citation review**.
 
-**All three of these verdicts are containment-guarded (1.16.0)** — as are
-mass-translate's two waits and its `DRAFT_MISSING` fix check, six sites over the
-two templates. Each short-circuits when the sentinel is found anywhere in the
+**All four of these verdicts are containment-guarded** — the precheck, the wait,
+and (1.16.1) both halves of the citation pair — as are mass-translate's
+`waitChunkVerdict()` and its `DRAFT_MISSING` fix check, **six sites over the two
+templates**. The total is unchanged from 1.16.0 but its composition is not: the
+glossary side went from three to four when the citation reviewer split in two,
+and the mass-translate side went from three to two when 1.16.1 (#348) collapsed
+the two separate wait verdicts into the single `waitChunkVerdict()` parse site
+that now serves both chunked wait loops. Counting *call sites in the templates*
+rather than *waits in the pipeline* is what makes those two movements cancel.
+Each short-circuits when the sentinel is found anywhere in the
 reply as a substring, before `sentinelVerdict()` is consulted.
 `sentinelVerdict()` alone matches whole LINES, so a sentinel sharing its line
 with anything `trim()` does not strip was skipped.
 
 Five of the six take a FAILURE sentinel via `rejectedAnywhere()`, where a hit
-biases toward REJECTING and the guard only ever adds rejections. The
+biases toward REJECTING and the guard only ever adds rejections.
+`waitChunkVerdict()` is the one site that runs it TWICE — once for `FAILED` and
+once for `PENDING`. `PENDING` is not strictly a failure sentinel, but it biases
+in the same direction the helper is named for: away from `READY`. Spelling that
+second guard `mentionedAnywhere()` was proposed in the 1.16.1 review and
+deliberately not taken; the two helpers share one body, so it would have been
+behaviour-identical, but `bounded_poll_present.test.py` pins both guards by
+helper NAME, and widening that regex would trade a structural guard on a
+false-green boundary for a naming nicety. The
 `DRAFT_MISSING` fix site is the exception and runs the same containment test in
 the opposite direction, through `mentionedAnywhere()`: there the sentinel is the
 OK one, so gluing hid a genuine missing-draft report and the loop silently

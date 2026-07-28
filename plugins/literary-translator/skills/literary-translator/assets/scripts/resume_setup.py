@@ -58,7 +58,10 @@ path. Payload shape:
         "research_mode": "...", "verse_policy": "...",
         "source_lang": "...", "target_lang": "...",
         "max_fix_rounds": N, "batch_agent_cap": N,
-        "effort": "low|medium|high|xhigh"        # #197; NOT "model" (see SUBST_FIELDS)
+        "effort": "low|medium|high|xhigh",       # #197; NOT "model" (see SUBST_FIELDS)
+        "citation_content_types": "text/,application/pdf"   # 1.16.1 (#347);
+                                                 # "" when the profile key is
+                                                 # absent, but REQUIRED even then
       },
       "resume_from_run_id": "<candidate RUN_ID>" | null,   # optional
       "segs": ["seg01", "seg02", ...],           # required for kind="mass"
@@ -111,6 +114,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -130,6 +134,16 @@ CACHE_KEY_SCRIPT = SCRIPTS_DIR / "cache_key.py"
 SUBST_FIELDS = frozenset({
     "research_mode", "verse_policy", "source_lang", "target_lang",
     "max_fix_rounds", "batch_agent_cap", "effort",
+    # 1.16.1 (#347). It changes the prepare step's actual command line, so it
+    # changes what a cached citation-review result MEANS: widening the list from
+    # ["text/"] to ["text/", "application/pdf"] makes the boundary admit pages it
+    # previously refused, and a resumed run would otherwise reuse verdicts taken
+    # under the OLD policy while reporting them as current. Omitting it was
+    # caught by codex in the 1.16.1 round-3 review, which measured two identical
+    # digests across that exact change -- and it would have recreated this
+    # release's own stated anti-goal: a profile setting that silently does not
+    # take effect.
+    "citation_content_types",
 })
 # NOT "model": the mass digest already carries engine.model via each
 # segment's own cache_key/agent_config_hash; the glossary pass has no model
@@ -385,6 +399,17 @@ def write_glossary_manifests(glossary_run_dir: Path, batches) -> None:
 
 _GLOSSARY_FRAGMENT_RE = re.compile(r"^(out|approved)_(\d+)_attempt_(\d+)\.json$")
 
+# #347 -- the citation audit's prepare step writes a DIRECTORY per batch attempt
+# (fetched evidence bodies plus index.json), not a file, so the fragment regex
+# above cannot see it and entry.unlink() could not remove it anyway.
+# \A...\Z, not ^...$: Python's `$` also matches BEFORE a trailing newline, so
+# `^...$` admits "evidence_0_attempt_1\n" -- a directory name POSIX allows.
+# This regex gates a shutil.rmtree, so a name that matches by accident is
+# deleted by accident. Same anchor defect this release already fixed once in
+# the content-type gate (round 3); the sibling in a DESTRUCTIVE path had kept
+# the loose form.
+_GLOSSARY_EVIDENCE_DIR_RE = re.compile(r"\Aevidence_(\d+)_attempt_(\d+)\Z")
+
 
 def _wipe_stale_glossary_fragments(glossary_run_dir: Path, resume: bool) -> None:
     """Remove fragments a later wait step could otherwise poll while assuming
@@ -410,8 +435,25 @@ def _wipe_stale_glossary_fragments(glossary_run_dir: Path, resume: bool) -> None
 
     Cost of the fresh-run wipe is at most one re-dispatch per batch on the rare
     orphan collision, never a wrong result.
+
+    EVIDENCE DIRECTORIES (#347) are wiped UNCONDITIONALLY -- fresh run and
+    resume alike, attempt 0 included. They follow the `approved_*` rule, not the
+    `out_*` one, and for the same reason: evidence is an OUTPUT of the citation
+    review, re-produced by the prepare step that runs before anything judges it,
+    so a surviving copy is never useful and is potentially wrong. It is the
+    stronger reading of the resume rule, and the asymmetry with `out_*` is
+    deliberate: keeping attempt 0's FRAGMENT is what the resume-skip
+    optimisation depends on, whereas keeping attempt 0's EVIDENCE buys nothing
+    and would leave a previous run's fetched page bodies sitting at exactly the
+    paths this run writes. The judge is separately instructed to read only the
+    files this run's `index.json` names, so this is defence in depth rather than
+    the sole protection -- but a stale body reachable at a live path is the kind
+    of thing that outlives the prompt that currently makes it harmless.
     """
     for entry in glossary_run_dir.iterdir():
+        if _GLOSSARY_EVIDENCE_DIR_RE.match(entry.name) and entry.is_dir():
+            shutil.rmtree(entry)
+            continue
         m = _GLOSSARY_FRAGMENT_RE.match(entry.name)
         if m is None:
             continue

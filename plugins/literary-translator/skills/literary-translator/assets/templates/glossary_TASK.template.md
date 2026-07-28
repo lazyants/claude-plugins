@@ -219,7 +219,7 @@ item's own `disposition` field, never a bare array of resolved entries.
 Self-check before returning: run
 `python3 ${durable_root}/scripts/canon_validate.py --check-batch <the file you just wrote> --research-mode <live|offline> --expect-source-forms-file <the manifest file your dispatch prompt named>`
 and confirm it prints a line with `"success": true`. If it prints a line
-with `"success": false`, it names every offending item -- fix each one in
+with `"success": false`, it names the offending items (the first 8, then a count of the rest -- re-run after fixing those to see the next batch) -- fix each one in
 your own array (reassign `basis`/`disposition`/`note` as the rules above
 require; never weaken the offline backstop, never fabricate a source URL
 to make the check pass, never drop or add a candidate), rewrite the file

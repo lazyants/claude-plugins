@@ -117,6 +117,32 @@ def _wrap(js_source: str) -> str:
 # used by the #228 exact-match sentinel tests to inject a substring-collision
 # or falsy/null reply at review-wait:*, wait:*, or fix:* without having to
 # thread a new bespoke parameter through this harness for each site.
+#
+# #348 -- A WAIT IS NO LONGER ONE CALL. Each wait site now makes up to
+# WAIT_CHUNKS bounded chunk calls that REUSE that site's existing label
+# ("wait:<seg>" / "review-wait:<seg>:r<round>"), then ONE authoritative
+# non-polling re-check under a NEW label containing "-recheck:". Two
+# consequences this harness has to carry deliberately:
+#
+#   * promptByLabel keeps ONE prompt per label, so for a chunked wait it holds
+#     the LAST chunk's prompt, not the first. Every Contract-layer test below
+#     inspects a wait prompt from the happy path, where the first chunk answers
+#     READY and the loop stops -- so exactly one chunk ran and the recorded
+#     prompt IS chunk 1's. test_wait_poll_shape_accept_failfast_deadline
+#     asserts that call count rather than assuming it, so a future change that
+#     made the happy path poll twice fails loudly instead of silently swapping
+#     which chunk's prompt is under assertion.
+#   * a re-check label must be classified by CONTAINMENT of "-recheck:", never
+#     a prefix test: the review site's re-check label is
+#     "review-wait-recheck:<seg>:r<round>", which a prefix test against
+#     "wait-recheck:" would miss, and neither re-check label contains its
+#     site's chunk label as a prefix -- so without an explicit branch every
+#     test in this file dies on "unrecognized label".
+#
+# The re-check's default answer is PENDING (fail-safe: a wait can only FAIL by
+# default, never falsely converge). OVERRIDES is consulted first, so a test
+# that wants a landing-after-the-last-chunk artifact scripts the re-check label
+# directly; tests/wait_chunking.test.py owns that direction end to end.
 HARNESS = r"""
 'use strict';
 __WRAPPED_SOURCE__
@@ -153,9 +179,12 @@ async function agent(promptText, opts) {
   }
   const seg = label.split(":")[1];
   if (label.indexOf("translate:") === 0) return DRIVE_RETURNS.translate !== null ? DRIVE_RETURNS.translate : ("DISPATCHED " + seg + " a1b2c3d4");
-  if (label.indexOf("wait:") === 0) return "READY " + seg;
   if (label.indexOf("review-dispatch:") === 0) return DRIVE_RETURNS.review !== null ? DRIVE_RETURNS.review : ("DISPATCHED " + seg + " beef1234");
-  if (label.indexOf("review-wait:") === 0) return "READY " + seg;
+  // #348 -- both wait sites, chunk and re-check. Containment of "-recheck:"
+  // classifies first, because "review-wait-recheck:<seg>:r<round>" would fall
+  // to the chunk branch under any prefix test written for the translate site.
+  if (label.indexOf("-recheck:") !== -1) return "PENDING " + seg;
+  if (label.indexOf("wait:") === 0 || label.indexOf("review-wait:") === 0) return "READY " + seg;
   if (label.indexOf("review-read:") === 0) return { clean: true, coverage_ok: true, findings: [], draft_sha1: "a" };
   if (label.indexOf("artifact-check:") === 0) return { match: true };
   if (label.indexOf("fix:") === 0) return "FIXED " + seg;
@@ -362,7 +391,17 @@ def test_drive_dispatch_call_sites_have_no_codex_agenttype(tmp_path):
 )
 def test_wait_poll_shape_accept_failfast_deadline(tmp_path, wait_label, accept_scripts, disp):
     out = _happy_run(tmp_path)
-    poll = extract_poll(out["promptByLabel"][wait_label])
+    # The happy path answers READY on the first chunk, so exactly one call was
+    # made at this label and promptByLabel's single slot holds CHUNK 1. Asserted,
+    # not assumed: chunk calls reuse the label (#348), so a change that made the
+    # happy path poll twice would silently move these assertions onto chunk 2.
+    n_wait_calls = sum(1 for c in out["calls"] if c["label"] == wait_label)
+    assert n_wait_calls == 1, (
+        f"expected the happy path to answer READY on chunk 1, got {n_wait_calls} calls "
+        f"at {wait_label} -- the prompt asserted below is no longer chunk 1's"
+    )
+    prompt = out["promptByLabel"][wait_label]
+    poll = extract_poll(prompt)
 
     # (e) ACCEPT runs the full canonical gate directly; no external timeout.
     for s in accept_scripts:
@@ -371,19 +410,44 @@ def test_wait_poll_shape_accept_failfast_deadline(tmp_path, wait_label, accept_s
     assert "timeout" not in poll and "gtimeout" not in poll, "no external timeout binary"
 
     # (e) FAIL-FAST: DISP-named sentinel presence check, keyed on the captured
-    # DISP, evaluated ONLY AFTER the ACCEPT `exit 0`.
-    sentinel = f'[ -f "{FIXTURE_DURABLE_ROOT}/segments/.codex_failed.seg01.{disp}" ] && exit 1'
+    # DISP, evaluated ONLY AFTER the ACCEPT `exit 0`. Since #348 the sentinel
+    # branch also PRINTS its marker before exiting (the reply grammar's FAILED
+    # verdict is derived from that marker, not from the exit status alone) --
+    # the presence check itself, and its position after ACCEPT, are unchanged.
+    sentinel = (
+        f'[ -f "{FIXTURE_DURABLE_ROOT}/segments/.codex_failed.seg01.{disp}" ]'
+        " && { echo LT_FAIL_SENTINEL; exit 1; }"
+    )
     assert sentinel in poll, "fail-fast must be a DISP-named sentinel presence check"
     assert poll.index("exit 0") < poll.index(".codex_failed."), (
         "fail-fast must be evaluated AFTER the ACCEPT gate (a valid canonical wins)"
     )
 
-    # (f) elapsed bound = 3450 (>= the 2700 deadline), gate-then-deadline-break,
-    # NO separate post-loop gate.
-    assert "end=$((SECONDS + 3450))" in poll, "bound = DEADLINE(2700)+FINALIZE(150)+GRACE(600)=3450"
+    # (f) #348 -- the elapsed bound is now this CHUNK's slice of the total, not
+    # the whole 3450 s wait: the Bash tool clamps any single call at 600 s, so a
+    # one-call poll of 3450 s was killed every time. Both halves are asserted --
+    # the chunk's own bound stays clear of the clamp, AND the prompt still
+    # declares the unchanged total bound of 3450 s (DEADLINE 2700 + FINALIZE 150
+    # + GRACE 600), which is the contract every downstream doc quotes.
+    # tests/wait_chunking.test.py owns the sum-of-chunks property.
+    chunk_sec = int(re.match(r"^end=\$\(\(SECONDS \+ (\d+)\)\);", poll).group(1))
+    assert 0 < chunk_sec < 600, (
+        f"chunk 1 declares {chunk_sec}s; the Bash tool clamps a single call at 600s (#348)"
+    )
+    assert "3450" in prompt, (
+        "the chunk prompt must still declare the total wait bound "
+        "DEADLINE(2700)+FINALIZE(150)+GRACE(600)=3450"
+    )
     assert "[ $SECONDS -ge $end ] && break" in poll
     tail = poll.rsplit("done;", 1)[1]
-    assert tail.strip() == "exit 1", f"no separate post-loop gate -- tail after done must be `exit 1`, got: {tail!r}"
+    # The tail gained the chunk's own budget-exhausted MARKER; what it must
+    # still not gain is a second gate. `echo`-plus-`exit 1` keeps a TOOL-KILLED
+    # chunk (exit 143, no marker) indistinguishable from a merely-exhausted one,
+    # which is the safe reading: not ready yet, keep polling.
+    assert tail.strip() == "echo LT_CHUNK_BOUND; exit 1", (
+        f"no separate post-loop gate -- tail after done must be the chunk marker "
+        f"plus `exit 1`, got: {tail!r}"
+    )
     for s in accept_scripts:
         assert s not in tail, f"a gate ({s}) must NOT run after the loop (no post-loop gate)"
 
@@ -460,7 +524,7 @@ def test_valid_disp_still_produces_failfast_control(tmp_path):
     res = run(tmp_path=tmp_path, segs=["seg01"], drive_returns={"translate": "DISPATCHED seg01 abcDEF01"})
     assert res["ok"], res["stderr"]
     poll = extract_poll(res["out"]["promptByLabel"]["wait:seg01"])
-    assert '.codex_failed.seg01.abcDEF01" ] && exit 1' in poll
+    assert '.codex_failed.seg01.abcDEF01" ] && { echo LT_FAIL_SENTINEL; exit 1; }' in poll
 
 
 # ---------------------------------------------------------------------------
@@ -481,17 +545,31 @@ def _non_clean_review():
     }
 
 
-def test_translate_wait_substring_collision_reports_timeout(tmp_path):
+# Both rows below are run against TWO replies. "TIMEOUT ..." is the #228
+# evidence verbatim -- kept because it is the reply that actually broke, and
+# because under #348's grammar it is ALSO the unrecognized-reply shape, whose
+# fail-safe fallthrough to PENDING is worth pinning. "PENDING ..." is the same
+# collision written in the grammar the chunk prompts now ask for. A reply
+# carrying the literal substring "READY" inside its own prose must be rejected
+# in both.
+COLLIDING_NOT_READY_REPLIES = [
+    "TIMEOUT seg01 (not READY)",
+    "PENDING seg01 (not READY)",
+]
+
+
+@pytest.mark.parametrize("reply", COLLIDING_NOT_READY_REPLIES)
+def test_translate_wait_substring_collision_reports_timeout(tmp_path, reply):
     """RED before the #228 exact-match fix at site E (reviewFixLoop's
     "wait:" + seg): the OLD `ready.indexOf("READY") === -1` check falsely
-    treated a TIMEOUT reply that merely contains the literal substring
-    "READY" inside its own explanatory prose (e.g. "TIMEOUT seg01 (not
+    treated a not-ready reply that merely contains the literal substring
+    "READY" inside its own explanatory prose (e.g. "PENDING seg01 (not
     READY)") as ready -- `indexOf` finds "READY" so the negated `=== -1`
     check was false. This is the worst of the five #228 sites: a false pass
     here sends the entire review/fix cycle over a draft that never actually
     finished translating, and no recoverable signal is ever recorded to
     pick it back up."""
-    res = run(tmp_path=tmp_path, segs=["seg01"], overrides={"wait:seg01": "TIMEOUT seg01 (not READY)"})
+    res = run(tmp_path=tmp_path, segs=["seg01"], overrides={"wait:seg01": reply})
     assert res["ok"], res["stderr"]
     out = res["out"]
     assert out["result"]["failed"] == [{"seg": "seg01", "converged": False, "reason": "translate-timeout"}]
@@ -503,14 +581,15 @@ def test_translate_wait_substring_collision_reports_timeout(tmp_path):
     assert "review-wait:seg01:r1" not in labels
 
 
-def test_review_wait_substring_collision_reports_review_timeout(tmp_path):
+@pytest.mark.parametrize("reply", COLLIDING_NOT_READY_REPLIES)
+def test_review_wait_substring_collision_reports_review_timeout(tmp_path, reply):
     """RED before the #228 exact-match fix at site C (getVerifiedReview's
     "review-wait:" + seg + ":r" + roundLabel): the OLD
-    `ready.indexOf("READY") === -1` check falsely treated a TIMEOUT reply
+    `ready.indexOf("READY") === -1` check falsely treated a not-ready reply
     containing the literal substring "READY" as ready, letting the code go
     on to read a review artifact that review_ready.py never actually
     confirmed."""
-    res = run(tmp_path=tmp_path, segs=["seg01"], overrides={"review-wait:seg01:r1": "TIMEOUT seg01 (not READY)"})
+    res = run(tmp_path=tmp_path, segs=["seg01"], overrides={"review-wait:seg01:r1": reply})
     assert res["ok"], res["stderr"]
     out = res["out"]
     assert out["result"]["failed"] == [
@@ -634,20 +713,39 @@ def test_translate_wait_decorated_ready_still_converges(tmp_path):
     assert "review-dispatch:seg01:r1" in labels, "a decorated READY must still enter the review cycle"
 
 
-def test_review_wait_fail_sentinel_wins_when_not_last_line(tmp_path):
+# #348 re-pointed these two rows. The sentinel whose priority they assert used
+# to be the single "TIMEOUT <seg>"; the chunked wait replaced it with TWO
+# non-success sentinels -- "FAILED <seg>" (the driver's fail sentinel appeared)
+# and "PENDING <seg>" (this chunk spent its budget, or was cut short) -- and
+# waitChunkVerdict tests both by containment BEFORE the whole-line READY test.
+# The INVARIANT is unchanged and is what is parametrized here: a non-success
+# sentinel anywhere in the reply outranks a READY on the reply's own final
+# line. Dropping the rows because the literal "TIMEOUT" is gone would delete
+# the property; re-pointing them at the sentinels that replaced it keeps it,
+# and now covers two sentinels where there was one.
+NON_SUCCESS_SENTINELS = ["FAILED", "PENDING"]
+
+
+@pytest.mark.parametrize("fail_sentinel", NON_SUCCESS_SENTINELS)
+def test_review_wait_fail_sentinel_wins_when_not_last_line(tmp_path, fail_sentinel):
     """Fail-priority, discriminating order (round-3 codex finding): the
-    failure sentinel appearing BEFORE the success sentinel -- "TIMEOUT
+    non-success sentinel appearing BEFORE the success sentinel -- "FAILED
     seg01\\nREADY seg01" -- must still block. READY is the reply's own FINAL
     line, so a last-line-only reader would wrongly ACCEPT it; the correct
     full-scan-for-failSentinel-then-check-last-line algorithm still rejects
     it because the failure-sentinel scan runs over every line, not just the
-    last. The non-discriminating order ("READY seg01\\nTIMEOUT seg01",
+    last. The non-discriminating order ("READY seg01\\nFAILED seg01",
     covered by the #228 substring-collision tests' sibling cases above)
     would not tell a correct implementation apart from a broken
-    last-line-only one."""
+    last-line-only one.
+
+    The observable stays `review-timeout`: a FAILED chunk stops the chunk
+    loop early but NOT the segment (#348's re-check runs on that path too,
+    since a valid canonical outranks any sentinel), and this harness answers
+    that re-check PENDING -- so the artifact genuinely never landed."""
     res = run(
         tmp_path=tmp_path, segs=["seg01"],
-        overrides={"review-wait:seg01:r1": "TIMEOUT seg01\nREADY seg01"},
+        overrides={"review-wait:seg01:r1": f"{fail_sentinel} seg01\nREADY seg01"},
     )
     assert res["ok"], res["stderr"]
     out = res["out"]
@@ -659,11 +757,12 @@ def test_review_wait_fail_sentinel_wins_when_not_last_line(tmp_path):
     assert "review-read:seg01:r1" not in labels
 
 
-def test_translate_wait_fail_sentinel_wins_when_not_last_line(tmp_path):
+@pytest.mark.parametrize("fail_sentinel", NON_SUCCESS_SENTINELS)
+def test_translate_wait_fail_sentinel_wins_when_not_last_line(tmp_path, fail_sentinel):
     """Same discriminating-order fail-priority case as above, at site E."""
     res = run(
         tmp_path=tmp_path, segs=["seg01"],
-        overrides={"wait:seg01": "TIMEOUT seg01\nREADY seg01"},
+        overrides={"wait:seg01": f"{fail_sentinel} seg01\nREADY seg01"},
     )
     assert res["ok"], res["stderr"]
     out = res["out"]

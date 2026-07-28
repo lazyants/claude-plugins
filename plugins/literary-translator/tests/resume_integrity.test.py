@@ -202,6 +202,11 @@ BASE_SUBST = {
     "max_fix_rounds": 3,
     "batch_agent_cap": 5,
     "effort": "high",
+    # 1.16.1 (#347). Empty = fetch_citation.py's shipped default list. REQUIRED
+    # even when empty: the value is what the template actually burned in, and a
+    # digest that omitted it would let a resumed run reuse citation verdicts
+    # taken under a DIFFERENT retrieval policy.
+    "citation_content_types": "",
 }
 
 
@@ -545,6 +550,37 @@ def test_case6_research_mode_flip_forces_fresh_run_no_byte_change(tmp_path):
 
     perturbed = copy.deepcopy(base_payload)
     perturbed["subst"]["research_mode"] = "offline"
+    proc2, parsed2 = run_resume_setup(root, with_resume_from(perturbed, run_id))
+    assert_fresh_no_resume(proc2, parsed2, run_id)
+
+
+def test_case6b_citation_content_types_change_forces_fresh_run_no_byte_change(tmp_path):
+    """1.16.1 (#347), same shape as case 6 and found the same way it would have
+    been missed: a `citation_content_types` change is a PROFILE SUBSTITUTION with
+    no byte-hash change anywhere on disk.
+
+    Widening ["text/"] to ["text/", "application/pdf"] makes the retrieval
+    boundary admit pages it previously refused, so every cached citation verdict
+    was taken under a policy that no longer applies. Codex measured two IDENTICAL
+    digests across exactly this change in the 1.16.1 round-3 review -- meaning a
+    resumed run would have reused those verdicts while reporting them as current,
+    which is this release's own stated anti-goal (a profile setting that silently
+    does not take effect).
+    """
+    root = make_resume_setup_root(tmp_path)
+    write_fixture_cache_keys(root, mass_base_cache_keys())
+    base_payload = mass_base_payload()
+    base_payload["subst"]["citation_content_types"] = "text/"
+
+    proc0, parsed0 = run_resume_setup(root, base_payload)
+    assert_setup_success(proc0, parsed0)
+    run_id = parsed0["effectiveRunId"]
+
+    proc1, parsed1 = run_resume_setup(root, with_resume_from(base_payload, run_id))
+    assert_resumes(proc1, parsed1, run_id)
+
+    perturbed = copy.deepcopy(base_payload)
+    perturbed["subst"]["citation_content_types"] = "text/,application/pdf"
     proc2, parsed2 = run_resume_setup(root, with_resume_from(perturbed, run_id))
     assert_fresh_no_resume(proc2, parsed2, run_id)
 

@@ -111,13 +111,18 @@
 // driver validate-before-promotes it -- under a per-seg flock -- to the
 // canonical segments/<seg>.{draft,review}.json: codex writes disk, its own
 // return line is NEVER the verdict. The Workflow's OWN wait poll
-// (waitPrompt/reviewWaitPrompt) is the AUTHORITATIVE independent gate -- an
-// elapsed-time loop (bound = CODEX_DEADLINE_SEC + CODEX_FINALIZE_BUDGET_SEC
-// + CODEX_WAIT_GRACE_SEC = 3450 s, gate-then-deadline-break with NO separate
-// post-loop gate, plus one final finite gate check; NO `timeout` binary)
+// (waitPrompt/reviewWaitPrompt) is the AUTHORITATIVE independent gate -- a
+// POLLING-BUDGET loop (budget = CODEX_DEADLINE_SEC + CODEX_FINALIZE_BUDGET_SEC
+// + CODEX_WAIT_GRACE_SEC = 3450 s, spent since 1.16.1 across WAIT_CHUNKS = 8
+// bounded agent calls rather than inside one, because the agent Bash tool
+// clamps a single call at a measured 600 s regardless of the timeout requested
+// (#348); NO `timeout` binary)
 // whose ACCEPT is a FULL re-validation of the CURRENT canonical (translate:
 // draft_ready.py --expect-token AND validate_draft.py; review: review_ready
-// .py --expect-token), never a trust of any driver-written file. Its
+// .py --expect-token), never a trust of any driver-written file.
+// A failed or exhausted poll is followed by ONE non-polling authoritative
+// re-check before any timeout is declared, so a run that finished while the
+// poll was between chunks is not reported as a timeout. Its
 // optional fail-fast is a pure presence check on the DISP-named sentinel
 // segments/.codex_failed.<seg>.<DISP> (the driver writes it only when it did
 // NOT promote), evaluated ONLY AFTER the ACCEPT gate did not pass this
@@ -363,10 +368,65 @@ const CODEX_FINALIZE_BUDGET_SEC = 150;
 const FINALIZE_TAIL = 10;
 const PER_CALL_CAP = 90;
 const CODEX_WAIT_GRACE_SEC = 600;
-// The wait poll's elapsed-time outer bound: the driver's deadline plus its
-// finalize budget plus a grace margin, so the Workflow poll never gives up
-// before the driver can promote/finalize. = 2700 + 150 + 600 = 3450 s.
+// The wait poll's POLLING BUDGET -- not an elapsed-time outer bound, and the
+// distinction is load-bearing: the driver's deadline plus its finalize budget
+// plus a grace margin, so the Workflow poll never gives up before the driver
+// can promote/finalize. = 2700 + 150 + 600 = 3450 s. Since 1.16.1 it is spent
+// across WAIT_CHUNKS bounded calls, so total WALL-CLOCK for a wait is this
+// budget plus per-call overhead plus the final authoritative re-check -- the
+// budget bounds how long the workflow POLLS, never how long the wait TAKES.
 const WAIT_BOUND_SEC = CODEX_DEADLINE_SEC + CODEX_FINALIZE_BUDGET_SEC + CODEX_WAIT_GRACE_SEC;
+
+// ---------------------------------------------------------------------------
+// #348 -- the wait bound above is SPENT ACROSS SEVERAL AGENT CALLS, not one.
+//
+// MEASURED, not inferred: the agent's Bash tool clamps a single call at
+// 600 000 ms regardless of the timeout the agent passes. The failing call in
+// the P1 gate run asked for `timeout: 3600000` and still came back
+// `Exit code 143 / Command timed out after 10m 0s`. So "just raise the
+// timeout" is not available, and a one-call poll of WAIT_BOUND_SEC (3450 s)
+// was killed at 600 s every time -- reported as translate-timeout /
+// review-timeout while a clean canonical artifact sat unread on disk.
+//
+// Chunk i (1-based) polls for whatever is LEFT of WAIT_BOUND_SEC, never a flat
+// WAIT_CHUNK_SEC -- so the chunk bounds SUM to WAIT_BOUND_SEC exactly. Flat
+// chunks would not SPEND the declared bound, they would silently EXTEND it
+// (8 * 480 = 3840 s), breaking the one contract WAIT_BOUND_SEC exists to
+// state and falsifying every doc that quotes it.
+//
+// NOT PER_CALL_CAP. #348 suggested making the declared-but-unused
+// PER_CALL_CAP = 90 load-bearing here; deliberately declined. PER_CALL_CAP
+// mirrors codex_job.py:65's ceiling for THE DRIVER'S OWN SUBPROCESSES ("hard
+// ceiling for ANY single subprocess") -- a different quantity from this
+// template's per-agent-call poll bound, and conflating them would make one
+// constant answer two unrelated questions. WAIT_CHUNK_SEC is the new
+// load-bearing chunk bound; do not "restore" the conflation.
+const BASH_CALL_CAP_SEC = 600;              // measured hard clamp (see CHANGELOG 1.16.1)
+const WAIT_CHUNK_SEC = 480;                 // one chunk's own elapsed bound
+const WAIT_CHUNK_TOOL_TIMEOUT_MS = 540000;  // what the chunk prompt tells the agent to pass
+const WAIT_CHUNKS = Math.ceil(WAIT_BOUND_SEC / WAIT_CHUNK_SEC);   // 8
+const WAIT_CALLS = WAIT_CHUNKS + 1;         // worst case per wait: chunks + one re-check
+
+// Startup guards, not comments: a future raise of either constant re-creates
+// #348 silently otherwise. They throw here, before pipeline() is ever called.
+if (WAIT_CHUNK_TOOL_TIMEOUT_MS > BASH_CALL_CAP_SEC * 1000) {
+  throw new Error(
+    "WAIT_CHUNK_TOOL_TIMEOUT_MS (" + WAIT_CHUNK_TOOL_TIMEOUT_MS + " ms) exceeds the measured " +
+    "Bash per-call clamp (" + BASH_CALL_CAP_SEC * 1000 + " ms): the agent would be told to ask " +
+    "for a timeout it cannot get, and the chunk bound would stop being the real bound (#348)."
+  );
+}
+if (WAIT_CHUNK_SEC * 1000 >= WAIT_CHUNK_TOOL_TIMEOUT_MS) {
+  throw new Error(
+    "WAIT_CHUNK_SEC (" + WAIT_CHUNK_SEC + " s) leaves no headroom under " +
+    "WAIT_CHUNK_TOOL_TIMEOUT_MS (" + WAIT_CHUNK_TOOL_TIMEOUT_MS + " ms): the poll must reach its " +
+    "own elapsed bound and print its marker BEFORE the tool kills the call (#348)."
+  );
+}
+
+function waitChunkSec(i) {
+  return Math.min(WAIT_CHUNK_SEC, WAIT_BOUND_SEC - (i - 1) * WAIT_CHUNK_SEC);
+}
 
 // SEGS is this run's dispatch list -- the exact array select_segments.py
 // emitted (SEGS = not_started union recoverable union stale, minus reusable/
@@ -755,6 +815,57 @@ function mentionedAnywhere(reply, sentinel) {
   return rejectedAnywhere(reply, sentinel)
 }
 
+// #348 -- THE SINGLE PARSE SITE for both chunked wait loops. One copy, not two,
+// for the same reason matchedVerdict() is one copy: two divergent readings of a
+// false-green boundary are worse than one.
+//
+// Grammar: a chunk agent returns exactly one of
+//   READY <seg>   -- the canonical ACCEPT gate exited 0
+//   FAILED <seg>  -- the driver's DISP-named fail sentinel appeared
+//   PENDING <seg> -- the chunk spent its own elapsed bound, or was cut short
+//
+// PENDING, not NOTREADY: it keeps the option open to guard the READY direction
+// with containment later, and it removes a reader-facing trap where two of the
+// three sentinels differ only by a prefix.
+//
+// ORDER IS LOAD-BEARING. Both containment guards run BEFORE the exact-line
+// READY test, so every #228/#308 property is preserved unchanged: a fail
+// sentinel glued behind ANY character still rejects (rejectedAnywhere is raw
+// indexOf and never asks where the sentinel sits), while READY stays whole-line
+// equality via sentinelVerdict, so a quoted-but-disavowed success form is still
+// not a success.
+//
+// The fail-safe direction is the default: an unparseable reply, a null return,
+// or a tool error is PENDING -- never READY. At worst that costs one more chunk
+// of waiting, bounded by WAIT_CHUNKS, and the post-exhaustion re-check still
+// runs afterwards.
+//
+// KNOWN COLLISION, inherited and recorded rather than closed. SEG_ID_RE permits
+// one id to prefix another (seg1 / seg10) and these two guards are raw
+// containment, so "FAILED seg10" matches seg1's FAILED guard. This is
+// FALSE-RED ONLY -- READY is whole-line equality, so it can never manufacture a
+// false green -- and the same exposure already exists for TIMEOUT today. Its
+// new cost is that seg1 could abandon its remaining chunk budget early; the
+// authoritative re-check below still runs, so a genuinely-landed artifact is
+// still found. Unreachable in practice: a wait agent's prompt names only its
+// own seg. tests/wait_chunking.test.py pins the behaviour so it stays recorded.
+function waitChunkVerdict(reply, seg) {
+  if (rejectedAnywhere(reply, "FAILED " + seg)) return "failed";
+  // rejectedAnywhere() for PENDING too, and deliberately so, though PENDING is
+  // not strictly a FAILURE sentinel: the 1.16.1 review proposed mentionedAnywhere()
+  // here on naming grounds -- the two share one body, so it is behaviour-identical --
+  // and it was NOT taken. tests/bounded_poll_present.test.py's
+  // test_wait_chunk_verdict_runs_both_guards_before_the_whole_line_ready_test
+  // pins BOTH guards by helper NAME and additionally checks they read the same
+  // reply variable and sit positionally before the whole-line READY test. Buying
+  // a naming nicety by widening that regex would trade a real structural guard on
+  // a false-green boundary for cosmetics. What PENDING means here is "a hit biases
+  // AWAY from READY", which is the same direction rejectedAnywhere() is named for.
+  if (rejectedAnywhere(reply, "PENDING " + seg)) return "pending";
+  if (sentinelVerdict(reply, "READY " + seg, null)) return "ready";
+  return "pending";
+}
+
 // ---------------------------------------------------------------------------
 // Prompt-builder functions. All plain JavaScript string interpolation
 // against the constants above -- there is no templating engine at Workflow
@@ -873,32 +984,130 @@ function reviewDrivePrompt(seg, roundLabel) {
   return lines.join("\n");
 }
 
+// ---------------------------------------------------------------------------
+// #348 -- the two wait sites' ACCEPT gates, COMPOSED ONCE AND SHARED.
+//
+// Each returns the exact canonical-validation command for its kind. The chunk
+// poll and the post-exhaustion re-check both splice the SAME string, so the
+// re-check can never drift into a weaker gate than the poll it backs up --
+// that drift would be a false GREEN (accepting an artifact the poll would have
+// rejected), the one direction this pipeline cannot recover from. Same idiom
+// and same reason as glossary's shared --check-batch command.
+//
+// translate ACCEPT = draft_ready.py --expect-token (token + delivery, so an
+// old-run straggler's stale-token draft is never accepted) AND
+// validate_draft.py (the six quality checks, so a structurally-complete but
+// content-defective draft is REJECTED). review ACCEPT = review_ready.py
+// --expect-token (full schema + draft_sha1 freshness + this round's
+// dispatch_token). No external `timeout` binary in either.
+// ---------------------------------------------------------------------------
+function translateAcceptCmd(seg) {
+  const dispatchToken = RUN_ID + ":" + seg;
+  return PY + " " + ROOT + "/scripts/draft_ready.py " + seg + " --expect-token " + dispatchToken +
+    " && " + PY + " " + ROOT + "/scripts/validate_draft.py " + seg;
+}
+function reviewAcceptCmd(seg, roundLabel) {
+  const dispatchToken = RUN_ID + ":" + seg + ":r" + roundLabel;
+  return PY + " " + ROOT + "/scripts/review_ready.py " + seg + " --expect-token " + dispatchToken;
+}
+
+// #348 -- ONE chunk of a chunked wait. Shared by both wait sites so the two
+// deliberately-parallel polls cannot drift apart in shape; only the ACCEPT
+// gate, the fail-fast sentinel's seg and the prose differ.
+//
+// The bash keeps #198's proven grammar exactly: ACCEPT gate first (a valid
+// canonical always wins over any sentinel), optional fail-fast evaluated ONLY
+// AFTER the gate did not pass this iteration, gate -> deadline-break ->
+// clamped sleep, and NO separate post-loop gate inside the command, so exactly
+// one gate straddles this chunk's deadline. What is new is the elapsed bound
+// (this chunk's slice, not the whole run's) and the terminal markers.
+//
+// `>/dev/null 2>&1` ON THE IN-LOOP ACCEPT GATE IS LOAD-BEARING, not tidiness.
+// Without it the gate prints one `{"ready": false, ...}` line per iteration
+// (~30 measured in the #348 transcript), so "the marker is the last line"
+// would be a claim about the tail of a noisy stream. Suppressed, the chunk
+// emits exactly zero or one line and that line is the marker. The gate's EXIT
+// STATUS -- the only thing this workflow acts on -- is unaffected by the
+// redirect.
+//
+// Marker-plus-`exit 1` rather than distinct exit codes, deliberately: it keeps
+// #198's `&& exit 0` / `exit 1` grammar intact, and -- the point -- a
+// TOOL-KILLED chunk (exit 143, no marker printed) becomes indistinguishable
+// from a chunk that merely ran out of budget. That is exactly the safe
+// reading: not ready yet, keep polling.
+function waitChunkPrompt(seg, acceptCmd, disp, chunkIndex, whatPhrase, dontClause) {
+  const failFast = disp
+    ? " [ -f \"" + ROOT + "/segments/.codex_failed." + seg + "." + disp + "\" ] && { echo LT_FAIL_SENTINEL; exit 1; };"
+    : "";
+  const lines = [];
+  lines.push("The codex " + whatPhrase + " is running in a DETACHED background job (launched by codex_job.py). This is wait chunk " + chunkIndex + " of " + WAIT_CHUNKS + " -- one bounded slice of this segment's total " + WAIT_BOUND_SEC + "s wait, sized so a single bash call never approaches the " + BASH_CALL_CAP_SEC + "s per-call cap.");
+  lines.push("Run EXACTLY ONE bash command, passing a bash tool timeout of " + WAIT_CHUNK_TOOL_TIMEOUT_MS + " ms -- an elapsed-time poll that re-validates the canonical artifact directly:");
+  lines.push("end=$((SECONDS + " + waitChunkSec(chunkIndex) + ")); while true; do " + acceptCmd + " >/dev/null 2>&1 && exit 0;" + failFast + " [ $SECONDS -ge $end ] && break; slp=$((end-SECONDS)); [ $slp -gt 20 ] && slp=20; [ $slp -gt 0 ] && sleep $slp; done; echo LT_CHUNK_BOUND; exit 1");
+  lines.push("If that command exits 0 (the canonical artifact validated), return exactly the line: READY " + seg);
+  lines.push("If it printed LT_FAIL_SENTINEL, return exactly the line: FAILED " + seg);
+  lines.push("In every other case -- it printed LT_CHUNK_BOUND, or the call was cut short for any reason at all -- return exactly the line: PENDING " + seg);
+  lines.push("Do nothing else -- do not touch any files, and " + dontClause + ".");
+  return lines.join("\n");
+}
+
+// #348 -- THE FIX. After the chunk budget is spent (or a chunk reported the
+// driver's fail sentinel), re-check the canonical artifact ONCE, without
+// polling, before declaring a timeout.
+//
+// This is the defect #348 actually reports. Chunking alone would have turned
+// the one observed 610 s failure into a success by accident, while leaving the
+// real hole open: a job that finishes after the last poll ended has a complete,
+// valid artifact on disk that nothing ever reads. The frozen reproduction is a
+// clean segments/<seg>.review.json sitting beside a ledger saying in_progress.
+//
+// Running it on the FAILED path too is deliberate, not sloppy: the fail
+// sentinel means the DRIVER did not promote, and this file's own rule is that
+// a valid canonical always wins over any sentinel. The canonical gate is the
+// authority on whether one landed anyway.
+//
+// Non-polling by construction -- no `end=`, no loop, no sleep. A polling
+// re-check would just be one more chunk and could itself hit the cap.
+function waitRecheckPromptFor(seg, acceptCmd, whatPhrase, dontClause) {
+  const lines = [];
+  lines.push("The " + WAIT_BOUND_SEC + "s wait budget for the codex " + whatPhrase + " is spent, or its job reported failure. Before this is declared a timeout, re-check the canonical artifact ONCE -- it may have landed after the last wait chunk's poll ended.");
+  lines.push("Run EXACTLY ONE bash command. It does NOT poll and returns immediately:");
+  lines.push(acceptCmd + " >/dev/null 2>&1");
+  lines.push("If that command exits 0 (the canonical artifact validated), return exactly the line: READY " + seg);
+  lines.push("Otherwise return exactly the line: PENDING " + seg);
+  lines.push("Do nothing else -- do not touch any files, and " + dontClause + ".");
+  return lines.join("\n");
+}
+
 // #198 -- the Workflow's AUTHORITATIVE independent wait gate for the review
 // dispatch above. The codex reviewer runs in a DETACHED codex_job.py job;
 // this poll re-validates the CANONICAL review artifact directly (never
 // trusts any driver-written file). ACCEPT = review_ready.py <seg>
 // --expect-token <tok> exit 0 (full schema + draft_sha1 freshness + this
-// round's dispatch_token). Elapsed-time loop, gate-then-deadline-break, NO
-// separate post-loop gate (so exactly ONE gate can straddle the deadline).
-// The optional fail-fast (only when disp is non-empty) is a pure presence
-// check on the DISP-named sentinel the driver writes when it did NOT
-// promote, evaluated ONLY AFTER the ACCEPT gate did not pass this iteration
-// -- a valid canonical always wins over any sentinel; an empty disp disables
-// fail-fast and simply polls to the bound (safe degradation). No external
-// `timeout` binary anywhere. roundLabel derives the token internally
+// round's dispatch_token).
+//
+// Since 1.16.1 (#348) this builds ONE CHUNK of the chunked wait, not the whole
+// poll: chunkIndex selects the slice, and the bash grammar, the chunk bound and
+// the fail-fast semantics all live in waitChunkPrompt() -- see its comment
+// rather than duplicating them here, which is how this header came to describe
+// a single full-bound poll that no longer exists. The chunk loop and the ONE
+// non-polling authoritative re-check that follows an exhausted or failed poll
+// belong to the CALL SITE (getVerifiedReview/reviewFixLoop); an exhausted chunk
+// is not a timeout on its own. What is genuinely this wrapper's own is the
+// ACCEPT gate named above; roundLabel derives the token internally
 // (RUN_ID:seg:r<label>).
-function reviewWaitPrompt(seg, roundLabel, disp) {
-  const dispatchToken = RUN_ID + ":" + seg + ":r" + roundLabel;
-  const failFast = disp
-    ? " [ -f \"" + ROOT + "/segments/.codex_failed." + seg + "." + disp + "\" ] && exit 1;"
-    : "";
-  const lines = [];
-  lines.push("The codex reviewer for segment " + seg + " (round " + roundLabel + ") is running in a DETACHED background job (launched by codex_job.py). Wait for it by running EXACTLY ONE bash command -- an elapsed-time poll that re-validates the canonical review artifact directly:");
-  lines.push("end=$((SECONDS + " + WAIT_BOUND_SEC + ")); while true; do " + PY + " " + ROOT + "/scripts/review_ready.py " + seg + " --expect-token " + dispatchToken + " && exit 0;" + failFast + " [ $SECONDS -ge $end ] && break; slp=$((end-SECONDS)); [ $slp -gt 20 ] && slp=20; [ $slp -gt 0 ] && sleep $slp; done; exit 1");
-  lines.push("If that command exits 0 (review_ready.py confirmed the canonical review artifact for this run and round), return exactly the line: READY " + seg);
-  lines.push("Otherwise (the elapsed-time bound was reached, or the job's fail sentinel appeared), return exactly the line: TIMEOUT " + seg);
-  lines.push("Do nothing else -- do not touch any files, and do not review anything yourself.");
-  return lines.join("\n");
+function reviewWaitPrompt(seg, roundLabel, disp, chunkIndex) {
+  return waitChunkPrompt(seg, reviewAcceptCmd(seg, roundLabel), disp, chunkIndex,
+    "reviewer for segment " + seg + " (round " + roundLabel + ")",
+    "do not review anything yourself");
+}
+
+// #348 -- the post-exhaustion authoritative re-check for the review wait. See
+// waitRecheckPrompt(); this wrapper exists so the review site reads like its
+// translate twin and so the shared reviewAcceptCmd() is spliced, never retyped.
+function reviewWaitRecheckPrompt(seg, roundLabel) {
+  return waitRecheckPromptFor(seg, reviewAcceptCmd(seg, roundLabel),
+    "review of segment " + seg + " (round " + roundLabel + ")",
+    "do not review anything yourself");
 }
 
 // Mechanical read only, once reviewWaitPrompt confirms the on-disk artifact
@@ -922,24 +1131,25 @@ function readReviewPrompt(seg) {
 // --expect-token <tok> exit 0 (token + delivery -- so an old-run straggler
 // translator's draft with a stale token is never accepted) AND
 // validate_draft.py <seg> prints OK (the six quality checks -- so a
-// structurally-complete but content-defective draft is REJECTED). Elapsed-
-// time loop, gate-then-deadline-break, NO separate post-loop gate. The
-// optional fail-fast (only when disp is non-empty) is a pure presence check
-// on the DISP-named sentinel, evaluated ONLY AFTER the ACCEPT gate did not
-// pass this iteration (a valid canonical always wins; an empty disp disables
-// it -- safe degradation). No external `timeout` binary.
-function waitPrompt(seg, disp) {
-  const dispatchToken = RUN_ID + ":" + seg;
-  const failFast = disp
-    ? " [ -f \"" + ROOT + "/segments/.codex_failed." + seg + "." + disp + "\" ] && exit 1;"
-    : "";
-  const lines = [];
-  lines.push("The codex translator for segment " + seg + " is running in a DETACHED background job (launched by codex_job.py). Wait for it by running EXACTLY ONE bash command -- an elapsed-time poll that re-validates the canonical draft directly:");
-  lines.push("end=$((SECONDS + " + WAIT_BOUND_SEC + ")); while true; do " + PY + " " + ROOT + "/scripts/draft_ready.py " + seg + " --expect-token " + dispatchToken + " && " + PY + " " + ROOT + "/scripts/validate_draft.py " + seg + " && exit 0;" + failFast + " [ $SECONDS -ge $end ] && break; slp=$((end-SECONDS)); [ $slp -gt 20 ] && slp=20; [ $slp -gt 0 ] && sleep $slp; done; exit 1");
-  lines.push("If that command exits 0 (the canonical draft passed both draft_ready.py --expect-token and validate_draft.py), return exactly the line: READY " + seg);
-  lines.push("Otherwise (the elapsed-time bound was reached, or the job's fail sentinel appeared), return exactly the line: TIMEOUT " + seg);
-  lines.push("Do nothing else -- do not touch any files, do not translate anything yourself, and do not read the draft.");
-  return lines.join("\n");
+// structurally-complete but content-defective draft is REJECTED).
+//
+// Since 1.16.1 (#348) this builds ONE CHUNK of the chunked wait, not the whole
+// poll: chunkIndex selects the slice, and the bash grammar, the chunk bound and
+// the fail-fast semantics live in waitChunkPrompt(). The chunk loop and the ONE
+// non-polling authoritative re-check that follows an exhausted or failed poll
+// belong to the CALL SITE, so an exhausted chunk is not a timeout on its own.
+// The ACCEPT gate above is what is genuinely this wrapper's own.
+function waitPrompt(seg, disp, chunkIndex) {
+  return waitChunkPrompt(seg, translateAcceptCmd(seg), disp, chunkIndex,
+    "translator for segment " + seg,
+    "do not translate anything yourself, and do not read the draft");
+}
+
+// #348 -- the post-exhaustion authoritative re-check for the translate wait.
+function waitRecheckPrompt(seg) {
+  return waitRecheckPromptFor(seg, translateAcceptCmd(seg),
+    "translation of segment " + seg,
+    "do not translate anything yourself, and do not read the draft");
 }
 
 // 1.3.6 (#132 option b): the fixer now reads its findings from the
@@ -1197,9 +1407,14 @@ async function readAndCheck(seg, roundLabel, isRetry) {
 // of the DETACHED codex_job.py review job (translateStage's own #198 pattern
 // -- codex writes disk, its return is not the verdict); this function never
 // trusts the dispatcher's return except to capture DISP, only the on-disk
-// canonical artifact the bounded poll below re-validates. TIMEOUT ends the
-// point immediately as blocked/review-timeout -- no read/check is attempted
-// against an artifact that may still be mid-write.
+// canonical artifact the bounded poll below re-validates. An EXHAUSTED wait no
+// longer ends the point immediately: since #348 one non-polling authoritative
+// re-check runs first, and only if that also fails is the point blocked as
+// review-timeout -- so a run that finished while the poll was between chunks is
+// not reported as a timeout. The TIMEOUT sentinel itself is gone from these two
+// sites; the round-5 comment sweep named waitPrompt/reviewWaitPrompt and missed
+// this one. No read/check is attempted against an artifact that may still be
+// mid-write.
 //
 // After a successful wait, ONE shared retry budget covers the read and
 // the check together: a null read OR a match:false check retries the
@@ -1207,42 +1422,51 @@ async function readAndCheck(seg, roundLabel, isRetry) {
 // blocked/review-null (the retry's own read came back null) or
 // blocked/review-artifact-mismatch (the retry's read succeeded but still
 // didn't match) -- never two independent read-retry/check-retry budgets.
-// Call budget for one review point: dispatch(1) + wait(1) + read(1) +
-// check(1) + [retry: read(1) + check(1)] = 6 calls, worst case.
+// Call budget for one review point: dispatch(1) + wait(WAIT_CALLS) + read(1) +
+// check(1) + [retry: read(1) + check(1)] = 5 + WAIT_CALLS calls, worst case.
+// It was a flat 6 before 1.16.1, when a wait was one call; the ladder at the
+// bottom of this file carries the generalised arithmetic and reduces to the
+// old 6 when WAIT_CALLS = 1.
 async function getVerifiedReview(seg, roundLabel) {
   const disp = await callReviewDispatch(seg, roundLabel);
 
+  // #348 -- the wait is CHUNKED across WAIT_CHUNKS agent calls (the Bash tool
+  // clamps any single call at BASH_CALL_CAP_SEC), then backed by ONE
+  // authoritative non-polling re-check. Chunk calls keep the EXISTING label
+  // `review-wait:<seg>:r<round>` unchanged; only the re-check gets a new one.
+  // Written inline here rather than factored into a helper so this site stays
+  // the deliberate twin of reviewFixLoop's translate wait -- the parsing is
+  // shared (waitChunkVerdict), which is where divergence would actually hurt.
   const waitLabel = "review-wait:" + seg + ":r" + roundLabel;
-  const ready = await agent(reviewWaitPrompt(seg, roundLabel, disp), {
-    effort: "low", phase: "ReviewFix", label: waitLabel,
-  });
-  // Line-oriented match via sentinelVerdict (#308), never a whole-string
-  // exact compare: the reply's LAST trimmed non-empty line must equal
-  // "READY <seg>" exactly, and no line anywhere may equal "TIMEOUT <seg>".
-  // This keeps BOTH directions closed. #228's direction: a timeout reply
-  // like "TIMEOUT seg01 (not READY)" contains the literal substring "READY"
-  // but its one line matches neither sentinel exactly, so it still blocks
-  // (never a `.indexOf("READY") === -1` substring check). #308's direction:
-  // a benign prose-decorated success ("The poll confirmed the review
-  // artifact is ready (exit 0).\n\nREADY seg03") no longer misses the OLD
-  // whole-string `String(x).trim() !== "READY " + seg` check just because
-  // of the preamble -- reviewWaitPrompt still instructs the agent to return
-  // exactly "READY <seg>"/"TIMEOUT <seg>", this only tolerates decoration
-  // around it.
+  let verdict = "pending";
+  for (let chunk = 1; chunk <= WAIT_CHUNKS; chunk++) {
+    const chunkReply = await agent(reviewWaitPrompt(seg, roundLabel, disp, chunk), {
+      effort: "low", phase: "ReviewFix", label: waitLabel,
+    });
+    verdict = waitChunkVerdict(chunkReply, seg);
+    if (verdict !== "pending") break;
+  }
+  // #348 -- the authoritative re-check. Runs whenever the chunk loop did not
+  // end READY: budget exhausted, OR a chunk reported the driver's fail
+  // sentinel. See waitRecheckPromptFor() for why the FAILED path re-checks too.
+  if (verdict !== "ready") {
+    const recheck = await agent(reviewWaitRecheckPrompt(seg, roundLabel), {
+      effort: "low", phase: "ReviewFix",
+      label: "review-wait-recheck:" + seg + ":r" + roundLabel,
+    });
+    verdict = waitChunkVerdict(recheck, seg);
+  }
+  // Every reply at this site -- chunk or re-check -- is parsed by
+  // waitChunkVerdict() and nothing else, which is where #228's and #308's
+  // properties now live as one enforced order (containment guards first, then
+  // whole-line READY). See that function's comment; this call site deliberately
+  // does not re-implement any part of the reading.
   //
-  // sentinelVerdict()'s fail-priority scan only catches a contradictory reply
-  // when an LF put "TIMEOUT <seg>" on a line of its own; rejectedAnywhere()
-  // catches it whatever glued it there. Measured over GLUE_CHARS (16 items,
-  // tests/glossary_citation_review.test.py), shape: the fail sentinel sharing
-  // its line with prose -- 15 of 16 glue characters falsely PROCEEDED as ready
-  // before the guard, 0 of 16 after. (The mass-translate suite pins the same
-  // property over ALL_GLUES, 15 items, and reports 14 of 15 -- a different set,
-  // not a different answer; see rejectedAnywhere()'s comment.)
-  // A false RED here blocks the segment for this run with
-  // reason:"review-timeout" -- the fail-safe direction, but not an in-run
-  // retry. See rejectedAnywhere()'s comment.
-  if (rejectedAnywhere(ready, "TIMEOUT " + seg) ||
-      !sentinelVerdict(ready, "READY " + seg, "TIMEOUT " + seg)) {
+  // The reason string is unchanged on purpose: select_segments.py's
+  // "non-terminal -> recoverable" rule and every recovery doc key off
+  // "review-timeout". A false RED here still blocks the segment for this run --
+  // the fail-safe direction, but not an in-run retry.
+  if (verdict !== "ready") {
     return { status: "blocked", reason: "review-timeout" };
   }
 
@@ -1392,35 +1616,39 @@ async function reviewFixLoop(stage1Result, seg) {
   // #198 -- the DISP captured by translateStage's dispatcher (or "" if its
   // return was unparseable -- safe degradation, fail-fast simply disabled).
   const disp = stage1Result && typeof stage1Result.disp === "string" ? stage1Result.disp : "";
-  const ready = await agent(waitPrompt(seg, disp), { effort: "low", phase: "ReviewFix", label: "wait:" + seg });
-  // Line-oriented match via sentinelVerdict (#308), never a whole-string
-  // exact compare: the reply's LAST trimmed non-empty line must equal
-  // "READY <seg>" exactly, and no line anywhere may equal "TIMEOUT <seg>".
-  // This keeps BOTH directions closed. #228's direction: a timeout reply
-  // like "TIMEOUT seg01 (not READY)" contains the literal substring "READY"
-  // but its one line matches neither sentinel exactly, so it still blocks
-  // (never a `.indexOf("READY") === -1` substring check) -- this is the
-  // worst of the five sites (#228): a false pass here sends the ENTIRE
-  // review/fix cycle over a draft that never actually finished translating,
-  // and the "we'll pick it back up next run" safety net never fires because
-  // nothing here is recorded as recoverable. #308's direction: a benign
-  // prose-decorated success no longer misses the OLD whole-string check
-  // just because of a preamble -- waitPrompt still instructs the agent to
-  // return exactly "READY <seg>"/"TIMEOUT <seg>", this only tolerates
-  // decoration around it.
+  // #348 -- the deliberate twin of getVerifiedReview's chunked wait: the same
+  // WAIT_CHUNKS bounded chunks under the same existing label, then ONE
+  // authoritative non-polling re-check. Kept inline here rather than factored
+  // out so both wait sites still read as this file's two parallel polls; the
+  // PARSING is shared (waitChunkVerdict), which is where divergence would
+  // actually cost something.
   //
-  // Being the worst site makes the gluing gap worst here too: sentinelVerdict()
-  // alone catches a contradictory reply only when an LF put "TIMEOUT <seg>" on
-  // its own line. Measured over GLUE_CHARS (16 items,
-  // tests/glossary_citation_review.test.py), shape: the fail sentinel sharing
-  // its line with prose -- 15 of 16 glue characters
-  // falsely PROCEEDED as ready before rejectedAnywhere() was added here, 0 of
-  // 16 after -- i.e. the "worst of the five" consequence above was reachable by
-  // gluing the timeout sentinel behind a PLAIN SPACE. A false RED costs one
-  // segment's rework and is automatically recoverable next run (see the
-  // #131 facet C note just below); a false GREEN was the corruption path.
-  if (rejectedAnywhere(ready, "TIMEOUT " + seg) ||
-      !sentinelVerdict(ready, "READY " + seg, "TIMEOUT " + seg)) {
+  // This is the worse of the two sites to get wrong in EITHER direction. A
+  // false GREEN sends the entire review/fix cycle over a draft that never
+  // finished translating, and nothing on that path is recorded as recoverable,
+  // so the "we'll pick it back up next run" net never fires. A false RED --
+  // which is what #348 was, ~30 times per killed poll -- discards a finished
+  // translation and re-runs a 45-minute codex job. The chunk loop addresses
+  // neither by itself; the re-check below is what closes the false RED.
+  let verdict = "pending";
+  for (let chunk = 1; chunk <= WAIT_CHUNKS; chunk++) {
+    const chunkReply = await agent(waitPrompt(seg, disp, chunk), {
+      effort: "low", phase: "ReviewFix", label: "wait:" + seg,
+    });
+    verdict = waitChunkVerdict(chunkReply, seg);
+    if (verdict !== "pending") break;
+  }
+  if (verdict !== "ready") {
+    const recheck = await agent(waitRecheckPrompt(seg), {
+      effort: "low", phase: "ReviewFix", label: "wait-recheck:" + seg,
+    });
+    verdict = waitChunkVerdict(recheck, seg);
+  }
+  // Every reply at this site -- chunk or re-check -- is parsed by
+  // waitChunkVerdict() and nothing else; see that function's comment for the
+  // #228/#308 properties and the enforced guard order. This call site
+  // deliberately does not re-implement any part of the reading.
+  if (verdict !== "ready") {
     // #131 facet C: a translate-timeout is transient/mechanical (the codex
     // translator agent died, hit an infra hiccup, or is simply still
     // running past the bounded poll) -- not genuine content
@@ -1479,12 +1707,39 @@ async function translateStage(seg) {
 // no such check anywhere). Must run, and must be able to return, BEFORE
 // pipeline() is ever called below.
 //
-// Per segment: 3 fixed calls (in_progress ledger write, translate dispatch,
-// translate wait) + up to MAXFIX normal rounds at 7 calls each (a review
-// point's 6-call worst case plus 1 fix call) + 1 mandatory final review
-// point (6 calls, no fix dispatched) + 1 terminal ledger write
-// = 3 + 7*MAXFIX + 6 + 1 = 10 + 7*MAXFIX. Batch-level: 1 (the final
-// merge-ledger completeness check; there is no batch pre-clean call).
+// Per segment, with #348's chunked waits. A WAIT is no longer one call: worst
+// case it is WAIT_CALLS = WAIT_CHUNKS chunks + 1 authoritative re-check.
+//   2 fixed non-wait calls (in_progress ledger write, translate dispatch)
+// + 1 translate wait                      -> WAIT_CALLS
+// + MAXFIX normal rounds, each = a review point's 6-call worst case
+//   (of which ONE is the review wait -> WAIT_CALLS) + 1 fix call
+//                                          -> MAXFIX * (5 + WAIT_CALLS + 1)
+// + 1 mandatory final review point (6 calls, no fix dispatched)
+//                                          -> 5 + WAIT_CALLS
+// + 1 terminal ledger write
+// = 2 + WAIT_CALLS + MAXFIX*(6 + WAIT_CALLS) + 5 + WAIT_CALLS + 1
+// = 8 + 2*WAIT_CALLS + MAXFIX*(6 + WAIT_CALLS).
+// Batch-level: 1 (the final merge-ledger completeness check; there is no
+// batch pre-clean call).
+//
+// PROVABLY A GENERALISATION, not a rewrite: substitute WAIT_CALLS = 1 and this
+// reduces to 8 + 2 + MAXFIX*7 = 10 + 7*MAXFIX, the pre-#348 formula verbatim.
+//
+// OPERATIONAL CONSEQUENCE, stated rather than hidden: at WAIT_CALLS = 9 and
+// MAXFIX = 4 a segment budgets 86 calls, up from 38. At the shipped
+// engine.batch_agent_cap: 3500 a normal batch therefore drops from 92 segments
+// to 40 -- both re-derived here rather than quoted: 1 + 92*38 = 3497 and
+// 1 + 40*86 = 3441, with 93 and 41 the first values to exceed the cap.
+// This said "~78 segments" until round 5. That number is a batch SIZE, not a
+// ceiling: it is the ~78-segment repro in
+// references/orchestration-and-batching.md's note on 1.3.5 raising this cap
+// from 1000, where the whole point is that 1 + 78*38 = 2965 fitted under 3500
+// WITH HEADROOM. Quoting it here turned a repro size into a capacity and then
+// compared it against a real ceiling.
+// profile.example.yml states the post-#348 figure (40, and 26 at cap 1000);
+// neither it nor references/orchestration-and-batching.md ever carried a
+// before/after capacity pair, so the claim that they "carry the same
+// arithmetic" was describing agreement that did not exist.
 //
 // #131's draftPresentAndValid probe does NOT change this formula: it fires
 // only from runRound's fix-call-failed terminal branch, which ENDS the
@@ -1492,7 +1747,7 @@ async function translateStage(seg) {
 // formula already sizes against (a full MAXFIX rounds then the final
 // review), so the ceiling this preflight enforces stays sound.
 // ---------------------------------------------------------------------------
-const estimatedCalls = 1 + SEGS.length * (10 + 7 * MAXFIX);
+const estimatedCalls = 1 + SEGS.length * (8 + 2 * WAIT_CALLS + MAXFIX * (6 + WAIT_CALLS));
 if (estimatedCalls > BATCH_AGENT_CAP) {
   log(
     "Batch too large: estimatedCalls=" + estimatedCalls +

@@ -155,13 +155,15 @@ callers (the glossary-pass Workflow, tests) should read stdout, not rely
 on the exit code alone.
 """
 import argparse
+import ipaddress
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
 from typing import NamedTuple
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlsplit
 
 try:
     import jsonschema
@@ -424,6 +426,44 @@ CANON_ENTRY_FIELDS = (
 )
 
 
+# Most problems worth listing in one failure. The per-message cap bounds each
+# ENTRY; nothing bounded the COUNT, and canon-batch.schema.json has no maxItems,
+# so output stayed linear in the batch size: measured, 40 items (the shipped
+# DEFAULT_BATCH_SIZE) produced 14 KB carrying an injected sentence 80 times, each
+# copy individually within its 200-char cap. Round 6's claim that the cap made
+# output "no longer a function of the attacker's input" was measured on a
+# ONE-item batch and was true only there. An operator does not need 40 near
+# identical diagnostics to act, and the prepare agent should not be handed them.
+_MAX_LISTED_PROBLEMS = 8
+
+
+def _joined_problems(problems) -> str:
+    """Join problems one per line, bounded in COUNT as well as in each entry."""
+    # Each element too, not only the count: a single item's schema errors are
+    # joined with no count bound of their own upstream, so one problem could be
+    # arbitrarily long while the list stayed short.
+    shown = [_bounded_message(str(x)) for x in problems[:_MAX_LISTED_PROBLEMS]]
+    if len(problems) > _MAX_LISTED_PROBLEMS:
+        shown = shown + [f"... and {len(problems) - _MAX_LISTED_PROBLEMS} more "
+                         f"(showing the first {_MAX_LISTED_PROBLEMS} of {len(problems)})"]
+    return "\n  ".join(shown)
+
+
+def _bounded_list(values) -> list:
+    """Bound a reported list in COUNT and in each element's LENGTH.
+
+    The same treatment CanonValidationError.__init__ applies, factored out so a
+    reporting path that never raises can share it rather than reinvent it. That
+    split is what let --verify-merged stay unbounded through two rounds of
+    "everything is bounded now".
+    """
+    extra = len(values) - _MAX_LISTED_PROBLEMS
+    bounded = [_bounded_message(str(v)) for v in list(values)[:_MAX_LISTED_PROBLEMS]]
+    if extra > 0:
+        bounded.append(f"... and {extra} more")
+    return bounded
+
+
 class CanonValidationError(Exception):
     """Raised for any failure that should surface as a FAILURE result.
 
@@ -432,8 +472,38 @@ class CanonValidationError(Exception):
     caller never has to re-derive that from a bare error string.
     """
 
+    # Total ceiling for one failure payload. Generous: every legitimate
+    # diagnostic in this file is far under it.
+    MAX_MESSAGE_CHARS = 4000
+
     def __init__(self, message, offending=None):
+        # BOUNDED HERE, at the one place every failure passes through, rather
+        # than at each site that happens to build a list. Round 7 capped the two
+        # sites it had measured and left three siblings in this same file
+        # emitting 563 KB at the shipped DEFAULT_BATCH_SIZE and 6 MB at 500
+        # items -- the exact magnitude that commit claimed to have closed,
+        # reproduced one function over. Fixing the three would have been the
+        # same mistake a third time; the guard belongs where it cannot be
+        # missed, so a future raise site inherits it without knowing.
+        message = str(message)
+        if len(message) > self.MAX_MESSAGE_CHARS:
+            message = (message[:self.MAX_MESSAGE_CHARS]
+                       + f"\n  ... [truncated, {len(message)} chars total]")
         super().__init__(message)
+        # Bounded in COUNT here, at the one place every failure passes through,
+        # rather than at each of the call sites that build a list. Each element
+        # is already length-capped by _bounded_message; without a count bound the
+        # payload stayed linear in the batch size, and canon-batch.schema.json
+        # has no maxItems. Measured at the shipped DEFAULT_BATCH_SIZE of 40: the
+        # message obeyed its own cap while `offending` carried all 40 entries.
+        if offending is not None:
+            # A BARE STRING is not a list of offenders. list("shortkey") shreds
+            # it into characters -- a regression the previous version of this
+            # block introduced, reachable from canon_senses.py, which raises
+            # with offending=<a single key>. Wrap before bounding.
+            if isinstance(offending, (str, bytes)):
+                offending = [offending]
+            offending = _bounded_list(offending)
         self.offending = offending
 
 
@@ -557,9 +627,41 @@ def _forbidden_keys_for_schema(schema, instance) -> list:
     return sorted(offending)
 
 
+# Longest jsonschema message this script will re-emit. jsonschema builds its
+# message by embedding the OFFENDING INSTANCE VALUE verbatim, so an item whose
+# `basis`/`confidence`/extra key carries a paragraph of fragment prose produces a
+# message containing that paragraph -- measured at 12.4 KB of output from a
+# 6 KB payload, with the injected sentence repeated 120 times across `error` and
+# `offending`. That output is read by the prepare agent, whose whole design
+# premise is that it ingests nothing attacker-authored, and its reply is relayed
+# into the next attempt's dispatch prompt. Round 5 capped `_indexed_item_label`
+# and left this sibling channel in the same output string uncapped.
+# The SLICE length. The emitted string can be 15 chars longer, because
+# ' [...truncated]' is appended after slicing -- 215 is the real ceiling.
+_SCHEMA_MESSAGE_MAX_CHARS = 200
+
+
+def _bounded_message(message: str) -> str:
+    """Cap a jsonschema message and strip the line breaks it can contain.
+
+    Newlines matter as much as length: the caller joins problems one per line,
+    so an embedded newline lets a value forge what looks like a separate
+    diagnostic line of its own.
+    """
+    flat = " ".join(str(message).split())
+    if len(flat) > _SCHEMA_MESSAGE_MAX_CHARS:
+        flat = flat[:_SCHEMA_MESSAGE_MAX_CHARS] + " [...truncated]"
+    return flat
+
+
 def _format_single_error(e, prefix: str = "") -> str:
-    loc = "/".join(str(p) for p in e.path) or "<root>"
-    return f"{prefix}at '{loc}': {e.message}"
+    # loc too, not only the message. For an entries{} error the path IS the
+    # entries key -- a fragment-authored source_form -- so bounding one half of
+    # this f-string and not the other left the site unbounded. Measured:
+    # 32,826 chars generated, 4,037 delivered head-truncated, injected sentence
+    # x59, saturating at n=8 rather than needing a large batch.
+    loc = _bounded_message("/".join(str(p) for p in e.path)) or "<root>"
+    return f"{prefix}at '{loc}': {_bounded_message(e.message)}"
 
 
 def _forbidden_keys_message(keys, basis, prefix: str = "") -> str:
@@ -663,14 +765,39 @@ def _format_errors(errors, instance=None, root_schema=None) -> str:
                 parts.append(_format_single_error(e))
         else:
             parts.append(_format_single_error(e))
-    return "; ".join(parts)
+    # COUNT-bounded as well: one item can carry arbitrarily many schema errors,
+    # so a short list of problems could still be an enormous string.
+    return "; ".join(_bounded_list(parts))
+
+
+# Longest source_form excerpt a failure label may carry. A real name is far
+# shorter; the cap exists so the label cannot become a delivery vehicle for
+# prose aimed at whoever reads the failure.
+_ITEM_LABEL_MAX_CHARS = 60
 
 
 def _indexed_item_label(kind: str, index: int, item) -> str:
     """Builds a "kind[i]" or "kind[i] ('source_form')" label for a batch or
-    review_queue item, so a Pass-1 failure names exactly which item broke."""
+    review_queue item, so a Pass-1 failure names exactly which item broke.
+
+    The INDEX is the identifier; the source_form is a convenience for whoever
+    reads the failure. It is also free text the pipeline does not control -- an
+    LLM wrote it from source text a hostile document can seed -- and this label
+    lands in `error`/`offending`, which the prepare agent is told to read and
+    describe. So it is bounded rather than passed through whole: repr() first
+    (which escapes quotes, control characters and newlines, so the label cannot
+    break out of its own line), then a hard length cap, because repr bounds the
+    CHARSET and nothing bounds the LENGTH. A name long enough to hold a
+    paragraph of instructions is not a name. The reader still has the index and
+    the fragment when the excerpt is not enough.
+    """
     source_form = item.get("source_form") if isinstance(item, dict) else None
-    return f"{kind}[{index}]" + (f" ({source_form!r})" if source_form else "")
+    if not source_form:
+        return f"{kind}[{index}]"
+    shown = repr(source_form)
+    if len(shown) > _ITEM_LABEL_MAX_CHARS:
+        shown = shown[:_ITEM_LABEL_MAX_CHARS] + "...'"
+    return f"{kind}[{index}] ({shown})"
 
 
 def _is_uri(value: str) -> bool:
@@ -710,6 +837,299 @@ def _uri_format_checker() -> "jsonschema.FormatChecker":
     fc = jsonschema.FormatChecker()
     fc.checks("uri", raises=(ValueError,))(_check_uri_format)
     return fc
+
+
+# ---------------------------------------------------------------------------
+# Citation `source` safety -- the STATIC half of the #347 fetch boundary
+# ---------------------------------------------------------------------------
+#
+# NOTE ON _is_uri, DIRECTLY ABOVE: it was deliberately NOT widened to do this
+# job. It is the generic `format: "uri"` checker, wired through
+# _check_uri_format -> _uri_format_checker into EVERY validator this script
+# builds, so teaching it about loopback addresses would silently redefine what
+# `format: "uri"` means on every field of every canon schema -- including
+# fields that have nothing to do with citations. `http://127.0.0.1/x` IS a
+# well-formed URI; it is an unacceptable CITATION. Those are two different
+# questions and they stay in two different functions.
+#
+# DELIBERATE DUPLICATION with fetch_citation.py's `validate_url`, which
+# implements this same static decision (its module docstring points back
+# here). Not consolidated into a shared import, for two load-bearing reasons:
+#
+#   1. --check-batch must stay offline-safe and importable WITHOUT the
+#      fetcher. fetch_citation.py owns sockets, TLS and DNS; this file is the
+#      gate that also runs on the offline path, and must not grow an import
+#      edge to a networking module to perform a check that touches no network.
+#   2. A static rejection that fired only at fetch time would not close the
+#      hole at all on that offline path -- nothing ever fetches there, so an
+#      unsafe `source` would reach canon.json's frozen, hash-versioned bytes
+#      completely unexamined.
+#
+# So: same reasons, same strings, two call sites. Change one, change the
+# other, and keep tests/canon_citation_refusal.test.py's table in step.
+
+CITATION_ALLOWED_SCHEMES = ("http", "https")
+
+# Schemes worth NAMING in a refusal, so the reason still says which kind of
+# unsafe URL was attempted. Everything outside this set collapses to "other".
+# A diagnostic vocabulary, NOT a denylist: refusal is decided by
+# CITATION_ALLOWED_SCHEMES above and nothing here widens it.
+#
+# Byte-identical to fetch_citation.py's KNOWN_SCHEMES / scheme_token(), and
+# pinned that way by canon_citation_refusal.test.py's shared table. The reason
+# this exists at all: urlsplit accepts a scheme of [A-Za-z0-9+.-] with no
+# length bound, so interpolating the raw scheme let a `source` write its own
+# refusal reason -- the exact thing this function's docstring promises never
+# happens. Four review rounds missed it because every scheme in that shared
+# table was a KNOWN member, and for those the token equals the scheme, so the
+# two engines agreed and the divergence was invisible.
+CITATION_KNOWN_SCHEMES = ("file", "ftp", "ftps", "data", "javascript", "gopher", "ws", "wss",
+                          "mailto", "tel", "about", "blob", "chrome", "jar", "ldap", "dict",
+                          "sftp", "smb", "nfs", "redis", "gemini")
+
+
+def _citation_scheme_token(scheme: str) -> str:
+    """Collapse a scheme to a closed vocabulary: a KNOWN member, `none` for an
+    absent scheme, or `other`. Mirrors fetch_citation.scheme_token()."""
+    if not scheme:
+        return "none"
+    return scheme if scheme in CITATION_KNOWN_SCHEMES else "other"
+
+# Control characters anywhere in the URL. Also catches the raw CR/LF that make
+# request/header splitting possible; \x20 (space) is inside the range on
+# purpose, since a space is enough to carry a second request line.
+_CITATION_CONTROL_CHAR_RE = re.compile(r"[\x00-\x20\x7f]")
+
+
+# A host whose every label is a bare integer or an 0x-hex integer, and which is
+# NOT already a canonical IP literal. getaddrinfo accepts these as addresses --
+# measured: 2130706433, 0x7f.0x0.0x0.0x1, 017700000001 and 127.1 all resolve to
+# 127.0.0.1 -- while ipaddress.ip_address() rejects every one of them, so the
+# literal check upstream simply does not see them. In fetch_citation.py that was
+# only a static miss (resolve_and_pin still refuses the loopback address it comes
+# back with); in canon_validate.py, which has no resolver, it was the WHOLE
+# check, and a `source` naming loopback in one of these spellings was frozen into
+# canon.json.
+#
+# Refused outright rather than normalised, because normalising means picking a
+# platform: 0177.0.0.1 resolves to 177.0.0.1 under getaddrinfo on BSD (measured
+# here; inet_aton is the one API that does NOT diverge, returning 127.0.0.1 on
+# both) and to 127.0.0.1 under glibc, so the SAME fragment gets different
+# verdicts on macOS and Linux. A citation never legitimately cites a decimal,
+# octal or hex-spelled address, and a real DNS name cannot have an all-numeric
+# final label, so refusing costs nothing real. Verified against example.com,
+# 1.example.com, 0x.com and archive.org, all still admitted.
+_NUMERIC_LABEL_RE = re.compile(r"\A(?:0[xX][0-9a-fA-F]+|[0-9]+)\Z")
+
+
+def _is_ambiguous_numeric_host(host: str) -> bool:
+    try:
+        ipaddress.ip_address(host)
+        return False              # a canonical literal; the address checks own it
+    except ValueError:
+        pass
+    labels = host.rstrip(".").split(".")
+    return bool(labels) and all(_NUMERIC_LABEL_RE.match(l) for l in labels)
+
+
+def _non_global_address_reason(ip) -> "str | None":
+    """The reason this IP literal is not a legitimate citation host, or None.
+
+    Every disqualifying property is named explicitly rather than leaning on
+    `is_global` alone, and every reason ends in "-address" so a caller can
+    recognise the family without matching the exact member.
+
+    `is_global` is the right primary test, but it is neither sufficient nor
+    stable. Not sufficient: 224.0.0.1 reports `is_global` TRUE while being
+    multicast. Not stable: its answer has moved across Python versions
+    (notably for 0.0.0.0/8 and several IPv6 ranges), and this gate must behave
+    identically on whatever interpreter an operator happens to have. The
+    checks therefore overlap deliberately -- WHICH one fires first for a given
+    address is not a contract, only the refusal itself is.
+    """
+    if ip.is_loopback:
+        return "loopback-address"
+    if ip.is_link_local:
+        return "link-local-address"      # includes 169.254.169.254
+    # fec0::/10, IPv6 site-local. getattr because IPv4Address has no such
+    # property. Deprecated by RFC 3879, still routed on legacy networks, and
+    # covered by nothing around it: CPython leaves fec0::/10 out of
+    # ipaddress._private_networks, so is_private is False and is_global is
+    # consequently True. Kept byte-identical to fetch_citation._assert_global.
+    if getattr(ip, "is_site_local", False):
+        return "site-local-address"
+    if ip.is_private:
+        return "private-address"
+    if ip.is_multicast:
+        return "multicast-address"
+    if ip.is_reserved:
+        return "reserved-address"
+    if ip.is_unspecified:
+        return "unspecified-address"
+    if not ip.is_global:
+        return "non-global-address"      # e.g. CGNAT 100.64/10, which trips no named property
+    # An IPv4-mapped or 6to4 IPv6 address can smuggle a private v4 address
+    # past every check above, because all of them evaluate the WRAPPER rather
+    # than the payload. Recurse into the payload.
+    mapped = getattr(ip, "ipv4_mapped", None)
+    if mapped is not None:
+        return _non_global_address_reason(mapped)
+    sixtofour = getattr(ip, "sixtofour", None)
+    if sixtofour is not None:
+        return _non_global_address_reason(sixtofour)
+    return None
+
+
+
+def _name_for_comparison(host: str) -> str:
+    """Fold a host to the ASCII form a RESOLVER would actually use, for NAME
+    comparisons only. Kept behaviourally identical to
+    fetch_citation.name_for_comparison(); see that copy for the measurements.
+
+    `encodings.idna` splits labels on the literal set `[.\u3002\uff0e\uff61]`
+    and UTS-46 folds decorated letters home, so "localhost\u3002",
+    "localhost\uff0e", "localhost\uff61" and "\u24dbocalhost" all fold to
+    "localhost" and all resolve to loopback. In fetch_citation.py missing them
+    would only be a static false-negative, because it re-checks every resolved
+    address. THIS file has no resolver behind it by design -- it runs on the
+    offline path where nothing ever fetches -- so here the miss is the entire
+    check, exactly as it was for the trailing ASCII dot.
+
+    Comparison only: the folded value is never returned to a caller or used as a
+    connection target. Anything the codec rejects falls back to the original, so
+    this can only add refusals.
+    """
+    try:
+        folded = host.encode("idna").decode("ascii").lower()
+    except (UnicodeError, UnicodeDecodeError):
+        folded = host.lower()
+    # rstrip, not a single [:-1]: several codepoints fold to MORE than one
+    # dot (U+2025 "..", U+2026 "...", U+FE30 "...."), so stripping exactly one
+    # left "localhost." / "localhost..", which matched neither the equality
+    # test nor the ".localhost" suffix test -- the same one-dot reasoning
+    # this function exists to generalise, stopping one dot short.
+    return folded.rstrip(".")
+
+
+def _citation_source_refusal(value) -> "str | None":
+    """A short, stable machine reason to refuse this citation `source`, or
+    None when it is acceptable.
+
+    STATIC ONLY -- no DNS, no connection, no I/O of any kind. `--check-batch`
+    runs on the offline path and has to stay usable there, so this closes
+    exactly the checks decidable from the URL text alone. The resolve-time
+    half (require EVERY resolved address to be global, connect to the pinned
+    IP, revalidate every redirect hop) lives in fetch_citation.py and cannot
+    be done here. A NAME that resolves to 127.0.0.1 is therefore admitted by
+    this function and refused later by the fetcher: that split is the design,
+    not a gap in it.
+
+    The reason never embeds the offending URL. It goes into an operator-facing
+    message that a retry agent also reads, and a `source` is attacker-
+    authorable in the one sense that matters -- an LLM produced it from source
+    text a hostile document can seed.
+    """
+    if not isinstance(value, str) or not value:
+        return "empty-url"
+    if _CITATION_CONTROL_CHAR_RE.search(value):
+        return "control-character-in-url"
+
+    try:
+        parts = urlsplit(value)
+        scheme = (parts.scheme or "").lower()
+        host = parts.hostname
+        username = parts.username
+        password = parts.password
+    except ValueError:
+        # urlsplit itself raises on e.g. an unbalanced IPv6 bracket
+        # ("http://[::1"). Guarded because this script's contract is ONE line
+        # of JSON on stdout -- an escaping ValueError would replace that with
+        # a traceback in the middle of a merge gate, which reads to an
+        # operator as a broken tool rather than a rejected fragment.
+        return "unparseable-url"
+
+    if scheme not in CITATION_ALLOWED_SCHEMES:
+        # An allowlist, never a denylist -- the set of schemes a URL library
+        # will accept is open-ended and grows with the runtime. The scheme is
+        # collapsed to a closed token before it reaches the reason string: it
+        # is part of the offending URL, so echoing it raw would break this
+        # function's own no-URL-in-the-reason contract.
+        return f"scheme-not-allowed:{_citation_scheme_token(scheme)}"
+    if username is not None or password is not None:
+        # `user:pw@host` shifts which host is really contacted depending on
+        # who parses it.
+        return "embedded-credentials"
+    if not host:
+        return "no-host"
+    # Against the FOLDED host as well as the raw one. The resolver does not see
+    # the bytes written in the URL: getaddrinfo applies the IDNA codec, whose
+    # nameprep pass NFKC-folds fullwidth digits to ASCII and whose label split
+    # accepts [.\u3002\uff0e\uff61] as separators. So "\uff12\uff18\uff15\uff12\uff10\uff13\uff19\uff11\uff16\uff16" -- which this
+    # check reads as a non-numeric name and ipaddress refuses to parse -- is
+    # b"2852039166" to the resolver, i.e. 169.254.169.254. Measured: seven such
+    # spellings passed BOTH static halves, one of them straight to cloud IMDS.
+    #
+    # This file already folds for the localhost NAME test a few lines below, and
+    # for exactly this reason; round 7 is that same reasoning finally applied to
+    # the numeric and literal checks, which sit ABOVE the fold. Folding alone is
+    # not enough either: the four dot-separator spellings fold into a CANONICAL
+    # literal, which _is_ambiguous_numeric_host deliberately passes, so the
+    # literal check has to see the folded form too.
+    folded_host = _name_for_comparison(host)
+    if _is_ambiguous_numeric_host(host) or _is_ambiguous_numeric_host(folded_host):
+        return "ambiguous-numeric-host"
+
+    host = host.lower()
+    # `localhost` and anything under it are refused BY NAME, before any
+    # resolution: a resolver can be configured to point them anywhere, and
+    # admitting the name would make the refusal depend on local DNS config.
+    #
+    # ONE trailing dot is stripped first, matching fetch_citation.py exactly.
+    # "localhost." is the fully-qualified spelling of the same name and resolves
+    # identically, but matches neither test below. This file has NO resolver
+    # behind it -- it runs on the offline path where nothing ever fetches -- so
+    # unlike the fetcher there is no second net here and the miss would be the
+    # whole check. rstrip, not one dot: U+2025/U+2026/U+FE30 fold to two, three
+    # and four dots, so a single strip left a name the tests below could not match (see name_for_comparison).
+    host = host.rstrip(".")
+    name = _name_for_comparison(host)
+    if name == "localhost" or name.endswith(".localhost"):
+        return "localhost-name"
+
+    # A host that is ALREADY an IP literal never goes through name resolution
+    # at all, so the fetcher's resolution-time check would simply not run for
+    # it -- this is the half that has to be caught statically.
+    try:
+        # No .strip("[]"): urlsplit().hostname has ALREADY removed the brackets
+        # (measured: urlsplit("http://[::1]/x").hostname == "::1"), and a URL
+        # whose brackets are unbalanced raises out of urlsplit above rather than
+        # reaching here. The old strip was a no-op on the only live path AND a
+        # character-set strip rather than a pair strip
+        # ("]::1[".strip("[]") == "::1"), so it encoded the opposite assumption
+        # to its twin. Removed in fetch_citation.py in round 4; this is the same
+        # removal in the sibling that the round-4 fix did not reach.
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        # The FOLDED form too: the four Unicode dot separators fold a spelling
+        # like 127。0。0。1 into the canonical literal a resolver
+        # sees, and ipaddress rejects the raw form outright. Without this the
+        # address checks never run on exactly the inputs that reach the network.
+        try:
+            ip = ipaddress.ip_address(folded_host)
+        except ValueError:
+            ip = None   # a name, not a literal; the fetcher owns that half
+    if ip is not None:
+        reason = _non_global_address_reason(ip)
+        if reason is not None:
+            return reason
+
+    try:
+        port = parts.port
+    except ValueError:
+        return "invalid-port"
+    if port is not None and not (0 < port < 65536):
+        return "invalid-port"
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -929,10 +1349,41 @@ def _load_source_forms_manifest(manifest_path_str: str) -> list:
     return doc
 
 
+def _labelled_sides(missing, extra) -> list:
+    """Bound two offender lists into one reported list, keeping BOTH sides
+    identifiable and spending the whole budget when only one side is populated.
+
+    The first version split the budget 4-and-4 unconditionally. That defended
+    the two-sided case by halving the common one -- a batch agent that dropped
+    or added items produces a ONE-sided discrepancy, and it reported 4 names
+    where the unbounded version reported 8. It also dropped the "... and N more"
+    overflow marker (appended at index 8, discarded by the [:4] slice) and left
+    the entries unlabelled, so a reader could not tell which side a name was on.
+    """
+    def _side(label, values):
+        # The overflow marker _bounded_list appends is not an offender, so it
+        # must not inherit a side prefix.
+        bounded = _bounded_list(values)
+        return [x if x.startswith("... and ") else f"{label}: {x}" for x in bounded]
+
+    if not missing:
+        return _side("extra", extra)
+    if not extra:
+        return _side("missing", missing)
+    half = _MAX_LISTED_PROBLEMS // 2
+    out = [f"missing: {x}" for x in _bounded_list(missing)[:half]]
+    out += [f"extra: {x}" for x in _bounded_list(extra)[:half]]
+    dropped = max(0, len(missing) - half) + max(0, len(extra) - half)
+    if dropped:
+        out.append(f"... and {dropped} more")
+    return out
+
+
 def _assert_exact_source_form_coverage(items: list, expected_forms: list) -> None:
     """Asserts the set of source_form values across `items` EXACTLY equals
     `expected_forms` -- no missing, no extra. Raises CanonValidationError
-    naming both sides of any discrepancy (mirrors the naming discipline of
+    naming both sides of any discrepancy, each side bounded to the
+    first few entries with a count of the rest (mirrors the naming discipline of
     every other CanonValidationError raised in this module)."""
     got = {item.get("source_form") for item in items if isinstance(item, dict)}
     want = set(expected_forms)
@@ -940,14 +1391,24 @@ def _assert_exact_source_form_coverage(items: list, expected_forms: list) -> Non
     extra = sorted(got - want)
     if missing or extra:
         parts = []
+        # _bounded_list on BOTH sides. Round 9 bounded the sites spelled
+        # `", ".join(repr(o) for o in ...)` and missed this one because it
+        # spells the same thing as an f-string list interpolation -- searching
+        # for a SPELLING rather than for the property. Measured unbounded: a
+        # 17,134-char message delivered as 4,037 chars with the injected
+        # sentence 61 times, and the `extra` half -- the entirely
+        # fragment-authored half -- evicted by the head-keeping cap.
         if missing:
-            parts.append(f"missing from batch: {missing}")
+            parts.append("missing from batch: " + ", ".join(_bounded_list(missing)))
         if extra:
-            parts.append(f"unexpected extra in batch: {extra}")
+            parts.append("unexpected extra in batch: " + ", ".join(_bounded_list(extra)))
         raise CanonValidationError(
             "batch does not exactly cover the expected source_form "
             "manifest (" + "; ".join(parts) + ")",
-            offending=missing + extra,
+            # Both sides, interleaved, so the count cap cannot spend all 8
+            # slots on `missing` and report none of the attacker-authored
+            # `extra` -- which is what it did, measured n=9 maxlen=16.
+            offending=_labelled_sides(missing, extra),
         )
 
 
@@ -1003,7 +1464,7 @@ def _validate_batch_items(batch: list, registry: "Registry") -> None:
     against canon-batch.schema.json's own discriminated-union item shape
     (canon-batch.schema.json#/items) -- never the bare
     canon-entry.schema.json shape, since a batch item also carries
-    'disposition'. Raises CanonValidationError naming every offending item
+    'disposition'. Raises CanonValidationError naming the offending items (bounded to the first 8)
     (by index and, when present, source_form) if any item fails.
     """
     validator = _validator_for_ref("canon-batch.schema.json#/items", registry)
@@ -1015,7 +1476,7 @@ def _validate_batch_items(batch: list, registry: "Registry") -> None:
             problems.append(f"{label}: {_format_errors(errors, instance=item)}")
     if problems:
         raise CanonValidationError(
-            "batch failed per-item schema validation:\n  " + "\n  ".join(problems),
+            "batch failed per-item schema validation:\n  " + _joined_problems(problems),
             offending=problems,
         )
 
@@ -1034,7 +1495,7 @@ def _validate_existing_entries(canon: dict, registry: "Registry") -> None:
         errors = _sorted_errors(entry_validator, entry)
         if errors:
             formatted = _format_errors(errors, instance=entry, root_schema=entry_validator.schema)
-            problems.append(f"entries[{source_form!r}]: {formatted}")
+            problems.append(f"entries[{_bounded_message(repr(source_form))}]: {formatted}")
 
     for i, item in enumerate(canon.get("review_queue", [])):
         errors = _sorted_errors(queued_validator, item)
@@ -1044,7 +1505,7 @@ def _validate_existing_entries(canon: dict, registry: "Registry") -> None:
 
     if problems:
         raise CanonValidationError(
-            "canon.json failed per-item schema validation:\n  " + "\n  ".join(problems),
+            "canon.json failed per-item schema validation:\n  " + _joined_problems(problems),
             offending=problems,
         )
 
@@ -1076,13 +1537,74 @@ def _enforce_offline_backstop(batch: list, research_mode: str) -> None:
     if offenders:
         raise CanonValidationError(
             "research_mode=offline forbids basis:\"established\" for every new "
-            "entry, but the batch claims it for: " + ", ".join(repr(o) for o in offenders)
+            "entry, but the batch claims it for: " + ", ".join(_bounded_list(offenders))
             + ". Reassign basis:\"transliterated\" (if mechanical transliteration "
             "suffices), basis:\"sense_translated\" (if a project-specific editorial "
             "sense-rendering fits -- style_bible.md §C -- no external citation "
             "needed), or disposition:\"review_queue\" with a note carrying the "
             "literal prefix \"SOURCE_UNAVAILABLE:\" instead -- the whole batch "
             "merge is rejected, canon.json is unchanged.",
+            offending=offenders,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Citation-source backstop (#347)
+# ---------------------------------------------------------------------------
+
+
+def _enforce_citation_source_safety(batch: list) -> None:
+    """FATALLY rejects the whole batch if ANY item carries a `source` the
+    static citation boundary refuses. Nothing is written when this fires.
+
+    SCOPE -- every item carrying a `source`, NOT only basis:"established".
+    This is not defensive over-reach, it is forced by the schema:
+    canon-batch.schema.json's QUEUED branch types `source` as a bare
+    unconstrained string (no `format`, no `minLength`, no conditional) and its
+    `basis` enum still admits "established", so a
+    `disposition: "review_queue"` item can carry `basis: "established"` plus
+    an entirely arbitrary `source` and pass Pass 1 untouched. Narrowing this
+    to the ACCEPTED branch would leave that door open. The ACCEPTED branch's
+    own `format: "uri"` conditional is NOT a substitute either: it asks
+    whether the string is a well-formed URI, and `http://169.254.169.254/` is
+    a perfectly well-formed URI.
+
+    Item selection mirrors fetch_citation.py's `iter_sources` exactly -- a
+    missing, empty or non-string `source` is skipped here, because it is not a
+    fetch target and its shape is Pass 1's business, not the boundary's. The
+    two files must agree on WHICH items they cover, not merely on the checks
+    they run; a divergence there would be a hole neither file's tests would
+    show.
+    """
+    problems = []
+    offenders = []
+    for i, item in enumerate(batch):
+        if not isinstance(item, dict):
+            continue
+        source = item.get("source")
+        if not isinstance(source, str) or not source:
+            continue
+        reason = _citation_source_refusal(source)
+        if reason is not None:
+            problems.append(f"{_indexed_item_label('batch', i, item)}: {reason}")
+            # Bounded for the same reason _indexed_item_label is: this list is
+            # serialized into `offending`, which the prepare agent reads, and
+            # round 5 capped the label while leaving this sibling raw.
+            offenders.append(_bounded_message(item.get("source_form", f"<item {i}>")))
+
+    if problems:
+        raise CanonValidationError(
+            "batch carries an unsafe citation source:\n  " + _joined_problems(problems)
+            + "\nA citation `source` must be an ordinary public http(s) URL. This is "
+            "refused STATICALLY here, before anything fetches it, because "
+            "--check-batch also runs on the offline path where nothing ever "
+            "fetches -- so this is the only place such a `source` can be stopped "
+            "before it is frozen into canon.json (#347; see fetch_citation.py's "
+            "module docstring for the full boundary). Fix the fragment upstream: "
+            "cite a real public page, or drop the `source` and route the item to "
+            "disposition:\"review_queue\" with a note explaining why no citation "
+            "is available -- never by loosening this check. The whole batch is "
+            "rejected; canon.json is unchanged.",
             offending=offenders,
         )
 
@@ -1192,7 +1714,7 @@ def _merge_batch(canon: dict, batch: list, senses: "SensesResult") -> dict:
     if collisions:
         raise CanonValidationError(
             "batch merge rejected due to entries{} collision(s):\n  "
-            + "\n  ".join(collisions),
+            + "\n  ".join(_bounded_list(collisions)),
             offending=collisions,
         )
 
@@ -1231,7 +1753,7 @@ def _assert_no_entries_review_queue_overlap(canon: dict) -> None:
         raise CanonValidationError(
             "canon.json failed whole-file invariant: source_form(s) present "
             "in both entries{} and review_queue[]: "
-            + ", ".join(repr(o) for o in overlap),
+            + ", ".join(_bounded_list(overlap)),
             offending=overlap,
         )
 
@@ -1491,6 +2013,7 @@ def run_merge(
     senses = _load_senses_or_raise(senses_path, allow_absent_senses)
 
     _validate_batch_items(batch, registry)
+    _enforce_citation_source_safety(batch)
     _enforce_offline_backstop(batch, research_mode)
     merged = _merge_batch(canon, batch, senses)
 
@@ -1545,6 +2068,11 @@ def run_check_batch(
     else:
         batch = _load_batch(batch_path)
     _validate_batch_items(batch, registry)
+    # After Pass 1 (so a structurally broken item is reported as broken rather
+    # than as an unsafe citation) but before the offline backstop: an unsafe
+    # `source` is unsafe in BOTH research modes, so it must not be reportable
+    # only in the mode that happens to reject the item for another reason.
+    _enforce_citation_source_safety(batch)
     _enforce_offline_backstop(batch, research_mode)
     if manifest_path is not None:
         expected_forms = _load_source_forms_manifest(manifest_path)
@@ -1587,6 +2115,7 @@ def run_merge_batches(
     batches = [_load_batch(p) for p in batch_paths]
     for batch in batches:
         _validate_batch_items(batch, registry)
+        _enforce_citation_source_safety(batch)
         _enforce_offline_backstop(batch, research_mode)
 
     canon = _load_canon(canon_path)
@@ -1675,7 +2204,16 @@ def run_verify_merged(
         missing.extend(sorted(set(expected_forms) - covered_forms))
 
     missing = sorted(set(missing))
-    return {"verified": not missing, "missing": missing}
+    # BOUNDED HERE, because this mode reports failure through a SUCCESS-shaped
+    # payload and therefore never constructs CanonValidationError -- so round 8's
+    # "the one place every failure passes through" was false for exactly this
+    # path. `missing` carries raw fragment-authored source_forms, and
+    # glossaryVerifyPrompt tells an agent to read this line and return `missing`
+    # COPIED VERBATIM, against MANIFEST_ALL (the whole run, not one batch).
+    # Measured before this bound: 196 KB at 40 items and 2.4 MB at 500, linear
+    # in both count and length -- the same magnitude the central bound was added
+    # to close, on the last gate before merged:true.
+    return {"verified": not missing, "missing": _bounded_list(missing)}
 
 
 def run_validate_only(canon_path: Path, research_mode: str, registry: "Registry") -> dict:

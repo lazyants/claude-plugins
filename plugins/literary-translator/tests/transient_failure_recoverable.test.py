@@ -87,6 +87,34 @@ def _extract_if_block(function_body: str, condition_substring: str, *, context: 
     return function_body[brace_start + 1 : brace_end - 1]
 
 
+def _extract_all_if_blocks(function_body: str, condition_substring: str, *, context: str) -> list:
+    """The plural of ``_extract_if_block``: EVERY ``if`` block in
+    ``function_body`` whose condition contains ``condition_substring``, in
+    textual order.
+
+    Needed from 1.16.1 (#348). ``_extract_if_block`` resolves a repeated
+    condition to whichever occurrence comes FIRST, silently -- and #348 gives
+    ``reviewFixLoop`` two blocks gated on the identical
+    ``verdict !== "ready"`` text (the authoritative re-check, then the timeout
+    branch). A single-anchor lookup would therefore have asserted #131's
+    invariant against the re-check while reporting it as the timeout branch:
+    green, and about the wrong code. Enumerating instead lets the caller
+    identify its branch by what the branch RETURNS, which no later reordering
+    or insertion can quietly redirect the way an ordinal index would."""
+    blocks = []
+    pos = 0
+    while True:
+        idx = function_body.find(condition_substring, pos)
+        if idx == -1:
+            break
+        brace_start = function_body.index("{", idx)
+        brace_end = _find_balanced_brace_span(function_body, brace_start)
+        blocks.append(function_body[brace_start + 1 : brace_end - 1])
+        pos = brace_end
+    assert blocks, f"expected {condition_substring!r} inside {context} in {TEMPLATE_PATH}"
+    return blocks
+
+
 @pytest.fixture(scope="module")
 def review_fix_loop_body(js_source: str) -> str:
     return _extract_function_body(js_source, r"async\s+function\s+reviewFixLoop\s*\([^)]*\)\s*")
@@ -113,15 +141,47 @@ def draft_present_and_valid_body(js_source: str) -> str:
 # ---------------------------------------------------------------------------
 
 def test_translate_timeout_branch_has_no_ledger_write(review_fix_loop_body):
-    branch = _extract_if_block(
-        review_fix_loop_body, '!sentinelVerdict(ready, "READY " + seg, "TIMEOUT " + seg)', context="reviewFixLoop"
+    # 1.16.1 re-anchor (#348), following the same idiom as the fix-call branch's
+    # 1.16.0 re-anchor below. This branch's condition moved from
+    # `!sentinelVerdict(ready, "READY " + seg, "TIMEOUT " + seg)` to
+    # `verdict !== "ready"`: the wait reply parse was CENTRALISED into
+    # waitChunkVerdict(), so no wait site spells a sentinel comparison inline any
+    # more, and TIMEOUT left the grammar entirely (it is READY/FAILED/PENDING
+    # now). Only the anchor is stale; everything this test asserts still holds.
+    #
+    # The new condition text is deliberately NOT unique inside reviewFixLoop --
+    # #348 gates the post-exhaustion authoritative re-check on the same
+    # `verdict !== "ready"` -- so the branch is identified by what it RETURNS,
+    # never by ordinal position, and BOTH blocks are asserted. Both sit on the
+    # same transient wait path, where a terminal ledger write is the whole
+    # defect #131 facet C is about; asserting only one would leave the other as
+    # an unwatched place to reintroduce it.
+    blocks = _extract_all_if_blocks(
+        review_fix_loop_body, 'verdict !== "ready"', context="reviewFixLoop"
     )
-    assert "recordLedgerCall" not in branch, (
-        "the translate-timeout branch must NOT call recordLedgerCall -- a terminal "
-        "write there would overwrite the in_progress fragment and take the segment "
-        "out of select_segments.py's recoverable classification (#131 facet C)"
+    assert len(blocks) == 2, (
+        f"expected reviewFixLoop's wait path to hold exactly two "
+        f'`verdict !== "ready"` blocks (the #348 authoritative re-check, then '
+        f"the timeout branch); found {len(blocks)}. If a block was added or "
+        f"removed, assert the ledger-write invariant on it and update this "
+        f"count -- do not relax the assertion"
     )
-    assert 'reason: "translate-timeout"' in branch
+
+    for i, block in enumerate(blocks, start=1):
+        assert "recordLedgerCall" not in block, (
+            f"block {i} of reviewFixLoop's wait path calls recordLedgerCall -- a "
+            f"terminal write anywhere on the translate-timeout path would overwrite "
+            f"the in_progress fragment and take the segment out of "
+            f"select_segments.py's recoverable classification (#131 facet C)"
+        )
+
+    timeout_branches = [b for b in blocks if 'reason: "translate-timeout"' in b]
+    assert len(timeout_branches) == 1, (
+        f"expected exactly one of reviewFixLoop's wait blocks to return "
+        f'reason: "translate-timeout"; found {len(timeout_branches)}. Without a '
+        f"unique returning branch this test cannot say WHICH block it proved"
+    )
+    branch = timeout_branches[0]
     assert "converged: false" in branch
 
 
@@ -247,6 +307,44 @@ def test_draft_probe_schema_shape(js_source):
 # implicitly, but an explicit standalone case pins the helper's own
 # correctness independent of runRound's real shape).
 # ---------------------------------------------------------------------------
+
+def test_extract_all_if_blocks_helper_separates_repeated_conditions():
+    """The plural helper's own non-vacuity proof, on a synthetic fixture rather
+    than by mutating the shipped template -- this worktree is shared with
+    concurrently-running agents, and an on-disk mutation would surface in THEIR
+    suite runs as a real-looking failure.
+
+    Three things at once, because the helper exists for exactly the shape #348
+    introduced: two blocks share one condition, only the second carries the
+    ledger write, and the singular helper silently reports the FIRST. If
+    _extract_all_if_blocks returned one block, or concatenated them, the
+    'recordLedgerCall not in block' loop above would be asserting about text
+    that never contained it either way."""
+    fixture = (
+        '  if (verdict !== "ready") {\n'
+        "    const recheck = await agent(waitRecheckPrompt(seg), { label: 'x' });\n"
+        "  }\n"
+        '  if (verdict !== "ready") {\n'
+        "    await recordLedgerCall(seg, { status: \"blocked\" }, 'l');\n"
+        '    return { seg: seg, converged: false, reason: "translate-timeout" };\n'
+        "  }\n"
+    )
+    blocks = _extract_all_if_blocks(fixture, 'verdict !== "ready"', context="fixture")
+    assert len(blocks) == 2, f"the helper did not separate the two blocks: {blocks}"
+    assert "recordLedgerCall" not in blocks[0]
+    assert "recordLedgerCall" in blocks[1], (
+        "the helper cannot see a ledger write that IS there -- every "
+        "'recordLedgerCall not in block' assertion above would then be vacuous"
+    )
+    # ...and the singular helper really does resolve to the wrong one, which is
+    # why the re-anchor could not simply reuse it.
+    assert "recordLedgerCall" not in _extract_if_block(
+        fixture, 'verdict !== "ready"', context="fixture"
+    )
+    # The RETURN-based identification picks the block the test means.
+    timeout = [b for b in blocks if 'reason: "translate-timeout"' in b]
+    assert len(timeout) == 1 and timeout[0] is blocks[1]
+
 
 def test_extract_if_block_helper_finds_a_real_ledger_call(run_round_body):
     converged_branch = _extract_if_block(

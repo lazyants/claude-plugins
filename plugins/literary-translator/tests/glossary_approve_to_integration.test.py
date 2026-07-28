@@ -1,15 +1,16 @@
 """tests/glossary_approve_to_integration.test.py -- the ONE cross-language
-producer/consumer test for LT 1.16.0's approve-to snapshot seam.
+producer/consumer test for LT 1.16.x's approve-to snapshot seam.
 
 Neither sibling suite closes this seam alone. tests/canon_approve_to.test.py
 runs the REAL canon_validate.py, but against a HAND-BUILT --check-batch
 --approve-to command, so it cannot notice the glossary template emitting a
 different flag or path. tests/glossary_snapshot_ordering.test.py checks the
 template EMITS `<checkBatchCmd> --approve-to <approvedPath>` into the
-citation-review prompt, but never RUNS that string against the script, so it
-cannot notice canon_validate.py renaming the flag or moving the write. The gap
-between them is JS<->Python flag/path drift: either side could change and both
-files stay green.
+citation-PREPARE prompt (the citation-review prompt until 1.16.1 moved retrieval,
+and the approve command with it, out of the judging agent -- see #347), but never
+RUNS that string against the script, so it cannot notice canon_validate.py
+renaming the flag or moving the write. The gap between them is JS<->Python
+flag/path drift: either side could change and both files stay green.
 
 This test drives the REAL template under Node, lifts the approve command it
 ACTUALLY emitted (verbatim -- never reconstructed for the run), and executes
@@ -79,6 +80,8 @@ def instantiate(durable_root: str, *, research_mode: str = "live",
     text = text.replace("{{RUN_ID}}", FIXTURE_RUN_ID)
     text = text.replace("{{BATCH_AGENT_CAP}}", str(int(batch_agent_cap)))
     text = text.replace("{{EFFORT}}", "high")
+    # 1.16.1 (#347): empty = fetch_citation.py's shipped default list.
+    text = text.replace("{{CITATION_CONTENT_TYPES}}", "")
     assert "{{" not in text, "fixture instantiation left an unresolved token"
     return text
 
@@ -147,8 +150,20 @@ async function agent(promptText, opts) {
   }
   if (kind === "dispatch") return "FRAGMENT " + idx;
   if (kind === "wait") return "READY " + idx;
+  // 1.16.1 (#347) -- the citation review is two calls now, and the JUDGE runs
+  // only after PREPARE reports EVIDENCE_READY. Leaving this label unanswered
+  // does not fail loudly: the batch simply climbs the retry ladder to
+  // exhaustion, no review prompt is ever recorded, and the approve command this
+  // test exists to LIFT is never emitted at all.
+  if (kind === "citation-prepare") {
+    return nth(p.prepares, ordinal, "EVIDENCE_READY " + idx + " ATTEMPT " + ordinal);
+  }
   if (kind === "citation-review") {
-    return nth(p.reviews, ordinal, "CITATIONS_OK " + idx + " ATTEMPT " + ordinal);
+    // Attempt derived from the prepare count rather than from this label's own
+    // ordinal: a failed prepare spends no judge call, so the two diverge. See
+    // tests/glossary_snapshot_ordering.test.py's copy of this harness.
+    const prepared = seenCount["glossary:citation-prepare:" + idx] || 1;
+    return nth(p.reviews, ordinal, "CITATIONS_OK " + idx + " ATTEMPT " + (prepared - 1));
   }
   return "UNEXPECTED_LABEL " + label;
 }
@@ -239,16 +254,27 @@ def approve_cmd_for(check_cmd: str, root: Path, index: int, attempt: int) -> str
     return check_cmd + " --approve-to " + str(approved_path(root, index, attempt))
 
 
-def emitted_approve_cmd(review: str) -> str:
+def emitted_approve_cmd(prepare: str) -> str:
     """The approve command the template ACTUALLY emitted into the citation
-    review's STEP 1 line -- lifted verbatim, not rebuilt, so the string this
-    test runs is the string the template produces."""
-    step1 = [ln for ln in review.split("\n") if "--approve-to" in ln]
+    PREPARE call's STEP 1 line -- lifted verbatim, not rebuilt, so the string
+    this test runs is the string the template produces.
+
+    Read off the prepare prompt since 1.16.1 (#347), where retrieval moved out of
+    the judging agent and the approve command moved with it into the new prepare
+    call; it used to be lifted from the citation-review prompt. The STEP 1 check
+    is not decoration: the whole seam only means anything if the snapshot is
+    still the first thing that happens, so lifting a command that had drifted to
+    some later step would run green while the ordering guarantee was gone.
+    """
+    step1 = [ln for ln in prepare.split("\n") if "--approve-to" in ln]
     assert len(step1) == 1, (
-        f"expected exactly one --approve-to line in the citation-review prompt, "
+        f"expected exactly one --approve-to line in the citation-prepare prompt, "
         f"found {len(step1)}"
     )
     line = step1[0]
+    assert line.startswith("STEP 1."), (
+        f"the approve command is no longer prepare's first act: {line}"
+    )
     assert "python3 " in line, f"the approve line does not begin a python3 command: {line}"
     return line[line.index("python3 "):]
 
@@ -290,13 +316,13 @@ def test_the_emitted_approve_command_snapshots_byte_identically_against_the_real
     # Drive the REAL template under Node with DURABLE_ROOT bound to this project,
     # so the command it emits names the real staged canon_validate.py.
     out = run(tmp_path=tmp_path, durable_root=str(root), batches=[make_batch(0, [SOURCE_FORM])])
-    review = prompts_for(out, "glossary:citation-review:0")[0]
+    prepare = prompts_for(out, "glossary:citation-prepare:0")[0]
 
     # Lift the approve command the template ACTUALLY emitted. Cross-check it
     # against the wait poll's own --check-batch string plus the appended flag, so
     # a drift in either the check prefix or the --approve-to append is named here
     # rather than surfacing as an opaque subprocess failure below.
-    emitted = emitted_approve_cmd(review)
+    emitted = emitted_approve_cmd(prepare)
     reconstructed = approve_cmd_for(check_cmd_from_wait(out, root, 0), root, 0, 0)
     assert emitted == reconstructed, (
         "the emitted approve command is not checkBatchCmd()+--approve-to as the "

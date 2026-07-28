@@ -225,8 +225,26 @@ per-dispatch `DISP` nonce travels only via the drive agent's `DISPATCHED <seg>
 **Wait bound.** The driver bounds itself to `abs_ceiling = deadline + 150 s`
 (`CODEX_DEADLINE_SEC=2700` poll window + `CODEX_FINALIZE_BUDGET_SEC=150`), and the
 Workflow's own poll adds `CODEX_WAIT_GRACE_SEC=600`, so the total W5
-translate/review wait is bounded at `2700 + 150 + 600 = 3450 s` elapsed plus one
+translate/review wait is bounded at `2700 + 150 + 600 = 3450 s` of polling plus one
 final finite on-disk gate check — never an unbounded hang (the #198 failure mode).
+**1.16.1 (#348):** that bound is UNCHANGED; what changed is that it is now SPENT
+ACROSS AGENT CALLS rather than inside one. The agent's Bash tool clamps any single
+call at `BASH_CALL_CAP_SEC = 600 s` no matter what timeout the agent asks for, so
+the Workflow poll runs up to `WAIT_CHUNKS = 8` chunk calls, one per
+`WAIT_CHUNK_SEC = 480 s` slice. Each chunk polls only what is LEFT of the 3450 s,
+so chunks 1–7 take 480 s and chunk 8 takes the remaining 90 s, summing to exactly
+3450 — the chunks SPEND the declared POLLING budget, they never extend it.
+Read that as a polling budget, not a wall-clock guarantee: 3450 s is the total
+time the loop spends *polling*, and the elapsed time of a full wait is
+necessarily somewhat longer, because eight chunk calls mean eight agent handoffs
+and each chunk's final acceptance-gate invocation may straddle its own deadline.
+Nothing here bounds wall-clock elapsed time to 3450 s, and the pre-1.16.1 single
+call did not either. What the bound guarantees is termination — no unbounded
+hang, the #198 failure mode — not a deadline. After them
+comes ONE authoritative, non-polling
+re-check of the canonical artifact (`WAIT_CALLS = WAIT_CHUNKS + 1 = 9` calls per
+wait, worst case), so a job that finishes after the last chunk's poll ended is
+still seen rather than discarded.
 A timed-out dispatch leaves the segment `in_progress` and re-dispatches on the NEXT
 W5 run — the ordinary ledger-resume path, no in-loop retry.
 
@@ -477,7 +495,7 @@ Exact byte-scope per field:
   catches a footnote-apparatus re-extraction change for this segment
   specifically.
 - **`plugin_bundle_hash`** (global) — sha1 of sorted,
-  filename-concatenated bytes of the eleven generic scripts that directly
+  filename-concatenated bytes of the twelve generic scripts that directly
   shape translate/review content (`ledger_update.py` included — its
   `reviewed_draft_sha1` binding-check logic directly determines
   correctness) plus the two workflow templates
@@ -531,7 +549,7 @@ membership.
 
 - **`plugin_bundle_hash`** (global, read from
   `${durable_root}/runs/.plugin_bundle_hash` — a marker file Step 0a writes
-  once per run, not recomputed per segment) — covers exactly **eleven
+  once per run, not recomputed per segment) — covers exactly **twelve
   scripts** (six pre-1.2.0, plus `review_ready.py` and `resume_setup.py`,
   new in 1.2.0, `glossary_batch_plan.py`, new in 1.3.5, `codex_job.py`,
   new in 1.4.7, and `canon_senses.py`, added for RFC #215's homonym-split
@@ -542,7 +560,10 @@ membership.
   `canon_validate.py`, `cache_key.py`, `draft_sha1.py`,
   `review_artifact_check.py`, `ledger_update.py`, `review_ready.py`,
   `resume_setup.py`, `glossary_batch_plan.py`, `codex_job.py`,
-  `canon_senses.py`, plus
+  `canon_senses.py`, and `fetch_citation.py`, added in 1.16.1 as the
+  validated retrieval boundary for the W3 citation audit (#347) -- it
+  decides which citations may be fetched at all, so its bytes shape review
+  content as directly as any validator, plus
   `mass-translate-wf.template.js`/`glossary-pass-wf.template.js`. These are
   scripts that directly shape extraction/translation/review/validation
   content, or determine whether a convergence verdict was correctly

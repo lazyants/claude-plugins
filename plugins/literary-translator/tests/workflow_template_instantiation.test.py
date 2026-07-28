@@ -104,6 +104,12 @@ GLOSSARY_PASS_TOKENS = (
     # #197 -- engine.effort. No {{MODEL}} here -- the glossary pass has no
     # model knob (see the pinned contract in mass-translate-wf's own header).
     "{{EFFORT}}",
+    # #347/1.16.1 -- glossary.citation_content_types, comma-separated inside
+    # its own quotes. Empty string is the ordinary case and means "use
+    # fetch_citation.py's shipped default", so every pre-1.16.1 profile keeps
+    # working -- but the token must still be SUBSTITUTED, which is why it is
+    # listed here rather than treated as optional.
+    "{{CITATION_CONTENT_TYPES}}",
 )
 
 # A named-token shape (always {{UPPER_SNAKE_CASE}} in both templates) --
@@ -234,6 +240,7 @@ def instantiate_glossary_pass(
     research_mode: str,
     batch_agent_cap: int = FIXTURE_BATCH_AGENT_CAP,
     effort: str = FIXTURE_EFFORT,
+    citation_content_types: str = "",
 ) -> str:
     text = GLOSSARY_PASS_TEMPLATE.read_text(encoding="utf-8")
 
@@ -252,6 +259,9 @@ def instantiate_glossary_pass(
     # so the raw value is spliced in as-is. No {{MODEL}} here -- the glossary
     # pass has no model knob.
     text = text.replace("{{EFFORT}}", effort)
+    # #347/1.16.1 -- also inside its own quotes. Comma-separated; empty means
+    # the fetcher's shipped default list.
+    text = text.replace("{{CITATION_CONTENT_TYPES}}", citation_content_types)
 
     return text
 
