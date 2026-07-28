@@ -10,6 +10,7 @@
 - [Source-completeness before trusting a rebuild](#source-completeness)
 - [Cross-check your own artifacts](#cross-check-your-own-artifacts)
 - [Reproduce the gate's clean env](#reproduce-the-gates-clean-env)
+- [RED evidence read from a MOVING ref stops being evidence at the commit](#red-evidence-that-reads-its-before-from-a-moving-ref-stops-being-evidence-at-the-commit)
 - [A staged RED gate must be SATISFIABLE by its owner](#a-staged-red-gate-must-be-satisfiable)
 - [A coverage claim needs the same evidence as the thing it covers](#a-coverage-claim-needs-the-same-evidence)
 - [A pin can CEMENT a wrong claim — pinning is not review](#a-pin-can-cement-a-wrong-claim)
