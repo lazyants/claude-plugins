@@ -1198,12 +1198,30 @@ def run_batch(batch_path: Path, out_dir: Path, *,
     batch_deadline = time.monotonic() + BATCH_TIMEOUT_SEC
 
     for i, item, src in sources:
-        entry = {
-            "item_index": i,
-            "source_form": _recorded("source_form", item.get("source_form")),
-            "basis": _recorded("basis", item.get("basis")),
-            "source": _recorded("source", src),
-        }
+        # The entry dict is built INSIDE a guard, not before one. It used to sit
+        # above the try below, so anything raised while CONSTRUCTING it -- a
+        # _recorded() fault, an item that is not the shape item.get() expects --
+        # escaped run_batch entirely and destroyed index.json. That is exactly
+        # what the second guard's own comment forbids ("one bad citation may cost
+        # one entry; it may never cost the run's evidence index"), and the guard
+        # could not reach the lines that built its subject.
+        #
+        # item_index is set first and separately: it is the field that identifies
+        # an entry, it cannot fail, and it is what lets a failed item still be
+        # reported as an item rather than vanish from the index.
+        entry = {"item_index": i}
+        try:
+            entry["source_form"] = _recorded("source_form", item.get("source_form"))
+            entry["basis"] = _recorded("basis", item.get("basis"))
+            entry["source"] = _recorded("source", src)
+        except Exception as exc:                  # noqa: BLE001 -- deliberate
+            entry.setdefault("source_form", None)
+            entry.setdefault("basis", None)
+            entry.setdefault("source", None)
+            entry["outcome"] = f"refused:internal-error:{type(exc).__name__}"
+            counts["refused"] += 1
+            index.append(entry)
+            continue
         if time.monotonic() > batch_deadline:
             entry["outcome"] = "refused:batch-deadline"
             counts["refused"] += 1

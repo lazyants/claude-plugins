@@ -2225,7 +2225,14 @@ def test_before_the_deadline_the_real_cause_is_still_named(monkeypatch):
 
 
 def test_index_json_bounds_the_three_fragment_copied_fields(tmp_path):
-    """index.json's only open-ended strings, capped.
+    """The three FRAGMENT-copied strings in index.json, capped.
+
+    Not "the only open-ended strings": final_origin and chain[].host bypass
+    _recorded entirely and carry no local cap. They are bounded only by the
+    resolver -- a chain entry is appended after resolve_and_pin succeeds, so a
+    name that does not resolve never reaches the file, and DNS caps a name at
+    253 octets. That is an INHERITED bound, not one this code enforces, and the
+    judge prompt marks both fields SERVER-SELECTED for exactly that reason.
 
     canon_validate.py caps the SAME source_form at 60 chars ("a name long enough
     to hold a paragraph of instructions is not a name") while this file wrote it
@@ -2368,3 +2375,33 @@ def test_an_undeclared_field_is_bounded_rather_than_fatal():
     run_batch, outside every handler, destroying index.json."""
     out = fc._recorded("a-field-nobody-declared", "x" * 5000)
     assert len(out) <= min(fc.MAX_RECORDED_FIELD_CHARS.values()) + len("...[truncated]")
+
+
+def test_a_fault_while_building_the_entry_still_writes_index_json(monkeypatch, tmp_path):
+    """GUARDS' round-12 finding, and the sharper form of an earlier one.
+
+    The entry dict -- including all three _recorded() calls -- was built ABOVE
+    run_batch's try, so anything raised while constructing it escaped the guard
+    whose own comment says "one bad citation may cost one entry; it may never
+    cost the run's evidence index". Measured before the fix by popping a field
+    out of MAX_RECORDED_FIELD_CHARS: AssertionError escaped and index.json was
+    never written. The `-O` framing understated it -- asserts ON failed
+    identically, only the exception type differed, so the precondition was "an
+    undeclared field exists", not "-O is set".
+    """
+    def boom(field, value):
+        if field == "basis":
+            raise RuntimeError("entry construction fault")
+        return value
+    monkeypatch.setattr(fc, "_recorded", boom)
+
+    path = write_snapshot(tmp_path, [accepted("A", "https://example.com/a"),
+                                     accepted("B", "https://example.com/b")])
+    out = tmp_path / "ev"
+    assert fc.run_batch(path, out) == 0
+
+    index = json.loads((out / "index.json").read_text(encoding="utf-8"))
+    assert [e["item_index"] for e in index["entries"]] == [0, 1], "every item recorded"
+    for entry in index["entries"]:
+        assert entry["outcome"] == "refused:internal-error:RuntimeError"
+        assert "entry construction fault" not in json.dumps(entry), "no exception text"
