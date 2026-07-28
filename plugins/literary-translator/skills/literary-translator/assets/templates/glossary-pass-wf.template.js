@@ -434,9 +434,13 @@ const BATCHES = Array.isArray(args) ? args : JSON.parse(args)
 // never "offline must keep its historical figure"; it is "charge offline only
 // for work an offline run can actually perform". A retry ladder is work offline
 // can NEVER perform, so charging for it was always a false refusal. The extra
-// wait calls are work every offline run performs on every batch: the wait was
-// one agent call and is now WAIT_CALLS of them, in both modes alike, because the
-// Bash clamp is indifferent to research_mode. So 5*BATCHES.length + 2 is the
+// wait calls are cost every offline run must be preflight-CHARGED for on every
+// batch, as a worst-case CEILING -- not a claim that every batch actually
+// spends it (see the CEILING paragraph below: a wait whose first chunk finds
+// the fragment still spends only 1 call, not WAIT_CALLS, offline exactly as
+// live). The wait was budgeted at one agent call and the ceiling is now
+// WAIT_CALLS of them, in both modes alike, because the Bash clamp is
+// indifferent to research_mode. So 5*BATCHES.length + 2 is the
 // TRUE offline cost, where 3*BATCHES.length + 2 has become an under-count -- and
 // an under-count is the dangerous direction, since it lets a run start and then
 // blow engine.batch_agent_cap mid-flight rather than refusing it early and

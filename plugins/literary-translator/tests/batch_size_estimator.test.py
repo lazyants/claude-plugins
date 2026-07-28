@@ -1601,10 +1601,14 @@ def test_shared_retry_recovers_mid_loop_and_matches_exact_count(tmp_path):
 #     offline run can actually perform". A retry ladder is work offline can NEVER
 #     perform (there is no reviewer to reject an attempt), so charging for it was
 #     always a false refusal -- and the offline branch still does not. The extra
-#     wait calls are the opposite case: every offline run performs them on every
-#     batch, because the Bash clamp is indifferent to research_mode. Leaving
-#     offline at 3*N+2 would be an UNDER-count, which is the dangerous direction
-#     -- it lets a run start and then blow engine.batch_agent_cap mid-flight
+#     wait calls are the opposite case: every offline run must be
+#     preflight-charged for them on every batch, as a worst-case CEILING -- not
+#     a claim that every batch actually spends them (see below: a wait whose
+#     first chunk finds the fragment pays 1 call, not WAIT_CALLS, offline
+#     exactly as live) -- because the Bash clamp is indifferent to
+#     research_mode. Leaving offline at 3*N+2 would be an UNDER-count, which is
+#     the dangerous direction -- it lets a run start and then blow
+#     engine.batch_agent_cap mid-flight
 #     instead of refusing it early and loudly.
 #
 #     If that exceeds engine.batch_agent_cap the whole run is refused WITHOUT
@@ -2159,11 +2163,14 @@ def test_glossary_preflight_offline_formula_is_5_batches_plus_2(tmp_path, n_batc
 
     What DID move is the wait term, 1 -> WAIT_CALLS, so the per-batch total went
     3 -> 5. That is not the principle being abandoned, it is the same principle
-    applied: the extra wait calls are work every offline run really performs on
-    every batch, because #352's Bash per-call clamp is indifferent to
-    research_mode. Leaving offline at 3*N+2 would be an UNDER-count -- the
-    dangerous direction, since it admits a run that then blows
-    engine.batch_agent_cap mid-flight instead of refusing it early and loudly.
+    applied: the extra wait calls are cost every offline run must be
+    preflight-charged for on every batch, as a worst-case CEILING, not a claim
+    that every batch actually spends them -- a wait whose first chunk finds the
+    fragment pays 1 call, not WAIT_CALLS, offline exactly as live -- because
+    #352's Bash per-call clamp is indifferent to research_mode. Leaving offline
+    at 3*N+2 would be an UNDER-count -- the dangerous direction, since it
+    admits a run that then blows engine.batch_agent_cap mid-flight instead of
+    refusing it early and loudly.
 
     So this test discriminates against two opposite regressions at once: an
     offline branch that grew a ladder (which would give 1 + 3*4 = 13 or worse),

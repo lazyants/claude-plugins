@@ -115,11 +115,13 @@ FIXTURE_RUN_ID = "20260728T000000Z"
 
 # ---------------------------------------------------------------------------
 # Template instantiation. `source` is a parameter rather than always being read
-# from disk, so the same test body can be driven against a MUTANT or against the
-# pre-fix content of `git show HEAD:<path>` -- which is how every gate in this
-# file was watched failing. Mutating the file ON DISK is deliberately never done:
-# this worktree is shared with concurrently running teammates, and an on-disk
-# mutation would corrupt whatever suite they are running at that moment.
+# from disk, so the same test body can be driven against a MUTANT or against
+# the pre-fix content read from git's object store at a FROZEN baseline commit
+# (`PRE_RELEASE_BASELINE`, never `HEAD:` -- see read_template_at_baseline()
+# below for why) -- which is how every gate in this file was watched failing.
+# Mutating the file ON DISK is deliberately never done: this worktree is
+# shared with concurrently running teammates, and an on-disk mutation would
+# corrupt whatever suite they are running at that moment.
 # ---------------------------------------------------------------------------
 
 def instantiate_glossary(source: str, *, batch_agent_cap: int = 100000,
@@ -1205,8 +1207,10 @@ def test_the_full_wait_cost_ladder_is_one_two_or_three_calls(target, tmp_path):
         return len([lbl for lbl in labels(res["out"])
                     if lbl in (target.chunk_label, target.recheck_label)])
 
+    # Int-keyed only -- the exhaustion case gets its own variable rather than a
+    # string key smuggled into this dict, so the dict's key type stays honest.
     ladder = {k: spent(_ready_at(k), "PENDING <idx>") for k in range(1, n_chunks + 1)}
-    ladder["exhausted"] = spent(["PENDING <idx>"], "READY <idx>")
+    exhausted_calls = spent(["PENDING <idx>"], "READY <idx>")
 
     assert ladder[1] == 1, (
         f"{target.name}: the ORDINARY path -- the fragment already there when the "
@@ -1214,11 +1218,11 @@ def test_the_full_wait_cost_ladder_is_one_two_or_three_calls(target, tmp_path):
     )
     for k in range(1, n_chunks + 1):
         assert ladder[k] == k, f"{target.name}: chunk-{k} answer spent {ladder[k]} calls"
-    assert ladder["exhausted"] == EXPECTED_WAIT_CALLS == n_chunks + 1, (
-        f"{target.name}: the exhaustion path spent {ladder['exhausted']} calls; the "
+    assert exhausted_calls == EXPECTED_WAIT_CALLS == n_chunks + 1, (
+        f"{target.name}: the exhaustion path spent {exhausted_calls} calls; the "
         f"ceiling is {EXPECTED_WAIT_CALLS} == {n_chunks} chunk(s) + 1 re-check"
     )
-    assert ladder[1] < ladder["exhausted"], (
+    assert ladder[1] < exhausted_calls, (
         f"{target.name}: the ordinary path costs the same as exhaustion, so the "
         f"preflight ceiling is no longer an over-estimate of anything"
     )
@@ -1393,15 +1397,24 @@ def test_the_shipped_cap_still_admits_the_documented_batch_count(ladder):
 #
 # Every gate above was watched failing before it passed. Two of those reds are
 # reproducible on demand and so are kept executable here: the pre-fix templates
-# are still in git, and running the two headline assertions against
-# `git show HEAD:<path>` is a stronger, more durable statement than any
-# transcript of a one-off revert -- and it costs nothing, because it reads git's
-# object store rather than the working tree, which teammates are concurrently
-# editing.
+# are still in git, and running the two headline assertions against a FROZEN
+# baseline commit (`PRE_RELEASE_BASELINE`, the 1.16.1 release merge -- see
+# read_template_at_baseline() above) is a stronger, more durable statement than
+# any transcript of a one-off revert -- and it costs nothing, because it reads
+# git's object store rather than the working tree, which teammates are
+# concurrently editing.
 #
-# These become vacuous once 1.16.2 is committed and HEAD carries the fix. That
-# is handled explicitly rather than by letting them rot into false greens: each
-# SKIPS, loudly, the moment HEAD already chunks.
+# The baseline is FROZEN rather than `HEAD:`, and deliberately does NOT skip.
+# An earlier version of this file read `HEAD:` and treated "the baseline
+# already has the fix" as a reason to skip; that was briefly correct while
+# 1.16.2 stayed uncommitted, then quietly stopped being a pre-fix read at all
+# the moment HEAD carried the release, and the four red-evidence tests below
+# degraded into skips that stayed green while asserting nothing. Under a
+# FROZEN baseline that failure mode cannot recur the same way: "the baseline
+# already has the fix" can only mean the pinned SHA is wrong, since a frozen
+# commit does not itself drift, so `_baseline_is_prefix()` below is a hard
+# ASSERT, never a skip -- skipping on it would hide exactly the thing worth
+# knowing.
 # ===========================================================================
 
 def _baseline_is_prefix(target: Target) -> bool:

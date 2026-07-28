@@ -79,19 +79,96 @@ release commit and goes permanently red, and one that merely resolves survives a
 already voided every row's provenance.
 
 Each row also pins the REPLACEMENT: the corrected wording must be present at its expected count,
-absent at the baseline, and — the part that makes the row mean something — present in the ADDED
-side of `git diff -U0 <baseline>` for that file. Without that hunk binding, an unrelated literal
-copied out of the current file carries a correct file-level count while the intended correction was
-never installed anywhere. One row of fourteen declares no one-to-one replacement, because its
-sentence was deleted rather than reworded; a separate assertion pins that count at exactly one, so
-the exemption is countable and widening it is a deliberate act.
+absent at the baseline, and present in the ADDED side of `git diff -U0 <baseline>` for that file.
+Without that, an unrelated literal copied out of the current file carries a correct file-level count
+while the intended correction was never installed anywhere. One row of fourteen declares no
+one-to-one replacement, because its sentence was deleted rather than reworded; a separate assertion
+pins that count at exactly one, so the exemption is countable and widening it is a deliberate act.
+
+**That was still weaker than these notes originally claimed, and the gap was real rather than
+theoretical.** Both sides were matched against the diff AS A WHOLE, so a row passed while its
+retired needle sat in one hunk and its replacement in an unrelated hunk elsewhere in the same file —
+each side genuinely part of this change, the pair proving nothing about whether that replacement is
+what replaced that claim. Two of the fourteen rows were exactly that shape, and the suite was green.
+A third assertion now requires both to occur in the SAME `-U0` hunk. Same-hunk is the closest proxy
+a `-U0` diff can offer for "the same edit": a boundary falls at every run of unchanged lines, however
+short, so two edits sharing a hunk are textually adjacent and two edits in different hunks provably
+are not one edit. Neither row had to be retracted — each retired sentence already had a genuine
+same-hunk successor sitting beside it, and the row set had simply pointed at a thematically related
+literal from the wrong hunk.
+
+The proxy's own limit is documented where the parser lives rather than smoothed over: a later edit
+that MERGES two hunks can sweep some other genuinely cross-hunk pair into one hunk and mask it, so a
+hunk-binding result is only as fresh as the last full run against a quiescent tree. That is the same
+working-tree-as-current-state property the rest of the file already lives with, sharper here.
 
 Its guarantee is deliberately narrow and stated in its own docstring: a fixed list of
 `(file, literal)` predicates, with no claim that a stale statement cannot return in different words
 or in a file the list does not name.
 
-Suite: 4178 → **4339 passed, 2 skipped, 2 xfailed**. Both skips are named rather than incidental:
-one pre-existing placeholder, and the pin row that declares no replacement.
+### The review round this release took, and what it found in the release itself
+
+Every finding below is against work already committed in this release. They are recorded because
+each is an instance of the defect class the release exists to close.
+
+**The containment guard was ported to the wait site and not to the site beside it.** The skeptic
+pass's resume precheck still read its reply with a bare `sentinelVerdict()`, while the glossary twin
+wrapped the identical call in `!rejectedAnywhere(precheck, "ABSENT " + i) && …`. Measured with the
+shipped functions, not read: of eleven reply shapes the two sites disagreed on two, both in the
+false-GREEN direction — a reply that reports the fragment ABSENT in prose and then emits a clean
+`PRESENT <i>` line made the skeptic resume-skip a batch the glossary twin would regenerate. Both
+templates now agree on all eleven. The consequence was bounded — a false success there SKIPS work
+rather than approving a bad artifact, and `--verify-merged` re-authenticates every citation
+independently — but the shipped comment above that line claimed `sentinelVerdict()` alone "keeps
+BOTH directions closed", which was false for exactly the glued form.
+
+**The parity test that existed to prevent this could not see it.** It extracted the three helper
+declarations and called `waitChunkVerdict()` directly, so it measured the HELPERS while asserting
+something about the CALL SITES. Mutation-proved: with both skeptic delegations replaced by bare
+`sentinelVerdict()` calls — zero `waitChunkVerdict` calls left in that workflow — the harness still
+returned all-pending and PASSED. A parity test comparing helper copies is green precisely while a
+call site never calls the helper. The gate now ENUMERATES the call sites out of each template with a
+real tokenizer that classifies every byte as code, comment, string, template literal or regex
+literal — not a regex over source, which would only match the spelling someone thought of — and pins
+exact per-template counts (mass-translate 4, glossary 2, skeptic 2) plus a total floor, so an
+enumeration that silently matched nothing cannot read as clean. The precheck sites are covered the
+same way: the guard call's offset must precede the verdict call's offset. Each site was reverted one
+at a time and watched failing.
+
+**Four more statements were stronger than the code**, all corrected rather than merely noted: the
+"exactly 900 s" wait guarantee (the emitted loop tests its deadline only BETWEEN iterations, so a
+validation begun just before the bound runs on to the call's own 540 s ceiling — what is guaranteed
+is that no call exceeds the clamp and the wait terminates, and 900 s is the polling budget those
+calls divide up); the claim that every offline run performs every wait call, which survived in three
+places after the notes said it was retired; the RED-evidence narration that still described the
+superseded `git show HEAD:` and skip design; and `skeptic_ready.py`'s own docstring, which still
+carried the `evidence_coverage` wording this release corrected in both schemas — a file outside the
+release diff, which no diff-scoped review could have reached.
+
+**This PR must be merged with a true merge commit.** `retired_wording_pins.test.py` pins a second
+frozen baseline at the release's first commit, because three rows pin wording that commit introduced
+fresh — it occurs zero times at the pre-release baseline, so those rows cannot be expressed against
+one baseline. A squash discards that commit and a rebase replays it under a new SHA; either strands
+the pinned baseline off `main`'s ancestry with nothing to re-point at, and the ancestor assertion
+goes permanently red for a reason no code change can fix. The constraint is now stated on the
+constant itself and named in the assertion's failure text.
+
+**Not fixed, and not filed.** `sentinelVerdict()` accepts a reply whose final non-empty line is the
+success sentinel regardless of what precedes it, so a disavowal followed by a quoted sentinel reads
+as success while the same content in the opposite order does not. Measured identical at the
+pre-release baseline and here, in all three templates: it is the semantics this parser has had since
+the line-oriented rewrite, not a regression of this release, and it is left alone deliberately —
+tightening the grammar re-opens the #308 failure where a prose-decorated but genuine `READY` was
+mislabelled a timeout, and detecting a disavowal in prose is not something a keyword list closes.
+Worth revisiting, because this release changes the arithmetic: with an authoritative re-check now
+backing both waits, a false PENDING costs one bounded extra call instead of a wrongly declared
+timeout. Stated here rather than claimed as tracked — no issue number is cited because none was
+filed.
+
+Suite: 4178 → **4368 passed, 3 skipped, 2 xfailed**. Every skip is named rather than incidental,
+and there are three for two reasons: one pre-existing placeholder, plus the single pin row that
+declares no one-to-one replacement, which now skips in TWO tests — the diff-side check and the
+same-hunk check added below — because a row with no replacement has nothing for either to bind.
 
 Every new gate was watched failing against the pre-fix tree first — and that evidence is
 EXECUTABLE rather than a claim in these notes. Four gates re-read both templates at a frozen

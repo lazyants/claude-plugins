@@ -155,8 +155,16 @@ def has_schema(options_text):
 
 
 def has_seq_poll_loop(body):
-    """The OLD `for i in $(seq 1 N)` bounded loop -- glossary still uses it;
-    #198's mass-translate wait polls must NOT."""
+    """The OLD `for i in $(seq 1 N)` fixed-iteration bounded loop -- #198 took
+    mass-translate's wait polls off this shape, and 1.16.2 (#352) did the same
+    for glossary's (see test_glossary_batch_wait_chunk_is_an_elapsed_bounded_poll_of_check_batch
+    below). As of 1.16.2 no shipped template emits this grammar as real code;
+    it survives only as historical prose in a comment
+    (skeptic-pass-wf.template.js narrates the pre-1.16.2 shape it replaced).
+    Kept as a predicate rather than deleted: every assertion below still uses
+    it to prove ABSENCE, and the synthetic fixture in
+    test_regression_catcher_helpers_actually_discriminate still needs
+    something that recognises the shape if it were to reappear."""
     return re.search(r"for\s+i\s+in\s+\$\(seq\s+1\s+\d+\)", body) is not None
 
 

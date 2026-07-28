@@ -27,7 +27,7 @@ arithmetic instead of against the bytes a template emits: it passes without ever
 exercising the thing it names. See tests/wait_chunking_batch_passes.test.py's
 header for that one.
 
-TWO TRAPS, both measured on this change rather than imagined. Each has a
+THREE TRAPS, all measured on this change rather than imagined. Each has a
 self-test below, because a rule nobody has watched fire is a comment.
 
   1. A NEEDLE THAT SPANS A LINE BREAK INSIDE A COMMENT BLOCK CONTAINS THE
@@ -52,6 +52,20 @@ self-test below, because a rule nobody has watched fire is a comment.
      in the idempotence fix, where the old wording is kept as a quoted
      refutation: `always safe` and `never destructive` are still in the file
      deliberately and must never be pinned bare.
+
+  3. A NEEDLE AND ITS REPLACEMENT CAN BOTH BE REAL AND STILL BE UNRELATED. This
+     row set first shipped pairing the skeptic idempotence retirement (this
+     module's own opening example, in trap 1) with `it is not idempotent` as
+     its replacement -- a string this change genuinely added, so it satisfied
+     every check that looks at the removed lines and the added lines as two
+     WHOLE-FILE pools. It is also in a different hunk than the retired needle:
+     the retired sentence sits in one comment, the replacement in a dispatch
+     prompt string several unchanged lines away. Whole-file pooling cannot
+     tell that apart from a genuine successor, because it never asks whether
+     the two sides came from the SAME edit. `_diff_hunks()` and
+     test_retired_needle_and_its_replacement_share_a_hunk exist to ask exactly
+     that; see test_a_needle_pair_bound_only_by_diff_side_can_share_no_hunk for
+     the reconstruction.
 
 THE AUTHORING RULE THAT FOLLOWS: copy a needle programmatically out of the
 NORMALIZED text, never retype it from the rendered comment. The presence-before
@@ -128,6 +142,22 @@ BASELINE_RELEASE = "4343994b9de4f6fe979e6e5af711ed9ab11c4381"
 # would fail presence-before while the row was perfectly correct. Each row
 # therefore carries the commit it was retired FROM, rather than the file
 # carrying one baseline for everything.
+#
+# THIS SHA HAS A FRAGILITY BASELINE_RELEASE DOES NOT: it exists only on the
+# branch this PR ships from, not on any earlier release. BASELINE_RELEASE
+# survives on main no matter how a LATER PR merges, because it is already the
+# tip of a past #359-style true MERGE commit. BASELINE_FIX_ROUND survives on
+# main only if THIS PR is ALSO merged with a true merge commit -- a squash or
+# rebase merge does not preserve this SHA (squash discards it entirely, rebase
+# replays the same content under a new SHA), and there is no post-merge commit
+# to re-point at afterwards: the intermediate wrong-claim state this SHA names
+# does not survive either method, it is simply gone from main's ancestry. This
+# repo's GitHub config allows squash, rebase, AND merge-commit merges --
+# nothing on GitHub's side enforces the one this SHA depends on.
+# test_the_pin_baseline_is_frozen_and_still_in_history's ancestor check catches
+# a wrong merge after the fact; it cannot choose the merge method for you.
+# THE OPERATOR ACTION THIS BUYS: merge this PR with a true merge commit, not
+# squash and not rebase.
 BASELINE_FIX_ROUND = "c33d1d8a68348f1edf2b4fdeee5f3874bbb17083"
 
 PIN_BASELINES = (BASELINE_RELEASE, BASELINE_FIX_ROUND)
@@ -216,6 +246,66 @@ def diff_removed_text(path: Path, baseline: str) -> str:
     return _diff_side(path, baseline, "-")
 
 
+def _diff_hunks(path: Path, baseline: str) -> list[tuple[str, str]]:
+    """One (removed_text, added_text) pair per hunk of the diff between
+    `baseline` and the working tree, both sides normalized independently.
+
+    THIS IS THE GRANULARITY `_diff_side()` DELIBERATELY DISCARDS, and the gap
+    that discarding leaves open: `_diff_side()` proves a needle occurs
+    SOMEWHERE among the file's added or removed lines, never that two needles
+    belong to the SAME edit. Under `-U0`, a hunk boundary is drawn at every run
+    of unchanged lines, however short -- so "the same hunk" is the closest
+    proxy for "the same edit" this diff format can offer. A retired claim and
+    a replacement that land in different hunks are, by that measure, two
+    separate edits that happen to share a row, not one edit and its
+    correction.
+
+    Measured, not theoretical: two rows in this file's own RETIRED table
+    shipped with a replacement drawn from a DIFFERENT hunk than the retired
+    needle it was paired with -- see
+    test_a_needle_pair_bound_only_by_diff_side_can_share_no_hunk below for the
+    reconstruction. Both passed every check `_diff_side()` can perform,
+    because both checks are correct about the SIDE and silent about the HUNK.
+
+    A CAVEAT THIS FUNCTION INHERITS, THEN SHARPENS. `-- rel` with no second
+    ref diffs against the WORKING TREE, same as `_diff_side()` and
+    current_text() -- deliberate, because these pins must validate what is
+    actually ON DISK, not a stale commit. That already makes every check in
+    this file a statement about "as of the last time it ran". Hunk boundaries
+    add a SECOND axis of the same sensitivity: an unrelated edit ELSEWHERE in
+    the same file, made between two runs, can MERGE hunks (closing the run of
+    unchanged lines that used to separate them) even though it never touches
+    either needle. A merge cannot flip a currently-PASSING row to failing --
+    it can only add MORE lines to a hunk's pools, never remove the pairing
+    that already held -- but it CAN, in principle, sweep a genuinely
+    cross-hunk pair elsewhere in the row set into the same merged hunk and
+    mask that defect on the next run. Splitting an existing hunk the opposite
+    way would require an edit that reproduces the BASELINE line verbatim at
+    that exact position, which an unrelated edit essentially never does. Net:
+    a result from this function is only as fresh as the last full re-run
+    against a quiescent tree, exactly like every other check in this file --
+    not a NEW risk this function invents, but the existing one, now able to
+    hide a defect instead of only losing a needle."""
+    rel = path.relative_to(REPO_ROOT).as_posix()
+    proc = git("diff", "-U0", baseline, "--", rel)
+    assert proc.returncode == 0, f"git diff failed for {rel}: {proc.stderr.strip()}"
+    pairs: list[tuple[list[str], list[str]]] = []
+    removed: list[str] = []
+    added: list[str] = []
+    for line in proc.stdout.splitlines():
+        if line.startswith("@@"):
+            if removed or added:
+                pairs.append((removed, added))
+            removed, added = [], []
+        elif line.startswith("+") and not line.startswith("+++"):
+            added.append(line[1:])
+        elif line.startswith("-") and not line.startswith("---"):
+            removed.append(line[1:])
+    if removed or added:
+        pairs.append((removed, added))
+    return [(normalize(" ".join(r)), normalize(" ".join(a))) for r, a in pairs]
+
+
 # ---------------------------------------------------------------------------
 # The rows. Each is (file, needle, what the needle is a claim ABOUT).
 #
@@ -232,17 +322,18 @@ def diff_removed_text(path: Path, baseline: str) -> str:
 # makes the count of unpaired rows visible instead of letting it drift.
 #
 # Every needle here was copied out of normalized text programmatically, never
-# retyped. Two of them show why: `is filed // separately` and `this release's
-# CHANGELOG // promises that file is untouched` both carry a `//` mid-sentence
-# because the comment wrapped there. Typed as a reader sees them, both match
-# zero occurrences -- verified.
+# retyped. Three of them show why: `is filed // separately`, `this release's
+# CHANGELOG // promises that file is untouched`, and the offline replacement's
+# `is the // TRUE offline cost` all carry a `//` mid-sentence because the
+# comment wrapped there. Typed as a reader sees them, all three match zero
+# occurrences -- verified.
 RETIRED = [
     # -- 1.16.2 RELEASE: skeptic-pass-wf.template.js ---------------------
     (
         BASELINE_RELEASE, SKEPTIC_TEMPLATE,
         "but that coercion is idempotent, so running it // again here is always safe, "
         "never destructive",
-        "it is not idempotent", 1,
+        "THAT NORMALIZATION IS NOT IDEMPOTENT.", 1,
         "the claim that --validate-fragment is idempotent, which it is not: the "
         "successful run rewrites the fragment in place, so a second run consumes "
         "its own already-pruned output",
@@ -293,7 +384,8 @@ RETIRED = [
     (
         BASELINE_RELEASE, GLOSSARY_TEMPLATE,
         "The offline branch is therefore EXACTLY the historical 3*BATCHES.length + 2",
-        "offline -- perBatch = 1 + (1 + WAIT_CALLS) == 2 + WAIT_CALLS", 1,
+        "5*BATCHES.length + 2 is the // TRUE offline cost, where 3*BATCHES.length + "
+        "2 has become an under-count", 1,
         "the claim that offline keeps its historical figure. What survives #352 is "
         "the LADDER-FREE guarantee, not the number: offline pays 5N+2 now, because "
         "the Bash clamp is indifferent to research_mode",
@@ -470,6 +562,46 @@ def test_replacement_is_installed_and_bound_to_the_hunk_that_added_it(
 
 
 @pytest.mark.parametrize("baseline,path,needle,repl,count,about", RETIRED, ids=ROW_IDS)
+def test_retired_needle_and_its_replacement_share_a_hunk(
+    baseline, path, needle, repl, count, about
+):
+    """THE CHECK THE PREVIOUS TWO CANNOT GIVE TOGETHER. Each of the two tests
+    above binds ONE side (removed or added) to the diff AS A WHOLE; neither
+    relates the two sides to EACH OTHER. A row whose retired needle lives in
+    one hunk and whose replacement lives in an unrelated hunk elsewhere in the
+    same file passes both: the retired needle is genuinely among the lines
+    this change removed, the replacement is genuinely among the lines this
+    change added, and the pair still proves nothing about whether the
+    replacement is what replaced the claim -- it may simply be some other,
+    unrelated edit the same commit happened to make.
+
+    "Same hunk" is the closest proxy for "the same edit" a `-U0` diff can
+    offer: a hunk boundary falls at every run of unchanged lines, however
+    short, so two edits sharing a hunk are textually adjacent and two edits in
+    different hunks are provably not the same edit."""
+    if repl is None:
+        pytest.skip("row declares no one-to-one replacement (claim deleted outright)")
+    needle_n = normalize(needle)
+    repl_n = normalize(repl)
+    pairs = _diff_hunks(path, baseline)
+    shared = [i for i, (rem, add) in enumerate(pairs) if needle_n in rem and repl_n in add]
+    assert shared, (
+        f"the retired needle and its replacement for {path.name} each occur "
+        f"somewhere in the diff against {baseline[:12]}, but no SINGLE hunk "
+        f"contains BOTH -- the replacement is not bound to the hunk that retired "
+        f"the claim it is paired with, so the pair does not verify that this "
+        f"replacement is what replaced this claim.\n"
+        f"  needle:      {needle!r}\n"
+        f"  replacement: {repl!r}\n"
+        f"  about:       {about}\n"
+        f"Find the hunk that actually replaced this needle (search {path.name}'s "
+        f"diff for the removed line, then read the ADDED lines of that SAME hunk) "
+        f"and use a literal drawn from there -- copied programmatically out of the "
+        f"normalized hunk text, per this file's authoring rule, never retyped."
+    )
+
+
+@pytest.mark.parametrize("baseline,path,needle,repl,count,about", RETIRED, ids=ROW_IDS)
 def test_every_needle_is_stored_in_its_own_normalized_form(
     baseline, path, needle, repl, count, about
 ):
@@ -529,7 +661,11 @@ def test_the_pin_baseline_is_frozen_and_still_in_history(PIN_BASELINE_SHA):
         breaks: a rewritten history leaves the old object resolvable for a while
         (so the check above still passes) while the branch no longer descends
         from it, which means the baseline is no longer "the tree this change was
-        made against" and every row's provenance is void.
+        made against" and every row's provenance is void. It is also the one a
+        SQUASH or REBASE MERGE of this very PR breaks, specifically for
+        BASELINE_FIX_ROUND and not for BASELINE_RELEASE -- see the comment on
+        BASELINE_FIX_ROUND for why, and the branch below for the remedy this
+        row set can actually name.
     """
     assert re.fullmatch(r"[0-9a-f]{40}", PIN_BASELINE_SHA), (
         f"a PIN_BASELINES entry must be a full 40-hex commit id, got "
@@ -550,13 +686,36 @@ def test_the_pin_baseline_is_frozen_and_still_in_history(PIN_BASELINE_SHA):
     )
 
     ancestor = git("merge-base", "--is-ancestor", PIN_BASELINE_SHA, "HEAD")
+    if PIN_BASELINE_SHA == BASELINE_FIX_ROUND:
+        # Named, not generic: this SHA has a specific known way to break that
+        # BASELINE_RELEASE does not, and the remedy is an operator ACTION
+        # (choose a different merge method), not a code edit.
+        remedy = (
+            f"THIS IS BASELINE_FIX_ROUND: it exists only on the branch this PR "
+            f"ships from, and survives on main only if THIS PR merges with a true "
+            f"merge commit. If BASELINE_RELEASE (a different SHA) still passes "
+            f"this same check while this one fails, that is the specific "
+            f"signature of a SQUASH or REBASE merge -- this repo's GitHub config "
+            f"allows all three merge methods, and only merge-commit preserves "
+            f"this SHA. There is no post-merge commit to re-point at: a squash "
+            f"discards the intermediate commit entirely, a rebase replays its "
+            f"content under a new SHA, and either way the wrong-claim state this "
+            f"SHA names is simply gone from main's ancestry, not relocated. "
+            f"THE FIX: merge this PR (or redo the merge) with a true merge "
+            f"commit. If it is already merged that way and this still fails, the "
+            f"cause is a genuine history rewrite -- see the general remedy below.\n"
+        )
+    else:
+        remedy = ""
     assert ancestor.returncode == 0, (
         f"the frozen baseline {PIN_BASELINE_SHA[:12]} is no longer an ancestor of "
-        f"HEAD. The branch was rebased or its history rewritten, so this SHA is no "
-        f"longer the tree these pins were authored against and their provenance is "
-        f"void. Re-derive the baseline from the new history and re-verify every "
-        f"row -- advancing the SHA blindly turns all {len(RETIRED)} presence-before "
-        f"rows into assertions about a tree nobody chose."
+        f"HEAD.\n{remedy}"
+        f"The branch may also simply have been rebased or its history rewritten, "
+        f"which makes this SHA no longer the tree these pins were authored "
+        f"against, voiding their provenance. Re-derive the baseline from the new "
+        f"history and re-verify every row -- advancing the SHA blindly turns all "
+        f"{len(RETIRED)} presence-before rows into assertions about a tree nobody "
+        f"chose."
     )
 
 
@@ -618,6 +777,76 @@ def test_a_bare_needle_would_match_its_own_historical_quotation():
         stored = next(n for _b, p, n, _r, _c, _a in RETIRED
                       if p is path and "lines.push" in n)
         assert current_text(path).count(normalize(stored)) == 0
+
+
+IDEMPOTENCE_RETIRED_NEEDLE = normalize(
+    "but that coercion is idempotent, so running it // again here is always safe, "
+    "never destructive"
+)
+
+# The replacement this row set stored BEFORE this fix -- real text this change
+# added, so it passed both `_diff_side()` checks, but drawn from
+# batchDispatchPrompt()'s lines.push() call rather than from the comment that
+# actually retired the needle above. Recorded here as a literal, not read out
+# of RETIRED, because the whole point is that it no longer appears there.
+HISTORICAL_CROSS_HUNK_MISPAIRING = normalize("it is not idempotent")
+
+
+def test_a_needle_pair_bound_only_by_diff_side_can_share_no_hunk():
+    """TRAP 3, measured on this file's own review round rather than invented.
+
+    This row set first shipped pairing the skeptic idempotence retirement with
+    `it is not idempotent` as its replacement. That string is real text this
+    change added -- it occurs in batchDispatchPrompt()'s lines.push() call --
+    so it passed test_replacement_is_installed_and_bound_to_the_hunk_that_added_it
+    outright. It is also in a DIFFERENT hunk than the retired needle: the
+    retired sentence sits in checkCommand()'s comment, several unchanged lines
+    away from the dispatch prompt string it was mispaired with. Both
+    diff-side checks are correct about the SIDE and silent about the HUNK,
+    which is exactly the gap _diff_hunks() exists to close.
+
+    The comment's OWN immediate replacement, `THAT NORMALIZATION IS NOT
+    IDEMPOTENT.`, sits in the SAME hunk as the retired sentence -- and is what
+    this row set stores now."""
+    pairs = _diff_hunks(SKEPTIC_TEMPLATE, BASELINE_RELEASE)
+    # Refuse an implausible case count BEFORE trusting the `any(...)` below --
+    # on an EMPTY pairs list `any()` is vacuously False, which would make
+    # `assert not same_hunk_historical` pass for having tested nothing rather
+    # than for the reason this self-test claims.
+    hunks_with_retired = [i for i, (rem, _add) in enumerate(pairs) if IDEMPOTENCE_RETIRED_NEEDLE in rem]
+    assert len(hunks_with_retired) == 1, (
+        f"expected the retired needle in exactly one hunk of {len(pairs)} against "
+        f"{BASELINE_RELEASE[:12]}, found it in {len(hunks_with_retired)} -- "
+        f"_diff_hunks() may be broken, or the template was restructured enough "
+        f"that this self-test needs re-deriving rather than trusted as-is"
+    )
+    same_hunk_historical = any(
+        IDEMPOTENCE_RETIRED_NEEDLE in rem and HISTORICAL_CROSS_HUNK_MISPAIRING in add
+        for rem, add in pairs
+    )
+    assert not same_hunk_historical, (
+        "the historical mispairing now shares a hunk with the retired needle -- "
+        "the skeptic template was restructured, and this self-test no longer "
+        "demonstrates trap 3 the way it was measured"
+    )
+    # ...yet it is genuinely among the lines this change added, so both
+    # diff-side checks alone would have let it through.
+    assert HISTORICAL_CROSS_HUNK_MISPAIRING in diff_added_text(
+        SKEPTIC_TEMPLATE, BASELINE_RELEASE
+    ), (
+        "the historical mispairing is no longer among this change's added lines "
+        "at all, so it no longer demonstrates a pair that clears the diff-side "
+        "checks while sharing no hunk"
+    )
+
+    # The row set's actual, same-hunk replacement.
+    stored = next(
+        r for _b, p, n, r, _c, _a in RETIRED
+        if p is SKEPTIC_TEMPLATE and r is not None and "IDEMPOTENT" in r
+    )
+    assert any(
+        IDEMPOTENCE_RETIRED_NEEDLE in rem and normalize(stored) in add for rem, add in pairs
+    ), "the row set's stored replacement no longer shares a hunk with the retired needle"
 
 
 @pytest.mark.parametrize("kept", ["always safe", "never destructive"])

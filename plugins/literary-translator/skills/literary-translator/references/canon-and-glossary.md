@@ -154,9 +154,18 @@ Concretely: chunks of `WAIT_CHUNK_SEC = 480` s, with chunk *i* polling whatever
 is LEFT of the budget rather than a flat 480 s, so the chunk bounds **sum to the
 declared budget exactly** — for 900 s that is two chunks of 480 s and 420 s.
 Flat chunks would silently EXTEND the budget instead of spending it, falsifying
-every doc that quotes the 900 s figure. Each chunk asks for a tool timeout
-comfortably under the clamp, so the chunk always reaches its own elapsed bound
-and prints its marker before the tool can kill the call.
+every doc that quotes the 900 s figure. Each chunk asks for a tool timeout of
+540 s, comfortably under the 600 s clamp — but that bounds the CALL, not the
+poll. The loop tests its own deadline only BETWEEN iterations, after that
+iteration's validation command has already run, so a validation begun just
+before the chunk's own elapsed bound can run on past it, up to the tool's own
+540 s ceiling, before the marker is ever printed: two nominal chunks of 480 s
+and 420 s can therefore consume up to 540 s and 540 s of wall clock apiece, not
+480 s and 420 s. What IS guaranteed, and is the property #352 exists to hold:
+no single call can exceed its declared 540 s timeout, safely under the
+measured 600 s clamp, and the wait always terminates, in at most
+`WAIT_CHUNKS + 1` calls. The declared 900 s is the polling budget those calls
+divide up, not a wall-clock deadline the wait is certain to land inside.
 
 **The sentinel pair is `READY`/`PENDING` — exactly two tokens — and `TIMEOUT`
 is no longer a sentinel at all.** A chunk returns `READY {index}` the instant

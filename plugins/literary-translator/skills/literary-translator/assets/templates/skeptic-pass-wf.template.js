@@ -659,12 +659,34 @@ async function batchStep(batch) {
   // the literal substring "PRESENT" and would falsely resume-skip under a
   // naive `.indexOf(...) !== -1` check -- the earlier whole-string exact
   // match closed that direction, but then rejected a benign prose-decorated
-  // PRESENT reply as ABSENT (#308). sentinelVerdict() keeps BOTH directions
-  // closed at once: a decorated PRESENT (prose preamble, the sentinel as
-  // the reply's own final line) now resume-skips, while a plain ABSENT or a
-  // contradictory reply still regenerates (see sentinelVerdict()'s own
-  // comment for the exact rule).
-  if (sentinelVerdict(precheck, "PRESENT " + batch.index, "ABSENT " + batch.index)) {
+  // PRESENT reply as ABSENT (#308). sentinelVerdict() ALONE closes only the
+  // PRESENT direction: a decorated PRESENT (prose preamble, the sentinel as
+  // the reply's own final line) resume-skips, and a plain ABSENT alone on
+  // its own line regenerates.
+  //
+  // It does NOT by itself close the ABSENT direction. sentinelVerdict()
+  // rejects on whole-line equality only, so an ABSENT sentinel sharing its
+  // line with prose -- "ABSENT 0 (fragment missing; not PRESENT)" is exactly
+  // that shape -- survives the fail-priority scan, and a reply that both
+  // says ABSENT and ends on a clean "PRESENT 0" line would resume-skip on
+  // sentinelVerdict() alone. Measured directly against this file's own
+  // functions, over the same GLUE_CHARS set and dual-sentinel shape
+  // tests/glossary_citation_review.test.py defines for its own precheck: 15
+  // of 16 gluing characters falsely resume-skip this way, 0 of 16 once
+  // guarded below.
+  //
+  // The rejectedAnywhere() containment guard closes that direction, the same
+  // way it already closes the wait site's PENDING direction (see
+  // waitChunkVerdict() above) and the same way glossary's own precheck
+  // guards its PRESENT/ABSENT read (glossary-pass-wf.template.js's
+  // batchStep): a contradictory reply -- ABSENT glued to prose anywhere,
+  // whatever glued it there -- now regenerates regardless of what the
+  // reply's last clean line says. The two guards together close BOTH
+  // directions; sentinelVerdict() alone never did, and this comment no
+  // longer claims it does. Parity with glossary's precheck guard is enforced
+  // by tests/rejected_anywhere_parity.test.py, not merely described here.
+  if (!rejectedAnywhere(precheck, "ABSENT " + batch.index) &&
+    sentinelVerdict(precheck, "PRESENT " + batch.index, "ABSENT " + batch.index)) {
     log("batch " + batch.index + ": resume-skip -- existing fragment already passed --validate-fragment, not re-dispatching")
     return { batchIndex: batch.index, fragmentPath: fragmentPath(batch.index), ready: true }
   }

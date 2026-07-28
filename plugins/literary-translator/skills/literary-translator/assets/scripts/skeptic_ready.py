@@ -609,10 +609,24 @@ def _coerce_record(record: dict, manifest: dict, language_config, *, competitors
     ``insufficient_window`` (never up): the fail-closed half of the RFC #215
     safety invariant. A ``propose_split`` that started with more referents
     than survive verification is not thrown away wholesale as long as >=2
-    verified referents remain -- the failed ones are dropped and
-    ``evidence_coverage`` records the partial count (rendered by
-    ``skeptic_report.py``). Never mutates ``record``; always returns a NEW,
-    schema-conformant record.
+    verified referents remain -- the failed ones are dropped and this call's
+    ``evidence_coverage`` records THIS invocation's cited/verified split.
+
+    DO NOT read ``evidence_coverage`` as a durable record of that pruning:
+    ``cited`` below is ``len(record.get("referents"))`` as the record stands
+    AT THIS CALL, never the batch's original referent count. Because
+    ``--validate-fragment`` rewrites the fragment in place (see
+    ``run_validate_fragment``), a SECOND validation of an already-pruned
+    fragment hands this function the already-pruned referent list, so
+    ``cited`` recomputes to the pruned count and ``cited == verified`` even
+    though referents were dropped on the first pass. The normal path
+    validates at least twice -- codex's own self-check, then the wait poll --
+    so by merge time a partial coverage is generally no longer distinguishable
+    from a complete one here. See ``skeptic-triage.schema.json``'s
+    ``evidence_coverage`` description for the full consequence: a merged
+    record showing ``cited == verified`` does NOT establish that nothing was
+    pruned. Never mutates ``record``; always returns a NEW, schema-conformant
+    record.
 
     ``competitors`` (#243): threaded straight through to every
     ``_evidence_failure_reason()`` call below -- see that function's own
