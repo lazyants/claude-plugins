@@ -97,6 +97,30 @@ A green LOCAL test run is not proof of shippability — a CI/review gate under d
 - Force Linux-like tmp: `TMPDIR=/tmp V/bin/python -m pytest` — on macOS `/tmp` → `/private/tmp`, which DOES contain a `tmp` component, so tmp/path-sensitive guards fire exactly as on CI.
 - Run the FULL suite that way; green ⇒ shippable. A single knob (`TMPDIR=/tmp`) can reproduce the bulk of the failures instantly; the clean venv reproduces the dep-masked remainder.
 
+## RED evidence that reads its "before" from a MOVING ref stops being evidence at the commit
+
+A gate that proves the defect by re-reading the source at a baseline must FREEZE that baseline as a
+40-hex SHA. `git show HEAD:<path>` is the trap: it returns the pre-fix tree for exactly as long as
+the work is uncommitted, and returns the POST-fix tree from the release commit onward.
+
+What makes it expensive is the direction it fails in. If the gate asserts "the baseline still fails",
+it goes permanently red for a structural reason and the next person deletes it. If it *skips* when
+the baseline already carries the fix — the reasonable-looking guard — the gate degrades into silence:
+green, running, reporting nothing, and indistinguishable from a gate that ran. Verified: four
+red-evidence gates had already become silent skips on the release commit before anyone noticed, and
+the published suite figure was arithmetically impossible for the tree it was attached to, which is
+what surfaced them.
+
+- Freeze the SHA, and assert it is still an **ancestor** of HEAD — not merely that it resolves. A
+  rebase leaves the old object resolvable for a while while the branch no longer descends from it,
+  at which point every row's provenance is void and `rev-parse` still passes.
+- Under a frozen ref, **retire the skip**. "The baseline already has the fix" was a real state worth
+  standing down for while the ref moved; frozen, it can only mean the SHA is wrong, and skipping on
+  that hides precisely the thing worth knowing.
+- Claims introduced *by* the release under review need their own baseline — they occur zero times at
+  the pre-release SHA, so a single-baseline set cannot express them and presence-before fails on
+  correct rows.
+
 ## A staged RED gate must be satisfiable
 
 When you stage a failing assertion BEFORE the fix (red-before-green across a team, where one owner
