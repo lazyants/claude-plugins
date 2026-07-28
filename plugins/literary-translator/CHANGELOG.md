@@ -283,6 +283,21 @@ was a subtle bug in the code that existed; both were work the code never did.
     clock, including `resolve_and_pin`, which takes no deadline at all; and the "names every
     offending item" correction had reached one copy of four, with `glossary_TASK.template.md`
     handing the *same agent in the same dispatch* the contradictory version.
+  - **Round 10 — searching for a spelling finds the sites that use it.** Round 9 bounded the
+    offender lists written as `", ".join(repr(o) for o in …)`; the coverage gate spells the same
+    thing as an f-string list interpolation, so a search for the spelling could not see it.
+    Measured through the shipped CLI — the exact command the batch agent is told to run and read —
+    a 17,134-character message delivered as 4,037 with the injected sentence 61 times, and the
+    entirely fragment-authored half of the diagnostic evicted by the head-keeping cap. Both sides
+    are bounded now and `offending` interleaves them so the cap cannot spend itself on one half.
+    The same round found the clock check added in round 9 sitting *behind* an unconditional
+    re-raise — `resolve_and_pin` raises `Refused`, and that handler runs first — which round 9's
+    own comment had predicted ("`resolve_and_pin` takes no deadline at all"). The re-attribution
+    is deliberately narrow: only `dns-failure`, `dns-empty` and `unparseable-resolved-address` are
+    re-labelled as our timeout, because a slow resolver and an unresolvable host are
+    indistinguishable past the deadline, while **every address and scheme refusal keeps its own
+    name however late it fires** — laundering `loopback-address` into a timeout would hide an SSRF
+    attempt at exactly the moment it matters. Both directions are mutation-proved.
   - **Rounds 6–8, also.** `fec0::/10` was admitted by both address checks (CPython leaves it out of
     `_private_networks`, so `is_private` is False and `is_global` therefore True). A lone surrogate
     copied from a fragment made the `index.json` write raise, losing the whole batch's index one
