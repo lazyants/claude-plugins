@@ -98,19 +98,27 @@ FIXTURE_TARGET_LANG = "Russian"
 # silently making these fixtures test a different ladder than the one shipped.
 EXPECTED_MAX_CITATION_RETRIES = 2
 
+# 1.16.2 (#352): what ONE wait costs in agent calls, worst case --
+# WAIT_CHUNKS bounded poll chunks (ceil(900/480) == 2) plus ONE authoritative
+# non-polling re-check. The Bash tool clamps a single call at 600 s, so the
+# 900 s wait can no longer be one call.
+EXPECTED_WAIT_CALLS = 3
 # This file's copy of the live worst-case per-batch ceiling the preflight
-# charges: precheck 1 + one (dispatch + wait + citation prepare + citation
-# judge) QUADRUPLE per attempt. It was a triple until 1.16.1, when #347 split
-# the single fetch-and-judge reviewer into a retrieving prepare call and a
-# judging call that never touches the network -- so the live term moved 10 -> 13
-# for a security boundary, not for new work.
+# charges: precheck 1 + one (dispatch 1 + wait WAIT_CALLS + citation prepare 1 +
+# citation judge 1) group per attempt. It was a triple until 1.16.1, when #347
+# split the single fetch-and-judge reviewer into a retrieving prepare call and a
+# judging call that never touches the network (10 -> 13, a security boundary
+# rather than new work), and it grew again in 1.16.2 when one wait stopped being
+# one call (13 -> 19).
 #
 # tests/batch_size_estimator.test.py keeps its own independent copy
 # (GLOSSARY_LIVE_PER_BATCH_CEILING), and the two must move together. What makes
 # their agreement an invariant rather than a coincidence is
 # test_live_per_batch_ceiling_is_pinned_to_the_template_and_the_estimator_file
 # at the end of the formula-tightness section below.
-LIVE_PER_BATCH_CEILING = 1 + 4 * (EXPECTED_MAX_CITATION_RETRIES + 1)  # 13
+LIVE_PER_BATCH_CEILING = (
+    1 + (3 + EXPECTED_WAIT_CALLS) * (EXPECTED_MAX_CITATION_RETRIES + 1)
+)  # 19
 
 RUN_DIR = f"{FIXTURE_DURABLE_ROOT}/glossary/runs/{FIXTURE_RUN_ID}"
 
@@ -208,6 +216,14 @@ const promptsByLabel = {};
 const callsLog = [];
 const logLines = [];
 const seenCount = {};
+// 1.16.2 (#352) -- per-batch count of WAITS STARTED, not of wait CALLS made.
+// One wait is now up to WAIT_CHUNKS chunk calls (all under the existing
+// `glossary:wait:<idx>` label) plus one authoritative re-check under
+// `glossary:wait-recheck:<idx>`, so a per-label ordinal no longer identifies
+// "which wait is this". A wait always follows a dispatch, so the dispatch call
+// is what advances this counter -- taken from the template's real control flow
+// rather than from any assumption about how many calls a wait spends.
+const waitsStarted = {};
 let pipelineCalled = false;
 
 function record(label, promptText) {
@@ -256,10 +272,31 @@ async function agent(promptText, opts) {
     return Object.prototype.hasOwnProperty.call(p, "precheck") ? p.precheck : ("ABSENT " + idx);
   }
   if (kind === "dispatch") {
+    waitsStarted[idx] = (waitsStarted[idx] || 0) + 1;
     return "FRAGMENT " + idx;
   }
-  if (kind === "wait") {
-    return nth(p.waits, ordinal, "READY " + idx);
+  // `waits` stays ONE ENTRY PER WAIT, not one per wait CALL, and every chunk of
+  // that wait plus its re-check gets the same reply. That is what keeps every
+  // pre-1.16.2 fixture in this file meaning what it meant: they say "the wait
+  // for attempt N answers THIS", and a chunked wait that answered it once and
+  // then fell back to the READY default on chunk 2 -- or was rescued by a
+  // defaulted-READY re-check -- would report a converged batch while the
+  // property under test was broken. A test that needs the chunks to differ from
+  // each other is testing the chunking itself, which is
+  // tests/wait_chunking_batch_passes.test.py's subject and has its own harness.
+  if (kind === "wait" || kind === "wait-recheck") {
+    const waitOrdinal = (waitsStarted[idx] || 1) - 1;
+    // `waitRechecks`, when a fixture supplies it, is the ONLY way the re-check
+    // answers differently from the chunks that preceded it. That asymmetry is
+    // the whole shape of a worst-case wait -- every chunk PENDING, then the
+    // authoritative re-check finding the fragment -- and it is the only shape
+    // that actually spends WAIT_CALLS calls, so a test measuring the ceiling
+    // cannot be written without it. Everything else keeps the symmetric
+    // default.
+    if (kind === "wait-recheck" && Array.isArray(p.waitRechecks)) {
+      return nth(p.waitRechecks, waitOrdinal, "READY " + idx);
+    }
+    return nth(p.waits, waitOrdinal, "READY " + idx);
   }
   if (kind === "citation-prepare") {
     // Default: the two boundary commands both succeeded for THIS attempt. As
@@ -477,7 +514,7 @@ def test_rejection_reason_is_carried_into_the_regeneration_prompt(tmp_path):
     # reaches no parser at all -- the dispatch call is an unassigned expression
     # statement (`await agent(batchDispatchPrompt(...), {...})`), so its reply
     # is discarded and never sentinel-parsed, and the only reply parsed anywhere
-    # near it is the separate WAIT step's, over a disjoint READY/TIMEOUT set no
+    # near it is the separate WAIT step's, over a disjoint READY/PENDING set no
     # CITATIONS_* string can collide with. It is still worth pinning: this
     # prompt is meant to hand the next attempt the reviewer's findings and
     # nothing else, and a stray verdict string is confusing input to a model
@@ -731,14 +768,14 @@ def test_glued_absent_still_falls_through_at_the_precheck(tmp_path, glue):
 def test_glued_timeout_still_times_out_at_the_wait(tmp_path, glue):
     """A false READY here sends a fragment that may not exist on to the citation
     review and then the merge."""
-    reply = _dual_sentinel(glue, "TIMEOUT 0", "READY 0")
+    reply = _dual_sentinel(glue, "PENDING 0", "READY 0")
     plan = {"0": {"precheck": "ABSENT 0", "waits": [reply]}}
     res = run(tmp_path=tmp_path, batches=[make_batch(0, ["Ninon"])], plan=plan)
     assert res["ok"], res["stderr"]
     out = res["out"]
 
     assert count_label(out, "glossary:citation-review:0") == 0, (
-        "a wait reply carrying TIMEOUT anywhere in it must time out, however the "
+        "a wait reply carrying PENDING anywhere in it must stay not-ready, however the "
         "sentinel is glued to the prose -- treating it as READY hands an "
         f"unproven fragment to the review and the merge; calls were {labels_of(out)}"
     )
@@ -1349,7 +1386,7 @@ def test_timeout_still_reports_fragment_check_failed(tmp_path):
     still report reason:"fragment-check-failed". Without this, a template that
     relabelled EVERY not-ready batch as citation-exhausted would pass the
     exhaustion test while destroying the existing signal."""
-    plan = {"0": {"precheck": "ABSENT 0", "waits": ["TIMEOUT 0"]}}
+    plan = {"0": {"precheck": "ABSENT 0", "waits": ["PENDING 0"]}}
     res = run(tmp_path=tmp_path, batches=[make_batch(0, ["Ninon"])], plan=plan)
     assert res["ok"], res["stderr"]
     out = res["out"]
@@ -1465,16 +1502,46 @@ def test_live_worst_case_run_does_not_exceed_its_own_estimate(tmp_path):
     """The estimate is only meaningful if a real worst-case run stays within it.
     Drives one batch all the way to exhaustion -- the most expensive path that
     exists -- and counts the ACTUAL calls against the formula, rather than
-    trusting the arithmetic in the comment."""
+    trusting the arithmetic in the comment.
+
+    1.16.2 (#352): "worst case" now has a WAIT dimension too, and the fixture
+    has to drive it explicitly. Every chunk answers PENDING and only the
+    authoritative re-check finds the fragment, which is the single shape that
+    spends all WAIT_CALLS calls of a wait. Left on the default (a first chunk
+    that answers READY) this run would spend 1 call per wait instead of 3, come
+    to 13, and "measure" a ceiling of 19 by simply never approaching it -- the
+    exact false-green this test exists to prevent, and one that would have
+    looked identical to a correct pass in the summary line.
+
+    That the run still CONVERGES on each attempt is the point of driving the
+    re-check READY rather than PENDING: a PENDING re-check would end the batch
+    at reason:"glossary-pass-null" on attempt 0, spending 4 calls in total and
+    never reaching the ladder at all."""
+    attempts = EXPECTED_MAX_CITATION_RETRIES + 1
     per_batch = LIVE_PER_BATCH_CEILING
-    rejections = [
-        f"CITATIONS_REJECTED 0 ATTEMPT {n}"
-        for n in range(EXPECTED_MAX_CITATION_RETRIES + 1)
-    ]
-    plan = {"0": {"precheck": "ABSENT 0", "reviews": rejections}}
+    rejections = [f"CITATIONS_REJECTED 0 ATTEMPT {n}" for n in range(attempts)]
+    plan = {"0": {
+        "precheck": "ABSENT 0",
+        # One entry per WAIT (not per wait call): every chunk of that wait sees
+        # this reply, and `waitRechecks` overrides only the re-check.
+        "waits": ["PENDING 0"] * attempts,
+        "waitRechecks": ["READY 0"] * attempts,
+        "reviews": rejections,
+    }}
     res = run(tmp_path=tmp_path, batches=[make_batch(0, ["Ninon"])], plan=plan)
     assert res["ok"], res["stderr"]
     out = res["out"]
+
+    # The wait really did spend its whole budget -- asserted rather than assumed,
+    # because everything below is only a worst-case measurement if it did.
+    assert count_label(out, "glossary:wait:0") == attempts * (EXPECTED_WAIT_CALLS - 1), (
+        f"expected every attempt's wait to exhaust all {EXPECTED_WAIT_CALLS - 1} "
+        f"chunks; calls were {labels_of(out)}"
+    )
+    assert count_label(out, "glossary:wait-recheck:0") == attempts, (
+        f"expected one authoritative re-check per exhausted wait; calls were "
+        f"{labels_of(out)}"
+    )
 
     # Exhaustion skips merge + verify, so the ceiling for the batch itself is
     # per_batch; the +2 pair is only spent on a run that reaches the merge.
@@ -1551,26 +1618,75 @@ def test_live_per_batch_ceiling_is_pinned_to_the_template_and_the_estimator_file
         "renamed -- re-derive, do not delete this test"
     )
 
+    # 1.16.2 (#352): the ladder's per-attempt term is no longer a bare integer.
+    # One wait became WAIT_CALLS agent calls, and the template writes the term
+    # SYMBOLICALLY (`3 + WAIT_CALLS`) rather than rendering it, so this seam has
+    # to resolve WAIT_CALLS out of the template's own wait constants before it
+    # can evaluate anything. Resolving it here rather than substituting this
+    # file's EXPECTED_WAIT_CALLS is the point: it means a template that changes
+    # its chunk size -- and so silently changes what every attempt costs --
+    # fails HERE, at the seam, rather than in whichever file happens to have the
+    # staler literal.
+    wait_consts = {}
+    for name in ("WAIT_BOUND_SEC", "WAIT_CHUNK_SEC"):
+        m = re.search(rf"^const {name} = (\d+)", source, re.MULTILINE)
+        assert m, (
+            f"could not find `const {name} = <n>` in the template; the wait "
+            f"constants the live ladder is now built from have moved or been "
+            f"renamed -- re-derive, do not delete this test"
+        )
+        wait_consts[name] = int(m.group(1))
+    wait_chunks = -(-wait_consts["WAIT_BOUND_SEC"] // wait_consts["WAIT_CHUNK_SEC"])
+    wait_calls_from_template = wait_chunks + 1
+    assert wait_calls_from_template == EXPECTED_WAIT_CALLS, (
+        f"the template's wait constants imply {wait_chunks} chunk(s) + 1 re-check "
+        f"== {wait_calls_from_template} calls per wait, but this file's "
+        f"EXPECTED_WAIT_CALLS is {EXPECTED_WAIT_CALLS} -- every live count here "
+        f"is built on it, so RE-DERIVE them"
+    )
+
     # The template's own live per-batch expression, executed verbatim by the
     # preflight (glossary-pass-wf.template.js, `const perBatchCalls = ...`).
     # Parsed rather than mirrored, so the SHAPE of the ladder is pinned too and
-    # not just the retry count: dropping the review, or the wait, would leave
-    # every MAX_CITATION_RETRIES needle test in both files green.
+    # not just the retry count: dropping the review, or the wait's re-check,
+    # would leave every MAX_CITATION_RETRIES needle test in both files green.
     ladder_match = re.search(
         r"const\s+perBatchCalls\s*=\s*CITATION_REVIEW_ENABLED\s*"
-        r"\?\s*(\d+)\s*\+\s*(\d+)\s*\*\s*\(\s*MAX_CITATION_RETRIES\s*\+\s*1\s*\)",
+        r"\?\s*(\d+)\s*\+\s*\(\s*(\d+)\s*\+\s*WAIT_CALLS\s*\)\s*"
+        r"\*\s*\(\s*MAX_CITATION_RETRIES\s*\+\s*1\s*\)",
         source,
     )
     assert ladder_match, (
         "the template's live per-batch preflight expression no longer has the "
-        "shape `1 + <k>*(MAX_CITATION_RETRIES + 1)` that this seam parses -- "
-        "the ladder was restructured, so RE-DERIVE the ceiling in BOTH this "
-        "file and tests/batch_size_estimator.test.py from the template's new "
+        "shape `1 + (<k> + WAIT_CALLS)*(MAX_CITATION_RETRIES + 1)` that this seam "
+        "parses -- the ladder was restructured, so RE-DERIVE the ceiling in BOTH "
+        "this file and tests/batch_size_estimator.test.py from the template's new "
         "expression; do not relax this regex to make it pass"
+    )
+    # The OFFLINE branch is parsed too, and symbolically: it shares the wait term
+    # with the live branch, so a wait change applied to one and not the other is
+    # a drift no live-only assertion can see. It must stay LADDER-FREE -- exactly
+    # one dispatch and one wait, never multiplied by the retry bound.
+    offline_match = re.search(
+        r"const\s+perBatchCalls\s*=\s*CITATION_REVIEW_ENABLED\s*\?[^:]*"
+        r":\s*(\d+)\s*\+\s*WAIT_CALLS\s*$",
+        source,
+        re.MULTILINE,
+    )
+    assert offline_match, (
+        "the template's OFFLINE per-batch expression is no longer `<k> + WAIT_CALLS`. "
+        "If it grew a MAX_CITATION_RETRIES factor, that is a false refusal: an "
+        "offline run has no reviewer, so it can never reach attempt 1 and must "
+        "never be charged for a ladder"
+    )
+    assert int(offline_match.group(1)) + wait_calls_from_template == 2 + EXPECTED_WAIT_CALLS, (
+        f"the template charges {offline_match.group(1)} + WAIT_CALLS per offline "
+        f"batch, not the precheck + dispatch + wait this file expects"
     )
 
     retries = int(retries_match.group(1))
-    base, per_attempt = int(ladder_match.group(1)), int(ladder_match.group(2))
+    base = int(ladder_match.group(1))
+    per_attempt = int(ladder_match.group(2)) + wait_calls_from_template
     ceiling_from_template = base + per_attempt * (retries + 1)
 
     assert ceiling_from_template == LIVE_PER_BATCH_CEILING, (

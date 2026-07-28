@@ -1,5 +1,84 @@
 # Changelog
 
+## 1.16.2 — 2026-07-28
+
+The 1.16.1 release fixed the W5 mass-translate wait, which spent a 3450 s budget inside one
+`agent()` call against a Bash tool that clamps any single call at 600 000 ms. It said, in its own
+notes, that the glossary and skeptic passes still poll `45 × (check + sleep 20)` — 900 s — inside
+one call against the same clamp, and tracked that as #352. This release closes it, by porting the
+pattern rather than inventing a second one.
+
+Each wait now spends its 900 s across bounded chunks: `WAIT_CHUNK_SEC = 480`, so two chunks of
+480 s and 420 s that sum to exactly 900 — flat chunks would silently EXTEND the declared bound
+instead of spending it. When the chunk loop ends on anything other than `READY`, one authoritative
+NON-polling re-check runs the same canonical gate before a timeout is declared, so a fragment that
+became valid between two chunk polls is no longer reported as a timeout while sitting complete on
+disk.
+
+Three properties are load-bearing and each is pinned by a test:
+
+- `READY` in ANY chunk ends the wait immediately — no later chunk, no re-check. The break and the
+  re-check are conditioned on the VERDICT, never on the loop index. This matters beyond tidiness in
+  the skeptic pass: `skeptic_ready.py --validate-fragment` normalizes in place and is NOT
+  idempotent, so an extra chunk after a `READY` would add a second write-capable validation on the
+  normal path.
+- An ambiguous chunk reply — null, malformed, or tool-killed — resolves to `PENDING` and CONTINUES
+  polling. Before this release both callers terminated on every non-`READY` reply, which under
+  chunking would have turned an ordinary slow batch into a failure.
+- The poll and the re-check splice the SAME composed command, built once per site, so the re-check
+  cannot drift into a weaker gate than the poll it backs up.
+
+`TIMEOUT` stops being a sentinel an agent returns. The per-chunk grammar is `READY <index>` /
+`PENDING <index>`; a timeout is now a conclusion the call site draws after the re-check also
+returns `PENDING`. W5 has a third verdict, `FAILED`, raised by the detached `codex_job.py` driver —
+these two waits have no equivalent and deliberately do not pretend to.
+
+**The preflight cost changed, and it moves three operator-visible refusal thresholds, not one.** A
+wait is now worth UP TO `WAIT_CALLS = 3` agent calls rather than exactly 1 — up to, because a
+`READY` in any chunk suppresses the rest, so 1 and 2 are the ordinary cases. The estimators compute
+the worst case, which is what a preflight gate should do:
+
+| gate | before | after | batches admitted at `batch_agent_cap: 3500` |
+|---|---|---|---|
+| glossary live | `13N+2` | `19N+2` | 269 → 184 |
+| glossary offline | `3N+2` | `5N+2` | 1166 → 699 |
+| skeptic (both estimator gates) | `3N+2` | `5N+2` | 1166 → 699 |
+
+The offline move deserves its own note, because a shipped comment argued against exactly it. That
+comment held the offline branch byte-identical to the historical `3*BATCHES.length + 2` on the
+principle that "a preflight that refuses runs it should permit is a worse failure than one that is
+slightly loose". The principle is applied here, not abandoned: charging offline for a retry ladder
+it can NEVER execute would have been a false refusal, whereas the extra wait calls are work every
+offline run performs on every batch. Any project with a tuned `batch_agent_cap` can now be refused
+with `reason:"batch-too-large"` in a mode that was previously unaffected.
+
+Documentation corrected where it was stronger than the code — the defect class 1.16.1 was also
+about, found this time in two shipped schema contracts. `skeptic-triage.schema.json` and
+`suspicion-worklist.schema.json` both claimed that any citation which will not byte-verify **is
+coerced to `insufficient_window`**. That is false, and was false before this release: a
+`propose_split` with two surviving verified referents keeps its verdict and merely drops the failed
+referents individually; only `adverse` and `propose_rescope`, whose single required citation is then
+missing, are coerced down. Both now describe the per-verdict behaviour the code implements.
+
+Also corrected: a template comment claiming that `--validate-fragment`'s normalization "is
+idempotent, so running it again here is always safe, never destructive". Measured to be false —
+re-running it on an already-normalized fragment recomputes `evidence_coverage.cited` from the
+already-pruned referent list, so partial citation coverage is silently rewritten as complete, and
+`coerced` stays 0 so nothing signals the loss. The underlying defect is NOT fixed here and is not
+made worse by this release: the loss completes at invocation 2, which happens on today's normal
+path, and the re-check this release adds is a later invocation against an already-stable value. The
+comment claiming the opposite does not ship.
+
+A shipped test now pins the wording this release retired: for each corrected site, the retired
+literal must be absent and its replacement present, matched over whole-file whitespace-normalized
+text against a FROZEN pre-release commit. Its guarantee is deliberately narrow and stated in its own
+docstring — it holds a fixed list of `(file, literal, count)` predicates, and does not claim that a
+stale claim cannot return in different words or in a file the list does not name.
+
+Suite: 4178 → 4284 passed, 1 skipped, 2 xfailed. Every new gate was watched failing against the
+pre-fix tree first: 108 failures, all 108 inside the ten test files this release touches, zero
+outside them.
+
 ## 1.16.1 — 2026-07-27
 
 Two independent fixes, both about a boundary that was described more strongly than it was

@@ -93,7 +93,7 @@ export const meta = {
   phases: [
     {
       title: "SkepticPass",
-      detail: "codex adversarially examines each batch of assigned entities against their bounded source windows, resolving each to adverse/propose_split/propose_rescope/insufficient_window, and writes its own run-scoped fragment atomically, self-validated (shape + token/coverage + evidence re-auth, with any unverifiable citation silently coerced to insufficient_window) via skeptic_ready.py --validate-fragment -- never a shared file, so concurrent batches never race; the same run's own frozen-input tripwire is also checked directly if no batch ever becomes ready, so a tamper is never missed just because dispatch itself failed",
+      detail: "codex adversarially examines each batch of assigned entities against their bounded source windows, resolving each to adverse/propose_split/propose_rescope/insufficient_window, and writes its own run-scoped fragment atomically, self-validated (shape + token/coverage + evidence re-auth, dropping a propose_split's unverified referents and coercing a record whose remaining evidence no longer carries its verdict down to insufficient_window) via skeptic_ready.py --validate-fragment -- never a shared file, so concurrent batches never race; each batch is then awaited by a chunked poll of that same check, bounded so no single call approaches the Bash per-call clamp and backed by one authoritative non-polling re-check; the same run's own frozen-input tripwire is also checked directly if no batch ever becomes ready, so a tamper is never missed just because dispatch itself failed",
     },
     {
       title: "Merge",
@@ -109,6 +109,59 @@ const PARTICLE_CONFIG = "{{PARTICLE_CONFIG}}"
 const RUN_ID = "{{RUN_ID}}"
 const RUN_DIR = ROOT + "/skeptic/runs/" + RUN_ID
 const BATCH_AGENT_CAP = {{BATCH_AGENT_CAP}}
+
+// ---------------------------------------------------------------------------
+// #352 -- the batch wait's budget is SPENT ACROSS SEVERAL AGENT CALLS, not
+// one. The same defect #348 fixed in mass-translate-wf.template.js, ported
+// here; that file's own constants block carries the primary record.
+//
+// MEASURED, not inferred: the agent's Bash tool clamps a single call at
+// 600 000 ms regardless of the timeout the agent asks for. The failing call in
+// the W5 P1 gate run asked for `timeout: 3600000` and still came back
+// `Exit code 143 / Command timed out after 10m 0s`. So "just raise the
+// timeout" does not exist as a fix. This template's own pre-1.16.2 wait --
+// `for i in $(seq 1 45); do <check> && exit 0; sleep 20; done; exit 1`, a
+// 45 * 20 == 900 s loop inside ONE agent() call -- was therefore killed at
+// 600 s and reported as a batch that never became ready, while a complete,
+// valid fragment could already be sitting on disk unread.
+//
+// Chunk i (1-based) polls for whatever is LEFT of WAIT_BOUND_SEC, never a flat
+// WAIT_CHUNK_SEC -- so the chunk bounds SUM to WAIT_BOUND_SEC exactly. Flat
+// chunks would not SPEND the declared bound, they would silently EXTEND it
+// (2 * 480 == 960 s), breaking the one contract WAIT_BOUND_SEC exists to state
+// and falsifying every doc that quotes it.
+//
+// WAIT_BOUND_SEC is 900 s on purpose: the pre-1.16.2 loop's own 45 * 20 s
+// product, preserved exactly. This change re-shapes HOW the polling budget is
+// spent, never how much of it there is.
+// ---------------------------------------------------------------------------
+const BASH_CALL_CAP_SEC = 600              // measured hard clamp (see CHANGELOG 1.16.1)
+const WAIT_CHUNK_SEC = 480                 // one chunk's own elapsed bound
+const WAIT_CHUNK_TOOL_TIMEOUT_MS = 540000  // what the chunk prompt tells the agent to pass
+const WAIT_BOUND_SEC = 900                 // this batch's whole polling budget
+const WAIT_CHUNKS = Math.ceil(WAIT_BOUND_SEC / WAIT_CHUNK_SEC)   // 2
+const WAIT_CALLS = WAIT_CHUNKS + 1         // worst case per wait: chunks + one re-check
+
+// Startup guards, not comments: a future raise of either constant re-creates
+// #352 silently otherwise. They throw here, before pipeline() is ever called.
+if (WAIT_CHUNK_TOOL_TIMEOUT_MS > BASH_CALL_CAP_SEC * 1000) {
+  throw new Error(
+    "WAIT_CHUNK_TOOL_TIMEOUT_MS (" + WAIT_CHUNK_TOOL_TIMEOUT_MS + " ms) exceeds the measured " +
+    "Bash per-call clamp (" + BASH_CALL_CAP_SEC * 1000 + " ms): the agent would be told to ask " +
+    "for a timeout it cannot get, and the chunk bound would stop being the real bound (#352)."
+  )
+}
+if (WAIT_CHUNK_SEC * 1000 >= WAIT_CHUNK_TOOL_TIMEOUT_MS) {
+  throw new Error(
+    "WAIT_CHUNK_SEC (" + WAIT_CHUNK_SEC + " s) leaves no headroom under " +
+    "WAIT_CHUNK_TOOL_TIMEOUT_MS (" + WAIT_CHUNK_TOOL_TIMEOUT_MS + " ms): the poll must reach its " +
+    "own elapsed bound and print its marker BEFORE the tool kills the call (#352)."
+  )
+}
+
+function waitChunkSec(i) {
+  return Math.min(WAIT_CHUNK_SEC, WAIT_BOUND_SEC - (i - 1) * WAIT_CHUNK_SEC)
+}
 
 // ---------------------------------------------------------------------------
 // Schema literal -- declared ABOVE the pipeline() call at the bottom of this
@@ -165,15 +218,29 @@ const SKEPTIC_FROZEN_CHECK_SCHEMA = {
 const BATCHES = Array.isArray(args) ? args : JSON.parse(args)
 
 // ---------------------------------------------------------------------------
-// Preflight cost cap -- IDENTICAL formula to glossary-pass-wf.template.js's
-// own (per batch: precheck + dispatch + wait == 3; plus the fixed
-// merge + verify pair == 2), for the same reason: a resumed batch whose
-// fragment already passes --validate-fragment pays only the 1 precheck
-// call, strictly cheaper, so 3*BATCHES.length + 2 is the true worst-case
-// ceiling for a FRESH run. Refuses the whole run, dispatching nothing, if
-// exceeded -- the caller re-plans smaller batches and re-runs.
+// Preflight cost cap -- the same SHAPE glossary-pass-wf.template.js uses (a
+// per-batch term times BATCHES.length, plus the fixed merge + verify pair
+// == 2), carrying this template's OWN per-batch term: precheck 1 +
+// dispatch 1 + wait WAIT_CALLS == 2 + WAIT_CALLS. Not "identical to
+// glossary's", which this comment claimed until 1.16.2 and which stopped
+// being true when #347 made glossary's own per-batch term conditional on its
+// citation review.
+//
+// It was a flat 3 before 1.16.2, when a wait was ONE agent call. #352 spends
+// that wait across WAIT_CHUNKS bounded chunks plus one authoritative
+// re-check, so the wait term is WAIT_CALLS and the per-batch total is 5 at
+// the constants above. A resumed batch whose fragment already passes
+// --validate-fragment pays only the 1 precheck call, strictly cheaper, so
+// this stays the true worst-case ceiling for a FRESH run. Refuses the whole
+// run, dispatching nothing, if exceeded -- the caller re-plans smaller
+// batches and re-runs.
+//
+// skeptic_setup.py's own step-5 preflight asserts this SAME number
+// independently, BEFORE the Workflow ever runs (it writes nothing at all when
+// it refuses). The two estimators must move together: leave one behind and
+// one of them refuses a batch the other admits.
 // ---------------------------------------------------------------------------
-const estimatedCalls = 3 * BATCHES.length + 2
+const estimatedCalls = (2 + WAIT_CALLS) * BATCHES.length + 2
 if (estimatedCalls > BATCH_AGENT_CAP) {
   log(
     "Batch too large: estimatedCalls=" + estimatedCalls +
@@ -227,13 +294,25 @@ const MANIFEST_PATH = ROOT + "/manifest.json"
 const CANON_PATH = ROOT + "/canon.json"
 const SENSES_PATH = ROOT + "/canon_senses.json"
 
+// THE single ACCEPT builder for this batch. Every site that asks "is this
+// batch's fragment complete and valid?" splices THIS composed command and
+// never re-types it: the precheck, dispatch's own self-check, each wait chunk's
+// poll, and -- since #352 -- the one authoritative non-polling re-check that
+// follows an exhausted wait. A second, hand-rolled copy at any one of those
+// sites would let the gate that DECIDES a batch is ready differ from the gate
+// codex was told to satisfy, which is the whole reason this is a function.
+//
 // #243: --canon/--senses-path project the shared ambiguity-competitors
 // universe (canon_senses.fold_collision_map) every cited evidence record is
 // re-verified against -- see skeptic_ready.py's own module docstring. Both
-// inputs feed --validate-fragment (this batch check, reused by precheck,
-// dispatch's own self-check, and the wait poll below) the SAME way
-// --verify-merged already needs --canon (and, as of #243, --senses-path
-// too, see verifyMergedPrompt() below).
+// inputs feed --validate-fragment the SAME way --verify-merged already needs
+// --canon (and, as of #243, --senses-path too, see verifyMergedPrompt()
+// below).
+//
+// NOT read-only, and NOT idempotent -- see batchPrecheckPrompt()'s comment for
+// the measured behaviour. Every site that splices this command must therefore
+// run it exactly ONCE per decision, never in a loop that keeps calling it after
+// it has already succeeded.
 function checkCommand(batch) {
   return PY + " " + ROOT + "/scripts/skeptic_ready.py --validate-fragment " + fragmentPath(batch.index) +
     " --particle-config " + PARTICLE_CONFIG +
@@ -251,18 +330,36 @@ function checkCommand(batch) {
 // PRECHECK -- Claude, effort:low, no agentType, no schema. Resume-skip: a
 // prior, possibly-interrupted run of this SAME {{RUN_ID}} may have already
 // written a fragment that still passes --validate-fragment against the
-// CURRENT assignment manifest. Unlike glossary's --check-batch, this
-// command is not strictly read-only -- it also NORMALIZES the fragment in
-// place (any citation that no longer re-verifies is silently coerced to
-// insufficient_window) -- but that coercion is idempotent, so running it
-// again here is always safe, never destructive, and never changes an
-// already-safe fragment's meaning.
+// CURRENT assignment manifest. Unlike glossary's --check-batch, this command
+// is not read-only: it also NORMALIZES the fragment in place -- any citation
+// that no longer re-verifies is coerced to insufficient_window, and a
+// propose_split's unverified referents are dropped from its referents[].
+//
+// THAT NORMALIZATION IS NOT IDEMPOTENT. Until 1.16.2 this comment claimed it
+// was ("always safe, never destructive"); that claim is false, and measured to
+// be false. Re-running --validate-fragment on an ALREADY-normalized fragment
+// destroys the partial-evidence fact: skeptic_ready.py's _coerce_record()
+// recomputes `evidence_coverage.cited` from the referent list it is handed
+// (skeptic_ready.py:650), which on the second invocation is the ALREADY-PRUNED
+// list -- so a record that honestly said "3 citations offered, 2 verified"
+// silently becomes "2 offered, 2 verified", and the fact that a citation was
+// ever rejected is gone. Nothing signals the loss: the run's own `coerced`
+// count only ever counts VERDICT changes (skeptic_ready.py:740-741), and the
+// verdict does not change on that second pass, so it stays 0.
+//
+// Fixing that non-idempotence is OUT of scope for #352 and is filed
+// separately; what this comment must not do is keep asserting the opposite.
+// The practical consequence for THIS file is the discipline stated on
+// checkCommand() above and enforced at the wait site below: every splice of
+// the ACCEPT command runs it exactly once per decision, and a READY verdict
+// ends the wait immediately rather than spending another chunk on a fragment
+// that already validated.
 function batchPrecheckPrompt(batch) {
   const checkCmd = checkCommand(batch)
   const lines = []
   lines.push("A prior run of skeptic-pass batch " + batch.index + " may already have written a valid fragment to disk. Check ONCE whether it is already present and valid: run exactly this one bash command (a single invocation, NOT a polling loop):")
   lines.push(checkCmd)
-  lines.push("This command also normalizes the fragment in place (any citation that fails to re-verify is silently downgraded to insufficient_window) -- safe to run even if it was already run before; it never fabricates or drops a whole record, only downgrades an unverifiable citation's own verdict.")
+  lines.push("That command is not read-only: it also normalizes the fragment in place -- any citation that fails to re-verify is downgraded to insufficient_window, and a propose_split's unverified referents are dropped from its referent list. It never fabricates a record and never drops a whole record. Run it EXACTLY ONCE and act on that one exit code: it is NOT idempotent, so a second invocation over an already-normalized fragment quietly rewrites that fragment's own record of how many citations were originally offered, and nothing in its output reports having done so.")
   lines.push("If that command exits successfully (exit code 0), the fragment is already complete and valid -- return exactly the line: PRESENT " + batch.index)
   lines.push("If it exits non-zero for ANY reason (the file is missing, is not valid JSON, or fails its shape/token/coverage checks), return exactly the line: ABSENT " + batch.index)
   lines.push("Do nothing else -- do not create, dispatch, or resolve any entity yourself; this is purely a read-only-in-intent presence check.")
@@ -293,22 +390,69 @@ function batchDispatchPrompt(batch) {
   lines.push(JSON.stringify(batch.assignments, null, 1))
   lines.push("Write this exact JSON object, to " + outPath + " ATOMICALLY: write it first to a fresh temp file in the SAME directory (for example a dot-prefixed name alongside the target, holding your own process id), then rename that temp file into place at exactly " + outPath + " -- so a partially-written file is never visible at that path. Shape: {\"schema_version\": 1, \"run_id\": \"" + RUN_ID + "\", \"records\": [ ... ]}, with EXACTLY one record per entity listed above, in the SAME order, each shaped { assignment_id (copied verbatim from that entity), source_form (copied verbatim), verdict, rationale (a short human-readable reason), and evidence/referents exactly as the verdict rules above require }. A plain JSON object, no markdown code fence, no comment, nothing else in the file.")
   lines.push("Then self-check by running this command and reading its one line of JSON output: " + checkCmd)
-  lines.push("This command schema-validates your fragment and rejects it outright (naming every offending item) if its shape, its assignment_id/source_form pairing, or its coverage of this batch's assigned entities is wrong -- fix each one named and re-run the command until it prints a line with \"success\": true. It ALSO independently re-authenticates every citation you gave and silently downgrades any that does not check out to insufficient_window, rewriting your fragment in place -- a \"success\": true result with a nonzero \"coerced\" count just means some of your citations were not verifiable; this is a normal, safe, and expected outcome, never something you need to fix or re-litigate.")
+  lines.push("This command schema-validates your fragment and rejects it outright (naming every offending item) if its shape, its assignment_id/source_form pairing, or its coverage of this batch's assigned entities is wrong -- fix each one named and re-run the command until it prints a line with \"success\": true. A rejected run changes nothing on disk, so retrying after a rejection is safe; STOP at the FIRST \"success\": true and do not run the command again after that, because the successful run is the one that rewrites your fragment and running it a second time over the already-rewritten file loses information (it is not idempotent).")
+  lines.push("What that successful run rewrites: it independently re-authenticates every citation you gave, downgrades any that does not check out to insufficient_window, and drops a propose_split's unverified referents from its referent list, writing the result back in place. A \"success\": true result with a nonzero \"coerced\" count just means some of your citations were not verifiable; this is a normal, safe, and expected outcome, never something you need to fix or re-litigate.")
   lines.push("Once you see \"success\": true, return exactly the line: FRAGMENT " + batch.index)
   return lines.join("\n")
 }
 
-// WAIT -- Claude, effort:low, no agentType, no schema: a bounded poll of the
-// SAME --validate-fragment command DISPATCH's self-check already used,
-// against this batch's own fragment (the translate/review wait steps'
-// shape -- see mass-translate-wf.template.js's waitPrompt).
-function batchWaitPrompt(batch) {
+// WAIT -- Claude, effort:low, no agentType, no schema: ONE CHUNK of a bounded
+// poll of the SAME --validate-fragment ACCEPT command DISPATCH's self-check
+// already used, against this batch's own fragment. Ported from
+// mass-translate-wf.template.js's waitChunkPrompt() (#348); see that function's
+// comment for the primary record of the bash grammar's own properties. What is
+// this file's own is the ACCEPT gate (checkCommand()) and the absence of a
+// fail-fast sentinel: the skeptic dispatch is a direct codex agent() call, not
+// a detached codex_job.py driver, so there is no `.codex_failed.*` file for a
+// chunk to report and the chunk's only two outcomes are READY and PENDING.
+//
+// `>/dev/null 2>&1` ON THE IN-LOOP ACCEPT GATE IS LOAD-BEARING, not tidiness.
+// skeptic_ready.py --validate-fragment prints one JSON line per invocation, so
+// without the redirect the chunk emits one such line per poll iteration and
+// "the marker is the last line" would be a claim about the tail of a noisy
+// stream. Suppressed, the chunk emits exactly zero or one line and that line is
+// the marker. The gate's EXIT STATUS -- the only thing this workflow acts on --
+// is unaffected by the redirect.
+//
+// Marker-plus-`exit 1` rather than distinct exit codes, deliberately: a
+// TOOL-KILLED chunk (exit 143, no marker printed) becomes indistinguishable
+// from a chunk that merely ran out of budget. That is exactly the safe reading:
+// not ready yet, keep polling.
+function batchWaitChunkPrompt(batch, chunkIndex) {
   const checkCmd = checkCommand(batch)
   const lines = []
-  lines.push("The codex skeptic-pass batch " + batch.index + " is working in the background. Wait for it to finish: run exactly one bash command, a polling loop:")
-  lines.push("for i in $(seq 1 45); do " + checkCmd + " && exit 0; sleep 20; done; exit 1")
-  lines.push("If that command exits successfully, return exactly the line: READY " + batch.index)
-  lines.push("Otherwise, after the timeout (about 15 minutes), return exactly the line: TIMEOUT " + batch.index)
+  lines.push("The codex skeptic-pass batch " + batch.index + " is working in the background. This is wait chunk " + chunkIndex + " of " + WAIT_CHUNKS + " -- one bounded slice of this batch's total " + WAIT_BOUND_SEC + "s wait, sized so a single bash call never approaches the " + BASH_CALL_CAP_SEC + "s per-call cap.")
+  lines.push("Run EXACTLY ONE bash command, passing a bash tool timeout of " + WAIT_CHUNK_TOOL_TIMEOUT_MS + " ms -- an elapsed-time poll that re-validates this batch's fragment directly:")
+  lines.push("end=$((SECONDS + " + waitChunkSec(chunkIndex) + ")); while true; do " + checkCmd + " >/dev/null 2>&1 && exit 0; [ $SECONDS -ge $end ] && break; slp=$((end-SECONDS)); [ $slp -gt 20 ] && slp=20; [ $slp -gt 0 ] && sleep $slp; done; echo LT_CHUNK_BOUND; exit 1")
+  lines.push("If that command exits 0 (the fragment validated), return exactly the line: READY " + batch.index)
+  lines.push("In every other case -- it printed LT_CHUNK_BOUND, or the call was cut short for any reason at all -- return exactly the line: PENDING " + batch.index)
+  lines.push("Do nothing else -- do not touch any files, and do not resolve any entity yourself.")
+  return lines.join("\n")
+}
+
+// #352 -- THE FIX. After the chunk budget is spent, re-check this batch's
+// fragment ONCE, without polling, before declaring the batch not-ready.
+//
+// Chunking alone would only have moved the wall the poll dies against. The
+// hole it leaves open is the one that actually loses work: a codex batch that
+// finishes after the last chunk's poll ended has a complete, valid fragment on
+// disk that nothing ever reads, and the run reports skeptic-pass-null over it.
+//
+// Non-polling by construction -- no `end=`, no loop, no sleep. A polling
+// re-check would just be one more chunk and could itself hit the cap.
+//
+// Runs at most ONCE per batch, and only on the path where no chunk returned
+// READY -- so the normal path's count of write-capable --validate-fragment
+// invocations is unchanged by #352 (see batchPrecheckPrompt()'s comment on why
+// that count matters).
+function batchWaitRecheckPrompt(batch) {
+  const checkCmd = checkCommand(batch)
+  const lines = []
+  lines.push("The " + WAIT_BOUND_SEC + "s wait budget for the codex skeptic-pass batch " + batch.index + " is spent. Before this batch is declared not-ready, re-check its fragment ONCE -- it may have landed after the last wait chunk's poll ended.")
+  lines.push("Run EXACTLY ONE bash command. It does NOT poll and returns immediately:")
+  lines.push(checkCmd + " >/dev/null 2>&1")
+  lines.push("If that command exits 0 (the fragment validated), return exactly the line: READY " + batch.index)
+  lines.push("Otherwise return exactly the line: PENDING " + batch.index)
   lines.push("Do nothing else -- do not touch any files, and do not resolve any entity yourself.")
   return lines.join("\n")
 }
@@ -435,6 +579,27 @@ function sentinelVerdict(reply, okSentinel, failSentinel) {
   return lines[lines.length - 1] === okSentinel;
 }
 
+// #352 -- the ONE reader of every wait reply at the wait site below, chunk and
+// re-check alike. Two verdicts only, because a skeptic wait chunk has only two
+// outcomes: this template dispatches codex through a direct agent() call rather
+// than a detached codex_job.py driver, so there is no fail sentinel for a chunk
+// to report (see batchWaitChunkPrompt()).
+//
+// "ready" is sentinelVerdict()'s own rule, used unchanged: no line of the reply
+// is a bare PENDING for this batch, AND the reply's LAST non-empty line is
+// exactly READY for this batch.
+//
+// EVERYTHING ELSE IS "pending", and that default is the load-bearing half. A
+// null reply, an unparseable one, or one from a chunk the tool killed mid-call
+// is not evidence that the fragment failed -- only that this chunk learned
+// nothing. Before 1.16.2 the wait site treated EVERY non-READY reply as
+// terminal, so a single ambiguous reply ended the whole wait and lost the
+// batch; now it costs one chunk, the remaining chunks still poll, and the
+// authoritative re-check still runs at the end.
+function waitChunkVerdict(reply, index) {
+  return sentinelVerdict(reply, "READY " + index, "PENDING " + index) ? "ready" : "pending"
+}
+
 // ---------------------------------------------------------------------------
 // Per-batch dispatch -> wait sequence. pipeline() runs these concurrently;
 // each batch writes only its own fragment file, so concurrent batches never
@@ -467,20 +632,45 @@ async function batchStep(batch) {
     label: "skeptic:dispatch:" + batch.index,
   })
 
-  const ready = await agent(batchWaitPrompt(batch), {
-    effort: "low", phase: "SkepticPass", label: "skeptic:wait:" + batch.index,
-  })
-  // Same line-oriented sentinel-verdict discipline as the precheck above
-  // (#308, replacing the earlier whole-string EXACT match): a timeout reply
-  // like "TIMEOUT 0 (not READY)" contains the literal substring "READY" and
-  // would falsely pass a naive `.indexOf("READY") === -1` check; the
-  // earlier whole-string cure then rejected a benign prose-decorated READY
-  // reply as a timeout (#308). sentinelVerdict() keeps both directions
-  // closed -- a decorated READY (prose preamble, sentinel as the final
-  // line) is now accepted, while a plain TIMEOUT or a contradictory reply
-  // still times out (see sentinelVerdict()'s own comment for the exact
-  // rule).
-  if (!sentinelVerdict(ready, "READY " + batch.index, "TIMEOUT " + batch.index)) {
+  // #352 -- the wait is CHUNKED across WAIT_CHUNKS agent calls (the Bash tool
+  // clamps any single call at BASH_CALL_CAP_SEC, so the pre-1.16.2 single
+  // 900 s poll was killed at 600 s and the batch reported not-ready over a
+  // fragment that may well have been valid on disk), then backed by ONE
+  // authoritative non-polling re-check. The chunk calls keep the EXISTING
+  // label `skeptic:wait:<index>` unchanged; only the re-check gets a new one.
+  //
+  // The break is conditioned on the VERDICT, never on the loop index: with
+  // waitChunkVerdict()'s two verdicts, "not pending" is exactly READY, so a
+  // READY from ANY chunk -- the first, the last, or one in between -- ends the
+  // wait immediately, with no later chunk and no re-check. That is a
+  // correctness requirement, not a saved call: each of those would re-run the
+  // write-capable, NON-idempotent --validate-fragment over a fragment that has
+  // already validated (see batchPrecheckPrompt()'s comment for what that
+  // destroys).
+  let verdict = "pending"
+  for (let chunk = 1; chunk <= WAIT_CHUNKS; chunk++) {
+    const chunkReply = await agent(batchWaitChunkPrompt(batch, chunk), {
+      effort: "low", phase: "SkepticPass", label: "skeptic:wait:" + batch.index,
+    })
+    verdict = waitChunkVerdict(chunkReply, batch.index)
+    if (verdict !== "pending") break
+  }
+  // The authoritative re-check, conditioned on the VERDICT the loop ended with
+  // rather than on how many chunks ran: it fires only when no chunk ever
+  // returned READY, and its own verdict -- not the loop's -- decides the batch.
+  if (verdict !== "ready") {
+    const recheck = await agent(batchWaitRecheckPrompt(batch), {
+      effort: "low", phase: "SkepticPass", label: "skeptic:wait-recheck:" + batch.index,
+    })
+    verdict = waitChunkVerdict(recheck, batch.index)
+  }
+  // Every reply at this site -- chunk or re-check -- is read by
+  // waitChunkVerdict() and nothing else; this call site deliberately does not
+  // re-implement any part of the reading. The #308 line-oriented properties it
+  // inherits from sentinelVerdict() are the same ones the precheck above
+  // relies on: a prose-decorated READY (sentinel as the reply's final line) is
+  // accepted, while "PENDING 0 (not READY)" is not.
+  if (verdict !== "ready") {
     log("batch " + batch.index + ": fragment never became ready")
     return { batchIndex: batch.index, fragmentPath: fragmentPath(batch.index), ready: false, reason: "skeptic-pass-null" }
   }

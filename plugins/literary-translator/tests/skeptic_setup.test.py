@@ -704,9 +704,27 @@ def test_assignment_id_is_sha256_hex_of_nfc_source_form(tmp_path):
 
 
 # ===========================================================================
-# batch_agent_cap: honest chunking + over-cap refusal (glossary-pass-wf
-# .template.js:144-166's own formula)
+# batch_agent_cap: honest chunking + over-cap refusal (skeptic-pass-wf
+# .template.js's own `(2 + WAIT_CALLS) * BATCHES.length + 2` formula, which
+# skeptic_setup.py duplicates as PER_BATCH_CALLS/FIXED_RUN_CALLS)
+#
+# 1.16.2 (#352) moved the per-batch term from a flat 3 to 2 + WAIT_CALLS == 5.
+# The wait stopped being ONE agent call: the Bash tool clamps a single call at
+# 600 s, so a wait is now WAIT_CHUNKS bounded chunks plus one authoritative
+# non-polling re-check. Both estimators charge for the worst case.
+#
+# The two literals below are restated INDEPENDENTLY rather than imported from
+# skeptic_setup.py, on purpose: importing the module under test would make the
+# arithmetic agree with itself for any pair of self-consistent constants. That
+# the script's own constants really are these numbers, and that they still match
+# the template's expression, is
+# tests/wait_chunking_batch_passes.test.py::test_skeptic_setup_estimator_matches_the_template_and_the_shipped_ladder.
 # ===========================================================================
+
+# precheck 1 + dispatch 1 + wait (WAIT_CHUNKS 2 chunks + 1 re-check) 3.
+SKEPTIC_PER_BATCH_CALLS = 5
+# The serialized merge call + the disk-independent verify, once per run.
+SKEPTIC_FIXED_RUN_CALLS = 2
 
 
 def test_batch_agent_cap_chunking_shape(tmp_path):
@@ -718,8 +736,11 @@ def test_batch_agent_cap_chunking_shape(tmp_path):
     write_worklist(root, entries)
 
     # 12 entities / 5 per batch -> ceil(12/5) == 3 batches -> estimatedCalls
-    # == 3*3+2 == 11.
-    proc, parsed = run_skeptic_setup(root, entities_per_batch=5, batch_agent_cap=11)
+    # == 5*3 + 2 == 17. Run AT the boundary: the gate refuses on '>', so an
+    # estimate exactly equal to the cap must still dispatch.
+    estimated = SKEPTIC_PER_BATCH_CALLS * 3 + SKEPTIC_FIXED_RUN_CALLS
+    assert estimated == 17
+    proc, parsed = run_skeptic_setup(root, entities_per_batch=5, batch_agent_cap=estimated)
 
     assert proc.returncode == 0, f"stdout={proc.stdout}\nstderr={proc.stderr}"
     assert parsed["batch_count"] == 3
@@ -743,8 +764,13 @@ def test_batch_agent_cap_over_cap_refuses_whole_run_writes_nothing(tmp_path):
     ]
     write_worklist(root, entries)
 
-    # Same 12/5 -> 3 batches -> estimatedCalls == 11; demand cap=10 (< 11).
-    proc, parsed = run_skeptic_setup(root, entities_per_batch=5, batch_agent_cap=10)
+    # Same 12/5 -> 3 batches -> estimatedCalls == 17; demand ONE below it, so
+    # this pins the boundary rather than merely being comfortably over it (a
+    # cap far below the estimate would keep passing through any estimator
+    # change, including one that under-counts).
+    estimated = SKEPTIC_PER_BATCH_CALLS * 3 + SKEPTIC_FIXED_RUN_CALLS
+    assert estimated == 17
+    proc, parsed = run_skeptic_setup(root, entities_per_batch=5, batch_agent_cap=estimated - 1)
 
     assert proc.returncode == 1
     assert parsed is not None and parsed["success"] is False

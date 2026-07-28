@@ -81,12 +81,17 @@ inventing a second discipline for them:
 2. **WAIT** — Claude, `effort:'low'`, **no** `agentType`, **no** `schema`: a
    **bounded** bash polling loop against a readiness script that fully
    validates the on-disk artifact, including its run-scoped token. What 1.2.0
-   generalized from translate here is the DISCIPLINE, not the loop shape: the
-   two have since diverged, and the loop and the sentinel set both differ by
-   path. The glossary batch wait polls a fixed iteration count and returns
-   `READY`/`TIMEOUT`; W5's two waits poll elapsed time and return
-   `READY`/`FAILED`/`PENDING` per chunk since 1.16.1/#348. See the WAIT
-   section below for each.
+   generalized from translate here is the DISCIPLINE, not the loop shape —
+   and the two paths, having diverged in 1.16.1, **re-converged in
+   1.16.2/#352**: every wait in the plugin now polls ELAPSED TIME across
+   bounded chunks plus one authoritative non-polling re-check, rather than
+   any of them running a fixed iteration count inside a single call. The
+   glossary and skeptic batch waits return `READY`/`PENDING`; W5's two waits
+   return `READY`/`FAILED`/`PENDING` per chunk, the extra `FAILED` being the
+   detached driver's own fail sentinel, which the disk-polling batch waits
+   have no equivalent of. `TIMEOUT` is no longer returned anywhere — it is
+   the conclusion drawn when the re-check also answers `PENDING`. See the
+   WAIT section below for each.
 3. **CONSUME** — Claude, schema-validated: reads the artifact and returns it
    (`readReviewPrompt` → `REVIEW_SCHEMA`), then a **separate**
    schema-validated call runs the deterministic cross-check script against
@@ -141,26 +146,42 @@ agent(batchDispatchPrompt(batch, attempt, rejectionReason), {agentType: 'codex:c
 
 ### WAIT calls — Claude, schema-less, bounded poll
 
-`waitPrompt` (translate), `reviewWaitPrompt`, `batchWaitPrompt` (glossary).
+`waitPrompt` (translate), `reviewWaitPrompt`, and — in BOTH the glossary and
+skeptic templates — `batchWaitChunkPrompt` plus `batchWaitRecheckPrompt`,
+which replaced the single `batchWaitPrompt()` in 1.16.2.
 Plain Claude, `effort:'low'`, no `agentType`, no `schema` — a bounded bash
 polling loop against a readiness script (`draft_ready.py --expect-token`,
-`review_ready.py --expect-token`, `canon_validate.py --check-batch`). The
-loop SHAPE and the sentinel set differ by path, and have since #198:
+`review_ready.py --expect-token`, `canon_validate.py --check-batch`,
+`skeptic_ready.py --validate-fragment`). The loop SHAPE diverged at #198 and
+**re-converged at 1.16.2/#352**: all four sites now run the same ELAPSED-TIME
+loop (`end=$((SECONDS + <bound>))`), never an iteration count, chunked across
+several `agent()` calls because the Bash tool clamps any single call at
+`BASH_CALL_CAP_SEC = 600 s` regardless of the timeout the agent asks for. The
+historical `for i in $(seq 1 45)` iteration-count shape is gone from every
+template, surviving only in comments that explain why. Only the sentinel set
+and the chunk count still differ by path:
 
-- **Glossary (`batchWaitPrompt`)** — the historical
-  `for i in $(seq 1 45)`-shaped iteration-count loop, returning
-  `READY`/`TIMEOUT` as plain text. Untouched by #198 and by #348.
-- **W5 (`waitPrompt`, `reviewWaitPrompt`)** — an ELAPSED-TIME loop
-  (`end=$((SECONDS + <bound>))`), never an iteration count;
-  `tests/bounded_poll_present.test.py` actively forbids the `seq` shape at
-  these two sites. **1.16.1 (#348):** each of these waits is CHUNKED across
-  up to `WAIT_CHUNKS = 8` `agent()` calls, because the Bash tool clamps any
-  single call at `BASH_CALL_CAP_SEC = 600 s` regardless of the timeout the
-  agent asks for. Each chunk returns `READY`/`FAILED`/`PENDING <seg>` as
-  plain text — `TIMEOUT` is gone from these two sites — and ONE
-  authoritative non-polling re-check of the canonical artifact follows the
-  chunks, for `WAIT_CALLS = 9` calls per wait, worst case. See
-  `references/orchestration-and-batching.md`'s estimator section.
+- **Glossary and skeptic (`batchWaitChunkPrompt`)** — `READY`/`PENDING <index>` as
+  plain text. **1.16.2 (#352):** `WAIT_CHUNKS = 2` over an unchanged 900 s
+  budget (480 s + 420 s, the last chunk short so the bounds SUM to the budget
+  exactly), plus the re-check, for `WAIT_CALLS = 3` per wait, worst case — a
+  `READY` in any chunk ends the loop and suppresses the re-check, so a real
+  wait spends 1, 2 or 3. There is no
+  `FAILED` here: these waits poll a fragment on disk and have no detached
+  driver to report its own failure.
+- **W5 (`waitPrompt`, `reviewWaitPrompt`)** — `READY`/`FAILED`/`PENDING <seg>`
+  as plain text, the extra `FAILED` being the detached `codex_job.py` driver's
+  own fail sentinel. **1.16.1 (#348):** `WAIT_CHUNKS = 8` over a 3450 s
+  budget, plus the re-check, for `WAIT_CALLS = 9` per wait, worst case.
+
+At every one of the four, an ambiguous or errored chunk reply resolves DOWN to
+`PENDING`, never up to `READY`, and ONE authoritative non-polling re-check of
+the canonical artifact follows the chunks — parsed by the same verdict
+function as the chunks, so it can never become a weaker gate than the poll it
+backs up. `TIMEOUT` is not returned anywhere: a timeout is what the call site
+concludes when that re-check also answers `PENDING`. See
+`references/orchestration-and-batching.md`'s estimator section and
+`references/canon-and-glossary.md`'s **The chunked wait**.
 
 ### CONSUME calls — Claude, schema-validated
 

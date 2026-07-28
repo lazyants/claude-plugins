@@ -109,8 +109,12 @@ alongside the TASK opener's own `Effort: <value>.` line; see
 `references/ledger-and-resumability.md`'s dual-injection rule), **schema-less**, fire-and-forget — it writes the run-scoped
 fragment `${durable_root}/glossary/runs/{{RUN_ID}}/out_{index}_attempt_{n}.json`
 atomically and self-validates it via `canon_validate.py --check-batch`
-before printing `FRAGMENT {index}`; `batchWaitPrompt(batch, attempt)` is Claude,
-bounded-poll, `READY`/`TIMEOUT`. Under `research_mode: live` a bounded
+before printing `FRAGMENT {index}`; the wait is Claude,
+bounded-poll, `READY`/`PENDING` — since **1.16.2** it is spent across
+several bounded agent calls rather than one, so the single `batchWaitPrompt()`
+became `batchWaitChunkPrompt(batch, attempt, chunkIndex)` plus one
+`batchWaitRecheckPrompt(batch, attempt)`, and `TIMEOUT` is no longer a sentinel any
+agent returns (see **The chunked wait** below). Under `research_mode: live` a bounded
 citation-review stage then gates whether that batch counts as ready at all,
 still inside `batchStep` — see **Pre-merge citation review** below for the
 stage and for why a citation gets exactly one chance, here, before the
@@ -132,6 +136,94 @@ codex batches producing `glossary/out_*.json`, not as a schema-validated Workflo
 script. The first real plugin project should pilot this template on one small
 batch and manually verify the `canon.json` merge output before treating it as
 fully load-bearing.
+
+### The chunked wait (**1.16.2**, #352)
+
+The wait is a **budget spent across several bounded agent calls**, never one
+long call. Until 1.16.2 this template polled its whole 900 s budget inside a
+single `agent()` call running `for i in $(seq 1 45); do … sleep 20; done` —
+against a **measured** hard clamp of 600 000 ms on any one Bash call, which the
+agent cannot raise by asking for a longer timeout. The 900 s poll was therefore
+killed at 600 s, and the kill was reported as a timeout while a perfectly valid
+fragment could be sitting unread on disk. This is the same defect
+`mass-translate-wf.template.js` fixed for its own waits in 1.16.1 (#348); 1.16.2
+ports that fix here and to the skeptic pass, so all three templates now share one
+shape. The budget is unchanged at 900 s — what changed is how it is spent.
+
+Concretely: chunks of `WAIT_CHUNK_SEC = 480` s, with chunk *i* polling whatever
+is LEFT of the budget rather than a flat 480 s, so the chunk bounds **sum to the
+declared budget exactly** — for 900 s that is two chunks of 480 s and 420 s.
+Flat chunks would silently EXTEND the budget instead of spending it, falsifying
+every doc that quotes the 900 s figure. Each chunk asks for a tool timeout
+comfortably under the clamp, so the chunk always reaches its own elapsed bound
+and prints its marker before the tool can kill the call.
+
+**The sentinel pair is `READY`/`PENDING` — exactly two tokens — and `TIMEOUT`
+is no longer a sentinel at all.** A chunk returns `READY {index}` the instant
+the fragment validates, which ends the wait immediately; anything else — the
+chunk spending its bound, an ambiguous reply, a tool error — resolves to
+`PENDING {index}` and the next chunk runs. Resolving ambiguity DOWN to
+`PENDING` is deliberate and fail-safe: at worst it costs one more chunk of
+waiting, bounded by the chunk count, whereas resolving it up to `READY` would
+hand the merge unvalidated bytes.
+
+Two tokens, not three: W5's chunked wait has a third, `FAILED`, which is the
+detached `codex_job.py` driver's own fail sentinel. **These waits have no
+equivalent and must not pretend to** — they poll a fragment on disk written by
+an agent, with no external driver to report its own failure.
+
+`PENDING` rather than `NOTREADY` is also deliberate: it keeps the option of
+guarding the `READY` direction by containment, and it avoids a reader-facing
+trap in which two of the vocabulary's tokens differ only by a prefix.
+
+**Read the verdict in the right direction.** The parse is asymmetric on
+purpose: `PENDING {index}` is tested FIRST and by CONTAINMENT (a hit anywhere
+in the reply), and only then is `READY {index}` accepted, by whole-line
+equality. That is false-RED-only by construction — a stray mention of
+`PENDING` biases away from `READY`, and `READY` can never be manufactured by
+a reply that merely discusses it. A description that says "the reply is
+checked for `READY`" has the direction backwards.
+
+The re-check runs on exactly ONE condition: **the chunk loop ended with a
+verdict that is not `ready`** — the budget was spent, or a reply was ambiguous,
+null or tool-killed and so resolved to `PENDING`. There is no early fail
+sentinel to trigger it, because these waits have no `FAILED` verdict to raise.
+When that condition holds, exactly
+ONE authoritative, **non-polling** re-check runs before anything is declared a
+timeout, because the fragment may have landed after the last chunk's poll ended.
+It runs the same accept command once, returns immediately, and answers with the
+same `READY`/`PENDING` grammar, parsed by the same verdict function as the
+chunks; sharing the parse site is what stops the re-check from drifting into a
+weaker gate than the poll it backs up. **A timeout is thus a conclusion the
+orchestrator draws after the re-check also says `PENDING` — not a word any agent
+returns.** An exhausted chunk loop is not, on its own, a timeout.
+
+Keep the WIRE GRAMMAR and the OUTCOME separate when reading or writing about
+this — the pre-1.16.2 docs conflated them, which is most of why the sentinel
+change touched so many sentences. The grammar is `READY`/`PENDING`. The
+outcome has a different name at every call site, and **on this path there is
+no timeout outcome either**: a batch whose re-check still says `PENDING` is
+simply never ready, and the pass ends with
+`reason: "fragment-check-failed"` — distinct from
+`citation-review-exhausted`, which means the fragments WERE valid but their
+citations did not survive review. That is a real asymmetry with W5, which
+does name a timeout outcome (`reason:"review-timeout"` / `"translate-timeout"`,
+load-bearing because `select_segments.py` keys its recoverable
+reclassification off those strings). Do not import W5's vocabulary here.
+
+The cost consequence is the one operators feel, and it is a **CEILING, not a
+runtime cost**: a wait now costs anywhere from 1 to `chunks + 1` — **1 to 3**
+here — because a `READY` in any chunk leaves the loop on the spot AND
+suppresses the re-check, which is gated on the verdict rather than on the loop
+index. A fragment that validates in chunk 1 spends exactly 1 call; only a wait
+that exhausts every chunk and still needs the re-check spends all 3. The
+estimator computes the worst case, which is what a preflight gate should do —
+but do not read `19N + 2` or `5N + 2` as what a run will actually spend. In the
+skeptic pass the early exit is a **correctness** requirement rather than a
+saved call: each extra chunk would re-run the write-capable, NON-idempotent
+`--validate-fragment` over a fragment that has already validated. See
+`references/orchestration-and-batching.md`'s **Preflight cost
+cap** for the arithmetic, stated once there.
 
 ## Schema shapes
 
@@ -252,7 +344,9 @@ existing tests exercise it directly):
 
 ### `--check-batch PATH [--expect-source-forms-file M.json]` — one fragment, no write
 
-The `batchWaitPrompt`/`batchDispatchPrompt` self-check invocation (see
+The self-check invocation issued character-identically by
+`batchPrecheckPrompt`, `batchDispatchPrompt`, `batchWaitChunkPrompt` and —
+since **1.16.2** — `batchWaitRecheckPrompt` (see
 `references/orchestration-and-batching.md`). Pass-1 per-item validation plus
 the offline backstop on the ONE fragment at `PATH` — never touches
 `canon.json`, never writes anything. When `--expect-source-forms-file` is
@@ -583,7 +677,12 @@ them.
 The snapshot stays inside PREPARE's own turn rather than becoming a step of
 its own, but since **1.16.1** the reason is no longer cost: the split already
 spends the extra call, taking the live ceiling from
-`1 + 3*(MAX_CITATION_RETRIES+1)` to `1 + 4*(MAX_CITATION_RETRIES+1)`. What
+`1 + 3*(MAX_CITATION_RETRIES+1)` to `1 + 4*(MAX_CITATION_RETRIES+1)` — and
+**1.16.2** took it further still, to
+`1 + (3 + WAIT_CALLS)*(MAX_CITATION_RETRIES+1)` (**19** at the shipped
+`WAIT_CALLS = 3`), when the wait itself stopped being reliably one agent call
+— `WAIT_CALLS` is its worst case, not its price (see
+**The chunked wait** above). What
 survives is the structural reason, which was always the stronger one — this
 is the ONE point both entry points into the review loop converge on. Putting
 the snapshot in the wait step instead would silently skip it on every
@@ -782,14 +881,18 @@ other four — is another roll of the same die and not a repair:
 - **Precheck** — `resumed` stays false and the batch falls through to the
   dispatch + wait it would have run had no fragment been on disk. Automatic,
   same run, same batch; the whole cost is the forfeited resume-skip saving,
-  one codex dispatch plus one poll. This is the only genuine repair of the
+  one codex dispatch plus one wait call — the fragment really is on disk and
+  valid, which is what made the rejection false, so the wait's FIRST chunk
+  validates it at once and returns `READY` without ever reaching a second
+  chunk or the re-check. This is the only genuine repair of the
   seven, and it is genuine precisely because the fall-through path is correct
   regardless of WHY the precheck reported `ABSENT`.
 - **Evidence prepare (1.16.1)** — joins the citation ladder below rather than
   falling through: a false hit on `EVIDENCE_FAILED` skips the judge call
   entirely, carries prepare's own reply forward as the next attempt's
   regeneration constraint, and still counts against `MAX_CITATION_RETRIES`,
-  so that attempt costs 3 calls rather than the ladder's 4. Not a repair
+  so that attempt costs `2 + WAIT_CALLS` calls rather than the ladder's
+  `3 + WAIT_CALLS` — 5 rather than 6 at the shipped `WAIT_CALLS = 3`. Not a repair
   either, and for the same reason as the review below — the ladder varies the
   FRAGMENT, while what tripped the guard was prepare's WORDING.
 - **Citation review — NOT RELIABLY self-recovering, however much its retry
@@ -853,7 +956,7 @@ is PROMPT HYGIENE, and claiming anything stronger would be false: a leaked
 sentinel reaches no parser at all. The dispatch call's own reply is
 DISCARDED — its `await agent(...)` is not assigned to anything — and the only
 reply sentinel-parsed anywhere near it is the separate wait step's, over a
-disjoint `READY`/`TIMEOUT` set that no `CITATIONS_*` string can collide with.
+disjoint `READY`/`PENDING` set that no `CITATIONS_*` string can collide with.
 So a leak cannot corrupt the state machine or route a rejected fragment into
 the merge. It is still worth stripping: that prompt is meant to hand the next
 attempt the reviewer's findings and nothing else. Exhausting the
@@ -1013,4 +1116,4 @@ decision is reviewed BEFORE it is merged, never after.
 
 The skeptic pass is an **opt-in, advisory-only** addition (`glossary.skeptic_pass.enabled`, default `false`): a deterministic `suspicion_scan.py` surfaces structurally-risky canon entries (over-merge participants, offline-established entries, singletons, high-dispersion names, citation-only figures, near-spelling pairs, and a globally-capped sample), then a scoped codex pass -- cloning the glossary dispatch control flow, never its identity-decision authority -- is fed bounded, whole-block windows for each flagged entity and adversarially asked to find a contradicting sentence or a genuine homonym split. Its verdict schema (`skeptic-triage.schema.json`) can express only `adverse` / `propose_split` / `propose_rescope` / `insufficient_window` -- there is deliberately no confirmation value, and no freeze/merge reader ever opens the resulting `skeptic_triage.json`. Every actual confirmation still flows through the unchanged human/codex `canon_adjudications.json` / `canon_senses.json` paths. `skeptic_report.py` is a separate, read-only advisory command that renders `skeptic_triage.json` for a human reviewer (per-entity risk context, the verdict, a quote derived fresh from the stored offsets, and evidence coverage) -- it is not a gate, it never blocks, and it runs strictly after `canon_adjudication_audit.py`, which is unchanged byte-for-byte by the skeptic pass's presence (see `tests/audit_unchanged_regression.test.py`).
 
-Two scoping limits carry through to this reporting layer. First, **verse evidence stays block-only**: `evidence_verify` (and therefore any skeptic citation) can only authenticate an offset against `manifest.blocks{}`, never `verse.store[]` -- a citation whose window is an embedded-verse node is coerced to `insufficient_window` upstream, so `skeptic_report.py` never needs to (and cannot) derive a quote from verse text. Second, **`all_citation` is adapter-safe**: for `source.format` values with no configured citation-block-type set (i.e. anything other than `gutenberg_epub`/`plain_text` -- any `custom` adapter), the risk class is disabled fail-safe rather than guessed from tag spelling, annotated `citation_classification_unavailable` in the worklist; this never blocks the skeptic pass itself, it only means that one risk signal is honestly reported as unavailable for that project's format.
+Two scoping limits carry through to this reporting layer. First, **verse evidence stays block-only**: `evidence_verify` (and therefore any skeptic citation) can only authenticate an offset against `manifest.blocks{}`, never `verse.store[]` -- a citation whose window is an embedded-verse node can never byte-verify, so `skeptic_ready.py` DROPS it upstream and `skeptic_report.py` never needs to (and cannot) derive a quote from verse text. Dropping the citation is not the same as coercing the record, and the difference matters for what the report renders: `adverse`/`propose_rescope` lose their single required citation and the record really does coerce to `insufficient_window`, but a `propose_split` merely loses that referent and KEEPS its verdict as long as >=2 byte-verified referents survive, with `evidence_coverage` recording the partial count. Either way every referent the report can still see is block-anchored and byte-verified, which is what makes the quote derivation safe. Second, **`all_citation` is adapter-safe**: for `source.format` values with no configured citation-block-type set (i.e. anything other than `gutenberg_epub`/`plain_text` -- any `custom` adapter), the risk class is disabled fail-safe rather than guessed from tag spelling, annotated `citation_classification_unavailable` in the worklist; this never blocks the skeptic pass itself, it only means that one risk signal is honestly reported as unavailable for that project's format.

@@ -174,11 +174,23 @@ engine:
     # ~2000 calls of margin (1 + 40*38 = 1521). Raising this cap is a deliberate operator decision, not
     # something to discover mid-run. (The old default of 1000 refused any batch over 26 segments at the
     # pre-#348 rate -- worse than a full novel needs.)
-    # Also read by the W3 glossary-pass preflight, reusing this one knob -- but ITS estimate is mode-dependent.
-    # offline (glossary.research_mode) -- 3*BATCHES.length + 2, unchanged: basis:"established" is fatal offline,
-    # so the pre-merge citation review has nothing to act on and never runs. live -- 13*BATCHES.length + 2, the
-    # citation-review retry ladder: 1 + 4*(MAX_CITATION_RETRIES+1) = 13 calls per batch at the template's own
-    # shipped MAX_CITATION_RETRIES = 2. Size the cap for the LIVE ladder, or a live run refuses "batch-too-large".
+    # Also read by the W3 glossary-pass preflight and (when enabled) the skeptic pass, reusing this one knob for
+    # THREE consumers -- but the glossary estimate is mode-dependent.
+    # offline (glossary.research_mode) -- 5*BATCHES.length + 2: basis:"established" is fatal offline,
+    # so the pre-merge citation review has nothing to act on and never runs. live -- 19*BATCHES.length + 2, the
+    # citation-review retry ladder: 1 + (3+WAIT_CALLS)*(MAX_CITATION_RETRIES+1) = 19 calls per batch at the
+    # template's own shipped MAX_CITATION_RETRIES = 2 and WAIT_CALLS = 3. Substituting those, the live shape
+    # spells out as 1 + 6*(MAX_CITATION_RETRIES+1) = 19, which is where an operator re-deriving it should land.
+    # Size the cap for the LIVE ladder, or a live run refuses "batch-too-large".
+    # ALL THREE GATES MOVED IN 1.16.2 -- read this table before sizing anything. Max batches at this cap of 3500:
+    #
+    #   gate                before      after      max batches (3500)
+    #   glossary live       13N+2       19N+2      269 -> 184
+    #   glossary offline     3N+2        5N+2     1166 -> 699
+    #   skeptic (both)       3N+2        5N+2     1166 -> 699
+    #
+    # "skeptic (both)" = the Workflow's own preflight AND skeptic_setup.py's independent step-5 assertion; they
+    # must move together, since leaving one behind makes one refuse a batch the other admits.
     # The live per-attempt cost rose from 3 to 4 in 1.16.1 (#347): the single agent that both fetched citations
     # and judged them became a prepare call that retrieves without reading and a judge call that reads without
     # retrieving. Stated at its true width, narrower than an earlier draft of this note claimed: the judge is given
@@ -187,10 +199,31 @@ engine:
     # What changed is that nothing in its prompt asks it to fetch and every byte it judges arrived through
     # fetch_citation.py's checks -- not that URLs were kept away from it, and not that the tool was taken away.
     # Its prompt therefore marks those fields UNTRUSTED explicitly. That is a security boundary,
-    # not extra work -- but it IS extra calls. UPGRADE NOTE: a live project whose cap was tuned near the old
-    # 10-per-batch figure will now be refused at preflight with reason:"batch-too-large" -- loud and early rather
-    # than mid-run, which is the intended direction, but it means the cap may need raising. The OFFLINE ladder is
-    # deliberately byte-identical, so no offline project's tuned cap starts refusing.
+    # not extra work -- but it IS extra calls. The live per-batch term then rose again from 13 to 19 in 1.16.2
+    # (#352), for an unrelated reason: not a new review step, but the WAIT itself becoming worth UP TO
+    # WAIT_CALLS = 3 agent calls (2 bounded chunks of the same unchanged 900 s budget, plus one authoritative
+    # non-polling re-check), multiplied by the retry ladder. The formula is a strict generalisation --
+    # substitute WAIT_CALLS = 1 and it collapses to the 1.16.1 figures of 13 and 3.
+    # THESE ARE CEILINGS, NOT RUNTIME COSTS -- a READY in any chunk ends the wait immediately AND suppresses
+    # the re-check, so a real wait spends 1, 2 or 3 calls and a real run comes in under 19N+2 / 5N+2. That is
+    # the correct thing for a preflight gate to compute; it is not a prediction of what the run will spend.
+    # UPGRADE NOTE, AND IT IS WIDER THAN BEFORE: a live project whose cap was tuned near an earlier per-batch
+    # figure will be refused at preflight with reason:"batch-too-large" -- loud and early rather than mid-run,
+    # which is the intended direction, but it means the cap may need raising. Unlike the 1.16.0/1.16.1 moves,
+    # 1.16.2's is NOT confined to the live ladder: the chunked wait can cost the same extra calls offline, so
+    # the offline term moved 3 -> 5 too and an OFFLINE project's tuned cap can now start refusing as well.
+    # THE PRINCIPLE BEHIND THE OLD "OFFLINE IS UNCHANGED" PROMISE IS UPHELD, NOT BROKEN, and the distinction is
+    # what justifies the move: through 1.16.1 the offline REAL COST did not change, so charging offline projects
+    # for the live ladder would have been a FALSE refusal -- a preflight that refuses runs it should permit is a
+    # worse failure than one that is slightly loose. In 1.16.2 the wait can genuinely cost three calls in BOTH
+    # modes, so 5N+2 is offline's true CEILING -- the same kind of quantity 3N+2 always was -- and refusing
+    # against it is a correct refusal, not a false one. What must
+    # never happen is a MODE-BLIND estimate charging offline the live 19N+2 for a ladder it cannot execute.
+    # THIRD CONSUMER -- the skeptic pass (glossary.skeptic_pass.enabled) carries its own unconditional per-batch
+    # term of precheck 1 + dispatch 1 + wait WAIT_CALLS == 5, i.e. 5*BATCHES.length + 2, moved from a flat 3 by
+    # the same #352 change. Being opt-in and advisory does not exempt it: this is an OPERATOR-VISIBLE refusal
+    # threshold moving under an existing cap, and skeptic_setup.py asserts the same number independently before
+    # the Workflow starts, so an undersized cap refuses there first and writes nothing at all.
 
 footnotes:
   apparatus_policy: translate_all

@@ -76,6 +76,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -145,29 +146,58 @@ def step_line(prompt: str, step: int) -> tuple:
     return hits[0]
 
 
+# The chunk poll's ACCEPT gate, as it is actually rendered since 1.16.2 (#352):
+#
+#   end=$((SECONDS + 480)); while true; do <CMD> >/dev/null 2>&1 && exit 0; ...
+#
+# The `>/dev/null 2>&1` is load-bearing rather than cosmetic (--check-batch
+# prints a JSON line per invocation, and without the redirect the chunk's own
+# terminal marker would stop being the last line), which is exactly why it is
+# matched here instead of being swept into the extracted command: the approve
+# command is the pinned contract plus an APPENDED flag, so a suffix left on the
+# extracted string would silently make every comparison below compare the wrong
+# thing.
+_CHUNK_ACCEPT_RE = re.compile(r"while true; do (.*?) >/dev/null 2>&1 && exit 0;")
+
+
 def check_cmd_from_wait(out: dict, index: int, attempt: int = 0) -> str:
     """The --check-batch command the WAIT poll for this attempt actually issued,
     lifted back out of its rendered polling loop.
 
     Deliberately extracted from a rendered prompt rather than transcribed into a
-    local f-string. checkBatchCmd() is a pinned contract three sites must issue
+    local f-string. checkBatchCmd() is a pinned contract four sites must issue
     character-identically, and what has to hold is that the approve command is
     THAT string plus an appended flag -- so the comparison has to be against the
     string the template really emitted, not against this file's idea of it. A
     local copy would keep agreeing with itself after a contract change on either
     side.
+
+    1.16.2 (#352): one wait renders up to WAIT_CHUNKS chunk prompts, all under
+    the same `glossary:wait:<index>` label, so the prompt list is no longer
+    one-entry-per-attempt and positional indexing by `attempt` would silently
+    read another attempt's chunk. Selected by the attempt's own fragment PATH
+    instead, which is the thing that actually distinguishes them.
     """
-    prompt = prompts_for(out, f"glossary:wait:{index}")[attempt]
-    lines = [ln for ln in prompt.split("\n") if "--check-batch" in ln]
-    assert len(lines) == 1, f"expected one --check-batch line in the wait prompt, got {lines}"
-    loop = lines[0]
-    start = loop.index("do ") + len("do ")
-    end = loop.index(" && exit 0")
-    cmd = loop[start:end]
-    assert attempt_path(index, attempt) in cmd, (
-        f"the wait poll for attempt {attempt} does not name that attempt's path: {cmd}"
+    wanted = attempt_path(index, attempt)
+    hits = []
+    for prompt in prompts_for(out, f"glossary:wait:{index}"):
+        for line in prompt.split("\n"):
+            m = _CHUNK_ACCEPT_RE.search(line)
+            if m and "--check-batch" in m.group(1) and wanted in m.group(1):
+                hits.append(m.group(1))
+    assert hits, (
+        f"no wait chunk for batch {index} attempt {attempt} issued a --check-batch "
+        f"gate naming {wanted}"
     )
-    return cmd
+    # Every chunk of one attempt's wait splices the SAME builder, so they must
+    # all be character-identical; asserting that here is what lets the callers
+    # treat "the command this attempt's wait issued" as a single well-defined
+    # string at all.
+    assert len(set(hits)) == 1, (
+        f"the wait chunks for batch {index} attempt {attempt} issued DIFFERENT "
+        f"--check-batch commands: {sorted(set(hits))}"
+    )
+    return hits[0]
 
 
 def check_cmd_from_precheck(out: dict, index: int) -> str:

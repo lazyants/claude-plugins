@@ -330,6 +330,20 @@ async function agent(promptText, opts) {
     }
     return "FRAGMENT " + idx;
   }
+  // 1.16.2 (#352) -- the wait became WAIT_CHUNKS bounded chunk calls (all under
+  // the existing `skeptic:wait:<idx>` label) plus ONE authoritative non-polling
+  // re-check under its own `skeptic:wait-recheck:<idx>` label.
+  //
+  // `recheck` DEFAULTS TO THE SAME REPLY AS `wait`, deliberately: every
+  // pre-1.16.2 fixture in this file says "a wait reply shaped like THIS must not
+  // make the batch ready", and under a chunked wait that claim is only
+  // observable end-to-end when the authoritative re-check answers the same way.
+  // Defaulting the re-check to READY would have turned all of them green
+  // through the re-check while the property under test was broken.
+  if (kind === "wait-recheck") {
+    if (p.recheck !== undefined) return p.recheck;
+    return (p.wait !== undefined) ? p.wait : ("READY " + idx);
+  }
   if (kind === "wait") return (p.wait !== undefined) ? p.wait : ("READY " + idx);
   throw new Error("skeptic mock agent(): unrecognized label " + label);
 }
@@ -535,7 +549,10 @@ def test_e2e_batch_never_ready_short_circuits_before_merge(tmp_path):
     dispatch_doc_0 = {"schema_version": 1, "run_id": run_id, "records": [adverse_record("Jean", jean_evidence)]}
     plan = {
         "0": {"precheck": "ABSENT 0", "dispatchWrite": dispatch_doc_0, "wait": "READY 0"},
-        "1": {"precheck": "ABSENT 1", "wait": "TIMEOUT 1"},  # batch 1's fragment never becomes ready
+        "1": {"precheck": "ABSENT 1", "wait": "PENDING 1"},  # batch 1's fragment never becomes ready
+        # (and its re-check answers PENDING too -- the harness defaults
+        # `recheck` to the `wait` reply, so this is a genuine end-to-end
+        # not-ready, not a chunk that the re-check then rescues)
         # This test is about the not-ready-batches short-circuit itself, not
         # the frozen-input check -- canned clean, mirrors skeptic:verify's
         # own optional-override convention.
@@ -561,7 +578,7 @@ def test_e2e_frozen_input_mismatch_from_not_ready_batches_real_check(tmp_path):
     fragment-check-failed. Unlike test_e2e_frozen_input_mismatch_surfaces_
     distinct_signal (which drives the EXISTING verify-merged path via a
     canned PLAN.verify), this batch NEVER becomes ready at all
-    (precheck=ABSENT, wait=TIMEOUT, mirroring
+    (precheck=ABSENT, wait=PENDING, mirroring
     test_e2e_batch_never_ready_short_circuits_before_merge exactly) -- the
     pre-fix pipeline would reach `fragment-check-failed` here and never
     even attempt merge+verify, so the H1 tripwire there would never fire.
@@ -613,7 +630,7 @@ def test_e2e_frozen_input_mismatch_from_not_ready_batches_real_check(tmp_path):
 
     batches = [{"index": 0, "assignments": [make_assignment_for_args("Jean", [])]}]
     plan = {
-        "0": {"precheck": "ABSENT 0", "wait": "TIMEOUT 0"},  # never becomes ready
+        "0": {"precheck": "ABSENT 0", "wait": "PENDING 0"},  # never becomes ready
     }
 
     out = run_skeptic_workflow(
@@ -668,7 +685,7 @@ def test_e2e_not_ready_batches_without_tamper_still_reports_ordinary_failure(tmp
     # No tamper this time.
 
     batches = [{"index": 0, "assignments": [make_assignment_for_args("Jean", [])]}]
-    plan = {"0": {"precheck": "ABSENT 0", "wait": "TIMEOUT 0"}}
+    plan = {"0": {"precheck": "ABSENT 0", "wait": "PENDING 0"}}
 
     out = run_skeptic_workflow(
         tmp_path=tmp_path, durable_root=durable_root, particle_config=particle_config,
@@ -780,9 +797,21 @@ def test_e2e_embedded_verse_citation_coerced_to_insufficient_window(tmp_path):
 
 
 def test_e2e_preflight_batch_too_large_dispatches_nothing(tmp_path):
-    """Same 3*N+2 preflight formula as glossary -- locks the shared shape
-    so a future edit to one template's estimator can't silently drift from
-    the other's."""
+    """The (2 + WAIT_CALLS)*N + 2 preflight formula, which skeptic_setup.py's
+    own step-5 preflight must agree with call-for-call -- leave one behind and
+    one of them refuses a batch the other admits, after the setup script has
+    already written this run's manifests.
+
+    1.16.2 (#352): the per-batch term went 3 -> 5, and NOT because the pass does
+    more work. One wait stopped being one agent call: the Bash tool clamps a
+    single call at 600 s, so the 900 s wait is now WAIT_CHUNKS bounded chunks
+    plus one authoritative non-polling re-check == WAIT_CALLS == 3 calls worst
+    case. This charges the worst case, as a preflight must.
+
+    Run ONE below the estimate, so it pins the boundary: a cap comfortably under
+    it would keep refusing through any estimator change, including one that
+    under-counts -- and under-counting is the dangerous direction here, since it
+    admits a run that then blows engine.batch_agent_cap mid-flight."""
     durable_root = str(tmp_path)
     lang_dir = tmp_path / "languages"
     particle_config = write_particle_config(lang_dir)
@@ -791,7 +820,9 @@ def test_e2e_preflight_batch_too_large_dispatches_nothing(tmp_path):
         {"index": 0, "assignments": [make_assignment_for_args("Jean", [])]},
         {"index": 1, "assignments": [make_assignment_for_args("Marie", [])]},
     ]
-    estimated = 3 * len(batches) + 2  # 8
+    # precheck 1 + dispatch 1 + wait (2 chunks + 1 re-check) 3 == 5 per batch,
+    # plus the fixed merge + verify pair.
+    estimated = 5 * len(batches) + 2  # 12
 
     out = run_skeptic_workflow(
         tmp_path=tmp_path, durable_root=durable_root, particle_config=particle_config,
@@ -855,9 +886,9 @@ def test_e2e_precheck_substring_collision_does_not_falsely_resume_skip(tmp_path)
 
 def test_e2e_wait_substring_collision_reports_not_ready(tmp_path):
     """RED before the P1 sentinel-exact-match fix: the OLD
-    `ready.indexOf("READY") === -1` check falsely treated a TIMEOUT reply
+    `ready.indexOf("READY") === -1` check falsely treated a not-ready reply
     that merely contains the literal substring "READY" inside its own
-    explanatory prose (e.g. "TIMEOUT 0 (not READY)") as ready -- `indexOf`
+    explanatory prose (e.g. "PENDING 0 (not READY)") as ready -- `indexOf`
     finds "READY" so the negated `=== -1` check was false, leaving the
     batch wrongly marked ready:true."""
     durable_root = str(tmp_path)
@@ -882,7 +913,7 @@ def test_e2e_wait_substring_collision_reports_not_ready(tmp_path):
     plan = {
         "0": {
             "precheck": "ABSENT 0", "dispatchWrite": dispatch_doc,
-            "wait": "TIMEOUT 0 (not READY)",
+            "wait": "PENDING 0 (not READY)",
         },
         # This test is about the sentinel substring-collision fix, not the
         # frozen-input check -- canned clean.
@@ -993,15 +1024,15 @@ def test_e2e_precheck_fail_priority_discriminating_order(tmp_path):
 
 
 def test_e2e_wait_fail_priority_discriminating_order(tmp_path):
-    """Same discriminating-order proof at site B': TIMEOUT before a
-    trailing READY line must still time out."""
+    """Same discriminating-order proof at site B': PENDING before a
+    trailing READY line must still be read as not-ready."""
     durable_root = str(tmp_path)
     lang_dir = tmp_path / "languages"
     particle_config = write_particle_config(lang_dir)
     run_id = "e2e-run-wait-discriminating"
     batches = [{"index": 0, "assignments": [make_assignment_for_args("Jean", [])]}]
     plan = {
-        "0": {"precheck": "ABSENT 0", "wait": "TIMEOUT 0\nREADY 0"},
+        "0": {"precheck": "ABSENT 0", "wait": "PENDING 0\nREADY 0"},
         # This test is about the sentinel fail-priority fix, not the
         # frozen-input check -- canned clean (mirrors the #227 collision
         # test above).

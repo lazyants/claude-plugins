@@ -230,6 +230,7 @@ Fixtures, one per branch:
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -1565,42 +1566,59 @@ def test_shared_retry_recovers_mid_loop_and_matches_exact_count(tmp_path):
 # the mass-translate section above, but for glossary-pass-wf.template.js's
 # own, distinct control flow:
 #
-#   * PREFLIGHT COST CAP (#95, re-derived for 1.16.0's citation review and
-#     again for 1.16.1's prepare/judge split, #347). The template's own
-#     preflight comment block documents the per-call ladder this whole
-#     section derives its expected counts from -- never the other way round:
+#   * PREFLIGHT COST CAP (#95, re-derived for 1.16.0's citation review, again
+#     for 1.16.1's prepare/judge split, #347, and again for 1.16.2's chunked
+#     wait, #352). The template's own preflight comment block documents the
+#     per-call ladder this whole section derives its expected counts from --
+#     never the other way round:
 #
 #         1 precheck                                (always, exactly one)
-#       + (dispatch + wait)          per attempt    (2 each)
+#       + (dispatch + wait)          per attempt    (1 + WAIT_CALLS each)
 #       + (citation prepare + judge) per attempt    (2 each, LIVE ONLY)
 #       + merge + verify                            (2, fixed, per run)
 #
 #     with attempts == MAX_CITATION_RETRIES + 1 == 3 in the worst case, so:
 #
-#         live    -- perBatch = 1 + 4*(MAX_CITATION_RETRIES+1) = 1 + 4*3 = 13
-#         offline -- perBatch = 1 + 2 == 3
+#         live    -- perBatch = 1 + (3 + WAIT_CALLS)*(MAX_CITATION_RETRIES+1)
+#                            = 1 + 6*3 = 19
+#         offline -- perBatch = 1 + (1 + WAIT_CALLS) == 2 + WAIT_CALLS == 5
 #         estimatedCalls = perBatch * BATCHES.length + 2
 #
 #     The live term went 10 -> 13 in 1.16.1 and NOT because the pass does more
 #     work: #347 split the single fetch-and-judge reviewer into a prepare call
 #     that runs the validated fetcher while ingesting no page content, and a
-#     judge call that reads only local files. One review point, two calls. The
-#     OFFLINE term did not move by one call, and every offline assertion in this
-#     section must stay byte-identical in meaning -- an offline run has no
-#     reviewer to split.
+#     judge call that reads only local files. One review point, two calls.
+#
+#     It went 13 -> 19 in 1.16.2, for a reason that has nothing to do with
+#     citations: ONE WAIT STOPPED BEING ONE AGENT CALL. The Bash tool clamps a
+#     single call at 600 s, so #352 spends the 900 s wait across WAIT_CHUNKS
+#     bounded chunks plus one authoritative non-polling re-check -- WAIT_CALLS
+#     == 3 in the worst case -- and the retry ladder multiplies that.
+#
+#     THE OFFLINE TERM MOVED THIS TIME, 3 -> 5, and that is the mode-awareness
+#     principle being APPLIED rather than abandoned. The rule was never "offline
+#     keeps its historical figure"; it is "charge offline only for work an
+#     offline run can actually perform". A retry ladder is work offline can NEVER
+#     perform (there is no reviewer to reject an attempt), so charging for it was
+#     always a false refusal -- and the offline branch still does not. The extra
+#     wait calls are the opposite case: every offline run performs them on every
+#     batch, because the Bash clamp is indifferent to research_mode. Leaving
+#     offline at 3*N+2 would be an UNDER-count, which is the dangerous direction
+#     -- it lets a run start and then blow engine.batch_agent_cap mid-flight
+#     instead of refusing it early and loudly.
 #
 #     If that exceeds engine.batch_agent_cap the whole run is refused WITHOUT
 #     calling pipeline(), mirroring the mass template's
 #     `{merged:false, reason:"batch-too-large", ...}` shape.
 #
-#     The OFFLINE branch is exactly the historical 3*N + 2, byte-identically,
-#     and is regression-pinned here on its own: an existing offline project's
-#     engine.batch_agent_cap was tuned against that number, so making the
-#     estimate mode-blind would start refusing runs whose real cost never
-#     changed. Under live the estimate is a worst-case CEILING, not the
-#     observed cost -- a run whose reviews approve on attempt 0 pays 5 per
-#     batch, not 13 -- so the live tests assert the observed count from the
-#     ladder AND that it stays under the ceiling.
+#     The OFFLINE branch is pinned here on its own precisely because it is NOT
+#     mode-blind: it charges 1 dispatch + 1 wait for exactly one attempt, never
+#     a ladder. Under live the estimate is a worst-case CEILING, not the
+#     observed cost -- a run whose reviews approve on attempt 0, and whose very
+#     first wait chunk finds the fragment, pays 5 per batch, not 19 -- so the
+#     live tests assert the observed count from the ladder AND that it stays
+#     under the ceiling. 1.16.2 WIDENS that gap rather than narrowing it, which
+#     is why the observed constants below did not move while the ceiling did.
 #   * RESUME-SKIP PRECHECK (#101): batchStep runs one single-shot precheck
 #     agent() call first; if it reports the fragment is already present and
 #     valid (PRESENT), the codex dispatch + wait are SKIPPED. Any other
@@ -1616,11 +1634,10 @@ def test_shared_retry_recovers_mid_loop_and_matches_exact_count(tmp_path):
 #
 #     SCOPE SPLIT -- this file owns the review only as a term in the COST
 #     ARITHMETIC: since 1.16.1 it adds TWO calls per attempt (prepare + judge),
-#     it is what makes the live ceiling 13 rather than 3, and it is why a
-#     resume-skipped batch saves 2 calls and not 4 -- the skip drops the
-#     dispatch and the wait, never the review, so the split widened the gap
-#     between what a resume saves and what a batch costs rather than the saving
-#     itself. The review's BEHAVIOUR -- rejection regenerating to a
+#     it is what makes the live ceiling 19 rather than 5, and it is why a
+#     resume-skipped batch saves the dispatch + wait and never the review, so
+#     the split widened the gap between what a resume saves and what a batch
+#     costs rather than the saving itself. The review's BEHAVIOUR -- rejection regenerating to a
 #     fresh attempt-scoped path, the resume-skip path reaching the gate at
 #     all, a stale attempt-bound verdict failing to approve a later attempt,
 #     exhaustion reporting its own reason instead of falling into the merge,
@@ -1865,23 +1882,40 @@ def run_glossary_workflow(
 # ---------------------------------------------------------------------------
 GLOSSARY_MAX_CITATION_RETRIES = 2          # template: const MAX_CITATION_RETRIES
 GLOSSARY_MAX_ATTEMPTS = GLOSSARY_MAX_CITATION_RETRIES + 1          # 3
-# per batch, worst case: precheck 1 + attempts * (dispatch + wait + citation
-# prepare + citation judge) 4. The per-attempt term is 4 and not 3 as of 1.16.1
-# (#347): the reviewer split into a prepare call that runs the validated fetcher
-# without ingesting page content and a judge call that reads only local files.
-GLOSSARY_LIVE_PER_BATCH_CEILING = 1 + 4 * GLOSSARY_MAX_ATTEMPTS    # 13
-# per batch, offline: precheck 1 + the single dispatch + wait pair 2. The
+# 1.16.2 (#352): what ONE wait costs in agent calls, worst case. The template
+# derives it as WAIT_CHUNKS + 1 == ceil(WAIT_BOUND_SEC / WAIT_CHUNK_SEC) + 1 ==
+# ceil(900/480) + 1 == 3: two bounded poll chunks, then one authoritative
+# non-polling re-check. Restated here as an independent literal, like every
+# other constant in this block -- re-deriving it from the template would make
+# the ceiling agree with the template for any self-consistent pair of wait
+# constants. test_glossary_wait_calls_term_is_the_template_own_chunk_count
+# below is the tripwire that ties this literal back to the shipped template.
+GLOSSARY_WAIT_CALLS = 3
+# per batch, worst case: precheck 1 + attempts * (dispatch 1 + wait WAIT_CALLS +
+# citation prepare 1 + citation judge 1). The per-attempt term became 4 in
+# 1.16.1 (#347 split the reviewer into prepare + judge) and 6 in 1.16.2 (#352
+# made one wait WAIT_CALLS agent calls instead of one).
+GLOSSARY_LIVE_PER_ATTEMPT = 3 + GLOSSARY_WAIT_CALLS                # 6
+GLOSSARY_LIVE_PER_BATCH_CEILING = (
+    1 + GLOSSARY_LIVE_PER_ATTEMPT * GLOSSARY_MAX_ATTEMPTS
+)                                                                  # 19
+# per batch, offline: precheck 1 + the single dispatch 1 + wait WAIT_CALLS. The
 # review is a no-op there, which ALSO removes the only thing that can reject an
-# attempt -- so the ladder can never advance past attempt 0. UNCHANGED by
-# #347's split, which is the whole reason it is a separate constant: there is no
-# reviewer to split under offline, so an offline project's tuned
-# engine.batch_agent_cap must keep working across this release untouched.
-GLOSSARY_OFFLINE_PER_BATCH = 1 + 2                                 # 3
+# attempt -- so the ladder can never advance past attempt 0, and this term stays
+# ladder-free. It is a separate constant because it moves for DIFFERENT reasons
+# than the live one: #347's reviewer split did not touch it (there is no
+# reviewer to split under offline), while #352's chunked wait did (the Bash
+# per-call clamp is indifferent to research_mode).
+GLOSSARY_OFFLINE_PER_BATCH = 2 + GLOSSARY_WAIT_CALLS               # 5
 # per RUN, either mode: the serialized merge call + the disk-independent verify
 GLOSSARY_FIXED_MERGE_VERIFY = 2
-# per batch, live, when the review approves on the first attempt (the happy
-# path every plan in this file takes unless it scripts a REJECT):
-#   precheck 1 + attempt0 (dispatch + wait + prepare + judge) 4
+# per batch, live, when the review approves on the first attempt AND the very
+# first wait chunk finds the fragment (the happy path every plan in this file
+# takes unless it scripts a REJECT or a PENDING chunk):
+#   precheck 1 + attempt0 (dispatch 1 + wait 1 + prepare 1 + judge 1) 4
+# UNCHANGED by #352, and that is the point rather than an oversight: a wait that
+# is answered by its first chunk still costs ONE call. WAIT_CALLS is a ceiling,
+# paid only by a wait that exhausts every chunk and still needs the re-check.
 GLOSSARY_LIVE_PER_BATCH_APPROVED_FIRST = 1 + 4                     # 5
 # per batch, live, when the precheck resume-skips a valid fragment: precheck 1 +
 # (prepare + judge) 2. The skip drops the dispatch and the wait; it is NOT
@@ -1905,8 +1939,9 @@ def test_glossary_citation_retry_bound_is_the_documented_two():
 def test_glossary_live_per_attempt_term_is_the_template_own_multiplier():
     """The OTHER knob every live count here hangs off: how many calls one
     attempt costs. #347 moved it from 3 to 4 (the reviewer split into prepare +
-    judge) and nothing in this file would have noticed -- the ceiling is a
-    Python arithmetic expression, so a template that went back to 3, or on to 5,
+    judge), #352 moved it from 4 to 6 (one wait became WAIT_CALLS calls), and
+    nothing in this file would have noticed either time -- the ceiling is a
+    Python arithmetic expression, so a template that went back to 4, or on to 7,
     would leave every assertion below internally consistent and wrong.
 
     The authoritative comparison of the three copies (template expression, this
@@ -1915,7 +1950,12 @@ def test_glossary_live_per_attempt_term_is_the_template_own_multiplier():
     which imports this module and reads the constant out of it. This assertion
     is the local tripwire, and it is not redundant with the seam: it names the
     per-attempt MULTIPLIER specifically, so a drift reports as "the ladder
-    changed shape" here rather than only as "two totals disagree" there."""
+    changed shape" here rather than only as "two totals disagree" there.
+
+    Matched against the template's SYMBOLIC expression (`3 + WAIT_CALLS`), not
+    against a rendered `6`, because the template deliberately writes the ladder
+    in terms of its own wait constants -- pinning a literal here would fail on
+    the shipped source while the arithmetic was perfectly correct."""
     text = GLOSSARY_PASS_TEMPLATE.read_text(encoding="utf-8")
     per_attempt, remainder = divmod(
         GLOSSARY_LIVE_PER_BATCH_CEILING - 1, GLOSSARY_MAX_ATTEMPTS
@@ -1923,42 +1963,84 @@ def test_glossary_live_per_attempt_term_is_the_template_own_multiplier():
     # Carries its own message rather than being a bare assert: this fires FIRST,
     # so a bare one would report a stale ceiling as an unexplained AssertionError
     # and bury the very diagnostic this test exists to give.
-    assert remainder == 0 and per_attempt == 4, (
+    assert remainder == 0 and per_attempt == 6, (
         f"GLOSSARY_LIVE_PER_BATCH_CEILING ({GLOSSARY_LIVE_PER_BATCH_CEILING}) is no "
-        f"longer 1 precheck + {GLOSSARY_MAX_ATTEMPTS} attempts * 4 calls. Either the "
+        f"longer 1 precheck + {GLOSSARY_MAX_ATTEMPTS} attempts * 6 calls. Either the "
         f"ladder changed and every count in this section needs re-deriving from the "
         f"template's preflight comment and from the labels a real run emits, or the "
         f"constant was patched to silence a failure -- which is the move this test "
         f"exists to stop"
     )
-    assert f"1 + {per_attempt} * (MAX_CITATION_RETRIES + 1)" in text, (
+    assert "1 + (3 + WAIT_CALLS) * (MAX_CITATION_RETRIES + 1)" in text, (
         f"the template's live perBatchCalls expression is no longer "
-        f"`1 + {per_attempt} * (MAX_CITATION_RETRIES + 1)`. An attempt now costs a "
-        f"different number of calls than the {per_attempt} "
-        f"(dispatch + wait + citation prepare + citation judge) this section's "
-        f"GLOSSARY_LIVE_PER_BATCH_CEILING is built from -- RE-DERIVE the ladder "
-        f"from the template's own preflight comment and from the labels a real "
-        f"run emits, do not patch the constant until the suite goes green"
+        f"`1 + (3 + WAIT_CALLS) * (MAX_CITATION_RETRIES + 1)`. An attempt now costs a "
+        f"different number of calls than the {per_attempt} (dispatch 1 + wait "
+        f"{GLOSSARY_WAIT_CALLS} + citation prepare 1 + citation judge 1) this "
+        f"section's GLOSSARY_LIVE_PER_BATCH_CEILING is built from -- RE-DERIVE the "
+        f"ladder from the template's own preflight comment and from the labels a "
+        f"real run emits, do not patch the constant until the suite goes green"
+    )
+
+
+def test_glossary_wait_calls_term_is_the_template_own_chunk_count():
+    """1.16.2 (#352): the third knob, new in this release. GLOSSARY_WAIT_CALLS
+    feeds BOTH the live ceiling and the offline term, and it is the one number
+    in this section that is not visible anywhere in the template's rendered
+    output -- it is computed from two constants and a ceil-div. A template that
+    raised WAIT_CHUNK_SEC to 900 (one chunk, WAIT_CALLS 2) or dropped it to 300
+    (three chunks, WAIT_CALLS 4) would leave every count in this section
+    internally consistent and wrong in both directions.
+
+    Re-derives WAIT_CALLS from the template's OWN declared constants, so it
+    fails on the drift rather than on the total. That is a different question
+    from the one wait_chunking_batch_passes.test.py asks: this one is
+    "does the estimator's input still match the template's declaration", that
+    one is "does the template's declaration still match what it EMITS"."""
+    text = GLOSSARY_PASS_TEMPLATE.read_text(encoding="utf-8")
+    declared = {}
+    for name in ("WAIT_BOUND_SEC", "WAIT_CHUNK_SEC"):
+        m = re.search(rf"^const {name} = (\d+)", text, re.MULTILINE)
+        assert m is not None, f"the template no longer declares a const {name}"
+        declared[name] = int(m.group(1))
+
+    chunks = -(-declared["WAIT_BOUND_SEC"] // declared["WAIT_CHUNK_SEC"])  # ceil-div
+    assert chunks + 1 == GLOSSARY_WAIT_CALLS, (
+        f"the template's wait constants (WAIT_BOUND_SEC={declared['WAIT_BOUND_SEC']}, "
+        f"WAIT_CHUNK_SEC={declared['WAIT_CHUNK_SEC']}) now imply {chunks} chunk(s) + 1 "
+        f"re-check == {chunks + 1} calls per wait, not this section's "
+        f"GLOSSARY_WAIT_CALLS ({GLOSSARY_WAIT_CALLS}). Both the live ceiling and the "
+        f"offline term are built on it -- RE-DERIVE them, do not patch the constant"
+    )
+    # The template must still compute it the same way, not merely happen to
+    # agree at these values: a hard-coded `const WAIT_CALLS = 3` would satisfy
+    # the arithmetic above and then silently stop tracking WAIT_CHUNK_SEC.
+    assert "const WAIT_CHUNKS = Math.ceil(WAIT_BOUND_SEC / WAIT_CHUNK_SEC)" in text, (
+        "the template no longer derives WAIT_CHUNKS from its own bound and chunk size"
+    )
+    assert "const WAIT_CALLS = WAIT_CHUNKS + 1" in text, (
+        "the template no longer derives WAIT_CALLS as WAIT_CHUNKS + 1 (the chunks "
+        "plus the one authoritative re-check)"
     )
 
 
 # ---------------------------------------------------------------------------
-# Preflight cost cap (#95, re-derived for 1.16.0's citation-review ladder and
-# again for 1.16.1's prepare/judge split, #347).
+# Preflight cost cap (#95, re-derived for 1.16.0's citation-review ladder,
+# again for 1.16.1's prepare/judge split, #347, and again for 1.16.2's chunked
+# wait, #352).
 #
-#   live    -- perBatch = 1 + 4*(MAX_CITATION_RETRIES+1) = 13
-#   offline -- perBatch = 1 + 2 = 3   (unchanged from the historical formula)
+#   live    -- perBatch = 1 + (3 + WAIT_CALLS)*(MAX_CITATION_RETRIES+1) = 19
+#   offline -- perBatch = 2 + WAIT_CALLS = 5
 #   estimatedCalls = perBatch * N + 2
 # ---------------------------------------------------------------------------
 
 
 def test_glossary_preflight_boundary_exactly_at_cap_permits_dispatch(tmp_path):
     batches = _glossary_batches(2)
-    # Derivation (live): perBatch = precheck 1 + 3 attempts * (dispatch +
-    # wait + citation prepare + citation judge) 4 = 13; 2 batches = 26;
-    # + merge/verify 2 = 28.
+    # Derivation (live): perBatch = precheck 1 + 3 attempts * (dispatch 1 +
+    # wait 3 + citation prepare 1 + citation judge 1) 6 = 19; 2 batches = 38;
+    # + merge/verify 2 = 40.
     estimated = GLOSSARY_LIVE_PER_BATCH_CEILING * len(batches) + GLOSSARY_FIXED_MERGE_VERIFY
-    assert estimated == 28
+    assert estimated == 40
 
     out = run_glossary_workflow(
         tmp_path=tmp_path,
@@ -1973,7 +2055,9 @@ def test_glossary_preflight_boundary_exactly_at_cap_permits_dispatch(tmp_path):
     assert out["result"]["merged"] is True
     # OBSERVED cost, which is no longer the estimate: as of 1.16.0 the live
     # estimate is a worst-case CEILING (every review rejects until the ladder
-    # is exhausted), while this plan's reviews all approve on attempt 0.
+    # is exhausted), while this plan's reviews all approve on attempt 0. As of
+    # 1.16.2 it is also a ceiling on the WAIT: this plan's first wait chunk
+    # answers READY, so the wait costs 1 call rather than WAIT_CALLS.
     # Derivation: per batch precheck 1 + attempt0 dispatch/wait/prepare/judge
     # 4 = 5; 2 batches = 10; + merge/verify 2 = 12.
     expected_observed = (
@@ -1988,9 +2072,9 @@ def test_glossary_preflight_boundary_exactly_at_cap_permits_dispatch(tmp_path):
 
 def test_glossary_preflight_one_below_boundary_blocks_dispatch_entirely(tmp_path):
     batches = _glossary_batches(2)
-    # Same live derivation as above: 13*2 + 2 = 28.
+    # Same live derivation as above: 19*2 + 2 = 40.
     estimated = GLOSSARY_LIVE_PER_BATCH_CEILING * len(batches) + GLOSSARY_FIXED_MERGE_VERIFY
-    assert estimated == 28
+    assert estimated == 40
 
     out = run_glossary_workflow(
         tmp_path=tmp_path,
@@ -2011,10 +2095,11 @@ def test_glossary_preflight_one_below_boundary_blocks_dispatch_entirely(tmp_path
 
 
 @pytest.mark.parametrize("n_batches", [1, 2, 5, 13])
-def test_glossary_preflight_live_formula_is_13_batches_plus_2(tmp_path, n_batches):
-    """Locks the LIVE formula (1 + 4*(MAX_CITATION_RETRIES+1))*N + 2 == 13*N + 2.
+def test_glossary_preflight_live_formula_is_19_batches_plus_2(tmp_path, n_batches):
+    """Locks the LIVE formula (1 + (3+WAIT_CALLS)*(MAX_CITATION_RETRIES+1))*N + 2
+    == 19*N + 2.
 
-    Four wrong variants this discriminates against, each a plausible partial
+    Six wrong variants this discriminates against, each a plausible partial
     implementation, with the per-batch term spelled out so the arithmetic can be
     checked rather than taken on faith:
       * the historical pre-1.16.0 estimate, review and ladder both uncharged:
@@ -2026,17 +2111,23 @@ def test_glossary_preflight_live_formula_is_13_batches_plus_2(tmp_path, n_batche
       * the 1.16.0 figure -- the full ladder, but the reviewer still counted as
         ONE call per attempt rather than #347's prepare + judge pair:
         1 + 3*(dispatch + wait + review) = 1 + 3*3            = 10 -> 10*N + 2
-    Only the split ladder gives 13, and that last variant is the one this
-    release can actually regress into: it is what the file asserted before
-    #347, so any count left un-re-derived lands exactly there. Cheap: the gate
-    trips before pipeline() ever runs, so no PLAN and zero agent calls are
-    needed."""
+      * the 1.16.1 figure -- the split reviewer, but the wait still counted as
+        ONE call rather than #352's WAIT_CALLS:
+        1 + 3*(dispatch + wait + prepare + judge) = 1 + 3*4   = 13 -> 13*N + 2
+      * #352's chunks charged but its authoritative re-check not (WAIT_CALLS
+        read as WAIT_CHUNKS): 1 + 3*(1 + 2 + 2) = 1 + 3*5     = 16 -> 16*N + 2
+    Only the chunked ladder with its re-check gives 19. The two the release can
+    actually regress into are the last two: 13 is what this file asserted before
+    #352, so any count left un-re-derived lands exactly there, and 16 is what
+    dropping the re-check from the wait term gives -- which is the term the
+    whole fix turns on. Cheap: the gate trips before pipeline() ever runs, so no
+    PLAN and zero agent calls are needed."""
     batches = _glossary_batches(n_batches)
-    # Derivation: perBatch = precheck 1 + 3 attempts * (dispatch + wait +
-    # citation prepare + citation judge) 4 = 13, plus the fixed merge + verify
-    # pair 2.
+    # Derivation: perBatch = precheck 1 + 3 attempts * (dispatch 1 + wait 3 +
+    # citation prepare 1 + citation judge 1) 6 = 19, plus the fixed merge +
+    # verify pair 2.
     expected = GLOSSARY_LIVE_PER_BATCH_CEILING * n_batches + GLOSSARY_FIXED_MERGE_VERIFY
-    assert expected == {1: 15, 2: 28, 5: 67, 13: 171}[n_batches]
+    assert expected == {1: 21, 2: 40, 5: 97, 13: 249}[n_batches]
 
     out = run_glossary_workflow(
         tmp_path=tmp_path,
@@ -2053,25 +2144,46 @@ def test_glossary_preflight_live_formula_is_13_batches_plus_2(tmp_path, n_batche
 
 
 @pytest.mark.parametrize("n_batches", [1, 2, 5, 13])
-def test_glossary_preflight_offline_formula_stays_3_batches_plus_2(tmp_path, n_batches):
-    """REGRESSION GUARD for existing offline projects (1.16.0). Their
-    engine.batch_agent_cap was tuned against the historical 3*N + 2, and the
-    citation review is a provable no-op under offline (canon_validate.py makes
-    basis:"established" FATAL there, so there is no citation in existence to
-    review). Charging offline for a retry ladder it can never execute would
-    start refusing runs with reason:"batch-too-large" whose real cost did not
-    change at all -- a preflight that refuses runs it should permit is a worse
-    failure than one that is slightly loose.
+def test_glossary_preflight_offline_formula_is_5_batches_plus_2(tmp_path, n_batches):
+    """THE LADDER-FREE GUARANTEE for offline projects, which is what survives
+    1.16.2 -- not the historical NUMBER, which does not.
 
-    Without this test nothing in the suite would notice that regression: every
-    other preflight test here now runs under live."""
+    The citation review is a provable no-op under offline (canon_validate.py
+    makes basis:"established" FATAL there, so there is no citation in existence
+    to review), and with no reviewer there is nothing that can reject an
+    attempt. Charging offline for a retry ladder it can never execute would
+    start refusing runs whose real cost did not change at all -- a preflight
+    that refuses runs it should permit is a worse failure than one that is
+    slightly loose. That is the invariant, and the formula below still holds it:
+    exactly ONE dispatch and ONE wait, never (MAX_CITATION_RETRIES+1) of them.
+
+    What DID move is the wait term, 1 -> WAIT_CALLS, so the per-batch total went
+    3 -> 5. That is not the principle being abandoned, it is the same principle
+    applied: the extra wait calls are work every offline run really performs on
+    every batch, because #352's Bash per-call clamp is indifferent to
+    research_mode. Leaving offline at 3*N+2 would be an UNDER-count -- the
+    dangerous direction, since it admits a run that then blows
+    engine.batch_agent_cap mid-flight instead of refusing it early and loudly.
+
+    So this test discriminates against two opposite regressions at once: an
+    offline branch that grew a ladder (which would give 1 + 3*4 = 13 or worse),
+    and an offline branch left at the stale flat 3. Without it nothing in the
+    suite would notice either: every other preflight test here runs under
+    live."""
     batches = _glossary_batches(n_batches)
-    # Derivation (offline): perBatch = precheck 1 + the single dispatch + wait
-    # pair 2 = 3 (no review, and therefore no retry ladder), plus the fixed
-    # merge + verify pair 2. Byte-identical to the pre-1.16.0 formula.
+    # Derivation (offline): perBatch = precheck 1 + the single dispatch 1 +
+    # wait WAIT_CALLS 3 = 5 (no review, and therefore no retry ladder), plus
+    # the fixed merge + verify pair 2.
     expected = GLOSSARY_OFFLINE_PER_BATCH * n_batches + GLOSSARY_FIXED_MERGE_VERIFY
-    assert expected == 3 * n_batches + 2
-    assert expected == {1: 5, 2: 8, 5: 17, 13: 41}[n_batches]
+    assert expected == 5 * n_batches + 2
+    assert expected == {1: 7, 2: 12, 5: 27, 13: 67}[n_batches]
+    # The ladder-free half, stated as its own fact rather than left implicit in
+    # the total: offline must charge for exactly ONE attempt. A ladder here
+    # would multiply the same per-attempt term the live branch uses.
+    assert GLOSSARY_OFFLINE_PER_BATCH == 1 + (1 + GLOSSARY_WAIT_CALLS), (
+        "the offline term must stay precheck + ONE (dispatch + wait), never a "
+        "ladder -- an offline run has no reviewer and so can never reach attempt 1"
+    )
 
     out = run_glossary_workflow(
         tmp_path=tmp_path,
@@ -2092,10 +2204,10 @@ def test_glossary_preflight_offline_formula_stays_3_batches_plus_2(tmp_path, n_b
 # citation-review call at all -- lives in
 # tests/glossary_citation_review.test.py::test_offline_mode_spends_no_review_call.
 # The two are genuinely different assertions, not one test written twice, and
-# each catches a bug the other misses: an estimate left at 3*N+2 while the stage
-# still runs passes THIS test and fails that one; a mode-blind estimate over a
-# stage that correctly no-ops fails THIS test and passes that one. Both were
-# confirmed by scoped template mutation, in both directions.
+# each catches a bug the other misses: an estimate left at the old flat term
+# while the stage still runs passes THIS test and fails that one; a mode-blind
+# estimate over a stage that correctly no-ops fails THIS test and passes that
+# one. Both were confirmed by scoped template mutation, in both directions.
 
 
 # ---------------------------------------------------------------------------
@@ -2138,6 +2250,9 @@ def test_glossary_resume_skip_trusts_valid_fragment_and_skips_dispatch(tmp_path)
     # The saving is stated as a saving, not just as a total: #347 raised what a
     # fresh batch costs, and a resume that quietly stopped skipping anything
     # would still satisfy the equality above once the constants moved with it.
+    # OBSERVED saving, so it is 2 (dispatch + one answered wait chunk) and not
+    # 1 + WAIT_CALLS: the ceiling's version of this saving is 4, and the two are
+    # different facts about the same skip -- see the ladder constants above.
     assert (
         GLOSSARY_LIVE_PER_BATCH_APPROVED_FIRST - GLOSSARY_LIVE_PER_BATCH_RESUME_SKIPPED == 2
     ), "the resume-skip must save exactly the dispatch + wait pair, and nothing else"
