@@ -382,7 +382,7 @@ PARITY_REPLY_SHAPES = {
     "glued_pending_tab": "the chunk was cut short\tPENDING <idx>\nREADY <idx>",
     "glued_pending_cr": "the chunk was cut short\rPENDING <idx>\nREADY <idx>",
     "glued_pending_nbsp": "the chunk was cut short\xa0PENDING <idx>\nREADY <idx>",
-    "glued_pending_zwsp": "the chunk was cut short​PENDING <idx>\nREADY <idx>",
+    "glued_pending_zwsp": "the chunk was cut short\u200bPENDING <idx>\nREADY <idx>",
     "glued_pending_letter": "cut shortxPENDING <idx>\nREADY <idx>",
     "fail_priority_lf": "PENDING <idx>\nREADY <idx>",
     "quoted_disavowed_ready": (

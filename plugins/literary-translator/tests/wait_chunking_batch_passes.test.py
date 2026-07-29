@@ -270,6 +270,16 @@ function log() {}
     }));
   } catch (err) {
     process.stderr.write("HARNESS_ERROR: " + (err && err.message || String(err)) + "\n");
+    // The ordering half of a startup guard's claim -- "the throw happens
+    // BEFORE anything is dispatched" -- is otherwise unassertable from the
+    // Python side: run() below discards `out` on this exact path, so the call
+    // log recorded up to the moment of the throw would vanish with it unless
+    // it rides out on stderr instead. Labels only, not the full callsLog
+    // objects: this line is meant to be greppable evidence of ordering, not a
+    // second copy of the harness's own JSON contract.
+    process.stderr.write(
+      "HARNESS_CALLS_BEFORE_THROW: " + JSON.stringify(callsLog.map((c) => c.label)) + "\n"
+    );
     process.exit(1);
   }
 })();
@@ -457,9 +467,14 @@ def run(target: Target, *, tmp_path: Path, chunk_replies, recheck_reply,
         source: str | None = None, batches: list | None = None,
         batch_agent_cap: int = 100000, research_mode: str = "live",
         timeout: int = 30) -> dict:
-    """Returns {ok, out, stderr}. `<idx>` in a reply is substituted with the
-    calling batch's index. ok=False (with stderr) when the template threw before
-    producing stdout -- the startup-guard path."""
+    """Returns {ok, out, stderr, calls_before_throw}. `<idx>` in a reply is
+    substituted with the calling batch's index. ok=False (with stderr) when the
+    template threw before producing stdout -- the startup-guard path.
+    calls_before_throw is the list of agent() call labels the harness itself
+    recorded before that throw (empty when the throw preceded every call, which
+    is what a startup guard must do) -- [] when the run succeeded, and None
+    when the process never reached the harness's own catch block at all (e.g.
+    a syntax error in the instantiated source), so there is nothing to report."""
     if isinstance(chunk_replies, str) or chunk_replies is None:
         chunk_replies = [chunk_replies]
     src = target.instantiate(
@@ -478,8 +493,13 @@ def run(target: Target, *, tmp_path: Path, chunk_replies, recheck_reply,
     assert NODE is not None
     proc = subprocess.run([NODE, str(p)], capture_output=True, text=True, timeout=timeout)
     if proc.returncode != 0:
-        return {"ok": False, "out": None, "stderr": proc.stderr}
-    return {"ok": True, "out": json.loads(proc.stdout), "stderr": proc.stderr}
+        m = re.search(r"^HARNESS_CALLS_BEFORE_THROW: (.*)$", proc.stderr, re.MULTILINE)
+        calls_before_throw = json.loads(m.group(1)) if m else None
+        return {
+            "ok": False, "out": None, "stderr": proc.stderr,
+            "calls_before_throw": calls_before_throw,
+        }
+    return {"ok": True, "out": json.loads(proc.stdout), "stderr": proc.stderr, "calls_before_throw": []}
 
 
 # ---------------------------------------------------------------------------
@@ -547,6 +567,23 @@ ACCEPT_RE = re.compile(CHUNK_ACCEPT_PATTERN)
 # wait..."), read back out so the declared bound and the spent bound can be
 # compared without either being taken on trust.
 DECLARED_BOUND_RE = re.compile(r"total (\d+)s wait")
+
+# The chunk poll line's WHOLE grammar, as a WHITELIST rather than a scan for
+# one bad spelling. Anchored both ends (fullmatch), so anything riding on this
+# line beyond the one elapsed-time loop it describes -- a `seq N`-style
+# fixed-iteration loop appended, inserted, or wrapped around it, under
+# whatever argument count or spelling -- fails to match, instead of only the
+# one `seq 1 N ... sleep M` shape that shipped pre-1.16.2. Group 1 is the
+# elapsed bound (already read by POLL_RE/chunk_seconds()); group 2 is the
+# ACCEPT gate command, captured rather than matched so its own text can be
+# checked for a smuggled loop too -- see the belt-and-suspenders check in
+# test_no_emitted_poll_can_exceed_the_bash_call_cap.
+CHUNK_POLL_GRAMMAR_RE = re.compile(
+    r"^end=\$\(\(SECONDS \+ (\d+)\)\); while true; do (.+) >/dev/null 2>&1 && exit 0; "
+    r"\[ \$SECONDS -ge \$end \] && break; slp=\$\(\(end-SECONDS\)\); "
+    r"\[ \$slp -gt 20 \] && slp=20; \[ \$slp -gt 0 \] && sleep \$slp; "
+    r"done; echo LT_CHUNK_BOUND; exit 1$"
+)
 
 
 def labels(out: dict) -> list:
@@ -728,9 +765,13 @@ def test_no_emitted_poll_can_exceed_the_bash_call_cap(target, tmp_path):
       * the chunk's own elapsed bound,
       * the bash-tool timeout the chunk INSTRUCTS the agent to pass (asking for
         one it cannot get would mean the chunk bound is not the real bound),
-      * any surviving fixed-iteration `seq N x sleep M` loop, whose product is
-        invisible to both of the above -- and is exactly the shape the pre-1.16.2
-        poll had.
+      * any surviving fixed-iteration loop riding on the poll line -- whatever
+        its spelling -- whose product is invisible to both of the above, and is
+        exactly the shape the pre-1.16.2 poll had. Checked as a WHITELIST of the
+        poll line's whole grammar (CHUNK_POLL_GRAMMAR_RE), not a scan for the one
+        `seq 1 N ... sleep M` spelling that shipped pre-1.16.2: a bare `seq N`
+        loop, one wrapped in `for ((...))`, or a second `while`, all read the
+        same cap-defeating shape and none of them fullmatch.
     """
     out = exhausted_run(target, tmp_path)
     for i, prompt in enumerate(prompts(out, target.chunk_label), start=1):
@@ -748,18 +789,36 @@ def test_no_emitted_poll_can_exceed_the_bash_call_cap(target, tmp_path):
                 f"the {BASH_CALL_CAP_SEC * 1000} ms clamp"
             )
 
-    # No surviving fixed-iteration loop, at EITHER wait call, whose iteration
-    # count times its sleep would exceed the clamp. Checked over the re-check
-    # too: it is the call that runs on the recovery path nobody watches.
-    for label in (target.chunk_label, target.recheck_label):
-        for prompt in prompts(out, label):
-            for iters, sleep_s in re.findall(r"seq 1 (\d+)\).*?sleep (\d+)", prompt):
-                product = int(iters) * int(sleep_s)
-                assert product <= BASH_CALL_CAP_SEC, (
-                    f"{target.name} {label} still emits a fixed-iteration poll of "
-                    f"{iters} x {sleep_s}s == {product}s, over the "
-                    f"{BASH_CALL_CAP_SEC}s clamp -- this is the pre-1.16.2 shape"
-                )
+        line = poll_line(prompt)
+        m = CHUNK_POLL_GRAMMAR_RE.fullmatch(line)
+        assert m, (
+            f"{target.name} chunk {i}'s poll line does not match the pinned "
+            f"elapsed-time-poll grammar -- something else is riding on this "
+            f"line, fixed-iteration or otherwise:\n{line}"
+        )
+        # Belt and suspenders on the one sub-part the grammar treats as opaque
+        # (the ACCEPT gate command, `.+` above): it must not smuggle a second
+        # loop or sleep inside its own argument text either.
+        gate_cmd = m.group(2)
+        for token in ("seq", "sleep", "while true"):
+            assert token not in gate_cmd, (
+                f"{target.name} chunk {i}'s ACCEPT gate command contains "
+                f"{token!r}, which would hide a second loop inside the poll "
+                f"line:\n{gate_cmd}"
+            )
+
+    # The re-check is non-polling by construction (batchWaitRecheckPrompt's own
+    # comment: no `end=`, no loop, no sleep) -- so its whole command line is
+    # checked against every one of those tokens, not just the one fixed-iteration
+    # spelling the chunk poll line's grammar pins against above. This is the
+    # call that runs on the recovery path nobody watches.
+    for prompt in prompts(out, target.recheck_label):
+        command = recheck_command(prompt)
+        for token in ("seq", "sleep", "while", "end=$((SECONDS"):
+            assert token not in command, (
+                f"{target.name} re-check command contains {token!r}, which "
+                f"means it polls instead of running exactly once:\n{command}"
+            )
 
     # The chunk's in-loop gate output must stay suppressed. Without it the gate
     # prints one JSON line per iteration, and "the marker is the last line"
@@ -1207,7 +1266,10 @@ def test_startup_guard_fires_when_its_constant_passes_its_bound(target, guard, t
     Each is proved by pushing exactly the constant it watches past exactly its
     bound, and the throw must happen BEFORE anything is dispatched: a guard that
     fired after the first batch went out would have already spent the call it
-    exists to prevent."""
+    exists to prevent -- asserted directly below against the harness's own
+    call log, not merely claimed here: `not res["ok"]` and a message match tell
+    you THAT it threw, never WHEN, because run() discards `out` -- the only
+    other carrier of the call log -- on this exact path."""
     old, new, needle = GUARD_MUTATIONS[guard]
     mutant = mutate(read_template(target), old, new)
     res = run(target, tmp_path=tmp_path, chunk_replies=["READY <idx>"],
@@ -1220,6 +1282,12 @@ def test_startup_guard_fires_when_its_constant_passes_its_bound(target, guard, t
     assert needle in res["stderr"], (
         f"{target.name}'s {guard} guard fired with an unexpected message "
         f"(expected {needle!r}):\n{res['stderr']}"
+    )
+    assert res["calls_before_throw"] == [], (
+        f"{target.name}'s {guard} guard fired only after "
+        f"{res['calls_before_throw']} had already been dispatched -- the throw "
+        f"must happen before anything is dispatched, not merely before the run "
+        f"finishes"
     )
 
 

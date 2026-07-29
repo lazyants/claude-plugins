@@ -50,7 +50,7 @@ than a source grep:
   * a prepare that reports failure spends no judge call, and its attempt's
     snapshot never reaches the merge;
   * the emitted approve command is checkBatchCmd() plus --approve-to APPENDED, so
-    the three character-identical --check-batch sites keep issuing that prefix
+    the four character-identical --check-batch sites keep issuing that prefix
     verbatim, and PREPARE is the only call in the file that carries --approve-to;
   * under LIVE the merge and verify consume approved_{i}_attempt_{n}.json for the
     approved attempt, and no rejected attempt's snapshot is ever named;
@@ -299,7 +299,17 @@ async function agent(promptText, opts) {
     return Object.prototype.hasOwnProperty.call(p, "precheck") ? p.precheck : ("ABSENT " + idx);
   }
   if (kind === "dispatch") return "FRAGMENT " + idx;
-  if (kind === "wait") return "READY " + idx;
+  // 1.16.2 (#352): the wait poll is chunked, and every chunk of every attempt
+  // shares this one label, so a plan-supplied reply is consumed POSITIONALLY --
+  // one entry per call, not one per attempt. The default keeps every prior
+  // caller's behaviour (READY on the first chunk, so the re-check below never
+  // fires) while letting a plan force PENDING to reach it.
+  if (kind === "wait") return nth(p.waits, ordinal, "READY " + idx);
+  // The authoritative re-check (#352) -- reached only when every chunk of an
+  // attempt's wait answered something other than READY. Same default as
+  // "wait" above: a plan that says nothing gets a READY re-check, so a run
+  // that never forces PENDING waits never has to know this branch exists.
+  if (kind === "wait-recheck") return nth(p.rechecks, ordinal, "READY " + idx);
   // 1.16.1 (#347) -- the citation review became TWO calls, and this branch is
   // what the whole file's live path now hangs on: the JUDGE runs only if PREPARE
   // reported EVIDENCE_READY, so a harness that leaves this label unanswered
@@ -397,6 +407,23 @@ def labels_of(out: dict) -> list:
 
 def one_batch_run(tmp_path: Path, **kwargs) -> dict:
     return run(tmp_path=tmp_path, batches=[make_batch(0, ["Sarrasin", "Enclos"])], **kwargs)
+
+
+def pending_wait_run(tmp_path: Path, **kwargs) -> dict:
+    """A run whose chunked wait poll never answers READY, so the fallthrough to
+    the authoritative re-check (glossary:wait-recheck:0, #352) actually fires.
+
+    one_batch_run's wait answers READY on its first chunk by default, which is
+    exactly why the re-check never rendered a prompt anywhere in this file
+    before it got its own roster entry: nothing ever drove the harness past the
+    chunk loop. WAIT_CHUNKS is 2 in the shipped template, so two PENDING
+    replies exhaust the chunk budget and hand control to the re-check, which
+    then defaults to READY so the rest of the run (prepare, judge, merge)
+    completes exactly like every other fixture here.
+    """
+    plan = {"0": {"waits": ["PENDING 0", "PENDING 0"]}}
+    return run(tmp_path=tmp_path, batches=[make_batch(0, ["Sarrasin", "Enclos"])],
+               plan=plan, **kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -588,17 +615,18 @@ def test_the_approve_command_is_the_check_batch_contract_plus_approve_to(tmp_pat
 
 @pytest.mark.parametrize("label", [
     "glossary:precheck:0", "glossary:dispatch:0", "glossary:wait:0",
-    "glossary:citation-review:0",
+    "glossary:wait-recheck:0", "glossary:citation-review:0",
 ])
 def test_only_the_prepare_call_ever_issues_the_approve_command(tmp_path, label):
     """PREPARE is the one call in the file that may snapshot, and the reasons
     differ per label rather than being one rule repeated.
 
-    The three --check-batch sites (precheck, dispatch self-check, wait poll) must
-    issue checkBatchCmd() character-identically, so none of them may acquire the
-    flag: a precheck or wait poll that snapshotted would write an approved copy of
-    bytes nobody has reviewed, and a dispatch self-check that did it would let the
-    producer approve its own output.
+    The four --check-batch sites (precheck, dispatch self-check, wait chunk
+    poll, wait re-check -- the last added in 1.16.2, #352) must issue
+    checkBatchCmd() character-identically, so none of them may acquire the
+    flag: a precheck, wait chunk poll or re-check that snapshotted would write
+    an approved copy of bytes nobody has reviewed, and a dispatch self-check
+    that did it would let the producer approve its own output.
 
     The JUDGE is here for a different reason and was added in 1.16.1 (the test was
     named test_no_plain_check_batch_site_ever_issues_approve_to when it covered
@@ -606,8 +634,17 @@ def test_only_the_prepare_call_ever_issues_the_approve_command(tmp_path, label):
     do is re-take the snapshot AFTER the evidence was retrieved from the first
     one, which would leave the audited bytes and the fetched-from bytes as two
     different objects -- the very split this file exists to prevent.
+
+    The re-check needs a different run from the other four labels: the default
+    fixture's wait answers READY on its very first chunk, so the re-check never
+    renders a prompt at all under it -- see pending_wait_run()'s docstring for
+    why a plan has to force the chunk budget to exhaust before this label ever
+    fires.
     """
-    out = one_batch_run(tmp_path)
+    out = (
+        pending_wait_run(tmp_path) if label == "glossary:wait-recheck:0"
+        else one_batch_run(tmp_path)
+    )
     prompts = prompts_for(out, label)
     assert prompts, f"no prompt recorded for {label}"
     for prompt in prompts:

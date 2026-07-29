@@ -415,7 +415,7 @@ def test_the_recheck_is_a_single_non_polling_check(tmp_path):
             f"another chunk"
         )
         prompt = recheck_prompts[0]
-        for forbidden in ("end=$((SECONDS +", "while true", "sleep ", "$(seq "):
+        for forbidden in ("end=$((SECONDS +", "while true", "sleep", "$(seq "):
             assert forbidden not in prompt, (
                 f"{recheck_label}'s re-check polls -- found {forbidden!r}:\n{prompt}"
             )
@@ -494,9 +494,11 @@ def test_accept_gate_parity_is_mutation_proved(tmp_path, shape):
     of the canonical artifact) -- not a strawman, and exactly the shape a
     plausible, easy-to-miss-in-review edit would take. The narrower gate
     string stays a literal SUBSTRING of the widened one, so only the old
-    CONTAINMENT assertion, not this equality one, could ever miss it -- which
-    is what the OTHER assertion in this function (against the un-fixed
-    `accept in recheck` form) demonstrates before it is deleted below."""
+    CONTAINMENT assertion, not this equality one, could ever miss it -- and
+    that is asserted directly below, for the widened shape only, rather than
+    only claimed here: the un-fixed `accept in recheck` form still holds even
+    after the mutation, which is exactly the blind spot the round-6 fix above
+    exists to close."""
     mutated_line = {
         "replaced": 'lines.push("test -f /tmp/lt-weaker-gate >/dev/null 2>&1");',
         "widened": 'lines.push(acceptCmd + " --candidate-file /tmp/lt-decoy-candidate.json >/dev/null 2>&1");',
@@ -521,6 +523,20 @@ def test_accept_gate_parity_is_mutation_proved(tmp_path, shape):
             f"was {shape}, so the parity assertion is not reading the "
             f"executable command.\nre-check:\n{recheck}"
         )
+        if shape == "widened":
+            # The blind spot the round-6 fix above exists to close, made
+            # executable rather than only claimed in the docstring: the
+            # UN-FIXED containment form (`accept in recheck`, against the
+            # whole multi-line prompt) still holds under this exact mutation,
+            # so it is demonstrably not that form doing the catching above --
+            # only the equality one, against recheck_command()'s own
+            # single-line extraction, can tell the two apart.
+            assert accept in recheck, (
+                f"widened mutation stopped containing the chunk's own ACCEPT "
+                f"gate as a literal substring of the re-check prompt, so it no "
+                f"longer demonstrates the old containment form's blind spot at "
+                f"{recheck_label}:\n{recheck}"
+            )
 
 
 def test_recheck_still_runs_after_a_fail_sentinel(tmp_path):

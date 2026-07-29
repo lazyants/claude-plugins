@@ -973,18 +973,52 @@ def test_sanitize_forged_newline_marker_text_differs_from_real_marker():
 
 
 def test_sanitize_forged_marker_with_embedded_control_char_does_not_reassemble_unescaped():
-    """MUTATION this guards: stripping C0/C1 controls AFTER introducer-
-    escaping (the pre-round-6 relative order) would let an agent hide the
-    "[" from the escape step behind a control character that only
-    disappears afterward, reassembling into a convincing forged marker.
-    With the strip running FIRST, the "[" is always visible to the escape
-    step -- the fragments still reassemble (the control char is still
-    stripped either way), but the RESULT is now escaped like any other
-    typed "[", instead of being left free to coincide with a real marker."""
+    """A control character hidden inside a typed "[U+20\\x012E]" must not
+    reassemble into something indistinguishable from a real marker.
+
+    Round 7 correction to this docstring, measured. It used to say the
+    relative ORDER of the strip and the escape was what closed this, and
+    that stripping AFTER escaping was the pre-round-6 hole. Both halves
+    are false: the steps COMMUTE. The strip only removes characters that
+    are neither "\\" nor "[", and the escape only adds "\\" and "[", which
+    the strip never matches -- so a control character cannot manufacture
+    an introducer under either order. What actually closes the forgery is
+    the escape being TOTAL over the two introducers, which the sibling
+    tests above pin directly. Measured below rather than asserted: the
+    shipped order and the swapped order are compared on the real
+    function's own alphabet, so a future editor cannot be told the order
+    is a security property by a test that never checked."""
     forged_fragmented = sr._sanitize("Ivan[U+20\x012E]ov")
     real = sr._sanitize("Ivan" + chr(0x202E) + "ov")
     assert forged_fragmented == "Ivan\\[U+202E]ov"
     assert forged_fragmented != real
+
+    # The commutation itself, over every single-control insertion at every
+    # position of the typed marker. `_strip_then_escape` and
+    # `_escape_then_strip` are the two orderings of the SAME two production
+    # objects (`sr._OTHER_CONTROL_CHARS_RE`, and the two literal replaces
+    # `_sanitize` performs), so this compares orderings, not a
+    # reimplementation of the whole function.
+    def _strip_then_escape(s):
+        s = sr._OTHER_CONTROL_CHARS_RE.sub("", s)
+        return s.replace("\\", "\\\\").replace("[", "\\[")
+
+    def _escape_then_strip(s):
+        s = s.replace("\\", "\\\\").replace("[", "\\[")
+        return sr._OTHER_CONTROL_CHARS_RE.sub("", s)
+
+    typed = "Ivan[U+202E]ov"
+    controls = [chr(cp) for cp in list(range(0x00, 0x20)) + list(range(0x7F, 0xA0))]
+    probes = 0
+    for ch in controls:
+        for pos in range(len(typed) + 1):
+            probe = typed[:pos] + ch + typed[pos:]
+            probes += 1
+            assert _strip_then_escape(probe) == _escape_then_strip(probe), (
+                f"the two orderings diverge on {probe!r} -- if this ever fires, the ORDER really "
+                "is load-bearing and this docstring's round-7 correction is the thing that is wrong"
+            )
+    assert probes > 900, f"only {probes} probes ran -- an empty loop prints exactly what a passing one prints"
 
 
 def test_format_report_sanitizes_unavailable_reason_defense_in_depth():

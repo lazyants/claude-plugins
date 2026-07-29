@@ -787,6 +787,14 @@ _ITEM_LABEL_SHAPES = [
      "A" * (canon_validate._ITEM_LABEL_MAX_CHARS - 2) + "\x01\x02" + "B" * 40),
     ("line_separator_payload", (" " + chr(0x2028)) * 60),
     ("astral_plane", chr(0x1F600) * 80),
+    # A NON-PRINTABLE astral codepoint. astral_plane above (U+1F600, an
+    # emoji) is PRINTABLE, so repr() renders its glyph rather than escaping
+    # it -- it exercises the astral RANGE but never the "\Uxxxxxxxx" escape
+    # FORM, which is the widest single-codepoint expansion repr() can
+    # produce. Without this row, `widest` below was measured against
+    # fixtures structurally incapable of reaching the branch it claims to
+    # bound -- the same shape as this file's own repr-then-slice bug.
+    ("astral_nonprintable", chr(0x1D173) * 80),
 ]
 
 
@@ -825,11 +833,19 @@ def test_the_item_label_cap_bounds_the_source_not_the_rendered_excerpt():
     future Python or a future input could invalidate."""
     cap = canon_validate._ITEM_LABEL_MAX_CHARS
 
-    # The widest single-codepoint expansion repr() produces, re-derived here
-    # rather than hardcoded: "\N{...}" is not used by repr(), so the maximum is
-    # a "\Uxxxxxxxx" form. Measured against the escape-heaviest inputs this
-    # plugin can actually see.
-    widest = max(len(repr(chr(cp))) - 2 for cp in (0x01, 0x7F, 0x2028, 0x200B, 0x1F600))
+    # The widest single-codepoint expansion repr() produces. Swept over the
+    # FULL codespace rather than sampled from a probe tuple: a probe list is
+    # exactly the shape that made this bound wrong before -- the original
+    # five-codepoint sample (0x01, 0x7F, 0x2028, 0x200B, 0x1F600) tops out at
+    # 6, because its one astral probe (U+1F600) is PRINTABLE and repr()
+    # renders it as a glyph rather than escaping it, so no probe in the
+    # tuple ever reached a "\Uxxxxxxxx" form at all -- contradicting the
+    # tuple's own justification. The true maximum is 10, first attained at
+    # U+1000C and shared by 949,296 codepoints, among them U+1D173, which
+    # the astral_nonprintable row above now exercises. "\N{...}" is not used
+    # by repr(), so the maximum IS a "\Uxxxxxxxx" form -- just not one any
+    # of the five original probes reached. The sweep costs ~60 ms.
+    widest = max(len(repr(chr(cp))) - 2 for cp in range(0x110000))
     for _, source_form in _ITEM_LABEL_SHAPES:
         label = canon_validate._indexed_item_label("batch", 0, {"source_form": source_form})
         excerpt = label[len("batch[0] ("):-1]
@@ -844,7 +860,7 @@ def test_the_item_label_cap_bounds_the_source_not_the_rendered_excerpt():
         )
 
 
-def test_verify_merged_bounds_the_missing_list_it_relays_to_an_agent():
+def test_verify_merged_bounds_the_missing_list_it_relays_to_an_agent(tmp_path):
     """The round-9 BLOCKER. --verify-merged reports failure through a
     SUCCESS-shaped payload and therefore never constructs
     CanonValidationError -- so round 8's "the one place every failure passes
@@ -868,19 +884,65 @@ def test_verify_merged_bounds_the_missing_list_it_relays_to_an_agent():
 
     # AND THE WIRING. The assertions above exercise the helper; on their own
     # they pass even if run_verify_merged stops calling it -- which is the
-    # failure mode this whole file keeps finding, so it must not be reproduced
-    # in the test that closes it. Pin the actual return expression.
-    tree = ast.parse(Path(canon_validate.__file__).read_text(encoding="utf-8"))
-    fn = next(n for n in ast.walk(tree)
-              if isinstance(n, ast.FunctionDef) and n.name == "run_verify_merged")
-    returns = [ast.unparse(n.value) for n in ast.walk(fn)
-               if isinstance(n, ast.Return) and n.value is not None]
-    relaying = [r for r in returns if "'missing'" in r or '"missing"' in r]
-    assert relaying, "run_verify_merged no longer returns a 'missing' key"
-    for expr in relaying:
-        assert "_bounded_list" in expr, (
-            f"run_verify_merged relays `missing` unbounded: {expr}. That payload is "
-            "copied verbatim into an agent by glossaryVerifyPrompt.")
+    # failure mode this whole file keeps finding, so it must not be
+    # reproduced in the test that closes it.
+    #
+    # This used to pin `ast.unparse()` of run_verify_merged's WHOLE return
+    # expression and assert the substring "_bounded_list" appeared somewhere
+    # in it. That cannot tell WHICH dict value the call binds to:
+    # `_bounded_list(missing)` occurs three separate times in
+    # canon_validate.py, and a mutant that keeps `_bounded_list` textually
+    # present in the return while routing `missing` around it unbounded (a
+    # debug flag selecting the raw list, say) left that pin green while
+    # shipping 1,183,530 bytes to an agent, with the ENTIRE suite green
+    # alongside it -- the exact failure mode this docstring's first paragraph
+    # exists to catch.
+    #
+    # Driving the real --verify-merged CLI path with a hostile 500-item
+    # manifest is invariant to how the bound is spelled: it fails for real
+    # whenever the RETURNED payload is unbounded, however that happens, and
+    # it stays green through a behaviour-preserving refactor that a
+    # source-text pin would wrongly flag.
+    root = make_durable_root(tmp_path)
+    (root / "canon.json").write_text(
+        json.dumps(
+            {
+                "entries": {},
+                "review_queue": [],
+                "generation_hashes": {
+                    "particle_config_hash": "abc123",
+                    "derivation_bundle_hash": "def456",
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    fragment_path = root / "fragment.json"
+    fragment_path.write_text("[]", encoding="utf-8")
+    manifest_path = root / "manifest_all.json"
+    manifest_path.write_text(
+        json.dumps([payload + str(i) for i in range(500)], ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    proc = run_cli(
+        root,
+        [
+            "--research-mode", "live",
+            "--verify-merged",
+            "--batch", str(fragment_path),
+            "--expect-source-forms-file", str(manifest_path),
+        ],
+    )
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    relayed = parse_stdout(proc)
+    assert relayed["verified"] is False
+    assert len(relayed["missing"]) <= 9, f"{len(relayed['missing'])} elements relayed"
+    relayed_total = sum(len(x) for x in relayed["missing"])
+    assert relayed_total < 2500, (
+        f"{relayed_total} bytes relayed verbatim to the agent through --verify-merged"
+    )
 
 
 def test_a_bare_string_offending_is_not_shredded_into_characters():

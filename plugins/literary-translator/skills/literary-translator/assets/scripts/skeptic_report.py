@@ -285,9 +285,12 @@ _LINE_BREAK_CHARS = frozenset("\n\r\v\f\x1c\x1d\x1e\x85" + chr(0x2028) + chr(0x2
 # Every C0/C1 control character (\x00-\x1f, \x7f-\x9f) EXCEPT the members of
 # _LINE_BREAK_CHARS above -- those are marked visibly by the line-break step
 # in `_sanitize`, never silently dropped, so they must not also match here.
-# Round 6 (F3, LOW): this strip now runs FIRST in `_sanitize`, before the
-# introducer-escaping step below -- see `_sanitize`'s own docstring for why
-# the ORDER (not just the presence) of this strip is itself part of the fix.
+# Round 6 (F3, LOW) put this strip FIRST in `_sanitize`, ahead of the
+# introducer-escaping step, and claimed the ORDER was itself part of the fix.
+# Round 7 measured that claim false: the two steps commute, because the strip
+# only removes characters the escape never adds and vice versa. See
+# `_sanitize`'s own docstring for the measurement. The order is kept for
+# readability and is NOT a security property.
 _OTHER_CONTROL_CHARS_RE = re.compile(
     "[" + "".join(
         re.escape(chr(cp))
@@ -616,11 +619,28 @@ def _sanitize(s):
     -- wherever they already occur in the input, BEFORE this function ever
     inserts a marker of its own; after that escape step, every unescaped
     "\\" or "[" remaining in the output was put there by THIS function, for
-    an actual codepoint. The C0/C1 strip runs FIRST, ahead of that escape
-    step: a control character hidden inside a typed "[U+20\x012E]" would
-    otherwise still be present when the escape step ran, then vanish only
-    afterward, reassembling into a convincing forged marker post-escape --
-    stripping first closes that fragment-assembly bypass. A string with
+    an actual codepoint. THAT TOTALITY is what makes the markers
+    injective -- not the order of the steps.
+
+    Round 7 correction, measured. This docstring used to claim the C0/C1
+    strip running FIRST was itself load-bearing, closing a "fragment-
+    assembly bypass" where a control character hidden inside a typed
+    "[U+20\x012E]" would survive the escape step and then vanish,
+    reassembling into a forged marker. It does not, and the two steps
+    commute by construction: the strip only REMOVES characters that are
+    neither "\\" nor "[", and the escape only ADDS "\\" and "[", which the
+    strip never matches -- so a control character cannot manufacture an
+    introducer under either order. Measured against a copy of this file
+    whose ONLY difference is the swapped order, driven through the real
+    `_sanitize` on both sides: the docstring's own named example renders
+    identically, every single-control insertion at every position of a
+    typed "[U+202E]" (975 probes) diverges 0 times and forges 0 markers,
+    and 200000 random strings over a 272-character hostile alphabet
+    (every C0/C1, every line-break char, every marked codepoint, plus the
+    marker's own literal characters) diverge 0 times. The strip stays
+    first for readability; a future editor told the order closes a bypass
+    would preserve it against a threat that does not exist while missing
+    the property that actually holds. A string with
     none of the above (no control chars, no "\\", no "[", nothing in
     `_LINE_BREAK_CHARS` / `_BIDI_CONTROL_CHARS` / `_INVISIBLE_CHARS`) is the
     identity function."""

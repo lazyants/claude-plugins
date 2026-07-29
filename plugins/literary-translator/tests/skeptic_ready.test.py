@@ -2033,9 +2033,17 @@ def test_line_separator_escapes_derived_correctly_against_a_full_brute_force_sca
         if len(("a" + ch + "b").splitlines()) == 2:
             brute_force_boundaries.add(ch)
     assert brute_force_boundaries == {chr(cp) for cp in _LINE_BREAK_CODEPOINTS}
-    assert set(sr._LINE_SEPARATOR_ESCAPES.keys()) <= brute_force_boundaries, (
-        "every escaped character must actually be a real splitlines() boundary"
-    )
+    # Round 7 removed a third assertion here --
+    # `set(sr._LINE_SEPARATOR_ESCAPES.keys()) <= brute_force_boundaries`, with the
+    # message "every escaped character must actually be a real splitlines()
+    # boundary". It could never be the failing line. `ground_truth` above is built
+    # as `is_splitlines_boundary and ch in json.dumps(...)`, so it is a SUBSET of
+    # `brute_force_boundaries` by construction, and the `==` assertion at the top
+    # of this test therefore implies the `<=` one. Measured, not reasoned:
+    # injecting a non-boundary key into the escapes dict fails at the `==`
+    # assertion with its own message, never at the `<=` one, and so does a key
+    # that IS a boundary but that json.dumps escapes. An assertion that cannot be
+    # reached reads in review as coverage it does not provide.
 
 
 @pytest.mark.parametrize("codepoint", _LINE_BREAK_CODEPOINTS)

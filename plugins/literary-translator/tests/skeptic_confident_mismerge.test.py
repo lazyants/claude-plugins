@@ -211,13 +211,28 @@ def _wrap_for_execution(js_source: str) -> str:
 # branch below still wrote the fragment on LABEL alone before this fix, so a
 # future decoy test added to this file would have been just as unable to
 # catch it as skeptic_pipeline_e2e.test.py's was pre-round-6.
+#
+# Round 7/8 port: the round-6 fix landed here as a flat array + `.indexOf()`,
+# byte-identical to what skeptic_pipeline_e2e.test.py's own copy had at the
+# time -- and round 7 found that shape insufficient there: it proves a
+# prompt came from the real builder for SOME batch, not for the batch being
+# dispatched, so a decoy that calls the builder for the WRONG batch and
+# forwards the result satisfies it. That same gap existed here, unfixed,
+# until this port -- measured directly with the cross-batch-replay parity
+# fixture in skeptic_pipeline_e2e.test.py
+# (test_dispatch_write_guard_rejects_cross_batch_replay_in_both_harness_
+# copies): this copy accepted a prompt built for batch 0 and replayed under
+# batch 1's own dispatch label. Ported the same fix as the sibling file:
+# record identity keyed by `batch.index` (coerced to string to match the
+# label-derived `idx` string below), and require the recorded prompt for
+# THIS call's own idx to match exactly.
 _DISPATCH_PROMPT_RECORDER = """
-globalThis.__realDispatchPrompts__ = [];
+globalThis.__realDispatchPrompts__ = new Map();
 {
   const __origBatchDispatchPrompt = batchDispatchPrompt;
   batchDispatchPrompt = function (batch) {
     const built = __origBatchDispatchPrompt(batch);
-    globalThis.__realDispatchPrompts__.push(built);
+    globalThis.__realDispatchPrompts__.set(String(batch.index), built);
     return built;
   };
 }
@@ -263,12 +278,18 @@ async function agent(promptText, opts) {
     // (round 6): the fragment must not appear for a call whose prompt the
     // REAL batchDispatchPrompt() never produced, so a decoy call cannot
     // manufacture the artifact a downstream on-disk assertion reads.
-    if (globalThis.__realDispatchPrompts__.indexOf(promptText) === -1) {
+    //
+    // Round 7/8 port: bound to THIS call's own batch index, not just to
+    // "the builder produced it for some batch" -- see
+    // _DISPATCH_PROMPT_RECORDER's header comment above.
+    if (globalThis.__realDispatchPrompts__.get(idx) !== promptText) {
       throw new Error(
-        "skeptic:dispatch:" + idx + " was called with a prompt batchDispatchPrompt() " +
-        "never produced, so this call did not dispatch. No fragment is written for " +
-        "it: a decoy must not be able to manufacture the artifact a downstream " +
-        "on-disk assertion reads. Prompt seen: " + JSON.stringify(promptText.slice(0, 120))
+        "skeptic:dispatch:" + idx + " was called with a prompt that does not match " +
+        "what batchDispatchPrompt() produced for batch " + idx + " specifically, so " +
+        "this call did not dispatch THIS batch's own work (it may have replayed " +
+        "another batch's recorded prompt). No fragment is written for it: a decoy " +
+        "must not be able to manufacture the artifact a downstream on-disk assertion " +
+        "reads. Prompt seen: " + JSON.stringify(promptText.slice(0, 120))
       );
     }
     if (p.dispatchWrite !== undefined) {

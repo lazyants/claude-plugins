@@ -258,17 +258,30 @@ def _wrap_for_execution(js_source: str) -> str:
 # `batchDispatchPrompt` is a hoisted function declaration inside the wrapped
 # workflow, so rebinding it here -- before any of the body runs, and without
 # touching control flow -- makes every string the real builder produces
-# observable. A dispatch call whose prompt is not one of them did not call the
-# builder; a decoy that DOES call it and forwards the result has performed the
-# dispatch, which is the property under test. There is no level above this one
-# for the next decoy to sit at.
+# observable.
+#
+# Round 7 finding (survived independent verification, live mutant in the real
+# template): round 6's recorder was a flat, index-agnostic array -- it proved
+# a prompt came from the real builder for SOME batch, not for the batch being
+# dispatched. `batchDispatchPrompt(batch)` -> `batchDispatchPrompt(BATCHES[0])`
+# at the real call site left the whole suite green: batch 1's dispatch replayed
+# batch 0's recorded prompt, batch 0's own fragment path, and the flat-array
+# `.indexOf` check accepted it because *some* call to the real builder had once
+# produced that exact string. So identity has to be bound to the batch it was
+# built for, not merely to the builder that built it: the recorder now keys by
+# `batch.index` (coerced to string to match the label-derived `idx` string
+# below), and the dispatch branch requires the recorded prompt for THIS idx to
+# equal what was actually sent. A dispatch call whose prompt is not the one the
+# builder produced for this call's own batch index did not dispatch this
+# batch's work -- a decoy that calls the builder for the WRONG batch and
+# forwards that result no longer satisfies the guard.
 _DISPATCH_PROMPT_RECORDER = """
-globalThis.__realDispatchPrompts__ = [];
+globalThis.__realDispatchPrompts__ = new Map();
 {
   const __origBatchDispatchPrompt = batchDispatchPrompt;
   batchDispatchPrompt = function (batch) {
     const built = __origBatchDispatchPrompt(batch);
-    globalThis.__realDispatchPrompts__.push(built);
+    globalThis.__realDispatchPrompts__.set(String(batch.index), built);
     return built;
   };
 }
@@ -377,12 +390,21 @@ async function agent(promptText, opts) {
     // "skeptic:dispatch:0"/"skeptic:wait:0", the fragment appeared,
     // run_merge_fragments() found its record and run_verify_merged() agreed --
     // measured. Fixed HERE rather than per-test, so no future test inherits it.
-    if (globalThis.__realDispatchPrompts__.indexOf(promptText) === -1) {
+    //
+    // Round 7 finding: a flat "was this prompt built by the real function at
+    // all" check does not bind the prompt to THIS call's own batch index --
+    // a mutant that dispatches every batch with batch 0's prompt (right
+    // function, wrong batch) stayed invisible to the whole suite. The guard
+    // now requires the prompt recorded for idx specifically -- see
+    // _DISPATCH_PROMPT_RECORDER above -- to match what was actually sent.
+    if (globalThis.__realDispatchPrompts__.get(idx) !== promptText) {
       throw new Error(
-        "skeptic:dispatch:" + idx + " was called with a prompt batchDispatchPrompt() " +
-        "never produced, so this call did not dispatch. No fragment is written for " +
-        "it: a decoy must not be able to manufacture the artifact a downstream " +
-        "on-disk assertion reads. Prompt seen: " + JSON.stringify(promptText.slice(0, 120))
+        "skeptic:dispatch:" + idx + " was called with a prompt that does not match " +
+        "what batchDispatchPrompt() produced for batch " + idx + " specifically, so " +
+        "this call did not dispatch THIS batch's own work (it may have replayed " +
+        "another batch's recorded prompt). No fragment is written for it: a decoy " +
+        "must not be able to manufacture the artifact a downstream on-disk assertion " +
+        "reads. Prompt seen: " + JSON.stringify(promptText.slice(0, 120))
       );
     }
     if (p.dispatchWrite !== undefined) {
@@ -1224,9 +1246,25 @@ def test_e2e_wait_fail_priority_discriminating_order(tmp_path):
 def test_e2e_wait_glued_pending_with_trailing_ready_still_not_ready(tmp_path):
     """Round-5 finding F4: the precheck site's own gluing defect (see
     test_e2e_precheck_glued_absent_still_regenerates just above) has a
-    live-batchStep e2e test; the WAIT site's identical defect did not, until
-    this test. Every existing wait-site e2e test above drives a DIFFERENT
-    shape: test_e2e_wait_substring_collision_reports_not_ready is the #227
+    live-batchStep e2e test.
+
+    Round 8 correction (an outside reviewer caught this): this docstring
+    used to claim the WAIT site's identical defect had NO live e2e coverage
+    at all until this test. That overstates it -- the round-6 correction
+    paragraph just below already measured, and this round re-measured
+    independently, that deleting rejectedAnywhere() from waitChunkVerdict()
+    entirely fails test_e2e_wait_fail_priority_discriminating_order too, not
+    only this test: that pre-existing test already drives the guard live,
+    end-to-end, through the real template. What it does NOT cover is the
+    GLUED shape: its own PENDING sentinel already sits alone on its own
+    LF-delimited line, so a narrower mutant that reads PENDING by
+    whole-line equality instead of containment still passes it while
+    failing only this test (measured directly; see the round-6 correction
+    below for the same discrimination in more detail). That narrower gap --
+    not "any coverage at all" -- is what this test actually closes.
+
+    Every existing wait-site e2e test above drives a DIFFERENT shape:
+    test_e2e_wait_substring_collision_reports_not_ready is the #227
     substring-inside-prose bug, and test_e2e_wait_fail_priority_discriminating_
     order puts PENDING alone on its own LF-delimited line before a trailing
     READY.
@@ -1656,5 +1694,115 @@ def test_dispatch_write_guard_agrees_between_the_two_harness_copies(tmp_path):
         assert result["realReply"] == "FRAGMENT 0", (
             f"{label}'s dispatch-write identity guard REJECTED a real, "
             f"faithfully-produced prompt -- over-broad, not just under-broad. "
+            f"Result: {result}"
+        )
+
+
+# Round 8: the parity pin above drives a SINGLE batch, so it cannot see the
+# round-7 finding -- a decoy that dispatches under one batch's label while
+# replaying a DIFFERENT batch's real, builder-produced prompt (right
+# function, wrong index). Both copies' original recorders were a flat
+# array/`.indexOf()`, which only proves the builder produced a string for
+# SOME batch, never for the one being dispatched; the single-batch fixture
+# above has no second batch to replay FROM, so it stayed green through that
+# exact gap in both copies at once. This second fixture adds the missing
+# case.
+_DISPATCH_GUARD_CROSS_BATCH_REPLAY_FIXTURE = r"""
+export const meta = { version: "dispatch-guard-cross-batch-replay-parity-pin-fixture" };
+
+function batchDispatchPrompt(batch) {
+  return "REAL PROMPT for " + batch.assignments.map(a => a.assignment_id).join(",");
+}
+
+const batch0 = args[0];
+const batch1 = args[1];
+
+const batch0Reply = await agent(batchDispatchPrompt(batch0), {
+  phase: "SkepticPass", label: "skeptic:dispatch:0",
+});
+
+let replayRejected = false;
+let replayErrorMessage = null;
+let replayReply = null;
+try {
+  // The decoy: the REAL builder, called for batch 0, forwarded under
+  // batch 1's own dispatch label -- a prompt the builder genuinely
+  // produced, just not for the batch this call claims to be.
+  replayReply = await agent(batchDispatchPrompt(batch0), {
+    phase: "SkepticPass", label: "skeptic:dispatch:1",
+  });
+} catch (err) {
+  replayRejected = true;
+  replayErrorMessage = String(err && err.message || err);
+}
+
+return {
+  batch0Reply: batch0Reply,
+  replayRejected: replayRejected,
+  replayErrorMessage: replayErrorMessage,
+  replayReply: replayReply,
+};
+"""
+
+
+def _run_dispatch_guard_cross_batch_replay_fixture(build_harness_fn, tmp_path: Path, label: str) -> dict:
+    """Same one-input-two-harnesses discipline as
+    _run_dispatch_guard_parity_fixture, for the cross-batch-replay shape."""
+    assert NODE is not None, "node executable not found on PATH"
+    batches = [
+        {"index": 0, "assignments": [{
+            "assignment_id": aid("Jean"), "source_form": "Jean", "canonical_target_form": "Jean",
+            "risk_classes": ["high_dispersion"], "windows_truncated": False, "windows": [],
+        }]},
+        {"index": 1, "assignments": [{
+            "assignment_id": aid("Marie"), "source_form": "Marie", "canonical_target_form": "Marie",
+            "risk_classes": ["high_dispersion"], "windows_truncated": False, "windows": [],
+        }]},
+    ]
+    harness_text = build_harness_fn(
+        _DISPATCH_GUARD_CROSS_BATCH_REPLAY_FIXTURE, batches, {}, str(tmp_path), "cross-batch-replay-pin-run",
+    )
+    harness_path = tmp_path / f"dispatch_guard_cross_batch_replay_{label}.js"
+    harness_path.write_text(harness_text, encoding="utf-8")
+    proc = subprocess.run([NODE, str(harness_path)], capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, (
+        f"{label}'s cross-batch-replay parity harness process itself failed (exit "
+        f"{proc.returncode}) -- this means the LEGITIMATE batch-0 dispatch was "
+        f"rejected too, not just the replay:\nSTDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}"
+    )
+    return json.loads(proc.stdout)["result"]
+
+
+def test_dispatch_write_guard_rejects_cross_batch_replay_in_both_harness_copies(tmp_path):
+    """Round 8: closes the parity pin's own blind spot. The pin above
+    (test_dispatch_write_guard_agrees_between_the_two_harness_copies) drives
+    only a single batch, so it cannot see a decoy that dispatches under one
+    batch's label while replaying a DIFFERENT batch's real, builder-produced
+    prompt -- exactly the defect round 7 found in this file's own
+    identity-recording fix (see _DISPATCH_PROMPT_RECORDER's header comment).
+    Measured directly, before porting the fix to the sibling copy: this
+    file's own recorder, Map-keyed by batch index, rejects the replay; the
+    sibling's still-flat-array recorder accepted the SAME replay
+    (`.indexOf()` only proves the builder produced this string for SOME
+    batch, not for batch 1 specifically). This test pins that both copies
+    now reject it, closing the gap the single-batch pin above cannot see."""
+    results = {
+        "skeptic_pipeline_e2e.test.py": _run_dispatch_guard_cross_batch_replay_fixture(
+            build_skeptic_harness, tmp_path, "e2e",
+        ),
+        "skeptic_confident_mismerge.test.py": _run_dispatch_guard_cross_batch_replay_fixture(
+            _load_sibling_mismerge_module_for_dispatch_guard_parity().build_skeptic_harness,
+            tmp_path, "mismerge",
+        ),
+    }
+    for label, result in results.items():
+        assert result["batch0Reply"] == "FRAGMENT 0", (
+            f"{label}'s dispatch-write identity guard rejected batch 0's own "
+            f"legitimate dispatch -- over-broad, not just under-broad. Result: {result}"
+        )
+        assert result["replayRejected"] is True, (
+            f"{label}'s dispatch-write identity guard ACCEPTED a prompt the real "
+            f"batchDispatchPrompt() built for a DIFFERENT batch (batch 0), replayed "
+            f"under batch 1's own dispatch label -- right function, wrong index. "
             f"Result: {result}"
         )
