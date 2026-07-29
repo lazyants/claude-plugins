@@ -43,6 +43,37 @@ of closing it. Round 6's own fix produced instance seven **against itself, withi
    that is the only code performing the guarded operation. A new member can only be added as a
    table entry; there is no code shape that reaches the unguarded path.
 
+### "Drive it through the REAL entry point" has its own ladder, and every rung but the last is decoy-able
+
+Rung 3 says to stop measuring the helper and measure the site. True, but underspecified in the way
+that costs rounds: **a gate is only as strong as the thing it actually OBSERVES, and every way of
+"locating the real decision" can be satisfied by a decoy planted beside it.** Measured over four
+consecutive review rounds on one release, each round's gate defeated by a mutation the previous
+round's gate could not see:
+
+| the gate observes | the decoy that satisfies it | measured result |
+|---|---|---|
+| the guard call exists, and its offset precedes the verdict's | an unused sibling guard placed **earlier in the file**, real guard deleted | gate green, zero real guards |
+| the guard is `!`-negated and `&&`-adjacent to the verdict — same statement | alias the verdict fn, park the correctly guarded expression in an **unused `const`**, point the live branch at the alias | gate green (35 passed), live branch resume-skips |
+| an end-to-end run of the real workflow, asserting the expected **call labels** appeared | two semantically empty `agent()` calls carrying those labels, real guard deleted | all assertions green, no real dispatch, no artifact written |
+
+Each fix was locally reasonable and each was beaten one level up, because each still observed a
+LOCATOR or a NAME rather than an EFFECT. Patching the locator to also reject the latest decoy
+(reject aliases, reject unused consts) buys exactly one round — the next reviewer plants the decoy
+at the level above.
+
+**The rule: assert the EFFECT the guarded operation is supposed to produce or prevent — the artifact
+written to disk, the prompt actually sent, the record actually rejected — never a name, label,
+offset, call count, or extracted copy that merely correlates with it.** A label is a proxy an
+attacker (or a careless refactor) can emit for free; a written fragment is not. When you catch
+yourself asserting `"some:label" in calls`, ask what observable state that label is standing in for,
+and assert that instead.
+
+Corollary for the prose: **do not write the absolute.** "This gate cannot be fooled at any level"
+was shipped in release notes one round after two absolutes about the same gate had already been
+refuted, and the next round refuted it too. State what the gate observes and what that does and does
+not establish; the honest sentence survives the next round, the absolute never has.
+
 ## The step people skip: delete the alternative path
 
 **Delete the alternative path.** Rung 4 with the old helper left in place is rung 3 wearing a
