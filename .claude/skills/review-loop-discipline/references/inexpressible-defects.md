@@ -43,7 +43,7 @@ of closing it. Round 6's own fix produced instance seven **against itself, withi
    that is the only code performing the guarded operation. A new member can only be added as a
    table entry; there is no code shape that reaches the unguarded path.
 
-### "Drive it through the REAL entry point" has its own ladder, and every rung but the last is decoy-able
+### "Drive it through the REAL entry point" has its own ladder, and each rung is decoy-able one level up
 
 Rung 3 says to stop measuring the helper and measure the site. True, but underspecified in the way
 that costs rounds: **a gate is only as strong as the thing it actually OBSERVES, and every way of
@@ -56,18 +56,31 @@ round's gate could not see:
 | the guard call exists, and its offset precedes the verdict's | an unused sibling guard placed **earlier in the file**, real guard deleted | gate green, zero real guards |
 | the guard is `!`-negated and `&&`-adjacent to the verdict — same statement | alias the verdict fn, park the correctly guarded expression in an **unused `const`**, point the live branch at the alias | gate green (35 passed), live branch resume-skips |
 | an end-to-end run of the real workflow, asserting the expected **call labels** appeared | two semantically empty `agent()` calls carrying those labels, real guard deleted | all assertions green, no real dispatch, no artifact written |
+| an end-to-end run asserting the expected **artifact exists** at the expected path | write an expected-looking fixture straight to that path, real operation deleted | green while the guarded operation never ran (raised by a reviewer against this very page; not measured — the row is here because the ladder does not stop at the row above it) |
 
 Each fix was locally reasonable and each was beaten one level up, because each still observed a
 LOCATOR or a NAME rather than an EFFECT. Patching the locator to also reject the latest decoy
 (reject aliases, reject unused consts) buys exactly one round — the next reviewer plants the decoy
-at the level above.
+at the level above. The last row is the one to read twice: it arrived as a review finding on the
+first draft of this section, which had called the artifact rung the end of the ladder. There is no
+rung that is safe by construction.
 
-**The rule: assert the EFFECT the guarded operation is supposed to produce or prevent — the artifact
-written to disk, the prompt actually sent, the record actually rejected — never a name, label,
-offset, call count, or extracted copy that merely correlates with it.** A label is a proxy an
-attacker (or a careless refactor) can emit for free; a written fragment is not. When you catch
-yourself asserting `"some:label" in calls`, ask what observable state that label is standing in for,
-and assert that instead.
+**The rule: assert an effect only the real operation could have produced — its CONTENT and its
+provenance, not the fact that something happened.** "A fragment exists at the expected path" is
+still a proxy: a bypass can write an expected-looking file as cheaply as it can log an expected
+label. What a decoy cannot fake without doing the work is content carrying identity from the real
+inputs — the batch's own `assignment_id` embedded in the prompt that was actually sent, a value
+re-derived from the real artifact by the real downstream code, a record whose rejection reason names
+the input that caused it. Never a name, label, offset, call count, extracted copy, or bare existence
+check. When you catch yourself asserting `"some:label" in calls` — or `path.exists()` — ask what
+observable state it is standing in for, and assert that instead.
+
+**And prove the binding with a negative control, in the same round you write it.** Mutate the real
+operation away — delete the guard, replace the dispatch with a decoy that produces the same surface
+signal — and watch the new assertion fail. An assertion that stays green under that mutation is
+still on a proxy, whatever it is named after; the fix is not finished until you have watched it go
+red for the right reason. This is the cheapest step in the whole ladder and the one that would have
+caught every row of the table one round earlier.
 
 Corollary for the prose: **do not write the absolute.** "This gate cannot be fooled at any level"
 was shipped in release notes one round after two absolutes about the same gate had already been
