@@ -158,24 +158,82 @@ earlier offset — an independent reviewer measured that ordering alone is satis
 UNUSED sibling guard call placed anywhere earlier in the file while the real decision stays unguarded.
 Each site was reverted one at a time and watched failing.
 
-**The precheck guard's own verification was defeated twice, and the fix that finally cannot be.** The
-offset-only structural check above was defeated by a decoy guard: an unused sibling `rejectedAnywhere`
-call placed earlier in the file satisfies mere ordering while the real decision stays unguarded — the
-escape the same-statement-pairing fix above closes. What replaced it — extracting the real
-`!rejectedAnywhere(...) && sentinelVerdict(...)` expression by matching its argument text and running
-that snippet under node — was ALSO defeated, one level up, by a decoy expression (round-4 codex
-finding C1): alias `sentinelVerdict`, park the correctly-guarded expression in an unused `const`, and
-make the real branch call the alias instead. The extraction-based gate still finds one guard, one
-verdict, sees them same-statement-paired, and passes, because it never confirms the snippet it
-extracted is the one actually wired to the live branch — while that live branch resume-skips a reply
-it must reject. Reproduced directly: against that mutant, the round-3 extraction gate reports 35
-passed, fully blind, while a new end-to-end test —
-`tests/skeptic_pipeline_e2e.test.py::test_e2e_precheck_glued_absent_still_regenerates` — fails,
-correctly. That test cannot be fooled by either decoy, at any level: it instantiates the real,
-unmodified `skeptic-pass-wf.template.js` and drives its REAL, live `batchStep()` under node via a
-mocked `agent()`, so whatever expression actually executes is what it exercises, because there is
-nothing else it could be. The extraction-based gate is kept as a secondary, faster signal, not
-removed — but the property this release now trusts is the one only an end-to-end drive can prove.
+**The precheck guard's own verification was defeated three times running, and this release's own
+claim of finality was the third defeat.** The offset-only structural check above was defeated by a
+decoy guard: an unused sibling `rejectedAnywhere` call placed earlier in the file satisfies mere
+ordering while the real decision stays unguarded — the escape the same-statement-pairing fix above
+closes. What replaced it — extracting the real `!rejectedAnywhere(...) && sentinelVerdict(...)`
+expression by matching its argument text and running that snippet under node — was ALSO defeated, one
+level up, by a decoy expression (round-4 codex finding C1): alias `sentinelVerdict`, park the
+correctly-guarded expression in an unused `const`, and make the real branch call the alias instead.
+The extraction-based gate still finds one guard, one verdict, sees them same-statement-paired, and
+passes, because it never confirms the snippet it extracted is the one actually wired to the live
+branch — while that live branch resume-skips a reply it must reject. Reproduced directly: against
+that mutant, the round-3 extraction gate reports 35 passed, fully blind, while a new end-to-end
+test — `tests/skeptic_pipeline_e2e.test.py::test_e2e_precheck_glued_absent_still_regenerates` —
+fails, correctly, because it drives the real, unmodified `skeptic-pass-wf.template.js`'s live
+`batchStep()` under node instead of extracting a snippet.
+
+An earlier draft of these notes said that end-to-end test therefore "cannot be fooled by either
+decoy, at any level." Round 5 measured that false, and it is corrected here rather than smoothed
+over, because an unretracted overclaim shipped in a release about overclaims would be the exact
+defect this release exists to close. The test's three assertions — the `skeptic:dispatch:0` and
+`skeptic:wait:0` labels both appear in the call log, and a canned `merged: true` comes back — are
+read off the mock `agent(promptText, opts)`'s own record of its calls, and every branch of that mock
+keys on `opts.label`; it never reads `promptText` at all. Strip the real containment guard out of the
+live branch, replace it with two bare `agent()` calls carrying those same two labels and nothing
+else — no genuine dispatch prompt sent, no fragment written to disk — and all three assertions still
+pass. A label is a proxy for the effect it normally accompanies, not the effect itself, and a gate
+that asserts on the proxy is only as strong as that correlation.
+
+The progression across three rounds is the most useful thing in this release for a future
+maintainer, because it is one shape recurring at a different layer each time: a structural gate
+defeated by a decoy GUARD (an unused call satisfying pure ordering); the expression gate that
+replaced it defeated by a decoy EXPRESSION (the correct text parked where it is never executed); the
+end-to-end gate that replaced THAT defeated by a decoy CALL LABEL (the right label logged with no
+real work behind it). Driving the live branch was the right direction each time and remains so —
+every fix strictly narrowed what could be faked. What stayed open across all three, restated the same
+way each time: is the thing the gate actually OBSERVES the effect itself, or something that merely
+correlates with it under normal operation? The extraction-based gate stays in place regardless, as a
+secondary, faster signal, not a replacement for either the structural or the end-to-end check.
+
+**This release carries the fix for that instance rather than only naming it.** The mock `agent()`
+now records `promptText`, and the end-to-end test binds to this batch's own `assignment_id` — a
+value only `batchDispatchPrompt(batch)` puts into a prompt, because it `JSON.stringify`s the
+assignments verbatim, so a decoy call cannot carry it without doing the work. The merge and verify
+outcomes are re-derived by real Python off the fragment on disk instead of being read from the
+mock's canned return, the discipline the happy-path test in the same file already used. Existence
+alone would not have been enough either: a bypass can write an expected-looking file as cheaply as
+it can log an expected label, so the assertion is on content the real inputs determine. Verified by
+reproducing the decoy mutation and measuring both gates against it — a copy of the test carrying
+only the previous round's assertions passes, and the new assertion fails.
+
+**The sibling site had no live coverage at all**, which is where every round of this loop has found
+its next defect. The precheck site's gluing defect now has an end-to-end test; the wait site's
+identical defect had only extraction-based coverage — `PARITY_REPLY_SHAPES` calls
+`waitChunkVerdict()`'s extracted definition directly, the exact shape of coverage a decoy call site
+walks around. A `PENDING` sentinel glued to prose ahead of a clean trailing `READY` line now drives
+the real template's live wait loop. That one needs no prompt-text binding: removing the guard flips
+the observable result rather than merely freeing a label, so `merged: false`, the absent
+merge/verify labels, and a `skeptic_triage.json` that must not exist are already effect assertions.
+
+**The identity pins covered four names of sixteen.** The four with non-obvious semantics were
+pinned and the other twelve left as "obvious, safe unpinned" — but the same repointing mutation
+through any of the twelve survives every check: `("lf", chr(0x0A))` → `("lf", "y")` keeps 16
+entries, single codepoints, 16 distinct values, and every generated reply still contains `ABSENT`.
+It also silently voids a claim in these very notes, since lf is the one member that already behaved
+and is excluded from the glued shapes for exactly that reason, so a repointed lf entry stops testing
+lf. Measured with the mutation asserted to have reached `GLUE_CHARS` at runtime: across both
+relevant test files exactly one test fails, and it is the extended pin. All 16 name-to-codepoint
+pairs are pinned now.
+
+**And one fixture could not fail for its own reason.** The block-comment transparency test guarded
+both directions, but its division-direction fixture put the target call on the FOLLOWING line. Under
+the overcorrection it exists to catch, the `/` after the comment starts a regex scan that
+immediately meets the newline and bails — a regex literal cannot span a line — so the scan falls
+through to ordinary-operator exactly as the healthy path does, and the call is found either way.
+Replaced with a same-line fixture where a wrongly-started regex literal swallows the call whole:
+under a live force-False mutant the old fixture reports 1 site and the new one 0.
 
 **Considered and deferred: simplifying the tokenizer.** Two reviewers independently judged its
 ~440-line hand-built construction over-engineered for what it needs to do; one reported a line-count
@@ -256,7 +314,7 @@ the U+2028/U+2029 hole. Named as its own change rather than folded into the secu
 those six is a `splitlines()` boundary, so every one was line-forging-capable, and deleting them
 silently discarded the evidence that an agent had put something there.
 
-Suite: 4178 → **4426 passed, 3 skipped, 2 xfailed**. Every skip is named rather than incidental,
+Suite: 4178 → **4483 passed, 3 skipped, 2 xfailed**. Every skip is named rather than incidental,
 and there are three for two reasons: one pre-existing placeholder, plus the single pin row that
 declares no one-to-one replacement, which now skips in TWO tests — the diff-side check and the
 same-hunk check added below — because a row with no replacement has nothing for either to bind.

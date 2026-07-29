@@ -287,6 +287,14 @@ async function agent(promptText, opts) {
     // schema-validation/retry-until-valid enforcement, which this harness
     // was never built to model.
     schemaRequired: (opts.schema && opts.schema.required) || null,
+    // Round-5 finding F1: a LABEL is a proxy for "this call really did the
+    // work its label names", not proof of it -- this mock never inspected
+    // promptText, so a decoy that fires a semantically empty agent() call
+    // under the right label satisfied every label-only assertion in this
+    // file. Recording the real prompt text lets a test bind its assertion
+    // to content only the REAL prompt-builder (batchDispatchPrompt() etc.)
+    // produces, which a decoy cannot fake without actually doing the work.
+    promptText: promptText,
   });
 
   if (label === "skeptic:merge") return "MERGED (mock)";
@@ -1035,8 +1043,8 @@ def test_e2e_precheck_glued_absent_still_regenerates(tmp_path):
     `&&`-paired, and passes, while the LIVE branch resume-skips a reply it
     must reject.
 
-    This test cannot be fooled by any such decoy, at any level: it does not
-    extract or select a snippet at all. It instantiates the REAL
+    This part of the test cannot be fooled by any such decoy, at any level:
+    it does not extract or select a snippet at all. It instantiates the REAL
     skeptic-pass-wf.template.js (unmodified control flow) and drives its
     REAL, live `batchStep()` under node via the mocked `agent()` -- whichever
     expression actually executes IS the one under test, because there is
@@ -1051,13 +1059,47 @@ def test_e2e_precheck_glued_absent_still_regenerates(tmp_path):
     the exact shape the rejectedAnywhere() containment guard exists to
     reject. Must dispatch (NOT resume-skip) and still merge once dispatch and
     wait succeed -- mirrors the sibling test's own shape/assertions exactly,
-    changing only the precheck reply."""
+    changing only the precheck reply.
+
+    Round-5 finding F1: even this live-batchStep test was not decoy-proof.
+    The mock `agent()` never inspected `promptText`, only `opts.label` -- so a
+    mutation that removes the real containment guard (making this precheck
+    resume-skip, exactly the defect above) AND inserts two semantically empty
+    `agent()` calls carrying the labels "skeptic:dispatch:0"/"skeptic:wait:0"
+    satisfied every assertion this test used to make: both labels present,
+    `merged: true` from the still-canned "skeptic:verify" mock. No real
+    dispatch prompt ever ran and no fragment was ever written. The two blocks
+    below close that: the dispatch call's own PROMPT TEXT must carry this
+    batch's real assignment_id (something only batchDispatchPrompt(batch)
+    itself embeds -- see the template's own `JSON.stringify(batch.assignments,
+    ...)` line -- a decoy prompt string cannot contain it without actually
+    calling that function), and the merge/verify outcome must be independently
+    re-derived by REAL Python straight off disk, never trusted from the
+    mock's own canned return value (the same discipline
+    test_e2e_full_pipeline_happy_path_real_merge_and_verify uses)."""
     durable_root = str(tmp_path)
     lang_dir = tmp_path / "languages"
     particle_config = write_particle_config(lang_dir)
+    lang = bn.load_language_config(particle_config, languages_dir=lang_dir)
+    text = "Jean walked home alone."
+    block_id, blk = block(text)
+    manifest_path = tmp_path / "manifest.json"
+    write_json(manifest_path, make_manifest((block_id, blk)))
+    jean_evidence = evidence_for("Jean", block_id, "seg01", text, lang)
+
     run_id = "e2e-run-precheck-glued-absent"
-    batches = [{"index": 0, "assignments": [make_assignment_for_args("Jean", [])]}]
-    plan = {"0": {"precheck": "the chunk was cut short ABSENT 0\nPRESENT 0"}}
+    run_dir = tmp_path / "skeptic" / "runs" / run_id
+    write_json(run_dir / "assignments_0.json", [aid("Jean")])
+    write_json(run_dir / "assignments.json", make_aggregate_manifest(
+        run_id, [make_assignment_for_manifest("Jean", [jean_evidence])],
+    ))
+
+    batches = [{"index": 0, "assignments": [make_assignment_for_args("Jean", [window_with_text(jean_evidence, text)])]}]
+    dispatch_doc = {"schema_version": 1, "run_id": run_id, "records": [adverse_record("Jean", jean_evidence)]}
+    plan = {"0": {
+        "precheck": "the chunk was cut short ABSENT 0\nPRESENT 0",
+        "dispatchWrite": dispatch_doc, "wait": "READY 0",
+    }}
 
     out = run_skeptic_workflow(
         tmp_path=tmp_path, durable_root=durable_root, particle_config=particle_config,
@@ -1071,6 +1113,30 @@ def test_e2e_precheck_glued_absent_still_regenerates(tmp_path):
     )
     assert "skeptic:wait:0" in labels
     assert out["result"]["merged"] is True
+
+    # F1 hardening 1/2: the dispatch call's own prompt content, not merely its
+    # label. A label-only decoy call (see the docstring above) cannot make
+    # this pass, because it never calls batchDispatchPrompt(batch) and so
+    # never embeds this batch's real assignment_id anywhere in its text.
+    dispatch_calls = [c for c in out["calls"] if c["label"] == "skeptic:dispatch:0"]
+    assert len(dispatch_calls) == 1, f"expected exactly one dispatch call, got {len(dispatch_calls)}"
+    assert aid("Jean") in dispatch_calls[0]["promptText"], (
+        "the dispatch call's own prompt text does not carry this batch's real "
+        "assignment_id -- a decoy that logs the right LABEL without actually "
+        "calling batchDispatchPrompt(batch) would satisfy every label-only "
+        "assertion above while never sending real work"
+    )
+
+    # F1 hardening 2/2: the SIDE EFFECT on disk, verified by REAL Python --
+    # never trusting the mock's own canned "skeptic:merge"/"skeptic:verify"
+    # return values, exactly as the happy-path test above does.
+    triage_path = tmp_path / "skeptic_triage.json"
+    merge_result = sr.run_merge_fragments(run_dir, triage_path)
+    assert merge_result["records"] == 1
+    verify_result = sr.run_verify_merged(
+        triage_path, run_dir / "assignments.json", manifest_path, particle_config, languages_dir=lang_dir,
+    )
+    assert verify_result == {"verified": True, "missing": [], "frozen_input_mismatch": False}
 
 
 def test_e2e_wait_fail_priority_discriminating_order(tmp_path):
@@ -1099,6 +1165,78 @@ def test_e2e_wait_fail_priority_discriminating_order(tmp_path):
     labels = [c["label"] for c in out["calls"]]
     assert "skeptic:merge" not in labels
     assert "skeptic:verify" not in labels
+
+
+def test_e2e_wait_glued_pending_with_trailing_ready_still_not_ready(tmp_path):
+    """Round-5 finding F4: the precheck site's own gluing defect (see
+    test_e2e_precheck_glued_absent_still_regenerates just above) has a
+    live-batchStep e2e test; the WAIT site's identical defect did not, until
+    this test. Every existing wait-site e2e test above drives a DIFFERENT
+    shape: test_e2e_wait_substring_collision_reports_not_ready is the #227
+    substring-inside-prose bug, and test_e2e_wait_fail_priority_discriminating_
+    order puts PENDING alone on its own LF-delimited line before a trailing
+    READY (sentinelVerdict()'s own fail-priority scan already rejects that,
+    unguarded). Neither drives a PENDING sentinel GLUED to prose by a
+    non-newline character with a trailing clean READY line -- the exact shape
+    tests/rejected_anywhere_parity.test.py's own PARITY_REPLY_SHAPES calls
+    "glued_pending_space", and the shape rejectedAnywhere()'s containment
+    guard inside waitChunkVerdict() exists to reject. That parity file's
+    test_all_three_wait_verdicts_agree_on_every_reply_shape already covers
+    this reply SHAPE, but only by extracting waitChunkVerdict()'s own
+    DEFINITION and calling it directly -- exactly the extraction-based
+    coverage that let a decoy call-site walk around the precheck guard
+    (round-4 codex finding C1) go unnoticed until an e2e test drove the real
+    control flow. This test closes the same gap at the wait site: it
+    instantiates the REAL template and drives its REAL, live batchStep()
+    wait loop under node via the mocked agent(), so whichever expression
+    actually decides readiness IS the one under test.
+
+    No promptText/disk hardening is needed here the way F1 needed it for the
+    precheck site: removing this guard does not merely let a decoy fake a
+    label, it flips the OBSERVABLE decision itself -- a glued PENDING
+    misread as ready would proceed straight into the real merge/verify calls
+    (out["result"]["merged"] would read True from the still-canned
+    "skeptic:verify" mock, and "skeptic:merge"/"skeptic:verify" would appear
+    in labels), which the assertions below already catch without needing a
+    label-count proxy. The skeptic_triage.json existence check adds one more
+    disk-level guard against a hypothetical mutation that fakes the JS
+    return value while still writing merge output some other way."""
+    durable_root = str(tmp_path)
+    lang_dir = tmp_path / "languages"
+    particle_config = write_particle_config(lang_dir)
+    run_id = "e2e-run-wait-glued-pending"
+    batches = [{"index": 0, "assignments": [make_assignment_for_args("Jean", [])]}]
+    plan = {
+        "0": {
+            "precheck": "ABSENT 0",
+            "wait": "the chunk was cut short PENDING 0\nREADY 0",
+        },
+        # This test is about the wait-site containment guard, not the
+        # frozen-input check -- canned clean (mirrors the sibling tests
+        # above).
+        "frozenCheck": {"frozen_input_mismatch": False},
+    }
+
+    out = run_skeptic_workflow(
+        tmp_path=tmp_path, durable_root=durable_root, particle_config=particle_config,
+        run_id=run_id, batch_agent_cap=10_000, batches=batches, plan=plan,
+    )
+    assert out["result"]["merged"] is False, (
+        "a PENDING sentinel glued to prose by a non-newline character, with a "
+        "trailing clean READY line, must never be read as ready -- the exact "
+        "defect rejectedAnywhere()'s containment guard inside "
+        "waitChunkVerdict() exists to close at this site"
+    )
+    assert out["result"]["reason"] == "fragment-check-failed"
+    assert out["result"]["notReady"] == [0]
+    labels = [c["label"] for c in out["calls"]]
+    assert "skeptic:merge" not in labels
+    assert "skeptic:verify" not in labels
+    assert not (tmp_path / "skeptic_triage.json").exists(), (
+        "no triage file should exist on disk at all -- the batch never "
+        "became ready, so merge must never have run for real, whatever the "
+        "JS return value claims"
+    )
 
 
 def test_e2e_precheck_non_terminal_quoted_present_still_regenerates(tmp_path):

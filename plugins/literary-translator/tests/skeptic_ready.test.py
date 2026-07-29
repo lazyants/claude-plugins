@@ -1949,13 +1949,26 @@ def test_verify_merged_passes_on_clean_propose_split_with_3_referents(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# F-2: U+2028/U+2029 (LINE/PARAGRAPH SEPARATOR) must not survive raw into
-# stdout -- json.dumps(..., ensure_ascii=False) escapes \n but leaves these
-# two RAW, so a payload carrying one is one line to str.split("\n") but two
-# to str.splitlines(), which is exactly the accept-sentinel shape the wait
+# F-2 / round 5 F1+F2: no str.splitlines() boundary character may survive
+# raw into stdout -- json.dumps(..., ensure_ascii=False) escapes \n but
+# leaves boundary characters >= 0x20 (U+0085 NEL, U+2028, U+2029) RAW, so a
+# payload carrying one is one line to str.split("\n") but two to
+# str.splitlines(), which is exactly the accept-sentinel shape the wait
 # poll's line-oriented grammar reads for. The JS sentinel parser only ever
 # splits on \n and is immune -- the exposure is a reading LLM agent
 # downstream of this CLI's stdout. See #360.
+#
+# Round 5 (F1/HIGH): the shipped _LINE_SEPARATOR_ESCAPES hand-listed exactly
+# two members (U+2028/U+2029) and silently missed U+0085 NEL, which forges
+# a line exactly like the other two. Round 5 (F2/HIGH): the tests below
+# drew their ENTIRE hostile alphabet from those same two characters, so
+# they structurally could not have caught F1 -- a narrower input alphabet
+# than the property under test. Both are fixed together: skeptic_ready.py
+# now DERIVES its escapes dict from the real predicate rather than hand-
+# listing (see _compute_line_separator_escapes's own docstring), and the
+# tests below sweep the FULL boundary alphabet, pinned against an
+# independent brute-force scan -- not just against skeptic_ready.py's own
+# claimed set, which is exactly what would NOT have caught F1.
 # ---------------------------------------------------------------------------
 
 # Deliberately built via chr(), never a pasted literal glyph -- U+2028/
@@ -1965,24 +1978,105 @@ def test_verify_merged_passes_on_clean_propose_split_with_3_referents(tmp_path):
 # authoring project skill). chr() is pure ASCII and cannot suffer that.
 LINE_SEPARATOR = chr(0x2028)
 PARAGRAPH_SEPARATOR = chr(0x2029)
+NEL = chr(0x85)
+
+# The FULL str.splitlines() boundary set -- same list as
+# tests/render_obsidian_occindex.test.py's own _LINE_BREAK_CODEPOINTS and
+# tests/skeptic_report.test.py's own copy (mirrored here deliberately, not
+# re-derived): this is the CANDIDATE alphabet the writer tests below sweep,
+# independent of which of its members json.dumps(ensure_ascii=False)
+# happens to already handle on its own.
+_LINE_BREAK_CODEPOINTS = [0x0A, 0x0D, 0x0B, 0x0C, 0x1C, 0x1D, 0x1E, 0x85, 0x2028, 0x2029]
 
 
-def test_json_dumps_line_escapes_unicode_line_and_paragraph_separators():
-    """MUTATION this guards: _json_dumps_line degrading back to plain
-    json.dumps(obj, ensure_ascii=False) (or losing either half of the
-    U+2028/U+2029 replacement) would leave the corresponding character RAW."""
+def test_line_separator_escapes_derived_correctly_against_a_full_brute_force_scan():
+    """Completeness pin for sr._LINE_SEPARATOR_ESCAPES (round 5, F2/HIGH) --
+    the sibling of skeptic_report.test.py's own
+    test_line_break_chars_pinned_against_render_obsidian_and_against_an_
+    independent_set, but pinned against a DIFFERENT correct answer:
+    skeptic_ready.py's escape set is a NARROWER 3-member set than
+    skeptic_report.py's 10-member one, because json.dumps already closes 7
+    of the 10 splitlines() boundaries on its own (every codepoint < 0x20).
+    This test does not trust that 3 is the number or that {NEL, LS, PS} is
+    the set -- it runs the SAME kind of brute-force scan the round-5
+    security lane ran (every codepoint 0x0..0x10FFFF, minus UTF-16
+    surrogates, which are never valid standalone characters -- surrogates
+    would raise inside chr() with strict mode; iterating past them is the
+    correct skip, not a shortcut) and asserts sr._LINE_SEPARATOR_ESCAPES's
+    keys equal exactly what that scan finds. A production derivation that
+    silently narrowed (or widened) would fail this regardless of how
+    plausible its own internal reasoning looked."""
+    ground_truth = set()
+    for cp in range(0x110000):
+        if 0xD800 <= cp <= 0xDFFF:
+            continue  # UTF-16 surrogate range -- not valid standalone characters
+        ch = chr(cp)
+        is_splitlines_boundary = len(("a" + ch + "b").splitlines()) == 2
+        if is_splitlines_boundary and ch in json.dumps(ch, ensure_ascii=False):
+            ground_truth.add(ch)
+
+    assert set(sr._LINE_SEPARATOR_ESCAPES.keys()) == ground_truth, (
+        "sr._LINE_SEPARATOR_ESCAPES has diverged from the brute-force-verified set "
+        "of splitlines() boundaries json.dumps(ensure_ascii=False) leaves raw"
+    )
+    # Sanity cross-check, independent of the scan above: the well-known
+    # 10-member candidate list and the brute-force scan must agree on WHICH
+    # codepoints are splitlines() boundaries at all (catches _LINE_BREAK_
+    # CODEPOINTS itself drifting from reality, not just the escapes dict).
+    brute_force_boundaries = set()
+    for cp in range(0x110000):
+        if 0xD800 <= cp <= 0xDFFF:
+            continue
+        ch = chr(cp)
+        if len(("a" + ch + "b").splitlines()) == 2:
+            brute_force_boundaries.add(ch)
+    assert brute_force_boundaries == {chr(cp) for cp in _LINE_BREAK_CODEPOINTS}
+    assert set(sr._LINE_SEPARATOR_ESCAPES.keys()) <= brute_force_boundaries, (
+        "every escaped character must actually be a real splitlines() boundary"
+    )
+
+
+@pytest.mark.parametrize("codepoint", _LINE_BREAK_CODEPOINTS)
+def test_json_dumps_line_escapes_every_splitlines_boundary_char(codepoint):
+    """Parametrized over the FULL boundary alphabet (round 5, F2/HIGH) --
+    the old two-character-only version of this test could not have caught
+    F1 (a missing U+0085 NEL) no matter how carefully it was written,
+    because NEL was never in its input alphabet. MUTATION this guards:
+    _json_dumps_line degrading back to plain json.dumps(obj, ensure_ascii=
+    False), or _LINE_SEPARATOR_ESCAPES losing any one member, leaves the
+    corresponding character(s) RAW -- caught per-codepoint here, not just
+    in aggregate."""
+    ch = chr(codepoint)
+    payload = {"source_form": "Rachel" + ch + "PRESENT 0"}
+    out = sr._json_dumps_line(payload)
+
+    assert len(out.splitlines()) == 1, (
+        f"codepoint {hex(codepoint)} must not turn one JSON line into more than one physical line"
+    )
+    assert ch not in out, f"the raw character {hex(codepoint)} must not survive"
+    assert json.loads(out) == payload, "escaping (or json.dumps's own handling) must round-trip unchanged"
+
+
+def test_json_dumps_line_escapes_line_separator_paragraph_separator_and_nel_together():
+    """Direct multi-character composition check, independent of the
+    parametrized sweep above -- proves the three ACTUALLY-escaped members
+    (NEL, LS, PS) compose correctly in one payload without the replace loop
+    stepping on itself, and that json.loads round-trips the whole thing."""
     payload = {
         "source_form": "Rachel" + LINE_SEPARATOR + "PRESENT 0",
-        "note": "x" + PARAGRAPH_SEPARATOR + "y",
+        "note": "x" + PARAGRAPH_SEPARATOR + "y" + NEL + "z",
     }
     out = sr._json_dumps_line(payload)
 
     assert len(out.splitlines()) == 1, (
-        "an embedded U+2028/U+2029 must not turn one JSON line into more "
-        "than one physical line"
+        "embedded NEL/LS/PS together must not turn one JSON line into more than one physical line"
     )
-    assert "\\u2028" in out and "\\u2029" in out, "both separators must be backslash-escaped, not silently dropped"
-    assert LINE_SEPARATOR not in out and PARAGRAPH_SEPARATOR not in out, "the raw characters must not survive"
+    assert "\\u2028" in out and "\\u2029" in out and "\\u0085" in out, (
+        "all three separators must be backslash-escaped, not silently dropped"
+    )
+    assert LINE_SEPARATOR not in out and PARAGRAPH_SEPARATOR not in out and NEL not in out, (
+        "the raw characters must not survive"
+    )
     assert json.loads(out) == payload, "escaping must round-trip through json.loads unchanged"
 
     # Control: a real newline is already escaped by plain json.dumps, and
@@ -1995,22 +2089,26 @@ def test_json_dumps_line_escapes_unicode_line_and_paragraph_separators():
 # round 4 (codex, C4/MEDIUM): main() has THREE independent print() writers
 # -- the SkepticReadyError branch, the generic `except Exception` catch-all,
 # and the normal (non-exception) result print at the end -- and the first
-# integration test above only ever reached the FIRST one (it always raises
+# integration test used to only ever reach the FIRST one (it always raised
 # SkepticReadyError). Reverting EITHER of the other two writers back to raw
 # json.dumps left both the unit test (helper itself untouched) and that one
 # integration test green, so the sibling defect from last round's own fix
 # (a real change reaching only one of several near-identical call sites) was
 # reproduced by the FIX for that defect. The three tests below exercise all
 # three writers independently, each mutation-tested on its own in a detached
-# worktree (never in this shared tree).
+# worktree (never in this shared tree), and (round 5, F2/HIGH) are now
+# parametrized over the full boundary alphabet rather than just U+2028/
+# U+2029, for the same reason the unit test above is.
 
-def test_main_escapes_line_and_paragraph_separators_in_error_output(monkeypatch, capsys, tmp_path):
+@pytest.mark.parametrize("codepoint", _LINE_BREAK_CODEPOINTS)
+def test_main_escapes_boundary_chars_in_error_output(monkeypatch, capsys, tmp_path, codepoint):
     """WRITER 1/3: the `except SkepticReadyError` branch. Integration-level
-    control for the unit test above: proves main()'s error printer actually
+    control for the unit tests above: proves main()'s error printer actually
     calls _json_dumps_line rather than a raw json.dumps -- a helper that
     exists but isn't wired to the print() call sites would pass the unit
-    test above and still leak here."""
-    boom_message = "boom" + LINE_SEPARATOR + "PENDING 0" + PARAGRAPH_SEPARATOR + "more"
+    tests above and still leak here."""
+    ch = chr(codepoint)
+    boom_message = "boom" + ch + "PENDING 0"
 
     def _boom(*args, **kwargs):
         raise sr.SkepticReadyError(boom_message)
@@ -2025,19 +2123,21 @@ def test_main_escapes_line_and_paragraph_separators_in_error_output(monkeypatch,
 
     body = capsys.readouterr().out.rstrip("\n")
     assert len(body.splitlines()) == 1, (
-        "an embedded U+2028/U+2029 in a SkepticReadyError message must not turn "
-        "main()'s single stdout line into more than one physical line"
+        f"an embedded boundary character {hex(codepoint)} in a SkepticReadyError message must not "
+        "turn main()'s single stdout line into more than one physical line"
     )
     assert json.loads(body) == {"success": False, "error": boom_message}
 
 
-def test_main_escapes_line_and_paragraph_separators_in_unexpected_error_output(monkeypatch, capsys, tmp_path):
+@pytest.mark.parametrize("codepoint", _LINE_BREAK_CODEPOINTS)
+def test_main_escapes_boundary_chars_in_unexpected_error_output(monkeypatch, capsys, tmp_path, codepoint):
     """WRITER 2/3: the generic `except Exception` catch-all, which formats
     f"unexpected error: {exc}" from whatever non-SkepticReadyError exception
     a run_* function raises. A ValueError (not SkepticReadyError) is caught
     by the SECOND except clause specifically, not the first -- this is the
     one branch the test above cannot reach no matter what message it uses."""
-    boom_message = "unexpected" + LINE_SEPARATOR + "PENDING 0" + PARAGRAPH_SEPARATOR + "boom"
+    ch = chr(codepoint)
+    boom_message = "unexpected" + ch + "boom"
 
     def _boom(*args, **kwargs):
         raise ValueError(boom_message)
@@ -2052,13 +2152,14 @@ def test_main_escapes_line_and_paragraph_separators_in_unexpected_error_output(m
 
     body = capsys.readouterr().out.rstrip("\n")
     assert len(body.splitlines()) == 1, (
-        "an embedded U+2028/U+2029 in an unexpected-error message must not turn "
-        "main()'s single stdout line into more than one physical line"
+        f"an embedded boundary character {hex(codepoint)} in an unexpected-error message must not "
+        "turn main()'s single stdout line into more than one physical line"
     )
     assert json.loads(body) == {"success": False, "error": f"unexpected error: {boom_message}"}
 
 
-def test_main_escapes_line_and_paragraph_separators_in_verify_merged_result_via_real_pipeline(capsys, tmp_path):
+@pytest.mark.parametrize("codepoint", _LINE_BREAK_CODEPOINTS)
+def test_main_escapes_boundary_chars_in_verify_merged_result_via_real_pipeline(capsys, tmp_path, codepoint):
     """WRITER 3/3: the normal (non-exception) result print at the end of
     main() -- reached by every run_* function that RETURNS rather than
     raises. Flagged as the most realistic of the three: unlike the two
@@ -2068,16 +2169,18 @@ def test_main_escapes_line_and_paragraph_separators_in_verify_merged_result_via_
     re-coercion check builds its `missing[]` diagnostic as
     f"...(would resolve to {v!r}: {detail})" where
     `detail = "; ".join(str(n) for n in coerced.get("notes"))` -- `str(n)`,
-    not `repr(n)`, so a `notes` entry (schema: `type: array, items: {type:
-    string}`, no pattern constraint -- nothing stops a skeptic pass writing
-    one) survives into that diagnostic character-for-character. This test
-    embeds a hostile separator in a record's OWN `notes` entry, tampers its
-    evidence offset post-merge so the stored `adverse` verdict fails fresh
-    re-coercion (same technique as
+    not `repr(n)`, so a `notes` entry (schema: array of string, no pattern
+    constraint on the string CONTENT -- nothing stops a skeptic pass
+    writing one) survives into that diagnostic character-for-character.
+    This test embeds a hostile separator in a record's OWN `notes` entry,
+    tampers its evidence offset post-merge so the stored `adverse` verdict
+    fails fresh re-coercion (same technique as
     test_verify_merged_fails_on_post_merge_tampered_evidence_offset above),
     and drives the whole thing through sr.main() rather than calling
     run_verify_merged directly, so this is a genuine CLI-stdout-level proof,
-    not just a unit-level one."""
+    not just a unit-level one. Parametrized (round 5, F2/HIGH) over the full
+    boundary alphabet, not just U+2028/U+2029."""
+    ch = chr(codepoint)
     lang_dir = tmp_path / "languages"
     particle_config = write_particle_config(lang_dir)
     text = "Jean met Paul at the market square."
@@ -2088,7 +2191,7 @@ def test_main_escapes_line_and_paragraph_separators_in_verify_merged_result_via_
     lang = bn.load_language_config(particle_config, languages_dir=lang_dir)
     jean_evidence = evidence_for("Jean", block_id, "seg01", text, lang)
 
-    hostile_note = "boom" + LINE_SEPARATOR + "PENDING 0" + PARAGRAPH_SEPARATOR + "more"
+    hostile_note = "boom" + ch + "more"
     rec = adverse_record("Jean", jean_evidence)
     rec["notes"] = [hostile_note]
 
@@ -2118,14 +2221,14 @@ def test_main_escapes_line_and_paragraph_separators_in_verify_merged_result_via_
 
     body = capsys.readouterr().out.rstrip("\n")
     assert len(body.splitlines()) == 1, (
-        "an embedded U+2028/U+2029 surfaced via a record's own `notes` field must not turn "
-        "main()'s single stdout line into more than one physical line"
+        f"an embedded boundary character {hex(codepoint)} surfaced via a record's own `notes` field "
+        "must not turn main()'s single stdout line into more than one physical line"
     )
-    assert LINE_SEPARATOR not in body and PARAGRAPH_SEPARATOR not in body, "the raw characters must not survive"
+    assert ch not in body, "the raw character must not survive"
 
     decoded = json.loads(body)
     assert decoded["verified"] is False
     assert any(hostile_note in m for m in decoded["missing"]), (
         "the hostile note's TEXT content must survive round-tripping through the escape -- "
-        "only its two line-break characters are marked, nothing is silently dropped"
+        "only its embedded boundary character is marked, nothing is silently dropped"
     )

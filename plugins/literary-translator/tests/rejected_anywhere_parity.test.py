@@ -1087,10 +1087,37 @@ def test_js_call_sites_treats_block_comments_as_transparent():
         f"prev_ends_expr=True instead of staying transparent"
     )
 
-    # A block comment sitting where division is expected must not flip that
-    # either -- transparency has to work in both directions.
-    src_division = "const ratio = total /* gap */ / count\nwaitChunkVerdict(a, b)\n"
-    assert len(js_call_sites(src_division, "waitChunkVerdict")) == 1
+    # Round-5 finding F3: the fixture that used to stand here for the OPPOSITE
+    # overcorrection (a block comment sitting where DIVISION is expected,
+    # wrongly forcing prev_ends_expr=False) put its target call on the
+    # FOLLOWING line: "const ratio = total /* gap */ / count\nwaitChunkVerdict(a, b)\n".
+    # That cannot discriminate the mutation it claims to guard: under a
+    # force-False bug the `/` after the comment tries `_skip_regex_literal`,
+    # which immediately hits the `\n` before the next `/` and returns None
+    # (a well-formed regex literal cannot span a line) -- so it falls through
+    # to "ordinary operator" exactly as the correct, transparent path does,
+    # and the call on the next line is found either way. Green whether the
+    # bug is present or not is not a lock on anything.
+    #
+    # Codex's discriminating fixture keeps the call on the SAME line, between
+    # the two division slashes, so a wrongly-started regex literal actually
+    # swallows it: correctly (prev_ends_expr transparent, staying True from
+    # "total"), the `/` right after the comment is read as ordinary division
+    # and the scan proceeds character-by-character through the call,
+    # finding it; under the force-False bug, that same `/` triggers
+    # `_skip_regex_literal`, which -- with no `\n` in the way this time --
+    # runs all the way to the SECOND `/` (before " count") and swallows
+    # " waitChunkVerdict(real) " whole as if it were regex body text, so the
+    # call is never scanned as code at all.
+    src_division = "total /* gap */ / waitChunkVerdict(real) / count\n"
+    sites_division = js_call_sites(src_division, "waitChunkVerdict")
+    assert len(sites_division) == 1, (
+        f"a block comment sitting where division is expected desynced the "
+        f"tokenizer: found {sites_division}. If empty, block comments have "
+        f"regressed to forcing prev_ends_expr=False instead of staying "
+        f"transparent, and the '/' right after the comment was misread as "
+        f"the start of a regex literal that swallowed the real call whole"
+    )
 
 
 def test_js_call_sites_recurses_into_template_interpolations():
@@ -1589,19 +1616,41 @@ assert len(GLUE_CHARS_BY_NAME) == len(GLUE_CHARS), (
     f"{len(GLUE_CHARS)} entries down to {len(GLUE_CHARS_BY_NAME)}"
 )
 
-# The members with non-obvious semantics -- the ones a shape-only check
-# cannot distinguish from an arbitrary stand-in character, and the ones this
-# release's own claims are actually about: U+2028/U+2029 are treated as line
-# breaks by str.splitlines() but NOT by split("\n") (what sentinelVerdict()
-# actually calls), and U+0085 is NOT stripped by trim() the way U+2028/U+2029
-# are. zwsp (U+200B) is pinned too because it is invisible in a diff or
-# terminal -- a silent substitution there is the least likely to be caught by
-# eye, the exact failure mode this whole section exists to close.
+# Round-5 finding F2: round 4 pinned only the four members with non-obvious
+# semantics -- U+2028/U+2029 are treated as line breaks by str.splitlines()
+# but NOT by split("\n") (what sentinelVerdict() actually calls), U+0085 is
+# NOT stripped by trim() the way U+2028/U+2029 are, and zwsp (U+200B) is
+# invisible in a diff or terminal, the least likely substitution to be caught
+# by eye. But codex measured that the SAME class of mutation also defeats the
+# release notes' own historical claim through any of the OTHER twelve names:
+# changing `("lf", chr(0x0A))` to `("lf", "y")` preserves every shape-only
+# guard above -- still 16 entries, still single codepoints, still 16 distinct
+# values, and every PRECHECK_GLUE_REPLY_SHAPES entry still contains "ABSENT"
+# so the behavioural assertions stay green too -- while silently flipping the
+# release notes' "lf is the sole non-offender, 15 of 16 falsely resume-skip"
+# claim to "16 of 16 non-offenders" (lf's pre-fix good behaviour was the
+# reason it was excluded from the glued_* shapes in PRECHECK_REPLY_SHAPES to
+# begin with; a repointed "lf" entry would no longer be testing lf at all).
+# So the full name-to-codepoint mapping is pinned, not just the four
+# non-obvious ones -- every member is something a claim in this release's own
+# notes is actually about.
 REQUIRED_GLUE_IDENTITIES = {
+    "space": 0x20,
+    "tab": 0x09,
+    "lf": 0x0A,
+    "cr": 0x0D,
+    "vt": 0x0B,
+    "ff": 0x0C,
+    "fs_u001c": 0x1C,
+    "gs_u001d": 0x1D,
+    "rs_u001e": 0x1E,
+    "us_u001f": 0x1F,
+    "nbsp_u00a0": 0xA0,
+    "nel_u0085": 0x0085,
     "lsep_u2028": 0x2028,
     "psep_u2029": 0x2029,
-    "nel_u0085": 0x0085,
     "zwsp_u200b": 0x200B,
+    "letter_x": ord("x"),
 }
 
 
@@ -1613,7 +1662,13 @@ def test_glue_chars_pins_the_specific_high_risk_codepoints():
     that replaces `("lsep_u2028", chr(0x2028))` with `("lsep_u2028", "y")`.
     That mutation is invisible to shape-only checks because "y" is also a
     single, distinct codepoint; it is only visible by looking up the NAME and
-    checking it maps to the codepoint the name claims."""
+    checking it maps to the codepoint the name claims.
+
+    Round-5 finding F2 extended this from 4 pinned names to all 16 -- see
+    the module-level comment above REQUIRED_GLUE_IDENTITIES for why the other
+    twelve are not "obvious semantics, safe to leave unpinned": the SAME
+    repointing mutation applied to any of them survives every check that
+    existed before this extension."""
     for name, expected_codepoint in REQUIRED_GLUE_IDENTITIES.items():
         assert name in GLUE_CHARS_BY_NAME, (
             f"expected a GLUE_CHARS entry named {name!r}, not found. Names "

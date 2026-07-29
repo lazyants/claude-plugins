@@ -130,7 +130,22 @@ def load_worklist_risk_classes(worklist_path: Path) -> dict:
     `entries[]`. Absent/unreadable/malformed -> `{}`, degrading every
     entity's risk-class display to "unavailable" rather than making the
     whole report fatal -- the worklist is never the binding input here,
-    `skeptic_triage.json` is."""
+    `skeptic_triage.json` is.
+
+    Round 5 (F5, LOW): file-level malformation (missing file, bad JSON, no
+    `entries[]` array) was already caught above, but a per-ENTRY `risk_
+    classes` of the wrong SHAPE (not a list, or a list containing a
+    non-string) was not -- it reached `format_report`'s `", ".join(...)`/
+    `for c in ...` unguarded and raised `TypeError`, with no `try` around
+    any of it in `main()` (only `load_triage`/`load_manifest` are wrapped).
+    That contradicted this function's own "never fatal" promise, so the
+    fix is here, not in the docstring: a malformed `risk_classes` value now
+    degrades that ONE entity to the SAME "no worklist entry" state (never
+    added to `by_form`, so `.get(source_form)` returns `None`, which
+    `format_report` already renders as "unavailable") rather than crashing
+    the whole report over one bad entity -- mirrors `derive_quote`'s own
+    "malformed input degrades to `unavailable_reason`, never raises"
+    pattern for evidence citations."""
     if not worklist_path.is_file():
         return {}
     try:
@@ -142,8 +157,14 @@ def load_worklist_risk_classes(worklist_path: Path) -> dict:
         return {}
     by_form = {}
     for e in entries:
-        if isinstance(e, dict) and isinstance(e.get("source_form"), str):
-            by_form[e["source_form"]] = e.get("risk_classes") or []
+        if not isinstance(e, dict) or not isinstance(e.get("source_form"), str):
+            continue
+        risk_classes = e.get("risk_classes")
+        if risk_classes is None:
+            risk_classes = []
+        if not isinstance(risk_classes, list) or not all(isinstance(c, str) for c in risk_classes):
+            continue  # malformed shape -- degrade to "no entry", never crash on it
+        by_form[e["source_form"]] = risk_classes
     return by_form
 
 
@@ -262,26 +283,77 @@ _LINE_BREAK_CHARS = frozenset("\n\r\v\f\x1c\x1d\x1e\x85" + chr(0x2028) + chr(0x2
 
 _CONTROL_CHARS_RE = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 
+# Round 5 (F4, MEDIUM): the explicit bidi OVERRIDE/EMBEDDING family --
+# LRE, RLE, PDF, LRO, RLO -- lets a source_form DISPLAY as a different name
+# than the one actually stored (the "Trojan Source" class, CVE-2021-42574):
+# LRO/RLO force EVERY character within their scope to render in a specific
+# direction regardless of that character's own bidi class, and LRE/RLE/PDF
+# are their paired embed/pop counterparts.
+#
+# JUDGMENT CALL (see this file's own round-5 report for the full reasoning):
+# this five-member family is fixed here; three lookalike candidates the
+# reviewer also raised are deliberately DEFERRED, not fixed, because they
+# are different threat classes or not vulnerable at all:
+#   - Isolates (LRI U+2066, RLI U+2067, FSI U+2068, PDI U+2069) are
+#     Unicode's own SAFER REPLACEMENT for embeddings/overrides: they do
+#     not force a direction on their content -- each character's own bidi
+#     class still participates -- so they cannot reorder or reverse the
+#     characters of a name the way LRO/RLO can, which is the spoof this
+#     fix is about. Not risk-FREE, and the weaker claim is the honest one:
+#     under UAX #9's BD9 an isolate initiator with no matching PDI runs to
+#     the end of the paragraph, so an UNPAIRED one does reach the text
+#     after it -- as a direction context, not as a character reordering,
+#     and bounded to that line here because every line-break-class
+#     character is already collapsed above. This plugin translates Hebrew
+#     (RTL) content that can legitimately need an isolate when embedded
+#     inside LTR prose, so marking them would risk mangling a genuine
+#     name: the residual is named here and deliberately left.
+#   - ZWSP (U+200B) has bidi class BN (Boundary Neutral) -- it has NO
+#     directional power at all (verified: unicodedata.bidirectional
+#     returns "BN", unlike every character actually fixed here). Its risk,
+#     if any, is an invisible-character/homograph concern, not a bidi
+#     display spoof -- a different vulnerability class than this finding.
+#   - NBSP (U+00A0) is not even Cf (format) -- it is Zs (space separator),
+#     verified via unicodedata.category. It renders identically to a plain
+#     space in every renderer, cannot reverse or hide anything, and is
+#     legitimate real-world typography (French text uses it routinely).
+#     Grouping it with the Cf format characters above overstates its risk.
+#
+# Built via chr() per codepoint -- never a pasted glyph or a \uXXXX
+# string-literal escape, both of which have degraded silently before (see
+# the unicode-boundary-text-authoring project skill).
+_BIDI_OVERRIDE_CHARS = frozenset(chr(cp) for cp in (0x202A, 0x202B, 0x202C, 0x202D, 0x202E))
+
 
 def _sanitize(s):
     """Neutralizes an agent-authored string before `format_report` prints
     it (fix L12; round 4 widened the newline-class set past bare \\n/\\r --
     see `_LINE_BREAK_CHARS`' own comment for why U+2028/U+2029 needed
-    closing here specifically): every triage record field rendered below
-    (`run_id`, `source_form`, `verdict`, `risk_classes`, `rationale`,
-    `notes`/disambiguators, the derived evidence `quote`) was authored by
-    the skeptic codex pass, and this report is its SOLE human-facing
-    consumer -- a human reads it to make identity decisions. Without
-    sanitizing, an embedded LINE-BREAK-CLASS character (not just \\n/\\r --
-    str.splitlines() also breaks on \\v, \\f, FS/GS/RS, NEL, and U+2028/
-    U+2029, and a raw U+2028/U+2029 survives even a naive "\\n"-only
-    check) could forge a fake "[n] SomeName (verdict: ...)" line, and an
-    embedded ANSI/control escape (e.g. "\x1b[2J") could clear or spoof the
-    terminal. EVERY member of `_LINE_BREAK_CHARS` is collapsed to a single
-    visible "\\n" marker (never silently dropped -- consistent regardless
-    of which original character it was); every remaining C0/C1 control
-    character (0x00-0x1f, 0x7f-0x9f, including ESC) is stripped. A string
-    with neither is the identity function."""
+    closing here specifically; round 5 added `_BIDI_OVERRIDE_CHARS` -- see
+    its own comment for the fixed-vs-deferred reasoning): every triage
+    record field rendered below (`run_id`, `source_form`, `verdict`,
+    `risk_classes`, `rationale`, `notes`/disambiguators, the derived
+    evidence `quote`) was authored by the skeptic codex pass, and this
+    report is its SOLE human-facing consumer -- a human reads it to make
+    identity decisions. Without sanitizing: an embedded LINE-BREAK-CLASS
+    character (not just \\n/\\r -- str.splitlines() also breaks on \\v, \\f,
+    FS/GS/RS, NEL, and U+2028/U+2029, and a raw U+2028/U+2029 survives even
+    a naive "\\n"-only check) could forge a fake "[n] SomeName (verdict:
+    ...)" line; an embedded ANSI/control escape (e.g. "\x1b[2J") could
+    clear or spoof the terminal; and an embedded bidi OVERRIDE character
+    could render `source_form` as a DIFFERENT name than the one actually
+    stored -- not a line forge, a display spoof, on the exact field a
+    human reads to make an identity decision. EVERY member of
+    `_LINE_BREAK_CHARS` is collapsed to a single visible "\\n" marker
+    (never silently dropped -- consistent regardless of which original
+    character it was); EVERY member of `_BIDI_OVERRIDE_CHARS` is likewise
+    replaced with a visible "[U+XXXX]" marker, never silently deleted --
+    deletion would still let the SURROUNDING text's bidi resolution shift
+    depending on what used to be there, and this plugin handles genuine
+    RTL (Hebrew) content where blunt stripping is the wrong instinct; every
+    remaining C0/C1 control character (0x00-0x1f, 0x7f-0x9f, including
+    ESC) is stripped. A string with none of the above is the identity
+    function."""
     if not isinstance(s, str):
         return s
     s = s.replace("\r\n", "\n")
@@ -289,6 +361,9 @@ def _sanitize(s):
         if ch != "\n":
             s = s.replace(ch, "\n")
     s = s.replace("\n", "\\n")
+    for ch in _BIDI_OVERRIDE_CHARS:
+        if ch in s:
+            s = s.replace(ch, f"[U+{ord(ch):04X}]")
     return _CONTROL_CHARS_RE.sub("", s)
 
 

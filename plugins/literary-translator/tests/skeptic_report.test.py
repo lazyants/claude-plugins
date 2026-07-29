@@ -352,6 +352,78 @@ def test_load_worklist_risk_classes_malformed_json_is_empty_not_fatal(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# 5a. round 5 (F5, LOW): per-ENTRY malformation (as opposed to the file-
+#     level malformation above) previously reached format_report's
+#     ", ".join(...)/for-loop UNGUARDED and raised TypeError -- main() has
+#     no try around load_worklist_risk_classes/build_report/format_report,
+#     only around load_triage/load_manifest -- contradicting this module's
+#     own "malformed -> silently degrades ... never fatal" promise for the
+#     worklist. Fixed at the source: a malformed risk_classes shape now
+#     degrades that ONE entity to "no worklist entry" rather than crashing.
+# ---------------------------------------------------------------------------
+
+def test_load_worklist_risk_classes_entry_with_non_string_list_items_degrades_that_entry(tmp_path):
+    """MUTATION this guards: risk_classes=[1, 2] (a list of ints, not
+    strings) previously raised TypeError at format_report's
+    ", ".join(_sanitize(c) for c in e["risk_classes"])."""
+    path = tmp_path / "suspicion_worklist.json"
+    path.write_text(json.dumps({"entries": [{"source_form": "Jean", "risk_classes": [1, 2]}]}), encoding="utf-8")
+    assert sr.load_worklist_risk_classes(path) == {}
+
+
+def test_load_worklist_risk_classes_entry_with_non_list_risk_classes_degrades_that_entry(tmp_path):
+    """MUTATION this guards: risk_classes=5 (not a list at all) previously
+    raised TypeError on `for c in 5` inside format_report."""
+    path = tmp_path / "suspicion_worklist.json"
+    path.write_text(json.dumps({"entries": [{"source_form": "Jean", "risk_classes": 5}]}), encoding="utf-8")
+    assert sr.load_worklist_risk_classes(path) == {}
+
+
+def test_load_worklist_risk_classes_one_malformed_entry_does_not_drop_a_valid_sibling(tmp_path):
+    """A single bad entry degrades only ITSELF -- a well-formed sibling
+    entry in the same file must still enrich normally, proving the fix is
+    per-entity, not a blanket "any bad entry empties the whole worklist"."""
+    path = tmp_path / "suspicion_worklist.json"
+    path.write_text(json.dumps({"entries": [
+        {"source_form": "Jean", "risk_classes": ["high_dispersion"]},
+        {"source_form": "Marie", "risk_classes": [1, 2]},
+    ]}), encoding="utf-8")
+    assert sr.load_worklist_risk_classes(path) == {"Jean": ["high_dispersion"]}
+
+
+def test_load_worklist_risk_classes_missing_key_defaults_to_empty_list(tmp_path):
+    """An entry present in the worklist but with no risk_classes key at all
+    is a genuine "confirmed zero risk classes" state, not a malformed one
+    -- must still render as [] (label "(none)"), never degraded to
+    "unavailable" (which would misrepresent a confirmed-empty entry as an
+    absent one)."""
+    path = tmp_path / "suspicion_worklist.json"
+    path.write_text(json.dumps({"entries": [{"source_form": "Jean"}]}), encoding="utf-8")
+    assert sr.load_worklist_risk_classes(path) == {"Jean": []}
+
+
+def test_format_report_does_not_crash_on_a_malformed_worklist_reaching_it(tmp_path):
+    """Integration-level control: the full main()-equivalent call chain
+    (load_worklist_risk_classes -> build_report -> format_report), fed a
+    malformed worklist that WOULD have raised TypeError pre-fix, must
+    complete and render "unavailable" for the malformed entity rather than
+    crashing the whole report."""
+    block_text = "Jean text"
+    manifest = make_manifest({"b1": block_text})
+    triage = make_triage([make_record("Jean", "insufficient_window")])
+    worklist_path = tmp_path / "suspicion_worklist.json"
+    worklist_path.write_text(
+        json.dumps({"entries": [{"source_form": "Jean", "risk_classes": [1, 2]}]}), encoding="utf-8",
+    )
+
+    worklist_risk_classes = sr.load_worklist_risk_classes(worklist_path)
+    report = sr.build_report(triage, manifest, worklist_risk_classes)
+    text = sr.format_report(report)  # must not raise
+
+    assert "risk classes: unavailable" in text
+
+
+# ---------------------------------------------------------------------------
 # 5b. _sanitize / format_report injection guard (fix L12) -- every
 #     agent-authored field is neutralized before it reaches the human's
 #     terminal: a raw newline must never forge another report-looking
@@ -503,6 +575,83 @@ def test_format_report_sanitizes_source_form_against_line_separator_forgery():
     )
     assert chr(0x2028) not in text, "the raw LINE SEPARATOR character must not survive into the rendered report"
     assert "Rachel\\n[9] FORGED (verdict: adverse)" in text, "collapsed to the visible marker, content preserved"
+
+
+# ---------------------------------------------------------------------------
+# 5c. round 5 (F4, MEDIUM): the explicit bidi OVERRIDE/EMBEDDING family --
+#     LRE, RLE, PDF, LRO, RLO -- lets source_form DISPLAY as a different
+#     name than the one actually stored (the "Trojan Source" class,
+#     CVE-2021-42574). Fixed with a VISIBLE marker, never deletion,
+#     consistent with how _sanitize already treats newlines. Three
+#     lookalike candidates (isolates, ZWSP, NBSP) are deliberately verified
+#     UNTOUCHED below -- see _BIDI_OVERRIDE_CHARS' own comment in
+#     skeptic_report.py for the full fixed-vs-deferred reasoning.
+# ---------------------------------------------------------------------------
+
+_BIDI_OVERRIDE_CODEPOINTS = [0x202A, 0x202B, 0x202C, 0x202D, 0x202E]  # LRE RLE PDF LRO RLO
+_BIDI_DEFERRED_CODEPOINTS = [0x2066, 0x2067, 0x2068, 0x2069, 0x200B, 0x00A0]  # LRI RLI FSI PDI ZWSP NBSP
+
+
+@pytest.mark.parametrize("codepoint", _BIDI_OVERRIDE_CODEPOINTS)
+def test_sanitize_marks_bidi_override_chars_visibly_not_deletion(codepoint):
+    """MUTATION this guards: _sanitize losing this step (or reverting to
+    silent deletion instead of a visible marker) would leave the override
+    character either RAW (still spoof-capable) or silently gone (losing
+    evidence an agent put something there -- the same principle round 4
+    applied to newlines: mark, never delete)."""
+    ch = chr(codepoint)
+    out = sr._sanitize("x" + ch + "y")
+    expected_marker = f"[U+{codepoint:04X}]"
+    assert out == f"x{expected_marker}y", f"codepoint {hex(codepoint)} must become {expected_marker!r}"
+    assert ch not in out, "the raw override character must not survive"
+
+
+@pytest.mark.parametrize("codepoint", _BIDI_DEFERRED_CODEPOINTS)
+def test_sanitize_does_not_touch_deferred_bidi_lookalikes(codepoint):
+    """Negative control for the judgment call above: isolates/ZWSP/NBSP
+    are DELIBERATELY untouched (different threat class or no spoof
+    capability at all -- see the production comment), and this test would
+    catch an over-eager future edit that swept them in by accident,
+    which would risk mangling genuine Hebrew/mixed-script content this
+    plugin actually translates."""
+    ch = chr(codepoint)
+    out = sr._sanitize("x" + ch + "y")
+    assert out == "x" + ch + "y", f"codepoint {hex(codepoint)} was unexpectedly modified: {out!r}"
+
+
+def test_sanitize_marks_a_paired_rlo_pdf_override_preserving_content_between():
+    """Realistic composition: an RLO...PDF pair (the actual CVE-2021-42574
+    shape -- an override opened then closed around a substring) must have
+    BOTH controls marked and the text between them preserved verbatim,
+    not reordered or dropped."""
+    RLO, PDF = chr(0x202E), chr(0x202C)
+    hostile = "Rachel" + RLO + "leahcaR" + PDF
+    out = sr._sanitize(hostile)
+    assert out == "Rachel[U+202E]leahcaR[U+202C]"
+    assert RLO not in out and PDF not in out
+    assert "Rachel" in out and "leahcaR" in out
+
+
+def test_format_report_sanitizes_source_form_against_bidi_override_display_spoof():
+    """Integration-level control, same shape as the U+2028 forgery test
+    above: a source_form carrying a raw RLO that would otherwise render
+    the identity string differently than its actual byte content to the
+    human reading this report to make an identity decision."""
+    block_text = "irrelevant block text for this fixture"
+    manifest = make_manifest({"b1": block_text})
+    RLO = chr(0x202E)
+    hostile_source_form = "Rachel" + RLO + "SPOOFED"
+    triage = make_triage([
+        make_record(hostile_source_form, "adverse",
+                    evidence=make_evidence("b1", 0, 4, 0, len(block_text))),
+    ])
+    validate_triage(triage)
+
+    report = sr.build_report(triage, manifest)
+    text = sr.format_report(report)
+
+    assert RLO not in text, "the raw override character must not survive into the rendered report"
+    assert "Rachel[U+202E]SPOOFED" in text, "collapsed to the visible marker, content preserved"
 
 
 # ---------------------------------------------------------------------------

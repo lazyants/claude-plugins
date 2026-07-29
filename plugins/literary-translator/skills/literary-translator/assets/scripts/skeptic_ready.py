@@ -358,36 +358,69 @@ def _atomic_write_json(path: Path, doc) -> None:
     tmp_path.replace(path)  # atomic on the same filesystem
 
 
-# Built entirely from chr() -- including chr(92) for the backslash itself --
-# rather than any escape-sequence string literal: a pasted raw U+2028/U+2029
-# glyph is visually indistinguishable from a plain space on skim (and has
-# been silently normalized to one by authoring tooling before -- see the
-# unicode-boundary-text-authoring project skill), and a literal backslash
-# inside a string literal risks being parsed back into the very character
-# this dict must instead emit as PLAIN escaped text.
-_BACKSLASH = chr(92)
-_LINE_SEPARATOR_ESCAPES = {
-    chr(0x2028): _BACKSLASH + "u2028",
-    chr(0x2029): _BACKSLASH + "u2029",
-}
+# CPython's str.splitlines() boundary set -- the SAME 10-member candidate
+# list render_obsidian.py's _MENTIONS_LINE_BREAK_CHARS and skeptic_report.py's
+# _LINE_BREAK_CHARS restate, stable across Python versions (nothing outside
+# this list is ever a splitlines() boundary, so nothing outside it can ever
+# need the escape below). Built entirely from chr()/\xXX escapes for
+# codepoints <= 0xFF plus chr() calls for U+2028/U+2029 -- never a \uXXXX
+# string-literal escape or a pasted glyph, both of which have silently
+# degraded before (see the unicode-boundary-text-authoring project skill).
+_SPLITLINES_BOUNDARY_CANDIDATES = "\n\r\v\f\x1c\x1d\x1e\x85" + chr(0x2028) + chr(0x2029)
+
+_BACKSLASH = chr(92)  # a literal backslash inside a string literal risks being
+# parsed back into the very character this module must instead emit as
+# PLAIN escaped text -- chr(92) sidesteps that ambiguity entirely.
+
+
+def _compute_line_separator_escapes() -> dict:
+    """DERIVES (round 5, F1/HIGH -- does not hand-list) which of
+    ``_SPLITLINES_BOUNDARY_CANDIDATES`` ``json.dumps(..., ensure_ascii=
+    False)`` actually leaves RAW: every codepoint < 0x20 (``\\n \\r \\v \\f
+    \\x1c \\x1d \\x1e``) is ALREADY backslash-escaped by ``json.dumps``
+    itself, unconditionally, regardless of ``ensure_ascii`` -- only the
+    candidates >= 0x20 (U+0085 NEL, U+2028, U+2029) survive it raw and need
+    an escape from THIS function. A hand-typed two-member dict here
+    (U+2028/U+2029 only) is exactly how round 5's F1 happened: it silently
+    missed NEL, which ``str.splitlines()`` also treats as a boundary. This
+    computation is the cheap equivalent of a full 0x0-0x10FFFF brute-force
+    scan (which tests/skeptic_ready.test.py actually runs, mirroring the
+    round-5 security lane's own scan, to PROVE the reduced candidate set
+    above is complete) -- filtering 10 known candidates by the real
+    predicate, rather than trusting either a fixed count or a fixed list of
+    which ones need it. If a future Python version ever changed which
+    codepoints ``json.dumps`` escapes, this recomputes correctly; a hand-
+    listed dict would not."""
+    escapes = {}
+    for ch in _SPLITLINES_BOUNDARY_CANDIDATES:
+        if ch in json.dumps(ch, ensure_ascii=False):
+            escapes[ch] = _BACKSLASH + "u" + format(ord(ch), "04x")
+    return escapes
+
+
+_LINE_SEPARATOR_ESCAPES = _compute_line_separator_escapes()
 
 
 def _json_dumps_line(obj) -> str:
-    """``json.dumps(obj, ensure_ascii=False)``, but also escaping U+2028/
-    U+2029 -- the two characters ``ensure_ascii=False`` does NOT escape (JSON
-    permits a literal line/paragraph separator inside a string, unlike a raw
-    control character below 0x20, which ``json.dumps`` always backslash-
-    escapes regardless of ``ensure_ascii``). Left raw, a ``source_form`` or
-    rationale carrying either one turns ONE JSON line into what
-    ``str.splitlines()`` reads as TWO physical lines, while ``str.split
-    ("\\n")`` still sees one -- exactly the accept-sentinel shape the wait
-    poll's line-oriented grammar reads for. The JS sentinel parser only ever
-    splits on ``\\n`` and is immune; the exposure is a reading LLM agent
-    (skeptic/codex) downstream of this CLI's stdout -- see the already-filed
-    #360. A ``\\u2028``/``\\u2029`` escape round-trips through every JSON
-    parser identically to the raw character, so this is a small, behavior-
-    preserving change: only the on-the-wire bytes differ, never the decoded
-    value."""
+    """``json.dumps(obj, ensure_ascii=False)``, but also escaping every
+    ``str.splitlines()`` boundary character ``json.dumps(ensure_ascii=
+    False)`` leaves raw (see ``_compute_line_separator_escapes``'s own
+    docstring for the derivation and why round 5 found a hand-typed
+    two-member set here incomplete -- currently U+0085 NEL, U+2028 LINE
+    SEPARATOR, and U+2029 PARAGRAPH SEPARATOR, per ``_LINE_SEPARATOR_
+    ESCAPES``, never re-hand-listed here). JSON permits a literal line/
+    paragraph/NEL separator inside a string, unlike a raw control character
+    below 0x20, which ``json.dumps`` always backslash-escapes regardless of
+    ``ensure_ascii``. Left raw, a ``source_form`` or rationale carrying ANY
+    of these turns ONE JSON line into what ``str.splitlines()`` reads as
+    TWO (or more) physical lines, while ``str.split("\\n")`` still sees one
+    -- exactly the accept-sentinel shape the wait poll's line-oriented
+    grammar reads for. The JS sentinel parser only ever splits on ``\\n``
+    and is immune; the exposure is a reading LLM agent (skeptic/codex)
+    downstream of this CLI's stdout -- see the already-filed #360. A
+    ``\\uXXXX`` escape round-trips through every JSON parser identically to
+    the raw character, so this is a small, behavior-preserving change:
+    only the on-the-wire bytes differ, never the decoded value."""
     text = json.dumps(obj, ensure_ascii=False)
     for raw, escaped in _LINE_SEPARATOR_ESCAPES.items():
         text = text.replace(raw, escaped)
