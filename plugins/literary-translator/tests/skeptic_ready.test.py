@@ -686,6 +686,58 @@ def test_verify_merged_fails_on_post_merge_tampered_evidence_offset(tmp_path):
     assert any("does not survive fresh re-verification" in m and "evidence_unverified" in m for m in result["missing"])
 
 
+def test_verify_merged_preserves_the_machine_note_behind_many_agent_notes(tmp_path):
+    """Round 10 (MEDIUM): `_coerce_record`'s own `_downgrade` always APPENDS
+    the machine's own diagnosis LAST to `notes`
+    (`notes.append(f"skeptic_ready:coerced_insufficient_window:{reason}")`)
+    -- confirmed by reading `_downgrade` directly, the same convention
+    skeptic_report.py's own `_bounded_items` docstring names and fixes for.
+    That note then feeds `run_verify_merged`'s own composed verdict-mismatch
+    message as `detail`, at the message's own END. A plain head-first
+    character cap on the WHOLE composed message keeps every earlier
+    agent-authored note and drops exactly the one note the agent did not
+    write. This is the same base fixture as
+    test_verify_merged_fails_on_post_merge_tampered_evidence_offset, with 20
+    long agent-authored notes added to the record BEFORE tampering, so the
+    composed message would exceed the per-item cap without the fix."""
+    lang_dir = tmp_path / "languages"
+    particle_config = write_particle_config(lang_dir)
+    lang = bn.load_language_config(particle_config, languages_dir=lang_dir)
+    text = "Jean met Paul at the market square."
+    block_id, blk = block(text)
+    manifest_path = tmp_path / "manifest.json"
+    write_json(manifest_path, make_manifest((block_id, blk)))
+
+    jean_evidence = evidence_for("Jean", block_id, "seg01", text, lang)
+    rec = adverse_record("Jean", jean_evidence)
+    rec["notes"] = [f"agent note #{i}: " + ("x" * 60) for i in range(20)]
+
+    triage_path = tmp_path / "skeptic_triage.json"
+    write_json(triage_path, {"schema_version": 1, "run_id": "run-1", "records": [rec]})
+    aggregate_path = tmp_path / "assignments.json"
+    write_json(aggregate_path, make_aggregate_manifest("run-1", [make_assignment("Jean", [window_for(jean_evidence)])]))
+
+    assert sr.run_verify_merged(
+        triage_path, aggregate_path, manifest_path, particle_config, languages_dir=lang_dir
+    )["verified"] is True
+
+    tampered = json.loads(triage_path.read_text(encoding="utf-8"))
+    tampered["records"][0]["evidence"]["char_start"] += 1
+    tampered["records"][0]["evidence"]["char_end"] += 1
+    write_json(triage_path, tampered)
+
+    result = sr.run_verify_merged(triage_path, aggregate_path, manifest_path, particle_config, languages_dir=lang_dir)
+    assert result["verified"] is False
+    assert any(
+        "does not survive fresh re-verification" in m
+        and "skeptic_ready:coerced_insufficient_window" in m
+        for m in result["missing"]
+    ), (
+        f"the machine's own coercion diagnosis must survive behind 20 agent notes, not be "
+        f"truncated away because it is the LAST thing in the composed message: {result['missing']}"
+    )
+
+
 def test_verify_merged_fails_on_schema_invalid_triage(tmp_path):
     lang_dir = tmp_path / "languages"
     particle_config = write_particle_config(lang_dir)
@@ -940,6 +992,74 @@ def test_verify_merged_fails_on_canon_tamper(tmp_path):
     # from an ordinary skeptic-pass failure, so a caller can HALT on it
     # specifically instead of treating it as merely advisory.
     assert result["frozen_input_mismatch"] is True
+
+
+def test_verify_merged_missing_is_bounded_per_population_not_pooled(tmp_path):
+    """Round 10 (verifier MEDIUM, reported HIGH): `missing[]` used to be ONE
+    flat list -- schema failures, H1 frozen-input tamper reasons, coverage
+    gaps, and per-record findings all pooled, `sorted()`ed alphabetically,
+    then head-capped at 8. A lexical sort has no relationship to importance:
+    whichever population happens to sort last can be evicted WHOLESALE by an
+    unrelated, larger population that sorts earlier -- not merely trimmed.
+
+    Measured directly (this is the fixture that proved it, not a
+    hypothetical): a canon.json tamper (sorts after "canon") alongside 10
+    "assignment <64-hex> has no triage record (coverage gap)" entries (sort
+    before "canon" -- 'a' < 'c') -- under the old single-pool bound the
+    tamper reason TEXT was completely ABSENT from `missing[]`, even though
+    `frozen_input_mismatch` (the boolean skeptic-pass-wf.template.js actually
+    gates HALT on) still correctly fired. That is why the verifier downgraded
+    HIGH to MEDIUM: the safety behaviour survives: only the diagnostic text
+    was at risk. Fixed by bounding the structural/coverage/per-record
+    populations separately and concatenating -- this pins that the tamper
+    reason and a representative sample of coverage gaps are BOTH present at
+    once, not one crowding out the other."""
+    lang_dir = tmp_path / "languages"
+    particle_config = write_particle_config(lang_dir)
+    text = "Jean walked home."
+    block_id, blk = block(text)
+    manifest_path = tmp_path / "manifest.json"
+    write_json(manifest_path, make_manifest((block_id, blk)))
+
+    canon_path = tmp_path / "canon.json"
+    canon_path.write_text(json.dumps({"entries": {}}), encoding="utf-8")
+    canon_sha256 = suspicion_scan.compute_frozen_input_hash(canon_path)
+
+    rec = insufficient_record("Jean")
+    triage_path = tmp_path / "skeptic_triage.json"
+    write_json(triage_path, {"schema_version": 1, "run_id": "run-1", "records": [rec]})
+
+    # "Jean" gets a real triage record; 10 OTHER assigned entities never do
+    # -- each produces its own "assignment <aid> has no triage record
+    # (coverage gap)" entry, sorting alphabetically before "canon.json ...".
+    assignments = [make_assignment("Jean", [])]
+    for i in range(10):
+        assignments.append(make_assignment(f"Missing{i}", []))
+    aggregate_path = tmp_path / "assignments.json"
+    write_json(aggregate_path, {
+        **make_aggregate_manifest("run-1", assignments),
+        "canon_sha256": canon_sha256,
+    })
+
+    # Tamper canon.json AFTER stamping (same technique as the sibling tamper
+    # test above).
+    canon_path.write_text(json.dumps({"entries": {"INJECTED": {}}}), encoding="utf-8")
+
+    result = sr.run_verify_merged(
+        triage_path, aggregate_path, manifest_path, particle_config, languages_dir=lang_dir, canon_path=canon_path,
+    )
+    assert result["verified"] is False
+    assert result["frozen_input_mismatch"] is True, (
+        "the safety-relevant boolean must fire regardless of missing[]'s rendering"
+    )
+    assert any("canon.json" in m and "tamper" in m for m in result["missing"]), (
+        f"the tamper reason must survive alongside the coverage-gap population, not be "
+        f"evicted by it: {result['missing']}"
+    )
+    assert any("has no triage record (coverage gap)" in m for m in result["missing"]), (
+        "the coverage-gap population must still be represented too -- this is not a "
+        "structural-only fix that starves the other population instead"
+    )
 
 
 def test_verify_merged_fails_on_senses_tamper(tmp_path):

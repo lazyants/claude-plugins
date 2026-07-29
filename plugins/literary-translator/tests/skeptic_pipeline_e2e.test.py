@@ -373,9 +373,14 @@ const BATCHES_ARGS = __BATCHES_JSON__;
 // ...)`, etc.). Then measured, not just read: this SAME recursive freeze
 // was driven through both harness copies' FULL existing test suites --
 // every precheck/dispatch/wait/wait-recheck/frozen-check/merge/verify path
-// either file's tests exercise against the real template -- 29/29 passed,
-// nothing threw. The freeze mechanism itself was sanity-checked against a
-// live artificial mutation (`batch.assignments = []` inside batchStep())
+// either file's tests exercise against the real template -- at commit
+// 1d180e8 (round 8's tip, where this was measured), that suite was 29/29
+// passed, nothing threw. That denominator is not this file's current test
+// count and will drift further as later rounds add tests to either file --
+// re-run `pytest tests/skeptic_pipeline_e2e.test.py tests/skeptic_
+// confident_mismerge.test.py -q` for the CURRENT total rather than trusting
+// the number above. The freeze mechanism itself was sanity-checked against
+// a live artificial mutation (`batch.assignments = []` inside batchStep())
 // to confirm it is not silently inert -- that threw, as expected, before
 // this measurement was trusted.
 //
@@ -758,6 +763,33 @@ def test_e2e_batch_never_ready_short_circuits_before_merge(tmp_path):
     labels = [c["label"] for c in out["calls"]]
     assert "skeptic:merge" not in labels
     assert "skeptic:verify" not in labels
+
+    # Round 10 finding: round 9's identity guard proves batchDispatchPrompt()
+    # was CALLED with this harness's own batch-1 object -- it proves nothing
+    # about whether that call's RETURN VALUE actually reflects batch 1's own
+    # content. A builder that ignores its argument and always reads
+    # `BATCHES[0].assignments` internally still gets called with the right
+    # reference (the call site is unchanged), so round 9's guard accepts it;
+    # every assertion above (labels, merged, notReady) is unaffected too,
+    # since none of them inspect prompt CONTENT. Measured directly: with
+    # exactly that mutation in the real batchDispatchPrompt(), this whole
+    # test -- and the full suite of both harness copies -- passed unchanged.
+    # This is the only place in the file that dispatches two REAL batches
+    # with distinct assignment_ids through the real template, so it is the
+    # only place that can observe a batch's dispatch prompt carrying the
+    # WRONG batch's content while still carrying the right index/label.
+    dispatch_calls_by_label = {c["label"]: c for c in out["calls"] if c["label"].startswith("skeptic:dispatch:")}
+    batch1_prompt = dispatch_calls_by_label["skeptic:dispatch:1"]["promptText"]
+    assert aid("Marie") in batch1_prompt, (
+        "batch 1's own dispatch prompt does not carry batch 1's real assignment_id -- "
+        "the builder may have been called with the right reference (round 9's guard "
+        "would still accept that) while still returning the wrong batch's content"
+    )
+    assert aid("Jean") not in batch1_prompt, (
+        "batch 1's dispatch prompt carries batch 0's assignment_id -- the builder "
+        "read the wrong batch's assignments despite being called with batch 1's own "
+        "object reference"
+    )
 
 
 def test_e2e_frozen_input_mismatch_from_not_ready_batches_real_check(tmp_path):

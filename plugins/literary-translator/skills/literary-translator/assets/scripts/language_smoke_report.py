@@ -678,6 +678,54 @@ def _compiled_inventory_trie(name_inventory: frozenset, has_elision: bool, elisi
     return _build_inventory_trie(f for f in inventory_forms if f)
 
 
+# Round 10, finding 2 -- the sibling of bootstrap_names.py's own round-8 fix.
+# This file's pass-1 capitalized-run algorithm had the SAME unbounded join:
+# no upper bound on how many consecutive capitalized tokens fuse into one
+# candidate `name`. Ported here byte-identically (constant, marker text, and
+# both helper bodies) rather than re-derived independently, because this
+# plugin's own convention for these two extractors is EXACT parity --
+# tests/extractor_terminators_drift.test.py already pins TERMINATORS/
+# _WRAPPERS/TOKEN_RE byte-identical across both copies and extends here to
+# _MAX_CANDIDATE_NAME_CHARS/_CAPPED_NAME_MARKER, plus an OUTPUT-parity check
+# (both extractors capping the SAME hostile text identically), not merely
+# the constants -- a constant-only pin would have missed this file lacking
+# the cap entirely, which is exactly how this finding was found.
+#
+# NOT the same migration surface as bootstrap_names.py: this file is an
+# ORCHESTRATION_BUNDLE_MEMBERS script (scaffold_setup.py), never a
+# DERIVATION_BUNDLE_MEMBERS one (cache_key.py -- verified directly against
+# both tuples, not assumed) -- editing it flips `.orchestration_bundle_hash`
+# (Surface 2: an INTERRUPTED run's in-flight work restarts on resume;
+# already-converged segments are untouched) and `smoke_report_contract_hash`
+# (an isolated EXTRA_GLOBAL_FIELD outside the 15-field cache_key composite
+# entirely -- forces the W3 smoke test to re-run once, which is that hash's
+# whole documented purpose). Neither approaches bootstrap_names.py's
+# `blocked_needs_regeneration` cost.
+_MAX_CANDIDATE_NAME_CHARS = 200  # matches skeptic_report.py's _MAX_SOURCE_FIELD_CHARS
+# and canon_validate.py's _bounded_message cap -- the same order of
+# magnitude this plugin already uses for "one free-text field", not a new
+# number invented for this one call site.
+
+_CAPPED_NAME_MARKER = " [...truncated]"
+
+
+def _capped_candidate_name(name: str) -> str:
+    """Bounds a candidate `name`'s CHARACTER length -- deliberately not a
+    token count, which a single connector-joined TOKEN_RE token (no space
+    anywhere) would sail past at run-length 1 while still reaching the exact
+    harm this bound exists to close. See `_MAX_CANDIDATE_NAME_CHARS`' own
+    comment for the measurement, the reachability, and why the bound lives
+    here rather than at the render site this plugin otherwise always uses.
+    Marks rather than hides: `_ITEM_LABEL_MAX_CHARS`-style truncation
+    (canon_validate.py) is not available to a candidate name that is written
+    into canon.json and read back later with no memory of this function
+    having run, so the marker has to travel WITH the string itself.
+    """
+    if len(name) <= _MAX_CANDIDATE_NAME_CHARS:
+        return name
+    return name[:_MAX_CANDIDATE_NAME_CHARS] + _CAPPED_NAME_MARKER
+
+
 def extract_candidate_names(text, lang):
     particles_lower = lang["particles_lower"]
     stopwords = lang["stopwords"]
@@ -740,7 +788,7 @@ def extract_candidate_names(text, lang):
                 k += 2
             else:
                 break
-        name = " ".join(tokens[i][0] for i in run_idx)
+        name = _capped_candidate_name(" ".join(tokens[i][0] for i in run_idx))
         out.append((name, not sentence_initial))
         seen_spans.add((name, run_idx[0], run_idx[-1]))
         idx = k
@@ -824,7 +872,13 @@ def extract_candidate_names(text, lang):
             # candidate turns out to be an exact duplicate. Emit AT MOST ONE
             # candidate per position -- stop at the first fresh one.
             for m in reversed(match_lens):
-                name = " ".join(tokens[idx + k][0] for k in range(m))
+                # Same cap as pass 1's emission (see _MAX_CANDIDATE_NAME_CHARS'
+                # own comment, and bootstrap_names.py's identical pass-2 site).
+                # Not reachable in practice here either -- a match can only be
+                # this long if lang name_inventory (operator-supplied, not
+                # source-document-controlled) already contains a form this
+                # long -- kept for the same output-invariant reason.
+                name = _capped_candidate_name(" ".join(tokens[idx + k][0] for k in range(m)))
                 span_key = (name, idx, idx + m - 1)
                 if span_key not in seen_spans:
                     preceding0 = tokens[idx][1]

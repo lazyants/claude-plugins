@@ -800,6 +800,15 @@ _MAX_CANDIDATE_NAME_CHARS = 200  # matches skeptic_report.py's _MAX_SOURCE_FIELD
 # magnitude this plugin already uses for "one free-text field", not a new
 # number invented for this one call site.
 
+# The exact marker `_capped_candidate_name` appends, named once rather than
+# repeated as a literal: round 10 (finding 1) measured that `collect_
+# candidates()` re-derives `multiword`/`abbrev` by calling `name.split()` on
+# the CAPPED string, so an unnamed marker duplicated at both the append site
+# and the strip site is exactly the kind of drift that would silently
+# reopen this. `_strip_capped_marker` is the one place that removes it again
+# before any structural re-derivation.
+_CAPPED_NAME_MARKER = " [...truncated]"
+
 
 def _capped_candidate_name(name: str) -> str:
     """Bounds a candidate `name`'s CHARACTER length -- deliberately not a
@@ -815,7 +824,30 @@ def _capped_candidate_name(name: str) -> str:
     """
     if len(name) <= _MAX_CANDIDATE_NAME_CHARS:
         return name
-    return name[:_MAX_CANDIDATE_NAME_CHARS] + " [...truncated]"
+    return name[:_MAX_CANDIDATE_NAME_CHARS] + _CAPPED_NAME_MARKER
+
+
+def _strip_capped_marker(name: str) -> str:
+    """The inverse of `_capped_candidate_name`'s append, for the ONE
+    legitimate reason to undo it: re-deriving a STRUCTURAL property (word
+    count, first character) of the candidate's own content. Round 10
+    (finding 1, HIGH): `collect_candidates()` computed `multiword`/`abbrev`
+    by calling `name.split()` directly on the marker-bearing string --
+    `" [...truncated]"` splits into its own extra "word", so a candidate
+    that was a SINGLE connector-joined token before capping (this file's
+    own round-8 mega-token attack shape) came back `multiword: True`, and
+    `likely_name` (which OR's in `multiword`) inherited the wrong verdict --
+    a fix that made the STRING safe to embed and simultaneously made a
+    DERIVED PROPERTY of that string wrong, the exact shape this release
+    keeps finding. Every place downstream of extraction that needs the
+    candidate's own content structurally (not merely as an opaque string to
+    print or dict-key by) must strip this marker first; this function is
+    that one place, so a future re-derivation added to `collect_candidates`
+    inherits the fix instead of reopening the same bug with a new literal.
+    """
+    if name.endswith(_CAPPED_NAME_MARKER):
+        return name[: -len(_CAPPED_NAME_MARKER)]
+    return name
 
 
 def extract_candidate_spans(text: str, lang: LanguageConfig):
@@ -1109,7 +1141,13 @@ def collect_candidates(sources, lang: LanguageConfig):
     # "strong".
     rows = []
     for name, f in freq.items():
-        words = name.split()
+        # Round 10 (finding 1): split the candidate's own CONTENT, never the
+        # marker `_capped_candidate_name` may have appended -- see
+        # `_strip_capped_marker`'s own docstring for the measured bug this
+        # closes (an all-connector, no-space mega-token that got capped came
+        # back `multiword: True`, purely because " [...truncated]" itself
+        # split into an extra "word").
+        words = _strip_capped_marker(name).split()
         multiword = len(words) > 1
         abbrev = len(words) == 1 and len(words[0]) == 1
         mid_count = mid[name]
@@ -1144,15 +1182,22 @@ def collect_candidates(sources, lang: LanguageConfig):
     if lang.has_elision and lang.elision_re is not None:
         all_names = {r["name"] for r in rows}
         for row in rows:
-            name = row["name"]
-            if row["multiword"] or not is_upper_initial(name):
+            # Round 10 (finding 1, same root cause as `words` above): match
+            # against the candidate's own content, not a marker-bearing
+            # `name` -- the gate on `row["multiword"]` is correct again now
+            # that `multiword` itself is, but `content[0].lower() +
+            # content[1:]` still has to read the STRIPPED string, or a
+            # genuinely single-token capped candidate's elision check would
+            # try to match " [...truncated]" as part of the name's own tail.
+            content = _strip_capped_marker(row["name"])
+            if row["multiword"] or not is_upper_initial(content):
                 continue
-            elided = lang.elision_re.match(name[0].lower() + name[1:])
+            elided = lang.elision_re.match(content[0].lower() + content[1:])
             if not elided:
                 continue
             stripped = elided.group(2)
             stripped_cap = stripped[:1].upper() + stripped[1:]
-            if stripped_cap != name and stripped_cap in all_names:
+            if stripped_cap != content and stripped_cap in all_names:
                 row["elision_ambiguous"] = True
                 row["elision_stripped_form"] = stripped_cap
 

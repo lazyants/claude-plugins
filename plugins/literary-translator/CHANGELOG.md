@@ -537,7 +537,9 @@ yield it and returns a clean, confident, wrong count. Before this release two li
 existed; AFTER it, one does — a forced NBSP inside an r-string regex, where `\xa0` would be four
 literal characters, deliberately left alone. Scope of that count, so it can be re-derived rather than
 believed: a flat codepoint walk over every UTF-8-decodable file under `plugins/literary-translator`
-(263 of them), matching C0/C1, every category-Cf codepoint, U+2028/U+2029, NBSP and CGJ. A narrower
+(258 at the commit this section describes; 263 once round 9's files landed, which is why the
+count is given with its tree rather than as a constant), matching C0/C1, every category-Cf
+codepoint, U+2028/U+2029, NBSP and CGJ. A narrower
 file filter gives a smaller denominator; an earlier draft of this sentence also stated the pre-fix
 figure as if it were the shipped one.
 
@@ -717,7 +719,72 @@ it. The measurement is the part worth recording: a plain before/after taken whil
 turn by turn gave 102.5 ms against 180.2 ms — 77.7 ms saved. Same defect as everything else in this
 release, in a benchmark rather than in prose.
 
-Suite: 4178 → **4717 passed, 3 skipped, 2 xfailed**. Every skip is named rather than incidental,
+### Round 10 — the carve-out inside the fix that removed carve-outs
+
+Round 10 attacked round 9's two "structural closure" claims directly, and both were overstated. That
+is the useful result: the approach was right and the SURFACE it covered was smaller than the previous
+section said.
+
+**A keyword exemption inside the scan that replaced keyword matching.** Round 9's restored whole-prompt
+sweep exempted `while true` BY NAME — `(?!\s+true\b)` — because the poll-line grammar "already owns"
+the legitimate loop. It owns exactly ONE line. An unbounded `while true; do sleep 20; done` emitted on
+any OTHER prompt line was invisible in all three templates, with the full suite green, and it is the
+spelling a copy-paste regression is most likely to produce since the legitimate poll line already uses
+it. The obvious fix is a false RED and that was measured too: deleting the lookahead on the unmutated
+tree turns the same three tests red, because the real poll line then trips its own scan. The exemption
+is now POSITIONAL — the line the grammar has already fullmatched is subtracted from the text before
+the remainder is scanned, so the legitimate loop is exempt because it was already checked, not because
+of how it spells its keyword. Chunk prompts only: `poll_line()` raises on a re-check prompt, so an
+unconditional subtraction would have converted the fix into a false RED on every re-check.
+
+**A prefix check on a chain.** Round 9 widened mass-translate's gate grammar to `token (?: && token)?`
+so `translateAcceptCmd`'s legitimate two-command chain would fit, and layer 2 kept testing
+`command.startswith("python3 ")` — the WHOLE string's first token. The right-hand side of the `&&` was
+therefore unconstrained: `reviewAcceptCmd` plus ` && tail -f /dev/null` fullmatches, passes all three
+layers, and blocks forever precisely WHEN THE GATE SUCCEEDS, which is #348 itself. Layer 2's own
+docstring names `tail -f <path>` as what it exists to stop. Now applied per chain element.
+
+**A cap that changed a derived property.** `bootstrap_names.py`'s new character cap appends a visible
+` [...truncated]` marker, and `collect_candidates()` computed `words = name.split()` on the marked
+string — so the marker counted as a word and a genuinely single-token candidate came back
+`multiword: True`, which `likely_name` then inherited. Every site that re-reads `name` after
+extraction was enumerated rather than fixed one at a time: four, of which two were consequences of the
+first and one was LATENT — an elision match that would have mis-fired on capped input but was
+unreachable because the wrongly-True gate above it skipped that path. That one is fixed too, on the
+grounds that a trap protected by another bug becomes live the moment the other bug is fixed.
+
+**A sibling producer with no cap at all.** `language_smoke_report.py` runs the same extraction and had
+no bound. Both are capped now, and the drift test between them was extended from CONSTANT parity to
+OUTPUT parity at the cap — because a constants-only pin could not have caught this defect, whose shape
+was "one file has no such constant" rather than "the two disagree". Note this does not reverse the
+earlier argument for capping at the root: that argument was about a value reaching two embed sites,
+and this producer's output reaches no prompt at all, so there was no embed site to move the bound to.
+
+**A pooled list, lexically sorted, capped from the head.** `skeptic_ready.py`'s new bound was applied
+once over a merged population of structural findings, coverage gaps and per-record findings. A lexical
+sort has no relationship to importance, so whichever population sorts last is evicted WHOLESALE —
+measured end to end, a canon tamper's reason text vanished entirely behind ten coverage-gap entries
+while the safety boolean survived, which is why this is a diagnostics defect rather than a safety one.
+The populations are bounded separately now. A second, genuinely different finding in the same file —
+a composed message truncated from the front, losing `_coerce_record`'s machine-appended note — got its
+own fix rather than being folded into the first.
+
+**Identity is not content.** Round 9's reference-keyed recorder proves the dispatch builder was CALLED
+with the harness's own batch object. It says nothing about what that call RETURNED. A builder that
+ignores its argument and reads batch 0's assignments satisfies the guard completely — measured
+invisible to all 30 tests. One assertion binding content to index closes it, and the sibling harness
+gets a header sentence explaining why the same property is unobservable there: its fixtures are
+single-batch by construction, so there is no second batch for a content swap to be seen against.
+
+**And five numbers, all measured correctly and attributed to the wrong tree.** 22 tests where the
+commit had 23; 263 files where the commit had 258; 29 of 29 under a freeze where both files now
+collect 30; a 444-character message that varies with the running machine's temp-directory path; 30
+`agent()` calls where there are 27 call sites and the rest were comment and label-string text. Every
+one was true when taken and false when read. Figures in this release now carry what they depend on —
+the tree, the commit, or the formula — because a bare number in prose reads as a constant and rots
+silently, which is the same defect as everything else here, in a measurement rather than a claim.
+
+Suite: 4178 → **4731 passed, 3 skipped, 2 xfailed**. Every skip is named rather than incidental,
 and there are three for two reasons: one pre-existing placeholder, plus the single pin row that
 declares no one-to-one replacement, which now skips in TWO tests — the diff-side check and the
 same-hunk check added below — because a row with no replacement has nothing for either to bind.

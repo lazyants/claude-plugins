@@ -341,7 +341,9 @@ def test_drive_prompt_launches_detached_codex_job(tmp_path, drive_label, launch_
 # catch") cannot distinguish a genuine codex translation from a plausible
 # fabrication with the right shape. This is a real, currently unclosable gap
 # given this system has no tool-restriction mechanism (round-8 sweep,
-# confirmed across all 30 agent() calls in the three templates) -- named
+# confirmed across all 27 `await agent(` call sites in the three templates --
+# an earlier draft said 30, counting `agent(` occurrences that were comment
+# and label-string text rather than call sites) -- named
 # here rather than left implicit behind a presence check that would read as
 # coverage it does not have.
 DISPATCH_NO_SELF_ACTION_CLAUSES = {

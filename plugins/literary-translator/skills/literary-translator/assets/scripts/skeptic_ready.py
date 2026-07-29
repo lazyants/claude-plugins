@@ -1202,11 +1202,21 @@ def frozen_input_check(
 #   2. canon_validate.py's own 200-char per-item cap does not fit this
 #      file's own message shapes: `_frozen_input_tamper_reason`'s tamper
 #      message alone embeds TWO 64-char sha256 hashes plus a full path
-#      inside fixed boilerplate -- measured at 444 chars for a realistic
-#      pytest tmp_path, comfortably past 200, truncating away the "tamper"/
-#      "HALTING" text every existing tamper test asserts on. Capped at 600
-#      here instead -- comfortable headroom over that measured worst case,
-#      while still meaningfully bounding the genuinely unbounded content
+#      inside fixed boilerplate. NOT a constant, on purpose stated as one
+#      here: the message is `fixed prose + label + path + 2 hashes`, so its
+#      length moves with the path length of whoever runs it -- measured
+#      126 chars of fixed prose (the template minus label/path/both
+#      hashes) + len(label) + len(path) + 128 (two 64-hex-char sha256
+#      digests, always exactly that long). A pytest tmp_path of ~150 chars
+#      (this machine, this session) reconstructs the earlier one-number
+#      figure exactly: 126 + 13 ("manifest.json") + ~177 + 128 = 444. Round
+#      10 measured 389-403 on a different machine's shorter tmp_paths --
+#      same formula, different path length, not a discrepancy. A future
+#      reader can recompute their own headroom from `126 + len(label) +
+#      len(path) + 128` against the 600 cap below, rather than trust a
+#      figure taken on one machine's temp-directory layout.
+#      Comfortable headroom over that formula's realistic range, while
+#      still meaningfully bounding the genuinely unbounded content
 #      elsewhere in this file's own `missing[]` entries (a `source_form`
 #      derived from source text, an evidence-verification `reason`, a
 #      skeptic-authored coercion `note` -- none schema-length-bounded).
@@ -1222,6 +1232,39 @@ def frozen_input_check(
 # on (re-run after this fix: full suite green, see commit/round notes).
 _MISSING_ITEM_MAX_CHARS = 600
 _MAX_LISTED_MISSING = 8
+# Round 10 (verifier MEDIUM, reported HIGH): `_bounded_missing` bounds ONE
+# homogeneous list correctly -- the bug was never in this function, it was
+# calling it ONCE over `sorted(set(missing))`, a list `run_verify_merged`
+# pools from several genuinely different POPULATIONS (schema failures,
+# frozen-input tamper reasons, coverage gaps, per-record findings). A
+# lexical sort has no relationship to importance, so whichever population
+# sorts last can be evicted WHOLESALE by an unrelated, larger population
+# that happens to sort earlier -- not merely trimmed. Measured, not assumed:
+# a canon.json tamper (frozen_input_mismatch=True, sorts after "canon") with
+# 11 "assignment <64-hex-id> has no triage record (coverage gap)" entries
+# (sorts before "canon") present -- the tamper reason TEXT is completely
+# absent from `missing[]` under the old single-pool bound, even though
+# `frozen_input_mismatch` (the boolean the caller actually gates HALT on,
+# per skeptic-pass-wf.template.js) still correctly fires. That is why the
+# verifier downgraded HIGH to MEDIUM: the SAFETY behavior survives, only the
+# DIAGNOSTIC text is at risk -- still worth fixing, since a human/log reader
+# cannot see why it halted.
+#
+# Fix is at the CALL SITE, not in this function's own shape: `_bounded_
+# missing` stays a simple, correct, general-purpose "count-cap + per-item
+# length-cap" primitive over ONE list; `run_verify_merged` now calls it
+# ONCE PER POPULATION (structural: schema/frozen-input/run_id, all small and
+# already bounded by their own nature; coverage gaps and per-record findings,
+# both potentially large) and concatenates the results, so each population
+# gets a GUARANTEED slice of the output rather than competing in one pool.
+# The two potentially-large populations share `_MAX_LISTED_MISSING_HALF`
+# (canon_validate.py's own `half = _MAX_LISTED_PROBLEMS // 2` precedent for
+# its two-sided case, checked here to actually fit before reusing it: same
+# "two comparable-severity populations, neither should starve the other"
+# shape, not blindly copied) rather than each claiming the full 8, so the
+# worst-case total stays close to the original single-pool budget instead of
+# tripling it.
+_MAX_LISTED_MISSING_HALF = _MAX_LISTED_MISSING // 2
 
 
 def _bounded_missing_item(message: str) -> str:
@@ -1236,19 +1279,58 @@ def _bounded_missing_item(message: str) -> str:
     return text
 
 
-def _bounded_missing(values) -> list:
-    """Bound a `missing` list in COUNT as well as in each entry's length --
-    mirrors canon_validate.py's own `_bounded_list`. Marks rather than
-    hides: a caller sees "... and N more", never just a shorter list
-    indistinguishable from a smaller problem."""
+def _bounded_missing(values, max_items: int = _MAX_LISTED_MISSING) -> list:
+    """Bound ONE list in COUNT as well as in each entry's length -- mirrors
+    canon_validate.py's own `_bounded_list`. Marks rather than hides: a
+    caller sees "... and N more", never just a shorter list indistinguishable
+    from a smaller problem. `max_items` lets a caller reserve a SMALLER slice
+    when concatenating several bounded populations together (see the
+    module-level comment above `_MAX_LISTED_MISSING_HALF`) -- this function
+    itself stays a single-population primitive either way; it does not know
+    or care that its caller may be combining several calls."""
     values = list(values)
-    bounded = [_bounded_missing_item(v) for v in values[:_MAX_LISTED_MISSING]]
-    extra = len(values) - _MAX_LISTED_MISSING
+    bounded = [_bounded_missing_item(v) for v in values[:max_items]]
+    extra = len(values) - max_items
     if extra > 0:
         bounded.append(
-            f"... and {extra} more (showing the first {_MAX_LISTED_MISSING} of {len(values)})"
+            f"... and {extra} more (showing the first {max_items} of {len(values)})"
         )
     return bounded
+
+
+def _bounded_notes_detail(notes) -> str:
+    """Joins a coercion's `notes` into ONE string for embedding in a
+    `missing[]` message -- round 10 (MEDIUM). `_coerce_record`'s own
+    `_downgrade` ALWAYS appends the machine's own diagnosis LAST
+    (`notes.append(f"skeptic_ready:coerced_insufficient_window:{reason}")`,
+    read directly to confirm rather than assumed): the machine's note is
+    therefore the LAST item in this list, and the composed message it feeds
+    into (`f"...(would resolve to {verdict!r}: {detail})"`) puts `detail` at
+    the message's own END. A plain head-first character cap on the WHOLE
+    composed message (what `_bounded_missing_item` alone would do) then
+    keeps every earlier agent-authored note and drops exactly the one note
+    the agent did not write -- the SAME shape skeptic_report.py's own
+    `_bounded_items` docstring names and fixes for the identical convention,
+    independently confirmed here rather than assumed to transfer. Here, the
+    machine's note is kept in full (bounded on its own), and the earlier
+    notes fill whatever budget remains -- reserving ~200 chars for the
+    surrounding message's own boilerplate (measured: a realistic `rec_aid` +
+    verdict-pair prefix/suffix is ~158 chars; 200 leaves headroom) so the
+    WHOLE composed message stays under `_MISSING_ITEM_MAX_CHARS` and never
+    needs the outer per-item cap to fire at all."""
+    notes = [str(n) for n in (notes or [])]
+    if len(notes) <= 1:
+        return "; ".join(_bounded_missing_item(n) for n in notes)
+    head, tail = notes[:-1], notes[-1]
+    tail_bounded = _bounded_missing_item(tail)
+    detail_budget = _MISSING_ITEM_MAX_CHARS - 200
+    budget = detail_budget - len(tail_bounded) - len("; ")
+    if budget <= 0:
+        return tail_bounded
+    head_joined = "; ".join(head)
+    if len(head_joined) > budget:
+        head_joined = head_joined[:budget] + " [...truncated]"
+    return f"{head_joined}; {tail_bounded}"
 
 
 # ---------------------------------------------------------------------------
@@ -1504,6 +1586,16 @@ def run_verify_merged(
                 f"triage run_id {triage_run_id!r} does not match aggregate manifest run_id {aggregate_run_id!r}"
             )
 
+    # Round 10 population boundary 1/2: everything ABOVE this line is
+    # STRUCTURAL -- schema failures, the H1 frozen-input tamper reasons,
+    # a competitors-resolution failure, the run_id binding check -- all
+    # small and bounded by their own nature (schema: <=2 sites; frozen-input:
+    # <=3, one per canon/manifest/senses, frozen_input_check()'s own fixed
+    # table; run_id: <=1). See _MAX_LISTED_MISSING_HALF's own comment for why
+    # this population is bounded SEPARATELY from what follows, at the return
+    # statement below.
+    structural_end = len(missing)
+
     # FIX (e): multiplicity -- exactly one triage record per assigned
     # assignment_id. A duplicate (of an assigned id or a foreign one) is a
     # FAIL; the set-based coverage checks below would silently absorb it.
@@ -1522,6 +1614,13 @@ def run_verify_merged(
         for aid, count in sorted(id_counts.items(), key=lambda kv: kv[0] or "")
         if count > 1
     )
+
+    # Round 10 population boundary 2/2: everything between the two markers
+    # is COVERAGE (potentially large -- scales with how many entities this
+    # run assigned); everything below is PER-RECORD (potentially large --
+    # scales with entity count AND findings-per-record). Both share
+    # _MAX_LISTED_MISSING_HALF rather than each claiming the full cap.
+    coverage_end = len(missing)
 
     for rec in records:
         if not isinstance(rec, dict):
@@ -1594,15 +1693,34 @@ def run_verify_merged(
         # substitute for it -- see this function's own docstring.
         coerced = _coerce_record(rec, manifest, language_config, competitors=competitors)
         if coerced.get("verdict") != rec.get("verdict"):
-            detail = "; ".join(str(n) for n in (coerced.get("notes") or []))
+            # Round 10 (MEDIUM): _bounded_notes_detail, not a plain join --
+            # see its own docstring for why a plain join left the machine's
+            # own diagnosis (always the LAST note) exposed to being sliced
+            # off by the outer per-item length cap further down.
+            detail = _bounded_notes_detail(coerced.get("notes"))
             missing.append(
                 f"{rec_aid}: stored verdict {rec.get('verdict')!r} does not survive fresh "
                 f"re-verification (would resolve to {coerced.get('verdict')!r}: {detail})"
             )
 
+    # Round 10: bounded PER POPULATION (see the two boundary markers above),
+    # not once over the whole pooled-and-sorted list -- `sorted(set(...))`
+    # stays applied WITHIN each population (dedup + a stable, readable
+    # order), never across them, so the alphabetically-last item of a small
+    # important population can no longer be squeezed out by a large
+    # unrelated one. `verified` still reads the UNBOUNDED, un-pooled
+    # `missing` -- bounding is a rendering concern for the returned list
+    # only, never the pass/fail verdict itself.
+    structural = missing[:structural_end]
+    coverage = missing[structural_end:coverage_end]
+    per_record = missing[coverage_end:]
     return {
         "verified": not missing,
-        "missing": _bounded_missing(sorted(set(missing))),
+        "missing": (
+            _bounded_missing(sorted(set(structural)))
+            + _bounded_missing(sorted(set(coverage)), _MAX_LISTED_MISSING_HALF)
+            + _bounded_missing(sorted(set(per_record)), _MAX_LISTED_MISSING_HALF)
+        ),
         "frozen_input_mismatch": frozen_input_mismatch,
     }
 

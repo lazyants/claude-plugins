@@ -668,13 +668,26 @@ NON_POLLING_FORBIDDEN_TOKENS = ("seq", "sleep", "while", "end=$((SECONDS")
 # their own ("wait until it's done", "while you wait") -- verified against
 # every line of the real glossary/skeptic chunk and re-check prompts, and
 # against five representative benign sentences using all three words --
-# never trips it, and the one legitimate `while true; do ... done` shape is
-# excluded by name (it is what CHUNK_POLL_GRAMMAR_RE already owns).
+# never trips it.
+#
+# Round 10 (HIGH): this regex used to ALSO exempt the one legitimate
+# `while true; do ... done` shape BY NAME, via a `(?!\s+true\b)` lookahead --
+# the exact denylist reasoning round 8/9 spent two rounds removing,
+# reintroduced one level up. `while true; do sleep 20; done` pushed as its
+# OWN, separate prompt line (the real poll line untouched) escaped: only
+# that one spelling, because it is the one the legitimate poll line already
+# uses -- the spelling a copy-paste regression is most likely to produce.
+# This regex now names NO exception at all; the legitimate poll line is
+# instead exempted POSITIONALLY, at the one call site below that has
+# already fullmatched it against CHUNK_POLL_GRAMMAR_RE -- see the comment
+# there. Simply deleting the old lookahead without adding that positional
+# carve-out is a FALSE RED, not a fix: on the unmutated tree the legitimate
+# poll line would then trip this scan on itself (measured).
 _LOOP_CONSTRUCT_ANYWHERE_RE = re.compile(
     r"for\s+\w+\s+in\s+\$\(\s*seq\b"                                  # any seq-based for-loop
     r"|for\s*\(\("                                                     # C-style for ((init; cond; incr))
     r"|for\s+\w+\s+in\s+\{\d+\.\.\d+\}"                                # brace-range for X in {N..M}
-    r"|\b(?:while|until)\b(?!\s+true\b)[^\n]*?\bdo\b[^\n]*?\bdone\b"   # any while/until...do...done, except "while true"
+    r"|\b(?:while|until)\b[^\n]*?\bdo\b[^\n]*?\bdone\b"                # any while/until...do...done, no exception
 )
 
 
@@ -896,6 +909,52 @@ def test_each_chunk_polls_for_what_is_left_of_the_budget_not_a_flat_slice(target
 # 4c. THE REGRESSION CATCHER. No emitted poll may exceed the clamp.
 # ===========================================================================
 
+def test_loop_construct_anywhere_actually_discriminates():
+    """Round 10: _LOOP_CONSTRUCT_ANYWHERE_RE's own discrimination table, on
+    synthetic fixtures, proven BEFORE trusting it against real templates
+    below -- the gap round 10 found. The exact case that must never again be
+    exempted: `while true; do sleep 20; done`, standing alone (as it would
+    if pushed as a SEPARATE prompt line, never touching the recognised poll
+    line at all), must be CAUGHT here -- a keyword-based carve-out for
+    "while true" specifically is what let it through once already."""
+    must_catch = [
+        ("the exact round-10 escape, standing alone",
+         "while true; do sleep 20; done"),
+        ("canonical seq for-loop", "for i in $(seq 1 45); do true; done"),
+        ("different-var-name seq for-loop", "for j in $(seq 45); do true; done"),
+        ("C-style for-loop", "for ((i=0; i<45; i++)); do true; done"),
+        ("brace-range for-loop", "for i in {1..45}; do true; done"),
+        ("while with a non-true condition", "while :; do :; done"),
+        ("until-loop", "until false; do :; done"),
+    ]
+    for label, shape in must_catch:
+        assert _LOOP_CONSTRUCT_ANYWHERE_RE.search(shape), (
+            f"{label} must be recognised as a loop construct: {shape!r}"
+        )
+
+    # Negative controls: ordinary prose using the same keywords without a
+    # full do...done shape on one line. Deliberately NOT included here: the
+    # legitimate elapsed-time poll line itself (`end=$((SECONDS + N)); while
+    # true; do ... done`) -- this regex must catch THAT shape too now (it is
+    # exactly must_catch's "while true" case above), the same as any other
+    # while/until loop. The real poll line is exempted at the call site,
+    # POSITIONALLY (subtracted before this regex ever sees it), never by this
+    # regex refusing to recognise its own keyword -- see
+    # test_no_emitted_poll_can_exceed_the_bash_call_cap's own comment for
+    # why a nominal exemption here is exactly the round-10 bug.
+    must_not_catch = [
+        "Wait until it's done before returning.",
+        "This is fine for now.",
+        "While you wait, do nothing else.",
+        "Keep polling until the bound is reached, then return.",
+        "Run this for as long as needed, until it succeeds.",
+    ]
+    for shape in must_not_catch:
+        assert _LOOP_CONSTRUCT_ANYWHERE_RE.search(shape) is None, (
+            f"benign text must not be flagged as a loop construct: {shape!r}"
+        )
+
+
 @pytest.mark.parametrize("target", TARGETS, ids=TARGET_IDS)
 def test_no_emitted_poll_can_exceed_the_bash_call_cap(target, tmp_path):
     """#352 itself, stated as the one thing that must never be emitted again.
@@ -978,14 +1037,40 @@ def test_no_emitted_poll_can_exceed_the_bash_call_cap(target, tmp_path):
     # sites, restoring the coverage the pre-round-8 code had (it scanned the
     # whole prompt too) while still catching every spelling round 8's own fix
     # widened for, not just the one historical instance.
-    for label in (target.chunk_label, target.recheck_label):
-        for prompt in prompts(out, label):
-            hit = _LOOP_CONSTRUCT_ANYWHERE_RE.search(prompt)
-            assert hit is None, (
-                f"{target.name} {label}'s prompt contains a loop construct "
-                f"({hit.group(0)!r}) somewhere in its text, not just in the "
-                f"one line/command already checked above:\n{prompt}"
-            )
+    #
+    # Round 10: the chunk prompt's own legitimate poll line -- already
+    # fullmatch-verified above against CHUNK_POLL_GRAMMAR_RE -- is subtracted
+    # from the text POSITIONALLY before this scan runs, rather than the scan
+    # regex exempting its keyword by name (that was the round-10 bug: see
+    # _LOOP_CONSTRUCT_ANYWHERE_RE's own comment). The re-check prompt gets no
+    # such subtraction: its own command is held to SAFE_COMMAND_RE above,
+    # which cannot contain "while"/"until" at all, so there is nothing
+    # legitimate to exempt there, and poll_line() would raise on a re-check
+    # prompt anyway (it asserts exactly one `end=$((SECONDS +` line, and a
+    # re-check prompt has none) -- calling it unconditionally on both labels
+    # would turn this into a false RED on every re-check prompt instead of a
+    # fix.
+    for prompt in prompts(out, target.chunk_label):
+        line = poll_line(prompt)
+        assert prompt.count(line) == 1, (
+            f"{target.name} chunk poll line appears {prompt.count(line)}x in "
+            f"its own prompt; the positional carve-out below assumes exactly "
+            f"one occurrence to subtract"
+        )
+        remainder = prompt.replace(line, "", 1)
+        hit = _LOOP_CONSTRUCT_ANYWHERE_RE.search(remainder)
+        assert hit is None, (
+            f"{target.name} {target.chunk_label}'s prompt contains a loop "
+            f"construct ({hit.group(0)!r}) somewhere in its text, not just "
+            f"in the poll line already checked above:\n{prompt}"
+        )
+    for prompt in prompts(out, target.recheck_label):
+        hit = _LOOP_CONSTRUCT_ANYWHERE_RE.search(prompt)
+        assert hit is None, (
+            f"{target.name} {target.recheck_label}'s prompt contains a loop "
+            f"construct ({hit.group(0)!r}) somewhere in its text, not just "
+            f"in the one command already checked above:\n{prompt}"
+        )
 
     # The chunk's in-loop gate output must stay suppressed. Without it the gate
     # prints one JSON line per iteration, and "the marker is the last line"

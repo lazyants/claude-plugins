@@ -304,34 +304,58 @@ NON_POLLING_FORBIDDEN_TOKENS = ("seq", "sleep", "while", "end=$((SECONDS")
 # .test.py's own _LOOP_CONSTRUCT_ANYWHERE_RE for the full derivation
 # (structural: while/until only match when "do" and "done" both follow later
 # on the SAME line, so ordinary prose using those words alone never trips
-# it; the one legitimate "while true" is excluded by name).
+# it). Round 10 (HIGH): this used to ALSO exempt the one legitimate
+# `while true; do ... done` shape BY NAME, via a `(?!\s+true\b)` lookahead
+# -- the exact denylist reasoning round 8/9 removed one level down,
+# reintroduced here; `while true; do sleep 20; done` pushed as its own
+# separate prompt line escaped. No exception is named here any more -- the
+# legitimate poll line is exempted POSITIONALLY at this regex's own call
+# site instead (the line already fullmatch-verified against
+# CHUNK_POLL_GRAMMAR_RE is subtracted before this scan runs), matching
+# wait_chunking_batch_passes.test.py's own round-10 fix.
 _LOOP_CONSTRUCT_ANYWHERE_RE = re.compile(
     r"for\s+\w+\s+in\s+\$\(\s*seq\b"
     r"|for\s*\(\("
     r"|for\s+\w+\s+in\s+\{\d+\.\.\d+\}"
-    r"|\b(?:while|until)\b(?!\s+true\b)[^\n]*?\bdo\b[^\n]*?\bdone\b"
+    r"|\b(?:while|until)\b[^\n]*?\bdo\b[^\n]*?\bdone\b"
 )
 
 
 def _assert_gate_command_cannot_hide_a_loop(command: str, where: str) -> None:
     """Same three-layer property as wait_chunking_batch_passes.test.py's own
     helper of this name: (1) SAFE_COMMAND_RE -- POSITIVE, structurally
-    excludes any shell control-flow construct under any keyword; (2)
-    `command.startswith("python3 ")` -- both translateAcceptCmd and
-    reviewAcceptCmd return `PY + " " + ...`, PY == "python3"; (3)
+    excludes any shell control-flow construct under any keyword; (2) EVERY
+    `&&`-separated part starts with "python3 " -- both translateAcceptCmd
+    and reviewAcceptCmd return `PY + " " + ...`, PY == "python3"; (3)
     NON_POLLING_FORBIDDEN_TOKENS, cheap defense-in-depth. See that file's
     docstring for the full reasoning and the stated residual (an argument to
-    python3 itself that somehow blocks IT is not excluded by any layer)."""
+    python3 itself that somehow blocks IT is not excluded by any layer).
+
+    Round 10 (HIGH): layer 2 used to check only `command.startswith("python3
+    ")` -- the WHOLE string's prefix. That closes the whole surface in
+    wait_chunking_batch_passes.test.py, where SAFE_COMMAND_RE never allows
+    an `&&`. It does NOT close it here: this file's own SAFE_COMMAND_RE was
+    widened for translateAcceptCmd's genuine `&&` chain, and reviewAcceptCmd
+    -- which has no `&&` of its own -- passed with ` && tail -f /dev/null`
+    appended: exactly one `&&`, the whole string still starts with "python3
+    ", "seq"/"sleep"/"while" never appear, all three layers passed, and the
+    command blocks FOREVER precisely WHEN THE GATE SUCCEEDS -- every wait
+    chunk then runs to the 600 s clamp, which is #348/#352 itself. Layer 2
+    now checks EVERY `&&`-separated part, not just the string's own prefix
+    -- splitting on " && " is unambiguous because SAFE_COMMAND_RE's own
+    character class cannot contain "&" inside a token, so it can only ever
+    appear as this literal chain separator."""
     assert SAFE_COMMAND_RE.fullmatch(command), (
         f"{where} is not a flat command invocation (or the one legitimate "
         f"`&&`-chain) -- it may carry a shell construct of some kind (a "
         f"loop, a pipe, a subshell, a background job) under any spelling:\n"
         f"{command}"
     )
-    assert command.startswith("python3 "), (
-        f"{where} does not start with the real gate-command builders' own "
-        f"fixed prefix (\"python3 \") -- it may be an alternate bare command "
-        f"substituted whole in place of the real check:\n{command}"
+    parts = command.split(" && ")
+    assert all(part.startswith("python3 ") for part in parts), (
+        f"{where} has a part that does not start with the real gate-command "
+        f"builders' own fixed prefix (\"python3 \") -- it may be an "
+        f"alternate bare command chained in beside the real check:\n{command}"
     )
     for token in NON_POLLING_FORBIDDEN_TOKENS:
         assert token not in command, (
@@ -649,6 +673,84 @@ def test_recheck_still_runs_after_a_fail_sentinel(tmp_path):
 # 2. Chunking: no call approaches the cap, and the bound is SPENT not EXTENDED
 # ---------------------------------------------------------------------------
 
+def test_loop_construct_anywhere_actually_discriminates():
+    """Round 10: _LOOP_CONSTRUCT_ANYWHERE_RE's own discrimination table --
+    see wait_chunking_batch_passes.test.py's own copy of this test for the
+    full rationale. The exact case that must never again be exempted:
+    `while true; do sleep 20; done`, standing alone, must be CAUGHT here."""
+    must_catch = [
+        ("the exact round-10 escape, standing alone",
+         "while true; do sleep 20; done"),
+        ("canonical seq for-loop", "for i in $(seq 1 45); do true; done"),
+        ("different-var-name seq for-loop", "for j in $(seq 45); do true; done"),
+        ("C-style for-loop", "for ((i=0; i<45; i++)); do true; done"),
+        ("brace-range for-loop", "for i in {1..45}; do true; done"),
+        ("while with a non-true condition", "while :; do :; done"),
+        ("until-loop", "until false; do :; done"),
+    ]
+    for label, shape in must_catch:
+        assert _LOOP_CONSTRUCT_ANYWHERE_RE.search(shape), (
+            f"{label} must be recognised as a loop construct: {shape!r}"
+        )
+
+    # Negative controls: ordinary prose without a full do...done shape.
+    # Deliberately NOT included: the legitimate elapsed-time poll line --
+    # this regex must catch that shape too now (it is must_catch's "while
+    # true" case above); the real poll line is exempted POSITIONALLY at the
+    # call site, never by this regex refusing its own keyword.
+    must_not_catch = [
+        "Wait until it's done before returning.",
+        "This is fine for now.",
+        "While you wait, do nothing else.",
+        "Keep polling until the bound is reached, then return.",
+        "Run this for as long as needed, until it succeeds.",
+    ]
+    for shape in must_not_catch:
+        assert _LOOP_CONSTRUCT_ANYWHERE_RE.search(shape) is None, (
+            f"benign text must not be flagged as a loop construct: {shape!r}"
+        )
+
+
+def test_gate_command_helper_actually_discriminates():
+    """Round 10 (HIGH): _assert_gate_command_cannot_hide_a_loop's own
+    discrimination table. The exact escape that must never return: a
+    single-command gate (reviewAcceptCmd's own shape, no `&&` of its own)
+    with ` && tail -f /dev/null` appended -- one legitimate-looking `&&`,
+    the whole string starts with "python3 ", no forbidden token appears, and
+    the command blocks forever exactly when the real gate succeeds. Layer
+    2's old prefix-only check let this through; it must check EVERY
+    `&&`-separated part now."""
+    real_translate_chain = (
+        "python3 /fixture/x/scripts/draft_ready.py seg01 --expect-token run:seg01"
+        " && python3 /fixture/x/scripts/validate_draft.py seg01"
+    )
+    real_review_single = "python3 /fixture/x/scripts/review_ready.py seg01 --expect-token run:seg01:r1"
+
+    for label, cmd in [
+        ("real translate chain", real_translate_chain),
+        ("real review single command", real_review_single),
+    ]:
+        _assert_gate_command_cannot_hide_a_loop(cmd, label)  # must not raise
+
+    hostile = [
+        ("the exact round-10 escape: single command + hostile second half",
+         real_review_single + " && tail -f /dev/null"),
+        ("hostile first half, real command second",
+         "tail -f /dev/null && " + real_review_single),
+        ("a third chained command beyond the one allowed",
+         real_translate_chain + " && python3 /fixture/x/scripts/extra.py"),
+        ("a loop construct riding beside the real command",
+         real_review_single + " && for i in $(seq 1 45); do sleep 20; done"),
+    ]
+    for label, cmd in hostile:
+        try:
+            _assert_gate_command_cannot_hide_a_loop(cmd, label)
+        except AssertionError:
+            pass
+        else:
+            raise AssertionError(f"{label} was NOT caught: {cmd!r}")
+
+
 def test_no_single_chunk_approaches_the_bash_call_cap(tmp_path):
     """The constraint that forced chunking. 600 s is a measured hard clamp: a
     call declaring more is killed at 600 s with exit 143 no matter what timeout
@@ -692,14 +794,39 @@ def test_no_single_chunk_approaches_the_bash_call_cap(tmp_path):
                 recheck_command(prompt), f"{recheck_label} re-check command"
             )
 
-    for label in ["wait:seg01", "review-wait:seg01:r1",
-                  "wait-recheck:seg01", "review-wait-recheck:seg01:r1"]:
+    # Round 10: the chunk prompt's own legitimate poll line -- already
+    # fullmatch-verified above -- is subtracted POSITIONALLY before this scan
+    # runs, rather than the scan regex exempting its keyword by name (see
+    # _LOOP_CONSTRUCT_ANYWHERE_RE's own comment for the bug that shape was).
+    # The re-check prompts get no such subtraction and are scanned whole:
+    # their own command is held to SAFE_COMMAND_RE above, which cannot
+    # contain "while"/"until" at all, so there is nothing legitimate to
+    # exempt there, and poll_line() would raise on a re-check prompt anyway
+    # (exactly one `end=$((SECONDS +` line is required, and a re-check
+    # prompt has none) -- calling it unconditionally on every label would
+    # turn this into a false RED on every re-check prompt instead of a fix.
+    for label in ["wait:seg01", "review-wait:seg01:r1"]:
         for prompt in chunk_prompts(out, label):
-            hit = _LOOP_CONSTRUCT_ANYWHERE_RE.search(prompt)
+            line = poll_line(prompt)
+            assert prompt.count(line) == 1, (
+                f"{label} poll line appears {prompt.count(line)}x in its own "
+                f"prompt; the positional carve-out below assumes exactly one "
+                f"occurrence to subtract"
+            )
+            remainder = prompt.replace(line, "", 1)
+            hit = _LOOP_CONSTRUCT_ANYWHERE_RE.search(remainder)
             assert hit is None, (
                 f"{label}'s prompt contains a loop construct "
                 f"({hit.group(0)!r}) somewhere in its text, not just in the "
-                f"one line/command already checked above:\n{prompt}"
+                f"poll line already checked above:\n{prompt}"
+            )
+    for recheck_label in ["wait-recheck:seg01", "review-wait-recheck:seg01:r1"]:
+        for prompt in chunk_prompts(out, recheck_label):
+            hit = _LOOP_CONSTRUCT_ANYWHERE_RE.search(prompt)
+            assert hit is None, (
+                f"{recheck_label}'s prompt contains a loop construct "
+                f"({hit.group(0)!r}) somewhere in its text, not just in the "
+                f"one command already checked above:\n{prompt}"
             )
 
 

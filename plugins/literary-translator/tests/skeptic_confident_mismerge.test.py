@@ -33,6 +33,15 @@ nothing), and (iii) assigns ``risk_classes=["high_dispersion"]`` to record
 that a real scan run with ``--dispersion-threshold 3``/
 ``--windows-per-entity >= 3`` would have genuinely fired for this entity.
 
+This file's own harness carries the identical round-9 dispatch-identity
+recorder/guard/freeze mechanism as skeptic_pipeline_e2e.test.py's copy, but
+every fixture below is single-batch by construction (see cases (a)/(b)
+above), so the round-10 content-binding property -- that a batch's dispatch
+prompt reflects ITS OWN assignments, not some other batch's, which that
+guard alone cannot verify -- has no second batch here to be observable
+against, and is exercised only in skeptic_pipeline_e2e.test.py's own
+multi-batch fixture.
+
 Fixtures mirror tests/skeptic_ready.test.py's own helpers (duplicated here,
 not imported -- see pytest.ini's own comment on this project's
 self-contained-test-file convention).
