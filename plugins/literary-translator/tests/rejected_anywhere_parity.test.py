@@ -680,10 +680,21 @@ def _scan_code(
             i = n if j == -1 else j
             continue
         if c == "/" and i + 1 < n and source[i + 1] == "*":
+            # Transparent, like the line-comment branch above: leave
+            # prev_ends_expr/prev_word/prev_is_dot exactly as they were
+            # BEFORE the comment, not force-set. Round-4 codex finding (C3):
+            # forcing prev_ends_expr=True here made `const r = /* gap */ /`/`
+            # -- a regex literal split from its `=` only by a comment --
+            # misread the following `/` as division (since regex-detection
+            # requires prev_ends_expr False), so the stray `/` was treated as
+            # an ordinary operator and the backtick right after it was then
+            # read as an OPENING template literal with no matching close,
+            # corrupting everything read afterward, including the real call
+            # this exists to find. A comment carries no grammatical state of
+            # its own; whatever ended before it (or didn't) must still be
+            # true after it.
             j = source.find("*/", i + 2)
             i = n if j == -1 else j + 2
-            prev_ends_expr = True
-            prev_is_dot = False
             continue
         if c in ("'", '"'):
             i = _skip_string(source, i)
@@ -694,6 +705,25 @@ def _scan_code(
             i = _scan_template(source, i, name, calls)
             prev_ends_expr = True
             prev_is_dot = False
+            continue
+        if c in "+-" and i + 1 < n and source[i + 1] == c:
+            # `++`/`--`. POSTFIX (prev_ends_expr already True -- follows an
+            # identifier/`)`/`]`/number) leaves the value it operated on in
+            # expression position, so a `/` right after it must still read as
+            # division, not a regex start: prev_ends_expr is left AS IS,
+            # unlike the generic operator fallback below, which unconditionally
+            # resets it to False. Round-4 codex finding (C3): that
+            # unconditional reset is what made `a++ / waitChunkVerdict(real) /
+            # b` misread the postfix `++` as ending expression position,
+            # sending the following `/` down the regex-literal path, which
+            # then swallowed the real call as if it were inside the "regex"
+            # body. PREFIX (`++a`, prev_ends_expr already False) does not end
+            # an expression either way, so it is left unchanged too --
+            # matching the generic fallback's own behaviour for this case,
+            # which is why prefix needed no special handling to begin with.
+            prev_word = ""
+            prev_is_dot = False
+            i += 2
             continue
         if c == "/" and not (
             prev_ends_expr and prev_word not in _REGEX_ALLOWED_AFTER_WORD
@@ -1007,6 +1037,60 @@ def test_js_call_sites_handles_division_not_mistaken_for_regex():
     src = "const ratio = total / count\nwaitChunkVerdict(a, b)\n"
     sites = js_call_sites(src, "waitChunkVerdict")
     assert len(sites) == 1, f"division mistaken for regex desynced the tokenizer: found {sites}"
+
+
+def test_js_call_sites_handles_postfix_increment_before_division():
+    """Round-4 codex finding (C3), measured against the pre-fix tokenizer
+    (`git show` of this file at the commit before this test was added): `a++`
+    ends an expression the same way a bare identifier does, so a `/` right
+    after it must read as division. The pre-fix tokenizer's generic operator
+    fallback unconditionally reset prev_ends_expr on EVERY non-space,
+    non-word character -- including each `+` of a postfix `++` -- so the `/`
+    that followed was misread as a possible regex start, and
+    `_skip_regex_literal` then consumed everything up to the NEXT `/` as if
+    it were the regex body, swallowing the real call site whole."""
+    src = "const x = a++ / waitChunkVerdict(real) / b;\n"
+    sites = js_call_sites(src, "waitChunkVerdict")
+    assert len(sites) == 1, (
+        f"postfix `++` before `/` desynced the tokenizer: found {sites}. If "
+        f"empty, the regex/division disambiguation has regressed to treating "
+        f"the `/` after `a++` as a possible regex start again"
+    )
+
+    # Prefix `++a` must still work exactly as before -- prefix does not end
+    # an expression either way, so the fix must not perturb it.
+    src_prefix = "let y = ++a / waitChunkVerdict(real);\n"
+    assert len(js_call_sites(src_prefix, "waitChunkVerdict")) == 1
+
+    # Postfix `--` (the sibling operator) must be handled the same way.
+    src_decr = "const z = a-- / waitChunkVerdict(real) / b;\n"
+    assert len(js_call_sites(src_decr, "waitChunkVerdict")) == 1
+
+
+def test_js_call_sites_treats_block_comments_as_transparent():
+    """Round-4 codex finding (C3), measured against the pre-fix tokenizer:
+    the block-comment branch force-set prev_ends_expr=True after every `/*
+    ... */`, unlike the line-comment branch just above it (which correctly
+    leaves prev_ends_expr untouched, transparent to whatever came before).
+    That inconsistency made `const r = /* gap */ /`/` -- a regex literal
+    split from its `=` only by a comment -- misread the `/` right after the
+    comment as division (regex-detection requires prev_ends_expr False), so
+    the stray `/` fell through as an ordinary operator and the backtick
+    immediately after it was then read as an OPENING template literal with
+    no matching close, corrupting everything scanned afterward, including
+    the real call this test drives."""
+    src = "const r = /* gap */ /`/; waitChunkVerdict(real);\n"
+    sites = js_call_sites(src, "waitChunkVerdict")
+    assert len(sites) == 1, (
+        f"a block comment before a regex literal desynced the tokenizer: "
+        f"found {sites}. If empty, block comments have regressed to forcing "
+        f"prev_ends_expr=True instead of staying transparent"
+    )
+
+    # A block comment sitting where division is expected must not flip that
+    # either -- transparency has to work in both directions.
+    src_division = "const ratio = total /* gap */ / count\nwaitChunkVerdict(a, b)\n"
+    assert len(js_call_sites(src_division, "waitChunkVerdict")) == 1
 
 
 def test_js_call_sites_recurses_into_template_interpolations():
@@ -1489,6 +1573,61 @@ PRECHECK_GLUE_REPLY_SHAPES = {
     f"glue_{name}": f"the chunk was cut short{char}ABSENT <idx>\nPRESENT <idx>"
     for name, char in GLUE_CHARS
 }
+
+# IDENTITY, not shape (round 4, C2). Every check above -- 16 entries, each a
+# single codepoint, 16 distinct values -- passes UNCHANGED if GLUE_CHARS's
+# "lsep_u2028" entry is silently repointed from chr(0x2028) to the plain
+# letter "y": still 16 entries, still a single codepoint each, still 16
+# distinct values. Every reply PRECHECK_GLUE_REPLY_SHAPES generates still
+# contains "ABSENT" regardless of which character glued it, so the
+# behavioral assertions stay green too -- a codepoint-specific regression
+# would lose its ONLY coverage in total silence, with every guard above and
+# every downstream test reporting a clean 16 of 16.
+GLUE_CHARS_BY_NAME = dict(GLUE_CHARS)
+assert len(GLUE_CHARS_BY_NAME) == len(GLUE_CHARS), (
+    f"GLUE_CHARS has a duplicate name -- dict(GLUE_CHARS) collapsed "
+    f"{len(GLUE_CHARS)} entries down to {len(GLUE_CHARS_BY_NAME)}"
+)
+
+# The members with non-obvious semantics -- the ones a shape-only check
+# cannot distinguish from an arbitrary stand-in character, and the ones this
+# release's own claims are actually about: U+2028/U+2029 are treated as line
+# breaks by str.splitlines() but NOT by split("\n") (what sentinelVerdict()
+# actually calls), and U+0085 is NOT stripped by trim() the way U+2028/U+2029
+# are. zwsp (U+200B) is pinned too because it is invisible in a diff or
+# terminal -- a silent substitution there is the least likely to be caught by
+# eye, the exact failure mode this whole section exists to close.
+REQUIRED_GLUE_IDENTITIES = {
+    "lsep_u2028": 0x2028,
+    "psep_u2029": 0x2029,
+    "nel_u0085": 0x0085,
+    "zwsp_u200b": 0x200B,
+}
+
+
+def test_glue_chars_pins_the_specific_high_risk_codepoints():
+    """IDENTITY, not shape. `test_precheck_glue_reply_shapes_cover_all_sixteen_glue_chars`
+    below and the module-level guards above prove the population has 16
+    entries, each a genuine single codepoint, all 16 distinct -- and codex
+    round 4 measured that every one of those properties survives a mutation
+    that replaces `("lsep_u2028", chr(0x2028))` with `("lsep_u2028", "y")`.
+    That mutation is invisible to shape-only checks because "y" is also a
+    single, distinct codepoint; it is only visible by looking up the NAME and
+    checking it maps to the codepoint the name claims."""
+    for name, expected_codepoint in REQUIRED_GLUE_IDENTITIES.items():
+        assert name in GLUE_CHARS_BY_NAME, (
+            f"expected a GLUE_CHARS entry named {name!r}, not found. Names "
+            f"present: {sorted(GLUE_CHARS_BY_NAME)}"
+        )
+        actual = GLUE_CHARS_BY_NAME[name]
+        assert ord(actual) == expected_codepoint, (
+            f"GLUE_CHARS[{name!r}] is U+{ord(actual):04X} ({actual!r}), "
+            f"expected U+{expected_codepoint:04X}. A silent repointing to an "
+            f"arbitrary stand-in character (codex round 4's own mutation: "
+            f"chr(0x2028) -> \"y\") passes every shape-only check in this "
+            f"file -- 16 entries, single codepoints, 16 distinct -- while "
+            f"this specific codepoint's coverage disappears entirely"
+        )
 
 
 def test_precheck_glue_reply_shapes_cover_all_sixteen_glue_chars():

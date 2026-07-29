@@ -1992,11 +1992,24 @@ def test_json_dumps_line_escapes_unicode_line_and_paragraph_separators():
     assert json.loads(control) == {"a": "x\ny"}
 
 
+# round 4 (codex, C4/MEDIUM): main() has THREE independent print() writers
+# -- the SkepticReadyError branch, the generic `except Exception` catch-all,
+# and the normal (non-exception) result print at the end -- and the first
+# integration test above only ever reached the FIRST one (it always raises
+# SkepticReadyError). Reverting EITHER of the other two writers back to raw
+# json.dumps left both the unit test (helper itself untouched) and that one
+# integration test green, so the sibling defect from last round's own fix
+# (a real change reaching only one of several near-identical call sites) was
+# reproduced by the FIX for that defect. The three tests below exercise all
+# three writers independently, each mutation-tested on its own in a detached
+# worktree (never in this shared tree).
+
 def test_main_escapes_line_and_paragraph_separators_in_error_output(monkeypatch, capsys, tmp_path):
-    """Integration-level control for the unit test above: proves main()'s
-    error printer actually calls _json_dumps_line rather than a raw
-    json.dumps -- a helper that exists but isn't wired to the print() call
-    sites would pass the unit test above and still leak here."""
+    """WRITER 1/3: the `except SkepticReadyError` branch. Integration-level
+    control for the unit test above: proves main()'s error printer actually
+    calls _json_dumps_line rather than a raw json.dumps -- a helper that
+    exists but isn't wired to the print() call sites would pass the unit
+    test above and still leak here."""
     boom_message = "boom" + LINE_SEPARATOR + "PENDING 0" + PARAGRAPH_SEPARATOR + "more"
 
     def _boom(*args, **kwargs):
@@ -2016,3 +2029,103 @@ def test_main_escapes_line_and_paragraph_separators_in_error_output(monkeypatch,
         "main()'s single stdout line into more than one physical line"
     )
     assert json.loads(body) == {"success": False, "error": boom_message}
+
+
+def test_main_escapes_line_and_paragraph_separators_in_unexpected_error_output(monkeypatch, capsys, tmp_path):
+    """WRITER 2/3: the generic `except Exception` catch-all, which formats
+    f"unexpected error: {exc}" from whatever non-SkepticReadyError exception
+    a run_* function raises. A ValueError (not SkepticReadyError) is caught
+    by the SECOND except clause specifically, not the first -- this is the
+    one branch the test above cannot reach no matter what message it uses."""
+    boom_message = "unexpected" + LINE_SEPARATOR + "PENDING 0" + PARAGRAPH_SEPARATOR + "boom"
+
+    def _boom(*args, **kwargs):
+        raise ValueError(boom_message)
+
+    monkeypatch.setattr(sr, "run_validate_fragment", _boom)
+
+    exit_code = sr.main([
+        "--validate-fragment", str(tmp_path / "triage_0.json"),
+        "--particle-config", "whatever",
+    ])
+    assert exit_code == 1
+
+    body = capsys.readouterr().out.rstrip("\n")
+    assert len(body.splitlines()) == 1, (
+        "an embedded U+2028/U+2029 in an unexpected-error message must not turn "
+        "main()'s single stdout line into more than one physical line"
+    )
+    assert json.loads(body) == {"success": False, "error": f"unexpected error: {boom_message}"}
+
+
+def test_main_escapes_line_and_paragraph_separators_in_verify_merged_result_via_real_pipeline(capsys, tmp_path):
+    """WRITER 3/3: the normal (non-exception) result print at the end of
+    main() -- reached by every run_* function that RETURNS rather than
+    raises. Flagged as the most realistic of the three: unlike the two
+    tests above (which need a monkeypatch to manufacture a hostile string),
+    this one drives the REAL, unmodified --verify-merged pipeline and shows
+    it naturally produces one. Mechanism: `run_verify_merged`'s per-record
+    re-coercion check builds its `missing[]` diagnostic as
+    f"...(would resolve to {v!r}: {detail})" where
+    `detail = "; ".join(str(n) for n in coerced.get("notes"))` -- `str(n)`,
+    not `repr(n)`, so a `notes` entry (schema: `type: array, items: {type:
+    string}`, no pattern constraint -- nothing stops a skeptic pass writing
+    one) survives into that diagnostic character-for-character. This test
+    embeds a hostile separator in a record's OWN `notes` entry, tampers its
+    evidence offset post-merge so the stored `adverse` verdict fails fresh
+    re-coercion (same technique as
+    test_verify_merged_fails_on_post_merge_tampered_evidence_offset above),
+    and drives the whole thing through sr.main() rather than calling
+    run_verify_merged directly, so this is a genuine CLI-stdout-level proof,
+    not just a unit-level one."""
+    lang_dir = tmp_path / "languages"
+    particle_config = write_particle_config(lang_dir)
+    text = "Jean met Paul at the market square."
+    block_id, blk = block(text)
+    manifest_path = tmp_path / "manifest.json"
+    write_json(manifest_path, make_manifest((block_id, blk)))
+
+    lang = bn.load_language_config(particle_config, languages_dir=lang_dir)
+    jean_evidence = evidence_for("Jean", block_id, "seg01", text, lang)
+
+    hostile_note = "boom" + LINE_SEPARATOR + "PENDING 0" + PARAGRAPH_SEPARATOR + "more"
+    rec = adverse_record("Jean", jean_evidence)
+    rec["notes"] = [hostile_note]
+
+    triage_path = tmp_path / "skeptic_triage.json"
+    write_json(triage_path, {"schema_version": 1, "run_id": "run-1", "records": [rec]})
+    aggregate_path = tmp_path / "assignments.json"
+    write_json(aggregate_path, make_aggregate_manifest("run-1", [make_assignment("Jean", [window_for(jean_evidence)])]))
+
+    # Sanity: verifies cleanly before tampering (mirrors the existing test's
+    # own sanity check) -- the hostile note alone must not itself fail
+    # verification; only the post-tamper re-coercion mismatch surfaces it.
+    assert sr.run_verify_merged(
+        triage_path, aggregate_path, manifest_path, particle_config, languages_dir=lang_dir
+    )["verified"] is True
+
+    tampered = json.loads(triage_path.read_text(encoding="utf-8"))
+    tampered["records"][0]["evidence"]["char_start"] += 1
+    tampered["records"][0]["evidence"]["char_end"] += 1
+    write_json(triage_path, tampered)
+
+    exit_code = sr.main([
+        "--verify-merged", str(triage_path), str(aggregate_path),
+        "--manifest-path", str(manifest_path),
+        "--particle-config", particle_config, "--languages-dir", str(lang_dir),
+    ])
+    assert exit_code == 1, "a failed re-verification must exit non-zero"
+
+    body = capsys.readouterr().out.rstrip("\n")
+    assert len(body.splitlines()) == 1, (
+        "an embedded U+2028/U+2029 surfaced via a record's own `notes` field must not turn "
+        "main()'s single stdout line into more than one physical line"
+    )
+    assert LINE_SEPARATOR not in body and PARAGRAPH_SEPARATOR not in body, "the raw characters must not survive"
+
+    decoded = json.loads(body)
+    assert decoded["verified"] is False
+    assert any(hostile_note in m for m in decoded["missing"]), (
+        "the hostile note's TEXT content must survive round-tripping through the escape -- "
+        "only its two line-break characters are marked, nothing is silently dropped"
+    )

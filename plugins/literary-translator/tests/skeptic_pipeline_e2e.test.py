@@ -1023,6 +1023,56 @@ def test_e2e_precheck_fail_priority_discriminating_order(tmp_path):
     assert out["result"]["merged"] is True
 
 
+def test_e2e_precheck_glued_absent_still_regenerates(tmp_path):
+    """Round-4 codex finding (C1) against
+    tests/rejected_anywhere_parity.test.py's behavioral gate: that gate
+    extracts a `!rejectedAnywhere(...) && sentinelVerdict(...)` expression by
+    matching argument TEXT, and never proves the extracted snippet is the one
+    that actually controls the live branch. Codex's mutation: alias
+    `sentinelVerdict`, park the correctly-guarded expression in an unused
+    `const`, and make the real branch call the alias instead -- the
+    extraction-based gate still finds one guard, one verdict, sees them
+    `&&`-paired, and passes, while the LIVE branch resume-skips a reply it
+    must reject.
+
+    This test cannot be fooled by any such decoy, at any level: it does not
+    extract or select a snippet at all. It instantiates the REAL
+    skeptic-pass-wf.template.js (unmodified control flow) and drives its
+    REAL, live `batchStep()` under node via the mocked `agent()` -- whichever
+    expression actually executes IS the one under test, because there is
+    nothing else it could be.
+
+    Reply shape: the sibling test just above
+    (test_e2e_precheck_fail_priority_discriminating_order) already covers
+    ABSENT alone on its own LF-delimited line, which sentinelVerdict()'s own
+    fail-priority scan catches unguarded. This test covers what that one does
+    NOT: ABSENT GLUED to prose by a non-newline character (so the fail-
+    priority scan alone would miss it), with a clean trailing PRESENT line --
+    the exact shape the rejectedAnywhere() containment guard exists to
+    reject. Must dispatch (NOT resume-skip) and still merge once dispatch and
+    wait succeed -- mirrors the sibling test's own shape/assertions exactly,
+    changing only the precheck reply."""
+    durable_root = str(tmp_path)
+    lang_dir = tmp_path / "languages"
+    particle_config = write_particle_config(lang_dir)
+    run_id = "e2e-run-precheck-glued-absent"
+    batches = [{"index": 0, "assignments": [make_assignment_for_args("Jean", [])]}]
+    plan = {"0": {"precheck": "the chunk was cut short ABSENT 0\nPRESENT 0"}}
+
+    out = run_skeptic_workflow(
+        tmp_path=tmp_path, durable_root=durable_root, particle_config=particle_config,
+        run_id=run_id, batch_agent_cap=10_000, batches=batches, plan=plan,
+    )
+    labels = [c["label"] for c in out["calls"]]
+    assert "skeptic:dispatch:0" in labels, (
+        "a precheck reply with ABSENT glued to prose (not on its own line) "
+        "must still dispatch -- resume-skipping here is the actual defect "
+        "the containment guard exists to close"
+    )
+    assert "skeptic:wait:0" in labels
+    assert out["result"]["merged"] is True
+
+
 def test_e2e_wait_fail_priority_discriminating_order(tmp_path):
     """Same discriminating-order proof at site B': PENDING before a
     trailing READY line must still be read as not-ready."""

@@ -29,10 +29,16 @@ SCHEMAS_DIR = ASSETS_DIR / "schemas"
 SKEPTIC_REPORT_SCRIPT = SCRIPTS_DIR / "skeptic_report.py"
 SKEPTIC_CONSTANTS_SCRIPT = SCRIPTS_DIR / "skeptic_constants.py"
 TRIAGE_SCHEMA_PATH = SCHEMAS_DIR / "skeptic-triage.schema.json"
+# Loaded ONLY to pin skeptic_report.py's restated _LINE_BREAK_CHARS equal to
+# this module's own _MENTIONS_LINE_BREAK_CHARS (see _sanitize's docstring
+# for why skeptic_report.py restates rather than imports it in production
+# code) -- test-only cross-module comparison, never a production coupling.
+RENDER_OBSIDIAN_SCRIPT = SCRIPTS_DIR / "render_obsidian.py"
 
 assert SKEPTIC_REPORT_SCRIPT.is_file(), f"skeptic_report.py not found at {SKEPTIC_REPORT_SCRIPT}"
 assert SKEPTIC_CONSTANTS_SCRIPT.is_file(), f"skeptic_constants.py not found at {SKEPTIC_CONSTANTS_SCRIPT}"
 assert TRIAGE_SCHEMA_PATH.is_file(), f"skeptic-triage.schema.json not found at {TRIAGE_SCHEMA_PATH}"
+assert RENDER_OBSIDIAN_SCRIPT.is_file(), f"render_obsidian.py not found at {RENDER_OBSIDIAN_SCRIPT}"
 
 TRIAGE_SCHEMA = json.loads(TRIAGE_SCHEMA_PATH.read_text(encoding="utf-8"))
 
@@ -54,6 +60,9 @@ def _load_module(name: str, path: Path, extra_sys_path: Path):
 
 
 sr = _load_module("skeptic_report_under_test", SKEPTIC_REPORT_SCRIPT, SCRIPTS_DIR)
+# render_obsidian.py's own top-level imports are all stdlib (no sibling-file
+# `from X import Y` to resolve), so no sys.path trick is needed to load it.
+robs = _load_module("render_obsidian_for_skeptic_report_test", RENDER_OBSIDIAN_SCRIPT, SCRIPTS_DIR)
 
 
 # ---------------------------------------------------------------------------
@@ -404,6 +413,96 @@ def test_format_report_clean_rationale_renders_unchanged():
 
     assert "rationale: a perfectly clean rationale with no control chars" in text
     assert "evidence quote: 'Jean'" in text
+
+
+# ---------------------------------------------------------------------------
+# 5c. round 4 (HIGH): U+2028/U+2029 (and the rest of str.splitlines()'s
+#     line-boundary set) are Zl/Zp, not C0/C1 controls -- neither the old
+#     "\r"/"\n"-only replace() nor _CONTROL_CHARS_RE (\x00-\x1f, \x7f-\x9f)
+#     touched them, so a source_form carrying one survived _sanitize RAW and
+#     still forged a second physical line via str.splitlines() even though
+#     str.split("\n") saw only one -- the same asymmetry as skeptic_ready.py's
+#     already-fixed F-2. This report is the field's SOLE human-facing
+#     consumer with no JSON layer downstream to normalize anything, so the
+#     stakes are the forged line itself, not just a machine-reader artifact.
+#     Same codepoint list as tests/render_obsidian_occindex.test.py's own
+#     _LINE_BREAK_CODEPOINTS (mirrored here deliberately, not re-derived).
+# ---------------------------------------------------------------------------
+
+_LINE_BREAK_CODEPOINTS = [0x0A, 0x0D, 0x0B, 0x0C, 0x1C, 0x1D, 0x1E, 0x85, 0x2028, 0x2029]
+
+
+def test_line_break_chars_pinned_against_render_obsidian_and_against_an_independent_set():
+    """Two independent anchors, not one: equality with render_obsidian.py's
+    own _MENTIONS_LINE_BREAK_CHARS catches the two sets silently diverging
+    from EACH OTHER, but would not catch both shrinking identically (e.g. if
+    someone "fixed" both copies by dropping U+2028 from each). The second
+    assertion, built straight from _LINE_BREAK_CODEPOINTS via chr() rather
+    than copied from either module, catches that: it can only agree with
+    skeptic_report.py's set if skeptic_report.py's set is actually complete."""
+    assert sr._LINE_BREAK_CHARS == robs._MENTIONS_LINE_BREAK_CHARS, (
+        "skeptic_report.py's restated _LINE_BREAK_CHARS has diverged from "
+        "render_obsidian.py's _MENTIONS_LINE_BREAK_CHARS -- keep them equal"
+    )
+    independently_built = frozenset(chr(cp) for cp in _LINE_BREAK_CODEPOINTS)
+    assert sr._LINE_BREAK_CHARS == independently_built
+    assert len(sr._LINE_BREAK_CHARS) == 10, "a silently narrowed set must fail loud, not pass smaller"
+
+
+@pytest.mark.parametrize("codepoint", _LINE_BREAK_CODEPOINTS)
+def test_sanitize_collapses_every_line_break_class_char_to_visible_marker(codepoint):
+    """MUTATION this guards: _sanitize reverting to only \\r/\\n-aware
+    replace() (or _LINE_BREAK_CHARS narrowing back to just {\\n, \\r}) would
+    leave this codepoint's character RAW (or, for the pre-round-4 code, the
+    non-\\r/\\n members were silently STRIPPED by _CONTROL_CHARS_RE rather
+    than marked -- also wrong, since a dropped separator is not distinguish-
+    able from one that was never there)."""
+    ch = chr(codepoint)
+    sanitized = sr._sanitize("x" + ch + "y")
+    assert sanitized == "x\\ny", f"codepoint {hex(codepoint)} must collapse to the visible \\n marker"
+    assert len(sanitized.splitlines()) == 1
+    assert ch not in sanitized, "the raw character must not survive"
+
+
+def test_sanitize_line_separator_and_paragraph_separator_round_trip_pre_existing_assertions():
+    """Direct measurement, independent of the parametrized sweep above --
+    same shape as skeptic_ready.py's F-2 regression: splitlines() sees an
+    embedded U+2028/U+2029 as a second physical line while split("\\n")
+    still sees one, and _sanitize must close that gap for BOTH characters."""
+    raw = "Rachel" + chr(0x2028) + "PRESENT 0" + chr(0x2029) + "more"
+    assert len(raw.splitlines()) == 3, "sanity check on the raw (pre-sanitize) input"
+    assert len(raw.split("\n")) == 1
+
+    sanitized = sr._sanitize(raw)
+    assert sanitized == "Rachel\\nPRESENT 0\\nmore"
+    assert len(sanitized.splitlines()) == 1
+    assert len(sanitized.split("\n")) == 1
+
+
+def test_format_report_sanitizes_source_form_against_line_separator_forgery():
+    """Integration-level control for the unit tests above: reproduces the
+    exact scenario from the round-4 finding -- a source_form carrying a raw
+    U+2028 that would otherwise forge a second, fake "[n] SomeName (verdict:
+    ...)"-shaped line for the human reading this report to make an identity
+    decision from."""
+    block_text = "irrelevant block text for this fixture"
+    manifest = make_manifest({"b1": block_text})
+    hostile_source_form = "Rachel" + chr(0x2028) + "[9] FORGED (verdict: adverse)"
+    triage = make_triage([
+        make_record(hostile_source_form, "adverse",
+                    evidence=make_evidence("b1", 0, 4, 0, len(block_text))),
+    ])
+    validate_triage(triage)
+
+    report = sr.build_report(triage, manifest)
+    text = sr.format_report(report)
+
+    lines = text.split("\n")
+    assert not any(line.strip().startswith("[9] FORGED") for line in lines), (
+        "a U+2028 embedded in source_form must never forge its own report-looking line"
+    )
+    assert chr(0x2028) not in text, "the raw LINE SEPARATOR character must not survive into the rendered report"
+    assert "Rachel\\n[9] FORGED (verdict: adverse)" in text, "collapsed to the visible marker, content preserved"
 
 
 # ---------------------------------------------------------------------------

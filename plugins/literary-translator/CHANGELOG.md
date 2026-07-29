@@ -144,12 +144,46 @@ something about the CALL SITES. Mutation-proved: with both skeptic delegations r
 `sentinelVerdict()` calls — zero `waitChunkVerdict` calls left in that workflow — the harness still
 returned all-pending and PASSED. A parity test comparing helper copies is green precisely while a
 call site never calls the helper. The gate now ENUMERATES the call sites out of each template with a
-real tokenizer that classifies every byte as code, comment, string, template literal or regex
-literal — not a regex over source, which would only match the spelling someone thought of — and pins
-exact per-template counts (mass-translate 4, glossary 2, skeptic 2) plus a total floor, so an
-enumeration that silently matched nothing cannot read as clean. The precheck sites are covered the
-same way: the guard call's offset must precede the verdict call's offset. Each site was reverted one
-at a time and watched failing.
+hand-built JS tokenizer, not a full parser and not a regex over source (which would only match the
+spelling someone thought of), and
+pins exact per-template counts (mass-translate 4, glossary 2, skeptic 2) plus an exact total of 8, so
+an enumeration that silently matched nothing cannot read as clean. The tokenizer classifies each byte
+as CODE, line/block comment, string, or template literal (recursing into `${...}` interpolations), and
+disambiguates a leading `/` as a regex literal vs division — including across postfix/prefix `++`/`--`
+and comments, two gaps round 4 closed. It covers the constructs this suite's own self-tests exercise,
+not a claim of exhaustive ECMAScript grammar coverage. The precheck sites are covered the
+same way, tightened past pure offset order: the guard call must be `!`-negated and `&&`-adjacent
+directly into the verdict call it protects, with nothing else between them, not merely occur at an
+earlier offset — an independent reviewer measured that ordering alone is satisfiable by an unrelated,
+UNUSED sibling guard call placed anywhere earlier in the file while the real decision stays unguarded.
+Each site was reverted one at a time and watched failing.
+
+**The precheck guard's own verification was defeated twice, and the fix that finally cannot be.** The
+offset-only structural check above was defeated by a decoy guard: an unused sibling `rejectedAnywhere`
+call placed earlier in the file satisfies mere ordering while the real decision stays unguarded — the
+escape the same-statement-pairing fix above closes. What replaced it — extracting the real
+`!rejectedAnywhere(...) && sentinelVerdict(...)` expression by matching its argument text and running
+that snippet under node — was ALSO defeated, one level up, by a decoy expression (round-4 codex
+finding C1): alias `sentinelVerdict`, park the correctly-guarded expression in an unused `const`, and
+make the real branch call the alias instead. The extraction-based gate still finds one guard, one
+verdict, sees them same-statement-paired, and passes, because it never confirms the snippet it
+extracted is the one actually wired to the live branch — while that live branch resume-skips a reply
+it must reject. Reproduced directly: against that mutant, the round-3 extraction gate reports 35
+passed, fully blind, while a new end-to-end test —
+`tests/skeptic_pipeline_e2e.test.py::test_e2e_precheck_glued_absent_still_regenerates` — fails,
+correctly. That test cannot be fooled by either decoy, at any level: it instantiates the real,
+unmodified `skeptic-pass-wf.template.js` and drives its REAL, live `batchStep()` under node via a
+mocked `agent()`, so whatever expression actually executes is what it exercises, because there is
+nothing else it could be. The extraction-based gate is kept as a secondary, faster signal, not
+removed — but the property this release now trusts is the one only an end-to-end drive can prove.
+
+**Considered and deferred: simplifying the tokenizer.** Two reviewers independently judged its
+~440-line hand-built construction over-engineered for what it needs to do; one reported a line-count
+reduction to roughly 55 lines. That replacement was never written to disk anywhere this release's
+lanes could find it — this worktree, its scratchpad, and the other worktrees in use all came back
+empty. It was reasoned about in a review pass and never persisted, so nobody can read it, run it, or
+re-derive the figure. Recorded here as CONSIDERED, not as measured, because the number cannot be
+checked — and deferred rather than filed, with no issue number, because none was filed.
 
 **Four more statements were stronger than the code**, all corrected rather than merely noted: the
 "exactly 900 s" wait guarantee (the emitted loop tests its deadline only BETWEEN iterations, so a
@@ -186,18 +220,63 @@ backing both waits, a false PENDING costs one bounded extra call instead of a wr
 timeout. Stated here rather than claimed as tracked — no issue number is cited because none was
 filed.
 
-Suite: 4178 → **4407 passed, 3 skipped, 2 xfailed**. Every skip is named rather than incidental,
+**A shipped fix at one site, and an open class everywhere else.** `skeptic_ready.py`'s three stdout
+prints used `json.dumps(..., ensure_ascii=False)`, which escapes `\n` but leaves U+2028/U+2029 RAW —
+measured: such a payload is one line to `str.split("\n")` and two lines to `str.splitlines()`, so a
+`source_form` carrying U+2028 renders to the agent reading that reply as a second physical line of the
+sentinel shape this release's own parser is guarding against. Fixed there, at all three sites, via a
+new `_json_dumps_line()` helper, because that script's stdout is what a wait/precheck-driving agent
+reads directly. Not fixed and not filed: the same raw pattern remains at every other stdout site in
+`assets/scripts/`. Measured directly rather than estimated — every `print(...)` call whose arguments
+contain both `json.dumps(` and `ensure_ascii=False`, plus the one site that writes straight to
+`sys.stdout` via `json.dump()` instead of `print()` — over every script in that directory except
+`skeptic_ready.py` itself: 38 sites across 17 scripts (`render_obsidian.py` 7; `validate_conservation.py`,
+`skeptic_setup.py`, `resume_setup.py`, `ledger_merge.py`, `canon_validate.py`, and
+`diff_rendered_output.py` 3 each; `glossary_batch_plan.py`, `canon_adjudication_audit.py`, and
+`select_segments.py` 2 each; one each in `bootstrap_names.py` (the `json.dump`-to-`sys.stdout` form,
+not `print`), `validate_backlinks.py`, `validate_assembled.py`, `glossary_preflight.py`,
+`final_audit.py`, `cache_key.py`, and `assemble.py`). This count is a floor on the pattern actually
+searched for, not a claim that every indirect path to stdout was traced — a helper that builds a
+message string consumed by some other script's own `print(json.dumps(...))` call is credited to that
+call's site, not counted again. This release closes the class at the one site its own wait/precheck
+grammar reads; the rest is a pre-existing gap this release neither introduced nor was scoped to close.
+
+**A different script, a different audience, and a rendering change riding along with its security
+fix.** `skeptic_report.py`'s `_sanitize()` — the HUMAN-facing triage-report renderer, not the
+agent-facing stdout above — used to convert only `\n`/`\r` to a visible `\n` marker and strip every
+other C0/C1 control character silently; U+2028/U+2029 sit outside that control-character range, so
+they passed through completely raw, letting an agent-authored `source_form` forge a fake
+`"[n] SomeName (verdict: ...)"` report line. Fixed by widening `_LINE_BREAK_CHARS` to the full
+`str.splitlines()` boundary set and collapsing every member to the same visible marker. That closes
+U+2028/U+2029, which is the security fix — but the same widened set also catches six codepoints
+(`\v`, `\f`, `\x1c`, `\x1d`, `\x1e`, `\x85`) that the OLD code already neutralized, just silently, by
+stripping them as ordinary control characters. Those six now render as a visible `\n` marker instead of
+disappearing, which is a user-visible change in how a triage report reads, not itself required to close
+the U+2028/U+2029 hole. Named as its own change rather than folded into the security fix: every one of
+those six is a `splitlines()` boundary, so every one was line-forging-capable, and deleting them
+silently discarded the evidence that an agent had put something there.
+
+Suite: 4178 → **4426 passed, 3 skipped, 2 xfailed**. Every skip is named rather than incidental,
 and there are three for two reasons: one pre-existing placeholder, plus the single pin row that
 declares no one-to-one replacement, which now skips in TWO tests — the diff-side check and the
 same-hunk check added below — because a row with no replacement has nothing for either to bind.
 
-Every new gate was watched failing against the pre-fix tree first — and that evidence is
-EXECUTABLE rather than a claim in these notes. Four gates re-read both templates at a frozen
-pre-release SHA and assert they still fail there, so the #352 defect stays reproducible in CI
-instead of living only in a commit message. The frozen SHA matters: an earlier draft read `HEAD`,
-which was the pre-fix tree while this work was uncommitted and became the POST-fix tree the moment
-it was committed — at which point those four gates degraded from red evidence into silent skips,
-still green, reporting nothing.
+Not every new gate carries the same kind of pre-fix evidence, and the difference is worth stating
+rather than folding into one blanket claim. Four gates — `tests/wait_chunking_batch_passes.test.py`'s
+cap and late-landing-fragment checks, each parametrized over both templates — re-read the pre-fix
+source at a frozen pre-release SHA via `git show` and assert it still fails there on EVERY run, so
+the #352 defect stays EXECUTABLY reproducible in CI instead of living only in a commit message. The
+frozen SHA matters: an earlier draft read `HEAD`, which was the pre-fix tree while this work was
+uncommitted and became the POST-fix tree the moment it was committed — at which point those four
+gates degraded from red evidence into silent skips, still green, reporting nothing. The two new
+precheck BEHAVIOURAL gates (`tests/rejected_anywhere_parity.test.py`) are different: neither reads a
+baseline in its executable code, so their pre-fix figures live only in prose, not in an assertion any
+run re-checks. The 6-shape reply-agreement lock's docstring narrates what running it against `190ac36`
+would show; the full-population glue lock's 15-of-16 figure is a documented ONE-TIME measurement taken
+by hand against `190ac36` via `git show` and recorded in the test's own docstring. Both, as shipped,
+only lock that the CURRENT tree behaves correctly, whatever the historical figure was. Accepted as
+sufficient when reported, and named here rather than left to read as the same kind of evidence as the
+four gates above.
 
 ## 1.16.1 — 2026-07-27
 

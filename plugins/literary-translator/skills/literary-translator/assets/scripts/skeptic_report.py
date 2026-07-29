@@ -237,26 +237,58 @@ def build_report(triage: dict, manifest: dict, worklist_risk_classes: "dict | No
     return {"run_id": triage.get("run_id"), "record_count": len(entries), "entries": entries}
 
 
+# The full str.splitlines() line-boundary codepoint set (LF, CR, VT, FF,
+# FS/GS/RS, NEL, and the Unicode LINE/PARAGRAPH SEPARATORS) -- RESTATED
+# from render_obsidian.py's own `_MENTIONS_LINE_BREAK_CHARS`, not imported:
+# render_obsidian.py is a single-purpose Obsidian `output.target` adapter
+# (one of potentially several pluggable adapters, see its own docstring),
+# and this report has nothing to do with output targets -- importing it
+# here would wire an unrelated dependency into a script that must keep
+# working regardless of which adapter is installed or in effect, and this
+# round's own reviewer already counted four independent, mostly-accidental
+# expressions of this one rule across the codebase. Restating is the same
+# tradeoff every one of skeptic_ready.py's/skeptic_report.py's other
+# constants makes vs. skeptic_constants.py, except this one is small and
+# stable enough not to warrant its own shared module for a two-file round.
+# tests/skeptic_report.test.py pins this set EQUAL to render_obsidian.py's
+# own, so the two cannot silently diverge.
+#
+# Built from chr() for U+2028/U+2029, never a pasted literal glyph -- see
+# the unicode-boundary-text-authoring project skill: a raw glyph here is
+# visually indistinguishable from a plain space on skim and has been
+# silently normalized to one by authoring tooling before (twice, in one
+# file, in one session).
+_LINE_BREAK_CHARS = frozenset("\n\r\v\f\x1c\x1d\x1e\x85" + chr(0x2028) + chr(0x2029))
+
 _CONTROL_CHARS_RE = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 
 
 def _sanitize(s):
     """Neutralizes an agent-authored string before `format_report` prints
-    it (fix L12): every triage record field rendered below (`run_id`,
-    `source_form`, `verdict`, `risk_classes`, `rationale`, `notes`/
-    disambiguators, the derived evidence `quote`) was authored by the
-    skeptic codex pass, and this report is its SOLE human-facing consumer
-    -- a human reads it to make identity decisions. Without sanitizing,
-    an embedded newline could forge a fake "[n] SomeName (verdict: ...)"
-    line, and an embedded ANSI/control escape (e.g. "\x1b[2J") could
-    clear or spoof the terminal. Newlines/carriage returns are collapsed
-    to a visible "\\n" marker (never silently dropped) and every
-    remaining C0/C1 control character (0x00-0x1f, 0x7f-0x9f, including
-    ESC) is stripped. A string with no control characters round-trips
-    unchanged."""
+    it (fix L12; round 4 widened the newline-class set past bare \\n/\\r --
+    see `_LINE_BREAK_CHARS`' own comment for why U+2028/U+2029 needed
+    closing here specifically): every triage record field rendered below
+    (`run_id`, `source_form`, `verdict`, `risk_classes`, `rationale`,
+    `notes`/disambiguators, the derived evidence `quote`) was authored by
+    the skeptic codex pass, and this report is its SOLE human-facing
+    consumer -- a human reads it to make identity decisions. Without
+    sanitizing, an embedded LINE-BREAK-CLASS character (not just \\n/\\r --
+    str.splitlines() also breaks on \\v, \\f, FS/GS/RS, NEL, and U+2028/
+    U+2029, and a raw U+2028/U+2029 survives even a naive "\\n"-only
+    check) could forge a fake "[n] SomeName (verdict: ...)" line, and an
+    embedded ANSI/control escape (e.g. "\x1b[2J") could clear or spoof the
+    terminal. EVERY member of `_LINE_BREAK_CHARS` is collapsed to a single
+    visible "\\n" marker (never silently dropped -- consistent regardless
+    of which original character it was); every remaining C0/C1 control
+    character (0x00-0x1f, 0x7f-0x9f, including ESC) is stripped. A string
+    with neither is the identity function."""
     if not isinstance(s, str):
         return s
-    s = s.replace("\r\n", "\n").replace("\r", "\n").replace("\n", "\\n")
+    s = s.replace("\r\n", "\n")
+    for ch in _LINE_BREAK_CHARS:
+        if ch != "\n":
+            s = s.replace(ch, "\n")
+    s = s.replace("\n", "\\n")
     return _CONTROL_CHARS_RE.sub("", s)
 
 
