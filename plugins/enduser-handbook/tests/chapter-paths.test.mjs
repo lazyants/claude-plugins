@@ -38,6 +38,12 @@ import {
   specReferencesDir,
   chapterHasWikilinkTo,
   containerTitleMatches,
+  findMarkdownLinkGroups,
+  stripInertContexts,
+  parseMdLinkDestination,
+  buildEmbedCandidates,
+  isCanonicalAssetKey,
+  expectedAssets,
 } from '../skills/enduser-handbook/assets/lib/chapter-paths.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -4385,4 +4391,580 @@ test(`${PINNED_DEFECT_ACCUMULATION}: a chapter title EDITED between publishes ac
       `generation ${generation} is still in the index`,
     );
   }
+});
+
+// =================================================================================================
+// [1.12.0] Image-destination API — buildEmbedCandidates, isCanonicalAssetKey, expectedAssets.
+// Section order mirrors the plan's own "Extraction" discussion: candidate generation (round-trip +
+// character-subset gates, legacy eligibility) -> isCanonicalAssetKey -> the raw-text
+// completeness-or-halt extractor (recognition, reference forms, raw-HTML/PI/ref-def triggers,
+// inert-context erasure halts, indentation, legacy candidates, keys).
+// =================================================================================================
+
+const GROUPED_CHAPTER_FILE = 'vault/handbook/billing/invoices.md';
+const GROUPED_ENTRY = { slug: 'invoices', group: 'billing', group_title: 'Billing' };
+
+// output_dir sits BESIDE chapters_dir (a sibling, not beneath it) — the shipped worked example for
+// a multi-'../'-climb embed (plan: "chapterFile = vault/docs/handbook/billing/invoices.md with
+// output_dir = vault/assets yields ../../../assets/billing/invoices/shot.png").
+const MULTI_CLIMB_PROFILE = profile({ capture: { output_dir: 'vault/assets' } });
+const MULTI_CLIMB_CHAPTER_FILE = 'vault/docs/handbook/billing/invoices.md';
+
+// output_dir strictly ABOVE chapters_dir (the "parent" row of the shipped divergence table,
+// chapter-paths.test.mjs's own staticEmbedPath new-write table above) — the one layout where the
+// current and legacy embed spellings genuinely DIFFER for a flat entry. A plain sibling layout
+// (output_dir a sibling of chapters_dir, e.g. profile()'s own default) makes the two formulas
+// coincide for a flat entry with no subdirectory nesting, which would make a legacy-eligibility
+// fixture built on it pass vacuously regardless of whether the legacy candidate is actually offered.
+const PARENT_PROFILE = profile({
+  capture: { output_dir: 'vault/handbook' },
+  publish: { chapters_dir: 'vault/handbook/items' },
+});
+const PARENT_CHAPTER_FILE = 'vault/handbook/items/items.md';
+
+function chapterText(...lines) {
+  return lines.join('\n');
+}
+
+// The real, adapter-produced destination string for `filename` under the DEFAULT profile()/entry()
+// /'vault/handbook/items.md' fixture used throughout this section (always 'assets/items/<file>').
+// A bare filename used directly as a markdown destination is never byte-equal to a real candidate,
+// so every fixture below that needs an image to be genuinely LIVE goes through this helper rather
+// than a literal string.
+function dest(filename) {
+  return embedPath('vault/handbook/items.md', chapterAssetDir(profile(), entry()), filename);
+}
+
+// =================================================================================================
+// buildEmbedCandidates
+// =================================================================================================
+
+test('buildEmbedCandidates: flat entry produces the byte-exact current candidate, keyed by the directory entry', () => {
+  const candidates = buildEmbedCandidates(profile(), entry(), 'vault/handbook/items.md', ['01-overview.png'], 'obsidian_vault');
+  assert.equal(candidates.get('assets/items/01-overview.png'), '01-overview.png');
+  assert.equal(candidates.size, 1);
+});
+
+test('buildEmbedCandidates: grouped entry candidate begins ../assets/<group>/<slug>/', () => {
+  const candidates = buildEmbedCandidates(profile(), GROUPED_ENTRY, GROUPED_CHAPTER_FILE, ['01-open.png'], 'static_md');
+  assert.equal(candidates.get('../assets/billing/invoices/01-open.png'), '01-open.png');
+});
+
+test('buildEmbedCandidates: multi-climb entry begins ../../../assets/ (output_dir a sibling of chapters_dir, not beneath it)', () => {
+  const candidates = buildEmbedCandidates(MULTI_CLIMB_PROFILE, GROUPED_ENTRY, MULTI_CLIMB_CHAPTER_FILE, ['shot.png'], 'static_md');
+  assert.equal(candidates.get('../../../assets/billing/invoices/shot.png'), 'shot.png');
+});
+
+test('buildEmbedCandidates: subdirectory directory-listing entry sub/a.png produces one candidate, key stays sub/a.png', () => {
+  const candidates = buildEmbedCandidates(profile(), entry(), 'vault/handbook/items.md', ['sub/a.png'], 'obsidian_vault');
+  assert.equal(candidates.get('assets/items/sub/a.png'), 'sub/a.png');
+});
+
+test('buildEmbedCandidates: built from the DIRECTORY, not a manifest — every filename gets a candidate regardless of whether anything embeds it', () => {
+  const candidates = buildEmbedCandidates(profile(), entry(), 'vault/handbook/items.md', ['a.png', 'b.png', 'c.png'], 'obsidian_vault');
+  assert.equal(candidates.size, 3);
+});
+
+// --- legacy candidate eligibility: all four cases -----------------------------------------------
+
+test('buildEmbedCandidates legacy eligibility 1/4: a genuinely flat static_md entry gets BOTH the current and the legacy spelling, mapped to the SAME key', () => {
+  const candidates = buildEmbedCandidates(PARENT_PROFILE, entry(), PARENT_CHAPTER_FILE, ['01.png'], 'static_md');
+  const current = embedPath(PARENT_CHAPTER_FILE, chapterAssetDir(PARENT_PROFILE, entry()), '01.png');
+  const legacy = legacyStaticEmbedPath(PARENT_CHAPTER_FILE, PARENT_PROFILE.capture.output_dir, entry().slug, '01.png');
+  assert.notEqual(current, legacy, 'the fixture must actually exercise two DISTINCT spellings');
+  assert.equal(candidates.get(current), '01.png');
+  assert.equal(candidates.get(legacy), '01.png');
+});
+
+test('buildEmbedCandidates legacy eligibility 2/4: a DEGENERATE layout (dirname(chapterFile) === outputDir) offers no legacy candidate', () => {
+  const degenerate = profile({ capture: { output_dir: 'vault/handbook' } });
+  const chapterFile = 'vault/handbook/items.md';
+  const candidates = buildEmbedCandidates(degenerate, entry(), chapterFile, ['01.png'], 'static_md');
+  const legacy = legacyStaticEmbedPath(chapterFile, degenerate.capture.output_dir, entry().slug, '01.png');
+  assert.equal(legacy, '/items/01.png', 'sanity: the legacy spelling really does degenerate to a leading slash here');
+  assert.equal(candidates.has(legacy), false);
+  assert.equal(candidates.size, 1, 'only the current candidate is offered');
+});
+
+test('buildEmbedCandidates legacy eligibility 3/4: a non-static target (obsidian_vault) offers no legacy candidate even for a flat entry', () => {
+  const candidates = buildEmbedCandidates(PARENT_PROFILE, entry(), PARENT_CHAPTER_FILE, ['01.png'], 'obsidian_vault');
+  const legacy = legacyStaticEmbedPath(PARENT_CHAPTER_FILE, PARENT_PROFILE.capture.output_dir, entry().slug, '01.png');
+  assert.equal(candidates.size, 1);
+  assert.equal(candidates.has(legacy), false, 'the legacy spelling must not be offered under a non-static target');
+});
+
+test('buildEmbedCandidates legacy eligibility 4/4: a GROUPED static_md entry offers no legacy candidate — the group-free spelling would bind a stale group-free file', () => {
+  const flatProfile = profile({ capture: { output_dir: 'vault/assets' } });
+  const candidates = buildEmbedCandidates(flatProfile, GROUPED_ENTRY, GROUPED_CHAPTER_FILE, ['01.png'], 'static_md');
+  assert.equal(candidates.size, 1, 'grouped entries never get the group-free legacy spelling, regardless of target');
+});
+
+// --- the round-trip gate -------------------------------------------------------------------------
+
+test('buildEmbedCandidates round-trip gate: a sole file literally named sub\\stale.png HALTS — embedPath normalizes the backslash into a separator, so the candidate addresses a DIFFERENT (nonexistent) file', () => {
+  assert.throws(
+    () => buildEmbedCandidates(profile(), entry(), 'vault/handbook/items.md', ['sub\\stale.png'], 'obsidian_vault'),
+    /round-trip/,
+  );
+});
+
+test('buildEmbedCandidates round-trip gate: a genuine subdirectory entry sub/a.png (a real "/", not a disguised "\\\\") round-trips fine', () => {
+  assert.doesNotThrow(() =>
+    buildEmbedCandidates(profile(), entry(), 'vault/handbook/items.md', ['sub/a.png'], 'obsidian_vault'),
+  );
+});
+
+// --- the closed character-subset gate, both directions -------------------------------------------
+
+test('buildEmbedCandidates charset gate, negative direction: café.png in NFC and in NFD, shot@2x.png, a&b.png and a\'b.png all HALT', () => {
+  const bad = ['caf\u00e9.png', 'cafe\u0301.png', 'shot@2x.png', 'a&b.png', "a'b.png"];
+  for (const filename of bad) {
+    assert.throws(
+      () => buildEmbedCandidates(profile(), entry(), 'vault/handbook/items.md', [filename], 'obsidian_vault'),
+      new RegExp(filename.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace('\u00e9', '.').replace('\u0301', '.')),
+      `'${filename}' must halt naming the file`,
+    );
+  }
+});
+
+test('buildEmbedCandidates charset gate, positive direction: the template shot.png, a grouped embed, a multi-climb embed, and a_b-c.1.png are all ACCEPTED', () => {
+  assert.doesNotThrow(() => buildEmbedCandidates(profile(), entry(), 'vault/handbook/items.md', ['shot.png'], 'obsidian_vault'));
+  assert.doesNotThrow(() => buildEmbedCandidates(profile(), GROUPED_ENTRY, GROUPED_CHAPTER_FILE, ['01-open-invoice.png'], 'obsidian_vault'));
+  assert.doesNotThrow(() =>
+    buildEmbedCandidates(MULTI_CLIMB_PROFILE, GROUPED_ENTRY, MULTI_CLIMB_CHAPTER_FILE, ['shot.png'], 'obsidian_vault'),
+  );
+  assert.doesNotThrow(() => buildEmbedCandidates(profile(), entry(), 'vault/handbook/items.md', ['a_b-c.1.png'], 'obsidian_vault'));
+});
+
+test('buildEmbedCandidates charset gate: an exhaustive on-disk sweep — every ASCII byte outside [A-Za-z0-9._-] that is a legal POSIX filename byte HALTS naming the file', () => {
+  // '/' and NUL cannot appear in a single filename component at all, so they are excluded from the
+  // sweep — everything else printable-ASCII outside the allowed class is tried.
+  for (let code = 0x21; code <= 0x7e; code += 1) {
+    const ch = String.fromCharCode(code);
+    if (/[A-Za-z0-9._-]/.test(ch)) continue;
+    if (ch === '/' || ch === '\\') continue; // '\\' is the round-trip gate's own dedicated case above
+    const filename = `x${ch}y.png`;
+    assert.throws(
+      () => buildEmbedCandidates(profile(), entry(), 'vault/handbook/items.md', [filename], 'obsidian_vault'),
+      `byte 0x${code.toString(16)} ('${ch}') must halt`,
+    );
+  }
+});
+
+// =================================================================================================
+// isCanonicalAssetKey
+// =================================================================================================
+
+test('isCanonicalAssetKey: rejects a leading slash, an empty segment, and the segments "." and ".."', () => {
+  assert.equal(isCanonicalAssetKey('/a.png'), false);
+  assert.equal(isCanonicalAssetKey('sub//a.png'), false);
+  assert.equal(isCanonicalAssetKey('./a.png'), false);
+  assert.equal(isCanonicalAssetKey('../a.png'), false);
+  assert.equal(isCanonicalAssetKey('sub/../a.png'), false);
+  assert.equal(isCanonicalAssetKey(''), false);
+});
+
+test('isCanonicalAssetKey: constrains NO characters — a literal backslash and a "%2e%2e" segment are both ACCEPTED', () => {
+  assert.equal(isCanonicalAssetKey('sub\\stale.png'), true);
+  assert.equal(isCanonicalAssetKey('%2e%2e/a.png'), true);
+  assert.equal(isCanonicalAssetKey('sub/a.png'), true);
+  assert.equal(isCanonicalAssetKey('a&b.png'), true);
+  assert.equal(isCanonicalAssetKey('caf\u00e9.png'), true);
+});
+
+test('isCanonicalAssetKey: destructive round-trip — a directory containing %2e%2e and a literal backslash is snapshotted by W2, and its own keys must be accepted, never rejected by the reader', () => {
+  const filenames = ['%2e%2e/a.png', 'sub\\stale.png', 'normal.png'];
+  for (const key of filenames) {
+    assert.equal(isCanonicalAssetKey(key), true, `a reader rejecting '${key}' would reject a record its own writer just wrote`);
+  }
+});
+
+test('isCanonicalAssetKey: non-string input is rejected, not coerced', () => {
+  assert.equal(isCanonicalAssetKey(null), false);
+  assert.equal(isCanonicalAssetKey(undefined), false);
+  assert.equal(isCanonicalAssetKey(42), false);
+});
+
+// =================================================================================================
+// expectedAssets — recognition (candidate matching, nested brackets, escape parity, offsets)
+// =================================================================================================
+
+test('expectedAssets: a flat, real adapter-produced embed is recognized end-to-end', () => {
+  const chapterFile = 'vault/handbook/items.md';
+  const assetDir = chapterAssetDir(profile(), entry());
+  const dest = embedPath(chapterFile, assetDir, '01-overview.png');
+  const text = chapterText(`![Overview](${dest})`);
+  const result = expectedAssets(profile(), entry(), chapterFile, text, ['01-overview.png'], 'obsidian_vault');
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.assets, [{ key: '01-overview.png', absPath: 'vault/handbook/assets/items/01-overview.png' }]);
+});
+
+test('expectedAssets: a grouped embed (../assets/<group>/<slug>/...) is recognized end-to-end', () => {
+  const assetDir = chapterAssetDir(profile(), GROUPED_ENTRY);
+  const dest = embedPath(GROUPED_CHAPTER_FILE, assetDir, '01-open.png');
+  const text = chapterText(`![Open invoice](${dest})`);
+  const result = expectedAssets(profile(), GROUPED_ENTRY, GROUPED_CHAPTER_FILE, text, ['01-open.png'], 'obsidian_vault');
+  assert.equal(result.ok, true);
+  assert.equal(result.assets.length, 1);
+  assert.equal(result.assets[0].key, '01-open.png');
+});
+
+test('expectedAssets: a multi-climb embed (../../../assets/...) is recognized end-to-end', () => {
+  const assetDir = chapterAssetDir(MULTI_CLIMB_PROFILE, GROUPED_ENTRY);
+  const dest = embedPath(MULTI_CLIMB_CHAPTER_FILE, assetDir, 'shot.png');
+  assert.ok(dest.startsWith('../../../assets/'), 'sanity: this really is a multi-climb destination');
+  const text = chapterText(`![Shot](${dest})`);
+  const result = expectedAssets(MULTI_CLIMB_PROFILE, GROUPED_ENTRY, MULTI_CLIMB_CHAPTER_FILE, text, ['shot.png'], 'obsidian_vault');
+  assert.equal(result.ok, true);
+  assert.equal(result.assets[0].key, 'shot.png');
+});
+
+test('expectedAssets: a nested-bracket label is SUPPORTED, never silently dropped — ![A [Beta]](<real dest>) yields the image', () => {
+  const text = chapterText(`![A [Beta]](${dest('img.png')})`);
+  const result = expectedAssets(profile(), entry(), 'vault/handbook/items.md', text, ['img.png'], 'obsidian_vault');
+  assert.equal(result.ok, true, 'the shipped link scanner declines this shape by design; the image extractor must not');
+  assert.equal(result.assets[0].key, 'img.png');
+});
+
+test('expectedAssets: escape parity on three fixtures — one backslash escapes, two do not, three do', () => {
+  const chapterFile = 'vault/handbook/items.md';
+  const d = dest('img.png');
+  const single = expectedAssets(profile(), entry(), chapterFile, chapterText(`\\![x](${d})`), ['img.png'], 'obsidian_vault');
+  assert.equal(single.ok, true, 'one backslash: escaped, no image at all — zero embeds is not a halt');
+  assert.equal(single.assets.length, 0);
+
+  const double = expectedAssets(profile(), entry(), chapterFile, chapterText(`\\\\![x](${d})`), ['img.png'], 'obsidian_vault');
+  assert.equal(double.ok, true, 'two backslashes: UNESCAPED — the image is live');
+  assert.equal(double.assets.length, 1);
+
+  const triple = expectedAssets(profile(), entry(), chapterFile, chapterText(`\\\\\\![x](${d})`), ['img.png'], 'obsidian_vault');
+  assert.equal(triple.ok, true, 'three backslashes: escaped again — no image');
+  assert.equal(triple.assets.length, 0);
+});
+
+test('expectedAssets: offsets are asserted at NONZERO positions — two images separated by a blanked comment', () => {
+  const chapterFile = 'vault/handbook/items.md';
+  const text = chapterText(`![fresh](${dest('fresh.png')})`, `<!-- ![stale](${dest('stale.png')}) -->`);
+  const result = expectedAssets(profile(), entry(), chapterFile, text, ['fresh.png', 'stale.png'], 'obsidian_vault');
+  assert.equal(result.ok, false);
+  assert.ok(result.halt.line >= 2, `the halt must be attributed to line 2 (the comment), not line 1; got ${result.halt.line}`);
+});
+
+// =================================================================================================
+// expectedAssets — reference forms and the "no `![` at all" triggers
+// =================================================================================================
+
+for (const [label, image] of [
+  ['full', '![alt][shot]'],
+  ['collapsed', '![shot][]'],
+  ['shortcut', '![shot]'],
+]) {
+  test(`expectedAssets: every reference-image form HALTS — ${label}`, () => {
+    const result = expectedAssets(profile(), entry(), 'vault/handbook/items.md', chapterText(image), ['shot.png'], 'obsidian_vault');
+    assert.equal(result.ok, false, `${label} reference form must halt, never resolve`);
+  });
+}
+
+test('expectedAssets: a bare reference definition with no image at all still HALTS (carries no "![" and cannot be counted)', () => {
+  const result = expectedAssets(profile(), entry(), 'vault/handbook/items.md', chapterText('[shot]: a.png'), ['a.png'], 'obsidian_vault');
+  assert.equal(result.ok, false);
+});
+
+test('expectedAssets: the scoping decoy HALTS rather than resolving — a last-wins map would bind provenance to the wrong file', () => {
+  const text = chapterText('![shot]', '> [shot]: stale.png', '[shot]: changed.png');
+  const result = expectedAssets(profile(), entry(), 'vault/handbook/items.md', text, ['stale.png', 'changed.png'], 'obsidian_vault');
+  assert.equal(result.ok, false);
+});
+
+// =================================================================================================
+// expectedAssets — raw HTML tags, autolinks, processing instructions (mixed shapes: only one file
+// changed, so a wrong-file binding would be provable)
+// =================================================================================================
+
+test('expectedAssets: a raw-HTML image HALTS in the mixed shape — one live inline image beside one <img> tag', () => {
+  const chapterFile = 'vault/handbook/items.md';
+  const text = chapterText(`![fresh](${dest('fresh.png')})`, '<img src="assets/example/stale.png">');
+  const result = expectedAssets(profile(), entry(), chapterFile, text, ['fresh.png'], 'obsidian_vault');
+  assert.equal(result.ok, false, 'the raw <img> renders a stale image no rule here catches without this trigger');
+});
+
+test('expectedAssets: the raw-HTML trigger is structural, not a tag list — figure/object/svg-image/span/a custom element all HALT', () => {
+  const chapterFile = 'vault/handbook/items.md';
+  const shapes = [
+    '<figure>x</figure>',
+    '<object data="stale.png"></object>',
+    '<svg><image href="stale.png" /></svg>',
+    '<span>x</span>',
+    '<x-provenance-probe>',
+  ];
+  for (const shape of shapes) {
+    const text = chapterText(`![fresh](${dest('fresh.png')})`, shape);
+    const result = expectedAssets(profile(), entry(), chapterFile, text, ['fresh.png'], 'obsidian_vault');
+    assert.equal(result.ok, false, `'${shape}' must halt — a name list would miss exactly this one`);
+  }
+});
+
+test('expectedAssets: raw HTML detection is case-insensitive and spans lines — <IMG SRC=...> and a tag split across a line break both HALT', () => {
+  const chapterFile = 'vault/handbook/items.md';
+  const upper = chapterText(`![fresh](${dest('fresh.png')})`, '<IMG SRC="stale.png">');
+  assert.equal(expectedAssets(profile(), entry(), chapterFile, upper, ['fresh.png'], 'obsidian_vault').ok, false);
+
+  const splitAcrossLines = chapterText(`![fresh](${dest('fresh.png')})`, '<img', ' src="stale.png">');
+  assert.equal(expectedAssets(profile(), entry(), chapterFile, splitAcrossLines, ['fresh.png'], 'obsidian_vault').ok, false);
+});
+
+test('expectedAssets: autolinks are POSITIVE controls — a URL autolink and an email autolink beside a live image do NOT halt', () => {
+  const chapterFile = 'vault/handbook/items.md';
+  const url = expectedAssets(
+    profile(),
+    entry(),
+    chapterFile,
+    chapterText(`![fresh](${dest('fresh.png')})`, '<https://example.test/x>'),
+    ['fresh.png'],
+    'obsidian_vault',
+  );
+  assert.equal(url.ok, true, 'a URL autolink is not a raw HTML tag — a multiline tag matcher would wrongly halt here');
+  const email = expectedAssets(
+    profile(),
+    entry(),
+    chapterFile,
+    chapterText(`![fresh](${dest('fresh.png')})`, '<user@example.test>'),
+    ['fresh.png'],
+    'obsidian_vault',
+  );
+  assert.equal(email.ok, true, 'an email autolink is not a raw HTML tag either');
+});
+
+test('expectedAssets: a processing instruction HALTS (carries no "![" and is not a raw HTML tag)', () => {
+  const chapterFile = 'vault/handbook/items.md';
+  const text = chapterText(`![fresh](${dest('fresh.png')})`, '<?xml-stylesheet href="x.xsl"?>');
+  const result = expectedAssets(profile(), entry(), chapterFile, text, ['fresh.png'], 'obsidian_vault');
+  assert.equal(result.ok, false);
+});
+
+// =================================================================================================
+// expectedAssets — inert-context POSITIVES (no image inside, must not false-halt) and ERASURE
+// halts (an image genuinely inside/beyond the construct must halt instead of being believed inert)
+// =================================================================================================
+
+test('expectedAssets: every supported closed inert construct with NO image inside it yields the live image and does not halt', () => {
+  const chapterFile = 'vault/handbook/items.md';
+  const shapes = [
+    ['closed backtick fence', chapterText('```', 'plain sample text', '```')],
+    ['closed tilde fence', chapterText('~~~', 'plain sample text', '~~~')],
+    ['closed inline code span', '`plain code`'],
+    ['well-formed closed HTML comment', '<!-- a comment, no image inside -->'],
+  ];
+  for (const [label, construct] of shapes) {
+    const text = chapterText(`![fresh](${dest('fresh.png')})`, construct);
+    const result = expectedAssets(profile(), entry(), chapterFile, text, ['fresh.png'], 'obsidian_vault');
+    assert.equal(result.ok, true, `${label}: must not false-halt`);
+  }
+});
+
+test('expectedAssets: a well-formed CLOSED comment containing an image still HALTS — raw-text accounting, not stripped-text counting', () => {
+  const chapterFile = 'vault/handbook/items.md';
+  const text = chapterText(`<!-- ![stale](${dest('stale.png')}) -->`);
+  const result = expectedAssets(profile(), entry(), chapterFile, text, ['stale.png'], 'obsidian_vault');
+  assert.equal(result.ok, false, 'counting on the STRIPPED text (the previous revision) would see zero images and pass silently');
+});
+
+test('expectedAssets: an UNCLOSED comment followed by a live image HALTS', () => {
+  const chapterFile = 'vault/handbook/items.md';
+  const text = chapterText('<!-- no closer here', `![stale](${dest('stale.png')})`);
+  const result = expectedAssets(profile(), entry(), chapterFile, text, ['stale.png'], 'obsidian_vault');
+  assert.equal(result.ok, false);
+});
+
+test('expectedAssets: the malformed comment openers <!--> and <!---> both HALT (mixed with a live image)', () => {
+  const chapterFile = 'vault/handbook/items.md';
+  for (const opener of ['<!-->', '<!--->']) {
+    const text = chapterText(opener, `![stale](${dest('stale.png')})`, 'more text', '-->');
+    const result = expectedAssets(profile(), entry(), chapterFile, text, ['stale.png'], 'obsidian_vault');
+    assert.equal(result.ok, false, `'${opener}' must halt`);
+  }
+});
+
+test('expectedAssets: an unmatched inline-code opener HALTS in the mixed shape (fresh above, stale swallowed below)', () => {
+  const chapterFile = 'vault/handbook/items.md';
+  const text = chapterText(`![fresh](${dest('fresh.png')})`, '`no closing run here', `![stale](${dest('stale.png')})`);
+  const result = expectedAssets(profile(), entry(), chapterFile, text, ['fresh.png', 'stale.png'], 'obsidian_vault');
+  assert.equal(result.ok, false, 'CommonMark treats an unmatched inline-code opener as literal text, not code-to-EOF');
+});
+
+test('expectedAssets: a three-backtick opener whose info string contains a backtick is not a fence, and HALTS', () => {
+  const chapterFile = 'vault/handbook/items.md';
+  const text = chapterText('```has`backtick', `![stale](${dest('stale.png')})`);
+  const result = expectedAssets(profile(), entry(), chapterFile, text, ['stale.png'], 'obsidian_vault');
+  assert.equal(result.ok, false);
+});
+
+test('expectedAssets: the over-indented FENCE counterexample YIELDS — four spaces is an indented code block, not a fence', () => {
+  const chapterFile = 'vault/handbook/items.md';
+  const text = `    \`\`\`\n\n![live](${dest('a.png')})\n`;
+  const result = expectedAssets(profile(), entry(), chapterFile, text, ['a.png'], 'obsidian_vault');
+  assert.equal(result.ok, true, 'the shipped stripper reads this as an unterminated fence and erases the live image after it');
+  assert.equal(result.assets[0].key, 'a.png');
+});
+
+test('expectedAssets: an Obsidian-native ![[shot.png]] HALTS — the generic unconsumed-"![" rule, a guard against hand-authoring', () => {
+  const result = expectedAssets(profile(), entry(), 'vault/handbook/items.md', chapterText('![[shot.png]]'), ['shot.png'], 'obsidian_vault');
+  assert.equal(result.ok, false);
+});
+
+// =================================================================================================
+// expectedAssets — indentation: five fixtures, no single four-space rule passes all of them
+// =================================================================================================
+
+test('expectedAssets indentation 1/5: "1. Step" + blank + a four-space-indented image YIELDS (content column 3)', () => {
+  const text = chapterText('1. Step', '', `    ![x](${dest('a.png')})`);
+  const result = expectedAssets(profile(), entry(), 'vault/handbook/items.md', text, ['a.png'], 'obsidian_vault');
+  assert.equal(result.ok, true);
+});
+
+test('expectedAssets indentation 2/5: "10. Step" + blank + a four-space-indented image YIELDS (content column 4)', () => {
+  const text = chapterText('10. Step', '', `    ![x](${dest('a.png')})`);
+  const result = expectedAssets(profile(), entry(), 'vault/handbook/items.md', text, ['a.png'], 'obsidian_vault');
+  assert.equal(result.ok, true, 'the two-digit marker makes four spaces exactly the content column');
+});
+
+test('expectedAssets indentation 3/5: a four-space-indented image at DOCUMENT START HALTS', () => {
+  const text = `    ![x](${dest('a.png')})\n`;
+  const result = expectedAssets(profile(), entry(), 'vault/handbook/items.md', text, ['a.png'], 'obsidian_vault');
+  assert.equal(result.ok, false);
+});
+
+test('expectedAssets indentation 4/5: "paragraph" + a four-space-indented image HALTS (indented code cannot interrupt a paragraph, but this release does not decide it either way)', () => {
+  const text = chapterText(`![fresh](${dest('fresh.png')})`, 'paragraph', `    ![live](${dest('stale.png')})`);
+  const result = expectedAssets(profile(), entry(), 'vault/handbook/items.md', text, ['fresh.png', 'stale.png'], 'obsidian_vault');
+  assert.equal(result.ok, false);
+});
+
+test('expectedAssets indentation 5/5: the SAME shape INSIDE a list item HALTS — seven spaces is four past the "1. " content column', () => {
+  const text = chapterText(`![fresh](${dest('fresh.png')})`, '1. paragraph', `       ![stale](${dest('stale.png')})`);
+  const result = expectedAssets(profile(), entry(), 'vault/handbook/items.md', text, ['fresh.png', 'stale.png'], 'obsidian_vault');
+  assert.equal(result.ok, false);
+});
+
+// =================================================================================================
+// expectedAssets — the unmatched-destination corpus (one assertion, not a list of separate rules:
+// none of these is byte-equal to an embedPath output, so all fall through the SAME halt)
+// =================================================================================================
+
+test('expectedAssets: the unmatched-destination corpus all HALT, each in the mixed shape (only the fresh file actually changed)', () => {
+  const chapterFile = 'vault/handbook/items.md';
+  const badDestinations = [
+    'a&#46;png',
+    'data:image/png;base64,AAAA',
+    'https://example.test/a.png',
+    '//host/x.png',
+    '/x.png',
+    'stale.png?cache.png',
+    'stale.png?',
+    'stale.png#',
+    'sub/%2e%2e/stale.png',
+    'sub\\stale.png',
+    '<a\\>b.png>',
+    'a b.png',
+    'a.png "caption"',
+  ];
+  for (const badDest of badDestinations) {
+    const text = chapterText(`![fresh](${dest('fresh.png')})`, `![stale](${badDest})`);
+    const result = expectedAssets(profile(), entry(), chapterFile, text, ['fresh.png', 'stale.png'], 'obsidian_vault');
+    assert.equal(result.ok, false, `destination '${badDest}' must halt — it is not byte-equal to any embedPath output`);
+  }
+});
+
+test('expectedAssets: resolution replacing byte-equality with PATH RESOLUTION must fail — sub/%2e%2e/ and sub\\\\stale.png resolve to a real candidate while their bytes do not', () => {
+  const chapterFile = 'vault/handbook/items.md';
+  const dotDot = expectedAssets(
+    profile(),
+    entry(),
+    chapterFile,
+    chapterText('![x](sub/%2e%2e/stale.png)'),
+    ['stale.png'],
+    'obsidian_vault',
+  );
+  assert.equal(dotDot.ok, false, 'a resolving implementation would treat this as ../stale.png -> assets/items/stale.png and wrongly match');
+});
+
+test('expectedAssets: a HAND-WRITTEN candidate set is killed by a second on-disk file the hand-written set omits', () => {
+  const chapterFile = 'vault/handbook/items.md';
+  const text = chapterText(`![a](${dest('01.png')})`, `![b](${dest('02-detail.png')})`);
+  const result = expectedAssets(profile(), entry(), chapterFile, text, ['01.png', '02-detail.png'], 'obsidian_vault');
+  assert.equal(result.ok, true, 'the generated candidate set covers the whole directory, not just the first file');
+  assert.equal(result.assets.length, 2);
+});
+
+// =================================================================================================
+// expectedAssets — legacy candidates: all four cases, end-to-end
+// =================================================================================================
+
+test('expectedAssets legacy 1/4: a genuinely valid legacy-only retained static chapter YIELDS its image, never halts', () => {
+  const legacyDest = legacyStaticEmbedPath(PARENT_CHAPTER_FILE, PARENT_PROFILE.capture.output_dir, entry().slug, '01.png');
+  const currentDest = embedPath(PARENT_CHAPTER_FILE, chapterAssetDir(PARENT_PROFILE, entry()), '01.png');
+  assert.notEqual(legacyDest, currentDest, 'the fixture must actually exercise the RETAINED spelling, not a coincidentally-identical one');
+  const text = chapterText(`![Overview](${legacyDest})`);
+  const result = expectedAssets(PARENT_PROFILE, entry(), PARENT_CHAPTER_FILE, text, ['01.png'], 'static_md');
+  assert.equal(result.ok, true, 'a pre-1.6.0 group-free chapter keeps its retained legacy spelling; refusing it is provenance silently absent');
+  assert.equal(result.assets[0].key, '01.png');
+});
+
+test('expectedAssets legacy 2/4: a DEGENERATE layout is neither falsely accepted NOR the cause of a false halt on the ordinary current embed', () => {
+  const degenerate = profile({ capture: { output_dir: 'vault/handbook' } });
+  const chapterFile = 'vault/handbook/items.md';
+  const currentDest = embedPath(chapterFile, chapterAssetDir(degenerate, entry()), '01.png');
+  const text = chapterText(`![Overview](${currentDest})`);
+  const result = expectedAssets(degenerate, entry(), chapterFile, text, ['01.png'], 'static_md');
+  assert.equal(result.ok, true, 'the ordinary current embed in the same degenerate-layout chapter must still be accepted');
+  assert.equal(result.assets[0].key, '01.png');
+});
+
+test('expectedAssets legacy 3/4: a non-static target offers no legacy candidate — a legacy-spelled destination HALTS under obsidian_vault', () => {
+  const legacyDest = legacyStaticEmbedPath(PARENT_CHAPTER_FILE, PARENT_PROFILE.capture.output_dir, entry().slug, '01.png');
+  const text = chapterText(`![Overview](${legacyDest})`);
+  const result = expectedAssets(PARENT_PROFILE, entry(), PARENT_CHAPTER_FILE, text, ['01.png'], 'obsidian_vault');
+  assert.equal(result.ok, false);
+});
+
+test('expectedAssets legacy 4/4: a GROUPED static_md entry offers no legacy candidate — the group-free spelling HALTS while the current spelling in the same chapter is accepted', () => {
+  const flatProfile = profile({ capture: { output_dir: 'vault/assets' } });
+  const chapterFile = 'vault/handbook/billing/invoices.md';
+  const legacyDest = legacyStaticEmbedPath(chapterFile, flatProfile.capture.output_dir, GROUPED_ENTRY.slug, '01.png');
+  const legacyOnly = expectedAssets(flatProfile, GROUPED_ENTRY, chapterFile, chapterText(`![x](${legacyDest})`), ['01.png'], 'static_md');
+  assert.equal(legacyOnly.ok, false, 'the group-free spelling would bind a stale group-free file for a grouped entry');
+
+  const currentDest = embedPath(chapterFile, chapterAssetDir(flatProfile, GROUPED_ENTRY), '01.png');
+  const currentOk = expectedAssets(flatProfile, GROUPED_ENTRY, chapterFile, chapterText(`![x](${currentDest})`), ['01.png'], 'static_md');
+  assert.equal(currentOk.ok, true, 'the current spelling for the SAME grouped entry must still be accepted');
+});
+
+test('expectedAssets legacy same-file case: a flat retained-static chapter where BOTH the current and legacy spellings appear resolves to ONE key, not two records', () => {
+  const currentDest = embedPath(PARENT_CHAPTER_FILE, chapterAssetDir(PARENT_PROFILE, entry()), '01.png');
+  const legacyDest = legacyStaticEmbedPath(PARENT_CHAPTER_FILE, PARENT_PROFILE.capture.output_dir, entry().slug, '01.png');
+  assert.notEqual(currentDest, legacyDest, 'the fixture must actually exercise two DISTINCT spellings of the same file');
+  const text = chapterText(`![current](${currentDest})`, `![legacy](${legacyDest})`);
+  const result = expectedAssets(PARENT_PROFILE, entry(), PARENT_CHAPTER_FILE, text, ['01.png'], 'static_md');
+  assert.equal(result.ok, true);
+  assert.equal(result.assets.length, 1, 'both spellings of the same file must collapse to one asset entry');
+  assert.equal(result.assets[0].key, '01.png');
+});
+
+// =================================================================================================
+// expectedAssets — keys are byte-exact, taken from the matched candidate's own file path
+// =================================================================================================
+
+test('expectedAssets: the written key equals the directory-listing path byte-exactly — a subdirectory embed and special-character filenames', () => {
+  const chapterFile = 'vault/handbook/items.md';
+  const subDest = embedPath(chapterFile, chapterAssetDir(profile(), entry()), 'sub/a.png');
+  const sub = expectedAssets(profile(), entry(), chapterFile, chapterText(`![x](${subDest})`), ['sub/a.png'], 'obsidian_vault');
+  assert.equal(sub.ok, true);
+  assert.equal(sub.assets[0].key, 'sub/a.png');
+});
+
+test('expectedAssets: zero in-directory embeds is a clean success with an empty asset list, not a halt', () => {
+  const chapterFile = 'vault/handbook/items.md';
+  const result = expectedAssets(profile(), entry(), chapterFile, chapterText('no images here'), ['01.png'], 'obsidian_vault');
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.assets, []);
 });

@@ -283,3 +283,58 @@ export function verifyNonHeadingPlacement(
   groupTitle: string,
   options?: VerifyNonHeadingPlacementOptions,
 ): VerifyNonHeadingPlacementResult;
+
+// ---------------------------------------------------------------------------------------------
+// [1.12.0] Image-destination API — see chapter-paths.mjs's own "Image-destination API" section.
+// ---------------------------------------------------------------------------------------------
+
+/** See chapter-paths.mjs: the bounded balanced-paren / angle-wrapped destination-group scanner behind every markdown-link-shaped recognizer in this module — now exported so a consumer can reuse the same scanner rather than re-implementing it. */
+export function findMarkdownLinkGroups(line: string): string[];
+
+/** See chapter-paths.mjs: the shared inert-context stripper (fenced code, inline code spans, HTML comments blanked to equal-length spans) — now exported so a consumer can reuse the same classification the index-file scanners above are built on. */
+export function stripInertContexts(text: string): string;
+
+/** See chapter-paths.mjs: extracts and escape-decodes a markdown link/image destination from its raw parenthesized (or angle-wrapped) group — now exported so a consumer matching a destination against a candidate set does not need to re-implement the angle/escape handling. */
+export function parseMdLinkDestination(raw: string): string;
+
+/** One entry of expectedAssets' asset list: the record key (asset-dir-relative, byte-exact from the directory listing) and the assetDir-qualified path a caller reads/hashes directly. */
+export interface EmbedCandidateEntry {
+  key: string;
+  absPath: string;
+}
+
+export type ExpectedAssetsResult =
+  | { ok: true; assets: EmbedCandidateEntry[] }
+  | { ok: false; halt: { construct: string; line: number } };
+
+/**
+ * See chapter-paths.mjs: the ONLY place an embed candidate destination set is constructed —
+ * expectedAssets calls this itself, so no caller may hand in a hand-written map. `target` is the
+ * RAW profile value ('static_md' / 'obsidian_vault'), never the '-'-hyphenated adapter filename.
+ * Throws (an EmbedCandidateHalt, an ordinary Error to a caller outside this module) when any
+ * candidate fails the round-trip gate, the closed character-subset gate, or a current/legacy
+ * union-collision check.
+ */
+export function buildEmbedCandidates(
+  profileLike: CaptureProfileLike,
+  entry: ChapterEntry,
+  chapterFile: string,
+  filenames: string[],
+  target: string,
+): Map<string, string>;
+
+/** See chapter-paths.mjs: the structural-only stored-record-key predicate shared by both record readers — rejects a leading '/', an empty segment, and the segments '.'/'..'; constrains no characters. */
+export function isCanonicalAssetKey(key: unknown): boolean;
+
+/**
+ * See chapter-paths.mjs: the chapter's embedded images, or a halt naming the first construct the
+ * bounded extractor cannot account for. Calls buildEmbedCandidates itself.
+ */
+export function expectedAssets(
+  profileLike: CaptureProfileLike,
+  entry: ChapterEntry,
+  chapterFile: string,
+  chapterText: string,
+  filenames: string[],
+  target: string,
+): ExpectedAssetsResult;

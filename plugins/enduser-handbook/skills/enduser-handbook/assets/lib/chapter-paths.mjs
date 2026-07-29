@@ -559,7 +559,7 @@ function findLinkOpeners(line) {
 // rather than checking backward at every position; the two are provably equivalent (a backslash
 // run's parity is unaffected by which direction you count from) and this form avoids re-deriving
 // the same parity check on every character of the loop.
-function findMarkdownLinkGroups(line) {
+export function findMarkdownLinkGroups(line) {
   const groups = [];
   for (const start of findLinkOpeners(line)) {
     let i = start;
@@ -672,7 +672,7 @@ function findCodeSpanClose(text, from, openLen) {
   return n;
 }
 
-function stripInertContexts(text) {
+export function stripInertContexts(text) {
   const n = text.length;
   let out = '';
   let i = 0;
@@ -739,7 +739,7 @@ function stripInertContexts(text) {
 // the target `docs(v2)/admin/orders.md` — the caller's expectedTarget is always computed from
 // filesystem-derived path segments (posixRelative etc.), which never contain backslash-escapes,
 // so a raw (still-escaped) return here would compare unequal forever.
-function parseMdLinkDestination(raw) {
+export function parseMdLinkDestination(raw) {
   const trimmed = raw.trim();
   if (trimmed.startsWith('<')) {
     const end = trimmed.indexOf('>');
@@ -2192,4 +2192,506 @@ export function verifyNonHeadingPlacement(indexLines, selectedTarget, groupTitle
   const ownerLabel = scan.ownerLabelOf[matchIndex];
   if (ownerLabel === wantedLabel) return { kind: 'ok' };
   return { kind: 'misplaced', foundContainer: ownerLabel };
+}
+
+// ---------------------------------------------------------------------------------------------
+// [1.12.0] Image-destination API — build-provenance completeness ("Extraction" / "The
+// completeness rule (W5)" in the 1.12.0 plan). Still pure, still dependency-free: `filenames` is
+// the caller's own directory listing (W5 already lists the asset dir for hashing), so this module
+// never re-lists a directory itself — a second listing is a second chance to disagree with the
+// first. Existing call-path logic above is untouched; everything below is new.
+// ---------------------------------------------------------------------------------------------
+
+// Splits on a literal '/' only — NEVER '\\' — unlike rawSegments above. A raw directory-listing
+// filename may contain a literal backslash BYTE as part of its own name (not a separator); reusing
+// rawSegments/posixJoin for the round-trip check below would silently re-run the file through the
+// SAME backslash-aware algebra embedPath already used to build the candidate, so the comparison
+// would agree with itself regardless of what the file actually was — a vacuous self-comparison.
+function literalSlashSegments(p) {
+  return String(p).split('/');
+}
+
+// True iff `candidate` (embedPath's actual output for directory entry `f`) resolves, by LITERAL
+// '/'-only path arithmetic against the chapter's own directory, back to exactly the file that
+// generated it. `f` may be a real multi-segment subdirectory entry ('sub/a.png') or a single
+// filename that merely CONTAINS a backslash byte ('sub\stale.png') — the two are indistinguishable
+// after they both pass through posixJoin/embedPath, because rawSegments treats '\\' as a separator
+// too (so a stray Windows-authored profile path still normalizes). This is what tells them apart
+// again: it resolves the CANDIDATE (embedPath's own output, always '/'-joined) against
+// dirname(chapterFile) using ONLY '/' as a separator, and compares the result — segment by segment
+// — against assetDir's segments followed by f's OWN literal '/'-only segments. For
+// 'sub\stale.png' the two disagree (the candidate resolves to ['sub','stale.png'], two segments,
+// while f's literal segments are the single ['sub\\stale.png']); for a genuine 'sub/a.png' entry
+// they agree, because there was no backslash for the two algebras to disagree about.
+function embedCandidateRoundTrips(chapterFile, assetDir, candidate, f) {
+  const resolved = literalSlashSegments(posixDirname(chapterFile)).filter((s) => s !== '');
+  for (const seg of literalSlashSegments(candidate)) {
+    if (seg === '' || seg === '.') continue;
+    if (seg === '..') {
+      if (resolved.length > 0 && resolved[resolved.length - 1] !== '..') resolved.pop();
+      else resolved.push('..');
+      continue;
+    }
+    resolved.push(seg);
+  }
+  const expected = [
+    ...literalSlashSegments(assetDir).filter((s) => s !== ''),
+    ...literalSlashSegments(f).filter((s) => s !== ''),
+  ];
+  return resolved.length === expected.length && resolved.every((seg, i) => seg === expected[i]);
+}
+
+// The closed, renderer-invariant destination character subset (plan: "Why a subset and not a
+// renderer model", measured against Pandoc 3.x and markdown-it 14.3.0): an optional run of one or
+// more '../' climbs, then one or more segments drawn only from ASCII alphanumerics, '.', '_' and
+// '-', joined by a single '/'. The moment a byte falls outside it, at least one of the two
+// supported renderers rewrites the destination on its way to `src`, which is exactly the
+// wrong-file-binding risk this gate exists to close — so anything outside it halts rather than
+// being compared to a candidate at all.
+const CANDIDATE_CHARSET_RE = /^(?:\.\.\/)*[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)*$/;
+
+// A dedicated Error subclass for a candidate-generation gate failure — thrown rather than
+// returned, so buildEmbedCandidates' own success type stays the plain Map its signature promises,
+// matching posixRelative's existing throw-on-config-error precedent above. expectedAssets is the
+// one production caller that must convert this into its own {ok:false, halt} shape without parsing
+// a message string; a caller invoking buildEmbedCandidates directly (a test, or a future consumer)
+// sees an ordinary thrown Error either way.
+class EmbedCandidateHalt extends Error {
+  constructor(construct) {
+    super(construct);
+    this.name = 'EmbedCandidateHalt';
+    this.construct = construct;
+  }
+}
+
+// The legacy static-md spelling is offered only when BOTH conditions hold, checked BEFORE the
+// candidate is generated (never after, which would turn a filter into a gate — see the plan's
+// discussion of the degenerate layout): the active target is 'static_md' — the RAW profile
+// spelling, never the '-'-hyphenated adapter filename — and the entry is genuinely flat AND
+// non-degenerate. Nondegeneracy is compared over the CANONICAL relative prefix from
+// dirname(chapterFile) to outputDir, never a raw string-equality: legacyStaticEmbedPath normalizes
+// '/', '\\' and dot segments before constructing its result, so several raw spellings of the same
+// degenerate layout (chapter-paths.mjs:229 pins the leading-slash quirk) must all be excluded
+// identically.
+function isLegacyCandidateEligible(profileLike, entry, chapterFile, target) {
+  if (target !== 'static_md') return false;
+  if (entry.group !== undefined) return false;
+  return posixRelative(posixDirname(chapterFile), profileLike.capture.output_dir) !== '';
+}
+
+/**
+ * buildEmbedCandidates(profileLike, entry, chapterFile, filenames, target) — the ONLY place a
+ * candidate destination set is constructed; expectedAssets below calls this itself, so no caller
+ * can hand in a hand-written candidate map. For every directory-listing entry `f` in `filenames`,
+ * computes the exact destination string the adapter would emit (embedPath) — and, when the entry
+ * is a genuinely flat, non-degenerate static_md chapter, also its retained legacy spelling
+ * (legacyStaticEmbedPath), which maps to the SAME key `f` as the current spelling. Every candidate
+ * is checked against two gates before being added — a round-trip back to the file that generated
+ * it (embedCandidateRoundTrips), and the closed renderer-invariant character subset
+ * (CANDIDATE_CHARSET_RE) — plus a defensive current-vs-legacy union-collision check; any of the
+ * three throws an EmbedCandidateHalt naming the file rather than silently dropping or guessing.
+ *
+ * @param {ProfileLike} profileLike
+ * @param {ChapterEntry} entry
+ * @param {string} chapterFile
+ * @param {string[]} filenames  the caller's own directory listing — never re-listed here
+ * @param {string} target  the RAW profile value ('static_md' / 'obsidian_vault')
+ * @returns {Map<string, string>} candidate destination -> the directory entry that generated it
+ */
+export function buildEmbedCandidates(profileLike, entry, chapterFile, filenames, target) {
+  const assetDir = chapterAssetDir(profileLike, entry);
+  const legacyEligible = isLegacyCandidateEligible(profileLike, entry, chapterFile, target);
+  const candidates = new Map();
+
+  const add = (candidate, f) => {
+    if (!CANDIDATE_CHARSET_RE.test(candidate)) {
+      throw new EmbedCandidateHalt(
+        `embed candidate for '${f}' contains a character outside the renderer-invariant subset: '${candidate}'`,
+      );
+    }
+    if (!embedCandidateRoundTrips(chapterFile, assetDir, candidate, f)) {
+      throw new EmbedCandidateHalt(`embed candidate for '${f}' does not round-trip back to it: '${candidate}'`);
+    }
+    const existing = candidates.get(candidate);
+    if (existing !== undefined && existing !== f) {
+      throw new EmbedCandidateHalt(
+        `embed candidate collision: '${candidate}' is generated by both '${existing}' and '${f}'`,
+      );
+    }
+    candidates.set(candidate, f);
+  };
+
+  for (const f of filenames) {
+    add(embedPath(chapterFile, assetDir, f), f);
+    if (legacyEligible) {
+      add(legacyStaticEmbedPath(chapterFile, profileLike.capture.output_dir, entry.slug, f), f);
+    }
+  }
+  return candidates;
+}
+
+/**
+ * isCanonicalAssetKey(key) — the structural-only predicate a stored record key must satisfy,
+ * shared by both the run record's and the chapter record's readers. Rejects only what CANNOT be a
+ * relative path inside the asset directory: a leading '/', an empty segment, and the segments
+ * '.'/'..'. It constrains NO characters at all — a literal backslash and a segment literally named
+ * '%2e%2e' are both legal POSIX names a real directory snapshot can produce, and a reader rejecting
+ * them would reject a record its own writer just wrote.
+ *
+ * @param {unknown} key
+ * @returns {boolean}
+ */
+export function isCanonicalAssetKey(key) {
+  if (typeof key !== 'string' || key === '' || key.startsWith('/')) return false;
+  return key.split('/').every((seg) => seg !== '' && seg !== '.' && seg !== '..');
+}
+
+// The escape-aware, DEPTH-COUNTING generalization of findLinkOpeners's label scan above
+// (chapter-paths.mjs:518-523), needed because an image's alt text may legitimately contain a
+// literal '[' ("![A [Beta]](img.png)") — a shape findLinkOpeners declines by design (nested-bracket
+// labels are supported here, never silently dropped). Returns the index of the matching ']'
+// (depth back to 0), or -1 when the label never closes.
+function findNestedLabelEnd(text, labelStart) {
+  let depth = 0;
+  let i = labelStart;
+  while (i < text.length) {
+    if (text[i] === '\\') {
+      i += 2;
+      continue;
+    }
+    if (text[i] === '[') {
+      depth += 1;
+      i += 1;
+      continue;
+    }
+    if (text[i] === ']') {
+      if (depth === 0) return i;
+      depth -= 1;
+      i += 1;
+      continue;
+    }
+    i += 1;
+  }
+  return -1;
+}
+
+// The same balanced-paren / angle-wrapped destination scan findMarkdownLinkGroups uses above
+// (chapter-paths.mjs:562-597), factored so the image scanner below can start from an arbitrary
+// absolute offset (just past the opening '(') instead of a per-line opener list. A destination
+// never legitimately spans a line break, wrapped or not, so hitting one is treated the same as
+// never finding a close. Returns the index of the closing ')', or -1.
+function scanDestinationGroup(text, openParenIndex) {
+  let i = openParenIndex + 1;
+  if (text[i] === '<') {
+    const gt = text.indexOf('>', i + 1);
+    i = gt === -1 ? text.length : gt + 1;
+  }
+  let depth = 0;
+  while (i < text.length && text[i] !== '\n') {
+    if (text[i] === '\\') {
+      i += 2;
+      continue;
+    }
+    if (text[i] === '(') {
+      depth += 1;
+      i += 1;
+      continue;
+    }
+    if (text[i] === ')') {
+      if (depth === 0) return i;
+      depth -= 1;
+      i += 1;
+      continue;
+    }
+    i += 1;
+  }
+  return -1;
+}
+
+// Scans `text` for every unescaped '![' — the raw-text accounting marker the whole
+// completeness-or-halt contract is built on (plan: "every unescaped ![ in the RAW text must be
+// accounted for"). Escape parity is checked on the '!' itself (isEscaped), matching every other
+// escape-skip in this module. Classifies each marker by what follows its (nested-bracket-aware)
+// label: 'inline' when a destination GROUP closes (the raw text between the parens/angles, not yet
+// decoded — parseMdLinkDestination does that); 'reference' for any of the three reference-image
+// shapes (full/collapsed/shortcut — none of which this release resolves, by design);
+// 'unterminated' when the label or the destination group never closes. This function never
+// consults inert context (fences/code spans/comments) at all — that is the caller's job, achieved
+// by running this same scan over TWO different views of the text (see expectedAssets below).
+function findImageMarkers(text) {
+  const markers = [];
+  let i = 0;
+  while (i < text.length) {
+    if (text[i] === '!' && text[i + 1] === '[' && !isEscaped(text, i)) {
+      const offset = i;
+      const labelEnd = findNestedLabelEnd(text, i + 2);
+      if (labelEnd === -1) {
+        markers.push({ offset, kind: 'unterminated' });
+        i += 2;
+        continue;
+      }
+      const after = labelEnd + 1;
+      if (text[after] === '(') {
+        const close = scanDestinationGroup(text, after);
+        if (close === -1) {
+          markers.push({ offset, kind: 'unterminated' });
+          i = after + 1;
+          continue;
+        }
+        markers.push({ offset, kind: 'inline', rawDestination: text.slice(after + 1, close) });
+        i = close + 1;
+        continue;
+      }
+      // '![alt][ref]' (full) or '![ref][]' (collapsed) both open with '[' right after the label;
+      // '![ref]' (shortcut) is neither — all three are reference forms this release refuses.
+      markers.push({ offset, kind: 'reference' });
+      i = text[after] === '[' ? after + 1 : after;
+      continue;
+    }
+    i += 1;
+  }
+  return markers;
+}
+
+function lineStartOf(text, offset) {
+  let start = offset;
+  while (start > 0 && text[start - 1] !== '\n') start -= 1;
+  return start;
+}
+
+function lineNumberOf(text, offset) {
+  let line = 1;
+  for (let i = 0; i < offset && i < text.length; i += 1) {
+    if (text[i] === '\n') line += 1;
+  }
+  return line;
+}
+
+// Column of `uptoOffset`, tab-expanded to 4-column stops from `lineStart` — the plan's own stated
+// rule ("tabs are expanded to four-column stops before any of this is measured").
+function tabExpandedColumn(text, lineStart, uptoOffset) {
+  let col = 0;
+  for (let i = lineStart; i < uptoOffset; i += 1) {
+    col = text[i] === '\t' ? col + (4 - (col % 4)) : col + 1;
+  }
+  return col;
+}
+
+// A bounded, one-level heuristic for "the enclosing container's content column" (plan: "fence
+// recognition is relative to the enclosing container's content column"; the same reference point
+// governs the over-indentation halt below). Walks backward from the image's own line, over at most
+// one intervening blank line, looking for the nearest ordered/unordered list-marker line — this
+// release does not track full container nesting, so a marker line found this way is trusted
+// without re-verifying it is still "open" at the image's position. Returns 0 (top-level) when none
+// is found within that bound.
+const LIST_MARKER_LINE_RE = /^([ \t]*)((?:[-*+])|(?:\d{1,9}[.)]))([ \t]+)/;
+
+function containerContentColumn(text, lineStart) {
+  let cursor = lineStart;
+  while (cursor > 0) {
+    const prevLineEnd = cursor - 1; // the '\n' terminating the previous line
+    const prevLineStart = lineStartOf(text, prevLineEnd);
+    const prevLine = text.slice(prevLineStart, prevLineEnd);
+    const m = prevLine.match(LIST_MARKER_LINE_RE);
+    if (m) {
+      const indentCol = tabExpandedColumn(text, prevLineStart, prevLineStart + m[1].length);
+      return indentCol + m[2].length + m[3].length;
+    }
+    if (prevLine.trim() === '') {
+      cursor = prevLineStart;
+      continue;
+    }
+    break;
+  }
+  return 0;
+}
+
+// The image-indentation halt: undecidable whenever a live image's OWN line reaches four or more
+// columns past its container's content column — regardless of what precedes it. Deciding it
+// correctly in general needs a real block parser's paragraph-continuation state (this release does
+// not add one), so the rule is uniform in both directions: neither "indented code interrupting a
+// paragraph" nor "an ordinary list continuation at exactly the content column" gets a special
+// case — only the column difference is measured.
+function isOverIndented(text, markerOffset) {
+  const lineStart = lineStartOf(text, markerOffset);
+  const imageColumn = tabExpandedColumn(text, lineStart, markerOffset);
+  return imageColumn - containerContentColumn(text, lineStart) >= 4;
+}
+
+/**
+ * A private near-duplicate of stripInertContexts (exported above) used ONLY by expectedAssets'
+ * recognition pass. The one behavior difference: a backtick/tilde run at column >= 4 (tab-expanded,
+ * from its own line start) is never recognized as a FENCE opener — it is an indented CODE BLOCK,
+ * not a fence (CommonMark), so treating it as one and blanking to EOF erases a live image after it
+ * (the "over-indented fence counterexample" the plan measures). Such a run is therefore left
+ * untouched (passthrough, no blanking) rather than routed to either the fence or the inline-code-
+ * span path — both risk incorrectly consuming trailing content. The shipped, exported
+ * stripInertContexts is kept byte-for-byte UNCHANGED for its own existing callers (index-file
+ * scanning), which never exercise this column distinction.
+ */
+function stripInertContextsForImages(text) {
+  const n = text.length;
+  let out = '';
+  let i = 0;
+
+  while (i < n) {
+    if (text.startsWith('<!--', i) && !isEscaped(text, i)) {
+      const close = text.indexOf('-->', i + 4);
+      const end = close === -1 ? n : close + 3;
+      out += blankSpan(text.slice(i, end));
+      i = end;
+      continue;
+    }
+
+    const ch = text[i];
+    if (ch === '`' || ch === '~') {
+      const runLen = runLength(text, i, ch);
+      if (isEscaped(text, i)) {
+        out += text.slice(i, i + runLen);
+        i += runLen;
+        continue;
+      }
+      const atTrueLineStart = isLineStart(text, i);
+      if (runLen >= 3 && atTrueLineStart) {
+        const column = tabExpandedColumn(text, lineStartOf(text, i), i);
+        if (column < 4) {
+          const end = findFenceClose(text, i + runLen, ch, runLen);
+          out += blankSpan(text.slice(i, end));
+          i = end;
+          continue;
+        }
+        // column >= 4: an indented code block, not a fence — passthrough, no blanking, and no
+        // inline-code-span fallback either (that path has the identical erase-to-EOF risk).
+        out += text.slice(i, i + runLen);
+        i += runLen;
+        continue;
+      }
+      if (ch === '`') {
+        const end = findCodeSpanClose(text, i + runLen, runLen);
+        out += blankSpan(text.slice(i, end));
+        i = end;
+        continue;
+      }
+    }
+
+    out += ch;
+    i += 1;
+  }
+
+  return out;
+}
+
+// A conservative CommonMark-shaped raw HTML open/close tag matcher — deliberately NOT a fixed tag
+// list (an enumeration is the losing game the halt rule exists to end): any tagname (an ASCII
+// letter, then letters/digits/hyphens) immediately followed by '>', a self-closing '/>', or
+// whitespace is a tag, so a custom element like '<x-provenance-probe>' is caught the same as
+// '<img>'. Case-insensitive (HTML tag names are ASCII case-insensitive) and 's' lets a tag split
+// across a line break still match. An autolink's scheme/email is excluded by construction:
+// '<https:' and '<user@' both fail immediately after the tagname-shaped prefix, because ':' and
+// '@' are neither '>', '/', nor whitespace, so the match never completes.
+const RAW_HTML_TAG_RE = /<\/?[A-Za-z][A-Za-z0-9-]*(?:\s[^<>]*)?\/?>/gis;
+const PROCESSING_INSTRUCTION_RE = /<\?[\s\S]*?\?>/g;
+
+// The triggers that carry NO '![' at all and therefore cannot be caught by the raw-text accounting
+// scan: any raw HTML tag, a processing instruction, and a reference definition. Detected over the
+// RAW text unconditionally — no live-context qualifier, so one shown inside a fenced example still
+// halts the chapter (the accepted cost the plan states explicitly).
+function findRawTextTriggers(text) {
+  const triggers = [];
+  for (const m of text.matchAll(RAW_HTML_TAG_RE)) {
+    triggers.push({ offset: m.index, construct: `raw HTML tag '${m[0]}'` });
+  }
+  for (const m of text.matchAll(PROCESSING_INSTRUCTION_RE)) {
+    triggers.push({ offset: m.index, construct: 'processing instruction' });
+  }
+  let idx = text.indexOf(']:');
+  while (idx !== -1) {
+    triggers.push({ offset: idx, construct: 'reference definition' });
+    idx = text.indexOf(']:', idx + 1);
+  }
+  return triggers;
+}
+
+function haltResult(construct, line) {
+  return { ok: false, halt: { construct, line } };
+}
+
+/**
+ * expectedAssets(profileLike, entry, chapterFile, chapterText, filenames, target) — the chapter's
+ * embedded images, or a halt naming the first construct the bounded extractor cannot account for.
+ * Calls buildEmbedCandidates itself (the one entry point; no caller may hand in a prebuilt map).
+ *
+ * Two views of `chapterText` drive the two separate jobs this contract needs (see the plan's
+ * "completeness-or-halt" discussion for why one view cannot do both): RECOGNITION runs over a
+ * STRIPPED view (inert fences/code-spans/comments blanked, so an image marker inside one is
+ * invisible here even when its destination happens to byte-match a real candidate); ACCOUNTING
+ * runs over the RAW text and requires every unescaped '![' found there to correspond to a
+ * recognized position — one that fell inside an inert span, or that recognition could not resolve
+ * into a valid inline image, is unaccounted and halts. Counting on the stripped view instead (what
+ * every earlier revision of this feature did) is precisely the defect this closes: a '![' the
+ * stripper blanks away is invisible to a stripped-view count, never unconsumed, so it silently
+ * never gets a chance to halt.
+ *
+ * @param {ProfileLike} profileLike
+ * @param {ChapterEntry} entry
+ * @param {string} chapterFile
+ * @param {string} chapterText
+ * @param {string[]} filenames
+ * @param {string} target
+ * @returns {{ok: true, assets: Array<{key: string, absPath: string}>}
+ *         | {ok: false, halt: {construct: string, line: number}}}
+ */
+export function expectedAssets(profileLike, entry, chapterFile, chapterText, filenames, target) {
+  let candidates;
+  try {
+    candidates = buildEmbedCandidates(profileLike, entry, chapterFile, filenames, target);
+  } catch (err) {
+    if (err instanceof EmbedCandidateHalt) return haltResult(err.construct, 0);
+    throw err;
+  }
+
+  const assetDir = chapterAssetDir(profileLike, entry);
+  const liveMarkers = findImageMarkers(stripInertContextsForImages(chapterText));
+  const liveByOffset = new Map(liveMarkers.map((m) => [m.offset, m]));
+  const rawMarkers = findImageMarkers(chapterText);
+  const rawTriggers = findRawTextTriggers(chapterText);
+
+  const events = [
+    ...rawTriggers.map((t) => ({ offset: t.offset, type: 'trigger', construct: t.construct })),
+    ...rawMarkers.map((m) => ({ offset: m.offset, type: 'marker', marker: m })),
+  ].sort((a, b) => a.offset - b.offset);
+
+  const assets = [];
+  const seenKeys = new Set();
+
+  for (const event of events) {
+    if (event.type === 'trigger') {
+      return haltResult(event.construct, lineNumberOf(chapterText, event.offset));
+    }
+    const marker = event.marker;
+    const live = liveByOffset.get(marker.offset);
+    if (live === undefined) {
+      return haltResult('unaccounted image marker', lineNumberOf(chapterText, marker.offset));
+    }
+    if (live.kind === 'reference') {
+      return haltResult('reference-style image', lineNumberOf(chapterText, marker.offset));
+    }
+    if (live.kind === 'unterminated') {
+      return haltResult('unterminated image construct', lineNumberOf(chapterText, marker.offset));
+    }
+    if (isOverIndented(chapterText, marker.offset)) {
+      return haltResult('over-indented image', lineNumberOf(chapterText, marker.offset));
+    }
+    const destination = parseMdLinkDestination(live.rawDestination);
+    const f = candidates.get(destination);
+    if (f === undefined) {
+      return haltResult(`unmatched image destination '${destination}'`, lineNumberOf(chapterText, marker.offset));
+    }
+    if (!seenKeys.has(f)) {
+      seenKeys.add(f);
+      assets.push({ key: f, absPath: posixJoin(assetDir, f) });
+    }
+  }
+
+  return { ok: true, assets };
 }

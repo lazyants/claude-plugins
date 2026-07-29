@@ -50,6 +50,17 @@ capture:
   locale: de_DE.UTF-8               # full POSIX locale fed verbatim to LANG/LC_ALL (see command above); content language is language.code
   output_dir: "vault/handbook/assets"
 
+  # Optional (new in 1.12.0). Build/version identity for the provenance records this plugin writes
+  # under vault/handbook/.provenance — a root DERIVED from publish.chapters_dir below, never
+  # configured here (there is no publish.provenance_dir key). Absent, or {}, disables the command
+  # source entirely; the run/chapter records then carry value: null, source: "unavailable" rather
+  # than halting — every existing profile predates this key, so no build identity is ever mandatory.
+  # See SKILL.md's W2 preflight/resolution step for the full precedence order.
+  build_identity:
+    command: "docker compose exec -T app git describe --tags --always"   # exact, copy-pasteable; run once per capture run
+    ui_read: true                   # opt-out fallback (this IS the default): falls back to an LLM read of the
+                                     # running UI when command is unset, fails, or its output is rejected
+
   # Free-text English description of the engine-specific signal. The base SKILL.md
   # consumes it by embedding the literal string verbatim into the capture-step instruction —
   # i.e. Claude is told "After navigation, apply: {{capture.page_identity_signal}}." It is NOT

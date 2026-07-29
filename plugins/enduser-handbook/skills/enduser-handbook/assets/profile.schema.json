@@ -118,6 +118,21 @@
           }
         },
         "command": { "type": "string" },
+        "build_identity": {
+          "type": "object",
+          "description": "Optional, new in 1.12.0. Configures how W2 resolves a build/version identity for the provenance records written under <publish.chapters_dir>/.provenance (see SKILL.md's W2 preflight/resolution step). Absent or {} is legal — every profile predates this key — and simply disables the command source; the run and chapter records then carry value: null, source: \"unavailable\". additionalProperties is deliberately closed: command and ui_read are the only two keys this release defines.",
+          "additionalProperties": false,
+          "properties": {
+            "command": {
+              "type": "string",
+              "description": "Exact, copy-pasteable shell command run once per capture run; its stdout is normalized and validated as a build identity string (a version, a commit SHA, …). Follows the same run-inside-the-sandbox conventions as capture.command — see container-isolation.md \"Common command patterns\"."
+            },
+            "ui_read": {
+              "type": "boolean",
+              "description": "Opt-out fallback, defaults to true. When command is absent, fails to run, or its output is rejected, the running UI is read for a build identity unless this is explicitly false."
+            }
+          }
+        },
         "locale": { "type": "string" },
         "output_dir": { "type": "string" },
         "page_identity_signal": {
