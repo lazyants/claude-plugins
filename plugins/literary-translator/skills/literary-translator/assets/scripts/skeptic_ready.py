@@ -417,7 +417,9 @@ def _json_dumps_line(obj) -> str:
     -- exactly the accept-sentinel shape the wait poll's line-oriented
     grammar reads for. The JS sentinel parser only ever splits on ``\\n``
     and is immune; the exposure is a reading LLM agent (skeptic/codex)
-    downstream of this CLI's stdout -- see the already-filed #360. A
+    downstream of this CLI's stdout -- unfiled: #360 covers this file's
+    unbounded diagnostic VOLUME (message length / list count), a distinct
+    exposure from a boundary character forging an extra line. A
     ``\\uXXXX`` escape round-trips through every JSON parser identically to
     the raw character, so this is a small, behavior-preserving change:
     only the on-the-wire bytes differ, never the decoded value."""

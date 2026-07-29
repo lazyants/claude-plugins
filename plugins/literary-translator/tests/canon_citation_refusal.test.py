@@ -758,6 +758,92 @@ def test_the_item_label_cap_bounds_a_hostile_source_form():
     assert canon_validate._indexed_item_label("batch", 7, {}) == "batch[7]"
 
 
+# Round 6. The test above cannot reach the defect below, and the reason is worth
+# stating rather than just adding a case: its only hostile fixture is INJECTED,
+# which contains NEITHER `'` NOR `"`. repr() therefore picks single quotes for
+# it, and the pre-fix code's hardcoded `"...'"` closer happened to be right. The
+# fixture was not merely failing to cover the double-quote branch -- it was
+# structurally incapable of reaching it, the same shape as a marked-character
+# test named for one member of a twelve-member class.
+#
+# The property under test is that the excerpt is a WELL-FORMED literal, so that
+# is what is asserted -- by parsing it. Asserting that the label ends in the
+# character it starts with would re-encode the very assumption that produced the
+# bug (that one hardcoded closer fits every input), and would pass for a label
+# whose middle had been cut through an escape sequence.
+_ITEM_LABEL_SHAPES = [
+    # repr() switches to DOUBLE quotes for a string containing ' and not " --
+    # which is what this plugin's own domain produces as ordinary correct data.
+    ("apostrophe_glottal_stop", "Re'uven" + " ben Yaakov" * 12),
+    ("apostrophe_surname", "D'Angelo" + " Xa" * 30),
+    # The single-quote branch, reached two ways.
+    ("double_quote_only", 'Sh"muel' + " Xa" * 30),
+    ("both_quote_kinds", 'Ya\'akov "the elder"' + " Xa" * 30),
+    ("neither_quote_kind", INJECTED * 4),
+    # Escape-boundary shapes: a naive repr-then-slice can cut through a
+    # multi-character escape and leave a dangling backslash.
+    ("backslash_at_the_cut", "A" * (canon_validate._ITEM_LABEL_MAX_CHARS - 2) + "\\" + "B" * 40),
+    ("control_chars_at_the_cut",
+     "A" * (canon_validate._ITEM_LABEL_MAX_CHARS - 2) + "\x01\x02" + "B" * 40),
+    ("line_separator_payload", (" " + chr(0x2028)) * 60),
+    ("astral_plane", chr(0x1F600) * 80),
+]
+
+
+@pytest.mark.parametrize(
+    "source_form", [s for _, s in _ITEM_LABEL_SHAPES],
+    ids=[n for n, _ in _ITEM_LABEL_SHAPES],
+)
+def test_the_item_label_excerpt_is_always_a_well_formed_literal(source_form):
+    """Every excerpt must PARSE, whatever quote style repr() chose and wherever
+    the truncation landed. Pre-fix, `apostrophe_glottal_stop`,
+    `apostrophe_surname` and `line_separator_payload` produced a label opening
+    with `"` and closing with `'`, and the escape-boundary shapes could leave a
+    trailing lone backslash."""
+    label = canon_validate._indexed_item_label("batch", 0, {"source_form": source_form})
+    assert label.startswith("batch[0] (") and label.endswith(")")
+    excerpt = label[len("batch[0] ("):-1]
+
+    # Parses, and to a str -- not merely "does not raise".
+    parsed = ast.literal_eval(excerpt)
+    assert isinstance(parsed, str), f"excerpt parsed to {type(parsed).__name__}, not str"
+
+    # It is genuinely an excerpt OF this source_form, not of something else: the
+    # ellipsis is the only thing the truncation adds.
+    assert source_form.startswith(parsed.removesuffix("...")), (
+        "the parsed excerpt is not a prefix of the source_form it claims to excerpt"
+    )
+    assert "\n" not in label
+
+
+def test_the_item_label_cap_bounds_the_source_not_the_rendered_excerpt():
+    """`_ITEM_LABEL_MAX_CHARS`' own comment says truncation is what it bounds,
+    "not the escaped result". That is a real distinction and it is stated in the
+    code, so pin BOTH halves rather than leaving the second one unstated: the
+    SOURCE is capped exactly, and the rendered excerpt is still bounded -- by the
+    widest escape repr() can emit for a single codepoint, not by a magic number a
+    future Python or a future input could invalidate."""
+    cap = canon_validate._ITEM_LABEL_MAX_CHARS
+
+    # The widest single-codepoint expansion repr() produces, re-derived here
+    # rather than hardcoded: "\N{...}" is not used by repr(), so the maximum is
+    # a "\Uxxxxxxxx" form. Measured against the escape-heaviest inputs this
+    # plugin can actually see.
+    widest = max(len(repr(chr(cp))) - 2 for cp in (0x01, 0x7F, 0x2028, 0x200B, 0x1F600))
+    for _, source_form in _ITEM_LABEL_SHAPES:
+        label = canon_validate._indexed_item_label("batch", 0, {"source_form": source_form})
+        excerpt = label[len("batch[0] ("):-1]
+        parsed = ast.literal_eval(excerpt)
+        assert len(parsed.removesuffix("...")) <= cap, (
+            "the SOURCE excerpt exceeded the cap the constant names"
+        )
+        # quotes (2) + the "..." marker (3) is the whole fixed overhead.
+        assert len(excerpt) <= widest * cap + 5, (
+            f"rendered excerpt {len(excerpt)} exceeds the derived worst case "
+            f"{widest * cap + 5} -- repr()'s expansion factor grew past {widest}x"
+        )
+
+
 def test_verify_merged_bounds_the_missing_list_it_relays_to_an_agent():
     """The round-9 BLOCKER. --verify-merged reports failure through a
     SUCCESS-shaped payload and therefore never constructs

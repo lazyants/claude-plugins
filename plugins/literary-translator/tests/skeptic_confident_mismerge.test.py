@@ -194,7 +194,34 @@ def instantiate_skeptic_pass(*, durable_root: str, source_lang: str, particle_co
 def _wrap_for_execution(js_source: str) -> str:
     assert js_source.count("export const meta") == 1
     body = js_source.replace("export const meta", "const meta", 1)
-    return "async function __workflowMain__(agent, pipeline, log, args) {\n" + body + "\n}\n"
+    return (
+        "async function __workflowMain__(agent, pipeline, log, args) {\n"
+        + _DISPATCH_PROMPT_RECORDER
+        + body
+        + "\n}\n"
+    )
+
+
+# Same identity-recording fix as skeptic_pipeline_e2e.test.py's own
+# _DISPATCH_PROMPT_RECORDER (round 6) -- see that file's header comment for
+# the full derivation. This file carries its own independent copy of the
+# harness (see this module's own docstring on the self-contained-test-file
+# convention), so the fix has to be applied here too: neither of this file's
+# two tests currently drives a decoy dispatch path, but the mock's dispatch
+# branch below still wrote the fragment on LABEL alone before this fix, so a
+# future decoy test added to this file would have been just as unable to
+# catch it as skeptic_pipeline_e2e.test.py's was pre-round-6.
+_DISPATCH_PROMPT_RECORDER = """
+globalThis.__realDispatchPrompts__ = [];
+{
+  const __origBatchDispatchPrompt = batchDispatchPrompt;
+  batchDispatchPrompt = function (batch) {
+    const built = __origBatchDispatchPrompt(batch);
+    globalThis.__realDispatchPrompts__.push(built);
+    return built;
+  };
+}
+"""
 
 
 SKEPTIC_HARNESS_TEMPLATE = r"""
@@ -232,6 +259,18 @@ async function agent(promptText, opts) {
   const p = PLAN[idx] || {};
   if (kind === "precheck") return (p.precheck !== undefined) ? p.precheck : ("ABSENT " + idx);
   if (kind === "dispatch") {
+    // Same guard as skeptic_pipeline_e2e.test.py's own dispatch branch
+    // (round 6): the fragment must not appear for a call whose prompt the
+    // REAL batchDispatchPrompt() never produced, so a decoy call cannot
+    // manufacture the artifact a downstream on-disk assertion reads.
+    if (globalThis.__realDispatchPrompts__.indexOf(promptText) === -1) {
+      throw new Error(
+        "skeptic:dispatch:" + idx + " was called with a prompt batchDispatchPrompt() " +
+        "never produced, so this call did not dispatch. No fragment is written for " +
+        "it: a decoy must not be able to manufacture the artifact a downstream " +
+        "on-disk assertion reads. Prompt seen: " + JSON.stringify(promptText.slice(0, 120))
+      );
+    }
     if (p.dispatchWrite !== undefined) {
       const outPath = fragmentPathFor(idx);
       fs.mkdirSync(path.dirname(outPath), { recursive: true });

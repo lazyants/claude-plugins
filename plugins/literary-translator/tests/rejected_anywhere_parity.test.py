@@ -512,6 +512,12 @@ _REGEX_ALLOWED_AFTER_WORD = {
     "case", "do", "else", "yield", "throw",
 }
 
+# Round-6 finding: keywords whose own "(...)" is a CONDITION, not a value --
+# the ")" that closes one is followed by a new STATEMENT, never a
+# continuation of an expression. See _scan_code's "(" / ")" handling for why
+# this matters for regex-vs-division disambiguation.
+_CONTROL_KEYWORDS_BEFORE_PAREN = {"if", "while", "for", "switch", "catch", "with"}
+
 
 def _skip_string(source: str, start: int) -> int:
     """`start` is the opening quote. Returns the index just past the closing
@@ -667,8 +673,22 @@ def _scan_code(
     is jumped past whole. `_skip_template`/`_skip_interpolation` above still
     exist and are still used by `js_call_args` -- they only need to find the
     matching backtick/brace, not call sites, so they stay the cheaper,
-    non-recursing-for-calls tool for that job."""
+    non-recursing-for-calls tool for that job.
+
+    `paren_stack` (round-6 finding) tracks, for every open "(", whether it
+    is a CONTROL-FLOW CONDITION paren (the word immediately before it is
+    if/while/for/switch/catch/with) or any other kind (a call's own parens,
+    a grouping paren, a function's parameter list). The matching ")" pops
+    it and sets `prev_ends_expr` accordingly: a control paren's ")" is
+    followed by a new STATEMENT (the condition's value was already consumed
+    by the keyword, so "/" right after it cannot be division -- there is
+    nothing to divide), while every other ")" closes something that IS a
+    value, so "/" right after it is division, same as always. Before this,
+    every ")" was treated identically, which mis-scanned valid, executing JS
+    like `if (ready)\n  /re/.test(x);\nrealCall(a, b);` -- reading the "/"
+    after `if (ready)` as division corrupted everything scanned afterward."""
     depth = 0  # only meaningful when stop_at_brace_depth_zero
+    paren_stack: list[bool] = []
     prev_ends_expr = False
     prev_word = ""
     prev_is_dot = False
@@ -775,6 +795,43 @@ def _scan_code(
             i += 1
             continue
 
+        if c == "(":
+            # Push whether THIS paren is a control-flow CONDITION paren --
+            # prev_word is transparent across whitespace/comments the same
+            # way it is everywhere else in this loop, so `if  (x)` and
+            # `if /* c */ (x)` are both recognised. The matching ")" below
+            # reads this back to decide what follows it.
+            paren_stack.append(prev_word in _CONTROL_KEYWORDS_BEFORE_PAREN)
+            prev_ends_expr = False
+            prev_word = ""
+            prev_is_dot = False
+            i += 1
+            continue
+
+        if c == ")":
+            # Round-6 finding, measured: a "/" right after the ")" closing
+            # an if/while/for/switch/catch/with condition begins a NEW
+            # STATEMENT -- the condition's value was already consumed by the
+            # keyword, so there is nothing on the left to divide, and "/"
+            # must be read as a possible regex-literal start, exactly like
+            # the start of any other statement. Every OTHER ")" -- a call's
+            # own closing paren, a grouping paren, a parameter list -- closes
+            # something that IS a value, so "/" right after it is still
+            # division, unchanged from before this fix. The old unconditional
+            # `prev_ends_expr = True` for every ")" could not tell these
+            # apart: `if (ready)\n  /x\`y/.test(1);\nrealCall(a, b);` is
+            # valid, EXECUTING JS (the regex statement is a no-op; the real
+            # call runs once) but was read as `if (ready)` divided by `x`,
+            # with the backtick right after misread as an OPENING template
+            # literal that ran unterminated to end-of-source, swallowing the
+            # real call along with everything after it.
+            is_control_paren = paren_stack.pop() if paren_stack else False
+            prev_ends_expr = not is_control_paren
+            prev_word = ""
+            prev_is_dot = False
+            i += 1
+            continue
+
         if stop_at_brace_depth_zero and c == "{":
             depth += 1
         elif stop_at_brace_depth_zero and c == "}":
@@ -782,7 +839,7 @@ def _scan_code(
                 return i + 1
             depth -= 1
 
-        if c in ")]":
+        if c == "]":
             prev_ends_expr = True
             prev_word = ""
             prev_is_dot = False
@@ -1117,6 +1174,60 @@ def test_js_call_sites_treats_block_comments_as_transparent():
         f"regressed to forcing prev_ends_expr=False instead of staying "
         f"transparent, and the '/' right after the comment was misread as "
         f"the start of a regex literal that swallowed the real call whole"
+    )
+
+
+def test_js_call_sites_treats_a_statement_after_a_control_paren_as_regex_eligible():
+    """Round-6 finding, measured against the pre-fix tokenizer: a "/" right
+    after the ")" that closes an `if`/`while`/`for`/`switch`/`catch`
+    condition begins a NEW STATEMENT, not a continuation of the condition's
+    own value, so it must be regex-eligible the same way the start of any
+    other statement is. The pre-fix tokenizer treated every ")" identically
+    -- `prev_ends_expr = True` unconditionally -- which is correct for a
+    call's own closing paren or a grouping paren (something IS a value
+    there) but wrong for a control-flow condition's closing paren (nothing
+    is; the condition's value was already consumed by `if`/`while`/etc.).
+
+    This fixture is valid, EXECUTING JS: ``/x`y/.test(1)`` is a real regex
+    literal (a backtick has no special meaning inside one) matched against
+    the string "1", as a no-op statement; `waitChunkVerdict(a, b)` on the
+    next line runs for real, once. Node executes it and calls the real
+    function; the pre-fix tokenizer, misreading the "/" right after
+    `if (ready)` as division, then misread the regex body's own backtick as
+    an OPENING template literal with no closing backtick anywhere else in
+    the source, so it ran unterminated to end-of-string and swallowed the
+    real call along with everything after it -- js_call_sites() returned []
+    for code that genuinely calls the function once."""
+    src = "if (ready)\n  /x`y/.test(1);\nwaitChunkVerdict(a, b);\n"
+    sites = js_call_sites(src, "waitChunkVerdict")
+    assert len(sites) == 1, (
+        f"a regex statement right after a control-flow ')' desynced the "
+        f"tokenizer: found {sites}. If empty, ')' has regressed to "
+        f"unconditionally forcing prev_ends_expr=True regardless of what it "
+        f"closes, and the regex literal's own backtick was misread as an "
+        f"opening template literal that swallowed the real call"
+    )
+
+    # The adjacent case, in the opposite direction: a ")" that closes
+    # anything OTHER than a control-flow condition -- here, a plain call's
+    # own parens -- must still mean division, exactly as before this fix.
+    # Built the same way the block-comment self-test's own "src_division"
+    # fixture above is, per the lesson that shape drove: the real call sits
+    # BETWEEN the two division slashes, on the same line, so an
+    # overcorrection that started treating every ")" as regex-eligible would
+    # actually swallow it -- `_skip_regex_literal` finds the same-line
+    # closing "/" (the one before " count") and consumes
+    # "waitChunkVerdict(real) " whole as pretend regex-body text -- rather
+    # than merely being masked by a newline the way a less careful fixture
+    # would be.
+    src_division = "const ratio = getTotal() / waitChunkVerdict(real) / count;\n"
+    sites_division = js_call_sites(src_division, "waitChunkVerdict")
+    assert len(sites_division) == 1, (
+        f"a ')' that does NOT close a control-flow condition desynced the "
+        f"tokenizer: found {sites_division}. If empty, the fix has "
+        f"overcorrected to treating every ')' as starting a new statement, "
+        f"and the '/' right after a plain call's own closing paren was "
+        f"misread as a regex-literal start that swallowed the real call"
     )
 
 
@@ -1653,6 +1764,65 @@ REQUIRED_GLUE_IDENTITIES = {
     "letter_x": ord("x"),
 }
 
+# Round-6 finding: this IS the pin set, and nothing derives its size from
+# anything else the way GLUE_CHARS's own 16-count guard (module level, above)
+# is at least independently re-checked by the distinctness test below it.
+# Deleting an entry here silently narrows what the per-name loop in
+# test_glue_chars_pins_the_specific_high_risk_codepoints below even visits --
+# a name missing from this dict is never looked up at all, not looked up and
+# found wrong. Pinned the same deliberate, non-derived way GLUE_CHARS's own
+# count is: update this number only as a visible, intentional change made
+# alongside REQUIRED_GLUE_IDENTITIES itself, never to make a shrunk dict pass
+# unnoticed.
+assert len(REQUIRED_GLUE_IDENTITIES) == 16, (
+    f"REQUIRED_GLUE_IDENTITIES has {len(REQUIRED_GLUE_IDENTITIES)} entries, "
+    f"not 16"
+)
+
+
+def test_required_glue_identities_covers_every_name_in_the_live_population():
+    """The REVERSE direction of the identity pin -- round-6 finding.
+
+    test_glue_chars_pins_the_specific_high_risk_codepoints below only WALKS
+    REQUIRED_GLUE_IDENTITIES and looks each of its names up in
+    GLUE_CHARS_BY_NAME. A name that exists in the live GLUE_CHARS population
+    but has been deleted from REQUIRED_GLUE_IDENTITIES is then never visited
+    by that loop again -- measured mutation: delete "letter_x" from
+    REQUIRED_GLUE_IDENTITIES while repointing the live GLUE_CHARS entry
+    itself from `("letter_x", "x")` to `("letter_x", "y")`. Every check that
+    existed before this test still passed against that mutation -- 16
+    GLUE_CHARS entries, each a genuine single codepoint, all 16 distinct (a
+    plain letter is still one distinct codepoint), the module-level count
+    above still 16 -- because none of them looks at REQUIRED_GLUE_IDENTITIES
+    and GLUE_CHARS_BY_NAME's name sets TOGETHER.
+
+    So this checks the two NAME SETS are identical, not just that the names
+    REQUIRED_GLUE_IDENTITIES happens to still have resolve correctly: every
+    name it claims must exist in the live population (the direction the loop
+    below already covered) AND every name in the live population must be
+    claimed by it (the direction that was missing). What this does NOT
+    establish: that the codepoints themselves are the expected ones (that is
+    test_glue_chars_pins_the_specific_high_risk_codepoints, immediately
+    below, deliberately left as its own, separate property) or that they are
+    pairwise distinct (test_precheck_glue_reply_shapes_cover_all_sixteen_glue_chars,
+    further below)."""
+    required_names = set(REQUIRED_GLUE_IDENTITIES)
+    live_names = set(GLUE_CHARS_BY_NAME)
+    assert required_names == live_names, (
+        f"REQUIRED_GLUE_IDENTITIES and the live GLUE_CHARS population no "
+        f"longer name the same set of members.\n"
+        f"in REQUIRED_GLUE_IDENTITIES but not the live population: "
+        f"{sorted(required_names - live_names)}\n"
+        f"in the live population but not REQUIRED_GLUE_IDENTITIES: "
+        f"{sorted(live_names - required_names)}\n"
+        f"A name missing from REQUIRED_GLUE_IDENTITIES is never checked by "
+        f"test_glue_chars_pins_the_specific_high_risk_codepoints at all -- "
+        f"that loop only walks REQUIRED_GLUE_IDENTITIES's own keys -- so a "
+        f"member could be silently repointed to an arbitrary stand-in "
+        f"character with the pin set shrunk to match, and every other check "
+        f"in this file would stay green"
+    )
+
 
 def test_glue_chars_pins_the_specific_high_risk_codepoints():
     """IDENTITY, not shape. `test_precheck_glue_reply_shapes_cover_all_sixteen_glue_chars`
@@ -1668,7 +1838,13 @@ def test_glue_chars_pins_the_specific_high_risk_codepoints():
     the module-level comment above REQUIRED_GLUE_IDENTITIES for why the other
     twelve are not "obvious semantics, safe to leave unpinned": the SAME
     repointing mutation applied to any of them survives every check that
-    existed before this extension."""
+    existed before this extension.
+
+    This test only proves the FORWARD direction (every name it walks
+    resolves to the right codepoint) -- see
+    test_required_glue_identities_covers_every_name_in_the_live_population
+    just above for the REVERSE direction (round-6 finding) that a name
+    silently missing from REQUIRED_GLUE_IDENTITIES cannot hide behind."""
     for name, expected_codepoint in REQUIRED_GLUE_IDENTITIES.items():
         assert name in GLUE_CHARS_BY_NAME, (
             f"expected a GLUE_CHARS entry named {name!r}, not found. Names "

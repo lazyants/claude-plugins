@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.16.2 — 2026-07-28
+## 1.16.2 — 2026-07-29
 
 The 1.16.1 release fixed the W5 mass-translate wait, which spent a 3450 s budget inside one
 `agent()` call against a Bash tool that clamps any single call at 600 000 ms. It said, in its own
@@ -116,8 +116,9 @@ or in a file the list does not name.
 
 ### The review round this release took, and what it found in the release itself
 
-Every finding below is against work already committed in this release. They are recorded because
-each is an instance of the defect class the release exists to close.
+Every finding below is against work already committed in this release, with one exception that says so
+in its own paragraph. They are recorded because each is an instance of the defect class the release
+exists to close.
 
 **The containment guard was ported to the wait site and not to the site beside it.** The skeptic
 pass's resume precheck still read its reply with a bare `sentinelVerdict()`, while the glossary twin
@@ -314,7 +315,92 @@ the U+2028/U+2029 hole. Named as its own change rather than folded into the secu
 those six is a `splitlines()` boundary, so every one was line-forging-capable, and deleting them
 silently discarded the evidence that an agent had put something there.
 
-Suite: 4178 → **4483 passed, 3 skipped, 2 xfailed**. Every skip is named rather than incidental,
+**Round 6 found the defect inside round 5's own fix, for the sixth consecutive round.** Round 5 bound
+the end-to-end test to this batch's own `assignment_id`, on the reasoning that only
+`batchDispatchPrompt(batch)` puts that value into a prompt. A decoy can put it there too: reading
+`batch.assignments[0].assignment_id` off the batch and passing the bare id as the whole prompt
+satisfies a substring check without building anything. The gate now records prompt IDENTITY rather
+than prompt CONTENT — `batchDispatchPrompt` is wrapped at harness-injection time, every prompt it
+actually builds is recorded, and the mock refuses to write a fragment for any dispatch whose prompt
+that function never produced. Measured against a shape-conditioned decoy — one that fires only on the
+glued reply shape under test, so sibling tests never see it and stay green — the round-5 assertions
+pass blind and the round-6 assertion fails.
+
+**The ACCEPT-gate parity assertion said "character-identical" and did substring containment, in three
+copies.** `tests/wait_chunking_batch_passes.test.py`'s own docstring states "Character-identical is
+the assertion, not merely 'mentions `--check-batch`'"; the assertion was `gate in recheck`, and
+`accept_gate()` lifts only the bare command from between the loop head and the suppressed
+`&& exit 0`. Any re-check command CONTAINING the chunk's command therefore passed, including a strict
+superset asking a different question. Measured, whole file green in every case: skeptic's re-check
+widened with `--senses-path /dev/null`, glossary's with `--research-mode offline`, and — in
+`tests/wait_chunking.test.py`, a file outside this release's diff that no scope had included —
+mass-translate's with `--candidate-file`. Per the file's own words the failure direction is a false
+GREEN on the exhaustion path, accepting a fragment the poll would have rejected. All three now assert
+equality, which is what the prose claimed; equality is structurally guaranteed rather than
+fixture-specific, since the accept-command builders are pure functions of the same `batch`/`attempt`
+both prompts receive within one iteration. The existing control could not see this: it REPLACED the
+whole command, so it discriminates a different gate and not a wider one. A second control that widens
+rather than replaces is added at every copy, and `tests/wait_chunking.test.py` — which carried no
+mutation-testing machinery at all — gains both.
+
+**The authoritative re-check's call count was unasserted in the file whose subject it is.** The
+mass-translate module docstring says the canonical gate runs ONCE more, and the test asserting the
+re-check is one immediate evaluation only checked the recorded prompts for polling SYNTAX. Measured: a
+second `agent()` call under the same `review-wait-recheck:` label, its result discarded, leaves all 16
+of that file's pre-fix tests green. A looping re-check is precisely the #348 defect — it can itself hit
+the 600 s clamp — so an unasserted "once" here is not cosmetic. Now pinned at both label pairs; under
+the same mutation the fixed file fails exactly one test,
+`test_the_recheck_is_a_single_non_polling_check`, which is the one whose discrimination is being
+measured rather than a collided fixture, and the review site was mutated independently rather than
+inferred from the translate site failing. The chunk-side count on
+the exhaustion path was investigated the same way and is NOT a gap: nothing asserts it directly, but
+`waitChunkSec(i)` computes from the absolute index, so a short loop drops the final compensating
+remainder and two arithmetic tests catch it. Recorded as protected-indirectly, with the refactor that
+would silently remove that protection named, because "unasserted" and "unprotected" are not the same
+finding.
+
+**A twelve-member class closed at one member.** Round 5 marked five bidi controls and missed the four
+isolates; round 6's own first fix marked ZWSP and missed eleven siblings. Measured against the shipped
+`_sanitize`: U+200C, U+200D, U+2060, U+FEFF, U+00AD, U+034F, U+180E and U+2061–U+2064 all survived
+unmarked, each making two distinct stored `source_form` values render indistinguishably — the exact
+spoof the ZWSP fix exists to stop — and the pin added alongside it asserted the set had length 1, so
+it certified the gap rather than catching it. The set is now DERIVED rather than hand-listed, from
+`unicodedata.category(ch) == "Cf"` swept across the BMP, mirroring `skeptic_ready.py`'s own
+`_compute_line_separator_escapes()`: 43 BMP format characters, less the nine already handled as bidi
+controls, plus U+034F by name. The one place judgement was needed is recorded with its measurement
+rather than asserted: CGJ is category Mn, and the tempting broader predicate that would catch it (`Mn`
+with `combining() == 0`) returns 368 BMP codepoints, overwhelmingly genuine visible vowel signs from
+Devanagari, Thai, Khmer and a dozen other living scripts, so it was rejected and the rejection
+measured inline. Hebrew non-interference is asserted at import time and independently in the suite,
+not assumed. The BMP restriction is a stated scope decision, and the marker-width arithmetic that
+follows from it is pinned separately so a future widening is flagged rather than absorbed.
+
+**A constant named for a quantity it does not bound — caught before it shipped, unlike everything
+else in this section.** The triage report's per-field length bound is new here; `skeptic_report.py`
+carried no cap and no `_bounded()` before this release. Its first draft named the constant
+`_MAX_RENDERED_FIELD_CHARS = 200`, and it caps the SOURCE length, after which `_sanitize` expands each
+marked codepoint into an 8-character `[U+XXXX]` marker. Measured through the real call path
+`_sanitize(_bounded(x))`: a 5000-character U+202E field renders at 1616, 8.1× the cap the draft name
+asserted. Shipped as `_MAX_SOURCE_FIELD_CHARS`, with the expansion factor derived from the marker
+format rather than written as a literal 8 — a literal would have silently constrained the derivation
+above, since the 127 non-BMP format characters produce nine-character markers. Recorded even though no
+released version ever carried the wrong name, because the defect is the same one the rest of this
+release is about: a name asserting a property the code does not have.
+
+**The measurements were the least reliable thing this round, and that is worth more than any single
+finding.** Three suite figures circulated before one held, because a report was written against a tree
+its author was still editing — the file was finalised two minutes after the report claiming to have
+measured it. A working-tree state hash (`git rev-parse HEAD`, `git diff HEAD` and
+`git status --porcelain` hashed together) taken before and after each run is what settled it, and it
+catches what a filename-set comparison cannot: a byte-level edit inside an unchanged filename. Three
+separate mutations went RED for the wrong reason — one collided with the literal a control test's own
+`mutate()` greps for, one collided with an extraction helper's `len(hits) == 1` guard, one moved both
+sides of a derived-constant comparison together — and each RED was indistinguishable at the summary
+line from a gate doing its job. A live mutant is necessary and not sufficient; so is knowing the suite
+went red. The question is WHICH test failed, and whether that test is the one whose discrimination is
+being measured.
+
+Suite: 4178 → **4556 passed, 3 skipped, 2 xfailed**. Every skip is named rather than incidental,
 and there are three for two reasons: one pre-existing placeholder, plus the single pin row that
 declares no one-to-one replacement, which now skips in TWO tests — the diff-side check and the
 same-hunk check added below — because a row with no replacement has nothing for either to bind.

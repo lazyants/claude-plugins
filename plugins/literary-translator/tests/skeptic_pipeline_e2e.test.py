@@ -233,7 +233,46 @@ def _wrap_for_execution(js_source: str) -> str:
         "the template's export contract may have changed"
     )
     body = js_source.replace("export const meta", "const meta", 1)
-    return "async function __workflowMain__(agent, pipeline, log, args) {\n" + body + "\n}\n"
+    return (
+        "async function __workflowMain__(agent, pipeline, log, args) {\n"
+        + _DISPATCH_PROMPT_RECORDER
+        + body
+        + "\n}\n"
+    )
+
+
+# Round 6: a dispatch assertion has to observe that the REAL prompt builder ran
+# and produced this exact string. Nothing weaker survives.
+#
+# Round 5 bound the assertion to the batch's `assignment_id` appearing in the
+# prompt, reasoning that only batchDispatchPrompt() embeds it. Measured false:
+# `assignment_id` is already sitting in `batch.assignments`, so a bypass reads
+# it straight off the batch and passes it as the prompt --
+# `agent(batch.assignments.map(a => a.assignment_id).join("\\n"), {label: ...})`
+# satisfies the containment check with the guard deleted and no dispatch sent.
+#
+# Demanding more prompt TEXT (the full stringified assignments, a fixed
+# preamble) buys exactly one round each time -- the mistake this loop has now
+# made at four successive levels, because the decoy simply copies whatever new
+# text is demanded. So the harness stops matching text and records IDENTITY.
+# `batchDispatchPrompt` is a hoisted function declaration inside the wrapped
+# workflow, so rebinding it here -- before any of the body runs, and without
+# touching control flow -- makes every string the real builder produces
+# observable. A dispatch call whose prompt is not one of them did not call the
+# builder; a decoy that DOES call it and forwards the result has performed the
+# dispatch, which is the property under test. There is no level above this one
+# for the next decoy to sit at.
+_DISPATCH_PROMPT_RECORDER = """
+globalThis.__realDispatchPrompts__ = [];
+{
+  const __origBatchDispatchPrompt = batchDispatchPrompt;
+  batchDispatchPrompt = function (batch) {
+    const built = __origBatchDispatchPrompt(batch);
+    globalThis.__realDispatchPrompts__.push(built);
+    return built;
+  };
+}
+"""
 
 
 # The mock `agent()`'s "dispatch" branch WRITES a real fragment file to
@@ -331,6 +370,21 @@ async function agent(promptText, opts) {
   const p = PLAN[idx] || {};
   if (kind === "precheck") return (p.precheck !== undefined) ? p.precheck : ("ABSENT " + idx);
   if (kind === "dispatch") {
+    // Round 6: the fragment must not appear for a call that did not send a
+    // prompt the REAL builder produced. This mock used to write it on the
+    // LABEL alone, so every on-disk assertion in this file was decoy-blind:
+    // with the precheck guard deleted and two empty agent() calls carrying
+    // "skeptic:dispatch:0"/"skeptic:wait:0", the fragment appeared,
+    // run_merge_fragments() found its record and run_verify_merged() agreed --
+    // measured. Fixed HERE rather than per-test, so no future test inherits it.
+    if (globalThis.__realDispatchPrompts__.indexOf(promptText) === -1) {
+      throw new Error(
+        "skeptic:dispatch:" + idx + " was called with a prompt batchDispatchPrompt() " +
+        "never produced, so this call did not dispatch. No fragment is written for " +
+        "it: a decoy must not be able to manufacture the artifact a downstream " +
+        "on-disk assertion reads. Prompt seen: " + JSON.stringify(promptText.slice(0, 120))
+      );
+    }
     if (p.dispatchWrite !== undefined) {
       const outPath = fragmentPathFor(idx);
       fs.mkdirSync(path.dirname(outPath), { recursive: true });
@@ -1175,14 +1229,38 @@ def test_e2e_wait_glued_pending_with_trailing_ready_still_not_ready(tmp_path):
     shape: test_e2e_wait_substring_collision_reports_not_ready is the #227
     substring-inside-prose bug, and test_e2e_wait_fail_priority_discriminating_
     order puts PENDING alone on its own LF-delimited line before a trailing
-    READY (sentinelVerdict()'s own fail-priority scan already rejects that,
-    unguarded). Neither drives a PENDING sentinel GLUED to prose by a
-    non-newline character with a trailing clean READY line -- the exact shape
-    tests/rejected_anywhere_parity.test.py's own PARITY_REPLY_SHAPES calls
-    "glued_pending_space", and the shape rejectedAnywhere()'s containment
-    guard inside waitChunkVerdict() exists to reject. That parity file's
-    test_all_three_wait_verdicts_agree_on_every_reply_shape already covers
-    this reply SHAPE, but only by extracting waitChunkVerdict()'s own
+    READY.
+
+    Round 6 correction (an outside reviewer caught this): an earlier revision
+    of this docstring claimed that sibling shape was rejected by
+    "sentinelVerdict()'s own fail-priority scan, unguarded" -- reasoning by
+    analogy from the precheck site above, where sentinelVerdict()'s
+    fail-priority scan genuinely is a second, independent guard (its
+    failSentinel there is "ABSENT "+batch.index, non-null). Measured false
+    for the wait site: waitChunkVerdict() calls
+    sentinelVerdict(reply, "READY "+index, null) with failSentinel literally
+    null, and that function's own scan is gated on `failSentinel !== null`,
+    so it never fires here. rejectedAnywhere() is the ONLY fail-direction
+    guard at this site, and it is the SAME guard this test exercises:
+    deleting it from waitChunkVerdict() fails BOTH this test and
+    test_e2e_wait_fail_priority_discriminating_order (measured directly).
+    What THIS test adds is narrower than "an independently guarded shape" --
+    it pins that the guard is CONTAINMENT, not whole-line exact match.
+    Replacing rejectedAnywhere() with a scan that only rejects a PENDING
+    sentinel occupying its own whole line still passes the sibling test
+    (its shape already IS a whole line) but fails this one (a glued PENDING
+    never occupies a whole line) -- measured directly. The sibling test
+    alone cannot tell those two possible implementations apart; this one
+    can, which is the actual, narrower reason it earns its place here.
+
+    Neither of the two prior tests drives a PENDING sentinel GLUED to prose
+    by a non-newline character with a trailing clean READY line -- the exact
+    shape tests/rejected_anywhere_parity.test.py's own PARITY_REPLY_SHAPES
+    calls "glued_pending_space", and the shape rejectedAnywhere()'s
+    containment guard inside waitChunkVerdict() exists to reject. That
+    parity file's test_all_three_wait_verdicts_agree_on_every_reply_shape
+    already covers this reply SHAPE, but only by extracting
+    waitChunkVerdict()'s own
     DEFINITION and calling it directly -- exactly the extraction-based
     coverage that let a decoy call-site walk around the precheck guard
     (round-4 codex finding C1) go unnoticed until an e2e test drove the real
@@ -1198,9 +1276,17 @@ def test_e2e_wait_glued_pending_with_trailing_ready_still_not_ready(tmp_path):
     (out["result"]["merged"] would read True from the still-canned
     "skeptic:verify" mock, and "skeptic:merge"/"skeptic:verify" would appear
     in labels), which the assertions below already catch without needing a
-    label-count proxy. The skeptic_triage.json existence check adds one more
-    disk-level guard against a hypothetical mutation that fakes the JS
-    return value while still writing merge output some other way."""
+    label-count proxy. (Round 6 -- codex: an earlier revision of this test
+    also asserted `not (tmp_path / "skeptic_triage.json").exists()` as a
+    supposed extra disk-level guard. Measured vacuous: this test's plan
+    carries no `dispatchWrite`, so `run_dir` is never even created on disk
+    here, and the only thing in this whole file that ever writes
+    `tmp_path/skeptic_triage.json` is the explicit `sr.run_merge_fragments`
+    Python call other tests make -- this test never makes it. The mock's own
+    "skeptic:merge" branch is canned (`return "MERGED (mock)"`) and never
+    touches disk either way, so there is no "writes merge output some other
+    way" path for a disk check to catch that the `labels` assertions above
+    do not already catch. Removed rather than kept as false insurance.)"""
     durable_root = str(tmp_path)
     lang_dir = tmp_path / "languages"
     particle_config = write_particle_config(lang_dir)
@@ -1232,11 +1318,6 @@ def test_e2e_wait_glued_pending_with_trailing_ready_still_not_ready(tmp_path):
     labels = [c["label"] for c in out["calls"]]
     assert "skeptic:merge" not in labels
     assert "skeptic:verify" not in labels
-    assert not (tmp_path / "skeptic_triage.json").exists(), (
-        "no triage file should exist on disk at all -- the batch never "
-        "became ready, so merge must never have run for real, whatever the "
-        "JS return value claims"
-    )
 
 
 def test_e2e_precheck_non_terminal_quoted_present_still_regenerates(tmp_path):
@@ -1428,3 +1509,152 @@ def test_e2e_verify_schema_requires_frozen_input_mismatch(tmp_path):
     assert verify_calls[0]["schemaRequired"] is not None
     assert "verified" in verify_calls[0]["schemaRequired"]
     assert "frozen_input_mismatch" in verify_calls[0]["schemaRequired"]
+
+
+# ---------------------------------------------------------------------------
+# Round 6 -- parity pin for the dispatch-write identity guard.
+#
+# This file's own mock agent() (see _DISPATCH_PROMPT_RECORDER and the
+# "dispatch" branch's own comment above) and tests/skeptic_confident_mismerge
+# .test.py's INDEPENDENT copy of the same mock both got the identity-recording
+# fix this round: a "dispatch" call only writes a fragment for a promptText
+# that the REAL batchDispatchPrompt() actually produced. The fix landed in
+# both copies by hand, one at a time -- which is exactly how today's earlier
+# defect happened: round 5 hardened this file's own copy against a decoy and
+# left the sibling copy unguarded, and nothing caught it until a human audit.
+# Nothing else in this suite would have caught THAT: each file's own tests
+# pass against its own copy, so a guard present in one and missing from the
+# other is invisible to both.
+#
+# What this test DOES establish: the two copies, as they exist RIGHT NOW,
+# agree on the guard's behaviour for a forged dispatch input and for a real
+# one. What it does NOT establish: that a single shared implementation
+# exists (there still are two, hand-maintained), or that some future THIRD
+# copy would be caught by anything (nothing generalizes this pairwise pin to
+# an unknown copy count). Extracting one shared harness module that both
+# files import would remove the drift vector at its source instead of
+# detecting it after the fact, and is the stronger fix. That extraction was
+# considered this round and deferred -- not because the reasoning is wrong,
+# but because this is round six of a loop where every round's fix has
+# contained the next round's defect, and a structural refactor of a harness
+# both e2e files depend on deserves its own review round rather than riding
+# along at the end of this one. It has NOT been filed anywhere; this
+# paragraph is the only record of the decision until someone acts on it.
+#
+# BEHAVIOURAL, not textual, per tests/rejected_anywhere_parity.test.py's own
+# round-2 lesson (recorded in that file's docstring): a prior version of that
+# guard's parity check asserted two copies were byte-identical, which proved
+# nothing about whether either copy's CALL SITE actually used it. So this
+# test does not diff source text at all. It drives one shared, hand-built
+# fixture -- deliberately NOT the real skeptic-pass-wf.template.js, so this
+# test exercises exactly the dispatch-write guard and nothing else -- through
+# each file's own, real, unmodified build_skeptic_harness()/mock agent(),
+# with one genuine dispatch (must be accepted) and one forged one that reads
+# real assignment_ids straight off the batch without ever calling the real
+# batchDispatchPrompt() (the same "bare assignment ids" shape
+# probe_battery.py's own decoy battery used against this round's Task 1 fix;
+# see the identity-recording rationale above _DISPATCH_PROMPT_RECORDER).
+#
+# Proved red/green before trusting it: with the guard's `throw` block deleted
+# from one copy's dispatch branch (mutant asserted live), this test fails for
+# that copy and passes for the other; restoring the block, both pass again.
+# ---------------------------------------------------------------------------
+
+_MISMERGE_TEST_FILE = Path(__file__).resolve().parent / "skeptic_confident_mismerge.test.py"
+assert _MISMERGE_TEST_FILE.is_file(), (
+    f"sibling harness copy not found at {_MISMERGE_TEST_FILE} -- this parity "
+    "pin has nothing to compare against"
+)
+
+
+def _load_sibling_mismerge_module_for_dispatch_guard_parity():
+    # Dynamic load, not a normal import: this project's test files are each
+    # self-contained (see this file's own header comment on the convention),
+    # and the whole point of this pin is to exercise the SIBLING FILE'S OWN
+    # shipped build_skeptic_harness(), never a reimplementation of it -- a
+    # third, hand-copied version of the harness logic here would just be a
+    # third thing that can drift.
+    return _load_module(
+        "skeptic_confident_mismerge_for_dispatch_guard_parity_pin", _MISMERGE_TEST_FILE, SCRIPTS_DIR,
+    )
+
+
+# A minimal, self-contained workflow body. Deliberately NOT the real
+# skeptic-pass-wf.template.js -- it needs no precheck/wait control flow at
+# all, only a hoisted batchDispatchPrompt() (so _DISPATCH_PROMPT_RECORDER's
+# rebind has something to rebind) and two "skeptic:dispatch:0" calls.
+_DISPATCH_GUARD_PARITY_FIXTURE = r"""
+export const meta = { version: "dispatch-guard-parity-pin-fixture" };
+
+function batchDispatchPrompt(batch) {
+  return "REAL PROMPT for " + batch.assignments.map(a => a.assignment_id).join(",");
+}
+
+const batch = args[0];
+const realReply = await agent(batchDispatchPrompt(batch), {
+  phase: "SkepticPass", label: "skeptic:dispatch:0",
+});
+
+let forgedRejected = false;
+let forgedErrorMessage = null;
+try {
+  await agent(
+    "FORGED " + batch.assignments.map(a => a.assignment_id).join(","),
+    { phase: "SkepticPass", label: "skeptic:dispatch:0" },
+  );
+} catch (err) {
+  forgedRejected = true;
+  forgedErrorMessage = String(err && err.message || err);
+}
+
+return { realReply: realReply, forgedRejected: forgedRejected, forgedErrorMessage: forgedErrorMessage };
+"""
+
+
+def _run_dispatch_guard_parity_fixture(build_harness_fn, tmp_path: Path, label: str) -> dict:
+    """Drive _DISPATCH_GUARD_PARITY_FIXTURE through ONE file's own
+    build_skeptic_harness() -- the same fixture body and batch for both
+    files, so this is one input driven through two real harnesses, not two
+    separately-reasoned-about scenarios."""
+    assert NODE is not None, "node executable not found on PATH"
+    batches = [{"index": 0, "assignments": [{
+        "assignment_id": aid("Jean"), "source_form": "Jean", "canonical_target_form": "Jean",
+        "risk_classes": ["high_dispersion"], "windows_truncated": False, "windows": [],
+    }]}]
+    harness_text = build_harness_fn(_DISPATCH_GUARD_PARITY_FIXTURE, batches, {}, str(tmp_path), "parity-pin-run")
+    harness_path = tmp_path / f"dispatch_guard_parity_{label}.js"
+    harness_path.write_text(harness_text, encoding="utf-8")
+    proc = subprocess.run([NODE, str(harness_path)], capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, (
+        f"{label}'s dispatch-guard parity harness process itself failed (exit "
+        f"{proc.returncode}) -- this means the REAL dispatch call was rejected "
+        f"too (the fixture only catches the FORGED one in its own try/catch), "
+        f"not just the forged one:\nSTDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}"
+    )
+    return json.loads(proc.stdout)["result"]
+
+
+def test_dispatch_write_guard_agrees_between_the_two_harness_copies(tmp_path):
+    """The parity pin itself. See the section comment above for what this
+    does and does not establish, and why the stronger fix (one shared
+    harness module) is deferred rather than done here."""
+    results = {
+        "skeptic_pipeline_e2e.test.py": _run_dispatch_guard_parity_fixture(
+            build_skeptic_harness, tmp_path, "e2e",
+        ),
+        "skeptic_confident_mismerge.test.py": _run_dispatch_guard_parity_fixture(
+            _load_sibling_mismerge_module_for_dispatch_guard_parity().build_skeptic_harness,
+            tmp_path, "mismerge",
+        ),
+    }
+    for label, result in results.items():
+        assert result["forgedRejected"] is True, (
+            f"{label}'s dispatch-write identity guard ACCEPTED a forged prompt "
+            f"that batchDispatchPrompt() never produced -- the two copies have "
+            f"drifted, and this is the weaker one. Result: {result}"
+        )
+        assert result["realReply"] == "FRAGMENT 0", (
+            f"{label}'s dispatch-write identity guard REJECTED a real, "
+            f"faithfully-produced prompt -- over-broad, not just under-broad. "
+            f"Result: {result}"
+        )

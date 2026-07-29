@@ -1718,8 +1718,11 @@ async function batchStep(batch) {
       // spending the judge call anyway would ask an agent to audit files that may
       // not exist. This is NOT a fall-through: it joins the same retry ladder a
       // citation rejection does, carrying prepare's own reason forward, so an
-      // attempt that could not be prepared costs 3 calls rather than the ladder's
-      // 4 and still counts against MAX_CITATION_RETRIES.
+      // attempt that could not be prepared costs 2 + WAIT_CALLS calls rather than
+      // the ladder's 3 + WAIT_CALLS and still counts against MAX_CITATION_RETRIES
+      // (the same two costs this file states parametrically near perBatchCalls'
+      // own definition -- restated here as stale hardcoded numbers before this
+      // fix, contradicting that comment rather than agreeing with it).
       rejectionReason = rejectionDetail(prepared, prepareOk, prepareFail)
       log("batch " + batch.index + ": citation evidence could not be prepared for attempt " + attempt + " (no judge call spent)")
     }

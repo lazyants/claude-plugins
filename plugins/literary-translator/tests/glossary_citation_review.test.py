@@ -38,7 +38,7 @@ further cases cover the structural traps a naive insertion hits:
     human resolving unsourceable candidates).
 
 SCOPE, vs tests/batch_size_estimator.test.py. That file owns the COST
-ESTIMATOR: the live 10*N+2 and offline 3*N+2 preflight formulas, the
+ESTIMATOR: the live 19*N+2 and offline 5*N+2 preflight formulas, the
 exactly-at-cap boundary, and the shape of the over-cap refusal. This file owns
 the STATE MACHINE the estimate is a model of -- what the review actually does
 to the control flow. The one place the two touch on purpose is formula
@@ -46,9 +46,9 @@ TIGHTNESS (below): a real worst-case run measured against the formula, which
 is the only assertion here that a refusal test cannot make, plus the one
 assertion that ties the two files' ladder constants to the template's own
 expression so they cannot drift apart silently. The offline case exists in
-both files and is NOT a duplicate: there it is the estimate (3*N+2), here it
-is the behaviour (no review call is spent at all), and a template can get
-either one right while getting the other wrong.
+both files and is NOT a duplicate: there it is the worst-case estimate
+(5*N+2), here it is the behaviour (no review call is spent at all), and a
+template can get either one right while getting the other wrong.
 
 MECHANISM. Same extract-substitute-wrap-run-under-Node harness as
 tests/glossary_pipeline_e2e.test.py and tests/batch_size_estimator.test.py's
@@ -1476,7 +1476,7 @@ def test_offline_mode_spends_no_review_call(tmp_path):
 #
 # The preflight REFUSAL tests (does an over-cap run return
 # reason:"batch-too-large" without dispatching, and is estimatedCalls exactly
-# 10*N+2 live / 3*N+2 offline) live in tests/batch_size_estimator.test.py --
+# 19*N+2 live / 5*N+2 offline) live in tests/batch_size_estimator.test.py --
 # that file's subject is the cost estimator, so the ladder arithmetic belongs
 # there and is not duplicated here.
 #
@@ -2223,7 +2223,10 @@ def test_prepare_is_a_plain_low_effort_claude_call(tmp_path):
 def test_offline_spends_neither_a_prepare_nor_a_judge_call(tmp_path):
     """offline forbids basis:"established" outright, so there is no citation to
     review and nothing to fetch. The split must not have smuggled a second
-    always-on call into the mode whose whole point is that it costs 3*N+2."""
+    always-on call into the mode whose whole point is being the cheap
+    alternative -- precheck + dispatch + a single-chunk wait per batch, 3*N+2
+    here since the default (non-exhausted) wait resolves in one call; the
+    estimator charges the worst case (an exhausted wait) at 5*N+2 instead."""
     res = run(
         tmp_path=tmp_path,
         batches=[make_batch(0, ["Ninon"]), make_batch(1, ["Scudery"])],

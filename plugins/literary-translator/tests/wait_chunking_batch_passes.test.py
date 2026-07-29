@@ -579,6 +579,23 @@ def accept_gate(prompt: str) -> str:
     return m.group(1)
 
 
+# The re-check's own command line, ALONE on its own line: `batchWaitRecheckPrompt()`
+# (both templates) pushes it as `lines.push(checkCmd + " >/dev/null 2>&1")` --
+# no `while true` wrapper, no trailing `&& exit 0;` continuation, unlike the
+# chunk's poll line ACCEPT_RE lifts a command out of. So a plain end-of-line
+# anchor is the CORRECT, exact extraction here, not a coincidence of the two
+# prompts sharing a substring -- and it is what makes an equality comparison
+# against accept_gate()'s own extraction meaningful rather than comparing a
+# substring to the wrong-shaped haystack.
+RECHECK_COMMAND_RE = re.compile(r"^(.*) >/dev/null 2>&1$", re.MULTILINE)
+
+
+def recheck_command(prompt: str) -> str:
+    hits = RECHECK_COMMAND_RE.findall(prompt)
+    assert len(hits) == 1, f"expected exactly one re-check command line, got {len(hits)}:\n{prompt}"
+    return hits[0]
+
+
 def declared_bound(prompt: str) -> int:
     m = DECLARED_BOUND_RE.search(prompt)
     assert m is not None, f"chunk prompt does not state the wait's total bound:\n{prompt}"
@@ -944,7 +961,19 @@ def test_the_recheck_runs_the_chunks_exact_accept_gate(target, tmp_path):
     and it would only ever fire on the exhaustion path, where nobody is looking.
 
     Character-identical is the assertion, not merely "mentions --check-batch":
-    a gate that asked a NARROWER question would still name the same script."""
+    a gate that asked a NARROWER question would still name the same script.
+
+    Round-6 fix: this used to read `assert gate in recheck` -- CONTAINMENT
+    against the re-check's whole multi-line PROMPT, not equality against its
+    own command. That is blind to a strictly WIDER command: a re-check that
+    runs `checkCmd + " --research-mode offline"` still literally CONTAINS the
+    chunk's own narrower gate string as a substring, so the old assertion
+    passed it -- measured directly, both templates, before this fix landed
+    (see test_accept_gate_parity_is_mutation_proved_against_a_widened_recheck_
+    command below, this file's own second control for exactly that shape).
+    Fixed by comparing against recheck_command()'s own single-line extraction
+    of the re-check's ACTUAL command, which is what "character-identical"
+    already meant here -- the docstring was right; the assertion was not."""
     out = exhausted_run(target, tmp_path)
     gates = {accept_gate(p) for p in prompts(out, target.chunk_label)}
     assert len(gates) == 1, (
@@ -952,9 +981,12 @@ def test_the_recheck_runs_the_chunks_exact_accept_gate(target, tmp_path):
     )
     gate = gates.pop()
     recheck = prompts(out, target.recheck_label)[0]
-    assert gate in recheck, (
-        f"{target.name}'s re-check does not run the chunks' exact ACCEPT gate.\n"
-        f"chunk ACCEPT: {gate}\nre-check prompt:\n{recheck}"
+    assert recheck_command(recheck) == gate, (
+        f"{target.name}'s re-check does not run the chunks' exact ACCEPT gate "
+        f"(character-identical, not merely containing it).\n"
+        f"chunk ACCEPT gate:  {gate!r}\n"
+        f"re-check command:   {recheck_command(recheck)!r}\n"
+        f"re-check prompt:\n{recheck}"
     )
 
 
@@ -967,7 +999,13 @@ def test_accept_gate_parity_is_mutation_proved(target, tmp_path):
     wrong condition: the parity assertion reads the command the agent is told to
     RUN, so only a changed command can prove it discriminates. Here the
     re-check's command becomes a strictly weaker gate -- a bare file-existence
-    test -- which is precisely the drift this pairing exists to make impossible."""
+    test -- which is precisely the drift this pairing exists to make impossible.
+
+    Round-6: reads recheck_command()'s own single-line extraction, matching
+    the (now equality) primary assertion above, rather than testing containment
+    against the whole prompt -- so both this control and the widening one
+    below check the SAME derived quantity for two different mutation shapes,
+    instead of two different notions of "differs"."""
     mutant = mutate(
         read_template(target),
         'lines.push(checkCmd + " >/dev/null 2>&1")',
@@ -976,10 +1014,61 @@ def test_accept_gate_parity_is_mutation_proved(target, tmp_path):
     out = exhausted_run(target, tmp_path, source=mutant)
     gate = accept_gate(prompts(out, target.chunk_label)[0])
     recheck = prompts(out, target.recheck_label)[0]
-    assert gate not in recheck, (
+    assert recheck_command(recheck) != gate, (
         f"MUTATION NOT CAUGHT: {target.name}'s re-check still carries the chunks' "
         f"ACCEPT gate after its command was replaced with a weaker one, so the "
         f"parity assertion is not reading the executable command.\nre-check:\n{recheck}"
+    )
+
+
+# A per-target flag that widens the re-check's command into a strict SUPERSET
+# of the chunk's own ACCEPT gate -- syntactically valid, and not an arbitrary
+# choice: both are flags these scripts' own CLIs genuinely accept elsewhere
+# (skeptic_ready.py's --senses-path, glossary's --research-mode), so this is
+# the shape a plausible, easy-to-miss-in-review edit would actually take, not
+# a strawman. This is exactly what the OLD containment assertion
+# (`gate in recheck`) could never catch: the narrower gate string stays a
+# literal SUBSTRING of the widened one, so containment reads it as a match.
+WIDENING_FLAG = {
+    "glossary": " --research-mode offline",
+    "skeptic": " --senses-path /dev/null",
+}
+
+
+@pytest.mark.parametrize("target", TARGETS, ids=TARGET_IDS)
+def test_accept_gate_parity_is_mutation_proved_against_a_widened_recheck_command(target, tmp_path):
+    """The SECOND control the equality fix above needs, and the one
+    test_accept_gate_parity_is_mutation_proved just above cannot stand in for.
+    That control REPLACES the re-check's command outright, which even the OLD
+    containment assertion caught (an unrelated string is not a substring of
+    the recheck prompt either). A command that only ADDS a flag stays a
+    superset of the chunk's own gate, so the OLD assertion passed it --
+    measured directly against this repo's HEAD before this fix landed, both
+    targets, all green. Only the equality fix above closes it.
+
+    Mutates the checkCmd BINDING inside batchWaitRecheckPrompt specifically,
+    not batchWaitChunkPrompt's identically-worded line. Both templates carry
+    TWO occurrences of a `const checkCmd = check*Cmd(...)`-shaped binding (one
+    per function), so anchoring on that binding by itself would be ambiguous
+    -- mutate() would refuse it (count != 1) or, worse, silently hit the wrong
+    one if the anchor happened to be unique for the wrong reason. The anchor
+    used here is the re-check's own OUTPUT line,
+    `lines.push(checkCmd + " >/dev/null 2>&1")`, which is unique to
+    batchWaitRecheckPrompt in both templates (the chunk builder's own poll
+    line embeds the same checkCmd inside a longer `while true; do ...`
+    string, never this exact substring) -- verified before relying on it."""
+    anchor = 'lines.push(checkCmd + " >/dev/null 2>&1")'
+    widened = f'lines.push(checkCmd + "{WIDENING_FLAG[target.name]} >/dev/null 2>&1")'
+    mutant = mutate(read_template(target), anchor, widened)
+    out = exhausted_run(target, tmp_path, source=mutant)
+    gate = accept_gate(prompts(out, target.chunk_label)[0])
+    recheck = prompts(out, target.recheck_label)[0]
+    assert recheck_command(recheck) != gate, (
+        f"MUTATION NOT CAUGHT: {target.name}'s re-check command was widened by "
+        f"adding {WIDENING_FLAG[target.name]!r}, and the parity check still "
+        f"treated it as matching the chunk's own ACCEPT gate.\n"
+        f"chunk ACCEPT gate: {gate!r}\n"
+        f"re-check command:  {recheck_command(recheck)!r}"
     )
 
 

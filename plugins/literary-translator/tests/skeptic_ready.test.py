@@ -1956,7 +1956,9 @@ def test_verify_merged_passes_on_clean_propose_split_with_3_referents(tmp_path):
 # str.splitlines(), which is exactly the accept-sentinel shape the wait
 # poll's line-oriented grammar reads for. The JS sentinel parser only ever
 # splits on \n and is immune -- the exposure is a reading LLM agent
-# downstream of this CLI's stdout. See #360.
+# downstream of this CLI's stdout. Unfiled: #360 covers this file's
+# unbounded diagnostic VOLUME (message length / list count), a distinct
+# exposure from a boundary character forging an extra line.
 #
 # Round 5 (F1/HIGH): the shipped _LINE_SEPARATOR_ESCAPES hand-listed exactly
 # two members (U+2028/U+2029) and silently missed U+0085 NEL, which forges

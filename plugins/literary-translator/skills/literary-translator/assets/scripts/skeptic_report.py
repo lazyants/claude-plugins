@@ -52,6 +52,7 @@ import argparse
 import json
 import re
 import sys
+import unicodedata
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -281,130 +282,432 @@ def build_report(triage: dict, manifest: dict, worklist_risk_classes: "dict | No
 # file, in one session).
 _LINE_BREAK_CHARS = frozenset("\n\r\v\f\x1c\x1d\x1e\x85" + chr(0x2028) + chr(0x2029))
 
-_CONTROL_CHARS_RE = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+# Every C0/C1 control character (\x00-\x1f, \x7f-\x9f) EXCEPT the members of
+# _LINE_BREAK_CHARS above -- those are marked visibly by the line-break step
+# in `_sanitize`, never silently dropped, so they must not also match here.
+# Round 6 (F3, LOW): this strip now runs FIRST in `_sanitize`, before the
+# introducer-escaping step below -- see `_sanitize`'s own docstring for why
+# the ORDER (not just the presence) of this strip is itself part of the fix.
+_OTHER_CONTROL_CHARS_RE = re.compile(
+    "[" + "".join(
+        re.escape(chr(cp))
+        for cp in list(range(0x00, 0x20)) + list(range(0x7f, 0xa0))
+        if chr(cp) not in _LINE_BREAK_CHARS
+    ) + "]"
+)
 
-# Round 5 (F4, MEDIUM): the explicit bidi OVERRIDE/EMBEDDING family --
-# LRE, RLE, PDF, LRO, RLO -- lets a source_form DISPLAY as a different name
-# than the one actually stored (the "Trojan Source" class, CVE-2021-42574):
-# LRO/RLO force EVERY character within their scope to render in a specific
-# direction regardless of that character's own bidi class, and LRE/RLE/PDF
-# are their paired embed/pop counterparts.
+# Round 5 (F4, MEDIUM) + round 6 (F1/F2): characters that can make a
+# source_form DISPLAY as something other than what is actually stored (the
+# "Trojan Source" class, CVE-2021-42574, plus a plain visual-collision
+# variant) -- split into two sets below because the two are different
+# vulnerability classes, even though `_sanitize` marks both the same way.
 #
-# JUDGMENT CALL (see this file's own round-5 report for the full reasoning):
-# this five-member family is fixed here; three lookalike candidates the
-# reviewer also raised are deliberately DEFERRED, not fixed, because they
-# are different threat classes or not vulnerable at all:
-#   - Isolates (LRI U+2066, RLI U+2067, FSI U+2068, PDI U+2069) are
-#     Unicode's own SAFER REPLACEMENT for embeddings/overrides: they do
-#     not force a direction on their content -- each character's own bidi
-#     class still participates -- so they cannot reorder or reverse the
-#     characters of a name the way LRO/RLO can, which is the spoof this
-#     fix is about. Not risk-FREE, and the weaker claim is the honest one:
-#     under UAX #9's BD9 an isolate initiator with no matching PDI runs to
-#     the end of the paragraph, so an UNPAIRED one does reach the text
-#     after it -- as a direction context, not as a character reordering,
-#     and bounded to that line here because every line-break-class
-#     character is already collapsed above. This plugin translates Hebrew
-#     (RTL) content that can legitimately need an isolate when embedded
-#     inside LTR prose, so marking them would risk mangling a genuine
-#     name: the residual is named here and deliberately left.
-#   - ZWSP (U+200B) has bidi class BN (Boundary Neutral) -- it has NO
-#     directional power at all (verified: unicodedata.bidirectional
-#     returns "BN", unlike every character actually fixed here). Its risk,
-#     if any, is an invisible-character/homograph concern, not a bidi
-#     display spoof -- a different vulnerability class than this finding.
-#   - NBSP (U+00A0) is not even Cf (format) -- it is Zs (space separator),
-#     verified via unicodedata.category. It renders identically to a plain
-#     space in every renderer, cannot reverse or hide anything, and is
-#     legitimate real-world typography (French text uses it routinely).
-#     Grouping it with the Cf format characters above overstates its risk.
+# _BIDI_CONTROL_CHARS -- every Unicode bidi FORMAT character that can shift
+# how OTHER text renders around it: LRE/RLE/PDF/LRO/RLO (round 5) force
+# every character within their scope to a fixed direction regardless of
+# that character's own bidi class; LRI/RLI/FSI/PDI (round 6, finding 1)
+# were deferred in round 5 as "cannot reorder or reverse the characters of
+# a name" on the theory that isolates only set a direction CONTEXT rather
+# than forcing reordering. Measured false at the run level: fribidi
+# (`fribidi --nopad`) on `"Ann" + RLI + "ABC 123" + <Hebrew> + "  (verdict:
+# adverse)"` renders the verdict text ADJACENT to "Ann", pulled out of its
+# logical position, because UAX #9's BD9 gives an unmatched isolate
+# initiator a scope running to the end of the paragraph -- exactly the
+# "reach the text after it" residual round 5's own comment already named,
+# just under-weighted. The round-5 "marking would risk mangling a genuine
+# RTL name" worry doesn't hold up either: `_sanitize` marks with a visible
+# "[U+XXXX]" annotation, never deletion, and this function's ONLY consumer
+# is this one advisory report -- never the translated book text -- so a
+# genuinely embedded Hebrew name loses nothing but this report's own
+# display convenience, which is exactly the trade round 5 already accepted
+# for LRO/RLO. Not marking isolates was the part of round 5 that didn't
+# survive contact with measurement, not the visible-marker mechanism.
+#
+# _INVISIBLE_CHARS -- ZWSP (U+200B, round 6 finding 2) was the first
+# member marked. Round 5 correctly placed it in a different taxonomy (bidi
+# class BN -- Boundary Neutral, no directional power at all, verified via
+# unicodedata.bidirectional) than the bidi-display-spoof family above, and
+# that taxonomy call is still right. What round 5 under-weighted is the
+# CONSEQUENCE in this specific artifact: "Rachel" and "Ra<ZWSP>chel" are
+# two logically distinct source_form values that render pixel-identical in
+# the one report a human reads to decide whether two names are the same
+# identity -- the same wrong-identity-decision outcome as a bidi spoof, by
+# a different mechanism.
+#
+# Round 6 REVISIT (F2 continued): hand-listing ZWSP alone missed 11
+# siblings measured to be the exact same threat -- see
+# `_compute_invisible_chars`'s own docstring below for the full predicate,
+# the one named exception (CGJ), the Hebrew check, the NBSP deferral, and
+# every codepoint the derivation surfaced. Kept in its own set (never
+# folded into `_BIDI_CONTROL_CHARS`) because the taxonomy distinction is
+# real -- these have no directional power at all, unlike overrides/
+# isolates -- even though `_sanitize` marks both sets the same way.
 #
 # Built via chr() per codepoint -- never a pasted glyph or a \uXXXX
 # string-literal escape, both of which have degraded silently before (see
 # the unicode-boundary-text-authoring project skill).
-_BIDI_OVERRIDE_CHARS = frozenset(chr(cp) for cp in (0x202A, 0x202B, 0x202C, 0x202D, 0x202E))
+_BIDI_CONTROL_CHARS = frozenset(
+    chr(cp) for cp in (
+        0x202A, 0x202B, 0x202C, 0x202D, 0x202E,  # LRE RLE PDF LRO RLO (round 5)
+        0x2066, 0x2067, 0x2068, 0x2069,          # LRI RLI FSI PDI (round 6, F1)
+    )
+)
+
+
+def _compute_invisible_chars() -> frozenset:
+    """DERIVES (round 6, F2 revisited -- does not hand-list) the zero-
+    width/invisible-format-character set from `unicodedata`'s own category
+    table, mirroring `skeptic_ready.py`'s own `_compute_line_separator_
+    escapes()` (a real predicate, computed once at import time, rather
+    than a hand-typed literal): round 6's first pass hand-listed ZWSP
+    alone and missed 11 measured siblings -- ZWNJ, ZWJ, WORD JOINER,
+    ZWNBSP/BOM, SOFT HYPHEN, the four invisible math operators, MONGOLIAN
+    VOWEL SEPARATOR, and COMBINING GRAPHEME JOINER -- the exact same
+    threat this set exists to close (two distinct `source_form` values
+    rendering indistinguishably on the field a reader uses to make an
+    identity decision).
+
+    The predicate: Unicode general category Cf -- "Format character:
+    invisible characters, used to control the layout or processing of
+    text", the Unicode Standard's own definition, the authoritative table
+    this derivation is built on -- swept across the BMP (0x0000-0xFFFF).
+    Restricting the sweep to BMP is a DEFINED, principled range, not an
+    arbitrary cut: every living script's ordinary text lives there; the
+    supplementary planes above it hold only historic scripts, emoji, and
+    specialized notations (Egyptian hieroglyph markup, Duployan shorthand,
+    musical notation controls) no `source_form` plausibly needs, hostile
+    or not. `_BIDI_CONTROL_CHARS` above is Cf too (all nine members) but
+    is EXCLUDED here since it already gets its own directional-scope
+    marker reasoning, not this set's. This range choice happens to ALSO be
+    what keeps every "[U+XXXX]" marker `_sanitize` emits at a uniform 4
+    hex digits today (see `_MAX_MARKER_CHARS`, defined right after this
+    set) -- that width fact is pinned INDEPENDENTLY of this range choice,
+    not derived from it, precisely so the two stay visibly connected here
+    rather than one silently depending on the other with nothing saying so.
+
+    LEFT-TO-RIGHT MARK / RIGHT-TO-LEFT MARK (U+200E/U+200F) are the one
+    member of this set most likely to make a future reader stop and
+    question it, so the reason belongs here, not buried in a list: they
+    are Cf and genuinely zero-width like everything else in this set, but
+    unlike every OTHER member (all bidi class BN -- Boundary Neutral, no
+    directional power), LRM/RLM carry a STRONG directional bidi class (L/
+    R respectively) -- the same property that makes `_BIDI_CONTROL_CHARS`
+    its own set above. They belong HERE, not there, because they do not
+    create a directional SCOPE the way an embedding/override/isolate does
+    (see `_BIDI_CONTROL_CHARS`'s own comment): LRM/RLM act only as a
+    strong-directional character AT THEIR OWN POSITION, influencing how
+    adjacent neutral punctuation resolves, without forcing or isolating
+    anything around them. Weaker and narrower than the embedding/override/
+    isolate family, but still a bidi-adjacent effect on a zero-width
+    character -- exactly the taxonomy tension this whole set already
+    names above (kept separate from `_BIDI_CONTROL_CHARS` because the
+    distinction is real, marked the same way because the artifact-level
+    stakes are the same). Marking them costs nothing a legitimate
+    `source_form` needs -- confirmed disjoint from Hebrew below -- and
+    closes the same wrong-identity-decision gap as every other member.
+
+    ONE exception, added by NAME rather than swept in: COMBINING GRAPHEME
+    JOINER (U+034F) is category Mn (Mark, nonspacing), not Cf, because
+    Unicode's category reflects its SYNTACTIC role (a combining mark that
+    blocks unwanted normalization/collation reordering) rather than its
+    rendering, which is always zero-width by its own Unicode definition --
+    it exists purely to influence text processing, never to draw anything.
+    Checked, not assumed, before adding it this way: a broader "Mn with
+    canonical combining class 0" predicate was tried and rejected --
+    swept across the BMP it returns 368 codepoints, the overwhelming
+    majority of them GENUINE, VISIBLE combining vowel signs from
+    Devanagari, Thai, Khmer, Myanmar, Balinese, and a dozen other living
+    scripts (each has `combining()==0` because those scripts order their
+    own marks by script-specific rules, not the generic canonical-
+    ordering algorithm -- ccc==0 does not mean invisible). That predicate
+    would have marked genuine diacritics as suspicious; CGJ is the one
+    member of that set whose OWN Unicode definition guarantees zero
+    rendering, so it is named explicitly rather than swept in by a
+    predicate broad enough to catch real marks.
+
+    Checked against Hebrew specifically (this plugin's actual RTL
+    content), not assumed: none of the derived codepoints fall in the
+    Hebrew block (U+0590-U+05FF) or Hebrew presentation forms
+    (U+FB1D-U+FB4F) -- verified by direct intersection below, which
+    raises if that ever stops being true -- and Hebrew's own niqqud/
+    cantillation marks all carry a NONZERO canonical combining class
+    (measured: U+05B0-U+05C7 range from ccc=10 to ccc=230, disjoint from
+    both predicates above), so neither predicate can ever touch them.
+
+    NBSP (U+00A0) remains the one deliberately deferred lookalike: its
+    category is Zs (space separator), verified, not Cf -- this predicate
+    does not pull it back in on its own, and the round-5 reasoning for
+    deferring it (renders as a plain space, cannot hide or reverse
+    anything, legitimate French typography) still holds independent of
+    this derivation.
+
+    The derivation surfaced further members beyond the 11 the reviewing
+    round measured plus LRM/RLM above, reported rather than pruned: six
+    deprecated bidi/shaping controls (U+206A-U+206F -- INHIBIT/ACTIVATE
+    SYMMETRIC SWAPPING, INHIBIT/ACTIVATE ARABIC FORM SHAPING, NATIONAL/
+    NOMINAL DIGIT SHAPES, formally deprecated by Unicode since 6.3.0), six
+    Arabic/Syriac format marks (U+0600-U+0605, U+061C, U+06DD, U+070F,
+    U+0890-U+0891, U+08E2), and three obsolete interlinear-annotation
+    controls (U+FFF9-U+FFFB). None are used by any script this plugin
+    translates; marking one if it ever
+    appears costs nothing and is correct for a genuinely invisible
+    character no legitimate `source_form` has a reason to contain."""
+    bmp_cf = frozenset(
+        chr(cp) for cp in range(0x0000, 0x10000)
+        if unicodedata.category(chr(cp)) == "Cf"
+    )
+    derived = (bmp_cf - _BIDI_CONTROL_CHARS) | frozenset(chr(0x034F))
+    hebrew_block = frozenset(chr(cp) for cp in range(0x0590, 0x0600))
+    hebrew_presentation_forms = frozenset(chr(cp) for cp in range(0xFB1D, 0xFB50))
+    overlap = derived & (hebrew_block | hebrew_presentation_forms)
+    assert not overlap, (
+        f"invisible-char derivation now overlaps Hebrew content: {sorted(map(ord, overlap))} "
+        "-- this must never mark a genuine Hebrew codepoint, re-check the predicate"
+    )
+    return derived
+
+
+_INVISIBLE_CHARS = _compute_invisible_chars()
+
+# The widest "[U+XXXX]" marker `_sanitize` can emit for the CURRENT
+# `_BIDI_CONTROL_CHARS` / `_INVISIBLE_CHARS` membership -- COMPUTED, not
+# assumed, and referenced by `_bounded`'s own docstring instead of a
+# hardcoded multiplier. `f"{cp:04X}"` pads to exactly 4 hex digits for
+# every BMP codepoint (0x0000-0xFFFF), so today's marker is uniformly 8
+# chars ("[U+" + 4 digits + "]") for every member of either set, since
+# both are BMP-only by construction (`_compute_invisible_chars`'s own
+# docstring states why). A codepoint >= 0x10000 needs 5-6 hex digits and
+# would widen this automatically -- `_bounded`'s worst-case arithmetic
+# must read THIS constant, never a fixed "8", so a future non-BMP
+# addition to either set changes the true worst case and this constant
+# together, instead of silently invalidating a hardcoded claim elsewhere.
+_MAX_MARKER_CHARS = max(
+    len(f"[U+{ord(ch):04X}]") for ch in (_BIDI_CONTROL_CHARS | _INVISIBLE_CHARS)
+)
 
 
 def _sanitize(s):
     """Neutralizes an agent-authored string before `format_report` prints
     it (fix L12; round 4 widened the newline-class set past bare \\n/\\r --
     see `_LINE_BREAK_CHARS`' own comment for why U+2028/U+2029 needed
-    closing here specifically; round 5 added `_BIDI_OVERRIDE_CHARS` -- see
-    its own comment for the fixed-vs-deferred reasoning): every triage
-    record field rendered below (`run_id`, `source_form`, `verdict`,
-    `risk_classes`, `rationale`, `notes`/disambiguators, the derived
-    evidence `quote`) was authored by the skeptic codex pass, and this
-    report is its SOLE human-facing consumer -- a human reads it to make
-    identity decisions. Without sanitizing: an embedded LINE-BREAK-CLASS
-    character (not just \\n/\\r -- str.splitlines() also breaks on \\v, \\f,
-    FS/GS/RS, NEL, and U+2028/U+2029, and a raw U+2028/U+2029 survives even
-    a naive "\\n"-only check) could forge a fake "[n] SomeName (verdict:
-    ...)" line; an embedded ANSI/control escape (e.g. "\x1b[2J") could
-    clear or spoof the terminal; and an embedded bidi OVERRIDE character
-    could render `source_form` as a DIFFERENT name than the one actually
-    stored -- not a line forge, a display spoof, on the exact field a
-    human reads to make an identity decision. EVERY member of
-    `_LINE_BREAK_CHARS` is collapsed to a single visible "\\n" marker
-    (never silently dropped -- consistent regardless of which original
-    character it was); EVERY member of `_BIDI_OVERRIDE_CHARS` is likewise
-    replaced with a visible "[U+XXXX]" marker, never silently deleted --
-    deletion would still let the SURROUNDING text's bidi resolution shift
-    depending on what used to be there, and this plugin handles genuine
-    RTL (Hebrew) content where blunt stripping is the wrong instinct; every
-    remaining C0/C1 control character (0x00-0x1f, 0x7f-0x9f, including
-    ESC) is stripped. A string with none of the above is the identity
-    function."""
+    closing here specifically; round 5 + round 6 added `_BIDI_CONTROL_CHARS`
+    / `_INVISIBLE_CHARS` -- see their own comment for the fixed-vs-deferred
+    reasoning): every triage record field rendered below (`run_id`,
+    `source_form`, `verdict`, `risk_classes`, `rationale`, `notes`/
+    disambiguators, the derived evidence `quote`) was authored by the
+    skeptic codex pass.
+
+    Round 6 correction: this docstring previously claimed a human is this
+    report's SOLE consumer. That is wrong, and it is wrong in the same
+    shape `skeptic_ready.py`'s own docstring (see its `:420` comment)
+    already states correctly for the same class of stdout: `SKILL.md`'s
+    own dispatch step is "Finally run `skeptic_report.py` to render the
+    findings for a human", which means the FIRST reader of this stdout is
+    the orchestrating AGENT that ran the CLI and received it as a tool
+    result -- a human is the SECOND reader, only if and when that agent
+    surfaces the text further. That ordering matters for what these
+    markers are FOR: a visible "[U+XXXX]"/"\\n" marker is calibrated for a
+    terminal reader's eye; to an LLM reader it is just more text, and a
+    forged one (see round 6, F3 below) is if anything MORE persuasive to
+    an LLM than to a human, not less -- an extra reason the markers must
+    be injective, not a reason to relax them.
+
+    Without sanitizing: an embedded LINE-BREAK-CLASS character (not just
+    \\n/\\r -- str.splitlines() also breaks on \\v, \\f, FS/GS/RS, NEL, and
+    U+2028/U+2029, and a raw U+2028/U+2029 survives even a naive "\\n"-only
+    check) could forge a fake "[n] SomeName (verdict: ...)" line for
+    either reader; an embedded ANSI/control escape (e.g. "\x1b[2J") could
+    clear or spoof a terminal specifically (a human-reader-only exposure --
+    an LLM reader has no terminal to clear); an embedded bidi control
+    character could render `source_form` as a DIFFERENT name than the one
+    actually stored, or pull unrelated trailing text (even another entry's
+    verdict) into its apparent scope, when EITHER reader's rendering
+    surface applies bidi resolution; and an embedded ZWSP could make two
+    logically distinct source_form values render pixel-identical to a
+    human's eye specifically. Every one of these is a spoof on a field one
+    or both readers use to make an identity decision, not merely cosmetic
+    noise.
+
+    EVERY member of `_LINE_BREAK_CHARS` is collapsed to a single visible
+    "\\n" marker; EVERY member of `_BIDI_CONTROL_CHARS` / `_INVISIBLE_CHARS`
+    is replaced with a visible "[U+XXXX]" marker -- NEVER silently deleted
+    in either case, consistent regardless of which original character it
+    was: deletion would still let the SURROUNDING text's bidi resolution or
+    apparent identity shift depending on what used to be there, and this
+    plugin handles genuine RTL (Hebrew) content where blunt stripping is
+    the wrong instinct. Every remaining C0/C1 control character (0x00-0x1f,
+    0x7f-0x9f minus the line-break members, including ESC) is stripped.
+
+    Round 6 (F3, LOW): the markers above are only trustworthy EVIDENCE that
+    a real control/invisible character was present if an agent cannot type
+    their literal text and get byte-identical output -- pre-round-6,
+    `_sanitize("Ivan[U+202E]ov")` (a typed string that merely LOOKS like the
+    marker) equaled `_sanitize("Ivan" + chr(0x202E) + "ov")` (the real
+    marker), and `_sanitize("a\\\\nb")` (literal backslash-n) equaled
+    `_sanitize("a\\nb")` (a real newline) -- an agent could fabricate fake
+    sanitizer evidence for an attack that never happened in either
+    direction, or teach a reader the marker means nothing. Fixed by
+    escaping the two ASCII characters this function uses to INTRODUCE its
+    own markers -- "\\" (introduces "\\n") and "[" (introduces "[U+XXXX]")
+    -- wherever they already occur in the input, BEFORE this function ever
+    inserts a marker of its own; after that escape step, every unescaped
+    "\\" or "[" remaining in the output was put there by THIS function, for
+    an actual codepoint. The C0/C1 strip runs FIRST, ahead of that escape
+    step: a control character hidden inside a typed "[U+20\x012E]" would
+    otherwise still be present when the escape step ran, then vanish only
+    afterward, reassembling into a convincing forged marker post-escape --
+    stripping first closes that fragment-assembly bypass. A string with
+    none of the above (no control chars, no "\\", no "[", nothing in
+    `_LINE_BREAK_CHARS` / `_BIDI_CONTROL_CHARS` / `_INVISIBLE_CHARS`) is the
+    identity function."""
     if not isinstance(s, str):
         return s
+    s = _OTHER_CONTROL_CHARS_RE.sub("", s)
+    s = s.replace("\\", "\\\\")
+    s = s.replace("[", "\\[")
     s = s.replace("\r\n", "\n")
     for ch in _LINE_BREAK_CHARS:
         if ch != "\n":
             s = s.replace(ch, "\n")
     s = s.replace("\n", "\\n")
-    for ch in _BIDI_OVERRIDE_CHARS:
+    for ch in _BIDI_CONTROL_CHARS | _INVISIBLE_CHARS:
         if ch in s:
             s = s.replace(ch, f"[U+{ord(ch):04X}]")
-    return _CONTROL_CHARS_RE.sub("", s)
+    return s
+
+
+# Round 6 (F-volume, MEDIUM, relayed then independently verified): a per-
+# entry length bound on every free-text field this file renders. Measured:
+# `skeptic-triage.schema.json` puts NO maximum on `char_start`/`char_end`
+# (only `minimum: 0`), no `maxLength` on `rationale`/`source_form`/`run_id`/
+# `disambiguator`/each `notes[]` item/each `evidence.block` id, and no
+# `maxItems` on `notes`. `derive_quote`'s `quote` is `text[char_start:
+# char_end]` sliced from an agent-chosen span over a WHOLE manifest block,
+# so a single record can otherwise put an entire block into this stdout --
+# and per the corrected threat model above, this stdout's first reader is
+# an LLM agent, exactly the "reading LLM agent downstream of this CLI's
+# stdout" exposure `skeptic_ready.py`'s own docstring already names for the
+# same release. Checked against issue #360 directly (not just cited): its
+# body names `skeptic_ready.py` and `canon_adjudication_audit.py` only --
+# `"skeptic_report" in body` is False -- so this is a genuinely separate
+# gap, not a duplicate of a filed one.
+#
+# Deliberately bounds LENGTH only, not the RECORD COUNT (`report["entries"]`
+# itself is never truncated here) -- the reviewed precedent this mirrors
+# (`canon_validate.py`'s 1.16.1 fix, see issue #360's own "suggested fix")
+# bounds both axes, and that asymmetry was considered, not overlooked: this
+# report's whole reason to exist is a COMPLETE list of adverse findings a
+# human/agent must act on (verdicts, propose_split candidates), unlike
+# `canon_validate.py`'s list of schema-validation problems, which is safe
+# to page through 8-at-a-time without losing anything the reader still
+# needs to act on. Truncating a field's rendered LENGTH loses nothing an
+# evidence-verified citation didn't already establish; truncating the
+# RECORD list risks silently dropping a genuine identity conflict from the
+# one report whose entire job is to surface it -- a worse failure than an
+# oversized report. If a record-count flood ever needs bounding too, that
+# is a follow-up decision, not one this comment makes by omission.
+_MAX_SOURCE_FIELD_CHARS = 200  # matches canon_validate.py's `_bounded_message` cap (1.16.1's reviewed shape) for a consistent order of magnitude across the plugin
+
+
+def _bounded(text):
+    """Caps a free-text field's STORED/SOURCE length -- the text as it
+    exists BEFORE `_sanitize` runs on it, never its final RENDERED length.
+
+    Naming correction, measured: an earlier pass of this same fix named
+    this constant `_MAX_RENDERED_FIELD_CHARS` and this docstring claimed
+    it capped the field's "RENDERED length". Both were wrong. `_sanitize`
+    can EXPAND what this function keeps: each single bidi/invisible
+    control character it finds becomes a "[U+XXXX]" marker -- see
+    `_MAX_MARKER_CHARS`, COMPUTED from the actual current membership of
+    `_BIDI_CONTROL_CHARS`/`_INVISIBLE_CHARS` rather than a hardcoded
+    literal (an earlier version of THIS docstring hardcoded "8x", which
+    only holds while every marked codepoint is BMP -- the invisible-char
+    derivation this same round added could grow to include a non-BMP
+    codepoint later, and a hardcoded "8" would then silently stop
+    matching reality; `_MAX_MARKER_CHARS` follows the set instead of
+    fencing it). Backslash/bracket introducer-escaping is only a 2x
+    expansion; the marker is always the worst case. So the true per-field
+    RENDERED-length worst case is `_MAX_MARKER_CHARS * _MAX_SOURCE_FIELD_
+    CHARS` plus this function's own "...(+N chars)" tail (small in
+    practice; its digit count grows only with log10 of the source length,
+    negligible next to the marker-expansion term) -- a real, finite,
+    per-field bound, just not the number the old name implied. See
+    `test_sanitize_of_bounded_worst_case_expansion_matches_max_marker_
+    chars` for the pinned arithmetic.
+
+    Applied only at this file's rendering boundary (`format_report`),
+    never inside `derive_quote`/`build_report`, so `build_report`'s own
+    data (asserted byte-exact by this suite) stays untouched; only what
+    prints to stdout is capped. Truncation is always VISIBLE (an explicit
+    "...(+N chars)" tail), never silent -- the same "mark, don't hide"
+    rule `_sanitize` applies to control characters. Runs BEFORE
+    `_sanitize`, not after: bounding the raw text first means the char
+    count in the tail reflects the actual stored length, and `_sanitize`
+    never has to PROCESS more than `_MAX_SOURCE_FIELD_CHARS` of a single
+    field regardless of how large the underlying source is -- that
+    processing-cost guarantee is real and is why this runs before
+    `_sanitize` rather than after: bounding the already-sanitized output
+    to a hard RENDERED cap would lose that guarantee, and would also make
+    the truncation tail's count meaningless relative to the source length
+    the reader actually wants to know about."""
+    if not isinstance(text, str) or len(text) <= _MAX_SOURCE_FIELD_CHARS:
+        return text
+    return text[:_MAX_SOURCE_FIELD_CHARS] + f"...(+{len(text) - _MAX_SOURCE_FIELD_CHARS} chars)"
 
 
 def format_report(report: dict) -> str:
-    """Human-facing text rendering of `build_report`'s output. Deliberately
-    unstructured prose (this is an advisory command for a human reviewer,
-    not a machine-consumed artifact -- nothing downstream parses this
-    string; see `canon_adjudication_audit.py`'s own JSON-line contract for
-    the actual machine-checkable gate). Every agent-authored field is run
-    through `_sanitize` first (see its docstring for why)."""
+    """Text rendering of `build_report`'s output, read FIRST by the
+    orchestrating agent that ran this CLI (see `_sanitize`'s own docstring
+    for the corrected threat model) and SECOND, if at all, by a human.
+    Deliberately unstructured prose either way -- nothing downstream
+    parses this string; see `canon_adjudication_audit.py`'s own JSON-line
+    contract for the actual machine-checkable gate. EVERY free-text field
+    rendered below is run through `_bounded` then `_sanitize` (see their
+    own docstrings for why -- `_bounded` caps each field's SOURCE length,
+    not its final rendered length, which `_sanitize`'s marker expansion
+    can multiply by up to `_MAX_MARKER_CHARS`; see `_bounded`'s own
+    docstring for the arithmetic), including `evidence_coverage_label` and
+    `unavailable_reason` -- round 6 noted both are safe today only by
+    construction (`coverage_label` returns one of a few fixed English
+    strings; `unavailable_reason` is built with `{block_id!r}`, and
+    Python's own repr already escapes non-printable codepoints) rather
+    than by any stated rule, which is exactly the "every sibling field is
+    handled, this one is not" shape that has produced this loop's defects
+    before -- handling them too costs nothing on the safe path and removes
+    the asymmetry outright instead of just documenting it."""
     lines = [
-        f"Skeptic Triage Report -- run {_sanitize(report['run_id'])} -- {report['record_count']} record(s)",
+        f"Skeptic Triage Report -- run {_sanitize(_bounded(report['run_id']))} -- {report['record_count']} record(s)",
         "=" * 60,
     ]
     if not report["entries"]:
         lines.append("(no adverse findings)")
     for i, e in enumerate(report["entries"], 1):
-        lines.append(f"[{i}] {_sanitize(e['source_form'])}  (verdict: {_sanitize(e['verdict'])})")
+        # `verdict` is schema-enum-constrained (4 fixed short values) -- no
+        # `_bounded` needed, unlike every OTHER field here.
+        lines.append(f"[{i}] {_sanitize(_bounded(e['source_form']))}  (verdict: {_sanitize(e['verdict'])})")
         if e["risk_classes"] is not None:
-            risk_classes = ", ".join(_sanitize(c) for c in e["risk_classes"])
+            risk_classes = ", ".join(_sanitize(_bounded(c)) for c in e["risk_classes"])
             lines.append(f"    risk classes: {risk_classes or '(none)'}")
         else:
             lines.append("    risk classes: unavailable (no worklist entry)")
-        lines.append(f"    rationale: {_sanitize(e['rationale'])}")
-        lines.append(f"    evidence_coverage: {e['evidence_coverage_label']}")
+        lines.append(f"    rationale: {_sanitize(_bounded(e['rationale']))}")
+        lines.append(f"    evidence_coverage: {_sanitize(_bounded(e['evidence_coverage_label']))}")
         if "evidence" in e:
             ev = e["evidence"]
             if ev["unavailable_reason"]:
-                lines.append(f"    evidence: unavailable ({ev['unavailable_reason']})")
+                lines.append(f"    evidence: unavailable ({_sanitize(_bounded(ev['unavailable_reason']))})")
             else:
-                lines.append(f"    evidence quote: {_sanitize(ev['quote'])!r}")
+                lines.append(f"    evidence quote: {_sanitize(_bounded(ev['quote']))!r}")
         if "referents" in e:
             for r in e["referents"]:
                 ev = r["evidence"]
                 if ev["unavailable_reason"]:
-                    shown = f"unavailable ({ev['unavailable_reason']})"
+                    shown = f"unavailable ({_sanitize(_bounded(ev['unavailable_reason']))})"
                 else:
-                    shown = repr(_sanitize(ev["quote"]))
-                lines.append(f"    referent [{_sanitize(r['disambiguator'])}]: {shown}")
+                    shown = repr(_sanitize(_bounded(ev["quote"])))
+                lines.append(f"    referent [{_sanitize(_bounded(r['disambiguator']))}]: {shown}")
         if e["notes"]:
-            lines.append(f"    notes: {', '.join(_sanitize(n) for n in e['notes'])}")
+            lines.append(f"    notes: {', '.join(_sanitize(_bounded(n)) for n in e['notes'])}")
     return "\n".join(lines)
 
 
