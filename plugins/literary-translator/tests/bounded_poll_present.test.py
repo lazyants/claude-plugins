@@ -154,18 +154,56 @@ def has_schema(options_text):
     return re.search(r"\bschema\s*:", options_text) is not None
 
 
-def has_seq_poll_loop(body):
-    """The OLD `for i in $(seq 1 N)` fixed-iteration bounded loop -- #198 took
-    mass-translate's wait polls off this shape, and 1.16.2 (#352) did the same
-    for glossary's (see test_glossary_batch_wait_chunk_is_an_elapsed_bounded_poll_of_check_batch
-    below). As of 1.16.2 no shipped template emits this grammar as real code;
-    it survives only as historical prose in a comment
+_FIXED_ITERATION_LOOP_RE = re.compile(
+    r"for\s+\w+\s+in\s+\$\(\s*seq\b"      # for X in $(seq ...) -- any var name, any seq arg count
+    r"|for\s*\(\("                         # C-style for ((init; cond; incr))
+    r"|for\s+\w+\s+in\s+\{\d+\.\.\d+\}"    # brace-range for X in {N..M}
+)
+
+
+def has_fixed_iteration_poll_loop(body):
+    """The OLD fixed-iteration bounded loop FAMILY -- #198 took mass-translate's
+    wait polls off this shape, and 1.16.2 (#352) did the same for glossary's
+    (see test_glossary_batch_wait_chunk_is_an_elapsed_bounded_poll_of_check_batch
+    below). As of 1.16.2 no shipped template emits any of this family as real
+    code; it survives only as historical prose in a comment
     (skeptic-pass-wf.template.js narrates the pre-1.16.2 shape it replaced).
     Kept as a predicate rather than deleted: every assertion below still uses
-    it to prove ABSENCE, and the synthetic fixture in
+    it to prove ABSENCE, and the table in
     test_regression_catcher_helpers_actually_discriminate still needs
-    something that recognises the shape if it were to reappear."""
-    return re.search(r"for\s+i\s+in\s+\$\(seq\s+1\s+\d+\)", body) is not None
+    something that recognises the family if it were to reappear.
+
+    WIDENED, review round 8: the regression that shipped was `for i in
+    $(seq 1 N)` exactly, and this predicate (then named has_seq_poll_loop)
+    used to match only that one spelling -- a different loop variable, a
+    one- or three-argument `seq`, a C-style `for ((...))`, or a brace-range
+    `for i in {1..N}` all escaped it silently, while every caller's
+    assertion message claimed the whole CATEGORY ("the old... loop must be
+    gone"), not one spelling. Renamed to match what it now covers.
+
+    This checks the SOURCE layer (a JS string literal inside a
+    prompt-builder function body), not rendered output, so it is a
+    source-grammar detector recognising a FAMILY of bad shapes -- not a
+    fullmatch whitelist of the one legitimate shape the way
+    wait_chunking_batch_passes.test.py's CHUNK_POLL_GRAMMAR_RE is at the
+    runtime-prompt layer. A fullmatch whitelist does not fit a whole
+    multi-line function body carrying legitimate prose, comments and other
+    JS the way it fit one single rendered bash line there; the legitimate
+    shape here is verified PRESENT by has_elapsed_poll_loop below, which is
+    this file's positive half of the same pair.
+
+    KNOWN RESIDUAL, not attempted: a manual counter loop with no `seq`/`for`
+    syntax at all (`n=45; while [ $n -gt 0 ]; do sleep 20; n=$((n-1));
+    done`) is NOT caught -- syntactically it is indistinguishable, at the
+    regex level, from the legitimate elapsed-time `while true` shape this
+    file also verifies is present, and a sound detector would need to tell
+    apart a wall-clock-bound exit condition from a counter-bound one, which
+    is beyond a source-text regex without a real parser. The call sites that
+    need this covered end-to-end already are, at the runtime-prompt layer,
+    by wait_chunking_batch_passes.test.py's CHUNK_POLL_GRAMMAR_RE fullmatch,
+    which pins the one legitimate rendered shape directly rather than
+    denylisting bad ones."""
+    return _FIXED_ITERATION_LOOP_RE.search(body) is not None
 
 
 def has_elapsed_poll_loop(body):
@@ -243,8 +281,39 @@ def test_regression_catcher_helpers_actually_discriminate():
     assert has_schema('schema: REVIEW_SCHEMA, effort: "low"') is True
     assert has_schema('effort: "low", phase: "Ledger"') is False
 
-    assert has_seq_poll_loop("for i in $(seq 1 45); do true; done") is True
-    assert has_seq_poll_loop("end=$((SECONDS + 3450)); while true; do true; done") is False
+    # Review round 8: the shipped regression was `for i in $(seq 1 N)`
+    # exactly, and this predicate used to match only that one spelling --
+    # silently missing every sibling shape while every caller's assertion
+    # message claimed the whole category. Table-driven over the escape
+    # spellings that were actually measured to slip through the old regex,
+    # so "actually discriminate" is proven for the family this predicate now
+    # claims to cover, not just the one historical instance.
+    fixed_iteration_shapes = [
+        ("canonical spelling",      "for i in $(seq 1 45); do true; done"),
+        ("different loop variable", "for j in $(seq 1 45); do true; done"),
+        ("one-argument seq",        "for i in $(seq 45); do true; done"),
+        ("three-argument seq",      "for i in $(seq 1 45 1); do true; done"),
+        ("C-style for loop",        "for ((i=0; i<45; i++)); do true; done"),
+        ("brace-range for loop",    "for i in {1..45}; do true; done"),
+    ]
+    for label, shape in fixed_iteration_shapes:
+        assert has_fixed_iteration_poll_loop(shape) is True, (
+            f"{label} must be recognised as a fixed-iteration loop: {shape!r}"
+        )
+    assert has_fixed_iteration_poll_loop(
+        "end=$((SECONDS + 3450)); while true; do true; done"
+    ) is False, "the legitimate elapsed-time shape must never false-positive"
+
+    # KNOWN RESIDUAL, documented in has_fixed_iteration_poll_loop's own
+    # docstring rather than silently missed: a manual counter loop carries
+    # no `seq`/`for` syntax at all, so it is indistinguishable at the regex
+    # level from the legitimate elapsed-time `while true` shape above.
+    # Pinned here as an explicit non-goal, not an oversight -- covered
+    # end-to-end instead by the runtime-prompt-layer fullmatch whitelist in
+    # wait_chunking_batch_passes.test.py.
+    assert has_fixed_iteration_poll_loop(
+        "n=45; while [ $n -gt 0 ]; do sleep 20; n=$((n-1)); done"
+    ) is False, "counter-while is a documented residual, not a surprise"
 
     assert has_elapsed_poll_loop("end=$((SECONDS + 3450)); while true; do true; done") is True
     assert has_elapsed_poll_loop("for i in $(seq 1 45); do true; done") is False
@@ -381,7 +450,9 @@ def test_wait_chunk_poll_keeps_the_198_elapsed_gate_shape():
     assert has_elapsed_poll_loop(body), (
         f"#198: the chunk poll must be an elapsed-time poll, not a seq loop:\n{body}"
     )
-    assert not has_seq_poll_loop(body), "the old `for i in $(seq 1 N)` loop must be gone"
+    assert not has_fixed_iteration_poll_loop(body), (
+        "the old fixed-iteration bounded loop must be gone, in every spelling"
+    )
 
     poll = line_containing(body, "end=$((SECONDS +")
 
@@ -440,7 +511,7 @@ def test_wait_recheck_is_a_single_non_polling_gate_evaluation():
     and it must run the gate it was handed, not one of its own."""
     body = code_lines(extract_function_body(MASS_TRANSLATE_SOURCE, WAIT_RECHECK_BUILDER))
     assert not has_elapsed_poll_loop(body), f"the re-check polls:\n{body}"
-    assert not has_seq_poll_loop(body), f"the re-check polls:\n{body}"
+    assert not has_fixed_iteration_poll_loop(body), f"the re-check polls:\n{body}"
     assert "while true" not in body, f"the re-check loops:\n{body}"
     assert "sleep" not in body, f"the re-check sleeps:\n{body}"
     gate = line_containing(body, "acceptCmd +")
@@ -665,9 +736,9 @@ def test_glossary_batch_wait_chunk_is_an_elapsed_bounded_poll_of_check_batch():
     an ELAPSED bound instead (`end=$((SECONDS + <chunk>))`), so the assertion
     inverts: a surviving seq-loop here is the regression, not the contract."""
     wait_body = code_lines(extract_function_body(GLOSSARY_SOURCE, "batchWaitChunkPrompt"))
-    assert not has_seq_poll_loop(wait_body), (
-        f"batchWaitChunkPrompt must NOT use the pre-1.16.2 fixed-iteration "
-        f"`for i in $(seq 1 N)` loop -- its iteration count is what silently "
+    assert not has_fixed_iteration_poll_loop(wait_body), (
+        f"batchWaitChunkPrompt must NOT use a pre-1.16.2 fixed-iteration "
+        f"loop, in any spelling -- its iteration count is what silently "
         f"produced an over-cap single bash call (#352):\n{wait_body}"
     )
     poll = line_containing(wait_body, "end=$((SECONDS +")
@@ -716,7 +787,21 @@ def test_glossary_batch_wait_recheck_is_a_single_non_polling_gate_evaluation():
     which is the whole defect. Non-polling BY CONSTRUCTION: no elapsed bound,
     no loop, no sleep anywhere in its rendered bash."""
     body = code_lines(extract_function_body(GLOSSARY_SOURCE, "batchWaitRecheckPrompt"))
-    for forbidden in ("end=$((SECONDS +", "while true", "sleep ", "$(seq "):
+    # Round 8: this used to be a bare ("end=$((SECONDS +", "while true",
+    # "sleep ", "$(seq ") tuple -- the same one-spelling-per-token shape as
+    # has_fixed_iteration_poll_loop before its own round-8 fix, and with the
+    # identical "sleep " (trailing space) weakness measured elsewhere in this
+    # release: a tab-separated `sleep\t5` smuggled in through an interpolated
+    # command would satisfy `"sleep " not in body` while still being a real
+    # sleep call. Aligned with the mass-translate sibling check just above
+    # (test_wait_recheck_is_a_single_non_polling_gate_evaluation): the two
+    # structural helpers cover the loop-shape family, and the bare-token scan
+    # below is narrowed to what they cannot see (an "end="/"while true"
+    # literal not attached to a loop keyword, or a bare "sleep" anywhere at
+    # all), with "sleep" unspaced so a tab or any other separator still hits.
+    assert not has_elapsed_poll_loop(body), f"the re-check polls:\n{body}"
+    assert not has_fixed_iteration_poll_loop(body), f"the re-check polls:\n{body}"
+    for forbidden in ("end=$((SECONDS +", "while true", "sleep"):
         assert forbidden not in body, (
             f"batchWaitRecheckPrompt must not poll; found {forbidden!r} in:\n{body}"
         )
@@ -1191,7 +1276,10 @@ def test_callfix_is_exempt_from_bounded_poll_requirement():
     )
 
     fix_prompt_body = extract_function_body(MASS_TRANSLATE_SOURCE, "fixPrompt")
-    assert not has_seq_poll_loop(fix_prompt_body) and not has_elapsed_poll_loop(fix_prompt_body), (
+    assert (
+        not has_fixed_iteration_poll_loop(fix_prompt_body)
+        and not has_elapsed_poll_loop(fix_prompt_body)
+    ), (
         "fixPrompt must NOT itself contain a poll loop -- it is a direct, "
         "unbounded, blocking Claude call, deliberately NOT restructured"
     )

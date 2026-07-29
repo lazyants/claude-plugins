@@ -218,21 +218,42 @@ def _wrap_for_execution(js_source: str) -> str:
 # prompt came from the real builder for SOME batch, not for the batch being
 # dispatched, so a decoy that calls the builder for the WRONG batch and
 # forwards the result satisfies it. That same gap existed here, unfixed,
-# until this port -- measured directly with the cross-batch-replay parity
-# fixture in skeptic_pipeline_e2e.test.py
+# until round 8's port -- measured directly with the cross-batch-replay
+# parity fixture in skeptic_pipeline_e2e.test.py
 # (test_dispatch_write_guard_rejects_cross_batch_replay_in_both_harness_
 # copies): this copy accepted a prompt built for batch 0 and replayed under
-# batch 1's own dispatch label. Ported the same fix as the sibling file:
-# record identity keyed by `batch.index` (coerced to string to match the
-# label-derived `idx` string below), and require the recorded prompt for
-# THIS call's own idx to match exactly.
+# batch 1's own dispatch label. Round 8 ported the sibling file's fix here:
+# identity keyed by `batch.index` (coerced to string to match the
+# label-derived `idx` string below).
+#
+# Round 9 port (codex, HIGH; found and independently re-verified against
+# this file's own harness copy, not only skeptic_pipeline_e2e.test.py's):
+# `batch.index` is a property read off the very object the call site hands
+# to batchDispatchPrompt() -- forgeable the same way the round-7 array was.
+# `batchDispatchPrompt({ index: batch.index, assignments: BATCHES[0]
+# .assignments })` copies the real, correct index onto a fabricated object
+# carrying a DIFFERENT batch's assignments: the real builder still runs
+# (the recorder still fires) and records the wrong-content prompt under the
+# numerically-correct key, so round 8's guard here accepted it too -- same
+# index, wrong content, right function, in this copy exactly as in the
+# sibling. Ported the sibling file's round-9 fix: bind identity to the
+# batch OBJECT ITSELF, by reference, never a property copied off it.
+# `BATCHES` inside the wrapped workflow and this harness's own
+# `BATCHES_ARGS` (declared further down) are the SAME array with the SAME
+# element references, for the same reason as the sibling file (BATCHES_ARGS
+# is passed as `args`, and the real template's own `const BATCHES =
+# Array.isArray(args) ? args : JSON.parse(args)` keeps that reference). See
+# the sibling file's header comment for the full derivation and what this
+# closes. In-place mutation of a genuine batch object's own fields is a
+# separate rung, closed by the recursive freeze on BATCHES_ARGS below, in
+# SKEPTIC_HARNESS_TEMPLATE -- not by this guard.
 _DISPATCH_PROMPT_RECORDER = """
 globalThis.__realDispatchPrompts__ = new Map();
 {
   const __origBatchDispatchPrompt = batchDispatchPrompt;
   batchDispatchPrompt = function (batch) {
     const built = __origBatchDispatchPrompt(batch);
-    globalThis.__realDispatchPrompts__.set(String(batch.index), built);
+    globalThis.__realDispatchPrompts__.set(batch, built);
     return built;
   };
 }
@@ -248,6 +269,26 @@ __WRAPPED_SOURCE__
 
 const PLAN = __PLAN_JSON__;
 const BATCHES_ARGS = __BATCHES_JSON__;
+// Round 9 port: same recursive freeze as skeptic_pipeline_e2e.test.py's own
+// (see that file's header comment above this exact block for the full
+// derivation -- what it closes, the "shallow Object.freeze() vs the
+// recursive walk" distinction, and the RED/TypeError-vs-guard evidence).
+// Independently re-verified against THIS harness copy's own
+// build_skeptic_harness(), not only the sibling's: the named decoy
+// (`BATCHES[1].assignments = BATCHES[0].assignments`, call site
+// untouched) dispatches batch 1 with batch 0's assignment_id and rc=0
+// without this freeze; with it, the same decoy throws `TypeError: Cannot
+// assign to read only property 'assignments'` at the mutation site, and
+// the unmutated real template still runs clean (rc=0) with the freeze in
+// place.
+(function __freezeBatchesDeep__(o, seen) {
+  seen = seen || new Set();
+  if (o === null || typeof o !== "object" || seen.has(o)) return o;
+  seen.add(o);
+  Object.freeze(o);
+  Object.getOwnPropertyNames(o).forEach(function (k) { __freezeBatchesDeep__(o[k], seen); });
+  return o;
+})(BATCHES_ARGS);
 const ROOT = __ROOT_JSON__;
 const RUN_ID = __RUN_ID_JSON__;
 const RUN_DIR = ROOT + "/skeptic/runs/" + RUN_ID;
@@ -280,16 +321,25 @@ async function agent(promptText, opts) {
     // manufacture the artifact a downstream on-disk assertion reads.
     //
     // Round 7/8 port: bound to THIS call's own batch index, not just to
-    // "the builder produced it for some batch" -- see
-    // _DISPATCH_PROMPT_RECORDER's header comment above.
-    if (globalThis.__realDispatchPrompts__.get(idx) !== promptText) {
+    // "the builder produced it for some batch".
+    //
+    // Round 9 port: that property is exactly as forgeable as the round-7
+    // array was -- see _DISPATCH_PROMPT_RECORDER's header comment above.
+    // `trustedBatch` is looked up from BATCHES_ARGS (this harness's OWN
+    // copy, independent of anything the call site passed), and the
+    // recorded prompt must have come from calling batchDispatchPrompt()
+    // with THAT EXACT object reference, not merely with something
+    // claiming its index.
+    const trustedBatch = BATCHES_ARGS.find(function (b) { return String(b.index) === idx; });
+    if (!trustedBatch || globalThis.__realDispatchPrompts__.get(trustedBatch) !== promptText) {
       throw new Error(
-        "skeptic:dispatch:" + idx + " was called with a prompt that does not match " +
-        "what batchDispatchPrompt() produced for batch " + idx + " specifically, so " +
-        "this call did not dispatch THIS batch's own work (it may have replayed " +
-        "another batch's recorded prompt). No fragment is written for it: a decoy " +
-        "must not be able to manufacture the artifact a downstream on-disk assertion " +
-        "reads. Prompt seen: " + JSON.stringify(promptText.slice(0, 120))
+        "skeptic:dispatch:" + idx + " was called with a prompt that was not built by " +
+        "calling the real batchDispatchPrompt() with this harness's own batch object " +
+        "for index " + idx + " -- either the prompt was forged outright, or the real " +
+        "builder was called with a different object (possibly one that copies this " +
+        "index but carries a different batch's content). No fragment is written for " +
+        "it: a decoy must not be able to manufacture the artifact a downstream on-disk " +
+        "assertion reads. Prompt seen: " + JSON.stringify(promptText.slice(0, 120))
       );
     }
     if (p.dispatchWrite !== undefined) {

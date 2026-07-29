@@ -568,6 +568,24 @@ ACCEPT_RE = re.compile(CHUNK_ACCEPT_PATTERN)
 # compared without either being taken on trust.
 DECLARED_BOUND_RE = re.compile(r"total (\d+)s wait")
 
+# The syntax a FLAT command-line invocation can use: letters, digits, and the
+# punctuation an absolute path/flag/filename needs (`.` `/` `_` `-`), tokens
+# separated by single spaces. Deliberately excludes every character bash
+# needs to CHAIN statements or open a subshell -- `;` `&` `|` backtick `$`
+# `(` `)` quotes -- so no loop (under ANY keyword: `while`, `for`, `until`,
+# spelled however), conditional, pipe, background job, or command
+# substitution can be BUILT from it at all, rather than naming the ones
+# anyone happened to think of. Shared between CHUNK_POLL_GRAMMAR_RE's own
+# opaque group below and SAFE_COMMAND_RE, so a future widening of one is a
+# widening of both, not a second copy to keep in sync by hand --
+# NON_POLLING_FORBIDDEN_TOKENS below is the lesson this fragment applies
+# before it could repeat a second time in the same file.
+_SAFE_COMMAND_TOKEN = r"[A-Za-z0-9_./-]+(?: [A-Za-z0-9_./-]+)*"
+
+# A re-check command (recheck_command()'s own single-line extraction) must
+# match this shape WHOLESALE -- see _assert_gate_command_cannot_hide_a_loop.
+SAFE_COMMAND_RE = re.compile(_SAFE_COMMAND_TOKEN)
+
 # The chunk poll line's WHOLE grammar, as a WHITELIST rather than a scan for
 # one bad spelling. Anchored both ends (fullmatch), so anything riding on this
 # line beyond the one elapsed-time loop it describes -- a `seq N`-style
@@ -575,15 +593,137 @@ DECLARED_BOUND_RE = re.compile(r"total (\d+)s wait")
 # whatever argument count or spelling -- fails to match, instead of only the
 # one `seq 1 N ... sleep M` shape that shipped pre-1.16.2. Group 1 is the
 # elapsed bound (already read by POLL_RE/chunk_seconds()); group 2 is the
-# ACCEPT gate command, captured rather than matched so its own text can be
-# checked for a smuggled loop too -- see the belt-and-suspenders check in
-# test_no_emitted_poll_can_exceed_the_bash_call_cap.
+# ACCEPT gate command, captured rather than matched so its own text is held
+# to the SAME positive shape as SAFE_COMMAND_RE above (built from the same
+# fragment on purpose) -- see _assert_gate_command_cannot_hide_a_loop, called
+# from test_no_emitted_poll_can_exceed_the_bash_call_cap.
+#
+# Round 8: group 2 used to be an unrestricted `(.+)`, checked afterward by a
+# denylist of named tokens (`seq`/`sleep`/`while true`) -- codex's own
+# independent review broke that with three constructs containing none of
+# those words (`while :; do :; done;`, `for ((;;)); do :; done;`,
+# `until false; do :; done;`), all of which fullmatched the outer grammar and
+# hit zero banned tokens. The denylist had only moved one level inward, not
+# been removed. `_SAFE_COMMAND_TOKEN` closes the category structurally
+# instead: none of the three (or any other loop keyword) can be BUILT without
+# at least one of `;` `&` `|` to sequence a header, body and terminator on one
+# line, and none of those characters can appear in this group any more.
+#
+# Because the excluded characters are exactly the ones the outer grammar's
+# own fixed suffix (` >/dev/null 2>&1 && exit 0; ...`) is made of, greedy vs
+# lazy is now moot here: there is exactly one way to split "as many
+# safe-charset tokens as possible" from the mandatory literal suffix that
+# follows, regardless of the quantifier's greediness, because no safe token
+# can ever consume a character the suffix needs. (CHUNK_ACCEPT_PATTERN's own
+# `(.*?)` stays lazy for its own, different job -- reading the gate back OUT
+# for comparison elsewhere in this file -- composing one pattern from the
+# other would still force one job's requirement onto the other for no gain.)
 CHUNK_POLL_GRAMMAR_RE = re.compile(
-    r"^end=\$\(\(SECONDS \+ (\d+)\)\); while true; do (.+) >/dev/null 2>&1 && exit 0; "
+    r"^end=\$\(\(SECONDS \+ (\d+)\)\); while true; do (" + _SAFE_COMMAND_TOKEN + r") >/dev/null 2>&1 && exit 0; "
     r"\[ \$SECONDS -ge \$end \] && break; slp=\$\(\(end-SECONDS\)\); "
     r"\[ \$slp -gt 20 \] && slp=20; \[ \$slp -gt 0 \] && sleep \$slp; "
     r"done; echo LT_CHUNK_BOUND; exit 1$"
 )
+
+# The tokens that indicate a re-check ACTUALLY POLLS -- shared by every check
+# below that asks "is this re-check non-polling", rather than each carrying
+# its own hand-picked tuple. That used to be two copies (round 8's own
+# simplifier review caught it): one used "$(seq " and "sleep " (narrower --
+# require the literal "$(" prefix / a trailing space), the other bare "seq"
+# and "sleep" (broader), and neither knew the other existed, so they had
+# already drifted apart by the time anyone looked. Unlike CHUNK_ACCEPT_
+# PATTERN's deliberate per-FILE independent copies just above -- this
+# project's stated convention for guarding against SILENT cross-file drift,
+# where a shared helper would let one wrong edit invisibly change what FOUR
+# SEPARATE FILES assert -- these checks live in this ONE file, where a shared
+# constant is not hidden from any call site's reader and any test run already
+# exercises them together. There is no drift-visibility benefit to keeping
+# them apart here, only the accidental divergence that just happened.
+#
+# Kept as CHEAP, LEGIBLE, defense-in-depth ON TOP OF SAFE_COMMAND_RE + the
+# "python3 " prefix check below (_assert_gate_command_cannot_hide_a_loop),
+# not as the primary defense any more: this bare-word scan alone still
+# misses `for ((;;)); do :; done;` and `until false; do :; done;` (neither
+# contains "seq", "sleep", or the bare "while" this tuple DOES catch) --
+# measured, the same escape codex found in the chunk-poll grammar's own
+# belt-and-suspenders check, independently present here too.
+NON_POLLING_FORBIDDEN_TOKENS = ("seq", "sleep", "while", "end=$((SECONDS")
+
+# Round 9 (codex, HIGH): CHUNK_POLL_GRAMMAR_RE/_assert_gate_command_cannot_
+# hide_a_loop above both operate on ONE extracted line/command -- but the
+# pre-round-8 code they replaced scanned the WHOLE rendered prompt
+# (`re.findall(r"seq 1 (\d+)\).*?sleep (\d+)", prompt)`), so a fixed-
+# iteration or otherwise-unbounded construct emitted as a SEPARATE line
+# elsewhere in the prompt -- never touching the recognised poll line at all
+# -- was visible to the old code and is invisible to the new. Measured: a
+# `for i in $(seq 1 45); do sleep 20; done` pushed as its OWN, unrelated
+# prompt line (the real poll line left untouched) passes clean today; the
+# pre-round-8 code caught the identical injection.
+#
+# This restores that WHOLE-PROMPT coverage, widened the same way
+# _SAFE_COMMAND_TOKEN widened the single-line check, rather than narrowing
+# back to the one historical spelling. Structural, not a denylist of loop
+# keywords alone: `while`/`until` only match when "do" and "done" both
+# follow LATER ON THE SAME LINE, so ordinary prose using those words on
+# their own ("wait until it's done", "while you wait") -- verified against
+# every line of the real glossary/skeptic chunk and re-check prompts, and
+# against five representative benign sentences using all three words --
+# never trips it, and the one legitimate `while true; do ... done` shape is
+# excluded by name (it is what CHUNK_POLL_GRAMMAR_RE already owns).
+_LOOP_CONSTRUCT_ANYWHERE_RE = re.compile(
+    r"for\s+\w+\s+in\s+\$\(\s*seq\b"                                  # any seq-based for-loop
+    r"|for\s*\(\("                                                     # C-style for ((init; cond; incr))
+    r"|for\s+\w+\s+in\s+\{\d+\.\.\d+\}"                                # brace-range for X in {N..M}
+    r"|\b(?:while|until)\b(?!\s+true\b)[^\n]*?\bdo\b[^\n]*?\bdone\b"   # any while/until...do...done, except "while true"
+)
+
+
+def _assert_gate_command_cannot_hide_a_loop(command: str, where: str) -> None:
+    """Every place in this file that extracts an ACCEPT/re-check command and
+    asks "could this be hiding a construct that defeats the bounded poll"
+    calls this, rather than each running its own scan. Three layers, in order
+    of how much they structurally close rather than merely happen to catch:
+
+    1. SAFE_COMMAND_RE -- POSITIVE. `command` must be a flat, space-separated
+       sequence of safe-charset tokens, with none of the characters bash
+       needs to CHAIN statements or open a subshell. This closes the whole
+       CATEGORY of shell control-flow constructs -- a loop under any
+       keyword, a pipe, a background job, a command substitution --
+       structurally, not by naming the ones anyone happened to think of.
+    2. `command.startswith("python3 ")` -- both real gate-command builders
+       (checkBatchCmd/checkCommand in glossary/skeptic) return `PY + " " +
+       ...`, and PY == "python3" in both. This closes the residual layer 1
+       alone leaves open: a BARE alternate command needing no shell
+       metacharacter at all (`yes`, `tail -f <path>`, `sleep 999`)
+       substituted whole in place of the real check. Whatever follows
+       "python3 " is then only ever python3's own argv, never an
+       independently executable shell word, as long as no shell
+       metacharacter reaches it -- which layer 1 already guarantees.
+    3. NON_POLLING_FORBIDDEN_TOKENS -- residual, cheap, defense-in-depth:
+       catches the single most likely accidental regression (someone
+       literally writing `sleep N` or reintroducing a `seq` loop) fast and
+       legibly, even though layers 1+2 already structurally exclude it.
+
+    KNOWN RESIDUAL, not attempted: an argument to python3 itself that somehow
+    causes IT to block (e.g. `python3 -` reading an inherited stdin) is not
+    excluded by any of the three layers -- a materially narrower and
+    different risk than "an alternate shell construct", not the property
+    this file's #352 lock is about."""
+    assert SAFE_COMMAND_RE.fullmatch(command), (
+        f"{where} is not a flat command invocation -- it may carry a shell "
+        f"construct of some kind (a loop, a pipe, a subshell, a background "
+        f"job) under any spelling:\n{command}"
+    )
+    assert command.startswith("python3 "), (
+        f"{where} does not start with the real gate-command builders' own "
+        f"fixed prefix (\"python3 \") -- it may be an alternate bare command "
+        f"substituted whole in place of the real check:\n{command}"
+    )
+    for token in NON_POLLING_FORBIDDEN_TOKENS:
+        assert token not in command, (
+            f"{where} contains {token!r}, which would mean it polls or loops "
+            f"instead of running (or being evaluated) exactly once:\n{command}"
+        )
 
 
 def labels(out: dict) -> list:
@@ -765,13 +905,27 @@ def test_no_emitted_poll_can_exceed_the_bash_call_cap(target, tmp_path):
       * the chunk's own elapsed bound,
       * the bash-tool timeout the chunk INSTRUCTS the agent to pass (asking for
         one it cannot get would mean the chunk bound is not the real bound),
-      * any surviving fixed-iteration loop riding on the poll line -- whatever
-        its spelling -- whose product is invisible to both of the above, and is
-        exactly the shape the pre-1.16.2 poll had. Checked as a WHITELIST of the
-        poll line's whole grammar (CHUNK_POLL_GRAMMAR_RE), not a scan for the one
-        `seq 1 N ... sleep M` spelling that shipped pre-1.16.2: a bare `seq N`
-        loop, one wrapped in `for ((...))`, or a second `while`, all read the
-        same cap-defeating shape and none of them fullmatch.
+      * any surviving fixed-iteration or otherwise-unbounded construct riding
+        on the poll line -- whatever its spelling -- whose real duration is
+        invisible to both of the above, and is exactly the shape the
+        pre-1.16.2 poll had. Checked as a WHITELIST of the poll line's whole
+        grammar (CHUNK_POLL_GRAMMAR_RE, fullmatch), not a scan for the one
+        `seq 1 N ... sleep M` spelling that shipped pre-1.16.2.
+
+        That grammar's own ACCEPT-gate group is held to a POSITIVE shape too
+        (_assert_gate_command_cannot_hide_a_loop, SAFE_COMMAND_RE), not a
+        denylist of named tokens on an otherwise-opaque capture: round 8's
+        first attempt at this file got exactly that wrong, and an
+        independent review broke it with three named-token-free
+        constructs -- see that function's own docstring for the full
+        three-layer property this now asserts, and its own stated residual.
+
+      * (round 9) a construct emitted as its OWN, SEPARATE prompt line,
+        never touching the recognised poll line at all -- the two checks
+        above only ever look at ONE extracted line/command each, where the
+        pre-round-8 code scanned the WHOLE prompt. _LOOP_CONSTRUCT_ANYWHERE_RE
+        restores that scope, widened rather than reverted to the one
+        historical spelling.
     """
     out = exhausted_run(target, tmp_path)
     for i, prompt in enumerate(prompts(out, target.chunk_label), start=1):
@@ -796,28 +950,41 @@ def test_no_emitted_poll_can_exceed_the_bash_call_cap(target, tmp_path):
             f"elapsed-time-poll grammar -- something else is riding on this "
             f"line, fixed-iteration or otherwise:\n{line}"
         )
-        # Belt and suspenders on the one sub-part the grammar treats as opaque
-        # (the ACCEPT gate command, `.+` above): it must not smuggle a second
-        # loop or sleep inside its own argument text either.
+        # The one sub-part CHUNK_POLL_GRAMMAR_RE itself treats as opaque (the
+        # ACCEPT gate command) is held to its own positive shape here -- see
+        # _assert_gate_command_cannot_hide_a_loop's own docstring for why this
+        # is three layers, not a token scan alone.
         gate_cmd = m.group(2)
-        for token in ("seq", "sleep", "while true"):
-            assert token not in gate_cmd, (
-                f"{target.name} chunk {i}'s ACCEPT gate command contains "
-                f"{token!r}, which would hide a second loop inside the poll "
-                f"line:\n{gate_cmd}"
-            )
+        _assert_gate_command_cannot_hide_a_loop(
+            gate_cmd, f"{target.name} chunk {i}'s ACCEPT gate command"
+        )
 
     # The re-check is non-polling by construction (batchWaitRecheckPrompt's own
     # comment: no `end=`, no loop, no sleep) -- so its whole command line is
-    # checked against every one of those tokens, not just the one fixed-iteration
-    # spelling the chunk poll line's grammar pins against above. This is the
-    # call that runs on the recovery path nobody watches.
+    # held to the SAME property as the chunk's own ACCEPT gate above, not just
+    # the one fixed-iteration spelling the chunk poll line's grammar pins
+    # against. This is the call that runs on the recovery path nobody watches.
     for prompt in prompts(out, target.recheck_label):
         command = recheck_command(prompt)
-        for token in ("seq", "sleep", "while", "end=$((SECONDS"):
-            assert token not in command, (
-                f"{target.name} re-check command contains {token!r}, which "
-                f"means it polls instead of running exactly once:\n{command}"
+        _assert_gate_command_cannot_hide_a_loop(
+            command, f"{target.name} re-check command"
+        )
+
+    # Round 9: a loop construct emitted as its OWN, unrelated prompt line --
+    # never touching the poll line CHUNK_POLL_GRAMMAR_RE recognises, and never
+    # touching the re-check's own single command line -- is invisible to
+    # every check above, each of which only ever looks at ONE already-
+    # identified line/command. Scanned over the WHOLE prompt at both wait
+    # sites, restoring the coverage the pre-round-8 code had (it scanned the
+    # whole prompt too) while still catching every spelling round 8's own fix
+    # widened for, not just the one historical instance.
+    for label in (target.chunk_label, target.recheck_label):
+        for prompt in prompts(out, label):
+            hit = _LOOP_CONSTRUCT_ANYWHERE_RE.search(prompt)
+            assert hit is None, (
+                f"{target.name} {label}'s prompt contains a loop construct "
+                f"({hit.group(0)!r}) somewhere in its text, not just in the "
+                f"one line/command already checked above:\n{prompt}"
             )
 
     # The chunk's in-loop gate output must stay suppressed. Without it the gate
@@ -1004,10 +1171,19 @@ def test_the_recheck_is_a_single_non_polling_check(target, tmp_path):
         f"authoritative re-check is once per wait, or it is just another chunk"
     )
     prompt = recheck_prompts[0]
-    for forbidden in ("end=$((SECONDS +", "while true", "sleep ", "$(seq "):
+    for forbidden in NON_POLLING_FORBIDDEN_TOKENS:
         assert forbidden not in prompt, (
             f"{target.name}'s re-check polls -- found {forbidden!r}:\n{prompt}"
         )
+    # The command line itself, held to the SAME positive shape as the chunk's
+    # own ACCEPT gate (test_no_emitted_poll_can_exceed_the_bash_call_cap) --
+    # the token scan above catches the tokens it names, this closes the
+    # category regardless of spelling. Complementary, not redundant: the scan
+    # above covers the WHOLE prompt (a construct anywhere in the rendered
+    # text), this covers the command's own exact shape.
+    _assert_gate_command_cannot_hide_a_loop(
+        recheck_command(prompt), f"{target.name}'s re-check command"
+    )
 
 
 @pytest.mark.parametrize("target", TARGETS, ids=TARGET_IDS)
@@ -1282,6 +1458,19 @@ def test_startup_guard_fires_when_its_constant_passes_its_bound(target, guard, t
     assert needle in res["stderr"], (
         f"{target.name}'s {guard} guard fired with an unexpected message "
         f"(expected {needle!r}):\n{res['stderr']}"
+    )
+    # None and [] are DIFFERENT outcomes, run()'s own docstring says so, and a
+    # single `== []` assertion covering both misreports the None one: it
+    # would fail with "fired only after None had already been dispatched",
+    # which describes the opposite of what actually happened (the harness
+    # never reached its own catch block at all, so there is no dispatch
+    # record to report either way -- not "nothing" as in an empty list, but
+    # "unknown"). Split so each outcome gets an accurate message.
+    assert res["calls_before_throw"] is not None, (
+        f"{target.name}'s {guard} guard: the harness process never reached "
+        f"its own try/catch at all (a syntax error in the mutated source is "
+        f"the likely cause, not the guard itself) -- there is no dispatch "
+        f"record to check ordering against:\n{res['stderr']}"
     )
     assert res["calls_before_throw"] == [], (
         f"{target.name}'s {guard} guard fired only after "

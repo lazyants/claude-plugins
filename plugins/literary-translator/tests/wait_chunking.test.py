@@ -250,6 +250,95 @@ def run(*, tmp_path: Path, segs: list, chunk_reply: str | None, recheck_reply: s
 
 POLL_RE = re.compile(r"^end=\$\(\(SECONDS \+ (\d+)\)\);")
 
+# Round 9 (codex/round-9-review, HIGH): this file's chunk poll had no
+# whole-line WHITELIST at all -- only POLL_RE's prefix match (the elapsed
+# bound) plus a per-chunk numeric-range assertion, never a check that nothing
+# ELSE rides on the rest of the line. Ported from
+# tests/wait_chunking_batch_passes.test.py's own round-8/9 fix for the
+# identical gap (independent copy, not an import -- this project's stated
+# convention), with ONE real difference this file's template forces:
+#
+# mass-translate's ACCEPT gate can be TWO commands joined by " && "
+# (translateAcceptCmd runs `draft_ready.py --expect-token ... && validate_
+# draft.py ...`; reviewAcceptCmd is a single command) -- glossary/skeptic's
+# gates are always exactly one. Measured against the REAL rendered lines
+# (driven through the real template under Node, not reconstructed by hand):
+# allowing exactly one such chain -- never zero-or-more, never a bare "&"
+# alone -- fits both shapes and still excludes every character bash needs to
+# open a SECOND, unrelated chain, a loop, or a subshell. The dispatch token
+# embedded in `--expect-token RUN_ID:seg` also carries a literal ":" that
+# glossary/skeptic's paths never do, so ":" joins the allowed charset here;
+# it has no shell meaning on its own (not a chaining or substitution
+# operator), so this widens what the charset ACCEPTS without widening what a
+# loop/subshell could exploit.
+_SAFE_COMMAND_TOKEN = r"[A-Za-z0-9_.:/-]+(?: [A-Za-z0-9_.:/-]+)*"
+_SAFE_GATE_COMMAND = _SAFE_COMMAND_TOKEN + r"(?: && " + _SAFE_COMMAND_TOKEN + r")?"
+SAFE_COMMAND_RE = re.compile(_SAFE_GATE_COMMAND)
+
+# The chunk poll line's WHOLE grammar, fullmatch. Group 1 is the elapsed
+# bound; group 2 is the ACCEPT gate (held to SAFE_COMMAND_RE's own positive
+# shape, not a denylist of named tokens on an opaque capture -- see
+# _assert_gate_command_cannot_hide_a_loop); group 3, when present, is the
+# fail-fast sentinel path (waitChunkPrompt()'s own `failFast` local -- empty
+# when `disp` is empty, "an empty DISP must DISABLE fail-fast" per
+# mass_translate_driver_smoke.test.py's own lock on that path). The optional
+# group is what codex flagged from the OTHER side: this clause is exactly why
+# a single grammar shared with glossary/skeptic (which never have it) would
+# have to be bent to fit -- kept as its own grammar in this file instead.
+CHUNK_POLL_GRAMMAR_RE = re.compile(
+    r"^end=\$\(\(SECONDS \+ (\d+)\)\); while true; do (" + _SAFE_GATE_COMMAND + r") >/dev/null 2>&1 && exit 0;"
+    r"(?: \[ -f \"([A-Za-z0-9_./-]+)\" \] && \{ echo LT_FAIL_SENTINEL; exit 1; \};)? "
+    r"\[ \$SECONDS -ge \$end \] && break; slp=\$\(\(end-SECONDS\)\); "
+    r"\[ \$slp -gt 20 \] && slp=20; \[ \$slp -gt 0 \] && sleep \$slp; "
+    r"done; echo LT_CHUNK_BOUND; exit 1$"
+)
+
+# The tokens that indicate a re-check ACTUALLY POLLS -- see wait_chunking_
+# batch_passes.test.py's own NON_POLLING_FORBIDDEN_TOKENS for the full
+# rationale (kept as cheap defense-in-depth alongside SAFE_COMMAND_RE, not
+# the primary defense).
+NON_POLLING_FORBIDDEN_TOKENS = ("seq", "sleep", "while", "end=$((SECONDS")
+
+# Any loop construct ANYWHERE in the prompt, not just inside the one
+# recognised poll line / re-check command -- see wait_chunking_batch_passes
+# .test.py's own _LOOP_CONSTRUCT_ANYWHERE_RE for the full derivation
+# (structural: while/until only match when "do" and "done" both follow later
+# on the SAME line, so ordinary prose using those words alone never trips
+# it; the one legitimate "while true" is excluded by name).
+_LOOP_CONSTRUCT_ANYWHERE_RE = re.compile(
+    r"for\s+\w+\s+in\s+\$\(\s*seq\b"
+    r"|for\s*\(\("
+    r"|for\s+\w+\s+in\s+\{\d+\.\.\d+\}"
+    r"|\b(?:while|until)\b(?!\s+true\b)[^\n]*?\bdo\b[^\n]*?\bdone\b"
+)
+
+
+def _assert_gate_command_cannot_hide_a_loop(command: str, where: str) -> None:
+    """Same three-layer property as wait_chunking_batch_passes.test.py's own
+    helper of this name: (1) SAFE_COMMAND_RE -- POSITIVE, structurally
+    excludes any shell control-flow construct under any keyword; (2)
+    `command.startswith("python3 ")` -- both translateAcceptCmd and
+    reviewAcceptCmd return `PY + " " + ...`, PY == "python3"; (3)
+    NON_POLLING_FORBIDDEN_TOKENS, cheap defense-in-depth. See that file's
+    docstring for the full reasoning and the stated residual (an argument to
+    python3 itself that somehow blocks IT is not excluded by any layer)."""
+    assert SAFE_COMMAND_RE.fullmatch(command), (
+        f"{where} is not a flat command invocation (or the one legitimate "
+        f"`&&`-chain) -- it may carry a shell construct of some kind (a "
+        f"loop, a pipe, a subshell, a background job) under any spelling:\n"
+        f"{command}"
+    )
+    assert command.startswith("python3 "), (
+        f"{where} does not start with the real gate-command builders' own "
+        f"fixed prefix (\"python3 \") -- it may be an alternate bare command "
+        f"substituted whole in place of the real check:\n{command}"
+    )
+    for token in NON_POLLING_FORBIDDEN_TOKENS:
+        assert token not in command, (
+            f"{where} contains {token!r}, which would mean it polls or loops "
+            f"instead of running (or being evaluated) exactly once:\n{command}"
+        )
+
 
 def poll_line(prompt: str) -> str:
     """The single bash poll command line of a CHUNK prompt."""
@@ -563,7 +652,18 @@ def test_recheck_still_runs_after_a_fail_sentinel(tmp_path):
 def test_no_single_chunk_approaches_the_bash_call_cap(tmp_path):
     """The constraint that forced chunking. 600 s is a measured hard clamp: a
     call declaring more is killed at 600 s with exit 143 no matter what timeout
-    the agent passes."""
+    the agent passes.
+
+    Round 9: also the whole-line WHITELIST this file never had -- any
+    surviving fixed-iteration or otherwise-unbounded construct riding on the
+    poll line, whatever its spelling, checked as a fullmatch against
+    CHUNK_POLL_GRAMMAR_RE, not a scan for one historical shape. The
+    ACCEPT-gate group that grammar treats as opaque is held to its own
+    positive shape (_assert_gate_command_cannot_hide_a_loop); the re-check's
+    own command is held to the same property; and a loop construct emitted
+    as its OWN, unrelated prompt line -- never touching either recognised
+    line/command -- is caught by a whole-prompt scan, all three at both wait
+    sites (translate and review)."""
     res = _late_landing_run(tmp_path)
     assert res["ok"], f"run threw: {res['stderr']}"
     out = res["out"]
@@ -573,6 +673,33 @@ def test_no_single_chunk_approaches_the_bash_call_cap(tmp_path):
             assert 0 < sec < BASH_CALL_CAP_SEC, (
                 f"{label} chunk {i} declares {sec}s, which the Bash tool would clamp "
                 f"at {BASH_CALL_CAP_SEC}s -- this is #348"
+            )
+
+            line = poll_line(prompt)
+            m = CHUNK_POLL_GRAMMAR_RE.fullmatch(line)
+            assert m, (
+                f"{label} chunk {i}'s poll line does not match the pinned "
+                f"elapsed-time-poll grammar -- something else is riding on "
+                f"this line, fixed-iteration or otherwise:\n{line}"
+            )
+            _assert_gate_command_cannot_hide_a_loop(
+                m.group(2), f"{label} chunk {i}'s ACCEPT gate command"
+            )
+
+    for recheck_label in ["wait-recheck:seg01", "review-wait-recheck:seg01:r1"]:
+        for prompt in chunk_prompts(out, recheck_label):
+            _assert_gate_command_cannot_hide_a_loop(
+                recheck_command(prompt), f"{recheck_label} re-check command"
+            )
+
+    for label in ["wait:seg01", "review-wait:seg01:r1",
+                  "wait-recheck:seg01", "review-wait-recheck:seg01:r1"]:
+        for prompt in chunk_prompts(out, label):
+            hit = _LOOP_CONSTRUCT_ANYWHERE_RE.search(prompt)
+            assert hit is None, (
+                f"{label}'s prompt contains a loop construct "
+                f"({hit.group(0)!r}) somewhere in its text, not just in the "
+                f"one line/command already checked above:\n{prompt}"
             )
 
 

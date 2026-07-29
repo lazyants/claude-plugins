@@ -1244,7 +1244,7 @@ def test_per_entry_lists_are_length_bounded_with_a_visible_tail():
     per-entry list COUNTS stayed unbounded -- `notes[]` and `risk_classes[]`
     carry no `maxItems` in the schema and no cap upstream. Measured through
     the real `format_report`: one schema-valid record with 20000 200-char
-    notes rendered 4,040,284 characters, every `_bounded` call a no-op
+    notes rendered a 4,040,009-character `notes:` line, every `_bounded` call a no-op
     because each item sat exactly at the cap.
 
     Bounds the COUNT axis and requires the truncation to be VISIBLE -- a
@@ -1261,12 +1261,27 @@ def test_per_entry_lists_are_length_bounded_with_a_visible_tail():
     }
     text = sr.format_report({"run_id": "r", "record_count": 1, "entries": [entry]})
 
-    notes_line = next(l for l in text.split("\n") if l.strip().startswith("notes:"))
-    risk_line = next(l for l in text.split("\n") if l.strip().startswith("risk classes:"))
+    # Round 9: the omission marker now renders on its OWN line, deliberately --
+    # an inline marker is forgeable by an agent typing its text, a line-leading
+    # one is not, because _sanitize marks every line-break character so no
+    # agent-authored item can begin an output line. The tail is therefore the
+    # line AFTER the joined run, not the end of it.
+    lines = text.split("\n")
+    notes_line = next(l for l in lines if l.strip().startswith("notes:"))
+    notes_tail = next(l for l in lines if l.strip().startswith("... and") and "note(s)" in l)
+    risk_line = next(l for l in lines if l.strip().startswith("risk classes:"))
+    risk_tail = next(l for l in lines if l.strip().startswith("... and") and "risk class(es)" in l)
     omitted = flood - sr._MAX_LISTED_ITEMS
-    assert f"... and {omitted} more" in notes_line, "truncation must be visible, never silent"
-    assert f"... and {omitted} more" in risk_line
-    assert notes_line.count("N" * sr._MAX_SOURCE_FIELD_CHARS) == sr._MAX_LISTED_ITEMS, (
+    # Round 9: the NOUN is part of the contract, not decoration. A bare
+    # ", ... and 40 more" at the end of a comma-joined run does not say more
+    # of WHAT, and both joined-run callers previously emitted exactly that
+    # while the helper's docstring cited a noun-bearing example that appeared
+    # nowhere in the file.
+    assert f"... and {omitted} more note(s)" in notes_tail, (
+        "truncation must be visible AND say what was truncated, never silent and never ambiguous"
+    )
+    assert f"... and {omitted} more risk class(es)" in risk_tail
+    assert (notes_line + notes_tail).count("N" * sr._MAX_SOURCE_FIELD_CHARS) == sr._MAX_LISTED_ITEMS, (
         "exactly the cap must survive -- a bound that renders more than it declares is not a bound"
     )
     # The whole point: the rendered size now follows the CAP, not the input.
@@ -1275,7 +1290,129 @@ def test_per_entry_lists_are_length_bounded_with_a_visible_tail():
         f"notes line is {len(notes_line)} chars against an unbounded {unbounded_estimate} -- "
         "the count axis must actually bind"
     )
-    assert "risk-0" in risk_line and f"risk-{flood - 1}" not in risk_line
+    # Round 9: the LAST item is deliberately preserved, so this assertion is
+    # the inverse of what it said when the cap was head-only. See
+    # test_the_machine_appended_note_survives_a_padded_notes_list for why.
+    assert "risk-0" in risk_line, "the head of the list must still render"
+    assert f"risk-{flood - 1}" in risk_tail, "the LAST item must survive truncation"
+    assert f"risk-{sr._MAX_LISTED_ITEMS}" not in (risk_line + risk_tail), (
+        "an item past the cap and not last must be dropped -- otherwise nothing is bounded"
+    )
+
+
+def test_an_agent_cannot_forge_the_truncation_marker():
+    """Round 9 (MEDIUM): the omission marker had no protection of its own.
+
+    `_sanitize` escapes `\\` and `[` precisely so every marker it emits is
+    distinguishable from one an agent typed. Round 8's truncation tail was
+    appended INLINE to the joined run and had no such escape, so an agent
+    could put its exact text in a note and have it render inside an
+    UNTRUNCATED list -- a reader could not tell a real truncation from a
+    typed one.
+
+    The fix is structural rather than another escape: the marker renders on a
+    line of its OWN, and `_sanitize` converts every `str.splitlines()`
+    boundary in a field to a visible `\\n` marker, so no agent-authored item
+    can begin an output line. This proves the mechanism rather than trusting
+    it -- the forged text must appear INSIDE the joined run, never at the
+    start of a line."""
+    forgery = "... and 5 more note(s), ending with: something-else"
+    entry = {
+        "source_form": "Rachel", "verdict": "adverse", "risk_classes": None,
+        "rationale": "why", "evidence_coverage_label": "not recorded",
+        # Short enough that NOTHING is actually truncated.
+        "notes": ["real-note", forgery, "another-real-note"],
+    }
+    text = sr.format_report({"run_id": "r", "record_count": 1, "entries": [entry]})
+    lines = text.split("\n")
+
+    assert not any(l.strip().startswith("... and") for l in lines), (
+        "an agent-typed marker reached the start of a line -- the tail is forgeable again:\n"
+        + "\n".join(lines)
+    )
+    notes_line = next(l for l in lines if l.strip().startswith("notes:"))
+    assert forgery in notes_line, (
+        "the forged text must still be SHOWN, inline and attributable -- marking, not hiding"
+    )
+
+    # And a real truncation still puts its marker at a line start, so the two
+    # are distinguishable in the direction that matters.
+    real = sr.format_report({"run_id": "r", "record_count": 1, "entries": [dict(
+        entry, notes=[f"n{i}" for i in range(sr._MAX_LISTED_ITEMS + 5)])]})
+    assert any(l.strip().startswith("... and") for l in real.split("\n")), (
+        "a genuine truncation must render its marker at the start of a line"
+    )
+
+
+def test_per_entry_referent_lists_are_bounded_the_same_way():
+    """Round 9 (MEDIUM): `_bounded_items` has three call sites and the
+    round-8 test exercised two. The referents path renders line-per-item
+    rather than as a joined run, so it takes a different branch and was
+    never driven at the cap."""
+    flood = sr._MAX_LISTED_ITEMS * 2
+    referents = [
+        {"disambiguator": f"ref-{i:02d}",
+         "evidence": {"quote": None, "context": None,
+                      "unavailable_reason": f"reason-{i:02d}"}}
+        for i in range(flood)
+    ]
+    entry = {
+        "source_form": "Rachel", "verdict": "adverse", "risk_classes": None,
+        "rationale": "why", "evidence_coverage_label": "not recorded",
+        "notes": [], "referents": referents,
+    }
+    text = sr.format_report({"run_id": "r", "record_count": 1, "entries": [entry]})
+    lines = text.split("\n")
+
+    referent_lines = [l for l in lines if l.strip().startswith("referent [")]
+    omitted = flood - sr._MAX_LISTED_ITEMS
+    assert len(referent_lines) == sr._MAX_LISTED_ITEMS, (
+        f"{len(referent_lines)} referent lines rendered against a cap of {sr._MAX_LISTED_ITEMS}"
+    )
+    assert any(f"... and {omitted} more referent(s)" in l for l in lines), (
+        "the referents truncation must be visible too"
+    )
+    assert any(f"ref-{flood - 1:02d}" in l for l in referent_lines), (
+        "the LAST referent must survive, same rule as the joined lists"
+    )
+    assert not any(f"ref-{sr._MAX_LISTED_ITEMS:02d}" in l for l in referent_lines), (
+        "a referent past the cap and not last must be dropped"
+    )
+
+
+def test_the_machine_appended_note_survives_a_padded_notes_list():
+    """Round 9 (MEDIUM), and a defect round 8's own fix introduced.
+
+    `skeptic_ready.py`'s `_coerce_record` APPENDS its diagnosis to `notes`
+    (`notes.append(f"skeptic_ready:coerced_insufficient_window:{reason}")`),
+    so the machine's authoritative statement about why a record was coerced
+    sits at the TAIL. Round 8 capped the list head-first, which kept every
+    agent-authored note and hid the one note the agent did not write --
+    letting an agent bury the machine's own finding simply by padding the
+    list, which inverts what this report is for.
+
+    Pins the property rather than the prefix: the cap must preserve the last
+    item whoever wrote it, so this does not silently stop working if the
+    machine note's spelling changes."""
+    machine_note = "skeptic_ready:coerced_insufficient_window:no_window_offsets"
+    notes = [f"agent-note-{i:02d}" for i in range(sr._MAX_LISTED_ITEMS)] + [machine_note]
+    assert len(notes) > sr._MAX_LISTED_ITEMS, "the fixture must actually exceed the cap"
+
+    entry = {
+        "source_form": "Rachel", "verdict": "adverse", "risk_classes": None,
+        "rationale": "why", "evidence_coverage_label": "not recorded", "notes": notes,
+    }
+    text = sr.format_report({"run_id": "r", "record_count": 1, "entries": [entry]})
+    lines = text.split("\n")
+    notes_line = next(l for l in lines if l.strip().startswith("notes:"))
+    notes_tail = next(l for l in lines if l.strip().startswith("... and"))
+
+    assert machine_note in notes_tail, (
+        "the machine-appended note was truncated away by agent-authored padding -- "
+        f"lines were: {notes_line} / {notes_tail}"
+    )
+    assert "... and 1 more note(s)" in notes_tail, "the omission must still be visible"
+    assert "agent-note-00" in notes_line, "the head must still render"
 
 
 def test_the_hebrew_guard_still_fires_under_python_dash_O(tmp_path):
@@ -1352,15 +1489,15 @@ def test_the_rendered_worst_case_covers_the_repr_escaped_path_too():
     Pins the corrected constant AND drives the repr'd path, rather than
     restating the arithmetic in prose. The probe codepoint is chosen for
     its CATEGORY, not from a remembered list: an unassigned non-BMP
-    codepoint is the general case, and `_MAX_REPR_ESCAPE_CHARS` is swept
+    codepoint is the general case, and `_max_repr_escape_chars()` is swept
     rather than sampled precisely so a probe choice cannot define it."""
-    assert sr._MAX_REPR_ESCAPE_CHARS == max(
+    assert sr._max_repr_escape_chars() == max(
         len(repr(chr(cp))) - 2 for cp in range(0x0000, 0x110000)
     ), "the constant must be the swept maximum, not a sample"
-    assert sr._MAX_RENDERED_CHARS_PER_SOURCE_CHAR == max(
-        sr._MAX_MARKER_CHARS, sr._MAX_REPR_ESCAPE_CHARS
+    assert sr._max_rendered_chars_per_source_char() == max(
+        sr._MAX_MARKER_CHARS, sr._max_repr_escape_chars()
     )
-    assert sr._MAX_REPR_ESCAPE_CHARS > sr._MAX_MARKER_CHARS, (
+    assert sr._max_repr_escape_chars() > sr._MAX_MARKER_CHARS, (
         "the whole point of this constant is that repr beats the marker -- if that stops being "
         "true the arithmetic below is still correct but this test no longer proves anything"
     )
@@ -1378,7 +1515,7 @@ def test_the_rendered_worst_case_covers_the_repr_escaped_path_too():
         "this is the measurement the old marker-only arithmetic got wrong -- if the repr'd path "
         "no longer exceeds it, re-derive the bound rather than deleting this assertion"
     )
-    assert len(rendered) <= sr._MAX_RENDERED_CHARS_PER_SOURCE_CHAR * cap + len(tail) + 2, (
+    assert len(rendered) <= sr._max_rendered_chars_per_source_char() * cap + len(tail) + 2, (
         f"rendered {len(rendered)} chars exceeds the declared per-field worst case -- "
         "the +2 is repr's own quote characters"
     )

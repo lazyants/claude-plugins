@@ -613,12 +613,16 @@ function approvedPath(index, attempt) {
   return RUN_DIR + "/approved_" + index + "_attempt_" + attempt + ".json"
 }
 
-// checkBatchCmd() plus --approve-to, appended -- never interleaved. The three
-// character-identical --check-batch sites keep issuing checkBatchCmd() verbatim
-// (the dispatch prompt tells codex to re-run "exactly the command above", so
-// that string must stay reproducible from the dispatch side, which has no
-// business writing an approved snapshot). Appending leaves that prefix byte-
-// identical while --research-mode still precedes --expect-source-forms-file.
+// checkBatchCmd() plus --approve-to, appended -- never interleaved. The four
+// character-identical --check-batch sites (precheck, dispatch self-check, wait
+// chunk poll, wait re-check -- tests/bounded_poll_present.test.py's
+// CHECK_BATCH_CALL_SITES is the count's own authority, extracted from this
+// file's real source rather than restated as prose) keep issuing
+// checkBatchCmd() verbatim (the dispatch prompt tells codex to re-run "exactly
+// the command above", so that string must stay reproducible from the dispatch
+// side, which has no business writing an approved snapshot). Appending leaves
+// that prefix byte-identical while --research-mode still precedes
+// --expect-source-forms-file.
 //
 // canon_validate.py accepts --approve-to ONLY on --check-batch and refuses it
 // in every other mode, validate-only included, so this command cannot silently

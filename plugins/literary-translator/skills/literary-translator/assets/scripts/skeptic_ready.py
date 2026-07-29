@@ -1172,6 +1172,85 @@ def frozen_input_check(
     return frozen_input_mismatch, reasons, snapshots["canon"], snapshots["senses"]
 
 
+# Round 9 (codex, HIGH): both `missing` lists below (run_check_frozen_inputs'
+# own, and run_verify_merged's further down) had no per-item length cap and
+# no list-count cap -- the exact shape canon_validate.py's own
+# _bounded_message/_bounded_list already guard against (see that file's own
+# _MAX_LISTED_PROBLEMS comment: 40 items at the shipped DEFAULT_BATCH_SIZE
+# produced 14 KB carrying one injected sentence 80 times). Independent copy
+# here, not an import -- this project's stated convention (every sibling
+# script/test carries its own copy of a shared idea rather than importing
+# one, so a wrong edit to one never silently changes what another asserts) --
+# but NOT a byte-identical copy: canon_validate.py's own _bounded_message
+# ALSO flattens embedded whitespace/newlines, and copying that step
+# unmeasured broke this file's own, already-correct design. Measured before
+# settling on this shape (two things canon_validate.py's calibration did not
+# have to answer for its own message shapes):
+#   1. This file has its OWN, more precise defense against the exact thing
+#      whitespace-flattening exists to prevent -- _json_dumps_line() already
+#      backslash-escapes every U+0085/U+2028/U+2029 line-breaking boundary
+#      character json.dumps(ensure_ascii=False) otherwise leaves raw, so a
+#      `missing[]` entry carrying one can never turn one JSON output line
+#      into two. tests/skeptic_ready.test.py's own
+#      test_main_escapes_boundary_chars_in_verify_merged_result_via_real_
+#      pipeline pins the INVERSE property flattening would have broken: a
+#      boundary character embedded in a record's own `notes` field must
+#      survive character-for-character into `missing[]`, escaped only by
+#      json.dumps at print time, never silently collapsed beforehand.
+#      Measured directly: flattening here failed that exact test for every
+#      parametrized codepoint (10/13/11/12/28/29/30/8232/8233).
+#   2. canon_validate.py's own 200-char per-item cap does not fit this
+#      file's own message shapes: `_frozen_input_tamper_reason`'s tamper
+#      message alone embeds TWO 64-char sha256 hashes plus a full path
+#      inside fixed boilerplate -- measured at 444 chars for a realistic
+#      pytest tmp_path, comfortably past 200, truncating away the "tamper"/
+#      "HALTING" text every existing tamper test asserts on. Capped at 600
+#      here instead -- comfortable headroom over that measured worst case,
+#      while still meaningfully bounding the genuinely unbounded content
+#      elsewhere in this file's own `missing[]` entries (a `source_form`
+#      derived from source text, an evidence-verification `reason`, a
+#      skeptic-authored coercion `note` -- none schema-length-bounded).
+#
+# Checked before landing this: skeptic-pass-wf.template.js (the only
+# consumer -- see verifyMergedPrompt()/frozenInputCheckPrompt()'s own
+# "missing (... copied verbatim)" instruction) only ever checks
+# `missing.length === 0`/truthiness and `.join(", ")`s the entries into one
+# log line -- never counts, indexes, or pattern-matches a SPECIFIC entry --
+# and every existing test in tests/skeptic_ready.test.py asserts
+# `any(... in m for m in result["missing"])`, never an exact count or
+# position, so bounding changes nothing any current caller or test depends
+# on (re-run after this fix: full suite green, see commit/round notes).
+_MISSING_ITEM_MAX_CHARS = 600
+_MAX_LISTED_MISSING = 8
+
+
+def _bounded_missing_item(message: str) -> str:
+    """Cap one `missing` entry's length. Deliberately does NOT flatten
+    embedded whitespace/control/boundary characters -- see the module-level
+    comment above this constant for why that would fight this file's own
+    _json_dumps_line() escaping and the test that pins character-for-
+    character survival."""
+    text = str(message)
+    if len(text) > _MISSING_ITEM_MAX_CHARS:
+        text = text[:_MISSING_ITEM_MAX_CHARS] + " [...truncated]"
+    return text
+
+
+def _bounded_missing(values) -> list:
+    """Bound a `missing` list in COUNT as well as in each entry's length --
+    mirrors canon_validate.py's own `_bounded_list`. Marks rather than
+    hides: a caller sees "... and N more", never just a shorter list
+    indistinguishable from a smaller problem."""
+    values = list(values)
+    bounded = [_bounded_missing_item(v) for v in values[:_MAX_LISTED_MISSING]]
+    extra = len(values) - _MAX_LISTED_MISSING
+    if extra > 0:
+        bounded.append(
+            f"... and {extra} more (showing the first {_MAX_LISTED_MISSING} of {len(values)})"
+        )
+    return bounded
+
+
 # ---------------------------------------------------------------------------
 # --check-frozen-inputs (codex round 2)
 # ---------------------------------------------------------------------------
@@ -1232,7 +1311,7 @@ def run_check_frozen_inputs(aggregate_manifest_path, canon_path=None, manifest_p
     frozen_input_mismatch, reasons, _canon_snapshot, _senses_snapshot = frozen_input_check(
         aggregate, canon_path, manifest_path, senses_path, tolerant_reads=True
     )
-    return {"frozen_input_mismatch": frozen_input_mismatch, "missing": reasons}
+    return {"frozen_input_mismatch": frozen_input_mismatch, "missing": _bounded_missing(reasons)}
 
 
 def _iter_record_evidence(record: dict):
@@ -1523,7 +1602,7 @@ def run_verify_merged(
 
     return {
         "verified": not missing,
-        "missing": sorted(set(missing)),
+        "missing": _bounded_missing(sorted(set(missing))),
         "frozen_input_mismatch": frozen_input_mismatch,
     }
 

@@ -224,7 +224,11 @@ Removing the guard outright fails TWO tests, and one of them —
 `test_e2e_wait_fail_priority_discriminating_order` — predates this release and drives the real
 template's live `batchStep()` through the same node harness. So live end-to-end coverage of that
 guard already existed. What did not exist is coverage of the glued shape specifically: weakening the
-same guard from containment to whole-line equality fails ONLY the new test, 1 of 22. The new test
+same guard from containment to whole-line equality fails ONLY the new test. Both figures are
+`tests/skeptic_pipeline_e2e.test.py` alone, and the counts are spelling-dependent, so re-derive them
+rather than quoting them — an earlier draft of this sentence gave a denominator of 22 for that file
+at `1d180e8`, which was its size at the time the mutants were run and not at that commit, where it
+collects 23. Caught by a reviewer re-deriving the number rather than reading it. The new test
 earns its place on that second measurement, not on the first, and the overclaim is corrected here
 rather than quietly dropped because an unretracted overclaim in a release about overclaims is the
 defect itself. The same sentence in the test's own docstring is corrected with it.
@@ -529,9 +533,13 @@ an unreachable assertion reads in review as coverage it does not provide.
 **One literal invisible character in the source.** A raw U+200B sat in a fixture one line below a
 sibling spelling the same class of character as `\xa0`. Found by a flat codepoint scan rather than a
 line-oriented one, deliberately: `str.splitlines()` breaks on U+2028, so a splitlines walk can never
-yield it and returns a clean, confident, wrong count. Two literal invisibles exist in the whole
-plugin across 263 files; the other is a forced NBSP inside an r-string regex, where `\xa0` would be
-four literal characters, and is left alone.
+yield it and returns a clean, confident, wrong count. Before this release two literal invisibles
+existed; AFTER it, one does — a forced NBSP inside an r-string regex, where `\xa0` would be four
+literal characters, deliberately left alone. Scope of that count, so it can be re-derived rather than
+believed: a flat codepoint walk over every UTF-8-decodable file under `plugins/literary-translator`
+(263 of them), matching C0/C1, every category-Cf codepoint, U+2028/U+2029, NBSP and CGJ. A narrower
+file filter gives a smaller denominator; an earlier draft of this sentence also stated the pre-fix
+figure as if it were the shipped one.
 
 **The identity recorder proved the prompt was real and not that it was THIS batch's.** Round 6's
 terminus for the decoy ladder was to stop matching prompt text and record prompt IDENTITY instead —
@@ -627,7 +635,89 @@ template: the new assertion fails with `['glossary:precheck:0', 'glossary:dispat
 pre-existing assertions still pass — which is the definition of the blind spot it was written to
 close.
 
-Suite: 4178 → **4690 passed, 3 skipped, 2 xfailed**. Every skip is named rather than incidental,
+### Round 9 — two fixes stopped detecting forgeries and started preventing them
+
+Round 9 ran three independent lines against the round-8 commit: a fan-out of agents each given a
+different lens with every finding handed to a separate agent instructed to refute it, a codex pass,
+and a simplifier pass. Nineteen findings survived verification. Four of them were defects inside
+round 8's own fixes, which is the seventh consecutive round that has been true — but two of the
+repairs below are the first in this loop that change the KIND of guarantee rather than adding a rung.
+
+**A whitelist that moved the denylist inward.** Round 8 replaced a one-spelling `seq 1 N` scan with a
+whole-line grammar, and left the ACCEPT command inside it as an unrestricted `(.+)` guarded by a
+token denylist of `seq`, `sleep`, `while true`. Measured: `while :; do :; done;`,
+`for ((;;)); do :; done;` and `until false; do :; done;` all ride inside that group, fullmatch the
+grammar, and hit zero banned tokens — each one an unbounded Bash call, the exact property the gate
+exists to prevent. The group is now a positive character class, `[A-Za-z0-9_./-]` plus single spaces,
+which excludes every character Bash needs to chain a statement or open a subshell. The three
+constructs are not caught, they are *inexpressible*. Layered under it: the command must also begin
+`python3 `, which closes what the class alone still admits (`sleep 999`, `yes`, `tail -f` all fit the
+class), and the old token list survives only as cheap defence in depth. The residual is named rather
+than papered over — an argument to `python3` itself that blocks, such as reading inherited stdin, is
+excluded by none of the three layers.
+
+**And the same fix traded coverage while closing that gap.** The check it replaced scanned the WHOLE
+chunk prompt; `fullmatch(poll_line(prompt))` scans one line. Measured as a strict regression: a
+900-second loop instructed on any OTHER line of the chunk prompt went green at the round-8 commit and
+red with only the pre-round-8 test file restored. The whole-prompt sweep is back, widened the same way
+the rest of the round widened rather than reverted to the historical spelling, and verified in both
+directions — the real prompts produce zero hits, five benign English sentences using "while", "until"
+and "for" as ordinary words produce zero false positives, and the injected construct is caught. Worth
+stating plainly because the round-8 notes did not: that entry described the grammar as making "any
+construct riding on that line fail by default", which was true and line-scoped, and never disclosed
+that a whole-prompt scan had been deleted to get there.
+
+**The identity ladder reached a rung that cannot be climbed.** Round 6 recorded prompt identity,
+round 8 keyed it to `batch.index` — and round 9 forged the index:
+`batchDispatchPrompt({ index: batch.index, assignments: BATCHES[0].assignments })` records the wrong
+prompt under the expected key, and both harness copies accepted it, rc=0, merged=true. Every fix so
+far DETECTED a forgery. This one removes it: the recorder is keyed by the batch OBJECT REFERENCE, and
+the guard resolves the expected batch from the harness's own `BATCHES_ARGS`, which the call site
+cannot reach. A fabricated literal can copy every property including `.index`; it can never BE that
+element. The remaining shape — mutating a genuine batch object's fields in place before the real call
+— is closed by a recursive freeze of everything reachable from `BATCHES_ARGS`, and that was measured
+before it was written: the real template mutates nothing (static sweep for assignment/push/splice
+found zero hits; both suites run 29/29 under a deep freeze), and the freeze mechanism was itself
+sanity-checked by injecting an artificial write and confirming it throws. The evidence for the closed
+decoy is a strict-mode `TypeError` at the mutation site, not the guard catching anything, and the
+comment says so — a runtime exception and a firing gate are different evidence.
+
+**A gate keyed to today's implementation.** Round 8's "runs ONLY the two boundary commands" counted
+STEP lines containing `"python3 "`. A third command spelled `curl`, `wget`, `bash` or `node` was
+invisible to the count — precisely the network-bypass category the test's own docstring names. Now it
+counts STEP-numbered lines by structure, on the invariant that actually holds in that prompt: STEP
+numbering introduces commands and nothing else. Proved with two different binaries, not just the one
+codex used. The residual is named: ordinary prose carrying a command evades the count, and that is
+the clause assertion's job, checked separately in the same test.
+
+**A truncation marker an agent could type.** Round 8's per-entry list cap appended its "... and N
+more" tail inline to the joined run. `_sanitize` escapes the two characters that introduce ITS
+markers precisely so an agent cannot forge one; the new tail had no such protection, so an agent
+could put the marker's text in a note and have it render inside an UNTRUNCATED list. Fixed
+structurally rather than with another escape: the marker now renders on a line of its OWN, and
+`_sanitize` converts every `str.splitlines()` boundary in a field to a visible marker, so no
+agent-authored item can begin an output line. Unforgeable by construction, which is why the referents
+path — which already rendered line-per-item — was never vulnerable.
+
+**A cap that hid the one note the agent did not write.** The same round-8 cap kept the FIRST 20
+items, and `skeptic_ready.py`'s `_coerce_record` APPENDS its own diagnosis to `notes`. With 20
+agent-authored notes ahead of it, the machine's statement about why a record was coerced is exactly
+what got dropped — an agent could bury it by padding the list, inverting what this report is for.
+The last item is now always preserved, keyed on position rather than on the `skeptic_ready:` prefix
+so it keeps working if that spelling changes. The third call site, `referents`, takes a different
+branch and was never driven at the cap; it is now.
+
+**Constants nothing read, and a measurement that lied.** `_MAX_REPR_ESCAPE_CHARS` and
+`_MAX_MARKER_CHARS` have exactly one executable reader between them, and it is the definition of a
+third constant with no readers at all — the whole chain is documentation and test surface, while a
+1.1-million-codepoint sweep ran on every CLI invocation. Now computed lazily behind a cached
+function, so the derivation still lives beside the arithmetic it bounds and the CLI stops paying for
+it. The measurement is the part worth recording: a plain before/after taken while other work ran said
+13 ms, because the machine was loaded during one arm and not the other. Interleaving the two runs
+turn by turn gave 102.5 ms against 180.2 ms — 77.7 ms saved. Same defect as everything else in this
+release, in a benchmark rather than in prose.
+
+Suite: 4178 → **4717 passed, 3 skipped, 2 xfailed**. Every skip is named rather than incidental,
 and there are three for two reasons: one pre-existing placeholder, plus the single pin row that
 declares no one-to-one replacement, which now skips in TWO tests — the diff-side check and the
 same-hunk check added below — because a row with no replacement has nothing for either to bind.
@@ -648,6 +738,45 @@ by hand against `190ac36` via `git show` and recorded in the test's own docstrin
 only lock that the CURRENT tree behaves correctly, whatever the historical figure was. Accepted as
 sufficient when reported, and named here rather than left to read as the same kind of evidence as the
 four gates above.
+
+### Migration
+
+**This release invalidates the DERIVATION bundle as well as the plugin bundle, and that is the
+heavier of the two.** Up to round 8 the release touched only `PLUGIN_BUNDLE_MEMBERS`
+(`canon_validate.py`, `glossary-pass-wf.template.js`), which flips `plugin_bundle_hash` and marks
+affected segments `stale` in the ordinary way. Round 9's `source_form` bound is implemented in
+`bootstrap_names.py`, which is one of the two `DERIVATION_BUNDLE_MEMBERS`, so `derivation_bundle_hash`
+flips too — and per this plugin's own hash-migration-impact notes, an edit anywhere in that file does
+it regardless of what the edit was.
+
+What that means for a project with CONVERGED segments: they reclassify from `stale` to
+`blocked_needs_regeneration`, which asks for a full W3/W3a regeneration (`bootstrap_names.py` → the
+glossary pass → `segpack.py`) before re-translation. The sanctioned recovery is
+`canon_validate.py --restamp-derivation` followed by a `segpack.py` rerun (available since 1.15.0).
+A project with no converged segments pays nothing.
+
+Two things that reclassification is NOT, checked against `references/gotchas.md` rather than assumed,
+because "blocked" reads worse than it behaves. It is a LABEL computed by `select_segments.py`, never
+written into a ledger fragment's own `status` — the underlying fragment stays `converged` on disk and
+nothing is mutated or lost by the hash flip. And it SELF-CLEARS once the missing regeneration step is
+actually run, with no `--only-segs` override needed. So the cost is compute and operator time, not
+data, and it is recoverable by running the pipeline rather than by repairing anything.
+
+The cost was accepted deliberately rather than routed around. The alternative was to bound the value
+at its two embed sites instead of at its source, which would have left `derivation_bundle_hash`
+untouched — but the same unbounded value reaches two independently-owned template files today, a
+third consumer is plausible and was not ruled out, and a per-site fix closes only the sites someone
+thought to look at. Capping at the root closes every consumer, including ones not yet found.
+
+**No schema changed, and that is also deliberate.** An existing `canon.json` written before this
+release can contain an arbitrarily long `source_form`; adding a `maxLength` would have made those
+entries newly invalid on re-validation. Verified rather than assumed, and stated as the decisive fact
+rather than as a fixture result: `canon-entry.schema.json` declares no `maxLength` at all — nor does
+any of the 22 schemas in this plugin — so no length constraint exists that an already-stored value
+could newly violate. The bound applies to what extraction PRODUCES from here on, never retroactively
+to what is already on disk. Length discipline in this plugin has always lived in code at the point a
+value is rendered or embedded, and this fix keeps that convention while moving one instance of it
+upstream of every consumer instead of downstream of one.
 
 ## 1.16.1 — 2026-07-27
 

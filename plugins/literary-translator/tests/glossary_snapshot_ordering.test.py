@@ -284,8 +284,17 @@ async function agent(promptText, opts) {
   opts = opts || {};
   const label = opts.label || "";
   const ordinal = record(label, promptText);
-  callsLog.push({ label: label, ordinal: ordinal, effort: opts.effort || null,
-                  agentType: opts.agentType || null });
+  callsLog.push({
+    label: label, ordinal: ordinal, effort: opts.effort || null,
+    agentType: opts.agentType || null,
+    // Round-8: captures the REAL schema literal's own additionalProperties
+    // flag at the moment of each call, so a test can assert directly on the
+    // template's own schema declaration (e.g. that CANON_VERIFY_SCHEMA
+    // forbids extra fields) without this mock needing to simulate the real
+    // Workflow engine's schema-validation/retry-until-valid enforcement.
+    hasSchema: !!opts.schema,
+    schemaAdditionalProperties: opts.schema ? opts.schema.additionalProperties : null,
+  });
 
   if (label === "glossary:merge") return "MERGED (mock)";
   if (label === "glossary:verify") return { verified: true };
@@ -613,6 +622,58 @@ def test_the_approve_command_is_the_check_batch_contract_plus_approve_to(tmp_pat
     )
 
 
+# Round-8 sweep finding: PRECHECK and WAIT (chunk and re-check alike) are each
+# told "do nothing else" beyond their one read-only check -- unpinned, in this
+# file that already pins the --check-batch CONTRACT those same calls issue.
+# PRESENCE-ONLY: this file's mocked agent() cannot simulate an LLM doing
+# something extra with its bash tool, so this proves the instruction is still
+# WRITTEN, not that it is OBEYED -- see glossary_citation_review.test.py's
+# DISPATCH_NO_ACTION_CLAUSE pin for the same caveat spelled out at more length.
+PRECHECK_NOTHING_ELSE_CLAUSE = (
+    "do not create, modify, dispatch, or resolve any candidates yourself"
+)
+WAIT_NOTHING_ELSE_CLAUSE = (
+    "do not touch any files, and do not resolve any candidates yourself"
+)
+
+
+def test_precheck_and_wait_are_told_to_do_nothing_beyond_their_own_check(tmp_path):
+    """PRECHECK holds a bash tool to run its one read-only --check-batch probe;
+    WAIT holds one to run its bounded poll (and the re-check that backs it).
+    Neither is restricted by any tool-level sandbox -- confirmed in the round-8
+    sweep that NO agent() call anywhere in this plugin's templates carries a
+    tool-restriction option -- so the prompt's own "do nothing else" sentence
+    is the ONLY thing standing between "ran the one suggested command" and
+    "did whatever else its bash tool allows", for both of these mechanical,
+    supposedly read-only steps.
+
+    All three call sites share one property (the SAME sentence, verbatim, at
+    the wait chunk and the wait re-check) but need two different runs: the
+    chunk fires under one_batch_run's default; the re-check only fires when
+    the chunk budget is exhausted (see pending_wait_run(), used above by this
+    file's own --check-batch roster test for the identical reason)."""
+    out = one_batch_run(tmp_path)
+    precheck = sole_prompt(out, "glossary:precheck:0")
+    assert PRECHECK_NOTHING_ELSE_CLAUSE in precheck, (
+        "the precheck prompt must forbid the agent from doing anything beyond "
+        f"its one read-only check; prompt was:\n{precheck}"
+    )
+    for prompt in prompts_for(out, "glossary:wait:0"):
+        assert WAIT_NOTHING_ELSE_CLAUSE in prompt, (
+            "every wait chunk prompt must forbid the agent from touching "
+            f"files or resolving candidates itself; prompt was:\n{prompt}"
+        )
+
+    recheck_out = pending_wait_run(tmp_path)
+    recheck_prompts = prompts_for(recheck_out, "glossary:wait-recheck:0")
+    assert recheck_prompts, "pending_wait_run() must reach the wait re-check"
+    for prompt in recheck_prompts:
+        assert WAIT_NOTHING_ELSE_CLAUSE in prompt, (
+            "the wait re-check prompt must forbid the agent from touching "
+            f"files or resolving candidates itself; prompt was:\n{prompt}"
+        )
+
+
 @pytest.mark.parametrize("label", [
     "glossary:precheck:0", "glossary:dispatch:0", "glossary:wait:0",
     "glossary:wait-recheck:0", "glossary:citation-review:0",
@@ -681,6 +742,122 @@ def test_live_merge_and_verify_consume_the_approved_snapshot(tmp_path):
     # fragmentPath stays as the diagnostic record of which attempt produced the
     # bytes, and is deliberately not what merges.
     assert batch_result["fragmentPath"] == attempt_path(0, 0)
+
+
+# Round-8 sweep finding: the verify call is what the template's own comments
+# elsewhere call "what this run actually trusts" (glossaryVerifyPrompt() is
+# disk-independent and re-derives its own verdict rather than trusting the
+# merge call above), so a verify call that lied about its own result would go
+# completely unnoticed -- nothing re-runs --verify-merged independently.
+GLOSSARY_VERIFY_NO_JUDGE_CLAUSE = "do not judge the comparison yourself"
+GLOSSARY_VERIFY_NO_ALTER_CLAUSE = (
+    "Do not add, omit, or alter any value the command printed"
+)
+
+
+def test_verify_prompt_forbids_judging_or_altering_the_command_result(tmp_path):
+    """The verify call's whole safety property is that it RELAYS
+    --verify-merged's own output rather than deciding anything itself --
+    the template's own comment calls --verify-merged "never trusting the
+    merge call above's own claim", and that guarantee is worthless if the
+    RELAY step is then free to trust itself instead.
+
+    Two things are pinned, at two different strengths:
+
+    1. PRESENCE-ONLY (cannot be made behavioural with this mocked harness):
+       both clause texts must be in the rendered prompt. The mock agent()
+       here returns a canned Python dict for this label -- it never runs an
+       LLM that could ignore or obey these words -- so this half proves the
+       instruction is still WRITTEN, not that it is OBEYED.
+    2. STRUCTURAL / behavioural: CANON_VERIFY_SCHEMA's own
+       additionalProperties must be false. This is the one part of "do not
+       add ... any value" that IS independently enforced beyond the prompt
+       sentence -- the real Workflow engine's schema validation would reject
+       a reply carrying an extra field, regardless of what the prompt says.
+       It does NOT cover "omit" or "alter": a schema-conformant reply that
+       reports verified:true when the command actually printed false is
+       accepted by the schema and by isVerifiedResult() alike, exactly as
+       measured in the round-8 sweep -- for THAT half, the prompt clause
+       above is still the only defense that exists anywhere in this system.
+    """
+    out = one_batch_run(tmp_path)
+    verify = prompts_for(out, "glossary:verify")[0]
+
+    assert GLOSSARY_VERIFY_NO_JUDGE_CLAUSE in verify, (
+        "the verify prompt must tell the agent not to judge the comparison "
+        f"itself; prompt was:\n{verify}"
+    )
+    assert GLOSSARY_VERIFY_NO_ALTER_CLAUSE in verify, (
+        "the verify prompt must forbid adding, omitting, or altering any "
+        f"value the command printed; prompt was:\n{verify}"
+    )
+
+    verify_calls = [c for c in out["calls"] if c["label"] == "glossary:verify"]
+    assert len(verify_calls) == 1, (
+        f"expected exactly one glossary:verify call, got {len(verify_calls)}"
+    )
+    assert verify_calls[0]["hasSchema"] is True, (
+        "the glossary:verify call must be schema-carrying at all -- without a "
+        "schema, not even the 'add an extra field' half has any structural "
+        "backstop"
+    )
+    assert verify_calls[0]["schemaAdditionalProperties"] is False, (
+        "CANON_VERIFY_SCHEMA must set additionalProperties: false -- this is "
+        "the actual code-level enforcement of the 'do not add' half of the "
+        "prompt clause above, independent of whether the prompt sentence "
+        f"survives; got {verify_calls[0]['schemaAdditionalProperties']!r}"
+    )
+
+
+def test_verify_result_trust_rests_on_shape_alone_not_independent_corroboration(tmp_path):
+    """The STRONG form of the property the test above can only pin weakly.
+
+    Not "the schema forbids an extra field" (already pinned above) but: does
+    anything downstream treat a shape-valid reply as evidence the command
+    was actually run, or compare it against what the command itself
+    printed? Answered two ways, deliberately different in kind:
+
+    1. SOURCE-STRUCTURAL: isVerifiedResult() -- the one function standing
+       between the agent's reply and merged:true -- is read directly out of
+       the real template file and asserted to contain no subprocess call, no
+       second agent() call, and no reference to canon_validate.py. It is a
+       pure shape/value check over the reply OBJECT, nothing else. If a
+       future change adds real corroboration (re-running --verify-merged,
+       hashing something, anything that inspects reality instead of the
+       reply's shape), this is the assertion that would force a conscious
+       update here rather than staying silently true.
+    2. BEHAVIOURAL, over this file's own fixture: a MOCKED "glossary:verify"
+       reply that never invokes any subprocess at all -- one_batch_run's
+       canned `{ verified: true }` -- still makes the run report
+       merged:true. This is not new behaviour created by this test; it is
+       the precondition every other fixture in this file already depends on,
+       made an explicit, named assertion instead of an implicit one nobody
+       has to notice.
+    """
+    template_source = GLOSSARY_TEMPLATE.read_text(encoding="utf-8")
+    m = re.search(r"function isVerifiedResult\(v\) \{(.*?)\n\}", template_source, re.DOTALL)
+    assert m, (
+        "isVerifiedResult() not found in glossary-pass-wf.template.js -- has "
+        "it been renamed or restructured? This test's whole premise is that "
+        "function's own body."
+    )
+    body = m.group(1)
+    for marker in ("execFileSync", "spawnSync", "require(", "subprocess", "agent(", "canon_validate"):
+        assert marker not in body, (
+            f"isVerifiedResult() now contains {marker!r} -- it used to be a "
+            "pure shape/value check over the reply object with no "
+            "independent corroboration of anything; if that changed on "
+            "purpose, this assertion (and the docstring above citing it as "
+            f"the sole trust point) needs to be revisited, not silenced. "
+            f"Body was:\n{body}"
+        )
+
+    out = one_batch_run(tmp_path)
+    assert out["result"]["merged"] is True, (
+        "a schema-valid, canned verify reply that never invoked the real "
+        "--verify-merged command is still trusted -- confirms there is no "
+        f"independent corroboration step; result was {out['result']}"
+    )
 
 
 def test_a_rejected_attempts_snapshot_never_reaches_the_merge(tmp_path):

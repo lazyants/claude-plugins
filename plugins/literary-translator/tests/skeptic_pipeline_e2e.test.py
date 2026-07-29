@@ -19,6 +19,7 @@ see ``pytest.ini``'s own comment on this convention).
 """
 import importlib.util
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -267,21 +268,52 @@ def _wrap_for_execution(js_source: str) -> str:
 # at the real call site left the whole suite green: batch 1's dispatch replayed
 # batch 0's recorded prompt, batch 0's own fragment path, and the flat-array
 # `.indexOf` check accepted it because *some* call to the real builder had once
-# produced that exact string. So identity has to be bound to the batch it was
-# built for, not merely to the builder that built it: the recorder now keys by
-# `batch.index` (coerced to string to match the label-derived `idx` string
-# below), and the dispatch branch requires the recorded prompt for THIS idx to
-# equal what was actually sent. A dispatch call whose prompt is not the one the
-# builder produced for this call's own batch index did not dispatch this
-# batch's work -- a decoy that calls the builder for the WRONG batch and
-# forwards that result no longer satisfies the guard.
+# produced that exact string. Round 8's fix bound identity to `batch.index`
+# instead (coerced to string to match the label-derived `idx` string below),
+# requiring the prompt recorded for THIS idx to equal what was actually sent.
+#
+# Round 9 finding (codex, HIGH; survived independent verification against the
+# real template, driven through both harness copies): `batch.index` is a
+# property read off the very object the call site hands to
+# batchDispatchPrompt() -- forgeable the same way the round-7 array was.
+# `batchDispatchPrompt({ index: batch.index, assignments: BATCHES[0]
+# .assignments })` copies the real, correct index onto a fabricated object
+# carrying a DIFFERENT batch's assignments: the real builder still runs (the
+# recorder still fires) and records the wrong-content prompt under the
+# numerically-correct key, so round 8's guard accepted it -- same index,
+# wrong content, right function.
+#
+# The fix binds to something the call site cannot forge at all: the batch
+# OBJECT ITSELF, by reference, never a property copied off it. `BATCHES`
+# inside the wrapped workflow below and this harness's own `BATCHES_ARGS`
+# (declared further down) are the SAME array with the SAME element
+# references -- `BATCHES_ARGS` is passed as `args`, and the real template's
+# own `const BATCHES = Array.isArray(args) ? args : JSON.parse(args)` keeps
+# that exact reference when args is already an array (which it is here). So
+# the dispatch branch below looks up "the batch idx REALLY names" from its
+# own BATCHES_ARGS copy -- never from anything the call site passed -- and
+# requires the recorded prompt to have come from calling
+# batchDispatchPrompt() with THAT EXACT object. A forged literal can copy
+# every property it wants; it can never BE that reference.
+#
+# What this closes: any decoy that calls the real builder (or forwards its
+# result) with an object that is not, by reference, this harness's own batch
+# object for the claimed index -- whether the object is wholesale fabricated
+# (round 9) or genuinely a different batch (round 7). What it does NOT
+# close BY ITSELF: in-place mutation of a genuine batch object's own fields
+# (e.g. `BATCHES[1].assignments = BATCHES[0].assignments` before calling
+# batchDispatchPrompt(BATCHES[1])) -- the reference stays the harness's own,
+# so this guard alone would still accept it. That rung is closed separately,
+# by removing the ability to mutate at all rather than detecting it after
+# the fact -- see the recursive freeze on BATCHES_ARGS below, in
+# SKEPTIC_HARNESS_TEMPLATE, for the fix and its own measurement.
 _DISPATCH_PROMPT_RECORDER = """
 globalThis.__realDispatchPrompts__ = new Map();
 {
   const __origBatchDispatchPrompt = batchDispatchPrompt;
   batchDispatchPrompt = function (batch) {
     const built = __origBatchDispatchPrompt(batch);
-    globalThis.__realDispatchPrompts__.set(String(batch.index), built);
+    globalThis.__realDispatchPrompts__.set(batch, built);
     return built;
   };
 }
@@ -313,6 +345,66 @@ __WRAPPED_SOURCE__
 
 const PLAN = __PLAN_JSON__;
 const BATCHES_ARGS = __BATCHES_JSON__;
+// Round 9 in-place-mutation rung (named, not yet closed, in
+// _DISPATCH_PROMPT_RECORDER's header comment above): reference identity
+// survives a call site that mutates a genuine batch object's own fields in
+// place before making an otherwise-unmodified real call -- e.g.
+// `BATCHES[1].assignments = BATCHES[0].assignments` followed by
+// `batchDispatchPrompt(BATCHES[1])`. Measured directly: WITHOUT this freeze,
+// that exact decoy dispatches batch 1 carrying batch 0's assignment_id and
+// the round-9 guard accepts it (rc=0, merged=true; the recorded prompt
+// faithfully reflects the mutated, wrong content because the object
+// REFERENCE never changed).
+//
+// Closed here by removing the forgery rather than detecting it, the same
+// category change as round 9's own fix: every value reachable from
+// BATCHES_ARGS is frozen, RECURSIVELY (own enumerable properties, arrays
+// and plain objects alike -- not merely each batch object's own top-level
+// fields), before the wrapped workflow ever runs. `Object.freeze()` alone
+// is shallow; the recursive walk below is what makes the freeze reach
+// `batch.assignments[i].windows[j]` and not just `batch.assignments`
+// itself.
+//
+// Verified SAFE to do, not just convenient: skeptic-pass-wf.template.js
+// never writes to a batch, an assignment, or a window anywhere -- grepped
+// for every assignment/push/splice/sort/reverse touching `batch`/
+// `BATCHES`/`.assignments`/`.windows` (zero hits), and every other
+// reference is a read (`batch.index`, `JSON.stringify(batch.assignments,
+// ...)`, etc.). Then measured, not just read: this SAME recursive freeze
+// was driven through both harness copies' FULL existing test suites --
+// every precheck/dispatch/wait/wait-recheck/frozen-check/merge/verify path
+// either file's tests exercise against the real template -- 29/29 passed,
+// nothing threw. The freeze mechanism itself was sanity-checked against a
+// live artificial mutation (`batch.assignments = []` inside batchStep())
+// to confirm it is not silently inert -- that threw, as expected, before
+// this measurement was trusted.
+//
+// RED, against the exact named decoy above (`BATCHES[1].assignments =
+// BATCHES[0].assignments`, call site otherwise untouched): with this
+// freeze in place, test_e2e_batch_never_ready_short_circuits_before_merge
+// fails -- but the evidence is a runtime `TypeError: Cannot assign to read
+// only property 'assignments' of object '#<Object>'`, thrown at the
+// MUTATION SITE itself (right after `const BATCHES = ...` in the real
+// template), never reaching the dispatch guard or any of this file's own
+// assertions. That is the JS engine's strict-mode enforcement of the
+// freeze, not this harness's own dispatch-identity guard catching
+// anything -- a different kind of evidence from every other guard in this
+// file, recorded here so the next reader does not mistake one for the
+// other.
+//
+// What this does NOT close: if some future control-flow change needs to
+// legitimately write into a batch/assignment/window object, this freeze
+// throws on that too and must be revisited together with that change --
+// this is a snapshot of a currently-measured invariant (the template is
+// read-only over its own `args`), not a permanent guarantee.
+(function __freezeBatchesDeep__(o, seen) {
+  seen = seen || new Set();
+  if (o === null || typeof o !== "object" || seen.has(o)) return o;
+  seen.add(o);
+  Object.freeze(o);
+  Object.getOwnPropertyNames(o).forEach(function (k) { __freezeBatchesDeep__(o[k], seen); });
+  return o;
+})(BATCHES_ARGS);
 const ROOT = __ROOT_JSON__;
 const RUN_ID = __RUN_ID_JSON__;
 const RUN_DIR = ROOT + "/skeptic/runs/" + RUN_ID;
@@ -339,6 +431,9 @@ async function agent(promptText, opts) {
     // schema-validation/retry-until-valid enforcement, which this harness
     // was never built to model.
     schemaRequired: (opts.schema && opts.schema.required) || null,
+    // Round-8: same idea as schemaRequired above, for the OTHER half of a
+    // schema's own enforcement -- whether it rejects an extra field outright.
+    schemaAdditionalProperties: opts.schema ? opts.schema.additionalProperties : null,
     // Round-5 finding F1: a LABEL is a proxy for "this call really did the
     // work its label names", not proof of it -- this mock never inspected
     // promptText, so a decoy that fires a semantically empty agent() call
@@ -394,17 +489,27 @@ async function agent(promptText, opts) {
     // Round 7 finding: a flat "was this prompt built by the real function at
     // all" check does not bind the prompt to THIS call's own batch index --
     // a mutant that dispatches every batch with batch 0's prompt (right
-    // function, wrong batch) stayed invisible to the whole suite. The guard
-    // now requires the prompt recorded for idx specifically -- see
-    // _DISPATCH_PROMPT_RECORDER above -- to match what was actually sent.
-    if (globalThis.__realDispatchPrompts__.get(idx) !== promptText) {
+    // function, wrong batch) stayed invisible to the whole suite. Round 8
+    // bound the prompt to `idx` via `batch.index`, a property read off the
+    // call site's own argument.
+    //
+    // Round 9 finding: that property is exactly as forgeable as the round-7
+    // array was -- see _DISPATCH_PROMPT_RECORDER's header comment above for
+    // the mutation and the full derivation of this fix. `trustedBatch` is
+    // looked up from BATCHES_ARGS (this harness's OWN copy, independent of
+    // anything the call site passed), and the recorded prompt must have
+    // come from calling batchDispatchPrompt() with THAT EXACT object
+    // reference, not merely with something claiming its index.
+    const trustedBatch = BATCHES_ARGS.find(function (b) { return String(b.index) === idx; });
+    if (!trustedBatch || globalThis.__realDispatchPrompts__.get(trustedBatch) !== promptText) {
       throw new Error(
-        "skeptic:dispatch:" + idx + " was called with a prompt that does not match " +
-        "what batchDispatchPrompt() produced for batch " + idx + " specifically, so " +
-        "this call did not dispatch THIS batch's own work (it may have replayed " +
-        "another batch's recorded prompt). No fragment is written for it: a decoy " +
-        "must not be able to manufacture the artifact a downstream on-disk assertion " +
-        "reads. Prompt seen: " + JSON.stringify(promptText.slice(0, 120))
+        "skeptic:dispatch:" + idx + " was called with a prompt that was not built by " +
+        "calling the real batchDispatchPrompt() with this harness's own batch object " +
+        "for index " + idx + " -- either the prompt was forged outright, or the real " +
+        "builder was called with a different object (possibly one that copies this " +
+        "index but carries a different batch's content). No fragment is written for " +
+        "it: a decoy must not be able to manufacture the artifact a downstream on-disk " +
+        "assertion reads. Prompt seen: " + JSON.stringify(promptText.slice(0, 120))
       );
     }
     if (p.dispatchWrite !== undefined) {
@@ -1549,6 +1654,334 @@ def test_e2e_verify_schema_requires_frozen_input_mismatch(tmp_path):
     assert "frozen_input_mismatch" in verify_calls[0]["schemaRequired"]
 
 
+# Round-8 sweep finding: skeptic's verifyMergedPrompt() is the same shape as
+# glossary's glossaryVerifyPrompt() (a disk-independent, "never trusting the
+# merge call above's own claim" step), and its own "do not judge the
+# comparison yourself" / "Do not add, omit, or alter any value the command
+# printed" clauses were equally unpinned. See
+# tests/glossary_snapshot_ordering.test.py's
+# test_verify_prompt_forbids_judging_or_altering_the_command_result for the
+# sibling pin and its own two-strength explanation (presence-only for
+# "judge"/"omit"/"alter", structural for "add" via additionalProperties).
+SKEPTIC_VERIFY_NO_JUDGE_CLAUSE = "do not judge the comparison yourself"
+SKEPTIC_VERIFY_NO_ALTER_CLAUSE = (
+    "Do not add, omit, or alter any value the command printed"
+)
+
+
+def test_e2e_verify_prompt_forbids_judging_or_altering_the_command_result(tmp_path):
+    """Same property as the glossary sibling test, over the real
+    skeptic-pass-wf.template.js. PRESENCE-ONLY for the "judge"/"omit"/"alter"
+    half (this mocked harness cannot simulate an LLM being talked into or
+    resisting an embedded instruction -- it only proves the sentence is still
+    in the rendered prompt). STRUCTURAL for the "add" half: SKEPTIC_VERIFY_
+    SCHEMA's own additionalProperties must be false, which is real Workflow-
+    engine-enforced regardless of what the prompt says."""
+    durable_root = str(tmp_path)
+    lang_dir = tmp_path / "languages"
+    particle_config = write_particle_config(lang_dir)
+    lang = bn.load_language_config(particle_config, languages_dir=lang_dir)
+    text = "Jean walked home alone."
+    block_id, blk = block(text)
+    manifest_path = tmp_path / "manifest.json"
+    write_json(manifest_path, make_manifest((block_id, blk)))
+    jean_evidence = evidence_for("Jean", block_id, "seg01", text, lang)
+
+    run_id = "e2e-run-verify-prompt-forbids"
+    run_dir = tmp_path / "skeptic" / "runs" / run_id
+    write_json(run_dir / "assignments_0.json", [aid("Jean")])
+    write_json(run_dir / "assignments.json", make_aggregate_manifest(
+        run_id, [make_assignment_for_manifest("Jean", [jean_evidence])],
+    ))
+
+    batches = [{"index": 0, "assignments": [make_assignment_for_args("Jean", [window_with_text(jean_evidence, text)])]}]
+    dispatch_doc = {"schema_version": 1, "run_id": run_id, "records": [adverse_record("Jean", jean_evidence)]}
+    plan = {"0": {"precheck": "ABSENT 0", "dispatchWrite": dispatch_doc, "wait": "READY 0"}}
+
+    out = run_skeptic_workflow(
+        tmp_path=tmp_path, durable_root=durable_root, particle_config=particle_config,
+        run_id=run_id, batch_agent_cap=10_000, batches=batches, plan=plan,
+    )
+    verify_calls = [c for c in out["calls"] if c["label"] == "skeptic:verify"]
+    assert len(verify_calls) == 1, (
+        f"expected exactly one skeptic:verify call, got {len(verify_calls)}"
+    )
+    verify_prompt = verify_calls[0]["promptText"]
+
+    assert SKEPTIC_VERIFY_NO_JUDGE_CLAUSE in verify_prompt, (
+        "the verify prompt must tell the agent not to judge the comparison "
+        f"itself; prompt was:\n{verify_prompt}"
+    )
+    assert SKEPTIC_VERIFY_NO_ALTER_CLAUSE in verify_prompt, (
+        "the verify prompt must forbid adding, omitting, or altering any "
+        f"value the command printed; prompt was:\n{verify_prompt}"
+    )
+    assert verify_calls[0]["hasSchema"] is True
+    assert verify_calls[0]["schemaAdditionalProperties"] is False, (
+        "SKEPTIC_VERIFY_SCHEMA must set additionalProperties: false -- the "
+        "code-level enforcement of the 'do not add' half, independent of "
+        f"whether the prompt sentence survives; got "
+        f"{verify_calls[0]['schemaAdditionalProperties']!r}"
+    )
+
+
+def test_e2e_verify_result_trust_rests_on_shape_alone_not_independent_corroboration(tmp_path):
+    """The STRONG form of the property the test above can only pin weakly.
+    Same shape as glossary_snapshot_ordering.test.py's sibling test of the
+    same name (see that docstring for the full argument) -- over skeptic's
+    own isVerifiedResult(), which its own comment calls "IDENTICAL to
+    glossary-pass-wf.template.js's own isVerifiedResult()".
+
+    1. SOURCE-STRUCTURAL: isVerifiedResult() is read directly out of the real
+       template and asserted to contain no subprocess call, no second
+       agent() call, and no reference to skeptic_ready.py -- a pure
+       shape/value check over the reply object, nothing else.
+    2. BEHAVIOURAL: a mocked "skeptic:verify" reply that never invokes any
+       subprocess (this file's own canned `{ verified: true }` default) still
+       makes the run report merged:true.
+    """
+    template_source = SKEPTIC_PASS_TEMPLATE.read_text(encoding="utf-8")
+    m = re.search(r"function isVerifiedResult\(v\) \{(.*?)\n\}", template_source, re.DOTALL)
+    assert m, (
+        "isVerifiedResult() not found in skeptic-pass-wf.template.js -- has "
+        "it been renamed or restructured? This test's whole premise is that "
+        "function's own body."
+    )
+    body = m.group(1)
+    for marker in ("execFileSync", "spawnSync", "require(", "subprocess", "agent(", "skeptic_ready"):
+        assert marker not in body, (
+            f"isVerifiedResult() now contains {marker!r} -- it used to be a "
+            "pure shape/value check over the reply object with no "
+            "independent corroboration of anything; if that changed on "
+            "purpose, this assertion needs to be revisited, not silenced. "
+            f"Body was:\n{body}"
+        )
+
+    durable_root = str(tmp_path)
+    lang_dir = tmp_path / "languages"
+    particle_config = write_particle_config(lang_dir)
+    lang = bn.load_language_config(particle_config, languages_dir=lang_dir)
+    text = "Jean walked home alone."
+    block_id, blk = block(text)
+    manifest_path = tmp_path / "manifest.json"
+    write_json(manifest_path, make_manifest((block_id, blk)))
+    jean_evidence = evidence_for("Jean", block_id, "seg01", text, lang)
+
+    run_id = "e2e-run-verify-trust-shape-alone"
+    run_dir = tmp_path / "skeptic" / "runs" / run_id
+    write_json(run_dir / "assignments_0.json", [aid("Jean")])
+    write_json(run_dir / "assignments.json", make_aggregate_manifest(
+        run_id, [make_assignment_for_manifest("Jean", [jean_evidence])],
+    ))
+
+    batches = [{"index": 0, "assignments": [make_assignment_for_args("Jean", [window_with_text(jean_evidence, text)])]}]
+    dispatch_doc = {"schema_version": 1, "run_id": run_id, "records": [adverse_record("Jean", jean_evidence)]}
+    plan = {"0": {"precheck": "ABSENT 0", "dispatchWrite": dispatch_doc, "wait": "READY 0"}}
+
+    out = run_skeptic_workflow(
+        tmp_path=tmp_path, durable_root=durable_root, particle_config=particle_config,
+        run_id=run_id, batch_agent_cap=10_000, batches=batches, plan=plan,
+    )
+    assert out["result"]["merged"] is True, (
+        "a schema-valid, canned verify reply that never invoked the real "
+        "skeptic_ready.py --verify-merged command is still trusted -- "
+        f"confirms there is no independent corroboration step; result was "
+        f"{out['result']}"
+    )
+
+
+# Round-8 sweep finding: PRECHECK and WAIT (chunk and re-check alike) are each
+# told "do nothing else" beyond their one read-only check -- unpinned, the
+# same shape as the glossary sibling. PRESENCE-ONLY: this mocked agent()
+# cannot simulate an LLM doing something extra with its bash tool, so this
+# proves the instruction is still WRITTEN, not that it is OBEYED.
+SKEPTIC_PRECHECK_NOTHING_ELSE_CLAUSE = (
+    "do not create, dispatch, or resolve any entity yourself"
+)
+SKEPTIC_WAIT_NOTHING_ELSE_CLAUSE = (
+    "do not touch any files, and do not resolve any entity yourself"
+)
+
+
+def test_e2e_precheck_and_wait_are_told_to_do_nothing_beyond_their_own_check(tmp_path):
+    """No agent() call in any of this plugin's templates carries a tool-
+    restriction option (confirmed in the round-8 sweep), so for a precheck or
+    wait step that is supposed to be mechanical and read-only, the prompt's
+    own "do nothing else" sentence is the only thing standing between "ran
+    the one suggested command" and "did whatever else its bash tool allows".
+
+    Two runs: the first (default plan) reaches precheck and the wait chunk;
+    the second forces `wait: "PENDING 0"` (the same shape
+    test_e2e_not_ready_batches_without_tamper_still_reports_ordinary_failure
+    uses) so the chunk budget exhausts and the re-check -- which defaults to
+    the SAME reply as the chunk when no `recheck` override is given, see this
+    file's own mock agent() comment -- actually fires."""
+    durable_root = str(tmp_path)
+    lang_dir = tmp_path / "languages"
+    particle_config = write_particle_config(lang_dir)
+    lang = bn.load_language_config(particle_config, languages_dir=lang_dir)
+    text = "Jean walked home alone."
+    block_id, blk = block(text)
+    manifest_path = tmp_path / "manifest.json"
+    write_json(manifest_path, make_manifest((block_id, blk)))
+    jean_evidence = evidence_for("Jean", block_id, "seg01", text, lang)
+
+    run_id = "e2e-run-precheck-wait-nothing-else"
+    run_dir = tmp_path / "skeptic" / "runs" / run_id
+    write_json(run_dir / "assignments_0.json", [aid("Jean")])
+    write_json(run_dir / "assignments.json", make_aggregate_manifest(
+        run_id, [make_assignment_for_manifest("Jean", [jean_evidence])],
+    ))
+
+    batches = [{"index": 0, "assignments": [make_assignment_for_args("Jean", [window_with_text(jean_evidence, text)])]}]
+    dispatch_doc = {"schema_version": 1, "run_id": run_id, "records": [adverse_record("Jean", jean_evidence)]}
+    plan = {"0": {"precheck": "ABSENT 0", "dispatchWrite": dispatch_doc, "wait": "READY 0"}}
+
+    out = run_skeptic_workflow(
+        tmp_path=tmp_path, durable_root=durable_root, particle_config=particle_config,
+        run_id=run_id, batch_agent_cap=10_000, batches=batches, plan=plan,
+    )
+    precheck_calls = [c for c in out["calls"] if c["label"] == "skeptic:precheck:0"]
+    assert len(precheck_calls) == 1
+    assert SKEPTIC_PRECHECK_NOTHING_ELSE_CLAUSE in precheck_calls[0]["promptText"], (
+        "the precheck prompt must forbid the agent from doing anything "
+        f"beyond its one read-only check; prompt was:\n{precheck_calls[0]['promptText']}"
+    )
+    wait_calls = [c for c in out["calls"] if c["label"] == "skeptic:wait:0"]
+    assert wait_calls, "expected at least one skeptic:wait:0 call"
+    for c in wait_calls:
+        assert SKEPTIC_WAIT_NOTHING_ELSE_CLAUSE in c["promptText"], (
+            "every wait chunk prompt must forbid the agent from touching "
+            f"files or resolving entities itself; prompt was:\n{c['promptText']}"
+        )
+
+    # The re-check only fires once every wait chunk stays PENDING, which is
+    # also the branch that runs skeptic_ready.py --check-frozen-inputs for
+    # REAL (see this file's mock agent() comment on "skeptic:frozen-check"):
+    # the scripts must actually be staged under durable_root for that
+    # subprocess call to find them.
+    stage_skeptic_ready_scripts(tmp_path)
+    canon_path = tmp_path / "canon.json"
+    canon_path.write_text(json.dumps({"entries": {}}), encoding="utf-8")
+    senses_path = tmp_path / "canon_senses.json"
+    senses_path.write_text(
+        json.dumps({"schema_version": 1, "entries_by_source_form": {}}), encoding="utf-8"
+    )
+    recheck_run_id = "e2e-run-precheck-wait-nothing-else-recheck"
+    recheck_run_dir = tmp_path / "skeptic" / "runs" / recheck_run_id
+    write_json(recheck_run_dir / "assignments_0.json", [aid("Jean")])
+    write_json(recheck_run_dir / "assignments.json", {
+        **make_aggregate_manifest(recheck_run_id, [make_assignment_for_manifest("Jean", [])]),
+        "canon_sha256": suspicion_scan.compute_frozen_input_hash(canon_path),
+        "manifest_sha256": suspicion_scan.compute_frozen_input_hash(manifest_path),
+        "senses_sha256": suspicion_scan.compute_frozen_input_hash(senses_path),
+    })
+    recheck_batches = [{"index": 0, "assignments": [make_assignment_for_args("Jean", [])]}]
+    recheck_plan = {"0": {"precheck": "ABSENT 0", "wait": "PENDING 0"}}
+    recheck_out = run_skeptic_workflow(
+        tmp_path=tmp_path, durable_root=durable_root, particle_config=particle_config,
+        run_id=recheck_run_id, batch_agent_cap=10_000, batches=recheck_batches, plan=recheck_plan,
+    )
+    recheck_calls = [c for c in recheck_out["calls"] if c["label"] == "skeptic:wait-recheck:0"]
+    assert recheck_calls, (
+        "expected the wait re-check to fire when every chunk stays PENDING; "
+        f"calls were {[c['label'] for c in recheck_out['calls']]}"
+    )
+    for c in recheck_calls:
+        assert SKEPTIC_WAIT_NOTHING_ELSE_CLAUSE in c["promptText"], (
+            "the wait re-check prompt must forbid the agent from touching "
+            f"files or resolving entities itself; prompt was:\n{c['promptText']}"
+        )
+
+
+# Round-8 sweep item 2 (own-ranked list): the dispatch prompt's own STOP
+# instruction over skeptic_ready.py --validate-fragment's self-check loop.
+#
+# WHY THIS ONE RANKS ABOVE EVERYTHING BELOW IT. Unlike glossary's --check-
+# batch (confirmed, in the round-8 sweep, structurally incapable of writing
+# without --approve-to), skeptic_ready.py --validate-fragment is NOT read-
+# only by the script's own design: a successful run REWRITES the fragment in
+# place (dropping unverified propose_split referents, coercing a record to
+# insufficient_window). Grepped skeptic_ready.py for any lock file, mutation
+# marker, or double-invocation guard -- pattern `idempoten|already.normalized
+# |lock` across the whole script -- and found none. So a second invocation
+# over an already-normalized fragment silently corrupts that fragment's own
+# record of how many citations were originally offered, with no error
+# signal anywhere, and this prompt sentence is the ONLY thing that tells the
+# dispatch agent's self-check retry loop to stop calling it once it has
+# succeeded once. This corroborates a fact already on record before this
+# round (skeptic_ready.py --validate-fragment's non-idempotence was
+# previously measured but never had a test asserting the mitigating prompt
+# clause survives).
+#
+# PRESENCE-ONLY, and there is no stronger form available here. The
+# glossary/skeptic VERIFY pins above can go structural because the
+# ORCHESTRATING JS makes the trust decision (isVerifiedResult() et al.), so
+# this harness can observe it. Here the decision being guarded is "how many
+# times does the DISPATCHED CODEX SUBPROCESS itself invoke this command inside
+# its own self-check retry loop" -- entirely internal to that subprocess,
+# never surfaced to the orchestrating JS this harness can drive or observe.
+# Nothing in this file's mock agent() simulates codex's own bash-tool retry
+# loop (it returns a canned FRAGMENT/dispatchWrite reply directly), so no
+# structural assertion here could prove compliance even in principle. That is
+# a limitation of what this harness can prove, not a claim that the property
+# is unimportant -- it is this round's single highest-severity finding by the
+# ranking already reported.
+SKEPTIC_DISPATCH_STOP_AT_FIRST_SUCCESS_CLAUSE = (
+    "STOP at the FIRST \"success\": true and do not run the command again "
+    "after that"
+)
+SKEPTIC_DISPATCH_NOT_IDEMPOTENT_CLAUSE = "it is not idempotent"
+
+
+def test_e2e_dispatch_prompt_forbids_rerunning_the_self_check_after_success(tmp_path):
+    """See the module-level comment just above this test for the full
+    severity argument (no script-level lock exists; this sentence is the
+    sole defence against silent data corruption) and for why this pin
+    cannot be made behavioural with this harness."""
+    durable_root = str(tmp_path)
+    lang_dir = tmp_path / "languages"
+    particle_config = write_particle_config(lang_dir)
+    lang = bn.load_language_config(particle_config, languages_dir=lang_dir)
+    text = "Jean walked home alone."
+    block_id, blk = block(text)
+    manifest_path = tmp_path / "manifest.json"
+    write_json(manifest_path, make_manifest((block_id, blk)))
+    jean_evidence = evidence_for("Jean", block_id, "seg01", text, lang)
+
+    run_id = "e2e-run-dispatch-stop-at-first-success"
+    run_dir = tmp_path / "skeptic" / "runs" / run_id
+    write_json(run_dir / "assignments_0.json", [aid("Jean")])
+    write_json(run_dir / "assignments.json", make_aggregate_manifest(
+        run_id, [make_assignment_for_manifest("Jean", [jean_evidence])],
+    ))
+
+    batches = [{"index": 0, "assignments": [make_assignment_for_args("Jean", [window_with_text(jean_evidence, text)])]}]
+    dispatch_doc = {"schema_version": 1, "run_id": run_id, "records": [adverse_record("Jean", jean_evidence)]}
+    plan = {"0": {"precheck": "ABSENT 0", "dispatchWrite": dispatch_doc, "wait": "READY 0"}}
+
+    out = run_skeptic_workflow(
+        tmp_path=tmp_path, durable_root=durable_root, particle_config=particle_config,
+        run_id=run_id, batch_agent_cap=10_000, batches=batches, plan=plan,
+    )
+    dispatch_calls = [c for c in out["calls"] if c["label"] == "skeptic:dispatch:0"]
+    assert len(dispatch_calls) == 1, (
+        f"expected exactly one skeptic:dispatch:0 call, got {len(dispatch_calls)}"
+    )
+    dispatch_prompt = dispatch_calls[0]["promptText"]
+
+    assert SKEPTIC_DISPATCH_STOP_AT_FIRST_SUCCESS_CLAUSE in dispatch_prompt, (
+        "the dispatch prompt must tell codex to stop re-running the self-"
+        "check once it has already succeeded once; prompt was:\n"
+        f"{dispatch_prompt}"
+    )
+    assert SKEPTIC_DISPATCH_NOT_IDEMPOTENT_CLAUSE in dispatch_prompt, (
+        "the dispatch prompt must also state WHY -- that a second "
+        "invocation over an already-normalized fragment is destructive, not "
+        f"merely wasteful; prompt was:\n{dispatch_prompt}"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Round 6 -- parity pin for the dispatch-write identity guard.
 #
@@ -1805,4 +2238,117 @@ def test_dispatch_write_guard_rejects_cross_batch_replay_in_both_harness_copies(
             f"batchDispatchPrompt() built for a DIFFERENT batch (batch 0), replayed "
             f"under batch 1's own dispatch label -- right function, wrong index. "
             f"Result: {result}"
+        )
+
+
+# Round 9 (codex, HIGH): the round-8 fix above closed WRONG-INDEX replay, and
+# stayed blind to SAME-INDEX, wrong-CONTENT forgery -- a fabricated object
+# that copies the real batch's own `.index` but carries a DIFFERENT batch's
+# `.assignments`. `batchDispatchPrompt()` is still the real function, still
+# genuinely called, still genuinely producing a prompt from whatever object
+# it is handed; what is forged is the object, not the call. codex applied
+# this exact mutation to the real template (`batchDispatchPrompt(batch)` ->
+# `batchDispatchPrompt({ index: batch.index, assignments: BATCHES[0]
+# .assignments })`), built both real harness copies, and ran each under node
+# directly: rc=0, merged=true for both, with the round-8 different-index
+# replay still correctly rejected as a control (the guards were live, just
+# blind to this shape). See _DISPATCH_PROMPT_RECORDER's header comment above
+# for the object-identity fix this drove.
+_DISPATCH_GUARD_SAME_INDEX_WRONG_CONTENT_FIXTURE = r"""
+export const meta = { version: "dispatch-guard-same-index-wrong-content-parity-pin-fixture" };
+
+function batchDispatchPrompt(batch) {
+  return "REAL PROMPT for " + batch.assignments.map(a => a.assignment_id).join(",");
+}
+
+const batch0 = args[0];
+const batch1 = args[1];
+
+const batch0Reply = await agent(batchDispatchPrompt(batch0), {
+  phase: "SkepticPass", label: "skeptic:dispatch:0",
+});
+
+let forgeryRejected = false;
+let forgeryErrorMessage = null;
+let forgeryReply = null;
+try {
+  // The decoy: a FABRICATED object literal copying batch 1's own real
+  // index but carrying batch 0's real assignments -- codex's exact
+  // finding. The call to batchDispatchPrompt() is genuine; the object it
+  // is handed is not.
+  forgeryReply = await agent(
+    batchDispatchPrompt({ index: batch1.index, assignments: batch0.assignments }),
+    { phase: "SkepticPass", label: "skeptic:dispatch:1" },
+  );
+} catch (err) {
+  forgeryRejected = true;
+  forgeryErrorMessage = String(err && err.message || err);
+}
+
+return {
+  batch0Reply: batch0Reply,
+  forgeryRejected: forgeryRejected,
+  forgeryErrorMessage: forgeryErrorMessage,
+  forgeryReply: forgeryReply,
+};
+"""
+
+
+def _run_dispatch_guard_same_index_wrong_content_fixture(build_harness_fn, tmp_path: Path, label: str) -> dict:
+    """Same one-input-two-harnesses discipline as the cross-batch-replay
+    fixture above, for the same-index-wrong-content shape."""
+    assert NODE is not None, "node executable not found on PATH"
+    batches = [
+        {"index": 0, "assignments": [{
+            "assignment_id": aid("Jean"), "source_form": "Jean", "canonical_target_form": "Jean",
+            "risk_classes": ["high_dispersion"], "windows_truncated": False, "windows": [],
+        }]},
+        {"index": 1, "assignments": [{
+            "assignment_id": aid("Marie"), "source_form": "Marie", "canonical_target_form": "Marie",
+            "risk_classes": ["high_dispersion"], "windows_truncated": False, "windows": [],
+        }]},
+    ]
+    harness_text = build_harness_fn(
+        _DISPATCH_GUARD_SAME_INDEX_WRONG_CONTENT_FIXTURE, batches, {}, str(tmp_path),
+        "same-index-wrong-content-pin-run",
+    )
+    harness_path = tmp_path / f"dispatch_guard_same_index_wrong_content_{label}.js"
+    harness_path.write_text(harness_text, encoding="utf-8")
+    proc = subprocess.run([NODE, str(harness_path)], capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, (
+        f"{label}'s same-index-wrong-content parity harness process itself failed "
+        f"(exit {proc.returncode}) -- this means the LEGITIMATE batch-0 dispatch was "
+        f"rejected too, not just the forgery:\nSTDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}"
+    )
+    return json.loads(proc.stdout)["result"]
+
+
+def test_dispatch_write_guard_rejects_same_index_wrong_content_forgery_in_both_harness_copies(tmp_path):
+    """Round 9 (codex, HIGH). Pins the fix in _DISPATCH_PROMPT_RECORDER's
+    header comment: a decoy that fabricates an object copying a real batch's
+    own `.index` but carrying a DIFFERENT batch's `.assignments`, then calls
+    the REAL batchDispatchPrompt() with it, must be rejected in both harness
+    copies -- same index, wrong content, right function is not a lesser
+    attack than wrong index; it defeated the round-8 index-keyed guard
+    outright (measured directly, both copies, rc=0/merged=true, before this
+    fix)."""
+    results = {
+        "skeptic_pipeline_e2e.test.py": _run_dispatch_guard_same_index_wrong_content_fixture(
+            build_skeptic_harness, tmp_path, "e2e",
+        ),
+        "skeptic_confident_mismerge.test.py": _run_dispatch_guard_same_index_wrong_content_fixture(
+            _load_sibling_mismerge_module_for_dispatch_guard_parity().build_skeptic_harness,
+            tmp_path, "mismerge",
+        ),
+    }
+    for label, result in results.items():
+        assert result["batch0Reply"] == "FRAGMENT 0", (
+            f"{label}'s dispatch-write identity guard rejected batch 0's own "
+            f"legitimate dispatch -- over-broad, not just under-broad. Result: {result}"
+        )
+        assert result["forgeryRejected"] is True, (
+            f"{label}'s dispatch-write identity guard ACCEPTED a fabricated object "
+            f"that copies batch 1's own index but carries batch 0's assignments, "
+            f"passed to the REAL batchDispatchPrompt() -- same index, wrong content, "
+            f"right function. Result: {result}"
         )

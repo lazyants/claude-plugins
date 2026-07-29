@@ -49,6 +49,7 @@ advisory, never blocking); 2 on a fatal input problem (missing/unreadable/
 schema-invalid `skeptic_triage.json`, or a malformed `manifest.json`).
 """
 import argparse
+import functools
 import json
 import re
 import sys
@@ -374,7 +375,11 @@ def _compute_invisible_chars() -> frozenset:
     invisible characters, used to control the layout or processing of
     text", the Unicode Standard's own definition, the authoritative table
     this derivation is built on -- swept across the WHOLE codepoint space
-    (0x0000-0x10FFFF), 162 members.
+    (0x0000-0x10FFFF). Counted rather than remembered, because round 9
+    caught this sentence conflating two populations: the sweep finds 170 Cf
+    codepoints; nine are excluded as `_BIDI_CONTROL_CHARS` and U+034F is
+    added by name, so `_INVISIBLE_CHARS` holds 162 members of which 161
+    are Cf. 127 of the 162 sit above the BMP.
 
     Round 7 widened that sweep from the BMP, and the paragraph it replaced
     is worth keeping as an example of the defect class this release exists
@@ -470,10 +475,27 @@ def _compute_invisible_chars() -> frozenset:
     NOMINAL DIGIT SHAPES, formally deprecated by Unicode since 6.3.0), six
     Arabic/Syriac format marks (U+0600-U+0605, U+061C, U+06DD, U+070F,
     U+0890-U+0891, U+08E2), and three obsolete interlinear-annotation
-    controls (U+FFF9-U+FFFB). None are used by any script this plugin
-    translates; marking one if it ever
-    appears costs nothing and is correct for a genuinely invisible
-    character no legitimate `source_form` has a reason to contain.
+    controls (U+FFF9-U+FFFB).
+
+    Round 9 correction, and it is the one claim in this docstring that was
+    plainly false. It used to say "None are used by any script this plugin
+    translates; marking one if it ever appears costs nothing". Several are
+    used, in scripts this plugin documents support for: U+200C ZWNJ is
+    ORTHOGRAPHIC in Persian, U+06DD END OF AYAH numbers Quranic verses, and
+    among the non-BMP additions U+110BD is a Kaithi number sign. Verified by
+    driving `_sanitize`: all three render as `[U+XXXX]` today.
+
+    The set is NOT narrowed in response, and the reason is the marking
+    policy rather than a judgement that the cost is zero. `_sanitize` MARKS,
+    it never deletes, and it runs only at this file's rendering boundary --
+    stored data, `canon.json`, and every artifact a later stage consumes are
+    untouched. So the real cost is a NOISIER TRIAGE REPORT for a corpus in
+    one of those scripts: a legitimate ZWNJ renders as `[U+200C]` where it
+    used to be invisible. Set against that, an unmarked zero-width character
+    lets two distinct stored `source_form` values render identically on the
+    field a reader uses to make an identity decision -- and unlike the noise,
+    that failure is silent. Stated here as a trade-off with a named loser
+    rather than asserted as costless, which is what the old sentence did.
 
     The 127 non-BMP members the widened sweep adds, measured and listed in
     full rather than surveyed -- the survey was the defect: U+110BD and
@@ -498,10 +520,18 @@ def _compute_invisible_chars() -> frozenset:
     # predicate, `python3 -O` imported cleanly, `_INVISIBLE_CHARS` gained
     # U+05BE, and `_sanitize` mangled real Hebrew into "R[U+05BE]CH" --
     # silently, with no diagnostic at all. 1.16.1's `aae3692` closed exactly
-    # this class in `fetch_citation.py` and its message recorded "there are
-    # now zero" bare asserts across the shipped scripts; round 6 reopened it
-    # here, so the sweep in that commit is re-run in the suite rather than
-    # trusted. A guard that vanishes under an interpreter flag is not a guard.
+    # this class in `fetch_citation.py`, and its message recorded "there are
+    # now zero" bare asserts -- a claim scoped to the two scripts that commit
+    # touched, though it does not read that way. It was never repo-wide, and
+    # is not true of the tree: counted at `aae3692` itself, seven bare asserts
+    # sat in five other shipped scripts (`cache_key.py`, `profile_validate.py`
+    # x2, `skeptic_ready.py`, `validate_draft.py`, `validate_extraction.py`
+    # x2) and still do. They are a different genre -- post-exit type narrowing
+    # whose own messages say so ("require_yaml() should have exited already")
+    # -- so stripping them changes a diagnosis, not a safety property, and
+    # they are deliberately left alone. This one was the outlier: the only
+    # bare assert sold in a docstring as the guarantee itself.
+    # A guard that vanishes under an interpreter flag is not a guard.
     if overlap:
         raise RuntimeError(
             f"invisible-char derivation now overlaps Hebrew content: {sorted(map(ord, overlap))} "
@@ -524,7 +554,9 @@ _INVISIBLE_CHARS = _compute_invisible_chars()
 # arithmetic read THIS constant and never a literal, so a membership change
 # updates the true worst case and this constant together instead of
 # silently invalidating a hardcoded claim elsewhere. It is NOT the whole
-# story for a repr()'d field; see `format_report`'s own note on that.
+# story for a repr()'d field; see `_max_repr_escape_chars()` immediately
+# below. (Round 9: this pointed at `format_report`, which defers again to
+# `_bounded` -- two hops away from an answer sitting five lines down.)
 _MAX_MARKER_CHARS = max(
     len(f"[U+{ord(ch):04X}]") for ch in (_BIDI_CONTROL_CHARS | _INVISIBLE_CHARS)
 )
@@ -544,13 +576,33 @@ _MAX_MARKER_CHARS = max(
 # not think of is the one that breaks the bound. Measured histogram over
 # the full space: 949296 codepoints escape to 10 chars, 9939 to 6, 64 to
 # 4, 4 to 2, and 154809 pass through as themselves.
-_MAX_REPR_ESCAPE_CHARS = max(
-    len(repr(chr(cp))) - 2 for cp in range(0x0000, 0x110000)
-)
+# A FUNCTION, not a module-level constant, and the reason is worth stating
+# because round 8 wrote it as a constant and round 9 measured the consequence.
+# Nothing at RUNTIME reads this value: its only executable reader is
+# `_max_rendered_chars_per_source_char()` below, whose only readers are this
+# file's docstrings and the suite. It exists so the arithmetic those
+# docstrings state is DERIVED rather than asserted -- which is exactly why it
+# must not be deleted -- but as a module-level constant it charged every CLI
+# invocation for a number no CLI code path consults. Measured by importing
+# this file against a copy differing ONLY in the eagerness of this sweep,
+# interleaved run-by-run so concurrent machine load cancels rather than
+# lands on one arm: 102.5 ms lazy against 180.2 ms eager, 77.7 ms saved per
+# invocation. (A plain before/after taken while other work ran said 13 ms --
+# the same trap this release keeps finding, one arm measured under a load the
+# other never saw.) The Cf sweep in `_compute_invisible_chars` costs about the
+# same and is NOT moved: it builds `_INVISIBLE_CHARS`, which `_sanitize` reads
+# on every rendered field, so that one is load-bearing at runtime. Cached, so
+# the suite still pays this exactly once.
+@functools.cache
+def _max_repr_escape_chars():
+    return max(len(repr(chr(cp))) - 2 for cp in range(0x0000, 0x110000))
 
-# What a single source character can become in the WIDEST rendering path
-# this file has: marked by `_sanitize`, or left for `repr()` to escape.
-_MAX_RENDERED_CHARS_PER_SOURCE_CHAR = max(_MAX_MARKER_CHARS, _MAX_REPR_ESCAPE_CHARS)
+
+@functools.cache
+def _max_rendered_chars_per_source_char():
+    """What a single source character can become in the WIDEST rendering path
+    this file has: marked by `_sanitize`, or left for `repr()` to escape."""
+    return max(_MAX_MARKER_CHARS, _max_repr_escape_chars())
 
 
 def _sanitize(s):
@@ -698,7 +750,10 @@ def _sanitize(s):
 # LIST lengths. `notes[]` and `risk_classes[]` carry no `maxItems` in the
 # schema and no cap anywhere upstream (`skeptic_ready.py` APPENDS to
 # `notes` and declares no count constants at all), so ONE schema-valid
-# record with 20000 200-char notes rendered 4,040,284 characters to stdout
+# record with 20000 200-char notes rendered a 4,040,009-character `notes:`
+# line (the stable figure; the report TOTAL is fixture-sensitive by a few
+# dozen characters, and an earlier draft of this comment carried one that
+# was 40 off because it was relayed rather than re-derived)
 # with rc=0, every `_bounded` call a no-op because each item sat exactly at
 # the cap. That is the same "a single record can otherwise put an entire
 # block into this stdout" harm this comment's own motivating sentence
@@ -720,13 +775,79 @@ def _bounded_items(items):
 
     Truncation is always VISIBLE at the call site -- the same "mark, don't
     hide" rule `_bounded` and `_sanitize` apply -- so a reader can never
-    mistake a capped list for a complete one. Returns a count rather than
-    a rendered tail so each call site can phrase the tail in its own
-    grammar ("... and N more note(s)" vs "referent(s)")."""
+    mistake a capped list for a complete one.
+
+    Returns a count rather than a rendered tail because the referents path
+    puts its tail on a LINE OF ITS OWN rather than at the end of a joined
+    run. Round 9 correction: this docstring used to justify the tuple by
+    saying each call site phrases its own tail grammar, and cited
+    "... and N more note(s)" as the example -- but two of the three callers
+    emitted no noun at all, and the notes site was one of them, so the
+    cited example appeared nowhere in the file. The two joined-run callers
+    now share `_joined_bounded_items` below, which requires the noun; this
+    function keeps the tuple for the one caller that genuinely needs it.
+
+    THE LAST ITEM IS ALWAYS KEPT, and that is not a nicety. Round 9
+    measured what a plain head-first cap does here: `skeptic_ready.py`'s
+    `_coerce_record` APPENDS its own diagnosis to `notes` --
+    `notes.append(f"skeptic_ready:coerced_insufficient_window:{reason}")` --
+    so the machine's authoritative statement about why a record was
+    coerced sits at the TAIL. With 20 agent-authored notes ahead of it, a
+    head-first cap kept every agent note and hid the one note the agent
+    did not write. An agent could bury the machine's own finding by
+    padding the list, which inverts this report's purpose. Keeping the
+    last item costs one slot and closes that, independently of who wrote
+    the tail or what prefix it carries.
+
+    Returns `(head, omitted_count, tail)`. `tail` is empty when nothing was
+    dropped and holds the single preserved last item otherwise, so a caller
+    can put its "... and N more" marker BETWEEN them and the rendered order
+    still matches the stored order."""
     items = list(items)
     if len(items) <= _MAX_LISTED_ITEMS:
-        return items, 0
-    return items[:_MAX_LISTED_ITEMS], len(items) - _MAX_LISTED_ITEMS
+        return items, 0, []
+    head = items[:_MAX_LISTED_ITEMS - 1]
+    return head, len(items) - len(head) - 1, [items[-1]]
+
+
+def _referent_line(r):
+    """One rendered `referent [...]:` line. Extracted so the preserved last
+    entry (see `_bounded_items`) renders through exactly the same path as the
+    head entries rather than through a second copy of this formatting."""
+    ev = r["evidence"]
+    if ev["unavailable_reason"]:
+        shown = f"unavailable ({_sanitize(_bounded(ev['unavailable_reason']))})"
+    else:
+        shown = repr(_sanitize(_bounded(ev["quote"])))
+    return f"    referent [{_sanitize(_bounded(r['disambiguator']))}]: {shown}"
+
+
+def _joined_bounded_items(items, noun):
+    """Renders a per-entry list as ONE comma-joined field with a visible
+    truncation tail.
+
+    The noun is REQUIRED, and that is the point of the helper rather than
+    an ergonomic detail: ", ... and 40 more" at the end of a comma-joined
+    run does not say more of WHAT, and a reader scanning a triage report
+    has no way to tell whether 40 risk classes or 40 notes were dropped.
+
+    Returns a LIST OF LINES, and the omission marker is always on a line of
+    its OWN. Round 9: an inline marker is forgeable. `_sanitize` escapes the
+    two characters that introduce ITS markers precisely so an agent cannot
+    type one, but the truncation tail had no such protection -- an agent
+    could put "... and 5 more note(s), ending with" in a note and have it
+    render inside an untruncated list, so a reader could not tell a real
+    truncation from a typed one. Putting the marker on its own line makes it
+    structurally unforgeable rather than merely unlikely: `_sanitize`
+    converts EVERY `str.splitlines()` boundary in a field to a visible `\\n`
+    marker, so no agent-authored item can begin a new output line. That is
+    the same reason the referents path was already safe, applied here."""
+    head, omitted, tail = _bounded_items(items)
+    lines = [", ".join(_sanitize(_bounded(x)) for x in head)]
+    if omitted:
+        shown_tail = ", ".join(_sanitize(_bounded(x)) for x in tail)
+        lines.append(f"... and {omitted} more {noun}, ending with: {shown_tail}")
+    return lines
 
 
 def _bounded(text):
@@ -754,7 +875,7 @@ def _bounded(text):
     left alone -- up to `\\UXXXXXXXX`, 10 chars, which beats the 9-char
     marker. Measured: a 5000-char field of U+E0000 (category Cn, matched by
     no predicate here) rendered at 2018 against a predicted 1616. So the
-    true per-field worst case is `_MAX_RENDERED_CHARS_PER_SOURCE_CHAR *
+    true per-field worst case is `_max_rendered_chars_per_source_char() *
     _MAX_SOURCE_FIELD_CHARS`, plus this function's own "...(+N chars)" tail
     (small in practice; its digit count grows only with log10 of the source
     length), plus 2 for repr's own quote characters on the `!r` fields --
@@ -794,7 +915,7 @@ def format_report(report: dict) -> str:
     own docstrings for why -- `_bounded` caps each field's SOURCE length,
     not its final rendered length, which `_sanitize`'s marker expansion and
     `repr()`'s escaping can multiply by up to
-    `_MAX_RENDERED_CHARS_PER_SOURCE_CHAR`; see `_bounded`'s own
+    `_max_rendered_chars_per_source_char()`; see `_bounded`'s own
     docstring for the arithmetic), including `evidence_coverage_label` and
     `unavailable_reason` -- round 6 noted both are safe today only by
     construction (`coverage_label` returns one of a few fixed English
@@ -815,11 +936,9 @@ def format_report(report: dict) -> str:
         # `_bounded` needed, unlike every OTHER field here.
         lines.append(f"[{i}] {_sanitize(_bounded(e['source_form']))}  (verdict: {_sanitize(e['verdict'])})")
         if e["risk_classes"] is not None:
-            shown_classes, omitted_classes = _bounded_items(e["risk_classes"])
-            risk_classes = ", ".join(_sanitize(_bounded(c)) for c in shown_classes)
-            if omitted_classes:
-                risk_classes += f", ... and {omitted_classes} more"
-            lines.append(f"    risk classes: {risk_classes or '(none)'}")
+            rc_lines = _joined_bounded_items(e["risk_classes"], "risk class(es)")
+            lines.append(f"    risk classes: {rc_lines[0] or '(none)'}")
+            lines.extend(f"    {extra}" for extra in rc_lines[1:])
         else:
             lines.append("    risk classes: unavailable (no worklist entry)")
         lines.append(f"    rationale: {_sanitize(_bounded(e['rationale']))}")
@@ -831,22 +950,19 @@ def format_report(report: dict) -> str:
             else:
                 lines.append(f"    evidence quote: {_sanitize(_bounded(ev['quote']))!r}")
         if "referents" in e:
-            shown_referents, omitted_referents = _bounded_items(e["referents"])
-            for r in shown_referents:
-                ev = r["evidence"]
-                if ev["unavailable_reason"]:
-                    shown = f"unavailable ({_sanitize(_bounded(ev['unavailable_reason']))})"
-                else:
-                    shown = repr(_sanitize(_bounded(ev["quote"])))
-                lines.append(f"    referent [{_sanitize(_bounded(r['disambiguator']))}]: {shown}")
+            head_referents, omitted_referents, tail_referents = _bounded_items(e["referents"])
+            for r in head_referents:
+                lines.append(_referent_line(r))
             if omitted_referents:
-                lines.append(f"    ... and {omitted_referents} more referent(s)")
+                # The marker sits BETWEEN the head and the preserved last
+                # entry, so the rendered order still matches the stored one.
+                lines.append(f"    ... and {omitted_referents} more referent(s), ending with:")
+                for r in tail_referents:
+                    lines.append(_referent_line(r))
         if e["notes"]:
-            shown_notes, omitted_notes = _bounded_items(e["notes"])
-            notes = ", ".join(_sanitize(_bounded(n)) for n in shown_notes)
-            if omitted_notes:
-                notes += f", ... and {omitted_notes} more"
-            lines.append(f"    notes: {notes}")
+            note_lines = _joined_bounded_items(e["notes"], "note(s)")
+            lines.append(f"    notes: {note_lines[0]}")
+            lines.extend(f"    {extra}" for extra in note_lines[1:])
     return "\n".join(lines)
 
 
