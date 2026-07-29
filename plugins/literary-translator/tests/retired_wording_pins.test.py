@@ -148,12 +148,30 @@ BASELINE_RELEASE = "4343994b9de4f6fe979e6e5af711ed9ab11c4381"
 # survives on main no matter how a LATER PR merges, because it is already the
 # tip of a past #359-style true MERGE commit. BASELINE_FIX_ROUND survives on
 # main only if THIS PR is ALSO merged with a true merge commit -- a squash or
-# rebase merge does not preserve this SHA (squash discards it entirely, rebase
-# replays the same content under a new SHA), and there is no post-merge commit
-# to re-point at afterwards: the intermediate wrong-claim state this SHA names
-# does not survive either method, it is simply gone from main's ancestry. This
-# repo's GitHub config allows squash, rebase, AND merge-commit merges --
-# nothing on GitHub's side enforces the one this SHA depends on.
+# rebase merge both turn the ancestor check below red, but the two break it
+# for DIFFERENT reasons and take DIFFERENT remedies; do not treat them as one
+# case. SQUASH writes a single commit holding the branch's FINAL tree,
+# parented on main's tip -- measured: walking every commit reachable from
+# main afterwards, none carries the intermediate wrong-claim tree. That state
+# is genuinely gone from main's ancestry, and the remedy is to re-derive this
+# whole pin set against a new frozen baseline, not to hunt for a SHA to
+# re-point at. FINDING the pre-fix object is usually still easy even so -- it
+# survives on the feature branch for as long as that ref lives, and a deleted
+# head branch of a merged PR can be restored from the PR page -- but that is
+# a different problem from SATISFYING this check, which demands an ancestor
+# of main, and a recoverable object outside main's ancestry does not become
+# one. REBASE instead replays the intermediate commit onto the new base under
+# a fresh SHA that, absent a conflict on the touched lines, carries IDENTICAL
+# content -- measured: the replayed commit's blob for the changed file hashes
+# the same as the original's. There the remedy IS a re-point:
+# BASELINE_FIX_ROUND moves to the replayed SHA. One caveat survives into that
+# remedy: a rebase that resolved a conflict on this file can change the very
+# content the rows measure while keeping the original commit message, so the
+# replayed commit must be diffed against the original tree before it is
+# trusted, never accepted on message alone -- measured on a deliberately
+# conflicted rebase. This repo's GitHub config allows squash, rebase, AND
+# merge-commit merges -- nothing on GitHub's side enforces the one this SHA
+# depends on.
 # test_the_pin_baseline_is_frozen_and_still_in_history's ancestor check catches
 # a wrong merge after the fact; it cannot choose the merge method for you.
 # THE OPERATOR ACTION THIS BUYS: merge this PR with a true merge commit, not
@@ -285,7 +303,35 @@ def _diff_hunks(path: Path, baseline: str) -> list[tuple[str, str]]:
     a result from this function is only as fresh as the last full re-run
     against a quiescent tree, exactly like every other check in this file --
     not a NEW risk this function invents, but the existing one, now able to
-    hide a defect instead of only losing a needle."""
+    hide a defect instead of only losing a needle.
+
+    THE OPPOSITE DIRECTION IS ALSO REAL, and it FAILS rather than merely
+    hides a defect. `-U0` picks, among several IDENTICAL baseline lines,
+    which occurrence to treat as unchanged context and which to treat as the
+    edit site -- and when a file genuinely CONTAINS several identical lines
+    already, that choice is a cost tie git's diff algorithm resolves however
+    it resolves it, not something this function or a row author controls.
+    Confirmed: skeptic-pass-wf.template.js carries four structurally
+    identical `const checkCmd = checkCommand(batch)` / `const lines = []`
+    boilerplate pairs (~lines 376, 397, 443, 470), so a needle sitting near
+    one of them can have its hunk boundary drawn against a DIFFERENT
+    occurrence than the one a prior run drew it against, splitting a
+    genuinely correct, adjacent needle/replacement pair into two different
+    hunks. Unlike a hunk MERGE, this direction produces a FALSE RED, not a
+    masked defect -- it fails safe, in the sense that nothing wrong ships,
+    but a maintainer reading the failure will see "no shared hunk" and reach
+    for the wording, when the actual cause is diff alignment. THE FIRST
+    THING TO CHECK when a row fails this way is not the wording: confirm the
+    retired needle and its replacement are BOTH still present in the file
+    and still textually adjacent (same function, no unrelated lines inserted
+    between them) before treating the failure as a real mispairing. This is
+    not a documented knife-edge today: the current arrangement was probed
+    nine ways -- 1, 5, 12, and 30-line insertions at two different
+    locations, including inside the ambiguous boilerplate region -- against
+    an isolated replica of the full working tree, and the row passed every
+    time. That is evidence the tie currently resolves clear of this row, not
+    evidence the tie cannot bite; do not read the other direction into it
+    either."""
     rel = path.relative_to(REPO_ROOT).as_posix()
     proc = git("diff", "-U0", baseline, "--", rel)
     assert proc.returncode == 0, f"git diff failed for {rel}: {proc.stderr.strip()}"
@@ -697,13 +743,20 @@ def test_the_pin_baseline_is_frozen_and_still_in_history(PIN_BASELINE_SHA):
             f"this same check while this one fails, that is the specific "
             f"signature of a SQUASH or REBASE merge -- this repo's GitHub config "
             f"allows all three merge methods, and only merge-commit preserves "
-            f"this SHA. There is no post-merge commit to re-point at: a squash "
-            f"discards the intermediate commit entirely, a rebase replays its "
-            f"content under a new SHA, and either way the wrong-claim state this "
-            f"SHA names is simply gone from main's ancestry, not relocated. "
-            f"THE FIX: merge this PR (or redo the merge) with a true merge "
-            f"commit. If it is already merged that way and this still fails, the "
-            f"cause is a genuine history rewrite -- see the general remedy below.\n"
+            f"this exact SHA. The remedy depends on WHICH one happened. SQUASH "
+            f"writes a single commit holding the branch's final tree; no commit "
+            f"reachable from main carries the intermediate wrong-claim tree, so "
+            f"there is nothing to re-point at -- re-derive this whole pin set "
+            f"against a new frozen baseline instead. REBASE instead replays the "
+            f"intermediate commit under a fresh SHA that, absent a conflict on "
+            f"the touched lines, carries identical content: search main's "
+            f"history for a commit whose TREE (not commit message -- a "
+            f"conflict-resolved replay can keep the message and still change "
+            f"the content) matches this SHA's, and re-point BASELINE_FIX_ROUND "
+            f"there. THE FIX: merge this PR (or redo the merge) with a true "
+            f"merge commit -- that is what this row set actually requires. If "
+            f"it is already merged that way and this still fails, the cause is "
+            f"a genuine history rewrite -- see the general remedy below.\n"
         )
     else:
         remedy = ""

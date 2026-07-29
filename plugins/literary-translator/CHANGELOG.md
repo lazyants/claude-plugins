@@ -12,16 +12,24 @@ Each wait now spends its 900 s across bounded chunks: `WAIT_CHUNK_SEC = 480`, so
 480 s and 420 s that sum to exactly 900 — flat chunks would silently EXTEND the declared bound
 instead of spending it. When the chunk loop ends on anything other than `READY`, one authoritative
 NON-polling re-check runs the same canonical gate before a timeout is declared, so a fragment that
-became valid between two chunk polls is no longer reported as a timeout while sitting complete on
-disk.
+became valid between two chunk polls usually is no longer reported as a timeout while sitting
+complete on disk. That has a residual, inherited from the same guard that makes the rest of it true:
+the re-check's own reply is read by the same `waitChunkVerdict()`, whose containment check for
+`PENDING <index>` runs BEFORE the whole-line `READY <index>` test, so a re-check reply that merely
+MENTIONS the batch's `PENDING` sentinel anywhere — recapping an earlier chunk's verdict in prose,
+say — still resolves to `pending` even when the same reply also states `READY <index>` on its own
+line, and the batch is then reported not-ready with a valid fragment on disk. The bias is
+deliberately false-RED-only (see `rejectedAnywhere()`'s own comment), and this is the one call the
+wait has no further chance to recover from.
 
 Three properties are load-bearing and each is pinned by a test:
 
 - `READY` in ANY chunk ends the wait immediately — no later chunk, no re-check. The break and the
   re-check are conditioned on the VERDICT, never on the loop index. This matters beyond tidiness in
   the skeptic pass: `skeptic_ready.py --validate-fragment` normalizes in place and is NOT
-  idempotent, so an extra chunk after a `READY` would add a second write-capable validation on the
-  normal path.
+  idempotent, and the normal path already runs it twice — codex's own self-check, then the wait poll
+  (see `skeptic_ready.py`'s `_coerce_record` docstring) — so an extra chunk after a `READY` would add
+  a THIRD write-capable validation, not a second.
 - An ambiguous chunk reply — null, malformed, or tool-killed — resolves to `PENDING` and CONTINUES
   polling. Before this release both callers terminated on every non-`READY` reply, which under
   chunking would have turned an ordinary slow batch into a failure.
@@ -113,14 +121,22 @@ each is an instance of the defect class the release exists to close.
 
 **The containment guard was ported to the wait site and not to the site beside it.** The skeptic
 pass's resume precheck still read its reply with a bare `sentinelVerdict()`, while the glossary twin
-wrapped the identical call in `!rejectedAnywhere(precheck, "ABSENT " + i) && …`. Measured with the
-shipped functions, not read: of eleven reply shapes the two sites disagreed on two, both in the
-false-GREEN direction — a reply that reports the fragment ABSENT in prose and then emits a clean
-`PRESENT <i>` line made the skeptic resume-skip a batch the glossary twin would regenerate. Both
-templates now agree on all eleven. The consequence was bounded — a false success there SKIPS work
-rather than approving a bad artifact, and `--verify-merged` re-authenticates every citation
-independently — but the shipped comment above that line claimed `sentinelVerdict()` alone "keeps
-BOTH directions closed", which was false for exactly the glued form.
+wrapped the identical call in `!rejectedAnywhere(precheck, "ABSENT " + i) && …`. Measured against the
+shipped functions over the shared `GLUE_CHARS` set (16 items, `tests/glossary_citation_review.test.py`):
+15 of the 16 characters, used to glue `ABSENT <i>` to prose ahead of a clean trailing `PRESENT <i>`
+line, made the unguarded skeptic precheck resume-skip a batch the glossary twin would regenerate —
+the same false-GREEN direction, and the same set, the wait site's own guard already closed (see
+`tests/rejected_anywhere_parity.test.py`'s precheck coverage for the pinned figure). Both templates'
+real precheck decision expressions are now extracted and driven through that same reply population
+under node, required to agree — not merely checked for the guard's presence and ordering, which a
+reviewer showed satisfiable by an unrelated, unused sibling guard placed earlier in the file while the
+real decision stayed unguarded; the structural check that remains is tightened to same-statement
+pairing (`!rejectedAnywhere(...) &&` adjacent into the verdict call, not merely an earlier offset)
+rather than dropped. The consequence was bounded — a false success there SKIPS work rather than
+approving a bad artifact, and
+`--verify-merged` re-authenticates every citation independently — but the shipped comment above that
+line claimed `sentinelVerdict()` alone "keeps BOTH directions closed", which was false for exactly
+the glued form.
 
 **The parity test that existed to prevent this could not see it.** It extracted the three helper
 declarations and called `waitChunkVerdict()` directly, so it measured the HELPERS while asserting
@@ -148,10 +164,15 @@ release diff, which no diff-scoped review could have reached.
 **This PR must be merged with a true merge commit.** `retired_wording_pins.test.py` pins a second
 frozen baseline at the release's first commit, because three rows pin wording that commit introduced
 fresh — it occurs zero times at the pre-release baseline, so those rows cannot be expressed against
-one baseline. A squash discards that commit and a rebase replays it under a new SHA; either strands
-the pinned baseline off `main`'s ancestry with nothing to re-point at, and the ancestor assertion
-goes permanently red for a reason no code change can fix. The constraint is now stated on the
-constant itself and named in the assertion's failure text.
+one baseline. A squash discards that commit entirely, writing one commit that carries only the
+branch's FINAL tree, so no commit reachable from `main` carries the pre-fix tree the pin needs — the
+pinned baseline has nothing to re-point at, and the ancestor assertion goes permanently red for a
+reason no code change can fix. A rebase is milder, not equally fatal: it replays the same commit
+under a fresh SHA that carries the same content (barring a conflict resolution that alters it), so a
+rebase merge still breaks the pinned SHA as shipped, but recovery there is re-pointing the constant at
+the new SHA, not a dead end. Either way the constant as committed stops resolving on `main`, which is
+why the requirement stands regardless of which of the two this repo's merge settings would otherwise
+allow. The constraint is now stated on the constant itself and named in the assertion's failure text.
 
 **Not fixed, and not filed.** `sentinelVerdict()` accepts a reply whose final non-empty line is the
 success sentinel regardless of what precedes it, so a disavowal followed by a quoted sentinel reads
@@ -165,7 +186,7 @@ backing both waits, a false PENDING costs one bounded extra call instead of a wr
 timeout. Stated here rather than claimed as tracked — no issue number is cited because none was
 filed.
 
-Suite: 4178 → **4368 passed, 3 skipped, 2 xfailed**. Every skip is named rather than incidental,
+Suite: 4178 → **4407 passed, 3 skipped, 2 xfailed**. Every skip is named rather than incidental,
 and there are three for two reasons: one pre-existing placeholder, plus the single pin row that
 declares no one-to-one replacement, which now skips in TWO tests — the diff-side check and the
 same-hunk check added below — because a row with no replacement has nothing for either to bind.

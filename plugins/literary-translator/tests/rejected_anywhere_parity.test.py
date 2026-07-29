@@ -52,6 +52,7 @@ tests/frozen_input_path_state_parity.test.py).
 """
 from __future__ import annotations
 
+import importlib.util
 import json
 import re
 import shutil
@@ -641,23 +642,33 @@ def _skip_ws_and_comments(source: str, i: int) -> int:
     return i
 
 
-def js_call_sites(source: str, name: str) -> list[int]:
-    """Character offsets in `source` where the bare identifier `name` is
-    CALLED -- i.e. appears as a standalone token in CODE, immediately
-    followed (across any whitespace/comments) by `(`, that is neither a
-    member-expression call (`obj.name(...)`) nor the function's own
-    declaration (`function name(...) {`).
+def _scan_code(
+    source: str, i: int, n: int, name: str, calls: list[int], stop_at_brace_depth_zero: bool
+) -> int:
+    """The tokenizer's one real scanning loop. Walks `source[i:n)` as CODE,
+    appending the offset of every real call to `name` into `calls`, and
+    returns the index it stopped at.
 
-    Deliberately narrow: it recognises exactly the call SHAPE these templates
-    actually use for these helpers -- a bare top-level function name, never a
-    member expression or an aliased reference (grep confirms none of
-    waitChunkVerdict/rejectedAnywhere/sentinelVerdict is ever referenced any
-    other way in any of the three templates). It does not build a parse
-    tree; it only has to tell CODE from COMMENT/STRING/TEMPLATE, which is
-    exactly the distinction a line-oriented regex cannot make reliably."""
-    calls: list[int] = []
-    i = 0
-    n = len(source)
+    `stop_at_brace_depth_zero` is what makes this function do double duty:
+    False for a top-level or whole-function scan (walks all the way to `n`
+    and returns it); True when scanning the INSIDE of a `${...}` template
+    interpolation, where an unmatched `}` (brace depth returning to zero)
+    ends the interpolation and must end the scan too -- mirroring
+    `_skip_interpolation`'s own depth tracking so a nested object/block
+    literal inside the interpolation does not end it early. In that mode the
+    return value is the index just past that closing `}`.
+
+    This single loop, called both at the top level and (via `_scan_template`,
+    recursively) inside every interpolation, is what makes `js_call_sites`'s
+    own claim ("recursing into `${...}` interpolations, which are code
+    again") actually true rather than aspirational: a call written inside an
+    interpolation is found by the SAME call-detection code that finds one
+    anywhere else, not silently skipped while the enclosing template literal
+    is jumped past whole. `_skip_template`/`_skip_interpolation` above still
+    exist and are still used by `js_call_args` -- they only need to find the
+    matching backtick/brace, not call sites, so they stay the cheaper,
+    non-recursing-for-calls tool for that job."""
+    depth = 0  # only meaningful when stop_at_brace_depth_zero
     prev_ends_expr = False
     prev_word = ""
     prev_is_dot = False
@@ -680,7 +691,7 @@ def js_call_sites(source: str, name: str) -> list[int]:
             prev_is_dot = False
             continue
         if c == "`":
-            i = _skip_template(source, i)
+            i = _scan_template(source, i, name, calls)
             prev_ends_expr = True
             prev_is_dot = False
             continue
@@ -734,6 +745,13 @@ def js_call_sites(source: str, name: str) -> list[int]:
             i += 1
             continue
 
+        if stop_at_brace_depth_zero and c == "{":
+            depth += 1
+        elif stop_at_brace_depth_zero and c == "}":
+            if depth == 0:
+                return i + 1
+            depth -= 1
+
         if c in ")]":
             prev_ends_expr = True
             prev_word = ""
@@ -746,6 +764,54 @@ def js_call_sites(source: str, name: str) -> list[int]:
         # (unusual here, but legal JS) is still recognised as member access.
         i += 1
 
+    return n
+
+
+def _scan_template(source: str, start: int, name: str, calls: list[int]) -> int:
+    """`js_call_sites`'s own template walker: same backtick-matching job as
+    `_skip_template`, but every `${...}` interpolation is handed to
+    `_scan_code` (in brace-depth-stopping mode) instead of `_skip_interpolation`
+    -- so a real call to `name` written inside an interpolation is appended to
+    `calls` on the way past, rather than being skipped over along with the
+    rest of the template text. Nested templates inside an interpolation
+    recurse back into this same function via `_scan_code`'s own backtick
+    handling, so depth is unbounded, matching `_skip_template`/
+    `_skip_interpolation`'s mutual recursion."""
+    i = start + 1
+    n = len(source)
+    while i < n:
+        c = source[i]
+        if c == "\\":
+            i += 2
+            continue
+        if c == "`":
+            return i + 1
+        if c == "$" and i + 1 < n and source[i + 1] == "{":
+            i = _scan_code(source, i + 2, n, name, calls, stop_at_brace_depth_zero=True)
+            continue
+        i += 1
+    return n
+
+
+def js_call_sites(source: str, name: str) -> list[int]:
+    """Character offsets in `source` where the bare identifier `name` is
+    CALLED -- i.e. appears as a standalone token in CODE, immediately
+    followed (across any whitespace/comments) by `(`, that is neither a
+    member-expression call (`obj.name(...)`) nor the function's own
+    declaration (`function name(...) {`). Includes calls written inside a
+    template literal's `${...}` interpolation: that content is CODE again,
+    scanned by the same `_scan_code` loop used everywhere else, not skipped
+    past as part of the literal's text (see `_scan_template`).
+
+    Deliberately narrow: it recognises exactly the call SHAPE these templates
+    actually use for these helpers -- a bare top-level function name, never a
+    member expression or an aliased reference (grep confirms none of
+    waitChunkVerdict/rejectedAnywhere/sentinelVerdict is ever referenced any
+    other way in any of the three templates). It does not build a parse
+    tree; it only has to tell CODE from COMMENT/STRING/TEMPLATE, which is
+    exactly the distinction a line-oriented regex cannot make reliably."""
+    calls: list[int] = []
+    _scan_code(source, 0, len(source), name, calls, stop_at_brace_depth_zero=False)
     return calls
 
 
@@ -799,6 +865,88 @@ def js_call_args(source: str, call_start: int) -> str:
             continue
         i += 1
     return source[open_at + 1:i - 1]
+
+
+def js_call_end(source: str, call_start: int) -> int:
+    """Given an offset `js_call_sites` returned, return the index just past
+    that call's own closing parenthesis.
+
+    Mirrors `js_call_args()`'s own paren-depth walk, but returns the boundary
+    instead of the argument text -- kept as a separate walk rather than a
+    refactor of `js_call_args()` so an already-tested function is not
+    disturbed. It exists so a test can ask what happens immediately AFTER one
+    real, already-located call -- e.g. whether it is followed by `&&` and
+    then another real call, with nothing else between them -- which is what
+    distinguishes a guard actually WIRED into the expression it protects from
+    two calls that merely occur in the same function with one offset smaller
+    than the other."""
+    n = len(source)
+    i = call_start
+    while i < n and (source[i].isalnum() or source[i] in "_$"):
+        i += 1
+    i = _skip_ws_and_comments(source, i)
+    assert i < n and source[i] == "(", (
+        f"js_call_end() called on an offset that is not a real call site "
+        f"(no '(' found): {source[call_start:call_start + 40]!r}"
+    )
+    i += 1
+    depth = 1
+    while i < n and depth > 0:
+        c = source[i]
+        if c == "/" and i + 1 < n and source[i + 1] == "/":
+            j = source.find("\n", i)
+            i = n if j == -1 else j
+            continue
+        if c == "/" and i + 1 < n and source[i + 1] == "*":
+            j = source.find("*/", i + 2)
+            i = n if j == -1 else j + 2
+            continue
+        if c in ("'", '"'):
+            i = _skip_string(source, i)
+            continue
+        if c == "`":
+            i = _skip_template(source, i)
+            continue
+        if c == "(":
+            depth += 1
+            i += 1
+            continue
+        if c == ")":
+            depth -= 1
+            i += 1
+            continue
+        i += 1
+    return i
+
+
+def _negation_index(source: str, call_start: int):
+    """Index of the `!` immediately negating the call at `call_start`
+    (skipping only whitespace backward), or `None` if the call is not written
+    as `!name(...)`. Returns the index rather than a bool so a caller can
+    slice from it (see `extract_precheck_decision_expression`)."""
+    i = call_start - 1
+    while i >= 0 and source[i].isspace():
+        i -= 1
+    return i if i >= 0 and source[i] == "!" else None
+
+
+def _immediately_ands_into(source: str, call_end: int, next_call_start: int) -> bool:
+    """True when, reading forward from `call_end` (an index just past a
+    call's own closing paren, e.g. from `js_call_end`), the only thing before
+    `next_call_start` is `&&` and whitespace/comments -- i.e. the two calls
+    are joined in ONE boolean expression via `&&`, immediately adjacent, not
+    merely two calls whose offsets happen to be ordered.
+
+    This is the check that closes the escape a same-file mutation found: two
+    real calls to the right helpers, in the right order, are NOT enough --
+    an earlier, unrelated, unused sibling guard call satisfies "order" while
+    contributing nothing to the actual decision. Only a guard that `&&`s
+    directly into the verdict it protects is doing any guarding."""
+    i = _skip_ws_and_comments(source, call_end)
+    if source[i:i + 2] != "&&":
+        return False
+    i = _skip_ws_and_comments(source, i + 2)
+    return i == next_call_start
 
 
 # ---------------------------------------------------------------------------
@@ -861,6 +1009,44 @@ def test_js_call_sites_handles_division_not_mistaken_for_regex():
     assert len(sites) == 1, f"division mistaken for regex desynced the tokenizer: found {sites}"
 
 
+def test_js_call_sites_recurses_into_template_interpolations():
+    """The claim this file's own tokenizer overview makes ("recursing into
+    `${...}` interpolations, which are code again") must be true, not
+    aspirational. Measured directly against the pre-fix tokenizer (`git show`
+    of this file at the commit before this test was added): calling the OLD
+    `js_call_sites` on a call written inside a `${...}` interpolation returned
+    `[]` -- `_skip_template` jumped straight past the whole literal via
+    `_skip_interpolation`, which matches braces/strings/templates correctly
+    but never reports a call site back to its caller. Since exhaustiveness is
+    this gate's entire purpose (the whole-file completeness tests two
+    sections below rely on it), a call site hiding inside an interpolation
+    would silently undercount every one of them."""
+    src = "const t = `plain ${waitChunkVerdict(a, b)} text`;\n"
+    sites = js_call_sites(src, "waitChunkVerdict")
+    assert len(sites) == 1, (
+        f"expected the call inside the `${{...}}` interpolation to be found, "
+        f"got {sites}. If this is empty, the tokenizer has regressed to "
+        f"skipping interpolations wholesale instead of scanning them as code"
+    )
+    assert src[sites[0]:sites[0] + len("waitChunkVerdict")] == "waitChunkVerdict"
+
+    # A nested template inside the interpolation must not desync the scan,
+    # and a call inside THAT nested template must also be found -- unbounded
+    # recursion, not one level deep.
+    src_nested = "const t = `outer ${ `inner ${rejectedAnywhere(x, y)}` } end`;\n"
+    nested_sites = js_call_sites(src_nested, "rejectedAnywhere")
+    assert len(nested_sites) == 1, (
+        f"expected the call inside a NESTED interpolation to be found too, "
+        f"got {nested_sites}"
+    )
+
+    # And a call OUTSIDE the template, after it, must still be found -- the
+    # scan must correctly return to top-level CODE once the template closes.
+    src_after = "const t = `${waitChunkVerdict(a, b)}`;\nrejectedAnywhere(x, y)\n"
+    assert len(js_call_sites(src_after, "waitChunkVerdict")) == 1
+    assert len(js_call_sites(src_after, "rejectedAnywhere")) == 1
+
+
 def test_js_call_args_reads_the_real_arguments_of_a_located_call():
     src = 'rejectedAnywhere(reply, "ABSENT " + batch.index)\nsentinelVerdict(precheck, "PRESENT " + batch.index, "ABSENT " + batch.index)'
     sites = js_call_sites(src, "rejectedAnywhere")
@@ -872,15 +1058,56 @@ def test_js_call_args_reads_the_real_arguments_of_a_located_call():
     assert "PRESENT " in sv_args and "ABSENT " in sv_args
 
 
+def test_js_call_end_finds_the_real_closing_paren_across_lines():
+    src = (
+        "sentinelVerdict(\n  precheck,\n  \"PRESENT \" + batch.index,\n"
+        "  \"ABSENT \" + batch.index\n)\nafter()"
+    )
+    sites = js_call_sites(src, "sentinelVerdict")
+    assert len(sites) == 1
+    end = js_call_end(src, sites[0])
+    assert src[end:end + 6] == "\nafter", (
+        f"expected the end offset to land just past the call's own closing "
+        f"paren, got context {src[max(end - 5, 0):end + 10]!r}"
+    )
+
+
+def test_negation_and_and_adjacency_helpers_pair_a_real_guard_and_verdict():
+    src = "if (!guardFn(x) &&\n    verdictFn(x)) {}"
+    guard_start = src.index("guardFn")
+    verdict_start = src.index("verdictFn")
+    assert _negation_index(src, guard_start) == src.index("!")
+    guard_end = js_call_end(src, guard_start)
+    assert _immediately_ands_into(src, guard_end, verdict_start)
+
+
+def test_negation_and_and_adjacency_helpers_reject_an_unrelated_sibling_guard():
+    """The exact escape C1 closes, reduced to the helpers that close it: an
+    earlier, un-negated, unused sibling guard call satisfies neither
+    predicate against a verdict call it has no `&&` relationship with, even
+    though its offset is smaller (the property the old, offset-only check
+    could not tell apart from a real guard)."""
+    src = "guardFn(y)\nsomeOtherStatement()\nif (verdictFn(x)) {}"
+    unrelated_guard = src.index("guardFn")
+    verdict_start = src.index("verdictFn")
+    assert _negation_index(src, unrelated_guard) is None
+    guard_end = js_call_end(src, unrelated_guard)
+    assert not _immediately_ands_into(src, guard_end, verdict_start)
+
+
 # ---------------------------------------------------------------------------
 # THE ACTUAL LOCK -- every wait-verdict decision site in every shipped
 # template really does route its reply through waitChunkVerdict().
 #
 # Counts independently verified before pinning: `grep -n
 # "verdict = waitChunkVerdict("` over the three templates finds exactly the
-# same 8 lines this tokenizer enumerates (mass-translate :1446/:1457/:1638/
-# :1645, glossary :1610/:1623, skeptic :699/:709) -- cross-checked by a
-# second method, not merely asserted.
+# same 8 lines this tokenizer enumerates -- cross-checked by a second method,
+# not merely asserted. Exact line numbers are deliberately NOT cited here:
+# this file's own test history shows they drift with every unrelated edit to
+# a template's prose (a stale citation was itself a finding this round), so
+# the total (8) and the per-template counts below are the load-bearing,
+# checked claims; re-run the grep above for current line numbers rather than
+# trusting any pinned here.
 # ---------------------------------------------------------------------------
 
 WAIT_CHUNK_VERDICT_CALL_COUNTS = {
@@ -959,7 +1186,24 @@ def test_precheck_absent_direction_is_containment_guarded_at_a_real_call_site(te
     rejectedAnywhere() call site guards "PENDING " + index inside
     waitChunkVerdict, and none guards "ABSENT " + batch.index, so the list
     below is empty and the assertion fails with a count of 0 -- exactly the
-    gap work item 1 closes, now locked rather than merely fixed once."""
+    gap work item 1 closes, now locked rather than merely fixed once.
+
+    SAME EXPRESSION, not merely earlier offset, is what is checked below. An
+    independent reviewer measured the escape in the ordering-only version of
+    this test: delete the real guard from the precheck expression, then add
+    an earlier, UNUSED sibling `rejectedAnywhere("ABSENT " + ...)` call
+    anywhere else in the file. Both counts above stay at 1 and the deleted
+    guard's replacement sibling's offset is still smaller than the verdict's
+    -- ordering alone cannot tell a guard that is actually wired into the
+    decision from one that merely occurs earlier in the file. The two checks
+    below replace pure offset-ordering with same-statement pairing:
+    `!rejectedAnywhere(...) && sentinelVerdict(...)`, negated and `&&`-joined
+    with nothing else between the guard's own closing paren and the verdict
+    call's own opening paren. See
+    test_precheck_decision_expressions_agree_and_never_resume_on_a_mentioned_absent
+    below for the complementary BEHAVIOURAL lock: this test proves the wiring
+    is textually right; that one proves it actually DECIDES right by running
+    it."""
     source = template.read_text(encoding="utf-8")
     absent_guard_sites = [
         offset
@@ -986,19 +1230,331 @@ def test_precheck_absent_direction_is_containment_guarded_at_a_real_call_site(te
         f"reading the PRESENT/ABSENT precheck reply, found {len(precheck_verdict_sites)}"
     )
 
-    # ORDER IS THE PROPERTY, as it is for every other guard in this file: the
-    # containment guard must run BEFORE the whole-line verdict test it
-    # protects, via `!rejectedAnywhere(...) && sentinelVerdict(...)`. Reversed
-    # or unpaired, the guard is dead code for any reply the whole-line test
-    # already accepts.
-    assert absent_guard_sites[0] < precheck_verdict_sites[0], (
+    guard_start = absent_guard_sites[0]
+    verdict_start = precheck_verdict_sites[0]
+
+    # SAME-STATEMENT PAIRING, not offset ordering: the guard must be written
+    # `!rejectedAnywhere(...)`, immediately negated --
+    assert _negation_index(source, guard_start) is not None, (
+        f"{template.name}: the rejectedAnywhere() ABSENT guard call at offset "
+        f"{guard_start} is not immediately negated with `!`. An un-negated "
+        f"guard call taking the resume-skip branch when it returns true is "
+        f"backwards -- a TRUE result from rejectedAnywhere() means the reply "
+        f"DID mention ABSENT, which is exactly when resuming must NOT happen"
+    )
+    guard_end = js_call_end(source, guard_start)
+    # -- and it must `&&` directly into the sentinelVerdict() call it
+    # protects, with nothing else between them. This is what an unrelated
+    # earlier sibling guard call cannot satisfy: its own closing paren is not
+    # immediately followed by `&& sentinelVerdict(...)`, however much earlier
+    # its offset sits than the verdict's.
+    assert _immediately_ands_into(source, guard_end, verdict_start), (
         f"{template.name}: the rejectedAnywhere() ABSENT guard at offset "
-        f"{absent_guard_sites[0]} does not run BEFORE the sentinelVerdict() "
-        f"precheck test at offset {precheck_verdict_sites[0]}. A guard that "
-        f"runs after is dead code for every reply the whole-line test already "
-        f"accepts"
+        f"{guard_start} does not `&&` directly into the sentinelVerdict() "
+        f"precheck verdict at offset {verdict_start}, with nothing else "
+        f"between them. Offset ordering alone is satisfiable by an unrelated, "
+        f"UNUSED sibling rejectedAnywhere('ABSENT ' ...) call placed anywhere "
+        f"earlier in the file -- SAME EXPRESSION, not merely earlier offset, "
+        f"is the property that actually wires the guard to the decision it "
+        f"protects"
     )
 
+
+def extract_precheck_decision_expression(source: str, template_path: Path) -> str:
+    """The real `!rejectedAnywhere(...) && sentinelVerdict(...)` precheck
+    decision expression, read directly out of the template rather than
+    reconstructed by hand: from the `!` immediately negating the real
+    rejectedAnywhere() ABSENT guard call, through the closing paren of the
+    real sentinelVerdict() call it `&&`s into. Both templates write this
+    expression inside a different surrounding statement -- glossary as
+    `const resumed = <expr>`, skeptic as `if (<expr>) {` -- so this reads the
+    EXPRESSION itself, independent of the statement shape around it, which is
+    what lets one harness (below) drive both templates' real decisions
+    through node."""
+    guard_sites = [
+        offset
+        for offset in js_call_sites(source, GUARD_HELPER)
+        if "ABSENT " in js_call_args(source, offset)
+    ]
+    assert len(guard_sites) == 1, (
+        f"{template_path.name}: expected exactly one real {GUARD_HELPER}() "
+        f"call site guarding the ABSENT direction, found {len(guard_sites)}"
+    )
+    verdict_sites = [
+        offset
+        for offset in js_call_sites(source, "sentinelVerdict")
+        if "PRESENT " in js_call_args(source, offset) and "ABSENT " in js_call_args(source, offset)
+    ]
+    assert len(verdict_sites) == 1, (
+        f"{template_path.name}: expected exactly one real sentinelVerdict() "
+        f"call reading the PRESENT/ABSENT precheck reply, found {len(verdict_sites)}"
+    )
+    guard_start = guard_sites[0]
+    verdict_start = verdict_sites[0]
+    neg = _negation_index(source, guard_start)
+    assert neg is not None, (
+        f"{template_path.name}: the {GUARD_HELPER}() ABSENT guard at offset "
+        f"{guard_start} is not immediately negated with `!`, so it cannot be "
+        f"read as a self-contained `!{GUARD_HELPER}(...) && sentinelVerdict(...)` "
+        f"expression"
+    )
+    verdict_end = js_call_end(source, verdict_start)
+    return source[neg:verdict_end]
+
+
+# PRECHECK_REPLY_SHAPES is mechanically DERIVED from the already-shipped
+# PARITY_REPLY_SHAPES table above (the wait site's own reply-shape table),
+# substituting the precheck's PRESENT/ABSENT sentinel vocabulary for the wait
+# site's READY/PENDING -- not a second, hand-picked set. A hand-picked set is
+# itself a finding this round (F3: "eleven reply shapes" named a set that
+# existed nowhere in the shipped code): deriving this one from the shipped
+# table means every glue character and edge case the wait site already covers
+# -- space/tab/CR/nbsp/zwsp/letter gluing, decorated replies, other-batch
+# replies, empty/whitespace-only/tool-killed/unparseable replies -- is
+# exercised here too, traceably, rather than re-invented.
+PRECHECK_REPLY_SHAPES = {
+    shape: reply.replace("READY", "PRESENT").replace("PENDING", "ABSENT")
+    for shape, reply in PARITY_REPLY_SHAPES.items()
+}
+
+
+def _run_precheck_decision(template: Path, source: str, shape: str, reply: str, tmp_path: Path) -> bool:
+    """Runs a template's REAL, extracted precheck decision expression (see
+    extract_precheck_decision_expression) under node against one `reply`, and
+    returns the boolean it evaluates to. Mirrors
+    test_all_three_wait_verdicts_agree_on_every_reply_shape's own
+    extract-and-execute harness, one section up, for the precheck decision
+    instead of the wait decision."""
+    expr = extract_precheck_decision_expression(source, template)
+    fns = "\n".join(
+        extract_named_function(source, n, template)
+        for n in ("sentinelVerdict", GUARD_HELPER)
+        if re.search(rf"^function {n}\(", source, re.MULTILINE)
+    )
+    harness = (
+        fns
+        + "\nconst precheck = " + json.dumps(reply)
+        + ";\nconst batch = { index: 0 };"
+        + "\nprocess.stdout.write(String(!!(" + expr + ")));\n"
+    )
+    p = tmp_path / f"precheck_{template.stem}_{shape}.js"
+    p.write_text(harness, encoding="utf-8")
+    assert NODE is not None
+    proc = subprocess.run([NODE, str(p)], capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, (
+        f"{template.name}'s precheck decision expression threw on {shape}: "
+        f"{proc.stderr}\nexpression: {expr}"
+    )
+    # Node's String(!!(...)) prints JS's lowercase "true"/"false" -- NOT
+    # Python's capitalized True/False. Caught by running this against the
+    # real 190ac36 pre-fix skeptic template: a "True" comparison here made
+    # every shape read as `resumed=False` regardless of what the expression
+    # actually evaluated to, silently defeating both properties this test
+    # checks (agreement and containment) at once.
+    return proc.stdout.strip() == "true"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not found on PATH")
+@pytest.mark.parametrize("shape", sorted(PRECHECK_REPLY_SHAPES), ids=sorted(PRECHECK_REPLY_SHAPES))
+def test_precheck_decision_expressions_agree_and_never_resume_on_a_mentioned_absent(shape, tmp_path):
+    """BEHAVIOURAL lock for work item 1's own gap (C1) -- the complement to
+    test_precheck_absent_direction_is_containment_guarded_at_a_real_call_site
+    above, the same way test_all_three_wait_verdicts_agree_on_every_reply_shape
+    complements the wait site's structural call-count tests.
+
+    Why the structural test is not enough on its own, even tightened to
+    same-statement pairing: it proves the WIRING is textually right. It
+    cannot prove the wired-together expression actually DECIDES right --
+    that requires running it. This test extracts the real decision
+    expression (verbatim, via extract_precheck_decision_expression) and
+    drives it under node for every shape in PRECHECK_REPLY_SHAPES.
+
+    Two properties are checked, deliberately different in what they can
+    prove:
+
+    1. AGREEMENT. glossary's precheck guard predates this branch and every
+       commit on it (verified back to the merge base, 4343994); skeptic's
+       is this release's own fix (absent through 190ac36, the last commit
+       before it landed -- `git show 190ac36:<path to skeptic's template>`
+       has no `!rejectedAnywhere(precheck, "ABSENT " + ...)` anywhere). So
+       requiring the two templates' real decisions to agree is a genuine
+       regression lock: it goes RED against 190ac36's skeptic template on
+       every ABSENT-mentioning shape below, because glossary correctly
+       refuses to resume-skip while pre-fix skeptic's un-guarded
+       sentinelVerdict() whole-line test resume-skips on the shape's
+       trailing clean PRESENT line. It goes GREEN on the current tree.
+    2. CONTAINMENT, independent of agreement and NOT a reimplementation of
+       sentinelVerdict()'s own fail-priority scan: a reply that mentions
+       "ABSENT" anywhere must never resume-skip, full stop. That is the
+       guarantee this guard exists to provide, and it is statable without
+       re-deriving sentinelVerdict()'s line-splitting algorithm -- so a
+       second, independently-reasoned property, not merely a restatement of
+       the first."""
+    reply = PRECHECK_REPLY_SHAPES[shape].replace("<idx>", "0")
+    resumed = {}
+    for template in PRECHECK_GUARD_TEMPLATES:
+        source = template.read_text(encoding="utf-8")
+        resumed[template.name] = _run_precheck_decision(template, source, shape, reply, tmp_path)
+
+    assert len(set(resumed.values())) == 1, (
+        f"the precheck decision expressions in "
+        f"{[t.name for t in PRECHECK_GUARD_TEMPLATES]} DISAGREE on reply shape "
+        f"{shape!r}: {resumed}\nReply: {reply!r}\n"
+        f"glossary's guard predates this branch; skeptic's is this release's "
+        f"own fix. A disagreement here is exactly the historical gap: skeptic "
+        f"resume-skipping a reply glossary correctly rejects"
+    )
+
+    if "ABSENT" in reply:
+        resuming = [name for name, v in resumed.items() if v]
+        assert not resuming, (
+            f"a precheck reply mentioning ABSENT anywhere ({reply!r}, shape "
+            f"{shape!r}) resume-skipped in {resuming}. This is the actual "
+            f"defect this guard exists to close: a fragment reported ABSENT "
+            f"must never be treated as complete, however a trailing line is "
+            f"decorated"
+        )
+
+
+# ---------------------------------------------------------------------------
+# THE FULL GLUE_CHARS POPULATION -- PRECHECK_REPLY_SHAPES above samples only
+# 6 glue characters (space/tab/cr/nbsp/zwsp/letter); the release notes state
+# the precheck figure as "15 of the 16 characters ... over the shared
+# GLUE_CHARS set" and point a reader at this file's precheck coverage for it.
+# A gate that samples 6 of 16 does not lock a claim about all 16 -- the same
+# claim-stronger-than-the-check-that-backs-it defect this release exists to
+# close, one level up from the individual claim fixes. This section extends
+# coverage to the full population, ADDITIONAL to (not a replacement for)
+# PRECHECK_REPLY_SHAPES above.
+#
+# GLUE_CHARS is loaded from tests/glossary_citation_review.test.py rather
+# than hand-copied here: a second, independently-typed copy of a
+# security-relevant character population is exactly the kind of duplicate
+# this file's whole existence argues against (see the module docstring's
+# "WHY THIS FILE EXISTS AT ALL"). Loading the real object means a future
+# change to the shipped population is inherited automatically instead of
+# silently diverging from a frozen copy.
+# ---------------------------------------------------------------------------
+
+
+def _load_glue_chars() -> list[tuple[str, str]]:
+    """Dynamically imports tests/glossary_citation_review.test.py (via
+    importlib, the pattern this test suite already uses elsewhere to reach
+    another file's module-level objects) and returns its GLUE_CHARS list.
+
+    Plain `import` cannot reach it: the file is named with two dots
+    (`glossary_citation_review.test.py`), which is not an importable module
+    path. Executing the whole module has a real cost -- every top-level
+    statement in that ~2200-line file runs -- but inspection before relying
+    on this found nothing expensive: constant assignments, function/test
+    defs (bodies don't run at import time), and one cheap module-level
+    `assert ... .is_file()` that is already true independent of anything
+    this file does."""
+    path = PLUGIN_ROOT / "tests" / "glossary_citation_review.test.py"
+    assert path.is_file(), f"expected sibling test file not found: {path}"
+    spec = importlib.util.spec_from_file_location(
+        "_glossary_citation_review_for_glue_chars", path
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.GLUE_CHARS
+
+
+GLUE_CHARS = _load_glue_chars()
+
+# Runtime-value guards, not a source/byte scan: a dict or list literal whose
+# entries silently collapsed to the same character would still LOOK like 16
+# lines of source. Checked here, at load time, rather than trusted from the
+# sibling file's own claim to have 16 entries.
+assert len(GLUE_CHARS) == 16, (
+    f"tests/glossary_citation_review.test.py's GLUE_CHARS no longer has 16 "
+    f"entries (found {len(GLUE_CHARS)}). The precheck glue coverage below is "
+    f"derived from this population, so a change in its size must be a "
+    f"deliberate, visible one -- update this count to match, do not silently "
+    f"adapt to whatever it now is"
+)
+for _glue_name, _glue_char in GLUE_CHARS:
+    assert isinstance(_glue_char, str) and len(_glue_char) == 1, (
+        f"GLUE_CHARS entry {_glue_name!r} is not a single codepoint: "
+        f"{_glue_char!r} (len {len(_glue_char)}). A collapsed or dropped "
+        f"character here would silently shrink the population this gate "
+        f"drives while every name still prints"
+    )
+del _glue_name, _glue_char
+
+# Same glued-ABSENT-then-clean-PRESENT shape PRECHECK_REPLY_SHAPES's own
+# glued_* entries use (the measured defect direction), parameterized over
+# the full population instead of the 6-character sample.
+PRECHECK_GLUE_REPLY_SHAPES = {
+    f"glue_{name}": f"the chunk was cut short{char}ABSENT <idx>\nPRESENT <idx>"
+    for name, char in GLUE_CHARS
+}
+
+
+def test_precheck_glue_reply_shapes_cover_all_sixteen_glue_chars():
+    """Runtime-length guard, per the lesson behind this section: a dict built
+    from two colliding literal characters silently keeps only the LAST
+    value, so a source scan of this file would show 16 comprehension lines
+    while the collection actually driving the test below silently became
+    fewer. Assert the DERIVED collection's length and distinctness, not
+    merely GLUE_CHARS's own claimed size."""
+    assert len(PRECHECK_GLUE_REPLY_SHAPES) == 16, (
+        f"expected 16 precheck glue reply shapes derived from GLUE_CHARS, "
+        f"found {len(PRECHECK_GLUE_REPLY_SHAPES)} -- a collapsed name would "
+        f"silently drop entries here even though GLUE_CHARS itself still has "
+        f"16"
+    )
+    distinct_glue_chars = {char for _, char in GLUE_CHARS}
+    assert len(distinct_glue_chars) == 16, (
+        f"two or more GLUE_CHARS entries share the same runtime codepoint: "
+        f"only {len(distinct_glue_chars)} distinct character(s) across 16 "
+        f"names. This is exactly the collapse a literal-glyph paste through a "
+        f"tool call can cause -- two DIFFERENT separators silently becoming "
+        f"the same character while every name still prints"
+    )
+
+
+@pytest.mark.skipif(NODE is None, reason="node not found on PATH")
+@pytest.mark.parametrize(
+    "shape", sorted(PRECHECK_GLUE_REPLY_SHAPES), ids=sorted(PRECHECK_GLUE_REPLY_SHAPES)
+)
+def test_precheck_decisions_never_resume_across_the_full_glue_chars_population(shape, tmp_path):
+    """The claim this release's own notes make ("15 of the 16 characters ...
+    over the shared GLUE_CHARS set") is about ALL 16 members of the real,
+    shipped population, not the 6-character sample
+    test_precheck_decision_expressions_agree_and_never_resume_on_a_mentioned_absent
+    above happens to cover. This test locks the claim against the population
+    it actually names: 0 of 16 resume-skips on the current (guarded) tree,
+    and agreement between glossary and skeptic on all 16.
+
+    RED evidence (measured once against 190ac36, the last commit before
+    skeptic's precheck guard landed, via `git show`; not re-run here as an
+    automated test -- this suite does not read git history at test time):
+    15 of 16 GLUE_CHARS members resume-skip an ABSENT-glued reply through
+    skeptic's pre-fix, unguarded `sentinelVerdict()` alone. The one
+    non-offender is `lf` (U+000A): gluing with a newline puts "ABSENT 0" on
+    its OWN trimmed line, which sentinelVerdict()'s fail-priority scan
+    already rejects even without the containment guard -- the same reason
+    this file's PARITY_REPLY_SHAPES never included an lf-glued case as "the
+    defect" shape. 15 is the number the release notes state; this test does
+    not re-derive it at run time, only locks that the CURRENT tree resumes
+    zero times, whatever the historical count was."""
+    reply = PRECHECK_GLUE_REPLY_SHAPES[shape].replace("<idx>", "0")
+    resumed = {}
+    for template in PRECHECK_GUARD_TEMPLATES:
+        source = template.read_text(encoding="utf-8")
+        resumed[template.name] = _run_precheck_decision(template, source, shape, reply, tmp_path)
+
+    assert len(set(resumed.values())) == 1, (
+        f"the precheck decision expressions in "
+        f"{[t.name for t in PRECHECK_GUARD_TEMPLATES]} DISAGREE on GLUE_CHARS "
+        f"shape {shape!r}: {resumed}\nReply: {reply!r}"
+    )
+    assert not any(resumed.values()), (
+        f"a precheck reply with ABSENT glued to prose by GLUE_CHARS member "
+        f"{shape!r} ({reply!r}) resume-skipped. The release notes' \"0 of 16\" "
+        f"claim over GLUE_CHARS does not hold for this member"
+    )
 
 
 # ---------------------------------------------------------------------------

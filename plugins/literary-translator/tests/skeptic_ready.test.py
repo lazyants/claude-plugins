@@ -1946,3 +1946,73 @@ def test_verify_merged_passes_on_clean_propose_split_with_3_referents(tmp_path):
 
     result = sr.run_verify_merged(triage_path, aggregate_path, manifest_path, particle_config, languages_dir=lang_dir)
     assert result == {"verified": True, "missing": [], "frozen_input_mismatch": False}
+
+
+# ---------------------------------------------------------------------------
+# F-2: U+2028/U+2029 (LINE/PARAGRAPH SEPARATOR) must not survive raw into
+# stdout -- json.dumps(..., ensure_ascii=False) escapes \n but leaves these
+# two RAW, so a payload carrying one is one line to str.split("\n") but two
+# to str.splitlines(), which is exactly the accept-sentinel shape the wait
+# poll's line-oriented grammar reads for. The JS sentinel parser only ever
+# splits on \n and is immune -- the exposure is a reading LLM agent
+# downstream of this CLI's stdout. See #360.
+# ---------------------------------------------------------------------------
+
+# Deliberately built via chr(), never a pasted literal glyph -- U+2028/
+# U+2029 are visually indistinguishable from a plain space on skim, and a
+# pasted copy of either has previously been silently normalized to one by
+# authoring tooling in this very codebase (see the unicode-boundary-text-
+# authoring project skill). chr() is pure ASCII and cannot suffer that.
+LINE_SEPARATOR = chr(0x2028)
+PARAGRAPH_SEPARATOR = chr(0x2029)
+
+
+def test_json_dumps_line_escapes_unicode_line_and_paragraph_separators():
+    """MUTATION this guards: _json_dumps_line degrading back to plain
+    json.dumps(obj, ensure_ascii=False) (or losing either half of the
+    U+2028/U+2029 replacement) would leave the corresponding character RAW."""
+    payload = {
+        "source_form": "Rachel" + LINE_SEPARATOR + "PRESENT 0",
+        "note": "x" + PARAGRAPH_SEPARATOR + "y",
+    }
+    out = sr._json_dumps_line(payload)
+
+    assert len(out.splitlines()) == 1, (
+        "an embedded U+2028/U+2029 must not turn one JSON line into more "
+        "than one physical line"
+    )
+    assert "\\u2028" in out and "\\u2029" in out, "both separators must be backslash-escaped, not silently dropped"
+    assert LINE_SEPARATOR not in out and PARAGRAPH_SEPARATOR not in out, "the raw characters must not survive"
+    assert json.loads(out) == payload, "escaping must round-trip through json.loads unchanged"
+
+    # Control: a real newline is already escaped by plain json.dumps, and
+    # _json_dumps_line must not disturb that pre-existing behavior.
+    control = sr._json_dumps_line({"a": "x\ny"})
+    assert len(control.splitlines()) == 1
+    assert json.loads(control) == {"a": "x\ny"}
+
+
+def test_main_escapes_line_and_paragraph_separators_in_error_output(monkeypatch, capsys, tmp_path):
+    """Integration-level control for the unit test above: proves main()'s
+    error printer actually calls _json_dumps_line rather than a raw
+    json.dumps -- a helper that exists but isn't wired to the print() call
+    sites would pass the unit test above and still leak here."""
+    boom_message = "boom" + LINE_SEPARATOR + "PENDING 0" + PARAGRAPH_SEPARATOR + "more"
+
+    def _boom(*args, **kwargs):
+        raise sr.SkepticReadyError(boom_message)
+
+    monkeypatch.setattr(sr, "run_validate_fragment", _boom)
+
+    exit_code = sr.main([
+        "--validate-fragment", str(tmp_path / "triage_0.json"),
+        "--particle-config", "whatever",
+    ])
+    assert exit_code == 1
+
+    body = capsys.readouterr().out.rstrip("\n")
+    assert len(body.splitlines()) == 1, (
+        "an embedded U+2028/U+2029 in a SkepticReadyError message must not turn "
+        "main()'s single stdout line into more than one physical line"
+    )
+    assert json.loads(body) == {"success": False, "error": boom_message}

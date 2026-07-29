@@ -502,7 +502,13 @@ if (estimatedCalls > BATCH_AGENT_CAP) {
 // batches' fragment paths onto the same file, or escape into an injected
 // shell command. Checked BEFORE any write or dispatch: a bad/duplicate
 // index throws here, so nothing is ever dispatched against it. Mirrors
-// mass-translate-wf.template.js's own SEG_ID_RE guard discipline exactly.
+// mass-translate-wf.template.js's own SEG_ID_RE index guard -- not that
+// file's WHOLE guard discipline, which this template does not match: mass-
+// translate ALSO re-validates the other profile-sourced values it splices
+// into a shell command (EFFORT_RE/MODEL_RE, guarding EFFORT/MODEL) before
+// they reach a command line. RESEARCH_MODE below has no such startup guard
+// before checkBatchCmd() splices it in unquoted -- operator-authored, not an
+// attacker channel, but not the parity this comment used to claim either.
 // ---------------------------------------------------------------------------
 const seenBatchIndices = new Set()
 for (let i = 0; i < BATCHES.length; i++) {
@@ -1096,24 +1102,24 @@ const REPLY_LINE_BREAK = new RegExp("\\r\\n|[\\n\\r\\u2028\\u2029\\u0085]")
 // hashes -- both are cache_key.py PLUGIN_BUNDLE_MEMBERS entries, so that is a
 // forced re-translation, which is the cost worth avoiding.
 //
-// An earlier version of this passage gave a THIRD reason that was false twice
-// over: that the change would also flip the SKEPTIC bundle hash and break a
-// CHANGELOG promise that skeptic-pass-wf.template.js was untouched. That file is
-// not a PLUGIN_BUNDLE_MEMBERS entry at all, so editing it forces a fresh skeptic
-// RUN_ID but no re-translation; and 1.16.2 modified it substantially, so the
-// promise being invoked had already been spent by the release invoking it. The
-// surviving reasons above are checkable from this repo; the retired one rested
-// on a release-scope claim about another file, which is the one kind of reason
-// no reviewer of THIS file can ever see go stale.
+// Editing skeptic-pass-wf.template.js does not flip THIS file's own bundle
+// hash or force a re-translation: it is not a PLUGIN_BUNDLE_MEMBERS entry, so
+// a change there forces a fresh skeptic RUN_ID only. That is the only reason
+// this file can actually check from its own contents.
 //
-// An earlier version of this comment justified leaving it alone with a
-// fail-safety claim -- "its behaviour on these characters is fail-safe in BOTH
-// directions ... it can only fail to approve, never falsely approve". That was
-// half true, and the false half was the dangerous one. Gluing the OK sentinel
-// onto prose can only fail to APPROVE, which is genuinely fail-safe; but
+// This guard is NOT fail-safe in both directions. Gluing the OK sentinel onto
+// prose can only fail to APPROVE, which is genuinely fail-safe; but
 // `if (line === failSentinel) return false` is a REJECTION trigger, so a fail
 // sentinel glued behind anything other than LF escapes the scan entirely, and a
 // trailing clean OK line then approves.
+//
+// Both retired claims this comment used to make about the fail-safety
+// direction and about the skeptic CHANGELOG promise are pinned GONE by
+// tests/retired_wording_pins.test.py, which fails loudly if either wording
+// comes back -- that pin is the durable record of the retirement, not this
+// paragraph, and it is why this comment states only what is true of the
+// CURRENT code rather than re-narrating what an earlier version of itself
+// claimed.
 //
 // That hole is now CLOSED -- not by widening any split, but by the containment
 // guard rejectedAnywhere(), applied at all four of this file's sentinelVerdict
@@ -1282,12 +1288,14 @@ function sentinelVerdict(reply, okSentinel, failSentinel) {
 // against the pre-1.16.2 shape: the "TIMEOUT <index>" sentinel, guarded inline
 // in batchStep, one reply per wait. In 1.16.2 that guard moved into
 // waitChunkVerdict() and its sentinel became "PENDING <index>", read once per
-// chunk and once for the re-check. The MECHANISM is identical and the count is a
-// property of sentinelVerdict()'s "\n" split rather than of any particular
-// sentinel string, so nothing here is expected to change -- but "not expected to
-// change" is not a measurement, and this figure has not been re-taken at the new
-// site. Treat the wait row above as measured against the shape 1.16.2 replaced;
-// tests/glossary_citation_review.test.py is where a re-derivation belongs.
+// chunk and once for the re-check. RE-TAKEN at the new site, over the same
+// GLUE_CHARS set and dual-sentinel shape, against "PENDING <index>" / "READY
+// <index>" in place of the retired "TIMEOUT <index>" / "READY <index>" pair:
+// still 15 of 16, same offenders, LF the only one that behaves -- the count is
+// a property of sentinelVerdict()'s "\n" split rather than of any particular
+// sentinel string, so the re-measurement confirms the figure rather than
+// changing it. tests/glossary_citation_review.test.py is where that
+// re-derivation is pinned.
 // The 15 are not exotic: PLAIN SPACE (U+0020), TAB, a lone CR, VT, FF, U+001C,
 // U+001D, U+001E, U+001F, NBSP, U+0085, U+2028, U+2029, ZWSP -- and the
 // ordinary letter "x". LF alone rejects correctly.
@@ -1538,17 +1546,10 @@ async function batchStep(batch) {
   // the skeptic template defines the guard helper at all. Cite that test, which
   // fails loudly if it stops being true, rather than a remembered state.
   //
-  // TWO EARLIER VERSIONS OF THIS NOTE WERE FALSE, in the same way, and the shape
-  // of the mistake is worth more than either correction. The first justified a
-  // divergence by what the release's CHANGELOG promised about the skeptic
-  // template. The second replaced that with a measured observation of what the
-  // skeptic template contained. Both read true when written and were false
-  // within the hour -- the second because a parallel change landed the guard
-  // there while this very comment was being edited. A claim about ANOTHER file
-  // rots by construction: no edit to THIS file can invalidate it, so neither
-  // this file's diff nor any reviewer reading this file will ever catch it going
-  // stale. Name a mechanism, or name a test that enforces the agreement; never
-  // record what another file currently contains.
+  // A claim about ANOTHER file rots by construction: no edit to THIS file can
+  // invalidate it, so neither this file's diff nor any reviewer reading this
+  // file will ever catch it going stale. Name a mechanism, or name a test that
+  // enforces the agreement; never record what another file currently contains.
   // 1.16.0 -- the resume-skip no longer RETURNS; it sets the state machine's
   // entry condition. This is the whole reason the citation review is a loop
   // with two entry points rather than a step bolted on after the wait: a

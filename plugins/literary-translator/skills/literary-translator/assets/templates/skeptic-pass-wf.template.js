@@ -313,6 +313,21 @@ const SENSES_PATH = ROOT + "/canon_senses.json"
 // the measured behaviour. Every site that splices this command must therefore
 // run it exactly ONCE per decision, never in a loop that keeps calling it after
 // it has already succeeded.
+//
+// THAT DISCIPLINE IS CONDITIONED ON THE AGENT'S REPLY, not on whether this
+// command itself wrote -- an undocumented residual #352's chunked wait
+// creates. A chunk's poll can genuinely exit 0 -- writing the normalized
+// fragment -- while the CHUNK'S OWN REPLY still resolves to "pending" (a null
+// or tool-killed reply, or the batch-index prefix collision waitChunkVerdict()
+// documents); when that happens, the NEXT chunk, or the authoritative
+// re-check if it was the last one, splices this SAME command again over a
+// fragment that already validated -- exactly the non-idempotent,
+// information-destroying re-run batchPrecheckPrompt() documents. Before #352
+// one wait was one reply, so there was no "next chunk" for an ambiguous reply
+// to fall through to. Not fixed here -- the fail-safe direction (keep polling
+// on an ambiguous reply) is worth more than the evidence-coverage precision it
+// can occasionally cost -- but it is real, and unstated everywhere else this
+// command's "exactly once" rule is repeated.
 function checkCommand(batch) {
   return PY + " " + ROOT + "/scripts/skeptic_ready.py --validate-fragment " + fragmentPath(batch.index) +
     " --particle-config " + PARTICLE_CONFIG +
@@ -331,15 +346,18 @@ function checkCommand(batch) {
 // prior, possibly-interrupted run of this SAME {{RUN_ID}} may have already
 // written a fragment that still passes --validate-fragment against the
 // CURRENT assignment manifest. Unlike glossary's --check-batch, this command
-// is not read-only: it also NORMALIZES the fragment in place -- any citation
-// that no longer re-verifies is coerced to insufficient_window, and a
-// propose_split's unverified referents are dropped from its referents[].
+// is not read-only: it also NORMALIZES the fragment in place --
+// adverse/propose_rescope's single citation failing to re-verify coerces the
+// WHOLE record down to insufficient_window; a propose_split's unverified
+// referents are instead dropped INDIVIDUALLY, and only coerce the record down
+// once fewer than 2 verified referents remain (skeptic_ready.py's own
+// _coerce_record() docstring is the source of record for this split).
 //
-// THAT NORMALIZATION IS NOT IDEMPOTENT. Until 1.16.2 this comment claimed it
-// was ("always safe, never destructive"); that claim is false, and measured to
-// be false. Re-running --validate-fragment on an ALREADY-normalized fragment
-// destroys the partial-evidence fact: skeptic_ready.py's _coerce_record()
-// recomputes `evidence_coverage.cited` from the referent list it is handed
+// THAT NORMALIZATION IS NOT IDEMPOTENT. It is never "always safe, never destructive"
+// to re-run, whatever an earlier version of this comment claimed. Re-running
+// --validate-fragment on an ALREADY-normalized fragment destroys the
+// partial-evidence fact: skeptic_ready.py's _coerce_record() recomputes
+// `evidence_coverage.cited` from the referent list it is handed
 // (skeptic_ready.py:650), which on the second invocation is the ALREADY-PRUNED
 // list -- so a record that honestly said "3 citations offered, 2 verified"
 // silently becomes "2 offered, 2 verified", and the fact that a citation was
@@ -348,8 +366,7 @@ function checkCommand(batch) {
 // verdict does not change on that second pass, so it stays 0.
 //
 // Fixing that non-idempotence is OUT of scope for #352, and it is NOT filed --
-// as of 1.16.2 no issue tracks it. What this comment must not do is keep
-// asserting the opposite of what the code does.
+// as of 1.16.2 no issue tracks it.
 // The practical consequence for THIS file is the discipline stated on
 // checkCommand() above and enforced at the wait site below: every splice of
 // the ACCEPT command runs it exactly once per decision, and a READY verdict
@@ -360,7 +377,7 @@ function batchPrecheckPrompt(batch) {
   const lines = []
   lines.push("A prior run of skeptic-pass batch " + batch.index + " may already have written a valid fragment to disk. Check ONCE whether it is already present and valid: run exactly this one bash command (a single invocation, NOT a polling loop):")
   lines.push(checkCmd)
-  lines.push("That command is not read-only: it also normalizes the fragment in place -- any citation that fails to re-verify is downgraded to insufficient_window, and a propose_split's unverified referents are dropped from its referent list. It never fabricates a record and never drops a whole record. Run it EXACTLY ONCE and act on that one exit code: it is NOT idempotent, so a second invocation over an already-normalized fragment quietly rewrites that fragment's own record of how many citations were originally offered, and nothing in its output reports having done so.")
+  lines.push("That command is not read-only: it also normalizes the fragment in place -- an adverse or propose_rescope record whose single citation fails to re-verify is downgraded to insufficient_window; a propose_split's unverified referents are instead dropped one at a time from its referent list, and the record itself only downgrades to insufficient_window once fewer than 2 verified referents remain. It never fabricates a record and never drops a whole record. Run it EXACTLY ONCE and act on that one exit code: it is NOT idempotent, so a second invocation over an already-normalized fragment quietly rewrites that fragment's own record of how many citations were originally offered, and nothing in its output reports having done so.")
   lines.push("If that command exits successfully (exit code 0), the fragment is already complete and valid -- return exactly the line: PRESENT " + batch.index)
   lines.push("If it exits non-zero for ANY reason (the file is missing, is not valid JSON, or fails its shape/token/coverage checks), return exactly the line: ABSENT " + batch.index)
   lines.push("Do nothing else -- do not create, dispatch, or resolve any entity yourself; this is purely a read-only-in-intent presence check.")
@@ -386,13 +403,13 @@ function batchDispatchPrompt(batch) {
   lines.push("- adverse: the windows below show a SPECIFIC, concrete sentence that contradicts this entity's current canon identity or an existing merge (two named individuals doing incompatible things in the same passage, an impossible timeline, an explicit textual statement that two forms are different people, etc.). Requires ONE cited piece of evidence -- the exact contradicting quote.")
   lines.push("- propose_rescope: the windows show this entry should not be scoped as a person/identity entry at all (for instance, every occurrence is a citation or allusion, never an active narrative participant). Requires the SAME one-citation evidence shape as adverse.")
   lines.push("- insufficient_window: you found nothing definite either way, or windows_truncated is true for this entity (you were not shown every occurrence, so a confident negative or positive claim is not safe). This is the DEFAULT whenever you are not sure.")
-  lines.push("Evidence citation format -- every citation (adverse/propose_rescope's single one, or each propose_split referent's own) is an object { block, seg, char_start, char_end, context_start, context_end, sha256 }: block = the window's own block id (copied verbatim from the entity's windows below); seg = that window's own seg value (copied verbatim, including a literal null); char_start/char_end = the exact character offsets of your quoted span WITHIN that block's full text given below (0-indexed, half-open -- text[char_start:char_end] must equal your quote exactly); context_start = 0 and context_end = that block's full text length in characters (the context window is always the block's ENTIRE text, never a narrower slice); sha256 = the sha256 hex digest of the UTF-8 bytes of that block's entire text. Compute char_start/char_end/sha256 as precisely as you can from the exact text given -- a citation that does not check out byte-for-byte against the real text is automatically and safely downgraded to insufficient_window (never dangerous, only wasted effort), so precision helps but is never a hard requirement you must re-litigate.")
+  lines.push("Evidence citation format -- every citation (adverse/propose_rescope's single one, or each propose_split referent's own) is an object { block, seg, char_start, char_end, context_start, context_end, sha256 }: block = the window's own block id (copied verbatim from the entity's windows below); seg = that window's own seg value (copied verbatim, including a literal null); char_start/char_end = the exact character offsets of your quoted span WITHIN that block's full text given below (0-indexed, half-open -- text[char_start:char_end] must equal your quote exactly); context_start = 0 and context_end = that block's full text length in characters (the context window is always the block's ENTIRE text, never a narrower slice); sha256 = the sha256 hex digest of the UTF-8 bytes of that block's entire text. Compute char_start/char_end/sha256 as precisely as you can from the exact text given -- a citation that does not check out byte-for-byte against the real text is automatically and safely handled, never dangerous, only wasted effort: for adverse/propose_rescope's single citation the WHOLE record downgrades to insufficient_window, while for a propose_split referent that ONE referent is dropped and the record downgrades only if fewer than 2 verified referents then remain -- so precision helps but is never a hard requirement you must re-litigate.")
   lines.push("Entities assigned to this batch (each already flagged by a deterministic, confidence-independent structural scan -- risk_classes names WHY it was flagged, never a verdict; windows are this entity's own bounded set of whole-block source excerpts, capped per entity, with windows_truncated indicating whether some were omitted):")
   lines.push(JSON.stringify(batch.assignments, null, 1))
   lines.push("Write this exact JSON object, to " + outPath + " ATOMICALLY: write it first to a fresh temp file in the SAME directory (for example a dot-prefixed name alongside the target, holding your own process id), then rename that temp file into place at exactly " + outPath + " -- so a partially-written file is never visible at that path. Shape: {\"schema_version\": 1, \"run_id\": \"" + RUN_ID + "\", \"records\": [ ... ]}, with EXACTLY one record per entity listed above, in the SAME order, each shaped { assignment_id (copied verbatim from that entity), source_form (copied verbatim), verdict, rationale (a short human-readable reason), and evidence/referents exactly as the verdict rules above require }. A plain JSON object, no markdown code fence, no comment, nothing else in the file.")
   lines.push("Then self-check by running this command and reading its one line of JSON output: " + checkCmd)
   lines.push("This command schema-validates your fragment and rejects it outright (naming every offending item) if its shape, its assignment_id/source_form pairing, or its coverage of this batch's assigned entities is wrong -- fix each one named and re-run the command until it prints a line with \"success\": true. A rejected run changes nothing on disk, so retrying after a rejection is safe; STOP at the FIRST \"success\": true and do not run the command again after that, because the successful run is the one that rewrites your fragment and running it a second time over the already-rewritten file loses information (it is not idempotent).")
-  lines.push("What that successful run rewrites: it independently re-authenticates every citation you gave, downgrades any that does not check out to insufficient_window, and drops a propose_split's unverified referents from its referent list, writing the result back in place. A \"success\": true result with a nonzero \"coerced\" count just means some of your citations were not verifiable; this is a normal, safe, and expected outcome, never something you need to fix or re-litigate.")
+  lines.push("What that successful run rewrites: it independently re-authenticates every citation you gave -- an adverse or propose_rescope record whose one citation does not check out is downgraded to insufficient_window; a propose_split's referents that do not check out are instead dropped one at a time from its referent list, downgrading the whole record only once fewer than 2 verified referents remain -- writing the result back in place. A \"success\": true result with a nonzero \"coerced\" count just means some of your citations were not verifiable; this is a normal, safe, and expected outcome, never something you need to fix or re-litigate.")
   lines.push("Once you see \"success\": true, return exactly the line: FRAGMENT " + batch.index)
   return lines.join("\n")
 }
@@ -419,6 +436,9 @@ function batchDispatchPrompt(batch) {
 // TOOL-KILLED chunk (exit 143, no marker printed) becomes indistinguishable
 // from a chunk that merely ran out of budget. That is exactly the safe reading:
 // not ready yet, keep polling.
+//
+// PENDING here never means failed -- see waitChunkVerdict()'s own comment for
+// how an ambiguous reply is read.
 function batchWaitChunkPrompt(batch, chunkIndex) {
   const checkCmd = checkCommand(batch)
   const lines = []

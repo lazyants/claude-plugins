@@ -358,6 +358,42 @@ def _atomic_write_json(path: Path, doc) -> None:
     tmp_path.replace(path)  # atomic on the same filesystem
 
 
+# Built entirely from chr() -- including chr(92) for the backslash itself --
+# rather than any escape-sequence string literal: a pasted raw U+2028/U+2029
+# glyph is visually indistinguishable from a plain space on skim (and has
+# been silently normalized to one by authoring tooling before -- see the
+# unicode-boundary-text-authoring project skill), and a literal backslash
+# inside a string literal risks being parsed back into the very character
+# this dict must instead emit as PLAIN escaped text.
+_BACKSLASH = chr(92)
+_LINE_SEPARATOR_ESCAPES = {
+    chr(0x2028): _BACKSLASH + "u2028",
+    chr(0x2029): _BACKSLASH + "u2029",
+}
+
+
+def _json_dumps_line(obj) -> str:
+    """``json.dumps(obj, ensure_ascii=False)``, but also escaping U+2028/
+    U+2029 -- the two characters ``ensure_ascii=False`` does NOT escape (JSON
+    permits a literal line/paragraph separator inside a string, unlike a raw
+    control character below 0x20, which ``json.dumps`` always backslash-
+    escapes regardless of ``ensure_ascii``). Left raw, a ``source_form`` or
+    rationale carrying either one turns ONE JSON line into what
+    ``str.splitlines()`` reads as TWO physical lines, while ``str.split
+    ("\\n")`` still sees one -- exactly the accept-sentinel shape the wait
+    poll's line-oriented grammar reads for. The JS sentinel parser only ever
+    splits on ``\\n`` and is immune; the exposure is a reading LLM agent
+    (skeptic/codex) downstream of this CLI's stdout -- see the already-filed
+    #360. A ``\\u2028``/``\\u2029`` escape round-trips through every JSON
+    parser identically to the raw character, so this is a small, behavior-
+    preserving change: only the on-the-wire bytes differ, never the decoded
+    value."""
+    text = json.dumps(obj, ensure_ascii=False)
+    for raw, escaped in _LINE_SEPARATOR_ESCAPES.items():
+        text = text.replace(raw, escaped)
+    return text
+
+
 def _load_schema_document(schema_path: Path) -> dict:
     if not schema_path.is_file():
         raise SkepticReadyError(f"schema file not found: {schema_path}")
@@ -604,13 +640,18 @@ def _coerce_record(record: dict, manifest: dict, language_config, *, competitors
     ``skeptic-triage.schema.json`` documents but leaves to code:
     ``propose_split`` needs >=2 referents each byte-verified;
     ``adverse``/``propose_rescope`` need one byte-verified citation;
-    ``insufficient_window`` needs neither. Any citation that fails to
-    byte-verify -- or is simply absent where required -- is coerced DOWN to
-    ``insufficient_window`` (never up): the fail-closed half of the RFC #215
-    safety invariant. A ``propose_split`` that started with more referents
-    than survive verification is not thrown away wholesale as long as >=2
-    verified referents remain -- the failed ones are dropped and this call's
-    ``evidence_coverage`` records THIS invocation's cited/verified split.
+    ``insufficient_window`` needs neither. For ``adverse``/``propose_rescope``,
+    whose single required citation fails to byte-verify -- or is simply
+    absent -- the WHOLE record is coerced DOWN to ``insufficient_window``
+    (never up): the fail-closed half of the RFC #215 safety invariant. A
+    ``propose_split`` is coerced differently: a single failed referent does
+    NOT coerce the whole record on its own. A ``propose_split`` that started
+    with more referents than survive verification is not thrown away
+    wholesale as long as >=2 verified referents remain -- the failed
+    referents are dropped INDIVIDUALLY and this call's ``evidence_coverage``
+    records THIS invocation's cited/verified split; the record itself is
+    coerced to ``insufficient_window`` only when fewer than 2 verified
+    referents remain.
 
     DO NOT read ``evidence_coverage`` as a durable record of that pruning:
     ``cited`` below is ``len(record.get("referents"))`` as the record stands
@@ -1601,13 +1642,13 @@ def main(argv=None) -> int:
         payload = {"success": False, "error": str(exc)}
         if exc.offending is not None:
             payload["offending"] = exc.offending
-        print(json.dumps(payload, ensure_ascii=False))
+        print(_json_dumps_line(payload))
         return 1
     except Exception as exc:  # pragma: no cover -- defensive catch-all
-        print(json.dumps({"success": False, "error": f"unexpected error: {exc}"}, ensure_ascii=False))
+        print(_json_dumps_line({"success": False, "error": f"unexpected error: {exc}"}))
         return 1
 
-    print(json.dumps(result, ensure_ascii=False))
+    print(_json_dumps_line(result))
     if args.verify_merged is not None:
         return 0 if result.get("verified") else 1
     if args.check_frozen_inputs is not None:
