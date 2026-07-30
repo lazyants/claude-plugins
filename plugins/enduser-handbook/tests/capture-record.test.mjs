@@ -2469,6 +2469,78 @@ test('buildProvenanceReport: record_unsupported_version is REACHABLE — a struc
 const MODULE_PATH = new URL('../skills/enduser-handbook/assets/lib/capture-record.mjs', import.meta.url);
 const MODULE_SOURCE = nodeFs.readFileSync(MODULE_PATH, 'utf8');
 
+// Skips whitespace and both comment forms starting at `source[from]`, returning the index of the
+// next significant character (or `source.length` at EOF). Shared by every raw-source scanner below
+// (`nextSignificantChar`, `parseImportClause`, and the capability-policy occurrence walk) so there is
+// exactly one definition of "trivia" to keep in sync, rather than three inline copies drifting apart.
+function skipTriviaFrom(source, from) {
+  const n = source.length;
+  let i = from;
+  while (i < n) {
+    if (/\s/.test(source[i])) { i++; continue; }
+    if (source[i] === '/' && source[i + 1] === '/') { i += 2; while (i < n && source[i] !== '\n') i++; continue; }
+    if (source[i] === '/' && source[i + 1] === '*') { i += 2; while (i < n && !(source[i] === '*' && source[i + 1] === '/')) i++; i += 2; continue; }
+    break;
+  }
+  return i;
+}
+
+// Reads ONE JS identifier starting at `source[from]`, honoring `\uXXXX` / `\u{X+}` escape sequences
+// exactly as the grammar does: plain `write` and the same name spelled with its first letter as a
+// `w` escape name the IDENTICAL binding to the JS engine, so a checker that compares raw source
+// spelling treats them as two different names — a real bypass
+// (codex round 5: a named import's local binding written with an escaped code point defeated every
+// alias-name comparison in the previous version of this policy, because the regex-based identifier
+// reader it used couldn't even parse past the backslash and silently gave up on the whole clause).
+// Returns `{ text, end }` where `text` is the DECODED name (what the identifier actually IS) and
+// `end` is the RAW source index right past it — callers that ask "what comes after this identifier"
+// need the raw position; the escape sequence's on-disk length has nothing to do with where it ends.
+// Returns null when no identifier starts here at all.
+function readIdentifierAt(source, from) {
+  const n = source.length;
+  let i = from;
+  function readEscape() {
+    if (source[i + 2] === '{') {
+      const close = source.indexOf('}', i + 3);
+      if (close === -1) return null;
+      const hex = source.slice(i + 3, close);
+      if (hex === '' || !/^[0-9A-Fa-f]+$/.test(hex)) return null;
+      const code = parseInt(hex, 16);
+      if (code > 0x10ffff) return null;
+      i = close + 1;
+      return String.fromCodePoint(code);
+    }
+    const hex = source.slice(i + 2, i + 6);
+    if (!/^[0-9A-Fa-f]{4}$/.test(hex)) return null;
+    i += 6;
+    return String.fromCharCode(parseInt(hex, 16));
+  }
+  let text;
+  if (source[i] === '\\' && source[i + 1] === 'u') {
+    const ch = readEscape();
+    if (ch === null || !/[A-Za-z_$]/.test(ch)) return null;
+    text = ch;
+  } else if (/[A-Za-z_$]/.test(source[i] ?? '')) {
+    text = source[i];
+    i++;
+  } else {
+    return null;
+  }
+  for (;;) {
+    if (i >= n) break;
+    if (source[i] === '\\' && source[i + 1] === 'u') {
+      const before = i;
+      const ch = readEscape();
+      if (ch === null || !/[A-Za-z0-9_$]/.test(ch)) { i = before; break; }
+      text += ch;
+      continue;
+    }
+    if (/[A-Za-z0-9_$]/.test(source[i])) { text += source[i]; i++; continue; }
+    break;
+  }
+  return { text, end: i };
+}
+
 // A lexer sufficient for JS source: distinguishes comments, string/template literals and regex
 // literals from ordinary code, and emits a token per identifier/keyword and per string (its
 // decoded content, so a banned name hidden inside a string or a template's static text is still
@@ -2483,7 +2555,6 @@ function scanJsTokens(source) {
   const n = source.length;
   let prevSignificant = ''; // last non-trivial character/kind, for regex-vs-division disambiguation
   let precededByDot = false;
-  let lastIdent = null; // the text of the most recently emitted 'ident' token, for dotBase below
   while (i < n) {
     const ch = source[i];
     if (ch === '/' && source[i + 1] === '/') {
@@ -2552,44 +2623,60 @@ function scanJsTokens(source) {
       precededByDot = false;
       continue;
     }
-    if (/[A-Za-z_$]/.test(ch)) {
-      const start = i;
-      while (i < n && /[A-Za-z0-9_$]/.test(source[i])) i++;
-      const text = source.slice(start, i);
-      // `dotBase`: the identifier immediately before THIS token's own leading dot (if any) — lets
-      // `fs.writeFileSync` be recognized as "writeFileSync reached via fs." while `fs.constants` (a
-      // different, allowed base) is not confused with it.
-      // `precededByChar` snapshots the significant character/kind that came right before THIS
-      // token, BEFORE it gets overwritten to 'ident' below — used (IMPORTANT 4) to tell an
-      // OBJECT-LITERAL property value (`openSync: fs.openSync,`, preceded by ':') apart from a
-      // BARE variable target (`const write = fs.writeFileSync`, preceded by '='), which is exactly
-      // the shape distinction a fs.<method>-aliasing bypass needs to be caught.
-      tokens.push({ kind: 'ident', text, precededByDot, precededByChar: prevSignificant, dotBase: precededByDot ? lastIdent : null, end: i });
-      lastIdent = text;
-      prevSignificant = 'ident';
+    if (/[A-Za-z_$]/.test(ch) || (ch === '\\' && source[i + 1] === 'u')) {
+      const parsed = readIdentifierAt(source, i);
+      if (parsed !== null) {
+        const { text, end } = parsed;
+        // `precededByChar` snapshots the significant character/kind that came right before THIS
+        // token, BEFORE it gets overwritten to 'ident' below — used (IMPORTANT 4, and by the
+        // capability policy's occurrence walk below) to tell an OBJECT-LITERAL property value
+        // (`openSync: fs.openSync,`, preceded by ':') apart from a BARE variable/destructuring
+        // target (`const write = fs.writeFileSync`, preceded by '='), which is exactly the shape
+        // distinction a fs.<method>-aliasing bypass needs to be caught. `start`/`end` are the RAW
+        // source bounds of this identifier (its DECODED `text` may be a different length than
+        // `end - start` when it contains a `\uXXXX` escape) — used by the capability policy to
+        // exclude an import statement's own declaration span from its occurrence scan, and to walk
+        // raw source forward from a reference to see what it's used for.
+        tokens.push({ kind: 'ident', text, precededByDot, precededByChar: prevSignificant, start: i, end });
+        prevSignificant = 'ident';
+        precededByDot = false;
+        i = end;
+        continue;
+      }
+      // A lone '\' not actually starting a valid `\uXXXX`/`\u{X+}` escape — not an identifier at
+      // all; fall through to the generic single-character handling below, same as any other symbol.
+    }
+    if (ch === '.' && source[i + 1] === '.' && source[i + 2] === '.') {
+      // Spread/rest `...` — NOT a member-access dot. `{ ...fs }` spreads fs's own enumerable
+      // properties into a fresh object; it is not `something.fs`. Treating the run of three dots
+      // exactly like a single real `.` (the previous behaviour, since `.` was never tokenized and
+      // only updated `precededByDot` character-by-character) made `fs` in `{ ...fs }` look
+      // EXACTLY like someone else's member (`x.fs`) and silently exempted it from occurrence
+      // scanning — a real bypass (ped-ant round 6: `{ ...fs }; d.writeFileSync(...)` copies every
+      // enumerable export, including `writeFileSync`, into a bare object with no seam at all).
+      tokens.push({ kind: 'punct', text: '...' });
+      prevSignificant = '...';
       precededByDot = false;
+      i += 3;
       continue;
     }
     if (ch === '+') {
       tokens.push({ kind: 'punct', text: '+' });
       prevSignificant = '+';
       precededByDot = false;
-      lastIdent = null;
       i++;
       continue;
     }
     // [round 3, codex] `[`/`]` — needed to detect bracket/computed member access
-    // (`fs["writeFileSync"]`), which the dot-based `dotBase` tracking can never see. Sets
-    // `prevSignificant`/`precededByDot`/`lastIdent` exactly as the pre-existing generic fallback
-    // branch already did for these two characters (this is purely ADDITIVE: it only adds a token
-    // for something that previously fell through unrecorded, so every OTHER existing check —
-    // including the `]` value the regex-vs-division disambiguation below already inspects — is
-    // unaffected).
+    // (`fs["writeFileSync"]`). Sets `prevSignificant`/`precededByDot` exactly as the pre-existing
+    // generic fallback branch already did for these two characters (this is purely ADDITIVE: it
+    // only adds a token for something that previously fell through unrecorded, so every OTHER
+    // existing check — including the `]` value the regex-vs-division disambiguation below already
+    // inspects — is unaffected).
     if (ch === '[' || ch === ']') {
       tokens.push({ kind: 'punct', text: ch });
       prevSignificant = ch;
       precededByDot = false;
-      lastIdent = null;
       i++;
       continue;
     }
@@ -2612,7 +2699,6 @@ function scanJsTokens(source) {
           while (i < n && /[a-z]/.test(source[i])) i++; // flags
           prevSignificant = 'regex';
           precededByDot = false;
-          lastIdent = null;
           continue;
         }
       }
@@ -2620,7 +2706,6 @@ function scanJsTokens(source) {
     if (!/\s/.test(ch)) {
       prevSignificant = ch;
       precededByDot = ch === '.';
-      if (ch !== '.') lastIdent = null; // any OTHER punctuation breaks a dotted-chain base
     }
     i++;
   }
@@ -2631,24 +2716,8 @@ function scanJsTokens(source) {
 // detection so a comment inserted between `import` and `(` (`import /*x*/ (...)`) cannot defeat a
 // naive "only whitespace allowed" check.
 function nextSignificantChar(source, from) {
-  let i = from;
-  const n = source.length;
-  while (i < n) {
-    if (/\s/.test(source[i])) { i++; continue; }
-    if (source[i] === '/' && source[i + 1] === '/') {
-      i += 2;
-      while (i < n && source[i] !== '\n') i++;
-      continue;
-    }
-    if (source[i] === '/' && source[i + 1] === '*') {
-      i += 2;
-      while (i < n && !(source[i] === '*' && source[i + 1] === '/')) i++;
-      i += 2;
-      continue;
-    }
-    return source[i];
-  }
-  return '';
+  const i = skipTriviaFrom(source, from);
+  return source[i] ?? '';
 }
 
 // TOKEN-based, not a raw-source regex — the earlier regex required `import\s+...\s+from`
@@ -2685,25 +2754,25 @@ function findImportStatements(tokens) {
 // through its specifier string) into every LOCAL NAME it introduces — default, namespace, and/or
 // named (optionally `as`-renamed) — in whichever combination the statement uses. Returns null when
 // the clause is not well-formed enough to parse (a syntax error elsewhere is not this policy's
-// concern, matching findImportStatements' own "not well-formed" bail-out). Scans the RAW SOURCE
-// (punctuation like `{`,`}`,`,`,`*`,`=` is not tokenized by scanJsTokens, unlike `[`/`]` above).
+// concern, matching findImportStatements' own "not well-formed" bail-out). Also returns
+// `clauseEnd`, the raw source index right past the clause (before `from '...'`) — [round 5→6, this
+// fix] used by collectFsBindings below to mark the clause's own SPAN as a declaration, not a
+// reference: without it, `import * as fs from 'node:fs'` was itself flagged as an unsafe occurrence
+// of `fs`, because the identifier `fs` genuinely does appear in that raw text and the checker had no
+// way to tell "this is where the name is BEING BOUND" apart from "this is a USE of it".
 function parseImportClause(source, fromIndex) {
   const n = source.length;
   let i = fromIndex;
 
   function skipTrivia() {
-    while (i < n) {
-      if (/\s/.test(source[i])) { i++; continue; }
-      if (source[i] === '/' && source[i + 1] === '/') { i += 2; while (i < n && source[i] !== '\n') i++; continue; }
-      if (source[i] === '/' && source[i + 1] === '*') { i += 2; while (i < n && !(source[i] === '*' && source[i + 1] === '/')) i++; i += 2; continue; }
-      break;
-    }
+    i = skipTriviaFrom(source, i);
   }
   function readIdentifier() {
     skipTrivia();
-    const start = i;
-    while (i < n && /[A-Za-z0-9_$]/.test(source[i])) i++;
-    return i > start ? source.slice(start, i) : null;
+    const parsed = readIdentifierAt(source, i);
+    if (parsed === null) return null;
+    i = parsed.end;
+    return parsed.text;
   }
   function readNamedClause(named) {
     skipTrivia();
@@ -2739,14 +2808,14 @@ function parseImportClause(source, fromIndex) {
 
   skipTrivia();
   if (source[i] === "'" || source[i] === '"') {
-    return { defaultName, namespaceName, named }; // side-effect-only import — no bindings at all
+    return { defaultName, namespaceName, named, clauseEnd: i }; // side-effect-only import — no bindings at all
   }
   if (source[i] === '*') {
     i++;
     if (readIdentifier() !== 'as') return null;
     namespaceName = readIdentifier();
     if (namespaceName === null) return null;
-    return { defaultName, namespaceName, named };
+    return { defaultName, namespaceName, named, clauseEnd: i };
   }
   if (source[i] !== '{') {
     defaultName = readIdentifier();
@@ -2760,86 +2829,14 @@ function parseImportClause(source, fromIndex) {
         if (readIdentifier() !== 'as') return null;
         namespaceName = readIdentifier();
         if (namespaceName === null) return null;
-        return { defaultName, namespaceName, named };
+        return { defaultName, namespaceName, named, clauseEnd: i };
       }
       if (!readNamedClause(named)) return null;
     }
-    return { defaultName, namespaceName, named };
+    return { defaultName, namespaceName, named, clauseEnd: i };
   }
   if (!readNamedClause(named)) return null;
-  return { defaultName, namespaceName, named };
-}
-
-// [round 3, codex] Scans forward for `const|let|var {<prop>[: <alias>], ...} = <name>` — object
-// destructuring directly off a namespace-bound name (`const {writeFileSync} = fs;`). Each
-// destructured property becomes a fresh LOCAL BINDING equally capable of reaching the real fs
-// function it names — the dot/bracket-access checks can never see it once destructured — so every
-// non-allowed destructured name is tracked the SAME way a simple-assignment alias is: banned only
-// if LATER called bare under its own (possibly renamed) name. A hand-rolled, bounded scanner in the
-// same spirit as chapter-paths.mjs's own markdown scanners — real parsing is not required because
-// the only question is "does this exact shape appear", not full grammar coverage.
-function findFsDestructuredBindings(source, namespaceNames) {
-  const n = source.length;
-  const result = new Set();
-
-  function skipTriviaAt(i) {
-    while (i < n) {
-      if (/\s/.test(source[i])) { i++; continue; }
-      if (source[i] === '/' && source[i + 1] === '/') { i += 2; while (i < n && source[i] !== '\n') i++; continue; }
-      if (source[i] === '/' && source[i + 1] === '*') { i += 2; while (i < n && !(source[i] === '*' && source[i + 1] === '/')) i++; i += 2; continue; }
-      break;
-    }
-    return i;
-  }
-  function identAt(i) {
-    const start = i;
-    while (i < n && /[A-Za-z0-9_$]/.test(source[i])) i++;
-    return i > start ? { text: source.slice(start, i), end: i } : null;
-  }
-
-  for (let start = 0; start < n; start++) {
-    const kw = identAt(skipTriviaAt(start));
-    if (kw === null || !(kw.text === 'const' || kw.text === 'let' || kw.text === 'var')) continue;
-    let j = skipTriviaAt(kw.end);
-    if (source[j] !== '{') continue;
-    j++;
-    const pairs = [];
-    let ok = true;
-    while (true) {
-      j = skipTriviaAt(j);
-      if (source[j] === '}') { j++; break; }
-      if (source[j] === ',') { j++; continue; }
-      const prop = identAt(j);
-      if (prop === null) { ok = false; break; }
-      j = prop.end;
-      let local = prop.text;
-      j = skipTriviaAt(j);
-      if (source[j] === ':') {
-        j++;
-        const alias = identAt(skipTriviaAt(j));
-        if (alias === null) { ok = false; break; }
-        local = alias.text;
-        j = alias.end;
-      }
-      pairs.push({ imported: prop.text, local });
-      j = skipTriviaAt(j);
-      if (source[j] === ',') { j++; continue; }
-      if (source[j] === '}') { j++; break; }
-      ok = false;
-      break;
-    }
-    if (!ok) continue;
-    j = skipTriviaAt(j);
-    if (source[j] !== '=') continue;
-    j++;
-    const rhs = identAt(skipTriviaAt(j));
-    if (rhs !== null && namespaceNames.has(rhs.text)) {
-      for (const { imported, local } of pairs) {
-        if (!ALLOWED_FS_MEMBERS.has(imported)) result.add(local);
-      }
-    }
-  }
-  return result;
+  return { defaultName, namespaceName, named, clauseEnd: i };
 }
 
 const ALLOWED_IMPORT_SPECIFIERS = new Set(['node:fs', 'node:child_process', 'node:crypto', './build-identity.mjs', './chapter-paths.mjs']);
@@ -2855,51 +2852,7 @@ const UNCONDITIONALLY_BANNED = new Set(['process', 'Function', 'eval', 'require'
 const ALLOWED_FS_MEMBERS = new Set(['constants']);
 
 // [round 3, codex] Every LOCAL NAME the source binds to `node:fs`, traced from its actual import
-// statement(s) — see collectFsBindings below, which builds `namespaceNames`. Every BARE identifier
-// the source assigns directly from a banned `<namespace>.<method>` VALUE (`const write =
-// fs.writeFileSync`, or a plain reassignment `write = fs.writeFileSync`) — never a property-access
-// target (`deps.openSync = fs.openSync`, the real module's own DEFAULT-SEAM shape, merely spelled
-// as an assignment instead of an object-literal property; that target is always invoked back
-// through ITS OWN object, `deps.openSync(...)`, never bare, so it is not tracked here at all).
-// Returns the set of ALIAS NAMES found; the caller checks whether any is ever called under its own
-// bare name — an alias that is never called (see the fs.constants VALUE-reference test below,
-// which also assigns `deps.openSync = fs.openSync`) stays legitimate.
-function findBareFsAliasNames(tokens, namespaceNames) {
-  const names = new Set();
-  for (let idx = 0; idx < tokens.length; idx++) {
-    const token = tokens[idx];
-    if (token.kind !== 'ident' || !namespaceNames.has(token.dotBase) || ALLOWED_FS_MEMBERS.has(token.text)) continue;
-    // The base namespace ident is always the array element right before this one — nothing else
-    // can be pushed between a base ident and its own '.'-continuation (the '.' emits no token).
-    const base = tokens[idx - 1];
-    if (base?.precededByChar !== '=') continue; // not a bare `NAME = ns.method` shape at all
-    const target = tokens[idx - 2];
-    if (target?.kind === 'ident' && !target.precededByDot) names.add(target.text);
-  }
-  return names;
-}
-
-// True iff any of `aliasNames` is later referenced, under its own bare name, as a CALL —
-// `write(...)` — anywhere in the token stream. The declaration occurrence itself never matches
-// (it is followed by '=', never '('), so no explicit exclusion is needed for it.
-function anyAliasCalled(tokens, source, aliasNames) {
-  if (aliasNames.size === 0) return false;
-  for (const token of tokens) {
-    if (token.kind !== 'ident' || token.precededByDot || !aliasNames.has(token.text)) continue;
-    if (nextSignificantChar(source, token.end) === '(') return true;
-  }
-  return false;
-}
-
-// [round 3, codex] POSITIVE import-binding policy. The round-2 checker pattern-matched individual
-// bypass SHAPES (a literal `fs.<method>(...)` call, a bare alias of that exact dotted expression, a
-// named-clause import) — each closure killed the shape it named and left the CLASS open: a default
-// import (`import fsDefault from 'node:fs'`), a namespace import under any OTHER alias (`import *
-// as io from 'node:fs'`), computed/bracket member access (`fs["writeFileSync"]`), and object
-// destructuring (`const {writeFileSync} = fs`) all reach the identical banned function while being
-// invisible to a checker rooted on the literal identifier `fs` and a `.`-access shape. This traces
-// every LOCAL NAME the source binds to `node:fs`, however the import introduces it, into two
-// buckets:
+// statement(s) — see collectFsBindings below, which builds `namespaceNames`/`directNames`.
 //   - NAMESPACE names — the whole module object (a namespace OR default import; Node's ESM/CJS
 //     interop makes a default import of `node:fs` equally a whole-module object). The real
 //     module's OWN binding, `fs`, is included UNCONDITIONALLY — every "mutant"/"legitimate
@@ -2908,46 +2861,196 @@ function anyAliasCalled(tokens, source, aliasNames) {
 //     "the real module PASSES") is that `fs` always names this binding.
 //   - DIRECT names — a named import's local binding is already bound to one resolved fs FUNCTION,
 //     no member access needed at all.
-// Every access path from either bucket to a real call is then checked in ONE place: a namespace
-// name's dot-call (below), its bracket/computed-string access (banned unconditionally — the real
-// module never uses bracket access on its own `fs` binding at all), any bare alias of either access
-// form later called under its own name, and any destructured property later called bare — plus
-// every direct name, if ever called bare. A shape not yet imagined still has to terminate in "call
-// a name that traces back to one of these bindings", which is the property being checked here, not
-// the shape.
+//
+// [round 3, codex] first closed this against the SHAPE each bypass used: a bare alias of the
+// dotted expression, a named-clause import, a default import, a namespace import under another
+// alias, bracket access, destructuring — one closure per shape. [round 5, codex] then defeated
+// FOUR more shapes in one pass: `fs?.writeFileSync(...)` (optional chaining breaks the tokenizer's
+// "reached via a dot" tracking), `(fs).writeFileSync(...)` (a grouping paren does the same),
+// `fs.writeFileSync.call(null, ...)` (the CALL happens one property hop past the dotted expression
+// the old check looked at), and a named import's local binding spelled with a `\uXXXX` escape
+// (the regex-based identifier reader of the time couldn't parse past the backslash, so the whole
+// import clause silently failed to parse and the binding was never traced at all). Two clean rounds
+// in a row on the SAME two-shape-enumerating design is the sign the axis was wrong, not that the
+// list was short (schema-gate-hardening's positive-allowlist spine, principle 1): every new shape
+// bypasses this check by finding an expression that reaches the real function WITHOUT the checker's
+// chosen "is it a dotted `namespace.method` call" or "is this bare name ever called" pattern
+// matching it — an open-ended set, because "how can you invoke a function reference" has no bound.
+//
+// [round 5→6, this fix] inverts the axis: instead of asking "what shape reaches the function",
+// findDisallowedFsReference (below) asks "where does this occurrence of a bound name SIT". The
+// module has exactly ONE legitimate use of an fs OPERATION reference — assigning it as a property
+// VALUE while building the injectable `deps` seam (`openSync: fs.openSync,` in the object literal,
+// or the equally legitimate `deps.openSync = fs.openSync` assignment-target spelling exercised by
+// the standalone snippet tests below) — everywhere else in the file, `fs` is used only via
+// `fs.constants.<FLAG>` (data, not an operation; confirmed by grep — no other `fs.` shape appears
+// anywhere in the real module outside the `deps` seam). A reference that sits in that ONE property-
+// value SLOT is safe regardless of exactly which of `:`/`=` spelled it; a reference that sits
+// ANYWHERE ELSE is rejected regardless of what shape put it there — a call, a `.call`/`.apply`
+// indirection, an alias, a destructure, an escape, or a shape nobody has thought of yet all fail
+// the SAME one check, because none of them is "sitting in the property-value slot".
+//
+// [round 6, ped-ant review] found two MORE gaps in the round-5→6 rewrite itself, both from asking
+// what a "reference" even IS, rather than another call shape: (1) `{ ...fs }` — object-SPREAD of
+// the whole namespace — copies every enumerable export (`writeFileSync` included) into a fresh,
+// un-seamed object; the slot rule alone can't reject this, because a spread occurrence genuinely
+// does sit where `}` follows it, syntactically resembling a value position. The actual gap was one
+// level UP: the tokenizer had never distinguished `...` (spread/rest — three dots forming ONE
+// grammatical unit, not a member access) from a real `.` access, so `fs` right after `...` looked
+// exactly like someone else's member (`x.fs`) and was silently exempted from occurrence scanning
+// entirely — fixed in scanJsTokens itself, then closed properly here by rejecting ANY namespace
+// occurrence with no NAMED member following it (a bare `fs` — via spread, a function argument, a
+// bare assignment — always exposes every operation at once, never the one resolved function the
+// seam-construction slot exists for; this is categorically different from an in-slot `fs.method`
+// reference, not a slot violation of the same kind). (2) `export { writeFileSync } from 'node:fs';`
+// — a re-export performs no I/O and calls nothing WITHIN this module, so it is invisible to every
+// occurrence-based check above by construction; it defeats the module's contract at the PACKAGE
+// boundary instead, republishing the raw function to any future importer of this file. See
+// `findReExportSpecifiers` below for why this needed a wholly separate check, not an extension of
+// the occurrence walk.
 function collectFsBindings(source, tokens) {
   const namespaceNames = new Set(['fs']);
   const directNames = new Set();
+  // The raw-source SPAN of each `node:fs` import clause — collectFsBindings finds these names by
+  // reading the DECLARATION text itself, which necessarily contains the very identifiers this
+  // policy tracks (`fs`, a renamed alias, a destructured member name). findDisallowedFsReference
+  // must not mistake that declaration text for a USE of the name it declares, so every span is
+  // handed to it as an exclusion list — see the parseImportClause comment above `clauseEnd` for why.
+  const declarationSpans = [];
   for (const { specifier, importTokenEnd } of findImportStatements(tokens)) {
     if (specifier !== 'node:fs') continue;
     const clause = parseImportClause(source, importTokenEnd);
     if (clause === null) continue;
+    declarationSpans.push({ start: importTokenEnd, end: clause.clauseEnd });
     if (clause.namespaceName !== null) namespaceNames.add(clause.namespaceName);
     if (clause.defaultName !== null) namespaceNames.add(clause.defaultName);
     for (const { imported, local } of clause.named) {
       if (!ALLOWED_FS_MEMBERS.has(imported)) directNames.add(local);
     }
   }
-  return { namespaceNames, directNames };
+  return { namespaceNames, directNames, declarationSpans };
 }
 
-// Bracket/computed member access on a namespace-bound name (`fs["writeFileSync"]`) — the dot-based
-// check below can never see it, and the real module has zero legitimate use for bracket access on
-// its own `fs` binding at all, so ANY computed-string access to a non-allowed member is banned
-// outright, whether or not it is immediately called. `[`/`]` ARE tokenized (see scanJsTokens), so
-// this is a plain 4-token lookahead: ident(namespace) '[' string ']'.
-function anyBracketFsMemberAccess(tokens, namespaceNames) {
+const VALUE_TERMINATORS = new Set([',', '}', ';', ')']);
+
+// True iff the fs-bound name occurrence at `tokens[idx]` sits in the module's one sanctioned SLOT:
+// the direct RHS of an object-literal property (`key: <ref>`, preceded by ':') or of a member
+// assignment (`target.prop = <ref>`, preceded by '=' whose assignment TARGET is itself reached via
+// a dot — i.e. a real property, not a bare variable or a destructuring pattern). A bare-variable
+// target (`const write = ...`) and a destructuring pattern (`const {writeFileSync} = ...`) both fail
+// this on the SAME branch — neither is a dot-reached property — which is why no separate alias- or
+// destructuring-tracking machinery is needed any more: creating either kind of fresh bare binding is
+// itself already the violation, caught here at the point of creation, before any question of whether
+// the new name is later called arises.
+function isPropertyValuePosition(tokens, idx) {
+  const base = tokens[idx];
+  if (base.precededByChar === ':') return true;
+  if (base.precededByChar !== '=') return false;
+  const target = tokens[idx - 1];
+  return target?.kind === 'ident' && target.precededByDot === true;
+}
+
+// Walks every occurrence of a namespace or direct fs-bound name and rejects the first one that is
+// not safely confined to the property-value slot `isPropertyValuePosition` recognizes. Deliberately
+// does NOT use any FORWARD-looking token-chain tracking (the previous version's now-removed
+// `dotBase` field, which named "the identifier this one was reached via a dot FROM") to figure out
+// what follows an occurrence — that kind of tracking is exactly what an optional-chain `?.` or a
+// grouping `(...)` defeats (a round-5 finding: both reset the bookkeeping a chain-tracker needs)
+// — instead it re-derives "what immediately follows" fresh from the RAW SOURCE via
+// `readIdentifierAt` every time, which is robust to both and also decodes `\uXXXX` escapes (the
+// fourth round-5 finding) the same way scanJsTokens now does. `precededByDot`/`precededByChar` — a
+// token's own immediate BACKWARD-looking facts, not a chain — are still used, by `isPropertyValuePosition`.
+//
+// `.constants` is the one member name exempt from the slot rule entirely (checked first, before slot
+// position is even considered) — it is DATA (integer flags), never an operation, and the real module
+// references it as a bare expression term throughout (`flags | fs.constants.O_NOFOLLOW`), never as a
+// stored property value. A `?.`/bracket-accessed `.constants` is deliberately NOT recognized as this
+// safe form (only a literal, immediate `.constants` is) — the module's own style never defensively
+// null-checks or computed-accesses its own `fs` import, so treating anything else as an operation
+// reference (and rejecting it unless it separately satisfies the slot rule) is a strictness bias with
+// no real cost, not a gap: false-RED here is tolerable, false-GREEN is not (schema-gate-hardening
+// principle 2).
+//
+// Known blind spot, stated plainly rather than left implicit: this walk starts from each BASE
+// identifier occurrence and reads ONE step of raw source forward/backward from it. A reference
+// smuggled through TWO indirections at once — e.g. a fs-bound name copied into a bare alias that is
+// itself then only EVER referenced from inside a template-literal's `${...}` interpolation, whose
+// recursively-tokenized positions are relative to the extracted substring rather than the outer
+// source — is not specifically modeled; in practice this fails CLOSED (the position arithmetic lands
+// on the wrong raw-source offset and very rarely lands on a value terminator by coincidence), but it
+// is not a proven-sound case the way the four round-5 shapes above are, and any future rewrite of
+// this policy should re-derive this walk's soundness against template-literal-interior positions
+// specifically before relying on it there.
+function findDisallowedFsReference(source, tokens, namespaceNames, directNames, declarationSpans) {
   for (let idx = 0; idx < tokens.length; idx++) {
-    const t = tokens[idx];
-    if (t.kind !== 'ident' || t.precededByDot || !namespaceNames.has(t.text)) continue;
-    const open = tokens[idx + 1];
-    const key = tokens[idx + 2];
-    const close = tokens[idx + 3];
-    if (open?.kind === 'punct' && open.text === '[' && key?.kind === 'string' && close?.kind === 'punct' && close.text === ']') {
-      if (!ALLOWED_FS_MEMBERS.has(key.text)) return true;
+    const base = tokens[idx];
+    if (base.kind !== 'ident' || base.precededByDot) continue;
+    if (declarationSpans.some((span) => base.start >= span.start && base.start < span.end)) continue;
+    const isNamespace = namespaceNames.has(base.text);
+    const isDirect = !isNamespace && directNames.has(base.text);
+    if (!isNamespace && !isDirect) continue;
+
+    let member = null;
+    if (isNamespace) {
+      const i = skipTriviaFrom(source, base.end);
+      if (source[i] === '.') member = readIdentifierAt(source, i + 1);
+      if (member !== null && member.text === 'constants') continue; // flag data, safe anywhere
+      // A namespace occurrence with NO named member following it at all — `{ ...fs }`, `fn(fs)`,
+      // `const x = fs`, a bare `fs` standing alone — names the WHOLE module object, every fs
+      // operation at once, not the one resolved function the sanctioned seam-construction slot
+      // exists for. This is never safe regardless of where it sits (ped-ant round 6): the slot
+      // rule below only ever certified "one named operation, stored as a property value", and a
+      // bare namespace reference is categorically the wrong shape for that, not a slot violation of
+      // the same kind an `fs.writeFileSync` reference could also commit.
+      if (member === null) return 'fs_namespace_referenced_directly';
+    }
+
+    if (!isPropertyValuePosition(tokens, idx)) return 'fs_reference_outside_value_position';
+
+    const afterEnd = member !== null ? member.end : base.end;
+    const nextIdx = skipTriviaFrom(source, afterEnd);
+    if (nextIdx < source.length && !VALUE_TERMINATORS.has(source[nextIdx])) {
+      return 'fs_reference_escapes_value_slot';
     }
   }
-  return false;
+  return null;
+}
+
+// `export {...} from '<specifier>'` / `export * from '<specifier>'` / `export * as ns from
+// '<specifier>'` — re-publishes named bindings from an external module to every future importer of
+// THIS file. It performs no I/O of its own within this module, so none of the occurrence/slot
+// machinery above (scoped to references made INSIDE this file) can see it at all — but it defeats
+// the module's own stated contract just as completely: "the ONLY module in this feature that
+// touches disk" stops being true for any downstream consumer that imports the re-exported name
+// directly, bypassing the injectable `deps` seam entirely (ped-ant round 6:
+// `export { writeFileSync } from 'node:fs';` performs no I/O in THIS file and is invisible to every
+// check above, yet republishes the raw function). Scoped deliberately to the three RAW-CAPABILITY
+// specifiers this policy already gates — `node:fs`, `node:child_process`, `node:crypto` — a
+// re-export from either sibling PURE-helper module (`build-identity.mjs`, `chapter-paths.mjs`)
+// re-publishes no I/O capability and is NOT this policy's concern; this checker does not scan for it.
+const RAW_CAPABILITY_SPECIFIERS = new Set(['node:fs', 'node:child_process', 'node:crypto']);
+
+// Finds every `export ... from '<specifier>'` statement's specifier. Gated on the character
+// IMMEDIATELY after `export` (skipping trivia) being `{` or `*` — the only two shapes a re-export-
+// from clause can start with — so an ordinary `export function foo() { ... }`/`export const x = ...`
+// declaration (the overwhelming majority of this module's own exports) is skipped before ever
+// scanning its BODY, exactly the same safety `findImportStatements` relies on for its own forward
+// scan. A from-less bare re-export (`export { a, b };`, which republishes nothing external and has
+// no capability-leak relevance) naturally finds no string before the next `import`/`export` keyword
+// and contributes nothing here — matching `findImportStatements`'s own "not well-formed enough to
+// matter to this policy" bail-out.
+function findReExportSpecifiers(source, tokens) {
+  const specifiers = [];
+  for (let idx = 0; idx < tokens.length; idx++) {
+    if (tokens[idx].kind !== 'ident' || tokens[idx].text !== 'export') continue;
+    const i = skipTriviaFrom(source, tokens[idx].end);
+    if (source[i] !== '{' && source[i] !== '*') continue; // a local declaration export — no specifier to trace
+    for (let j = idx + 1; j < tokens.length; j++) {
+      if (tokens[j].kind === 'string') { specifiers.push(tokens[j].text); break; }
+      if (tokens[j].kind === 'ident' && (tokens[j].text === 'import' || tokens[j].text === 'export')) break;
+    }
+  }
+  return specifiers;
 }
 
 function checkCapabilityPolicy(source) {
@@ -2955,23 +3058,13 @@ function checkCapabilityPolicy(source) {
   for (const { specifier } of findImportStatements(tokens)) {
     if (!ALLOWED_IMPORT_SPECIFIERS.has(specifier)) return { ok: false, reason: `disallowed_import:${specifier}` };
   }
-  const { namespaceNames, directNames } = collectFsBindings(source, tokens);
-
-  if (anyBracketFsMemberAccess(tokens, namespaceNames)) {
-    return { ok: false, reason: 'fs_bracket_access' };
+  for (const specifier of findReExportSpecifiers(source, tokens)) {
+    if (RAW_CAPABILITY_SPECIFIERS.has(specifier)) return { ok: false, reason: `reexports_raw_capability:${specifier}` };
   }
+  const { namespaceNames, directNames, declarationSpans } = collectFsBindings(source, tokens);
 
-  // Every way a real fs function can end up bound to a BARE name — a named import, a
-  // simple-assignment alias off a namespace binding, or destructuring off one — collapses to the
-  // SAME question: is that bare name ever called. One check covers all three sources.
-  const bareCallableNames = new Set([
-    ...directNames,
-    ...findBareFsAliasNames(tokens, namespaceNames),
-    ...findFsDestructuredBindings(source, namespaceNames),
-  ]);
-  if (anyAliasCalled(tokens, source, bareCallableNames)) {
-    return { ok: false, reason: 'fs_bound_name_called' };
-  }
+  const fsReason = findDisallowedFsReference(source, tokens, namespaceNames, directNames, declarationSpans);
+  if (fsReason) return { ok: false, reason: fsReason };
 
   for (const token of tokens) {
     if (UNCONDITIONALLY_BANNED.has(token.text)) return { ok: false, reason: `banned_word:${token.text}` };
@@ -2990,15 +3083,6 @@ function checkCapabilityPolicy(source) {
     // (codex, important #7).
     if (token.kind === 'ident' && token.text === 'import' && nextSignificantChar(source, token.end) === '(') {
       return { ok: false, reason: 'dynamic_import' };
-    }
-    // A direct `<namespace>.<method>(...)` CALL — not a bare reference. `openSync: fs.openSync,`
-    // inside the default seam object is a legitimate VALUE reference (the whole point of
-    // "defaulting to node:fs bindings"); an actual invocation `fs.openSync(...)` (or
-    // `io.openSync(...)` under any OTHER namespace alias — codex round 3) bypasses the seam
-    // entirely, which is what this specifically bans. `token.end` is only set on 'ident' tokens
-    // (see scanJsTokens), which is exactly the token kind this branch is already scoped to.
-    if (token.kind === 'ident' && namespaceNames.has(token.dotBase) && !ALLOWED_FS_MEMBERS.has(token.text) && nextSignificantChar(source, token.end) === '(') {
-      return { ok: false, reason: `direct_fs_call:${token.text}` };
     }
   }
   // Banned-word-via-string-concatenation: `'pro' + 'cess'` never produces a single token equal to
@@ -3063,13 +3147,41 @@ test('capability policy: mutants — each of these must FAIL', () => {
     // or access form the round-2 checks never named.
     'import fsDefault from "node:fs"; fsDefault.writeFileSync(...)', // a DEFAULT import — not the namespace form the round-2 checker looked for
     'import * as io from "node:fs"; io.writeFileSync(...)', // a namespace import under an alias OTHER than "fs"
-    'fs["writeFileSync"](...)', // computed/bracket member access — the dot-based dotBase tracking never sees it
+    'fs["writeFileSync"](...)', // computed/bracket member access — not a literal `.` immediately after `fs`, so it never reaches the one recognized safe form and is rejected as an out-of-slot occurrence
     'const {writeFileSync} = fs; writeFileSync(...)', // destructuring off the namespace binding, not a simple assignment
+    // [round 5, codex] four MORE bypasses against the round-3 rewrite immediately above — every one
+    // of these reaches the identical banned function while returning `ok: true` from that version,
+    // because none of them matches the literal "namespace.method immediately followed by '('" shape
+    // it checked for. This is exactly the class of failure the round-5→6 rewrite (see the
+    // collectFsBindings doc comment above) replaced with a positive LOCATION check instead of one
+    // more shape.
+    'fs?.writeFileSync("/etc/passwd", "pwned")', // optional chaining breaks the "reached via a dot" tracking a shape check relies on
+    '(fs).writeFileSync("/etc/passwd", "pwned")', // a grouping paren does the same
+    'fs.writeFileSync.call(null, "/etc/passwd", "pwned")', // the CALL happens one property hop past the dotted expression a shape check inspects
+    'import { writeFileSync as \\u0077rite } from "node:fs";\nwrite("/etc/passwd", "pwned")', // the local binding is spelled with a `\uXXXX` escape — one binding to the JS engine, a different raw string to a checker that never decodes it
+    // [round 6, ped-ant review] two MORE gaps found in the round-5→6 rewrite itself — see the
+    // collectFsBindings doc comment above for why each needed a genuinely new mechanism, not one
+    // more slot-check special case.
+    'import * as fs from "node:fs";\nconst d = { ...fs };\nd.writeFileSync("/etc/passwd", "pwned")', // object-spread of the whole namespace copies every export, including writeFileSync, into an un-seamed object
+    'export { writeFileSync } from "node:fs";', // re-exports the raw function to every importer of THIS module; no I/O inside this file at all, invisible to every occurrence check
+    'export * from "node:fs";', // the same leak, in its most totalizing form
+    'export * as rawFs from "node:fs";', // ...and under a namespace alias
   ];
   for (const mutant of mutants) {
     const result = checkCapabilityPolicy(mutant);
     assert.equal(result.ok, false, `mutant should FAIL: ${mutant}`);
   }
+});
+
+test('capability policy: an UNCONDITIONALLY_BANNED word spelled with a unicode escape is still caught (the round-5 escape-decoding fix applies file-wide, not only to fs-bound names)', () => {
+  const result = checkCapabilityPolicy('\\u0070rocess.exit()');
+  assert.equal(result.ok, false, JSON.stringify(result));
+});
+
+test('capability policy: a bare namespace reference is rejected even with no subsequent call — passing it as an argument, or storing the WHOLE object (not one resolved member) as a property value, both expose every fs operation at once', () => {
+  assert.equal(checkCapabilityPolicy('import * as fs from "node:fs";\nsomeFunc(fs);').ok, false);
+  assert.equal(checkCapabilityPolicy('import * as fs from "node:fs";\ndeps.fs = fs;').ok, false);
+  assert.equal(checkCapabilityPolicy('import fsDefault from "node:fs";\nconst d = { ...fsDefault };').ok, false);
 });
 
 test('capability policy: a legitimate fs.constants VALUE reference (never called) is not flagged', () => {
@@ -3080,6 +3192,17 @@ test('capability policy: a legitimate fs.constants VALUE reference (never called
 test('capability policy: a disallowed static import is rejected', () => {
   const result = checkCapabilityPolicy("import { execSync } from 'node:os';\n");
   assert.equal(result.ok, false);
+});
+
+test('capability policy: spreading an object that is NOT an fs-bound name is unaffected — the real module\'s own `{ ...defaultDeps, ...deps }` / `{ ...profileLike, ... }` pattern, and rest params in a function signature, all still PASS', () => {
+  assert.equal(checkCapabilityPolicy('const merged = deps ? { ...defaultDeps, ...deps } : defaultDeps;').ok, true);
+  assert.equal(checkCapabilityPolicy('const p = { ...profileLike, capture: { ...profileLike.capture, output_dir: x } };').ok, true);
+  assert.equal(checkCapabilityPolicy('function posixJoin(...parts) { return parts; }').ok, true);
+});
+
+test('capability policy: re-exporting from an ALLOWED sibling module (out of scope for this policy — it republishes no raw I/O capability), and a from-less bare local re-export, both still PASS', () => {
+  assert.equal(checkCapabilityPolicy("export { normalizeBuildIdentity } from './build-identity.mjs';").ok, true);
+  assert.equal(checkCapabilityPolicy('const a = 1, b = 2;\nexport { a, b };').ok, true);
 });
 
 // =================================================================================================
