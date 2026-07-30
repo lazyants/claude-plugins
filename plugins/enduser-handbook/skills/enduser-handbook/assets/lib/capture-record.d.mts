@@ -95,15 +95,30 @@ export type OwnershipResult =
 /** See capture-record.mjs: ledger row 1 — gate 5, the provenance-root/capture.output_dir disjointness check. Called from W1 prose and, silently, at the top of every other entrypoint. */
 export function assertProvenanceOwnership(profileLike: ProfileLike, deps?: Partial<CaptureRecordDeps>): OwnershipResult;
 
-export interface RunState {
-  skipped: boolean;
-  run_id?: string;
-  opening_digest?: string;
-  opening?: BuildIdentity;
-  opening_assets?: Record<string, Record<string, string>>;
-  entries?: ChapterEntryLike[];
-  closed?: boolean;
-}
+// A discriminated union, not one interface with every payload field optional — `skipped` is the
+// discriminant. A skipped run (W1's ownership outcome) carries ONLY `skipped: true`: see
+// capture-record.mjs's `openCaptureRun`/`closeCaptureRun`, both of which return exactly
+// `{runState: {skipped: true}}` on that branch, no other property. An active run carries
+// `skipped: false` plus every payload field `openCaptureRun` actually assigns before returning
+// (`run_id`, `opening_digest`, `opening`, `opening_assets`, `entries`) — none of those are
+// optional there, because `closeCaptureRun` reads all five unconditionally off a non-skipped
+// `runState`, and a caller driving W5 needs `run_id` narrowed to `string` to pass as
+// `recordChapterProvenance`'s `expectedRunId`. `closed` alone stays optional: absent before
+// `closeCaptureRun` runs, `true` on the runState it returns (`{...runState, closed: true}`), and
+// never read back by anything in this module — a caller-facing marker only. Pinned at runtime by
+// the "RunState union" tests in capture-record.test.mjs, since nothing in this repository compiles
+// TypeScript and a `.d.mts`-only change is otherwise invisible to the whole suite.
+export type RunState =
+  | { skipped: true }
+  | {
+      skipped: false;
+      run_id: string;
+      opening_digest: string;
+      opening: BuildIdentity;
+      opening_assets: Record<string, Record<string, string>>;
+      entries: ChapterEntryLike[];
+      closed?: boolean;
+    };
 
 export type OpenResult = { ok: true; runState: RunState } | HaltResult | NeedsUiRead;
 

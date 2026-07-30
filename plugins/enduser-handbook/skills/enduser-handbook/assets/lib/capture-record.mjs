@@ -750,17 +750,28 @@ export function assertProvenanceOwnership(profileLike, deps) {
 
   const configured = profileLike.capture.build_identity != null;
   if (configured) {
+    // The overlap decision above is made on the RESOLVED (realpath'd) segments — `root` and
+    // `outputDir` below are the raw, as-configured strings, which is exactly what makes this halt
+    // otherwise unactionable: a symlinked alias can make two raw paths look disjoint (different
+    // names, no lexical prefix relationship) while they resolve into one overlapping tree, which is
+    // the only reason this halt is firing at all. Naming just the raw strings tells the operator
+    // "these two look fine to me" about the very halt refusing them. Rendering the resolved
+    // segments back into absolute paths mirrors `canonicalizeForComparison`'s own contract
+    // (`realpathSync` always returns an absolute path, so every resolved segment list is absolute).
+    const rootResolvedPath = `/${rootCanon.join('/')}`;
+    const outputResolvedPath = `/${outputCanon.join('/')}`;
     return {
       ok: false,
       halts: [
         {
           halt: 'provenance_root_overlap',
           message:
-            `provenance root '${root}' (derived from publish.chapters_dir) overlaps ` +
-            `capture.output_dir '${outputDir}' — the capture command's writable mount cannot be ` +
-            'allowed to reach the provenance tree, and vice versa. Relocate capture.output_dir so ' +
-            'the two trees are disjoint, or remove capture.build_identity to stop asking for ' +
-            'provenance on this topology.',
+            `provenance root '${root}' (derived from publish.chapters_dir; resolves to ` +
+            `'${rootResolvedPath}') overlaps capture.output_dir '${outputDir}' (resolves to ` +
+            `'${outputResolvedPath}') — the capture command's writable mount cannot be allowed to ` +
+            'reach the provenance tree, and vice versa. Relocate capture.output_dir so the two ' +
+            'trees are disjoint, or remove capture.build_identity to stop asking for provenance on ' +
+            'this topology.',
         },
       ],
     };

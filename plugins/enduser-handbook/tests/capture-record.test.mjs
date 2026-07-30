@@ -431,6 +431,49 @@ test('gate 5: sibling-prefix topology (handbook-old vs handbook) does NOT overla
   });
 });
 
+test('gate 5: overlap hidden behind two DIFFERENT symlinked aliases — the halt message must name the RESOLVED paths, not just the raw disjoint-looking ones', () => {
+  // `alias-a` and `alias-b` are two distinct names, both pointing at the SAME real directory — the
+  // raw configured strings ('.../alias-a/.provenance' vs '.../alias-b') share no lexical prefix at
+  // all, so a reader comparing only the raw values would conclude the two trees are unrelated. They
+  // are not: both resolve into 'real', and `capture.output_dir` (resolved) turns out to be a direct
+  // ANCESTOR of the resolved provenance root — the overlap the gate exists to refuse. The gate
+  // already refuses this correctly (this is not a gate-5 detection bug); what this test pins is that
+  // the halt MESSAGE explains why, by naming what each raw string actually resolved to.
+  withTempDir((dir) => {
+    const real = join(dir, 'real');
+    nodeFs.mkdirSync(real, { recursive: true });
+    const aliasA = join(dir, 'alias-a');
+    const aliasB = join(dir, 'alias-b');
+    nodeFs.symlinkSync(real, aliasA);
+    nodeFs.symlinkSync(real, aliasB);
+    const profile = {
+      capture: { output_dir: aliasB, build_identity: { ui_read: false } },
+      publish: { chapters_dir: aliasA },
+    };
+    const halt = CR.assertProvenanceOwnership(profile, realDeps());
+    assert.equal(halt.ok, false);
+    assert.equal(halt.skip, undefined, 'build_identity is configured — this must halt, not skip');
+    assert.equal(halt.halts[0].halt, 'provenance_root_overlap');
+
+    const message = halt.halts[0].message;
+    const realResolved = nodeFs.realpathSync(real);
+    // The raw, as-configured values — both must still be present (this much already held before
+    // the fix; a message that dropped them would be a regression in the other direction).
+    assert.ok(message.includes(join(aliasA, '.provenance')), 'message must still name the raw provenance root');
+    assert.ok(message.includes(aliasB), 'message must still name the raw capture.output_dir');
+    // The RESOLVED values — this is what a raw-only message cannot provide, and what makes the halt
+    // actionable: the operator's own alias names never appear in the same tree, only their targets do.
+    assert.ok(
+      message.includes(`${realResolved}/.provenance`),
+      `message must name the RESOLVED provenance root ('${realResolved}/.provenance'); got: ${message}`,
+    );
+    assert.ok(
+      message.includes(realResolved),
+      `message must name the RESOLVED capture.output_dir ('${realResolved}'); got: ${message}`,
+    );
+  });
+});
+
 // =================================================================================================
 // Gate 6 — hazard inspection, driven through the real recoverProvenanceState consumer.
 //
@@ -1389,6 +1432,80 @@ test('runState survives a real JSON serialization boundary (simulated fresh proc
     nodeFs.writeFileSync(join(profile.capture.output_dir, 'items', 'a.png'), 'v2');
     const closed = CR.closeCaptureRun(profile, roundTripped, { ok: true }, null, stubDepsNoIdentity());
     assert.equal(closed.ok, true);
+  });
+});
+
+// capture-record.d.mts declares `RunState` as a discriminated union on `skipped`, not one interface
+// with every payload field optional — nothing in this repository compiles TypeScript, so that
+// declaration is otherwise unchecked by the whole suite (a codex mutation audit confirmed ANY
+// `.d.mts` edit survives it). These two tests pin the union's two branches against a REAL
+// openCaptureRun/closeCaptureRun round trip, not a hand-built fixture, so a future change that
+// widens or narrows either branch's actual field set is caught here.
+test('RunState union: an ACTIVE run carries exactly the non-optional payload fields the declaration promises, before and after close', () => {
+  withTempDir((dir) => {
+    const profile = profileFor(dir);
+    const entry = { slug: 'items' };
+    nodeFs.mkdirSync(join(profile.capture.output_dir, 'items'), { recursive: true });
+    nodeFs.writeFileSync(join(profile.capture.output_dir, 'items', 'a.png'), 'v1');
+
+    const opened = CR.openCaptureRun(profile, [entry], null, stubDepsNoIdentity());
+    assert.equal(opened.ok, true, JSON.stringify(opened));
+    const openedState = opened.runState;
+
+    assert.equal(openedState.skipped, false);
+    assert.equal(typeof openedState.run_id, 'string');
+    assert.ok(openedState.run_id.length > 0);
+    assert.match(openedState.opening_digest, /^sha256:[0-9a-f]{64}$/);
+    assert.deepEqual(Object.keys(openedState.opening).sort(), ['detail', 'resolution_reason', 'source', 'value']);
+    assert.equal(typeof openedState.opening_assets, 'object');
+    assert.ok(Array.isArray(openedState.entries));
+    // Not yet closed — `closed` is the one field the declaration keeps optional on this branch,
+    // and it must be genuinely ABSENT here (not merely falsy), matching `openCaptureRun`'s own
+    // construction, which never assigns it at all.
+    assert.equal(Object.hasOwn(openedState, 'closed'), false);
+    assert.deepEqual(
+      Object.keys(openedState).sort(),
+      ['entries', 'opening', 'opening_assets', 'opening_digest', 'run_id', 'skipped'].sort(),
+    );
+
+    nodeFs.writeFileSync(join(profile.capture.output_dir, 'items', 'a.png'), 'v2');
+    const closed = CR.closeCaptureRun(profile, openedState, { ok: true }, null, stubDepsNoIdentity());
+    assert.equal(closed.ok, true, JSON.stringify(closed));
+    const closedState = closed.runState;
+
+    assert.equal(closedState.skipped, false);
+    assert.equal(closedState.run_id, openedState.run_id);
+    assert.equal(closedState.opening_digest, openedState.opening_digest);
+    assert.deepEqual(closedState.opening, openedState.opening);
+    assert.deepEqual(closedState.entries, openedState.entries);
+    assert.equal(typeof closedState.opening_assets, 'object');
+    assert.equal(closedState.closed, true);
+    assert.deepEqual(
+      Object.keys(closedState).sort(),
+      ['closed', 'entries', 'opening', 'opening_assets', 'opening_digest', 'run_id', 'skipped'].sort(),
+    );
+  });
+});
+
+test('RunState union: a SKIPPED run carries ONLY `skipped: true` — from openCaptureRun and unchanged out of closeCaptureRun', () => {
+  withTempDir((dir) => {
+    // The EQUAL-topology, no-`build_identity` fixture from the gate-5 section above: ownership
+    // overlaps but is unconfigured, so this is the warn-and-skip branch, never the halt branch.
+    nodeFs.mkdirSync(join(dir, 'handbook'), { recursive: true });
+    const profile = {
+      capture: { output_dir: join(dir, 'handbook') },
+      publish: { chapters_dir: join(dir, 'handbook') },
+    };
+
+    const opened = CR.openCaptureRun(profile, [], null, stubDepsNoIdentity());
+    assert.equal(opened.ok, true, JSON.stringify(opened));
+    assert.deepEqual(Object.keys(opened.runState), ['skipped']);
+    assert.equal(opened.runState.skipped, true);
+
+    const closed = CR.closeCaptureRun(profile, opened.runState, { ok: true }, null, stubDepsNoIdentity());
+    assert.equal(closed.ok, true, JSON.stringify(closed));
+    assert.deepEqual(Object.keys(closed.runState), ['skipped']);
+    assert.equal(closed.runState.skipped, true);
   });
 });
 
