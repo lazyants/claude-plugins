@@ -2971,8 +2971,20 @@ function scanJsTokens(source) {
     // every existing check that reads `precededByChar`/`precededByDot` on a NEIGHBORING token sees
     // no change at all; the only difference is that a `{`/`}` now also appears as its own entry in
     // the `tokens` array, which nothing before this round ever indexed into expecting otherwise.
+    //
+    // [round 7→8, this fix] ALSO records `precededByChar` on the `{`/`}` token itself (ident tokens
+    // already carry this; punct tokens never did, since nothing needed it before). Without it,
+    // findDefaultDepsLiteralSpan's "is `defaultDeps` immediately followed by `=`" check — which reads
+    // `precededByChar` off whatever token comes right after `defaultDeps` — silently failed for
+    // `const defaultDeps = { ... }` (no `Object.freeze(` wrapper): the token right after `defaultDeps`
+    // is this `{` PUNCT token, which had no `precededByChar` field at all (`undefined !== '='`), so
+    // the declaration was never found and every legitimate fs reference inside a plain-literal seam
+    // was rejected as outside the sanctioned slot — a false-RED that fails safe (nothing ships) but
+    // would be baffling to hit from an ordinary `Object.freeze` removal (team-lead review, guard5
+    // round 7). `Object.freeze({` was unaffected either way, since there the token right after
+    // `defaultDeps` is the `Object` IDENT, which already carried `precededByChar` correctly.
     if (ch === '{' || ch === '}') {
-      tokens.push({ kind: 'punct', text: ch });
+      tokens.push({ kind: 'punct', text: ch, precededByChar: prevSignificant });
       prevSignificant = ch;
       precededByDot = false;
       i++;
@@ -3267,14 +3279,46 @@ const VALUE_TERMINATORS = new Set([',', '}', ';', ')']);
 // template-literal-interior blind spot documented above `findDisallowedFsReference`, not a new one).
 // No legitimate edit to this file has ever had reason to redeclare `defaultDeps` in a nested scope,
 // so this is a real but narrow gap, not a load-bearing one.
+//
+// Same root cause, a second measured consequence (guard5 round 8, team-lead review): the locator
+// takes the FIRST `defaultDeps` declaration in TOKEN ORDER and returns immediately — it does not
+// attempt to disambiguate multiple declarations by scope, and it does not prefer a "more real-
+// looking" one. Confirmed by direct measurement: `var defaultDeps = { foo: 1 };` (an unrelated
+// EARLIER declaration with no fs reference in it at all) followed by a genuinely correct, correctly-
+// keyed seam nested inside a function, still returns `fs_reference_outside_sanctioned_slot` for the
+// real seam's own `openSync: fs.openSync` — the locator finds the decoy's span first and never looks
+// past it. This fails CLOSED, same as the shadowing gap above (the checker rejects a legitimate
+// module rather than admitting a bypass), and no legitimate edit to this file has ever had reason to
+// declare more than one `defaultDeps` anywhere in it — but it is the same class of gap, not a new
+// coincidence, and is recorded here rather than left for the next round to re-discover.
 
 // The raw-source span of the `defaultDeps` object literal's `{...}` — the ONE declaration `const
-// defaultDeps = Object.freeze({ ... })` — located by finding the `defaultDeps` identifier
-// immediately followed by `=` (its DECLARATION; never the two bare REFERENCES to it inside
+// defaultDeps = Object.freeze({ ... })` in the real module, but the check below does not care what
+// the real module happens to spell it as: it only reads what comes AFTER `defaultDeps`, never what
+// keyword (if any) precedes it, so `const`/`let`/`var`/`export const`/a bare reassignment
+// (`defaultDeps = ...` with no declaration keyword at all) are all recognized identically — verified
+// directly, not merely assumed (see the fixtures below). It is located by finding the `defaultDeps`
+// identifier immediately followed by `=` (its DECLARATION; never the two bare REFERENCES to it inside
 // `mergeDeps`: `{ ...defaultDeps, ...deps } : defaultDeps`, neither followed by `=`), then balancing
-// `{`/`}` PUNCT tokens forward from the first `{` after it. Returns null when no such declaration
-// exists at all — every isolated snippet fixture in this file that carries no `defaultDeps`
-// declaration of its own (which is most of them) simply has no sanctioned literal slot to sit in.
+// `{`/`}` PUNCT tokens forward from the first `{` after it.
+//
+// [round 7→8, this fix] "immediately followed by `=`" is read off `next.precededByChar`, which for
+// most declarations is an IDENT token (`Object`, in `= Object.freeze({`) — but for the real module's
+// object literal SANS wrapper (`const defaultDeps = { ... }`), the very next token is the `{` PUNCT
+// token itself, which used to carry no `precededByChar` at all (only ident tokens did), so this
+// branch's `!next || next.precededByChar !== '='` unconditionally treated that shape as "not a
+// declaration" and rejected every legitimate reference inside it (team-lead review, guard5 round 7 —
+// a plain-literal `defaultDeps` failed the real-module-shaped-but-not-Object.freeze'd test). Fixed at
+// the token source: `{`/`}` PUNCT tokens now carry `precededByChar` too (see scanJsTokens), so this
+// check reads correctly whichever kind of token happens to sit right after `defaultDeps =`.
+//
+// Returns null when no such declaration exists at all — every isolated snippet fixture in this file
+// that carries no `defaultDeps` declaration of its own (which is most of them) simply has no
+// sanctioned literal slot to sit in. When MULTIPLE `defaultDeps` declarations exist, this returns the
+// FIRST one found in token order and never looks further — see the residual paragraph above
+// isSanctionedSeamSlot for the measured consequence (an earlier, unrelated decoy declaration can hide
+// a genuinely correct later seam) and why it is a documented, not accidental, limitation.
+//
 // Returned as TOKEN INDICES (`openIdx`/`closeIdx`), not raw source positions: the recursive
 // template-literal branch of scanJsTokens re-scans an interpolated `${...}` expression as its OWN
 // substring starting at position 0, so tokens found THAT way carry raw positions relative to the
@@ -3648,6 +3692,26 @@ test('capability policy: an ordinary, correctly-shaped defaultDeps literal — t
     ).ok,
     true,
   );
+});
+
+// [round 7→8, this fix] team-lead review, guard5 round 7: the real module happens to spell its seam
+// as `Object.freeze({ ... })`, but nothing in the CONTRACT requires that wrapper — a plain
+// `const defaultDeps = { ... }` is an equally legitimate seam shape, and the round-6→7 locator
+// silently rejected it (see findDefaultDepsLiteralSpan's doc comment above). Pinned here so the
+// plain spelling can never regress, alongside its own wrongly-keyed variant, so the newly-accepted
+// path does not become a fresh hole the way the ORIGINAL `Object.freeze` shape's site rule almost did.
+test('capability policy: the seam literal need not be wrapped in Object.freeze(...) — a plain `const defaultDeps = { ... }` is an equally legitimate seam, and a wrongly-keyed member inside THAT shape is still rejected', () => {
+  assert.equal(checkCapabilityPolicy('const defaultDeps = { openSync: fs.openSync };').ok, true);
+  assert.equal(checkCapabilityPolicy('const defaultDeps = { run: fs.writeFileSync };').ok, false);
+});
+
+// [round 7→8, this fix] findDefaultDepsLiteralSpan's declaration check reads only what FOLLOWS
+// `defaultDeps` (`= ...`), never what precedes it — so it is agnostic to the declaration keyword.
+// Verified directly rather than left as an assumption riding on the fix above: `let` and an exported
+// `const` both locate the seam identically to a bare `const`.
+test('capability policy: the seam locator is agnostic to the declaration keyword — `let` and `export const` both find the real seam the same way `const` does', () => {
+  assert.equal(checkCapabilityPolicy('let defaultDeps = { openSync: fs.openSync };').ok, true);
+  assert.equal(checkCapabilityPolicy('export const defaultDeps = { openSync: fs.openSync };').ok, true);
 });
 
 // =================================================================================================
