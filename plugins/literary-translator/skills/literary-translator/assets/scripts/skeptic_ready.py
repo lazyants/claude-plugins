@@ -358,6 +358,77 @@ def _atomic_write_json(path: Path, doc) -> None:
     tmp_path.replace(path)  # atomic on the same filesystem
 
 
+# CPython's str.splitlines() boundary set -- the SAME 10-member candidate
+# list render_obsidian.py's _MENTIONS_LINE_BREAK_CHARS and skeptic_report.py's
+# _LINE_BREAK_CHARS restate, stable across Python versions (nothing outside
+# this list is ever a splitlines() boundary, so nothing outside it can ever
+# need the escape below). Built entirely from chr()/\xXX escapes for
+# codepoints <= 0xFF plus chr() calls for U+2028/U+2029 -- never a \uXXXX
+# string-literal escape or a pasted glyph, both of which have silently
+# degraded before (see the unicode-boundary-text-authoring project skill).
+_SPLITLINES_BOUNDARY_CANDIDATES = "\n\r\v\f\x1c\x1d\x1e\x85" + chr(0x2028) + chr(0x2029)
+
+_BACKSLASH = chr(92)  # a literal backslash inside a string literal risks being
+# parsed back into the very character this module must instead emit as
+# PLAIN escaped text -- chr(92) sidesteps that ambiguity entirely.
+
+
+def _compute_line_separator_escapes() -> dict:
+    """DERIVES (round 5, F1/HIGH -- does not hand-list) which of
+    ``_SPLITLINES_BOUNDARY_CANDIDATES`` ``json.dumps(..., ensure_ascii=
+    False)`` actually leaves RAW: every codepoint < 0x20 (``\\n \\r \\v \\f
+    \\x1c \\x1d \\x1e``) is ALREADY backslash-escaped by ``json.dumps``
+    itself, unconditionally, regardless of ``ensure_ascii`` -- only the
+    candidates >= 0x20 (U+0085 NEL, U+2028, U+2029) survive it raw and need
+    an escape from THIS function. A hand-typed two-member dict here
+    (U+2028/U+2029 only) is exactly how round 5's F1 happened: it silently
+    missed NEL, which ``str.splitlines()`` also treats as a boundary. This
+    computation is the cheap equivalent of a full 0x0-0x10FFFF brute-force
+    scan (which tests/skeptic_ready.test.py actually runs, mirroring the
+    round-5 security lane's own scan, to PROVE the reduced candidate set
+    above is complete) -- filtering 10 known candidates by the real
+    predicate, rather than trusting either a fixed count or a fixed list of
+    which ones need it. If a future Python version ever changed which
+    codepoints ``json.dumps`` escapes, this recomputes correctly; a hand-
+    listed dict would not."""
+    escapes = {}
+    for ch in _SPLITLINES_BOUNDARY_CANDIDATES:
+        if ch in json.dumps(ch, ensure_ascii=False):
+            escapes[ch] = _BACKSLASH + "u" + format(ord(ch), "04x")
+    return escapes
+
+
+_LINE_SEPARATOR_ESCAPES = _compute_line_separator_escapes()
+
+
+def _json_dumps_line(obj) -> str:
+    """``json.dumps(obj, ensure_ascii=False)``, but also escaping every
+    ``str.splitlines()`` boundary character ``json.dumps(ensure_ascii=
+    False)`` leaves raw (see ``_compute_line_separator_escapes``'s own
+    docstring for the derivation and why round 5 found a hand-typed
+    two-member set here incomplete -- currently U+0085 NEL, U+2028 LINE
+    SEPARATOR, and U+2029 PARAGRAPH SEPARATOR, per ``_LINE_SEPARATOR_
+    ESCAPES``, never re-hand-listed here). JSON permits a literal line/
+    paragraph/NEL separator inside a string, unlike a raw control character
+    below 0x20, which ``json.dumps`` always backslash-escapes regardless of
+    ``ensure_ascii``. Left raw, a ``source_form`` or rationale carrying ANY
+    of these turns ONE JSON line into what ``str.splitlines()`` reads as
+    TWO (or more) physical lines, while ``str.split("\\n")`` still sees one
+    -- exactly the accept-sentinel shape the wait poll's line-oriented
+    grammar reads for. The JS sentinel parser only ever splits on ``\\n``
+    and is immune; the exposure is a reading LLM agent (skeptic/codex)
+    downstream of this CLI's stdout -- unfiled: #360 covers this file's
+    unbounded diagnostic VOLUME (message length / list count), a distinct
+    exposure from a boundary character forging an extra line. A
+    ``\\uXXXX`` escape round-trips through every JSON parser identically to
+    the raw character, so this is a small, behavior-preserving change:
+    only the on-the-wire bytes differ, never the decoded value."""
+    text = json.dumps(obj, ensure_ascii=False)
+    for raw, escaped in _LINE_SEPARATOR_ESCAPES.items():
+        text = text.replace(raw, escaped)
+    return text
+
+
 def _load_schema_document(schema_path: Path) -> dict:
     if not schema_path.is_file():
         raise SkepticReadyError(f"schema file not found: {schema_path}")
@@ -604,15 +675,34 @@ def _coerce_record(record: dict, manifest: dict, language_config, *, competitors
     ``skeptic-triage.schema.json`` documents but leaves to code:
     ``propose_split`` needs >=2 referents each byte-verified;
     ``adverse``/``propose_rescope`` need one byte-verified citation;
-    ``insufficient_window`` needs neither. Any citation that fails to
-    byte-verify -- or is simply absent where required -- is coerced DOWN to
-    ``insufficient_window`` (never up): the fail-closed half of the RFC #215
-    safety invariant. A ``propose_split`` that started with more referents
-    than survive verification is not thrown away wholesale as long as >=2
-    verified referents remain -- the failed ones are dropped and
-    ``evidence_coverage`` records the partial count (rendered by
-    ``skeptic_report.py``). Never mutates ``record``; always returns a NEW,
-    schema-conformant record.
+    ``insufficient_window`` needs neither. For ``adverse``/``propose_rescope``,
+    whose single required citation fails to byte-verify -- or is simply
+    absent -- the WHOLE record is coerced DOWN to ``insufficient_window``
+    (never up): the fail-closed half of the RFC #215 safety invariant. A
+    ``propose_split`` is coerced differently: a single failed referent does
+    NOT coerce the whole record on its own. A ``propose_split`` that started
+    with more referents than survive verification is not thrown away
+    wholesale as long as >=2 verified referents remain -- the failed
+    referents are dropped INDIVIDUALLY and this call's ``evidence_coverage``
+    records THIS invocation's cited/verified split; the record itself is
+    coerced to ``insufficient_window`` only when fewer than 2 verified
+    referents remain.
+
+    DO NOT read ``evidence_coverage`` as a durable record of that pruning:
+    ``cited`` below is ``len(record.get("referents"))`` as the record stands
+    AT THIS CALL, never the batch's original referent count. Because
+    ``--validate-fragment`` rewrites the fragment in place (see
+    ``run_validate_fragment``), a SECOND validation of an already-pruned
+    fragment hands this function the already-pruned referent list, so
+    ``cited`` recomputes to the pruned count and ``cited == verified`` even
+    though referents were dropped on the first pass. The normal path
+    validates at least twice -- codex's own self-check, then the wait poll --
+    so by merge time a partial coverage is generally no longer distinguishable
+    from a complete one here. See ``skeptic-triage.schema.json``'s
+    ``evidence_coverage`` description for the full consequence: a merged
+    record showing ``cited == verified`` does NOT establish that nothing was
+    pruned. Never mutates ``record``; always returns a NEW, schema-conformant
+    record.
 
     ``competitors`` (#243): threaded straight through to every
     ``_evidence_failure_reason()`` call below -- see that function's own
@@ -1082,6 +1172,167 @@ def frozen_input_check(
     return frozen_input_mismatch, reasons, snapshots["canon"], snapshots["senses"]
 
 
+# Round 9 (codex, HIGH): both `missing` lists below (run_check_frozen_inputs'
+# own, and run_verify_merged's further down) had no per-item length cap and
+# no list-count cap -- the exact shape canon_validate.py's own
+# _bounded_message/_bounded_list already guard against (see that file's own
+# _MAX_LISTED_PROBLEMS comment: 40 items at the shipped DEFAULT_BATCH_SIZE
+# produced 14 KB carrying one injected sentence 80 times). Independent copy
+# here, not an import -- this project's stated convention (every sibling
+# script/test carries its own copy of a shared idea rather than importing
+# one, so a wrong edit to one never silently changes what another asserts) --
+# but NOT a byte-identical copy: canon_validate.py's own _bounded_message
+# ALSO flattens embedded whitespace/newlines, and copying that step
+# unmeasured broke this file's own, already-correct design. Measured before
+# settling on this shape (two things canon_validate.py's calibration did not
+# have to answer for its own message shapes):
+#   1. This file has its OWN, more precise defense against the exact thing
+#      whitespace-flattening exists to prevent -- _json_dumps_line() already
+#      backslash-escapes every U+0085/U+2028/U+2029 line-breaking boundary
+#      character json.dumps(ensure_ascii=False) otherwise leaves raw, so a
+#      `missing[]` entry carrying one can never turn one JSON output line
+#      into two. tests/skeptic_ready.test.py's own
+#      test_main_escapes_boundary_chars_in_verify_merged_result_via_real_
+#      pipeline pins the INVERSE property flattening would have broken: a
+#      boundary character embedded in a record's own `notes` field must
+#      survive character-for-character into `missing[]`, escaped only by
+#      json.dumps at print time, never silently collapsed beforehand.
+#      Measured directly: flattening here failed that exact test for every
+#      parametrized codepoint (10/13/11/12/28/29/30/8232/8233).
+#   2. canon_validate.py's own 200-char per-item cap does not fit this
+#      file's own message shapes: `_frozen_input_tamper_reason`'s tamper
+#      message alone embeds TWO 64-char sha256 hashes plus a full path
+#      inside fixed boilerplate. NOT a constant, on purpose stated as one
+#      here: the message is `fixed prose + label + path + 2 hashes`, so its
+#      length moves with the path length of whoever runs it -- measured
+#      126 chars of fixed prose (the template minus label/path/both
+#      hashes) + len(label) + len(path) + 128 (two 64-hex-char sha256
+#      digests, always exactly that long). A pytest tmp_path of ~150 chars
+#      (this machine, this session) reconstructs the earlier one-number
+#      figure exactly: 126 + 13 ("manifest.json") + ~177 + 128 = 444. Round
+#      10 measured 389-403 on a different machine's shorter tmp_paths --
+#      same formula, different path length, not a discrepancy. A future
+#      reader can recompute their own headroom from `126 + len(label) +
+#      len(path) + 128` against the 600 cap below, rather than trust a
+#      figure taken on one machine's temp-directory layout.
+#      Comfortable headroom over that formula's realistic range, while
+#      still meaningfully bounding the genuinely unbounded content
+#      elsewhere in this file's own `missing[]` entries (a `source_form`
+#      derived from source text, an evidence-verification `reason`, a
+#      skeptic-authored coercion `note` -- none schema-length-bounded).
+#
+# Checked before landing this: skeptic-pass-wf.template.js (the only
+# consumer -- see verifyMergedPrompt()/frozenInputCheckPrompt()'s own
+# "missing (... copied verbatim)" instruction) only ever checks
+# `missing.length === 0`/truthiness and `.join(", ")`s the entries into one
+# log line -- never counts, indexes, or pattern-matches a SPECIFIC entry --
+# and every existing test in tests/skeptic_ready.test.py asserts
+# `any(... in m for m in result["missing"])`, never an exact count or
+# position, so bounding changes nothing any current caller or test depends
+# on (re-run after this fix: full suite green, see commit/round notes).
+_MISSING_ITEM_MAX_CHARS = 600
+_MAX_LISTED_MISSING = 8
+# Round 10 (verifier MEDIUM, reported HIGH): `_bounded_missing` bounds ONE
+# homogeneous list correctly -- the bug was never in this function, it was
+# calling it ONCE over `sorted(set(missing))`, a list `run_verify_merged`
+# pools from several genuinely different POPULATIONS (schema failures,
+# frozen-input tamper reasons, coverage gaps, per-record findings). A
+# lexical sort has no relationship to importance, so whichever population
+# sorts last can be evicted WHOLESALE by an unrelated, larger population
+# that happens to sort earlier -- not merely trimmed. Measured, not assumed:
+# a canon.json tamper (frozen_input_mismatch=True, sorts after "canon") with
+# 11 "assignment <64-hex-id> has no triage record (coverage gap)" entries
+# (sorts before "canon") present -- the tamper reason TEXT is completely
+# absent from `missing[]` under the old single-pool bound, even though
+# `frozen_input_mismatch` (the boolean the caller actually gates HALT on,
+# per skeptic-pass-wf.template.js) still correctly fires. That is why the
+# verifier downgraded HIGH to MEDIUM: the SAFETY behavior survives, only the
+# DIAGNOSTIC text is at risk -- still worth fixing, since a human/log reader
+# cannot see why it halted.
+#
+# Fix is at the CALL SITE, not in this function's own shape: `_bounded_
+# missing` stays a simple, correct, general-purpose "count-cap + per-item
+# length-cap" primitive over ONE list; `run_verify_merged` now calls it
+# ONCE PER POPULATION (structural: schema/frozen-input/run_id, all small and
+# already bounded by their own nature; coverage gaps and per-record findings,
+# both potentially large) and concatenates the results, so each population
+# gets a GUARANTEED slice of the output rather than competing in one pool.
+# The two potentially-large populations share `_MAX_LISTED_MISSING_HALF`
+# (canon_validate.py's own `half = _MAX_LISTED_PROBLEMS // 2` precedent for
+# its two-sided case, checked here to actually fit before reusing it: same
+# "two comparable-severity populations, neither should starve the other"
+# shape, not blindly copied) rather than each claiming the full 8, so the
+# worst-case total stays close to the original single-pool budget instead of
+# tripling it.
+_MAX_LISTED_MISSING_HALF = _MAX_LISTED_MISSING // 2
+
+
+def _bounded_missing_item(message: str) -> str:
+    """Cap one `missing` entry's length. Deliberately does NOT flatten
+    embedded whitespace/control/boundary characters -- see the module-level
+    comment above this constant for why that would fight this file's own
+    _json_dumps_line() escaping and the test that pins character-for-
+    character survival."""
+    text = str(message)
+    if len(text) > _MISSING_ITEM_MAX_CHARS:
+        text = text[:_MISSING_ITEM_MAX_CHARS] + " [...truncated]"
+    return text
+
+
+def _bounded_missing(values, max_items: int = _MAX_LISTED_MISSING) -> list:
+    """Bound ONE list in COUNT as well as in each entry's length -- mirrors
+    canon_validate.py's own `_bounded_list`. Marks rather than hides: a
+    caller sees "... and N more", never just a shorter list indistinguishable
+    from a smaller problem. `max_items` lets a caller reserve a SMALLER slice
+    when concatenating several bounded populations together (see the
+    module-level comment above `_MAX_LISTED_MISSING_HALF`) -- this function
+    itself stays a single-population primitive either way; it does not know
+    or care that its caller may be combining several calls."""
+    values = list(values)
+    bounded = [_bounded_missing_item(v) for v in values[:max_items]]
+    extra = len(values) - max_items
+    if extra > 0:
+        bounded.append(
+            f"... and {extra} more (showing the first {max_items} of {len(values)})"
+        )
+    return bounded
+
+
+def _bounded_notes_detail(notes) -> str:
+    """Joins a coercion's `notes` into ONE string for embedding in a
+    `missing[]` message -- round 10 (MEDIUM). `_coerce_record`'s own
+    `_downgrade` ALWAYS appends the machine's own diagnosis LAST
+    (`notes.append(f"skeptic_ready:coerced_insufficient_window:{reason}")`,
+    read directly to confirm rather than assumed): the machine's note is
+    therefore the LAST item in this list, and the composed message it feeds
+    into (`f"...(would resolve to {verdict!r}: {detail})"`) puts `detail` at
+    the message's own END. A plain head-first character cap on the WHOLE
+    composed message (what `_bounded_missing_item` alone would do) then
+    keeps every earlier agent-authored note and drops exactly the one note
+    the agent did not write -- the SAME shape skeptic_report.py's own
+    `_bounded_items` docstring names and fixes for the identical convention,
+    independently confirmed here rather than assumed to transfer. Here, the
+    machine's note is kept in full (bounded on its own), and the earlier
+    notes fill whatever budget remains -- reserving ~200 chars for the
+    surrounding message's own boilerplate (measured: a realistic `rec_aid` +
+    verdict-pair prefix/suffix is ~158 chars; 200 leaves headroom) so the
+    WHOLE composed message stays under `_MISSING_ITEM_MAX_CHARS` and never
+    needs the outer per-item cap to fire at all."""
+    notes = [str(n) for n in (notes or [])]
+    if len(notes) <= 1:
+        return "; ".join(_bounded_missing_item(n) for n in notes)
+    head, tail = notes[:-1], notes[-1]
+    tail_bounded = _bounded_missing_item(tail)
+    detail_budget = _MISSING_ITEM_MAX_CHARS - 200
+    budget = detail_budget - len(tail_bounded) - len("; ")
+    if budget <= 0:
+        return tail_bounded
+    head_joined = "; ".join(head)
+    if len(head_joined) > budget:
+        head_joined = head_joined[:budget] + " [...truncated]"
+    return f"{head_joined}; {tail_bounded}"
+
+
 # ---------------------------------------------------------------------------
 # --check-frozen-inputs (codex round 2)
 # ---------------------------------------------------------------------------
@@ -1142,7 +1393,7 @@ def run_check_frozen_inputs(aggregate_manifest_path, canon_path=None, manifest_p
     frozen_input_mismatch, reasons, _canon_snapshot, _senses_snapshot = frozen_input_check(
         aggregate, canon_path, manifest_path, senses_path, tolerant_reads=True
     )
-    return {"frozen_input_mismatch": frozen_input_mismatch, "missing": reasons}
+    return {"frozen_input_mismatch": frozen_input_mismatch, "missing": _bounded_missing(reasons)}
 
 
 def _iter_record_evidence(record: dict):
@@ -1335,6 +1586,16 @@ def run_verify_merged(
                 f"triage run_id {triage_run_id!r} does not match aggregate manifest run_id {aggregate_run_id!r}"
             )
 
+    # Round 10 population boundary 1/2: everything ABOVE this line is
+    # STRUCTURAL -- schema failures, the H1 frozen-input tamper reasons,
+    # a competitors-resolution failure, the run_id binding check -- all
+    # small and bounded by their own nature (schema: <=2 sites; frozen-input:
+    # <=3, one per canon/manifest/senses, frozen_input_check()'s own fixed
+    # table; run_id: <=1). See _MAX_LISTED_MISSING_HALF's own comment for why
+    # this population is bounded SEPARATELY from what follows, at the return
+    # statement below.
+    structural_end = len(missing)
+
     # FIX (e): multiplicity -- exactly one triage record per assigned
     # assignment_id. A duplicate (of an assigned id or a foreign one) is a
     # FAIL; the set-based coverage checks below would silently absorb it.
@@ -1353,6 +1614,13 @@ def run_verify_merged(
         for aid, count in sorted(id_counts.items(), key=lambda kv: kv[0] or "")
         if count > 1
     )
+
+    # Round 10 population boundary 2/2: everything between the two markers
+    # is COVERAGE (potentially large -- scales with how many entities this
+    # run assigned); everything below is PER-RECORD (potentially large --
+    # scales with entity count AND findings-per-record). Both share
+    # _MAX_LISTED_MISSING_HALF rather than each claiming the full cap.
+    coverage_end = len(missing)
 
     for rec in records:
         if not isinstance(rec, dict):
@@ -1425,15 +1693,34 @@ def run_verify_merged(
         # substitute for it -- see this function's own docstring.
         coerced = _coerce_record(rec, manifest, language_config, competitors=competitors)
         if coerced.get("verdict") != rec.get("verdict"):
-            detail = "; ".join(str(n) for n in (coerced.get("notes") or []))
+            # Round 10 (MEDIUM): _bounded_notes_detail, not a plain join --
+            # see its own docstring for why a plain join left the machine's
+            # own diagnosis (always the LAST note) exposed to being sliced
+            # off by the outer per-item length cap further down.
+            detail = _bounded_notes_detail(coerced.get("notes"))
             missing.append(
                 f"{rec_aid}: stored verdict {rec.get('verdict')!r} does not survive fresh "
                 f"re-verification (would resolve to {coerced.get('verdict')!r}: {detail})"
             )
 
+    # Round 10: bounded PER POPULATION (see the two boundary markers above),
+    # not once over the whole pooled-and-sorted list -- `sorted(set(...))`
+    # stays applied WITHIN each population (dedup + a stable, readable
+    # order), never across them, so the alphabetically-last item of a small
+    # important population can no longer be squeezed out by a large
+    # unrelated one. `verified` still reads the UNBOUNDED, un-pooled
+    # `missing` -- bounding is a rendering concern for the returned list
+    # only, never the pass/fail verdict itself.
+    structural = missing[:structural_end]
+    coverage = missing[structural_end:coverage_end]
+    per_record = missing[coverage_end:]
     return {
         "verified": not missing,
-        "missing": sorted(set(missing)),
+        "missing": (
+            _bounded_missing(sorted(set(structural)))
+            + _bounded_missing(sorted(set(coverage)), _MAX_LISTED_MISSING_HALF)
+            + _bounded_missing(sorted(set(per_record)), _MAX_LISTED_MISSING_HALF)
+        ),
         "frozen_input_mismatch": frozen_input_mismatch,
     }
 
@@ -1587,13 +1874,13 @@ def main(argv=None) -> int:
         payload = {"success": False, "error": str(exc)}
         if exc.offending is not None:
             payload["offending"] = exc.offending
-        print(json.dumps(payload, ensure_ascii=False))
+        print(_json_dumps_line(payload))
         return 1
     except Exception as exc:  # pragma: no cover -- defensive catch-all
-        print(json.dumps({"success": False, "error": f"unexpected error: {exc}"}, ensure_ascii=False))
+        print(_json_dumps_line({"success": False, "error": f"unexpected error: {exc}"}))
         return 1
 
-    print(json.dumps(result, ensure_ascii=False))
+    print(_json_dumps_line(result))
     if args.verify_merged is not None:
         return 0 if result.get("verified") else 1
     if args.check_frozen_inputs is not None:

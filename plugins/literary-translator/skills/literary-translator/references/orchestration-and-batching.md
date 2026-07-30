@@ -412,13 +412,17 @@ sequence, per `references/workflow-schema-validation.md`.
 `verifyReviewArtifactPrompt` keeps its pre-1.2.0 name but is now dispatched as
 a separate call after `readReviewPrompt` returns, rather than immediately after
 the old single `reviewPrompt` call.) `glossary-pass-wf.template.js` defines its own,
-smaller set of seven: `batchPrecheckPrompt`, `batchDispatchPrompt`,
-`batchWaitPrompt`, `citationPreparePrompt` and `citationJudgePrompt` (1.16.1,
+smaller set of eight: `batchPrecheckPrompt`, `batchDispatchPrompt`,
+`batchWaitChunkPrompt` and `batchWaitRecheckPrompt` (**1.16.2**, the pair that
+replaced the single `batchWaitPrompt`), `citationPreparePrompt` and
+`citationJudgePrompt` (1.16.1,
 `live` only — the pair that replaced 1.16.0's single `citationReviewPrompt`),
 `mergeBatchesPrompt`, and `glossaryVerifyPrompt` (`CANON_VERIFY_SCHEMA`) — see
-`references/canon-and-glossary.md`. Its `batchWaitPrompt` is NOT the shape
-W5's two waits use — see `references/workflow-schema-validation.md`'s WAIT
-section.
+`references/canon-and-glossary.md`. Since **1.16.2** its wait IS the shape
+W5's two waits use — chunks plus one authoritative non-polling re-check, over
+an elapsed-time loop — where before it was the odd one out; the sentinel sets
+and chunk counts still differ. See
+`references/workflow-schema-validation.md`'s WAIT section.
 
 **There is no templating engine at Workflow-runtime.** Every prompt function
 is plain JavaScript string interpolation against constants the orchestrating
@@ -664,9 +668,27 @@ See `references/ledger-and-resumability.md` for the full cache-key
 membership list. **1.3.5:** W3's glossary-pass template reads this SAME
 `engine.batch_agent_cap` field, with its own smaller worst-case formula and
 the same refusal shape. **1.16.0:** that formula is now MODE-DEPENDENT — an
-`offline` run keeps the historical `3 * BATCHES.length + 2` unchanged, while
+`offline` run kept the historical `3 * BATCHES.length + 2` unchanged, while
 a `live` run additionally pays for the citation-review retry ladder. See the
-glossary-pass template section below for both branches.
+glossary-pass template section below for both branches. **1.16.2:** the
+offline branch no longer matches that historical figure, and deliberately so —
+it is now `5 * BATCHES.length + 2`. Holding offline byte-identical to `3N + 2`
+was only ever possible because the extra 1.16.0/1.16.1 cost sat entirely in
+the live-only citation ladder; the chunked wait (#352) is mode-INDEPENDENT, so
+**an `offline` project whose cap was tuned to the old formula can now be
+refused at preflight too**, not just a live one — the first time offline
+projects are exposed to this class of change.
+
+**The principle the old promise rested on is upheld, not abandoned**, and the
+distinction is the whole justification. Through 1.16.1 the offline REAL COST
+did not change, so charging offline for the live ladder would have been a
+FALSE refusal — and a preflight that refuses runs it should permit is a worse
+failure than one that is slightly loose. In 1.16.2 the wait can genuinely cost
+`WAIT_CALLS` in BOTH modes, so `5N + 2` is offline's true CEILING — the same
+kind of quantity `3N + 2` always was, not a claim about what a run spends —
+and a refusal against it is a correct refusal. What the mode-awareness still prevents is the
+thing that would break the principle: a MODE-BLIND estimate charging an
+offline project the live `19N + 2` for a ladder it can never execute.
 
 ## The glossary-pass template — a second, smaller `pipeline()` call
 
@@ -734,7 +756,7 @@ pipeline(BATCHES, batchStep)
 
 - `batchPrecheckPrompt(batch)` — Claude, `effort:'low'`, no `agentType`, no
   schema, **run FIRST (resume-skip, 1.3.5 #101)**: a single-shot, read-only
-  run of the same `--check-batch` invocation `batchWaitPrompt` polls. If a
+  run of the same `--check-batch` invocation `batchWaitChunkPrompt` polls. If a
   prior interrupted run of this SAME `{{RUN_ID}}` already left a valid
   `out_{index}_attempt_0.json` fragment on disk (the precheck is hard-wired to
   attempt 0 — `checkBatchCmd(batch.index, 0)`), the precheck returns `PRESENT`
@@ -759,8 +781,20 @@ pipeline(BATCHES, batchStep)
   `FRAGMENT {index}`. **1.16.0:** the path is attempt-scoped and
   `rejectionReason` carries the citation reviewer's own findings into every
   attempt after the first.
-- `batchWaitPrompt(batch, attempt)` — Claude, `effort:'low'`, bounded poll of
-  the same `--check-batch` invocation, returning `READY`/`TIMEOUT`.
+- `batchWaitChunkPrompt(batch, attempt, chunkIndex)` and
+  `batchWaitRecheckPrompt(batch, attempt)` — Claude, `effort:'low'`, together
+  replacing 1.16.1's single `batchWaitPrompt()`: one CHUNK of a bounded poll
+  of the same `--check-batch` invocation, and the post-exhaustion re-check,
+  both returning
+  `READY`/`PENDING`. **1.16.2 (#352):** the 900 s budget is spent across
+  bounded chunks plus one authoritative non-polling re-check rather than in a
+  single call that the measured 600 000 ms Bash clamp would kill; a wait
+  therefore costs **up to** `chunks + 1` = 3 agent calls rather than exactly 1
+  — a `READY` in any chunk ends the loop and suppresses the re-check, so 3 is
+  the ceiling the estimator uses, not the runtime cost — and `TIMEOUT` is no
+  longer a sentinel — a timeout is what the call site concludes when the
+  re-check also answers `PENDING`. See `references/canon-and-glossary.md`'s
+  **The chunked wait** for the full contract.
 - `citationPreparePrompt(batch, attempt)` (**1.16.1**, replacing 1.16.0's single
   `citationReviewPrompt`) — Claude, `effort:'low'`, `live` only; returns
   `EVIDENCE_READY`/`EVIDENCE_FAILED <index> ATTEMPT <n>`. It opens by re-running
@@ -787,8 +821,11 @@ pipeline(BATCHES, batchStep)
   **This pair costs one MORE `agent()` call per attempt than 1.16.0's single
   reviewer** — that is the whole reason the live ladder moved from
   `1 + 3*(MAX_CITATION_RETRIES+1)` to `1 + 4*(MAX_CITATION_RETRIES+1)`; see the
-  batch_agent_cap section above. See `references/canon-and-glossary.md`'s
-  **Pre-merge citation review**.
+  batch_agent_cap section above. **1.16.2 (#352)** then moved it again, to
+  `1 + (3 + WAIT_CALLS)*(MAX_CITATION_RETRIES+1)` — **19** at the shipped
+  `WAIT_CALLS = 3` — for an unrelated reason: not a new review step, but one
+  wait becoming worth up to `WAIT_CALLS` agent calls instead of exactly 1. See
+  `references/canon-and-glossary.md`'s **Pre-merge citation review**.
 
 **All four of these verdicts are containment-guarded** — the precheck, the wait,
 and (1.16.1) both halves of the citation pair — as are mass-translate's
@@ -799,6 +836,12 @@ and the mass-translate side went from three to two when 1.16.1 (#348) collapsed
 the two separate wait verdicts into the single `waitChunkVerdict()` parse site
 that now serves both chunked wait loops. Counting *call sites in the templates*
 rather than *waits in the pipeline* is what makes those two movements cancel.
+**1.16.2 (#352)** chunks the glossary and skeptic waits the same way, and the
+count survives that only because a chunked wait must keep ONE parse site for
+its chunks AND its post-exhaustion re-check — the reason #348 gave originally:
+a re-check parsed somewhere else could silently drift into a weaker gate than
+the poll it backs up. A port that gave the re-check its own verdict parser
+would both break that guarantee and make this total wrong.
 Each short-circuits when the sentinel is found anywhere in the
 reply as a substring, before `sentinelVerdict()` is consulted.
 `sentinelVerdict()` alone matches whole LINES, so a sentinel sharing its line
@@ -928,40 +971,54 @@ inside it:
   exceeds `engine.batch_agent_cap` — the SAME field W5 reads, spliced in as
   the bare-integer `{{BATCH_AGENT_CAP}}` token. **1.16.0: `perBatchCalls` is
   MODE-DEPENDENT**, because the citation-review retry ladder exists only
-  under `live`:
+  under `live`. **1.16.2: it is also parameterized by `WAIT_CALLS`**, since
+  one wait is no longer one agent call:
 
   ```
-  live    -- perBatchCalls = 1 + 3 * (MAX_CITATION_RETRIES + 1)
-             1 precheck, then dispatch + wait + citation review per attempt,
-             with attempts == MAX_CITATION_RETRIES + 1 in the worst case
-             (every review rejects until the ladder is exhausted)
-  offline -- perBatchCalls = 1 + 2 == 3
-             precheck + dispatch + wait, unchanged from 1.15.2
+  live    -- perBatchCalls = 1 + (3 + WAIT_CALLS) * (MAX_CITATION_RETRIES + 1)
+             1 precheck, then dispatch + wait + citation prepare + judge per
+             attempt, with attempts == MAX_CITATION_RETRIES + 1 in the worst
+             case (every review rejects until the ladder is exhausted)
+  offline -- perBatchCalls = 1 + (1 + WAIT_CALLS) == 2 + WAIT_CALLS
+             precheck + dispatch + wait
   ```
 
-  **The offline branch is the historical `3 * BATCHES.length + 2` exactly,
-  and that is deliberate.** Under `offline`, `canon_validate.py` makes
+  At the shipped `WAIT_CALLS = 3` and `MAX_CITATION_RETRIES = 2` that is
+  **`19 * BATCHES.length + 2` live** and **`5 * BATCHES.length + 2`
+  offline**, so a `batch_agent_cap` of 3500 admits ~184 live batches or ~699
+  offline ones. The parameterized form is **provably a generalisation rather
+  than a rewrite**: substituting `WAIT_CALLS = 1` collapses the two branches
+  to `1 + 4*(MAX_CITATION_RETRIES+1) == 13` and to `3`, which are exactly the
+  1.16.1 formulas.
+
+  **The offline branch stays MODE-AWARE, but it is no longer the historical
+  `3 * BATCHES.length + 2`.** Under `offline`, `canon_validate.py` makes
   `basis:"established"` fatal, so there is provably no citation to review —
   the stage is not skipped for speed, it has nothing to act on.
   `CITATION_REVIEW_ENABLED` is therefore false, which also removes the only
   thing that can REJECT an attempt, so the ladder can never advance past
-  attempt 0 and there is exactly one dispatch + wait pair. Making the
-  estimate mode-blind would have charged every offline project for a ladder
-  it cannot execute, and any existing project whose `engine.batch_agent_cap`
-  was tuned to the old formula would start being refused with
-  `reason:"batch-too-large"` for a run whose real cost did not change at all
-  — a preflight that refuses runs it should permit is a worse failure than
-  one that is slightly loose.
+  attempt 0 and there is exactly one dispatch + wait. Keeping the estimate
+  mode-aware still matters for the same reason it always did — a mode-blind
+  estimate would charge every offline project for a ladder it cannot execute.
+  What changed in 1.16.2 is the wait alone, `3N + 2 → 5N + 2`, and that is a
+  real increase in the CEILING in BOTH modes rather than a bookkeeping one: unlike the
+  1.16.0/1.16.1 moves, it is not confined to the live ladder, so an offline
+  project whose cap was tuned to the old formula will now be refused.
 
-  This is a worst-case CEILING, not a typical-run estimate: under `live`, a
-  batch approved on attempt 0 costs 4 calls, not the full ladder. A resumed
-  batch whose fragment already passes `--check-batch` skips its attempt-0
-  dispatch + wait and so comes in strictly under the ceiling — but it does
-  NOT skip the citation review, which is why that saving is 2 calls and not
-  3. The count is over BATCHES, never candidates-per-batch, so a co-located
-  elision pair nudging one batch a candidate or two over its nominal
-  `--batch-size` never trips it. A refused run re-plans smaller batches
-  (`glossary_batch_plan.py --batch-size`).
+  This is a worst-case CEILING, not a typical-run estimate, and 1.16.2 widens
+  the gap between the two — a wait that finds its fragment on the FIRST chunk
+  spends 1 call, not `WAIT_CALLS`, and only a wait that exhausts every chunk
+  and still needs the re-check spends all 3. Under `live` a batch approved on
+  attempt 0 costs `2 + WAIT_CALLS + 2` = 7 calls, not the full ladder, and an
+  attempt whose prepare fails short-circuits before the judge for
+  `2 + WAIT_CALLS` rather than `3 + WAIT_CALLS`. A resumed batch whose
+  fragment already passes `--check-batch` skips its attempt-0 dispatch + wait
+  and so comes in strictly under the ceiling — but it does NOT skip the
+  citation review, which is why that saving is `1 + WAIT_CALLS` calls and not
+  `3 + WAIT_CALLS`. The count is over BATCHES, never candidates-per-batch, so
+  a co-located elision pair nudging one batch a candidate or two over its
+  nominal `--batch-size` never trips it. A refused run re-plans smaller
+  batches (`glossary_batch_plan.py --batch-size`).
 - **Resume-skip precheck** — the `batchPrecheckPrompt` bullet above; a valid
   pre-existing fragment for this `{{RUN_ID}}` is trusted and its dispatch +
   wait skipped, so a resumed run never re-pays the codex dispatch for a batch
@@ -969,7 +1026,7 @@ inside it:
 
 ## Skeptic pass dispatch (opt-in, RFC #215 Phase 2)
 
-When `glossary.skeptic_pass.enabled` is set, the W-step sequence gains one additional, self-contained leg after the glossary merge: `suspicion_scan.py` (regenerated every enabled run -- never trusts a stale worklist) -> `skeptic_setup.py` (its own `kind="skeptic"` resume domain, deliberately NOT folded into `resume_setup.py`'s `mass`/`glossary` kinds and NOT a `PLUGIN_BUNDLE_MEMBERS`/`ORCHESTRATION_BUNDLE_MEMBERS` entry) -> `skeptic-pass-wf.template.js` (clones the glossary template's dispatch/poll/merge/verify control flow exactly, including its own `batch_agent_cap` preflight) -> `skeptic_report.py`, run last and purely for a human to read. Because this whole leg sits behind an opt-in flag and writes only its own new files, a project that never enables it sees zero change to dispatch shape, batching, or cache-key behavior. `skeptic_report.py` itself is never dispatched as part of any batch -- it takes no part in convergence, retries, or the ledger; it is a single, synchronous, read-only render of whatever `skeptic_triage.json` the pass produced.
+When `glossary.skeptic_pass.enabled` is set, the W-step sequence gains one additional, self-contained leg after the glossary merge: `suspicion_scan.py` (regenerated every enabled run -- never trusts a stale worklist) -> `skeptic_setup.py` (its own `kind="skeptic"` resume domain, deliberately NOT folded into `resume_setup.py`'s `mass`/`glossary` kinds and NOT a `PLUGIN_BUNDLE_MEMBERS`/`ORCHESTRATION_BUNDLE_MEMBERS` entry) -> `skeptic-pass-wf.template.js` (clones the glossary template's dispatch/poll/merge/verify control flow, including a `batch_agent_cap` preflight of the same SHAPE -- a per-batch term times `BATCHES.length` plus the fixed merge + verify pair -- though no longer the same NUMBER: this template's per-batch term is an unconditional `precheck 1 + dispatch 1 + wait WAIT_CALLS == 2 + WAIT_CALLS`, i.e. `5 * BATCHES.length + 2` at the shipped constants, where glossary's became conditional on its citation review in 1.16.1. **1.16.2 (#352)** moved this term from a flat 3, and since it gates an opt-in advisory pass, that is an OPERATOR-VISIBLE refusal threshold moving under an existing `batch_agent_cap`. Note `skeptic_setup.py`'s step-5 preflight asserts the SAME number independently, before the Workflow ever runs, and the two estimators must move together -- leave one behind and one of them refuses a batch the other admits) -> `skeptic_report.py`, run last and purely for a human to read. Because this whole leg sits behind an opt-in flag and writes only its own new files, a project that never enables it sees zero change to dispatch shape, batching, or cache-key behavior. `skeptic_report.py` itself is never dispatched as part of any batch -- it takes no part in convergence, retries, or the ledger; it is a single, synchronous, read-only render of whatever `skeptic_triage.json` the pass produced.
 
 ## Ledger writes stay orchestration-adjacent, not orchestration-owned
 

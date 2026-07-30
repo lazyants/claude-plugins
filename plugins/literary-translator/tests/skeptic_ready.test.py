@@ -686,6 +686,58 @@ def test_verify_merged_fails_on_post_merge_tampered_evidence_offset(tmp_path):
     assert any("does not survive fresh re-verification" in m and "evidence_unverified" in m for m in result["missing"])
 
 
+def test_verify_merged_preserves_the_machine_note_behind_many_agent_notes(tmp_path):
+    """Round 10 (MEDIUM): `_coerce_record`'s own `_downgrade` always APPENDS
+    the machine's own diagnosis LAST to `notes`
+    (`notes.append(f"skeptic_ready:coerced_insufficient_window:{reason}")`)
+    -- confirmed by reading `_downgrade` directly, the same convention
+    skeptic_report.py's own `_bounded_items` docstring names and fixes for.
+    That note then feeds `run_verify_merged`'s own composed verdict-mismatch
+    message as `detail`, at the message's own END. A plain head-first
+    character cap on the WHOLE composed message keeps every earlier
+    agent-authored note and drops exactly the one note the agent did not
+    write. This is the same base fixture as
+    test_verify_merged_fails_on_post_merge_tampered_evidence_offset, with 20
+    long agent-authored notes added to the record BEFORE tampering, so the
+    composed message would exceed the per-item cap without the fix."""
+    lang_dir = tmp_path / "languages"
+    particle_config = write_particle_config(lang_dir)
+    lang = bn.load_language_config(particle_config, languages_dir=lang_dir)
+    text = "Jean met Paul at the market square."
+    block_id, blk = block(text)
+    manifest_path = tmp_path / "manifest.json"
+    write_json(manifest_path, make_manifest((block_id, blk)))
+
+    jean_evidence = evidence_for("Jean", block_id, "seg01", text, lang)
+    rec = adverse_record("Jean", jean_evidence)
+    rec["notes"] = [f"agent note #{i}: " + ("x" * 60) for i in range(20)]
+
+    triage_path = tmp_path / "skeptic_triage.json"
+    write_json(triage_path, {"schema_version": 1, "run_id": "run-1", "records": [rec]})
+    aggregate_path = tmp_path / "assignments.json"
+    write_json(aggregate_path, make_aggregate_manifest("run-1", [make_assignment("Jean", [window_for(jean_evidence)])]))
+
+    assert sr.run_verify_merged(
+        triage_path, aggregate_path, manifest_path, particle_config, languages_dir=lang_dir
+    )["verified"] is True
+
+    tampered = json.loads(triage_path.read_text(encoding="utf-8"))
+    tampered["records"][0]["evidence"]["char_start"] += 1
+    tampered["records"][0]["evidence"]["char_end"] += 1
+    write_json(triage_path, tampered)
+
+    result = sr.run_verify_merged(triage_path, aggregate_path, manifest_path, particle_config, languages_dir=lang_dir)
+    assert result["verified"] is False
+    assert any(
+        "does not survive fresh re-verification" in m
+        and "skeptic_ready:coerced_insufficient_window" in m
+        for m in result["missing"]
+    ), (
+        f"the machine's own coercion diagnosis must survive behind 20 agent notes, not be "
+        f"truncated away because it is the LAST thing in the composed message: {result['missing']}"
+    )
+
+
 def test_verify_merged_fails_on_schema_invalid_triage(tmp_path):
     lang_dir = tmp_path / "languages"
     particle_config = write_particle_config(lang_dir)
@@ -940,6 +992,74 @@ def test_verify_merged_fails_on_canon_tamper(tmp_path):
     # from an ordinary skeptic-pass failure, so a caller can HALT on it
     # specifically instead of treating it as merely advisory.
     assert result["frozen_input_mismatch"] is True
+
+
+def test_verify_merged_missing_is_bounded_per_population_not_pooled(tmp_path):
+    """Round 10 (verifier MEDIUM, reported HIGH): `missing[]` used to be ONE
+    flat list -- schema failures, H1 frozen-input tamper reasons, coverage
+    gaps, and per-record findings all pooled, `sorted()`ed alphabetically,
+    then head-capped at 8. A lexical sort has no relationship to importance:
+    whichever population happens to sort last can be evicted WHOLESALE by an
+    unrelated, larger population that sorts earlier -- not merely trimmed.
+
+    Measured directly (this is the fixture that proved it, not a
+    hypothetical): a canon.json tamper (sorts after "canon") alongside 10
+    "assignment <64-hex> has no triage record (coverage gap)" entries (sort
+    before "canon" -- 'a' < 'c') -- under the old single-pool bound the
+    tamper reason TEXT was completely ABSENT from `missing[]`, even though
+    `frozen_input_mismatch` (the boolean skeptic-pass-wf.template.js actually
+    gates HALT on) still correctly fired. That is why the verifier downgraded
+    HIGH to MEDIUM: the safety behaviour survives: only the diagnostic text
+    was at risk. Fixed by bounding the structural/coverage/per-record
+    populations separately and concatenating -- this pins that the tamper
+    reason and a representative sample of coverage gaps are BOTH present at
+    once, not one crowding out the other."""
+    lang_dir = tmp_path / "languages"
+    particle_config = write_particle_config(lang_dir)
+    text = "Jean walked home."
+    block_id, blk = block(text)
+    manifest_path = tmp_path / "manifest.json"
+    write_json(manifest_path, make_manifest((block_id, blk)))
+
+    canon_path = tmp_path / "canon.json"
+    canon_path.write_text(json.dumps({"entries": {}}), encoding="utf-8")
+    canon_sha256 = suspicion_scan.compute_frozen_input_hash(canon_path)
+
+    rec = insufficient_record("Jean")
+    triage_path = tmp_path / "skeptic_triage.json"
+    write_json(triage_path, {"schema_version": 1, "run_id": "run-1", "records": [rec]})
+
+    # "Jean" gets a real triage record; 10 OTHER assigned entities never do
+    # -- each produces its own "assignment <aid> has no triage record
+    # (coverage gap)" entry, sorting alphabetically before "canon.json ...".
+    assignments = [make_assignment("Jean", [])]
+    for i in range(10):
+        assignments.append(make_assignment(f"Missing{i}", []))
+    aggregate_path = tmp_path / "assignments.json"
+    write_json(aggregate_path, {
+        **make_aggregate_manifest("run-1", assignments),
+        "canon_sha256": canon_sha256,
+    })
+
+    # Tamper canon.json AFTER stamping (same technique as the sibling tamper
+    # test above).
+    canon_path.write_text(json.dumps({"entries": {"INJECTED": {}}}), encoding="utf-8")
+
+    result = sr.run_verify_merged(
+        triage_path, aggregate_path, manifest_path, particle_config, languages_dir=lang_dir, canon_path=canon_path,
+    )
+    assert result["verified"] is False
+    assert result["frozen_input_mismatch"] is True, (
+        "the safety-relevant boolean must fire regardless of missing[]'s rendering"
+    )
+    assert any("canon.json" in m and "tamper" in m for m in result["missing"]), (
+        f"the tamper reason must survive alongside the coverage-gap population, not be "
+        f"evicted by it: {result['missing']}"
+    )
+    assert any("has no triage record (coverage gap)" in m for m in result["missing"]), (
+        "the coverage-gap population must still be represented too -- this is not a "
+        "structural-only fix that starves the other population instead"
+    )
 
 
 def test_verify_merged_fails_on_senses_tamper(tmp_path):
@@ -1946,3 +2066,299 @@ def test_verify_merged_passes_on_clean_propose_split_with_3_referents(tmp_path):
 
     result = sr.run_verify_merged(triage_path, aggregate_path, manifest_path, particle_config, languages_dir=lang_dir)
     assert result == {"verified": True, "missing": [], "frozen_input_mismatch": False}
+
+
+# ---------------------------------------------------------------------------
+# F-2 / round 5 F1+F2: no str.splitlines() boundary character may survive
+# raw into stdout -- json.dumps(..., ensure_ascii=False) escapes \n but
+# leaves boundary characters >= 0x20 (U+0085 NEL, U+2028, U+2029) RAW, so a
+# payload carrying one is one line to str.split("\n") but two to
+# str.splitlines(), which is exactly the accept-sentinel shape the wait
+# poll's line-oriented grammar reads for. The JS sentinel parser only ever
+# splits on \n and is immune -- the exposure is a reading LLM agent
+# downstream of this CLI's stdout. Unfiled: #360 covers this file's
+# unbounded diagnostic VOLUME (message length / list count), a distinct
+# exposure from a boundary character forging an extra line.
+#
+# Round 5 (F1/HIGH): the shipped _LINE_SEPARATOR_ESCAPES hand-listed exactly
+# two members (U+2028/U+2029) and silently missed U+0085 NEL, which forges
+# a line exactly like the other two. Round 5 (F2/HIGH): the tests below
+# drew their ENTIRE hostile alphabet from those same two characters, so
+# they structurally could not have caught F1 -- a narrower input alphabet
+# than the property under test. Both are fixed together: skeptic_ready.py
+# now DERIVES its escapes dict from the real predicate rather than hand-
+# listing (see _compute_line_separator_escapes's own docstring), and the
+# tests below sweep the FULL boundary alphabet, pinned against an
+# independent brute-force scan -- not just against skeptic_ready.py's own
+# claimed set, which is exactly what would NOT have caught F1.
+# ---------------------------------------------------------------------------
+
+# Deliberately built via chr(), never a pasted literal glyph -- U+2028/
+# U+2029 are visually indistinguishable from a plain space on skim, and a
+# pasted copy of either has previously been silently normalized to one by
+# authoring tooling in this very codebase (see the unicode-boundary-text-
+# authoring project skill). chr() is pure ASCII and cannot suffer that.
+LINE_SEPARATOR = chr(0x2028)
+PARAGRAPH_SEPARATOR = chr(0x2029)
+NEL = chr(0x85)
+
+# The FULL str.splitlines() boundary set -- same list as
+# tests/render_obsidian_occindex.test.py's own _LINE_BREAK_CODEPOINTS and
+# tests/skeptic_report.test.py's own copy (mirrored here deliberately, not
+# re-derived): this is the CANDIDATE alphabet the writer tests below sweep,
+# independent of which of its members json.dumps(ensure_ascii=False)
+# happens to already handle on its own.
+_LINE_BREAK_CODEPOINTS = [0x0A, 0x0D, 0x0B, 0x0C, 0x1C, 0x1D, 0x1E, 0x85, 0x2028, 0x2029]
+
+
+def test_line_separator_escapes_derived_correctly_against_a_full_brute_force_scan():
+    """Completeness pin for sr._LINE_SEPARATOR_ESCAPES (round 5, F2/HIGH) --
+    the sibling of skeptic_report.test.py's own
+    test_line_break_chars_pinned_against_render_obsidian_and_against_an_
+    independent_set, but pinned against a DIFFERENT correct answer:
+    skeptic_ready.py's escape set is a NARROWER 3-member set than
+    skeptic_report.py's 10-member one, because json.dumps already closes 7
+    of the 10 splitlines() boundaries on its own (every codepoint < 0x20).
+    This test does not trust that 3 is the number or that {NEL, LS, PS} is
+    the set -- it runs the SAME kind of brute-force scan the round-5
+    security lane ran (every codepoint 0x0..0x10FFFF, minus UTF-16
+    surrogates, which are never valid standalone characters -- surrogates
+    would raise inside chr() with strict mode; iterating past them is the
+    correct skip, not a shortcut) and asserts sr._LINE_SEPARATOR_ESCAPES's
+    keys equal exactly what that scan finds. A production derivation that
+    silently narrowed (or widened) would fail this regardless of how
+    plausible its own internal reasoning looked."""
+    ground_truth = set()
+    for cp in range(0x110000):
+        if 0xD800 <= cp <= 0xDFFF:
+            continue  # UTF-16 surrogate range -- not valid standalone characters
+        ch = chr(cp)
+        is_splitlines_boundary = len(("a" + ch + "b").splitlines()) == 2
+        if is_splitlines_boundary and ch in json.dumps(ch, ensure_ascii=False):
+            ground_truth.add(ch)
+
+    assert set(sr._LINE_SEPARATOR_ESCAPES.keys()) == ground_truth, (
+        "sr._LINE_SEPARATOR_ESCAPES has diverged from the brute-force-verified set "
+        "of splitlines() boundaries json.dumps(ensure_ascii=False) leaves raw"
+    )
+    # Sanity cross-check, independent of the scan above: the well-known
+    # 10-member candidate list and the brute-force scan must agree on WHICH
+    # codepoints are splitlines() boundaries at all (catches _LINE_BREAK_
+    # CODEPOINTS itself drifting from reality, not just the escapes dict).
+    brute_force_boundaries = set()
+    for cp in range(0x110000):
+        if 0xD800 <= cp <= 0xDFFF:
+            continue
+        ch = chr(cp)
+        if len(("a" + ch + "b").splitlines()) == 2:
+            brute_force_boundaries.add(ch)
+    assert brute_force_boundaries == {chr(cp) for cp in _LINE_BREAK_CODEPOINTS}
+    # Round 7 removed a third assertion here --
+    # `set(sr._LINE_SEPARATOR_ESCAPES.keys()) <= brute_force_boundaries`, with the
+    # message "every escaped character must actually be a real splitlines()
+    # boundary". It could never be the failing line. `ground_truth` above is built
+    # as `is_splitlines_boundary and ch in json.dumps(...)`, so it is a SUBSET of
+    # `brute_force_boundaries` by construction, and the `==` assertion at the top
+    # of this test therefore implies the `<=` one. Measured, not reasoned:
+    # injecting a non-boundary key into the escapes dict fails at the `==`
+    # assertion with its own message, never at the `<=` one, and so does a key
+    # that IS a boundary but that json.dumps escapes. An assertion that cannot be
+    # reached reads in review as coverage it does not provide.
+
+
+@pytest.mark.parametrize("codepoint", _LINE_BREAK_CODEPOINTS)
+def test_json_dumps_line_escapes_every_splitlines_boundary_char(codepoint):
+    """Parametrized over the FULL boundary alphabet (round 5, F2/HIGH) --
+    the old two-character-only version of this test could not have caught
+    F1 (a missing U+0085 NEL) no matter how carefully it was written,
+    because NEL was never in its input alphabet. MUTATION this guards:
+    _json_dumps_line degrading back to plain json.dumps(obj, ensure_ascii=
+    False), or _LINE_SEPARATOR_ESCAPES losing any one member, leaves the
+    corresponding character(s) RAW -- caught per-codepoint here, not just
+    in aggregate."""
+    ch = chr(codepoint)
+    payload = {"source_form": "Rachel" + ch + "PRESENT 0"}
+    out = sr._json_dumps_line(payload)
+
+    assert len(out.splitlines()) == 1, (
+        f"codepoint {hex(codepoint)} must not turn one JSON line into more than one physical line"
+    )
+    assert ch not in out, f"the raw character {hex(codepoint)} must not survive"
+    assert json.loads(out) == payload, "escaping (or json.dumps's own handling) must round-trip unchanged"
+
+
+def test_json_dumps_line_escapes_line_separator_paragraph_separator_and_nel_together():
+    """Direct multi-character composition check, independent of the
+    parametrized sweep above -- proves the three ACTUALLY-escaped members
+    (NEL, LS, PS) compose correctly in one payload without the replace loop
+    stepping on itself, and that json.loads round-trips the whole thing."""
+    payload = {
+        "source_form": "Rachel" + LINE_SEPARATOR + "PRESENT 0",
+        "note": "x" + PARAGRAPH_SEPARATOR + "y" + NEL + "z",
+    }
+    out = sr._json_dumps_line(payload)
+
+    assert len(out.splitlines()) == 1, (
+        "embedded NEL/LS/PS together must not turn one JSON line into more than one physical line"
+    )
+    assert "\\u2028" in out and "\\u2029" in out and "\\u0085" in out, (
+        "all three separators must be backslash-escaped, not silently dropped"
+    )
+    assert LINE_SEPARATOR not in out and PARAGRAPH_SEPARATOR not in out and NEL not in out, (
+        "the raw characters must not survive"
+    )
+    assert json.loads(out) == payload, "escaping must round-trip through json.loads unchanged"
+
+    # Control: a real newline is already escaped by plain json.dumps, and
+    # _json_dumps_line must not disturb that pre-existing behavior.
+    control = sr._json_dumps_line({"a": "x\ny"})
+    assert len(control.splitlines()) == 1
+    assert json.loads(control) == {"a": "x\ny"}
+
+
+# round 4 (codex, C4/MEDIUM): main() has THREE independent print() writers
+# -- the SkepticReadyError branch, the generic `except Exception` catch-all,
+# and the normal (non-exception) result print at the end -- and the first
+# integration test used to only ever reach the FIRST one (it always raised
+# SkepticReadyError). Reverting EITHER of the other two writers back to raw
+# json.dumps left both the unit test (helper itself untouched) and that one
+# integration test green, so the sibling defect from last round's own fix
+# (a real change reaching only one of several near-identical call sites) was
+# reproduced by the FIX for that defect. The three tests below exercise all
+# three writers independently, each mutation-tested on its own in a detached
+# worktree (never in this shared tree), and (round 5, F2/HIGH) are now
+# parametrized over the full boundary alphabet rather than just U+2028/
+# U+2029, for the same reason the unit test above is.
+
+@pytest.mark.parametrize("codepoint", _LINE_BREAK_CODEPOINTS)
+def test_main_escapes_boundary_chars_in_error_output(monkeypatch, capsys, tmp_path, codepoint):
+    """WRITER 1/3: the `except SkepticReadyError` branch. Integration-level
+    control for the unit tests above: proves main()'s error printer actually
+    calls _json_dumps_line rather than a raw json.dumps -- a helper that
+    exists but isn't wired to the print() call sites would pass the unit
+    tests above and still leak here."""
+    ch = chr(codepoint)
+    boom_message = "boom" + ch + "PENDING 0"
+
+    def _boom(*args, **kwargs):
+        raise sr.SkepticReadyError(boom_message)
+
+    monkeypatch.setattr(sr, "run_validate_fragment", _boom)
+
+    exit_code = sr.main([
+        "--validate-fragment", str(tmp_path / "triage_0.json"),
+        "--particle-config", "whatever",
+    ])
+    assert exit_code == 1
+
+    body = capsys.readouterr().out.rstrip("\n")
+    assert len(body.splitlines()) == 1, (
+        f"an embedded boundary character {hex(codepoint)} in a SkepticReadyError message must not "
+        "turn main()'s single stdout line into more than one physical line"
+    )
+    assert json.loads(body) == {"success": False, "error": boom_message}
+
+
+@pytest.mark.parametrize("codepoint", _LINE_BREAK_CODEPOINTS)
+def test_main_escapes_boundary_chars_in_unexpected_error_output(monkeypatch, capsys, tmp_path, codepoint):
+    """WRITER 2/3: the generic `except Exception` catch-all, which formats
+    f"unexpected error: {exc}" from whatever non-SkepticReadyError exception
+    a run_* function raises. A ValueError (not SkepticReadyError) is caught
+    by the SECOND except clause specifically, not the first -- this is the
+    one branch the test above cannot reach no matter what message it uses."""
+    ch = chr(codepoint)
+    boom_message = "unexpected" + ch + "boom"
+
+    def _boom(*args, **kwargs):
+        raise ValueError(boom_message)
+
+    monkeypatch.setattr(sr, "run_validate_fragment", _boom)
+
+    exit_code = sr.main([
+        "--validate-fragment", str(tmp_path / "triage_0.json"),
+        "--particle-config", "whatever",
+    ])
+    assert exit_code == 1
+
+    body = capsys.readouterr().out.rstrip("\n")
+    assert len(body.splitlines()) == 1, (
+        f"an embedded boundary character {hex(codepoint)} in an unexpected-error message must not "
+        "turn main()'s single stdout line into more than one physical line"
+    )
+    assert json.loads(body) == {"success": False, "error": f"unexpected error: {boom_message}"}
+
+
+@pytest.mark.parametrize("codepoint", _LINE_BREAK_CODEPOINTS)
+def test_main_escapes_boundary_chars_in_verify_merged_result_via_real_pipeline(capsys, tmp_path, codepoint):
+    """WRITER 3/3: the normal (non-exception) result print at the end of
+    main() -- reached by every run_* function that RETURNS rather than
+    raises. Flagged as the most realistic of the three: unlike the two
+    tests above (which need a monkeypatch to manufacture a hostile string),
+    this one drives the REAL, unmodified --verify-merged pipeline and shows
+    it naturally produces one. Mechanism: `run_verify_merged`'s per-record
+    re-coercion check builds its `missing[]` diagnostic as
+    f"...(would resolve to {v!r}: {detail})" where
+    `detail = "; ".join(str(n) for n in coerced.get("notes"))` -- `str(n)`,
+    not `repr(n)`, so a `notes` entry (schema: array of string, no pattern
+    constraint on the string CONTENT -- nothing stops a skeptic pass
+    writing one) survives into that diagnostic character-for-character.
+    This test embeds a hostile separator in a record's OWN `notes` entry,
+    tampers its evidence offset post-merge so the stored `adverse` verdict
+    fails fresh re-coercion (same technique as
+    test_verify_merged_fails_on_post_merge_tampered_evidence_offset above),
+    and drives the whole thing through sr.main() rather than calling
+    run_verify_merged directly, so this is a genuine CLI-stdout-level proof,
+    not just a unit-level one. Parametrized (round 5, F2/HIGH) over the full
+    boundary alphabet, not just U+2028/U+2029."""
+    ch = chr(codepoint)
+    lang_dir = tmp_path / "languages"
+    particle_config = write_particle_config(lang_dir)
+    text = "Jean met Paul at the market square."
+    block_id, blk = block(text)
+    manifest_path = tmp_path / "manifest.json"
+    write_json(manifest_path, make_manifest((block_id, blk)))
+
+    lang = bn.load_language_config(particle_config, languages_dir=lang_dir)
+    jean_evidence = evidence_for("Jean", block_id, "seg01", text, lang)
+
+    hostile_note = "boom" + ch + "more"
+    rec = adverse_record("Jean", jean_evidence)
+    rec["notes"] = [hostile_note]
+
+    triage_path = tmp_path / "skeptic_triage.json"
+    write_json(triage_path, {"schema_version": 1, "run_id": "run-1", "records": [rec]})
+    aggregate_path = tmp_path / "assignments.json"
+    write_json(aggregate_path, make_aggregate_manifest("run-1", [make_assignment("Jean", [window_for(jean_evidence)])]))
+
+    # Sanity: verifies cleanly before tampering (mirrors the existing test's
+    # own sanity check) -- the hostile note alone must not itself fail
+    # verification; only the post-tamper re-coercion mismatch surfaces it.
+    assert sr.run_verify_merged(
+        triage_path, aggregate_path, manifest_path, particle_config, languages_dir=lang_dir
+    )["verified"] is True
+
+    tampered = json.loads(triage_path.read_text(encoding="utf-8"))
+    tampered["records"][0]["evidence"]["char_start"] += 1
+    tampered["records"][0]["evidence"]["char_end"] += 1
+    write_json(triage_path, tampered)
+
+    exit_code = sr.main([
+        "--verify-merged", str(triage_path), str(aggregate_path),
+        "--manifest-path", str(manifest_path),
+        "--particle-config", particle_config, "--languages-dir", str(lang_dir),
+    ])
+    assert exit_code == 1, "a failed re-verification must exit non-zero"
+
+    body = capsys.readouterr().out.rstrip("\n")
+    assert len(body.splitlines()) == 1, (
+        f"an embedded boundary character {hex(codepoint)} surfaced via a record's own `notes` field "
+        "must not turn main()'s single stdout line into more than one physical line"
+    )
+    assert ch not in body, "the raw character must not survive"
+
+    decoded = json.loads(body)
+    assert decoded["verified"] is False
+    assert any(hostile_note in m for m in decoded["missing"]), (
+        "the hostile note's TEXT content must survive round-tripping through the escape -- "
+        "only its embedded boundary character is marked, nothing is silently dropped"
+    )

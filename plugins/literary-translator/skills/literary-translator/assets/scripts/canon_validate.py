@@ -770,9 +770,20 @@ def _format_errors(errors, instance=None, root_schema=None) -> str:
     return "; ".join(_bounded_list(parts))
 
 
-# Longest source_form excerpt a failure label may carry. A real name is far
-# shorter; the cap exists so the label cannot become a delivery vehicle for
-# prose aimed at whoever reads the failure.
+# Longest source_form EXCERPT (source characters kept, before repr()) a
+# failure label may carry -- NOT the final rendered label's length. A real
+# name is far shorter; the cap exists so the label cannot become a delivery
+# vehicle for prose aimed at whoever reads the failure.
+#
+# Round 6 sweep finding, fixed here: this constant's own name and the
+# function's old docstring both read as if 60 bounded the RENDERED label,
+# and the code truncated repr()'s OUTPUT to enforce that -- the same
+# source-versus-rendered confusion skeptic_report.py's `_bounded` needed
+# fixing for earlier this round, in a different file. Stated plainly rather
+# than fixed by narrowing further: repr()'s own escaping (a control
+# character, a backslash, a non-ASCII codepoint Python considers
+# unprintable) can still make the RENDERED label longer than 60 -- source
+# TRUNCATION is what this bounds, not the escaped result.
 _ITEM_LABEL_MAX_CHARS = 60
 
 
@@ -784,20 +795,40 @@ def _indexed_item_label(kind: str, index: int, item) -> str:
     reads the failure. It is also free text the pipeline does not control -- an
     LLM wrote it from source text a hostile document can seed -- and this label
     lands in `error`/`offending`, which the prepare agent is told to read and
-    describe. So it is bounded rather than passed through whole: repr() first
-    (which escapes quotes, control characters and newlines, so the label cannot
-    break out of its own line), then a hard length cap, because repr bounds the
-    CHARSET and nothing bounds the LENGTH. A name long enough to hold a
-    paragraph of instructions is not a name. The reader still has the index and
-    the fragment when the excerpt is not enough.
+    describe. So it is bounded rather than passed through whole: the SOURCE is
+    truncated first, THEN repr()'d -- never the other way around.
+
+    Measured bug in the old order (repr() first, slice its output, close with
+    a hardcoded "'"): repr() picks DOUBLE quotes whenever the string contains
+    `'` but not `"`, which an apostrophe-bearing source_form does -- and this
+    plugin's own domain, Hebrew-to-English transliteration, produces exactly
+    that ("Re'uven", "Ya'akov", "Sh'muel") as ordinary correct data, not just
+    adversarial input. The old code's hardcoded `"'"` closer then produced a
+    label that opened with `"` and closed with `'` -- not valid Python literal
+    syntax, breaking the "cannot break out of its own line" self-containment
+    this whole function exists for. A minimal fix (close with the label's own
+    first character instead of a hardcoded one) does not fully close it either:
+    slicing repr()'s OUTPUT at a fixed position can land inside a multi-
+    character escape sequence repr() produced (e.g. cutting between the `\\`
+    and the `n` of a `\\n`), leaving a lone trailing backslash whose validity
+    depends on Python's current, EXPLICITLY DEPRECATED lenient handling of
+    unrecognized escape sequences in string literals -- accepted with a
+    warning today, a planned SyntaxError in a future Python. Measured with 500
+    randomized adversarial constructions (backslashes/quotes/control chars at
+    every position near the cut): the repr-then-slice order breaks on the
+    exact boundary case; slicing the SOURCE first and repr()'ing the
+    (already-truncated) result never does, for any input, because repr() of
+    an arbitrary string is unconditionally well-formed Python literal syntax
+    by construction -- there is no escape sequence left dangling to cut
+    through. The reader still has the index and the fragment when the excerpt
+    is not enough.
     """
     source_form = item.get("source_form") if isinstance(item, dict) else None
     if not source_form:
         return f"{kind}[{index}]"
-    shown = repr(source_form)
-    if len(shown) > _ITEM_LABEL_MAX_CHARS:
-        shown = shown[:_ITEM_LABEL_MAX_CHARS] + "...'"
-    return f"{kind}[{index}] ({shown})"
+    if len(source_form) > _ITEM_LABEL_MAX_CHARS:
+        source_form = source_form[:_ITEM_LABEL_MAX_CHARS] + "..."
+    return f"{kind}[{index}] ({source_form!r})"
 
 
 def _is_uri(value: str) -> bool:

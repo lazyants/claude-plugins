@@ -52,9 +52,10 @@ pointed/maqaf-joined source occurrence there, while this module's own
 all bind against -- did not, silently diverging from the appendix path.
 
 **#243 closes that residual.** ``production_occurrences()``'s comparison
-below is now ``fold_match_key(name) == fold_match_key(source_form)``, never
-a raw, unfolded ``==`` -- so a pointed/maqaf-joined production occurrence IS
-found under an unpointed/space-joined canon ``source_form``, on every path
+below is now ``<the span's own match key> == fold_match_key(source_form)``,
+never a raw, unfolded ``==`` -- so a pointed/maqaf-joined production
+occurrence IS found under an unpointed/space-joined canon ``source_form``,
+on every path
 that ultimately calls ``production_occurrences()``
 (``evidence_verify.py``, ``suspicion_scan.py``, this module's own
 ``index_manifest()``). Two consequences that must not be conflated:
@@ -94,7 +95,8 @@ DEFAULT_OUT_PATH = DURABLE_ROOT / "occurrence_index.json"
 
 try:
     from bootstrap_names import (
-        extract_candidate_spans, fold_match_key, load_language_config, BootstrapNamesError,
+        extract_candidate_spans, fold_match_key, span_match_keys,
+        load_language_config, BootstrapNamesError,
     )
 except ImportError as exc:
     sys.exit(
@@ -102,9 +104,11 @@ except ImportError as exc:
         "bootstrap_names.py must be installed alongside occ_index.py under "
         "${durable_root}/scripts/ -- Step 0a copies the whole scripts/ set together. "
         "It supplies extract_candidate_spans(), the offset-preserving production "
-        "tokenizer/matcher this module reuses (never reimplements), and "
+        "tokenizer/matcher this module reuses (never reimplements); "
         "fold_match_key(), the #238/#241 Hebrew mark/connector MATCH KEY #243 uses "
-        "to compare production_occurrences()'s emitted name against source_form. "
+        "to compare a caller-supplied source_form against a span's own key; and "
+        "span_match_keys(), the ONE construction of that key from a span (neither "
+        "the capped name nor the raw slice is a valid lookup key -- see its docstring). "
         "Re-run Step 0a, or verify the plugin install is not corrupted."
     )
 
@@ -137,6 +141,28 @@ def _run_spans(block_text: str, language_config):
     return extract_candidate_spans(block_text, language_config)
 
 
+def _run_span_keys(block_text: str, language_config):
+    """``[(char_start, char_end, match_key)]`` -- every run ``_run_spans()``
+    emits for this block, paired with the OCCURRENCE-IDENTITY key a canon
+    ``source_form`` is compared against. The lookup form of ``_run_spans()``,
+    and what every grouping/filtering site in this module (and in
+    ``evidence_verify.py``, which imports it) actually wants: none of them
+    needs ``name`` or ``mid_sentence``.
+
+    Routed THROUGH ``_run_spans()`` on purpose, so that function stays the
+    single place this module talks to bootstrap_names.py for extraction --
+    the seam ``evidence_verify``'s own one-pass-per-block guard patches and
+    counts. The key itself is built by ``bootstrap_names.span_match_keys()``,
+    never here: keying on the emitted ``name`` loses an over-cap run and
+    keying on the raw ``block_text`` slice loses a sentinel-interrupted one,
+    and that reasoning belongs in exactly one docstring.
+    """
+    return span_match_keys(block_text, [
+        (char_start, char_end)
+        for _name, _mid_sentence, char_start, char_end in _run_spans(block_text, language_config)
+    ])
+
+
 def production_occurrences(source_form: str, block_text: str, language_config) -> list:
     """The exact matcher spans the PRODUCTION tokenizer/matcher emits for
     ``source_form`` in ``block_text`` under ``language_config``. Half-open
@@ -146,9 +172,11 @@ def production_occurrences(source_form: str, block_text: str, language_config) -
     ``LanguageConfig`` (carrying its real ``elision_re``/particle set) is
     required and load-bearing.
 
-    ``fold_match_key(name) == fold_match_key(source_form)`` (#243, supersedes
-    A-C6's deliberate unfolded comparison -- see this module's own
-    docstring): a pointed/maqaf-joined production occurrence IS found under
+    ``<the span's own match key> == fold_match_key(source_form)`` (#243,
+    supersedes A-C6's deliberate unfolded comparison -- see this module's own
+    docstring; the span's key is built by ``bootstrap_names.span_match_keys()``
+    and is deliberately NOT a fold of the emitted ``name``, which would lose
+    an over-cap run): a pointed/maqaf-joined production occurrence IS found under
     an unpointed/space-joined ``source_form``, matching ``occurrence_targets.
     py``'s own lookup semantics. This is a single-``source_form`` primitive
     with no notion of a fold-key COLLISION among several other
@@ -156,11 +184,20 @@ def production_occurrences(source_form: str, block_text: str, language_config) -
     once must apply its own fail-closed guard (``canon_senses.
     fold_collision_map()``); see ``index_manifest()``'s docstring below.
     """
+    # Match on the span's OWN slice of `block_text`, never on the emitted
+    # `name` -- which is neither the run's identity nor a key `source_form`
+    # can ever equal for an over-cap run. `_run_span_keys()` builds the one
+    # valid key (see `bootstrap_names.span_match_keys()` for why neither the
+    # capped name nor the raw slice is it). For every shape where `name` and
+    # the span's own text differ literally but MEAN the same run -- a double
+    # space or a newline between tokens, an inline sentinel crossed by the
+    # run -- the key folds them together, so this narrows nothing; pinned by
+    # the controls in tests/capped_name_occurrence_lookup.test.py.
     key = fold_match_key(source_form)
     return [
         (char_start, char_end)
-        for name, _mid_sentence, char_start, char_end in _run_spans(block_text, language_config)
-        if fold_match_key(name) == key
+        for char_start, char_end, span_key in _run_span_keys(block_text, language_config)
+        if span_key == key
     ]
 
 
@@ -274,9 +311,10 @@ def index_manifest(manifest_path, source_forms, language_config, *,
     Calls ``_run_spans()`` (the expensive tokenizer/run-building pass) exactly
     ONCE per block -- never once per ``(block, source_form)`` pair, which
     would re-run the full extraction ``len(source_forms)`` times over the
-    same text. The single pass's spans are grouped by
-    ``bootstrap_names.fold_match_key(name)`` (#243 -- previously grouped by
-    raw ``name``; preserving each key's own start-order, since ``_run_spans()``
+    same text. The single pass's spans are grouped by each span's own match
+    key (``bootstrap_names.span_match_keys()``, reached via ``_run_span_keys()``
+    -- #243 folded the key, previously grouped by raw ``name``; preserving each
+    key's own start-order, since ``_run_spans()``
     already returns spans sorted by ``char_start`` and grouping-by-filtering a
     sorted sequence preserves that order even when several distinct raw
     ``name``s share one folded key), then records are emitted per
@@ -364,9 +402,17 @@ def index_manifest(manifest_path, source_forms, language_config, *,
 
     records = []
     for block_id, seg, text in iter_manifest_blocks(manifest_path):
+        # Same key construction as production_occurrences() above, and
+        # load-bearing for the SAME reason: these keys are intersected with
+        # `fold_to_name` below, which is built from canon `source_form`s. A
+        # key built any other way would simply not intersect, and this
+        # function would emit zero records for that form in silence.
+        # `fold_key_of` above is built from `source_forms` (caller-supplied
+        # canon spellings, never extractor output), so it is correct as it
+        # stands and is deliberately untouched.
         folded_spans_by_key = defaultdict(list)
-        for name, _mid_sentence, char_start, char_end in _run_spans(text, language_config):
-            folded_spans_by_key[fold_match_key(name)].append((char_start, char_end))
+        for char_start, char_end, span_key in _run_span_keys(text, language_config):
+            folded_spans_by_key[span_key].append((char_start, char_end))
         context_start, context_end = _context_window(text)
         context_sha256 = hashlib.sha256(
             text[context_start:context_end].encode("utf-8")

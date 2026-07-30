@@ -45,6 +45,15 @@ derivation_bundle_hash pairing as this script):
         used to apply to raw text BEFORE calling extract_candidates. segpack.py
         passes raw block/footnote text straight through; it never pre-strips
         sentinels itself.
+    _strip_capped_marker(name: str) -> str
+        Strips the (possibly digest-bearing, issue #352) truncation marker
+        `extract_candidates()` may have appended to an over-long candidate
+        `name`, returning the candidate's own content unmarked. Any place
+        that re-derives a STRUCTURAL property of `name` (this script's own
+        `multiword` re-derivation at `build_pack()`'s name-scanning pass)
+        must call this first, or the marker text itself gets counted as
+        part of that content -- see bootstrap_names.py's own
+        `_strip_capped_marker` docstring for the measured bug this closes.
 
 Usage:
     python3 segpack.py SEG --particle-config fr.json --apparatus-policy translate_all
@@ -65,16 +74,16 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 DURABLE_ROOT = SCRIPT_DIR.parent
 
 try:
-    from bootstrap_names import load_language_config, extract_candidates
+    from bootstrap_names import load_language_config, extract_candidates, _strip_capped_marker
 except ImportError as exc:
     sys.exit(
         f"segpack.py: cannot import bootstrap_names.py from {SCRIPT_DIR} ({exc}).\n"
         "bootstrap_names.py must be installed alongside segpack.py under "
         "${durable_root}/scripts/ -- Step 0a copies both scripts together as a "
         "pair (they share the derivation_bundle_hash). It supplies "
-        "load_language_config / extract_candidates, the shared name-candidate "
-        "extraction primitives segpack.py reuses per segment. Re-run Step 0a, "
-        "or verify the plugin install is not corrupted."
+        "load_language_config / extract_candidates / _strip_capped_marker, the "
+        "shared name-candidate extraction primitives segpack.py reuses per "
+        "segment. Re-run Step 0a, or verify the plugin install is not corrupted."
     )
 
 # Canonical segment-id safety contract. A seg id is either an ordinary body
@@ -436,12 +445,23 @@ def build_pack(seg_id, manifest, canon, lang_config, apparatus_policy):
     #      the SAME masking internally with a length-preserving space run, so
     #      the extra pre-pass here was redundant AND the one place in this
     #      script that could have silently corrupted a span-based caller. ----
+    # bootstrap_names.py round 10 (finding 1): a candidate `name` may carry a
+    # `_capped_candidate_name` truncation marker (issue #91's "cap" -- see
+    # bootstrap_names.py's own `_MAX_CANDIDATE_NAME_CHARS` comment), and the
+    # marker itself contains a space, so `name.split()` on the raw returned
+    # string counts the marker as an extra "word" -- a capped SINGLE-token
+    # name would come back `multiword: True` purely from being truncated,
+    # then get promoted into `strong_names` below for the wrong reason. Route
+    # through `_strip_capped_marker` (the same fix bootstrap_names.py's own
+    # `collect_candidates()` applies) so this site derives `multiword` from
+    # the candidate's own content, never from the marker.
     name_stats = {}
     scan_texts = [_scan_text(entry) for entry in blocks_out]
     scan_texts += [fo["source_text"] for fo in footnotes_out]
     for raw_text in scan_texts:
         for name, mid_sentence in extract_candidates(raw_text, lang_config):
-            d = name_stats.setdefault(name, {"freq": 0, "mid": 0, "multiword": len(name.split()) > 1})
+            multiword = len(_strip_capped_marker(name).split()) > 1
+            d = name_stats.setdefault(name, {"freq": 0, "mid": 0, "multiword": multiword})
             d["freq"] += 1
             d["mid"] += int(mid_sentence)
     strong_names = sorted(

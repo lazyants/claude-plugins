@@ -154,10 +154,56 @@ def has_schema(options_text):
     return re.search(r"\bschema\s*:", options_text) is not None
 
 
-def has_seq_poll_loop(body):
-    """The OLD `for i in $(seq 1 N)` bounded loop -- glossary still uses it;
-    #198's mass-translate wait polls must NOT."""
-    return re.search(r"for\s+i\s+in\s+\$\(seq\s+1\s+\d+\)", body) is not None
+_FIXED_ITERATION_LOOP_RE = re.compile(
+    r"for\s+\w+\s+in\s+\$\(\s*seq\b"      # for X in $(seq ...) -- any var name, any seq arg count
+    r"|for\s*\(\("                         # C-style for ((init; cond; incr))
+    r"|for\s+\w+\s+in\s+\{\d+\.\.\d+\}"    # brace-range for X in {N..M}
+)
+
+
+def has_fixed_iteration_poll_loop(body):
+    """The OLD fixed-iteration bounded loop FAMILY -- #198 took mass-translate's
+    wait polls off this shape, and 1.16.2 (#352) did the same for glossary's
+    (see test_glossary_batch_wait_chunk_is_an_elapsed_bounded_poll_of_check_batch
+    below). As of 1.16.2 no shipped template emits any of this family as real
+    code; it survives only as historical prose in a comment
+    (skeptic-pass-wf.template.js narrates the pre-1.16.2 shape it replaced).
+    Kept as a predicate rather than deleted: every assertion below still uses
+    it to prove ABSENCE, and the table in
+    test_regression_catcher_helpers_actually_discriminate still needs
+    something that recognises the family if it were to reappear.
+
+    WIDENED, review round 8: the regression that shipped was `for i in
+    $(seq 1 N)` exactly, and this predicate (then named has_seq_poll_loop)
+    used to match only that one spelling -- a different loop variable, a
+    one- or three-argument `seq`, a C-style `for ((...))`, or a brace-range
+    `for i in {1..N}` all escaped it silently, while every caller's
+    assertion message claimed the whole CATEGORY ("the old... loop must be
+    gone"), not one spelling. Renamed to match what it now covers.
+
+    This checks the SOURCE layer (a JS string literal inside a
+    prompt-builder function body), not rendered output, so it is a
+    source-grammar detector recognising a FAMILY of bad shapes -- not a
+    fullmatch whitelist of the one legitimate shape the way
+    wait_chunking_batch_passes.test.py's CHUNK_POLL_GRAMMAR_RE is at the
+    runtime-prompt layer. A fullmatch whitelist does not fit a whole
+    multi-line function body carrying legitimate prose, comments and other
+    JS the way it fit one single rendered bash line there; the legitimate
+    shape here is verified PRESENT by has_elapsed_poll_loop below, which is
+    this file's positive half of the same pair.
+
+    KNOWN RESIDUAL, not attempted: a manual counter loop with no `seq`/`for`
+    syntax at all (`n=45; while [ $n -gt 0 ]; do sleep 20; n=$((n-1));
+    done`) is NOT caught -- syntactically it is indistinguishable, at the
+    regex level, from the legitimate elapsed-time `while true` shape this
+    file also verifies is present, and a sound detector would need to tell
+    apart a wall-clock-bound exit condition from a counter-bound one, which
+    is beyond a source-text regex without a real parser. The call sites that
+    need this covered end-to-end already are, at the runtime-prompt layer,
+    by wait_chunking_batch_passes.test.py's CHUNK_POLL_GRAMMAR_RE fullmatch,
+    which pins the one legitimate rendered shape directly rather than
+    denylisting bad ones."""
+    return _FIXED_ITERATION_LOOP_RE.search(body) is not None
 
 
 def has_elapsed_poll_loop(body):
@@ -235,8 +281,39 @@ def test_regression_catcher_helpers_actually_discriminate():
     assert has_schema('schema: REVIEW_SCHEMA, effort: "low"') is True
     assert has_schema('effort: "low", phase: "Ledger"') is False
 
-    assert has_seq_poll_loop("for i in $(seq 1 45); do true; done") is True
-    assert has_seq_poll_loop("end=$((SECONDS + 3450)); while true; do true; done") is False
+    # Review round 8: the shipped regression was `for i in $(seq 1 N)`
+    # exactly, and this predicate used to match only that one spelling --
+    # silently missing every sibling shape while every caller's assertion
+    # message claimed the whole category. Table-driven over the escape
+    # spellings that were actually measured to slip through the old regex,
+    # so "actually discriminate" is proven for the family this predicate now
+    # claims to cover, not just the one historical instance.
+    fixed_iteration_shapes = [
+        ("canonical spelling",      "for i in $(seq 1 45); do true; done"),
+        ("different loop variable", "for j in $(seq 1 45); do true; done"),
+        ("one-argument seq",        "for i in $(seq 45); do true; done"),
+        ("three-argument seq",      "for i in $(seq 1 45 1); do true; done"),
+        ("C-style for loop",        "for ((i=0; i<45; i++)); do true; done"),
+        ("brace-range for loop",    "for i in {1..45}; do true; done"),
+    ]
+    for label, shape in fixed_iteration_shapes:
+        assert has_fixed_iteration_poll_loop(shape) is True, (
+            f"{label} must be recognised as a fixed-iteration loop: {shape!r}"
+        )
+    assert has_fixed_iteration_poll_loop(
+        "end=$((SECONDS + 3450)); while true; do true; done"
+    ) is False, "the legitimate elapsed-time shape must never false-positive"
+
+    # KNOWN RESIDUAL, documented in has_fixed_iteration_poll_loop's own
+    # docstring rather than silently missed: a manual counter loop carries
+    # no `seq`/`for` syntax at all, so it is indistinguishable at the regex
+    # level from the legitimate elapsed-time `while true` shape above.
+    # Pinned here as an explicit non-goal, not an oversight -- covered
+    # end-to-end instead by the runtime-prompt-layer fullmatch whitelist in
+    # wait_chunking_batch_passes.test.py.
+    assert has_fixed_iteration_poll_loop(
+        "n=45; while [ $n -gt 0 ]; do sleep 20; n=$((n-1)); done"
+    ) is False, "counter-while is a documented residual, not a surprise"
 
     assert has_elapsed_poll_loop("end=$((SECONDS + 3450)); while true; do true; done") is True
     assert has_elapsed_poll_loop("for i in $(seq 1 45); do true; done") is False
@@ -373,7 +450,9 @@ def test_wait_chunk_poll_keeps_the_198_elapsed_gate_shape():
     assert has_elapsed_poll_loop(body), (
         f"#198: the chunk poll must be an elapsed-time poll, not a seq loop:\n{body}"
     )
-    assert not has_seq_poll_loop(body), "the old `for i in $(seq 1 N)` loop must be gone"
+    assert not has_fixed_iteration_poll_loop(body), (
+        "the old fixed-iteration bounded loop must be gone, in every spelling"
+    )
 
     poll = line_containing(body, "end=$((SECONDS +")
 
@@ -432,7 +511,7 @@ def test_wait_recheck_is_a_single_non_polling_gate_evaluation():
     and it must run the gate it was handed, not one of its own."""
     body = code_lines(extract_function_body(MASS_TRANSLATE_SOURCE, WAIT_RECHECK_BUILDER))
     assert not has_elapsed_poll_loop(body), f"the re-check polls:\n{body}"
-    assert not has_seq_poll_loop(body), f"the re-check polls:\n{body}"
+    assert not has_fixed_iteration_poll_loop(body), f"the re-check polls:\n{body}"
     assert "while true" not in body, f"the re-check loops:\n{body}"
     assert "sleep" not in body, f"the re-check sleeps:\n{body}"
     gate = line_containing(body, "acceptCmd +")
@@ -628,10 +707,18 @@ def test_glossary_batch_dispatch_is_codex_and_schema_less():
     assert not has_schema(options), f"glossary batch dispatch must be schema-less (fire-and-forget): {options}"
 
 
-# The three sites that must issue the --check-batch command
+# The FOUR sites that must issue the --check-batch command
 # character-identically (see checkBatchCmd()'s own comment in the template):
-# the resume precheck, the codex dispatch's own self-check, and the wait poll.
-CHECK_BATCH_CALL_SITES = ("batchPrecheckPrompt", "batchDispatchPrompt", "batchWaitPrompt")
+# the resume precheck, the codex dispatch's own self-check, the wait poll's
+# chunk, and -- new in 1.16.2 (#352) -- the authoritative re-check that backs
+# the chunk budget. The wait was one site until #352 split it in two, and both
+# halves belong here for the reason the re-check exists at all: a re-check that
+# asked a WEAKER question than the poll it backs up would be a gate that opens
+# only on the path nobody watches.
+CHECK_BATCH_CALL_SITES = (
+    "batchPrecheckPrompt", "batchDispatchPrompt",
+    "batchWaitChunkPrompt", "batchWaitRecheckPrompt",
+)
 
 # The command as CODE. The "/scripts/" path prefix is the tell that separates
 # BUILDING the command from merely naming it in prose -- the template's prose
@@ -639,10 +726,26 @@ CHECK_BATCH_CALL_SITES = ("batchPrecheckPrompt", "batchDispatchPrompt", "batchWa
 COMPOSED_CHECK_BATCH_LITERAL = "/scripts/canon_validate.py --check-batch"
 
 
-def test_glossary_batch_wait_is_a_bounded_poll_of_check_batch():
-    wait_body = code_lines(extract_function_body(GLOSSARY_SOURCE, "batchWaitPrompt"))
-    assert has_seq_poll_loop(wait_body), (
-        f"batchWaitPrompt must contain a bounded `for i in $(seq 1 N)` poll:\n{wait_body}"
+def test_glossary_batch_wait_chunk_is_an_elapsed_bounded_poll_of_check_batch():
+    """1.16.2 (#352): the glossary wait's bash grammar caught up with
+    mass-translate's #198/#348 shape, and this assertion moved with it.
+
+    It used to require the OLD `for i in $(seq 1 N)` FIXED-ITERATION loop --
+    which is exactly the shape that made the pre-1.16.2 poll a 900 s single bash
+    call, killed by the Bash tool's 600 s per-call clamp. The chunk now declares
+    an ELAPSED bound instead (`end=$((SECONDS + <chunk>))`), so the assertion
+    inverts: a surviving seq-loop here is the regression, not the contract."""
+    wait_body = code_lines(extract_function_body(GLOSSARY_SOURCE, "batchWaitChunkPrompt"))
+    assert not has_fixed_iteration_poll_loop(wait_body), (
+        f"batchWaitChunkPrompt must NOT use a pre-1.16.2 fixed-iteration "
+        f"loop, in any spelling -- its iteration count is what silently "
+        f"produced an over-cap single bash call (#352):\n{wait_body}"
+    )
+    poll = line_containing(wait_body, "end=$((SECONDS +")
+    assert "waitChunkSec(chunkIndex)" in poll, (
+        f"the chunk's elapsed bound must be waitChunkSec(chunkIndex) -- a flat "
+        f"per-chunk constant would EXTEND the declared WAIT_BOUND_SEC rather "
+        f"than spend it, got: {poll}"
     )
     # 1.16.0 extracted checkBatchCmd(), so the command's own literals no longer
     # sit inline here -- follow that indirection rather than grepping this body
@@ -650,10 +753,9 @@ def test_glossary_batch_wait_is_a_bounded_poll_of_check_batch():
     # bounded poll runs the checkBatchCmd()-built command, and that command is
     # canon_validate.py --check-batch.
     assert "checkBatchCmd(batch.index, attempt)" in wait_body, (
-        "batchWaitPrompt must build its poll command from checkBatchCmd(), "
+        "batchWaitChunkPrompt must build its poll command from checkBatchCmd(), "
         "scoped to THIS attempt's own fragment path"
     )
-    poll = line_containing(wait_body, "for i in $(seq 1")
     # Word-anchored, not a bare substring: `"checkCmd" in poll` is satisfied by
     # any identifier that merely CONTAINS it, so a poll interpolating some
     # unrelated `checkCmdFallback` would have passed while running a command
@@ -672,20 +774,57 @@ def test_glossary_batch_wait_is_a_bounded_poll_of_check_batch():
     )
 
     wrapper = extract_function_body(GLOSSARY_SOURCE, "batchStep")
-    wait_call_options = extract_agent_call_options(wrapper, "batchWaitPrompt(")
-    assert not is_codex_dispatch(wait_call_options), (
-        f"the wait POLL must be a Claude call (no agentType), got: {wait_call_options}"
+    for builder in ("batchWaitChunkPrompt(", "batchWaitRecheckPrompt("):
+        wait_call_options = extract_agent_call_options(wrapper, builder)
+        assert not is_codex_dispatch(wait_call_options), (
+            f"the {builder} call must be a Claude call (no agentType), got: {wait_call_options}"
+        )
+
+
+def test_glossary_batch_wait_recheck_is_a_single_non_polling_gate_evaluation():
+    """1.16.2 (#352) -- the fix itself, in its structural half. A re-check that
+    polled would just be one more chunk and could itself hit the 600 s clamp,
+    which is the whole defect. Non-polling BY CONSTRUCTION: no elapsed bound,
+    no loop, no sleep anywhere in its rendered bash."""
+    body = code_lines(extract_function_body(GLOSSARY_SOURCE, "batchWaitRecheckPrompt"))
+    # Round 8: this used to be a bare ("end=$((SECONDS +", "while true",
+    # "sleep ", "$(seq ") tuple -- the same one-spelling-per-token shape as
+    # has_fixed_iteration_poll_loop before its own round-8 fix, and with the
+    # identical "sleep " (trailing space) weakness measured elsewhere in this
+    # release: a tab-separated `sleep\t5` smuggled in through an interpolated
+    # command would satisfy `"sleep " not in body` while still being a real
+    # sleep call. Aligned with the mass-translate sibling check just above
+    # (test_wait_recheck_is_a_single_non_polling_gate_evaluation): the two
+    # structural helpers cover the loop-shape family, and the bare-token scan
+    # below is narrowed to what they cannot see (an "end="/"while true"
+    # literal not attached to a loop keyword, or a bare "sleep" anywhere at
+    # all), with "sleep" unspaced so a tab or any other separator still hits.
+    assert not has_elapsed_poll_loop(body), f"the re-check polls:\n{body}"
+    assert not has_fixed_iteration_poll_loop(body), f"the re-check polls:\n{body}"
+    for forbidden in ("end=$((SECONDS +", "while true", "sleep"):
+        assert forbidden not in body, (
+            f"batchWaitRecheckPrompt must not poll; found {forbidden!r} in:\n{body}"
+        )
+    assert "checkBatchCmd(batch.index, attempt)" in body, (
+        "the re-check must evaluate the SAME checkBatchCmd()-built gate the "
+        "chunks poll, scoped to THIS attempt's own fragment path -- a weaker "
+        "gate here opens only on the path nobody watches"
     )
 
 
-def test_check_batch_command_is_composed_once_and_shared_by_all_three_sites():
+def test_check_batch_command_is_composed_once_and_shared_by_all_four_sites():
     """1.16.0 anti-drift lock -- the whole point of extracting checkBatchCmd().
-    The three sites have to issue this command character-identically (the
+    The sites have to issue this command character-identically (the
     dispatch prompt literally tells the agent to re-run "exactly the command
     above"), an invariant previously stated only in prose comments and enforced
     nowhere. Lock both halves: the helper really IS the canon_validate.py
-    --check-batch command, and every one of the three sites goes THROUGH it
+    --check-batch command, and every one of the sites goes THROUGH it
     instead of composing the command itself.
+
+    1.16.2 (#352): three sites became four. The wait split into a bounded chunk
+    poll and one authoritative non-polling re-check, and the re-check is the
+    site where drift would be least visible -- it runs only after the whole
+    chunk budget is spent, on the recovery path a healthy run never takes.
 
     Every check here runs over code_lines(), never the raw slice. The prose
     version of this test was tautological at one of the three sites: the
@@ -766,7 +905,8 @@ def _normalized_code(body):
 
 
 def test_every_glossary_sentinel_verdict_call_site_is_containment_guarded():
-    """The 1.16.0 false-approval fix, locked at all FOUR sites at once.
+    """The 1.16.0 false-approval fix, locked at all THREE remaining batchStep
+    sites at once.
 
     Runs over code_lines(), never the raw slice: batchStep's own comments
     discuss both helpers by name at length, and a `GUARD_HELPER in body` check
@@ -777,18 +917,29 @@ def test_every_glossary_sentinel_verdict_call_site_is_containment_guarded():
     that both fetched and judged was split into a PREPARE agent (runs the
     validated fetcher, ingests no page content) and a JUDGE agent (reads local
     files, retrieves nothing), so prepare contributes its own
-    EVIDENCE_READY/EVIDENCE_FAILED sentinel pair. The count moved rather than
-    the assertion relaxing, exactly as this test's own failure message
-    instructs -- and the count is not the protection. The pairing loop below is:
-    it re-checks EVERY site, so raising the number is what lets the new site be
-    verified at all, and a prepare site added without a guard fails there."""
+    EVIDENCE_READY/EVIDENCE_FAILED sentinel pair.
+
+    1.16.2 (#352): four became three, and NOT because a guard was dropped. The
+    WAIT site's reply parse moved OUT of batchStep into waitChunkVerdict(), the
+    single reader of every wait reply -- chunk and re-check alike. That is a
+    strictly stronger shape (one place to get right instead of one per call
+    site), and it is why the count went DOWN here while the number of wait
+    replies parsed went UP. The moved site keeps its guard, checked by
+    test_glossary_wait_chunk_verdict_is_guarded_and_ordered below -- which is
+    where the guard now has to be proved, and is not optional: without it, this
+    count dropping to three is indistinguishable from a guard being deleted.
+
+    The count is not the protection. The pairing loop below is: it re-checks
+    EVERY site, so moving the number is what lets a changed site be verified at
+    all, and a site added without a guard fails there."""
     body = extract_function_body(GLOSSARY_SOURCE, "batchStep")
     code = _normalized_code(body)
 
     verdict_calls = _SENTINEL_VERDICT_CALL_RE.findall(code)
-    assert len(verdict_calls) == 4, (
-        f"expected batchStep to hold exactly the four sentinel sites (precheck, "
-        f"wait, citation prepare, citation judge); found {len(verdict_calls)}: "
+    assert len(verdict_calls) == 3, (
+        f"expected batchStep to hold exactly the three sentinel sites (precheck, "
+        f"citation prepare, citation judge -- the wait's own parse lives in "
+        f"waitChunkVerdict since 1.16.2); found {len(verdict_calls)}: "
         f"{verdict_calls}. If a site was added or removed, guard it and update "
         f"this count -- do not relax the assertion"
     )
@@ -803,6 +954,104 @@ def test_every_glossary_sentinel_verdict_call_site_is_containment_guarded():
             f"newline survives whole-line equality and this site falsely "
             f"approves. Guards actually present: {sorted(guarded)}"
         )
+
+
+# ---------------------------------------------------------------------------
+# 1.16.2 (#352) -- the glossary wait's parse, where it now lives.
+#
+# The test above proves the guard at the three sites that STAYED in batchStep.
+# These two prove it at the one that moved, and they are what keeps that count
+# dropping from four to three from being indistinguishable from a deletion.
+#
+# The shape mirrors mass-translate's own post-#348 lock below, with one real
+# difference: glossary's chunk grammar has TWO verdicts, not three. There is no
+# FAILED sentinel here because this pass dispatches through an awaited
+# codex:codex-rescue agent call rather than a detached codex_job.py driver, so
+# no `.codex_failed.*` file exists for a chunk to report -- a FAILED grammar
+# would be a verdict nothing could ever produce. So exactly ONE containment
+# guard is expected, on PENDING, and expecting two here would be asserting
+# against a sentinel the template cannot emit.
+# ---------------------------------------------------------------------------
+
+GLOSSARY_WAIT_PARSE_SITE = "waitChunkVerdict"
+
+
+def test_glossary_wait_chunk_verdict_is_guarded_and_ordered():
+    """The wait site's guard, proved where #352 moved the reading to.
+
+    ONE verdict call, ONE guard, both on the SAME reply, and the guard
+    positionally BEFORE the verdict call. The order is the whole property: a
+    guard that runs after the whole-line READY test is dead code for every reply
+    that test already accepts, and the site falls back to exactly the
+    pre-containment behaviour -- a PENDING sentinel sharing its line with prose
+    is never seen, and the batch is declared ready off a reply that said it was
+    not.
+
+    The null fail sentinel handed to sentinelVerdict is asserted rather than
+    tolerated. It is only SAFE while the containment guard ahead of it is the
+    fail path; a second fail path inside sentinelVerdict would be the weaker of
+    the two and would quietly decide the cases the guard was written for."""
+    code = _normalized_code(extract_function_body(GLOSSARY_SOURCE, GLOSSARY_WAIT_PARSE_SITE))
+
+    verdict_calls = _SENTINEL_VERDICT_CALL_RE.findall(code)
+    assert len(verdict_calls) == 1, (
+        f"expected {GLOSSARY_WAIT_PARSE_SITE} to hold exactly ONE sentinelVerdict "
+        f"call (the whole-line READY test); found {len(verdict_calls)}: {verdict_calls}"
+    )
+    reply, ok_sentinel, fail_sentinel = verdict_calls[0]
+    assert ok_sentinel == '"READY " + index', (
+        f"the whole-line test must be the READY direction, got ok={ok_sentinel!r}"
+    )
+    assert fail_sentinel == "null", (
+        f"the READY test must pass a null fail sentinel (got {fail_sentinel!r}): "
+        f"fail-priority lives in the containment guard ahead of it, and a second "
+        f"fail path here would be the weaker one"
+    )
+
+    guards = _GUARD_CALL_RE.findall(code)
+    assert {sentinel for _r, sentinel in guards} == {'"PENDING " + index'}, (
+        f"{GLOSSARY_WAIT_PARSE_SITE} must containment-guard the ONE non-ready "
+        f"sentinel of its two-verdict grammar; found guards on "
+        f"{sorted(s for _r, s in guards)}"
+    )
+    for guard_reply, sentinel in guards:
+        assert guard_reply == reply, (
+            f"the {GUARD_HELPER}(..., {sentinel}) guard watches {guard_reply!r} while "
+            f"the READY test reads {reply!r} -- a guard on the wrong reply variable "
+            f"never fires, and the site silently falls back to whole-line equality"
+        )
+
+    # ORDER IS THE PROPERTY. Last guard before first verdict call.
+    assert code.rindex(GUARD_HELPER + "(") < code.index("sentinelVerdict("), (
+        f"a {GUARD_HELPER}() containment guard runs AFTER the whole-line READY test "
+        f"in {GLOSSARY_WAIT_PARSE_SITE}. Reversed, the guard is dead code for any "
+        f"reply the READY test already accepts, and a PENDING sentinel sharing its "
+        f"line with prose is never seen"
+    )
+
+
+def test_glossary_wait_loop_delegates_every_reply_to_the_single_parse_site():
+    """Both of a glossary wait's replies -- the chunk's and the
+    post-exhaustion re-check's -- must go through the guarded site.
+
+    A re-check parsed inline would be a second, unguarded reading of exactly the
+    reply that decides whether a landed fragment is found, which is the decision
+    #352 exists to get right. Counted rather than merely required-present: one
+    delegation plus one inline parse would satisfy a presence check.
+
+    batchStep legitimately calls sentinelVerdict at its OTHER three sites, so
+    this cannot use the mass-translate version's blanket "no parse helpers in
+    this function" rule. It pins the delegation COUNT instead, and the
+    three-site count asserted above is what covers the rest of the function."""
+    code = _normalized_code(extract_function_body(GLOSSARY_SOURCE, "batchStep"))
+
+    parse_calls = code.count(GLOSSARY_WAIT_PARSE_SITE + "(")
+    assert parse_calls == 2, (
+        f"expected batchStep to parse exactly two wait replies through "
+        f"{GLOSSARY_WAIT_PARSE_SITE}() -- the chunk reply and the re-check reply -- "
+        f"found {parse_calls}. If the wait gained or lost a reply, route it through "
+        f"the same site and update this count -- do not relax the assertion"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1027,7 +1276,10 @@ def test_callfix_is_exempt_from_bounded_poll_requirement():
     )
 
     fix_prompt_body = extract_function_body(MASS_TRANSLATE_SOURCE, "fixPrompt")
-    assert not has_seq_poll_loop(fix_prompt_body) and not has_elapsed_poll_loop(fix_prompt_body), (
+    assert (
+        not has_fixed_iteration_poll_loop(fix_prompt_body)
+        and not has_elapsed_poll_loop(fix_prompt_body)
+    ), (
         "fixPrompt must NOT itself contain a poll loop -- it is a direct, "
         "unbounded, blocking Claude call, deliberately NOT restructured"
     )

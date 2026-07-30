@@ -142,6 +142,25 @@ def _code_only(text: str) -> str:
 
 
 def _touches_consumer(code: str) -> bool:
+    # KNOWN BLIND SPOT (round-8 finding, accepted -- symmetric to the
+    # documented sys.path.insert precision gap above): this matches each
+    # CONSUMER_SCRIPTS entry WITH its ".py" suffix, so any file that
+    # references "canon_validate", "glossary_batch_plan" or
+    # "canon_adjudication_audit" as a bare name -- no extension -- is
+    # invisible to this predicate, and so is any loader/copy idiom in that
+    # same file. Measured: a test asserting the bare name "canon_validate"
+    # (e.g. as a substring marker checked against unrelated JS source, never
+    # as a script reference) does not trip _touches_consumer at all, even
+    # though the identical text WITH ".py" would. Deliberately not widened to
+    # a bare-name match: CONSUMER_SCRIPTS are common enough words/word-stems
+    # (validate, plan, audit) that a bare-name scan would false-positive on
+    # ordinary prose across this whole plugin's test suite, trading a rare
+    # false-negative for many false positives. Accepted as a PRECISION gap
+    # like the sys.path.insert one above: a real unstaged isolation of this
+    # shape still fails LOUD with ModuleNotFoundError the instant that test
+    # runs, so the miss is in this guard's ability to name the file
+    # PRE-EMPTIVELY, not in whether the underlying regression can land
+    # silently.
     return any(name in code for name in CONSUMER_SCRIPTS)
 
 

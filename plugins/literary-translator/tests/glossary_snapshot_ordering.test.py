@@ -50,7 +50,7 @@ than a source grep:
   * a prepare that reports failure spends no judge call, and its attempt's
     snapshot never reaches the merge;
   * the emitted approve command is checkBatchCmd() plus --approve-to APPENDED, so
-    the three character-identical --check-batch sites keep issuing that prefix
+    the four character-identical --check-batch sites keep issuing that prefix
     verbatim, and PREPARE is the only call in the file that carries --approve-to;
   * under LIVE the merge and verify consume approved_{i}_attempt_{n}.json for the
     approved attempt, and no rejected attempt's snapshot is ever named;
@@ -76,6 +76,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -145,29 +146,58 @@ def step_line(prompt: str, step: int) -> tuple:
     return hits[0]
 
 
+# The chunk poll's ACCEPT gate, as it is actually rendered since 1.16.2 (#352):
+#
+#   end=$((SECONDS + 480)); while true; do <CMD> >/dev/null 2>&1 && exit 0; ...
+#
+# The `>/dev/null 2>&1` is load-bearing rather than cosmetic (--check-batch
+# prints a JSON line per invocation, and without the redirect the chunk's own
+# terminal marker would stop being the last line), which is exactly why it is
+# matched here instead of being swept into the extracted command: the approve
+# command is the pinned contract plus an APPENDED flag, so a suffix left on the
+# extracted string would silently make every comparison below compare the wrong
+# thing.
+_CHUNK_ACCEPT_RE = re.compile(r"while true; do (.*?) >/dev/null 2>&1 && exit 0;")
+
+
 def check_cmd_from_wait(out: dict, index: int, attempt: int = 0) -> str:
     """The --check-batch command the WAIT poll for this attempt actually issued,
     lifted back out of its rendered polling loop.
 
     Deliberately extracted from a rendered prompt rather than transcribed into a
-    local f-string. checkBatchCmd() is a pinned contract three sites must issue
+    local f-string. checkBatchCmd() is a pinned contract four sites must issue
     character-identically, and what has to hold is that the approve command is
     THAT string plus an appended flag -- so the comparison has to be against the
     string the template really emitted, not against this file's idea of it. A
     local copy would keep agreeing with itself after a contract change on either
     side.
+
+    1.16.2 (#352): one wait renders up to WAIT_CHUNKS chunk prompts, all under
+    the same `glossary:wait:<index>` label, so the prompt list is no longer
+    one-entry-per-attempt and positional indexing by `attempt` would silently
+    read another attempt's chunk. Selected by the attempt's own fragment PATH
+    instead, which is the thing that actually distinguishes them.
     """
-    prompt = prompts_for(out, f"glossary:wait:{index}")[attempt]
-    lines = [ln for ln in prompt.split("\n") if "--check-batch" in ln]
-    assert len(lines) == 1, f"expected one --check-batch line in the wait prompt, got {lines}"
-    loop = lines[0]
-    start = loop.index("do ") + len("do ")
-    end = loop.index(" && exit 0")
-    cmd = loop[start:end]
-    assert attempt_path(index, attempt) in cmd, (
-        f"the wait poll for attempt {attempt} does not name that attempt's path: {cmd}"
+    wanted = attempt_path(index, attempt)
+    hits = []
+    for prompt in prompts_for(out, f"glossary:wait:{index}"):
+        for line in prompt.split("\n"):
+            m = _CHUNK_ACCEPT_RE.search(line)
+            if m and "--check-batch" in m.group(1) and wanted in m.group(1):
+                hits.append(m.group(1))
+    assert hits, (
+        f"no wait chunk for batch {index} attempt {attempt} issued a --check-batch "
+        f"gate naming {wanted}"
     )
-    return cmd
+    # Every chunk of one attempt's wait splices the SAME builder, so they must
+    # all be character-identical; asserting that here is what lets the callers
+    # treat "the command this attempt's wait issued" as a single well-defined
+    # string at all.
+    assert len(set(hits)) == 1, (
+        f"the wait chunks for batch {index} attempt {attempt} issued DIFFERENT "
+        f"--check-batch commands: {sorted(set(hits))}"
+    )
+    return hits[0]
 
 
 def check_cmd_from_precheck(out: dict, index: int) -> str:
@@ -254,8 +284,17 @@ async function agent(promptText, opts) {
   opts = opts || {};
   const label = opts.label || "";
   const ordinal = record(label, promptText);
-  callsLog.push({ label: label, ordinal: ordinal, effort: opts.effort || null,
-                  agentType: opts.agentType || null });
+  callsLog.push({
+    label: label, ordinal: ordinal, effort: opts.effort || null,
+    agentType: opts.agentType || null,
+    // Round-8: captures the REAL schema literal's own additionalProperties
+    // flag at the moment of each call, so a test can assert directly on the
+    // template's own schema declaration (e.g. that CANON_VERIFY_SCHEMA
+    // forbids extra fields) without this mock needing to simulate the real
+    // Workflow engine's schema-validation/retry-until-valid enforcement.
+    hasSchema: !!opts.schema,
+    schemaAdditionalProperties: opts.schema ? opts.schema.additionalProperties : null,
+  });
 
   if (label === "glossary:merge") return "MERGED (mock)";
   if (label === "glossary:verify") return { verified: true };
@@ -269,7 +308,17 @@ async function agent(promptText, opts) {
     return Object.prototype.hasOwnProperty.call(p, "precheck") ? p.precheck : ("ABSENT " + idx);
   }
   if (kind === "dispatch") return "FRAGMENT " + idx;
-  if (kind === "wait") return "READY " + idx;
+  // 1.16.2 (#352): the wait poll is chunked, and every chunk of every attempt
+  // shares this one label, so a plan-supplied reply is consumed POSITIONALLY --
+  // one entry per call, not one per attempt. The default keeps every prior
+  // caller's behaviour (READY on the first chunk, so the re-check below never
+  // fires) while letting a plan force PENDING to reach it.
+  if (kind === "wait") return nth(p.waits, ordinal, "READY " + idx);
+  // The authoritative re-check (#352) -- reached only when every chunk of an
+  // attempt's wait answered something other than READY. Same default as
+  // "wait" above: a plan that says nothing gets a READY re-check, so a run
+  // that never forces PENDING waits never has to know this branch exists.
+  if (kind === "wait-recheck") return nth(p.rechecks, ordinal, "READY " + idx);
   // 1.16.1 (#347) -- the citation review became TWO calls, and this branch is
   // what the whole file's live path now hangs on: the JUDGE runs only if PREPARE
   // reported EVIDENCE_READY, so a harness that leaves this label unanswered
@@ -367,6 +416,23 @@ def labels_of(out: dict) -> list:
 
 def one_batch_run(tmp_path: Path, **kwargs) -> dict:
     return run(tmp_path=tmp_path, batches=[make_batch(0, ["Sarrasin", "Enclos"])], **kwargs)
+
+
+def pending_wait_run(tmp_path: Path, **kwargs) -> dict:
+    """A run whose chunked wait poll never answers READY, so the fallthrough to
+    the authoritative re-check (glossary:wait-recheck:0, #352) actually fires.
+
+    one_batch_run's wait answers READY on its first chunk by default, which is
+    exactly why the re-check never rendered a prompt anywhere in this file
+    before it got its own roster entry: nothing ever drove the harness past the
+    chunk loop. WAIT_CHUNKS is 2 in the shipped template, so two PENDING
+    replies exhaust the chunk budget and hand control to the re-check, which
+    then defaults to READY so the rest of the run (prepare, judge, merge)
+    completes exactly like every other fixture here.
+    """
+    plan = {"0": {"waits": ["PENDING 0", "PENDING 0"]}}
+    return run(tmp_path=tmp_path, batches=[make_batch(0, ["Sarrasin", "Enclos"])],
+               plan=plan, **kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -556,19 +622,72 @@ def test_the_approve_command_is_the_check_batch_contract_plus_approve_to(tmp_pat
     )
 
 
+# Round-8 sweep finding: PRECHECK and WAIT (chunk and re-check alike) are each
+# told "do nothing else" beyond their one read-only check -- unpinned, in this
+# file that already pins the --check-batch CONTRACT those same calls issue.
+# PRESENCE-ONLY: this file's mocked agent() cannot simulate an LLM doing
+# something extra with its bash tool, so this proves the instruction is still
+# WRITTEN, not that it is OBEYED -- see glossary_citation_review.test.py's
+# DISPATCH_NO_ACTION_CLAUSE pin for the same caveat spelled out at more length.
+PRECHECK_NOTHING_ELSE_CLAUSE = (
+    "do not create, modify, dispatch, or resolve any candidates yourself"
+)
+WAIT_NOTHING_ELSE_CLAUSE = (
+    "do not touch any files, and do not resolve any candidates yourself"
+)
+
+
+def test_precheck_and_wait_are_told_to_do_nothing_beyond_their_own_check(tmp_path):
+    """PRECHECK holds a bash tool to run its one read-only --check-batch probe;
+    WAIT holds one to run its bounded poll (and the re-check that backs it).
+    Neither is restricted by any tool-level sandbox -- confirmed in the round-8
+    sweep that NO agent() call anywhere in this plugin's templates carries a
+    tool-restriction option -- so the prompt's own "do nothing else" sentence
+    is the ONLY thing standing between "ran the one suggested command" and
+    "did whatever else its bash tool allows", for both of these mechanical,
+    supposedly read-only steps.
+
+    All three call sites share one property (the SAME sentence, verbatim, at
+    the wait chunk and the wait re-check) but need two different runs: the
+    chunk fires under one_batch_run's default; the re-check only fires when
+    the chunk budget is exhausted (see pending_wait_run(), used above by this
+    file's own --check-batch roster test for the identical reason)."""
+    out = one_batch_run(tmp_path)
+    precheck = sole_prompt(out, "glossary:precheck:0")
+    assert PRECHECK_NOTHING_ELSE_CLAUSE in precheck, (
+        "the precheck prompt must forbid the agent from doing anything beyond "
+        f"its one read-only check; prompt was:\n{precheck}"
+    )
+    for prompt in prompts_for(out, "glossary:wait:0"):
+        assert WAIT_NOTHING_ELSE_CLAUSE in prompt, (
+            "every wait chunk prompt must forbid the agent from touching "
+            f"files or resolving candidates itself; prompt was:\n{prompt}"
+        )
+
+    recheck_out = pending_wait_run(tmp_path)
+    recheck_prompts = prompts_for(recheck_out, "glossary:wait-recheck:0")
+    assert recheck_prompts, "pending_wait_run() must reach the wait re-check"
+    for prompt in recheck_prompts:
+        assert WAIT_NOTHING_ELSE_CLAUSE in prompt, (
+            "the wait re-check prompt must forbid the agent from touching "
+            f"files or resolving candidates itself; prompt was:\n{prompt}"
+        )
+
+
 @pytest.mark.parametrize("label", [
     "glossary:precheck:0", "glossary:dispatch:0", "glossary:wait:0",
-    "glossary:citation-review:0",
+    "glossary:wait-recheck:0", "glossary:citation-review:0",
 ])
 def test_only_the_prepare_call_ever_issues_the_approve_command(tmp_path, label):
     """PREPARE is the one call in the file that may snapshot, and the reasons
     differ per label rather than being one rule repeated.
 
-    The three --check-batch sites (precheck, dispatch self-check, wait poll) must
-    issue checkBatchCmd() character-identically, so none of them may acquire the
-    flag: a precheck or wait poll that snapshotted would write an approved copy of
-    bytes nobody has reviewed, and a dispatch self-check that did it would let the
-    producer approve its own output.
+    The four --check-batch sites (precheck, dispatch self-check, wait chunk
+    poll, wait re-check -- the last added in 1.16.2, #352) must issue
+    checkBatchCmd() character-identically, so none of them may acquire the
+    flag: a precheck, wait chunk poll or re-check that snapshotted would write
+    an approved copy of bytes nobody has reviewed, and a dispatch self-check
+    that did it would let the producer approve its own output.
 
     The JUDGE is here for a different reason and was added in 1.16.1 (the test was
     named test_no_plain_check_batch_site_ever_issues_approve_to when it covered
@@ -576,8 +695,17 @@ def test_only_the_prepare_call_ever_issues_the_approve_command(tmp_path, label):
     do is re-take the snapshot AFTER the evidence was retrieved from the first
     one, which would leave the audited bytes and the fetched-from bytes as two
     different objects -- the very split this file exists to prevent.
+
+    The re-check needs a different run from the other four labels: the default
+    fixture's wait answers READY on its very first chunk, so the re-check never
+    renders a prompt at all under it -- see pending_wait_run()'s docstring for
+    why a plan has to force the chunk budget to exhaust before this label ever
+    fires.
     """
-    out = one_batch_run(tmp_path)
+    out = (
+        pending_wait_run(tmp_path) if label == "glossary:wait-recheck:0"
+        else one_batch_run(tmp_path)
+    )
     prompts = prompts_for(out, label)
     assert prompts, f"no prompt recorded for {label}"
     for prompt in prompts:
@@ -614,6 +742,122 @@ def test_live_merge_and_verify_consume_the_approved_snapshot(tmp_path):
     # fragmentPath stays as the diagnostic record of which attempt produced the
     # bytes, and is deliberately not what merges.
     assert batch_result["fragmentPath"] == attempt_path(0, 0)
+
+
+# Round-8 sweep finding: the verify call is what the template's own comments
+# elsewhere call "what this run actually trusts" (glossaryVerifyPrompt() is
+# disk-independent and re-derives its own verdict rather than trusting the
+# merge call above), so a verify call that lied about its own result would go
+# completely unnoticed -- nothing re-runs --verify-merged independently.
+GLOSSARY_VERIFY_NO_JUDGE_CLAUSE = "do not judge the comparison yourself"
+GLOSSARY_VERIFY_NO_ALTER_CLAUSE = (
+    "Do not add, omit, or alter any value the command printed"
+)
+
+
+def test_verify_prompt_forbids_judging_or_altering_the_command_result(tmp_path):
+    """The verify call's whole safety property is that it RELAYS
+    --verify-merged's own output rather than deciding anything itself --
+    the template's own comment calls --verify-merged "never trusting the
+    merge call above's own claim", and that guarantee is worthless if the
+    RELAY step is then free to trust itself instead.
+
+    Two things are pinned, at two different strengths:
+
+    1. PRESENCE-ONLY (cannot be made behavioural with this mocked harness):
+       both clause texts must be in the rendered prompt. The mock agent()
+       here returns a canned Python dict for this label -- it never runs an
+       LLM that could ignore or obey these words -- so this half proves the
+       instruction is still WRITTEN, not that it is OBEYED.
+    2. STRUCTURAL / behavioural: CANON_VERIFY_SCHEMA's own
+       additionalProperties must be false. This is the one part of "do not
+       add ... any value" that IS independently enforced beyond the prompt
+       sentence -- the real Workflow engine's schema validation would reject
+       a reply carrying an extra field, regardless of what the prompt says.
+       It does NOT cover "omit" or "alter": a schema-conformant reply that
+       reports verified:true when the command actually printed false is
+       accepted by the schema and by isVerifiedResult() alike, exactly as
+       measured in the round-8 sweep -- for THAT half, the prompt clause
+       above is still the only defense that exists anywhere in this system.
+    """
+    out = one_batch_run(tmp_path)
+    verify = prompts_for(out, "glossary:verify")[0]
+
+    assert GLOSSARY_VERIFY_NO_JUDGE_CLAUSE in verify, (
+        "the verify prompt must tell the agent not to judge the comparison "
+        f"itself; prompt was:\n{verify}"
+    )
+    assert GLOSSARY_VERIFY_NO_ALTER_CLAUSE in verify, (
+        "the verify prompt must forbid adding, omitting, or altering any "
+        f"value the command printed; prompt was:\n{verify}"
+    )
+
+    verify_calls = [c for c in out["calls"] if c["label"] == "glossary:verify"]
+    assert len(verify_calls) == 1, (
+        f"expected exactly one glossary:verify call, got {len(verify_calls)}"
+    )
+    assert verify_calls[0]["hasSchema"] is True, (
+        "the glossary:verify call must be schema-carrying at all -- without a "
+        "schema, not even the 'add an extra field' half has any structural "
+        "backstop"
+    )
+    assert verify_calls[0]["schemaAdditionalProperties"] is False, (
+        "CANON_VERIFY_SCHEMA must set additionalProperties: false -- this is "
+        "the actual code-level enforcement of the 'do not add' half of the "
+        "prompt clause above, independent of whether the prompt sentence "
+        f"survives; got {verify_calls[0]['schemaAdditionalProperties']!r}"
+    )
+
+
+def test_verify_result_trust_rests_on_shape_alone_not_independent_corroboration(tmp_path):
+    """The STRONG form of the property the test above can only pin weakly.
+
+    Not "the schema forbids an extra field" (already pinned above) but: does
+    anything downstream treat a shape-valid reply as evidence the command
+    was actually run, or compare it against what the command itself
+    printed? Answered two ways, deliberately different in kind:
+
+    1. SOURCE-STRUCTURAL: isVerifiedResult() -- the one function standing
+       between the agent's reply and merged:true -- is read directly out of
+       the real template file and asserted to contain no subprocess call, no
+       second agent() call, and no reference to canon_validate.py. It is a
+       pure shape/value check over the reply OBJECT, nothing else. If a
+       future change adds real corroboration (re-running --verify-merged,
+       hashing something, anything that inspects reality instead of the
+       reply's shape), this is the assertion that would force a conscious
+       update here rather than staying silently true.
+    2. BEHAVIOURAL, over this file's own fixture: a MOCKED "glossary:verify"
+       reply that never invokes any subprocess at all -- one_batch_run's
+       canned `{ verified: true }` -- still makes the run report
+       merged:true. This is not new behaviour created by this test; it is
+       the precondition every other fixture in this file already depends on,
+       made an explicit, named assertion instead of an implicit one nobody
+       has to notice.
+    """
+    template_source = GLOSSARY_TEMPLATE.read_text(encoding="utf-8")
+    m = re.search(r"function isVerifiedResult\(v\) \{(.*?)\n\}", template_source, re.DOTALL)
+    assert m, (
+        "isVerifiedResult() not found in glossary-pass-wf.template.js -- has "
+        "it been renamed or restructured? This test's whole premise is that "
+        "function's own body."
+    )
+    body = m.group(1)
+    for marker in ("execFileSync", "spawnSync", "require(", "subprocess", "agent(", "canon_validate"):
+        assert marker not in body, (
+            f"isVerifiedResult() now contains {marker!r} -- it used to be a "
+            "pure shape/value check over the reply object with no "
+            "independent corroboration of anything; if that changed on "
+            "purpose, this assertion (and the docstring above citing it as "
+            f"the sole trust point) needs to be revisited, not silenced. "
+            f"Body was:\n{body}"
+        )
+
+    out = one_batch_run(tmp_path)
+    assert out["result"]["merged"] is True, (
+        "a schema-valid, canned verify reply that never invoked the real "
+        "--verify-merged command is still trusted -- confirms there is no "
+        f"independent corroboration step; result was {out['result']}"
+    )
 
 
 def test_a_rejected_attempts_snapshot_never_reaches_the_merge(tmp_path):

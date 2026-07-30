@@ -155,7 +155,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 DURABLE_ROOT = SCRIPT_DIR.parent
 
 try:
-    from bootstrap_names import extract_candidate_spans, fold_match_key
+    from bootstrap_names import extract_candidate_spans, fold_match_key, span_match_keys
 except ImportError as exc:
     sys.exit(
         f"occurrence_targets.py: cannot import bootstrap_names.py from {SCRIPT_DIR} ({exc}).\n"
@@ -163,7 +163,9 @@ except ImportError as exc:
         "${durable_root}/scripts/ -- it supplies extract_candidate_spans(), the "
         "offset-preserving production tokenizer/matcher this module reuses (never "
         "reimplements) -- the SAME entry point occ_index.production_occurrences() "
-        "itself calls (occ_index.py's own _run_spans) -- and fold_match_key(), the "
+        "itself calls (occ_index.py's own _run_spans); span_match_keys(), the ONE "
+        "construction of a span's occurrence-identity key, which this module groups "
+        "by; and fold_match_key(), the "
         "#238/#241 Hebrew mark/connector MATCH KEY this module applies at lookup "
         "time to both the matcher's own grouping key and the canon source_form it "
         "looks up, never to either side's own emitted string (Contract 5/3). Called "
@@ -221,9 +223,19 @@ def _spans_by_name(text: str, language_config) -> dict:
     docstring's own note on the unfolded-key/folded-matching asymmetry.
     Each key's own spans stay in `char_start` order (`extract_candidate_
     spans` already returns its full list sorted that way)."""
+    # Group on the span's OWN occurrence-identity key, never on the emitted
+    # `name` and never on the raw `text` slice -- `bootstrap_names.
+    # span_match_keys()` is the ONE construction of that key and its docstring
+    # carries why both of those alternatives silently lose a run. See
+    # occ_index.production_occurrences()'s own comment for why this narrows
+    # nothing else.
     grouped = defaultdict(list)
-    for name, _mid_sentence, char_start, char_end in extract_candidate_spans(text, language_config):
-        grouped[fold_match_key(name)].append((char_start, char_end))
+    spans = [
+        (char_start, char_end)
+        for _name, _mid_sentence, char_start, char_end in extract_candidate_spans(text, language_config)
+    ]
+    for char_start, char_end, span_key in span_match_keys(text, spans):
+        grouped[span_key].append((char_start, char_end))
     return grouped
 
 
