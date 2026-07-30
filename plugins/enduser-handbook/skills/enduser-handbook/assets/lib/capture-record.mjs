@@ -670,16 +670,20 @@ function canonicalizeForComparison(rawPath, deps) {
   // policy bans every such reference, in any shape, anywhere in this module).
   const absolute = isAbsolutePath(rawPath);
   const segments = normalizeSegments(rawSegments(rawPath), absolute);
+
+  // The prefix path to probe at a given depth. Depth 0 means "no segments left at all": the
+  // filesystem root for an absolute candidate, the working directory for a relative one (which
+  // `realpathSync` resolves internally, so this module never reads a working directory itself).
+  function prefixPath(depth) {
+    if (depth === 0) return absolute ? '/' : '.';
+    const joined = segments.slice(0, depth).join('/');
+    return absolute ? `/${joined}` : joined;
+  }
+
   let tail = [];
   let idx = segments.length;
   while (idx >= 0) {
-    const candidate = absolute
-      ? idx === 0
-        ? '/'
-        : `/${segments.slice(0, idx).join('/')}`
-      : idx === 0
-        ? '.'
-        : segments.slice(0, idx).join('/');
+    const candidate = prefixPath(idx);
     try {
       const real = deps.realpathSync(candidate); // always returns an absolute path
       const realSegments = normalizeSegments(rawSegments(real), true);
@@ -1043,10 +1047,7 @@ export function openCaptureRun(profileLike, entries, openingObservation, deps) {
     d.closeSync(fd);
   }
 
-  return {
-    ok: true,
-    runState,
-  };
+  return { ok: true, runState };
 }
 
 // chapter-paths.mjs's outputDirTail checks `entry.group !== undefined` (strict) — a `group: null`
@@ -1071,6 +1072,34 @@ function openingPayloadFromRunState(runState) {
   return { entries: runState.entries, assets: runState.opening_assets, identity: runState.opening };
 }
 
+// The one recursive asset-tree walk both sweeps below share (the hash snapshot and the filename
+// listing) — a single definition of "which files under an asset directory this feature can see",
+// rather than two copies free to drift apart on the symlink or the errno rule. A symlink is never
+// followed, as a directory to descend or as a file to visit. ENOENT/ENOTDIR ends that branch
+// quietly (an asset directory that does not exist yet is legitimately empty — W2 snapshots the
+// opening baseline before the capture command has written anything); every OTHER errno propagates
+// to the caller, which turns it into a halt rather than a silently short list.
+function walkRegularFiles(rootDir, deps, visit) {
+  walk(rootDir, '');
+
+  function walk(absDir, relPrefix) {
+    let entries;
+    try {
+      entries = deps.readdirSync(absDir, { withFileTypes: true });
+    } catch (err) {
+      if (err.code === 'ENOENT' || err.code === 'ENOTDIR') return;
+      throw err;
+    }
+    for (const dirent of entries) {
+      const childAbs = posixJoin(absDir, dirent.name);
+      const childRel = relPrefix ? `${relPrefix}/${dirent.name}` : dirent.name;
+      if (dirent.isSymbolicLink()) continue;
+      if (dirent.isDirectory()) walk(childAbs, childRel);
+      else if (dirent.isFile()) visit(childAbs, childRel);
+    }
+  }
+}
+
 // `capture.output_dir` is NOT plugin-owned (ledger row 7: the opaque capture command's own
 // namespace, "outside our contract entirely"), so it is not part of gate 6's stated obligation set
 // (scoped to the token/record/temp leaves and the root/run/ hierarchy). But an UNPROTECTED read
@@ -1087,31 +1116,13 @@ function openingPayloadFromRunState(runState) {
 // fails completeness (rule 3) and the chapter is reported ineligible, never silently trusted.
 function snapshotAssetHashes(assetDir, deps) {
   const result = Object.create(null);
-  walk(assetDir, '');
+  walkRegularFiles(assetDir, deps, (absPath, relPath) => {
+    const hashed = hashFileNoFollow(absPath, deps);
+    if (hashed.kind === 'present') result[relPath] = hashed.digest;
+    // 'hazard' (a symlink/hard-link/non-regular swapped in after the listing, or an inspection
+    // failure) and 'absent' (the file vanished) are both excluded, same as a symlink dirent.
+  });
   return result;
-
-  function walk(absDir, relPrefix) {
-    let entries;
-    try {
-      entries = deps.readdirSync(absDir, { withFileTypes: true });
-    } catch (err) {
-      if (err.code === 'ENOENT' || err.code === 'ENOTDIR') return; // missing/absent dir => empty map
-      throw err;
-    }
-    for (const dirent of entries) {
-      const childAbs = posixJoin(absDir, dirent.name);
-      const childRel = relPrefix ? `${relPrefix}/${dirent.name}` : dirent.name;
-      if (dirent.isSymbolicLink()) continue; // never followed for the opening/closing snapshot
-      if (dirent.isDirectory()) {
-        walk(childAbs, childRel);
-      } else if (dirent.isFile()) {
-        const hashed = hashFileNoFollow(childAbs, deps);
-        if (hashed.kind === 'present') result[childRel] = hashed.digest;
-        // 'hazard' (a symlink/hard-link/non-regular swapped in after the listing, or an inspection
-        // failure) and 'absent' (the file vanished) are both excluded, same as isSymbolicLink().
-      }
-    }
-  }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1149,7 +1160,7 @@ function listMatchingTemps(profileLike, deps) {
  *
  * @param {object} profileLike
  * @param {object} runState
- * @param {{ok: boolean, detail？: string}} captureOutcome
+ * @param {{ok: boolean, detail?: string}} captureOutcome
  * @param {import('./build-identity.mjs').UiReadObservation|null} [closingObservation]
  * @param {object} [deps]
  * @returns {{ok: true, runState: object, warnings: string[]}|{ok: false, halts: Array<object>}|{needs_ui_read: true, region_hint: string}}
@@ -1173,7 +1184,14 @@ export function closeCaptureRun(profileLike, runState, captureOutcome, closingOb
     return haltResult('token_missing', 'no pending token found for this run — it may already have been closed or aborted.');
   }
   const parsedToken = parseJsonStrict(tokenRead.text);
-  if (!parsedToken.ok || parsedToken.value.run_id !== runState.run_id) {
+  // Optional-chained for the same reason as the equivalent read in `recoverProvenanceState`: a
+  // token body of the literal `null` parses successfully into `{ok: true, value: null}` and is the
+  // one JSON value that is both non-object and dereferenceable-looking, so a bare `.run_id` threw
+  // a TypeError here — in a function whose contract is that every ordinary failure comes back as a
+  // returned `{ok: false, halts}`. It is a `stale_replay` like every other non-matching token.
+  // Line 1199 below needs no such guard: it is reachable only once `run_id` compared equal to a
+  // string, which a null value cannot do.
+  if (!parsedToken.ok || parsedToken.value?.run_id !== runState.run_id) {
     return haltResult('stale_replay', 'the token on disk does not match this runState — this run has already moved on; re-derive with recoverProvenanceState.');
   }
   // The digest is RECOMPUTED from runState's actual current content and checked against the
@@ -1271,19 +1289,13 @@ export function closeCaptureRun(profileLike, runState, captureOutcome, closingOb
   }
 
   // Cleanup: every leftover matching temp first, the token last — the same order and for the same
-  // reason as the row-6 repairs.
+  // reason as the row-6 repairs. Both are best-effort: a leftover temp is still classified
+  // correctly by recoverProvenanceState, and the token may already be gone under a concurrent or
+  // retried close, which is not this call's failure.
   for (const temp of listMatchingTemps(profileLike, d)) {
-    try {
-      d.unlinkSync(temp);
-    } catch {
-      /* best-effort; a leftover temp is still classified correctly by recoverProvenanceState */
-    }
+    unlinkBestEffort(temp, d);
   }
-  try {
-    d.unlinkSync(tokenPath);
-  } catch {
-    /* the token may already be gone under a concurrent/retried close; not this call's failure */
-  }
+  unlinkBestEffort(tokenPath, d);
 
   return { ok: true, runState: { ...runState, closed: true }, warnings: [] };
 }
@@ -1297,12 +1309,14 @@ export function closeCaptureRun(profileLike, runState, captureOutcome, closingOb
 // and a reader rejecting what its own writer wrote is the defect this shared predicate avoids.
 // ---------------------------------------------------------------------------------------------
 
-function isHashMap(value) {
+// "A plain object" — non-null, not an array. The shape test every record reader below opens with,
+// and the one a stored hash map must pass before its keys are examined.
+function isPlainObject(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
 function validateHashMap(map) {
-  if (!isHashMap(map)) return false;
+  if (!isPlainObject(map)) return false;
   for (const key of Object.keys(map)) {
     if (!isCanonicalAssetKey(key)) return false;
     if (typeof map[key] !== 'string' || !HASH_GRAMMAR.test(map[key])) return false;
@@ -1324,20 +1338,16 @@ export function readRunRecordText(text) {
   const parsed = parseJsonStrict(text);
   if (!parsed.ok) return { ok: false, reason: parsed.reason };
   const record = parsed.value;
-  if (record === null || typeof record !== 'object' || Array.isArray(record)) {
-    return { ok: false, reason: 'not_an_object' };
-  }
+  if (!isPlainObject(record)) return { ok: false, reason: 'not_an_object' };
   if (record.record_version !== 1) return { ok: false, reason: 'bad_record_version' };
   if (typeof record.run_id !== 'string') return { ok: false, reason: 'bad_run_id' };
   if (!isValidDigest(record.opening_digest)) return { ok: false, reason: 'bad_opening_digest' };
   const identityCheck = isValidBuildIdentityField(record.build_identity);
   if (!identityCheck.ok) return { ok: false, reason: `bad_build_identity:${identityCheck.reason}` };
-  if (record.chapters === null || typeof record.chapters !== 'object' || Array.isArray(record.chapters)) {
-    return { ok: false, reason: 'bad_chapters' };
-  }
+  if (!isPlainObject(record.chapters)) return { ok: false, reason: 'bad_chapters' };
   for (const key of Object.keys(record.chapters)) {
     const entry = record.chapters[key];
-    if (!isHashMap(entry)) return { ok: false, reason: 'bad_chapter_entry' };
+    if (!isPlainObject(entry)) return { ok: false, reason: 'bad_chapter_entry' };
     if (!Object.hasOwn(entry, 'opening') || !Object.hasOwn(entry, 'closing')) {
       return { ok: false, reason: 'bad_chapter_entry' };
     }
@@ -1358,9 +1368,7 @@ export function readChapterRecordText(text) {
   const parsed = parseJsonStrict(text);
   if (!parsed.ok) return { ok: false, reason: parsed.reason };
   const record = parsed.value;
-  if (record === null || typeof record !== 'object' || Array.isArray(record)) {
-    return { ok: false, reason: 'not_an_object' };
-  }
+  if (!isPlainObject(record)) return { ok: false, reason: 'not_an_object' };
   if (!Number.isInteger(record.record_version) || record.record_version < 1) {
     return { ok: false, reason: 'bad_record_version' };
   }
@@ -1584,25 +1592,8 @@ function readFileText(path, deps) {
 
 function listRegularFilesRecursive(assetDir, deps) {
   const out = [];
-  walk(assetDir, '');
+  walkRegularFiles(assetDir, deps, (_absPath, relPath) => out.push(relPath));
   return out;
-
-  function walk(absDir, relPrefix) {
-    let entries;
-    try {
-      entries = deps.readdirSync(absDir, { withFileTypes: true });
-    } catch (err) {
-      if (err.code === 'ENOENT' || err.code === 'ENOTDIR') return;
-      throw err;
-    }
-    for (const dirent of entries) {
-      const childAbs = posixJoin(absDir, dirent.name);
-      const childRel = relPrefix ? `${relPrefix}/${dirent.name}` : dirent.name;
-      if (dirent.isSymbolicLink()) continue;
-      if (dirent.isDirectory()) walk(childAbs, childRel);
-      else if (dirent.isFile()) out.push(childRel);
-    }
-  }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1795,22 +1786,24 @@ function inspectTokenAndRecordAndTemps(profileLike, deps) {
   const hierarchyHazard = inspectRunHierarchyComponents(profileLike, deps);
   if (hierarchyHazard) return { hazard: hierarchyHazard };
 
+  // Both leaves are read through the SAME gate-6 helpers every other reader in this module uses
+  // (`readLeafText` / `readRunRecordFromDisk`: O_NOFOLLOW open, fstat on that same descriptor,
+  // regular file, nlink === 1) rather than through a second hand-rolled open/read/close of their
+  // own — one definition of "how a leaf is read here" is what keeps the classifier's view of disk
+  // identical to the pipeline's.
   const tokenPath = pendingTokenPath(profileLike);
-  const recordPath = runRecordPath(profileLike);
-
-  const tokenLeaf = openLeafNoFollow(tokenPath, fs.constants.O_RDONLY, deps);
+  const tokenRead = readLeafText(tokenPath, deps);
+  if (tokenRead.kind === 'hazard') return { hazard: tokenRead };
   let tokenState = 'absent';
   let tokenValue = null;
-  if (tokenLeaf.kind === 'hazard') return { hazard: tokenLeaf };
-  if (tokenLeaf.kind === 'present') {
-    let text;
-    try {
-      text = readAllFromFd(tokenLeaf.fd, deps).toString('utf8');
-    } finally {
-      deps.closeSync(tokenLeaf.fd);
-    }
-    const parsed = parseJsonStrict(text);
-    if (parsed.ok && typeof parsed.value.run_id === 'string' && isValidDigest(parsed.value.opening_digest)) {
+  if (tokenRead.kind === 'present') {
+    const parsed = parseJsonStrict(tokenRead.text);
+    // `parsed.value` is optional-chained: a token body of the literal `null` parses SUCCESSFULLY
+    // (`{ok: true, value: null}`), and it is the one JSON value that is both non-object and
+    // dereferenceable-looking. Bodies `5`, `"str"` and `[]` all reach `typeof …run_id` harmlessly
+    // and classify as invalid; `null` threw a TypeError, breaking this function's documented
+    // totality over (token, record, temps). Measured before the fix.
+    if (parsed.ok && typeof parsed.value?.run_id === 'string' && isValidDigest(parsed.value?.opening_digest)) {
       tokenState = 'valid';
       tokenValue = parsed.value;
     } else {
@@ -1818,24 +1811,15 @@ function inspectTokenAndRecordAndTemps(profileLike, deps) {
     }
   }
 
-  const recordLeaf = openLeafNoFollow(recordPath, fs.constants.O_RDONLY, deps);
+  const recordRead = readRunRecordFromDisk(profileLike, deps);
+  if (recordRead.kind === 'hazard') return { hazard: recordRead };
   let recordState = 'absent';
   let recordValue = null;
-  if (recordLeaf.kind === 'hazard') return { hazard: recordLeaf };
-  if (recordLeaf.kind === 'present') {
-    let text;
-    try {
-      text = readAllFromFd(recordLeaf.fd, deps).toString('utf8');
-    } finally {
-      deps.closeSync(recordLeaf.fd);
-    }
-    const validated = readRunRecordText(text);
-    if (validated.ok) {
-      recordState = 'valid';
-      recordValue = validated.record;
-    } else {
-      recordState = 'invalid';
-    }
+  if (recordRead.kind === 'invalid') {
+    recordState = 'invalid';
+  } else if (recordRead.kind === 'present') {
+    recordState = 'valid';
+    recordValue = recordRead.record;
   }
 
   const temps = listMatchingTemps(profileLike, deps);
@@ -1914,7 +1898,10 @@ export function recoverProvenanceState(profileLike, deps) {
   return { state, action, expected, files };
 }
 
-function repair(profileLike, expected, deps, { calledApi, mutationOrder }) {
+// Both repairs share ONE mutation order — every matching temp first, the token last — so the order
+// is a property of this function rather than a parameter its two callers could disagree about.
+// They differ only in `calledApi`, which is what the wrong-executor check below is keyed on.
+function repair(profileLike, expected, deps, calledApi) {
   const d = mergeDeps(deps);
   const ownership = assertProvenanceOwnership(profileLike, d);
   if (ownership.skip) return { ok: true, skipped: true, removed: [] };
@@ -1977,29 +1964,27 @@ function repair(profileLike, expected, deps, { calledApi, mutationOrder }) {
 
   // Resume the remaining suffix of the mutation order from wherever we are.
   const removed = [];
-  if (mutationOrder === 'temps_then_token') {
-    for (const temp of observed.temps) {
-      try {
-        d.unlinkSync(temp);
-        removed.push(temp);
-      } catch (err) {
-        return mutationFailedHalt(temp, removed, err);
-      }
-    }
-    // The token is deleted UNCONDITIONALLY here, never gated on `observedState` — both repairs'
-    // whole job, once every temp is gone, is deleting the token: for abort, that is what takes
-    // 'open' to 'absent'; for cleanup, temps never blocked 'committed' in the first place, so this
-    // is the only remaining step. Confirmed intentional (team-lead review, #362) — an earlier draft
-    // had a conditional here whose body was empty comments only, which is exactly what a LOST edit
-    // looks like; there was no lost edit, the condition was simply never needed.
-    const tokenPath = pendingTokenPath(profileLike);
+  for (const temp of observed.temps) {
     try {
-      d.unlinkSync(tokenPath);
-      removed.push(tokenPath);
+      d.unlinkSync(temp);
+      removed.push(temp);
     } catch (err) {
-      if (err.code !== 'ENOENT') {
-        return mutationFailedHalt(tokenPath, removed, err);
-      }
+      return mutationFailedHalt(temp, removed, err);
+    }
+  }
+  // The token is deleted UNCONDITIONALLY here, never gated on `observedState` — both repairs'
+  // whole job, once every temp is gone, is deleting the token: for abort, that is what takes
+  // 'open' to 'absent'; for cleanup, temps never blocked 'committed' in the first place, so this
+  // is the only remaining step. Confirmed intentional (team-lead review, #362) — an earlier draft
+  // had a conditional here whose body was empty comments only, which is exactly what a LOST edit
+  // looks like; there was no lost edit, the condition was simply never needed.
+  const tokenPath = pendingTokenPath(profileLike);
+  try {
+    d.unlinkSync(tokenPath);
+    removed.push(tokenPath);
+  } catch (err) {
+    if (err.code !== 'ENOENT') {
+      return mutationFailedHalt(tokenPath, removed, err);
     }
   }
 
@@ -2017,7 +2002,7 @@ function repair(profileLike, expected, deps, { calledApi, mutationOrder }) {
  * @returns {{ok: true, removed: string[], noop?: true}|{ok: true, skipped: true, removed: []}|{ok: false, halts: Array<object>}}
  */
 export function abortCaptureRun(profileLike, expected, deps) {
-  return repair(profileLike, expected, deps, { calledApi: 'abortCaptureRun', mutationOrder: 'temps_then_token' });
+  return repair(profileLike, expected, deps, 'abortCaptureRun');
 }
 
 /**
@@ -2030,5 +2015,5 @@ export function abortCaptureRun(profileLike, expected, deps) {
  * @returns {{ok: true, removed: string[], noop?: true}|{ok: true, skipped: true, removed: []}|{ok: false, halts: Array<object>}}
  */
 export function cleanupCommittedRun(profileLike, expected, deps) {
-  return repair(profileLike, expected, deps, { calledApi: 'cleanupCommittedRun', mutationOrder: 'temps_then_token' });
+  return repair(profileLike, expected, deps, 'cleanupCommittedRun');
 }

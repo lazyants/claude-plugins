@@ -2423,19 +2423,29 @@ export function isCanonicalAssetKey(key) {
 // labels are supported here, never silently dropped). Returns the index of the matching ']'
 // (depth back to 0), or -1 when the label never closes.
 function findNestedLabelEnd(text, labelStart) {
+  return scanBalanced(text, labelStart, '[', ']', { stopAtNewline: false });
+}
+
+// The escape-aware depth counter both scans above are: from `start`, return the index of the
+// `close` that brings depth back to 0, or -1 when it never arrives. A backslash escapes whatever
+// follows it (the same escape-skip every other scan in this module uses), so an escaped delimiter
+// never moves the depth. `stopAtNewline` is the only behavioural difference between the two
+// callers: a link DESTINATION never legitimately spans a line break, so hitting one is treated the
+// same as never closing, while an image LABEL may wrap freely.
+function scanBalanced(text, start, open, close, { stopAtNewline }) {
   let depth = 0;
-  let i = labelStart;
-  while (i < text.length) {
+  let i = start;
+  while (i < text.length && !(stopAtNewline && text[i] === '\n')) {
     if (text[i] === '\\') {
       i += 2;
       continue;
     }
-    if (text[i] === '[') {
+    if (text[i] === open) {
       depth += 1;
       i += 1;
       continue;
     }
-    if (text[i] === ']') {
+    if (text[i] === close) {
       if (depth === 0) return i;
       depth -= 1;
       i += 1;
@@ -2457,26 +2467,7 @@ function scanDestinationGroup(text, openParenIndex) {
     const gt = text.indexOf('>', i + 1);
     i = gt === -1 ? text.length : gt + 1;
   }
-  let depth = 0;
-  while (i < text.length && text[i] !== '\n') {
-    if (text[i] === '\\') {
-      i += 2;
-      continue;
-    }
-    if (text[i] === '(') {
-      depth += 1;
-      i += 1;
-      continue;
-    }
-    if (text[i] === ')') {
-      if (depth === 0) return i;
-      depth -= 1;
-      i += 1;
-      continue;
-    }
-    i += 1;
-  }
-  return -1;
+  return scanBalanced(text, i, '(', ')', { stopAtNewline: true });
 }
 
 // Scans `text` for every unescaped '![' — the raw-text accounting marker the whole

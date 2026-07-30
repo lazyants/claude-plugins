@@ -673,6 +673,43 @@ test('row 6: `expected` is never null, and state-only-expected states carry null
   });
 });
 
+// Totality over a PARSEABLE-but-non-object token body. `null` is the one JSON value that is both
+// non-object and dereferenceable-looking: `parseJsonStrict` returns `{ok: true, value: null}`, so a
+// bare `.run_id` throws where every sibling body (`5`, `"str"`, `[]`) reaches the same `typeof`
+// comparison harmlessly. Measured RED before the fix: `recoverProvenanceState` threw
+// `TypeError: Cannot read properties of null (reading 'run_id')` for the `null` body alone, while
+// all four others classified as `partial` — a totality claim broken by exactly one input.
+// The whole non-object class is asserted here rather than just `null`, so a future guard that
+// special-cases the one measured value instead of the class still fails this test.
+test('row 6 totality: every parseable non-object token body classifies rather than throwing (`null` is not special)', () => {
+  const bodies = ['null', '5', '"str"', '[]', 'true'];
+  assert.ok(bodies.includes('null'), 'the regressed value must stay in the class under test');
+  let classified = 0;
+  for (const body of bodies) {
+    withTempDir((dir) => {
+      const profile = profileFor(dir);
+      writeFixture(profile, { token: body });
+      const result = CR.recoverProvenanceState(profile, realDeps());
+      assert.equal(result.state, 'partial', `token body ${body} should classify as partial`);
+      assert.equal(result.expected.run_id, null, `token body ${body} carries no fingerprint`);
+      classified += 1;
+    });
+  }
+  assert.equal(classified, bodies.length, 'every body must have been driven');
+});
+
+test('closeCaptureRun totality: a `null` token body returns a stale_replay halt rather than throwing', () => {
+  withTempDir((dir) => {
+    const profile = profileFor(dir);
+    const digest = 'sha256:' + 'a'.repeat(64);
+    writeFixture(profile, { token: 'null' });
+    const runState = { run_id: 'r1', opening_digest: digest, entries: [], opening: null, opening_assets: {} };
+    const result = CR.closeCaptureRun(profile, runState, { ok: true }, null, realDeps());
+    assert.equal(result.ok, false);
+    assert.equal(result.halts[0].halt, 'stale_replay', JSON.stringify(result.halts));
+  });
+});
+
 // =================================================================================================
 // Row 6 — abort / cleanup repairs
 // =================================================================================================
