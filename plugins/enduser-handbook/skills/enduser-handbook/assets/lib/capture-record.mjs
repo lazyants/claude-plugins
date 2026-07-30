@@ -831,6 +831,35 @@ function establishChapterGroupDir(profileLike, entry, deps) {
 // stages and gate 4 is a cross-entry recheck no single-entry call can perform).
 // ---------------------------------------------------------------------------------------------
 
+// The longest EXISTING ancestor of `pathSegs`, walked DOWNWARD starting at `rootSegs` — never
+// above it. Gate 3's own root canonicalization already fixed the coordinate system the caller
+// checks containment in; if the canonical root itself is not physically present either, nothing
+// under it can hold a planted symlink, so that degrades to "no ancestor to check" rather than
+// climbing past the root looking for one that predates it. Existence is probed with
+// `deps.lstatSync` only — never `realpath` — matching gate 3's own no-follow walk: this function
+// only decides WHERE the walk should start, `resolvePhysicalContainment` still performs the actual
+// symlink-substitution walk over whatever prefix comes back.
+//
+// @param {string[]} rootSegs  the canonical output root's own segments (never re-walked here)
+// @param {string[]} pathSegs  the candidate's full segments — MUST start with `rootSegs`
+// @param {object} deps
+// @returns {{ok: true, exists: false}|{ok: true, exists: true, path: string}|{ok: false, error: Error}}
+function longestExistingAncestor(rootSegs, pathSegs, deps) {
+  let lastExistingIdx = -1;
+  for (let idx = rootSegs.length; idx <= pathSegs.length; idx++) {
+    const candidate = `/${pathSegs.slice(0, idx).join('/')}`;
+    try {
+      deps.lstatSync(candidate);
+    } catch (err) {
+      if (err.code === 'ENOENT' || err.code === 'ENOTDIR') break;
+      return { ok: false, error: err };
+    }
+    lastExistingIdx = idx;
+  }
+  if (lastExistingIdx < 0) return { ok: true, exists: false };
+  return { ok: true, exists: true, path: `/${pathSegs.slice(0, lastExistingIdx).join('/')}` };
+}
+
 /**
  * Gates 1-4 over the asset tree for the FULL accepted entry set. The four predicates themselves —
  * `isValidSlugSyntax`, `findCanonicalPathCollisions`, `resolvePhysicalContainment`,
@@ -936,12 +965,10 @@ function validateEntriesForCapture(profileLike, entries, deps) {
     // `inspection-failed` — correct for a genuine hazard, but a chapter's asset directory
     // legitimately does not exist yet on its very first capture run (openCaptureRun snapshots the
     // OPENING baseline before the capture command has written anything there at all). Absent is
-    // therefore checked and skipped HERE, at this call site, before gate 3 ever runs on it —
-    // matching this module's own established rule elsewhere (gate 6's `ensureDirComponent`/
+    // therefore checked HERE, at this call site, before gate 3 ever runs on the full path — matching
+    // this module's own established rule elsewhere (gate 6's `ensureDirComponent`/
     // `inspectDirComponent`) that ENOENT-on-a-not-yet-established path is expected, not a hazard,
-    // while any OTHER lstat failure still is. Nothing to check also means nothing to add to gate
-    // 4's cross-entry collision set (two directories that do not yet exist cannot physically
-    // collide).
+    // while any OTHER lstat failure still is.
     let assetDirExists = true;
     try {
       deps.lstatSync(assetDir);
@@ -952,8 +979,33 @@ function validateEntriesForCapture(profileLike, entries, deps) {
         return haltResult('provenance_hazard', `cannot inspect asset directory '${assetDir}': ${err.code ?? err.message}`, { assetDir });
       }
     }
-    if (!assetDirExists) continue;
-    const result = resolvePhysicalContainment(canonicalOutputRoot, assetDir, containmentDeps);
+
+    // A missing LEAF is fine — but skipping gate 3 ENTIRELY throws away the containment check over
+    // the whole path, not just the missing tail: a symlinked ANCESTOR (`/safe/assets/admin` ->
+    // `/outside`, with `/outside/items` not yet created) still lstats the full candidate as ENOENT,
+    // and the capture command that runs afterwards then writes `/outside/items` into existence —
+    // outside `capture.output_dir` — with nothing here ever having checked the ancestor that made it
+    // possible. Run the SAME component-wise walk over the longest EXISTING ancestor prefix instead;
+    // the one thing the leaf-missing case legitimately cannot supply is the leaf itself, not the
+    // ancestors above it.
+    let containmentTarget = assetDir;
+    if (!assetDirExists) {
+      const ancestor = longestExistingAncestor(outputRootResolved.segments, rawSegments(assetDir), deps);
+      if (!ancestor.ok) {
+        return haltResult(
+          'provenance_hazard',
+          `cannot inspect an ancestor of asset directory '${assetDir}': ${ancestor.error.code ?? ancestor.error.message}`,
+          { assetDir },
+        );
+      }
+      // Nothing at all exists yet along this path (not even the canonical root itself) — nothing to
+      // check, and nothing to add to gate 4's cross-entry collision set (two directories that do not
+      // yet exist cannot physically collide).
+      if (!ancestor.exists) continue;
+      containmentTarget = ancestor.path;
+    }
+
+    const result = resolvePhysicalContainment(canonicalOutputRoot, containmentTarget, containmentDeps);
     if (!result.ok) {
       if (result.halt.reason === 'inspection-failed') {
         return haltResult('provenance_hazard', result.halt.detail, { assetDir });
@@ -963,7 +1015,10 @@ function validateEntriesForCapture(profileLike, entries, deps) {
       }
       return haltResult('asset_dir_escapes_output_dir', result.halt.detail, { assetDir, slug: entry.slug });
     }
-    resolvedEntries.push({ entry, resolved: result.resolved });
+    // A resolved ANCESTOR (the leaf itself still missing) is never added here — see the comment
+    // above: it cannot collide with anything yet, and two chapters legitimately sharing a group
+    // ancestor must not be manufactured into a false gate-4 collision.
+    if (assetDirExists) resolvedEntries.push({ entry, resolved: result.resolved });
   }
 
   // Gate 4 — pairwise PHYSICAL uniqueness, over gate 3's own resolved output (never re-derived) —
@@ -1765,6 +1820,14 @@ export function buildProvenanceReport(profileLike, entries, currentObservation, 
         resolution_reason: null,
         classification: 'indeterminate',
         classification_reason: 'provenance_unavailable',
+        // [round 5, codex finding 4] Present and null, never absent. Every OTHER branch of this
+        // function assigns `classifyBuildDelta`'s own `current_source`, so a row from THIS branch
+        // that simply omitted the key made `ReportRow.current_source: string` a lie a TypeScript
+        // caller could dereference and crash on — and nothing in this repository compiles
+        // TypeScript, so no gate saw it. `null` rather than a string sentinel because a skipped
+        // profile performs zero identity resolutions: there is no source, which is exactly what
+        // the sibling `source: null` on this same row already says.
+        current_source: null,
       })),
     };
   }

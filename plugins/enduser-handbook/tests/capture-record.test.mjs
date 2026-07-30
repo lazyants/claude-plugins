@@ -1044,6 +1044,54 @@ test('gate 3: a legitimate deep/nested asset directory does NOT false-halt', () 
   });
 });
 
+test('gate 3 (round 5, finding 1): a symlinked ANCESTOR of a not-yet-created leaf still halts — a missing leaf must not skip containment for the whole path', () => {
+  withTempDir((dir) => {
+    const profile = profileFor(dir);
+    const outside = join(dir, 'outside-assets');
+    nodeFs.mkdirSync(outside, { recursive: true });
+    nodeFs.mkdirSync(profile.capture.output_dir, { recursive: true });
+    // 'admin' is a symlink OUT of capture.output_dir. This entry's actual leaf ('admin/items') is
+    // never created — exactly the state gate 3 sees on a chapter's very first capture. Without the
+    // ancestor walk, the ENOENT on the full (non-existent) leaf skipped containment altogether, and
+    // the capture command run afterwards would have created 'items' straight through the symlink,
+    // physically outside capture.output_dir.
+    nodeFs.symlinkSync(outside, join(profile.capture.output_dir, 'admin'));
+    const result = CR.openCaptureRun(profile, [{ slug: 'items', group: 'admin' }], null, stubDepsNoIdentity());
+    assert.equal(result.ok, false, JSON.stringify(result));
+    assert.equal(result.halts[0].halt, 'asset_dir_escapes_output_dir', JSON.stringify(result));
+    assert.equal(nodeFs.existsSync(tokenPathFor(profile)), false);
+  });
+});
+
+test('gate 3 (round 5, finding 1): a chapter whose own leaf does not exist yet, under an existing non-symlinked root, does NOT false-halt', () => {
+  withTempDir((dir) => {
+    const profile = profileFor(dir);
+    // The root exists already (an earlier chapter's capture created it) but THIS chapter's own
+    // subdirectory never has — its very first capture run. The ancestor walk must stop at the root
+    // itself (the longest existing prefix) and find it trivially contained, not halt.
+    nodeFs.mkdirSync(profile.capture.output_dir, { recursive: true });
+    const result = CR.openCaptureRun(profile, [{ slug: 'items', group: 'admin' }], null, stubDepsNoIdentity());
+    assert.equal(result.ok, true, JSON.stringify(result));
+  });
+});
+
+test('gate 3/4 (round 5, finding 1): two sibling chapters sharing an existing group ancestor, both with not-yet-created leaves, do NOT manufacture a gate-4 collision', () => {
+  withTempDir((dir) => {
+    const profile = profileFor(dir);
+    // Both entries' ancestor walk resolves to the SAME existing 'admin' directory — that resolved
+    // ancestor must never be added to gate 4's cross-entry collision set (only a resolved, EXISTING
+    // leaf is), or two legitimately distinct, not-yet-created sibling chapters would falsely collide.
+    nodeFs.mkdirSync(join(profile.capture.output_dir, 'admin'), { recursive: true });
+    const result = CR.openCaptureRun(
+      profile,
+      [{ slug: 'items', group: 'admin' }, { slug: 'invoices', group: 'admin' }],
+      null,
+      stubDepsNoIdentity(),
+    );
+    assert.equal(result.ok, true, JSON.stringify(result));
+  });
+});
+
 test('gate 4: two entries whose LEXICALLY distinct asset directories resolve to the SAME physical directory (an inside-root symlink alias) halt', () => {
   withTempDir((dir) => {
     const profile = profileFor(dir);
@@ -2072,6 +2120,38 @@ test('buildProvenanceReport: provenance_unavailable on a skipped profile, zero U
     assert.equal(result.rows.length, 1);
     assert.equal(result.rows[0].classification_reason, 'provenance_unavailable');
     assert.equal(result.rows[0].value, 'unknown');
+  });
+});
+
+test('buildProvenanceReport (round 5, finding 4): a skipped-profile row carries current_source as an explicit null, and exactly the declared key set', () => {
+  withTempDir((dir) => {
+    nodeFs.mkdirSync(join(dir, 'handbook'), { recursive: true });
+    const profile = {
+      capture: { output_dir: join(dir, 'handbook') },
+      publish: { chapters_dir: join(dir, 'handbook') },
+    };
+    // DEFAULT deps deliberately — the defect this pins was invisible precisely because the skip
+    // branch runs before any seam is consulted, so an injected-deps fixture proves nothing about
+    // which keys production emits.
+    const result = CR.buildProvenanceReport(profile, [{ slug: 'items' }, { slug: 'orders' }]);
+    assert.equal(result.rows.length, 2);
+    for (const row of result.rows) {
+      // Present-and-null, not absent: `ReportRow.current_source` is declared `string | null`, and
+      // an omitted key would let a TypeScript caller dereference `undefined`. Nothing here compiles
+      // TypeScript, so this key-set equality is the ONLY gate that holds the declaration honest —
+      // a codex mutation audit confirmed every .d.mts mutation survives the whole suite otherwise.
+      assert.equal(Object.hasOwn(row, 'current_source'), true, 'current_source must be PRESENT');
+      assert.equal(row.current_source, null);
+      assert.deepEqual(Object.keys(row).sort(), [
+        'classification',
+        'classification_reason',
+        'current_source',
+        'key',
+        'resolution_reason',
+        'source',
+        'value',
+      ]);
+    }
   });
 });
 
