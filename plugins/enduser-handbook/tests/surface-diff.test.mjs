@@ -98,7 +98,11 @@ test('diffSurfaces throws on duplicate role labels (fail-closed)', () => {
     { role: 'admin', controls: [] },
     { role: 'admin', controls: [] },
   ];
-  assert.throws(() => diffSurfaces(perRole), /duplicate role label/);
+  // [round 7] surface-diff.mjs throws TypeError uniformly for every diffSurfaces guard (including
+  // this one, line 97) — the sibling malformed-entry test below already pins the class for its four
+  // cases; this one was the odd member out, class-blind, so a mutant swapping this ONE throw to a
+  // plain Error would have survived.
+  assert.throws(() => diffSurfaces(perRole), { name: 'TypeError', message: /duplicate role label/ });
 });
 
 test('diffSurfaces throws on a malformed entry rather than crashing mid-iteration', () => {

@@ -343,15 +343,30 @@ test('F4: "." and ".." segments normalize through join/dirname (parent-segment c
   assert.equal(chapterAssetDir(p3, entry()), '/assets/items');
 });
 
+// [round 7] Asserts the exact-Error contract chapter-paths.mjs draws between its own guards: the
+// manualMigrationChecklist provenanceActive guard throws TypeError deliberately ("this one reports
+// the argument's own TYPE being wrong"), contrasted with "every other guard in this module" —
+// posixRelative's mixed-rootedness check (line 121) and currentIndexExpectedTarget's three (lines
+// 1773/1779/1784) — which report a malformed VALUE and so throw plain Error. `instanceof Error`
+// alone cannot catch an Error->TypeError mutation (TypeError IS an Error), so this checks the exact
+// constructor rather than the prototype chain.
+function assertPlainErrorThrows(fn, messageRe) {
+  assert.throws(fn, (err) => {
+    assert.strictEqual(err.constructor, Error, `expected a plain Error, got ${err.constructor.name}`);
+    assert.match(err.message, messageRe);
+    return true;
+  });
+}
+
 test('R2-F4: mixed rootedness (one absolute, one relative path) THROWS rather than diffing garbage', () => {
   // An absolute asset dir diffed against a relative chapter file (or vice versa) would silently
   // discard one side's real root and produce a nonsense delta that still LOOKS like a valid
   // relative path — fail loud instead.
-  assert.throws(
+  assertPlainErrorThrows(
     () => embedPath('/vault/handbook/items.md', 'vault/handbook/assets/items', '01.png'),
     /mixed rootedness/,
   );
-  assert.throws(
+  assertPlainErrorThrows(
     () => embedPath('vault/handbook/items.md', '/vault/handbook/assets/items', '01.png'),
     /mixed rootedness/,
   );
@@ -3346,18 +3361,18 @@ test('§1a codex R2 BLOCKER-1 symlink-subdir topology: a multi-segment precomput
 
 test('§1a fail-loud guard: WIKILINKS mode with vaultRelChaptersDir omitted/null throws (no silent bare-slug fallback)', () => {
   const p = profile({ publish: { wikilinks: true } });
-  assert.throws(() => currentIndexExpectedTarget(p, entry()), /vaultRelChaptersDir is required/);
-  assert.throws(() => currentIndexExpectedTarget(p, entry(), null), /vaultRelChaptersDir is required/);
+  assertPlainErrorThrows(() => currentIndexExpectedTarget(p, entry()), /vaultRelChaptersDir is required/);
+  assertPlainErrorThrows(() => currentIndexExpectedTarget(p, entry(), null), /vaultRelChaptersDir is required/);
 });
 
 test('§1a fail-loud guard: WIKILINKS mode with an ABSOLUTE vaultRelChaptersDir throws', () => {
   const p = profile({ publish: { wikilinks: true } });
-  assert.throws(() => currentIndexExpectedTarget(p, entry(), '/v'), /must be vault-root-relative/);
+  assertPlainErrorThrows(() => currentIndexExpectedTarget(p, entry(), '/v'), /must be vault-root-relative/);
 });
 
 test('§1a fail-loud guard: WIKILINKS mode with a \'..\'-escaping vaultRelChaptersDir throws', () => {
   const p = profile({ publish: { wikilinks: true } });
-  assert.throws(() => currentIndexExpectedTarget(p, entry(), '../x'), /escapes the vault root/);
+  assertPlainErrorThrows(() => currentIndexExpectedTarget(p, entry(), '../x'), /escapes the vault root/);
 });
 
 // =================================================================================================
@@ -4503,10 +4518,27 @@ test('buildEmbedCandidates legacy eligibility 4/4: a GROUPED static_md entry off
   assert.equal(candidates.size, 1, 'grouped entries never get the group-free legacy spelling, regardless of target');
 });
 
+// [round 7] EmbedCandidateHalt (chapter-paths.mjs:2374) is a private, unexported class — the
+// .d.mts documents the distinction explicitly ("Throws (an EmbedCandidateHalt, an ordinary Error
+// to a caller outside this module)"), and it is load-bearing at runtime: expectedAssets' own catch
+// (`err instanceof EmbedCandidateHalt`, chapter-paths.mjs:2693) depends on buildEmbedCandidates
+// actually throwing THIS class rather than a plain Error, or the halt would escape uncaught instead
+// of converting to `{ok:false, halt:...}`. A regex-only assertion cannot see that distinction — both
+// classes would carry the same message. Since the class itself cannot be imported, `.name` (set
+// explicitly in the constructor) is the only caller-visible identity signal.
+function assertEmbedCandidateHaltThrows(fn, messageRe, label) {
+  const prefix = label ? `${label}: ` : '';
+  assert.throws(fn, (err) => {
+    assert.equal(err.name, 'EmbedCandidateHalt', `${prefix}expected an EmbedCandidateHalt, got ${err.name}`);
+    assert.match(err.message, messageRe, `${prefix}message mismatch`);
+    return true;
+  });
+}
+
 // --- the round-trip gate -------------------------------------------------------------------------
 
 test('buildEmbedCandidates round-trip gate: a sole file literally named sub\\stale.png HALTS — embedPath normalizes the backslash into a separator, so the candidate addresses a DIFFERENT (nonexistent) file', () => {
-  assert.throws(
+  assertEmbedCandidateHaltThrows(
     () => buildEmbedCandidates(profile(), entry(), 'vault/handbook/items.md', ['sub\\stale.png'], 'obsidian_vault'),
     /round-trip/,
   );
@@ -4523,7 +4555,7 @@ test('buildEmbedCandidates round-trip gate: a genuine subdirectory entry sub/a.p
 test('buildEmbedCandidates charset gate, negative direction: café.png in NFC and in NFD, shot@2x.png, a&b.png and a\'b.png all HALT', () => {
   const bad = ['caf\u00e9.png', 'cafe\u0301.png', 'shot@2x.png', 'a&b.png', "a'b.png"];
   for (const filename of bad) {
-    assert.throws(
+    assertEmbedCandidateHaltThrows(
       () => buildEmbedCandidates(profile(), entry(), 'vault/handbook/items.md', [filename], 'obsidian_vault'),
       new RegExp(filename.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace('\u00e9', '.').replace('\u0301', '.')),
       `'${filename}' must halt naming the file`,
@@ -4548,8 +4580,15 @@ test('buildEmbedCandidates charset gate: an exhaustive on-disk sweep — every A
     if (/[A-Za-z0-9._-]/.test(ch)) continue;
     if (ch === '/' || ch === '\\') continue; // '\\' is the round-trip gate's own dedicated case above
     const filename = `x${ch}y.png`;
-    assert.throws(
+    // [round 7] The ORIGINAL two-arg form here passed a plain string as the second assert.throws
+    // argument — per node:assert semantics that is used ONLY as the AssertionError's own message if
+    // the call fails to throw at all; it never checked the thrown error's message or class. Both are
+    // now checked: the class via assertEmbedCandidateHaltThrows (see its own comment above), the
+    // message via the escaped filename, so a mutant that halts for the WRONG reason (or on the wrong
+    // byte) is also caught, not just "halted at all".
+    assertEmbedCandidateHaltThrows(
       () => buildEmbedCandidates(profile(), entry(), 'vault/handbook/items.md', [filename], 'obsidian_vault'),
+      new RegExp(filename.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')),
       `byte 0x${code.toString(16)} ('${ch}') must halt`,
     );
   }

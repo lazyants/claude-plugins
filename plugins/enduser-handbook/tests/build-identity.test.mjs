@@ -319,7 +319,11 @@ test('resolveBuildIdentity: a non-string raw at the UI entrypoint is its own mut
 });
 
 test('resolveBuildIdentity: an unrecognized uiObservation.kind fails closed (throws) rather than silently resolving', () => {
-  assert.throws(() => resolveBuildIdentity({ uiObservation: { kind: 'bogus' } }));
+  // [round 7] The module header (build-identity.mjs:17-21) documents that exactly two functions
+  // throw a TypeError on an out-of-domain input — this one and classifyBuildDelta (see that
+  // function's own pinned-class assertions below). A class-blind assertion here survives a mutant
+  // that swaps the TypeError for a plain Error, silently losing that documented distinction.
+  assert.throws(() => resolveBuildIdentity({ uiObservation: { kind: 'bogus' } }), TypeError);
 });
 
 // ==== resolveClosingIdentity =======================================================================
