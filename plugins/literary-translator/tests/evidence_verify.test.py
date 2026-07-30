@@ -678,13 +678,15 @@ def test_243_group_production_spans_by_name_parity_with_production_occurrences()
 # ---------------------------------------------------------------------------
 
 def test_verify_senses_extracts_each_block_once_regardless_of_sense_count():
-    # Patches BOTH occ_index.py's own module-global _run_spans (what its
-    # production_occurrences() calls internally -- the pre-fix path) and
-    # this module's separately-bound `ev._run_spans` (what
-    # _group_production_spans_by_name() calls -- the post-fix caching path)
-    # onto ONE shared counter, since a `from occ_index import ...` binds an
-    # independent name in ev's own namespace: patching only one of the two
-    # would silently miss whichever path the code under test actually took.
+    # Patches occ_index.py's own module-global _run_spans -- and ONLY that,
+    # deliberately. Both paths funnel through it: production_occurrences()
+    # (the pre-fix path) and _group_production_spans_by_name() (the post-fix
+    # caching path) now both go via `_run_span_keys()`, which is defined in
+    # occ_index and therefore resolves `_run_spans` in occ_index's OWN module
+    # globals at call time -- even when reached through the independent name
+    # `from occ_index import _run_span_keys` binds in ev's namespace. So one
+    # patch here is not a weaker version of the previous two-sided patch; it
+    # is the single seam neither path can take without crossing.
     oi_module = sys.modules.get("occ_index")
     assert oi_module is not None, "occ_index must already be imported (evidence_verify.py imports it)"
 
@@ -724,12 +726,10 @@ def test_verify_senses_extracts_each_block_once_regardless_of_sense_count():
     # real attribute of either at runtime; setattr() patches/restores the
     # exact same live attribute without a static existence check.
     setattr(oi_module, "_run_spans", counting_run_spans)
-    setattr(ev, "_run_spans", counting_run_spans)
     try:
         failures = ev.verify_senses(_Entries(), manifest, lang)
     finally:
         setattr(oi_module, "_run_spans", real_run_spans)
-        setattr(ev, "_run_spans", real_run_spans)
 
     assert failures == []
     assert call_count["n"] == 1, (

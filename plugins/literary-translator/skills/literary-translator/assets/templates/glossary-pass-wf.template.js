@@ -71,6 +71,35 @@
 // dispatch agent's own open web research. The live preflight ceiling moved from
 // 1 + 3*(MAX_CITATION_RETRIES+1) to 1 + 4*(MAX_CITATION_RETRIES+1) as a result.
 //
+// 1.16.2 (#352) -- THE WAIT IS CHUNKED, AND A NON-POLLING RE-CHECK BACKS IT.
+// batchWaitPrompt() emitted ONE bash call: a 45-iteration loop sleeping 20 s per
+// iteration, so 900 s of polling inside a single agent call. (That command is
+// described here rather than quoted, deliberately -- this file must not contain
+// a literal over-cap poll for a reader or a grep to find and copy.)
+// MEASURED, not inferred: the agent's Bash tool clamps any single call at
+// 600 000 ms regardless of the timeout requested -- a call asking for
+// `timeout: 3600000` came back `Exit code 143 / Command timed out after 10m 0s`.
+// So a 900 s wait could not complete, and "raise the timeout" is not a fix that
+// exists. mass-translate-wf.template.js hit the same defect first and fixed it in
+// 1.16.1 (#348); this is the port, and the two shapes are deliberately one shape.
+//   * The 900 s bound is now SPENT ACROSS WAIT_CHUNKS bounded agent calls, each
+//     sized well under the clamp. Chunk i polls whatever is LEFT of the bound,
+//     never a flat slice, so the chunk bounds SUM to WAIT_BOUND_SEC exactly
+//     instead of silently extending it.
+//   * A chunk that neither validated nor reported its own bound is PENDING, and
+//     so is a null, malformed or tool-killed reply: an ambiguous chunk CONTINUES
+//     the poll, it never ends the wait. The pre-1.16.2 caller terminated the
+//     batch on EVERY non-READY reply, which under chunking would abandon a batch
+//     at its first chunk.
+//   * Once the chunk budget is spent, exactly ONE authoritative NON-POLLING
+//     re-check runs the same checkBatchCmd() gate before any timeout is
+//     declared. That, not the chunking, is what closes the real hole: a codex job
+//     finishing after the last chunk's poll ended leaves a valid fragment on disk
+//     that nothing would otherwise ever read.
+//   * The preflight ceiling moves with it, because a wait is now WAIT_CALLS
+//     calls rather than 1: live 13N+2 -> 19N+2, offline 3N+2 -> 5N+2. The offline
+//     branch stays research-mode-aware -- see the preflight block below.
+//
 // Substitution tokens this template documents (resolved ONCE by the
 // orchestrating Claude session at instantiation time, before the Workflow
 // tool ever executes this file -- there is no templating engine at
@@ -101,11 +130,14 @@
 //                        a glossary run whose worst-case agent-call estimate
 //                        would exceed it -- the same refusal
 //                        mass-translate-wf.template.js makes for its own
-//                        oversized batch (#95). That estimate is now
-//                        RESEARCH-MODE-DEPENDENT (1.16.0): offline keeps the
-//                        historical 3*BATCHES.length + 2 exactly, live pays
-//                        the citation-review retry ladder on top. See the
-//                        preflight block below for the derivation.
+//                        oversized batch (#95). That estimate is
+//                        RESEARCH-MODE-DEPENDENT (1.16.0) and moved again in
+//                        1.16.2 when one wait became WAIT_CALLS agent calls:
+//                        offline is 5*BATCHES.length + 2 (it was the historical
+//                        3*BATCHES.length + 2 through 1.16.1), and live pays the
+//                        citation-review retry ladder on top of that, reaching
+//                        19*BATCHES.length + 2. See the preflight block below
+//                        for the derivation.
 //   {{CITATION_CONTENT_TYPES}}
 //                     -- 1.16.1: glossary.citation_content_types, a
 //                        COMMA-SEPARATED list of Content-Type prefixes the
@@ -264,7 +296,10 @@ const MAX_CITATION_RETRIES = 2
 // source claim at all. Reviewing there would spend one full agent call per
 // batch to re-confirm a property two independent layers already enforce, so
 // the stage is a straight no-op instead. This is also what keeps the offline
-// preflight estimate byte-identical to the historical 3*BATCHES.length + 2.
+// preflight estimate free of the retry ladder entirely: it was byte-identical to
+// the historical 3*BATCHES.length + 2 through 1.16.1, and 1.16.2 moved it to
+// 5*BATCHES.length + 2 for a reason that has nothing to do with citations -- the
+// wait itself became WAIT_CALLS calls (see the preflight block below).
 const CITATION_REVIEW_ENABLED = RESEARCH_MODE === "live"
 
 // Upper bound on how much of a rejecting reviewer's prose is carried into the
@@ -272,6 +307,57 @@ const CITATION_REVIEW_ENABLED = RESEARCH_MODE === "live"
 // otherwise unbounded; the dispatch prompt already carries the whole candidate
 // array, so an unbounded append is a real prompt-size risk on a large batch.
 const MAX_REJECTION_DETAIL_CHARS = 2000
+
+// ---------------------------------------------------------------------------
+// 1.16.2 (#352) -- the wait bound is SPENT ACROSS SEVERAL AGENT CALLS, not one.
+// Ported from mass-translate-wf.template.js's #348 fix; read that file's own
+// block above waitChunkSec() for the measurement and the reasoning, which are
+// the same here and are not restated.
+//
+// The bound itself is UNCHANGED. The pre-1.16.2 poll emitted a single bash
+// command looping 45 times with a 20 s sleep per iteration, which is 900 s, and
+// WAIT_BOUND_SEC is that same 900 s -- only the way it is SPENT changed. (The
+// old command is described, never quoted, here and everywhere else in this file:
+// a literal over-cap poll left in the source is one a later reader or a
+// copy-paste can put back.)
+// Unlike mass-translate's, it is a plain constant rather than a sum of
+// codex_job.py's driver budgets, and deliberately: this pass has no detached
+// driver to stay ahead of. Its dispatch is an awaited codex:codex-rescue agent
+// call, so there is no deadline/finalize budget to mirror and nothing would be
+// made truer by pretending otherwise.
+//
+// Chunk i (1-based) polls for whatever is LEFT of WAIT_BOUND_SEC, never a flat
+// WAIT_CHUNK_SEC -- so the chunk bounds SUM to WAIT_BOUND_SEC exactly
+// (480 + 420 = 900). Flat chunks would not SPEND the declared bound, they would
+// silently EXTEND it (2 * 480 = 960 s), breaking the one contract
+// WAIT_BOUND_SEC exists to state and falsifying every doc that quotes it.
+const BASH_CALL_CAP_SEC = 600              // measured hard clamp (see CHANGELOG 1.16.1)
+const WAIT_BOUND_SEC = 900                 // the whole wait's polling budget, unchanged
+const WAIT_CHUNK_SEC = 480                 // one chunk's own elapsed bound
+const WAIT_CHUNK_TOOL_TIMEOUT_MS = 540000  // what the chunk prompt tells the agent to pass
+const WAIT_CHUNKS = Math.ceil(WAIT_BOUND_SEC / WAIT_CHUNK_SEC)  // 2
+const WAIT_CALLS = WAIT_CHUNKS + 1         // worst case per wait: chunks + one re-check
+
+// Startup guards, not comments: a future raise of either constant re-creates
+// #352 silently otherwise. They throw here, before pipeline() is ever called,
+// and they are why no emitted poll can exceed the clamp by construction rather
+// than by review -- the same reason the CITATION_TYPE_LIST guards above throw at
+// instantiation instead of failing forty times at runtime.
+if (WAIT_CHUNK_TOOL_TIMEOUT_MS > BASH_CALL_CAP_SEC * 1000) {
+  throw new Error("WAIT_CHUNK_TOOL_TIMEOUT_MS (" + WAIT_CHUNK_TOOL_TIMEOUT_MS +
+    " ms) exceeds the measured Bash per-call clamp (" + BASH_CALL_CAP_SEC * 1000 +
+    " ms): the agent would be told to ask for a timeout it cannot get, and the " +
+    "chunk bound would stop being the real bound (#352)")
+}
+if (WAIT_CHUNK_SEC * 1000 >= WAIT_CHUNK_TOOL_TIMEOUT_MS) {
+  throw new Error("WAIT_CHUNK_SEC (" + WAIT_CHUNK_SEC + " s) leaves no headroom under " +
+    "WAIT_CHUNK_TOOL_TIMEOUT_MS (" + WAIT_CHUNK_TOOL_TIMEOUT_MS + " ms): the poll must " +
+    "reach its own elapsed bound and print its marker BEFORE the tool kills the call (#352)")
+}
+
+function waitChunkSec(i) {
+  return Math.min(WAIT_CHUNK_SEC, WAIT_BOUND_SEC - (i - 1) * WAIT_CHUNK_SEC)
+}
 
 // ---------------------------------------------------------------------------
 // Schema literal -- declared ABOVE the pipeline() call at the bottom of this
@@ -308,49 +394,85 @@ const BATCHES = Array.isArray(args) ? args : JSON.parse(args)
 
 // ---------------------------------------------------------------------------
 // Preflight cost cap (#95, re-derived in 1.16.0 for the citation-review
-// ladder, and again in 1.16.1 for the prepare/judge split).
+// ladder, again in 1.16.1 for the prepare/judge split, and again in 1.16.2 when
+// one wait stopped being one call).
 // Worst-case agent-call count for a FRESH run. Per batch:
 //
 //   1 precheck                                          (always, exactly one)
-// + (dispatch + wait)               per attempt         (2 each)
+// + (dispatch + wait)               per attempt         (1 + WAIT_CALLS each)
 // + (citation prepare + judge)      per attempt         (2 each, live only)
 //
 // with attempts == MAX_CITATION_RETRIES + 1 in the worst case (every review
 // rejects until the ladder is exhausted). So:
 //
-//   live    -- perBatch = 1 + 4*(MAX_CITATION_RETRIES+1)
-//   offline -- perBatch = 1 + 2 == 3, since CITATION_REVIEW_ENABLED is false,
-//              which makes the review a no-op AND removes the only thing that
-//              can reject an attempt -- so the ladder can never advance past
-//              attempt 0 and there is exactly one dispatch+wait pair.
+//   live    -- perBatch = 1 + (3 + WAIT_CALLS)*(MAX_CITATION_RETRIES+1)
+//   offline -- perBatch = 1 + (1 + WAIT_CALLS) == 2 + WAIT_CALLS, since
+//              CITATION_REVIEW_ENABLED is false, which makes the review a no-op
+//              AND removes the only thing that can reject an attempt -- so the
+//              ladder can never advance past attempt 0 and there is exactly one
+//              dispatch + wait.
 //
-// plus the fixed merge + verify pair == 2 either way.
+// plus the fixed merge + verify pair == 2 either way. At the shipped
+// WAIT_CALLS = 3 that is 19*BATCHES.length + 2 live and 5*BATCHES.length + 2
+// offline.
 //
-// The offline branch is therefore EXACTLY the historical 3*BATCHES.length + 2,
-// deliberately: making the estimate mode-blind would have charged every
-// offline project for a retry ladder it can never execute, and any existing
-// project whose engine.batch_agent_cap was tuned to the old formula would
-// start being refused with reason:"batch-too-large" for a run whose real cost
-// did not change at all. A preflight that refuses runs it should permit is a
-// worse failure than one that is slightly loose.
+// PROVABLY A GENERALISATION, not a rewrite: substitute WAIT_CALLS = 1 and the
+// two branches collapse to 1 + 4*(MAX_CITATION_RETRIES+1) == 13 and to 3, which
+// are exactly the 1.16.1 formulas.
+//
+// The offline branch is deliberately still MODE-AWARE rather than mode-blind.
+// Making it mode-blind would charge every offline project for a retry ladder it
+// can never execute, and any existing project whose engine.batch_agent_cap was
+// tuned to the offline formula would start being refused with
+// reason:"batch-too-large" for a run whose real cost did not change at all. A
+// preflight that refuses runs it should permit is a worse failure than one that
+// is slightly loose.
+//
+// 1.16.2 MOVES THE OFFLINE THRESHOLD ANYWAY, and that is the principle being
+// APPLIED rather than abandoned -- the distinction is what the whole paragraph
+// above turns on, so read it before "restoring" the old number. The rule is
+// never "offline must keep its historical figure"; it is "charge offline only
+// for work an offline run can actually perform". A retry ladder is work offline
+// can NEVER perform, so charging for it was always a false refusal. The extra
+// wait calls are cost every offline run must be preflight-CHARGED for on every
+// batch, as a worst-case CEILING -- not a claim that every batch actually
+// spends it (see the CEILING paragraph below: a wait whose first chunk finds
+// the fragment still spends only 1 call, not WAIT_CALLS, offline exactly as
+// live). The wait was budgeted at one agent call and the ceiling is now
+// WAIT_CALLS of them, in both modes alike, because the Bash clamp is
+// indifferent to research_mode. So 5*BATCHES.length + 2 is the
+// TRUE offline cost, where 3*BATCHES.length + 2 has become an under-count -- and
+// an under-count is the dangerous direction, since it lets a run start and then
+// blow engine.batch_agent_cap mid-flight rather than refusing it early and
+// loudly. A project sized near the old ceiling genuinely can no longer afford
+// the same batch count (at engine.batch_agent_cap 3500: 1166 offline batches
+// before, 699 now, and 184 live), and being told so at preflight is the correct
+// outcome, not a regression.
 //
 // The live term went 10 -> 13 in 1.16.1, and the reason is #347's security
 // boundary rather than any new work: the single fetch-and-judge reviewer became
-// a prepare call plus a judge call (see citationPreparePrompt()). Any live
-// project whose engine.batch_agent_cap was tuned near the 1.16.0 figure will now
-// be refused at preflight and must raise the cap or re-plan smaller batches --
-// a loud, early refusal, which is the direction this gate is supposed to fail
-// in. assets/profile.example.yml documents the live ladder and moves with it.
+// a prepare call plus a judge call (see citationPreparePrompt()). It went
+// 13 -> 19 in 1.16.2, and that reason is #352's Bash per-call clamp: one wait is
+// now WAIT_CALLS agent calls (WAIT_CHUNKS chunks plus one authoritative
+// re-check), spent per attempt, so the ladder multiplies it. Any live project
+// whose engine.batch_agent_cap was tuned near an earlier figure will now be
+// refused at preflight and must raise the cap or re-plan smaller batches -- a
+// loud, early refusal, which is the direction this gate is supposed to fail in.
+// assets/profile.example.yml documents the live ladder and moves with it.
 //
-// This is a CEILING, not a per-attempt cost: an attempt whose prepare fails
-// short-circuits before the judge and spends 3, not 4. Only an attempt that
-// reaches a judged verdict spends the full 4, and only a batch that reaches
-// exhaustion spends the full ceiling.
+// This is a CEILING, not a per-attempt cost, and 1.16.2 widens the gap between
+// the two: a wait that finds its fragment on the FIRST chunk spends 1 call, not
+// WAIT_CALLS, and only a wait that exhausts every chunk and still needs the
+// re-check spends all 3. Likewise an attempt whose prepare fails short-circuits
+// before the judge and spends 2 + WAIT_CALLS, not 3 + WAIT_CALLS. Only an
+// attempt that reaches a judged verdict spends the full 3 + WAIT_CALLS, and only
+// a batch that reaches exhaustion spends the full ceiling.
 //
 // A resumed batch whose fragment already passes --check-batch skips its
 // attempt-0 dispatch + wait, so it is strictly cheaper than this ceiling --
 // note it does NOT skip the review (see batchStep), which is why the precheck
-// saving is 2 calls and not 4. If the estimate exceeds engine.batch_agent_cap,
+// saving is 1 + WAIT_CALLS calls and not 3 + WAIT_CALLS. If the estimate
+// exceeds engine.batch_agent_cap,
 // refuse the whole run WITHOUT dispatching anything, the same refusal shape
 // mass-translate-wf.template.js emits for its own oversized batch -- the
 // caller re-plans smaller batches (glossary_batch_plan.py's --batch-size) and
@@ -360,8 +482,8 @@ const BATCHES = Array.isArray(args) ? args : JSON.parse(args)
 // dispatches nothing, so there is no unsafe index to guard against yet.
 // ---------------------------------------------------------------------------
 const perBatchCalls = CITATION_REVIEW_ENABLED
-  ? 1 + 4 * (MAX_CITATION_RETRIES + 1)
-  : 3
+  ? 1 + (3 + WAIT_CALLS) * (MAX_CITATION_RETRIES + 1)
+  : 2 + WAIT_CALLS
 const estimatedCalls = perBatchCalls * BATCHES.length + 2
 if (estimatedCalls > BATCH_AGENT_CAP) {
   log(
@@ -375,12 +497,18 @@ if (estimatedCalls > BATCH_AGENT_CAP) {
 // ---------------------------------------------------------------------------
 // Defense-in-depth batch-index guard. Every batch's index is spliced,
 // unquoted, into shell command strings and file paths below
-// (batchDispatchPrompt/batchWaitPrompt, and the final merge/verify
-// commands) -- an unsafe or duplicate index would otherwise collide two
+// (batchDispatchPrompt, batchWaitChunkPrompt, batchWaitRecheckPrompt, and the
+// final merge/verify commands) -- an unsafe or duplicate index would collide two
 // batches' fragment paths onto the same file, or escape into an injected
 // shell command. Checked BEFORE any write or dispatch: a bad/duplicate
 // index throws here, so nothing is ever dispatched against it. Mirrors
-// mass-translate-wf.template.js's own SEG_ID_RE guard discipline exactly.
+// mass-translate-wf.template.js's own SEG_ID_RE index guard -- not that
+// file's WHOLE guard discipline, which this template does not match: mass-
+// translate ALSO re-validates the other profile-sourced values it splices
+// into a shell command (EFFORT_RE/MODEL_RE, guarding EFFORT/MODEL) before
+// they reach a command line. RESEARCH_MODE below has no such startup guard
+// before checkBatchCmd() splices it in unquoted -- operator-authored, not an
+// attacker channel, but not the parity this comment used to claim either.
 // ---------------------------------------------------------------------------
 const seenBatchIndices = new Set()
 for (let i = 0; i < BATCHES.length; i++) {
@@ -443,13 +571,19 @@ function manifestPath(index) {
 }
 const MANIFEST_ALL_PATH = RUN_DIR + "/manifest_all.json"
 
-// The --check-batch command, built ONCE here and used at all three sites that
+// The --check-batch command, built ONCE here and used at all four sites that
 // have to issue it character-identically: the precheck (which probes attempt 0
-// specifically), the dispatch call's own self-check, and the wait poll. Their
-// only difference is which fragment path they hold, which is exactly what the
-// two arguments carry. Argument order is part of the contract rather than
+// specifically), the dispatch call's own self-check, every chunk of the wait
+// poll, and -- since 1.16.2 -- the wait's authoritative re-check. Their only
+// difference is which fragment path they hold, which is exactly what the two
+// arguments carry. Argument order is part of the contract rather than
 // style -- the dispatch prompt tells the agent to re-run "exactly the command
 // above", so --research-mode must stay ahead of --expect-source-forms-file.
+//
+// The last two matter as a PAIR (#352): the chunked poll and the re-check that
+// backs it must ask the identical question, or the gate that decides a timeout
+// would be weaker than the gate that decides readiness. Splicing both from this
+// one builder is what makes that true by construction rather than by inspection.
 function checkBatchCmd(index, attempt) {
   return PY + " " + ROOT + "/scripts/canon_validate.py --check-batch " +
     fragmentPath(index, attempt) +
@@ -479,12 +613,16 @@ function approvedPath(index, attempt) {
   return RUN_DIR + "/approved_" + index + "_attempt_" + attempt + ".json"
 }
 
-// checkBatchCmd() plus --approve-to, appended -- never interleaved. The three
-// character-identical --check-batch sites keep issuing checkBatchCmd() verbatim
-// (the dispatch prompt tells codex to re-run "exactly the command above", so
-// that string must stay reproducible from the dispatch side, which has no
-// business writing an approved snapshot). Appending leaves that prefix byte-
-// identical while --research-mode still precedes --expect-source-forms-file.
+// checkBatchCmd() plus --approve-to, appended -- never interleaved. The four
+// character-identical --check-batch sites (precheck, dispatch self-check, wait
+// chunk poll, wait re-check -- tests/bounded_poll_present.test.py's
+// CHECK_BATCH_CALL_SITES is the count's own authority, extracted from this
+// file's real source rather than restated as prose) keep issuing
+// checkBatchCmd() verbatim (the dispatch prompt tells codex to re-run "exactly
+// the command above", so that string must stay reproducible from the dispatch
+// side, which has no business writing an approved snapshot). Appending leaves
+// that prefix byte-identical while --research-mode still precedes
+// --expect-source-forms-file.
 //
 // canon_validate.py accepts --approve-to ONLY on --check-batch and refuses it
 // in every other mode, validate-only included, so this command cannot silently
@@ -565,7 +703,7 @@ function fetchCitationsCmd(index, attempt) {
 // fragments on disk, ANY fragment that still passes --check-batch against
 // the CURRENT manifest is genuinely current, never stale -- so it can be
 // trusted and the (expensive) codex dispatch skipped. A single-shot run of
-// checkBatchCmd() (see that helper -- all three sites issue it identically);
+// checkBatchCmd() (see that helper -- all four sites issue it identically);
 // any failure at all (missing file, malformed JSON, wrong coverage, offline
 // backstop) makes this return ABSENT, so the batch falls THROUGH to a normal
 // dispatch + wait and a bad or absent fragment is never wrongly trusted.
@@ -647,17 +785,82 @@ function batchDispatchPrompt(batch, attempt, rejectionReason) {
 // WAIT -- Claude, effort:low, no agentType, no schema: a bounded poll of
 // checkBatchCmd() -- the same command DISPATCH's self-check issues (see that
 // helper) -- against this batch's own fragment (the translate/review wait
-// steps' shape -- see mass-translate-wf.template.js's waitPrompt).
+// steps' shape -- see mass-translate-wf.template.js's waitChunkPrompt).
 // 1.16.0: polls this ATTEMPT's own fragment path. See fragmentPath()'s comment
 // for why that is load-bearing rather than cosmetic -- against a single fixed
 // path this poll would return READY off the previous attempt's rejected bytes.
-function batchWaitPrompt(batch, attempt) {
+//
+// 1.16.2 (#352): this builds ONE CHUNK of the chunked wait, not the whole poll.
+// chunkIndex selects the slice; the chunk loop and the ONE non-polling
+// authoritative re-check that follows an exhausted budget belong to the CALL
+// SITE (batchStep), and an exhausted chunk is not a timeout on its own.
+//
+// The ACCEPT gate is checkBatchCmd() and NOTHING ELSE, spliced here and spliced
+// again, from that same builder, into batchWaitRecheckPrompt() below. Both sites
+// must issue a character-identical command: a re-check that asked a weaker
+// question than the poll would be a gate that opens only on the path nobody
+// watches.
+//
+// The bash keeps mass-translate's proven grammar exactly: ACCEPT gate first,
+// gate -> deadline-break -> clamped sleep, and NO separate post-loop gate inside
+// the command, so exactly one gate straddles this chunk's deadline. What is new
+// against the pre-1.16.2 fixed-iteration-count loop is the elapsed bound (this chunk's own
+// slice) and the terminal marker.
+//
+// `>/dev/null 2>&1` ON THE IN-LOOP ACCEPT GATE IS LOAD-BEARING, not tidiness.
+// canon_validate.py --check-batch prints one JSON line per invocation, so
+// without it the chunk emits one such line per iteration and "the marker is the
+// last line" would be a claim about the tail of a noisy stream. Suppressed, the
+// chunk emits exactly zero or one line and that line is the marker. The gate's
+// EXIT STATUS -- the only thing this workflow acts on -- is unaffected.
+//
+// Marker-plus-`exit 1` rather than distinct exit codes, deliberately: it keeps
+// the `&& exit 0` / `exit 1` grammar intact, and -- the point -- a TOOL-KILLED
+// chunk (exit 143, no marker printed) becomes indistinguishable from a chunk
+// that merely ran out of budget. That is exactly the safe reading: not ready
+// yet, keep polling.
+//
+// There is no fail-fast sentinel and no FAILED verdict here, unlike
+// mass-translate's twin. That template polls for a DETACHED codex_job.py job
+// which writes a .codex_failed.<seg>.<disp> file when the driver gives up; this
+// pass dispatches through an awaited codex:codex-rescue agent call and no such
+// file is ever written, so a FAILED grammar would be a verdict nothing could
+// ever produce. The chunk vocabulary is READY / PENDING only.
+function batchWaitChunkPrompt(batch, attempt, chunkIndex) {
   const checkCmd = checkBatchCmd(batch.index, attempt)
   const lines = []
-  lines.push("The codex glossary-pass batch " + batch.index + " is working in the background. Wait for it to finish: run exactly one bash command, a polling loop:")
-  lines.push("for i in $(seq 1 45); do " + checkCmd + " && exit 0; sleep 20; done; exit 1")
-  lines.push("If that command exits successfully, return exactly the line: READY " + batch.index)
-  lines.push("Otherwise, after the timeout (about 15 minutes), return exactly the line: TIMEOUT " + batch.index)
+  lines.push("The codex glossary-pass batch " + batch.index + " is working in the background. This is wait chunk " + chunkIndex + " of " + WAIT_CHUNKS + " -- one bounded slice of this batch's total " + WAIT_BOUND_SEC + "s wait, sized so a single bash call never approaches the " + BASH_CALL_CAP_SEC + "s per-call cap.")
+  lines.push("Run EXACTLY ONE bash command, passing a bash tool timeout of " + WAIT_CHUNK_TOOL_TIMEOUT_MS + " ms -- an elapsed-time poll that re-validates this batch's own fragment directly:")
+  lines.push("end=$((SECONDS + " + waitChunkSec(chunkIndex) + ")); while true; do " + checkCmd + " >/dev/null 2>&1 && exit 0; [ $SECONDS -ge $end ] && break; slp=$((end-SECONDS)); [ $slp -gt 20 ] && slp=20; [ $slp -gt 0 ] && sleep $slp; done; echo LT_CHUNK_BOUND; exit 1")
+  lines.push("If that command exits 0 (the fragment validated), return exactly the line: READY " + batch.index)
+  lines.push("In every other case -- it printed LT_CHUNK_BOUND, or the call was cut short for any reason at all -- return exactly the line: PENDING " + batch.index)
+  lines.push("Do nothing else -- do not touch any files, and do not resolve any candidates yourself.")
+  return lines.join("\n")
+}
+
+// 1.16.2 (#352) -- THE FIX. After the chunk budget is spent, re-check this
+// batch's fragment ONCE, without polling, before declaring a timeout.
+//
+// This is the defect #352 actually reports. Chunking alone would have turned the
+// observed 600 s kill into a success by accident while leaving the real hole
+// open: a codex job that finishes after the last chunk's poll ended has a
+// complete, --check-batch-valid fragment on disk that nothing ever reads, and
+// the batch is reported as if it never materialized.
+//
+// Non-polling by construction -- no `end=`, no loop, no sleep. A polling
+// re-check would just be one more chunk and could itself hit the cap.
+//
+// Splices checkBatchCmd() -- the same builder the chunk poll above splices, at
+// the same index and attempt. That identity is the invariant, not the
+// resemblance of the two prompts.
+function batchWaitRecheckPrompt(batch, attempt) {
+  const checkCmd = checkBatchCmd(batch.index, attempt)
+  const lines = []
+  lines.push("The " + WAIT_BOUND_SEC + "s wait budget for the codex glossary-pass batch " + batch.index + " is spent. Before this is declared a timeout, re-check this batch's fragment ONCE -- it may have landed after the last wait chunk's poll ended.")
+  lines.push("Run EXACTLY ONE bash command. It does NOT poll and returns immediately:")
+  lines.push(checkCmd + " >/dev/null 2>&1")
+  lines.push("If that command exits 0 (the fragment validated), return exactly the line: READY " + batch.index)
+  lines.push("Otherwise return exactly the line: PENDING " + batch.index)
   lines.push("Do nothing else -- do not touch any files, and do not resolve any candidates yourself.")
   return lines.join("\n")
 }
@@ -708,7 +911,9 @@ function batchWaitPrompt(batch, attempt) {
 // from THAT snapshot; and the judge audits the same snapshot. The reverse order
 // does not work and must not be "simplified" back into: the batch dispatch is
 // agentType:"codex:codex-rescue", the codex job outlives the awaited call (that
-// is why the 15-minute wait poll exists at all), and its own prompt instructs an
+// is why the WAIT_BOUND_SEC wait exists at all -- spent since 1.16.2 across
+// WAIT_CHUNKS chunks plus one authoritative re-check rather than in a single
+// call), and its own prompt instructs an
 // iterate-until-success rewrite loop against the attempt path. So repeated
 // atomic renames over that path are normal, expected behaviour, and a copy taken
 // AFTER the audit would capture whatever the producer wrote in between --
@@ -726,7 +931,11 @@ function batchWaitPrompt(batch, attempt) {
 // its own, and the reason has changed shape since 1.16.0. The cost argument no
 // longer applies -- the split already spends the extra call per attempt, so the
 // live ceiling moved from 1 + 3*(MAX_CITATION_RETRIES+1) to
-// 1 + 4*(MAX_CITATION_RETRIES+1). What survives is the structural reason, which
+// 1 + 4*(MAX_CITATION_RETRIES+1). 1.16.2 moved that ceiling again, to
+// 1 + (3 + WAIT_CALLS)*(MAX_CITATION_RETRIES+1), for an unrelated reason -- the
+// wait itself became WAIT_CALLS calls (#352) -- which only sharpens the same
+// point: the cost argument has now been outrun twice, and the structural one has
+// not moved once. What survives is that structural reason, which
 // was always the stronger one: this is the ONE point both entry points into the
 // review loop converge on (see batchStep()'s state-machine comment). Putting the
 // snapshot in the wait step instead would silently skip it on every
@@ -867,9 +1076,10 @@ const REPLY_LINE_BREAK = new RegExp("\\r\\n|[\\n\\r\\u2028\\u2029\\u0085]")
 // The cost of that leak is PROMPT HYGIENE, and claiming anything stronger
 // would be false: the leaked string reaches no parser at all. The dispatch
 // call's own reply is DISCARDED (its `await agent(...)` below is not assigned
-// to anything), and the only reply sentinel-parsed anywhere near it is the
-// separate wait step's, over a disjoint READY/TIMEOUT set that no CITATIONS_*
-// string can collide with. So this cannot corrupt the state machine or route a
+// to anything), and the only replies sentinel-parsed anywhere near it are the
+// separate wait step's chunk and re-check replies, over a disjoint READY/PENDING
+// set (READY/TIMEOUT before 1.16.2) that no CITATIONS_* string can collide with.
+// So this cannot corrupt the state machine or route a
 // rejected fragment into the merge. What it does cost is still worth fixing:
 // the regeneration prompt is meant to hand the next attempt the reviewer's
 // findings and nothing else, and a stray verdict string is confusing input to
@@ -892,23 +1102,34 @@ const REPLY_LINE_BREAK = new RegExp("\\r\\n|[\\n\\r\\u2028\\u2029\\u0085]")
 // byte-for-byte across the three workflow templates and that parity is pinned
 // by tests/sentinel_verdict_parity.test.py (which pins the comment block too,
 // not just the body), so changing it here alone breaks the pin, and changing
-// all three to keep the pin would flip the mass-translate and skeptic bundle
-// hashes and falsify this release's own CHANGELOG promise that
-// skeptic-pass-wf.template.js is not touched and the skeptic resume domain is
-// unaffected.
+// all three to keep the pin would flip the mass-translate and glossary bundle
+// hashes -- both are cache_key.py PLUGIN_BUNDLE_MEMBERS entries, so that is a
+// forced re-translation, which is the cost worth avoiding.
 //
-// An earlier version of this comment justified leaving it alone with a
-// fail-safety claim -- "its behaviour on these characters is fail-safe in BOTH
-// directions ... it can only fail to approve, never falsely approve". That was
-// half true, and the false half was the dangerous one. Gluing the OK sentinel
-// onto prose can only fail to APPROVE, which is genuinely fail-safe; but
+// Editing skeptic-pass-wf.template.js does not flip THIS file's own bundle
+// hash or force a re-translation: it is not a PLUGIN_BUNDLE_MEMBERS entry, so
+// a change there forces a fresh skeptic RUN_ID only. That is the only reason
+// this file can actually check from its own contents.
+//
+// This guard is NOT fail-safe in both directions. Gluing the OK sentinel onto
+// prose can only fail to APPROVE, which is genuinely fail-safe; but
 // `if (line === failSentinel) return false` is a REJECTION trigger, so a fail
 // sentinel glued behind anything other than LF escapes the scan entirely, and a
 // trailing clean OK line then approves.
 //
+// Both retired claims this comment used to make about the fail-safety
+// direction and about the skeptic CHANGELOG promise are pinned GONE by
+// tests/retired_wording_pins.test.py, which fails loudly if either wording
+// comes back -- that pin is the durable record of the retirement, not this
+// paragraph, and it is why this comment states only what is true of the
+// CURRENT code rather than re-narrating what an earlier version of itself
+// claimed.
+//
 // That hole is now CLOSED -- not by widening any split, but by the containment
 // guard rejectedAnywhere(), applied at all four of this file's sentinelVerdict
-// call sites (three since 1.16.0; the citation-prepare site joined in 1.16.1).
+// call sites (three since 1.16.0; the citation-prepare site joined in 1.16.1;
+// the wait site's moved INSIDE waitChunkVerdict() in 1.16.2 without changing the
+// count, since that helper is now the wait's only reader).
 // See its comment for the measurement (over GLUE_CHARS, 16 items,
 // tests/glossary_citation_review.test.py; shape: the fail sentinel sharing its
 // line with prose -- 15 of 16 glue characters falsely approved before the
@@ -1065,6 +1286,20 @@ function sentinelVerdict(reply, okSentinel, failSentinel) {
 // 15 of 16 at each of four sites, 60 of 64 pairs -- but the two halves of that
 // number were taken at different times against different site sets, and
 // collapsing them into one undated "60 of 64" would hide that.
+//
+// ONE OF THOSE FOUR SITES HAS SINCE MOVED, and saying so is the point of this
+// paragraph rather than a footnote. The WAIT site's figure above was taken
+// against the pre-1.16.2 shape: the "TIMEOUT <index>" sentinel, guarded inline
+// in batchStep, one reply per wait. In 1.16.2 that guard moved into
+// waitChunkVerdict() and its sentinel became "PENDING <index>", read once per
+// chunk and once for the re-check. RE-TAKEN at the new site, over the same
+// GLUE_CHARS set and dual-sentinel shape, against "PENDING <index>" / "READY
+// <index>" in place of the retired "TIMEOUT <index>" / "READY <index>" pair:
+// still 15 of 16, same offenders, LF the only one that behaves -- the count is
+// a property of sentinelVerdict()'s "\n" split rather than of any particular
+// sentinel string, so the re-measurement confirms the figure rather than
+// changing it. tests/glossary_citation_review.test.py is where that
+// re-derivation is pinned.
 // The 15 are not exotic: PLAIN SPACE (U+0020), TAB, a lone CR, VT, FF, U+001C,
 // U+001D, U+001E, U+001F, NBSP, U+0085, U+2028, U+2029, ZWSP -- and the
 // ordinary letter "x". LF alone rejects correctly.
@@ -1091,10 +1326,12 @@ function sentinelVerdict(reply, okSentinel, failSentinel) {
 // Done at the CALL SITES rather than inside sentinelVerdict() because that
 // function's body and comment are mirrored byte-for-byte across all three
 // workflow templates and pinned by tests/sentinel_verdict_parity.test.py.
-// Editing it would break the pin, flip the mass-translate and skeptic bundle
-// hashes, and falsify this release's CHANGELOG promise that
-// skeptic-pass-wf.template.js is untouched. Guarding outside it keeps all of
-// that intact, which is exactly why the fix lives here.
+// Editing it would break the pin and flip the mass-translate and glossary
+// bundle hashes -- both are cache_key.py PLUGIN_BUNDLE_MEMBERS entries, so it
+// would force a re-translation. Guarding outside it keeps all of that intact,
+// which is exactly why the fix lives here. (This passage also used to cite a
+// skeptic bundle hash and a CHANGELOG promise that the skeptic template was
+// untouched; both were false -- see the longer note above rejectionDetail().)
 //
 // THE COST, which is real and must not be hidden: containment is strictly
 // EASIER TO REJECT than whole-line equality. A reply that merely MENTIONS the
@@ -1128,24 +1365,36 @@ function sentinelVerdict(reply, okSentinel, failSentinel) {
 //     reason: the trigger is the prepare agent's phrasing, and its prompt prints
 //     EVIDENCE_FAILED verbatim in its own instructions. One difference worth
 //     stating rather than assuming symmetry: a false RED here costs LESS within
-//     the attempt, because the judge call is skipped -- that attempt spends 3
-//     calls instead of 4. It costs exactly the same at the ladder's end, since
-//     an attempt lost to a mis-phrased prepare is an attempt lost either way.
+//     the attempt, because the judge call is skipped -- that attempt spends
+//     2 + WAIT_CALLS calls instead of 3 + WAIT_CALLS. It costs exactly the same
+//     at the ladder's end, since an attempt lost to a mis-phrased prepare is an
+//     attempt lost either way.
 //   precheck -- automatic, same run. `resumed` simply goes false, so the loop
 //     body dispatches this batch instead of resume-skipping it. The cost is
 //     redoing work whose fragment was already valid on disk.
-//   wait -- NOT a same-run recovery, and it must not be described as one.
-//     batchWaitPrompt() is a single-shot bounded poll whose agent has ALREADY
-//     run its own 45x20s loop internally, so a false verdict here RETURNS from
-//     batchStep() immediately with ready:false, reason:"glossary-pass-null".
-//     No continue, no attempt increment -- nothing further happens for this
-//     batch in this run. That result lands in notReadyBatches, and the pass as
-//     a whole returns merged:false, reason:"fragment-check-failed", with the
-//     merge never attempted. "Recovery" here means the OPERATOR re-invokes the
-//     workflow; the precheck's resume-skip is what makes the untouched batches
-//     cheap on that second run.
+//   wait -- TWO sites since 1.16.2, and they are NOT alike. The guard now lives
+//     inside waitChunkVerdict(), which reads both a CHUNK reply and the
+//     authoritative RE-CHECK reply.
+//       * At a CHUNK, a false RED is a same-run recovery, which it was not
+//         before 1.16.2. The verdict resolves to "pending", so the loop simply
+//         continues to the next chunk, and even an exhausted budget falls to the
+//         re-check -- which re-runs the same checkBatchCmd() gate and answers
+//         READY if the fragment is genuinely there. The cost is at most the
+//         remaining chunk budget of this one wait.
+//       * At the RE-CHECK, a false RED IS terminal, and must not be described
+//         otherwise. It RETURNS from batchStep() with ready:false,
+//         reason:"glossary-pass-null" -- no continue, no attempt increment,
+//         nothing further for this batch in this run. That result lands in
+//         notReadyBatches, and the pass as a whole returns merged:false,
+//         reason:"fragment-check-failed", with the merge never attempted.
+//         "Recovery" here means the OPERATOR re-invokes the workflow; the
+//         precheck's resume-skip is what makes the untouched batches cheap on
+//         that second run.
+//     So the pre-1.16.2 cost -- one mis-phrased wait reply ending the batch --
+//     now requires the mis-phrasing to land on the ONE reply that is read last,
+//     rather than on any of them.
 // A false GREEN is unbounded by comparison -- a fabricated citation frozen into
-// canon, or a rejected fragment merged as if approved -- so even the wait
+// canon, or a rejected fragment merged as if approved -- so even the re-check
 // site's heavier cost is the right side to fail on. The guard buys that
 // asymmetry deliberately; it is not free.
 //
@@ -1155,6 +1404,58 @@ function sentinelVerdict(reply, okSentinel, failSentinel) {
 function rejectedAnywhere(reply, failSentinel) {
   if (typeof failSentinel !== "string" || failSentinel.length === 0) return false
   return String(reply == null ? "" : reply).indexOf(failSentinel) !== -1
+}
+
+// 1.16.2 (#352) -- THE SINGLE PARSE SITE for the chunked wait. Every reply the
+// wait produces, chunk or authoritative re-check, is read here and nowhere else,
+// for the same reason mass-translate-wf.template.js keeps one copy of its own:
+// two divergent readings of a false-green boundary are worse than one.
+//
+// Grammar: a wait agent returns exactly one of
+//   READY <index>    -- checkBatchCmd() exited 0 against this attempt's fragment
+//   PENDING <index>  -- the chunk spent its own elapsed bound, or was cut short
+//
+// There is no FAILED verdict, unlike mass-translate's twin -- see
+// batchWaitChunkPrompt() for why this pass has no driver fail sentinel to report.
+//
+// PENDING, not TIMEOUT, and the rename is the point rather than cosmetics. Under
+// the pre-1.16.2 single-shot poll a non-READY reply WAS a timeout, and the caller
+// correctly ended the batch on it. Under chunking that same reply means "this
+// slice of the budget elapsed", which is the ordinary outcome of every chunk but
+// the last -- so a name that still said TIMEOUT would invite exactly the bug
+// this release fixes, a batch abandoned at its first chunk. Only the caller,
+// after the chunk budget AND the authoritative re-check, may call anything a
+// timeout.
+//
+// ORDER IS LOAD-BEARING. The containment guard runs BEFORE the exact-line READY
+// test, so every #228/#308 property is preserved unchanged: the not-ready
+// sentinel glued behind ANY character still keeps this reply away from READY
+// (rejectedAnywhere is raw indexOf and never asks where the sentinel sits),
+// while READY stays whole-line equality via sentinelVerdict, so a
+// quoted-but-disavowed success form is still not a success. See
+// rejectedAnywhere()'s own comment for the measurement behind that ordering, and
+// for what the false-RED costs here.
+//
+// THE FAIL-SAFE DIRECTION IS THE DEFAULT, and it is the invariant this function
+// exists to hold: an unparseable reply, a null return, or a tool error is
+// PENDING -- never READY, and never a terminal verdict either. At worst that
+// costs one more chunk of waiting, bounded by WAIT_CHUNKS, and the
+// authoritative re-check still runs afterwards. The pre-1.16.2 caller resolved
+// every one of those cases to "terminate this batch now", which under a chunked
+// wait would throw away the remaining budget and the re-check with it.
+//
+// KNOWN COLLISION, inherited from the containment guard and recorded rather than
+// closed: a batch index may prefix another (1 / 10), and the PENDING guard is
+// raw containment, so "PENDING 10" matches batch 1's guard. FALSE-RED ONLY --
+// READY is whole-line equality, so it can never manufacture a false green -- and
+// the same exposure already existed for TIMEOUT before 1.16.2. Its cost is that
+// batch 1 could abandon its remaining chunk budget early; the authoritative
+// re-check still runs, so a genuinely-landed fragment is still found.
+// Unreachable in practice: a wait agent's prompt names only its own batch.
+function waitChunkVerdict(reply, index) {
+  if (rejectedAnywhere(reply, "PENDING " + index)) return "pending"
+  if (sentinelVerdict(reply, "READY " + index, null)) return "ready"
+  return "pending"
 }
 
 // ---------------------------------------------------------------------------
@@ -1173,8 +1474,18 @@ function rejectedAnywhere(reply, failSentinel) {
 //   ENTRY A (resumed):  precheck PRESENT ------------------\
 //   ENTRY B (fresh):    precheck ABSENT -> dispatch -> wait -+-> PREPARE -> JUDGE
 //
-//   WAIT not ready                 -> RETURNS from batchStep() on the spot,
-//                                     not ready, reason:"glossary-pass-null".
+//   WAIT (1.16.2, #352)            -> not one call: up to WAIT_CHUNKS bounded
+//                                     chunk polls, left the instant any chunk
+//                                     answers READY, then -- only if none did --
+//                                     ONE authoritative non-polling re-check of
+//                                     the same checkBatchCmd() gate. An
+//                                     ambiguous, null or tool-killed chunk reply
+//                                     is PENDING and CONTINUES the poll; it
+//                                     never ends the wait
+//   WAIT not ready                 -> only after BOTH the chunk budget and that
+//                                     re-check: RETURNS from batchStep() on the
+//                                     spot, not ready,
+//                                     reason:"glossary-pass-null".
 //                                     No attempt increment, no second pass:
 //                                     this batch does nothing further in this
 //                                     run, and the pass reports merged:false
@@ -1228,9 +1539,21 @@ async function batchStep(batch) {
   // run: a reply merely MENTIONING "ABSENT <i>" while reporting the fragment
   // present just sends the batch down the ordinary dispatch path below instead
   // of resume-skipping it. See rejectedAnywhere()'s comment.
-  // NOTE: skeptic-pass-wf.template.js's batchStep precheck still mirrors this
-  // control flow but is deliberately NOT guarded -- this release's CHANGELOG
-  // promises that file is untouched, so the two intentionally diverge here.
+  // NOTE: skeptic-pass-wf.template.js's batchStep precheck mirrors this control
+  // flow. Whether it carries this containment guard is a fact about THAT file --
+  // read its own precheck, and never infer it from here.
+  //
+  // For the WAIT verdict -- not this precheck -- that agreement is ENFORCED
+  // rather than described: tests/rejected_anywhere_parity.test.py drives a table
+  // of reply shapes through all three templates' real waitChunkVerdict()
+  // functions and asserts they return identical verdicts, and separately asserts
+  // the skeptic template defines the guard helper at all. Cite that test, which
+  // fails loudly if it stops being true, rather than a remembered state.
+  //
+  // A claim about ANOTHER file rots by construction: no edit to THIS file can
+  // invalidate it, so neither this file's diff nor any reviewer reading this
+  // file will ever catch it going stale. Name a mechanism, or name a test that
+  // enforces the agreement; never record what another file currently contains.
   // 1.16.0 -- the resume-skip no longer RETURNS; it sets the state machine's
   // entry condition. This is the whole reason the citation review is a loop
   // with two entry points rather than a step bolted on after the wait: a
@@ -1264,45 +1587,74 @@ async function batchStep(batch) {
         label: "glossary:dispatch:" + batch.index,
       })
 
-      const ready = await agent(batchWaitPrompt(batch, attempt), {
-        effort: "low", phase: "GlossaryPass", label: "glossary:wait:" + batch.index,
-      })
-      // Same line-oriented sentinel-verdict discipline as the precheck above
-      // (#308, replacing #228's whole-string EXACT match): a timeout reply
-      // like "TIMEOUT 0 (not READY)" contains the literal substring "READY"
-      // and would falsely pass a naive `.indexOf("READY") === -1` check
-      // (#228's fix); #228's whole-string cure then rejected a benign
-      // prose-decorated READY reply as a timeout (#308). sentinelVerdict()
-      // keeps both directions closed -- a decorated READY (prose preamble,
-      // sentinel as the final line) is now accepted, while a plain TIMEOUT or a
-      // contradictory reply times out. As at the precheck above,
-      // sentinelVerdict() alone catches the contradictory case only when an LF
-      // puts TIMEOUT on a line of its own; the rejectedAnywhere() guard on this
-      // call catches it whatever glued it there -- measured over GLUE_CHARS
-      // (16 items, tests/glossary_citation_review.test.py), shape: TIMEOUT
-      // sharing its line with prose -- 15 of 16 glue
-      // characters were falsely accepted as READY before the guard, 0 of 16
-      // after.
+      // 1.16.2 (#352) -- the wait is CHUNKED across WAIT_CHUNKS agent calls (the
+      // Bash tool clamps any single call at BASH_CALL_CAP_SEC), then backed by
+      // ONE authoritative non-polling re-check. Chunk calls keep the EXISTING
+      // label `glossary:wait:<index>` unchanged; only the re-check gets a new one.
       //
-      // The false RED here is NOT the same shape as the precheck's, and the
-      // parallel is worth resisting: a reply merely MENTIONING "TIMEOUT <i>"
-      // while reporting success takes the branch below, which RETURNS from
-      // batchStep() with ready:false, reason:"glossary-pass-null" -- it does
-      // not retry, and no later step revisits this batch in this run. The batch
-      // lands in notReadyBatches and the whole pass reports merged:false. That
-      // is still the correct side to fail on, but it costs an operator
-      // re-invocation rather than an automatic in-run retry. See
-      // rejectedAnywhere()'s comment for the per-site breakdown.
+      // THE BREAK AND THE RE-CHECK ARE CONDITIONED ON THE VERDICT, NEVER ON THE
+      // LOOP INDEX, and that is this block's whole correctness argument. A READY
+      // in ANY chunk leaves the loop on the spot -- no later chunk, and no
+      // re-check either, because the re-check is gated on `verdict !== "ready"`.
+      // Conditioning the re-check on "the loop reached its final chunk" instead
+      // would read as equivalent and is not: a batch whose fragment validated in
+      // the LAST chunk would then run the re-check anyway, spending an extra
+      // agent call on the NORMAL path to re-ask a question already answered.
+      //
+      // The break tests `!== "pending"` rather than `=== "ready"` even though
+      // waitChunkVerdict()'s domain is two-valued today. They are equivalent now;
+      // they differ if a third verdict is ever added, and this form is the one
+      // that fails safe -- an unrecognized verdict stops polling and falls to the
+      // authoritative re-check, rather than burning the remaining chunks on a
+      // wait that has already stopped being ordinary.
+      let verdict = "pending"
+      for (let chunk = 1; chunk <= WAIT_CHUNKS; chunk++) {
+        const chunkReply = await agent(batchWaitChunkPrompt(batch, attempt, chunk), {
+          effort: "low", phase: "GlossaryPass", label: "glossary:wait:" + batch.index,
+        })
+        verdict = waitChunkVerdict(chunkReply, batch.index)
+        if (verdict !== "pending") break
+      }
+
+      // The authoritative re-check (#352). Runs whenever the chunk loop did not
+      // end READY: the budget was spent, or a reply was ambiguous, null or
+      // tool-killed and so resolved to PENDING. An exhausted chunk budget is NOT
+      // a timeout on its own -- see batchWaitRecheckPrompt() for the fragment
+      // that lands after the last poll ended and would otherwise never be read.
+      if (verdict !== "ready") {
+        const recheck = await agent(batchWaitRecheckPrompt(batch, attempt), {
+          effort: "low", phase: "GlossaryPass", label: "glossary:wait-recheck:" + batch.index,
+        })
+        verdict = waitChunkVerdict(recheck, batch.index)
+      }
+
+      // Every reply at this site -- chunk or re-check -- is parsed by
+      // waitChunkVerdict() and nothing else, which is where #228's and #308's
+      // properties now live as one enforced order (containment guard first, then
+      // whole-line READY). See that function's comment; this call site
+      // deliberately re-implements no part of the reading. Before 1.16.2 the two
+      // guards were spelled out inline here against a TIMEOUT sentinel, and one
+      // reply decided the batch.
+      //
+      // Reaching here not-ready is the only thing in this pass that may be called
+      // a timeout, and it still RETURNS from batchStep() with ready:false,
+      // reason:"glossary-pass-null" -- no attempt increment, no retry, and no
+      // later step revisits this batch in this run. The batch lands in
+      // notReadyBatches and the whole pass reports merged:false. That is the
+      // correct side to fail on, but it costs an operator re-invocation rather
+      // than an automatic in-run retry; the reason string is unchanged on purpose
+      // so the recovery docs that key off it still apply. See
+      // rejectedAnywhere()'s comment for the per-site cost breakdown.
       //
       // The sentinel stays batch-scoped rather than attempt-scoped on purpose:
-      // what makes this poll attempt-correct is the attempt-scoped PATH it
-      // polls (see fragmentPath()), not the wording of the reply. These calls
-      // are sequential and awaited within one batchStep, so there is no
-      // cross-attempt reply to confuse -- unlike the citation verdict below,
-      // which is a judgment ABOUT a specific fragment and so must name it.
-      if (rejectedAnywhere(ready, "TIMEOUT " + batch.index) ||
-          !sentinelVerdict(ready, "READY " + batch.index, "TIMEOUT " + batch.index)) {
-        log("batch " + batch.index + ": fragment never became ready (attempt " + attempt + ")")
+      // what makes this poll attempt-correct is the attempt-scoped PATH every
+      // chunk and the re-check gate on (see fragmentPath()), not the wording of
+      // any reply. These calls are sequential and awaited within one batchStep,
+      // so there is no cross-attempt reply to confuse -- unlike the citation
+      // verdict below, which is a judgment ABOUT a specific fragment and so must
+      // name it.
+      if (verdict !== "ready") {
+        log("batch " + batch.index + ": fragment never became ready (attempt " + attempt + ", " + WAIT_CHUNKS + " wait chunk(s) plus one re-check)")
         return { batchIndex: batch.index, fragmentPath: attemptPath, ready: false, reason: "glossary-pass-null", attempt: attempt }
       }
     }
@@ -1370,8 +1722,11 @@ async function batchStep(batch) {
       // spending the judge call anyway would ask an agent to audit files that may
       // not exist. This is NOT a fall-through: it joins the same retry ladder a
       // citation rejection does, carrying prepare's own reason forward, so an
-      // attempt that could not be prepared costs 3 calls rather than the ladder's
-      // 4 and still counts against MAX_CITATION_RETRIES.
+      // attempt that could not be prepared costs 2 + WAIT_CALLS calls rather than
+      // the ladder's 3 + WAIT_CALLS and still counts against MAX_CITATION_RETRIES
+      // (the same two costs this file states parametrically near perBatchCalls'
+      // own definition -- restated here as stale hardcoded numbers before this
+      // fix, contradicting that comment rather than agreeing with it).
       rejectionReason = rejectionDetail(prepared, prepareOk, prepareFail)
       log("batch " + batch.index + ": citation evidence could not be prepared for attempt " + attempt + " (no judge call spent)")
     }

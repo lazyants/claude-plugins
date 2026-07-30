@@ -135,6 +135,21 @@ async function agent(promptText, opts) {
   if (label.indexOf("glossary:dispatch:") === 0) {
     return "FRAGMENT " + idx;
   }
+  // 1.16.2 (#352) -- the re-check branch is tested FIRST and by its own
+  // distinct prefix. "glossary:wait-recheck:0" does not start with
+  // "glossary:wait:", so ordering alone would not have saved this, but naming
+  // it explicitly documents that these are two different questions to the mock.
+  //
+  // `recheck` DEFAULTS TO THE SAME REPLY AS `wait`, which is what keeps every
+  // pre-1.16.2 fixture in this file meaning what it meant. Those fixtures say
+  // "a wait reply shaped like THIS must not be read as ready"; under a chunked
+  // wait that is only observable end-to-end if the authoritative re-check
+  // answers the same way. Defaulting it to READY would have turned every one of
+  // them green through the re-check while the property under test was broken.
+  if (label.indexOf("glossary:wait-recheck:") === 0) {
+    if (Object.prototype.hasOwnProperty.call(p, "recheck")) return p.recheck;
+    return Object.prototype.hasOwnProperty.call(p, "wait") ? p.wait : ("READY " + idx);
+  }
   if (label.indexOf("glossary:wait:") === 0) {
     return Object.prototype.hasOwnProperty.call(p, "wait") ? p.wait : ("READY " + idx);
   }
@@ -242,12 +257,21 @@ def test_precheck_substring_collision_does_not_falsely_resume_skip(tmp_path):
 def test_wait_substring_collision_reports_not_ready(tmp_path):
     """RED before the #228 exact-match fix at site B (batchStep's
     "glossary:wait:" + batch.index): the OLD
-    `ready.indexOf("READY") === -1` check falsely treated a TIMEOUT reply
+    `ready.indexOf("READY") === -1` check falsely treated a not-ready reply
     that merely contains the literal substring "READY" inside its own
-    explanatory prose (e.g. "TIMEOUT 0 (not READY)") as ready -- `indexOf`
+    explanatory prose (e.g. "PENDING 0 (not READY)") as ready -- `indexOf`
     finds "READY" so the negated `=== -1` check was false, letting an
-    unconfirmed fragment reach the merge step."""
-    plan = {"0": {"precheck": "ABSENT 0", "wait": "TIMEOUT 0 (not READY)"}}
+    unconfirmed fragment reach the merge step.
+
+    1.16.2 (#352) renamed the non-ready sentinel TIMEOUT -> PENDING, and the
+    rename is the point rather than cosmetics: under the pre-1.16.2 single-shot
+    poll a non-READY reply WAS a timeout and ended the batch, while a chunk that
+    reports PENDING only means THIS chunk learned nothing. The #228 property is
+    unchanged and is re-pointed at the sentinel the template can actually
+    emit -- asserted against PENDING because a fixture still saying TIMEOUT
+    would be exercising a string no template site produces or reads, and would
+    pass for the wrong reason (an unrecognized sentinel is PENDING by default)."""
+    plan = {"0": {"precheck": "ABSENT 0", "wait": "PENDING 0 (not READY)"}}
     res = run(tmp_path=tmp_path, batches=[make_batch(0, ["Jean"])], plan=plan)
     assert res["ok"], res["stderr"]
     out = res["out"]
@@ -263,7 +287,7 @@ def test_wait_substring_collision_in_one_of_two_batches(tmp_path):
     """Same as above but with a second, healthy batch alongside it -- proves
     the collision is caught per-batch, not just in a single-batch fixture,
     and that a healthy sibling batch does not mask the sick one."""
-    plan = {"0": {"precheck": "ABSENT 0", "wait": "TIMEOUT 0 (not READY)"}}
+    plan = {"0": {"precheck": "ABSENT 0", "wait": "PENDING 0 (not READY)"}}
     res = run(tmp_path=tmp_path, batches=[make_batch(0, ["Jean"]), make_batch(1, ["Marie"])], plan=plan)
     assert res["ok"], res["stderr"]
     out = res["out"]
@@ -326,9 +350,17 @@ def test_precheck_fail_priority_discriminating_order(tmp_path):
 
 
 def test_wait_fail_priority_discriminating_order(tmp_path):
-    """Same discriminating-order proof at site B: TIMEOUT before a trailing
-    READY line must still time out."""
-    plan = {"0": {"precheck": "ABSENT 0", "wait": "TIMEOUT 0\nREADY 0"}}
+    """Same discriminating-order proof at site B: PENDING before a trailing
+    READY line must still be read as not-ready.
+
+    This one is NOT sentinelVerdict's own fail-priority scan any more. #352's
+    waitChunkVerdict tests the PENDING containment guard FIRST and then calls
+    sentinelVerdict with a NULL fail sentinel, so what keeps this reply from
+    being read as ready is the guard's raw containment, not a whole-line fail
+    scan. Same verdict, different mechanism -- which is why the assertion is
+    kept rather than folded into the collision test above: the two now exercise
+    different code."""
+    plan = {"0": {"precheck": "ABSENT 0", "wait": "PENDING 0\nREADY 0"}}
     res = run(tmp_path=tmp_path, batches=[make_batch(0, ["Jean"])], plan=plan)
     assert res["ok"], res["stderr"]
     out = res["out"]

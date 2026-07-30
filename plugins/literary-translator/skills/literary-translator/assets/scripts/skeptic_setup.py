@@ -242,6 +242,34 @@ ASSIGNMENT_BATCH_PREFIX = "assignments_"
 RUN_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 RUN_ID_RETRY_LIMIT = 5
 
+# ---------------------------------------------------------------------------
+# #352 -- the per-batch agent-call budget, mirroring the constants of the same
+# names in ``skeptic-pass-wf.template.js``. That template is the authority: it
+# is the file that actually EMITS the calls, and its own copies of
+# ``WAIT_BOUND_SEC``/``WAIT_CHUNK_SEC`` carry the measured rationale (the Bash
+# tool clamps a single call at 600 000 ms, so a wait is spent across several
+# bounded chunks plus one authoritative non-polling re-check).
+#
+# They are duplicated here rather than imported because this script and that
+# template share no runtime: the template is a standalone JS file instantiated
+# into a project's durable root, never imported by Python. The cost of the
+# duplication is drift, and drift here is not cosmetic -- this script REFUSES a
+# run the template would have admitted, or admits one the template then refuses
+# mid-flight, having already written this run's manifests. Both numbers below
+# must move together with the template's.
+# ---------------------------------------------------------------------------
+WAIT_BOUND_SEC = 900
+WAIT_CHUNK_SEC = 480
+# Same ceil-div idiom `batch_count` uses below, for the same reason.
+WAIT_CHUNKS = (WAIT_BOUND_SEC + WAIT_CHUNK_SEC - 1) // WAIT_CHUNK_SEC
+# Worst case for one batch's wait: every chunk spent, then the re-check.
+WAIT_CALLS = WAIT_CHUNKS + 1
+# precheck 1 + dispatch 1 + wait WAIT_CALLS. Was a flat 3 before 1.16.2, when a
+# wait was one agent call.
+PER_BATCH_CALLS = 2 + WAIT_CALLS
+# The fixed merge + verify pair, paid once per run regardless of batch count.
+FIXED_RUN_CALLS = 2
+
 
 class SkepticSetupError(Exception):
     """Raised for any failure that should surface as a FAILURE result."""
@@ -687,12 +715,17 @@ def run(args) -> dict:
         assignment["batch_index"] = i // entities_per_batch
     batch_count = (len(assignments) + entities_per_batch - 1) // entities_per_batch
 
-    # 5) batch_agent_cap preflight (mirrors glossary-pass-wf.template.js's own
-    #    formula, glossary-pass-wf.template.js:144-166: precheck+dispatch+wait
-    #    == 3 per batch, plus the fixed merge+verify pair == 2). Refuse the
-    #    WHOLE run -- nothing written under skeptic/runs/ at all -- if the
-    #    worst-case agent-call estimate would exceed the cap.
-    estimated_calls = 3 * batch_count + 2
+    # 5) batch_agent_cap preflight. The SAME estimate skeptic-pass-wf
+    #    .template.js's own `estimatedCalls` computes -- see PER_BATCH_CALLS
+    #    above -- asserted here first, before anything is written. #352: the
+    #    per-batch term is precheck 1 + dispatch 1 + wait WAIT_CALLS, not the
+    #    flat 3 this comment claimed while a wait was one agent call. (It also
+    #    claimed the formula was glossary-pass-wf.template.js's; glossary's own
+    #    per-batch term became conditional on its citation review in #347 and
+    #    is no longer this one, so the skeptic template is the authority cited
+    #    now.) Refuse the WHOLE run -- nothing written under skeptic/runs/ at
+    #    all -- if the worst-case agent-call estimate would exceed the cap.
+    estimated_calls = PER_BATCH_CALLS * batch_count + FIXED_RUN_CALLS
     if estimated_calls > args.batch_agent_cap:
         entity_word = "entity" if len(assignments) == 1 else "entities"
         raise SkepticSetupError(

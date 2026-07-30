@@ -456,6 +456,11 @@ here, follow the linked doc:
     CONSUME/disk-verify call (`canon_validate.py --merge-batches` +
     `CANON_VERIFY_SCHEMA`) reads that artifact back and forces a real
     structured object out of it — never the codex call itself.
+    **1.16.2 (#352):** that WAIT poll is now chunked the same way W5's is —
+    2 bounded chunks plus one authoritative non-polling re-check, its 900 s
+    bound unchanged — so the glossary and skeptic passes no longer differ
+    from W5 on this point. The schema shape above is what is unchanged, not
+    the poll.
   - **Non-codex mechanical schema-confirmation calls** — `recordLedgerPrompt`,
     `mergeLedgerPrompt`, `verifyReviewArtifactPrompt` — use a `schema` param
     for a different reason (verifying a shell script's own JSON stdout/printed
@@ -737,7 +742,14 @@ configurable enum, default `high`; schema-less, writes the run-scoped fragment
 `glossary/runs/{{RUN_ID}}/out_{index}_attempt_{n}.json` — attempt-scoped, and
 `resume_setup.py` wipes stale attempts before the run starts (**1.16.0**), so
 a later poll never finds an older fragment sitting at the path it waits on —
-self-checks against its own manifest) → `batchWaitPrompt` (bounded poll) →
+self-checks against its own manifest) → `batchWaitChunkPrompt` ×2 +
+`batchWaitRecheckPrompt` (bounded poll — since **1.16.2** spent across
+bounded chunks plus one authoritative non-polling re-check rather than in the
+one `batchWaitPrompt()` call it replaced, `READY`/`PENDING`, so a wait costs
+**up to** 3 agent calls — a `READY` in any chunk ends the wait on the spot and
+suppresses the re-check, so 1 and 2 are the ordinary cases and 3 is the
+worst case; see `references/canon-and-glossary.md`'s **The chunked
+wait**) →
 **the pre-merge citation review** (see immediately below) → once every
 fragment is `READY`, one serialized `canon_validate.py --merge-batches` call
 plus one disk-verify call (`schema: CANON_VERIFY_SCHEMA`) close the pass and
@@ -805,7 +817,9 @@ are deliberately NOT enumerated here — read them in
 The snapshot stays inside PREPARE's own turn rather than becoming a step of
 its own, but no longer to save a call: the **1.16.1** split already spends
 one, taking the live ceiling from `1 + 3*(MAX_CITATION_RETRIES+1)` to
-`1 + 4*(MAX_CITATION_RETRIES+1)`. What survives is the structural reason —
+`1 + 4*(MAX_CITATION_RETRIES+1)`; **1.16.2** then took it to
+`1 + (3 + WAIT_CALLS)*(MAX_CITATION_RETRIES+1)` = **19**, the wait having
+stopped being a single agent call. What survives is the structural reason —
 prepare is the one point both entry points into the review loop converge on,
 so a resume-skipped batch, which runs neither the dispatch nor the wait,
 still gets a snapshot and its evidence.

@@ -416,7 +416,22 @@ def test_unreadable_draft_file_errors_nonzero(tmp_path):
 # ---------------------------------------------------------------------------
 
 SHA1SUM_RE = re.compile(r"\b(sha1sum|shasum)\b", re.IGNORECASE)
-NEGATION_RE = re.compile(r"\bnever\b|\bno\b|\bnot\b|\bn't\b", re.IGNORECASE)
+# The `n't` alternative below is `\w+n't\b`, not `\bn't\b`: a plain `\bn't\b`
+# can never match ANY real contraction ("don't", "doesn't", "isn't", "can't",
+# "won't", "shouldn't", "wasn't" -- measured, zero matches on all of them),
+# because \b requires a non-word -> word transition immediately before the
+# "n", and in every real contraction the letter before "n" is itself a word
+# character -- so that boundary never exists. `\w+n't\b` instead anchors the
+# boundary AFTER the "t" (where a real word/non-word transition does occur)
+# and lets the stem before "n" satisfy `\w+` -- measured to match every
+# contraction above with no new false positive on ordinary words ("aunt",
+# "continent", "confidential" all still miss). This bug's risk direction was
+# the OPPOSITE of a silent escape: it made the guard MORE strict than
+# intended (a genuinely safe mention negated only by a contraction, with no
+# bare "never"/"no"/"not" nearby, would be wrongly flagged as unguarded and
+# fail this file's own scan loudly) rather than letting an unguarded raw
+# invocation through unnoticed.
+NEGATION_RE = re.compile(r"\bnever\b|\bno\b|\bnot\b|\w+n't\b", re.IGNORECASE)
 
 
 def find_unguarded_sha1sum_mentions(text):
@@ -436,6 +451,33 @@ def find_unguarded_sha1sum_mentions(text):
             context = text[max(0, m.start() - 60):m.end() + 40]
             unguarded.append((m.start(), context))
     return unguarded
+
+
+def test_negation_re_recognises_contraction_only_guards():
+    """Round 8: NEGATION_RE's `n't` alternative used to be `\\bn't\\b`, which
+    can never match ANY real contraction -- `\\b` requires a non-word ->
+    word transition immediately before the "n", and in a real contraction
+    the letter before "n" is itself a word character, so that boundary
+    never exists. A guarded mention negated ONLY by a contraction ("this
+    script doesn't invoke sha1sum"), with no bare "never"/"no"/"not" nearby,
+    was silently reported as UNGUARDED -- the OPPOSITE of a silent escape:
+    it would fail this file's own scan loudly on a genuinely safe mention,
+    not let a real raw invocation through unnoticed."""
+    contractions = (
+        "don't", "doesn't", "isn't", "can't", "won't", "shouldn't", "wasn't",
+    )
+    for word in contractions:
+        text = f"draft_sha1.py -- this script {word} invoke sha1sum directly."
+        assert find_unguarded_sha1sum_mentions(text) == [], (
+            f"a mention guarded only by {word!r} was wrongly reported as unguarded"
+        )
+    # Negative control: an actually-unguarded mention, no negation at all,
+    # must still be caught -- proving the fix did not turn NEGATION_RE into
+    # an always-match that stops discriminating.
+    unguarded_text = "run sha1sum on the draft file directly"
+    assert find_unguarded_sha1sum_mentions(unguarded_text) != [], (
+        "a genuinely unguarded sha1sum mention must still be reported"
+    )
 
 
 def _scan_files(paths):

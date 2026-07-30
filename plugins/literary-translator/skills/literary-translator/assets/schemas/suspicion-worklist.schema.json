@@ -50,7 +50,7 @@
           },
           "occurrence_refs": {
             "type": "array",
-            "description": "Every occurrence backing the flag. origin='block' refs (offsets into manifest.blocks[block].plain_text) are the CITABLE windows the skeptic feeds and evidences against; origin='verse_embedded' refs (offsets into the verse.store[].plain_text whose placeholder lives in `block`) are LABEL-ONLY -- counted for singleton/dispersion/all_citation precision but NOT citable (evidence_verify authenticates against blocks{} only, so a verse citation coerces to insufficient_window).",
+            "description": "Every occurrence backing the flag. origin='block' refs (offsets into manifest.blocks[block].plain_text) are the CITABLE windows the skeptic feeds and evidences against; origin='verse_embedded' refs (offsets into the verse.store[].plain_text whose placeholder lives in `block`) are LABEL-ONLY -- counted for singleton/dispersion/all_citation precision but NOT citable (evidence_verify authenticates against blocks{} only, so a verse citation never byte-verifies and is dropped). Dropping it coerces the RECORD to insufficient_window only where that leaves the verdict below its procedural requirement -- always for adverse/propose_rescope, but for propose_split only if fewer than 2 byte-verified referents survive; see skeptic-triage.schema.json.",
             "items": {
               "type": "object",
               "additionalProperties": false,

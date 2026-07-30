@@ -90,12 +90,23 @@ BASH_CALL_CAP_SEC = 600
 EXPECTED_WAIT_BOUND_SEC = 3450
 
 
+def read_template() -> str:
+    return MASS_TRANSLATE_TEMPLATE.read_text(encoding="utf-8")
+
+
 def instantiate(*, max_fix_rounds: int, batch_agent_cap: int,
-                effort: str = FIXTURE_EFFORT, model: str = FIXTURE_MODEL) -> str:
+                effort: str = FIXTURE_EFFORT, model: str = FIXTURE_MODEL,
+                source: str | None = None) -> str:
     """The exact one-time substitution the template's header documents
     (duplicated, not imported, so this file stays self-contained like every
-    sibling)."""
-    text = MASS_TRANSLATE_TEMPLATE.read_text(encoding="utf-8")
+    sibling). `source`, when given, replaces the on-disk read -- this is how a
+    mutation-proof test drives a MUTATED string through the real control flow
+    without ever writing to the template file: this worktree is shared with
+    concurrently running teammates, and an on-disk mutation would corrupt
+    whatever suite they are running at that moment (mirrors
+    tests/wait_chunking_batch_passes.test.py's own read_template(target)-or-
+    source convention)."""
+    text = read_template() if source is None else source
     text = text.replace("{{DURABLE_ROOT}}", FIXTURE_DURABLE_ROOT)
     text = text.replace("{{RUN_ID}}", FIXTURE_RUN_ID)
     text = text.replace("{{SOURCE_LANG}}", FIXTURE_SOURCE_LANG)
@@ -211,10 +222,14 @@ function log() {}
 
 
 def run(*, tmp_path: Path, segs: list, chunk_reply: str | None, recheck_reply: str | None,
-        max_fix_rounds: int = 1, batch_agent_cap: int = 100000, timeout: int = 30) -> dict:
+        max_fix_rounds: int = 1, batch_agent_cap: int = 100000, timeout: int = 30,
+        source: str | None = None) -> dict:
     """Returns {ok, out, stderr}. `chunk_reply`/`recheck_reply` are templates in
-    which `<seg>` is substituted with the calling segment's id."""
-    src = instantiate(max_fix_rounds=max_fix_rounds, batch_agent_cap=batch_agent_cap)
+    which `<seg>` is substituted with the calling segment's id. `source`, when
+    given, drives a MUTATED template string through the real control flow
+    instead of the on-disk content -- see instantiate()'s own docstring for
+    why this is never written to disk."""
+    src = instantiate(max_fix_rounds=max_fix_rounds, batch_agent_cap=batch_agent_cap, source=source)
     harness = (
         HARNESS.replace("__WRAPPED_SOURCE__", _wrap(src))
         .replace("__SEGS_JSON__", json.dumps(segs))
@@ -235,6 +250,119 @@ def run(*, tmp_path: Path, segs: list, chunk_reply: str | None, recheck_reply: s
 
 POLL_RE = re.compile(r"^end=\$\(\(SECONDS \+ (\d+)\)\);")
 
+# Round 9 (codex/round-9-review, HIGH): this file's chunk poll had no
+# whole-line WHITELIST at all -- only POLL_RE's prefix match (the elapsed
+# bound) plus a per-chunk numeric-range assertion, never a check that nothing
+# ELSE rides on the rest of the line. Ported from
+# tests/wait_chunking_batch_passes.test.py's own round-8/9 fix for the
+# identical gap (independent copy, not an import -- this project's stated
+# convention), with ONE real difference this file's template forces:
+#
+# mass-translate's ACCEPT gate can be TWO commands joined by " && "
+# (translateAcceptCmd runs `draft_ready.py --expect-token ... && validate_
+# draft.py ...`; reviewAcceptCmd is a single command) -- glossary/skeptic's
+# gates are always exactly one. Measured against the REAL rendered lines
+# (driven through the real template under Node, not reconstructed by hand):
+# allowing exactly one such chain -- never zero-or-more, never a bare "&"
+# alone -- fits both shapes and still excludes every character bash needs to
+# open a SECOND, unrelated chain, a loop, or a subshell. The dispatch token
+# embedded in `--expect-token RUN_ID:seg` also carries a literal ":" that
+# glossary/skeptic's paths never do, so ":" joins the allowed charset here;
+# it has no shell meaning on its own (not a chaining or substitution
+# operator), so this widens what the charset ACCEPTS without widening what a
+# loop/subshell could exploit.
+_SAFE_COMMAND_TOKEN = r"[A-Za-z0-9_.:/-]+(?: [A-Za-z0-9_.:/-]+)*"
+_SAFE_GATE_COMMAND = _SAFE_COMMAND_TOKEN + r"(?: && " + _SAFE_COMMAND_TOKEN + r")?"
+SAFE_COMMAND_RE = re.compile(_SAFE_GATE_COMMAND)
+
+# The chunk poll line's WHOLE grammar, fullmatch. Group 1 is the elapsed
+# bound; group 2 is the ACCEPT gate (held to SAFE_COMMAND_RE's own positive
+# shape, not a denylist of named tokens on an opaque capture -- see
+# _assert_gate_command_cannot_hide_a_loop); group 3, when present, is the
+# fail-fast sentinel path (waitChunkPrompt()'s own `failFast` local -- empty
+# when `disp` is empty, "an empty DISP must DISABLE fail-fast" per
+# mass_translate_driver_smoke.test.py's own lock on that path). The optional
+# group is what codex flagged from the OTHER side: this clause is exactly why
+# a single grammar shared with glossary/skeptic (which never have it) would
+# have to be bent to fit -- kept as its own grammar in this file instead.
+CHUNK_POLL_GRAMMAR_RE = re.compile(
+    r"^end=\$\(\(SECONDS \+ (\d+)\)\); while true; do (" + _SAFE_GATE_COMMAND + r") >/dev/null 2>&1 && exit 0;"
+    r"(?: \[ -f \"([A-Za-z0-9_./-]+)\" \] && \{ echo LT_FAIL_SENTINEL; exit 1; \};)? "
+    r"\[ \$SECONDS -ge \$end \] && break; slp=\$\(\(end-SECONDS\)\); "
+    r"\[ \$slp -gt 20 \] && slp=20; \[ \$slp -gt 0 \] && sleep \$slp; "
+    r"done; echo LT_CHUNK_BOUND; exit 1$"
+)
+
+# The tokens that indicate a re-check ACTUALLY POLLS -- see wait_chunking_
+# batch_passes.test.py's own NON_POLLING_FORBIDDEN_TOKENS for the full
+# rationale (kept as cheap defense-in-depth alongside SAFE_COMMAND_RE, not
+# the primary defense).
+NON_POLLING_FORBIDDEN_TOKENS = ("seq", "sleep", "while", "end=$((SECONDS")
+
+# Any loop construct ANYWHERE in the prompt, not just inside the one
+# recognised poll line / re-check command -- see wait_chunking_batch_passes
+# .test.py's own _LOOP_CONSTRUCT_ANYWHERE_RE for the full derivation
+# (structural: while/until only match when "do" and "done" both follow later
+# on the SAME line, so ordinary prose using those words alone never trips
+# it). Round 10 (HIGH): this used to ALSO exempt the one legitimate
+# `while true; do ... done` shape BY NAME, via a `(?!\s+true\b)` lookahead
+# -- the exact denylist reasoning round 8/9 removed one level down,
+# reintroduced here; `while true; do sleep 20; done` pushed as its own
+# separate prompt line escaped. No exception is named here any more -- the
+# legitimate poll line is exempted POSITIONALLY at this regex's own call
+# site instead (the line already fullmatch-verified against
+# CHUNK_POLL_GRAMMAR_RE is subtracted before this scan runs), matching
+# wait_chunking_batch_passes.test.py's own round-10 fix.
+_LOOP_CONSTRUCT_ANYWHERE_RE = re.compile(
+    r"for\s+\w+\s+in\s+\$\(\s*seq\b"
+    r"|for\s*\(\("
+    r"|for\s+\w+\s+in\s+\{\d+\.\.\d+\}"
+    r"|\b(?:while|until)\b[^\n]*?\bdo\b[^\n]*?\bdone\b"
+)
+
+
+def _assert_gate_command_cannot_hide_a_loop(command: str, where: str) -> None:
+    """Same three-layer property as wait_chunking_batch_passes.test.py's own
+    helper of this name: (1) SAFE_COMMAND_RE -- POSITIVE, structurally
+    excludes any shell control-flow construct under any keyword; (2) EVERY
+    `&&`-separated part starts with "python3 " -- both translateAcceptCmd
+    and reviewAcceptCmd return `PY + " " + ...`, PY == "python3"; (3)
+    NON_POLLING_FORBIDDEN_TOKENS, cheap defense-in-depth. See that file's
+    docstring for the full reasoning and the stated residual (an argument to
+    python3 itself that somehow blocks IT is not excluded by any layer).
+
+    Round 10 (HIGH): layer 2 used to check only `command.startswith("python3
+    ")` -- the WHOLE string's prefix. That closes the whole surface in
+    wait_chunking_batch_passes.test.py, where SAFE_COMMAND_RE never allows
+    an `&&`. It does NOT close it here: this file's own SAFE_COMMAND_RE was
+    widened for translateAcceptCmd's genuine `&&` chain, and reviewAcceptCmd
+    -- which has no `&&` of its own -- passed with ` && tail -f /dev/null`
+    appended: exactly one `&&`, the whole string still starts with "python3
+    ", "seq"/"sleep"/"while" never appear, all three layers passed, and the
+    command blocks FOREVER precisely WHEN THE GATE SUCCEEDS -- every wait
+    chunk then runs to the 600 s clamp, which is #348/#352 itself. Layer 2
+    now checks EVERY `&&`-separated part, not just the string's own prefix
+    -- splitting on " && " is unambiguous because SAFE_COMMAND_RE's own
+    character class cannot contain "&" inside a token, so it can only ever
+    appear as this literal chain separator."""
+    assert SAFE_COMMAND_RE.fullmatch(command), (
+        f"{where} is not a flat command invocation (or the one legitimate "
+        f"`&&`-chain) -- it may carry a shell construct of some kind (a "
+        f"loop, a pipe, a subshell, a background job) under any spelling:\n"
+        f"{command}"
+    )
+    parts = command.split(" && ")
+    assert all(part.startswith("python3 ") for part in parts), (
+        f"{where} has a part that does not start with the real gate-command "
+        f"builders' own fixed prefix (\"python3 \") -- it may be an "
+        f"alternate bare command chained in beside the real check:\n{command}"
+    )
+    for token in NON_POLLING_FORBIDDEN_TOKENS:
+        assert token not in command, (
+            f"{where} contains {token!r}, which would mean it polls or loops "
+            f"instead of running (or being evaluated) exactly once:\n{command}"
+        )
+
 
 def poll_line(prompt: str) -> str:
     """The single bash poll command line of a CHUNK prompt."""
@@ -247,6 +375,19 @@ def chunk_seconds(prompt: str) -> int:
     m = POLL_RE.match(poll_line(prompt))
     assert m is not None, f"poll line does not declare an elapsed bound:\n{poll_line(prompt)}"
     return int(m.group(1))
+
+
+# The chunk's ACCEPT gate: everything between the loop head and the suppressed
+# `&& exit 0`. Factored out (round 6) so the primary parity test and its own
+# mutation-proof controls read the SAME extraction, rather than the primary
+# test inlining a `re.search` this file's helpers otherwise never repeat.
+ACCEPT_RE = re.compile(r"while true; do (.*?) >/dev/null 2>&1 && exit 0;")
+
+
+def accept_gate(prompt: str) -> str:
+    m = ACCEPT_RE.search(poll_line(prompt))
+    assert m is not None, f"chunk poll has no suppressed ACCEPT gate:\n{poll_line(prompt)}"
+    return m.group(1)
 
 
 def labels(out: dict) -> list:
@@ -267,11 +408,48 @@ def chunk_prompts(out: dict, label: str) -> list:
     return out["promptsByLabel"][label]
 
 
+# The re-check's own command line, ALONE on its own line: waitRecheckPromptFor()
+# (shared by BOTH wait sites -- see waitRecheckPrompt()/reviewWaitRecheckPrompt())
+# pushes it as `lines.push(acceptCmd + " >/dev/null 2>&1")` -- no `while true`
+# wrapper, no trailing `&& exit 0;` continuation, unlike the chunk's poll line
+# the ACCEPT-extraction regex above lifts a command out of. A plain end-of-line
+# anchor is therefore the correct, exact extraction here, not a coincidence of
+# the two prompts sharing a substring -- round-6 sibling fix, see
+# tests/wait_chunking_batch_passes.test.py's own recheck_command() for the full
+# derivation (mass-translate carries an independent copy of this pattern by
+# this project's own stated convention, not an import).
+RECHECK_COMMAND_RE = re.compile(r"^(.*) >/dev/null 2>&1$", re.MULTILINE)
+
+
+def recheck_command(prompt: str) -> str:
+    hits = RECHECK_COMMAND_RE.findall(prompt)
+    assert len(hits) == 1, f"expected exactly one re-check command line, got {len(hits)}:\n{prompt}"
+    return hits[0]
+
+
+def mutate(source: str, old: str, new: str) -> str:
+    """One scoped substitution, with proof it applied.
+
+    The assertion is not decoration. A mutation that silently matched nothing
+    leaves the ORIGINAL source running, the test under proof passes, and the
+    pass reads as "the mutation was caught" when nothing was ever mutated --
+    a false-green that looks exactly like the real thing. Mirrors
+    tests/wait_chunking_batch_passes.test.py's own mutate() -- this file had
+    NO mutation-testing machinery at all before round 6, which is why its own
+    containment-vs-identity gap (see test_recheck_uses_the_same_accept_gate_
+    as_the_chunks below) went unnoticed for longer than the sibling file's."""
+    count = source.count(old)
+    assert count == 1, (
+        f"mutation anchor must appear exactly once, found {count}: {old[:90]!r}"
+    )
+    return source.replace(old, new)
+
+
 # A run where the artifact lands only AFTER the whole chunk budget is spent --
 # the frozen `ssk-w5-smoke-116` fixture, expressed as a fixture input.
-def _late_landing_run(tmp_path, segs=("seg01",)) -> dict:
+def _late_landing_run(tmp_path, segs=("seg01",), *, source: str | None = None) -> dict:
     return run(tmp_path=tmp_path, segs=list(segs),
-               chunk_reply="PENDING <seg>", recheck_reply="READY <seg>")
+               chunk_reply="PENDING <seg>", recheck_reply="READY <seg>", source=source)
 
 
 # ---------------------------------------------------------------------------
@@ -318,22 +496,73 @@ def test_recheck_that_is_still_not_ready_times_out_as_before(tmp_path):
     assert out["result"]["failed"][0]["reason"] == "translate-timeout"
 
 
-def test_recheck_does_not_poll(tmp_path):
+def test_the_recheck_is_a_single_non_polling_check(tmp_path):
     """The re-check is ONE immediate evaluation of the canonical gate. If it
-    polled, it would be a ninth chunk and could itself hit the 600 s cap."""
+    polled, it would be a ninth chunk and could itself hit the 600 s cap.
+    Non-polling is asserted against the emitted bash, and singular against
+    the call log -- for BOTH wait sites, not just the translate one.
+
+    Round-6: this used to be test_recheck_does_not_poll, checking only
+    non-polling and only the translate site's re-check ("wait-recheck:seg01"),
+    never the review site's ("review-wait-recheck:seg01:r1") and never the
+    CALL COUNT -- so nothing here proved the re-check runs at most once, at
+    either site. Measured (mutation the team lead built, this round):
+    duplicating the re-check's own agent() CALL under the same label -- an
+    extra, discarded await agent(waitRecheckPrompt(seg), {...label:
+    "wait-recheck:"+seg}) injected before the real one -- passed 18/18, ALL
+    GREEN, before this fix. That is a genuinely different mutation from
+    duplicating the emitted COMMAND LINE inside one prompt: that shape is
+    caught for the WRONG reason, by recheck_command()'s own
+    `len(hits) == 1` guard, and gives a false RED that says nothing about
+    call count. A re-check that runs twice is precisely the #348 defect it
+    can itself hit the 600 s clamp -- so an unasserted 'ONCE' here is not a
+    cosmetic gap, it is the property this whole file exists to hold."""
     res = _late_landing_run(tmp_path)
     assert res["ok"], f"run threw: {res['stderr']}"
-    for prompt in chunk_prompts(res["out"], "wait-recheck:seg01"):
-        assert "end=$((SECONDS +" not in prompt, f"re-check polls:\n{prompt}"
-        assert "sleep" not in prompt, f"re-check sleeps:\n{prompt}"
-        assert "while true" not in prompt, f"re-check loops:\n{prompt}"
+    out = res["out"]
+    for recheck_label in ["wait-recheck:seg01", "review-wait-recheck:seg01:r1"]:
+        recheck_prompts = chunk_prompts(out, recheck_label)
+        assert len(recheck_prompts) == 1, (
+            f"{recheck_label} ran {len(recheck_prompts)} re-checks for one wait; "
+            f"the authoritative re-check is once per wait, or it is just "
+            f"another chunk"
+        )
+        prompt = recheck_prompts[0]
+        for forbidden in ("end=$((SECONDS +", "while true", "sleep", "$(seq "):
+            assert forbidden not in prompt, (
+                f"{recheck_label}'s re-check polls -- found {forbidden!r}:\n{prompt}"
+            )
 
 
 def test_recheck_uses_the_same_accept_gate_as_the_chunks(tmp_path):
     """Composed once and shared, so the re-check can never drift into a weaker
     gate than the poll it backs up -- the failure mode would be a false GREEN
     (accepting an artifact the poll would have rejected), which is the one
-    direction this pipeline cannot recover from."""
+    direction this pipeline cannot recover from.
+
+    Round-6 fix: this used to read `assert accept in recheck` -- CONTAINMENT
+    against the re-check's whole multi-line PROMPT, not equality against its
+    own command. Blind to a strictly WIDER command: a re-check that runs
+    `acceptCmd + " --candidate-file /tmp/decoy.json"` still literally CONTAINS
+    the chunk's own narrower gate string as a substring, so the old assertion
+    passed it -- measured directly, both label pairs below, before this fix
+    landed (see test_accept_gate_parity_is_mutation_proved_against_a_widened_
+    recheck_command, this file's own control for exactly that shape; ported
+    from tests/wait_chunking_batch_passes.test.py's round-6 fix for the
+    identical gap, itself measured, not assumed, to transfer to this file).
+    Fixed by comparing against recheck_command()'s own single-line extraction
+    of the re-check's ACTUAL command.
+
+    Equality is legitimate here, not merely convenient, for BOTH label pairs
+    looped below -- checked against source, not assumed to transfer just
+    because it held for the sibling file: translateAcceptCmd(seg) and
+    reviewAcceptCmd(seg, roundLabel) are pure functions of the SAME seg/
+    roundLabel both getVerifiedReview() and reviewFixLoop's translate wait
+    pass to their own chunk-loop call and their own re-check call, within one
+    invocation. The review site's extra roundLabel argument (the thing that
+    could have broken equality, since it is a retry index the translate path
+    does not carry) is threaded through to BOTH reviewWaitPrompt() and
+    reviewWaitRecheckPrompt() identically, so it does not."""
     res = _late_landing_run(tmp_path)
     assert res["ok"], f"run threw: {res['stderr']}"
     out = res["out"]
@@ -342,16 +571,85 @@ def test_recheck_uses_the_same_accept_gate_as_the_chunks(tmp_path):
         ("wait:seg01", "wait-recheck:seg01"),
         ("review-wait:seg01:r1", "review-wait-recheck:seg01:r1"),
     ]:
-        chunk = poll_line(chunk_prompts(out, chunk_label)[0])
-        # ACCEPT is everything between the loop head and the first `&& exit 0`.
-        m = re.search(r"while true; do (.*?) >/dev/null 2>&1 && exit 0;", chunk)
-        assert m is not None, f"chunk poll has no suppressed ACCEPT gate:\n{chunk}"
-        accept = m.group(1)
+        accept = accept_gate(chunk_prompts(out, chunk_label)[0])
         recheck = chunk_prompts(out, recheck_label)[0]
-        assert accept in recheck, (
-            f"re-check at {recheck_label} does not run the chunk's exact ACCEPT gate.\n"
-            f"chunk ACCEPT: {accept}\nre-check prompt:\n{recheck}"
+        assert recheck_command(recheck) == accept, (
+            f"re-check at {recheck_label} does not run the chunk's exact ACCEPT "
+            f"gate (character-identical, not merely containing it).\n"
+            f"chunk ACCEPT gate: {accept!r}\n"
+            f"re-check command:  {recheck_command(recheck)!r}\n"
+            f"re-check prompt:\n{recheck}"
         )
+
+
+@pytest.mark.parametrize("shape", ["replaced", "widened"], ids=["replaced", "widened"])
+def test_accept_gate_parity_is_mutation_proved(tmp_path, shape):
+    """The control for the test above, and the reason this file had none
+    before round 6: `mutate(` had zero hits here, so nothing proved the
+    parity assertion could discriminate ANY defect, replaced or widened.
+    Mirrors tests/wait_chunking_batch_passes.test.py's own two controls,
+    merged into one parametrized test since both mutation shapes need the
+    same mutation site and the same per-label-pair loop.
+
+    Both mutations target waitRecheckPromptFor()'s single shared emitted
+    line -- `lines.push(acceptCmd + " >/dev/null 2>&1")`, unique in this
+    template (verified: one occurrence) -- rather than either site's own
+    wrapper, because BOTH wrapper functions splice into this ONE shared
+    builder (waitRecheckPrompt() for translate, reviewWaitRecheckPrompt() for
+    review): one mutation here changes both sites' re-check commands in one
+    pass, so this test genuinely measures BOTH label pairs under the SAME
+    mutation rather than assuming symmetry.
+
+    "replaced" mirrors the sibling file's REPLACE control (an unrelated,
+    strictly weaker gate -- a bare file-existence test). "widened" mirrors
+    its WIDEN control: `--candidate-file` is a REAL flag both draft_ready.py
+    and review_ready.py accept (validates an isolated candidate file instead
+    of the canonical artifact) -- not a strawman, and exactly the shape a
+    plausible, easy-to-miss-in-review edit would take. The narrower gate
+    string stays a literal SUBSTRING of the widened one, so only the old
+    CONTAINMENT assertion, not this equality one, could ever miss it -- and
+    that is asserted directly below, for the widened shape only, rather than
+    only claimed here: the un-fixed `accept in recheck` form still holds even
+    after the mutation, which is exactly the blind spot the round-6 fix above
+    exists to close."""
+    mutated_line = {
+        "replaced": 'lines.push("test -f /tmp/lt-weaker-gate >/dev/null 2>&1");',
+        "widened": 'lines.push(acceptCmd + " --candidate-file /tmp/lt-decoy-candidate.json >/dev/null 2>&1");',
+    }[shape]
+    mutant = mutate(
+        read_template(),
+        'lines.push(acceptCmd + " >/dev/null 2>&1");',
+        mutated_line,
+    )
+    res = _late_landing_run(tmp_path, source=mutant)
+    assert res["ok"], f"run threw: {res['stderr']}"
+    out = res["out"]
+    for chunk_label, recheck_label in [
+        ("wait:seg01", "wait-recheck:seg01"),
+        ("review-wait:seg01:r1", "review-wait-recheck:seg01:r1"),
+    ]:
+        accept = accept_gate(chunk_prompts(out, chunk_label)[0])
+        recheck = chunk_prompts(out, recheck_label)[0]
+        assert recheck_command(recheck) != accept, (
+            f"MUTATION NOT CAUGHT ({shape}): re-check at {recheck_label} still "
+            f"reads as carrying the chunk's own ACCEPT gate after its command "
+            f"was {shape}, so the parity assertion is not reading the "
+            f"executable command.\nre-check:\n{recheck}"
+        )
+        if shape == "widened":
+            # The blind spot the round-6 fix above exists to close, made
+            # executable rather than only claimed in the docstring: the
+            # UN-FIXED containment form (`accept in recheck`, against the
+            # whole multi-line prompt) still holds under this exact mutation,
+            # so it is demonstrably not that form doing the catching above --
+            # only the equality one, against recheck_command()'s own
+            # single-line extraction, can tell the two apart.
+            assert accept in recheck, (
+                f"widened mutation stopped containing the chunk's own ACCEPT "
+                f"gate as a literal substring of the re-check prompt, so it no "
+                f"longer demonstrates the old containment form's blind spot at "
+                f"{recheck_label}:\n{recheck}"
+            )
 
 
 def test_recheck_still_runs_after_a_fail_sentinel(tmp_path):
@@ -375,10 +673,99 @@ def test_recheck_still_runs_after_a_fail_sentinel(tmp_path):
 # 2. Chunking: no call approaches the cap, and the bound is SPENT not EXTENDED
 # ---------------------------------------------------------------------------
 
+def test_loop_construct_anywhere_actually_discriminates():
+    """Round 10: _LOOP_CONSTRUCT_ANYWHERE_RE's own discrimination table --
+    see wait_chunking_batch_passes.test.py's own copy of this test for the
+    full rationale. The exact case that must never again be exempted:
+    `while true; do sleep 20; done`, standing alone, must be CAUGHT here."""
+    must_catch = [
+        ("the exact round-10 escape, standing alone",
+         "while true; do sleep 20; done"),
+        ("canonical seq for-loop", "for i in $(seq 1 45); do true; done"),
+        ("different-var-name seq for-loop", "for j in $(seq 45); do true; done"),
+        ("C-style for-loop", "for ((i=0; i<45; i++)); do true; done"),
+        ("brace-range for-loop", "for i in {1..45}; do true; done"),
+        ("while with a non-true condition", "while :; do :; done"),
+        ("until-loop", "until false; do :; done"),
+    ]
+    for label, shape in must_catch:
+        assert _LOOP_CONSTRUCT_ANYWHERE_RE.search(shape), (
+            f"{label} must be recognised as a loop construct: {shape!r}"
+        )
+
+    # Negative controls: ordinary prose without a full do...done shape.
+    # Deliberately NOT included: the legitimate elapsed-time poll line --
+    # this regex must catch that shape too now (it is must_catch's "while
+    # true" case above); the real poll line is exempted POSITIONALLY at the
+    # call site, never by this regex refusing its own keyword.
+    must_not_catch = [
+        "Wait until it's done before returning.",
+        "This is fine for now.",
+        "While you wait, do nothing else.",
+        "Keep polling until the bound is reached, then return.",
+        "Run this for as long as needed, until it succeeds.",
+    ]
+    for shape in must_not_catch:
+        assert _LOOP_CONSTRUCT_ANYWHERE_RE.search(shape) is None, (
+            f"benign text must not be flagged as a loop construct: {shape!r}"
+        )
+
+
+def test_gate_command_helper_actually_discriminates():
+    """Round 10 (HIGH): _assert_gate_command_cannot_hide_a_loop's own
+    discrimination table. The exact escape that must never return: a
+    single-command gate (reviewAcceptCmd's own shape, no `&&` of its own)
+    with ` && tail -f /dev/null` appended -- one legitimate-looking `&&`,
+    the whole string starts with "python3 ", no forbidden token appears, and
+    the command blocks forever exactly when the real gate succeeds. Layer
+    2's old prefix-only check let this through; it must check EVERY
+    `&&`-separated part now."""
+    real_translate_chain = (
+        "python3 /fixture/x/scripts/draft_ready.py seg01 --expect-token run:seg01"
+        " && python3 /fixture/x/scripts/validate_draft.py seg01"
+    )
+    real_review_single = "python3 /fixture/x/scripts/review_ready.py seg01 --expect-token run:seg01:r1"
+
+    for label, cmd in [
+        ("real translate chain", real_translate_chain),
+        ("real review single command", real_review_single),
+    ]:
+        _assert_gate_command_cannot_hide_a_loop(cmd, label)  # must not raise
+
+    hostile = [
+        ("the exact round-10 escape: single command + hostile second half",
+         real_review_single + " && tail -f /dev/null"),
+        ("hostile first half, real command second",
+         "tail -f /dev/null && " + real_review_single),
+        ("a third chained command beyond the one allowed",
+         real_translate_chain + " && python3 /fixture/x/scripts/extra.py"),
+        ("a loop construct riding beside the real command",
+         real_review_single + " && for i in $(seq 1 45); do sleep 20; done"),
+    ]
+    for label, cmd in hostile:
+        try:
+            _assert_gate_command_cannot_hide_a_loop(cmd, label)
+        except AssertionError:
+            pass
+        else:
+            raise AssertionError(f"{label} was NOT caught: {cmd!r}")
+
+
 def test_no_single_chunk_approaches_the_bash_call_cap(tmp_path):
     """The constraint that forced chunking. 600 s is a measured hard clamp: a
     call declaring more is killed at 600 s with exit 143 no matter what timeout
-    the agent passes."""
+    the agent passes.
+
+    Round 9: also the whole-line WHITELIST this file never had -- any
+    surviving fixed-iteration or otherwise-unbounded construct riding on the
+    poll line, whatever its spelling, checked as a fullmatch against
+    CHUNK_POLL_GRAMMAR_RE, not a scan for one historical shape. The
+    ACCEPT-gate group that grammar treats as opaque is held to its own
+    positive shape (_assert_gate_command_cannot_hide_a_loop); the re-check's
+    own command is held to the same property; and a loop construct emitted
+    as its OWN, unrelated prompt line -- never touching either recognised
+    line/command -- is caught by a whole-prompt scan, all three at both wait
+    sites (translate and review)."""
     res = _late_landing_run(tmp_path)
     assert res["ok"], f"run threw: {res['stderr']}"
     out = res["out"]
@@ -388,6 +775,58 @@ def test_no_single_chunk_approaches_the_bash_call_cap(tmp_path):
             assert 0 < sec < BASH_CALL_CAP_SEC, (
                 f"{label} chunk {i} declares {sec}s, which the Bash tool would clamp "
                 f"at {BASH_CALL_CAP_SEC}s -- this is #348"
+            )
+
+            line = poll_line(prompt)
+            m = CHUNK_POLL_GRAMMAR_RE.fullmatch(line)
+            assert m, (
+                f"{label} chunk {i}'s poll line does not match the pinned "
+                f"elapsed-time-poll grammar -- something else is riding on "
+                f"this line, fixed-iteration or otherwise:\n{line}"
+            )
+            _assert_gate_command_cannot_hide_a_loop(
+                m.group(2), f"{label} chunk {i}'s ACCEPT gate command"
+            )
+
+    for recheck_label in ["wait-recheck:seg01", "review-wait-recheck:seg01:r1"]:
+        for prompt in chunk_prompts(out, recheck_label):
+            _assert_gate_command_cannot_hide_a_loop(
+                recheck_command(prompt), f"{recheck_label} re-check command"
+            )
+
+    # Round 10: the chunk prompt's own legitimate poll line -- already
+    # fullmatch-verified above -- is subtracted POSITIONALLY before this scan
+    # runs, rather than the scan regex exempting its keyword by name (see
+    # _LOOP_CONSTRUCT_ANYWHERE_RE's own comment for the bug that shape was).
+    # The re-check prompts get no such subtraction and are scanned whole:
+    # their own command is held to SAFE_COMMAND_RE above, which cannot
+    # contain "while"/"until" at all, so there is nothing legitimate to
+    # exempt there, and poll_line() would raise on a re-check prompt anyway
+    # (exactly one `end=$((SECONDS +` line is required, and a re-check
+    # prompt has none) -- calling it unconditionally on every label would
+    # turn this into a false RED on every re-check prompt instead of a fix.
+    for label in ["wait:seg01", "review-wait:seg01:r1"]:
+        for prompt in chunk_prompts(out, label):
+            line = poll_line(prompt)
+            assert prompt.count(line) == 1, (
+                f"{label} poll line appears {prompt.count(line)}x in its own "
+                f"prompt; the positional carve-out below assumes exactly one "
+                f"occurrence to subtract"
+            )
+            remainder = prompt.replace(line, "", 1)
+            hit = _LOOP_CONSTRUCT_ANYWHERE_RE.search(remainder)
+            assert hit is None, (
+                f"{label}'s prompt contains a loop construct "
+                f"({hit.group(0)!r}) somewhere in its text, not just in the "
+                f"poll line already checked above:\n{prompt}"
+            )
+    for recheck_label in ["wait-recheck:seg01", "review-wait-recheck:seg01:r1"]:
+        for prompt in chunk_prompts(out, recheck_label):
+            hit = _LOOP_CONSTRUCT_ANYWHERE_RE.search(prompt)
+            assert hit is None, (
+                f"{recheck_label}'s prompt contains a loop construct "
+                f"({hit.group(0)!r}) somewhere in its text, not just in the "
+                f"one command already checked above:\n{prompt}"
             )
 
 
@@ -463,15 +902,46 @@ def test_a_glued_fail_sentinel_never_converges(tmp_path):
     """#228's rule, re-pointed at the new grammar. `split("\\n")` breaks on LF
     and nothing else, so ANY character between prose and the sentinel keeps them
     on one line and defeats whole-line equality -- which is why the FAILED and
-    PENDING guards are raw containment, evaluated BEFORE the READY test."""
-    for glue in [" ", "\t", "\r", "\x0b", "\x0c", "\x1c", "\xa0", " ", "​", "x"]:
+    PENDING guards are raw containment, evaluated BEFORE the READY test.
+
+    Round 6 (R6SANITIZER's sweep, confirmed by bytes): the LINE SEPARATOR and
+    ZERO WIDTH SPACE entries below used to be raw pasted glyphs rather than
+    chr() calls -- this plugin's own no-pasted-glyph convention, which
+    skeptic_report.py already follows and this file did not. Not a live bug --
+    the bytes decoded to exactly what the test needed -- but a raw glyph is
+    visually indistinguishable from a plain space on skim, and authoring
+    tooling has silently normalised one to a plain space before. Spelled via
+    chr() now: a pure-ASCII runtime call that cannot be mis-typed or
+    auto-converted into the character itself the way a string-literal escape
+    can.
+
+    Also asserts the glue character actually SENT is the intended codepoint,
+    for every entry, not just the two that used to be raw. Before this, only
+    converged_segs() was checked -- so if an editor, a merge tool, or a
+    careless re-indent ever degraded U+2028 to a plain space, the test would
+    keep passing while silently testing the plain-space case twice instead of
+    the line-separator case at all: a green test that has stopped covering
+    its own subject."""
+    glue_chars = [
+        (" ", 0x20), ("\t", 0x09), ("\r", 0x0D), ("\x0b", 0x0B), ("\x0c", 0x0C),
+        ("\x1c", 0x1C), ("\xa0", 0xA0),
+        (chr(0x2028), 0x2028),  # LINE SEPARATOR
+        (chr(0x200B), 0x200B),  # ZERO WIDTH SPACE
+        ("x", 0x78),
+    ]
+    for glue, expected_codepoint in glue_chars:
+        assert len(glue) == 1 and ord(glue) == expected_codepoint, (
+            f"glue fixture degraded: expected U+{expected_codepoint:04X}, got "
+            f"{glue!r}"
+        )
         res = run(tmp_path=tmp_path, segs=["seg01"],
                   chunk_reply="the job died" + glue + "FAILED <seg>\nREADY <seg>",
                   recheck_reply="PENDING <seg>")
         assert res["ok"], f"run threw: {res['stderr']}"
         out = res["out"]
         assert converged_segs(out) == [], (
-            f"a FAILED sentinel glued behind {glue!r} was overridden by a trailing READY"
+            f"a FAILED sentinel glued behind U+{expected_codepoint:04X} ({glue!r}) "
+            f"was overridden by a trailing READY"
         )
 
 

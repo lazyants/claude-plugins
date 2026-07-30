@@ -33,6 +33,15 @@ nothing), and (iii) assigns ``risk_classes=["high_dispersion"]`` to record
 that a real scan run with ``--dispersion-threshold 3``/
 ``--windows-per-entity >= 3`` would have genuinely fired for this entity.
 
+This file's own harness carries the identical round-9 dispatch-identity
+recorder/guard/freeze mechanism as skeptic_pipeline_e2e.test.py's copy, but
+every fixture below is single-batch by construction (see cases (a)/(b)
+above), so the round-10 content-binding property -- that a batch's dispatch
+prompt reflects ITS OWN assignments, not some other batch's, which that
+guard alone cannot verify -- has no second batch here to be observable
+against, and is exercised only in skeptic_pipeline_e2e.test.py's own
+multi-batch fixture.
+
 Fixtures mirror tests/skeptic_ready.test.py's own helpers (duplicated here,
 not imported -- see pytest.ini's own comment on this project's
 self-contained-test-file convention).
@@ -194,7 +203,70 @@ def instantiate_skeptic_pass(*, durable_root: str, source_lang: str, particle_co
 def _wrap_for_execution(js_source: str) -> str:
     assert js_source.count("export const meta") == 1
     body = js_source.replace("export const meta", "const meta", 1)
-    return "async function __workflowMain__(agent, pipeline, log, args) {\n" + body + "\n}\n"
+    return (
+        "async function __workflowMain__(agent, pipeline, log, args) {\n"
+        + _DISPATCH_PROMPT_RECORDER
+        + body
+        + "\n}\n"
+    )
+
+
+# Same identity-recording fix as skeptic_pipeline_e2e.test.py's own
+# _DISPATCH_PROMPT_RECORDER (round 6) -- see that file's header comment for
+# the full derivation. This file carries its own independent copy of the
+# harness (see this module's own docstring on the self-contained-test-file
+# convention), so the fix has to be applied here too: neither of this file's
+# two tests currently drives a decoy dispatch path, but the mock's dispatch
+# branch below still wrote the fragment on LABEL alone before this fix, so a
+# future decoy test added to this file would have been just as unable to
+# catch it as skeptic_pipeline_e2e.test.py's was pre-round-6.
+#
+# Round 7/8 port: the round-6 fix landed here as a flat array + `.indexOf()`,
+# byte-identical to what skeptic_pipeline_e2e.test.py's own copy had at the
+# time -- and round 7 found that shape insufficient there: it proves a
+# prompt came from the real builder for SOME batch, not for the batch being
+# dispatched, so a decoy that calls the builder for the WRONG batch and
+# forwards the result satisfies it. That same gap existed here, unfixed,
+# until round 8's port -- measured directly with the cross-batch-replay
+# parity fixture in skeptic_pipeline_e2e.test.py
+# (test_dispatch_write_guard_rejects_cross_batch_replay_in_both_harness_
+# copies): this copy accepted a prompt built for batch 0 and replayed under
+# batch 1's own dispatch label. Round 8 ported the sibling file's fix here:
+# identity keyed by `batch.index` (coerced to string to match the
+# label-derived `idx` string below).
+#
+# Round 9 port (codex, HIGH; found and independently re-verified against
+# this file's own harness copy, not only skeptic_pipeline_e2e.test.py's):
+# `batch.index` is a property read off the very object the call site hands
+# to batchDispatchPrompt() -- forgeable the same way the round-7 array was.
+# `batchDispatchPrompt({ index: batch.index, assignments: BATCHES[0]
+# .assignments })` copies the real, correct index onto a fabricated object
+# carrying a DIFFERENT batch's assignments: the real builder still runs
+# (the recorder still fires) and records the wrong-content prompt under the
+# numerically-correct key, so round 8's guard here accepted it too -- same
+# index, wrong content, right function, in this copy exactly as in the
+# sibling. Ported the sibling file's round-9 fix: bind identity to the
+# batch OBJECT ITSELF, by reference, never a property copied off it.
+# `BATCHES` inside the wrapped workflow and this harness's own
+# `BATCHES_ARGS` (declared further down) are the SAME array with the SAME
+# element references, for the same reason as the sibling file (BATCHES_ARGS
+# is passed as `args`, and the real template's own `const BATCHES =
+# Array.isArray(args) ? args : JSON.parse(args)` keeps that reference). See
+# the sibling file's header comment for the full derivation and what this
+# closes. In-place mutation of a genuine batch object's own fields is a
+# separate rung, closed by the recursive freeze on BATCHES_ARGS below, in
+# SKEPTIC_HARNESS_TEMPLATE -- not by this guard.
+_DISPATCH_PROMPT_RECORDER = """
+globalThis.__realDispatchPrompts__ = new Map();
+{
+  const __origBatchDispatchPrompt = batchDispatchPrompt;
+  batchDispatchPrompt = function (batch) {
+    const built = __origBatchDispatchPrompt(batch);
+    globalThis.__realDispatchPrompts__.set(batch, built);
+    return built;
+  };
+}
+"""
 
 
 SKEPTIC_HARNESS_TEMPLATE = r"""
@@ -206,6 +278,26 @@ __WRAPPED_SOURCE__
 
 const PLAN = __PLAN_JSON__;
 const BATCHES_ARGS = __BATCHES_JSON__;
+// Round 9 port: same recursive freeze as skeptic_pipeline_e2e.test.py's own
+// (see that file's header comment above this exact block for the full
+// derivation -- what it closes, the "shallow Object.freeze() vs the
+// recursive walk" distinction, and the RED/TypeError-vs-guard evidence).
+// Independently re-verified against THIS harness copy's own
+// build_skeptic_harness(), not only the sibling's: the named decoy
+// (`BATCHES[1].assignments = BATCHES[0].assignments`, call site
+// untouched) dispatches batch 1 with batch 0's assignment_id and rc=0
+// without this freeze; with it, the same decoy throws `TypeError: Cannot
+// assign to read only property 'assignments'` at the mutation site, and
+// the unmutated real template still runs clean (rc=0) with the freeze in
+// place.
+(function __freezeBatchesDeep__(o, seen) {
+  seen = seen || new Set();
+  if (o === null || typeof o !== "object" || seen.has(o)) return o;
+  seen.add(o);
+  Object.freeze(o);
+  Object.getOwnPropertyNames(o).forEach(function (k) { __freezeBatchesDeep__(o[k], seen); });
+  return o;
+})(BATCHES_ARGS);
 const ROOT = __ROOT_JSON__;
 const RUN_ID = __RUN_ID_JSON__;
 const RUN_DIR = ROOT + "/skeptic/runs/" + RUN_ID;
@@ -232,6 +324,33 @@ async function agent(promptText, opts) {
   const p = PLAN[idx] || {};
   if (kind === "precheck") return (p.precheck !== undefined) ? p.precheck : ("ABSENT " + idx);
   if (kind === "dispatch") {
+    // Same guard as skeptic_pipeline_e2e.test.py's own dispatch branch
+    // (round 6): the fragment must not appear for a call whose prompt the
+    // REAL batchDispatchPrompt() never produced, so a decoy call cannot
+    // manufacture the artifact a downstream on-disk assertion reads.
+    //
+    // Round 7/8 port: bound to THIS call's own batch index, not just to
+    // "the builder produced it for some batch".
+    //
+    // Round 9 port: that property is exactly as forgeable as the round-7
+    // array was -- see _DISPATCH_PROMPT_RECORDER's header comment above.
+    // `trustedBatch` is looked up from BATCHES_ARGS (this harness's OWN
+    // copy, independent of anything the call site passed), and the
+    // recorded prompt must have come from calling batchDispatchPrompt()
+    // with THAT EXACT object reference, not merely with something
+    // claiming its index.
+    const trustedBatch = BATCHES_ARGS.find(function (b) { return String(b.index) === idx; });
+    if (!trustedBatch || globalThis.__realDispatchPrompts__.get(trustedBatch) !== promptText) {
+      throw new Error(
+        "skeptic:dispatch:" + idx + " was called with a prompt that was not built by " +
+        "calling the real batchDispatchPrompt() with this harness's own batch object " +
+        "for index " + idx + " -- either the prompt was forged outright, or the real " +
+        "builder was called with a different object (possibly one that copies this " +
+        "index but carries a different batch's content). No fragment is written for " +
+        "it: a decoy must not be able to manufacture the artifact a downstream on-disk " +
+        "assertion reads. Prompt seen: " + JSON.stringify(promptText.slice(0, 120))
+      );
+    }
     if (p.dispatchWrite !== undefined) {
       const outPath = fragmentPathFor(idx);
       fs.mkdirSync(path.dirname(outPath), { recursive: true });

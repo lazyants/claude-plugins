@@ -322,6 +322,66 @@ def test_drive_prompt_launches_detached_codex_job(tmp_path, drive_label, launch_
     assert f'TASKFILE="{FIXTURE_DURABLE_ROOT}/segments/.codex_task.{kind}.seg01.$DISP"' in prompt
 
 
+# Round-8 sweep finding: the DISPATCHING agent (this prompt, NOT codex) holds
+# a Bash tool and is told it must do nothing but launch the detached job --
+# unpinned. PRESENCE-ONLY, and a residual gap is named rather than implied
+# away: this file's own `test_drive_dispatch_call_sites_have_no_codex_
+# agenttype` below already confirms the dispatcher itself carries no
+# agentType (it is a plain Claude call, not codex), which is exactly what
+# makes this prompt's own restraint the only thing standing between it and
+# writing the canonical draft/review file directly. Traced closely rather
+# than assumed: if this agent fabricated a structurally-valid
+# segments/{seg}.draft.json with the CORRECT dispatch_token (RUN_ID + ":" +
+# seg -- a value visible to it in this SAME prompt's own embedded codex task
+# text, not a secret), draft_ready.py's token check would pass it, and
+# validate_draft.py's six checks (verified in
+# assets/scripts/validate_draft.py -- placeholder/coverage/key-set/verse-
+# line-count structure only, explicitly NOT semantic fidelity, which its own
+# comments say is "deliberately left for the semantic codex review to
+# catch") cannot distinguish a genuine codex translation from a plausible
+# fabrication with the right shape. This is a real, currently unclosable gap
+# given this system has no tool-restriction mechanism (round-8 sweep,
+# confirmed across all 27 `await agent(` call sites in the three templates --
+# an earlier draft said 30, counting `agent(` occurrences that were comment
+# and label-string text rather than call sites) -- named
+# here rather than left implicit behind a presence check that would read as
+# coverage it does not have.
+DISPATCH_NO_SELF_ACTION_CLAUSES = {
+    "translate:seg01": (
+        "you do NOT translate anything yourself, and you do NOT wait for "
+        "the job to finish"
+    ),
+    "review-dispatch:seg01:r1": (
+        "you do NOT review anything yourself, and you do NOT wait for the "
+        "job to finish"
+    ),
+}
+DISPATCH_NO_POLL_OR_READ_CLAUSE = (
+    "Do not poll the job, do not read any file, and add no other text"
+)
+
+
+@pytest.mark.parametrize("drive_label", ["translate:seg01", "review-dispatch:seg01:r1"])
+def test_drive_prompt_forbids_the_dispatcher_doing_the_work_itself(tmp_path, drive_label):
+    """See the module-level comment just above for the full argument,
+    including the unclosable residual gap this pin cannot cover. This is a
+    PRESENCE check only: the mocked agent() here returns a canned DISPATCHED
+    string for this label -- it never runs an LLM that could ignore these
+    words -- so this proves the instructions are still WRITTEN, not that a
+    dispatching agent is actually restrained by them."""
+    out = _happy_run(tmp_path)
+    prompt = out["promptByLabel"][drive_label]
+
+    assert DISPATCH_NO_SELF_ACTION_CLAUSES[drive_label] in prompt, (
+        f"the {drive_label} dispatch prompt must forbid the agent from "
+        f"doing the translate/review work itself; prompt was:\n{prompt}"
+    )
+    assert DISPATCH_NO_POLL_OR_READ_CLAUSE in prompt, (
+        f"the {drive_label} dispatch prompt must forbid polling the job or "
+        f"reading any file; prompt was:\n{prompt}"
+    )
+
+
 @pytest.mark.parametrize(
     "drive_label,launch_needle",
     [("translate:seg01", "codex_job.py --kind translate"),
@@ -1008,6 +1068,56 @@ def test_translate_wait_non_terminal_quoted_ready_still_times_out(tmp_path):
     assert out["result"]["converged"] == []
 
 
+# Round-8 sweep finding: readReviewPrompt's "do not judge or second-guess the
+# reviewer's verdict" was unpinned. PRESENCE-ONLY, same caveat as the
+# dispatch pin above. Partial mitigation named rather than assumed: a
+# misreported verdict here is not the only line of defense -- getVerifiedReview
+# later runs verifyReviewArtifactPrompt/review_artifact_check.py to
+# independently re-derive the SAME four fields from the on-disk review.json
+# and compare, which is where this file's own artifactCheckMatched() pin
+# below (STRUCTURAL, not presence) actually lives. This test only covers the
+# read step's own prompt text.
+REVIEW_READ_NO_JUDGE_CLAUSE = "do not judge or second-guess the reviewer's verdict"
+
+
+def test_review_read_prompt_forbids_judging_the_verdict(tmp_path):
+    out = _happy_run(tmp_path)
+    prompt = out["promptByLabel"]["review-read:seg01:r1"]
+    assert REVIEW_READ_NO_JUDGE_CLAUSE in prompt, (
+        "the review-read prompt must forbid the agent from judging or "
+        f"second-guessing the reviewer's verdict; prompt was:\n{prompt}"
+    )
+
+
+# Round-8 sweep finding: draftProbePrompt's "do not translate, fix, or judge
+# anything" was unpinned. PRESENCE-ONLY. Reached via the same fixture
+# test_fix_null_return_still_triggers_probe uses above, since the default
+# happy path never dispatches a fix round and so never reaches this label.
+DRAFT_PROBE_NO_ACTION_CLAUSE = "do not translate, fix, or judge anything"
+
+
+def test_draft_probe_prompt_forbids_acting_on_the_draft(tmp_path):
+    res = run(
+        tmp_path=tmp_path, segs=["seg01"],
+        overrides={
+            "review-read:seg01:r1": _non_clean_review(),
+            "artifact-check:seg01:r1": {"match": True},
+            "fix:seg01:r1": None,
+        },
+    )
+    assert res["ok"], res["stderr"]
+    out = res["out"]
+    labels = [c["label"] for c in out["calls"]]
+    assert "draft-probe:seg01" in labels, (
+        f"expected the fix-call failure to reach the draft probe; calls were {labels}"
+    )
+    prompt = out["promptByLabel"]["draft-probe:seg01"]
+    assert DRAFT_PROBE_NO_ACTION_CLAUSE in prompt, (
+        "the draft-probe prompt must forbid the agent from translating, "
+        f"fixing, or judging anything itself; prompt was:\n{prompt}"
+    )
+
+
 # ---------------------------------------------------------------------------
 # #289 -- the two ledger guards (ledgerWriteSucceeded/ledgerMergeSucceeded)
 # must judge failure EVIDENCE, never failure-key PRESENCE.
@@ -1072,6 +1182,88 @@ def test_ledger_write_accepts_truthful_exit_code_zero(tmp_path):
     assert out["result"]["converged"] == [{"seg": "seg01", "converged": True, "rounds": 1}]
     assert out["result"]["failed"] == []
     assert out["result"]["batchComplete"] is True
+
+
+# Round-8 sweep finding: recordLedgerPrompt's scratch-file naming
+# instruction, "never reuse an existing scratch file" -- unpinned.
+# PRESENCE-ONLY: a collision-avoidance instruction, not a capability
+# boundary (the residual harm is a corrupted/racing write between two
+# ledger-write calls sharing a scratch path, not network reach or a trusted
+# verdict), so this is deliberately the lowest-priority pin in this file.
+LEDGER_SCRATCH_FILE_NO_REUSE_CLAUSE = "never reuse an existing scratch file"
+
+
+def test_ledger_write_prompt_forbids_reusing_a_scratch_file(tmp_path):
+    out = _happy_run(tmp_path)
+    prompt = out["promptByLabel"]["ledger:converged:seg01"]
+    assert LEDGER_SCRATCH_FILE_NO_REUSE_CLAUSE in prompt, (
+        "the ledger-write prompt must forbid reusing an existing scratch "
+        f"file; prompt was:\n{prompt}"
+    )
+
+
+# Round-8 sweep item singled out for the strongest treatment: "Do not trust
+# the command's own fragment_sha1 claim without this independent check" is
+# not a scope reminder -- it IS the only independent cross-check that
+# exists anywhere for ledger_update.py's reported hash. If it goes, nothing
+# re-derives the hash. Same shape and same two-part structure as
+# glossary_snapshot_ordering.test.py's/skeptic_pipeline_e2e.test.py's
+# test_verify_result_trust_rests_on_shape_alone_not_independent_corroboration.
+LEDGER_INDEPENDENT_SHA1_CHECK_CLAUSE = (
+    "Do not trust the command's own fragment_sha1 claim without this "
+    "independent check"
+)
+
+
+def test_ledger_write_result_trust_rests_on_shape_alone_not_independent_corroboration(tmp_path):
+    """The STRONG form of the sha1-independence property.
+
+    1. SOURCE-STRUCTURAL: ledgerWriteSucceeded() -- the one function
+       standing between the agent's reply and a converged ledger entry -- is
+       read directly out of the real template and asserted to contain none
+       of createHash/readFileSync/execFileSync/spawnSync/require(/
+       subprocess/agent(: it checks only that fragment_sha1 is a non-empty
+       STRING (isNonEmptyString), never its VALUE, and never independently
+       recomputes anything itself.
+    2. BEHAVIOURAL: this file's OWN happy-path mock -- _write_success(),
+       which every ledger-write override in this file builds on -- already
+       returns the trivially fake `fragment_sha1: "d"`, one character,
+       obviously never computed by hashlib over any real file, and the
+       workflow converges the segment anyway. That is not new behaviour
+       created by this test: it is the precondition this entire file's
+       fixtures already depend on, made an explicit, named assertion here
+       instead of an implicit byproduct nobody has to notice. Reinforced
+       with a second, differently-fake value below to show it is not
+       specifically the string "d" that slips through.
+    """
+    template_source = MASS_TRANSLATE_TEMPLATE.read_text(encoding="utf-8")
+    m = re.search(r"function ledgerWriteSucceeded\(raw\) \{(.*?)\n\}", template_source, re.DOTALL)
+    assert m, (
+        "ledgerWriteSucceeded() not found in mass-translate-wf.template.js "
+        "-- has it been renamed or restructured? This test's whole premise "
+        "is that function's own body."
+    )
+    body = m.group(1)
+    for marker in ("createHash", "readFileSync", "execFileSync", "spawnSync", "require(", "subprocess", "agent("):
+        assert marker not in body, (
+            f"ledgerWriteSucceeded() now contains {marker!r} -- it used to "
+            "be a pure shape/value check with no independent recomputation "
+            "of the hash; if that changed on purpose, this assertion needs "
+            f"to be revisited, not silenced. Body was:\n{body}"
+        )
+
+    res = run(
+        tmp_path=tmp_path, segs=["seg01"],
+        overrides={"ledger:converged:seg01": _write_success("seg01", fragment_sha1="not-a-real-sha1-either")},
+    )
+    assert res["ok"], res["stderr"]
+    assert res["out"]["result"]["converged"] == [{"seg": "seg01", "converged": True, "rounds": 1}], (
+        "a ledger-write reply carrying an obviously-fake fragment_sha1 "
+        "value (never independently computed by anything the harness ran) "
+        "still converges the segment -- confirms nothing downstream "
+        "corroborates the agent's independent-check claim; result was "
+        f"{res['out']['result']}"
+    )
 
 
 def test_ledger_merge_accepts_truthful_exit_code_zero(tmp_path):
@@ -1224,6 +1416,78 @@ def test_artifact_check_accepts_benign_empty_mismatch_detail(tmp_path):
     labels = [c["label"] for c in out["calls"]]
     assert ARTIFACT_LABELS[1] not in labels, (
         "an accepted first check must not trigger the shared read+check retry"
+    )
+
+
+# Round-8 sweep item, second one singled out for the strongest treatment.
+# verifyReviewArtifactPrompt's "do not judge the comparison yourself" /
+# "do not re-judge it" and artifactCheckMatched() -- the JS-side trust
+# function directly above this test's own section -- are the SAME shape as
+# the ledger sha1 case: a pure shape check over the reply object, with
+# nothing downstream re-running review_artifact_check.py or re-deriving
+# `match` independently. This is the DEEPEST layer in the review-verdict
+# chain (see the review-read pin's comment above, which names this as its
+# own partial mitigation) -- past this point, nothing else corroborates.
+ARTIFACT_CHECK_NO_JUDGE_CLAUSE = "do not judge the comparison yourself"
+ARTIFACT_CHECK_NO_REJUDGE_CLAUSE = "do not re-judge it"
+
+
+def test_artifact_check_prompt_forbids_judging_the_comparison(tmp_path):
+    """PRESENCE half: both clause texts must be in the rendered prompt."""
+    out = _happy_run(tmp_path)
+    prompt = out["promptByLabel"]["artifact-check:seg01:r1"]
+    assert ARTIFACT_CHECK_NO_JUDGE_CLAUSE in prompt, (
+        "the artifact-check prompt must forbid the agent from judging the "
+        f"comparison itself; prompt was:\n{prompt}"
+    )
+    assert ARTIFACT_CHECK_NO_REJUDGE_CLAUSE in prompt, (
+        "the artifact-check prompt must forbid re-judging the script's own "
+        f"comparison; prompt was:\n{prompt}"
+    )
+
+
+def test_artifact_check_result_trust_rests_on_shape_alone_not_independent_corroboration(tmp_path):
+    """STRUCTURAL + BEHAVIOURAL half, same two-part shape as the ledger
+    sha1 pin above and the glossary/skeptic verify-trust pins.
+
+    1. SOURCE-STRUCTURAL: artifactCheckMatched() is read directly out of the
+       real template and asserted to contain none of
+       execFileSync/spawnSync/require(/subprocess/agent(/review_artifact_
+       check -- it checks only that `match` is exactly `true`, that no
+       failure evidence is present, and that no undeclared key rides along;
+       it never re-runs review_artifact_check.py or re-derives the
+       comparison itself.
+    2. BEHAVIOURAL: a bare `{"match": true}` reply -- which every other test
+       in this ARTIFACT_LABELS section already uses as ITS happy path,
+       without any review_artifact_check.py subprocess ever actually
+       running inside this harness -- still converges the segment.
+    """
+    template_source = MASS_TRANSLATE_TEMPLATE.read_text(encoding="utf-8")
+    m = re.search(r"function artifactCheckMatched\(art\) \{(.*?)\n\}", template_source, re.DOTALL)
+    assert m, (
+        "artifactCheckMatched() not found in mass-translate-wf.template.js "
+        "-- has it been renamed or restructured? This test's whole premise "
+        "is that function's own body."
+    )
+    body = m.group(1)
+    for marker in ("execFileSync", "spawnSync", "require(", "subprocess", "agent(", "review_artifact_check"):
+        assert marker not in body, (
+            f"artifactCheckMatched() now contains {marker!r} -- it used to "
+            "be a pure shape check over the reply object with no "
+            "independent re-derivation of the comparison; if that changed "
+            f"on purpose, this assertion needs to be revisited, not "
+            f"silenced. Body was:\n{body}"
+        )
+
+    res = run(
+        tmp_path=tmp_path, segs=["seg01"],
+        overrides=_artifact_overrides({"match": True}),
+    )
+    assert res["ok"], res["stderr"]
+    assert res["out"]["result"]["converged"] == [{"seg": "seg01", "converged": True, "rounds": 1}], (
+        "a bare match:true reply, never independently corroborated against "
+        "review_artifact_check.py's own real comparison, still converges "
+        f"the segment; result was {res['out']['result']}"
     )
 
 

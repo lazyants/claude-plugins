@@ -30,6 +30,7 @@ the real seam rather than within one script's own suite.
 from __future__ import annotations
 
 import json
+import re
 import shlex
 import shutil
 import subprocess
@@ -229,22 +230,40 @@ def manifest_path(root: Path, index: int) -> Path:
     return run_dir(root) / f"manifest_{index}.json"
 
 
+# The chunk poll's ACCEPT gate as rendered since 1.16.2 (#352). The
+# `>/dev/null 2>&1` suppression is part of the emitted poll, NOT part of the
+# --check-batch contract, so it is matched here rather than swallowed into the
+# extracted command -- the approve command is that contract plus an APPENDED
+# flag, and a stray suffix would make every comparison below compare the wrong
+# string while still looking like it passed.
+_CHUNK_ACCEPT_RE = re.compile(r"while true; do (.*?) >/dev/null 2>&1 && exit 0;")
+
+
 def check_cmd_from_wait(out: dict, root: Path, index: int, attempt: int = 0) -> str:
     """The --check-batch command the WAIT poll for this attempt actually issued,
     lifted back out of its rendered polling loop (mirrors
     glossary_snapshot_ordering.test.py's helper, but resolved against a REAL
-    durable root)."""
-    prompt = prompts_for(out, f"glossary:wait:{index}")[attempt]
-    lines = [ln for ln in prompt.split("\n") if "--check-batch" in ln]
-    assert len(lines) == 1, f"expected one --check-batch line in the wait prompt, got {lines}"
-    loop = lines[0]
-    start = loop.index("do ") + len("do ")
-    end = loop.index(" && exit 0")
-    cmd = loop[start:end]
-    assert str(attempt_path(root, index, attempt)) in cmd, (
-        f"the wait poll for attempt {attempt} does not name that attempt's path: {cmd}"
+    durable root).
+
+    1.16.2 (#352): a wait renders up to WAIT_CHUNKS chunk prompts under one
+    label, so this selects by the attempt's own fragment PATH rather than by
+    position in the prompt list."""
+    wanted = str(attempt_path(root, index, attempt))
+    hits = []
+    for prompt in prompts_for(out, f"glossary:wait:{index}"):
+        for line in prompt.split("\n"):
+            m = _CHUNK_ACCEPT_RE.search(line)
+            if m and "--check-batch" in m.group(1) and wanted in m.group(1):
+                hits.append(m.group(1))
+    assert hits, (
+        f"no wait chunk for batch {index} attempt {attempt} issued a --check-batch "
+        f"gate naming {wanted}"
     )
-    return cmd
+    assert len(set(hits)) == 1, (
+        f"the wait chunks for batch {index} attempt {attempt} issued DIFFERENT "
+        f"--check-batch commands: {sorted(set(hits))}"
+    )
+    return hits[0]
 
 
 def approve_cmd_for(check_cmd: str, root: Path, index: int, attempt: int) -> str:
