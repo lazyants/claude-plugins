@@ -5,7 +5,8 @@
 // Section order: JCS canonicalization (pinned vectors + mutants) -> the strict JSON reader
 // (duplicate-key / lone-surrogate) -> path derivations -> gate 5 (ownership) -> gate 6 (hazards) ->
 // row 6 (the 22-case + 24-raw-case classifier, plus abort/cleanup) -> openCaptureRun/closeCaptureRun
-// -> recordChapterProvenance (completeness rules 1-5) -> buildProvenanceReport -> the fs capability
+// -> recordChapterProvenance (completeness rules 1-5) -> sweepChapterProvenanceTemps (deliberately
+// separate from row 6 — see its section banner) -> buildProvenanceReport -> the fs capability
 // policy -> the required integration test against teammate B's real chapter-paths.mjs exports.
 
 import test from 'node:test';
@@ -432,19 +433,33 @@ test('gate 5: sibling-prefix topology (handbook-old vs handbook) does NOT overla
 });
 
 test('gate 5: overlap hidden behind two DIFFERENT symlinked aliases — the halt message must name the RESOLVED paths, not just the raw disjoint-looking ones', () => {
-  // `alias-a` and `alias-b` are two distinct names, both pointing at the SAME real directory — the
-  // raw configured strings ('.../alias-a/.provenance' vs '.../alias-b') share no lexical prefix at
-  // all, so a reader comparing only the raw values would conclude the two trees are unrelated. They
-  // are not: both resolve into 'real', and `capture.output_dir` (resolved) turns out to be a direct
-  // ANCESTOR of the resolved provenance root — the overlap the gate exists to refuse. The gate
-  // already refuses this correctly (this is not a gate-5 detection bug); what this test pins is that
-  // the halt MESSAGE explains why, by naming what each raw string actually resolved to.
+  // `alias-a` and `alias-b` are two distinct names whose raw configured strings
+  // ('.../alias-a/.provenance' vs '.../alias-b') share no lexical prefix at all, so a reader
+  // comparing only the raw values would conclude the two trees are unrelated. They are not:
+  // `alias-a` resolves into `real/sub` and `alias-b` resolves into `real` — a direct ANCESTOR of
+  // `real/sub`, and therefore of the resolved provenance root `real/sub/.provenance` — the overlap
+  // the gate exists to refuse. The gate already refuses this correctly (this is not a gate-5
+  // detection bug); what this test pins is that the halt MESSAGE explains why, by naming what each
+  // raw string actually resolved to.
+  //
+  // The two resolved targets (`real` and `real/sub`) are deliberately DIFFERENT directories, not
+  // the same one aliased twice (an earlier version of this fixture used one shared target) — but
+  // that alone does not make the two assertions below independent: `real` is, by construction, a
+  // literal filesystem-and-string PREFIX of `real/sub/.provenance`, so a bare
+  // `message.includes(outputResolved)` would still pass on a message that named only the root's
+  // resolved value and never printed the output dir's on its own (an actual mutation caught this:
+  // deleting the "capture.output_dir ... resolves to '...'" clause entirely left both bare checks
+  // green). What makes them independent is asserting each value in the DELIMITED form the message
+  // template actually renders it in — `'<value>')`, quote-value-quote-paren — since that trailing
+  // `')` can only follow a value the message prints AT THAT POSITION, never a value that merely
+  // happens to be a prefix of a longer one printed elsewhere.
   withTempDir((dir) => {
     const real = join(dir, 'real');
-    nodeFs.mkdirSync(real, { recursive: true });
-    const aliasA = join(dir, 'alias-a');
-    const aliasB = join(dir, 'alias-b');
-    nodeFs.symlinkSync(real, aliasA);
+    const realSub = join(real, 'sub');
+    nodeFs.mkdirSync(realSub, { recursive: true });
+    const aliasA = join(dir, 'alias-a'); // publish.chapters_dir — resolves to realSub
+    const aliasB = join(dir, 'alias-b'); // capture.output_dir — resolves to real, realSub's ANCESTOR
+    nodeFs.symlinkSync(realSub, aliasA);
     nodeFs.symlinkSync(real, aliasB);
     const profile = {
       capture: { output_dir: aliasB, build_identity: { ui_read: false } },
@@ -456,20 +471,30 @@ test('gate 5: overlap hidden behind two DIFFERENT symlinked aliases — the halt
     assert.equal(halt.halts[0].halt, 'provenance_root_overlap');
 
     const message = halt.halts[0].message;
-    const realResolved = nodeFs.realpathSync(real);
+    const rootResolved = nodeFs.realpathSync(realSub);
+    const outputResolved = nodeFs.realpathSync(real);
+    assert.notEqual(
+      rootResolved,
+      outputResolved,
+      'fixture sanity: the two resolved targets must be genuinely different paths, or the two assertions below collapse into one',
+    );
+
     // The raw, as-configured values — both must still be present (this much already held before
     // the fix; a message that dropped them would be a regression in the other direction).
     assert.ok(message.includes(join(aliasA, '.provenance')), 'message must still name the raw provenance root');
     assert.ok(message.includes(aliasB), 'message must still name the raw capture.output_dir');
     // The RESOLVED values — this is what a raw-only message cannot provide, and what makes the halt
-    // actionable: the operator's own alias names never appear in the same tree, only their targets do.
+    // actionable: the operator's own alias names never appear in the same tree, only their targets
+    // do. Each is asserted in its DELIMITED form (see the comment above) so that neither check can
+    // pass merely because the OTHER value's rendering happens to contain it as a substring.
+    const rootResolvedPath = `${rootResolved}/.provenance`;
     assert.ok(
-      message.includes(`${realResolved}/.provenance`),
-      `message must name the RESOLVED provenance root ('${realResolved}/.provenance'); got: ${message}`,
+      message.includes(`'${rootResolvedPath}')`),
+      `message must name the RESOLVED provenance root ('${rootResolvedPath}'); got: ${message}`,
     );
     assert.ok(
-      message.includes(realResolved),
-      `message must name the RESOLVED capture.output_dir ('${realResolved}'); got: ${message}`,
+      message.includes(`'${outputResolved}')`),
+      `message must name the RESOLVED capture.output_dir ('${outputResolved}'); got: ${message}`,
     );
   });
 });
@@ -2098,6 +2123,122 @@ test('recordChapterProvenance: same-slug namespaces (flat vs grouped) record dis
 
     assert.equal(nodeFs.existsSync(CR.chapterRecordPath(profile, grouped)), false);
     assert.notEqual(CR.chapterRecordPath(profile, flat), CR.chapterRecordPath(profile, grouped));
+  });
+});
+
+// =================================================================================================
+// sweepChapterProvenanceTemps (codex round 5, finding 3) — the leftover `<slug>.json.<uuid>.tmp`
+// a crashed recordChapterProvenance leaves behind under chapters/, and why row 6's classifier stays
+// blind to it by design (see the module comment above sweepChapterProvenanceTemps's definition).
+// =================================================================================================
+
+function chapterTempPathFor(profile, entry, uuid = 'bbbbbbbb-0000-0000-0000-000000000000') {
+  return `${CR.chapterRecordPath(profile, entry)}.${uuid}.tmp`;
+}
+
+function writeChapterTemp(profile, entry, text = '{}', uuid) {
+  const tempPath = chapterTempPathFor(profile, entry, uuid);
+  nodeFs.mkdirSync(join(tempPath, '..'), { recursive: true });
+  nodeFs.writeFileSync(tempPath, text);
+  return tempPath;
+}
+
+test('sweepChapterProvenanceTemps: finds and removes a leftover chapter-record temp a crashed recordChapterProvenance left behind', () => {
+  withTempDir((dir) => {
+    const profile = profileFor(dir);
+    const entry = { slug: 'items' };
+    const tempPath = writeChapterTemp(profile, entry);
+    const result = CR.sweepChapterProvenanceTemps(profile, [entry], realDeps());
+    assert.equal(result.ok, true, JSON.stringify(result));
+    assert.deepEqual(result.removed, [tempPath]);
+    assert.equal(nodeFs.existsSync(tempPath), false, 'the leftover temp must actually be gone from disk');
+  });
+});
+
+test('sweepChapterProvenanceTemps: grouped entry — the leftover temp lives under chapters/<group>/, not chapters/', () => {
+  withTempDir((dir) => {
+    const profile = profileFor(dir);
+    const entry = { slug: 'items', group: 'setup' };
+    const tempPath = writeChapterTemp(profile, entry);
+    assert.ok(tempPath.includes(`${join('chapters', 'setup')}`), `fixture sanity: temp must live under the group dir, got ${tempPath}`);
+    const result = CR.sweepChapterProvenanceTemps(profile, [entry], realDeps());
+    assert.equal(result.ok, true, JSON.stringify(result));
+    assert.deepEqual(result.removed, [tempPath]);
+    assert.equal(nodeFs.existsSync(tempPath), false);
+  });
+});
+
+test("sweepChapterProvenanceTemps: a stray chapter temp is invisible to recoverProvenanceState — row 6's domain stays run/-only", () => {
+  withTempDir((dir) => {
+    const profile = profileFor(dir);
+    const entry = { slug: 'items' };
+    writeChapterTemp(profile, entry);
+    // No token/record written at all — the run's own state is 'absent' regardless of the stray
+    // chapter temp. If row 6's `temps` observation ever widened to include chapters/, this would
+    // misclassify as 'orphan_temp' instead, and — worse — would stay 'orphan_temp' forever, since
+    // nothing about sweeping a chapter temp changes the run's own token/record.
+    const result = CR.recoverProvenanceState(profile, realDeps());
+    assert.equal(result.state, 'absent', `a stray chapters/ temp must never affect row 6's run-state classification; got ${result.state}`);
+  });
+});
+
+test('sweepChapterProvenanceTemps: no leftover temps is a true no-op — the real chapter record is untouched', () => {
+  withTempDir((dir) => {
+    const profile = profileFor(dir);
+    const entry = { slug: 'items' };
+    const recordPath = CR.chapterRecordPath(profile, entry);
+    nodeFs.mkdirSync(join(recordPath, '..'), { recursive: true });
+    nodeFs.writeFileSync(recordPath, '{"record_version":1}');
+    const result = CR.sweepChapterProvenanceTemps(profile, [entry], realDeps());
+    assert.equal(result.ok, true, JSON.stringify(result));
+    assert.deepEqual(result.removed, []);
+    assert.equal(nodeFs.existsSync(recordPath), true, 'the real (non-temp) chapter record must never be touched by the sweep');
+  });
+});
+
+test('sweepChapterProvenanceTemps: a hazard on the chapters/ hierarchy halts rather than silently skipping', () => {
+  withTempDir((dir) => {
+    const profile = profileFor(dir);
+    const entry = { slug: 'items' };
+    const root = CR.provenanceRoot(profile);
+    nodeFs.mkdirSync(root, { recursive: true });
+    const outside = join(dir, 'outside-chapters-dir');
+    nodeFs.mkdirSync(outside, { recursive: true });
+    nodeFs.symlinkSync(outside, join(root, 'chapters'));
+    const result = CR.sweepChapterProvenanceTemps(profile, [entry], realDeps());
+    assert.equal(result.ok, false, JSON.stringify(result));
+    assert.equal(result.halts[0].halt, 'provenance_hazard');
+    assert.equal(result.halts[0].reason, 'symlink');
+  });
+});
+
+test('sweepChapterProvenanceTemps: a hazard on a temp leaf itself (hard link) halts rather than unlinking blind', () => {
+  withTempDir((dir) => {
+    const profile = profileFor(dir);
+    const entry = { slug: 'items' };
+    const tempPath = chapterTempPathFor(profile, entry);
+    nodeFs.mkdirSync(join(tempPath, '..'), { recursive: true });
+    const outside = join(dir, 'outside-hardlink-target.json');
+    nodeFs.writeFileSync(outside, '{}');
+    nodeFs.linkSync(outside, tempPath);
+    const result = CR.sweepChapterProvenanceTemps(profile, [entry], realDeps());
+    assert.equal(result.ok, false, JSON.stringify(result));
+    assert.equal(result.halts[0].halt, 'provenance_hazard');
+    assert.equal(result.halts[0].reason, 'hard_link');
+    assert.equal(nodeFs.existsSync(tempPath), true, 'a hazard leaf must never be unlinked');
+  });
+});
+
+test("sweepChapterProvenanceTemps: a skipped-ownership profile is a silent no-op, matching abortCaptureRun/cleanupCommittedRun's skip contract", () => {
+  withTempDir((dir) => {
+    nodeFs.mkdirSync(join(dir, 'handbook'), { recursive: true });
+    const profile = {
+      capture: { output_dir: join(dir, 'handbook') },
+      publish: { chapters_dir: join(dir, 'handbook') },
+    };
+    const entry = { slug: 'items' };
+    const result = CR.sweepChapterProvenanceTemps(profile, [entry], realDeps());
+    assert.deepEqual(result, { ok: true, skipped: true, removed: [] });
   });
 });
 

@@ -3397,6 +3397,23 @@ fi
 has_in_section "SKILL: repairs never touch <provenance root>/chapters/" \
   "$SKILL" '### W2 — Capture screenshots' \
   'never touch `<provenance root>/chapters/`'
+# [round 5, finding 3] The pin above states a BOUNDARY. On its own it reads as "chapters/ needs
+# nothing", which is false: a crashed W5 leaves its own temp there, and the only thing that removes
+# it is a call SKILL.md must name — an unnamed entrypoint in a skill asset is an unreachable one,
+# which is how three separate capabilities in this release came to be fully tested and never run.
+# So the boundary and its consequence are pinned together, and the W5 cross-reference with them.
+has_in_section "SKILL: the chapters/ boundary is deliberate, not an oversight" \
+  "$SKILL" '### W2 — Capture screenshots' \
+  'that boundary is deliberate, not an oversight'
+has_in_section "SKILL: W2 cites sweepChapterProvenanceTemps(profileLike, entries, deps)" \
+  "$SKILL" '### W2 — Capture screenshots' \
+  'sweepChapterProvenanceTemps(profileLike, entries, deps)'
+has_in_section "SKILL: W2 says a chapter temp is uncorrelated with row 6's token/record" \
+  "$SKILL" '### W2 — Capture screenshots' \
+  'a chapter temp is not correlated with either'
+has_in_section "SKILL: W5 cross-references the sweep for its own leftover temp" \
+  "$SKILL" '### W5 — Publish' \
+  "see W2's crash-recovery section for \`sweepChapterProvenanceTemps\`"
 has_in_section "SKILL: repairs are idempotent on an already-repaired tree" \
   "$SKILL" '### W2 — Capture screenshots' \
   'calling one again on an already-repaired tree is a no-op'

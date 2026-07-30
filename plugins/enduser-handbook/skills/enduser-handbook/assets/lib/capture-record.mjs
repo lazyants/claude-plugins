@@ -19,7 +19,12 @@
 // `assertProvenanceOwnership`, `openCaptureRun`, `closeCaptureRun`, `recordChapterProvenance`,
 // `buildProvenanceReport`, and row 6's operator-invoked recovery trio `recoverProvenanceState`,
 // `abortCaptureRun`, `cleanupCommittedRun` — plus the two path derivations every stage shares,
-// `provenanceRoot` and `chapterRecordPath`. Ten named exports; the eight entrypoints are a
+// `provenanceRoot` and `chapterRecordPath`, plus `sweepChapterProvenanceTemps` (codex round 5,
+// finding 3): an ELEVENTH, operator-invoked export that is deliberately NOT a member of row 6's
+// recovery trio — it answers a different question (is there a leftover chapter-record temp?) over
+// a domain row 6 does not cover (`chapters/`, not `run/`), so it is its own single-purpose sweep
+// rather than a fourth state the classifier's `(token, record, temps)` tuple would have to absorb;
+// see the comment above its definition. Eleven named exports; the eight entrypoints are a
 // different count of a different thing (five pipeline stages plus row 6's recovery trio), and the
 // plan is explicit that conflating the two counts is itself a defect worth guarding against.
 //
@@ -624,6 +629,22 @@ export function provenanceRoot(profileLike) {
   return posixJoin(profileLike.publish.chapters_dir, PROVENANCE_DIRNAME);
 }
 
+// The directory a chapter's own record (and, transiently, its write temp) lives in —
+// `<root>/chapters/<group>` (grouped) or `<root>/chapters` (flat). Split out of `chapterRecordPath`
+// below so `sweepChapterProvenanceTemps` (codex round 5, finding 3) can list a chapter's temp
+// directory without re-deriving the group/flat branch a third time; `chapterRecordPath` and
+// `sweepChapterProvenanceTemps` both call this one function rather than keeping their own copies
+// that could disagree, same rationale as `chapterRecordPath`'s own docstring below.
+function chapterRecordDir(profileLike, entry) {
+  const base = chaptersNamespaceDir(profileLike);
+  // `entry.group !== undefined`, never a truthy check — chapter-paths.mjs's own convention
+  // (chapterRelPath, outputDirTail), documented there as "a falsy-but-present group value must
+  // never silently derive a flat path". A truthy check would treat `group: 0` (or `''`) as flat
+  // here while chapterAssetDir treats the identical entry as grouped — a real cross-module
+  // classification mismatch for a malformed-but-present manifest value (found by paths, #362).
+  return entry.group !== undefined ? posixJoin(base, String(entry.group)) : base;
+}
+
 /**
  * `<root>/chapters/<group>/<slug>.json` (grouped) or `<root>/chapters/<slug>.json` (flat). Stable
  * across W2, W5 and W6 — all three call this one derivation rather than keeping three private
@@ -634,15 +655,8 @@ export function provenanceRoot(profileLike) {
  * @returns {string}
  */
 export function chapterRecordPath(profileLike, entry) {
-  const root = provenanceRoot(profileLike);
   const fileName = `${String(entry.slug)}.json`;
-  // `entry.group !== undefined`, never a truthy check — chapter-paths.mjs's own convention
-  // (chapterRelPath, outputDirTail), documented there as "a falsy-but-present group value must
-  // never silently derive a flat path". A truthy check would treat `group: 0` (or `''`) as flat
-  // here while chapterAssetDir treats the identical entry as grouped — a real cross-module
-  // classification mismatch for a malformed-but-present manifest value (found by paths, #362).
-  const tail = entry.group !== undefined ? posixJoin(String(entry.group), fileName) : fileName;
-  return posixJoin(root, CHAPTERS_NAMESPACE, tail);
+  return posixJoin(chapterRecordDir(profileLike, entry), fileName);
 }
 
 function runNamespaceDir(profileLike) {
@@ -1291,9 +1305,11 @@ function tempRunRecordPath(profileLike, deps) {
 // throws. A non-ENOENT `readdirSync` failure (EIO, ...) previously rethrew uncaught (codex round
 // 3): this is called from `closeCaptureRun` AFTER its rename has already committed the run record,
 // so a caller must be able to distinguish "no temps to report" from "could not find out" rather
-// than crash either way.
-function listMatchingTemps(profileLike, deps) {
-  const dir = runNamespaceDir(profileLike);
+// than crash either way. Generalized (codex round 5, finding 3) so `sweepChapterProvenanceTemps`'s
+// chapter-namespace listing shares this exact readdir/ENOENT/errno handling rather than a second,
+// possibly-drifting copy — the two differ only in which directory and which filename pattern they
+// list, never in how a listing failure is reported.
+function listMatchingTempsIn(dir, prefix, suffix, deps) {
   let entries;
   try {
     entries = deps.readdirSync(dir);
@@ -1301,10 +1317,22 @@ function listMatchingTemps(profileLike, deps) {
     if (err.code === 'ENOENT') return { ok: true, temps: [] };
     return { ok: false, hazard: { kind: 'hazard', reason: 'inspection_failure', path: dir } };
   }
-  const prefix = `${RUN_RECORD_NAME}.`;
-  const suffix = '.tmp';
   const temps = entries.filter((name) => name.startsWith(prefix) && name.endsWith(suffix)).map((name) => posixJoin(dir, name));
   return { ok: true, temps };
+}
+
+function listMatchingTemps(profileLike, deps) {
+  return listMatchingTempsIn(runNamespaceDir(profileLike), `${RUN_RECORD_NAME}.`, '.tmp', deps);
+}
+
+// A chapter's own `<slug>.json.<uuid>.tmp` temps — the same filename shape `recordChapterProvenance`
+// builds at its own write site (`tempPath = \`${finalPath}.${d.randomUUID()}.tmp\``), listed in that
+// chapter's own directory (`chapterRecordDir`, shared with `chapterRecordPath`) rather than
+// `run/current.json`'s namespace — chapter temps and run temps are never the same list (finding 3).
+function listMatchingChapterTemps(profileLike, entry, deps) {
+  const dir = chapterRecordDir(profileLike, entry);
+  const fileName = `${String(entry.slug)}.json`;
+  return listMatchingTempsIn(dir, `${fileName}.`, '.tmp', deps);
 }
 
 /**
@@ -1789,6 +1817,100 @@ function listRegularFilesRecursive(assetDir, deps) {
   const out = [];
   walkRegularFiles(assetDir, deps, (_absPath, relPath) => out.push(relPath));
   return out;
+}
+
+// ---------------------------------------------------------------------------------------------
+// sweepChapterProvenanceTemps — codex round 5, finding 3. A process that dies between
+// `recordChapterProvenance`'s temp write (above) and its rename leaves `<slug>.json.<uuid>.tmp`
+// behind under `chapters/`. Row 6's classifier could not see this: its `temps` observation
+// (`inspectTokenAndRecordAndTemps`) lists ONLY `run/current.json.*.tmp`, and that is not an
+// oversight to widen but a boundary to keep. A chapter temp is not correlated with the run's own
+// token/record the way a `run/` temp is — `recordChapterProvenance` may run, and crash, many times
+// per run (once per chapter) or even after the run has already cleanly committed, since its only
+// precondition is that the run record's `run_id` still matches; a chapter temp can therefore be
+// found, or be absent, under ANY of the nine row-6 states with no correlation to which one. Folding
+// it into the SAME `temps` tuple `classify` switches on would make `hasTemps` conflate two
+// unrelated leftovers — an `absent` run with one unrelated stray chapter temp would misclassify as
+// `orphan_temp` FOREVER, since nothing about closing that chapter temp ever changes the run's own
+// token/record — and `abortCaptureRun`/`cleanupCommittedRun` are documented (SKILL.md's recovery
+// table) as NEVER touching `chapters/`, which widening the tuple would either silently break or
+// require quietly contradicting. So row 6's domain statement — a TOTAL function of
+// `(token, record, temps)` observed under `run/` — stays exactly as declared, and this is its own,
+// separate, single-purpose pass.
+//
+// Unlike row 6, no state distinction is needed here. Row 6 needs nine states because a `run/` temp
+// can coexist with several different token/record combinations that mean different things (mid-
+// write vs. leftover-after-commit vs. stale-abandoned), and choosing the wrong repair for the wrong
+// one is unsafe — that is what `expected`'s fingerprint check guards against. A chapter temp has no
+// such ambiguity: this sweep is only ever invoked at recovery time (the same "before opening a new
+// run" moment `recoverProvenanceState` is), when nothing is concurrently running
+// `recordChapterProvenance` for any entry — so a temp found at rest IS a crash leftover, full stop,
+// and removing it is unconditionally safe. That is also why this is one combined find-and-remove
+// call rather than row 6's separate classify-then-repair split: there is no "wrong repair for this
+// state" question to protect against by making the caller round-trip an `expected` value first.
+//
+// Entries-driven, like every other per-chapter call in this module (`recordChapterProvenance`,
+// `buildProvenanceReport`) — never a raw directory walk of `chapters/`. This is a deliberate,
+// narrower choice, not an oversight: a raw walk would need its OWN hazard discipline for every
+// directory it descends into (any subdirectory could be a planted symlink), duplicating gate 6's
+// hierarchy walk instead of reusing it, and — more fundamentally — this module already treats
+// "which chapters exist" as manifest-derived everywhere else (`buildProvenanceReport` reports one
+// row per `entries`, never one row per file found on disk), so a filesystem-driven exception here
+// would be the one inconsistent reader of this state in the whole module. The consequence is
+// explicit, not hidden: a chapter removed from the manifest between the crash and this call is not
+// swept — operationally the same limitation `buildProvenanceReport` already has for a removed
+// chapter's stale record.
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * Find and best-effort-remove every leftover `<slug>.json.<uuid>.tmp` chapter-record temp for each
+ * of `entries` — the artifact left behind when a process dies between `recordChapterProvenance`
+ * closing its temp and renaming it into place. Deliberately separate from `recoverProvenanceState`:
+ * see the module comment above for why chapter temps are not folded into row 6's `(token, record,
+ * temps)` tuple. Call this, like `recoverProvenanceState`, before opening a new run where a prior
+ * chapter-write crash is suspected. Mutates nothing but the matched temps themselves — the run's
+ * own token/record and every chapter's actual record are untouched.
+ *
+ * @param {object} profileLike
+ * @param {Array<object>} entries
+ * @param {object} [deps]
+ * @returns {{ok: true, removed: string[]}|{ok: true, skipped: true, removed: []}|{ok: false, halts: Array<object>}}
+ */
+export function sweepChapterProvenanceTemps(profileLike, entries, deps) {
+  const d = mergeDeps(deps);
+  const ownership = assertProvenanceOwnership(profileLike, d);
+  if (ownership.skip) return { ok: true, skipped: true, removed: [] };
+  if (!ownership.ok) return { ok: false, halts: ownership.halts };
+
+  const removed = [];
+  for (const entry of entries) {
+    // Gate 6's hierarchy walk over THIS entry's own chapters/(/<group>) ancestor chain — the same
+    // check `recordChapterProvenance` runs before it ever opens this entry's leaf, so a symlinked
+    // `chapters/` or group ancestor is refused here exactly as it would be on the write path,
+    // rather than transparently followed by a sweep that skips the discipline the writer applies.
+    const hierarchyHazard = inspectChaptersHierarchyComponents(profileLike, entry, d);
+    if (hierarchyHazard) return { ok: false, halts: [{ halt: 'provenance_hazard', ...hierarchyHazard }] };
+
+    const tempsListed = listMatchingChapterTemps(profileLike, entry, d);
+    if (!tempsListed.ok) return { ok: false, halts: [{ halt: 'provenance_hazard', ...tempsListed.hazard }] };
+
+    for (const temp of tempsListed.temps) {
+      // Gate-6-verify the leaf (no-follow, regular, nlink===1) before touching it — the same
+      // discipline row 6 applies to every `run/` temp it lists (`inspectTokenAndRecordAndTemps`),
+      // so a symlink or hard-link planted at a temp's exact name halts here rather than being
+      // unlinked blind.
+      const tempLeaf = openLeafNoFollow(temp, fs.constants.O_RDONLY, d);
+      if (tempLeaf.kind === 'hazard') return { ok: false, halts: [{ halt: 'provenance_hazard', ...tempLeaf }] };
+      if (tempLeaf.kind === 'present') {
+        closeBestEffort(tempLeaf.fd, d);
+        unlinkBestEffort(temp, d);
+        removed.push(temp);
+      }
+      // 'absent': vanished between listing and open (e.g. a concurrent sweep already removed it) —
+      // nothing to remove, not an error.
+    }
+  }
+  return { ok: true, removed };
 }
 
 // ---------------------------------------------------------------------------------------------
