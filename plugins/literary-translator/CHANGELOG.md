@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.16.2 — 2026-07-29
+## 1.16.2 — 2026-07-30
 
 The 1.16.1 release fixed the W5 mass-translate wait, which spent a 3450 s budget inside one
 `agent()` call against a Bash tool that clamps any single call at 600 000 ms. It said, in its own
@@ -537,9 +537,15 @@ yield it and returns a clean, confident, wrong count. Before this release two li
 existed; AFTER it, one does — a forced NBSP inside an r-string regex, where `\xa0` would be four
 literal characters, deliberately left alone. Scope of that count, so it can be re-derived rather than
 believed: a flat codepoint walk over every UTF-8-decodable file under `plugins/literary-translator`
-(258 at the commit this section describes; 263 once round 9's files landed, which is why the
-count is given with its tree rather than as a constant), matching C0/C1, every category-Cf
-codepoint, U+2028/U+2029, NBSP and CGJ. A narrower
+— **258 files, and that figure is constant across every commit in this release line**, verified with
+`git ls-tree -r --name-only <commit> -- plugins/literary-translator` at each of rounds 5, 6, 8a, 8, 9
+and 10 — matching C0/C1, every category-Cf codepoint, U+2028/U+2029, NBSP and CGJ. The same walk run
+on a working tree reports **263**, and an earlier draft of this sentence attributed that delta to
+"round 9's files landing". That was wrong twice over: round 9 added no files, and the five extra are
+not repo content at all but `.pytest_cache/` artifacts left on disk by a test run
+(`.gitignore`, `CACHEDIR.TAG`, `README.md`, `v/cache/lastfailed`, `v/cache/nodeids`). Scan the tracked
+tree, not the working directory, or the denominator moves depending on whether the suite has been run.
+A narrower
 file filter gives a smaller denominator; an earlier draft of this sentence also stated the pre-fix
 figure as if it were the shipped one.
 
@@ -748,17 +754,102 @@ docstring names `tail -f <path>` as what it exists to stop. Now applied per chai
 ` [...truncated]` marker, and `collect_candidates()` computed `words = name.split()` on the marked
 string — so the marker counted as a word and a genuinely single-token candidate came back
 `multiword: True`, which `likely_name` then inherited. Every site that re-reads `name` after
-extraction was enumerated rather than fixed one at a time: four, of which two were consequences of the
-first and one was LATENT — an elision match that would have mis-fired on capped input but was
+extraction was enumerated rather than fixed one at a time: **five**, of which two were consequences of
+the first and one was LATENT — an elision match that would have mis-fired on capped input but was
 unreachable because the wrongly-True gate above it skipped that path. That one is fixed too, on the
 grounds that a trap protected by another bug becomes live the moment the other bug is fixed.
+
+The count says five because a later review round found the enumeration had stopped inside one file.
+`segpack.py:444` calls the same `extract_candidates()` and re-derives the identical
+`len(name.split()) > 1` on the marker-bearing string, three lines above a `strong_names` filter that
+reads `d["multiword"]` — so a capped SINGLE-token candidate was promoted to a strong name purely
+because it had been truncated. Shipped production code, not a test, and a regression introduced by
+this release: before the cap there was no marker to miscount. An enumeration that says "every site"
+and means "every site in the file I was looking at" is the same defect class as the prose this release
+exists to correct, so the number is stated with what it counted over: **five is every site that
+re-derives a PROPERTY from the name string** (`len(name.split())` and the elision-pair lookup), across
+`bootstrap_names.py` and `segpack.py`. It is NOT every consumer of the extractor.
+
+Named here rather than left for a reader to trip over: three further consumers reach the
+marker-bearing name by a different route and are NOT fixed in this release. `occ_index.py:137` calls
+`extract_candidate_spans()` directly, and `occ_index.py:159` and `evidence_verify.py:175` compare
+names through `bootstrap_names.fold_match_key()`, which tokenizes the marker and contributes a
+spurious `truncated` match unit. Measured consequence: for a capped name,
+`fold_match_key(raw) == fold_match_key(capped)` is False, so `production_occurrences(source_form, …)`
+returns `[]` while `production_occurrences(capped_name, …)` returns the span. A capped name is
+retrievable only by its CAPPED form, never by its original `source_form`. This is a regression
+introduced by this release — before the cap there was no marker to tokenize — and it is left unfixed
+deliberately: reaching it needs a single name run over 200 characters, and the fix touches three more
+production files at the end of a review line. Filed rather than carried as prose. What is corrected
+here is the docstring that claimed the opposite, that a capped name is harmless because the spans
+"still span the run's FULL original extent — evidence lookup stays complete even when the returned
+string does not". The spans are complete; the lookup is not, and the two are not the same guarantee.
+
+**The cap destroyed the identity of what it capped.** The marker was a fixed literal, and the cap runs
+inside `extract_candidate_spans()` — BEFORE `collect_candidates()` aggregates rows keyed by `name`. So
+every distinct over-cap form sharing the same first 200 characters collapsed onto one key. Measured
+against the real module with a control, because the failure looks like ordinary aggregation: four
+distinct sentence-initial candidates built as `"A"*210 + suffix` for suffixes `B`/`C`/`D`/`E` produced
+ONE row with `freq: 4`, `n_segments: 4`, `likely_name: True` and `n_strong: 1`, where the same four
+with short distinct names produce four rows, each `freq: 1`, `likely_name: False`, `n_strong: 0`. Four
+unrelated candidates manufactured one STRONG name — and strong names are what reach glossary
+adjudication. The source text is attacker-influenceable.
+
+The bound stays at the extraction root; what changed is that the capped representation is now
+identity-preserving. The marker carries a 16-hex-character `sha256` digest of the FULL pre-truncation
+name — `" [...truncated:<16 hex>]"` — so distinct forms keep distinct keys while the emitted length
+stays an exact constant (`_MAX_CANDIDATE_NAME_CHARS` + 32) rather than an upper bound. `sha256` and
+not the builtin `hash()`, deliberately and with a test that pins it: `hash()` is salted per process by
+`PYTHONHASHSEED`, so a `hash()`-based digest would differ between the extraction run and any later
+re-derivation, and nothing else in the suite would have noticed. That test drives two real subprocesses
+under different seeds and compares.
+
+`_strip_capped_marker` is now shape-matching (an anchored regex over prefix + fixed-width hex + suffix)
+rather than a fixed-literal slice, since the marker's content varies per name.
 
 **A sibling producer with no cap at all.** `language_smoke_report.py` runs the same extraction and had
 no bound. Both are capped now, and the drift test between them was extended from CONSTANT parity to
 OUTPUT parity at the cap — because a constants-only pin could not have caught this defect, whose shape
 was "one file has no such constant" rather than "the two disagree". Note this does not reverse the
 earlier argument for capping at the root: that argument was about a value reaching two embed sites,
-and this producer's output reaches no prompt at all, so there was no embed site to move the bound to.
+and this producer has none to move the bound to. The first draft of that sentence said this producer's
+output "reaches no prompt at all", which overstated it — the extracted names are rendered in exactly
+one place, the low-name-density coverage `fatal()` at `language_smoke_report.py:1229-1234`, which
+interpolates the raw uncovered candidate strings. Everywhere else in that script the names are opaque:
+set membership for `candidate_names_total`, `checked_names_out`, and the elision `issubset`, and the
+written report carries the COUNT, never the strings. So the conclusion holds and the reason was too
+strong: the render site is an operator's stderr on a documented failure branch, not a prompt.
+
+That parity guard then earned itself. Landing the digest marker in `bootstrap_names.py` alone turned
+it red — correctly, because `language_smoke_report.py` is an INDEPENDENT copy of the same run-building
+and capping algorithm and therefore carried the identical collision defect, unfixed. The marker is now
+ported byte-identically (same prefix, same `sha256`, same 16-hex width, same suffix), verified
+output-identical on the same input rather than assumed from reading two constant blocks. The two files
+stay independent copies — no shared import — deliberately: `language_smoke_report.py` is an
+`ORCHESTRATION_BUNDLE_MEMBERS` script and `bootstrap_names.py` a `DERIVATION_BUNDLE_MEMBERS` one, and a
+shared module would collapse which cache-key surface an edit flips. The drift contract is enforced by
+tests instead, and went from one angle to four: marker-shape constants, digest-ALGORITHM output parity,
+the hostile-run cases, and the pass-2 route below.
+
+The algorithm-parity test exists because constant parity provably cannot replace it: swapping one
+side's digest to `md5` at the SAME width leaves the marker-shape test green while the algorithm test
+goes red.
+
+**A cap site with no coverage anywhere, under code this release rewrote.** Both extractors cap in two
+places, a pass-1 route and a pass-2 caseless inventory route, and the pass-2 site had zero test
+coverage in either file — measured, not suspected: deleting `language_smoke_report.py`'s pass-2 cap
+outright left every test that references the file green (310 of them). The bootstrap-side test that
+claimed to cover it was vacuous for a different reason — its fixture was upper-initial, so pass 1
+emitted the name first and pass 2's identical match was skipped as a duplicate span, meaning pass 1's
+own capped entry satisfied the assertion while pass 2 silently emitted a second UNCAPPED entry nothing
+looked at.
+
+Both are closed with the same key: an all-LOWERCASE inventory form, which pass 1 cannot start a run on
+(`is_upper_initial()` gates it) and pass 2 reaches by design, since bypassing the case check is what
+the caseless route is for. The new parity case was watched failing under a pass-2-ONLY mutant — the
+pass-1 call site left intact, needle count asserted at 1 before mutating — and it failed on
+`assert bn_name == lsr_name` AFTER both `len(candidates) == 1` guards passed, which is what proves the
+fixture actually routed through pass 2 in both extractors rather than dying earlier.
 
 **A pooled list, lexically sorted, capped from the head.** `skeptic_ready.py`'s new bound was applied
 once over a merged population of structural findings, coverage gaps and per-record findings. A lexical

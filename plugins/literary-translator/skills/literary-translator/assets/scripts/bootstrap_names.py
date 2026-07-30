@@ -48,6 +48,7 @@ one-line reminder of that invariant when run in manifest mode, but never
 hard-blocks on it itself.
 """
 import argparse
+import hashlib
 import json
 import re
 import sys
@@ -782,10 +783,12 @@ def _compiled_inventory_trie(name_inventory: frozenset, elision_re: Optional["re
 # produce.
 #
 # WHAT HAPPENS TO A LEGITIMATE LONG NAME: never silently. A run that hits
-# this cap is still emitted, with " [...truncated]" appended (the same
-# marker `canon_validate.py`'s `_bounded_message` already uses) rather than
-# silently ending -- a capped candidate must never be indistinguishable from
-# an ordinary short one. This mirrors this file's own `elision_ambiguous`/
+# this cap is still emitted, with a visible " [...truncated:<digest>]"
+# marker appended (the same VISUAL SHAPE `canon_validate.py`'s
+# `_bounded_message` marker uses, extended with a content digest -- see
+# `_CAPPED_NAME_MARKER_PREFIX`'s own comment for why) rather than silently
+# ending -- a capped candidate must never be indistinguishable from an
+# ordinary short one. This mirrors this file's own `elision_ambiguous`/
 # `elision_stripped_form` flag (issue #91): detect, mark visibly, and leave
 # the decision to the glossary adjudicator -- never silently resolved here,
 # per THE IRON RULE. The value below is chosen generously above anything
@@ -800,14 +803,49 @@ _MAX_CANDIDATE_NAME_CHARS = 200  # matches skeptic_report.py's _MAX_SOURCE_FIELD
 # magnitude this plugin already uses for "one free-text field", not a new
 # number invented for this one call site.
 
-# The exact marker `_capped_candidate_name` appends, named once rather than
-# repeated as a literal: round 10 (finding 1) measured that `collect_
-# candidates()` re-derives `multiword`/`abbrev` by calling `name.split()` on
-# the CAPPED string, so an unnamed marker duplicated at both the append site
-# and the strip site is exactly the kind of drift that would silently
-# reopen this. `_strip_capped_marker` is the one place that removes it again
-# before any structural re-derivation.
-_CAPPED_NAME_MARKER = " [...truncated]"
+# The exact marker shape `_capped_candidate_name` appends, named once
+# rather than repeated as a literal: round 10 (finding 1) measured that
+# `collect_candidates()` re-derives `multiword`/`abbrev` by calling
+# `name.split()` on the CAPPED string, so an unnamed marker duplicated at
+# both the append site and the strip site is exactly the kind of drift that
+# would silently reopen this. `_strip_capped_marker` is the one place that
+# removes it again before any structural re-derivation.
+#
+# Issue #352 (identity collision): a FIXED literal marker made every
+# over-cap candidate that shares the same first `_MAX_CANDIDATE_NAME_CHARS`
+# characters collapse onto ONE key in `collect_candidates()`'s `freq`/
+# `mid`/`by_source` aggregation (all keyed by the emitted `name` string) --
+# four distinct 210+ char source forms differing only past the cap produced
+# ONE candidate row with a manufactured `freq`/`n_segments`, and once
+# `freq >= 4`, a manufactured `likely_name: True` reaching glossary
+# adjudication under a name that never actually recurred in the source. The
+# bound itself has to stay at the extraction root (see WHERE THE BOUND
+# BELONGS above), so the fix is making the CAPPED REPRESENTATION ITSELF
+# identity-preserving: append a stable digest of the FULL pre-truncation
+# name, so distinct over-cap forms produce distinct keys while the emitted
+# string stays bounded and still visibly announces truncation.
+#
+# `hashlib.sha256`, never the builtin `hash()`: `hash()` is salted per
+# process via `PYTHONHASHSEED`, so the SAME source name would cap to a
+# DIFFERENT marker in different runs (and differently again in whatever
+# process later re-derives evidence against it) -- exactly the kind of
+# non-determinism this plugin's cache-key/derivation-bundle discipline
+# cannot tolerate. See
+# `test_capped_name_digest_is_stable_across_python_hash_seeds` in
+# tests/bootstrap_names.test.py for the process-boundary proof.
+_CAPPED_NAME_MARKER_PREFIX = " [...truncated:"
+_CAPPED_NAME_MARKER_SUFFIX = "]"
+_CAPPED_NAME_DIGEST_CHARS = 16  # hex chars (64 bits) of the sha256 digest --
+# generous collision resistance for "distinct over-cap candidates within one
+# book" while keeping the emitted string small; fixed-width so the bound in
+# `_capped_candidate_name`'s own docstring stays an exact equality, not just
+# an upper bound.
+_CAPPED_NAME_MARKER_RE = re.compile(
+    re.escape(_CAPPED_NAME_MARKER_PREFIX)
+    + r"[0-9a-f]{" + str(_CAPPED_NAME_DIGEST_CHARS) + r"}"
+    + re.escape(_CAPPED_NAME_MARKER_SUFFIX)
+    + r"$"
+)
 
 
 def _capped_candidate_name(name: str) -> str:
@@ -821,10 +859,26 @@ def _capped_candidate_name(name: str) -> str:
     (canon_validate.py) is not available to a candidate name that is written
     into canon.json and read back later with no memory of this function
     having run, so the marker has to travel WITH the string itself.
+
+    The marker carries a `sha256` digest of the FULL (pre-truncation) name
+    (issue #352) so that two source forms differing only past the cap never
+    collapse onto the same emitted string -- `collect_candidates()` keys its
+    frequency/segment aggregation by this exact string, and a fixed literal
+    marker made every such pair collide onto one manufactured row. The
+    returned length is always exactly `_MAX_CANDIDATE_NAME_CHARS +
+    len(_CAPPED_NAME_MARKER_PREFIX) + _CAPPED_NAME_DIGEST_CHARS +
+    len(_CAPPED_NAME_MARKER_SUFFIX)` when capping fires -- deterministic and
+    bounded, never dependent on the input's own length beyond the cap.
     """
     if len(name) <= _MAX_CANDIDATE_NAME_CHARS:
         return name
-    return name[:_MAX_CANDIDATE_NAME_CHARS] + _CAPPED_NAME_MARKER
+    digest = hashlib.sha256(name.encode("utf-8")).hexdigest()[:_CAPPED_NAME_DIGEST_CHARS]
+    return (
+        name[:_MAX_CANDIDATE_NAME_CHARS]
+        + _CAPPED_NAME_MARKER_PREFIX
+        + digest
+        + _CAPPED_NAME_MARKER_SUFFIX
+    )
 
 
 def _strip_capped_marker(name: str) -> str:
@@ -833,9 +887,9 @@ def _strip_capped_marker(name: str) -> str:
     count, first character) of the candidate's own content. Round 10
     (finding 1, HIGH): `collect_candidates()` computed `multiword`/`abbrev`
     by calling `name.split()` directly on the marker-bearing string --
-    `" [...truncated]"` splits into its own extra "word", so a candidate
-    that was a SINGLE connector-joined token before capping (this file's
-    own round-8 mega-token attack shape) came back `multiword: True`, and
+    the marker text splits into its own extra "word", so a candidate that
+    was a SINGLE connector-joined token before capping (this file's own
+    round-8 mega-token attack shape) came back `multiword: True`, and
     `likely_name` (which OR's in `multiword`) inherited the wrong verdict --
     a fix that made the STRING safe to embed and simultaneously made a
     DERIVED PROPERTY of that string wrong, the exact shape this release
@@ -844,9 +898,17 @@ def _strip_capped_marker(name: str) -> str:
     print or dict-key by) must strip this marker first; this function is
     that one place, so a future re-derivation added to `collect_candidates`
     inherits the fix instead of reopening the same bug with a new literal.
+
+    Since issue #352 the marker's own content (the digest) varies per name,
+    so it can no longer be stripped with a fixed-literal `str.endswith`/
+    slice -- `_CAPPED_NAME_MARKER_RE` matches the marker's fixed SHAPE
+    (prefix, exactly `_CAPPED_NAME_DIGEST_CHARS` hex digits, suffix)
+    anchored to the end of the string. Still a no-op on any name that was
+    never capped.
     """
-    if name.endswith(_CAPPED_NAME_MARKER):
-        return name[: -len(_CAPPED_NAME_MARKER)]
+    match = _CAPPED_NAME_MARKER_RE.search(name)
+    if match:
+        return name[: match.start()]
     return name
 
 
@@ -863,10 +925,31 @@ def extract_candidate_spans(text: str, lang: LanguageConfig):
     reimplements any part of this decision logic. ONE disclosed exception
     (round 8, see ``_capped_candidate_name``): when a run's reconstructed
     text exceeds ``_MAX_CANDIDATE_NAME_CHARS``, the emitted ``name`` is
-    truncated with a visible `` [...truncated]`` marker while ``start``/
-    ``end`` still span the run's FULL original extent -- evidence lookup
+    truncated with a visible, digest-bearing `` [...truncated:<digest>]``
+    marker (issue #352 -- see ``_CAPPED_NAME_MARKER_PREFIX``) while
+    ``start``/``end`` still span the run's FULL original extent -- the SPAN
     stays complete even when the returned string does not, and the marker
     is why a capped ``name`` is not literally ``text[start:end]``.
+
+    Span completeness does NOT imply lookup completeness -- that inference
+    would be wrong, and an earlier version of this docstring invited it.
+    Three consumers key their own lookup on ``fold_match_key()`` of a
+    ``name`` this function (or ``_run_spans()``, its thin re-derivation
+    wrapper) returned -- ``occ_index.py``'s own ``production_occurrences()``
+    (matches a caller-supplied ``source_form`` against
+    ``fold_match_key(name)``), ``occurrence_targets.py`` (groups spans by
+    ``fold_match_key(name)`` directly), and ``evidence_verify.py`` (folds
+    ``_run_spans()``' own ``name`` the same way). The digest-bearing marker
+    is itself part of what gets tokenized (its literal text folds to its
+    own match units, e.g. a ``truncated`` unit), so
+    ``fold_match_key(source_form) != fold_match_key(capped_name)`` for a
+    capped candidate. A capped ``name`` is therefore retrievable ONLY by
+    its own capped form in all three -- looking it up (or grouping it) by
+    the original, uncapped ``source_form`` (i.e. ``text[start:end]``)
+    silently finds nothing, even though that exact span exists and is
+    complete. This is a disclosed, NOT-fixed gap in all three consumers;
+    stripping the marker before folding at any of those sites is a real
+    fix but is out of scope for this release.
 
     ``text`` is the RAW block/sample text (sentinels included) --
     ``⟦...⟧`` sentinels are masked internally via ``mask_sentinels()``
@@ -1145,7 +1228,7 @@ def collect_candidates(sources, lang: LanguageConfig):
         # marker `_capped_candidate_name` may have appended -- see
         # `_strip_capped_marker`'s own docstring for the measured bug this
         # closes (an all-connector, no-space mega-token that got capped came
-        # back `multiword: True`, purely because " [...truncated]" itself
+        # back `multiword: True`, purely because the marker text itself
         # split into an extra "word").
         words = _strip_capped_marker(name).split()
         multiword = len(words) > 1
@@ -1188,7 +1271,7 @@ def collect_candidates(sources, lang: LanguageConfig):
             # that `multiword` itself is, but `content[0].lower() +
             # content[1:]` still has to read the STRIPPED string, or a
             # genuinely single-token capped candidate's elision check would
-            # try to match " [...truncated]" as part of the name's own tail.
+            # try to match the marker text as part of the name's own tail.
             content = _strip_capped_marker(row["name"])
             if row["multiword"] or not is_upper_initial(content):
                 continue

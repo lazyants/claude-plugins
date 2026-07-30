@@ -681,15 +681,25 @@ def _compiled_inventory_trie(name_inventory: frozenset, has_elision: bool, elisi
 # Round 10, finding 2 -- the sibling of bootstrap_names.py's own round-8 fix.
 # This file's pass-1 capitalized-run algorithm had the SAME unbounded join:
 # no upper bound on how many consecutive capitalized tokens fuse into one
-# candidate `name`. Ported here byte-identically (constant, marker text, and
-# both helper bodies) rather than re-derived independently, because this
+# candidate `name`. Ported here byte-identically (constants, marker shape,
+# and both helper bodies) rather than re-derived independently, because this
 # plugin's own convention for these two extractors is EXACT parity --
 # tests/extractor_terminators_drift.test.py already pins TERMINATORS/
 # _WRAPPERS/TOKEN_RE byte-identical across both copies and extends here to
-# _MAX_CANDIDATE_NAME_CHARS/_CAPPED_NAME_MARKER, plus an OUTPUT-parity check
-# (both extractors capping the SAME hostile text identically), not merely
-# the constants -- a constant-only pin would have missed this file lacking
-# the cap entirely, which is exactly how this finding was found.
+# _MAX_CANDIDATE_NAME_CHARS/the marker constants below, plus an OUTPUT-parity
+# check (both extractors capping the SAME hostile text identically), not
+# merely the constants -- a constant-only pin would have missed this file
+# lacking the cap entirely, which is exactly how this finding was found.
+#
+# Issue #352 (identity collision, bootstrap_names.py side): a FIXED literal
+# marker made every over-cap candidate sharing the same first
+# `_MAX_CANDIDATE_NAME_CHARS` characters collapse onto one key wherever a
+# consuming aggregation keys by the emitted `name` string. bootstrap_names.py
+# fixed this by making the marker carry a `sha256` digest of the FULL
+# pre-truncation name; ported here byte-identically for the same EXACT-parity
+# reason as the rest of this block -- see bootstrap_names.py's own
+# `_CAPPED_NAME_MARKER_PREFIX` comment for the full rationale (never use the
+# builtin `hash()`: it is salted per process via `PYTHONHASHSEED`).
 #
 # NOT the same migration surface as bootstrap_names.py: this file is an
 # ORCHESTRATION_BUNDLE_MEMBERS script (scaffold_setup.py), never a
@@ -706,7 +716,21 @@ _MAX_CANDIDATE_NAME_CHARS = 200  # matches skeptic_report.py's _MAX_SOURCE_FIELD
 # magnitude this plugin already uses for "one free-text field", not a new
 # number invented for this one call site.
 
-_CAPPED_NAME_MARKER = " [...truncated]"
+# Byte-identical to bootstrap_names.py's own _CAPPED_NAME_MARKER_PREFIX/
+# _CAPPED_NAME_MARKER_SUFFIX/_CAPPED_NAME_DIGEST_CHARS/_CAPPED_NAME_MARKER_RE
+# -- same prefix, same suffix, same digest width, same sha256-over-the-
+# full-name algorithm. tests/extractor_terminators_drift.test.py pins all
+# four values equal across both files; do not let this copy drift from
+# bootstrap_names.py's independently.
+_CAPPED_NAME_MARKER_PREFIX = " [...truncated:"
+_CAPPED_NAME_MARKER_SUFFIX = "]"
+_CAPPED_NAME_DIGEST_CHARS = 16
+_CAPPED_NAME_MARKER_RE = re.compile(
+    re.escape(_CAPPED_NAME_MARKER_PREFIX)
+    + r"[0-9a-f]{" + str(_CAPPED_NAME_DIGEST_CHARS) + r"}"
+    + re.escape(_CAPPED_NAME_MARKER_SUFFIX)
+    + r"$"
+)
 
 
 def _capped_candidate_name(name: str) -> str:
@@ -720,10 +744,22 @@ def _capped_candidate_name(name: str) -> str:
     (canon_validate.py) is not available to a candidate name that is written
     into canon.json and read back later with no memory of this function
     having run, so the marker has to travel WITH the string itself.
+
+    Byte-identical port of bootstrap_names.py's own `_capped_candidate_name`
+    (issue #352): the marker carries a `sha256` digest of the FULL
+    (pre-truncation) name so two source forms differing only past the cap
+    never collapse onto the same emitted string in a consumer that keys by
+    this exact string.
     """
     if len(name) <= _MAX_CANDIDATE_NAME_CHARS:
         return name
-    return name[:_MAX_CANDIDATE_NAME_CHARS] + _CAPPED_NAME_MARKER
+    digest = hashlib.sha256(name.encode("utf-8")).hexdigest()[:_CAPPED_NAME_DIGEST_CHARS]
+    return (
+        name[:_MAX_CANDIDATE_NAME_CHARS]
+        + _CAPPED_NAME_MARKER_PREFIX
+        + digest
+        + _CAPPED_NAME_MARKER_SUFFIX
+    )
 
 
 def extract_candidate_names(text, lang):
