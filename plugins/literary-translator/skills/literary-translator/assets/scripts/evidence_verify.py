@@ -170,9 +170,17 @@ def _group_production_spans_by_name(block_text: str, language_config,
     the matcher's own raw spelling, which `verify_evidence()`'s `.get(
     source_form, ())` lookup would never find anyway (it queries by canon
     `source_form`, not by matcher-emitted `name`)."""
+    # Key on the span's OWN slice of `block_text`, never on the emitted `name`
+    # -- `name` is bounded by `bootstrap_names._capped_candidate_name()`, so an
+    # over-cap run would group under a truncated, digest-marked SYNTHETIC key
+    # that no canon `source_form` can equal, and the entry's stored evidence
+    # would silently verify against nothing. See occ_index.production_
+    # occurrences()'s own comment for why this narrows nothing else.
     folded_spans_by_key = defaultdict(list)
-    for name, _mid_sentence, char_start, char_end in _run_spans(block_text, language_config):
-        folded_spans_by_key[fold_match_key(name)].append((char_start, char_end))
+    for _name, _mid_sentence, char_start, char_end in _run_spans(block_text, language_config):
+        folded_spans_by_key[fold_match_key(block_text[char_start:char_end])].append(
+            (char_start, char_end)
+        )
 
     grouped = {}
     for key, spans in folded_spans_by_key.items():

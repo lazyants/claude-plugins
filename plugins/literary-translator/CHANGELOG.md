@@ -770,20 +770,43 @@ exists to correct, so the number is stated with what it counted over: **five is 
 re-derives a PROPERTY from the name string** (`len(name.split())` and the elision-pair lookup), across
 `bootstrap_names.py` and `segpack.py`. It is NOT every consumer of the extractor.
 
-Named here rather than left for a reader to trip over: three further consumers reach the
-marker-bearing name by a different route and are NOT fixed in this release. `occ_index.py:137` calls
-`extract_candidate_spans()` directly, and `occ_index.py:159` and `evidence_verify.py:175` compare
-names through `bootstrap_names.fold_match_key()`, which tokenizes the marker and contributes a
-spurious `truncated` match unit. Measured consequence: for a capped name,
-`fold_match_key(raw) == fold_match_key(capped)` is False, so `production_occurrences(source_form, …)`
-returns `[]` while `production_occurrences(capped_name, …)` returns the span. A capped name is
-retrievable only by its CAPPED form, never by its original `source_form`. This is a regression
-introduced by this release — before the cap there was no marker to tokenize — and it is left unfixed
-deliberately: reaching it needs a single name run over 200 characters, and the fix touches three more
-production files at the end of a review line. Filed rather than carried as prose. What is corrected
-here is the docstring that claimed the opposite, that a capped name is harmless because the spans
-"still span the run's FULL original extent — evidence lookup stays complete even when the returned
-string does not". The spans are complete; the lookup is not, and the two are not the same guarantee.
+**The cap made a canon entry unable to find its own occurrences.** Four sites across three files reach
+the name by a different route: `occ_index.production_occurrences()`, `occ_index.index_manifest()`,
+`occurrence_targets._spans_by_name()` and `evidence_verify._group_production_spans_by_name()` all
+grouped or filtered spans by `fold_match_key(name)` — the string the cap had just BOUNDED. The
+reviewer finding named three of them; the fourth came out of grepping the CLASS rather than fixing the
+reported instances, and it is the batch path: `index_manifest()` intersects its span keys with a map
+built from the caller's `source_form`s, so an over-cap form never intersects and the function emits
+zero records for it in silence. A same-file sibling, missed by both the finding and the issue that
+tracked it. (The neighbouring `fold_match_key` call at `occ_index.py:354` is NOT such a site and is
+deliberately untouched — it folds `source_forms`, the caller's canon spellings, never extractor
+output. A grep hit is not a site.) `fold_match_key` tokenizes the marker,
+so for a capped name `fold_match_key(raw) == fold_match_key(capped)` is False: measured,
+`production_occurrences(source_form, …)` returned `[]` while `production_occurrences(capped_name, …)`
+returned the span. The entry was retrievable only by a synthetic key no `canon.json` ever stores.
+
+This was first judged a rare edge case and deferred. It is not, and the argument that changed it is
+MIGRATION, not severity. Before this release there was no cap at all, so an over-long run WAS
+extractable and adjudicable into canon; and this release changes both members of
+`cache_key.DERIVATION_BUNDLE_MEMBERS` (`bootstrap_names.py` and `segpack.py`), forcing every existing
+project through regeneration. Such an entry would therefore lose its occurrences at exactly the moment
+everyone regenerates, silently, with the adjudication still on disk and looking intact.
+
+The fix is to key the match on the span's OWN slice of the source text rather than on the emitted
+`name`, at all three sites. That is exact rather than approximate: `_run_spans()`'s own docstring
+already guarantees every returned span is valid directly against the block text as given. The cost of
+the earlier deferral was a misjudged price, and the correction is worth recording: the worry was that
+`name` is a space-JOINED reconstruction of the run's tokens rather than a literal slice, so switching
+to the slice might narrow matching. Measured across six shapes — single token, multiword, double space
+between tokens, newline between tokens, sentinel-adjacent, over-cap — `name` and the slice differ
+LITERALLY in three of them, and `fold_match_key` folds them to the same key in every case EXCEPT the
+over-cap one. The only shape the change alters is the broken shape. Those controls ship as tests, so a
+later change that narrows matching cannot pass by fixing the over-cap case alone.
+
+Corrected alongside it, since it invited exactly the wrong inference: the docstring claiming a capped
+name is harmless because the spans "still span the run's FULL original extent — evidence lookup stays
+complete even when the returned string does not". The spans are complete; the lookup was not, and the
+two are not the same guarantee.
 
 **The cap destroyed the identity of what it capped.** The marker was a fixed literal, and the cap runs
 inside `extract_candidate_spans()` — BEFORE `collect_candidates()` aggregates rows keyed by `name`. So

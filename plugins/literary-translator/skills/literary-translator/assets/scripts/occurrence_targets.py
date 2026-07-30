@@ -221,9 +221,14 @@ def _spans_by_name(text: str, language_config) -> dict:
     docstring's own note on the unfolded-key/folded-matching asymmetry.
     Each key's own spans stay in `char_start` order (`extract_candidate_
     spans` already returns its full list sorted that way)."""
+    # Key on the span's OWN slice of `text`, never on the emitted `name` --
+    # `name` is bounded by `bootstrap_names._capped_candidate_name()`, so an
+    # over-cap run would group under a truncated, digest-marked SYNTHETIC key
+    # that no canon `source_form` can equal. See occ_index.production_
+    # occurrences()'s own comment for why this narrows nothing else.
     grouped = defaultdict(list)
-    for name, _mid_sentence, char_start, char_end in extract_candidate_spans(text, language_config):
-        grouped[fold_match_key(name)].append((char_start, char_end))
+    for _name, _mid_sentence, char_start, char_end in extract_candidate_spans(text, language_config):
+        grouped[fold_match_key(text[char_start:char_end])].append((char_start, char_end))
     return grouped
 
 

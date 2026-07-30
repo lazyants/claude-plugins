@@ -156,11 +156,22 @@ def production_occurrences(source_form: str, block_text: str, language_config) -
     once must apply its own fail-closed guard (``canon_senses.
     fold_collision_map()``); see ``index_manifest()``'s docstring below.
     """
+    # Match on the span's OWN slice of `block_text`, never on the emitted
+    # `name`. `name` is bounded by `bootstrap_names._capped_candidate_name()`,
+    # so for a run longer than `_MAX_CANDIDATE_NAME_CHARS` it is a truncated,
+    # digest-marked SYNTHETIC key that no `source_form` can ever equal -- and
+    # `source_form` is the only spelling canon.json stores. The slice is exact:
+    # `_run_spans()`'s own docstring above guarantees every returned span is
+    # valid directly against `block_text` as given. For every OTHER shape where
+    # `name` and the slice differ literally (a double space or a newline
+    # between tokens, since `name` is a space-JOINED reconstruction) both fold
+    # to the same key, so this narrows nothing -- pinned by the controls in
+    # tests/capped_name_occurrence_lookup.test.py.
     key = fold_match_key(source_form)
     return [
         (char_start, char_end)
-        for name, _mid_sentence, char_start, char_end in _run_spans(block_text, language_config)
-        if fold_match_key(name) == key
+        for _name, _mid_sentence, char_start, char_end in _run_spans(block_text, language_config)
+        if fold_match_key(block_text[char_start:char_end]) == key
     ]
 
 
@@ -364,9 +375,18 @@ def index_manifest(manifest_path, source_forms, language_config, *,
 
     records = []
     for block_id, seg, text in iter_manifest_blocks(manifest_path):
+        # Same rule as production_occurrences() above, and load-bearing for the
+        # SAME reason: these keys are intersected with `fold_to_name` below,
+        # which is built from canon `source_form`s. Keyed by the capped `name`,
+        # an over-cap form would never intersect and this function would emit
+        # zero records for it in silence. `fold_key_of` above is built from
+        # `source_forms` (caller-supplied canon spellings, never extractor
+        # output), so it is correct as it stands and is deliberately untouched.
         folded_spans_by_key = defaultdict(list)
-        for name, _mid_sentence, char_start, char_end in _run_spans(text, language_config):
-            folded_spans_by_key[fold_match_key(name)].append((char_start, char_end))
+        for _name, _mid_sentence, char_start, char_end in _run_spans(text, language_config):
+            folded_spans_by_key[fold_match_key(text[char_start:char_end])].append(
+                (char_start, char_end)
+            )
         context_start, context_end = _context_window(text)
         context_sha256 = hashlib.sha256(
             text[context_start:context_end].encode("utf-8")
