@@ -792,16 +792,39 @@ extractable and adjudicable into canon; and this release changes both members of
 project through regeneration. Such an entry would therefore lose its occurrences at exactly the moment
 everyone regenerates, silently, with the adjudication still on disk and looking intact.
 
-The fix is to key the match on the span's OWN slice of the source text rather than on the emitted
-`name`, at all three sites. That is exact rather than approximate: `_run_spans()`'s own docstring
-already guarantees every returned span is valid directly against the block text as given. The cost of
-the earlier deferral was a misjudged price, and the correction is worth recording: the worry was that
-`name` is a space-JOINED reconstruction of the run's tokens rather than a literal slice, so switching
-to the slice might narrow matching. Measured across six shapes — single token, multiword, double space
-between tokens, newline between tokens, sentinel-adjacent, over-cap — `name` and the slice differ
-LITERALLY in three of them, and `fold_match_key` folds them to the same key in every case EXCEPT the
-over-cap one. The only shape the change alters is the broken shape. Those controls ship as tests, so a
-later change that narrows matching cannot pass by fixing the over-cap case alone.
+The fix is to key the match on the span's own text rather than on the emitted `name`, at all four
+sites. The cost of the earlier deferral was a misjudged price, and the correction is worth recording:
+the worry was that `name` is a space-JOINED reconstruction of the run's tokens rather than a literal
+slice, so switching to the span's text might narrow matching. Measured across six shapes — single
+token, multiword, double space between tokens, newline between tokens, sentinel-adjacent, over-cap —
+`name` and the span's text differ LITERALLY in three of them, and `fold_match_key` folds them to the
+same key in every case EXCEPT the over-cap one. The only shape the change alters is the broken shape.
+Those controls ship as tests, so a later change that narrows matching cannot pass by fixing the
+over-cap case alone.
+
+**That matrix had a hole, and the first version of this fix fell through it.** The six shapes above
+included a sentinel ADJACENT to a run but not one INSIDE it. Runs are built over
+`mask_sentinels(text)` while their offsets stay in the raw text, so a run may legitimately span an
+inline sentinel: the extractor emits `Marie Claire` over a span whose raw slice reads
+`Marie ⟦FNREF_5⟧ Claire`. Keying on that raw slice folds the sentinel's own letters into the key
+(`Marie FNREF Claire`), and the occurrence stops being reachable from its canon form — the exact
+unreachability this section exists to remove, reintroduced by the remedy, at all four sites at once.
+Re-measured on 36 spans across 18 shapes, it reproduces on every route the extractor has:
+upper-initial, elision, caseless inventory, and the Hebrew maqaf inventory route. It is not an
+upper-initial quirk, and the reviewer's single French repro understated it.
+
+So the key is folded from the MASKED slice, which is the only form that is both UNCAPPED (an over-cap
+run keeps its identity) and SENTINEL-FREE (an interrupted run keeps its). `mask_sentinels()` is a
+same-length substitution by contract, so the masked copy is offset-identical and one mask per call
+serves every span rather than one mask per span.
+
+The structural half matters more than the one-character half. This defect existed because the key was
+hand-built at four sites, and the first fix hand-built a different wrong key at the same four. The
+construction now lives in exactly one function, `bootstrap_names.span_match_keys()`, next to the
+`mask_sentinels()` and `fold_match_key()` it has to reconcile; the four sites call it and no longer
+spell the rule themselves. It is routed through `occ_index._run_span_keys()` so `_run_spans()` remains
+the single seam this code takes into the extractor — the seam `evidence_verify`'s one-pass-per-block
+guard patches and counts, which therefore still holds with a single patch point instead of two.
 
 Corrected alongside it, since it invited exactly the wrong inference: the docstring claiming a capped
 name is harmless because the spans "still span the run's FULL original extent — evidence lookup stays

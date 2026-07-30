@@ -933,23 +933,17 @@ def extract_candidate_spans(text: str, lang: LanguageConfig):
 
     Span completeness does NOT imply lookup completeness -- that inference
     would be wrong, and an earlier version of this docstring invited it.
-    Three consumers key their own lookup on ``fold_match_key()`` of a
-    ``name`` this function (or ``_run_spans()``, its thin re-derivation
-    wrapper) returned -- ``occ_index.py``'s own ``production_occurrences()``
-    (matches a caller-supplied ``source_form`` against
-    ``fold_match_key(name)``), ``occurrence_targets.py`` (groups spans by
-    ``fold_match_key(name)`` directly), and ``evidence_verify.py`` (folds
-    ``_run_spans()``' own ``name`` the same way). The digest-bearing marker
-    is itself part of what gets tokenized (its literal text folds to its
-    own match units, e.g. a ``truncated`` unit), so
+    The returned ``name`` is NOT an occurrence-lookup key and must never be
+    folded into one: the digest-bearing cap marker is itself tokenized (its
+    literal text contributes match units, e.g. a ``truncated`` unit), so
     ``fold_match_key(source_form) != fold_match_key(capped_name)`` for a
-    capped candidate. A capped ``name`` is therefore retrievable ONLY by
-    its own capped form in all three -- looking it up (or grouping it) by
-    the original, uncapped ``source_form`` (i.e. ``text[start:end]``)
-    silently finds nothing, even though that exact span exists and is
-    complete. This is a disclosed, NOT-fixed gap in all three consumers;
-    stripping the marker before folding at any of those sites is a real
-    fix but is out of scope for this release.
+    capped candidate, and looking such a run up by the only spelling
+    ``canon.json`` stores would silently find nothing even though the exact
+    span exists and is complete. Nor is the RAW ``text[start:end]`` slice a
+    lookup key -- see ``span_match_keys()`` below, which is the ONE place
+    that key is built and the only place this reasoning belongs. Every
+    consumer that groups or filters spans against a canon ``source_form``
+    goes through it.
 
     ``text`` is the RAW block/sample text (sentinels included) --
     ``⟦...⟧`` sentinels are masked internally via ``mask_sentinels()``
@@ -1150,6 +1144,39 @@ def extract_candidate_spans(text: str, lang: LanguageConfig):
 
     out.sort(key=lambda r: r[2])
     return out
+
+
+def span_match_keys(text: str, spans):
+    """``[(char_start, char_end, match_key)]`` -- the OCCURRENCE-IDENTITY key
+    for each of ``spans`` (half-open codepoint offsets into the RAW ``text``,
+    as ``extract_candidate_spans()`` returns them). The ONE place that key is
+    constructed; no consumer may build it itself, because both obvious ways
+    of doing so are wrong, in OPPOSITE directions:
+
+    * ``fold_match_key(name)`` loses an OVER-CAP run. ``name`` is bounded by
+      ``_capped_candidate_name()`` and the marker is itself tokenized (it
+      contributes a ``truncated`` match unit), so a capped candidate folds to
+      a SYNTHETIC key that no canon ``source_form`` can equal.
+    * ``fold_match_key(text[start:end])`` -- the RAW slice -- loses a run that
+      SPANS an inline sentinel. Runs are built over ``mask_sentinels(text)``
+      while their offsets stay in ``text``, so a legitimate
+      ``Marie ⟦FNREF_5⟧ Claire`` occurrence folds to ``Marie FNREF Claire``
+      and its own canon form no longer finds it. Measured on all four
+      extractor routes (upper-initial, elision, caseless inventory, and the
+      Hebrew maqaf inventory route) -- this is not an upper-initial quirk.
+
+    Folding the MASKED slice is the only form that is both: UNCAPPED, so an
+    over-cap run keeps its own identity, and SENTINEL-FREE, so an interrupted
+    one keeps its. ``mask_sentinels()`` is a same-length substitution, so the
+    masked copy is offset-identical to ``text`` and ONE mask per call serves
+    every span -- never one mask per span, which would be quadratic on a
+    block with many runs.
+    """
+    masked = mask_sentinels(text)
+    return [
+        (char_start, char_end, fold_match_key(masked[char_start:char_end]))
+        for char_start, char_end in spans
+    ]
 
 
 def extract_candidates(text: str, lang: LanguageConfig):
