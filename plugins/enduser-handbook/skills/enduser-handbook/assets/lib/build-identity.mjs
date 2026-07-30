@@ -236,12 +236,7 @@ export function resolveBuildIdentity({ commandOutcome = null, uiReadEnabled = tr
   }
 
   if (uiReadEnabled === false) {
-    return {
-      value: null,
-      source: 'unavailable',
-      resolution_reason: commandFailureReason ?? 'no_source_configured',
-      detail: sanitizeDetailOrNull(commandFailureDetail),
-    };
+    return unavailableIdentity(commandFailureReason ?? 'no_source_configured', sanitizeDetailOrNull(commandFailureDetail));
   }
 
   if (uiObservation == null || uiObservation.kind === 'not_attempted') {
@@ -258,24 +253,26 @@ export function resolveBuildIdentity({ commandOutcome = null, uiReadEnabled = tr
         detail: sanitizeDetailOrNull(uiObservation.detail),
       };
     }
-    return {
-      value: null,
-      source: 'unavailable',
-      resolution_reason: 'ui_read_rejected',
-      detail: sanitizeDetailOrNull(uiObservation.detail),
-    };
+    return unavailableIdentity('ui_read_rejected', sanitizeDetailOrNull(uiObservation.detail));
   }
 
   const reason = UI_TERMINAL_REASONS[uiObservation.kind];
   if (reason === undefined) {
     throw new TypeError(`resolveBuildIdentity: unrecognized uiObservation.kind: ${String(uiObservation.kind)}`);
   }
-  return {
-    value: null,
-    source: 'unavailable',
-    resolution_reason: reason,
-    detail: sanitizeDetailOrNull(uiObservation.detail),
-  };
+  return unavailableIdentity(reason, sanitizeDetailOrNull(uiObservation.detail));
+}
+
+// The shared shape for every terminal "no value obtained" outcome across both resolution functions
+// below — `value` is always null and `source` always 'unavailable' on this path, by construction
+// (see resolveClosingIdentity's own docstring on why a null value always pairs with
+// 'unavailable'). `detail` is taken AS ALREADY SANITIZED — each call site remains responsible for
+// running it through `sanitizeDetailOrNull`/`sanitizeDetail` itself first, since the two callers
+// sanitize from different raw shapes (a CommandOutcome/UiReadObservation's own `.detail` here, vs.
+// an already-sanitized BuildIdentity `.detail` or a freshly-derived diagnostic string in
+// resolveClosingIdentity); this helper only assembles the four fields, it never sanitizes.
+function unavailableIdentity(resolutionReason, detail) {
+  return { value: null, source: 'unavailable', resolution_reason: resolutionReason, detail: detail ?? null };
 }
 
 function weakerSource(a, b) {
@@ -317,34 +314,22 @@ function weakerSource(a, b) {
  */
 export function resolveClosingIdentity({ opening, captureOutcome, closing }) {
   if (!captureOutcome?.ok) {
-    return { value: null, source: 'unavailable', resolution_reason: 'capture_failed', detail: null };
+    return unavailableIdentity('capture_failed', null);
   }
 
   if (opening.value === null) {
-    return {
-      value: null,
-      source: 'unavailable',
-      resolution_reason: opening.resolution_reason,
-      detail: opening.detail ?? null,
-    };
+    return unavailableIdentity(opening.resolution_reason, opening.detail);
   }
 
   if (closing.value === null) {
-    return {
-      value: null,
-      source: 'unavailable',
-      resolution_reason: 'build_unconfirmed',
-      detail: sanitizeDetail(closing.resolution_reason ?? ''),
-    };
+    return unavailableIdentity('build_unconfirmed', sanitizeDetail(closing.resolution_reason ?? ''));
   }
 
   if (opening.value !== closing.value) {
-    return {
-      value: null,
-      source: 'unavailable',
-      resolution_reason: 'build_changed_during_capture',
-      detail: sanitizeDetail(`build changed during capture: ${opening.value} -> ${closing.value}`),
-    };
+    return unavailableIdentity(
+      'build_changed_during_capture',
+      sanitizeDetail(`build changed during capture: ${opening.value} -> ${closing.value}`),
+    );
   }
 
   const source = weakerSource(opening.source, closing.source);
