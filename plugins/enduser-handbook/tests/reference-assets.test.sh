@@ -3414,6 +3414,14 @@ has_in_section "SKILL: W2 says a chapter temp is uncorrelated with row 6's token
 has_in_section "SKILL: W5 cross-references the sweep for its own leftover temp" \
   "$SKILL" '### W5 — Publish' \
   "see W2's crash-recovery section for \`sweepChapterProvenanceTemps\`"
+# [round 6, finding 2] `removed` used to list every candidate whether or not the unlink succeeded, so
+# an operator read a false clean tree. Nothing else can contradict it — row 6 never looks at
+# `chapters/` — which makes this the one place the distinction is ever stated to a reader.
+has_in_section "SKILL: the sweep's removed list is confirmed removals only, failures go to warnings" \
+  "$SKILL" '### W2 — Capture screenshots' \
+  'a temp the sweep could not unlink is named in `warnings` and is still on disk'
+has "capture-record.d.mts: ChapterTempSweepResult carries the warnings channel" \
+  'removed: string[]; warnings: string[]' "$ASSETS/lib/capture-record.d.mts"
 has_in_section "SKILL: repairs are idempotent on an already-repaired tree" \
   "$SKILL" '### W2 — Capture screenshots' \
   'calling one again on an already-repaired tree is a no-op'

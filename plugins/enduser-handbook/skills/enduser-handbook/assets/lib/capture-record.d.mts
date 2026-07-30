@@ -228,9 +228,16 @@ export function recordChapterProvenance(
 // never actually part of this function's contract — there is no `expected`-fingerprint round-trip
 // here to make an already-swept call idempotent-and-reported-as-such, so it is simply omitted
 // rather than carried over as an always-false field.
+// [round 6, codex finding 2] `removed` lists only what this call CONFIRMED gone, and `warnings` is
+// how it says otherwise: `unlinkBestEffort` swallows its failure by design, so before this the sweep
+// pushed every candidate onto `removed` whether or not the unlink actually happened, and an operator
+// read a false clean. Every other caller of that helper can afford the silence because row 6's
+// repair states are their fallback — this one has none, since row 6's `temps` observation is
+// `run/`-only by design. `warnings` is present and empty on a clean sweep rather than optional, so a
+// caller cannot mistake "no warnings" for "this build of the module does not report them".
 export type ChapterTempSweepResult =
-  | { ok: true; removed: string[] }
-  | { ok: true; skipped: true; removed: [] }
+  | { ok: true; removed: string[]; warnings: string[] }
+  | { ok: true; skipped: true; removed: []; warnings: [] }
   | HaltResult;
 
 /** See capture-record.mjs: finds and best-effort-removes every leftover `<slug>.json.<uuid>.tmp` chapter-record temp for each of `entries` — the artifact a crashed `recordChapterProvenance` leaves behind between closing its temp and renaming it into place. Entries-driven, like `recordChapterProvenance`/`buildProvenanceReport` above — never a raw directory walk of `chapters/`. Never reads `deps.expectedAssets` (it never extracts or hashes anything), so its `deps` seam is the plain `CaptureRecordDeps`, unlike its two neighbors above. */

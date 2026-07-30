@@ -2782,6 +2782,21 @@ function scanJsTokens(source) {
       i++;
       continue;
     }
+    // [round 6→7, this fix] `{`/`}` — needed so the capability policy can locate the `defaultDeps`
+    // object literal's own SPAN (see findDefaultDepsLiteralSpan below) by balancing brace tokens,
+    // the same way bracket access needed `[`/`]` above. Purely ADDITIVE, same rationale as that
+    // block: before this, `{`/`}` fell into the generic single-character fallback below, which
+    // already set `prevSignificant`/`precededByDot` to the IDENTICAL values this branch sets —
+    // every existing check that reads `precededByChar`/`precededByDot` on a NEIGHBORING token sees
+    // no change at all; the only difference is that a `{`/`}` now also appears as its own entry in
+    // the `tokens` array, which nothing before this round ever indexed into expecting otherwise.
+    if (ch === '{' || ch === '}') {
+      tokens.push({ kind: 'punct', text: ch });
+      prevSignificant = ch;
+      precededByDot = false;
+      i++;
+      continue;
+    }
     if (ch === '/') {
       // Regex-vs-division: a '/' starting a regex cannot follow an identifier/number/string/')'/']'.
       const regexAllowed = !['ident', 'str', ')', ']'].includes(prevSignificant);
@@ -3035,33 +3050,123 @@ function collectFsBindings(source, tokens) {
 
 const VALUE_TERMINATORS = new Set([',', '}', ';', ')']);
 
-// True iff the fs-bound name occurrence at `tokens[idx]` sits in the module's one sanctioned SLOT:
-// the direct RHS of an object-literal property (`key: <ref>`, preceded by ':') or of a member
-// assignment (`target.prop = <ref>`, preceded by '=' whose assignment TARGET is itself reached via
-// a dot — i.e. a real property, not a bare variable or a destructuring pattern). A bare-variable
-// target (`const write = ...`) and a destructuring pattern (`const {writeFileSync} = ...`) both fail
-// this on the SAME branch — neither is a dot-reached property — which is why no separate alias- or
-// destructuring-tracking machinery is needed any more: creating either kind of fresh bare binding is
-// itself already the violation, caught here at the point of creation, before any question of whether
-// the new name is later called arises.
-function isPropertyValuePosition(tokens, idx) {
+// [round 6→7, this fix] The round-5→6 slot rule (`isPropertyValuePosition`, removed here) asked only
+// "does this occurrence sit in *a* property-value slot" — the direct RHS of an object-literal
+// property, or of a dot-reached member assignment. Codex's round-6 finding: `const bypass = { run:
+// fs.writeFileSync }; bypass.run(...)` sits in exactly such a slot (preceded by ':') and was
+// accepted outright, even though `run` is a fresh private name, not the module's own `deps` seam.
+// Any object literal or assignment satisfies "a property-value slot" just by copying that shape —
+// the property this module actually needs is narrower: the reference must sit in *the* slot. Grep
+// against the real module (capture-record.mjs) confirms there is exactly ONE such slot: the twelve
+// `<member>: fs.<member>,` entries of `const defaultDeps = Object.freeze({ ... })` — every one of
+// them keyed by the identical name it binds. That is now the positive rule, in two shapes:
+//   (a) OBJECT-LITERAL shape — the reference is a direct (depth-1, not nested) property VALUE of the
+//       `defaultDeps` literal itself, and its KEY equals the exact operation name being bound
+//       (`openSync: fs.openSync,` passes; `run: fs.writeFileSync,` fails on the key; a correctly-
+//       keyed property nested one level deeper inside `defaultDeps` — e.g. `nested: { writeFileSync:
+//       fs.writeFileSync }` — fails on depth, because it is not a DIRECT child of the seam literal).
+//   (b) ASSIGNMENT shape — `target.key = <ref>` where `target` is the bare name `deps` or
+//       `defaultDeps` (see SANCTIONED_ASSIGNMENT_TARGETS below) and `key` again equals the exact
+//       operation name. The real module never actually uses this spelling (grep confirms every
+//       fs-operation reference it makes is shape (a)) — it exists only because an earlier round's
+//       fixture already pinned `deps.openSync = fs.openSync;` as an equally legitimate abstract
+//       spelling of "building the seam", and loosening shape (a)'s home to accept an assignment onto
+//       ANY object, keyed correctly, would reopen the identical bypass one indirection over
+//       (`bypass.writeFileSync = fs.writeFileSync; bypass.writeFileSync(...)` — a private copy under
+//       a matching key, via assignment instead of a literal).
+// A KEY/OPERATION mismatch fails both shapes identically, regardless of what put the reference there
+// — a call, a `.call`/`.apply` indirection, an alias, a destructure, an escape, or a shape nobody has
+// thought of yet: none of them is "keyed correctly, in the one sanctioned site".
+//
+// Residual, stated plainly rather than folded into a completeness claim: this is still a single-pass
+// TEXT scan, not a scope-aware parser. A NESTED SCOPE that shadows the module-level `defaultDeps`
+// binding with its own `const defaultDeps = { writeFileSync: fs.writeFileSync }` would be textually
+// indistinguishable from the real seam to this checker (this needs true lexical-scope tracking to
+// close, which this hand-rolled scanner does not attempt — same category of limitation as the
+// template-literal-interior blind spot documented above `findDisallowedFsReference`, not a new one).
+// No legitimate edit to this file has ever had reason to redeclare `defaultDeps` in a nested scope,
+// so this is a real but narrow gap, not a load-bearing one.
+
+// The raw-source span of the `defaultDeps` object literal's `{...}` — the ONE declaration `const
+// defaultDeps = Object.freeze({ ... })` — located by finding the `defaultDeps` identifier
+// immediately followed by `=` (its DECLARATION; never the two bare REFERENCES to it inside
+// `mergeDeps`: `{ ...defaultDeps, ...deps } : defaultDeps`, neither followed by `=`), then balancing
+// `{`/`}` PUNCT tokens forward from the first `{` after it. Returns null when no such declaration
+// exists at all — every isolated snippet fixture in this file that carries no `defaultDeps`
+// declaration of its own (which is most of them) simply has no sanctioned literal slot to sit in.
+// Returned as TOKEN INDICES (`openIdx`/`closeIdx`), not raw source positions: the recursive
+// template-literal branch of scanJsTokens re-scans an interpolated `${...}` expression as its OWN
+// substring starting at position 0, so tokens found THAT way carry raw positions relative to the
+// substring, not to the outer source (documented above `findDisallowedFsReference` as an existing,
+// accepted blind spot). Token INDICES stay monotonic and correct regardless, since they only ever
+// compare a token's ORDER in the stream, never its raw offset.
+function findDefaultDepsLiteralSpan(tokens) {
+  for (let idx = 0; idx < tokens.length; idx++) {
+    if (tokens[idx].kind !== 'ident' || tokens[idx].text !== 'defaultDeps') continue;
+    const next = tokens[idx + 1];
+    if (!next || next.precededByChar !== '=') continue; // a REFERENCE to defaultDeps, not its declaration
+    let openIdx = idx + 1;
+    while (openIdx < tokens.length && !(tokens[openIdx].kind === 'punct' && tokens[openIdx].text === '{')) openIdx++;
+    if (openIdx >= tokens.length) continue;
+    let depth = 0;
+    for (let j = openIdx; j < tokens.length; j++) {
+      if (tokens[j].kind !== 'punct') continue;
+      if (tokens[j].text === '{') depth++;
+      else if (tokens[j].text === '}') {
+        depth--;
+        if (depth === 0) return { openIdx, closeIdx: j };
+      }
+    }
+    return null; // unbalanced braces — malformed source, not this policy's concern
+  }
+  return null;
+}
+
+// See the shape-(b) rationale in the block comment above findDefaultDepsLiteralSpan: `deps` (the
+// parameter name every entrypoint in this module merges the seam into, via `mergeDeps(deps)`) and
+// `defaultDeps` itself, for symmetry. Deliberately NOT an open-ended or configurable list — widening
+// it defeats the whole point of shape (b), which is that ONLY the seam's own binding names count.
+const SANCTIONED_ASSIGNMENT_TARGETS = new Set(['deps', 'defaultDeps']);
+
+// True iff the fs-bound occurrence at `tokens[idx]` (whose resolved operation name is
+// `operationName` — the namespace member text for `fs.<member>`, or the direct-import local name for
+// a bare bound name) sits in the module's one sanctioned seam slot. See the block comment above
+// findDefaultDepsLiteralSpan for the two shapes and the rationale; this function is purely mechanical
+// given the pieces built above it.
+function isSanctionedSeamSlot(tokens, idx, operationName, defaultDepsSpan) {
   const base = tokens[idx];
-  if (base.precededByChar === ':') return true;
-  if (base.precededByChar !== '=') return false;
-  const target = tokens[idx - 1];
-  return target?.kind === 'ident' && target.precededByDot === true;
+  if (base.precededByChar === ':') {
+    const key = tokens[idx - 1];
+    if (key?.kind !== 'ident' || key.text !== operationName) return false;
+    if (defaultDepsSpan === null) return false;
+    if (idx <= defaultDepsSpan.openIdx || idx >= defaultDepsSpan.closeIdx) return false;
+    let depth = 0;
+    for (let j = defaultDepsSpan.openIdx; j < idx; j++) {
+      if (tokens[j].kind !== 'punct') continue;
+      if (tokens[j].text === '{') depth++;
+      else if (tokens[j].text === '}') depth--;
+    }
+    return depth === 1; // a DIRECT child of the seam literal, not nested one level deeper inside it
+  }
+  if (base.precededByChar === '=') {
+    const key = tokens[idx - 1];
+    if (key?.kind !== 'ident' || key.precededByDot !== true || key.text !== operationName) return false;
+    const objBase = tokens[idx - 2];
+    return objBase?.kind === 'ident' && SANCTIONED_ASSIGNMENT_TARGETS.has(objBase.text);
+  }
+  return false;
 }
 
 // Walks every occurrence of a namespace or direct fs-bound name and rejects the first one that is
-// not safely confined to the property-value slot `isPropertyValuePosition` recognizes. Deliberately
-// does NOT use any FORWARD-looking token-chain tracking (the previous version's now-removed
-// `dotBase` field, which named "the identifier this one was reached via a dot FROM") to figure out
-// what follows an occurrence — that kind of tracking is exactly what an optional-chain `?.` or a
-// grouping `(...)` defeats (a round-5 finding: both reset the bookkeeping a chain-tracker needs)
-// — instead it re-derives "what immediately follows" fresh from the RAW SOURCE via
+// not safely confined to the module's one sanctioned seam slot, `isSanctionedSeamSlot` (above).
+// Deliberately does NOT use any FORWARD-looking token-chain tracking (the previous version's
+// now-removed `dotBase` field, which named "the identifier this one was reached via a dot FROM") to
+// figure out what follows an occurrence — that kind of tracking is exactly what an optional-chain
+// `?.` or a grouping `(...)` defeats (a round-5 finding: both reset the bookkeeping a chain-tracker
+// needs) — instead it re-derives "what immediately follows" fresh from the RAW SOURCE via
 // `readIdentifierAt` every time, which is robust to both and also decodes `\uXXXX` escapes (the
 // fourth round-5 finding) the same way scanJsTokens now does. `precededByDot`/`precededByChar` — a
-// token's own immediate BACKWARD-looking facts, not a chain — are still used, by `isPropertyValuePosition`.
+// token's own immediate BACKWARD-looking facts, not a chain — are still used, by `isSanctionedSeamSlot`.
 //
 // `.constants` is the one member name exempt from the slot rule entirely (checked first, before slot
 // position is even considered) — it is DATA (integer flags), never an operation, and the real module
@@ -3083,7 +3188,7 @@ function isPropertyValuePosition(tokens, idx) {
 // is not a proven-sound case the way the four round-5 shapes above are, and any future rewrite of
 // this policy should re-derive this walk's soundness against template-literal-interior positions
 // specifically before relying on it there.
-function findDisallowedFsReference(source, tokens, namespaceNames, directNames, declarationSpans) {
+function findDisallowedFsReference(source, tokens, namespaceNames, directNames, declarationSpans, defaultDepsSpan) {
   for (let idx = 0; idx < tokens.length; idx++) {
     const base = tokens[idx];
     if (base.kind !== 'ident' || base.precededByDot) continue;
@@ -3107,7 +3212,13 @@ function findDisallowedFsReference(source, tokens, namespaceNames, directNames, 
       if (member === null) return 'fs_namespace_referenced_directly';
     }
 
-    if (!isPropertyValuePosition(tokens, idx)) return 'fs_reference_outside_value_position';
+    // The exact operation name being bound — the namespace MEMBER text for `fs.<member>`, or the
+    // direct local binding's own text for a name already destructured out of a named import. This is
+    // what the key/property name at the sanctioned slot must match exactly (see isSanctionedSeamSlot).
+    const operationName = member !== null ? member.text : base.text;
+    if (!isSanctionedSeamSlot(tokens, idx, operationName, defaultDepsSpan)) {
+      return 'fs_reference_outside_sanctioned_slot';
+    }
 
     const afterEnd = member !== null ? member.end : base.end;
     const nextIdx = skipTriviaFrom(source, afterEnd);
@@ -3164,8 +3275,9 @@ function checkCapabilityPolicy(source) {
     if (RAW_CAPABILITY_SPECIFIERS.has(specifier)) return { ok: false, reason: `reexports_raw_capability:${specifier}` };
   }
   const { namespaceNames, directNames, declarationSpans } = collectFsBindings(source, tokens);
+  const defaultDepsSpan = findDefaultDepsLiteralSpan(tokens);
 
-  const fsReason = findDisallowedFsReference(source, tokens, namespaceNames, directNames, declarationSpans);
+  const fsReason = findDisallowedFsReference(source, tokens, namespaceNames, directNames, declarationSpans, defaultDepsSpan);
   if (fsReason) return { ok: false, reason: fsReason };
 
   for (const token of tokens) {
@@ -3268,6 +3380,12 @@ test('capability policy: mutants — each of these must FAIL', () => {
     'export { writeFileSync } from "node:fs";', // re-exports the raw function to every importer of THIS module; no I/O inside this file at all, invisible to every occurrence check
     'export * from "node:fs";', // the same leak, in its most totalizing form
     'export * as rawFs from "node:fs";', // ...and under a namespace alias
+    // [round 6→7, this fix] the round-5→6 rewrite immediately above sanctioned ANY property-value
+    // slot, not the module's own ONE seam — this is codex's round-6 executed mutant, which returned
+    // `{ ok: true }` against that version: a fresh object literal, keyed by whatever name the author
+    // likes, sits in a real property-value slot (preceded by ':') exactly as legitimately as
+    // `defaultDeps` itself does, and the old rule had no way to tell them apart.
+    "const bypass = { run: fs.writeFileSync };\nbypass.run('/outside', 'x');",
   ];
   for (const mutant of mutants) {
     const result = checkCapabilityPolicy(mutant);
@@ -3305,6 +3423,50 @@ test('capability policy: spreading an object that is NOT an fs-bound name is una
 test('capability policy: re-exporting from an ALLOWED sibling module (out of scope for this policy — it republishes no raw I/O capability), and a from-less bare local re-export, both still PASS', () => {
   assert.equal(checkCapabilityPolicy("export { normalizeBuildIdentity } from './build-identity.mjs';").ok, true);
   assert.equal(checkCapabilityPolicy('const a = 1, b = 2;\nexport { a, b };').ok, true);
+});
+
+// [round 6→7, this fix] the sanctioned-SITE rule (isSanctionedSeamSlot / findDefaultDepsLiteralSpan)
+// closes the class codex's mutant belongs to, not just that one instance — every near variant a
+// reviewer would think to try next.
+test('capability policy: a correctly-shaped, correctly-KEYED seam entry still needs the correct SITE — a second literal or a bare assignment, keyed exactly like the real seam, both still FAIL', () => {
+  // A second object literal, keyed identically to a real fs member, with no `defaultDeps`
+  // declaration anywhere in the snippet at all — this is the "second literal keyed exactly like the
+  // seam" variant: the key-match alone would let this through, which is exactly why the SITE half of
+  // the rule (must sit inside the actual `defaultDeps` literal) exists.
+  assert.equal(
+    checkCapabilityPolicy("const bypass = { writeFileSync: fs.writeFileSync };\nbypass.writeFileSync('/outside', 'x');").ok,
+    false,
+  );
+  // An assignment onto a non-seam object, keyed correctly — the assignment-shape analogue of the
+  // same gap: `bypass` is not `deps`/`defaultDeps`, so this fails on SITE even though the key matches.
+  assert.equal(
+    checkCapabilityPolicy("const bypass = {};\nbypass.writeFileSync = fs.writeFileSync;\nbypass.writeFileSync('/outside', 'x');").ok,
+    false,
+  );
+  // A nested literal ONE level inside the real seam, keyed correctly, alongside a genuinely
+  // legitimate entry — depth alone must reject it: the property is not a DIRECT child of
+  // `defaultDeps`, it is a private copy stashed one level deeper inside an otherwise-real seam.
+  assert.equal(
+    checkCapabilityPolicy(
+      'const defaultDeps = Object.freeze({\n  openSync: fs.openSync,\n  nested: { writeFileSync: fs.writeFileSync },\n});',
+    ).ok,
+    false,
+  );
+});
+
+test('capability policy: an ordinary, correctly-shaped defaultDeps literal — the real seam shape, standalone — still PASSES, including a legitimate future ADDITION to it', () => {
+  assert.equal(
+    checkCapabilityPolicy('const defaultDeps = Object.freeze({ openSync: fs.openSync, closeSync: fs.closeSync });').ok,
+    true,
+  );
+  // A future maintenance edit that adds one more correctly-keyed member to the real seam must not
+  // trip this rule — tightness that breaks ordinary maintenance is its own kind of failure.
+  assert.equal(
+    checkCapabilityPolicy(
+      'const defaultDeps = Object.freeze({\n  openSync: fs.openSync,\n  closeSync: fs.closeSync,\n  readFileSync: fs.readFileSync,\n});',
+    ).ok,
+    true,
+  );
 });
 
 // =================================================================================================
