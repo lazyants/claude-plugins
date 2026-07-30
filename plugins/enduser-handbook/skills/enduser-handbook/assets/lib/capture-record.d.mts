@@ -183,9 +183,15 @@ export type RunState =
       closed?: boolean;
     };
 
-export type OpenResult = { ok: true; runState: RunState } | HaltResult | NeedsUiRead;
+// [round 9, codex finding 1] The needs_ui_read branch carries `warnings` because the release that
+// makes a continuation safe can itself fail. Present and EMPTY on a clean release, so a caller
+// cannot read "no warnings" as "this build does not report them"; non-empty names the token that is
+// still on disk, which is the difference between a re-triable continuation and one that will halt on
+// `run_already_open` for a reason the first result never mentioned. Widened only here rather than on
+// `NeedsUiRead` itself, which is shared with two entrypoints that hold no reservation.
+export type OpenResult = { ok: true; runState: RunState } | HaltResult | (NeedsUiRead & { warnings: string[] });
 
-/** See capture-record.mjs: ledger row 2 — re-assert ownership, establish the hierarchy, reserve the one-shot pending token via an exclusive create, resolve the opening identity, snapshot the opening asset hashes, and finalize the reserved token with the resolved runState. The reservation comes FIRST on purpose: a contended open must fail before it spends an operator's identity command, and must not return `needs_ui_read` for a run that could never have started. A `needs_ui_read` return releases the reservation so the continuation re-checks it cleanly. */
+/** See capture-record.mjs: ledger row 2 — re-assert ownership, establish the hierarchy, reserve the one-shot pending token via an exclusive create, resolve the opening identity, snapshot the opening asset hashes, and finalize the reserved token with the resolved runState. The reservation comes FIRST on purpose: a contended open must fail before it spends an operator's identity command, and must not return `needs_ui_read` for a run that could never have started. A `needs_ui_read` return releases the reservation so the continuation re-checks it cleanly; a release that could not actually remove the token surfaces a non-empty `warnings` array (present and empty on a clean release) rather than silently promising a clean check it did not deliver. Every path that leaves this function after the reservation either finalizes it or releases it — including one taken by a throw out of identity resolution or run-state construction, which return `provenance_hazard` halts rather than escaping. */
 export function openCaptureRun(
   profileLike: ProfileLike,
   entries: ChapterEntryLike[],

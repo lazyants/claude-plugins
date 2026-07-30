@@ -3457,6 +3457,18 @@ has_in_section "SKILL: the pending token is reserved before anything else the op
 has_in_section "SKILL: a contended open must not spend the operator's command or a UI read" \
   "$SKILL" '### W2 — Capture screenshots' \
   'must not send them to a UI read for a run that was never going to start'
+# [round 9, finding 1] The reservation made the open's failure paths load-bearing: a throw out of
+# identity resolution (which a malformed UI observation really does produce) used to leak the
+# descriptor and the token, and a release that could not remove the token promised a clean
+# continuation it did not deliver. Both are contracts an operator acts on, so both are stated.
+has_in_section "SKILL: a release that could not remove the token says so instead of promising clean" \
+  "$SKILL" '### W2 — Capture screenshots' \
+  'the return carries a non-empty `warnings` array naming it'
+has_in_section "SKILL: no path leaves the open holding a reservation it never mentions" \
+  "$SKILL" '### W2 — Capture screenshots' \
+  'no path leaves this call holding a reservation it never tells you about'
+has "capture-record.d.mts: OpenResult's needs_ui_read branch carries warnings" \
+  '(NeedsUiRead & { warnings: string[] })' "$ASSETS/lib/capture-record.d.mts"
 has_in_section "SKILL: repairs are idempotent on an already-repaired tree" \
   "$SKILL" '### W2 — Capture screenshots' \
   'calling one again on an already-repaired tree is a no-op'

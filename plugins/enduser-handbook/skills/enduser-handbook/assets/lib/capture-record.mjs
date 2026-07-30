@@ -1168,9 +1168,10 @@ function writeFull(fd, buffer, deps) {
 }
 
 /**
- * Open a capture run: re-assert ownership (silently), establish the provenance hierarchy,
- * snapshot every entry's current asset-dir hashes as the OPENING baseline, resolve the opening
- * build identity, and reserve a one-shot pending token holding the run id and a digest of the
+ * Open a capture run: re-assert ownership (silently), establish the provenance hierarchy, reserve
+ * a one-shot pending token via an exclusive create (before anything else this open would do),
+ * resolve the opening build identity, snapshot every entry's current asset-dir hashes as the
+ * OPENING baseline, and finalize the reservation — writing in the run id and a digest of the
  * opening payload (never the snapshot itself — the snapshot travels in the returned `runState`,
  * which is what the cross-process serialization test protects).
  *
@@ -1191,7 +1192,7 @@ function writeFull(fd, buffer, deps) {
  * @param {import('./build-identity.mjs').UiReadObservation|null} [openingObservation]
  * @param {object} [deps]
  * @param {import('./build-identity.mjs').CommandOutcome|null} [identityCommandOutcome]
- * @returns {{ok: true, runState: object}|{ok: false, halts: Array<object>}|{needs_ui_read: true, region_hint: string, identityCommandOutcome: import('./build-identity.mjs').CommandOutcome|null}}
+ * @returns {{ok: true, runState: object}|{ok: false, halts: Array<object>}|{needs_ui_read: true, region_hint: string, identityCommandOutcome: import('./build-identity.mjs').CommandOutcome|null, warnings: string[]}}
  */
 export function openCaptureRun(profileLike, entries, openingObservation, deps, identityCommandOutcome) {
   const d = mergeDeps(deps);
@@ -1243,18 +1244,46 @@ export function openCaptureRun(profileLike, entries, openingObservation, deps, i
     }
     return haltResult('provenance_hazard', `cannot create the pending token: ${err.code ?? err.message}`, { path: tokenPath });
   }
+  // Releases the reservation this call just took, and reports whether the token is actually GONE
+  // afterward — the operationally significant half of "released" (codex round 9, finding 1b): a
+  // leaked `fd` costs this process one descriptor until it exits, but a token still on disk is
+  // what blocks the NEXT `openCaptureRun` with `run_already_open`, so every caller below that is
+  // about to leave this function on this reservation needs to know which one happened rather than
+  // assuming the reservation is gone just because it tried to release it. At every call site of
+  // this helper the token is still the EMPTY file just created above (nothing has been written to
+  // it yet) — never valid JSON matching the schema — so row 6's classifier (`classify`,
+  // `tokenState === 'invalid'`) reports it as `'partial'` regardless of whatever the run record
+  // happens to hold, and `abortCaptureRun` is its repair. Returns `null` on a clean release, or a
+  // warning string when the token could not be removed.
   function releaseReservation() {
     closeBestEffort(fd, d);
-    unlinkBestEffort(tokenPath, d);
+    if (unlinkBestEffort(tokenPath, d)) return null;
+    return `the pending token '${tokenPath}' could not be removed while releasing this run's reservation — the next openCaptureRun will halt on 'run_already_open' until you run recoverProvenanceState (it will report 'partial') and abortCaptureRun to remove it.`;
   }
 
-  const buildIdentity = profileLike.capture.build_identity ?? null;
-  const uiReadEnabled = buildIdentity?.ui_read !== false;
-  const commandOutcome = resolveIdentityCommandOutcome(identityCommandOutcome, buildIdentity, d);
-  const opening = resolveBuildIdentity({ commandOutcome, uiReadEnabled, uiObservation: openingObservation });
+  let commandOutcome;
+  let opening;
+  try {
+    const buildIdentity = profileLike.capture.build_identity ?? null;
+    const uiReadEnabled = buildIdentity?.ui_read !== false;
+    commandOutcome = resolveIdentityCommandOutcome(identityCommandOutcome, buildIdentity, d);
+    opening = resolveBuildIdentity({ commandOutcome, uiReadEnabled, uiObservation: openingObservation });
+  } catch (err) {
+    // Both calls above can THROW rather than return a result — `resolveBuildIdentity` throws a
+    // `TypeError` on an unrecognized `uiObservation.kind` (build-identity.mjs), a shape that
+    // reaches it from a UI read, which is untrusted input by this project's own reference doc; the
+    // identity command executor (`d.runIdentityCommand`, called from `resolveIdentityCommandOutcome`
+    // with no guard of its own) is arbitrary operator shell and can throw just as easily. Before
+    // this catch, either throw escaped this function entirely with the reservation still open: the
+    // just-created token was never unlinked and the fd was never closed (codex round 9, finding
+    // 1a). Nothing is committed at this point, so turning the throw into an ordinary halt loses
+    // nothing a caller could have used, and keeps this function's own no-throw contract.
+    const releaseWarning = releaseReservation();
+    return haltResult('provenance_hazard', `cannot resolve the opening build identity: ${err.message}`, { warnings: releaseWarning ? [releaseWarning] : [] });
+  }
   if (opening.needs_ui_read) {
-    releaseReservation();
-    return { ...opening, identityCommandOutcome: commandOutcome };
+    const releaseWarning = releaseReservation();
+    return { ...opening, identityCommandOutcome: commandOutcome, warnings: releaseWarning ? [releaseWarning] : [] };
   }
 
   // Snapshotting is an I/O-heavy walk of caller-controlled directories — `snapshotAssetHashes`
@@ -1269,19 +1298,29 @@ export function openCaptureRun(profileLike, entries, openingObservation, deps, i
       openingAssets[chapterKeyFor(entry)] = snapshotAssetHashes(assetDir, d);
     }
   } catch (err) {
-    releaseReservation();
-    return haltResult('provenance_hazard', `cannot snapshot the opening asset hashes: ${err.code ?? err.message}`, {});
+    const releaseWarning = releaseReservation();
+    return haltResult('provenance_hazard', `cannot snapshot the opening asset hashes: ${err.code ?? err.message}`, { warnings: releaseWarning ? [releaseWarning] : [] });
   }
 
-  const runState = {
-    skipped: false,
-    run_id: d.randomUUID(),
-    opening,
-    opening_assets: openingAssets,
-    entries: entries.map(entryKeyShape),
-  };
-  const digest = digestOpeningPayload(openingPayloadFromRunState(runState));
-  runState.opening_digest = digest;
+  let runState;
+  try {
+    runState = {
+      skipped: false,
+      run_id: d.randomUUID(),
+      opening,
+      opening_assets: openingAssets,
+      entries: entries.map(entryKeyShape),
+    };
+    runState.opening_digest = digestOpeningPayload(openingPayloadFromRunState(runState));
+  } catch (err) {
+    // `randomUUID()` and `digestOpeningPayload` both throw rather than return a result (the
+    // latter documented on its own declaration) — this construction sits after the same
+    // reservation as identity resolution above, so an unhandled throw here leaked the fd and the
+    // token exactly the same way (codex round 9, finding 1a, the "throwing randomUUID" probe).
+    const releaseWarning = releaseReservation();
+    return haltResult('provenance_hazard', `cannot construct the run state: ${err.message}`, { warnings: releaseWarning ? [releaseWarning] : [] });
+  }
+  const digest = runState.opening_digest;
 
   const tokenText = JSON.stringify({ run_id: runState.run_id, opening_digest: digest });
   try {
@@ -1293,18 +1332,27 @@ export function openCaptureRun(profileLike, entries, openingObservation, deps, i
     // contract promises everywhere else, and the just-created (O_CREAT|O_EXCL) token was left
     // behind with no caller ever having a chance to clean it up. Best-effort: this closeSync
     // failing must never MASK the write failure we are about to report (codex round 3).
-    closeBestEffort(fd, d);
-    unlinkBestEffort(tokenPath, d);
-    return haltResult('provenance_hazard', `cannot write the pending token: ${err.reason ?? err.code ?? err.message}`, { path: tokenPath });
+    const releaseWarning = releaseReservation();
+    return haltResult('provenance_hazard', `cannot write the pending token: ${err.reason ?? err.code ?? err.message}`, { path: tokenPath, warnings: releaseWarning ? [releaseWarning] : [] });
   }
   try {
     d.closeSync(fd);
   } catch (err) {
     // The token was fully written (writeFull succeeded) but a failing close means it cannot be
     // trusted as durably flushed — untrust it outright rather than returning ok:true over an
-    // uncertain token (some filesystems can fail a close after acknowledging the write).
-    unlinkBestEffort(tokenPath, d);
-    return haltResult('provenance_hazard', `cannot close the pending token after writing it: ${err.code ?? err.message}`, { path: tokenPath });
+    // uncertain token (some filesystems can fail a close after acknowledging the write). The token
+    // now holds this run's real (valid) run_id/opening_digest rather than the empty file
+    // `releaseReservation` above assumes, so a failed unlink here leaves row 6's classifier
+    // reporting `'open'` (or `'prepared'` if a leftover temp also happens to survive), never
+    // `'partial'` — named explicitly here rather than reusing `releaseReservation`'s wording, which
+    // would be the wrong state at this specific site.
+    const removed = unlinkBestEffort(tokenPath, d);
+    const warnings = removed
+      ? []
+      : [
+          `the pending token '${tokenPath}' could not be removed after being written (the close that failed came after a successful write) — the next openCaptureRun will halt on 'run_already_open' until you run recoverProvenanceState (it will report 'open') and abortCaptureRun to remove it.`,
+        ];
+    return haltResult('provenance_hazard', `cannot close the pending token after writing it: ${err.code ?? err.message}`, { path: tokenPath, warnings });
   }
 
   return { ok: true, runState };

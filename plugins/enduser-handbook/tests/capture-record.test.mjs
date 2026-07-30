@@ -1742,7 +1742,142 @@ test('openCaptureRun: BLOCKER 4 (codex review) — a SHORT writeSync on the pend
   });
 });
 
-test('openCaptureRun: an unexpected snapshot-listing errno returns a halt, never an uncaught throw', () => {
+test('openCaptureRun (codex round 9, finding 1a): a malformed opening observation THROWS inside resolveBuildIdentity but must return a halt with the reservation released, not escape uncaught', () => {
+  // `resolveBuildIdentity` throws a TypeError on an unrecognized `uiObservation.kind`
+  // (build-identity.mjs) — a shape that reaches it from a UI read, which is untrusted input by
+  // this project's own reference doc. Before this fix, the throw escaped `openCaptureRun` entirely:
+  // the just-created (O_CREAT|O_EXCL) token was never unlinked and its fd was never closed.
+  withTempDir((dir) => {
+    const profile = profileFor(dir, { capture: { build_identity: { ui_read: true } } });
+    const deps = depsWithOverride({});
+    assert.doesNotThrow(() => {
+      const result = CR.openCaptureRun(profile, [], { kind: 'bogus' }, deps);
+      assert.equal(result.ok, false, JSON.stringify(result));
+      assert.equal(result.halts[0].halt, 'provenance_hazard', JSON.stringify(result));
+    });
+    assert.equal(nodeFs.existsSync(tokenPathFor(profile)), false, 'a throwing identity resolution must not leave the reservation token on disk');
+  });
+});
+
+test('openCaptureRun (codex round 9, finding 1a): a THROWING identity command executor must return a halt with the reservation released, not escape uncaught', () => {
+  // `resolveIdentityCommandOutcome` calls `d.runIdentityCommand` with no guard of its own — the
+  // command is arbitrary operator shell and can throw just as easily as answer.
+  withTempDir((dir) => {
+    const profile = profileFor(dir, { capture: { build_identity: { command: 'get-version', ui_read: false } } });
+    const deps = depsWithOverride({
+      runIdentityCommand: () => {
+        throw new Error('injected identity executor failure');
+      },
+    });
+    assert.doesNotThrow(() => {
+      const result = CR.openCaptureRun(profile, [], null, deps);
+      assert.equal(result.ok, false, JSON.stringify(result));
+      assert.equal(result.halts[0].halt, 'provenance_hazard', JSON.stringify(result));
+    });
+    assert.equal(nodeFs.existsSync(tokenPathFor(profile)), false, 'a throwing identity command must not leave the reservation token on disk');
+  });
+});
+
+test('openCaptureRun (codex round 9, finding 1a): a THROWING randomUUID during run-state construction must return a halt with the reservation released, not escape uncaught', () => {
+  withTempDir((dir) => {
+    const profile = profileFor(dir);
+    const deps = depsWithOverride({
+      randomUUID: () => {
+        throw new Error('injected randomUUID failure');
+      },
+    });
+    assert.doesNotThrow(() => {
+      const result = CR.openCaptureRun(profile, [], null, deps);
+      assert.equal(result.ok, false, JSON.stringify(result));
+      assert.equal(result.halts[0].halt, 'provenance_hazard', JSON.stringify(result));
+    });
+    assert.equal(nodeFs.existsSync(tokenPathFor(profile)), false, 'a throwing randomUUID must not leave the reservation token on disk');
+  });
+});
+
+test('openCaptureRun (codex round 9, finding 1a): a halt taken after the reservation ALSO surfaces a non-empty `warnings` array when the release itself fails', () => {
+  // The three tests above prove the reservation is RELEASED on a throw; this proves that when the
+  // release itself cannot remove the token (EACCES), that failure is reported rather than silently
+  // swallowed — the same "must not be silent" requirement finding 1b states for needs_ui_read,
+  // extended to every halt this function can return after taking the reservation.
+  withTempDir((dir) => {
+    const profile = profileFor(dir);
+    const deps = depsWithOverride({
+      randomUUID: () => {
+        throw new Error('injected randomUUID failure');
+      },
+      unlinkSync: (p) => {
+        if (p === tokenPathFor(profile)) throw Object.assign(new Error('injected'), { code: 'EACCES' });
+        return nodeFs.unlinkSync(p);
+      },
+    });
+    const result = CR.openCaptureRun(profile, [], null, deps);
+    assert.equal(result.ok, false, JSON.stringify(result));
+    assert.equal(result.halts[0].halt, 'provenance_hazard');
+    assert.ok(
+      Array.isArray(result.halts[0].warnings) && result.halts[0].warnings.length > 0,
+      `expected the halt to carry a non-empty warnings array; got ${JSON.stringify(result)}`,
+    );
+    assert.match(result.halts[0].warnings[0], /'partial'/);
+    assert.equal(nodeFs.existsSync(tokenPathFor(profile)), true, 'the injected EACCES must have left the token in place');
+  });
+});
+
+test("openCaptureRun (codex round 9, finding 1b): a needs_ui_read return whose token cannot be removed surfaces a non-empty `warnings` array naming 'partial', not a silently-failed release", () => {
+  withTempDir((dir) => {
+    const profile = profileFor(dir, { capture: { build_identity: { ui_read: true } } });
+    const deps = depsWithOverride({
+      unlinkSync: (p) => {
+        if (p === tokenPathFor(profile)) throw Object.assign(new Error('injected'), { code: 'EACCES' });
+        return nodeFs.unlinkSync(p);
+      },
+    });
+    const result = CR.openCaptureRun(profile, [], null, deps); // ui_read enabled, no observation -> needs_ui_read
+    assert.equal(result.needs_ui_read, true, JSON.stringify(result));
+    assert.ok(Array.isArray(result.warnings) && result.warnings.length > 0, `expected a non-empty warnings array; got ${JSON.stringify(result)}`);
+    assert.match(result.warnings[0], /'partial'/);
+    assert.equal(nodeFs.existsSync(tokenPathFor(profile)), true, 'the injected EACCES must have left the token in place');
+  });
+});
+
+test('openCaptureRun (codex round 9, finding 1b): a needs_ui_read return whose token IS removed reports an EMPTY warnings array, present rather than omitted', () => {
+  withTempDir((dir) => {
+    const profile = profileFor(dir, { capture: { build_identity: { ui_read: true } } });
+    const deps = depsWithOverride({});
+    const result = CR.openCaptureRun(profile, [], null, deps);
+    assert.equal(result.needs_ui_read, true, JSON.stringify(result));
+    assert.deepEqual(result.warnings, [], 'a clean release must report warnings as an empty array, not omit the field');
+    assert.equal(nodeFs.existsSync(tokenPathFor(profile)), false, 'a clean release must actually remove the token');
+  });
+});
+
+test("openCaptureRun: a failing close AFTER a successful token write reports the state row 6 will ACTUALLY classify ('open'), never the shared partial-token wording", () => {
+  // Distinct from the shared `releaseReservation` sites above: by the time this close fails, the
+  // token already holds this run's real (valid) run_id/opening_digest, so row 6 classifies it
+  // 'open' (no matching record yet), not 'partial' — a wrong state name here would send an
+  // operator to `recoverProvenanceState` expecting one report and getting another.
+  withTempDir((dir) => {
+    const profile = profileFor(dir);
+    const deps = depsWithOverride({
+      closeSync: () => {
+        throw Object.assign(new Error('injected'), { code: 'EIO' });
+      },
+      unlinkSync: (p) => {
+        if (p === tokenPathFor(profile)) throw Object.assign(new Error('injected'), { code: 'EACCES' });
+        return nodeFs.unlinkSync(p);
+      },
+    });
+    const result = CR.openCaptureRun(profile, [], null, deps);
+    assert.equal(result.ok, false, JSON.stringify(result));
+    assert.equal(result.halts[0].halt, 'provenance_hazard');
+    assert.match(result.halts[0].message, /cannot close the pending token/);
+    assert.ok(result.halts[0].warnings.length > 0, `expected a non-empty warnings array; got ${JSON.stringify(result)}`);
+    assert.match(result.halts[0].warnings[0], /'open'/);
+    assert.equal(nodeFs.existsSync(tokenPathFor(profile)), true, 'the injected EACCES must have left the (now fully-written) token in place');
+  });
+});
+
+test('openCaptureRun: an unexpected snapshot-listing errno returns a halt, never an uncaught throw, and the reservation is fully released', () => {
   withTempDir((dir) => {
     const profile = profileFor(dir);
     const entry = { slug: 'items' };
@@ -1760,7 +1895,11 @@ test('openCaptureRun: an unexpected snapshot-listing errno returns a halt, never
       const result = CR.openCaptureRun(profile, [entry], null, deps);
       assert.equal(result.ok, false, JSON.stringify(result));
       assert.equal(result.halts[0].halt, 'provenance_hazard');
+      // codex round 9, finding 3: this used to check only the returned halt, so deleting the
+      // reservation's release from this catch still passed — pin the actual on-disk effect too.
+      assert.deepEqual(result.halts[0].warnings, [], 'a clean release on this path must report an empty warnings array');
     });
+    assert.equal(nodeFs.existsSync(tokenPathFor(profile)), false, 'a snapshot hazard must not leave the reservation token on disk');
   });
 });
 
@@ -2809,11 +2948,18 @@ test('openCaptureRun (codex round 8, IMPORTANT 1): a contended open never runs t
     // A token already on disk from some earlier (unrelated, still-open) run — this open can never
     // succeed, no matter what the identity command would have said.
     writeFixture(profile, { token: validToken(RUN_ID_A, ZERO_DIGEST) });
+    const assetDir = join(profile.capture.output_dir, 'items');
+    nodeFs.mkdirSync(assetDir, { recursive: true });
     let calls = 0;
+    let snapshotCalls = 0;
     const deps = depsWithOverride({
       runIdentityCommand: () => {
         calls += 1;
         return { ok: true, raw: 'v1' };
+      },
+      readdirSync: (p, opts) => {
+        if (p === assetDir) snapshotCalls += 1;
+        return nodeFs.readdirSync(p, opts);
       },
     });
     // Before the fix: `openCaptureRun` resolved (and could EXECUTE) the identity command around
@@ -2824,6 +2970,10 @@ test('openCaptureRun (codex round 8, IMPORTANT 1): a contended open never runs t
     assert.equal(result.ok, false, JSON.stringify(result));
     assert.equal(result.halts[0].halt, 'run_already_open', JSON.stringify(result));
     assert.equal(calls, 0, 'the identity command must not run at all for an open that can never succeed');
+    // codex round 9, finding 3: this test only ever watched the identity command, so a REORDER
+    // moving the I/O-heavy asset-hash snapshot back before the reservation (reverting round 8's
+    // fix for the snapshot half rather than just the identity-command half) would leave it green.
+    assert.equal(snapshotCalls, 0, 'the opening asset-hash snapshot must not run at all for an open that can never succeed');
   });
 });
 
@@ -2831,7 +2981,10 @@ test('openCaptureRun (codex round 8, IMPORTANT 1): a contended open resolves to 
   withTempDir((dir) => {
     const profile = profileFor(dir, { capture: { build_identity: { command: 'get-version', ui_read: true } } });
     writeFixture(profile, { token: validToken(RUN_ID_A, ZERO_DIGEST) });
+    const assetDir = join(profile.capture.output_dir, 'items');
+    nodeFs.mkdirSync(assetDir, { recursive: true });
     let calls = 0;
+    let snapshotCalls = 0;
     const deps = depsWithOverride({
       runIdentityCommand: () => {
         calls += 1;
@@ -2840,12 +2993,20 @@ test('openCaptureRun (codex round 8, IMPORTANT 1): a contended open resolves to 
         // read for a run that could never open, discovering the real problem only on a LATER call.
         return { ok: false, detail: 'would force needs_ui_read if ever reached' };
       },
+      readdirSync: (p, opts) => {
+        if (p === assetDir) snapshotCalls += 1;
+        return nodeFs.readdirSync(p, opts);
+      },
     });
     const result = CR.openCaptureRun(profile, [{ slug: 'items' }], null, deps);
     assert.equal(result.needs_ui_read, undefined, `expected an immediate run_already_open halt, not a UI-read request; got ${JSON.stringify(result)}`);
     assert.equal(result.ok, false, JSON.stringify(result));
     assert.equal(result.halts[0].halt, 'run_already_open', JSON.stringify(result));
     assert.equal(calls, 0, 'the identity command must not run before the contention check settles the call');
+    // codex round 9, finding 3: same gap as the sibling contention test above — never watched the
+    // asset-hash snapshot, so a reorder reintroducing round 8's defect for the snapshot half alone
+    // would still pass.
+    assert.equal(snapshotCalls, 0, 'the opening asset-hash snapshot must not run before the contention check settles the call');
   });
 });
 
@@ -2853,6 +3014,8 @@ test('openCaptureRun: a UI-read continuation reuses the already-resolved identit
   withTempDir((dir) => {
     const profile = profileFor(dir, { capture: { build_identity: { command: 'get-version', ui_read: true } } });
     let calls = 0;
+    let reservationFd = null;
+    const closedFds = [];
     const deps = depsWithOverride({
       runIdentityCommand: () => {
         calls += 1;
@@ -2861,12 +3024,30 @@ test('openCaptureRun: a UI-read continuation reuses the already-resolved identit
         // result) is what this test would catch.
         return calls === 1 ? { ok: false, detail: 'first call fails' } : { ok: true, raw: 'command-would-have-won' };
       },
+      openSync: (p, flags, mode) => {
+        const fd = nodeFs.openSync(p, flags, mode);
+        if (p === tokenPathFor(profile)) reservationFd = fd;
+        return fd;
+      },
+      closeSync: (fd) => {
+        closedFds.push(fd);
+        return nodeFs.closeSync(fd);
+      },
     });
 
     const first = CR.openCaptureRun(profile, [{ slug: 'items' }], null, deps);
     assert.equal(first.needs_ui_read, true, JSON.stringify(first));
     assert.equal(calls, 1, 'the command must run exactly once for the first (needs_ui_read) call');
     assert.deepEqual(first.identityCommandOutcome, { ok: false, detail: 'first call fails' });
+    // codex round 9, finding 3: reaching this point only via `resumed.ok === true` below proves
+    // the token was UNLINKED (a second exclusive-create on the same name would otherwise EEXIST) —
+    // it says nothing about whether the reservation's own fd was ever closed, so an "unlink
+    // without close" mutation would still pass. Pin the close directly, by identity of the fd.
+    assert.notEqual(reservationFd, null, 'the reservation open must have been observed via the openSync seam');
+    assert.ok(
+      closedFds.includes(reservationFd),
+      `releasing a needs_ui_read reservation must close its own descriptor — closed fds were [${closedFds.join(',')}], reservation fd was ${reservationFd}`,
+    );
 
     const resumed = CR.openCaptureRun(profile, [{ slug: 'items' }], { kind: 'value', raw: 'ui-value' }, deps, first.identityCommandOutcome);
     assert.equal(calls, 1, 'the command must NOT run a second time on the continuation call');
