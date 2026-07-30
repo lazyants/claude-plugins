@@ -60,7 +60,7 @@ capture:
   # enabled source has been exhausted. See SKILL.md's W2 preflight/resolution step, which is
   # normative for the precedence order.
   build_identity:
-    command: "docker compose exec -T app git describe --tags --always"   # exact, copy-pasteable; run once per capture run
+    command: "docker compose exec -T app git describe --tags --always"   # exact, copy-pasteable; run TWICE per capture run (once at open, once at close) — see SKILL.md's W2 step
     ui_read: true                   # opt-out fallback (this IS the default): falls back to an LLM read of the
                                      # running UI when command is unset, fails, or its output is rejected
 

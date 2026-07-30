@@ -46,6 +46,7 @@ import {
   resolveBuildIdentity,
   resolveClosingIdentity,
   formatIdentityValue,
+  describeBuildIdentityWarning,
 } from './build-identity.mjs';
 
 import {
@@ -1079,6 +1080,20 @@ function validateEntriesForCapture(profileLike, entries, deps) {
   return { ok: true };
 }
 
+// Shared by all three identity-resolution call sites below (openCaptureRun's opening step,
+// closeCaptureRun's closing step, buildProvenanceReport's current step): reuse an already-resolved
+// CommandOutcome verbatim when the caller hands one back — a UI-read continuation resuming after a
+// prior `needs_ui_read` — rather than invoking `d.runIdentityCommand` a second time for the same
+// observation point. `undefined` (the default, and every pre-existing call site written before
+// this parameter existed) means "not yet resolved, compute it now"; any other value — including a
+// legitimate `null` when no command is configured at all — is used as-is, since `null` there is
+// itself a resolved fact ("there is nothing to run"), not an unset sentinel.
+function resolveIdentityCommandOutcome(providedOutcome, buildIdentity, d) {
+  if (providedOutcome !== undefined) return providedOutcome;
+  if (buildIdentity?.command) return d.runIdentityCommand(buildIdentity.command);
+  return null;
+}
+
 // ---------------------------------------------------------------------------------------------
 // Row 2 — openCaptureRun. Reservation is an EXCLUSIVE create on the final pending-token name
 // (O_CREAT | O_EXCL | O_NOFOLLOW), never a check-then-rename — the contended name is the fixed
@@ -1159,13 +1174,26 @@ function writeFull(fd, buffer, deps) {
  * opening payload (never the snapshot itself — the snapshot travels in the returned `runState`,
  * which is what the cross-process serialization test protects).
  *
+ * `identityCommandOutcome`, when passed, is used AS-IS instead of invoking
+ * `capture.build_identity.command` again — the fix for a UI-read continuation otherwise re-running
+ * the command a second time for one opening observation point (the command is arbitrary
+ * operator-supplied shell: it may be slow, side-effecting, or answer DIFFERENTLY on a second run,
+ * in which case the precedence chain in `resolveBuildIdentity` would resolve against a value that
+ * was never the one the UI read was requested for). On a `needs_ui_read` return, this function
+ * hands back the `identityCommandOutcome` it just used (computed fresh, or the one it was given) —
+ * the caller performs the UI read and calls again, passing that same value straight through as
+ * this parameter, so the command runs at most once per observation point regardless of how many
+ * times resolution needs to be resumed. Omitting it (the pre-existing 4-argument call shape) still
+ * works — the command is simply re-run on every call, exactly as before this parameter existed.
+ *
  * @param {object} profileLike
  * @param {Array<{slug: string|number, group?: string}>} entries
  * @param {import('./build-identity.mjs').UiReadObservation|null} [openingObservation]
  * @param {object} [deps]
- * @returns {{ok: true, runState: object}|{ok: false, halts: Array<object>}|{needs_ui_read: true, region_hint: string}}
+ * @param {import('./build-identity.mjs').CommandOutcome|null} [identityCommandOutcome]
+ * @returns {{ok: true, runState: object}|{ok: false, halts: Array<object>}|{needs_ui_read: true, region_hint: string, identityCommandOutcome: import('./build-identity.mjs').CommandOutcome|null}}
  */
-export function openCaptureRun(profileLike, entries, openingObservation, deps) {
+export function openCaptureRun(profileLike, entries, openingObservation, deps, identityCommandOutcome) {
   const d = mergeDeps(deps);
 
   const ownership = assertProvenanceOwnership(profileLike, d);
@@ -1184,12 +1212,9 @@ export function openCaptureRun(profileLike, entries, openingObservation, deps) {
 
   const buildIdentity = profileLike.capture.build_identity ?? null;
   const uiReadEnabled = buildIdentity?.ui_read !== false;
-  let commandOutcome = null;
-  if (buildIdentity?.command) {
-    commandOutcome = d.runIdentityCommand(buildIdentity.command);
-  }
+  const commandOutcome = resolveIdentityCommandOutcome(identityCommandOutcome, buildIdentity, d);
   const opening = resolveBuildIdentity({ commandOutcome, uiReadEnabled, uiObservation: openingObservation });
-  if (opening.needs_ui_read) return opening;
+  if (opening.needs_ui_read) return { ...opening, identityCommandOutcome: commandOutcome };
 
   // Snapshotting is an I/O-heavy walk of caller-controlled directories — `snapshotAssetHashes`
   // catches ENOENT/ENOTDIR internally (an absent directory is legitimately an empty map) but
@@ -1379,14 +1404,31 @@ function listMatchingChapterTemps(profileLike, entry, deps) {
  * leftover matching temp. Never throws on an ordinary failure — every exit is a returned
  * `{ok:false, halts}`, so a caller branches on `halts` rather than relying on an exception.
  *
+ * `identityCommandOutcome` is the closing counterpart of `openCaptureRun`'s parameter of the same
+ * name — see that function's doc comment for why a UI-read continuation must reuse the CLOSING
+ * step's already-resolved command outcome rather than re-invoking `capture.build_identity.command`
+ * a second time, and how the value returned alongside a `needs_ui_read` result is meant to be
+ * threaded straight back in on the retry call.
+ *
+ * The returned `warnings` array also carries an operator-facing line whenever the run's FINAL
+ * recorded identity did not cleanly resolve to a value — a missing, failing, unconfirmed or
+ * changed identity (SKILL.md's own "W2 warns... on any of these outcomes"), via
+ * `describeBuildIdentityWarning` (build-identity.mjs). Emitted here, once, on the committed
+ * result — never from `openCaptureRun`, since the run's FINAL identity (what a `build_unconfirmed`
+ * or `build_changed_during_capture` verdict actually is) is only known once both the opening and
+ * the closing resolutions and `captureOutcome` have all been combined, which happens in THIS
+ * function; an opening-side warning would either have to guess at the final verdict or duplicate
+ * this same check before it can be answered.
+ *
  * @param {object} profileLike
  * @param {object} runState
  * @param {{ok: boolean, detail?: string}} captureOutcome
  * @param {import('./build-identity.mjs').UiReadObservation|null} [closingObservation]
  * @param {object} [deps]
- * @returns {{ok: true, runState: object, warnings: string[]}|{ok: false, halts: Array<object>}|{needs_ui_read: true, region_hint: string}}
+ * @param {import('./build-identity.mjs').CommandOutcome|null} [identityCommandOutcome]
+ * @returns {{ok: true, runState: object, warnings: string[]}|{ok: false, halts: Array<object>}|{needs_ui_read: true, region_hint: string, identityCommandOutcome: import('./build-identity.mjs').CommandOutcome|null}}
  */
-export function closeCaptureRun(profileLike, runState, captureOutcome, closingObservation, deps) {
+export function closeCaptureRun(profileLike, runState, captureOutcome, closingObservation, deps, identityCommandOutcome) {
   const d = mergeDeps(deps);
 
   const ownership = assertProvenanceOwnership(profileLike, d);
@@ -1435,17 +1477,17 @@ export function closeCaptureRun(profileLike, runState, captureOutcome, closingOb
   const uiReadEnabled = buildIdentity?.ui_read !== false;
   // The closing observation runs the SAME three-step resolution order as the opening one — the
   // identity command is re-invoked, not skipped, since a command-configured profile must resolve
-  // its closing identity from the command too, not fall straight to the UI-read fallback.
-  let closingCommandOutcome = null;
-  if (buildIdentity?.command) {
-    closingCommandOutcome = d.runIdentityCommand(buildIdentity.command);
-  }
+  // its closing identity from the command too, not fall straight to the UI-read fallback. "Re-
+  // invoked" means at most once per closing observation point, though: `identityCommandOutcome`
+  // (a UI-read continuation resuming this same close) is reused verbatim instead, exactly as
+  // `openCaptureRun` reuses its own opening-side parameter.
+  const closingCommandOutcome = resolveIdentityCommandOutcome(identityCommandOutcome, buildIdentity, d);
   const closing = resolveBuildIdentity({
     commandOutcome: closingCommandOutcome,
     uiReadEnabled,
     uiObservation: closingObservation,
   });
-  if (closing.needs_ui_read) return closing;
+  if (closing.needs_ui_read) return { ...closing, identityCommandOutcome: closingCommandOutcome };
 
   // Same reasoning as the opening sweep: an unexpected errno during the closing sweep must return
   // a halt, not crash — and doing so HERE (before any temp is written) is what keeps the existing
@@ -1527,6 +1569,16 @@ export function closeCaptureRun(profileLike, runState, captureOutcome, closingOb
     return haltResult('provenance_hazard', `cannot commit the run record: ${err.code ?? err.message}`, { path: finalPath });
   }
 
+  // A missing, failing, unconfirmed or changed FINAL identity is a warning here, on the
+  // already-committed result — SKILL.md's own "W2 warns... on any of these outcomes" promise, kept
+  // for real this time: before this, the only place any of that ever landed was the committed
+  // record's own `build_identity.detail` field, which nothing production-side reads unprompted.
+  // `describeBuildIdentityWarning` returns `null` on a clean resolution (`resolution_reason: null`)
+  // — nothing pushed in that case.
+  const warnings = [];
+  const identityWarning = describeBuildIdentityWarning({ opening: runState.opening, closing, final: finalIdentity, captureOutcome });
+  if (identityWarning) warnings.push(identityWarning);
+
   // Cleanup: every leftover matching temp first, the token last — the same order and for the same
   // reason as the row-6 repairs. Both are best-effort: a leftover temp is still classified
   // correctly by recoverProvenanceState, and the token may already be gone under a concurrent or
@@ -1535,7 +1587,6 @@ export function closeCaptureRun(profileLike, runState, captureOutcome, closingOb
   // reported as if nothing was written (codex round 3): it is a WARNING on this still-`ok:true`
   // result, never a halt, and any leftover temp is still correctly seen by `recoverProvenanceState`
   // on its own next run regardless of whether this cleanup pass could enumerate it.
-  const warnings = [];
   const tempsListed = listMatchingTemps(profileLike, d);
   if (tempsListed.ok) {
     for (const temp of tempsListed.temps) {
@@ -1979,13 +2030,19 @@ export function sweepChapterProvenanceTemps(profileLike, entries, deps) {
  * between each chapter's recorded identity and the CURRENT one. On a skipped profile, returns
  * `provenance_unavailable` rows with zero UI requests and zero record reads.
  *
+ * `identityCommandOutcome` is this function's counterpart of `openCaptureRun`'s parameter of the
+ * same name — see that function's doc comment for why a UI-read continuation must reuse the
+ * already-resolved outcome rather than re-invoking `capture.build_identity.command` a second time
+ * for the same current-identity observation point.
+ *
  * @param {object} profileLike
  * @param {Array<object>} entries
  * @param {import('./build-identity.mjs').UiReadObservation|null} [currentObservation]
  * @param {object} [deps]
- * @returns {{rows: Array<object>}|{needs_ui_read: true, region_hint: string}|{ok: false, halts: Array<object>}}
+ * @param {import('./build-identity.mjs').CommandOutcome|null} [identityCommandOutcome]
+ * @returns {{rows: Array<object>}|{needs_ui_read: true, region_hint: string, identityCommandOutcome: import('./build-identity.mjs').CommandOutcome|null}|{ok: false, halts: Array<object>}}
  */
-export function buildProvenanceReport(profileLike, entries, currentObservation, deps) {
+export function buildProvenanceReport(profileLike, entries, currentObservation, deps, identityCommandOutcome) {
   const d = mergeDeps(deps);
 
   const ownership = assertProvenanceOwnership(profileLike, d);
@@ -2020,12 +2077,9 @@ export function buildProvenanceReport(profileLike, entries, currentObservation, 
 
   const buildIdentity = profileLike.capture.build_identity ?? null;
   const uiReadEnabled = buildIdentity?.ui_read !== false;
-  let commandOutcome = null;
-  if (buildIdentity?.command) {
-    commandOutcome = d.runIdentityCommand(buildIdentity.command);
-  }
+  const commandOutcome = resolveIdentityCommandOutcome(identityCommandOutcome, buildIdentity, d);
   const current = resolveBuildIdentity({ commandOutcome, uiReadEnabled, uiObservation: currentObservation });
-  if (current.needs_ui_read) return current;
+  if (current.needs_ui_read) return { ...current, identityCommandOutcome: commandOutcome };
 
   const rows = [];
   for (const entry of entries) {

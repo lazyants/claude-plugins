@@ -3422,6 +3422,20 @@ has_in_section "SKILL: the sweep's removed list is confirmed removals only, fail
   'a temp the sweep could not unlink is named in `warnings` and is still on disk'
 has "capture-record.d.mts: ChapterTempSweepResult carries the warnings channel" \
   'removed: string[]; warnings: string[]' "$ASSETS/lib/capture-record.d.mts"
+# [round 6, findings 3 and 4] W2's identity warnings were promised by this document and emitted by no
+# production path for the whole release; and a UI-read continuation silently re-ran the operator's
+# identity command, making a twice-per-run chain run three or more times. Both are contracts a reader
+# acts on, so both are pinned to the prose that states them.
+has_in_section "SKILL: W2's identity warnings are values closeCaptureRun returns, not just intent" \
+  "$SKILL" '### W2 — Capture screenshots' \
+  'returns them in its `warnings` array, one line per run, and the drift line names both'
+has_in_section "SKILL: a UI-read continuation must thread identityCommandOutcome back" \
+  "$SKILL" '### W2 — Capture screenshots' \
+  '`identityCommandOutcome` threaded straight through as its next argument'
+has "capture-record.d.mts: NeedsUiRead carries identityCommandOutcome for the retry" \
+  'identityCommandOutcome: CommandOutcome | null }' "$ASSETS/lib/capture-record.d.mts"
+has "build-identity.d.mts: declares describeBuildIdentityWarning" \
+  'export declare function describeBuildIdentityWarning' "$ASSETS/lib/build-identity.d.mts"
 has_in_section "SKILL: repairs are idempotent on an already-repaired tree" \
   "$SKILL" '### W2 — Capture screenshots' \
   'calling one again on an already-repaired tree is a no-op'

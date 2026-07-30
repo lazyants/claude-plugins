@@ -1777,8 +1777,14 @@ test('closeCaptureRun: BLOCKER (codex round 3) — a post-commit listing hazard 
     assert.doesNotThrow(() => {
       const result = CR.closeCaptureRun(profile, opened.runState, { ok: true }, null, deps);
       assert.equal(result.ok, true, `the rename already committed the record — this must stay ok:true, not become a halt; got ${JSON.stringify(result)}`);
-      assert.equal(result.warnings.length, 1, JSON.stringify(result.warnings));
-      assert.match(result.warnings[0], /committed successfully/);
+      // Two warnings on this fixture, not one: `profileFor`'s default `build_identity: { ui_read:
+      // false }` with no command configured resolves to `no_source_configured` on both ends, which
+      // now ALSO warns (Finding 2) — a fact orthogonal to the one THIS test pins (the temp-listing
+      // hazard's own warning), so both are asserted rather than a bare length check hiding which is
+      // which.
+      assert.equal(result.warnings.length, 2, JSON.stringify(result.warnings));
+      assert.ok(result.warnings.some((w) => /committed successfully/.test(w)), JSON.stringify(result.warnings));
+      assert.ok(result.warnings.some((w) => /no build identity source is configured/.test(w)), JSON.stringify(result.warnings));
     });
     assert.equal(nodeFs.existsSync(recordPathFor(profile)), true, 'the run record must be durably committed despite the cleanup hazard');
   });
@@ -2561,6 +2567,181 @@ test('buildProvenanceReport: record_unsupported_version is REACHABLE — a struc
     const result = CR.buildProvenanceReport(profile, [entry], null, deps);
     assert.equal(result.rows[0].classification_reason, 'record_unsupported_version', JSON.stringify(result.rows[0]));
     assert.notEqual(result.rows[0].classification_reason, 'record_malformed');
+  });
+});
+
+// =================================================================================================
+// UI-read continuation: identityCommandOutcome threading (Finding 1) and W2 identity warnings
+// (Finding 2) — both round-6 codex findings on build-identity resolution.
+//
+// The general capture fixtures above all disable the UI fallback (`build_identity: { ui_read:
+// false }`, `profileFor`'s default) precisely so lifecycle/completeness tests never have to thread
+// a UI observation through every call — which is exactly why the continuation path below was never
+// exercised anywhere else in this file. Every fixture here explicitly sets `ui_read: true` and
+// configures a `command`, so the `needs_ui_read` branch is genuinely reached.
+// =================================================================================================
+
+test('openCaptureRun: a UI-read continuation reuses the already-resolved identityCommandOutcome — the identity command is NOT re-invoked (Finding 1)', () => {
+  withTempDir((dir) => {
+    const profile = profileFor(dir, { capture: { build_identity: { command: 'get-version', ui_read: true } } });
+    let calls = 0;
+    const deps = depsWithOverride({
+      runIdentityCommand: () => {
+        calls += 1;
+        // Fails on the FIRST call, forcing needs_ui_read. If this were ever invoked a SECOND time
+        // it would "succeed" with a value that must never win — so a re-invocation (not just its
+        // result) is what this test would catch.
+        return calls === 1 ? { ok: false, detail: 'first call fails' } : { ok: true, raw: 'command-would-have-won' };
+      },
+    });
+
+    const first = CR.openCaptureRun(profile, [{ slug: 'items' }], null, deps);
+    assert.equal(first.needs_ui_read, true, JSON.stringify(first));
+    assert.equal(calls, 1, 'the command must run exactly once for the first (needs_ui_read) call');
+    assert.deepEqual(first.identityCommandOutcome, { ok: false, detail: 'first call fails' });
+
+    const resumed = CR.openCaptureRun(profile, [{ slug: 'items' }], { kind: 'value', raw: 'ui-value' }, deps, first.identityCommandOutcome);
+    assert.equal(calls, 1, 'the command must NOT run a second time on the continuation call');
+    assert.equal(resumed.ok, true, JSON.stringify(resumed));
+    assert.equal(resumed.runState.opening.value, 'ui-value');
+    assert.equal(resumed.runState.opening.source, 'ui');
+  });
+});
+
+test('openCaptureRun: OMITTING identityCommandOutcome on a repeated call still works, by re-invoking the command (backward compatible with the pre-existing 4-argument call shape)', () => {
+  withTempDir((dir) => {
+    const profile = profileFor(dir, { capture: { build_identity: { command: 'get-version', ui_read: true } } });
+    let calls = 0;
+    const deps = depsWithOverride({
+      runIdentityCommand: () => {
+        calls += 1;
+        return { ok: false, detail: `call ${calls} fails` };
+      },
+    });
+
+    const first = CR.openCaptureRun(profile, [{ slug: 'items' }], null, deps);
+    assert.equal(first.needs_ui_read, true);
+    assert.equal(calls, 1);
+
+    // No 5th argument at all — the OLD call shape every pre-existing caller uses.
+    const second = CR.openCaptureRun(profile, [{ slug: 'items' }], { kind: 'value', raw: 'ui-value' }, deps);
+    assert.equal(calls, 2, 'omitting identityCommandOutcome must still re-run the command, exactly as before this parameter existed');
+    assert.equal(second.ok, true, JSON.stringify(second));
+  });
+});
+
+test('closeCaptureRun: a UI-read continuation reuses the already-resolved identityCommandOutcome — the identity command is NOT re-invoked (Finding 1)', () => {
+  withTempDir((dir) => {
+    const profile = profileFor(dir, { capture: { build_identity: { command: 'get-version', ui_read: true } } });
+    const responses = [{ ok: true, raw: 'v-open' }, { ok: false, detail: 'close attempt 1 fails' }, { ok: true, raw: 'command-would-have-won' }];
+    let calls = 0;
+    const deps = depsWithOverride({
+      runIdentityCommand: () => {
+        const r = responses[Math.min(calls, responses.length - 1)];
+        calls += 1;
+        return r;
+      },
+    });
+
+    const opened = CR.openCaptureRun(profile, [{ slug: 'items' }], null, deps);
+    assert.equal(opened.ok, true, JSON.stringify(opened));
+    assert.equal(calls, 1, 'the OPENING command runs once, at open');
+    assert.equal(opened.runState.opening.value, 'v-open');
+
+    const firstClose = CR.closeCaptureRun(profile, opened.runState, { ok: true }, null, deps);
+    assert.equal(firstClose.needs_ui_read, true, JSON.stringify(firstClose));
+    assert.equal(calls, 2, 'the CLOSING command runs exactly once for the first close attempt');
+    assert.deepEqual(firstClose.identityCommandOutcome, { ok: false, detail: 'close attempt 1 fails' });
+
+    const resumed = CR.closeCaptureRun(
+      profile,
+      opened.runState,
+      { ok: true },
+      { kind: 'value', raw: 'ui-close-value' },
+      deps,
+      firstClose.identityCommandOutcome,
+    );
+    assert.equal(calls, 2, 'the closing command must NOT run a second time on the continuation call');
+    assert.equal(resumed.ok, true, JSON.stringify(resumed));
+
+    // opening='v-open' (command) vs closing='ui-close-value' (ui) are DIFFERENT — the committed
+    // record must reflect THAT drift, never the third (never-actually-invoked) command response.
+    const record = JSON.parse(nodeFs.readFileSync(recordPathFor(profile), 'utf8'));
+    assert.equal(record.build_identity.resolution_reason, 'build_changed_during_capture', JSON.stringify(record.build_identity));
+  });
+});
+
+test('buildProvenanceReport: a UI-read continuation reuses the already-resolved identityCommandOutcome — the identity command is NOT re-invoked (Finding 1)', () => {
+  withTempDir((dir) => {
+    const profile = profileFor(dir, { capture: { build_identity: { command: 'get-version', ui_read: true } } });
+    const entry = { slug: 'items' };
+    writeChapterAt(profile, entry, '# items\n');
+    let calls = 0;
+    const deps = depsWithOverride({
+      runIdentityCommand: () => {
+        calls += 1;
+        return calls === 1 ? { ok: false, detail: 'first call fails' } : { ok: true, raw: 'command-would-have-won' };
+      },
+      expectedAssets: emptyExpectedAssets,
+    });
+
+    const first = CR.buildProvenanceReport(profile, [entry], null, deps);
+    assert.equal(first.needs_ui_read, true, JSON.stringify(first));
+    assert.equal(calls, 1);
+    assert.deepEqual(first.identityCommandOutcome, { ok: false, detail: 'first call fails' });
+
+    const resumed = CR.buildProvenanceReport(profile, [entry], { kind: 'value', raw: 'ui-value' }, deps, first.identityCommandOutcome);
+    assert.equal(calls, 1, 'the command must NOT run a second time on the continuation call');
+    assert.equal(resumed.rows[0].current_source, 'ui', JSON.stringify(resumed.rows));
+  });
+});
+
+test('closeCaptureRun: build_changed_during_capture warns, NAMING BOTH VALUES (Finding 2 — codex repro: open v1, close v2, warnings used to stay empty)', () => {
+  withTempDir((dir) => {
+    const profile = profileFor(dir, { capture: { build_identity: { command: 'get-version', ui_read: false } } });
+    let calls = 0;
+    const deps = depsWithOverride({
+      runIdentityCommand: () => {
+        calls += 1;
+        return calls === 1 ? { ok: true, raw: 'v1' } : { ok: true, raw: 'v2' };
+      },
+    });
+    const opened = CR.openCaptureRun(profile, [{ slug: 'items' }], null, deps);
+    assert.equal(opened.ok, true, JSON.stringify(opened));
+    assert.equal(opened.runState.opening.value, 'v1');
+    const closed = CR.closeCaptureRun(profile, opened.runState, { ok: true }, null, deps);
+    assert.equal(closed.ok, true, JSON.stringify(closed));
+    const record = JSON.parse(nodeFs.readFileSync(recordPathFor(profile), 'utf8'));
+    assert.equal(record.build_identity.resolution_reason, 'build_changed_during_capture');
+    assert.equal(closed.warnings.length, 1, JSON.stringify(closed.warnings));
+    assert.match(closed.warnings[0], /v1/);
+    assert.match(closed.warnings[0], /v2/);
+  });
+});
+
+test('closeCaptureRun: a clean (unchanged) resolution never adds an identity warning', () => {
+  withTempDir((dir) => {
+    const profile = profileFor(dir, { capture: { build_identity: { command: 'get-version', ui_read: false } } });
+    const deps = depsWithOverride({ runIdentityCommand: () => ({ ok: true, raw: 'same-version' }) });
+    const opened = CR.openCaptureRun(profile, [{ slug: 'items' }], null, deps);
+    assert.equal(opened.ok, true, JSON.stringify(opened));
+    const closed = CR.closeCaptureRun(profile, opened.runState, { ok: true }, null, deps);
+    assert.equal(closed.ok, true, JSON.stringify(closed));
+    assert.deepEqual(closed.warnings, []);
+  });
+});
+
+test('closeCaptureRun: capture_failed warns using captureOutcome.detail (Finding 2)', () => {
+  withTempDir((dir) => {
+    const profile = profileFor(dir, { capture: { build_identity: { command: 'get-version', ui_read: false } } });
+    const deps = depsWithOverride({ runIdentityCommand: () => ({ ok: true, raw: 'v1' }) });
+    const opened = CR.openCaptureRun(profile, [{ slug: 'items' }], null, deps);
+    assert.equal(opened.ok, true, JSON.stringify(opened));
+    const closed = CR.closeCaptureRun(profile, opened.runState, { ok: false, detail: 'capture command exited 1' }, null, deps);
+    assert.equal(closed.ok, true, JSON.stringify(closed));
+    assert.equal(closed.warnings.length, 1, JSON.stringify(closed.warnings));
+    assert.match(closed.warnings[0], /capture\.command itself failed/);
+    assert.match(closed.warnings[0], /capture command exited 1/);
   });
 });
 

@@ -72,7 +72,12 @@ export interface Halt {
 }
 
 export type HaltResult = { ok: false; halts: Halt[] };
-export type NeedsUiRead = { needs_ui_read: true; region_hint: string };
+// [round 6, codex finding 3] `identityCommandOutcome` carries back the CommandOutcome the aborted
+// call already resolved (null when no command is configured). A continuation MUST thread it into the
+// retry: without it the retry re-invokes `capture.build_identity.command` — arbitrary operator shell,
+// possibly slow, side-effectful, or answering differently the second time — for what is meant to be
+// ONE observation point, and silently breaks the twice-per-run contract SKILL.md states.
+export type NeedsUiRead = { needs_ui_read: true; region_hint: string; identityCommandOutcome: CommandOutcome | null };
 
 /**
  * See capture-record.mjs: RFC 8785 (JCS) canonicalization of an in-memory JS value.
@@ -186,6 +191,7 @@ export function openCaptureRun(
   entries: ChapterEntryLike[],
   openingObservation?: UiReadObservation | null,
   deps?: Partial<CaptureRecordDeps>,
+  identityCommandOutcome?: CommandOutcome | null,
 ): OpenResult;
 
 export interface CaptureOutcome {
@@ -205,6 +211,7 @@ export function closeCaptureRun(
   captureOutcome: CaptureOutcome,
   closingObservation?: UiReadObservation | null,
   deps?: Partial<CaptureRecordDeps>,
+  identityCommandOutcome?: CommandOutcome | null,
 ): CloseResult;
 
 export type RecordResult = { recorded: true; reason: null } | { recorded: false; reason: string } | HaltResult;
@@ -275,6 +282,7 @@ export function buildProvenanceReport(
   entries: ChapterEntryLike[],
   currentObservation?: UiReadObservation | null,
   deps?: Partial<CaptureRecordDeps> & { expectedAssets?: ExpectedAssetsOverride },
+  identityCommandOutcome?: CommandOutcome | null,
 ): ReportResult;
 
 export type Row6State =

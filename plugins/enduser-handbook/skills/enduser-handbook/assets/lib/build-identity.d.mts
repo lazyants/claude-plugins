@@ -163,3 +163,20 @@ export declare function classifyBuildDelta(input: {
  * export's docstring for the measured detail.
  */
 export declare function formatIdentityValue(value: string | null): string;
+
+/**
+ * [round 6, codex finding 4] Render the W2 operator-facing warning line for a run's FINAL recorded
+ * build identity, or `null` on a clean resolution. This exists because SKILL.md's W2 promises a
+ * warning on a missing, failing, unconfirmed or changed identity and, before this, the runtime kept
+ * both drift values only inside the committed record's `detail` — `closeCaptureRun`'s `warnings`
+ * array was populated for exactly one unrelated hazard, so no production path ever emitted what the
+ * normative workflow says an operator reads. `build_changed_during_capture` names BOTH values (via
+ * `final.detail`); `build_unconfirmed` names the CLOSING side's own reason rather than the bare enum
+ * word; `capture_failed` reads `captureOutcome.detail`, since `final.detail` is always null there.
+ */
+export declare function describeBuildIdentityWarning(input: {
+  opening: BuildIdentity;
+  closing: BuildIdentity;
+  final: BuildIdentity;
+  captureOutcome?: { ok: boolean; detail?: string };
+}): string | null;

@@ -20,6 +20,7 @@ import {
   verifyRecord,
   classifyBuildDelta,
   formatIdentityValue,
+  describeBuildIdentityWarning,
 } from '../skills/enduser-handbook/assets/lib/build-identity.mjs';
 
 // Unicode code points, built without \u escapes in source.
@@ -652,6 +653,105 @@ test('formatIdentityValue: a real resolved "unknown" and a genuinely absent valu
   assert.equal(realUnknown.source, 'command');
   assert.equal(absent.source, 'unavailable');
   assert.notEqual(realUnknown.source, absent.source);
+});
+
+// ==== describeBuildIdentityWarning ==================================================================
+// The W2 operator-facing warning line — closeCaptureRun (capture-record.mjs) reads this into its
+// `warnings` array for a missing, failing, unconfirmed or changed FINAL identity (SKILL.md's own
+// "W2 warns... on any of these outcomes"). Finding 2, this release: before this function existed,
+// nothing rendered any of that into a warning a real run's caller ever saw.
+
+test('describeBuildIdentityWarning: a clean resolution (resolution_reason null) warns about nothing', () => {
+  const final = { value: 'A', source: 'command', resolution_reason: null, detail: null };
+  assert.equal(describeBuildIdentityWarning({ opening: OPENING_COMMAND_A, closing: CLOSING_COMMAND_A, final }), null);
+});
+
+test('describeBuildIdentityWarning: build_changed_during_capture NAMES BOTH VALUES — SKILL.md\'s own contract for this outcome', () => {
+  const opening = { value: 'v1', source: 'command', resolution_reason: null, detail: null };
+  const closing = { value: 'v2', source: 'command', resolution_reason: null, detail: null };
+  const final = resolveClosingIdentity({ opening, captureOutcome: { ok: true }, closing });
+  assert.equal(final.resolution_reason, 'build_changed_during_capture');
+  const warning = describeBuildIdentityWarning({ opening, closing, final });
+  assert.match(warning, /v1/);
+  assert.match(warning, /v2/);
+});
+
+test('describeBuildIdentityWarning: build_unconfirmed names the CLOSING side\'s own reason and detail, not just the bare word "build_unconfirmed"', () => {
+  const closing = UNRESOLVED('command_failed', 'exit code 1');
+  const final = resolveClosingIdentity({ opening: OPENING_COMMAND_A, captureOutcome: { ok: true }, closing });
+  assert.equal(final.resolution_reason, 'build_unconfirmed');
+  const warning = describeBuildIdentityWarning({ opening: OPENING_COMMAND_A, closing, final });
+  assert.match(warning, /reconfirmed at close/);
+  assert.match(warning, /failed to run/); // the command_failed clause, not the bare enum name
+  assert.match(warning, /exit code 1/);
+});
+
+test('describeBuildIdentityWarning: capture_failed reads captureOutcome.detail (sanitized), since final.detail is always null on this branch', () => {
+  const captureOutcome = { ok: false, detail: `boom${String.fromCharCode(0x00)}!` }; // an embedded NUL
+  const final = resolveClosingIdentity({ opening: OPENING_COMMAND_A, captureOutcome, closing: CLOSING_COMMAND_A });
+  assert.equal(final.resolution_reason, 'capture_failed');
+  assert.equal(final.detail, null); // confirms this case has nothing of its own to fall back on
+  const warning = describeBuildIdentityWarning({ opening: OPENING_COMMAND_A, closing: CLOSING_COMMAND_A, final, captureOutcome });
+  assert.match(warning, /capture\.command itself failed/);
+  assert.match(warning, /boom!/); // sanitized: the NUL byte is gone, the rest survives
+});
+
+test('describeBuildIdentityWarning: capture_failed with no captureOutcome.detail at all still renders a self-contained sentence', () => {
+  const captureOutcome = { ok: false };
+  const final = resolveClosingIdentity({ opening: OPENING_COMMAND_A, captureOutcome, closing: CLOSING_COMMAND_A });
+  const warning = describeBuildIdentityWarning({ opening: OPENING_COMMAND_A, closing: CLOSING_COMMAND_A, final, captureOutcome });
+  assert.match(warning, /capture\.command itself failed/);
+});
+
+test('describeBuildIdentityWarning: the six single-resolution reasons (rule 1 passthrough) each render a DISTINCT, non-generic clause, with the opening detail appended', () => {
+  // opening.value === null forces resolveClosingIdentity's rule 1 — the opening's own reason and
+  // detail carried straight through to `final`, verbatim — for every reason a lone
+  // `resolveBuildIdentity` call can itself produce (RESOLUTION_REASONS minus the three composite
+  // reasons only resolveClosingIdentity invents).
+  const cases = [
+    ['no_source_configured', /no build identity source is configured/],
+    ['command_failed', /configured `capture\.build_identity\.command` failed to run/],
+    ['command_output_rejected', /`capture\.build_identity\.command`'s output did not pass the identity grammar/],
+    ['ui_read_unavailable', /a UI read of the build identity was unavailable/],
+    ['ui_read_found_nothing', /a UI read of the build identity found nothing to read/],
+    ['ui_read_rejected', /the UI-read build identity did not pass the identity grammar/],
+  ];
+  for (const [reason, clausePattern] of cases) {
+    const opening = UNRESOLVED(reason, `detail for ${reason}`);
+    const final = resolveClosingIdentity({ opening, captureOutcome: { ok: true }, closing: CLOSING_COMMAND_A });
+    assert.equal(final.resolution_reason, reason);
+    const warning = describeBuildIdentityWarning({ opening, closing: CLOSING_COMMAND_A, final });
+    assert.match(warning, clausePattern, `reason '${reason}': got ${JSON.stringify(warning)}`);
+    assert.match(warning, new RegExp(`detail for ${reason}`), `reason '${reason}' detail not appended: got ${JSON.stringify(warning)}`);
+  }
+});
+
+test('describeBuildIdentityWarning: an unresolved opening with NO detail still renders a self-contained sentence (no trailing empty parenthesis)', () => {
+  const opening = UNRESOLVED('no_source_configured', null);
+  const final = resolveClosingIdentity({ opening, captureOutcome: { ok: true }, closing: CLOSING_COMMAND_A });
+  const warning = describeBuildIdentityWarning({ opening, closing: CLOSING_COMMAND_A, final });
+  assert.match(warning, /no build identity source is configured/);
+  assert.doesNotMatch(warning, /\(\)/); // no empty "()" left over from an absent detail
+});
+
+test('reachability gate: every resolution_reason produces a NON-null, non-empty warning from describeBuildIdentityWarning (except null itself, which is the "no warning" case)', () => {
+  const produced = new Map();
+
+  const record = (opening, closing, captureOutcome = { ok: true }) => {
+    const final = resolveClosingIdentity({ opening, captureOutcome, closing });
+    const warning = describeBuildIdentityWarning({ opening, closing, final, captureOutcome });
+    produced.set(final.resolution_reason, warning);
+  };
+
+  for (const reason of ['no_source_configured', 'command_failed', 'command_output_rejected', 'ui_read_unavailable', 'ui_read_found_nothing', 'ui_read_rejected']) {
+    record(UNRESOLVED(reason), CLOSING_COMMAND_A);
+  }
+  record(OPENING_COMMAND_A, UNRESOLVED('command_failed'));       // build_unconfirmed
+  record({ value: 'v1', source: 'command', resolution_reason: null, detail: null }, { value: 'v2', source: 'command', resolution_reason: null, detail: null }); // build_changed_during_capture
+  record(OPENING_COMMAND_A, CLOSING_COMMAND_A, { ok: false });   // capture_failed
+
+  const missing = RESOLUTION_REASONS.filter((reason) => !produced.has(reason) || !produced.get(reason));
+  assert.deepEqual(missing, [], `resolution_reason members with no non-empty warning: ${missing.join(', ')}`);
 });
 
 // ==== reachability gate ============================================================================

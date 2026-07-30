@@ -125,7 +125,7 @@
           "properties": {
             "command": {
               "type": "string",
-              "description": "Exact, copy-pasteable shell command run once per capture run; its stdout is normalized and validated as a build identity string (a version, a commit SHA, …). Follows the same run-inside-the-sandbox conventions as capture.command — see container-isolation.md \"Common command patterns\"."
+              "description": "Exact, copy-pasteable shell command run TWICE per capture run — once at open, once at close (see SKILL.md's W2 step) — never once; its stdout is normalized and validated as a build identity string (a version, a commit SHA, …). Follows the same run-inside-the-sandbox conventions as capture.command — see container-isolation.md \"Common command patterns\"."
             },
             "ui_read": {
               "type": "boolean",

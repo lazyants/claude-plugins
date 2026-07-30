@@ -589,3 +589,76 @@ export function classifyBuildDelta({ current, recordState, record }) {
 export function formatIdentityValue(value) {
   return value === null ? 'unknown' : value;
 }
+
+// The six reasons a SINGLE `resolveBuildIdentity` call (either the opening step or the closing
+// step) can itself produce — i.e. `RESOLUTION_REASONS` minus the three reasons only
+// `resolveClosingIdentity` invents (`build_unconfirmed`, `build_changed_during_capture`,
+// `capture_failed`), which `describeBuildIdentityWarning` below handles as their own cases. Used
+// twice: once directly, for a FINAL identity that carries one of these six verbatim (rule 1 —
+// the opening's own reason passed through unavailable at close too); and once indirectly, to
+// describe the CLOSING side's own reason inside the `build_unconfirmed` case, since `closing` is
+// itself always a plain `resolveBuildIdentity` result and can only ever hold one of these six (or
+// `null`, ruled out by the time that case is reached).
+const SINGLE_RESOLUTION_WARNING_CLAUSES = {
+  no_source_configured:
+    'no build identity source is configured — no `capture.build_identity.command`, and either `ui_read` is disabled or no UI read was available',
+  command_failed: 'the configured `capture.build_identity.command` failed to run',
+  command_output_rejected: "`capture.build_identity.command`'s output did not pass the identity grammar",
+  ui_read_unavailable: 'a UI read of the build identity was unavailable',
+  ui_read_found_nothing: 'a UI read of the build identity found nothing to read',
+  ui_read_rejected: 'the UI-read build identity did not pass the identity grammar',
+};
+
+/**
+ * Render the W2 operator-facing warning line for a run's FINAL recorded build identity —
+ * `closeCaptureRun` (capture-record.mjs) reads this into its `warnings` array so a missing,
+ * failing, unconfirmed or changed identity actually reaches the operator, rather than living only
+ * in the committed run record's `build_identity.detail` field, which nothing production-side ever
+ * surfaced. SKILL.md's own contract ("W2 warns... on any of these outcomes") promises exactly this;
+ * before this function, the promise was kept for a `null`-vs-a-value decision (never halting) but
+ * not for actually emitting a warning a real run produces.
+ *
+ * Returns `null` when `final.resolution_reason` is `null` — a value was obtained cleanly, nothing
+ * to warn about. Every other case renders a self-contained sentence naming what happened:
+ *
+ * - `build_changed_during_capture` reuses `final.detail` verbatim (`resolveClosingIdentity` already
+ *   builds it as `"build changed during capture: <opening> -> <closing>"`) — SKILL.md's own
+ *   contract for this outcome is "a warning naming both [values]", and this sentence already names
+ *   both, so it is not reconstructed a second time from `opening.value`/`closing.value`.
+ * - `build_unconfirmed` names the CLOSING side's own reason (and its detail, if any) — "the closing
+ *   observation's own reason is carried in detail" per `resolveClosingIdentity`'s own doc comment,
+ *   but nothing rendered that reason into an operator-facing sentence before this.
+ * - `capture_failed` reads `captureOutcome.detail` (sanitized here, since it is caller-supplied and
+ *   never passed through `resolveBuildIdentity`'s own sanitization) rather than `final.detail`,
+ *   which `resolveClosingIdentity` always sets to `null` on this branch and so has nothing to add.
+ * - every other reason is one of the six `SINGLE_RESOLUTION_WARNING_CLAUSES` above, reached via
+ *   rule 1 (the opening's own reason carried through to `final` verbatim), with `final.detail`
+ *   appended when present.
+ *
+ * @param {{opening: BuildIdentity, closing: BuildIdentity, final: BuildIdentity, captureOutcome?: {ok: boolean, detail?: string}}} input
+ * @returns {string|null}
+ */
+export function describeBuildIdentityWarning({ opening, closing, final, captureOutcome }) {
+  if (final.resolution_reason === null) return null;
+
+  if (final.resolution_reason === 'build_changed_during_capture') {
+    return `build identity warning: ${final.detail}.`;
+  }
+
+  if (final.resolution_reason === 'build_unconfirmed') {
+    const closingClause =
+      SINGLE_RESOLUTION_WARNING_CLAUSES[closing.resolution_reason] ?? `resolution ended with '${closing.resolution_reason}'`;
+    const closingDetail = closing.detail ? ` (${closing.detail})` : '';
+    return `build identity warning: the opening identity could not be reconfirmed at close — ${closingClause}${closingDetail}.`;
+  }
+
+  if (final.resolution_reason === 'capture_failed') {
+    const detail = captureOutcome?.detail ? ` (${sanitizeDetail(captureOutcome.detail)})` : '';
+    const clause = 'capture.command itself failed, so no build identity could be confirmed for this run';
+    return `build identity warning: ${clause}${detail}.`;
+  }
+
+  const clause = SINGLE_RESOLUTION_WARNING_CLAUSES[final.resolution_reason] ?? `resolution ended with '${final.resolution_reason}'`;
+  const detail = final.detail ? ` (${final.detail})` : '';
+  return `build identity warning: ${clause}${detail}.`;
+}
