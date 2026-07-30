@@ -110,7 +110,7 @@ Node stdlib has no YAML parser but a skill must read one key (e.g. `profile_vers
 
 A character allowlist admitting only "safe-looking" identifier characters does **not** make YAML
 emission safe, because YAML's implicit typing reads the WHOLE scalar, not its characters.
-Measured against PyYAML with `^[A-Za-z0-9][A-Za-z0-9._+:~!/-]{0,127}$`, **ten of sixteen**
+Measured against PyYAML 6.0.3 with `^[A-Za-z0-9][A-Za-z0-9._+:~!/-]{0,127}$`, **eleven of sixteen**
 conforming values parse back as NON-strings: `4.3`→float, `123`→int, `true`/`false`/`no`/`on`→
 bool, `null`→None, `0xFF`→255, `1_000`→1000, `1:20`→80 (sexagesimal), `2024-10-01`→a date
 object. The last is not a curiosity — it is a realistic calendar version string.
@@ -122,7 +122,7 @@ and does nothing about **type coercion**. So:
   key spelled `null`, `true`, or `on` types exactly the same way a value does.
 - **Prove it by PARSE-BACK, never by inspecting the emitted text.** The assertion is
   `typeof parsed === 'string' && parsed === input`, through a real parser. A test that compares
-  the emitted LINE against an expected string passes for all ten coerced values above — the
+  the emitted LINE against an expected string passes for all eleven coerced values above — the
   emitted text was never the problem.
 - If the oracle rides an optional interpreter (this repo's precedent shells out to
   `ruby -ryaml`), make it **fail** when that interpreter is absent. A skipped parse-back proves
