@@ -3479,6 +3479,18 @@ has_in_section "SKILL: a malformed observation halts as identity_resolution_thre
 has_in_section "SKILL: identity_resolution_threw is named apart from the disk-condition halt" \
   "$SKILL" '### W2 — Capture screenshots' \
   'not a disk condition; a throw out of run-state construction is a disk-adjacent one'
+# [round 10] The pins above cover SKILL.md only, which is how the rename reached the runtime and the
+# normative doc while openCaptureRun's own DECLARATION went on naming the old halt — a caller
+# following the declaration would dispatch the real result wrongly. Three declarations state this
+# halt; all three are pinned, so the next rename cannot land in two of them.
+has "capture-record.d.mts: all three identity-resolving entrypoints name identity_resolution_threw" \
+  'identity_resolution_threw' "$ASSETS/lib/capture-record.d.mts"
+count_identity_halt_docs=$(grep -c 'identity_resolution_threw' "$ASSETS/lib/capture-record.d.mts" 2>/dev/null || echo 0)
+if [ "$count_identity_halt_docs" -eq 3 ]; then
+  ok "capture-record.d.mts: open, close and W6 each document the identity halt (3 sites)"
+else
+  bad "capture-record.d.mts: expected 3 identity_resolution_threw doc sites, found $count_identity_halt_docs"
+fi
 has_in_section "SKILL: repairs are idempotent on an already-repaired tree" \
   "$SKILL" '### W2 — Capture screenshots' \
   'calling one again on an already-repaired tree is a no-op'
