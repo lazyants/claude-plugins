@@ -3446,6 +3446,17 @@ has_in_section "SKILL: the token survives a cleanup whose temps are not confirme
 has_in_section "SKILL: an unconfirmed cleanup halts the next open until recovery runs" \
   "$SKILL" '### W2 — Capture screenshots' \
   'the next `openCaptureRun` halts on `run_already_open` until you run `recoverProvenanceState`'
+# [round 8, finding 1] The retention above is only a forcing function if a contended open discovers
+# the contention BEFORE it spends anything. It used to resolve the identity first — running arbitrary
+# operator shell for a run that could never start, and on the ui_read path returning `needs_ui_read`
+# without attempting the token at all, so the first call never mentioned recovery. The order is the
+# contract now, not an implementation detail, and it is pinned where an operator reads it.
+has_in_section "SKILL: the pending token is reserved before anything else the open would do" \
+  "$SKILL" '### W2 — Capture screenshots' \
+  'first exclusively reserves a one-shot pending token'
+has_in_section "SKILL: a contended open must not spend the operator's command or a UI read" \
+  "$SKILL" '### W2 — Capture screenshots' \
+  'must not send them to a UI read for a run that was never going to start'
 has_in_section "SKILL: repairs are idempotent on an already-repaired tree" \
   "$SKILL" '### W2 — Capture screenshots' \
   'calling one again on an already-repaired tree is a no-op'

@@ -1216,11 +1216,46 @@ export function openCaptureRun(profileLike, entries, openingObservation, deps, i
   const validated = validateEntriesForCapture(profileLike, entries, d);
   if (!validated.ok) return validated;
 
+  // Reserve the pending-token NAME first, via the same exclusive create the rest of this function
+  // used to do LAST — a run that can never open (another token is already sitting here) now finds
+  // that out via a plain EEXIST before anything else runs: neither the operator's own identity
+  // command below (arbitrary, possibly side-effecting shell) nor the I/O-heavy asset-hash snapshot
+  // after it executes for a run that was never going to open (codex round 8, IMPORTANT 1). Before
+  // this reorder, both of those ran first and the exclusive create ran last, so a contended open
+  // paid for a full identity-command invocation before ever discovering it could not open — and
+  // when that command itself needed a UI read, the call returned `needs_ui_read` without having
+  // attempted the token at all, sending the operator off to do UI-read legwork for a run that could
+  // never open, only discovering `run_already_open` on a LATER call.
+  //
+  // The reservation is finalized (its real `run_id` and `opening_digest` written in) once identity
+  // resolution and the snapshot have actually produced a `runState` to describe — the fd stays open
+  // across both steps for exactly that reason. If either one instead needs a UI read or hits a
+  // hazard, `releaseReservation` undoes the reservation before returning, so a resumed (or simply
+  // retried) call gets a clean, re-triable exclusive-create check of its own rather than tripping
+  // over its own predecessor's leftover reservation.
+  const tokenPath = pendingTokenPath(profileLike);
+  let fd;
+  try {
+    fd = d.openSync(tokenPath, fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_WRONLY | fs.constants.O_NOFOLLOW, 0o644);
+  } catch (err) {
+    if (err.code === 'EEXIST') {
+      return haltResult('run_already_open', 'a capture run is already open for this profile — close or abort it before opening a new one.');
+    }
+    return haltResult('provenance_hazard', `cannot create the pending token: ${err.code ?? err.message}`, { path: tokenPath });
+  }
+  function releaseReservation() {
+    closeBestEffort(fd, d);
+    unlinkBestEffort(tokenPath, d);
+  }
+
   const buildIdentity = profileLike.capture.build_identity ?? null;
   const uiReadEnabled = buildIdentity?.ui_read !== false;
   const commandOutcome = resolveIdentityCommandOutcome(identityCommandOutcome, buildIdentity, d);
   const opening = resolveBuildIdentity({ commandOutcome, uiReadEnabled, uiObservation: openingObservation });
-  if (opening.needs_ui_read) return { ...opening, identityCommandOutcome: commandOutcome };
+  if (opening.needs_ui_read) {
+    releaseReservation();
+    return { ...opening, identityCommandOutcome: commandOutcome };
+  }
 
   // Snapshotting is an I/O-heavy walk of caller-controlled directories — `snapshotAssetHashes`
   // catches ENOENT/ENOTDIR internally (an absent directory is legitimately an empty map) but
@@ -1234,6 +1269,7 @@ export function openCaptureRun(profileLike, entries, openingObservation, deps, i
       openingAssets[chapterKeyFor(entry)] = snapshotAssetHashes(assetDir, d);
     }
   } catch (err) {
+    releaseReservation();
     return haltResult('provenance_hazard', `cannot snapshot the opening asset hashes: ${err.code ?? err.message}`, {});
   }
 
@@ -1248,16 +1284,6 @@ export function openCaptureRun(profileLike, entries, openingObservation, deps, i
   runState.opening_digest = digest;
 
   const tokenText = JSON.stringify({ run_id: runState.run_id, opening_digest: digest });
-  const tokenPath = pendingTokenPath(profileLike);
-  let fd;
-  try {
-    fd = d.openSync(tokenPath, fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_WRONLY | fs.constants.O_NOFOLLOW, 0o644);
-  } catch (err) {
-    if (err.code === 'EEXIST') {
-      return haltResult('run_already_open', 'a capture run is already open for this profile — close or abort it before opening a new one.');
-    }
-    return haltResult('provenance_hazard', `cannot create the pending token: ${err.code ?? err.message}`, { path: tokenPath });
-  }
   try {
     writeFull(fd, Buffer.from(tokenText, 'utf8'), d);
   } catch (err) {
@@ -1630,8 +1656,16 @@ export function closeCaptureRun(profileLike, runState, captureOutcome, closingOb
       `the run record committed successfully, but leftover temps under 'run/' could not be listed for cleanup (${tempsListed.hazard.reason} at '${tempsListed.hazard.path}') — the pending token has been left in place so the next openCaptureRun halts on it; run recoverProvenanceState to check for and remove any leftover temp.`,
     );
   }
-  if (!cleanupIncomplete) {
-    unlinkBestEffort(tokenPath, d);
+  if (!cleanupIncomplete && !unlinkBestEffort(tokenPath, d)) {
+    // Every temp WAS confirmed gone, so `cleanupIncomplete` alone can no longer explain a token
+    // still on disk — this is the token's OWN removal failing (EACCES, EROFS, ...), the one
+    // asymmetry left after the loop above already started checking `unlinkBestEffort`'s return: the
+    // temps were checked, the token itself was not (codex round 8, IMPORTANT 2). Left silent, the
+    // token stays exactly as long as it would after any other cleanup hazard, but with nothing in
+    // `warnings` telling the operator why the next `openCaptureRun` halts on `run_already_open`.
+    warnings.push(
+      `the pending token '${tokenPath}' could not be removed after every temp was confirmed gone — it will make the next openCaptureRun halt on 'run_already_open' even though this run committed cleanly; run recoverProvenanceState (it will report 'committed') and cleanupCommittedRun to remove it.`,
+    );
   }
 
   return { ok: true, runState: { ...runState, closed: true }, warnings };

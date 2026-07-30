@@ -2082,6 +2082,84 @@ test('closeCaptureRun (codex round 7, IMPORTANT 2): retaining the token on a stu
   });
 });
 
+test('closeCaptureRun (codex round 8, IMPORTANT 2): a failing FINAL token unlink is warned about on ok:true, not silently swallowed', () => {
+  withTempDir((dir) => {
+    const profile = profileFor(dir);
+    const opened = CR.openCaptureRun(profile, [], null, stubDepsNoIdentity());
+    assert.equal(opened.ok, true);
+    // No stuck temp this time — every temp (there are none) is confirmed gone, so the cleanup
+    // reaches the FINAL, previously-unconditional `unlinkBestEffort(tokenPath, d)` call and it is
+    // THIS unlink that fails.
+    const boom = Object.assign(new Error('permission denied'), { code: 'EACCES' });
+    const deps = depsWithOverride({
+      unlinkSync: (p) => {
+        if (p === tokenPathFor(profile)) throw boom;
+        return nodeFs.unlinkSync(p);
+      },
+      runIdentityCommand: () => ({ ok: false, detail: 'not configured' }),
+    });
+    const result = CR.closeCaptureRun(profile, opened.runState, { ok: true }, null, deps);
+    // Before the fix: `unlinkBestEffort`'s returned boolean was discarded at the final,
+    // "cleanupIncomplete === false" call site — a failing token removal produced NO warning at
+    // all, the one asymmetry left after round 7 already fixed the per-temp case.
+    assert.equal(result.ok, true, `a failed token unlink must still be a warning, never a halt, on an already-durable commit; got ${JSON.stringify(result)}`);
+    assert.equal(nodeFs.existsSync(recordPathFor(profile)), true, 'the run record must still be durably committed despite the failed token removal');
+    assert.equal(nodeFs.existsSync(tokenPathFor(profile)), true, 'the token must still be on disk when its removal genuinely failed, matching the honest report');
+    assert.equal(result.warnings.length, 2, JSON.stringify(result.warnings));
+    assert.ok(result.warnings.some((w) => /no build identity source is configured/.test(w)), JSON.stringify(result.warnings));
+    assert.ok(
+      result.warnings.some((w) => /token/.test(w) && /could not be removed/.test(w)),
+      `expected a warning naming the failed token removal; got ${JSON.stringify(result.warnings)}`,
+    );
+  });
+});
+
+test('closeCaptureRun -> recoverProvenanceState -> cleanupCommittedRun (codex round 8, MINOR): the FULL retained-token repair actually removes the stuck temp and the token, and the next openCaptureRun succeeds', () => {
+  withTempDir((dir) => {
+    const profile = profileFor(dir);
+    const opened = CR.openCaptureRun(profile, [], null, stubDepsNoIdentity());
+    assert.equal(opened.ok, true);
+    const stuckTemp = tempPathFor(profile, '11111111-0000-0000-0000-000000000000');
+    nodeFs.writeFileSync(stuckTemp, '{"stale":true}');
+    // The unlink fails ONLY until the (simulated) underlying permission problem is fixed — exactly
+    // what an operator who diagnoses and fixes the real EACCES cause, then re-runs the repair,
+    // would experience.
+    let failUnlink = true;
+    const deps = depsWithOverride({
+      unlinkSync: (p) => {
+        if (p === stuckTemp && failUnlink) {
+          const err = new Error('permission denied');
+          err.code = 'EACCES';
+          throw err;
+        }
+        return nodeFs.unlinkSync(p);
+      },
+      runIdentityCommand: () => ({ ok: false, detail: 'not configured' }),
+    });
+    const closed = CR.closeCaptureRun(profile, opened.runState, { ok: true }, null, deps);
+    assert.equal(closed.ok, true, JSON.stringify(closed));
+    assert.equal(nodeFs.existsSync(stuckTemp), true, 'sanity: the temp is still stuck right after close, same as the round-7 test above');
+    assert.equal(nodeFs.existsSync(tokenPathFor(profile)), true, 'sanity: the token is retained right after close, same as the round-7 test above');
+
+    const recovered = CR.recoverProvenanceState(profile, stubDepsNoIdentity());
+    assert.equal(recovered.state, 'committed', `expected the token-retained close to classify as committed; got ${JSON.stringify(recovered)}`);
+
+    failUnlink = false;
+    const repaired = CR.cleanupCommittedRun(profile, recovered.expected, deps);
+    assert.equal(repaired.ok, true, JSON.stringify(repaired));
+    // This is the coverage gap the round-7 tests left: they stopped at classification and the
+    // blocked reopen, never actually driving `cleanupCommittedRun` itself over a fixture WITH a
+    // temp — so a mutant that skipped temp removal (and deleted only the token) would have passed
+    // both of those tests while leaving exactly this residue behind.
+    assert.equal(nodeFs.existsSync(stuckTemp), false, 'cleanupCommittedRun must actually remove the stuck temp, not just the token');
+    assert.equal(nodeFs.existsSync(tokenPathFor(profile)), false, 'cleanupCommittedRun must remove the token once the temp is confirmed gone');
+    assert.equal(nodeFs.existsSync(recordPathFor(profile)), true, 'the committed run record itself must survive the repair untouched');
+
+    const reopened = CR.openCaptureRun(profile, [], null, stubDepsNoIdentity());
+    assert.equal(reopened.ok, true, `once the documented repair has actually run, a fresh run must be able to open again; got ${JSON.stringify(reopened)}`);
+  });
+});
+
 test('recordChapterProvenance: BLOCKER 4 (codex review) — a SHORT writeSync on the chapter-record temp must not commit a truncated record', () => {
   withTempDir((dir) => {
     const profile = profileFor(dir);
@@ -2724,6 +2802,52 @@ test('buildProvenanceReport: record_unsupported_version is REACHABLE — a struc
 // exercised anywhere else in this file. Every fixture here explicitly sets `ui_read: true` and
 // configures a `command`, so the `needs_ui_read` branch is genuinely reached.
 // =================================================================================================
+
+test('openCaptureRun (codex round 8, IMPORTANT 1): a contended open never runs the identity command, even one that would otherwise succeed', () => {
+  withTempDir((dir) => {
+    const profile = profileFor(dir, { capture: { build_identity: { command: 'get-version', ui_read: true } } });
+    // A token already on disk from some earlier (unrelated, still-open) run — this open can never
+    // succeed, no matter what the identity command would have said.
+    writeFixture(profile, { token: validToken(RUN_ID_A, ZERO_DIGEST) });
+    let calls = 0;
+    const deps = depsWithOverride({
+      runIdentityCommand: () => {
+        calls += 1;
+        return { ok: true, raw: 'v1' };
+      },
+    });
+    // Before the fix: `openCaptureRun` resolved (and could EXECUTE) the identity command around
+    // capture-record.mjs:1219 while the exclusive pending-token create happened only around
+    // :1254 — so this arbitrary, possibly side-effecting operator command ran for a run that was
+    // never going to open.
+    const result = CR.openCaptureRun(profile, [{ slug: 'items' }], null, deps);
+    assert.equal(result.ok, false, JSON.stringify(result));
+    assert.equal(result.halts[0].halt, 'run_already_open', JSON.stringify(result));
+    assert.equal(calls, 0, 'the identity command must not run at all for an open that can never succeed');
+  });
+});
+
+test('openCaptureRun (codex round 8, IMPORTANT 1): a contended open resolves to run_already_open on the FIRST call, never sending the operator to a UI read first', () => {
+  withTempDir((dir) => {
+    const profile = profileFor(dir, { capture: { build_identity: { command: 'get-version', ui_read: true } } });
+    writeFixture(profile, { token: validToken(RUN_ID_A, ZERO_DIGEST) });
+    let calls = 0;
+    const deps = depsWithOverride({
+      runIdentityCommand: () => {
+        calls += 1;
+        // A command failure with `ui_read: true` is exactly the case that used to return
+        // `needs_ui_read` without ever attempting the token — sending the operator off to do a UI
+        // read for a run that could never open, discovering the real problem only on a LATER call.
+        return { ok: false, detail: 'would force needs_ui_read if ever reached' };
+      },
+    });
+    const result = CR.openCaptureRun(profile, [{ slug: 'items' }], null, deps);
+    assert.equal(result.needs_ui_read, undefined, `expected an immediate run_already_open halt, not a UI-read request; got ${JSON.stringify(result)}`);
+    assert.equal(result.ok, false, JSON.stringify(result));
+    assert.equal(result.halts[0].halt, 'run_already_open', JSON.stringify(result));
+    assert.equal(calls, 0, 'the identity command must not run before the contention check settles the call');
+  });
+});
 
 test('openCaptureRun: a UI-read continuation reuses the already-resolved identityCommandOutcome — the identity command is NOT re-invoked (Finding 1)', () => {
   withTempDir((dir) => {

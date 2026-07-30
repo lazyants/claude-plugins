@@ -185,7 +185,7 @@ export type RunState =
 
 export type OpenResult = { ok: true; runState: RunState } | HaltResult | NeedsUiRead;
 
-/** See capture-record.mjs: ledger row 2 — re-assert ownership, establish the hierarchy, snapshot the opening asset hashes, resolve the opening identity, and reserve the one-shot pending token via an exclusive create. */
+/** See capture-record.mjs: ledger row 2 — re-assert ownership, establish the hierarchy, reserve the one-shot pending token via an exclusive create, resolve the opening identity, snapshot the opening asset hashes, and finalize the reserved token with the resolved runState. The reservation comes FIRST on purpose: a contended open must fail before it spends an operator's identity command, and must not return `needs_ui_read` for a run that could never have started. A `needs_ui_read` return releases the reservation so the continuation re-checks it cleanly. */
 export function openCaptureRun(
   profileLike: ProfileLike,
   entries: ChapterEntryLike[],
