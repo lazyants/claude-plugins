@@ -204,7 +204,7 @@ export type CloseResult =
   | HaltResult
   | NeedsUiRead;
 
-/** See capture-record.mjs: ledger row 3 — verify the token, snapshot the closing asset hashes, resolve the run's final identity, commit the run record by temp-then-rename, then remove every leftover matching temp and the token. */
+/** See capture-record.mjs: ledger row 3 — verify the token, snapshot the closing asset hashes, resolve the run's final identity, commit the run record by temp-then-rename, then remove every leftover matching temp and, only once every one is confirmed gone, the token — a temp that cannot be confirmed removed is named in `warnings` and leaves the token in place, so the next `openCaptureRun` halts on it rather than succeeding over residue nothing would otherwise make an operator clean up. */
 export function closeCaptureRun(
   profileLike: ProfileLike,
   runState: RunState,

@@ -3436,6 +3436,16 @@ has "capture-record.d.mts: NeedsUiRead carries identityCommandOutcome for the re
   'identityCommandOutcome: CommandOutcome | null }' "$ASSETS/lib/capture-record.d.mts"
 has "build-identity.d.mts: declares describeBuildIdentityWarning" \
   'export declare function describeBuildIdentityWarning' "$ASSETS/lib/build-identity.d.mts"
+# [round 7, finding 2] Removing the token while a temp survives leaves the residue NAMEABLE but
+# UNTRIGGERED: recovery can classify it, and nothing would ever make an operator run recovery, since
+# the token is the only thing that halts a later open. The retention is the forcing function, so it
+# is stated where an operator meets the halt rather than left to be inferred from behaviour.
+has_in_section "SKILL: the token survives a cleanup whose temps are not confirmed gone" \
+  "$SKILL" '### W2 — Capture screenshots' \
+  'only once every one of them is confirmed gone, the pending token'
+has_in_section "SKILL: an unconfirmed cleanup halts the next open until recovery runs" \
+  "$SKILL" '### W2 — Capture screenshots' \
+  'the next `openCaptureRun` halts on `run_already_open` until you run `recoverProvenanceState`'
 has_in_section "SKILL: repairs are idempotent on an already-repaired tree" \
   "$SKILL" '### W2 — Capture screenshots' \
   'calling one again on an already-repaired tree is a no-op'

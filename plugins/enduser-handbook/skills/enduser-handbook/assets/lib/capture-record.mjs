@@ -1205,7 +1205,13 @@ export function openCaptureRun(profileLike, entries, openingObservation, deps, i
   }
 
   const established = establishHierarchy(profileLike, d);
-  if (!established.ok) return { ok: false, halts: [established.hazard] };
+  // `established.hazard` is the bare `{kind, reason, path}` gate-6 shape (codex round 7, IMPORTANT
+  // 1) — never pushed into `halts` raw. Wrapped with the same `halt: 'provenance_hazard'` house
+  // convention every other hazard-shaped halt in this module uses (see the hierarchy-hazard sites
+  // in `recordChapterProvenance`/`buildProvenanceReport`/`sweepChapterProvenanceTemps` below), so a
+  // caller dispatching on the declared `Halt.halt` discriminator (capture-record.d.mts) sees
+  // `'provenance_hazard'` rather than `undefined`, while `reason`/`path` survive via the spread.
+  if (!established.ok) return { ok: false, halts: [{ halt: 'provenance_hazard', ...established.hazard }] };
 
   const validated = validateEntriesForCapture(profileLike, entries, d);
   if (!validated.ok) return validated;
@@ -1400,9 +1406,13 @@ function listMatchingChapterTemps(profileLike, entry, deps) {
 /**
  * Close a capture run: re-verify the token matches this `runState`, snapshot the CLOSING asset
  * hashes, resolve the closing build identity and the run's final recorded identity, write the run
- * record to a process-unique temp under `run/`, commit by rename, then remove the token and every
- * leftover matching temp. Never throws on an ordinary failure — every exit is a returned
- * `{ok:false, halts}`, so a caller branches on `halts` rather than relying on an exception.
+ * record to a process-unique temp under `run/`, commit by rename, then remove every leftover
+ * matching temp and, ONLY once every one of them is confirmed gone, the token (codex round 7,
+ * IMPORTANT 2 — a temp whose removal could not be confirmed leaves the token in place on purpose,
+ * so the next `openCaptureRun` halts on it and forces `recoverProvenanceState`/
+ * `cleanupCommittedRun` rather than silently reporting a clean close over a stuck temp). Never
+ * throws on an ordinary failure — every exit is a returned `{ok:false, halts}`, so a caller
+ * branches on `halts` rather than relying on an exception.
  *
  * `identityCommandOutcome` is the closing counterpart of `openCaptureRun`'s parameter of the same
  * name — see that function's doc comment for why a UI-read continuation must reuse the CLOSING
@@ -1579,25 +1589,50 @@ export function closeCaptureRun(profileLike, runState, captureOutcome, closingOb
   const identityWarning = describeBuildIdentityWarning({ opening: runState.opening, closing, final: finalIdentity, captureOutcome });
   if (identityWarning) warnings.push(identityWarning);
 
-  // Cleanup: every leftover matching temp first, the token last — the same order and for the same
-  // reason as the row-6 repairs. Both are best-effort: a leftover temp is still classified
-  // correctly by recoverProvenanceState, and the token may already be gone under a concurrent or
-  // retried close, which is not this call's failure. The rename above has ALREADY committed the run
-  // record durably — a hazard while merely LISTING leftover temps for cleanup must never be
-  // reported as if nothing was written (codex round 3): it is a WARNING on this still-`ok:true`
-  // result, never a halt, and any leftover temp is still correctly seen by `recoverProvenanceState`
-  // on its own next run regardless of whether this cleanup pass could enumerate it.
+  // Cleanup: every leftover matching temp first, the token last — the same order as the row-6
+  // repairs, but NOT the same unconditional-token-removal contract those two make (SKILL.md's
+  // "both repairs remove every leftover temp first and the token last" is a promise about
+  // `abortCaptureRun`/`cleanupCommittedRun` specifically, not about this cleanup). The rename above
+  // has ALREADY committed the run record durably — a hazard here, of either kind below, must never
+  // be reported as if nothing was written (codex round 3): it is a WARNING on this still-`ok:true`
+  // result, never a halt.
+  //
+  // The token, though, is removed ONLY once every matching temp is CONFIRMED gone (codex round 7,
+  // IMPORTANT 2) — not unconditionally best-effort as `unlinkBestEffort`'s own name would suggest.
+  // Before this, a temp whose `unlinkSync` genuinely threw (or a listing hazard that left every
+  // temp's fate unknown) still let the token get removed right after: with the token gone and a
+  // temp still on disk, row 6 classifies the tree `orphan_temp` — a state nothing but an operator
+  // manually running `recoverProvenanceState` will ever discover, since the very success this call
+  // reports removed the one signal (a pre-existing token) that would make a FUTURE `openCaptureRun`
+  // stop and ask. Retaining the token instead keeps the token/record pair matching (same run_id,
+  // same opening_digest), which classifies as `committed` — a state whose own repair
+  // (`cleanupCommittedRun`) re-verifies that fingerprint before touching anything, unlike
+  // `orphan_temp`'s `abortCaptureRun`, which is a blind sweep by design (no token left to check one
+  // against). And critically, a token left in place makes the NEXT `openCaptureRun` call halt on
+  // `run_already_open` (its pending-token create is an exclusive O_CREAT|O_EXCL, so ANY token on
+  // disk blocks it) — the forcing function that gets the operator to `recoverProvenanceState` at
+  // all, rather than silently opening a new run over an unresolved stuck temp. `cleanupIncomplete`
+  // covers both hazard kinds uniformly: a listing failure is exactly as uncertain about "is
+  // everything really gone" as a confirmed-failed unlink, so both withhold the token the same way.
   const tempsListed = listMatchingTemps(profileLike, d);
+  let cleanupIncomplete = false;
   if (tempsListed.ok) {
     for (const temp of tempsListed.temps) {
-      unlinkBestEffort(temp, d);
+      if (unlinkBestEffort(temp, d)) continue;
+      cleanupIncomplete = true;
+      warnings.push(
+        `leftover run-record temp '${temp}' could not be removed and remains on disk — the pending token has been left in place so the next openCaptureRun halts on it; run recoverProvenanceState (it will report 'committed') and cleanupCommittedRun to resolve it.`,
+      );
     }
   } else {
+    cleanupIncomplete = true;
     warnings.push(
-      `the run record committed successfully, but leftover temps under 'run/' could not be listed for cleanup (${tempsListed.hazard.reason} at '${tempsListed.hazard.path}') — run recoverProvenanceState to check for and remove any leftover temp.`,
+      `the run record committed successfully, but leftover temps under 'run/' could not be listed for cleanup (${tempsListed.hazard.reason} at '${tempsListed.hazard.path}') — the pending token has been left in place so the next openCaptureRun halts on it; run recoverProvenanceState to check for and remove any leftover temp.`,
     );
   }
-  unlinkBestEffort(tokenPath, d);
+  if (!cleanupIncomplete) {
+    unlinkBestEffort(tokenPath, d);
+  }
 
   return { ok: true, runState: { ...runState, closed: true }, warnings };
 }
@@ -1755,7 +1790,10 @@ export function recordChapterProvenance(profileLike, acceptedEntries, entry, cha
   if (chaptersHierarchyHazard) return { ok: false, halts: [{ halt: 'provenance_hazard', ...chaptersHierarchyHazard }] };
 
   const groupDirEstablished = establishChapterGroupDir(profileLike, entry, d);
-  if (!groupDirEstablished.ok) return { ok: false, halts: [groupDirEstablished.hazard] };
+  // Same defect as `openCaptureRun`'s hierarchy-establishment site above (codex round 7, IMPORTANT
+  // 1): `groupDirEstablished.hazard` is the bare gate-6 shape, wrapped with the same
+  // `halt: 'provenance_hazard'` convention rather than pushed raw.
+  if (!groupDirEstablished.ok) return { ok: false, halts: [{ halt: 'provenance_hazard', ...groupDirEstablished.hazard }] };
 
   const runRecord = readRunRecordFromDisk(profileLike, d);
   if (runRecord.kind === 'hazard') return { ok: false, halts: [{ halt: 'provenance_hazard', ...runRecord }] };

@@ -199,8 +199,21 @@ test('jcs: rejects undefined, functions, symbols and BigInt rather than coercing
   assert.equal(CR.jcsCanonicalize({ x: Number.NaN }).ok, false);
 });
 
-test('jcs: digestOpeningPayload throws on an uncanonicalizable payload and succeeds otherwise', () => {
-  assert.throws(() => CR.digestOpeningPayload({ x: undefined }));
+test('jcs: digestOpeningPayload throws a plain Error naming the canonicalization reason, and succeeds otherwise', () => {
+  // A bare `assert.throws(fn)` with no second argument is blind to the thrown value's constructor
+  // and message — codex round 7, finding 3. `digestOpeningPayload`'s own JSDoc and
+  // `capture-record.d.mts` both promise "an Error" (not a TypeError, not `jcsCanonicalize`'s
+  // documented RangeError-on-cycle exception) naming the reason, with the exact message measured
+  // there — both are part of the contract and get their own assertion, matching the house pattern
+  // used for the `TypeError` guard in chapter-paths.test.mjs's `assertProvenanceGuardThrows`.
+  assert.throws(
+    () => CR.digestOpeningPayload({ x: undefined }),
+    (err) => {
+      assert.strictEqual(err.constructor, Error, `expected a plain Error, got ${err.constructor.name}`);
+      assert.strictEqual(err.message, 'digestOpeningPayload: cannot canonicalize opening payload (undefined_unsupported)');
+      return true;
+    },
+  );
   const digest = CR.digestOpeningPayload({ a: 1 });
   assert.match(digest, /^sha256:[0-9a-f]{64}$/);
 });
@@ -1280,6 +1293,58 @@ test('BLOCKER 1: a RELATIVE capture.output_dir (the shipped example profile\'s o
   });
 });
 
+test('openCaptureRun (codex round 7, IMPORTANT 1): a hierarchy-establishment hazard is wrapped in the declared Halt shape, not the raw hazard object', () => {
+  withTempDir((dir) => {
+    const profile = profileFor(dir);
+    const rootPath = CR.provenanceRoot(profile);
+    // Before the fix, `establishHierarchy`'s failure (`{ok:false, hazard:{kind,reason,path}}`) was
+    // pushed straight into `halts` — the raw hazard object, with no `halt` discriminator at all.
+    // `capture-record.d.mts`'s `Halt` type requires `halt: string`; a caller dispatching on that
+    // declared field sees `undefined` here, exactly on a setup error, when the operator most needs
+    // the message.
+    const boom = Object.assign(new Error('injected lstat failure'), { code: 'EACCES' });
+    const deps = depsWithOverride({
+      lstatSync: (p, ...rest) => {
+        if (p === rootPath) throw boom;
+        return nodeFs.lstatSync(p, ...rest);
+      },
+      runIdentityCommand: () => ({ ok: false, detail: 'not configured' }),
+    });
+    const result = CR.openCaptureRun(profile, [], null, deps);
+    assert.equal(result.ok, false, JSON.stringify(result));
+    assert.equal(result.halts.length, 1, JSON.stringify(result));
+    assert.equal(result.halts[0].halt, 'provenance_hazard', `expected the declared halt discriminator; got ${JSON.stringify(result.halts[0])}`);
+    assert.equal(result.halts[0].reason, 'inspection_failure');
+    assert.equal(result.halts[0].path, rootPath);
+  });
+});
+
+test('recordChapterProvenance (codex round 7, IMPORTANT 1): a group-dir establishment hazard is wrapped in the declared Halt shape, not the raw hazard object', () => {
+  withTempDir((dir) => {
+    const profile = profileFor(dir);
+    const entry = { slug: 'items', group: 'admin' };
+    const { runId, assetDir, chapterFile } = runToCommitted(profile, entry, { 'overview.png': 'v1' }, { 'overview.png': 'v2' });
+    const groupDirPath = join(CR.provenanceRoot(profile), 'chapters', 'admin');
+    // Same defect as the W2 sibling above, at `establishChapterGroupDir`'s call site: the raw
+    // `{kind,reason,path}` hazard object went straight into `halts`, with no `halt` discriminator.
+    const boom = Object.assign(new Error('injected mkdir failure'), { code: 'EACCES' });
+    const deps = {
+      ...stubDepsNoIdentity(),
+      expectedAssets: stubExpectedAssetsFor(assetDir, ['overview.png']),
+      mkdirSync: (p, ...rest) => {
+        if (p === groupDirPath) throw boom;
+        return nodeFs.mkdirSync(p, ...rest);
+      },
+    };
+    const result = CR.recordChapterProvenance(profile, [entry], entry, chapterFile, runId, deps);
+    assert.equal(result.ok, false, JSON.stringify(result));
+    assert.equal(result.halts.length, 1, JSON.stringify(result));
+    assert.equal(result.halts[0].halt, 'provenance_hazard', `expected the declared halt discriminator; got ${JSON.stringify(result.halts[0])}`);
+    assert.equal(result.halts[0].reason, 'inspection_failure');
+    assert.equal(result.halts[0].path, groupDirPath);
+  });
+});
+
 test('openCaptureRun: exclusive-create contention — one success, one EEXIST halt', () => {
   withTempDir((dir) => {
     const profile = profileFor(dir);
@@ -1935,6 +2000,85 @@ test('closeCaptureRun: a temp-write failure and a rename failure both leave ZERO
     const result = CR.closeCaptureRun(profile, opened.runState, { ok: true }, null, deps);
     assert.equal(result.ok, false, JSON.stringify(result));
     assert.equal(listRunTempsOnDisk(profile).length, 0, 'a rename failure must leave no surviving temp');
+  });
+});
+
+test('closeCaptureRun (codex round 7, IMPORTANT 2): a run-temp that cannot be unlinked is warned about, stays on disk, and the token is retained rather than reporting a false clean', () => {
+  withTempDir((dir) => {
+    const profile = profileFor(dir);
+    const opened = CR.openCaptureRun(profile, [], null, stubDepsNoIdentity());
+    assert.equal(opened.ok, true);
+    // An "old" leftover temp from a previously crashed run, unrelated to THIS run's own
+    // write-then-rename — `listMatchingTemps` matches any `current.json.*.tmp` under run/, not only
+    // the temp this close call itself just wrote.
+    const stuckTemp = tempPathFor(profile, 'eeeeeeee-0000-0000-0000-000000000000');
+    nodeFs.writeFileSync(stuckTemp, '{"stale":true}');
+    const deps = depsWithOverride({
+      unlinkSync: (p) => {
+        if (p === stuckTemp) {
+          const err = new Error('permission denied');
+          err.code = 'EACCES';
+          throw err;
+        }
+        return nodeFs.unlinkSync(p);
+      },
+      runIdentityCommand: () => ({ ok: false, detail: 'not configured' }),
+    });
+    const result = CR.closeCaptureRun(profile, opened.runState, { ok: true }, null, deps);
+    assert.equal(result.ok, true, JSON.stringify(result));
+    assert.equal(nodeFs.existsSync(recordPathFor(profile)), true, 'the run record must still be durably committed despite the stuck temp');
+    assert.equal(nodeFs.existsSync(stuckTemp), true, 'a temp whose unlink genuinely failed must still be on disk, matching the honest report');
+    // Before the fix: `unlinkBestEffort`'s returned boolean was discarded here (unlike the parallel
+    // fix `sweepChapterProvenanceTemps` already got in round 6), so a failed unlink produced no
+    // warning at all — only a failure to LIST temps warned. Two warnings on this fixture, not one:
+    // `profileFor`'s default `build_identity: { ui_read: false }` with no command configured also
+    // warns `no build identity source is configured` (Finding 2 from an earlier round), a fact
+    // orthogonal to the one this test pins.
+    assert.equal(result.warnings.length, 2, JSON.stringify(result.warnings));
+    assert.ok(result.warnings.some((w) => /no build identity source is configured/.test(w)), JSON.stringify(result.warnings));
+    const stuckTempPattern = new RegExp(stuckTemp.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+    assert.ok(result.warnings.some((w) => stuckTempPattern.test(w)), `expected a warning naming the stuck temp; got ${JSON.stringify(result.warnings)}`);
+    // The token must NOT be removed when a temp's removal could not be confirmed — see the ORDER
+    // rationale in the comment above this cleanup in capture-record.mjs, and the pair of tests
+    // right below this one for what retaining the token actually buys the operator.
+    assert.equal(nodeFs.existsSync(tokenPathFor(profile)), true, 'the token must be retained when a temp could not be confirmed removed, so the run does not read as a false clean');
+  });
+});
+
+test('closeCaptureRun (codex round 7, IMPORTANT 2): retaining the token on a stuck temp forces recovery — recoverProvenanceState reports `committed`, and the next openCaptureRun halts on run_already_open', () => {
+  withTempDir((dir) => {
+    const profile = profileFor(dir);
+    const opened = CR.openCaptureRun(profile, [], null, stubDepsNoIdentity());
+    assert.equal(opened.ok, true);
+    const stuckTemp = tempPathFor(profile, 'ffffffff-0000-0000-0000-000000000000');
+    nodeFs.writeFileSync(stuckTemp, '{"stale":true}');
+    const deps = depsWithOverride({
+      unlinkSync: (p) => {
+        if (p === stuckTemp) {
+          const err = new Error('permission denied');
+          err.code = 'EACCES';
+          throw err;
+        }
+        return nodeFs.unlinkSync(p);
+      },
+      runIdentityCommand: () => ({ ok: false, detail: 'not configured' }),
+    });
+    const closed = CR.closeCaptureRun(profile, opened.runState, { ok: true }, null, deps);
+    assert.equal(closed.ok, true, JSON.stringify(closed));
+
+    // With the token retained, the token/record pair still matches (same run_id, same
+    // opening_digest) — row 6 classifies this as `committed`, the state whose OWN repair
+    // (`cleanupCommittedRun`) re-verifies the token's fingerprint before touching anything, rather
+    // than `orphan_temp` (reached only once the token is gone), whose repair sweeps blind.
+    const recovered = CR.recoverProvenanceState(profile, stubDepsNoIdentity());
+    assert.equal(recovered.state, 'committed', `expected the token-retained close to classify as committed; got ${JSON.stringify(recovered)}`);
+
+    // Before the fix (unconditional token removal): the next openCaptureRun would have returned
+    // {ok:true}, silently opening a new run over an unresolved stuck temp with nothing left to
+    // prompt the operator toward recoverProvenanceState ever again.
+    const reopened = CR.openCaptureRun(profile, [], null, stubDepsNoIdentity());
+    assert.equal(reopened.ok, false, JSON.stringify(reopened));
+    assert.equal(reopened.halts[0].halt, 'run_already_open', 'a stuck cleanup temp must force the operator through recovery, not silently allow a new run to open');
   });
 });
 
