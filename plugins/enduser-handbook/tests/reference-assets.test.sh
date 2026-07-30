@@ -3469,6 +3469,16 @@ has_in_section "SKILL: no path leaves the open holding a reservation it never me
   'no path leaves this call holding a reservation it never tells you about'
 has "capture-record.d.mts: OpenResult's needs_ui_read branch carries warnings" \
   '(NeedsUiRead & { warnings: string[] })' "$ASSETS/lib/capture-record.d.mts"
+# [round 9 follow-up] A UI read is untrusted input on every run, and all three entrypoints that
+# resolve identity used to answer a malformed one by THROWING past their own declared result. The
+# halt name is deliberately not `provenance_hazard` — that name means a disk condition in this
+# module's vocabulary, and this is a resolution failure — so the distinction is stated, not implied.
+has_in_section "SKILL: a malformed observation halts as identity_resolution_threw, not by throwing" \
+  "$SKILL" '### W2 — Capture screenshots' \
+  'returns `identity_resolution_threw` as well rather than escaping uncaught'
+has_in_section "SKILL: identity_resolution_threw is named apart from the disk-condition halt" \
+  "$SKILL" '### W2 — Capture screenshots' \
+  'not a disk condition; a throw out of run-state construction is a disk-adjacent one'
 has_in_section "SKILL: repairs are idempotent on an already-repaired tree" \
   "$SKILL" '### W2 — Capture screenshots' \
   'calling one again on an already-repaired tree is a no-op'

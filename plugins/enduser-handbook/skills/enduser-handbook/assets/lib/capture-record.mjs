@@ -1094,6 +1094,48 @@ function resolveIdentityCommandOutcome(providedOutcome, buildIdentity, d) {
   return null;
 }
 
+// Shared by the same three call sites as `resolveIdentityCommandOutcome` above: resolves ONE
+// observation point's build identity, converting either underlying throw into a returned halt
+// rather than letting it escape past this module's declared, non-throwing contract.
+//
+// `d.runIdentityCommand` (reached through `resolveIdentityCommandOutcome`, which guards nothing of
+// its own) is arbitrary operator shell and can throw for reasons this module has no way to
+// predict. `resolveBuildIdentity` itself throws a `TypeError` on a structurally invalid
+// `uiObservation.kind` (build-identity.mjs) — a shape that arrives from a UI read, which is
+// untrusted input by this project's own reference doc. codex round 9 found this in
+// `openCaptureRun` alone (three probes: a malformed observation, a throwing identity executor, a
+// throwing `randomUUID` — the last of those is `openCaptureRun`'s own run-state construction, not
+// this helper); the same exposure, unfixed, was independently measured against the real module in
+// `closeCaptureRun` (reachable via a genuine open then close with a malformed closing observation,
+// not merely a hypothetical) and in `buildProvenanceReport` (W6, the audit entrypoint an operator
+// runs over already-merged chapters, reachable from that same untrusted UI-read source).
+//
+// Both throw causes land on ONE halt, `identity_resolution_threw` — matching this file's existing
+// convention for "a helper this function calls threw" (see `extraction_threw` in
+// `buildProvenanceReport` below) rather than the filesystem/hazard-flavored `provenance_hazard`:
+// this is a resolution failure, not a disk condition, and lumping it into the hazard vocabulary
+// would send an operator looking for a permissions/disk problem that is not what happened.
+//
+// Returns {ok: true, commandOutcome, identity} | {ok: false, halt: string, message: string}. The
+// `identity` field is `resolveBuildIdentity`'s own return value UNEXAMINED — it may itself be
+// `{needs_ui_read: true, ...}`; every caller below still checks that. Never throws itself.
+function resolveIdentityOrHalt(identityCommandOutcome, buildIdentity, uiObservation, d) {
+  let commandOutcome;
+  try {
+    commandOutcome = resolveIdentityCommandOutcome(identityCommandOutcome, buildIdentity, d);
+  } catch (err) {
+    return { ok: false, halt: 'identity_resolution_threw', message: `cannot resolve the identity command outcome: ${err.message}` };
+  }
+  const uiReadEnabled = buildIdentity?.ui_read !== false;
+  let identity;
+  try {
+    identity = resolveBuildIdentity({ commandOutcome, uiReadEnabled, uiObservation });
+  } catch (err) {
+    return { ok: false, halt: 'identity_resolution_threw', message: `the UI-read observation is malformed: ${err.message}` };
+  }
+  return { ok: true, commandOutcome, identity };
+}
+
 // ---------------------------------------------------------------------------------------------
 // Row 2 — openCaptureRun. Reservation is an EXCLUSIVE create on the final pending-token name
 // (O_CREAT | O_EXCL | O_NOFOLLOW), never a check-then-rename — the contended name is the fixed
@@ -1261,26 +1303,19 @@ export function openCaptureRun(profileLike, entries, openingObservation, deps, i
     return `the pending token '${tokenPath}' could not be removed while releasing this run's reservation — the next openCaptureRun will halt on 'run_already_open' until you run recoverProvenanceState (it will report 'partial') and abortCaptureRun to remove it.`;
   }
 
-  let commandOutcome;
-  let opening;
-  try {
-    const buildIdentity = profileLike.capture.build_identity ?? null;
-    const uiReadEnabled = buildIdentity?.ui_read !== false;
-    commandOutcome = resolveIdentityCommandOutcome(identityCommandOutcome, buildIdentity, d);
-    opening = resolveBuildIdentity({ commandOutcome, uiReadEnabled, uiObservation: openingObservation });
-  } catch (err) {
-    // Both calls above can THROW rather than return a result — `resolveBuildIdentity` throws a
-    // `TypeError` on an unrecognized `uiObservation.kind` (build-identity.mjs), a shape that
-    // reaches it from a UI read, which is untrusted input by this project's own reference doc; the
-    // identity command executor (`d.runIdentityCommand`, called from `resolveIdentityCommandOutcome`
-    // with no guard of its own) is arbitrary operator shell and can throw just as easily. Before
-    // this catch, either throw escaped this function entirely with the reservation still open: the
-    // just-created token was never unlinked and the fd was never closed (codex round 9, finding
-    // 1a). Nothing is committed at this point, so turning the throw into an ordinary halt loses
-    // nothing a caller could have used, and keeps this function's own no-throw contract.
+  // Delegates to `resolveIdentityOrHalt` (see its own comment) rather than calling
+  // `resolveIdentityCommandOutcome`/`resolveBuildIdentity` directly: either can THROW, and before
+  // this fix (codex round 9, finding 1a) that throw escaped this function entirely with the
+  // reservation still open — the just-created token was never unlinked and the fd was never
+  // closed. Nothing is committed at this point, so turning the throw into an ordinary halt loses
+  // nothing a caller could have used, and keeps this function's own no-throw contract.
+  const buildIdentity = profileLike.capture.build_identity ?? null;
+  const resolvedOpening = resolveIdentityOrHalt(identityCommandOutcome, buildIdentity, openingObservation, d);
+  if (!resolvedOpening.ok) {
     const releaseWarning = releaseReservation();
-    return haltResult('provenance_hazard', `cannot resolve the opening build identity: ${err.message}`, { warnings: releaseWarning ? [releaseWarning] : [] });
+    return haltResult(resolvedOpening.halt, resolvedOpening.message, { warnings: releaseWarning ? [releaseWarning] : [] });
   }
+  const { commandOutcome, identity: opening } = resolvedOpening;
   if (opening.needs_ui_read) {
     const releaseWarning = releaseReservation();
     return { ...opening, identityCommandOutcome: commandOutcome, warnings: releaseWarning ? [releaseWarning] : [] };
@@ -1558,19 +1593,23 @@ export function closeCaptureRun(profileLike, runState, captureOutcome, closingOb
   }
 
   const buildIdentity = profileLike.capture.build_identity ?? null;
-  const uiReadEnabled = buildIdentity?.ui_read !== false;
   // The closing observation runs the SAME three-step resolution order as the opening one — the
   // identity command is re-invoked, not skipped, since a command-configured profile must resolve
   // its closing identity from the command too, not fall straight to the UI-read fallback. "Re-
   // invoked" means at most once per closing observation point, though: `identityCommandOutcome`
   // (a UI-read continuation resuming this same close) is reused verbatim instead, exactly as
   // `openCaptureRun` reuses its own opening-side parameter.
-  const closingCommandOutcome = resolveIdentityCommandOutcome(identityCommandOutcome, buildIdentity, d);
-  const closing = resolveBuildIdentity({
-    commandOutcome: closingCommandOutcome,
-    uiReadEnabled,
-    uiObservation: closingObservation,
-  });
+  //
+  // Delegates to `resolveIdentityOrHalt` rather than calling `resolveIdentityCommandOutcome`/
+  // `resolveBuildIdentity` directly: either can THROW (see that helper's own comment), and a
+  // malformed closing observation or a throwing identity command previously escaped this function
+  // uncaught — measured against the real module (codex round 9 follow-up), reachable via a genuine
+  // open then close with a malformed closing observation, not merely a hypothetical. Nothing
+  // durable has been written at this point (the temp/rename sequence is further down), so a halt
+  // here loses nothing a caller could have used.
+  const resolvedClosing = resolveIdentityOrHalt(identityCommandOutcome, buildIdentity, closingObservation, d);
+  if (!resolvedClosing.ok) return haltResult(resolvedClosing.halt, resolvedClosing.message, {});
+  const { commandOutcome: closingCommandOutcome, identity: closing } = resolvedClosing;
   if (closing.needs_ui_read) return { ...closing, identityCommandOutcome: closingCommandOutcome };
 
   // Same reasoning as the opening sweep: an unexpected errno during the closing sweep must return
@@ -1618,11 +1657,18 @@ export function closeCaptureRun(profileLike, runState, captureOutcome, closingOb
   };
   const recordText = JSON.stringify(record, null, 2);
 
-  const tempPath = tempRunRecordPath(profileLike, d);
   const finalPath = runRecordPath(profileLike);
 
+  // `tempPath` is now computed INSIDE the try, not before it: `tempRunRecordPath` calls
+  // `deps.randomUUID()` with no guard of its own, and a throw there previously escaped this
+  // function entirely — before a temp name even existed, let alone anything written (codex round 9
+  // follow-up; the same class of gap the round fixed in openCaptureRun, measured here too, not
+  // merely reasoned from the code's shape). `tempPath` staying `undefined` is how the catch below
+  // tells "never named" apart from "named but the write/open failed".
+  let tempPath;
   let fd;
   try {
+    tempPath = tempRunRecordPath(profileLike, d);
     fd = d.openSync(tempPath, fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_WRONLY | fs.constants.O_NOFOLLOW, 0o644);
     writeFull(fd, Buffer.from(recordText, 'utf8'), d);
   } catch (err) {
@@ -1630,10 +1676,13 @@ export function closeCaptureRun(profileLike, runState, captureOutcome, closingOb
       // Best-effort: this closeSync failing must never MASK the write failure we are about to
       // report (a throwing catch body would silently replace it — codex round 3).
       closeBestEffort(fd, d);
+    }
+    if (tempPath !== undefined) {
       unlinkBestEffort(tempPath, d); // a create that succeeded but a write that failed leaves a
       // partial temp on disk — remove it rather than leaving litter for the failure path to answer for.
     }
-    return haltResult('provenance_hazard', `cannot write the closing temp: ${err.code ?? err.message}`, { path: tempPath });
+    const detail = tempPath === undefined ? `cannot generate the closing temp name: ${err.message}` : `cannot write the closing temp: ${err.code ?? err.message}`;
+    return haltResult('provenance_hazard', detail, { path: tempPath });
   }
   try {
     d.closeSync(fd);
@@ -1983,9 +2032,15 @@ export function recordChapterProvenance(profileLike, acceptedEntries, entry, cha
   const recordText = JSON.stringify(chapterRecord, null, 2);
 
   const finalPath = chapterRecordPath(profileLike, entry);
-  const tempPath = `${finalPath}.${d.randomUUID()}.tmp`;
+  // `tempPath` is computed INSIDE the try, not before it: `d.randomUUID()` is called with no guard
+  // of its own, and a throw there previously escaped this function entirely — before a temp name
+  // even existed, let alone anything written (codex round 9 follow-up, measured against the real
+  // module, not merely reasoned from the code's shape). `tempPath` staying `undefined` is how the
+  // catch below tells "never named" apart from "named but the write/open failed".
+  let tempPath;
   let fd;
   try {
+    tempPath = `${finalPath}.${d.randomUUID()}.tmp`;
     fd = d.openSync(tempPath, fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_WRONLY | fs.constants.O_NOFOLLOW, 0o644);
     writeFull(fd, Buffer.from(recordText, 'utf8'), d);
   } catch (err) {
@@ -1993,9 +2048,10 @@ export function recordChapterProvenance(profileLike, acceptedEntries, entry, cha
       // Best-effort: this closeSync failing must never MASK the write failure we are about to
       // report (codex round 3).
       closeBestEffort(fd, d);
-      unlinkBestEffort(tempPath, d);
     }
-    return { ok: false, halts: [{ halt: 'provenance_hazard', reason: err.reason ?? 'write_failed', path: tempPath, detail: err.message }] };
+    if (tempPath !== undefined) unlinkBestEffort(tempPath, d);
+    const reason = tempPath === undefined ? 'temp_name_generation_failed' : (err.reason ?? 'write_failed');
+    return { ok: false, halts: [{ halt: 'provenance_hazard', reason, path: tempPath, detail: err.message }] };
   }
   try {
     d.closeSync(fd);
@@ -2195,10 +2251,16 @@ export function buildProvenanceReport(profileLike, entries, currentObservation, 
   const validated = validateEntriesForCapture(profileLike, entries, d);
   if (!validated.ok) return validated;
 
+  // Delegates to `resolveIdentityOrHalt` rather than calling `resolveIdentityCommandOutcome`/
+  // `resolveBuildIdentity` directly: either can THROW (see that helper's own comment). W6 is the
+  // audit entrypoint an operator runs over already-merged chapters, reachable from the same
+  // UI-read observation this project's own reference doc classifies as untrusted, and a malformed
+  // one previously escaped this function uncaught — measured against the real module (codex round
+  // 9 follow-up). This function reads only; nothing is written before this point either way.
   const buildIdentity = profileLike.capture.build_identity ?? null;
-  const uiReadEnabled = buildIdentity?.ui_read !== false;
-  const commandOutcome = resolveIdentityCommandOutcome(identityCommandOutcome, buildIdentity, d);
-  const current = resolveBuildIdentity({ commandOutcome, uiReadEnabled, uiObservation: currentObservation });
+  const resolvedCurrent = resolveIdentityOrHalt(identityCommandOutcome, buildIdentity, currentObservation, d);
+  if (!resolvedCurrent.ok) return { ok: false, halts: [{ halt: resolvedCurrent.halt, message: resolvedCurrent.message }] };
+  const { commandOutcome, identity: current } = resolvedCurrent;
   if (current.needs_ui_read) return { ...current, identityCommandOutcome: commandOutcome };
 
   const rows = [];

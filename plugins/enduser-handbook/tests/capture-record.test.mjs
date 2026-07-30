@@ -1753,7 +1753,10 @@ test('openCaptureRun (codex round 9, finding 1a): a malformed opening observatio
     assert.doesNotThrow(() => {
       const result = CR.openCaptureRun(profile, [], { kind: 'bogus' }, deps);
       assert.equal(result.ok, false, JSON.stringify(result));
-      assert.equal(result.halts[0].halt, 'provenance_hazard', JSON.stringify(result));
+      // Not `provenance_hazard` (round 9 follow-up): a malformed caller-argument shape is the same
+      // CLASS of defect as `identity_resolution_threw`'s sibling `extraction_threw` below, not a
+      // filesystem/hazard condition.
+      assert.equal(result.halts[0].halt, 'identity_resolution_threw', JSON.stringify(result));
     });
     assert.equal(nodeFs.existsSync(tokenPathFor(profile)), false, 'a throwing identity resolution must not leave the reservation token on disk');
   });
@@ -1772,7 +1775,7 @@ test('openCaptureRun (codex round 9, finding 1a): a THROWING identity command ex
     assert.doesNotThrow(() => {
       const result = CR.openCaptureRun(profile, [], null, deps);
       assert.equal(result.ok, false, JSON.stringify(result));
-      assert.equal(result.halts[0].halt, 'provenance_hazard', JSON.stringify(result));
+      assert.equal(result.halts[0].halt, 'identity_resolution_threw', JSON.stringify(result));
     });
     assert.equal(nodeFs.existsSync(tokenPathFor(profile)), false, 'a throwing identity command must not leave the reservation token on disk');
   });
@@ -2420,6 +2423,48 @@ test('recordChapterProvenance: PRODUCTION PATH — records a chapter with NO exp
     const result = CR.recordChapterProvenance(profile, [entry], entry, chapterFile, opened.runState.run_id, stubDepsNoIdentity());
     assert.equal(result.recorded, true, `production path must record without an injected extractor; got ${JSON.stringify(result)}`);
     assert.equal(nodeFs.existsSync(CR.chapterRecordPath(profile, entry)), true);
+  });
+});
+
+test('recordChapterProvenance (codex round 9 follow-up, module-wide sweep): a THROWING randomUUID while naming its own temp must return a halt, not escape uncaught, and leave no orphaned temp', () => {
+  // This module's inline `${finalPath}.${d.randomUUID()}.tmp` calls `d.randomUUID()` with no guard
+  // of its own — measured directly against the real module: before this fix it threw uncaught,
+  // before a temp name even existed, exactly the class of gap this round already fixed once in
+  // openCaptureRun and once more in closeCaptureRun's own temp-naming call.
+  withTempDir((dir) => {
+    const profile = profileFor(dir);
+    const entry = { slug: 'items' };
+    const assetDir = join(profile.capture.output_dir, 'items');
+    nodeFs.mkdirSync(assetDir, { recursive: true });
+    nodeFs.writeFileSync(join(assetDir, 'overview.png'), 'v1');
+    const chapterFile = join(dir, 'items.md');
+
+    const opened = CR.openCaptureRun(profile, [entry], null, stubDepsNoIdentity());
+    assert.equal(opened.ok, true);
+    nodeFs.writeFileSync(join(assetDir, 'overview.png'), 'v2');
+    const closed = CR.closeCaptureRun(profile, opened.runState, { ok: true }, null, stubDepsNoIdentity());
+    assert.equal(closed.ok, true);
+
+    const { embedPath } = chapterPathsModule;
+    const embed = embedPath(chapterFile, assetDir, 'overview.png');
+    nodeFs.writeFileSync(chapterFile, `# Items\n\n1. Step\n\n   ![overview](${embed})\n`);
+
+    const deps = depsWithOverride({
+      randomUUID: () => {
+        throw new Error('injected randomUUID failure at W5');
+      },
+    });
+    assert.doesNotThrow(() => {
+      const result = CR.recordChapterProvenance(profile, [entry], entry, chapterFile, opened.runState.run_id, deps);
+      assert.equal(result.ok, false, JSON.stringify(result));
+      assert.equal(result.halts[0].halt, 'provenance_hazard', JSON.stringify(result));
+    });
+    // No `<slug>.json.<uuid>.tmp` left behind under this chapter's own record directory.
+    const chapterRecordDir = join(CR.chapterRecordPath(profile, entry), '..');
+    const leftoverTemps = nodeFs.existsSync(chapterRecordDir)
+      ? nodeFs.readdirSync(chapterRecordDir).filter((name) => name.startsWith(`${entry.slug}.json.`) && name.endsWith('.tmp'))
+      : [];
+    assert.deepEqual(leftoverTemps, [], 'a throwing randomUUID must not leave an orphaned chapter-record temp on disk');
   });
 });
 
@@ -3120,6 +3165,65 @@ test('closeCaptureRun: a UI-read continuation reuses the already-resolved identi
   });
 });
 
+test('closeCaptureRun (codex round 9 follow-up): a malformed closing observation THROWS inside resolveBuildIdentity but must return a halt (identity_resolution_threw), not escape uncaught', () => {
+  // closeCaptureRun holds no reservation to leak (unlike openCaptureRun), but shares the same
+  // `resolveIdentityOrHalt` call, so the same uncaught TypeError from a malformed uiObservation.kind
+  // (untrusted UI-read input) escaped this function too before this fix — measured directly against
+  // the real module via a genuine open then close, not reasoned from the code's shape.
+  withTempDir((dir) => {
+    const profile = profileFor(dir, { capture: { build_identity: { ui_read: true } } });
+    const opened = CR.openCaptureRun(profile, [{ slug: 'items' }], { kind: 'unavailable', detail: 'no ui at open' }, {}, { ok: false, detail: 'no command' });
+    assert.equal(opened.ok, true, JSON.stringify(opened));
+    assert.doesNotThrow(() => {
+      const result = CR.closeCaptureRun(profile, opened.runState, { ok: true }, { kind: 'bogus-kind' }, {});
+      assert.equal(result.ok, false, JSON.stringify(result));
+      assert.equal(result.halts[0].halt, 'identity_resolution_threw', JSON.stringify(result));
+    });
+  });
+});
+
+test('closeCaptureRun (codex round 9 follow-up): a THROWING identity command executor at close must return a halt (identity_resolution_threw), not escape uncaught', () => {
+  withTempDir((dir) => {
+    const profile = profileFor(dir, { capture: { build_identity: { command: 'get-version', ui_read: false } } });
+    const opened = CR.openCaptureRun(profile, [{ slug: 'items' }], null, depsWithOverride({ runIdentityCommand: () => ({ ok: true, raw: 'v1' }) }));
+    assert.equal(opened.ok, true, JSON.stringify(opened));
+    const deps = depsWithOverride({
+      runIdentityCommand: () => {
+        throw new Error('injected identity executor failure at close');
+      },
+    });
+    assert.doesNotThrow(() => {
+      const result = CR.closeCaptureRun(profile, opened.runState, { ok: true }, null, deps);
+      assert.equal(result.ok, false, JSON.stringify(result));
+      assert.equal(result.halts[0].halt, 'identity_resolution_threw', JSON.stringify(result));
+    });
+  });
+});
+
+test('closeCaptureRun (codex round 9 follow-up, module-wide sweep): a THROWING randomUUID while naming the closing temp must return a halt, not escape uncaught, and leave no orphaned temp', () => {
+  // `tempRunRecordPath` calls `deps.randomUUID()` with no guard of its own — measured directly
+  // against the real module: before this fix it threw uncaught, before a temp name even existed.
+  withTempDir((dir) => {
+    const profile = profileFor(dir);
+    const entry = { slug: 'items' };
+    const assetDir = join(profile.capture.output_dir, 'items');
+    nodeFs.mkdirSync(assetDir, { recursive: true });
+    const opened = CR.openCaptureRun(profile, [entry], null, stubDepsNoIdentity());
+    assert.equal(opened.ok, true, JSON.stringify(opened));
+    const deps = depsWithOverride({
+      randomUUID: () => {
+        throw new Error('injected randomUUID failure at close');
+      },
+    });
+    assert.doesNotThrow(() => {
+      const result = CR.closeCaptureRun(profile, opened.runState, { ok: true }, null, deps);
+      assert.equal(result.ok, false, JSON.stringify(result));
+      assert.equal(result.halts[0].halt, 'provenance_hazard', JSON.stringify(result));
+    });
+    assert.equal(listRunTempsOnDisk(profile).length, 0, 'a throwing randomUUID must not leave an orphaned closing temp on disk');
+  });
+});
+
 test('buildProvenanceReport: a UI-read continuation reuses the already-resolved identityCommandOutcome — the identity command is NOT re-invoked (Finding 1)', () => {
   withTempDir((dir) => {
     const profile = profileFor(dir, { capture: { build_identity: { command: 'get-version', ui_read: true } } });
@@ -3142,6 +3246,42 @@ test('buildProvenanceReport: a UI-read continuation reuses the already-resolved 
     const resumed = CR.buildProvenanceReport(profile, [entry], { kind: 'value', raw: 'ui-value' }, deps, first.identityCommandOutcome);
     assert.equal(calls, 1, 'the command must NOT run a second time on the continuation call');
     assert.equal(resumed.rows[0].current_source, 'ui', JSON.stringify(resumed.rows));
+  });
+});
+
+test('buildProvenanceReport (codex round 9 follow-up): a malformed current observation THROWS inside resolveBuildIdentity but must return a halt (identity_resolution_threw), not escape uncaught', () => {
+  // W6 is the audit entrypoint an operator runs over already-merged chapters, reachable from the
+  // same UI-read observation this project's own reference doc classifies as untrusted — measured
+  // directly against the real module: it threw uncaught on this shape before this fix.
+  withTempDir((dir) => {
+    const profile = profileFor(dir, { capture: { build_identity: { ui_read: true } } });
+    const entry = { slug: 'items' };
+    writeChapterAt(profile, entry, '# items\n');
+    const deps = { ...stubDepsNoIdentity(), expectedAssets: emptyExpectedAssets };
+    assert.doesNotThrow(() => {
+      const result = CR.buildProvenanceReport(profile, [entry], { kind: 'bogus-kind' }, deps);
+      assert.equal(result.ok, false, JSON.stringify(result));
+      assert.equal(result.halts[0].halt, 'identity_resolution_threw', JSON.stringify(result));
+    });
+  });
+});
+
+test('buildProvenanceReport (codex round 9 follow-up): a THROWING identity command executor must return a halt (identity_resolution_threw), not escape uncaught', () => {
+  withTempDir((dir) => {
+    const profile = profileFor(dir, { capture: { build_identity: { command: 'get-version', ui_read: false } } });
+    const entry = { slug: 'items' };
+    writeChapterAt(profile, entry, '# items\n');
+    const deps = depsWithOverride({
+      runIdentityCommand: () => {
+        throw new Error('injected identity executor failure at W6');
+      },
+      expectedAssets: emptyExpectedAssets,
+    });
+    assert.doesNotThrow(() => {
+      const result = CR.buildProvenanceReport(profile, [entry], null, deps);
+      assert.equal(result.ok, false, JSON.stringify(result));
+      assert.equal(result.halts[0].halt, 'identity_resolution_threw', JSON.stringify(result));
+    });
   });
 });
 
