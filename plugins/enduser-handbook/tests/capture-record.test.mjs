@@ -1582,7 +1582,12 @@ test('closeCaptureRun: BLOCKER (codex round 3) — a closeSync failure after a W
     });
     const result = CR.closeCaptureRun(profile, opened.runState, { ok: true }, null, deps);
     assert.equal(result.ok, false, JSON.stringify(result));
-    assert.match(result.halts[0].message, /injected write failure/, `the write failure must survive a subsequent close failure; got ${JSON.stringify(result)}`);
+    // The halt message is built from `err.code ?? err.message` — the WRITE error's own code
+    // ("EIO") must be what survives; the CLOSE error's code ("EBADF") or text must never appear,
+    // which is exactly what a masking `catch`/`finally` body overwriting the pending exception
+    // would produce instead.
+    assert.match(result.halts[0].message, /EIO/, `the write failure must survive a subsequent close failure; got ${JSON.stringify(result)}`);
+    assert.doesNotMatch(result.halts[0].message, /EBADF|close failure/, `the close failure must never mask the write failure; got ${JSON.stringify(result)}`);
   });
 });
 

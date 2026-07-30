@@ -7,9 +7,16 @@
 
 import type { BuildIdentity, UiReadObservation } from './build-identity.d.mts';
 
+// [round 3, codex] `slug`/`group` were previously typed `string | number` / `string | null` — but
+// gate 1 (validateEntriesForCapture, run at the top of open/W5/W6) now deliberately REJECTS a
+// non-string slug and a non-string group (a numeric slug or a null group used to silently coerce
+// via `String(...)` before the type check ever saw the original value — IMPORTANT 1, round 2 of
+// this review). A TypeScript caller following the OLD, wider type could construct an entry this
+// runtime now halts on with `invalid_slug`/`invalid_group`; the type must describe what is actually
+// ACCEPTED, not merely what the JS implementation can survive typing errors on without crashing.
 export interface ChapterEntryLike {
-  slug: string | number;
-  group?: string | null;
+  slug: string;
+  group?: string;
 }
 
 export interface ProfileLike {
