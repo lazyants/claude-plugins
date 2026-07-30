@@ -227,12 +227,13 @@ export function isPlainLabel(s: string): boolean;
 /** See chapter-paths.mjs: the D6 manual-migration boundary trigger. */
 export function groupChanges(oldEntries: ChapterEntry[], newEntries: ChapterEntry[]): GroupChangesResult;
 
-/** See chapter-paths.mjs: the per-delta-kind terminal-state fact descriptors; vaultRelChaptersDir is threaded into every currentIndexExpectedTarget call this function makes (wikilinks mode). */
+/** See chapter-paths.mjs: the per-delta-kind terminal-state fact descriptors; vaultRelChaptersDir is threaded into every currentIndexExpectedTarget call this function makes (wikilinks mode). [1.12.0] provenanceActive (default false) gates the twelfth fact kind, 'provenance-record' ({kind, oldPath, newPath: string|null}) — the caller's own re-assertion of this run's W1 ownership outcome, never inferred from disk; absent (or false) reproduces every pre-1.12.0 checklist byte-for-byte. Present only for 'removal' and the two grouped-change kinds, never 'title-change'. */
 export function manualMigrationChecklist(
   profileLike: ProfileLike,
   oldEntry: ChapterEntry | null,
   newEntry: ChapterEntry | null,
   vaultRelChaptersDir?: string,
+  provenanceActive?: boolean,
 ): MigrationFact[];
 
 /** See chapter-paths.mjs: the production D6 halt-text formatter (exact strings). */
@@ -291,8 +292,18 @@ export function verifyNonHeadingPlacement(
 /** See chapter-paths.mjs: the bounded balanced-paren / angle-wrapped destination-group scanner behind every markdown-link-shaped recognizer in this module — now exported so a consumer can reuse the same scanner rather than re-implementing it. */
 export function findMarkdownLinkGroups(line: string): string[];
 
+export interface StripInertContextsOptions {
+  /**
+   * [1.12.0] default false. When true, a fence-shaped run (backtick/tilde, length >= 3, at true
+   * line start) whose own column is >= 4 (tab-expanded) is NOT recognized as a fence — it is an
+   * indented code block and is left untouched rather than blanked. Default false preserves every
+   * pre-1.12.0 caller's behavior byte-for-byte; expectedAssets is the only caller passing true.
+   */
+  indentedRunIsCode?: boolean;
+}
+
 /** See chapter-paths.mjs: the shared inert-context stripper (fenced code, inline code spans, HTML comments blanked to equal-length spans) — now exported so a consumer can reuse the same classification the index-file scanners above are built on. */
-export function stripInertContexts(text: string): string;
+export function stripInertContexts(text: string, options?: StripInertContextsOptions): string;
 
 /** See chapter-paths.mjs: extracts and escape-decodes a markdown link/image destination from its raw parenthesized (or angle-wrapped) group — now exported so a consumer matching a destination against a candidate set does not need to re-implement the angle/escape handling. */
 export function parseMdLinkDestination(raw: string): string;
@@ -338,3 +349,42 @@ export function expectedAssets(
   filenames: string[],
   target: string,
 ): ExpectedAssetsResult;
+
+// ---------------------------------------------------------------------------------------------
+// [1.12.0] W2 preflight gates 1-4 — see chapter-paths.mjs's own section header for why gate 3
+// takes injected fs access instead of importing node:fs, and why all four are independently
+// callable (W6 must run them itself against a bare entry set).
+// ---------------------------------------------------------------------------------------------
+
+/** Gate 1 — slug alphabet, the same pattern validateGroups already uses for `group`. */
+export function isValidSlugSyntax(slug: unknown): boolean;
+
+export interface CanonicalPathCollision {
+  canonicalPath: string;
+  entries: ChapterEntry[];
+}
+
+/** Gate 2 — canonical chapterAssetDir() uniqueness across a set of entries; deliberately independent of gate 1 (testable with alphabet-violating inputs directly). */
+export function findCanonicalPathCollisions(profileLike: CaptureProfileLike, entries: ChapterEntry[]): CanonicalPathCollision[];
+
+export interface PhysicalContainmentDeps {
+  lstat: (path: string) => { isSymbolicLink(): boolean };
+  readlink: (path: string) => string;
+}
+
+export type PhysicalContainmentHaltReason = 'escapes-root' | 'cycle' | 'inspection-failed';
+
+export type PhysicalContainmentResult =
+  | { ok: true; resolved: string }
+  | { ok: false; halt: { reason: PhysicalContainmentHaltReason; detail: string } };
+
+/** Gate 3 — physical containment, no-follow, cycle-safe; resolves `dir` against `rootDir` using ONLY deps.lstat/deps.readlink (never a realpath call). */
+export function resolvePhysicalContainment(rootDir: string, dir: string, deps: PhysicalContainmentDeps): PhysicalContainmentResult;
+
+export interface PhysicalPathCollision {
+  resolvedPath: string;
+  entries: ChapterEntry[];
+}
+
+/** Gate 4 — pairwise physical uniqueness over already gate-3-resolved directories (the cross-entry property gates 2 and 3 individually cannot see). Trust boundary: each `resolved` value is taken on trust as resolvePhysicalContainment's real output for that entry — this function cannot verify it was not hand-built, the same way `expected` elsewhere in this design is a public shape, deliberately not a capability. */
+export function findPhysicalPathCollisions(resolvedEntries: Array<{ entry: ChapterEntry; resolved: string }>): PhysicalPathCollision[];

@@ -124,7 +124,9 @@ export type RecordState = 'absent' | 'malformed' | 'unsupported_version' | 'stal
 /**
  * Classify the delta between a chapter's current resolved identity and its recorded one. See the
  * .mjs export for the full precedence (record state before any value comparison, and outranking the
- * current side's own resolution reason).
+ * current side's own resolution reason). THROWS a `TypeError` when `recordState` is `'ok'`/`'stale'`
+ * and `record` is not a valid `BuildIdentity` — e.g. the whole chapter/run record wrapper passed
+ * instead of its `build_identity` field.
  */
 export declare function classifyBuildDelta(input: {
   current: BuildIdentity;

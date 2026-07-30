@@ -44,6 +44,10 @@ import {
   buildEmbedCandidates,
   isCanonicalAssetKey,
   expectedAssets,
+  isValidSlugSyntax,
+  findCanonicalPathCollisions,
+  resolvePhysicalContainment,
+  findPhysicalPathCollisions,
 } from '../skills/enduser-handbook/assets/lib/chapter-paths.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -4586,6 +4590,34 @@ test('isCanonicalAssetKey: non-string input is rejected, not coerced', () => {
 });
 
 // =================================================================================================
+// stripInertContexts — the exported shared stripper, direct unit coverage for its [1.12.0]
+// indentedRunIsCode option (review finding: this option REPLACES the private
+// stripInertContextsForImages duplicate expectedAssets used to carry — one scanner, one place the
+// fence/indented-code boundary is decided).
+// =================================================================================================
+
+test('stripInertContexts: default (no options) — a four-space-indented backtick run is STILL treated as a fence, blanking to EOF (byte-identical to pre-1.12.0)', () => {
+  const text = '    ```\n\n![live](a.png)\n';
+  const stripped = stripInertContexts(text);
+  assert.ok(!stripped.includes('!['), 'the shipped, option-less behavior blanks the run to EOF, taking the image with it');
+});
+
+test('stripInertContexts: {indentedRunIsCode: true} — the SAME four-space-indented run is passthrough, not a fence', () => {
+  const text = '    ```\n\n![live](a.png)\n';
+  const stripped = stripInertContexts(text, { indentedRunIsCode: true });
+  assert.ok(stripped.includes('![live](a.png)'), 'an indented code block, not a fence — the image after it must survive unblanked');
+});
+
+test('stripInertContexts: {indentedRunIsCode: true} does not affect an ORDINARY column-0 fence — still blanked', () => {
+  const text = '```\nplain sample text\n```\n![live](a.png)';
+  const strippedDefault = stripInertContexts(text);
+  const strippedOption = stripInertContexts(text, { indentedRunIsCode: true });
+  assert.equal(strippedDefault, strippedOption, 'the option only changes the >= 4-column case, never a true column-0 fence');
+  assert.ok(!strippedOption.includes('plain sample text'));
+  assert.ok(strippedOption.includes('![live](a.png)'), 'the image AFTER the closed fence must remain live either way');
+});
+
+// =================================================================================================
 // expectedAssets — recognition (candidate matching, nested brackets, escape parity, offsets)
 // =================================================================================================
 
@@ -4967,4 +4999,394 @@ test('expectedAssets: zero in-directory embeds is a clean success with an empty 
   const result = expectedAssets(profile(), entry(), chapterFile, chapterText('no images here'), ['01.png'], 'obsidian_vault');
   assert.equal(result.ok, true);
   assert.deepEqual(result.assets, []);
+});
+
+// =================================================================================================
+// [1.12.0] manualMigrationChecklist's twelfth fact kind — the provenance record — and the matching
+// renderManualMigrationHalt rendering. `provenanceActive` (default false) is the caller's OWN
+// re-assertion of this run's W1 ownership outcome; its absence must reproduce every pre-1.12.0
+// rendering byte-for-byte (the plan's "omit the whole fragment on a skipped run" rule).
+// =================================================================================================
+
+test('manualMigrationChecklist: provenanceActive defaults to false — a removal checklist is byte-identical to the pre-1.12.0 shape (no 12th fact)', () => {
+  const old = entry({ slug: 'orders', group: 'admin', group_title: 'Admin' });
+  const facts = manualMigrationChecklist(profile(), old, null);
+  assert.equal(findFact(facts, 'provenance-record'), undefined);
+});
+
+test('manualMigrationChecklist: provenanceActive defaults to false — a group-change checklist carries no 12th fact', () => {
+  const old = entry({ slug: 'orders', group: 'admin', group_title: 'Admin' });
+  const next = entry({ slug: 'orders', group: 'billing', group_title: 'Billing' });
+  const facts = manualMigrationChecklist(profile(), old, next);
+  assert.equal(findFact(facts, 'provenance-record'), undefined);
+});
+
+test('manualMigrationChecklist: provenanceActive=true on REMOVAL adds the provenance-record fact, oldPath full-derived, newPath null', () => {
+  const old = entry({ slug: 'orders', group: 'admin', group_title: 'Admin' });
+  const facts = manualMigrationChecklist(profile(), old, null, undefined, true);
+  const record = findFact(facts, 'provenance-record');
+  assert.ok(record, 'the fact must be present when provenanceActive is true');
+  assert.equal(record.oldPath, 'vault/handbook/.provenance/chapters/admin/orders.json');
+  assert.equal(record.newPath, null);
+});
+
+test('manualMigrationChecklist: provenanceActive=true on GROUP-CHANGE adds the fact with BOTH endpoints, full-derived', () => {
+  const old = entry({ slug: 'orders', group: 'admin', group_title: 'Admin' });
+  const next = entry({ slug: 'orders', group: 'billing', group_title: 'Billing' });
+  const facts = manualMigrationChecklist(profile(), old, next, undefined, true);
+  const record = findFact(facts, 'provenance-record');
+  assert.ok(record);
+  assert.equal(record.oldPath, 'vault/handbook/.provenance/chapters/admin/orders.json');
+  assert.equal(record.newPath, 'vault/handbook/.provenance/chapters/billing/orders.json');
+});
+
+test('manualMigrationChecklist: a FLAT entry (no group) derives the provenance record path with no group segment', () => {
+  // A pure flat-entry removal never reaches manualMigrationChecklist at all — "only a GROUPED
+  // removal is a migration matter" (classifyEntryDelta's own comment; also pinned by the existing
+  // "a flat removal (never a migration matter) => []" test above). The flat side of
+  // migrationRecordPath is therefore exercised via a grouped-to-flat GROUP-CHANGE, whose newEntry
+  // is genuinely flat.
+  const old = entry({ slug: 'items', group: 'admin', group_title: 'Admin' });
+  const next = entry({ slug: 'items' });
+  const facts = manualMigrationChecklist(profile(), old, next, undefined, true);
+  const record = findFact(facts, 'provenance-record');
+  assert.equal(record.oldPath, 'vault/handbook/.provenance/chapters/admin/items.json');
+  assert.equal(record.newPath, 'vault/handbook/.provenance/chapters/items.json');
+});
+
+test('manualMigrationChecklist: a title-only change NEVER carries the provenance-record fact, even with provenanceActive=true — a title change does not move the record', () => {
+  const old = entry({ slug: 'orders', group: 'admin', group_title: 'Admin' });
+  const next = entry({ slug: 'orders', group: 'admin', group_title: 'Orders (renamed)' });
+  const facts = manualMigrationChecklist(profile(), old, next, undefined, true);
+  assert.equal(findFact(facts, 'provenance-record'), undefined);
+});
+
+test('renderManualMigrationHalt: with provenanceActive=false, a removal line is BYTE-IDENTICAL to the pre-1.12.0 wording (fragment omitted, not a placeholder)', () => {
+  const p = profile();
+  const old = entry({ slug: 'orders', group: 'admin', group_title: 'Admin' });
+  const change = { kind: 'removal', slug: 'orders', oldEntry: old, newEntry: null };
+  const facts = manualMigrationChecklist(p, old, null);
+  const text = renderManualMigrationHalt([change], [facts]);
+  assert.ok(text.includes("orders: removed — delete vault/handbook/admin/orders.md, vault/handbook/assets/admin/orders, and its index line (was under container 'Admin')"));
+  assert.ok(!text.includes('record'), 'no "record" word must appear anywhere when the run is not active');
+});
+
+test('renderManualMigrationHalt: with provenanceActive=true, a removal line matches the agreed wording exactly (docs/revalidation.md verbatim contract)', () => {
+  const p = profile();
+  const old = entry({ slug: 'orders', group: 'admin', group_title: 'Admin' });
+  const change = { kind: 'removal', slug: 'orders', oldEntry: old, newEntry: null };
+  const facts = manualMigrationChecklist(p, old, null, undefined, true);
+  const text = renderManualMigrationHalt([change], [facts]);
+  assert.ok(
+    text.includes(
+      "orders: removed — delete vault/handbook/admin/orders.md, vault/handbook/assets/admin/orders, its index line, and its record vault/handbook/.provenance/chapters/admin/orders.json (was under container 'Admin')",
+    ),
+  );
+});
+
+test('renderManualMigrationHalt: with provenanceActive=true, a group-change line matches the agreed wording exactly', () => {
+  const p = profile();
+  const old = entry({ slug: 'orders', group: 'admin', group_title: 'Admin' });
+  const next = entry({ slug: 'orders', group: 'billing', group_title: 'Billing' });
+  const change = { kind: 'group-change', slug: 'orders', oldEntry: old, newEntry: next };
+  const facts = manualMigrationChecklist(p, old, next, undefined, true);
+  const text = renderManualMigrationHalt([change], [facts]);
+  assert.ok(text.includes('orders: vault/handbook/admin/orders.md -> vault/handbook/billing/orders.md'));
+  assert.ok(
+    text.includes(
+      'record vault/handbook/.provenance/chapters/admin/orders.json -> vault/handbook/.provenance/chapters/billing/orders.json',
+    ),
+  );
+  // the record clause must sit BEFORE the "was under container" suffix, per this file's own
+  // ordering decision — agreed with `docs` as the resolution of their under-specified example.
+  const line = text.split('\n').find((l) => l.includes('orders:'));
+  assert.ok(line.indexOf('; record ') < line.indexOf("; was under container"));
+});
+
+test('renderManualMigrationHalt: with provenanceActive=true on a group-AND-title change, all four clauses appear in the agreed order — record, was-under-container, container-title', () => {
+  // The combination `docs` flagged as worth its own fixture: none of the "record alone" or
+  // "suffix alone" tests above can catch a future edit that reorders record/suffix/title-clause
+  // relative to each other, because each of those fixtures only carries a subset of the three.
+  const p = profile();
+  const old = entry({ slug: 'orders', group: 'admin', group_title: 'Admin' });
+  const next = entry({ slug: 'orders', group: 'billing', group_title: 'Billing Dept' });
+  const change = { kind: 'group-and-title-change', slug: 'orders', oldEntry: old, newEntry: next };
+  const facts = manualMigrationChecklist(p, old, next, undefined, true);
+  const text = renderManualMigrationHalt([change], [facts]);
+  const line = text.split('\n').find((l) => l.includes('orders:'));
+  assert.equal(
+    line,
+    "  orders: vault/handbook/admin/orders.md -> vault/handbook/billing/orders.md; assets vault/handbook/assets/admin/orders -> vault/handbook/assets/billing/orders; record vault/handbook/.provenance/chapters/admin/orders.json -> vault/handbook/.provenance/chapters/billing/orders.json; was under container 'Admin'; container title 'Admin' -> 'Billing Dept'",
+  );
+});
+
+test('renderManualMigrationHalt: with provenanceActive=false, a group-change line is BYTE-IDENTICAL to the pre-1.12.0 wording (no "record" clause)', () => {
+  const p = profile();
+  const old = entry({ slug: 'orders', group: 'admin', group_title: 'Admin' });
+  const next = entry({ slug: 'orders', group: 'billing', group_title: 'Billing' });
+  const change = { kind: 'group-change', slug: 'orders', oldEntry: old, newEntry: next };
+  const facts = manualMigrationChecklist(p, old, next);
+  const text = renderManualMigrationHalt([change], [facts]);
+  const line = text.split('\n').find((l) => l.includes('orders:'));
+  assert.equal(
+    line,
+    "  orders: vault/handbook/admin/orders.md -> vault/handbook/billing/orders.md; assets vault/handbook/assets/admin/orders -> vault/handbook/assets/billing/orders; was under container 'Admin'",
+  );
+});
+
+// =================================================================================================
+// [1.12.0] W2 preflight gates 1-4 — pure, exported, independently callable predicates. Codex
+// DO-NOT-SHIP finding: gates 1-4 never ran on the production path because they did not exist;
+// `record` wires these into openCaptureRun/recordChapterProvenance/buildProvenanceReport.
+// =================================================================================================
+
+// ---------------------------------------------------------------------------------------------
+// Gate 1 — isValidSlugSyntax
+// ---------------------------------------------------------------------------------------------
+
+test('isValidSlugSyntax: rejects every row of the measured 1.11.0 aliasing table', () => {
+  const bad = [
+    'admin/items',
+    'admin\\items',
+    'admin/./items',
+    'x/../items',
+    1, // number, not a string — the numeric-vs-string aliasing this gate removes at the source
+    'Items', // uppercase
+    'café', // NFC
+    'café', // NFD
+    'items.', // trailing dot
+  ];
+  for (const slug of bad) {
+    assert.equal(isValidSlugSyntax(slug), false, `'${String(slug)}' must be rejected`);
+  }
+});
+
+test('isValidSlugSyntax: digit-bearing positive controls PROCEED — q1 (the shipped suite\'s own fixture) and an all-digit slug', () => {
+  assert.equal(isValidSlugSyntax('q1'), true);
+  assert.equal(isValidSlugSyntax('123'), true);
+});
+
+test('isValidSlugSyntax: hyphen rules pinned in BOTH directions', () => {
+  assert.equal(isValidSlugSyntax('-a'), false);
+  assert.equal(isValidSlugSyntax('a-'), false);
+  assert.equal(isValidSlugSyntax('a--b'), false);
+  assert.equal(isValidSlugSyntax('invoice-export'), true);
+});
+
+test('isValidSlugSyntax: empty string and non-string types all rejected', () => {
+  assert.equal(isValidSlugSyntax(''), false);
+  assert.equal(isValidSlugSyntax(null), false);
+  assert.equal(isValidSlugSyntax(undefined), false);
+  assert.equal(isValidSlugSyntax(true), false);
+});
+
+// ---------------------------------------------------------------------------------------------
+// Gate 2 — findCanonicalPathCollisions
+// ---------------------------------------------------------------------------------------------
+
+test('findCanonicalPathCollisions: the canonicalizer is tested DIRECTLY, with alphabet-gate-bypass inputs — a case/separator/dot alias collides even though gate 1 would have rejected it first in the real preflight', () => {
+  const p = profile();
+  const collisions = findCanonicalPathCollisions(p, [
+    entry({ slug: 'Items' }), // uppercase — gate 1 would reject this, but gate 2 must still catch it
+    entry({ slug: 'items' }),
+  ]);
+  // chapterAssetDir is purely lexical join+normalize — it does NOT itself case-fold, so 'Items'
+  // and 'items' derive DISTINCT canonical paths lexically; the real aliasing collision (same file
+  // on a case-insensitive FS) is exactly what gate 1 exists to remove at the source, not gate 2.
+  // Gate 2's own collision case is a lexical-identity one instead: '../items' vs 'items' both
+  // normalize to the identical canonical path once dot-segments collapse.
+  assert.equal(collisions.length, 0, "'Items' and 'items' are lexically distinct canonical paths — not gate 2's job");
+
+  const dotCollisions = findCanonicalPathCollisions(p, [entry({ slug: 'x/../items' }), entry({ slug: 'items' })]);
+  assert.equal(dotCollisions.length, 1, 'a raw Set over UN-normalized tails would miss this; the canonical chapterAssetDir must not');
+  assert.equal(dotCollisions[0].entries.length, 2);
+});
+
+test('findCanonicalPathCollisions: a genuine cross-shape collision — flat vs grouped deriving the identical canonical directory', () => {
+  const p = profile();
+  const collisions = findCanonicalPathCollisions(p, [
+    entry({ slug: 'admin/items' }), // flat, but the SLUG ITSELF spells a nested path — gate 1's job to reject, not gate 2's
+    entry({ slug: 'items', group: 'admin', group_title: 'Admin' }),
+  ]);
+  assert.equal(collisions.length, 1);
+  assert.equal(collisions[0].canonicalPath, chapterAssetDir(p, entry({ slug: 'items', group: 'admin' })));
+});
+
+test('findCanonicalPathCollisions: distinct entries produce NO collisions', () => {
+  const p = profile();
+  const collisions = findCanonicalPathCollisions(p, [entry({ slug: 'items' }), entry({ slug: 'orders' })]);
+  assert.deepEqual(collisions, []);
+});
+
+// ---------------------------------------------------------------------------------------------
+// Gate 3 — resolvePhysicalContainment
+// ---------------------------------------------------------------------------------------------
+
+// A minimal lstat/readlink mock — `symlinks` maps an exact candidate path to its raw readlink()
+// target string. Any path not in the map is treated as a plain, non-symlink entry.
+function mockFsDeps(symlinks) {
+  const map = new Map(Object.entries(symlinks));
+  return {
+    lstat(p) {
+      return { isSymbolicLink: () => map.has(p) };
+    },
+    readlink(p) {
+      if (!map.has(p)) throw new Error(`readlink called on a non-symlink path: ${p}`);
+      return map.get(p);
+    },
+  };
+}
+
+test('resolvePhysicalContainment: a legitimate deep tail with no symlinks anywhere is accepted, not false-halted', () => {
+  const result = resolvePhysicalContainment('out/assets', 'out/assets/admin/billing/items', mockFsDeps({}));
+  assert.deepEqual(result, { ok: true, resolved: 'out/assets/admin/billing/items' });
+});
+
+test('resolvePhysicalContainment: {slug:"../elsewhere"} — no symlinks, purely lexical escape — HALTS', () => {
+  const result = resolvePhysicalContainment('out/assets', 'out/elsewhere', mockFsDeps({}));
+  assert.equal(result.ok, false);
+  assert.equal(result.halt.reason, 'escapes-root');
+});
+
+test('resolvePhysicalContainment: a component-boundary check, not a string-prefix one — out/assets-evil is rejected', () => {
+  const result = resolvePhysicalContainment('out/assets', 'out/assets-evil/items', mockFsDeps({}));
+  assert.equal(result.ok, false, 'a prefix-only check would wrongly accept this sibling directory');
+  assert.equal(result.halt.reason, 'escapes-root');
+});
+
+test('resolvePhysicalContainment: no-follow is pinned POSITIVELY — a symlink whose target stays INSIDE the root is accepted', () => {
+  const result = resolvePhysicalContainment(
+    'out/assets',
+    'out/assets/admin/items',
+    mockFsDeps({ 'out/assets/admin': 'real-admin' }),
+  );
+  assert.deepEqual(result, { ok: true, resolved: 'out/assets/real-admin/items' });
+});
+
+test('resolvePhysicalContainment: the two-hop chain halts — substituting only the first hop and accepting its immediate target would wrongly pass', () => {
+  const result = resolvePhysicalContainment(
+    'out/assets',
+    'out/assets/admin/items',
+    mockFsDeps({ 'out/assets/admin': 'hop', 'out/assets/hop': '../../outside' }),
+  );
+  assert.equal(result.ok, false);
+  assert.equal(result.halt.reason, 'escapes-root');
+});
+
+test('resolvePhysicalContainment: the relative-target discriminator — ../outside (ONE level) resolved against the link\'s PARENT halts, where resolving against the link\'s own path would wrongly accept', () => {
+  const result = resolvePhysicalContainment(
+    'out/assets',
+    'out/assets/admin/items',
+    mockFsDeps({ 'out/assets/admin': '../outside' }),
+  );
+  assert.equal(result.ok, false, "'../outside' against admin's parent 'out/assets' lands on 'out/outside', outside root");
+  assert.equal(result.halt.reason, 'escapes-root');
+});
+
+test('resolvePhysicalContainment: the deeper ../../outside case ALSO halts (both bases would agree here — this fixture alone pins nothing about which base is used)', () => {
+  const result = resolvePhysicalContainment(
+    'out/assets',
+    'out/assets/admin/items',
+    mockFsDeps({ 'out/assets/admin': '../../outside' }),
+  );
+  assert.equal(result.ok, false);
+  assert.equal(result.halt.reason, 'escapes-root');
+});
+
+test('resolvePhysicalContainment: a symlink cycle halts with a `cycle` reason, not an infinite loop', () => {
+  const result = resolvePhysicalContainment(
+    'out/assets',
+    'out/assets/admin/items',
+    mockFsDeps({ 'out/assets/admin': 'hop', 'out/assets/hop': 'admin' }),
+  );
+  assert.equal(result.ok, false);
+  assert.equal(result.halt.reason, 'cycle');
+});
+
+test('resolvePhysicalContainment: lstat throwing is its own halt (`inspection-failed`), never treated as "absent, therefore not a symlink"', () => {
+  const throwingLstat = {
+    lstat() {
+      throw new Error('EACCES');
+    },
+    readlink() {
+      throw new Error('must not be called — lstat already failed');
+    },
+  };
+  const result = resolvePhysicalContainment('out/assets', 'out/assets/admin', throwingLstat);
+  assert.equal(result.ok, false);
+  assert.equal(result.halt.reason, 'inspection-failed');
+});
+
+test('resolvePhysicalContainment: readlink throwing (lstat says symlink, readlink fails) is its own halt, distinct from a plain non-symlink', () => {
+  const deps = {
+    lstat(p) {
+      return { isSymbolicLink: () => p === 'out/assets/admin' };
+    },
+    readlink() {
+      throw new Error('EIO');
+    },
+  };
+  const result = resolvePhysicalContainment('out/assets', 'out/assets/admin/items', deps);
+  assert.equal(result.ok, false);
+  assert.equal(result.halt.reason, 'inspection-failed');
+});
+
+test('resolvePhysicalContainment: an absolute symlink target is followed correctly under a consistently-absolute root/dir', () => {
+  const inside = resolvePhysicalContainment(
+    '/out/assets',
+    '/out/assets/admin/items',
+    mockFsDeps({ '/out/assets/admin': '/out/assets/real-admin' }),
+  );
+  assert.deepEqual(inside, { ok: true, resolved: '/out/assets/real-admin/items' });
+
+  const outside = resolvePhysicalContainment(
+    '/out/assets',
+    '/out/assets/admin/items',
+    mockFsDeps({ '/out/assets/admin': '/outside' }),
+  );
+  assert.equal(outside.ok, false);
+  assert.equal(outside.halt.reason, 'escapes-root');
+});
+
+// ---------------------------------------------------------------------------------------------
+// Gate 4 — findPhysicalPathCollisions
+// ---------------------------------------------------------------------------------------------
+
+test('findPhysicalPathCollisions: a symlink that collapses two lexically-distinct, gate-2-clean entries onto one physical directory is caught', () => {
+  const admin = entry({ slug: 'items', group: 'admin', group_title: 'Admin' });
+  const billing = entry({ slug: 'invoices', group: 'billing', group_title: 'Billing' });
+  // Both entries resolve (via gate 3, simulated here directly) to the SAME physical directory —
+  // gate 2 cannot see this (it compares the two lexical strings, which are distinct), and gate 3
+  // cannot see it either (each resolved path, checked individually, sits inside the root).
+  const collisions = findPhysicalPathCollisions([
+    { entry: admin, resolved: 'out/assets/billing/invoices' },
+    { entry: billing, resolved: 'out/assets/billing/invoices' },
+  ]);
+  assert.equal(collisions.length, 1);
+  assert.equal(collisions[0].resolvedPath, 'out/assets/billing/invoices');
+  assert.deepEqual(collisions[0].entries, [admin, billing]);
+});
+
+test('findPhysicalPathCollisions: the resolved-directory collection is a THREE-item fixture whose alias is NOT in the first pair', () => {
+  // An implementation comparing only entries[0] against entries[1] passes every two-item fixture
+  // in this suite and still misses a collision between the SECOND and THIRD entries.
+  const a = entry({ slug: 'one' });
+  const b = entry({ slug: 'two' });
+  const c = entry({ slug: 'three' });
+  const collisions = findPhysicalPathCollisions([
+    { entry: a, resolved: 'out/assets/one' },
+    { entry: b, resolved: 'out/assets/shared' },
+    { entry: c, resolved: 'out/assets/shared' },
+  ]);
+  assert.equal(collisions.length, 1);
+  assert.equal(collisions[0].resolvedPath, 'out/assets/shared');
+  assert.deepEqual(collisions[0].entries, [b, c]);
+});
+
+test('findPhysicalPathCollisions: all-distinct resolved paths produce NO collisions', () => {
+  const collisions = findPhysicalPathCollisions([
+    { entry: entry({ slug: 'one' }), resolved: 'out/assets/one' },
+    { entry: entry({ slug: 'two' }), resolved: 'out/assets/two' },
+  ]);
+  assert.deepEqual(collisions, []);
 });

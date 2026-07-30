@@ -43,7 +43,16 @@ import {
   formatIdentityValue,
 } from './build-identity.mjs';
 
-import { chapterAssetDir, isCanonicalAssetKey } from './chapter-paths.mjs';
+import {
+  chapterAssetDir,
+  chapterRelPath,
+  isCanonicalAssetKey,
+  expectedAssets,
+  isValidSlugSyntax,
+  findCanonicalPathCollisions,
+  resolvePhysicalContainment,
+  findPhysicalPathCollisions,
+} from './chapter-paths.mjs';
 
 // ---------------------------------------------------------------------------------------------
 // Path algebra — private, POSIX-only by construction (see chapter-paths.mjs's identical rationale:
@@ -557,28 +566,30 @@ function readAllFromFd(fd, deps) {
   return Buffer.concat(chunks);
 }
 
-// Read a leaf file's full text through gate 6 (no-follow, regular, nlink===1, same-descriptor
-// read). Returns {kind:'absent'} | {kind:'hazard', reason, path} | {kind:'present', text}.
-function readLeafText(absPath, deps) {
+// Read a leaf file's full bytes through gate 6 (no-follow, regular, nlink===1, same-descriptor
+// read) — the one open/read/close body every leaf reader shares, differing only in what they do
+// with the resulting bytes. Returns {kind:'absent'} | {kind:'hazard', reason, path} |
+// {kind:'present', bytes}.
+function readLeafBytes(absPath, deps) {
   const opened = openLeafNoFollow(absPath, fs.constants.O_RDONLY, deps);
   if (opened.kind !== 'present') return opened;
   try {
-    const bytes = readAllFromFd(opened.fd, deps);
-    return { kind: 'present', text: bytes.toString('utf8') };
+    return { kind: 'present', bytes: readAllFromFd(opened.fd, deps) };
   } finally {
     deps.closeSync(opened.fd);
   }
 }
 
+function readLeafText(absPath, deps) {
+  const read = readLeafBytes(absPath, deps);
+  if (read.kind !== 'present') return read;
+  return { kind: 'present', text: read.bytes.toString('utf8') };
+}
+
 function hashFileNoFollow(absPath, deps) {
-  const opened = openLeafNoFollow(absPath, fs.constants.O_RDONLY, deps);
-  if (opened.kind !== 'present') return opened;
-  try {
-    const bytes = readAllFromFd(opened.fd, deps);
-    return { kind: 'present', digest: `sha256:${createHash('sha256').update(bytes).digest('hex')}` };
-  } finally {
-    deps.closeSync(opened.fd);
-  }
+  const read = readLeafBytes(absPath, deps);
+  if (read.kind !== 'present') return read;
+  return { kind: 'present', digest: `sha256:${createHash('sha256').update(read.bytes).digest('hex')}` };
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -617,7 +628,12 @@ export function provenanceRoot(profileLike) {
 export function chapterRecordPath(profileLike, entry) {
   const root = provenanceRoot(profileLike);
   const fileName = `${String(entry.slug)}.json`;
-  const tail = entry?.group ? posixJoin(String(entry.group), fileName) : fileName;
+  // `entry.group !== undefined`, never a truthy check — chapter-paths.mjs's own convention
+  // (chapterRelPath, outputDirTail), documented there as "a falsy-but-present group value must
+  // never silently derive a flat path". A truthy check would treat `group: 0` (or `''`) as flat
+  // here while chapterAssetDir treats the identical entry as grouped — a real cross-module
+  // classification mismatch for a malformed-but-present manifest value (found by paths, #362).
+  const tail = entry.group !== undefined ? posixJoin(String(entry.group), fileName) : fileName;
   return posixJoin(root, CHAPTERS_NAMESPACE, tail);
 }
 
@@ -639,7 +655,14 @@ function pendingTokenPath(profileLike) {
 
 // Canonicalize a possibly-not-yet-existing path for COMPARISON purposes: absolutize, lexically
 // normalize, then canonicalize the LONGEST EXISTING PREFIX via a real `realpath` (resolving any
-// symlink components already on disk) and re-append the not-yet-existing tail unchanged.
+// symlink components already on disk, multi-hop, cycle-detected, relative targets resolved
+// against the link's own parent — this is exactly what POSIX realpath(3) already guarantees, so
+// delegating to `deps.realpathSync` gets those guarantees for free rather than re-deriving a
+// component-by-component walker) and re-appends the not-yet-existing tail unchanged.
+//
+// Returns a DISCRIMINATED result rather than throwing or silently degrading: a symlink cycle
+// (ELOOP) or any other inspection failure during the walk is a hazard a caller must be able to
+// halt on, never a value it can accidentally compare as if resolution had succeeded.
 function canonicalizeForComparison(rawPath, deps) {
   // A RELATIVE rawPath is never absolutized against a working directory read by THIS module —
   // `realpathSync` resolves a relative candidate against the real process working directory
@@ -660,15 +683,19 @@ function canonicalizeForComparison(rawPath, deps) {
     try {
       const real = deps.realpathSync(candidate); // always returns an absolute path
       const realSegments = normalizeSegments(rawSegments(real), true);
-      return realSegments.concat(tail);
+      return { ok: true, segments: realSegments.concat(tail) };
     } catch (err) {
-      if (err.code !== 'ENOENT' && err.code !== 'ENOTDIR') throw err;
-      if (idx === 0) return tail; // nothing at all resolves; degrade gracefully
-      tail = [segments[idx - 1], ...tail];
-      idx -= 1;
+      if (err.code === 'ENOENT' || err.code === 'ENOTDIR') {
+        if (idx === 0) return { ok: true, segments: tail }; // nothing at all resolves; degrade gracefully
+        tail = [segments[idx - 1], ...tail];
+        idx -= 1;
+        continue;
+      }
+      // ELOOP (a symlink cycle) or any other inspection failure — a hazard, not a value.
+      return { ok: false, reason: err.code === 'ELOOP' ? 'symlink_cycle' : 'inspection_failure', path: candidate };
     }
   }
-  return tail;
+  return { ok: true, segments: tail };
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -697,8 +724,12 @@ export function assertProvenanceOwnership(profileLike, deps) {
   const root = provenanceRoot(profileLike);
   const outputDir = profileLike.capture.output_dir;
 
-  const rootCanon = canonicalizeForComparison(root, d);
-  const outputCanon = canonicalizeForComparison(outputDir, d);
+  const rootResolved = canonicalizeForComparison(root, d);
+  if (!rootResolved.ok) return haltResult('provenance_hazard', `cannot resolve provenance root '${root}': ${rootResolved.reason}`, { path: rootResolved.path });
+  const outputResolved = canonicalizeForComparison(outputDir, d);
+  if (!outputResolved.ok) return haltResult('provenance_hazard', `cannot resolve capture.output_dir '${outputDir}': ${outputResolved.reason}`, { path: outputResolved.path });
+  const rootCanon = rootResolved.segments;
+  const outputCanon = outputResolved.segments;
 
   const overlaps = isSegmentPrefixOf(rootCanon, outputCanon) || isSegmentPrefixOf(outputCanon, rootCanon);
   if (!overlaps) {
@@ -762,9 +793,147 @@ function establishHierarchy(profileLike, deps) {
 }
 
 function establishChapterGroupDir(profileLike, entry, deps) {
-  if (!entry?.group) return { ok: true };
+  if (entry.group === undefined) return { ok: true };
   const dir = posixJoin(chaptersNamespaceDir(profileLike), String(entry.group));
   return ensureDirComponent(dir, deps);
+}
+
+// ---------------------------------------------------------------------------------------------
+// W2's preflight — gates 1-4 over the ASSET tree (not the provenance root; that is gates 5-6
+// above). None of this existed before this pass: `openCaptureRun` derived and hashed every
+// entry's asset directory with no validation at all, so a traversal slug or an inside-root alias
+// produced confident provenance evidence for the wrong chapter — the exact defect this closes.
+// Run at W2 (`openCaptureRun`, over the opening entry set) and re-run at W5/W6 (`recordChapterProvenance`
+// /`buildProvenanceReport`, over the FULL accepted manifest, since a symlink can be planted between
+// stages and gate 4 is a cross-entry recheck no single-entry call can perform).
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * Gates 1-4 over the asset tree for the FULL accepted entry set. The four predicates themselves —
+ * `isValidSlugSyntax`, `findCanonicalPathCollisions`, `resolvePhysicalContainment`,
+ * `findPhysicalPathCollisions` — are `paths`' (chapter-paths.mjs), imported rather than
+ * vendored: an earlier version of this function carried its own alphabet regex and its own
+ * containment walk built on `canonicalizeForComparison`/`deps.realpathSync`, which is exactly the
+ * duplication this release has collapsed everywhere else (a second `isCanonicalAssetKey`, a
+ * near-duplicate `expectedAssets`, a duplicated stripper). The realpath-based version was also
+ * WRONG in a way tests alone could not surface: the plan requires gate 3's seam trace to be a
+ * component-wise `lstat`/`readlink` walk with NO `realpath` call, specifically because a
+ * `realpath`-based implementation passes every REFUSAL fixture (outside-target halts, two-hop
+ * chains, relative escapes) while silently following a symlink whose target legitimately stays
+ * INSIDE the root — the one POSITIVE case the gate exists to permit. A green suite built only from
+ * refusal fixtures could not tell the two apart; only asserting the seam trace itself can. This
+ * module still owns: the disk-touching side (wiring `deps.lstatSync`/`deps.readlinkSync` into gate
+ * 3's `{lstat, readlink}` seam, so chapter-paths.mjs keeps importing nothing), and the halt-shaping
+ * for each gate.
+ *
+ * @param {object} profileLike
+ * @param {Array<{slug: string|number, group?: string}>} entries
+ * @param {object} deps
+ * @returns {{ok: true}|{ok: false, halts: Array<object>}}
+ */
+function validateEntriesForCapture(profileLike, entries, deps) {
+  // Gate 1 — slug AND group alphabet. This module is independently callable (W5/W6 do not assume
+  // some earlier W1 step already validated the manifest), so it re-asserts format itself.
+  for (const entry of entries) {
+    const slugStr = String(entry.slug);
+    if (!isValidSlugSyntax(slugStr)) {
+      return haltResult('invalid_slug', `entry slug '${slugStr}' does not match the required kebab-case alphabet`, { slug: slugStr });
+    }
+    if (entry.group !== undefined && !isValidSlugSyntax(String(entry.group))) {
+      return haltResult('invalid_group', `entry group '${String(entry.group)}' does not match the required kebab-case alphabet`, {
+        group: String(entry.group),
+      });
+    }
+  }
+
+  // Gate 2 — canonical (lexical) uniqueness.
+  const canonicalCollisions = findCanonicalPathCollisions(profileLike, entries);
+  if (canonicalCollisions.length > 0) {
+    const first = canonicalCollisions[0];
+    return haltResult(
+      'duplicate_asset_dir',
+      `two or more entries derive the identical asset directory '${first.canonicalPath}' (slugs ${first.entries.map((e) => `'${e.slug}'`).join(', ')})`,
+      { assetDir: first.canonicalPath },
+    );
+  }
+
+  // Gate 3 — physical containment, per entry, via a component-wise lstat/readlink walk (never
+  // realpath) — deps.lstat/deps.readlink are THIS module's own seam, so chapter-paths.mjs stays
+  // dependency-free. `inspection-failed` is routed to a `provenance_hazard` halt, never silently
+  // read as "not a symlink" (the same distinction gate 6 already makes).
+  //
+  // `resolvePhysicalContainment`'s `rootDir` argument is used AS GIVEN — only lexically
+  // normalized, never itself walked against the real filesystem (only `dir` is). The CALLER is
+  // therefore responsible for supplying an already-canonical root: a raw, unresolved
+  // `capture.output_dir` can sit behind an OS-level symlinked ancestor (macOS's `/tmp` ->
+  // `/private/tmp`, `/var` -> `/private/var`), which the per-entry walk below WILL resolve through
+  // (it walks every component of the CANDIDATE path), producing a spurious `escapes-root` against
+  // a root that never went through the same resolution. Canonicalizing the root HERE, ONCE, via
+  // the real filesystem (the same mechanism gate 5 already uses for its own disjointness check)
+  // aligns both sides onto one coordinate system. This is a single root-level canonicalization,
+  // not the per-entry symlink-following walk the plan requires to stay realpath-free — it does not
+  // touch the guarantee that requirement protects (an entry-level symlink whose target legitimately
+  // stays inside the root is still resolved component-by-component, never via realpath).
+  const outputRootResolved = canonicalizeForComparison(profileLike.capture.output_dir, deps);
+  if (!outputRootResolved.ok) {
+    return haltResult('provenance_hazard', `cannot resolve capture.output_dir: ${outputRootResolved.reason}`, { path: outputRootResolved.path });
+  }
+  const canonicalOutputRoot = `/${outputRootResolved.segments.join('/')}`;
+
+  const containmentDeps = {
+    lstat: (p) => deps.lstatSync(p),
+    readlink: (p) => deps.readlinkSync(p),
+  };
+  const resolvedEntries = [];
+  for (const entry of entries) {
+    const assetDir = chapterAssetDir(profileLike, entry);
+    // `resolvePhysicalContainment` treats ANY lstat failure while walking `dir`'s components as
+    // `inspection-failed` — correct for a genuine hazard, but a chapter's asset directory
+    // legitimately does not exist yet on its very first capture run (openCaptureRun snapshots the
+    // OPENING baseline before the capture command has written anything there at all). Absent is
+    // therefore checked and skipped HERE, at this call site, before gate 3 ever runs on it —
+    // matching this module's own established rule elsewhere (gate 6's `ensureDirComponent`/
+    // `inspectDirComponent`) that ENOENT-on-a-not-yet-established path is expected, not a hazard,
+    // while any OTHER lstat failure still is. Nothing to check also means nothing to add to gate
+    // 4's cross-entry collision set (two directories that do not yet exist cannot physically
+    // collide).
+    let assetDirExists = true;
+    try {
+      deps.lstatSync(assetDir);
+    } catch (err) {
+      if (err.code === 'ENOENT' || err.code === 'ENOTDIR') {
+        assetDirExists = false;
+      } else {
+        return haltResult('provenance_hazard', `cannot inspect asset directory '${assetDir}': ${err.code ?? err.message}`, { assetDir });
+      }
+    }
+    if (!assetDirExists) continue;
+    const result = resolvePhysicalContainment(canonicalOutputRoot, assetDir, containmentDeps);
+    if (!result.ok) {
+      if (result.halt.reason === 'inspection-failed') {
+        return haltResult('provenance_hazard', result.halt.detail, { assetDir });
+      }
+      if (result.halt.reason === 'cycle') {
+        return haltResult('symlink_cycle', result.halt.detail, { assetDir });
+      }
+      return haltResult('asset_dir_escapes_output_dir', result.halt.detail, { assetDir, slug: entry.slug });
+    }
+    resolvedEntries.push({ entry, resolved: result.resolved });
+  }
+
+  // Gate 4 — pairwise PHYSICAL uniqueness, over gate 3's own resolved output (never re-derived) —
+  // the cross-entry recheck `acceptedEntries` exists for.
+  const physicalCollisions = findPhysicalPathCollisions(resolvedEntries);
+  if (physicalCollisions.length > 0) {
+    const first = physicalCollisions[0];
+    return haltResult(
+      'physical_asset_dir_collision',
+      `two or more entries resolve to the same PHYSICAL asset directory '${first.resolvedPath}' (slugs ${first.entries.map((e) => `'${e.slug}'`).join(', ')})`,
+      { resolvedPath: first.resolvedPath },
+    );
+  }
+
+  return { ok: true };
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -775,6 +944,22 @@ function establishChapterGroupDir(profileLike, entry, deps) {
 
 function haltResult(halt, message, extra) {
   return { ok: false, halts: [{ halt, message, ...extra }] };
+}
+
+// Best-effort cleanup of a temp this call itself created, on ITS OWN failure path (a write or
+// rename that this function caught and is about to halt on) — a CAUGHT, handled failure is not the
+// same situation row 6's crash-recovery model exists for (a process that died mid-operation with
+// no chance to clean up after itself); when this code is still running and about to return a halt,
+// it can and should remove what it just wrote rather than leaving litter for the operator to find
+// later (codex, important #6 — "zero surviving temps"). A secondary failure here is swallowed —
+// if the temp cannot be removed, row 6's `prepared`/`orphan_temp` states and their repairs are
+// exactly the fallback for that.
+function unlinkBestEffort(path, deps) {
+  try {
+    deps.unlinkSync(path);
+  } catch {
+    /* best-effort only; row 6's repair states cover a temp this cleanup itself could not remove */
+  }
 }
 
 /**
@@ -804,6 +989,9 @@ export function openCaptureRun(profileLike, entries, openingObservation, deps) {
   const established = establishHierarchy(profileLike, d);
   if (!established.ok) return { ok: false, halts: [established.hazard] };
 
+  const validated = validateEntriesForCapture(profileLike, entries, d);
+  if (!validated.ok) return validated;
+
   const buildIdentity = profileLike.capture.build_identity ?? null;
   const uiReadEnabled = buildIdentity?.ui_read !== false;
   let commandOutcome = null;
@@ -813,17 +1001,32 @@ export function openCaptureRun(profileLike, entries, openingObservation, deps) {
   const opening = resolveBuildIdentity({ commandOutcome, uiReadEnabled, uiObservation: openingObservation });
   if (opening.needs_ui_read) return opening;
 
+  // Snapshotting is an I/O-heavy walk of caller-controlled directories — `snapshotAssetHashes`
+  // catches ENOENT/ENOTDIR internally (an absent directory is legitimately an empty map) but
+  // re-throws anything else, and an earlier version of this function had NOTHING catching that,
+  // so an unexpected errno (EACCES, EIO, ...) crashed the whole call with an uncaught exception
+  // instead of returning a halt (codex, important #6).
   const openingAssets = {};
-  for (const entry of entries) {
-    const assetDir = chapterAssetDir(profileLike, entry);
-    openingAssets[chapterKeyFor(entry)] = snapshotAssetHashes(assetDir, d);
+  try {
+    for (const entry of entries) {
+      const assetDir = chapterAssetDir(profileLike, entry);
+      openingAssets[chapterKeyFor(entry)] = snapshotAssetHashes(assetDir, d);
+    }
+  } catch (err) {
+    return haltResult('provenance_hazard', `cannot snapshot the opening asset hashes: ${err.code ?? err.message}`, {});
   }
 
-  const openingPayload = { entries: entries.map(entryKeyShape), assets: openingAssets, identity: opening };
-  const digest = digestOpeningPayload(openingPayload);
-  const runId = d.randomUUID();
+  const runState = {
+    skipped: false,
+    run_id: d.randomUUID(),
+    opening,
+    opening_assets: openingAssets,
+    entries: entries.map(entryKeyShape),
+  };
+  const digest = digestOpeningPayload(openingPayloadFromRunState(runState));
+  runState.opening_digest = digest;
 
-  const tokenText = JSON.stringify({ run_id: runId, opening_digest: digest });
+  const tokenText = JSON.stringify({ run_id: runState.run_id, opening_digest: digest });
   const tokenPath = pendingTokenPath(profileLike);
   let fd;
   try {
@@ -842,14 +1045,7 @@ export function openCaptureRun(profileLike, entries, openingObservation, deps) {
 
   return {
     ok: true,
-    runState: {
-      skipped: false,
-      run_id: runId,
-      opening_digest: digest,
-      opening,
-      opening_assets: openingAssets,
-      entries: entries.map(entryKeyShape),
-    },
+    runState,
   };
 }
 
@@ -859,13 +1055,36 @@ export function openCaptureRun(profileLike, entries, openingObservation, deps) {
 // `undefined`-valued property outright, omitting the key is also what survives the cross-process
 // serialization boundary unchanged.
 function entryKeyShape(entry) {
-  return entry.group ? { slug: entry.slug, group: entry.group } : { slug: entry.slug };
+  return entry.group !== undefined ? { slug: entry.slug, group: entry.group } : { slug: entry.slug };
 }
 
 function chapterKeyFor(entry) {
-  return entry?.group ? `${entry.group}/${entry.slug}` : String(entry.slug);
+  return entry.group !== undefined ? `${entry.group}/${entry.slug}` : String(entry.slug);
 }
 
+// The EXACT shape `digestOpeningPayload` was originally computed over, reconstructed from a
+// `runState` rather than re-derived independently at each call site — `openCaptureRun` builds it
+// once at creation, `closeCaptureRun` rebuilds the identical shape from `runState`'s own fields to
+// RE-VERIFY the token's stored digest. One shared shape is what keeps the two from silently
+// drifting into two different notions of "the opening payload".
+function openingPayloadFromRunState(runState) {
+  return { entries: runState.entries, assets: runState.opening_assets, identity: runState.opening };
+}
+
+// `capture.output_dir` is NOT plugin-owned (ledger row 7: the opaque capture command's own
+// namespace, "outside our contract entirely"), so it is not part of gate 6's stated obligation set
+// (scoped to the token/record/temp leaves and the root/run/ hierarchy). But an UNPROTECTED read
+// here is a real substitution vector, not merely an untidy inconsistency: `readdirSync`'s dirent
+// types are a snapshot at listing time, so a regular file the walk just classified as `isFile()`
+// can be replaced by a symlink before this function ever opens it — a race window, not a
+// hypothetical, and the other two asset-hash call sites in this module (rule 5's rehash, W6's
+// current-hash resolution) already close it via `hashFileNoFollow`. Using the SAME helper here
+// keeps that closed consistently rather than leaving one of three call sites unprotected. A hazard
+// (or the file vanishing between listing and open) is treated exactly like `isSymbolicLink()`
+// already is a few lines up: the entry is silently excluded from the snapshot rather than halting
+// the whole run — this tree is not ours to halt on, but it is also not ours to hash blindly through
+// a symlink. The chapter-level consequence is the existing, correct one: a missing expected image
+// fails completeness (rule 3) and the chapter is reported ineligible, never silently trusted.
 function snapshotAssetHashes(assetDir, deps) {
   const result = Object.create(null);
   walk(assetDir, '');
@@ -886,25 +1105,12 @@ function snapshotAssetHashes(assetDir, deps) {
       if (dirent.isDirectory()) {
         walk(childAbs, childRel);
       } else if (dirent.isFile()) {
-        result[childRel] = hashRegularFile(childAbs, deps);
+        const hashed = hashFileNoFollow(childAbs, deps);
+        if (hashed.kind === 'present') result[childRel] = hashed.digest;
+        // 'hazard' (a symlink/hard-link/non-regular swapped in after the listing, or an inspection
+        // failure) and 'absent' (the file vanished) are both excluded, same as isSymbolicLink().
       }
     }
-  }
-}
-
-function hashRegularFile(absPath, deps) {
-  const fd = deps.openSync(absPath, fs.constants.O_RDONLY);
-  try {
-    const hash = createHash('sha256');
-    const buf = Buffer.alloc(65536);
-    let bytesRead;
-    // eslint-disable-next-line no-cond-assign
-    while ((bytesRead = deps.readSync(fd, buf, 0, buf.length, null)) > 0) {
-      hash.update(buf.subarray(0, bytesRead));
-    }
-    return `sha256:${hash.digest('hex')}`;
-  } finally {
-    deps.closeSync(fd);
   }
 }
 
@@ -957,6 +1163,9 @@ export function closeCaptureRun(profileLike, runState, captureOutcome, closingOb
 
   if (runState.skipped) return { ok: true, runState, warnings: [] };
 
+  const hierarchyHazard = inspectRunHierarchyComponents(profileLike, d);
+  if (hierarchyHazard) return { ok: false, halts: [{ halt: 'provenance_hazard', ...hierarchyHazard }] };
+
   const tokenPath = pendingTokenPath(profileLike);
   const tokenRead = readLeafText(tokenPath, d);
   if (tokenRead.kind === 'hazard') return haltResult('provenance_hazard', 'token hazard', { path: tokenRead.path, reason: tokenRead.reason });
@@ -964,8 +1173,23 @@ export function closeCaptureRun(profileLike, runState, captureOutcome, closingOb
     return haltResult('token_missing', 'no pending token found for this run — it may already have been closed or aborted.');
   }
   const parsedToken = parseJsonStrict(tokenRead.text);
-  if (!parsedToken.ok || parsedToken.value.run_id !== runState.run_id || parsedToken.value.opening_digest !== runState.opening_digest) {
+  if (!parsedToken.ok || parsedToken.value.run_id !== runState.run_id) {
     return haltResult('stale_replay', 'the token on disk does not match this runState — this run has already moved on; re-derive with recoverProvenanceState.');
+  }
+  // The digest is RECOMPUTED from runState's actual current content and checked against the
+  // TOKEN's stored value on disk — never against `runState.opening_digest`, which is just as
+  // tamperable as the fields it is supposed to be vouching for. `run_id` alone only proves this
+  // runState claims the right identity; it says nothing about whether `entries`/`opening`/
+  // `opening_assets` still match what was opened. A serialized `runState` whose payload was
+  // mutated while its two scalar fields were left untouched is exactly what this closes: the token
+  // on disk — the one thing an attacker did not get to also rewrite — is the sole source of truth
+  // for what the opening payload was allowed to be.
+  const recomputedDigest = digestOpeningPayload(openingPayloadFromRunState(runState));
+  if (recomputedDigest !== parsedToken.value.opening_digest) {
+    return haltResult(
+      'stale_replay',
+      'this runState\'s opening payload does not match the token\'s stored digest — the payload was altered after opening, or this runState belongs to a different (possibly no-longer-open) run.',
+    );
   }
 
   const buildIdentity = profileLike.capture.build_identity ?? null;
@@ -984,10 +1208,17 @@ export function closeCaptureRun(profileLike, runState, captureOutcome, closingOb
   });
   if (closing.needs_ui_read) return closing;
 
+  // Same reasoning as the opening sweep: an unexpected errno during the closing sweep must return
+  // a halt, not crash — and doing so HERE (before any temp is written) is what keeps the existing
+  // "no record written before the closing resolution" guarantee true on this exit too.
   const closingAssets = {};
-  for (const entry of runState.entries) {
-    const assetDir = chapterAssetDir(profileLike, entry);
-    closingAssets[chapterKeyFor(entry)] = snapshotAssetHashes(assetDir, d);
+  try {
+    for (const entry of runState.entries) {
+      const assetDir = chapterAssetDir(profileLike, entry);
+      closingAssets[chapterKeyFor(entry)] = snapshotAssetHashes(assetDir, d);
+    }
+  } catch (err) {
+    return haltResult('provenance_hazard', `cannot snapshot the closing asset hashes: ${err.code ?? err.message}`, {});
   }
 
   const finalIdentity = resolveClosingIdentity({
@@ -1022,7 +1253,11 @@ export function closeCaptureRun(profileLike, runState, captureOutcome, closingOb
     fd = d.openSync(tempPath, fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_WRONLY | fs.constants.O_NOFOLLOW, 0o644);
     d.writeSync(fd, Buffer.from(recordText, 'utf8'));
   } catch (err) {
-    if (fd !== undefined) d.closeSync(fd);
+    if (fd !== undefined) {
+      d.closeSync(fd);
+      unlinkBestEffort(tempPath, d); // a create that succeeded but a write that failed leaves a
+      // partial temp on disk — remove it rather than leaving litter for the failure path to answer for.
+    }
     return haltResult('provenance_hazard', `cannot write the closing temp: ${err.code ?? err.message}`, { path: tempPath });
   }
   d.closeSync(fd);
@@ -1030,6 +1265,8 @@ export function closeCaptureRun(profileLike, runState, captureOutcome, closingOb
   try {
     d.renameSync(tempPath, finalPath);
   } catch (err) {
+    unlinkBestEffort(tempPath, d); // the rename itself failed — the fully-written temp is still at
+    // its OWN name, never at finalPath, so removing it leaves zero surviving temps on this exit.
     return haltResult('provenance_hazard', `cannot commit the run record: ${err.code ?? err.message}`, { path: finalPath });
   }
 
@@ -1124,7 +1361,19 @@ export function readChapterRecordText(text) {
   if (record === null || typeof record !== 'object' || Array.isArray(record)) {
     return { ok: false, reason: 'not_an_object' };
   }
-  if (record.record_version !== 1) return { ok: false, reason: 'bad_record_version' };
+  if (!Number.isInteger(record.record_version) || record.record_version < 1) {
+    return { ok: false, reason: 'bad_record_version' };
+  }
+  // A version other than the one this reader understands is read back MINIMALLY — only far enough
+  // to know the version itself is well-formed — and its OTHER fields are never validated against
+  // v1's rules, which would be meaningless for a version this reader was not written for. This is
+  // the one thing that makes `record_unsupported_version` a REACHABLE report state rather than a
+  // branch nothing can ever take: an earlier version of this function rejected any non-1 version
+  // outright as `malformed`, which is indistinguishable from genuine corruption to W6's delta
+  // classifier and dead code in the caller that branches on the two separately.
+  if (record.record_version !== 1) {
+    return { ok: true, record, unsupportedVersion: true };
+  }
   if (typeof record.run_id !== 'string') return { ok: false, reason: 'bad_run_id' };
   const identityCheck = isValidBuildIdentityField(record.build_identity);
   if (!identityCheck.ok) return { ok: false, reason: `bad_build_identity:${identityCheck.reason}` };
@@ -1179,6 +1428,22 @@ export function recordChapterProvenance(profileLike, acceptedEntries, entry, cha
   if (ownership.skip) return { recorded: false, reason: 'provenance_skipped' };
   if (!ownership.ok) return { ok: false, halts: ownership.halts };
 
+  // Gates 1-4 are re-run here over the COMPLETE accepted manifest — gate 4 (pairwise physical
+  // uniqueness) is a cross-entry recheck no single-`entry` call could perform, which is exactly why
+  // this signature takes `acceptedEntries` rather than one entry; and a symlink can be planted
+  // between W2 and W5, so W2's result is re-established rather than assumed to still hold.
+  const validated = validateEntriesForCapture(profileLike, acceptedEntries, d);
+  if (!validated.ok) return validated;
+
+  // Gate 6's hierarchy walk, over BOTH namespaces this call touches: `run/` (the run record it is
+  // about to read) and `chapters/`(/<group>) (the chapter record it is about to write). An earlier
+  // pass wired this walk only into recovery, so a symlinked `chapters/` or group ancestor was
+  // followed transparently on this path (codex DO-NOT-SHIP blocker 3).
+  const runHierarchyHazard = inspectRunHierarchyComponents(profileLike, d);
+  if (runHierarchyHazard) return { ok: false, halts: [{ halt: 'provenance_hazard', ...runHierarchyHazard }] };
+  const chaptersHierarchyHazard = inspectChaptersHierarchyComponents(profileLike, entry, d);
+  if (chaptersHierarchyHazard) return { ok: false, halts: [{ halt: 'provenance_hazard', ...chaptersHierarchyHazard }] };
+
   const groupDirEstablished = establishChapterGroupDir(profileLike, entry, d);
   if (!groupDirEstablished.ok) return { ok: false, halts: [groupDirEstablished.hazard] };
 
@@ -1213,11 +1478,14 @@ export function recordChapterProvenance(profileLike, acceptedEntries, entry, cha
   }
 
   const target = profileLike.publish.target;
+  // `expectedAssets` defaults to the REAL chapter-paths.mjs extractor — a production caller never
+  // injects `deps`, so a missing default here would silently take an inert branch on every real
+  // chapter and no record would ever be written on the actual path. The seam stays: a test may
+  // still override `deps.expectedAssets` with a stub.
+  const extractionFn = deps?.expectedAssets ?? expectedAssets;
   let extraction;
   try {
-    extraction = deps?.expectedAssets
-      ? deps.expectedAssets(profileLike, entry, chapterFile, chapterText, filenames, target)
-      : { ok: false, halt: { construct: 'no_extractor_configured', line: 0 } };
+    extraction = extractionFn(profileLike, entry, chapterFile, chapterText, filenames, target);
   } catch (err) {
     return { recorded: false, reason: `extraction_threw:${err.message}` };
   }
@@ -1228,10 +1496,21 @@ export function recordChapterProvenance(profileLike, acceptedEntries, entry, cha
     return { recorded: false, reason: 'zero_in_directory_embeds' };
   }
 
-  // Rule 2 (foreign embed): every asset's absPath must resolve under assetDir.
-  const assetDirCanon = canonicalizeForComparison(assetDir, d);
+  // Rule 2 (foreign embed): every asset's absPath must resolve under assetDir. NOTE (not dead
+  // code): against the REAL chapter-paths.mjs `expectedAssets`, this branch is unreachable —
+  // candidates are only ever built from `assetDir`'s own directory listing, so a foreign
+  // destination can never byte-match one and always falls to the extractor's own unmatched-
+  // destination halt first. It fires only when `deps.expectedAssets` is a mock that returns an
+  // out-of-tree `absPath` (as some unit tests here deliberately do). Kept because the two-variant
+  // return shape (`ok`/halt vs. an in-tree assets array) is pinned regardless of which concrete
+  // extractor is wired in, and a future extractor need not share this one's guarantee.
+  const assetDirResolved = canonicalizeForComparison(assetDir, d);
+  if (!assetDirResolved.ok) return { recorded: false, reason: `asset_dir_resolution_failed:${assetDirResolved.reason}` };
+  const assetDirCanon = assetDirResolved.segments;
   for (const asset of extraction.assets) {
-    const assetCanon = canonicalizeForComparison(asset.absPath, d);
+    const assetResolved = canonicalizeForComparison(asset.absPath, d);
+    if (!assetResolved.ok) return { recorded: false, reason: `asset_resolution_failed:${assetResolved.reason}` };
+    const assetCanon = assetResolved.segments;
     if (!isSegmentPrefixOf(assetDirCanon, assetCanon) || assetCanon.length === assetDirCanon.length) {
       return { recorded: false, reason: 'foreign_embed' };
     }
@@ -1254,7 +1533,7 @@ export function recordChapterProvenance(profileLike, acceptedEntries, entry, cha
   // Rule 5: re-hash every expected image now and require it still differs from `opening`.
   const assetHashes = Object.create(null);
   for (const asset of extraction.assets) {
-    const rehash = hashFileNoFollowByPath(asset.absPath, d);
+    const rehash = hashFileNoFollow(asset.absPath, d);
     if (rehash.kind !== 'present') {
       return { recorded: false, reason: `rehash_failed:${rehash.kind}` };
     }
@@ -1280,13 +1559,17 @@ export function recordChapterProvenance(profileLike, acceptedEntries, entry, cha
     fd = d.openSync(tempPath, fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_WRONLY | fs.constants.O_NOFOLLOW, 0o644);
     d.writeSync(fd, Buffer.from(recordText, 'utf8'));
   } catch (err) {
-    if (fd !== undefined) d.closeSync(fd);
+    if (fd !== undefined) {
+      d.closeSync(fd);
+      unlinkBestEffort(tempPath, d);
+    }
     return { ok: false, halts: [{ halt: 'provenance_hazard', reason: 'write_failed', path: tempPath, detail: err.message }] };
   }
   d.closeSync(fd);
   try {
     d.renameSync(tempPath, finalPath);
   } catch (err) {
+    unlinkBestEffort(tempPath, d);
     return { ok: false, halts: [{ halt: 'provenance_hazard', reason: 'rename_failed', path: finalPath, detail: err.message }] };
   }
 
@@ -1297,10 +1580,6 @@ function readFileText(path, deps) {
   const read = readLeafText(path, deps);
   if (read.kind === 'present') return read.text;
   throw new Error(`cannot read ${path}: ${read.reason ?? read.kind}`);
-}
-
-function hashFileNoFollowByPath(absPath, deps) {
-  return hashFileNoFollow(absPath, deps);
 }
 
 function listRegularFilesRecursive(assetDir, deps) {
@@ -1360,6 +1639,13 @@ export function buildProvenanceReport(profileLike, entries, currentObservation, 
   }
   if (!ownership.ok) return { ok: false, halts: ownership.halts };
 
+  // W6 is independently callable (the audit mode for already-merged chapters), so it routinely
+  // runs against a manifest W2 never validated in that session — it must run gates 1-4 itself
+  // before deriving a single path, or it reads an unrelated record from outside the intended tree
+  // and reports its contents under the manifest entry's name.
+  const validated = validateEntriesForCapture(profileLike, entries, d);
+  if (!validated.ok) return validated;
+
   const buildIdentity = profileLike.capture.build_identity ?? null;
   const uiReadEnabled = buildIdentity?.ui_read !== false;
   let commandOutcome = null;
@@ -1372,12 +1658,47 @@ export function buildProvenanceReport(profileLike, entries, currentObservation, 
   const rows = [];
   for (const entry of entries) {
     const key = chapterKeyFor(entry);
+    // Gate 6's hierarchy walk over `chapters/`(/<group>) for THIS entry, before its record is read
+    // — an earlier pass wired this walk only into recovery, so a symlinked `chapters/` or group
+    // ancestor was followed transparently on the W6 read path (codex DO-NOT-SHIP blocker 3).
+    const chaptersHierarchyHazard = inspectChaptersHierarchyComponents(profileLike, entry, d);
+    if (chaptersHierarchyHazard) return { ok: false, halts: [{ halt: 'provenance_hazard', ...chaptersHierarchyHazard }] };
     const recordRead = readChapterRecordFromDisk(profileLike, entry, d);
     if (recordRead.kind === 'hazard') return { ok: false, halts: [{ halt: 'provenance_hazard', ...recordRead }] };
 
+    // W6 must verify the chapter's OWN embedded images, never the whole asset directory — hashing
+    // every regular file under chapterAssetDir (an earlier version of this loop) lets an unrelated
+    // leftover file masquerade as staleness, and lets a chapter with ZERO real embeds but stale
+    // leftover images appear "verified" (codex DO-NOT-SHIP blocker 4). So the real extractor runs
+    // for EVERY entry, unconditionally — an extraction halt anywhere in the manifest halts this
+    // whole report rather than silently reporting partial rows, matching W5's own halt discipline.
+    const chapterFile = posixJoin(profileLike.publish.chapters_dir, chapterRelPath(entry));
+    let chapterText;
+    try {
+      chapterText = readFileText(chapterFile, d);
+    } catch (err) {
+      return { ok: false, halts: [{ halt: 'chapter_read_failed', message: `cannot read chapter '${chapterFile}': ${err.code ?? err.message}`, key }] };
+    }
+    const assetDir = chapterAssetDir(profileLike, entry);
+    let filenames;
+    try {
+      filenames = listRegularFilesRecursive(assetDir, d);
+    } catch (err) {
+      return { ok: false, halts: [{ halt: 'asset_listing_failed', message: `cannot list the asset directory for '${key}': ${err.code ?? err.message}`, key }] };
+    }
+    const extractionFn = deps?.expectedAssets ?? expectedAssets;
+    let extraction;
+    try {
+      extraction = extractionFn(profileLike, entry, chapterFile, chapterText, filenames, profileLike.publish.target);
+    } catch (err) {
+      return { ok: false, halts: [{ halt: 'extraction_threw', message: err.message, key }] };
+    }
+    if (!extraction.ok) {
+      return { ok: false, halts: [{ halt: 'extraction_halt', construct: extraction.halt.construct, line: extraction.halt.line, key }] };
+    }
+
     let recordState;
     let chapterRecord = null;
-    let verify = null;
     if (recordRead.kind === 'absent') {
       recordState = 'absent';
     } else if (recordRead.kind === 'invalid') {
@@ -1387,8 +1708,12 @@ export function buildProvenanceReport(profileLike, entries, currentObservation, 
       if (chapterRecord.record_version !== 1) {
         recordState = 'unsupported_version';
       } else {
-        const currentHashes = currentAssetHashesFor(profileLike, entry, d);
-        verify = verifyRecord(chapterRecord.asset_hashes, currentHashes);
+        const currentHashes = Object.create(null);
+        for (const asset of extraction.assets) {
+          const hashed = hashFileNoFollow(asset.absPath, d);
+          if (hashed.kind === 'present') currentHashes[asset.key] = hashed.digest;
+        }
+        const verify = verifyRecord(chapterRecord.asset_hashes, currentHashes);
         recordState = verify.status === 'ok' ? 'ok' : 'stale';
       }
     }
@@ -1410,17 +1735,6 @@ export function buildProvenanceReport(profileLike, entries, currentObservation, 
   }
 
   return { rows };
-}
-
-function currentAssetHashesFor(profileLike, entry, deps) {
-  const assetDir = chapterAssetDir(profileLike, entry);
-  const result = Object.create(null);
-  const relPaths = listRegularFilesRecursive(assetDir, deps);
-  for (const rel of relPaths) {
-    const hashed = hashFileNoFollowByPath(posixJoin(assetDir, rel), deps);
-    if (hashed.kind === 'present') result[rel] = hashed.digest;
-  }
-  return result;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1447,21 +1761,34 @@ const REPAIR_FOR_STATE = {
   committed: 'cleanupCommittedRun',
 };
 
-// O_NOFOLLOW on the leaf open below only refuses a symlink at the FINAL path component — an
-// ancestor directory that is itself a symlink is followed transparently by the kernel regardless
-// of that flag. So every hierarchy component the token/record/temps live under (the provenance
-// root and its `run/` namespace directory) is walked and lstat-checked SEPARATELY, before any leaf
-// is ever opened.
-function inspectRunHierarchyComponents(profileLike, deps) {
-  const root = provenanceRoot(profileLike);
-  const run = runNamespaceDir(profileLike);
-  for (const dir of [root, run]) {
+// O_NOFOLLOW on a leaf open only refuses a symlink at the FINAL path component — an ancestor
+// directory that is itself a symlink is followed transparently by the kernel regardless of that
+// flag. So every hierarchy component a leaf lives under is walked and lstat-checked SEPARATELY,
+// before any leaf is ever opened. Shared by both namespaces this module owns: `run/` (token,
+// record, temps) and `chapters/`(/<group>) (chapter records) — every consumer that reads or
+// writes a leaf under either namespace calls the matching hierarchy check first, not only row 6's
+// recovery path (an earlier pass wired this into recovery alone, which is exactly why a symlinked
+// `chapters/` or group ancestor was followed on the W5/W6 paths — codex DO-NOT-SHIP blocker 3).
+function inspectHierarchyChain(dirs, deps) {
+  for (const dir of dirs) {
     const inspected = inspectDirComponent(dir, deps);
     if (inspected.kind === 'hazard') return inspected;
-    // 'absent' is expected on a first run before establishment — token/record/temps beneath an
-    // absent ancestor will each read as absent too, which is the correct classification.
+    // 'absent' is expected on a first run before establishment — a leaf beneath an absent
+    // ancestor will itself read as absent, which is the correct classification.
   }
   return null;
+}
+
+function inspectRunHierarchyComponents(profileLike, deps) {
+  return inspectHierarchyChain([provenanceRoot(profileLike), runNamespaceDir(profileLike)], deps);
+}
+
+// The `chapters/` namespace, plus the entry's own group directory when grouped — the ancestor
+// chain a chapter record's leaf actually lives under.
+function inspectChaptersHierarchyComponents(profileLike, entry, deps) {
+  const dirs = [provenanceRoot(profileLike), chaptersNamespaceDir(profileLike)];
+  if (entry.group !== undefined) dirs.push(posixJoin(chaptersNamespaceDir(profileLike), String(entry.group)));
+  return inspectHierarchyChain(dirs, deps);
 }
 
 function inspectTokenAndRecordAndTemps(profileLike, deps) {
@@ -1597,9 +1924,19 @@ function repair(profileLike, expected, deps, { calledApi, mutationOrder }) {
   if (observed.hazard) return { ok: false, halts: [{ halt: 'provenance_hazard', ...observed.hazard }] };
   const { state: observedState } = classify(observed);
 
-  const prescribed = REPAIR_FOR_STATE[observedState];
+  // The wrong-executor check is keyed on `expected.state` — the state the CALLER is claiming to
+  // repair — never on `observedState`, the state currently on disk. Keying it on `observedState`
+  // is a real bug, not a style choice: `REPAIR_FOR_STATE` has no entry for the four states with no
+  // prescribed repair (not_active, absent, malformed, divergent), so the moment the tree has
+  // ALREADY reached one of those (e.g. a concurrent abort already finished), the check silently
+  // stops comparing anything — a caller invoking `cleanupCommittedRun` against an `expected.state`
+  // of `open` (whose prescribed repair is `abortCaptureRun`) is accepted as a no-op the instant the
+  // tree happens to have reached `absent` first, which is exactly the wrong executor for the state
+  // it claims to be resolving (codex, important #5). Keying on `expected.state` instead means the
+  // check is a property of the REQUEST, not of a filesystem race the caller cannot control.
+  const prescribed = REPAIR_FOR_STATE[expected.state];
   if (prescribed !== undefined && prescribed !== calledApi) {
-    return { ok: false, halts: [{ halt: 'stale_verdict', reason: 'wrong_repair_for_state', observedState, calledApi }] };
+    return { ok: false, halts: [{ halt: 'stale_verdict', reason: 'wrong_repair_for_state', observedState, expectedState: expected.state, calledApi }] };
   }
 
   const chain = PROGRESS_CHAINS[expected.state];
@@ -1627,6 +1964,17 @@ function repair(profileLike, expected, deps, { calledApi, mutationOrder }) {
     return { ok: true, removed: [], noop: true };
   }
 
+  // A mutation_failed halt names the path, what was already removed, AND the state the tree is
+  // now in (re-observed fresh rather than reasoned about in-memory, since removing SOME but not
+  // all temps can either leave the classification unchanged or flip it, depending on whether the
+  // failure landed on the last one) — so the operator re-runs rather than guesses (codex,
+  // important #5: an earlier version omitted this).
+  function mutationFailedHalt(path, removedSoFar, err) {
+    const reobserved = inspectTokenAndRecordAndTemps(profileLike, d);
+    const currentState = reobserved.hazard ? null : classify(reobserved).state;
+    return { ok: false, halts: [{ halt: 'mutation_failed', path, removed: removedSoFar, detail: err.message, currentState }] };
+  }
+
   // Resume the remaining suffix of the mutation order from wherever we are.
   const removed = [];
   if (mutationOrder === 'temps_then_token') {
@@ -1635,20 +1983,22 @@ function repair(profileLike, expected, deps, { calledApi, mutationOrder }) {
         d.unlinkSync(temp);
         removed.push(temp);
       } catch (err) {
-        return { ok: false, halts: [{ halt: 'mutation_failed', path: temp, removed, detail: err.message }] };
+        return mutationFailedHalt(temp, removed, err);
       }
     }
-    if (observedState !== 'open' || calledApi === 'cleanupCommittedRun') {
-      // For abort: after temps are gone the state is 'open' (or already there); delete the token
-      // to reach 'absent'. For cleanup: temps never block reaching 'committed' -> delete the token.
-    }
+    // The token is deleted UNCONDITIONALLY here, never gated on `observedState` — both repairs'
+    // whole job, once every temp is gone, is deleting the token: for abort, that is what takes
+    // 'open' to 'absent'; for cleanup, temps never blocked 'committed' in the first place, so this
+    // is the only remaining step. Confirmed intentional (team-lead review, #362) — an earlier draft
+    // had a conditional here whose body was empty comments only, which is exactly what a LOST edit
+    // looks like; there was no lost edit, the condition was simply never needed.
     const tokenPath = pendingTokenPath(profileLike);
     try {
       d.unlinkSync(tokenPath);
       removed.push(tokenPath);
     } catch (err) {
       if (err.code !== 'ENOENT') {
-        return { ok: false, halts: [{ halt: 'mutation_failed', path: tokenPath, removed, detail: err.message }] };
+        return mutationFailedHalt(tokenPath, removed, err);
       }
     }
   }

@@ -2,6 +2,62 @@
 
 All notable changes to `lazyants/claude-plugins` are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is per-plugin, not repo-wide.
 
+## [enduser-handbook 1.12.0] — 2026-07-29
+
+Build-provenance records: a published handbook can say which build of the documented software it
+describes. Closes #362.
+
+### Added
+- **Build-identity resolution** (`assets/lib/build-identity.mjs`, new, pure — it imports nothing at
+  all) — an optional `capture.build_identity{command, ui_read}` resolves a build identity through a
+  three-step chain (configured command → an LLM read of the running UI → unavailable, with a fixed
+  reason naming which step ended it). The chain runs **twice per capture run**, at open and at
+  close, and the two results combine: the same known value both times is recorded as-is; differing
+  known values record `null` with `build_changed_during_capture`; a closing resolution that itself
+  fails records `build_unconfirmed`, because a closing failure is not evidence of a deploy but is
+  not evidence against one either. W2 warns and never halts on any of these — a missing, failing or
+  drifted identity source never blocks capture. A third resolution happens at W6, to classify the
+  delta between the recorded identity and the current one.
+- **Provenance records** (`assets/lib/capture-record.mjs`, new, the only new module that touches
+  disk) — one run record per capture run and one record per chapter, written through a single
+  injectable filesystem seam so the atomicity claims are testable by interposition rather than by
+  inspecting results after the fact. Ownership is decided by topology, not by a flag: gate 5
+  requires `capture.output_dir` and the derived provenance root to be physically disjoint at a
+  component boundary, and halts **only when `capture.build_identity` is configured** — an adopter
+  who never asked for provenance gets one warning and a run that proceeds. W6 then reports
+  `provenance_unavailable` rather than `record_absent`, because "cannot carry provenance here" and
+  "the records were lost" are different problems and only one is worth investigating.
+- **Crash recovery as a total function over what is on disk** — the classifier observes
+  `(token, record, temps)` *after* gate 6 and returns one of nine states; a path failing gate 6 is a
+  halt (`provenance_hazard`), not a state, so totality is over a written-down input domain rather
+  than over a vague "whatever can be on disk". Each repair carries a progress chain derived from its
+  own mutation order — abort runs `prepared → open → absent` — so re-running after a crash *inside*
+  a repair resumes the remaining suffix instead of refusing; only the final state is a no-op. The
+  repair a state prescribes is the only API permitted to act on it, and `expected` is an
+  optimistic-concurrency witness rather than an authorization capability, which is stated outright
+  rather than implied.
+- **Image-destination API** (`assets/lib/chapter-paths.mjs`) — the link-group scanner, the
+  inert-context stripper and the destination decoder are now exported, alongside
+  `buildEmbedCandidates`, `isCanonicalAssetKey` and `expectedAssets`. Completeness is
+  accounted on **raw** chapter text against a stripped-view recognition pass, so any `![` marker
+  that cannot be proved accounted for halts naming the construct. That one rule closes the whole
+  erasure class — an unmatched inline-code opener, an unclosed or malformed comment, a backtick in a
+  fence info string — instead of growing a special case per review round.
+
+### Notes
+- The opening digest is RFC 8785 (JCS), implemented in-tree because this repository carries no
+  `package.json` and no lockfile. Duplicate keys are compared as **decoded** names rather than raw
+  lexemes, lone surrogates are rejected by a manual code-unit scan rather than
+  `String.prototype.isWellFormed` (no Node floor is declared anywhere here), and the digest is
+  pinned by an independently computed UTF-8 vector — a canonicalizer that hashes the correct string
+  as UTF-16LE passes every self-consistent fixture and fails only that one.
+- Deleting a record is a pathname operation and inherits the check-not-lock limit gate 3 already
+  carries: the descriptor validated is not the entry unlinked, so a parent component replaced
+  between inspection and mutation redirects it. Node exposes no `unlinkat`. Hostile state already
+  present when inspection begins is covered; concurrent replacement is a stated residual risk.
+- No `publish.provenance_dir` and no frontmatter emission — both were specified, priced and
+  declined for this release rather than shipped as configuration nothing honours.
+
 ## [enduser-handbook 1.11.0] — 2026-07-26
 
 Makes the #329 non-heading manual halt convergent and adds present-line placement verification for a bounded non-heading-index subset (#330). Closes #329. Closes #330.

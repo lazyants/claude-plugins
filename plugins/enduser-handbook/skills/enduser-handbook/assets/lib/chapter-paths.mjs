@@ -672,7 +672,19 @@ function findCodeSpanClose(text, from, openLen) {
   return n;
 }
 
-export function stripInertContexts(text) {
+// [1.12.0] `options.indentedRunIsCode` (default false): when true, a fence-shaped run (backtick or
+// tilde, length >= 3, at true line start) whose OWN column is >= 4 (tab-expanded from its line
+// start — tabExpandedColumn, below) is NOT recognized as a fence opener at all — it is an indented
+// CODE BLOCK, not a fence (CommonMark), and is passed through untouched (no blanking, no fallback
+// to the inline-code-span path either, which carries the identical erase-to-EOF risk). Default
+// false preserves every pre-1.12.0 caller's behavior byte-for-byte (locateChapterLine,
+// chapterHasWikilinkTo — index-file scanning, which never exercises this column distinction); the
+// image extractor (expectedAssets) is the only caller that passes `true`, because the shipped
+// column-blind behavior treats a 4-space-indented backtick run as an unterminated fence and blanks
+// a LIVE image after it to EOF (the "over-indented fence counterexample" the plan measures). One
+// scanner, one place the fence/indented-code boundary is decided, instead of two copies that could
+// silently diverge the next time either is edited.
+export function stripInertContexts(text, { indentedRunIsCode = false } = {}) {
   const n = text.length;
   let out = '';
   let i = 0;
@@ -709,7 +721,15 @@ export function stripInertContexts(text) {
         i += runLen;
         continue;
       }
-      if (runLen >= 3 && isLineStart(text, i)) {
+      const atTrueLineStart = isLineStart(text, i);
+      if (runLen >= 3 && atTrueLineStart) {
+        if (indentedRunIsCode && tabExpandedColumn(text, lineStartOf(text, i), i) >= 4) {
+          // An indented code block, not a fence — passthrough, no blanking, and no
+          // inline-code-span fallback (that path has the identical erase-to-EOF risk).
+          out += text.slice(i, i + runLen);
+          i += runLen;
+          continue;
+        }
         const end = findFenceClose(text, i + runLen, ch, runLen);
         out += blankSpan(text.slice(i, end));
         i = end;
@@ -1764,22 +1784,51 @@ export function currentIndexExpectedTarget(profileLike, entry, vaultRelChaptersD
   return posixRelative(posixDirname(profileLike.publish.index_file), chapterFullPath(profileLike, entry));
 }
 
+// [1.12.0] Independent re-derivation of capture-record.mjs's chapterRecordPath — NOT an import.
+// chapter-paths.mjs stays pure and dependency-free (no fs, no cross-module coupling), the same
+// reason it re-implements its own path algebra instead of depending on node:path; capture-record.mjs
+// states the identical rationale for not importing this module's private helpers. Verified
+// byte-for-byte against the real capture-record.mjs source (`provenanceRoot`/`chapterRecordPath`,
+// which compose `<publish.chapters_dir>/.provenance/chapters/<group>/<slug>.json`, grouped, or
+// `.../chapters/<slug>.json` flat) rather than assumed from prose — this formula is ONLY for
+// rendering a halt message naming where the operator should find/move the record, never for an
+// actual read or write, so it does not carry the "one shared derivation" requirement chapterAssetDir
+// does for W2/W5/W6 (capture-record.mjs's own docstring on chapterRecordPath). Presence is checked
+// via `!== undefined` — this module's own established convention (chapterRelPath, outputDirTail),
+// not capture-record.mjs's `entry?.group` truthy check, which would (incorrectly) treat a
+// falsy-but-present group as flat; see the finding filed against capture-record.mjs for that gap.
+function migrationRecordPath(profileLike, entry) {
+  const fileName = `${entry.slug}.json`;
+  const tail = entry.group !== undefined ? `${entry.group}/${fileName}` : fileName;
+  return posixJoin(profileLike.publish.chapters_dir, '.provenance', 'chapters', tail);
+}
+
 /**
- * manualMigrationChecklist(profileLike, oldEntry|null, newEntry|null, vaultRelChaptersDir) — the
- * per-delta-kind terminal-state FACT DESCRIPTORS the D6 convergence check verifies. This function
- * is pure and has no filesystem/index access, so it does not itself evaluate met/unmet — it
- * derives the EXPECTED VALUES (current derived paths, old derived paths, index targets,
- * capture-spec dir spellings) a caller checks the real world against. An entry untouched by the
- * delta (no kind under classifyEntryDelta) returns [].
+ * manualMigrationChecklist(profileLike, oldEntry|null, newEntry|null, vaultRelChaptersDir,
+ * provenanceActive) — the per-delta-kind terminal-state FACT DESCRIPTORS the D6 convergence check
+ * verifies. This function is pure and has no filesystem/index access, so it does not itself
+ * evaluate met/unmet — it derives the EXPECTED VALUES (current derived paths, old derived paths,
+ * index targets, capture-spec dir spellings) a caller checks the real world against. An entry
+ * untouched by the delta (no kind under classifyEntryDelta) returns [].
+ *
+ * [1.12.0] `provenanceActive` (default false) gates the twelfth fact kind, `provenance-record` —
+ * the caller's OWN re-assertion of this run's W1 ownership outcome, never inferred from
+ * `<root>/` existing on disk (a profile that ran active once and later acquired an overlapping
+ * `capture.output_dir` still has a populated `.provenance/` from a PRIOR run — see the plan's
+ * "guard is the W1 outcome and explicitly NOT '<root>/' exists" rationale). Defaulting to false
+ * keeps every pre-1.12.0 caller's checklist byte-for-byte unchanged. The fact is present only for
+ * 'removal' and the two grouped-change kinds — a title-only change never moves the record's path,
+ * so it carries no such fact regardless of `provenanceActive`.
  *
  * @param {{capture: {output_dir: string}, publish: {chapters_dir: string, index_file: string, wikilinks: boolean}}} profileLike
  * @param {object|null} oldEntry
  * @param {object|null} newEntry
  * @param {string} [vaultRelChaptersDir]  wikilinks mode only — threaded into every
  *   currentIndexExpectedTarget call this function makes (see its own JSDoc, §1a)
+ * @param {boolean} [provenanceActive]  default false — this run's W1 ownership outcome
  * @returns {Array<object>} fact descriptors, each carrying a `kind` tag
  */
-export function manualMigrationChecklist(profileLike, oldEntry, newEntry, vaultRelChaptersDir) {
+export function manualMigrationChecklist(profileLike, oldEntry, newEntry, vaultRelChaptersDir, provenanceActive = false) {
   const kind = classifyEntryDelta(oldEntry, newEntry);
   if (kind === null) return [];
 
@@ -1789,6 +1838,9 @@ export function manualMigrationChecklist(profileLike, oldEntry, newEntry, vaultR
     return [
       { kind: 'old-chapter-path-gone', path: oldChapterPath },
       { kind: 'old-asset-dir-gone', path: oldAssetDir },
+      ...(provenanceActive
+        ? [{ kind: 'provenance-record', oldPath: migrationRecordPath(profileLike, oldEntry), newPath: null }]
+        : []),
       {
         kind: 'old-index-target-gone',
         form: profileLike.publish.wikilinks ? 'wikilink' : 'path',
@@ -1853,6 +1905,13 @@ export function manualMigrationChecklist(profileLike, oldEntry, newEntry, vaultR
   });
   facts.push({ kind: 'old-chapter-path-gone', path: oldChapterPath });
   facts.push({ kind: 'old-asset-dir-gone', path: oldAssetDir });
+  if (provenanceActive) {
+    facts.push({
+      kind: 'provenance-record',
+      oldPath: migrationRecordPath(profileLike, oldEntry),
+      newPath: migrationRecordPath(profileLike, newEntry),
+    });
+  }
 
   const sourceWasGrouped = oldEntry.group !== undefined;
   // Under Option A (#294, vault-root-relative wikilinks) a group-slug rename ALWAYS changes the
@@ -1894,7 +1953,14 @@ function renderChangeLine(change, facts) {
   if (kind === 'removal') {
     const oldChapterPath = findFact(facts, 'old-chapter-path-gone').path;
     const oldAssetDir = findFact(facts, 'old-asset-dir-gone').path;
-    return `  ${slug}: removed — delete ${oldChapterPath}, ${oldAssetDir}, and its index line (was under container '${trimmedTitle(oldEntry)}')`;
+    const record = findFact(facts, 'provenance-record');
+    // [1.12.0] The provenance-record fact is present ONLY when this run's W1 ownership outcome
+    // was active (manualMigrationChecklist's own `provenanceActive` gate) — its absence, never a
+    // null/placeholder path, is what "omit the whole fragment on a skipped run" means, so a
+    // skip-path caller reproduces this line byte-for-byte unchanged from before 1.12.0.
+    return record
+      ? `  ${slug}: removed — delete ${oldChapterPath}, ${oldAssetDir}, its index line, and its record ${record.oldPath} (was under container '${trimmedTitle(oldEntry)}')`
+      : `  ${slug}: removed — delete ${oldChapterPath}, ${oldAssetDir}, and its index line (was under container '${trimmedTitle(oldEntry)}')`;
   }
 
   if (kind === 'title-change') {
@@ -1908,7 +1974,12 @@ function renderChangeLine(change, facts) {
   const oldAssetDir = findFact(facts, 'old-asset-dir-gone').path;
   const sourceWasGrouped = oldEntry.group !== undefined;
   const suffix = sourceWasGrouped ? `; was under container '${trimmedTitle(oldEntry)}'` : '';
-  let line = `  ${slug}: ${oldChapterPath} -> ${newChapterPath}; assets ${oldAssetDir} -> ${newAssetDir}${suffix}`;
+  let line = `  ${slug}: ${oldChapterPath} -> ${newChapterPath}; assets ${oldAssetDir} -> ${newAssetDir}`;
+  const record = findFact(facts, 'provenance-record');
+  if (record) {
+    line += `; record ${record.oldPath} -> ${record.newPath}`;
+  }
+  line += suffix;
   if (kind === 'group-and-title-change') {
     line += `; container title '${trimmedTitle(oldEntry)}' -> '${trimmedTitle(newEntry)}'`;
   }
@@ -2479,11 +2550,12 @@ function tabExpandedColumn(text, lineStart, uptoOffset) {
 
 // A bounded, one-level heuristic for "the enclosing container's content column" (plan: "fence
 // recognition is relative to the enclosing container's content column"; the same reference point
-// governs the over-indentation halt below). Walks backward from the image's own line, over at most
-// one intervening blank line, looking for the nearest ordered/unordered list-marker line — this
-// release does not track full container nesting, so a marker line found this way is trusted
-// without re-verifying it is still "open" at the image's position. Returns 0 (top-level) when none
-// is found within that bound.
+// governs the over-indentation halt below). Walks backward from the image's own line, over any
+// run of blank lines, looking for the nearest ordered/unordered list-marker line — this release
+// does not track full container nesting (a blockquote marker, a second list at a different
+// indentation, or a genuinely closed-and-reopened list item all read the same as "still open"), so
+// a marker line found this way is trusted without re-verifying it is still open at the image's
+// position. Returns 0 (top-level) when none is found before a non-blank, non-marker line.
 const LIST_MARKER_LINE_RE = /^([ \t]*)((?:[-*+])|(?:\d{1,9}[.)]))([ \t]+)/;
 
 function containerContentColumn(text, lineStart) {
@@ -2516,69 +2588,6 @@ function isOverIndented(text, markerOffset) {
   const lineStart = lineStartOf(text, markerOffset);
   const imageColumn = tabExpandedColumn(text, lineStart, markerOffset);
   return imageColumn - containerContentColumn(text, lineStart) >= 4;
-}
-
-/**
- * A private near-duplicate of stripInertContexts (exported above) used ONLY by expectedAssets'
- * recognition pass. The one behavior difference: a backtick/tilde run at column >= 4 (tab-expanded,
- * from its own line start) is never recognized as a FENCE opener — it is an indented CODE BLOCK,
- * not a fence (CommonMark), so treating it as one and blanking to EOF erases a live image after it
- * (the "over-indented fence counterexample" the plan measures). Such a run is therefore left
- * untouched (passthrough, no blanking) rather than routed to either the fence or the inline-code-
- * span path — both risk incorrectly consuming trailing content. The shipped, exported
- * stripInertContexts is kept byte-for-byte UNCHANGED for its own existing callers (index-file
- * scanning), which never exercise this column distinction.
- */
-function stripInertContextsForImages(text) {
-  const n = text.length;
-  let out = '';
-  let i = 0;
-
-  while (i < n) {
-    if (text.startsWith('<!--', i) && !isEscaped(text, i)) {
-      const close = text.indexOf('-->', i + 4);
-      const end = close === -1 ? n : close + 3;
-      out += blankSpan(text.slice(i, end));
-      i = end;
-      continue;
-    }
-
-    const ch = text[i];
-    if (ch === '`' || ch === '~') {
-      const runLen = runLength(text, i, ch);
-      if (isEscaped(text, i)) {
-        out += text.slice(i, i + runLen);
-        i += runLen;
-        continue;
-      }
-      const atTrueLineStart = isLineStart(text, i);
-      if (runLen >= 3 && atTrueLineStart) {
-        const column = tabExpandedColumn(text, lineStartOf(text, i), i);
-        if (column < 4) {
-          const end = findFenceClose(text, i + runLen, ch, runLen);
-          out += blankSpan(text.slice(i, end));
-          i = end;
-          continue;
-        }
-        // column >= 4: an indented code block, not a fence — passthrough, no blanking, and no
-        // inline-code-span fallback either (that path has the identical erase-to-EOF risk).
-        out += text.slice(i, i + runLen);
-        i += runLen;
-        continue;
-      }
-      if (ch === '`') {
-        const end = findCodeSpanClose(text, i + runLen, runLen);
-        out += blankSpan(text.slice(i, end));
-        i = end;
-        continue;
-      }
-    }
-
-    out += ch;
-    i += 1;
-  }
-
-  return out;
 }
 
 // A conservative CommonMark-shaped raw HTML open/close tag matcher — deliberately NOT a fixed tag
@@ -2651,7 +2660,7 @@ export function expectedAssets(profileLike, entry, chapterFile, chapterText, fil
   }
 
   const assetDir = chapterAssetDir(profileLike, entry);
-  const liveMarkers = findImageMarkers(stripInertContextsForImages(chapterText));
+  const liveMarkers = findImageMarkers(stripInertContexts(chapterText, { indentedRunIsCode: true }));
   const liveByOffset = new Map(liveMarkers.map((m) => [m.offset, m]));
   const rawMarkers = findImageMarkers(chapterText);
   const rawTriggers = findRawTextTriggers(chapterText);
@@ -2694,4 +2703,188 @@ export function expectedAssets(profileLike, entry, chapterFile, chapterText, fil
   }
 
   return { ok: true, assets };
+}
+
+// ---------------------------------------------------------------------------------------------
+// [1.12.0] W2 preflight gates 1-4 — pure, exported, independently callable (W6 must run them
+// itself against a bare entry set before deriving a single path — "a gate that runs on the write
+// path but not on the read path secures neither"). Gate 3 is the one exception to "pure means no
+// fs": physical containment fundamentally needs real filesystem state (lstat/readlink), so it
+// takes those as an injected `deps` — chapter-paths.mjs still imports no node:fs itself, matching
+// this module's established convention; the caller (capture-record.mjs) wires deps to the real fs
+// seam, exactly as it already does for its own exported entrypoints.
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * Gate 1 — slug alphabet. The SAME regex validateGroups already uses for `group`
+ * (manifest-discipline.md's published pattern for that sibling field) — `slug` itself is
+ * documented only as "English kebab-case" with no regex and nothing enforcing it, so this gate
+ * adopts the sibling field's already-published one rather than inventing a stricter reading.
+ * Digits are in the class on purpose (the shipped suite uses slug: 'q1'). A non-string slug (a
+ * bare number, say) fails outright — the same numeric-vs-string aliasing this gate exists to
+ * remove at the source, rather than trying to out-normalize a filesystem later.
+ *
+ * @param {unknown} slug
+ * @returns {boolean}
+ */
+export function isValidSlugSyntax(slug) {
+  return typeof slug === 'string' && GROUP_PATTERN.test(slug);
+}
+
+/**
+ * Gate 2 — canonical uniqueness. Compares CANONICAL chapterAssetDir() results, never raw tails —
+ * deliberately independent of gate 1: once the alphabet gate passes, separator/case/Unicode/
+ * trailing-dot aliases are unreachable, so exercising this only through the full preflight (gate 1
+ * then gate 2) could never distinguish "canonicalizes" from "a raw Set", which is the false-kill
+ * the plan warns against — call this directly with alphabet-violating entries to prove it. Returns
+ * one entry per COLLIDING canonical path (empty when every entry derives a distinct directory) —
+ * never a boolean, since the caller must name every offending entry in its halt text.
+ *
+ * @param {CaptureProfileLike} profileLike
+ * @param {ChapterEntry[]} entries
+ * @returns {Array<{canonicalPath: string, entries: ChapterEntry[]}>}
+ */
+export function findCanonicalPathCollisions(profileLike, entries) {
+  const byPath = new Map();
+  for (const entry of entries) {
+    const canonicalPath = chapterAssetDir(profileLike, entry);
+    if (!byPath.has(canonicalPath)) byPath.set(canonicalPath, []);
+    byPath.get(canonicalPath).push(entry);
+  }
+  const collisions = [];
+  for (const [canonicalPath, group] of byPath) {
+    if (group.length > 1) collisions.push({ canonicalPath, entries: group });
+  }
+  return collisions;
+}
+
+const CONTAINMENT_MAX_HOPS = 40;
+
+/**
+ * Gate 3 — physical containment, no-follow, cycle-safe. Resolves `dir`'s path components ONE AT A
+ * TIME using ONLY deps.lstat/deps.readlink — never a single opaque realpath call — so the seam
+ * trace shows the granular component-wise walk a test can assert on directly. A symlink
+ * component's target is substituted: an ABSOLUTE target replaces the resolved-so-far path
+ * outright; a RELATIVE target is resolved against the symlink's OWN PARENT directory, never
+ * against the symlink's own full path — the two differ by exactly one segment, and getting this
+ * backwards is the discriminator the plan measures (a relative `../outside` target resolved
+ * against a link's parent correctly lands OUTSIDE a shallow root, while the identical target
+ * resolved against the link's own path incorrectly lands INSIDE it). After every substitution the
+ * walk restarts from the beginning of the newly-combined path rather than trying to resume at a
+ * computed offset — a `..` in the target can pop back through the parent segments themselves, so
+ * "the first segment the target introduced" is not a stable index to resume at; re-inspecting an
+ * already-verified prefix segment is harmless; skipping a genuinely new one is not. A bounded hop
+ * count (incremented only when an ACTUAL symlink is resolved, never on a plain re-inspection)
+ * halts a genuine cycle with zero further inspection — stronger than merely terminating, since
+ * returning the unresolved candidate on overflow would let the write proceed instead. Containment
+ * is checked AT THE END, component-wise against `rootDir`'s own resolved segments — never a string
+ * prefix, which `out/assets-evil` would otherwise satisfy against `out/assets`. `deps.lstat` and
+ * `deps.readlink` THROWING are each their own halt ('inspection-failed') — treating an inspection
+ * error as "absent, therefore not a symlink" would proceed to resolve past it without ever having
+ * established containment, which is the exact guarantee this gate sells.
+ *
+ * @param {string} rootDir  the physical root every resolved path must sit inside (e.g. capture.output_dir)
+ * @param {string} dir  the candidate directory to resolve (e.g. chapterAssetDir(profileLike, entry))
+ * @param {{lstat: (path: string) => {isSymbolicLink(): boolean}, readlink: (path: string) => string}} deps
+ * @returns {{ok: true, resolved: string} | {ok: false, halt: {reason: 'escapes-root'|'cycle'|'inspection-failed', detail: string}}}
+ */
+export function resolvePhysicalContainment(rootDir, dir, deps) {
+  const rootSegs = resolvedSegments(rootDir);
+  let segs = resolvedSegments(dir);
+  let absolute = isAbsolute(dir);
+  let hops = 0;
+  let cursor = 0;
+
+  while (cursor < segs.length) {
+    const candidatePath = formatPath(segs.slice(0, cursor + 1), absolute);
+    let stat;
+    try {
+      stat = deps.lstat(candidatePath);
+    } catch (err) {
+      return {
+        ok: false,
+        halt: { reason: 'inspection-failed', detail: `lstat failed on '${candidatePath}': ${err.message}` },
+      };
+    }
+    if (!stat.isSymbolicLink()) {
+      cursor += 1;
+      continue;
+    }
+    hops += 1;
+    if (hops > CONTAINMENT_MAX_HOPS) {
+      return {
+        ok: false,
+        halt: { reason: 'cycle', detail: `symlink chain exceeded ${CONTAINMENT_MAX_HOPS} hops resolving '${dir}'` },
+      };
+    }
+    let target;
+    try {
+      target = deps.readlink(candidatePath);
+    } catch (err) {
+      return {
+        ok: false,
+        halt: { reason: 'inspection-failed', detail: `readlink failed on '${candidatePath}': ${err.message}` },
+      };
+    }
+    const parentSegs = segs.slice(0, cursor); // the symlink's OWN PARENT — never its own path
+    const remainder = segs.slice(cursor + 1); // segments still to walk AFTER this one
+    if (isAbsolute(target)) {
+      segs = normalizeSegments([...rawSegments(target), ...remainder], true);
+      absolute = true;
+    } else {
+      segs = normalizeSegments([...parentSegs, ...rawSegments(target), ...remainder], absolute);
+    }
+    cursor = 0;
+  }
+
+  const resolved = formatPath(segs, absolute);
+  const withinRoot =
+    absolute === isAbsolute(rootDir) && segs.length >= rootSegs.length && rootSegs.every((seg, i) => segs[i] === seg);
+  if (!withinRoot) {
+    return {
+      ok: false,
+      halt: { reason: 'escapes-root', detail: `'${dir}' resolves to '${resolved}', outside '${rootDir}'` },
+    };
+  }
+  return { ok: true, resolved };
+}
+
+/**
+ * Gate 4 — pairwise PHYSICAL uniqueness, over already gate-3-resolved directories. Gates 2 and 3
+ * alone still permit two chapters to collapse onto one physical directory via a planted
+ * inside-root symlink (gate 3 is REQUIRED to accept an inside-root link, since adopters
+ * legitimately arrange assets that way) — this is the cross-entry property neither of the other
+ * two gates can see: canonical uniqueness compares lexical strings, and physical containment asks
+ * only whether EACH resolved path, individually, sits inside the root. Groups the
+ * CALLER-SUPPLIED resolved physical paths (gate 3's own output, never re-derived here) and returns
+ * every group with more than one member. The caller re-runs this at W5 too, because a symlink can
+ * be planted between W2 and W5.
+ *
+ * **Trust boundary, stated rather than enforced**: `resolvedEntries[i].resolved` is taken on
+ * trust — this function cannot verify it actually came from resolvePhysicalContainment rather
+ * than a hand-built string, the same way a recovery verdict's `expected` elsewhere in this plan is
+ * "an optimistic-concurrency witness whose shape and sources are public, deliberately not a
+ * capability". Re-deriving it here (accepting rootDir/deps and calling gate 3 itself per entry)
+ * was considered and rejected: it would conflate two gates the plan keeps separate on purpose —
+ * gate 4 would then need to surface BOTH "this entry individually escapes the root" and "these
+ * entries collide physically" from one call, which is exactly the kind of merged responsibility
+ * "four gates, because no one of them covers the others" argues against. The caller is therefore
+ * responsible for actually running gate 3 first and passing its real output through unmodified.
+ *
+ * @param {Array<{entry: ChapterEntry, resolved: string}>} resolvedEntries  each `resolved` MUST be
+ *   the real return value of resolvePhysicalContainment(rootDir, dir, deps).resolved for that
+ *   entry's own directory — never hand-constructed (see the trust-boundary note above)
+ * @returns {Array<{resolvedPath: string, entries: ChapterEntry[]}>}
+ */
+export function findPhysicalPathCollisions(resolvedEntries) {
+  const byResolved = new Map();
+  for (const item of resolvedEntries) {
+    if (!byResolved.has(item.resolved)) byResolved.set(item.resolved, []);
+    byResolved.get(item.resolved).push(item.entry);
+  }
+  const collisions = [];
+  for (const [resolvedPath, entries] of byResolved) {
+    if (entries.length > 1) collisions.push({ resolvedPath, entries });
+  }
+  return collisions;
 }

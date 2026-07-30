@@ -600,6 +600,33 @@ test('classifyBuildDelta: the clean-null x current-null cell legitimately report
   assert.equal(r.recorded_source, 'unavailable');
 });
 
+test('classifyBuildDelta: a non-BuildIdentity-shaped record (e.g. the whole chapter-record wrapper) throws rather than silently misclassifying', () => {
+  // Measured regression case: a caller passing the CHAPTER RECORD wrapper — {record_version,
+  // run_id, build_identity, asset_hashes} — instead of record.build_identity gets record.value
+  // === undefined (not null), which used to fall through the null-value branch and compare
+  // current.value === undefined, silently landing on 'changed' — a confidently WRONG verdict, not
+  // an error. Both 'ok' and 'stale' must reject this shape identically, since both read `record`.
+  const wrongShapeRecord = {
+    record_version: 1,
+    run_id: 'abc',
+    build_identity: RECORD_KNOWN_COMMAND,
+    asset_hashes: {},
+  };
+  assert.throws(
+    () => classifyBuildDelta({ current: CURRENT_KNOWN_COMMAND, recordState: 'ok', record: wrongShapeRecord }),
+    TypeError,
+  );
+  assert.throws(
+    () => classifyBuildDelta({ current: CURRENT_KNOWN_COMMAND, recordState: 'stale', record: wrongShapeRecord }),
+    TypeError,
+  );
+  // A record that IS the correct shape must still classify normally — this guard must not reject
+  // valid input.
+  assert.doesNotThrow(() =>
+    classifyBuildDelta({ current: CURRENT_KNOWN_COMMAND, recordState: 'ok', record: RECORD_KNOWN_COMMAND }),
+  );
+});
+
 // ==== formatIdentityValue ==========================================================================
 
 test('formatIdentityValue: null renders as "unknown"; a real value renders as itself', () => {

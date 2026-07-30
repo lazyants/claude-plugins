@@ -487,8 +487,15 @@ export function verifyRecord(recordedHashes, currentHashes) {
  * `current_source` is always `current.source`; `recorded_source` is `record.source` when
  * `recordState` is `'ok'` or `'stale'`, else `null`.
  *
+ * When `recordState` is `'ok'` or `'stale'`, `record` is validated with `isValidBuildIdentityField`
+ * and this THROWS a `TypeError` on a shape mismatch — e.g. the whole chapter/run record wrapper
+ * passed instead of its `build_identity` field. Without this, `record.value` on a wrapper object is
+ * `undefined` (not `null`), which slips past the null-value branch and produces a confidently WRONG
+ * `'changed'`/`'unchanged'` verdict from comparing against `undefined` instead of erroring.
+ *
  * @param {{current: BuildIdentity, recordState: RecordState, record: BuildIdentity|null}} input
  * @returns {{classification: 'unchanged'|'changed'|'indeterminate', classification_reason: string|null, current_source: IdentitySource, recorded_source: IdentitySource|null}}
+ * @throws {TypeError} when `recordState` is `'ok'`/`'stale'` and `record` is not a valid BuildIdentity
  */
 export function classifyBuildDelta({ current, recordState, record }) {
   const currentSource = current.source;
@@ -500,6 +507,22 @@ export function classifyBuildDelta({ current, recordState, record }) {
       current_source: currentSource,
       recorded_source: null,
     };
+  }
+
+  // recordState is 'stale' or 'ok' from here on, so `record` must be a real BuildIdentity — never
+  // the chapter/run record WRAPPER it lives inside. A wrong shape must fail LOUDLY here rather than
+  // silently misclassify: measured regression case, `record.value` on a wrapper object is
+  // `undefined` (not `null`), which slips past the null-value branch below and lands on a
+  // confidently WRONG 'changed'/'unchanged' verdict from comparing against `undefined` — the exact
+  // silent-wrong-value failure mode this release's fail-closed philosophy exists to prevent
+  // everywhere else. Reusing `isValidBuildIdentityField` rather than a bespoke check keeps this
+  // module's one definition of "valid BuildIdentity" in one place.
+  const validity = isValidBuildIdentityField(record);
+  if (!validity.ok) {
+    throw new TypeError(
+      `classifyBuildDelta: record is not a valid BuildIdentity (${validity.reason}) — ` +
+        'did you pass the whole chapter/run record instead of its build_identity field?',
+    );
   }
 
   const recordedSource = record.source;
