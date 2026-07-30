@@ -1,6 +1,6 @@
 ---
 name: workflow-ctx-tooling
-description: Traps when authoring or debugging a Workflow script or using the context-mode (ctx) tools — ctx_execute_file/ctx_execute confinement to the project root, the Workflow background-task .output wrapper shape, apostrophes in single-quoted prompt prose breaking the strict pre-run parse, a prompt array passed to agent() without .join making the agent improvise from its schema and return confident garbage, args arriving JSON-encoded so the script dies before dispatch, and multi-agent Workflow output you must not trust at face value (schema agents failing to null/placeholder, spread-makes-null-truthy, and investigators reading a stale copy). Read when a Workflow is rejected before agents run, a ctx tool refuses a path, an agent slot comes back empty/garbage, an agent reports its task message was empty, a synthesis contradicts the data it summarized, or you are about to bank a Workflow's recommendation.
+description: Traps when authoring or debugging a Workflow script or using the context-mode (ctx) tools — ctx_execute_file/ctx_execute confinement to the project root, the Workflow background-task .output wrapper shape, apostrophes in single-quoted prompt prose breaking the strict pre-run parse, a prompt array passed to agent() without .join making the agent improvise from its schema and return confident garbage, args arriving JSON-encoded so the script dies before dispatch, and multi-agent Workflow output you must not trust at face value (schema agents failing to null/placeholder, spread-makes-null-truthy, a partially-failed run whose empty category is indistinguishable from a clean one, and investigators reading a stale copy). Read when a Workflow is rejected before agents run, a ctx tool refuses a path, an agent slot comes back empty/garbage, an agent reports its task message was empty, a synthesis contradicts the data it summarized, a run comes back with an empty confirmed/findings list or some of its agents errored, or you are about to bank a Workflow's recommendation.
 ---
 
 # Workflow + context-mode (ctx) tooling traps
@@ -121,6 +121,45 @@ Fix pattern:
   placeholders" nudge), then drop-and-log if still garbage — so one flaky schema agent can't
   silently blank a phase.
 - Keep the schema simple, or budget for backfilling dropped slots by hand.
+
+### A2 — a PARTIAL run's empty category is indistinguishable from a clean one (consuming-time)
+
+Section A is about a bad VALUE getting in. This is the inverse and it is worse, because the output
+looks like good news: agents that die on infrastructure errors (`API Error: 529 Overloaded`,
+`500 Internal server error`, `Server error mid-response`) resolve to `null`, get `.filter(Boolean)`'d
+out, and **vanish from EVERY derived category — the confirmed list and the refuted list alike**. A
+`pipeline()` whose verify stage half-died returns the same shape as one where every finding was
+examined and none survived.
+
+Measured 2026-07-29 on a review round whose CONTINUE/STOP decision the user had just delegated to
+exactly that number: `agent_count 20, agents_done 10, agents_error 10`, and the run returned
+`confirmed_high: []`. Reading the journal instead of the return value: **16 findings raised, 6
+verdicts returned, 10 findings dropped — including one of the two reported HIGHs, which never reached
+a verifier at all.** Acting on the empty list would have ended a review loop on a run that verified
+6 of 16 findings, and nothing in the returned object said so.
+
+**Before reading any aggregate as complete, compare `agents_done` against `agent_count` in the task
+notification's `<usage>` block, and cross-check the counts inside the run:**
+
+```python
+rows = [json.loads(l) for l in open(f"{transcriptDir}/journal.jsonl") if l.strip()]
+res    = [r for r in rows if r.get("type") == "result"]
+raised = sum(len(r["result"]["findings"]) for r in res
+             if isinstance(r.get("result"), dict) and "findings" in r["result"])
+verdicts = sum(1 for r in res
+               if isinstance(r.get("result"), dict) and "survives" in r["result"])
+assert verdicts == raised, f"{raised - verdicts} findings never reached a verifier"
+```
+
+`<failures>` in the notification lists the dead agents by label, so the gap is attributable — but it
+is a SIBLING field of the result, not part of it, and it is easy to skim past when the result itself
+parses cleanly. **An empty category earned by verification and an empty category earned by a dead
+verifier are the same JSON.** If a decision rule keys on a count, the count needs its denominator.
+
+Fix at authoring time too: have the verify stage return an explicit `{unverified: true}` sentinel on
+failure rather than letting the branch resolve to `null`, so a dropped finding is a VISIBLE row in the
+output instead of an absence. Resume (`resumeFromRunId`) replays the survivors from cache and re-runs
+only the dead ones, so re-running after a 529 storm is cheap — but only if you noticed.
 
 ### B — investigators analyze a STALE copy and confidently recommend the wrong fix (consuming-time)
 
