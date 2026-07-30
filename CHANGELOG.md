@@ -2,7 +2,7 @@
 
 All notable changes to `lazyants/claude-plugins` are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is per-plugin, not repo-wide.
 
-## [enduser-handbook 1.12.0] — 2026-07-29
+## [enduser-handbook 1.12.0] — 2026-07-30
 
 Build-provenance records: a published handbook can say which build of the documented software it
 describes. Closes #362.
