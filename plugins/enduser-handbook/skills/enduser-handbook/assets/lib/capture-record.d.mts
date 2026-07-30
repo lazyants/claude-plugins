@@ -331,20 +331,96 @@ export function abortCaptureRun(profileLike: ProfileLike, expected: ExpectedFing
 /** See capture-record.mjs: ledger row 6 — repairs `committed`: every temp first, the token last, only at the expected fingerprint. Idempotent. */
 export function cleanupCommittedRun(profileLike: ProfileLike, expected: ExpectedFingerprint, deps?: Partial<CaptureRecordDeps>): RepairResult;
 
+// [round 6, codex] Six of the eleven members below were typed by ESCAPE HATCH rather than to the
+// seam this module actually drives through them: `openSync`/`readSync`/`writeSync` took
+// `(...args: unknown[])`, and `fstatSync`/`lstatSync`/`readdirSync` returned bare `unknown`.
+// Measured against every real call site in capture-record.mjs (an exhaustive grep of
+// `deps.openSync`/`d.openSync`, `deps.readSync`, `deps.writeSync`, `deps.fstatSync`,
+// `deps.lstatSync`, `deps.readdirSync`, plus every place their results are read), that escape
+// hatch cut both ways: a correct, narrower override like `openSync: (path: string, flags: number)
+// => number` was REJECTED — `string`/`number` are narrower than the `unknown` the seam promised to
+// pass, so a caller supplying them is contravariantly unsound the OTHER way (codex's own probe,
+// against an in-memory compiler host) — while an incorrect one like `lstatSync: () => ({})` was
+// ACCEPTED with no diagnostic and crashes at runtime the instant `inspectDirComponent` calls
+// `st.isSymbolicLink()`. Every member below is now typed to the minimum this module's own call
+// sites actually pass in and actually read off the result — not node:fs's full overload set, which
+// would accept far more than this seam needs and give an adopter writing an override no narrower a
+// contract than reading node:fs's own types would. This file adds no dependency on node:fs's
+// ambient types anywhere (`LstatResultLike`/`FstatResultLike`/`DirentLike` below are local, minimal
+// shapes) — a real `fs.Stats`/`fs.Dirent` instance satisfies each structurally, which is what keeps
+// `defaultDeps` (capture-record.mjs, real node:fs bindings) a legal `CaptureRecordDeps` under the
+// tightened types (verified against these exact declarations via an in-memory `tsc --strict` run
+// assigning wide, node:fs-shaped stand-ins — see this round's report, not re-derived here).
+
+/** The subset of `fs.Stats` `lstatSync`'s result is actually read through — `inspectDirComponent` (capture-record.mjs) calls only `st.isSymbolicLink()` and `st.isDirectory()`. The other three `lstatSync` call sites (gate 3's containment probe, gate 5's `canonicalizeForComparison`, `validateEntriesForCapture`'s existence checks) never read the result at all, so they impose no further requirement here. */
+export interface LstatResultLike {
+  isSymbolicLink(): boolean;
+  isDirectory(): boolean;
+}
+
+/** The subset of `fs.Stats` `fstatSync`'s result is actually read through — `openLeafNoFollow` (capture-record.mjs, gate 6) calls only `stat.isFile()` and reads `stat.nlink`. The sole call site. */
+export interface FstatResultLike {
+  isFile(): boolean;
+  nlink: number;
+}
+
+/** The subset of `fs.Dirent` a `readdirSync(path, {withFileTypes: true})` result is actually read through — `walkRegularFiles` (capture-record.mjs) reads `dirent.name` and calls `dirent.isSymbolicLink()`, `dirent.isDirectory()`, `dirent.isFile()`; nothing else on the element, and the sole call site of this overload. */
+export interface DirentLike {
+  name: string;
+  isSymbolicLink(): boolean;
+  isDirectory(): boolean;
+  isFile(): boolean;
+}
+
 /** The injectable filesystem seam every exported function accepts as its last argument, defaulting to node:fs/node:crypto/node:child_process bindings. */
 export interface CaptureRecordDeps {
-  openSync: (...args: unknown[]) => number;
+  // [round 6] `(path, flags)` at `openLeafNoFollow` (gate 6's read-only opens: `flags | fs.constants.O_NOFOLLOW`)
+  // and `(path, flags, mode)` at `openCaptureRun`'s pending-token create
+  // (`O_CREAT|O_EXCL|O_WRONLY|O_NOFOLLOW`, `0o644`) are the only two call sites — `mode` is optional
+  // here for that reason (the second call site always supplies it), not because node:fs's own
+  // signature happens to make it optional.
+  openSync: (path: string, flags: number, mode?: number) => number;
   closeSync: (fd: number) => void;
-  readSync: (...args: unknown[]) => number;
-  writeSync: (...args: unknown[]) => number;
-  fstatSync: (fd: number) => unknown;
-  lstatSync: (path: string) => unknown;
+  // [round 6] The sole call site, `readAllFromFd`, always passes all five positional arguments;
+  // `position` is `null` on every call in this module (never a numeric offset), but the type stays
+  // `number | null` rather than narrowing to the literal `null` this module happens to always
+  // pass — the seam describes what node:fs's `readSync` accepts here, not merely what this module
+  // currently supplies. `buffer` is `Uint8Array` rather than a bare `Buffer` so this file adds no
+  // dependency on node:fs's ambient `Buffer` global — every `Buffer` this module actually passes
+  // (`Buffer.alloc(...)`) is structurally a `Uint8Array`.
+  readSync: (fd: number, buffer: Uint8Array, offset: number, length: number, position: number | null) => number;
+  // [round 6] The sole call site, `writeFull`, always passes exactly these two arguments — no
+  // offset/length/position. See `readSync` above for why `buffer` is `Uint8Array`, not `Buffer`.
+  writeSync: (fd: number, buffer: Uint8Array) => number;
+  fstatSync: (fd: number) => FstatResultLike;
+  lstatSync: (path: string) => LstatResultLike;
   readlinkSync: (path: string) => string;
   realpathSync: (path: string) => string;
-  mkdirSync: (path: string) => void;
+  // [round 6, follow-up] `ensureDirComponent` calls the bare `(path)` form (gate 6's per-component
+  // discipline — one directory at a time, never recursive); `establishHierarchy` calls
+  // `(path, {recursive: true})` for `publish.chapters_dir`, which may need to come into existence
+  // several levels deep on a brand-new handbook's first capture. A real call site the previous
+  // `(path: string) => void` type rejected — the same defect shape as the six members above, found
+  // while auditing the rest of this interface rather than named in codex's own finding. Neither call
+  // site reads the return value (both are wrapped in a try/catch that only branches on `err.code`),
+  // so `void` stays correct even though node:fs's own `mkdirSync` returns `string | undefined` when
+  // `recursive` is set — a `void`-typed seam member accepts any real return value, it just never
+  // promises one back to a caller.
+  mkdirSync: (path: string, options?: { recursive: true }) => void;
   unlinkSync: (path: string) => void;
   renameSync: (from: string, to: string) => void;
-  readdirSync: (...args: unknown[]) => unknown;
+  // [round 6] Overloaded like node:fs's own `readdirSync`, but only the two shapes this module
+  // actually calls: `listMatchingTempsIn`'s bare `readdirSync(dir)` (a filename listing, filtered
+  // and mapped as plain strings) and `walkRegularFiles`'s `readdirSync(absDir, {withFileTypes:
+  // true})` (a `Dirent`-like listing — the only place this module distinguishes file/directory/
+  // symlink kind without a separate stat call). Previously `(...args: unknown[]) => unknown`, which
+  // admitted a non-array override (e.g. returning a bare number) with no diagnostic; the module's
+  // own two call sites already assume the result is iterable (`for...of`, `.filter`/`.map`), an
+  // assumption this signature now states rather than leaves implicit.
+  readdirSync: {
+    (path: string): string[];
+    (path: string, options: { withFileTypes: true }): DirentLike[];
+  };
   randomUUID: () => string;
   // [round 6] `CommandOutcome`, not a hand-rolled restatement of it. This member's result is not
   // consumed here — it is handed STRAIGHT to build-identity's `resolveBuildIdentity` as its
