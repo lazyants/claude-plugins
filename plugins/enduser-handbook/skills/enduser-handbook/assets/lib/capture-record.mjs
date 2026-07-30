@@ -839,11 +839,18 @@ function validateEntriesForCapture(profileLike, entries, deps) {
   // Gate 1 — slug AND group alphabet. This module is independently callable (W5/W6 do not assume
   // some earlier W1 step already validated the manifest), so it re-asserts format itself.
   for (const entry of entries) {
+    // `isValidSlugSyntax` itself already rejects a non-string outright (`typeof slug === 'string'`)
+    // — but this caller used to run it against `String(entry.slug)`, a value ALREADY coerced to a
+    // string before the type check could ever see the original. `{slug: 1}` therefore reached
+    // `String(1) === '1'`, which passes the kebab-alphabet regex (digits are in the class), and the
+    // non-string entry sailed past gate 1 entirely — a W6 probe with a numeric slug reached
+    // `chapter_read_failed` (file "1.md" not found) instead of `invalid_slug`. The RAW value must
+    // reach the syntax check; `slugStr`/`String(entry.group)` below are for the halt MESSAGE only.
     const slugStr = String(entry.slug);
-    if (!isValidSlugSyntax(slugStr)) {
+    if (!isValidSlugSyntax(entry.slug)) {
       return haltResult('invalid_slug', `entry slug '${slugStr}' does not match the required kebab-case alphabet`, { slug: slugStr });
     }
-    if (entry.group !== undefined && !isValidSlugSyntax(String(entry.group))) {
+    if (entry.group !== undefined && !isValidSlugSyntax(entry.group)) {
       return haltResult('invalid_group', `entry group '${String(entry.group)}' does not match the required kebab-case alphabet`, {
         group: String(entry.group),
       });
@@ -883,6 +890,21 @@ function validateEntriesForCapture(profileLike, entries, deps) {
     return haltResult('provenance_hazard', `cannot resolve capture.output_dir: ${outputRootResolved.reason}`, { path: outputRootResolved.path });
   }
   const canonicalOutputRoot = `/${outputRootResolved.segments.join('/')}`;
+  // `resolvePhysicalContainment` requires `rootDir` and `dir` to share ONE rootedness — it treats a
+  // mismatch (one absolute, one relative) the same as a genuine escape, halting `escapes-root`
+  // unconditionally. `canonicalOutputRoot` above is ALWAYS absolute (canonicalizeForComparison's
+  // contract), so the per-entry candidate must be derived from that SAME absolute root rather than
+  // from the raw (possibly relative) `capture.output_dir` — otherwise a profile whose output_dir and
+  // chapters_dir are BOTH relative (the shipped example profile's own topology:
+  // `output_dir: "vault/handbook/assets"`, `chapters_dir: "vault/handbook"`) halts every entry here,
+  // in open, W5 and W6 alike (all three route through this one function), on the very first real
+  // capture. Swapping in the canonical root for THIS derivation only still runs gate 3's own
+  // component-wise lstat/readlink walk over the resulting path unchanged (no realpath call is
+  // skipped or added) — it only fixes which coordinate system `dir` is expressed in.
+  const canonicalProfileForAssetDir = {
+    ...profileLike,
+    capture: { ...profileLike.capture, output_dir: canonicalOutputRoot },
+  };
 
   const containmentDeps = {
     lstat: (p) => deps.lstatSync(p),
@@ -890,7 +912,7 @@ function validateEntriesForCapture(profileLike, entries, deps) {
   };
   const resolvedEntries = [];
   for (const entry of entries) {
-    const assetDir = chapterAssetDir(profileLike, entry);
+    const assetDir = chapterAssetDir(canonicalProfileForAssetDir, entry);
     // `resolvePhysicalContainment` treats ANY lstat failure while walking `dir`'s components as
     // `inspection-failed` — correct for a genuine hazard, but a chapter's asset directory
     // legitimately does not exist yet on its very first capture run (openCaptureRun snapshots the
@@ -963,6 +985,29 @@ function unlinkBestEffort(path, deps) {
     deps.unlinkSync(path);
   } catch {
     /* best-effort only; row 6's repair states cover a temp this cleanup itself could not remove */
+  }
+}
+
+// `writeSync` returning fewer bytes than requested is a real possibility (a full disk, a pipe, an
+// interrupted write) — not merely a hypothetical interposed test seam — and every writer in this
+// module ignored the returned byte count outright: a seam that persists one byte and returns 1 let
+// `closeCaptureRun` rename a one-byte "{" temp into place as a successfully committed run record.
+// Throws rather than returning a result, so every existing call site's surrounding try/catch (which
+// already handles a THROWING `writeSync` for cleanup purposes) handles a short write identically,
+// with no separate branch needed at each of the three call sites.
+class ShortWriteError extends Error {
+  constructor(expected, actual) {
+    super(`short write: wrote ${actual} of ${expected} bytes`);
+    this.reason = 'short_write';
+    this.expected = expected;
+    this.actual = actual;
+  }
+}
+
+function writeFull(fd, buffer, deps) {
+  const written = deps.writeSync(fd, buffer);
+  if (written !== buffer.length) {
+    throw new ShortWriteError(buffer.length, written);
   }
 }
 
@@ -1042,10 +1087,18 @@ export function openCaptureRun(profileLike, entries, openingObservation, deps) {
     return haltResult('provenance_hazard', `cannot create the pending token: ${err.code ?? err.message}`, { path: tokenPath });
   }
   try {
-    d.writeSync(fd, Buffer.from(tokenText, 'utf8'));
-  } finally {
+    writeFull(fd, Buffer.from(tokenText, 'utf8'), d);
+  } catch (err) {
+    // A throwing (or short) write here previously escaped this function entirely — the surrounding
+    // `try` had only a `finally` closing the fd, never a `catch`, so an ordinary write failure
+    // became an UNCAUGHT exception instead of the returned `{ok:false, halts}` this module's
+    // contract promises everywhere else, and the just-created (O_CREAT|O_EXCL) token was left
+    // behind with no caller ever having a chance to clean it up.
     d.closeSync(fd);
+    unlinkBestEffort(tokenPath, d);
+    return haltResult('provenance_hazard', `cannot write the pending token: ${err.reason ?? err.code ?? err.message}`, { path: tokenPath });
   }
+  d.closeSync(fd);
 
   return { ok: true, runState };
 }
@@ -1257,7 +1310,15 @@ export function closeCaptureRun(profileLike, runState, captureOutcome, closingOb
   const record = {
     record_version: 1,
     run_id: runState.run_id,
-    opening_digest: runState.opening_digest,
+    // The RECOMPUTED digest — the value just verified against the on-disk token above — never
+    // `runState.opening_digest` directly. `runState` is caller-held data: mutating only its
+    // `opening_digest` field (leaving `entries`/`opening`/`opening_assets` untouched) sails straight
+    // through the check above unnoticed, because `recomputedDigest` is derived from the PAYLOAD, not
+    // from this field. Writing that field's raw value into the record would land a forged digest in
+    // a run that otherwise committed cleanly, which a later `recoverProvenanceState` read back as
+    // authentic — the token is the sole authenticated source of truth for this value, and
+    // `recomputedDigest` IS that authenticated value, already proven to match it above.
+    opening_digest: recomputedDigest,
     build_identity: finalIdentity,
     chapters,
   };
@@ -1269,7 +1330,7 @@ export function closeCaptureRun(profileLike, runState, captureOutcome, closingOb
   let fd;
   try {
     fd = d.openSync(tempPath, fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_WRONLY | fs.constants.O_NOFOLLOW, 0o644);
-    d.writeSync(fd, Buffer.from(recordText, 'utf8'));
+    writeFull(fd, Buffer.from(recordText, 'utf8'), d);
   } catch (err) {
     if (fd !== undefined) {
       d.closeSync(fd);
@@ -1565,13 +1626,13 @@ export function recordChapterProvenance(profileLike, acceptedEntries, entry, cha
   let fd;
   try {
     fd = d.openSync(tempPath, fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_WRONLY | fs.constants.O_NOFOLLOW, 0o644);
-    d.writeSync(fd, Buffer.from(recordText, 'utf8'));
+    writeFull(fd, Buffer.from(recordText, 'utf8'), d);
   } catch (err) {
     if (fd !== undefined) {
       d.closeSync(fd);
       unlinkBestEffort(tempPath, d);
     }
-    return { ok: false, halts: [{ halt: 'provenance_hazard', reason: 'write_failed', path: tempPath, detail: err.message }] };
+    return { ok: false, halts: [{ halt: 'provenance_hazard', reason: err.reason ?? 'write_failed', path: tempPath, detail: err.message }] };
   }
   d.closeSync(fd);
   try {

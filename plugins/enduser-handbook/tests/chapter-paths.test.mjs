@@ -326,7 +326,7 @@ test('F4: an absolute-rooted migration fact/halt path is never silently downgrad
   });
   const old = entry({ group: 'admin', group_title: 'Admin' });
   const next = entry({ group: 'management', group_title: 'Admin' });
-  const facts = manualMigrationChecklist(p, old, next);
+  const facts = manualMigrationChecklist(p, old, next, undefined, false);
   assert.equal(findFact(facts, 'current-chapter-path').path, '/vault/handbook/management/items.md');
   assert.equal(findFact(facts, 'old-asset-dir-gone').path, '/vault/handbook/assets/admin/items');
 });
@@ -3053,7 +3053,7 @@ test('R2-F5: the halt record renders the TRIMMED title, never the raw padded val
   const p = profile();
   const old = entry({ group: 'a', group_title: '  Admin  ' });
   const next = entry({ group: 'b', group_title: '  Admin  ' });
-  const facts = manualMigrationChecklist(p, old, next);
+  const facts = manualMigrationChecklist(p, old, next, undefined, false);
   const changes = [{ kind: 'group-change', slug: 'items', oldEntry: old, newEntry: next }];
   const text = renderManualMigrationHalt(changes, [facts]);
   assert.match(text, /was under container 'Admin'/);
@@ -3372,7 +3372,7 @@ test('manualMigrationChecklist: retained group-change facts (current path/dir/in
   const p = profile();
   const old = entry({ group: 'admin', group_title: 'Admin' });
   const next = entry({ group: 'management', group_title: 'Admin' });
-  const facts = manualMigrationChecklist(p, old, next);
+  const facts = manualMigrationChecklist(p, old, next, undefined, false);
 
   assert.equal(findFact(facts, 'current-chapter-path').path, 'vault/handbook/management/items.md');
   assert.equal(findFact(facts, 'current-asset-dir').path, 'vault/handbook/assets/management/items');
@@ -3402,7 +3402,7 @@ test('#253: manualMigrationChecklist derives each fact from its OWN root — dec
   });
   const old = entry({ group: 'admin', group_title: 'Admin' });
   const next = entry({ group: 'management', group_title: 'Admin' });
-  const facts = manualMigrationChecklist(p, old, next);
+  const facts = manualMigrationChecklist(p, old, next, undefined, false);
 
   assert.equal(findFact(facts, 'current-chapter-path').path, 'book/pages/management/items.md');
   assert.equal(findFact(facts, 'current-asset-dir').path, 'shots/management/items');
@@ -3420,7 +3420,7 @@ test('#294 group-slug move, WIKILINK mode: old vault-rel target is expected GONE
   const p = profile({ publish: { wikilinks: true } });
   const old = entry({ group: 'admin', group_title: 'Admin' });
   const next = entry({ group: 'management', group_title: 'Admin' });
-  const facts = manualMigrationChecklist(p, old, next, 'handbook');
+  const facts = manualMigrationChecklist(p, old, next, 'handbook', false);
 
   const oldTarget = findFact(facts, 'old-index-target-gone');
   assert.equal(oldTarget.form, 'wikilink');
@@ -3433,7 +3433,7 @@ test('R9-F5/R12-F2 grouped -> flat retained entry: flat-placement facts, NO titl
   const p = profile();
   const old = entry({ group: 'admin', group_title: 'Admin' });
   const next = entry();
-  const facts = manualMigrationChecklist(p, old, next);
+  const facts = manualMigrationChecklist(p, old, next, undefined, false);
 
   assert.equal(findFact(facts, 'current-chapter-path').path, 'vault/handbook/items.md');
   assert.equal(findFact(facts, 'current-asset-dir').path, 'vault/handbook/assets/items');
@@ -3449,7 +3449,7 @@ test('manualMigrationChecklist: title-only change emits ONLY the orthogonal titl
   const p = profile();
   const old = entry({ group: 'admin', group_title: 'Old Title' });
   const next = entry({ group: 'admin', group_title: 'New Title' });
-  const facts = manualMigrationChecklist(p, old, next);
+  const facts = manualMigrationChecklist(p, old, next, undefined, false);
 
   assert.deepEqual(facts, [
     { kind: 'title-container', containerTitle: 'New Title', oldContainerTitle: 'Old Title' },
@@ -3459,7 +3459,7 @@ test('manualMigrationChecklist: title-only change emits ONLY the orthogonal titl
 test('manualMigrationChecklist: grouped removal emits old-gone + no-live-sink + no-forbidden-wikilink facts', () => {
   const p = profile();
   const old = entry({ group: 'admin', group_title: 'Admin' });
-  const facts = manualMigrationChecklist(p, old, null);
+  const facts = manualMigrationChecklist(p, old, null, undefined, false);
 
   assert.equal(findFact(facts, 'old-chapter-path-gone').path, 'vault/handbook/admin/items.md');
   assert.equal(findFact(facts, 'old-asset-dir-gone').path, 'vault/handbook/assets/admin/items');
@@ -3475,7 +3475,7 @@ test('manualMigrationChecklist: grouped removal emits old-gone + no-live-sink + 
 test('#294 manualMigrationChecklist: grouped removal in WIKILINK mode carries the vault-rel qualified target + legacyBareTarget', () => {
   const p = profile({ publish: { wikilinks: true } });
   const old = entry({ group: 'admin', group_title: 'Admin' });
-  const facts = manualMigrationChecklist(p, old, null, 'handbook');
+  const facts = manualMigrationChecklist(p, old, null, 'handbook', false);
 
   const oldTarget = findFact(facts, 'old-index-target-gone');
   assert.equal(oldTarget.form, 'wikilink');
@@ -3500,7 +3500,7 @@ test('R11-F3 combined same-entry fixture: group AND title both change => facts U
   const p = profile();
   const old = entry({ group: 'admin', group_title: 'Admin' });
   const next = entry({ group: 'management', group_title: 'Ops' });
-  const facts = manualMigrationChecklist(p, old, next);
+  const facts = manualMigrationChecklist(p, old, next, undefined, false);
 
   assert.ok(findFact(facts, 'current-chapter-path'));
   assert.ok(findFact(facts, 'current-asset-dir'));
@@ -3872,7 +3872,7 @@ test('R10-F5/R11-F4 halt-record pin: the rendered halt names every changed entry
     newEntry: null,
   };
   const changes = [changeA, changeB];
-  const checklists = changes.map((c) => manualMigrationChecklist(p, c.oldEntry, c.newEntry));
+  const checklists = changes.map((c) => manualMigrationChecklist(p, c.oldEntry, c.newEntry, undefined, false));
   const text = renderManualMigrationHalt(changes, checklists);
 
   assert.match(text, /^This manifest change requires manual group migration \(not automated in 1\.5\.0\):/);
@@ -3891,7 +3891,7 @@ test('context-free reconstruction (a): a grouped removal record supplies the old
   const p = profile();
   const old = entry({ slug: 'orders', group: 'admin', group_title: 'Admin' });
   const change = { kind: 'removal', slug: 'orders', oldEntry: old, newEntry: null };
-  const facts = manualMigrationChecklist(p, old, null);
+  const facts = manualMigrationChecklist(p, old, null, undefined, false);
   const text = renderManualMigrationHalt([change], [facts]);
 
   const line = text.split('\n').find((l) => l.includes('orders:'));
@@ -3910,7 +3910,7 @@ test('context-free reconstruction (b): a grouped->flat move record is the ONLY s
   assert.equal(next.group_title, undefined, 'the current entry has no title to fall back on');
 
   const change = { kind: 'group-change', slug: 'orders', oldEntry: old, newEntry: next };
-  const facts = manualMigrationChecklist(p, old, next);
+  const facts = manualMigrationChecklist(p, old, next, undefined, false);
   const text = renderManualMigrationHalt([change], [facts]);
 
   const line = text.split('\n').find((l) => l.includes('orders:'));
@@ -3922,7 +3922,7 @@ test('context-free reconstruction (c): the scan-failure re-embed preserves the o
   const old = entry({ slug: 'orders', group: 'admin', group_title: 'Admin' });
   const next = entry({ slug: 'orders' });
   const change = { kind: 'group-change', slug: 'orders', oldEntry: old, newEntry: next };
-  const facts = manualMigrationChecklist(p, old, next);
+  const facts = manualMigrationChecklist(p, old, next, undefined, false);
 
   const scanFailures = [{ chapter: 'other.md', line: 12, target: 'admin/orders.md' }];
   const text = renderManualMigrationHalt([change], [facts], scanFailures);
@@ -3944,7 +3944,7 @@ test('#255: renderManualMigrationHalt scan-failure header + detail cover ALL tup
   const old = entry({ slug: 'orders', group: 'admin', group_title: 'Admin' });
   const next = entry({ slug: 'orders' });
   const change = { kind: 'group-change', slug: 'orders', oldEntry: old, newEntry: next };
-  const facts = manualMigrationChecklist(p, old, next);
+  const facts = manualMigrationChecklist(p, old, next, undefined, false);
 
   const scanFailures = [
     { chapter: 'a.md', line: 3, target: 'admin/orders.md' },
@@ -3967,7 +3967,7 @@ test('renderManualMigrationHalt: an EMPTY scanFailures array uses the normal for
   const old = entry({ slug: 'orders', group: 'admin', group_title: 'Admin' });
   const next = entry({ slug: 'orders' });
   const change = { kind: 'group-change', slug: 'orders', oldEntry: old, newEntry: next };
-  const facts = manualMigrationChecklist(p, old, next);
+  const facts = manualMigrationChecklist(p, old, next, undefined, false);
 
   const text = renderManualMigrationHalt([change], [facts], []);
   assert.match(text, /^This manifest change requires manual group migration/);
@@ -3986,8 +3986,8 @@ test('R10-F4 mixed-domain fixture: a retained change + a grouped removal + a new
   assert.equal(changes[1].slug, 'b');
 
   const p = profile();
-  const factsA = manualMigrationChecklist(p, changes[0].oldEntry, changes[0].newEntry);
-  const factsB = manualMigrationChecklist(p, changes[1].oldEntry, changes[1].newEntry);
+  const factsA = manualMigrationChecklist(p, changes[0].oldEntry, changes[0].newEntry, undefined, false);
+  const factsB = manualMigrationChecklist(p, changes[1].oldEntry, changes[1].newEntry, undefined, false);
   assert.ok(factsA.length > 0);
   assert.ok(factsB.length > 0);
 });
@@ -5003,21 +5003,22 @@ test('expectedAssets: zero in-directory embeds is a clean success with an empty 
 
 // =================================================================================================
 // [1.12.0] manualMigrationChecklist's twelfth fact kind — the provenance record — and the matching
-// renderManualMigrationHalt rendering. `provenanceActive` (default false) is the caller's OWN
-// re-assertion of this run's W1 ownership outcome; its absence must reproduce every pre-1.12.0
-// rendering byte-for-byte (the plan's "omit the whole fragment on a skipped run" rule).
+// renderManualMigrationHalt rendering. `provenanceActive` is the caller's OWN re-assertion of this
+// run's W1 ownership outcome — REQUIRED (no default) whenever the delta kind is not null, per the
+// fail-loud guard's own tests below; explicit `false` still reproduces every pre-1.12.0 rendering
+// byte-for-byte (the plan's "omit the whole fragment on a skipped run" rule).
 // =================================================================================================
 
-test('manualMigrationChecklist: provenanceActive defaults to false — a removal checklist is byte-identical to the pre-1.12.0 shape (no 12th fact)', () => {
+test('manualMigrationChecklist: provenanceActive=false — a removal checklist is byte-identical to the pre-1.12.0 shape (no 12th fact)', () => {
   const old = entry({ slug: 'orders', group: 'admin', group_title: 'Admin' });
-  const facts = manualMigrationChecklist(profile(), old, null);
+  const facts = manualMigrationChecklist(profile(), old, null, undefined, false);
   assert.equal(findFact(facts, 'provenance-record'), undefined);
 });
 
-test('manualMigrationChecklist: provenanceActive defaults to false — a group-change checklist carries no 12th fact', () => {
+test('manualMigrationChecklist: provenanceActive=false — a group-change checklist carries no 12th fact', () => {
   const old = entry({ slug: 'orders', group: 'admin', group_title: 'Admin' });
   const next = entry({ slug: 'orders', group: 'billing', group_title: 'Billing' });
-  const facts = manualMigrationChecklist(profile(), old, next);
+  const facts = manualMigrationChecklist(profile(), old, next, undefined, false);
   assert.equal(findFact(facts, 'provenance-record'), undefined);
 });
 
@@ -5065,7 +5066,7 @@ test('renderManualMigrationHalt: with provenanceActive=false, a removal line is 
   const p = profile();
   const old = entry({ slug: 'orders', group: 'admin', group_title: 'Admin' });
   const change = { kind: 'removal', slug: 'orders', oldEntry: old, newEntry: null };
-  const facts = manualMigrationChecklist(p, old, null);
+  const facts = manualMigrationChecklist(p, old, null, undefined, false);
   const text = renderManualMigrationHalt([change], [facts]);
   assert.ok(text.includes("orders: removed — delete vault/handbook/admin/orders.md, vault/handbook/assets/admin/orders, and its index line (was under container 'Admin')"));
   assert.ok(!text.includes('record'), 'no "record" word must appear anywhere when the run is not active');
@@ -5125,12 +5126,52 @@ test('renderManualMigrationHalt: with provenanceActive=false, a group-change lin
   const old = entry({ slug: 'orders', group: 'admin', group_title: 'Admin' });
   const next = entry({ slug: 'orders', group: 'billing', group_title: 'Billing' });
   const change = { kind: 'group-change', slug: 'orders', oldEntry: old, newEntry: next };
-  const facts = manualMigrationChecklist(p, old, next);
+  const facts = manualMigrationChecklist(p, old, next, undefined, false);
   const text = renderManualMigrationHalt([change], [facts]);
   const line = text.split('\n').find((l) => l.includes('orders:'));
   assert.equal(
     line,
     "  orders: vault/handbook/admin/orders.md -> vault/handbook/billing/orders.md; assets vault/handbook/assets/admin/orders -> vault/handbook/assets/billing/orders; was under container 'Admin'",
+  );
+});
+
+// IMPORTANT-2 (codex review of 69671ee): the twelfth fact kind was reachable only when a caller
+// opted in, every test constructed `true`/`false` by hand, and no real caller existed to opt in at
+// all — the same defect shape as the W5 blocker this release already closed once. These four pin
+// the fail-loud guard that closes it: provenanceActive is now REQUIRED (no default) whenever the
+// delta kind is not null, so a caller that forgets to thread this run's real W1 ownership outcome
+// through gets a thrown error immediately, never a checklist and halt text that silently omit the
+// provenance-record move. The untouched-entry / pure-addition / flat-removal tests above (kind ===
+// null) are deliberately UNCHANGED by this guard — see "an untouched entry never reaches the
+// guard" below for why that is the guard's own contract, not an oversight.
+test('fail-loud guard: provenanceActive omitted on a REMOVAL throws — no silent default', () => {
+  const old = entry({ slug: 'orders', group: 'admin', group_title: 'Admin' });
+  assert.throws(() => manualMigrationChecklist(profile(), old, null), /provenanceActive must be an explicit boolean/);
+});
+
+test('fail-loud guard: provenanceActive omitted on a GROUP-CHANGE throws', () => {
+  const old = entry({ slug: 'orders', group: 'admin', group_title: 'Admin' });
+  const next = entry({ slug: 'orders', group: 'billing', group_title: 'Billing' });
+  assert.throws(
+    () => manualMigrationChecklist(profile(), old, next),
+    /provenanceActive must be an explicit boolean/,
+  );
+});
+
+test('fail-loud guard: provenanceActive omitted on a TITLE-ONLY change throws too — the guard is uniform across every real delta kind, even one that never reads the value', () => {
+  const old = entry({ slug: 'orders', group: 'admin', group_title: 'Admin' });
+  const next = entry({ slug: 'orders', group: 'admin', group_title: 'Orders (renamed)' });
+  assert.throws(
+    () => manualMigrationChecklist(profile(), old, next),
+    /provenanceActive must be an explicit boolean/,
+  );
+});
+
+test('fail-loud guard: a non-boolean provenanceActive (a truthy string) throws the same as omission', () => {
+  const old = entry({ slug: 'orders', group: 'admin', group_title: 'Admin' });
+  assert.throws(
+    () => manualMigrationChecklist(profile(), old, null, undefined, 'yes'),
+    /provenanceActive must be an explicit boolean/,
   );
 });
 

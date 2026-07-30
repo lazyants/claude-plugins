@@ -44,8 +44,19 @@ export function digestOpeningPayload(openingPayload: unknown): string;
 /** See capture-record.mjs: field-by-field validation of a run record's raw JSON text (duplicate-key- and lone-surrogate-aware). */
 export function readRunRecordText(text: string): { ok: true; record: RunRecord } | { ok: false; reason: string };
 
-/** See capture-record.mjs: field-by-field validation of a chapter record's raw JSON text. */
-export function readChapterRecordText(text: string): { ok: true; record: ChapterRecord } | { ok: false; reason: string };
+/** A record whose `record_version` this reader does not understand (not `1`) — read back MINIMALLY: only the version field itself is confirmed to be a well-formed integer >= 1. Every OTHER field is UNVALIDATED and may be absent, malformed, or of a shape a future version invented; do not assume any `ChapterRecord` field is present. */
+export interface UnsupportedVersionChapterRecord {
+  record_version: number;
+  [key: string]: unknown;
+}
+
+export type ChapterRecordReadResult =
+  | { ok: true; record: ChapterRecord }
+  | { ok: true; record: UnsupportedVersionChapterRecord; unsupportedVersion: true }
+  | { ok: false; reason: string };
+
+/** See capture-record.mjs: field-by-field validation of a chapter record's raw JSON text. A `record_version` other than `1` is NOT validated against v1's field rules (that would be meaningless for a version this reader was not written for) and is returned as `{ok: true, record, unsupportedVersion: true}` — the runtime's actual behavior, which the v1-only `ChapterRecord` shape below cannot describe on its own. */
+export function readChapterRecordText(text: string): ChapterRecordReadResult;
 
 export interface RunRecord {
   record_version: 1;

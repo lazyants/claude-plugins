@@ -11,10 +11,17 @@
 // value normalization, the shared build_identity field-validity check, the resolution helpers W2's
 // open/close sequence drives, the completeness/staleness comparison W5/W6 read against, delta
 // classification, and the small rendering helper W6's report uses. Every exported function is a
-// total, side-effect-free transform over plain data — no node:fs, no node:child_process, no dynamic
+// side-effect-free transform over plain data — no node:fs, no node:child_process, no dynamic
 // import(), no `process` beyond what a pure module gets for free — so the whole resolution/
 // validation surface is unit-testable (tests/build-identity.test.mjs) without a filesystem, a
-// command executor or a browser. The disk-touching half — hashing, the token/record lifecycle, the
+// command executor or a browser. Side-effect-free is NOT total, and the difference is deliberate:
+// exactly two functions throw a TypeError on an input outside their declared domain —
+// `resolveBuildIdentity` on an unrecognized `uiObservation.kind`, and `classifyBuildDelta` when
+// `record` is not a valid BuildIdentity (the usual cause being a whole chapter/run record passed
+// where its `build_identity` field was meant). Those are caller-contract violations rather than
+// the ordinary failures this module models, and every ordinary failure IS returned as data. The
+// header previously said "total", which was simply false; a caller must not read it as a promise
+// never to throw. The disk-touching half — hashing, the token/record lifecycle, the
 // eight capture-record entrypoints — lives in the sibling module, assets/lib/capture-record.mjs,
 // which imports the exports below rather than re-implementing them.
 //

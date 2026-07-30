@@ -934,6 +934,32 @@ test('gate 1: the invalid entry is never first — [safe, invalid] halts with ze
   });
 });
 
+test('gate 1 (IMPORTANT 1, codex review): a NUMERIC slug is rejected as invalid_slug, not coerced to a passing string — driven through buildProvenanceReport (W6)', () => {
+  // The consumer used to call `isValidSlugSyntax(String(entry.slug))` — the type check inside
+  // `isValidSlugSyntax` (`typeof slug === 'string'`) never got to see the ORIGINAL value, since it
+  // was already coerced to a string before the call. `{slug: 1}` -> `String(1) === '1'`, which
+  // passes the kebab alphabet (digits are in the class), so gate 1 silently accepted a non-string
+  // slug and a W6 probe reached `chapter_read_failed` (no "1.md" chapter file exists) instead of
+  // `invalid_slug`.
+  withTempDir((dir) => {
+    const profile = profileFor(dir);
+    const result = CR.buildProvenanceReport(profile, [{ slug: 1 }], null, stubDepsNoIdentity());
+    assert.equal(result.ok, false, JSON.stringify(result));
+    assert.equal(result.halts[0].halt, 'invalid_slug', `a non-string slug must fail gate 1's TYPE check; got ${JSON.stringify(result)}`);
+  });
+});
+
+test('gate 1 (IMPORTANT 1, codex review): a NULL group is rejected as invalid_group, not coerced to the string "null"', () => {
+  // Same coercion bug on the group field: `String(null) === 'null'`, which itself matches the
+  // kebab alphabet (no hyphen required), so `{group: null}` used to sail past gate 1 too.
+  withTempDir((dir) => {
+    const profile = profileFor(dir);
+    const result = CR.openCaptureRun(profile, [{ slug: 'items', group: null }], null, stubDepsNoIdentity());
+    assert.equal(result.ok, false, JSON.stringify(result));
+    assert.equal(result.halts[0].halt, 'invalid_group', JSON.stringify(result));
+  });
+});
+
 test('gate 2: two entries deriving the identical LEXICAL asset directory halt', () => {
   withTempDir((dir) => {
     const profile = profileFor(dir);
@@ -1027,6 +1053,66 @@ test('gate 1-4 at W6: buildProvenanceReport halts on an invalid manifest before 
     const result = CR.buildProvenanceReport(profile, [{ slug: '../elsewhere' }], null, stubDepsNoIdentity());
     assert.equal(result.ok, false);
     assert.equal(result.halts[0].halt, 'invalid_slug');
+  });
+});
+
+// =================================================================================================
+// BLOCKER 1 (codex review, commit 69671ee) — a RELATIVE capture.output_dir must not desync gate 3's
+// two sides. Every OTHER fixture in this file uses ABSOLUTE temp paths (profileFor joins onto the
+// absolute `dir` withTempDir hands back), which is exactly why this was invisible: gate 3's root
+// (`canonicalOutputRoot`, always absolutized by canonicalizeForComparison) and its per-entry
+// candidate (the raw, still-relative `chapterAssetDir(...)`) silently sat in two different
+// coordinate systems, and `resolvePhysicalContainment` treats a rootedness mismatch the same as a
+// genuine escape. The SHIPPED example profile uses exactly this relative/relative topology
+// (`output_dir: "vault/handbook/assets"`, `chapters_dir: "vault/handbook"`), so this fired on the
+// very first real capture, in open, W5 and W6 alike.
+// =================================================================================================
+
+function withRelativeCwd(dir, fn) {
+  const prevCwd = process.cwd();
+  process.chdir(dir);
+  try {
+    return fn();
+  } finally {
+    process.chdir(prevCwd);
+  }
+}
+
+test('BLOCKER 1: a RELATIVE capture.output_dir (the shipped example profile\'s own topology) must not halt gate 3 in open, W5 or W6', () => {
+  withTempDir((dir) => {
+    withRelativeCwd(dir, () => {
+      const chaptersDir = 'vault/handbook';
+      nodeFs.mkdirSync(join(dir, chaptersDir), { recursive: true });
+      const profile = {
+        capture: { output_dir: 'vault/handbook/assets', build_identity: { ui_read: false } },
+        publish: { chapters_dir: chaptersDir, target: 'static_md' },
+      };
+      const entry = { slug: 'items' };
+      const assetDir = 'vault/handbook/assets/items'; // relative, mirrors profile.capture.output_dir
+      nodeFs.mkdirSync(assetDir, { recursive: true });
+      nodeFs.writeFileSync(join(assetDir, 'overview.png'), 'v1');
+
+      const opened = CR.openCaptureRun(profile, [entry], null, stubDepsNoIdentity());
+      assert.equal(opened.ok, true, `W2 (open) must accept a relative output_dir topology; got ${JSON.stringify(opened)}`);
+
+      nodeFs.writeFileSync(join(assetDir, 'overview.png'), 'v2');
+      const closed = CR.closeCaptureRun(profile, opened.runState, { ok: true }, null, stubDepsNoIdentity());
+      assert.equal(closed.ok, true, JSON.stringify(closed));
+
+      // Real embed formula, real chapter file — exercising the REAL default extractor (no
+      // `expectedAssets` override), matching what an actual handbook run does.
+      const chapterFile = 'vault/handbook/items.md';
+      const embed = chapterPathsModule.embedPath(chapterFile, assetDir, 'overview.png');
+      nodeFs.writeFileSync(chapterFile, `# Items\n\n1. Step\n\n   ![overview](${embed})\n`);
+
+      const recorded = CR.recordChapterProvenance(profile, [entry], entry, chapterFile, opened.runState.run_id, stubDepsNoIdentity());
+      assert.equal(recorded.recorded, true, `W5 must accept the same relative topology; got ${JSON.stringify(recorded)}`);
+
+      const report = CR.buildProvenanceReport(profile, [entry], null, stubDepsNoIdentity());
+      assert.equal(Array.isArray(report.rows), true, `W6 must accept the same relative topology; got ${JSON.stringify(report)}`);
+      assert.equal(report.rows.length, 1);
+      assert.equal(report.rows[0].key, 'items');
+    });
   });
 });
 
@@ -1240,6 +1326,44 @@ test('closeCaptureRun: PAYLOAD TAMPERING — a mutated `entries` list (a differe
   });
 });
 
+test('closeCaptureRun: BLOCKER 2 (codex review) — forging ONLY runState.opening_digest must not land the FORGED value in the committed record', () => {
+  // The token on disk is the sole AUTHENTICATED source of truth for the opening digest. Close
+  // recomputes the digest from runState's own entries/opening/opening_assets and checks it against
+  // the token — but a prior version then wrote `runState.opening_digest` (the field, not the
+  // recomputed-and-verified value) into the committed record. Mutating ONLY that field (leaving the
+  // actual payload untouched) sails straight through the check unnoticed — recomputedDigest is
+  // derived from the PAYLOAD, never from this field — so the forged value would land in a
+  // successfully committed record, and a later `recoverProvenanceState` read would classify it
+  // wrong (a legitimate commit misread as `divergent`, or vice versa, depending on what it's later
+  // compared against).
+  withTempDir((dir) => {
+    const profile = profileFor(dir);
+    const entry = { slug: 'items' };
+    const assetDir = join(profile.capture.output_dir, 'items');
+    nodeFs.mkdirSync(assetDir, { recursive: true });
+    nodeFs.writeFileSync(join(assetDir, 'a.png'), 'v1');
+    const opened = CR.openCaptureRun(profile, [entry], null, stubDepsNoIdentity());
+    assert.equal(opened.ok, true);
+
+    const authenticDigest = opened.runState.opening_digest;
+    const tampered = { ...opened.runState, opening_digest: ONE_DIGEST };
+    assert.notEqual(tampered.opening_digest, authenticDigest);
+
+    nodeFs.writeFileSync(join(assetDir, 'a.png'), 'v2');
+    const closed = CR.closeCaptureRun(profile, tampered, { ok: true }, null, stubDepsNoIdentity());
+    // The PAYLOAD itself is untouched, so this must still verify and commit — the vulnerability is
+    // in WHAT gets written, not whether the close succeeds.
+    assert.equal(closed.ok, true, `payload untouched, so this must still commit; got ${JSON.stringify(closed)}`);
+
+    const recordRaw = JSON.parse(nodeFs.readFileSync(recordPathFor(profile), 'utf8'));
+    assert.equal(
+      recordRaw.opening_digest,
+      authenticDigest,
+      'the committed record must carry the AUTHENTICATED (recomputed, token-verified) digest, never the forged runState field',
+    );
+  });
+});
+
 test('openCaptureRun on a skipped profile is a no-op returning {ok:true, runState:{skipped:true}}', () => {
   withTempDir((dir) => {
     nodeFs.mkdirSync(join(dir, 'handbook'), { recursive: true });
@@ -1273,6 +1397,47 @@ test('runState survives a real JSON serialization boundary (simulated fresh proc
 // after (codex important #6). Every injected failure below is a genuinely unexpected errno, never
 // ENOENT/ENOTDIR (which snapshotAssetHashes already treats as "empty directory", legitimately).
 // =================================================================================================
+
+test('openCaptureRun: BLOCKER 4 (codex review) — a THROWING pending-token write returns a halt and leaves no orphaned token, rather than escaping uncaught', () => {
+  // The write was previously wrapped in a bare `try { ... } finally { closeSync }` with no `catch`
+  // at all — an ordinary write failure (EIO, ENOSPC, ...) became an UNCAUGHT exception instead of
+  // this module's usual returned `{ok:false, halts}`, and the just-created (O_CREAT|O_EXCL) token
+  // was left behind with no caller ever having a chance to clean it up.
+  withTempDir((dir) => {
+    const profile = profileFor(dir);
+    const boom = Object.assign(new Error('injected token write failure'), { code: 'EIO' });
+    const deps = depsWithOverride({
+      writeSync: () => {
+        throw boom;
+      },
+      runIdentityCommand: () => ({ ok: false, detail: 'not configured' }),
+    });
+    assert.doesNotThrow(() => {
+      const result = CR.openCaptureRun(profile, [], null, deps);
+      assert.equal(result.ok, false, JSON.stringify(result));
+      assert.equal(result.halts[0].halt, 'provenance_hazard');
+    });
+    assert.equal(nodeFs.existsSync(tokenPathFor(profile)), false, 'a throwing token write must not leave an orphaned token on disk');
+  });
+});
+
+test('openCaptureRun: BLOCKER 4 (codex review) — a SHORT writeSync on the pending token must not leave a truncated token in place', () => {
+  // writeSync genuinely CAN return fewer bytes than requested (a full disk, a pipe, an interrupted
+  // write) — every writer in this module ignored the returned byte count outright.
+  withTempDir((dir) => {
+    const profile = profileFor(dir);
+    const deps = depsWithOverride({
+      writeSync: (fd, buffer, ...rest) => {
+        nodeFs.writeSync(fd, buffer, ...rest);
+        return 1; // report a short write regardless of the real (full) byte count
+      },
+      runIdentityCommand: () => ({ ok: false, detail: 'not configured' }),
+    });
+    const result = CR.openCaptureRun(profile, [], null, deps);
+    assert.equal(result.ok, false, `a short write must halt rather than open; got ${JSON.stringify(result)}`);
+    assert.equal(nodeFs.existsSync(tokenPathFor(profile)), false, 'a short-written token must not survive on disk');
+  });
+});
 
 test('openCaptureRun: an unexpected snapshot-listing errno returns a halt, never an uncaught throw', () => {
   withTempDir((dir) => {
@@ -1324,6 +1489,28 @@ test('closeCaptureRun: an unexpected closing-snapshot errno returns a halt, and 
   });
 });
 
+test('closeCaptureRun: BLOCKER 4 (codex review) — a SHORT writeSync must not commit a truncated run record', () => {
+  // Reproduces the finding's own illustration: "a seam that persists one byte and returns 1" let
+  // close rename a one-byte "{" temp into place as a successfully committed run record, because the
+  // writer ignored writeSync's returned byte count entirely.
+  withTempDir((dir) => {
+    const profile = profileFor(dir);
+    const opened = CR.openCaptureRun(profile, [], null, stubDepsNoIdentity());
+    assert.equal(opened.ok, true);
+    const deps = depsWithOverride({
+      writeSync: (fd, buffer, ...rest) => {
+        nodeFs.writeSync(fd, buffer, ...rest);
+        return 1; // report a short write regardless of the real (full) byte count
+      },
+      runIdentityCommand: () => ({ ok: false, detail: 'not configured' }),
+    });
+    const result = CR.closeCaptureRun(profile, opened.runState, { ok: true }, null, deps);
+    assert.equal(result.ok, false, `a short write must halt rather than commit; got ${JSON.stringify(result)}`);
+    assert.equal(nodeFs.existsSync(recordPathFor(profile)), false, 'a short-written record must never be committed (renamed into place)');
+    assert.equal(listRunTempsOnDisk(profile).length, 0, 'a short-write failure must leave no surviving temp');
+  });
+});
+
 test('closeCaptureRun: a temp-write failure and a rename failure both leave ZERO surviving temps', () => {
   withTempDir((dir) => {
     const profile = profileFor(dir);
@@ -1355,6 +1542,25 @@ test('closeCaptureRun: a temp-write failure and a rename failure both leave ZERO
     const result = CR.closeCaptureRun(profile, opened.runState, { ok: true }, null, deps);
     assert.equal(result.ok, false, JSON.stringify(result));
     assert.equal(listRunTempsOnDisk(profile).length, 0, 'a rename failure must leave no surviving temp');
+  });
+});
+
+test('recordChapterProvenance: BLOCKER 4 (codex review) — a SHORT writeSync on the chapter-record temp must not commit a truncated record', () => {
+  withTempDir((dir) => {
+    const profile = profileFor(dir);
+    const entry = { slug: 'items' };
+    const { runId, assetDir, chapterFile } = runToCommitted(profile, entry, { 'a.png': 'v1' }, { 'a.png': 'v2' });
+    const deps = {
+      ...stubDepsNoIdentity(),
+      expectedAssets: stubExpectedAssetsFor(assetDir, ['a.png']),
+      writeSync: (fd, buffer, ...rest) => {
+        nodeFs.writeSync(fd, buffer, ...rest);
+        return 1; // report a short write regardless of the real (full) byte count
+      },
+    };
+    const result = CR.recordChapterProvenance(profile, [entry], entry, chapterFile, runId, deps);
+    assert.equal(result.ok, false, `a short write must halt rather than record; got ${JSON.stringify(result)}`);
+    assert.equal(nodeFs.existsSync(CR.chapterRecordPath(profile, entry)), false, 'a short-written chapter record must never be committed');
   });
 });
 
@@ -1866,7 +2072,12 @@ function scanJsTokens(source) {
       // `dotBase`: the identifier immediately before THIS token's own leading dot (if any) — lets
       // `fs.writeFileSync` be recognized as "writeFileSync reached via fs." while `fs.constants` (a
       // different, allowed base) is not confused with it.
-      tokens.push({ kind: 'ident', text, precededByDot, dotBase: precededByDot ? lastIdent : null, end: i });
+      // `precededByChar` snapshots the significant character/kind that came right before THIS
+      // token, BEFORE it gets overwritten to 'ident' below — used (IMPORTANT 4) to tell an
+      // OBJECT-LITERAL property value (`openSync: fs.openSync,`, preceded by ':') apart from a
+      // BARE variable target (`const write = fs.writeFileSync`, preceded by '='), which is exactly
+      // the shape distinction a fs.<method>-aliasing bypass needs to be caught.
+      tokens.push({ kind: 'ident', text, precededByDot, precededByChar: prevSignificant, dotBase: precededByDot ? lastIdent : null, end: i });
       lastIdent = text;
       prevSignificant = 'ident';
       precededByDot = false;
@@ -1944,8 +2155,11 @@ function nextSignificantChar(source, from) {
 // statement invisible to it: zero specifiers found, so a disallowed one slipped through
 // completely unchecked (codex, important #7's "a commented static import" defeat). Working off
 // the already-comment-free token stream instead means comment PLACEMENT can no longer matter.
-function findImportSpecifiersFromTokens(tokens) {
-  const specifiers = [];
+// Returns one `{specifier, importTokenEnd}` per import statement — `importTokenEnd` is the raw-
+// source index right after the `import` keyword, which `importClauseIsNamed` below scans forward
+// from to classify the clause SHAPE (named/braced vs. namespace/default/side-effect-only).
+function findImportStatements(tokens) {
+  const statements = [];
   for (let idx = 0; idx < tokens.length; idx++) {
     if (tokens[idx].kind !== 'ident' || tokens[idx].text !== 'import') continue;
     // The specifier is the NEXT string token after `import`, whichever form introduced it
@@ -1954,7 +2168,7 @@ function findImportSpecifiersFromTokens(tokens) {
     // import ban already rejects the module outright regardless of what this finds).
     for (let j = idx + 1; j < tokens.length; j++) {
       if (tokens[j].kind === 'string') {
-        specifiers.push(tokens[j].text);
+        statements.push({ specifier: tokens[j].text, importTokenEnd: tokens[idx].end });
         break;
       }
       // Reached the next statement without finding a string — not a well-formed import; nothing
@@ -1962,7 +2176,35 @@ function findImportSpecifiersFromTokens(tokens) {
       if (tokens[j].kind === 'ident' && (tokens[j].text === 'import' || tokens[j].text === 'export')) break;
     }
   }
-  return specifiers;
+  return statements;
+}
+
+function findImportSpecifiersFromTokens(tokens) {
+  return findImportStatements(tokens).map((s) => s.specifier);
+}
+
+// IMPORTANT 4 (codex review): true iff the import clause between the `import` keyword and its
+// specifier string contains a top-level '{' — the NAMED/braced clause form (`import { a } from
+// 'x'`, `import a, { b } from 'x'`) as opposed to a namespace/default/side-effect-only form
+// (`import * as ns from 'x'`, `import x from 'x'`, `import 'x'`). Scans raw source (punctuation
+// like '{' is never itself tokenized by scanJsTokens) rather than tokens. Used to ban
+// `import { writeFileSync } from 'node:fs'` outright: the real module's only legitimate `node:fs`
+// import is the namespace form (`import * as fs from 'node:fs'`), and a named import destructures a
+// real fs function directly into module scope — a binding with no `fs.` prefix at all, invisible to
+// the dotBase-based direct-call check below no matter how it is later invoked.
+function importClauseIsNamed(source, importTokenEnd) {
+  let i = importTokenEnd;
+  const n = source.length;
+  while (i < n) {
+    const ch = source[i];
+    if (/\s/.test(ch)) { i++; continue; }
+    if (ch === '/' && source[i + 1] === '/') { i += 2; while (i < n && source[i] !== '\n') i++; continue; }
+    if (ch === '/' && source[i + 1] === '*') { i += 2; while (i < n && !(source[i] === '*' && source[i + 1] === '/')) i++; i += 2; continue; }
+    if (ch === '{') return true;
+    if (ch === "'" || ch === '"') return false; // reached the specifier string with no named clause seen
+    i++;
+  }
+  return false;
 }
 
 const ALLOWED_IMPORT_SPECIFIERS = new Set(['node:fs', 'node:child_process', 'node:crypto', './build-identity.mjs', './chapter-paths.mjs']);
@@ -1977,11 +2219,58 @@ const UNCONDITIONALLY_BANNED = new Set(['process', 'Function', 'eval', 'require'
 // in the module passed silently).
 const ALLOWED_FS_MEMBERS = new Set(['constants']);
 
+// IMPORTANT 4 (codex review): every BARE identifier the source assigns directly from a banned
+// `fs.<method>` VALUE (`const write = fs.writeFileSync`, or a plain reassignment `write =
+// fs.writeFileSync`) — never a property-access target (`deps.openSync = fs.openSync`, the real
+// module's own DEFAULT-SEAM shape, merely spelled as an assignment instead of an object-literal
+// property; that target is always invoked back through ITS OWN object, `deps.openSync(...)`, never
+// bare, so it is not tracked here at all). Returns the set of ALIAS NAMES found, so the caller can
+// check whether any of them is ever called under its own bare name — `const write =
+// fs.writeFileSync;` alone (never called) is exactly as inert as the object-literal case, and must
+// stay legitimate (see the fs.constants VALUE-reference test below, which also assigns
+// `deps.openSync = fs.openSync` and must keep passing).
+function findBareFsAliasNames(tokens) {
+  const names = new Set();
+  for (let idx = 0; idx < tokens.length; idx++) {
+    const token = tokens[idx];
+    if (token.kind !== 'ident' || token.dotBase !== 'fs' || ALLOWED_FS_MEMBERS.has(token.text)) continue;
+    // The base 'fs' ident is always the array element right before this one — nothing else can be
+    // pushed between a base ident and its own '.'-continuation (the '.' itself emits no token).
+    const base = tokens[idx - 1];
+    if (base?.precededByChar !== '=') continue; // not a bare `NAME = fs.method` shape at all
+    const target = tokens[idx - 2];
+    if (target?.kind === 'ident' && !target.precededByDot) names.add(target.text);
+  }
+  return names;
+}
+
+// True iff any of `aliasNames` is later referenced, under its own bare name, as a CALL —
+// `write(...)` — anywhere in the token stream. The declaration occurrence itself never matches
+// (it is followed by '=', never '('), so no explicit exclusion is needed for it.
+function anyAliasCalled(tokens, source, aliasNames) {
+  if (aliasNames.size === 0) return false;
+  for (const token of tokens) {
+    if (token.kind !== 'ident' || token.precededByDot || !aliasNames.has(token.text)) continue;
+    if (nextSignificantChar(source, token.end) === '(') return true;
+  }
+  return false;
+}
+
 function checkCapabilityPolicy(source) {
   const tokens = scanJsTokens(source);
-  const specifiers = findImportSpecifiersFromTokens(tokens);
-  for (const spec of specifiers) {
-    if (!ALLOWED_IMPORT_SPECIFIERS.has(spec)) return { ok: false, reason: `disallowed_import:${spec}` };
+  for (const { specifier, importTokenEnd } of findImportStatements(tokens)) {
+    if (!ALLOWED_IMPORT_SPECIFIERS.has(specifier)) return { ok: false, reason: `disallowed_import:${specifier}` };
+    // The real module's ONLY legitimate node:fs import is the namespace form; a named import of any
+    // node:fs export destructures a real fs function directly into scope, bypassing the `deps` seam
+    // as completely as a direct `fs.<method>(...)` call, and invisibly to the dotBase-based check
+    // below (the call site `writeFileSync(...)` carries no `fs.` prefix at all).
+    if (specifier === 'node:fs' && importClauseIsNamed(source, importTokenEnd)) {
+      return { ok: false, reason: 'named_import:node:fs' };
+    }
+  }
+  const aliasNames = findBareFsAliasNames(tokens);
+  if (anyAliasCalled(tokens, source, aliasNames)) {
+    return { ok: false, reason: 'fs_alias_call' };
   }
   for (const token of tokens) {
     if (UNCONDITIONALLY_BANNED.has(token.text)) return { ok: false, reason: `banned_word:${token.text}` };
@@ -2061,6 +2350,12 @@ test('capability policy: mutants — each of these must FAIL', () => {
     "import /*comment*/('node:fs')", // a comment wedged between `import` and `(` defeated the old /^\s*\(/ check
     "globalThis['pro' + 'cess']", // the banned word itself split across concatenated string literals
     "import/*x*/{a}from'not-an-allowed-specifier'", // a comment inside a STATIC import defeated the old whitespace-only regex outright (zero specifiers found)
+    // IMPORTANT 4 (codex review): the checker's OLD "class", not just its four demonstrated
+    // instances — allowed `node:fs` unconditionally and banned only a direct `fs.<method>(...)`
+    // call SHAPE, so a named import or a bare-variable alias of the identical banned function was
+    // invisible to it, however the module later invoked it.
+    "import { writeFileSync } from 'node:fs'; writeFileSync(path, data)", // a named import destructures the real fs function directly into scope — no `fs.` prefix anywhere
+    "const write = fs.writeFileSync; write(...)", // a bare alias of the fs.* VALUE, later called under its own name
   ];
   for (const mutant of mutants) {
     const result = checkCapabilityPolicy(mutant);

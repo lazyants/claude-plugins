@@ -227,13 +227,13 @@ export function isPlainLabel(s: string): boolean;
 /** See chapter-paths.mjs: the D6 manual-migration boundary trigger. */
 export function groupChanges(oldEntries: ChapterEntry[], newEntries: ChapterEntry[]): GroupChangesResult;
 
-/** See chapter-paths.mjs: the per-delta-kind terminal-state fact descriptors; vaultRelChaptersDir is threaded into every currentIndexExpectedTarget call this function makes (wikilinks mode). [1.12.0] provenanceActive (default false) gates the twelfth fact kind, 'provenance-record' ({kind, oldPath, newPath: string|null}) — the caller's own re-assertion of this run's W1 ownership outcome, never inferred from disk; absent (or false) reproduces every pre-1.12.0 checklist byte-for-byte. Present only for 'removal' and the two grouped-change kinds, never 'title-change'. */
+/** See chapter-paths.mjs: the per-delta-kind terminal-state fact descriptors; vaultRelChaptersDir is threaded into every currentIndexExpectedTarget call this function makes (wikilinks mode). [1.12.0] provenanceActive gates the twelfth fact kind, 'provenance-record' ({kind, oldPath, newPath: string|null}) — the caller's own re-assertion of this run's W1 ownership outcome, never inferred from disk. It is REQUIRED and has no default: the runtime throws a TypeError unless it is an explicit boolean, because a silently omitted argument is exactly what once let an active migration's record move go missing from both the checklist and the rendered halt with nothing red to catch it. Passing false is a legitimate explicit answer for a skipped run and reproduces every pre-1.12.0 checklist byte-for-byte; omitting it is not the same thing and is refused. Present only for 'removal' and the two grouped-change kinds, never 'title-change'. */
 export function manualMigrationChecklist(
   profileLike: ProfileLike,
   oldEntry: ChapterEntry | null,
   newEntry: ChapterEntry | null,
-  vaultRelChaptersDir?: string,
-  provenanceActive?: boolean,
+  vaultRelChaptersDir: string | undefined,
+  provenanceActive: boolean,
 ): MigrationFact[];
 
 /** See chapter-paths.mjs: the production D6 halt-text formatter (exact strings). */

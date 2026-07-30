@@ -7,10 +7,16 @@
 // chapter-paths.mjs — the pure, dependency-free (no node:fs, no node:path — path algebra is
 // reimplemented below so the module never depends on the host platform's separator convention)
 // group axis helper for the optional `group`/`group_title` manifest fields (issue #19). Every
-// exported function is a total, side-effect-free predicate/transform over plain data (manifest
-// entries, profile-shaped objects, index-file line arrays, chapter/spec text) so the whole
-// group-axis contract is unit-testable (tests/chapter-paths.test.mjs) without touching a
-// filesystem or a browser.
+// exported function is a pure, deterministic, side-effect-free predicate/transform over plain
+// data (manifest entries, profile-shaped objects, index-file line arrays, chapter/spec text) so
+// the whole group-axis contract is unit-testable (tests/chapter-paths.test.mjs) without touching
+// a filesystem or a browser — but NOT total: a narrow, named set of caller-detectable programming
+// errors throws rather than resolving ambiguously or answering silently wrong (currentIndexExpectedTarget's
+// missing/malformed vaultRelChaptersDir in wikilinks mode; manualMigrationChecklist's omitted
+// provenanceActive) — see each function's own "fail loud" contract. Every other input shape the
+// module can classify (an invalid `group`, a malformed manifest) is instead reported as an
+// ordinary halt-text VALUE, never an exception — throwing is reserved for the narrower case where
+// the caller itself made a mistake a return value could not safely paper over.
 //
 // A group-free manifest (no entry carries `group`) must behave byte-identically to the shipped
 // 1.4.1 flat layout in every function here — the activation rule (D1): every new gate/branch is
@@ -1811,26 +1817,54 @@ function migrationRecordPath(profileLike, entry) {
  * index targets, capture-spec dir spellings) a caller checks the real world against. An entry
  * untouched by the delta (no kind under classifyEntryDelta) returns [].
  *
- * [1.12.0] `provenanceActive` (default false) gates the twelfth fact kind, `provenance-record` —
- * the caller's OWN re-assertion of this run's W1 ownership outcome, never inferred from
- * `<root>/` existing on disk (a profile that ran active once and later acquired an overlapping
- * `capture.output_dir` still has a populated `.provenance/` from a PRIOR run — see the plan's
- * "guard is the W1 outcome and explicitly NOT '<root>/' exists" rationale). Defaulting to false
- * keeps every pre-1.12.0 caller's checklist byte-for-byte unchanged. The fact is present only for
- * 'removal' and the two grouped-change kinds — a title-only change never moves the record's path,
- * so it carries no such fact regardless of `provenanceActive`.
+ * [1.12.0] `provenanceActive` gates the twelfth fact kind, `provenance-record` — the caller's OWN
+ * re-assertion of this run's W1 ownership outcome, never inferred from `<root>/` existing on disk
+ * (a profile that ran active once and later acquired an overlapping `capture.output_dir` still has
+ * a populated `.provenance/` from a PRIOR run — see the plan's "guard is the W1 outcome and
+ * explicitly NOT '<root>/' exists" rationale). REQUIRED whenever `kind` is not null — no default:
+ * a caller passing anything other than a real `true`/`false` gets a thrown error, never a silently
+ * incomplete checklist (see the guard below). This module has no in-repo caller outside its own
+ * tests, so there was no pre-1.12.0 real caller to preserve byte-for-byte by quietly defaulting —
+ * the parameter is new in 1.12.0 either way — and a silent `false` default is exactly the defect
+ * class this release's W5 blocker already closed once (an opt-in-only capability that nothing real
+ * ever opts into: every test constructs `true` by hand, and the one thing that would need to pass
+ * it for real never does). Passing `false` explicitly still reproduces the pre-1.12.0 checklist
+ * byte-for-byte — the difference is that "explicit" is now mandatory, not assumed. The fact itself
+ * is present only for 'removal' and the two grouped-change kinds — a title-only change never moves
+ * the record's path, so it carries no such fact regardless of `provenanceActive`'s value (the
+ * boolean is still required there too, for the one uniform contract every real delta kind shares).
  *
  * @param {{capture: {output_dir: string}, publish: {chapters_dir: string, index_file: string, wikilinks: boolean}}} profileLike
  * @param {object|null} oldEntry
  * @param {object|null} newEntry
  * @param {string} [vaultRelChaptersDir]  wikilinks mode only — threaded into every
  *   currentIndexExpectedTarget call this function makes (see its own JSDoc, §1a)
- * @param {boolean} [provenanceActive]  default false — this run's W1 ownership outcome
+ * @param {boolean} provenanceActive  this run's real W1 ownership outcome — REQUIRED whenever
+ *   `kind` is not null (no default); throws when not strictly boolean
  * @returns {Array<object>} fact descriptors, each carrying a `kind` tag
  */
-export function manualMigrationChecklist(profileLike, oldEntry, newEntry, vaultRelChaptersDir, provenanceActive = false) {
+export function manualMigrationChecklist(profileLike, oldEntry, newEntry, vaultRelChaptersDir, provenanceActive) {
   const kind = classifyEntryDelta(oldEntry, newEntry);
   if (kind === null) return [];
+
+  // Fail-loud guard (this module's established idiom — see currentIndexExpectedTarget's own
+  // guards above): a silent default here is the exact defect shape the W5 blocker already cost
+  // this release once — an opt-in-only capability (the twelfth fact kind, provenance-record) that
+  // every test constructs by hand and no real caller has ever been written to pass. Requiring an
+  // explicit boolean means a future real caller that forgets to thread this run's W1 ownership
+  // outcome through gets a thrown error immediately, not a checklist and halt text that silently
+  // omit the provenance-record move for an ACTIVE run.
+  if (typeof provenanceActive !== 'boolean') {
+    throw new Error(
+      "manualMigrationChecklist: provenanceActive must be an explicit boolean — this run's real " +
+        "W1 ownership outcome (capture-record.mjs's assertProvenanceOwnership/openCaptureRun " +
+        'result: active iff ownership.ok and not ownership.skip), never omitted and never ' +
+        'defaulted. A caller with no ownership signal yet must still decide and pass false ' +
+        'explicitly — a silent default here would let an ACTIVE migration render its halt text ' +
+        'and terminal-state facts with the provenance-record fact missing, exactly as if the run ' +
+        'had never owned anything.',
+    );
+  }
 
   if (kind === 'removal') {
     const oldChapterPath = chapterFullPath(profileLike, oldEntry);
@@ -1989,8 +2023,13 @@ function renderChangeLine(change, facts) {
 /**
  * The production halt-text formatter (D6 "Halt texts" — exact strings). `changes` is
  * `groupChanges(...).changes`; `checklists[i]` is `manualMigrationChecklist(profileLike,
- * changes[i].oldEntry, changes[i].newEntry)` (parallel arrays) — the checklist facts are where
- * the rendered derived paths come from, since this formatter itself takes no profileLike. With
+ * changes[i].oldEntry, changes[i].newEntry, vaultRelChaptersDir, provenanceActive)` (parallel
+ * arrays) — the checklist facts are where the rendered derived paths come from, since this
+ * formatter itself takes no profileLike. `vaultRelChaptersDir` and `provenanceActive` must be the
+ * SAME value for every entry in one run (this run's own wikilinks prefix and W1 ownership
+ * outcome — never re-decided per entry); an earlier revision of this very example showed a stale
+ * 3-argument call that predated both parameters, which is exactly the kind of drift this comment
+ * must not repeat the next time `manualMigrationChecklist` grows another one. With
  * `scanFailures`, renders the scan-failure variant instead, which EMBEDS the full original
  * migration record verbatim (R13-F3) so a context-free re-run can reconstruct every terminal
  * check from the text alone (R10-F5, R27-F3, R28-F1).
