@@ -854,10 +854,18 @@ function establishChapterGroupDir(profileLike, entry, deps) {
 // only decides WHERE the walk should start, `resolvePhysicalContainment` still performs the actual
 // symlink-substitution walk over whatever prefix comes back.
 //
+// Also returns `tailSegs` — the not-yet-existing segments beyond the ancestor (empty when
+// `exists: false`, since then nothing at all resolves and there is no ancestor to hang a tail off).
+// These segments cannot themselves contain a symlink (nothing along them exists yet, and a symlink
+// is itself a filesystem entry that would have to exist to be one), so the CALLER may append them,
+// unresolved, straight onto the ancestor's own resolved physical path to get the composite physical
+// identity of the not-yet-created directory — see the caller (round 6, finding 1) for why that
+// composite, not the bare ancestor, is what gate 4 must compare.
+//
 // @param {string[]} rootSegs  the canonical output root's own segments (never re-walked here)
 // @param {string[]} pathSegs  the candidate's full segments — MUST start with `rootSegs`
 // @param {object} deps
-// @returns {{ok: true, exists: false}|{ok: true, exists: true, path: string}|{ok: false, error: Error}}
+// @returns {{ok: true, exists: false, tailSegs: []}|{ok: true, exists: true, path: string, tailSegs: string[]}|{ok: false, error: Error}}
 function longestExistingAncestor(rootSegs, pathSegs, deps) {
   let lastExistingIdx = -1;
   for (let idx = rootSegs.length; idx <= pathSegs.length; idx++) {
@@ -870,8 +878,13 @@ function longestExistingAncestor(rootSegs, pathSegs, deps) {
     }
     lastExistingIdx = idx;
   }
-  if (lastExistingIdx < 0) return { ok: true, exists: false };
-  return { ok: true, exists: true, path: `/${pathSegs.slice(0, lastExistingIdx).join('/')}` };
+  if (lastExistingIdx < 0) return { ok: true, exists: false, tailSegs: [] };
+  return {
+    ok: true,
+    exists: true,
+    path: `/${pathSegs.slice(0, lastExistingIdx).join('/')}`,
+    tailSegs: pathSegs.slice(lastExistingIdx),
+  };
 }
 
 /**
@@ -1003,6 +1016,7 @@ function validateEntriesForCapture(profileLike, entries, deps) {
     // the one thing the leaf-missing case legitimately cannot supply is the leaf itself, not the
     // ancestors above it.
     let containmentTarget = assetDir;
+    let missingTailSegs = [];
     if (!assetDirExists) {
       const ancestor = longestExistingAncestor(outputRootResolved.segments, rawSegments(assetDir), deps);
       if (!ancestor.ok) {
@@ -1013,10 +1027,12 @@ function validateEntriesForCapture(profileLike, entries, deps) {
         );
       }
       // Nothing at all exists yet along this path (not even the canonical root itself) — nothing to
-      // check, and nothing to add to gate 4's cross-entry collision set (two directories that do not
-      // yet exist cannot physically collide).
+      // check, and nothing to add to gate 4's cross-entry collision set. This is still safe with no
+      // symlink in play anywhere on the path (nothing exists to BE one), gate 2's lexical-uniqueness
+      // check already guarantees physical uniqueness too in that case.
       if (!ancestor.exists) continue;
       containmentTarget = ancestor.path;
+      missingTailSegs = ancestor.tailSegs;
     }
 
     const result = resolvePhysicalContainment(canonicalOutputRoot, containmentTarget, containmentDeps);
@@ -1029,10 +1045,23 @@ function validateEntriesForCapture(profileLike, entries, deps) {
       }
       return haltResult('asset_dir_escapes_output_dir', result.halt.detail, { assetDir, slug: entry.slug });
     }
-    // A resolved ANCESTOR (the leaf itself still missing) is never added here — see the comment
-    // above: it cannot collide with anything yet, and two chapters legitimately sharing a group
-    // ancestor must not be manufactured into a false gate-4 collision.
-    if (assetDirExists) resolvedEntries.push({ entry, resolved: result.resolved });
+    // A not-yet-created leaf's physical identity for gate 4 is the resolved (symlink-substituted)
+    // EXISTING ancestor plus its still-missing tail, UNCHANGED — never the bare ancestor alone
+    // (round 6, finding 1: two different chapters resolving through two different symlinked group
+    // ancestors into the SAME not-yet-created leaf directory manufactured no collision at all under
+    // the bare-ancestor comparison, and the capture command run afterwards silently overwrote one
+    // chapter's assets with the other's). The tail cannot itself hide a further symlink — nothing
+    // along it exists yet, and a symlink is itself a filesystem entry that would have to exist to be
+    // one — so appending it unresolved is exact, not an approximation. This still keeps two
+    // chapters that only share an ANCESTOR (different tails) from colliding: their composites differ
+    // even though `result.resolved` alone is identical for both (see the round-5 sibling test above).
+    // `missingTailSegs` is empty here whenever `assetDirExists` is true (never reassigned off its
+    // `[]` initializer on that branch) and non-empty whenever it is false and reached this line
+    // (the `!ancestor.exists` case above already `continue`d, and `assetDir`'s own already-checked
+    // ENOENT rules out `ancestor.tailSegs` coming back empty) — so every entry that reaches here has
+    // a real resolved identity to contribute, and the push below is unconditional.
+    const resolved = missingTailSegs.length > 0 ? `${result.resolved}/${missingTailSegs.join('/')}` : result.resolved;
+    resolvedEntries.push({ entry, resolved });
   }
 
   // Gate 4 — pairwise PHYSICAL uniqueness, over gate 3's own resolved output (never re-derived) —
@@ -1067,12 +1096,20 @@ function haltResult(halt, message, extra) {
 // it can and should remove what it just wrote rather than leaving litter for the operator to find
 // later (codex, important #6 — "zero surviving temps"). A secondary failure here is swallowed —
 // if the temp cannot be removed, row 6's `prepared`/`orphan_temp` states and their repairs are
-// exactly the fallback for that.
+// exactly the fallback for that, for every EXISTING call site (all over `run/`). Returns whether
+// the unlink actually succeeded (round 6, finding 2): most callers still deliberately ignore it —
+// row 6 IS the fallback for those — but `sweepChapterProvenanceTemps` has no such fallback for its
+// `chapters/` temps (row 6's own `temps` observation is `run/`-only by design, see the module banner
+// above that function), so a caller with nothing to fall back on needs to know a removal it is
+// about to report as done did not actually happen, rather than silently believing its own report.
 function unlinkBestEffort(path, deps) {
   try {
     deps.unlinkSync(path);
+    return true;
   } catch {
-    /* best-effort only; row 6's repair states cover a temp this cleanup itself could not remove */
+    // best-effort only; row 6's repair states cover a temp this cleanup itself could not remove —
+    // for the callers that have that fallback; see above for the one that does not.
+    return false;
   }
 }
 
@@ -1871,18 +1908,29 @@ function listRegularFilesRecursive(assetDir, deps) {
  * chapter-write crash is suspected. Mutates nothing but the matched temps themselves — the run's
  * own token/record and every chapter's actual record are untouched.
  *
+ * `removed` lists only the temps this call actually confirmed gone; a temp whose leaf inspection
+ * passes (so it is safe to remove) but whose `unlinkSync` itself then fails (EACCES, a read-only
+ * mount, ...) is reported in `warnings` instead — NEVER silently folded into `removed` (round 6,
+ * finding 2: reporting an unremoved temp as removed is a false-clean this module has no other way
+ * to catch, since row 6's classifier never observes `chapters/` at all, by design — see the module
+ * banner above). This is a WARNING on an otherwise-`ok: true` result, not a halt: the temp is inert
+ * litter either way (this call commits nothing; the record it is leftover FROM already committed or
+ * failed independently, before this sweep ever ran), so one entry's stuck temp must not block every
+ * other entry's genuinely-removable temps from being cleaned up, or the operator from proceeding.
+ *
  * @param {object} profileLike
  * @param {Array<object>} entries
  * @param {object} [deps]
- * @returns {{ok: true, removed: string[]}|{ok: true, skipped: true, removed: []}|{ok: false, halts: Array<object>}}
+ * @returns {{ok: true, removed: string[], warnings: string[]}|{ok: true, skipped: true, removed: [], warnings: []}|{ok: false, halts: Array<object>}}
  */
 export function sweepChapterProvenanceTemps(profileLike, entries, deps) {
   const d = mergeDeps(deps);
   const ownership = assertProvenanceOwnership(profileLike, d);
-  if (ownership.skip) return { ok: true, skipped: true, removed: [] };
+  if (ownership.skip) return { ok: true, skipped: true, removed: [], warnings: [] };
   if (!ownership.ok) return { ok: false, halts: ownership.halts };
 
   const removed = [];
+  const warnings = [];
   for (const entry of entries) {
     // Gate 6's hierarchy walk over THIS entry's own chapters/(/<group>) ancestor chain — the same
     // check `recordChapterProvenance` runs before it ever opens this entry's leaf, so a symlinked
@@ -1903,14 +1951,22 @@ export function sweepChapterProvenanceTemps(profileLike, entries, deps) {
       if (tempLeaf.kind === 'hazard') return { ok: false, halts: [{ halt: 'provenance_hazard', ...tempLeaf }] };
       if (tempLeaf.kind === 'present') {
         closeBestEffort(tempLeaf.fd, d);
-        unlinkBestEffort(temp, d);
-        removed.push(temp);
+        // The leaf is already verified safe (no-follow, regular, single-linked) — a failure here is
+        // an ordinary OS write-permission/mount failure, never the tampering hazard the check above
+        // exists to catch, so it is reported rather than escalated to a halt (see the JSDoc above).
+        if (unlinkBestEffort(temp, d)) {
+          removed.push(temp);
+        } else {
+          warnings.push(
+            `leftover chapter-record temp '${temp}' could not be removed and remains on disk — remove it manually, or re-run this sweep once the underlying issue (e.g. permissions) is resolved.`,
+          );
+        }
       }
       // 'absent': vanished between listing and open (e.g. a concurrent sweep already removed it) —
       // nothing to remove, not an error.
     }
   }
-  return { ok: true, removed };
+  return { ok: true, removed, warnings };
 }
 
 // ---------------------------------------------------------------------------------------------

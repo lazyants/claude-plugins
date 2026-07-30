@@ -1103,13 +1103,61 @@ test('gate 3 (round 5, finding 1): a chapter whose own leaf does not exist yet, 
 test('gate 3/4 (round 5, finding 1): two sibling chapters sharing an existing group ancestor, both with not-yet-created leaves, do NOT manufacture a gate-4 collision', () => {
   withTempDir((dir) => {
     const profile = profileFor(dir);
-    // Both entries' ancestor walk resolves to the SAME existing 'admin' directory — that resolved
-    // ancestor must never be added to gate 4's cross-entry collision set (only a resolved, EXISTING
-    // leaf is), or two legitimately distinct, not-yet-created sibling chapters would falsely collide.
+    // Both entries' ancestor walk resolves to the SAME existing 'admin' directory — but their
+    // TAILS beyond it ('items' vs 'invoices') differ, so the composite physical identity gate 4
+    // actually compares (resolved ancestor + remaining tail — round 6, finding 1) still differs
+    // between them. It is the differing tail that keeps this from colliding, not an exemption for
+    // ancestors in general: two sibling chapters legitimately distinct under one shared ancestor
+    // must not be manufactured into a false collision.
     nodeFs.mkdirSync(join(profile.capture.output_dir, 'admin'), { recursive: true });
     const result = CR.openCaptureRun(
       profile,
       [{ slug: 'items', group: 'admin' }, { slug: 'invoices', group: 'admin' }],
+      null,
+      stubDepsNoIdentity(),
+    );
+    assert.equal(result.ok, true, JSON.stringify(result));
+  });
+});
+
+test('gate 3/4 (codex round 6, finding 1 — BLOCKER): two entries with NOT-YET-CREATED leaves, symlinked through DIFFERENT group ancestors into the SAME shared physical directory, with the SAME tail, must collide', () => {
+  withTempDir((dir) => {
+    const profile = profileFor(dir);
+    // Codex's repro: 'a' and 'b' are two DIFFERENT symlinked group ancestors that both point at the
+    // one physical 'shared' directory; neither entry's own leaf ('items') has been created yet.
+    // Before this fix, a missing leaf was resolved only as far as its existing ANCESTOR and then
+    // dropped from gate 4's collision set entirely (never re-added with its tail) — so this pair
+    // sailed through as ok:true, and the capture command run afterwards would have written both
+    // chapters' assets into the one physical 'shared/items' directory, one silently overwriting the
+    // other's images.
+    const shared = join(profile.capture.output_dir, 'shared');
+    nodeFs.mkdirSync(shared, { recursive: true });
+    nodeFs.symlinkSync(shared, join(profile.capture.output_dir, 'a'));
+    nodeFs.symlinkSync(shared, join(profile.capture.output_dir, 'b'));
+    const result = CR.openCaptureRun(
+      profile,
+      [{ slug: 'items', group: 'a' }, { slug: 'items', group: 'b' }],
+      null,
+      stubDepsNoIdentity(),
+    );
+    assert.equal(result.ok, false, JSON.stringify(result));
+    assert.equal(result.halts[0].halt, 'physical_asset_dir_collision', JSON.stringify(result));
+  });
+});
+
+test('gate 3/4 (codex round 6, finding 1): two entries with NOT-YET-CREATED leaves under two DIFFERENT, non-aliased physical ancestors, sharing the SAME tail name, do NOT collide', () => {
+  withTempDir((dir) => {
+    const profile = profileFor(dir);
+    // Negative control for the fix above: the two ancestors ('admin', 'billing') are genuinely
+    // distinct physical directories (no symlink between them) — only the TAIL segment name
+    // ('items') happens to match. The composite (resolved ancestor + tail) must still differ,
+    // since the ancestors themselves differ; a mutant that collides on tail-name alone, ignoring
+    // which ancestor it hangs off, must fail this.
+    nodeFs.mkdirSync(join(profile.capture.output_dir, 'admin'), { recursive: true });
+    nodeFs.mkdirSync(join(profile.capture.output_dir, 'billing'), { recursive: true });
+    const result = CR.openCaptureRun(
+      profile,
+      [{ slug: 'items', group: 'admin' }, { slug: 'items', group: 'billing' }],
       null,
       stubDepsNoIdentity(),
     );
@@ -2196,6 +2244,60 @@ test('sweepChapterProvenanceTemps: no leftover temps is a true no-op — the rea
   });
 });
 
+test('sweepChapterProvenanceTemps (codex round 6, finding 2 — IMPORTANT): a failed unlink is reported as a warning, never listed in removed, and the temp stays on disk', () => {
+  withTempDir((dir) => {
+    const profile = profileFor(dir);
+    const entry = { slug: 'items' };
+    const tempPath = writeChapterTemp(profile, entry);
+    // Before this fix, `unlinkBestEffort` swallowed the EACCES and the caller unconditionally
+    // pushed the path onto `removed` anyway — `{ok: true, removed: [tempPath]}` while the temp was
+    // still on disk. Row 6's classifier deliberately cannot see chapters/ temps at all (see the
+    // module banner above), so nothing else would ever contradict that false-clean report.
+    const deps = depsWithOverride({
+      unlinkSync: (p) => {
+        if (p === tempPath) {
+          const err = new Error('permission denied');
+          err.code = 'EACCES';
+          throw err;
+        }
+        return nodeFs.unlinkSync(p);
+      },
+    });
+    const result = CR.sweepChapterProvenanceTemps(profile, [entry], deps);
+    assert.equal(result.ok, true, JSON.stringify(result));
+    assert.deepEqual(result.removed, [], 'a temp whose unlink actually failed must never appear in removed');
+    assert.equal(result.warnings.length, 1, JSON.stringify(result));
+    assert.match(result.warnings[0], new RegExp(tempPath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')), 'the warning must name the specific temp that could not be removed');
+    assert.equal(nodeFs.existsSync(tempPath), true, 'the temp must genuinely still be on disk, matching the honest report');
+  });
+});
+
+test('sweepChapterProvenanceTemps (codex round 6, finding 2): one removable and one unremovable temp under the same entry — removed lists only the removed one, warnings names the other', () => {
+  withTempDir((dir) => {
+    const profile = profileFor(dir);
+    const entry = { slug: 'items' };
+    const removablePath = writeChapterTemp(profile, entry, '{}', 'cccccccc-0000-0000-0000-000000000000');
+    const stuckPath = writeChapterTemp(profile, entry, '{}', 'dddddddd-0000-0000-0000-000000000000');
+    const deps = depsWithOverride({
+      unlinkSync: (p) => {
+        if (p === stuckPath) {
+          const err = new Error('permission denied');
+          err.code = 'EACCES';
+          throw err;
+        }
+        return nodeFs.unlinkSync(p);
+      },
+    });
+    const result = CR.sweepChapterProvenanceTemps(profile, [entry], deps);
+    assert.equal(result.ok, true, JSON.stringify(result));
+    assert.deepEqual(result.removed, [removablePath]);
+    assert.equal(result.warnings.length, 1, JSON.stringify(result));
+    assert.match(result.warnings[0], new RegExp(stuckPath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+    assert.equal(nodeFs.existsSync(removablePath), false, 'the genuinely-removed temp must actually be gone');
+    assert.equal(nodeFs.existsSync(stuckPath), true, 'the stuck temp must genuinely still be on disk');
+  });
+});
+
 test('sweepChapterProvenanceTemps: a hazard on the chapters/ hierarchy halts rather than silently skipping', () => {
   withTempDir((dir) => {
     const profile = profileFor(dir);
@@ -2238,7 +2340,7 @@ test("sweepChapterProvenanceTemps: a skipped-ownership profile is a silent no-op
     };
     const entry = { slug: 'items' };
     const result = CR.sweepChapterProvenanceTemps(profile, [entry], realDeps());
-    assert.deepEqual(result, { ok: true, skipped: true, removed: [] });
+    assert.deepEqual(result, { ok: true, skipped: true, removed: [], warnings: [] });
   });
 });
 
