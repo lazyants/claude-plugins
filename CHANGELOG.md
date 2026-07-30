@@ -44,6 +44,22 @@ describes. Closes #362.
   erasure class — an unmatched inline-code opener, an unclosed or malformed comment, a backtick in a
   fence info string — instead of growing a special case per review round.
 
+### Changed
+- **Breaking, stated plainly: `manualMigrationChecklist` now requires a fifth argument.**
+  `manualMigrationChecklist(profileLike, oldEntry, newEntry, vaultRelChaptersDir, provenanceActive)`
+  throws a `TypeError` unless `provenanceActive` is an explicit boolean; it previously defaulted to
+  `false`. A four-argument call that used to return migration facts now throws before producing the
+  halt or the checklist. The default was removed rather than kept because it was the defect: the
+  twelfth fact kind was reachable by no caller outside the tests, so an active group migration
+  silently omitted the provenance-record move from both the checklist and the rendered halt, with
+  nothing red to catch it — the same shape as the extraction-seam defect this release also had to
+  fix. Passing `false` is a legitimate explicit answer for a run where provenance is not active and
+  reproduces every pre-1.12.0 checklist byte-for-byte; omitting the argument is not the same thing
+  and is refused. The version is 1.12.0 rather than 2.0.0 because this function is a skill asset
+  consumed by the workflow in `SKILL.md` — updated in the same release — and not a published
+  package API; an adopter who wrote their own script against `assets/lib/chapter-paths.mjs` is the
+  one case that breaks, and it breaks loudly rather than silently.
+
 ### Notes
 - The opening digest is RFC 8785 (JCS), implemented in-tree because this repository carries no
   `package.json` and no lockfile. Duplicate keys are compared as **decoded** names rather than raw

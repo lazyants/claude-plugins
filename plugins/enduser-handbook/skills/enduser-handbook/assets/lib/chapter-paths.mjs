@@ -1822,8 +1822,8 @@ function migrationRecordPath(profileLike, entry) {
  * (a profile that ran active once and later acquired an overlapping `capture.output_dir` still has
  * a populated `.provenance/` from a PRIOR run — see the plan's "guard is the W1 outcome and
  * explicitly NOT '<root>/' exists" rationale). REQUIRED whenever `kind` is not null — no default:
- * a caller passing anything other than a real `true`/`false` gets a thrown error, never a silently
- * incomplete checklist (see the guard below). This module has no in-repo caller outside its own
+ * a caller passing anything other than a real `true`/`false` gets a thrown `TypeError`, never a
+ * silently incomplete checklist (see the guard below). This module has no in-repo caller outside its own
  * tests, so there was no pre-1.12.0 real caller to preserve byte-for-byte by quietly defaulting —
  * the parameter is new in 1.12.0 either way — and a silent `false` default is exactly the defect
  * class this release's W5 blocker already closed once (an opt-in-only capability that nothing real
@@ -1840,7 +1840,7 @@ function migrationRecordPath(profileLike, entry) {
  * @param {string} [vaultRelChaptersDir]  wikilinks mode only — threaded into every
  *   currentIndexExpectedTarget call this function makes (see its own JSDoc, §1a)
  * @param {boolean} provenanceActive  this run's real W1 ownership outcome — REQUIRED whenever
- *   `kind` is not null (no default); throws when not strictly boolean
+ *   `kind` is not null (no default); throws a TypeError when not strictly boolean
  * @returns {Array<object>} fact descriptors, each carrying a `kind` tag
  */
 export function manualMigrationChecklist(profileLike, oldEntry, newEntry, vaultRelChaptersDir, provenanceActive) {
@@ -1852,10 +1852,15 @@ export function manualMigrationChecklist(profileLike, oldEntry, newEntry, vaultR
   // this release once — an opt-in-only capability (the twelfth fact kind, provenance-record) that
   // every test constructs by hand and no real caller has ever been written to pass. Requiring an
   // explicit boolean means a future real caller that forgets to thread this run's W1 ownership
-  // outcome through gets a thrown error immediately, not a checklist and halt text that silently
-  // omit the provenance-record move for an ACTIVE run.
+  // outcome through gets a thrown TypeError immediately, not a checklist and halt text that
+  // silently omit the provenance-record move for an ACTIVE run. TypeError, not the plain Error
+  // every other guard in this module throws (currentIndexExpectedTarget's three) — those report a
+  // malformed VALUE for an argument the caller did supply; this one reports the argument's own
+  // TYPE being wrong (including "missing", which arrives as `undefined`, itself the wrong type) —
+  // the distinction the `.d.mts` declaration for this function already promises, so the runtime
+  // must actually keep that promise rather than merely resemble it.
   if (typeof provenanceActive !== 'boolean') {
-    throw new Error(
+    throw new TypeError(
       "manualMigrationChecklist: provenanceActive must be an explicit boolean — this run's real " +
         "W1 ownership outcome (capture-record.mjs's assertProvenanceOwnership/openCaptureRun " +
         'result: active iff ownership.ok and not ownership.skip), never omitted and never ' +

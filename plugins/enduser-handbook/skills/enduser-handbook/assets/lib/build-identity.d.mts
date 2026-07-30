@@ -139,5 +139,11 @@ export declare function classifyBuildDelta(input: {
   recorded_source: IdentitySource | null;
 };
 
-/** Render a stored identity value for the report: `null` renders as the word `unknown`. */
+/**
+ * Render a stored identity value for the report: `null` renders as the word `unknown`. That word is
+ * not reserved — `unknown`/`none`/`n/a`/`null`/`N/A` are all grammar-legal values a real command can
+ * emit, so this function alone cannot distinguish "no identity obtained" from a real identity that
+ * happens to read the same; the caller's adjacent `source` field is the disambiguator. See the .mjs
+ * export's docstring for the measured detail.
+ */
 export declare function formatIdentityValue(value: string | null): string;

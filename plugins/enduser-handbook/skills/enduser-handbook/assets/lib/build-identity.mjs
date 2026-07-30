@@ -378,8 +378,14 @@ export function resolveClosingIdentity({ opening, captureOutcome, closing }) {
  *   carries no reason to explain);
  * - `value` and `source` disagree in either direction — `value !== null` requires `source` to be
  *   `'command'` or `'ui'`; `value === null` requires `source === 'unavailable'`;
- * - `detail` is present and not a string, or present and not already in `sanitizeDetail`'s canonical
- *   (already-clean, already-bounded) form.
+ * - `detail` is `undefined` (absent, or explicitly set to `undefined`) — `BuildIdentity.detail` is a
+ *   REQUIRED field (`string | null`, never omitted); every constructor of this shape in this module
+ *   (`resolveBuildIdentity`, `resolveClosingIdentity`) always assigns it via `sanitizeDetailOrNull` or
+ *   a literal, so a record reaching this check with `detail` missing did not come from either of
+ *   them — it is corrupt or hand-edited, and this is the shared reader both record kinds rely on to
+ *   catch that, not a legacy shape this module ever produced;
+ * - `detail` is present and not `null`, and either not a string or not already in `sanitizeDetail`'s
+ *   canonical (already-clean, already-bounded) form.
  *
  * @param {unknown} candidate
  * @returns {{ok: true}|{ok: false, reason: string}}
@@ -421,7 +427,10 @@ export function isValidBuildIdentityField(candidate) {
     return { ok: false, reason: 'value_source_mismatch' };
   }
 
-  if (detail !== undefined && detail !== null) {
+  if (detail === undefined) {
+    return { ok: false, reason: 'detail_missing' };
+  }
+  if (detail !== null) {
     if (typeof detail !== 'string') {
       return { ok: false, reason: 'detail_wrong_type' };
     }
@@ -573,6 +582,21 @@ export function classifyBuildDelta({ current, recordState, record }) {
  * Render a stored identity value for the operator-facing report — `null` (no value obtained, or no
  * record at all) renders as the word `unknown`; a real value renders as itself. Decision 3 lives
  * here rather than in frontmatter (frontmatter emission is deferred to 1.13.0).
+ *
+ * The sentinel word this function invents (`unknown`) is drawn from the SAME alphabet
+ * `IDENTITY_GRAMMAR` accepts, so it is not actually reserved: a project whose version command prints
+ * a literal `unknown` — or `none`, `n/a`, `null`, `N/A` — passes `normalizeBuildIdentity` and gets
+ * recorded as a REAL, resolved value with those exact contents (measured directly against this
+ * module: all five normalize successfully; only a bare `-` is rejected, and for the unrelated reason
+ * that the grammar's leading character must be alphanumeric). So this function alone cannot tell a
+ * row reporting "no identity was obtained" apart from a row reporting a real identity that happens to
+ * read the same. The disambiguator lives OUTSIDE this function, in the adjacent `source` column the
+ * caller renders next to it: a real `unknown` carries `source: 'command'` or `source: 'ui'`, while an
+ * absent one carries `source: 'unavailable'` (see `buildProvenanceReport` in capture-record.mjs, which
+ * always puts `value: formatIdentityValue(...)` next to a `source` field in the same row). A future
+ * change that drops `source` from a report row using this helper, or reuses this helper somewhere
+ * `source` is not also shown, silently breaks that assumption rather than visibly breaking it — this
+ * function has no way to protect against that itself.
  *
  * @param {string|null} value
  * @returns {string}

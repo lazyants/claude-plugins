@@ -52,10 +52,13 @@ capture:
 
   # Optional (new in 1.12.0). Build/version identity for the provenance records this plugin writes
   # under vault/handbook/.provenance — a root DERIVED from publish.chapters_dir below, never
-  # configured here (there is no publish.provenance_dir key). Absent, or {}, disables the command
-  # source entirely; the run/chapter records then carry value: null, source: "unavailable" rather
-  # than halting — every existing profile predates this key, so no build identity is ever mandatory.
-  # See SKILL.md's W2 preflight/resolution step for the full precedence order.
+  # configured here (there is no publish.provenance_dir key). Absent, or {}, disables the COMMAND
+  # source only — it does not by itself make the identity unavailable, because ui_read defaults to
+  # true, so the UI-read step still runs and W2 can ask for one even with no build_identity block
+  # at all. Nothing here ever halts: every existing profile predates this key, so a build identity
+  # is never mandatory, and value: null with source: "unavailable" is what you get once every
+  # enabled source has been exhausted. See SKILL.md's W2 preflight/resolution step, which is
+  # normative for the precedence order.
   build_identity:
     command: "docker compose exec -T app git describe --tags --always"   # exact, copy-pasteable; run once per capture run
     ui_read: true                   # opt-out fallback (this IS the default): falls back to an LLM read of the

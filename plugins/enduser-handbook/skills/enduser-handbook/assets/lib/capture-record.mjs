@@ -541,15 +541,15 @@ function openLeafNoFollow(absPath, flags, deps) {
   try {
     stat = deps.fstatSync(fd);
   } catch {
-    deps.closeSync(fd);
+    closeBestEffort(fd, deps);
     return { kind: 'hazard', reason: 'inspection_failure', path: absPath };
   }
   if (!stat.isFile()) {
-    deps.closeSync(fd);
+    closeBestEffort(fd, deps);
     return { kind: 'hazard', reason: 'non_regular', path: absPath };
   }
   if (stat.nlink !== 1) {
-    deps.closeSync(fd);
+    closeBestEffort(fd, deps);
     return { kind: 'hazard', reason: 'hard_link', path: absPath };
   }
   return { kind: 'present', fd, stat };
@@ -569,15 +569,23 @@ function readAllFromFd(fd, deps) {
 // Read a leaf file's full bytes through gate 6 (no-follow, regular, nlink===1, same-descriptor
 // read) — the one open/read/close body every leaf reader shares, differing only in what they do
 // with the resulting bytes. Returns {kind:'absent'} | {kind:'hazard', reason, path} |
-// {kind:'present', bytes}.
+// {kind:'present', bytes}. `readAllFromFd`'s `readSync` was previously unguarded — a mid-read EIO
+// escaped this function uncaught (codex round 3), even though every OTHER hazard in this module is
+// a returned result, never a throw. Every caller along the chain (readRunRecordFromDisk,
+// readChapterRecordFromDisk, and their own callers) already dispatches on `.kind === 'hazard'`, so
+// converting a read failure here into that SAME kind needs no change anywhere downstream.
 function readLeafBytes(absPath, deps) {
   const opened = openLeafNoFollow(absPath, fs.constants.O_RDONLY, deps);
   if (opened.kind !== 'present') return opened;
+  let bytes;
   try {
-    return { kind: 'present', bytes: readAllFromFd(opened.fd, deps) };
-  } finally {
-    deps.closeSync(opened.fd);
+    bytes = readAllFromFd(opened.fd, deps);
+  } catch {
+    closeBestEffort(opened.fd, deps);
+    return { kind: 'hazard', reason: 'inspection_failure', path: absPath };
   }
+  closeBestEffort(opened.fd, deps);
+  return { kind: 'present', bytes };
 }
 
 function readLeafText(absPath, deps) {
@@ -988,6 +996,22 @@ function unlinkBestEffort(path, deps) {
   }
 }
 
+// Best-effort `closeSync` for a descriptor whose caller ALREADY has a definitive result (or error)
+// to return — a symlink/non-regular/hard-link hazard already classified in `openLeafNoFollow`, a
+// write failure already caught and about to become a halt, or a probe read whose bytes are already
+// in hand. A throwing `close()` here must never escape uncaught and must never MASK the result the
+// caller is already holding: a `finally`/`catch` body that itself throws SILENTLY REPLACES whatever
+// exception was already propagating (codex round 3, "a cleanup closeSync failure survives") — so
+// every one of those call sites swallows a close failure here rather than letting `deps.closeSync`
+// run unguarded.
+function closeBestEffort(fd, deps) {
+  try {
+    deps.closeSync(fd);
+  } catch {
+    /* best-effort only; see the comment above — the caller's own result/error already stands */
+  }
+}
+
 // `writeSync` returning fewer bytes than requested is a real possibility (a full disk, a pipe, an
 // interrupted write) — not merely a hypothetical interposed test seam — and every writer in this
 // module ignored the returned byte count outright: a seam that persists one byte and returns 1 let
@@ -1093,12 +1117,21 @@ export function openCaptureRun(profileLike, entries, openingObservation, deps) {
     // `try` had only a `finally` closing the fd, never a `catch`, so an ordinary write failure
     // became an UNCAUGHT exception instead of the returned `{ok:false, halts}` this module's
     // contract promises everywhere else, and the just-created (O_CREAT|O_EXCL) token was left
-    // behind with no caller ever having a chance to clean it up.
-    d.closeSync(fd);
+    // behind with no caller ever having a chance to clean it up. Best-effort: this closeSync
+    // failing must never MASK the write failure we are about to report (codex round 3).
+    closeBestEffort(fd, d);
     unlinkBestEffort(tokenPath, d);
     return haltResult('provenance_hazard', `cannot write the pending token: ${err.reason ?? err.code ?? err.message}`, { path: tokenPath });
   }
-  d.closeSync(fd);
+  try {
+    d.closeSync(fd);
+  } catch (err) {
+    // The token was fully written (writeFull succeeded) but a failing close means it cannot be
+    // trusted as durably flushed — untrust it outright rather than returning ok:true over an
+    // uncertain token (some filesystems can fail a close after acknowledging the write).
+    unlinkBestEffort(tokenPath, d);
+    return haltResult('provenance_hazard', `cannot close the pending token after writing it: ${err.code ?? err.message}`, { path: tokenPath });
+  }
 
   return { ok: true, runState };
 }
@@ -1188,20 +1221,24 @@ function tempRunRecordPath(profileLike, deps) {
   return posixJoin(runNamespaceDir(profileLike), `${RUN_RECORD_NAME}.${deps.randomUUID()}.tmp`);
 }
 
+// Returns {ok: true, temps: string[]} | {ok: false, hazard: {kind:'hazard', reason, path}} — never
+// throws. A non-ENOENT `readdirSync` failure (EIO, ...) previously rethrew uncaught (codex round
+// 3): this is called from `closeCaptureRun` AFTER its rename has already committed the run record,
+// so a caller must be able to distinguish "no temps to report" from "could not find out" rather
+// than crash either way.
 function listMatchingTemps(profileLike, deps) {
   const dir = runNamespaceDir(profileLike);
   let entries;
   try {
     entries = deps.readdirSync(dir);
   } catch (err) {
-    if (err.code === 'ENOENT') return [];
-    throw err;
+    if (err.code === 'ENOENT') return { ok: true, temps: [] };
+    return { ok: false, hazard: { kind: 'hazard', reason: 'inspection_failure', path: dir } };
   }
   const prefix = `${RUN_RECORD_NAME}.`;
   const suffix = '.tmp';
-  return entries
-    .filter((name) => name.startsWith(prefix) && name.endsWith(suffix))
-    .map((name) => posixJoin(dir, name));
+  const temps = entries.filter((name) => name.startsWith(prefix) && name.endsWith(suffix)).map((name) => posixJoin(dir, name));
+  return { ok: true, temps };
 }
 
 /**
@@ -1333,13 +1370,23 @@ export function closeCaptureRun(profileLike, runState, captureOutcome, closingOb
     writeFull(fd, Buffer.from(recordText, 'utf8'), d);
   } catch (err) {
     if (fd !== undefined) {
-      d.closeSync(fd);
+      // Best-effort: this closeSync failing must never MASK the write failure we are about to
+      // report (a throwing catch body would silently replace it — codex round 3).
+      closeBestEffort(fd, d);
       unlinkBestEffort(tempPath, d); // a create that succeeded but a write that failed leaves a
       // partial temp on disk — remove it rather than leaving litter for the failure path to answer for.
     }
     return haltResult('provenance_hazard', `cannot write the closing temp: ${err.code ?? err.message}`, { path: tempPath });
   }
-  d.closeSync(fd);
+  try {
+    d.closeSync(fd);
+  } catch (err) {
+    // A close failure right here means the fully-written temp is not yet renamed to its final
+    // name — nothing durable has been committed at this point, so this is an ordinary halt (with
+    // best-effort cleanup of the temp), not the post-commit case the cleanup loop below answers to.
+    unlinkBestEffort(tempPath, d);
+    return haltResult('provenance_hazard', `cannot close the closing temp after writing it: ${err.code ?? err.message}`, { path: tempPath });
+  }
 
   try {
     d.renameSync(tempPath, finalPath);
@@ -1352,13 +1399,25 @@ export function closeCaptureRun(profileLike, runState, captureOutcome, closingOb
   // Cleanup: every leftover matching temp first, the token last — the same order and for the same
   // reason as the row-6 repairs. Both are best-effort: a leftover temp is still classified
   // correctly by recoverProvenanceState, and the token may already be gone under a concurrent or
-  // retried close, which is not this call's failure.
-  for (const temp of listMatchingTemps(profileLike, d)) {
-    unlinkBestEffort(temp, d);
+  // retried close, which is not this call's failure. The rename above has ALREADY committed the run
+  // record durably — a hazard while merely LISTING leftover temps for cleanup must never be
+  // reported as if nothing was written (codex round 3): it is a WARNING on this still-`ok:true`
+  // result, never a halt, and any leftover temp is still correctly seen by `recoverProvenanceState`
+  // on its own next run regardless of whether this cleanup pass could enumerate it.
+  const warnings = [];
+  const tempsListed = listMatchingTemps(profileLike, d);
+  if (tempsListed.ok) {
+    for (const temp of tempsListed.temps) {
+      unlinkBestEffort(temp, d);
+    }
+  } else {
+    warnings.push(
+      `the run record committed successfully, but leftover temps under 'run/' could not be listed for cleanup (${tempsListed.hazard.reason} at '${tempsListed.hazard.path}') — run recoverProvenanceState to check for and remove any leftover temp.`,
+    );
   }
   unlinkBestEffort(tokenPath, d);
 
-  return { ok: true, runState: { ...runState, closed: true }, warnings: [] };
+  return { ok: true, runState: { ...runState, closed: true }, warnings };
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1629,12 +1688,21 @@ export function recordChapterProvenance(profileLike, acceptedEntries, entry, cha
     writeFull(fd, Buffer.from(recordText, 'utf8'), d);
   } catch (err) {
     if (fd !== undefined) {
-      d.closeSync(fd);
+      // Best-effort: this closeSync failing must never MASK the write failure we are about to
+      // report (codex round 3).
+      closeBestEffort(fd, d);
       unlinkBestEffort(tempPath, d);
     }
     return { ok: false, halts: [{ halt: 'provenance_hazard', reason: err.reason ?? 'write_failed', path: tempPath, detail: err.message }] };
   }
-  d.closeSync(fd);
+  try {
+    d.closeSync(fd);
+  } catch (err) {
+    // Nothing durable has been committed yet at this point (the rename below hasn't run) — an
+    // ordinary halt, with best-effort cleanup of the still-fully-written-but-unclosed temp.
+    unlinkBestEffort(tempPath, d);
+    return { ok: false, halts: [{ halt: 'provenance_hazard', reason: 'close_failed', path: tempPath, detail: err.message }] };
+  }
   try {
     d.renameSync(tempPath, finalPath);
   } catch (err) {
@@ -1883,11 +1951,17 @@ function inspectTokenAndRecordAndTemps(profileLike, deps) {
     recordValue = recordRead.record;
   }
 
-  const temps = listMatchingTemps(profileLike, deps);
+  // Recovery is read-only (it commits nothing), so a listing hazard here is an ordinary hazard —
+  // propagated through the same `{hazard}` discriminator this function already uses for the
+  // token/record reads above, which its own callers (`recoverProvenanceState`, `repair`) already
+  // dispatch on.
+  const tempsListed = listMatchingTemps(profileLike, deps);
+  if (!tempsListed.ok) return { hazard: tempsListed.hazard };
+  const temps = tempsListed.temps;
   for (const temp of temps) {
     const tempLeaf = openLeafNoFollow(temp, fs.constants.O_RDONLY, deps);
     if (tempLeaf.kind === 'hazard') return { hazard: tempLeaf };
-    if (tempLeaf.kind === 'present') deps.closeSync(tempLeaf.fd);
+    if (tempLeaf.kind === 'present') closeBestEffort(tempLeaf.fd, deps);
   }
 
   return {

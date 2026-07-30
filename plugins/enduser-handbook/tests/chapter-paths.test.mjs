@@ -5140,39 +5140,45 @@ test('renderManualMigrationHalt: with provenanceActive=false, a group-change lin
 // all — the same defect shape as the W5 blocker this release already closed once. These four pin
 // the fail-loud guard that closes it: provenanceActive is now REQUIRED (no default) whenever the
 // delta kind is not null, so a caller that forgets to thread this run's real W1 ownership outcome
-// through gets a thrown error immediately, never a checklist and halt text that silently omit the
-// provenance-record move. The untouched-entry / pure-addition / flat-removal tests above (kind ===
-// null) are deliberately UNCHANGED by this guard — see "an untouched entry never reaches the
+// through gets a thrown TypeError immediately, never a checklist and halt text that silently omit
+// the provenance-record move. The untouched-entry / pure-addition / flat-removal tests above (kind
+// === null) are deliberately UNCHANGED by this guard — see "an untouched entry never reaches the
 // guard" below for why that is the guard's own contract, not an oversight.
-test('fail-loud guard: provenanceActive omitted on a REMOVAL throws — no silent default', () => {
+//
+// Round-4 codex mutation audit: a mutant that swapped the guard's `throw new TypeError(...)` back
+// to plain `Error` (matching the module's OTHER guards, which are intentionally plain Error —
+// see the guard's own comment for why this one is different) survived all four tests below when
+// they asserted only the MESSAGE via a RegExp — `assert.throws(fn, /regex/)` never inspects the
+// thrown value's constructor. `chapter-paths.d.mts` specifically promises a `TypeError` here (not
+// merely "throws"), so the class itself is part of the contract and needs its own assertion.
+function assertProvenanceGuardThrows(fn) {
+  assert.throws(fn, (err) => {
+    assert.ok(err instanceof TypeError, `expected a TypeError, got ${err.constructor.name}`);
+    assert.match(err.message, /provenanceActive must be an explicit boolean/);
+    return true;
+  });
+}
+
+test('fail-loud guard: provenanceActive omitted on a REMOVAL throws a TypeError — no silent default', () => {
   const old = entry({ slug: 'orders', group: 'admin', group_title: 'Admin' });
-  assert.throws(() => manualMigrationChecklist(profile(), old, null), /provenanceActive must be an explicit boolean/);
+  assertProvenanceGuardThrows(() => manualMigrationChecklist(profile(), old, null));
 });
 
-test('fail-loud guard: provenanceActive omitted on a GROUP-CHANGE throws', () => {
+test('fail-loud guard: provenanceActive omitted on a GROUP-CHANGE throws a TypeError', () => {
   const old = entry({ slug: 'orders', group: 'admin', group_title: 'Admin' });
   const next = entry({ slug: 'orders', group: 'billing', group_title: 'Billing' });
-  assert.throws(
-    () => manualMigrationChecklist(profile(), old, next),
-    /provenanceActive must be an explicit boolean/,
-  );
+  assertProvenanceGuardThrows(() => manualMigrationChecklist(profile(), old, next));
 });
 
-test('fail-loud guard: provenanceActive omitted on a TITLE-ONLY change throws too — the guard is uniform across every real delta kind, even one that never reads the value', () => {
+test('fail-loud guard: provenanceActive omitted on a TITLE-ONLY change throws a TypeError too — the guard is uniform across every real delta kind, even one that never reads the value', () => {
   const old = entry({ slug: 'orders', group: 'admin', group_title: 'Admin' });
   const next = entry({ slug: 'orders', group: 'admin', group_title: 'Orders (renamed)' });
-  assert.throws(
-    () => manualMigrationChecklist(profile(), old, next),
-    /provenanceActive must be an explicit boolean/,
-  );
+  assertProvenanceGuardThrows(() => manualMigrationChecklist(profile(), old, next));
 });
 
-test('fail-loud guard: a non-boolean provenanceActive (a truthy string) throws the same as omission', () => {
+test('fail-loud guard: a non-boolean provenanceActive (a truthy string) throws a TypeError the same as omission', () => {
   const old = entry({ slug: 'orders', group: 'admin', group_title: 'Admin' });
-  assert.throws(
-    () => manualMigrationChecklist(profile(), old, null, undefined, 'yes'),
-    /provenanceActive must be an explicit boolean/,
-  );
+  assertProvenanceGuardThrows(() => manualMigrationChecklist(profile(), old, null, undefined, 'yes'));
 });
 
 // =================================================================================================

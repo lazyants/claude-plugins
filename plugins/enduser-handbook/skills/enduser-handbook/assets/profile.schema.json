@@ -120,7 +120,7 @@
         "command": { "type": "string" },
         "build_identity": {
           "type": "object",
-          "description": "Optional, new in 1.12.0. Configures how W2 resolves a build/version identity for the provenance records written under <publish.chapters_dir>/.provenance (see SKILL.md's W2 preflight/resolution step). Absent or {} is legal — every profile predates this key — and simply disables the command source; the run and chapter records then carry value: null, source: \"unavailable\". additionalProperties is deliberately closed: command and ui_read are the only two keys this release defines.",
+          "description": "Optional, new in 1.12.0. Configures how W2 resolves a build/version identity for the provenance records written under <publish.chapters_dir>/.provenance (see SKILL.md's W2 preflight/resolution step). Absent or {} is legal — every profile predates this key — and disables the COMMAND source only. It does NOT by itself produce an unavailable identity: ui_read defaults to true, so the UI-read step still runs unless ui_read is explicitly false, and W2 can return needs_ui_read for a profile carrying no build_identity block at all. value: null with source: \"unavailable\" is reached only once every enabled source has been exhausted — see SKILL.md's W2 resolution step, which is normative for the precedence order. additionalProperties is deliberately closed: command and ui_read are the only two keys this release defines.",
           "additionalProperties": false,
           "properties": {
             "command": {

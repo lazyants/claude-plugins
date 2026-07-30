@@ -1511,6 +1511,150 @@ test('closeCaptureRun: BLOCKER 4 (codex review) — a SHORT writeSync must not c
   });
 });
 
+// =================================================================================================
+// BLOCKER (codex round 3) — ordinary I/O failures must never throw uncaught, including AFTER a
+// durable commit, and a cleanup close failure must never MASK a more important error already being
+// reported. `listMatchingTemps` (the readdirSync-based helper under `run/`) previously rethrew any
+// non-ENOENT errno; `closeCaptureRun` called it UNGUARDED after its rename had already committed
+// `current.json`, and the SAME helper was unguarded in `recoverProvenanceState`'s recovery path.
+// Separately, `readAllFromFd`'s `readSync` was unguarded, and every write-failure catch block's own
+// cleanup `closeSync` could itself throw and silently REPLACE the pending exception it was
+// cleaning up after (a throwing `catch`/`finally` body overrides whatever was already propagating).
+// =================================================================================================
+
+test('closeCaptureRun: BLOCKER (codex round 3) — a post-commit listing hazard is a WARNING on ok:true, never implies nothing was written', () => {
+  withTempDir((dir) => {
+    const profile = profileFor(dir);
+    const opened = CR.openCaptureRun(profile, [], null, stubDepsNoIdentity());
+    assert.equal(opened.ok, true);
+    const runDirPath = runDir(profile);
+    const boom = Object.assign(new Error('injected listing failure'), { code: 'EIO' });
+    const deps = depsWithOverride({
+      readdirSync: (p, ...rest) => {
+        if (p === runDirPath) throw boom;
+        return nodeFs.readdirSync(p, ...rest);
+      },
+      runIdentityCommand: () => ({ ok: false, detail: 'not configured' }),
+    });
+    assert.doesNotThrow(() => {
+      const result = CR.closeCaptureRun(profile, opened.runState, { ok: true }, null, deps);
+      assert.equal(result.ok, true, `the rename already committed the record — this must stay ok:true, not become a halt; got ${JSON.stringify(result)}`);
+      assert.equal(result.warnings.length, 1, JSON.stringify(result.warnings));
+      assert.match(result.warnings[0], /committed successfully/);
+    });
+    assert.equal(nodeFs.existsSync(recordPathFor(profile)), true, 'the run record must be durably committed despite the cleanup hazard');
+  });
+});
+
+test('recoverProvenanceState: BLOCKER (codex round 3) — a listing hazard while enumerating temps returns a halt, never an uncaught throw', () => {
+  withTempDir((dir) => {
+    const profile = profileFor(dir);
+    const opened = CR.openCaptureRun(profile, [], null, stubDepsNoIdentity());
+    assert.equal(opened.ok, true);
+    const runDirPath = runDir(profile);
+    const boom = Object.assign(new Error('injected listing failure'), { code: 'EIO' });
+    const deps = depsWithOverride({
+      readdirSync: (p, ...rest) => {
+        if (p === runDirPath) throw boom;
+        return nodeFs.readdirSync(p, ...rest);
+      },
+      runIdentityCommand: () => ({ ok: false, detail: 'not configured' }),
+    });
+    assert.doesNotThrow(() => {
+      const result = CR.recoverProvenanceState(profile, deps);
+      assert.equal(result.ok, false, JSON.stringify(result));
+      assert.equal(result.halts[0].halt, 'provenance_hazard');
+    });
+  });
+});
+
+test('closeCaptureRun: BLOCKER (codex round 3) — a closeSync failure after a WRITE failure must not mask the write-failure halt', () => {
+  withTempDir((dir) => {
+    const profile = profileFor(dir);
+    const opened = CR.openCaptureRun(profile, [], null, stubDepsNoIdentity());
+    assert.equal(opened.ok, true);
+    const writeBoom = Object.assign(new Error('injected write failure'), { code: 'EIO' });
+    const closeBoom = Object.assign(new Error('injected close failure'), { code: 'EBADF' });
+    const deps = depsWithOverride({
+      writeSync: () => { throw writeBoom; },
+      closeSync: () => { throw closeBoom; },
+      runIdentityCommand: () => ({ ok: false, detail: 'not configured' }),
+    });
+    const result = CR.closeCaptureRun(profile, opened.runState, { ok: true }, null, deps);
+    assert.equal(result.ok, false, JSON.stringify(result));
+    assert.match(result.halts[0].message, /injected write failure/, `the write failure must survive a subsequent close failure; got ${JSON.stringify(result)}`);
+  });
+});
+
+test('closeCaptureRun: BLOCKER (codex round 3) — a closeSync failure AFTER a successful write (before rename) halts rather than committing an unclosed temp', () => {
+  withTempDir((dir) => {
+    const profile = profileFor(dir);
+    const opened = CR.openCaptureRun(profile, [], null, stubDepsNoIdentity());
+    assert.equal(opened.ok, true);
+    let tempFd = null;
+    const boom = Object.assign(new Error('injected close failure'), { code: 'EBADF' });
+    const deps = depsWithOverride({
+      openSync: (p, ...rest) => {
+        const fd = nodeFs.openSync(p, ...rest);
+        if (p.endsWith('.tmp')) tempFd = fd;
+        return fd;
+      },
+      closeSync: (fd) => {
+        if (fd === tempFd) {
+          tempFd = null; // fail only this ONE close, not every close for the rest of the test
+          throw boom;
+        }
+        return nodeFs.closeSync(fd);
+      },
+      runIdentityCommand: () => ({ ok: false, detail: 'not configured' }),
+    });
+    const result = CR.closeCaptureRun(profile, opened.runState, { ok: true }, null, deps);
+    assert.equal(result.ok, false, `a close failure right after a successful write must halt, not commit; got ${JSON.stringify(result)}`);
+    assert.equal(nodeFs.existsSync(recordPathFor(profile)), false, 'nothing must be committed — the rename never got a chance to run');
+  });
+});
+
+test('closeCaptureRun: BLOCKER (codex round 3) — a closeSync failure while classifying a non-regular token hazard must not mask the hazard classification', () => {
+  withTempDir((dir) => {
+    const profile = profileFor(dir);
+    const opened = CR.openCaptureRun(profile, [], null, stubDepsNoIdentity());
+    assert.equal(opened.ok, true);
+    // Replace the token with a DIRECTORY — openLeafNoFollow's non-regular-file hazard branch.
+    nodeFs.unlinkSync(tokenPathFor(profile));
+    nodeFs.mkdirSync(tokenPathFor(profile));
+    const boom = Object.assign(new Error('injected close failure'), { code: 'EBADF' });
+    const deps = depsWithOverride({
+      closeSync: () => { throw boom; },
+      runIdentityCommand: () => ({ ok: false, detail: 'not configured' }),
+    });
+    assert.doesNotThrow(() => {
+      const result = CR.closeCaptureRun(profile, opened.runState, { ok: true }, null, deps);
+      assert.equal(result.ok, false, JSON.stringify(result));
+      assert.equal(result.halts[0].halt, 'provenance_hazard');
+      assert.equal(result.halts[0].reason, 'non_regular', JSON.stringify(result));
+    });
+  });
+});
+
+test('recordChapterProvenance: BLOCKER (codex round 3) — a readSync failure while reading the run record returns a halt rather than throwing', () => {
+  withTempDir((dir) => {
+    const profile = profileFor(dir);
+    const entry = { slug: 'items' };
+    const { runId, assetDir, chapterFile } = runToCommitted(profile, entry, { 'a.png': 'v1' }, { 'a.png': 'v2' });
+    const boom = Object.assign(new Error('injected read failure'), { code: 'EIO' });
+    const deps = {
+      ...stubDepsNoIdentity(),
+      expectedAssets: stubExpectedAssetsFor(assetDir, ['a.png']),
+      readSync: () => { throw boom; },
+    };
+    assert.doesNotThrow(() => {
+      const result = CR.recordChapterProvenance(profile, [entry], entry, chapterFile, runId, deps);
+      assert.equal(result.ok, false, JSON.stringify(result));
+      assert.equal(result.halts[0].halt, 'provenance_hazard');
+    });
+  });
+});
+
 test('closeCaptureRun: a temp-write failure and a rename failure both leave ZERO surviving temps', () => {
   withTempDir((dir) => {
     const profile = profileFor(dir);
@@ -2091,6 +2235,21 @@ function scanJsTokens(source) {
       i++;
       continue;
     }
+    // [round 3, codex] `[`/`]` — needed to detect bracket/computed member access
+    // (`fs["writeFileSync"]`), which the dot-based `dotBase` tracking can never see. Sets
+    // `prevSignificant`/`precededByDot`/`lastIdent` exactly as the pre-existing generic fallback
+    // branch already did for these two characters (this is purely ADDITIVE: it only adds a token
+    // for something that previously fell through unrecorded, so every OTHER existing check —
+    // including the `]` value the regex-vs-division disambiguation below already inspects — is
+    // unaffected).
+    if (ch === '[' || ch === ']') {
+      tokens.push({ kind: 'punct', text: ch });
+      prevSignificant = ch;
+      precededByDot = false;
+      lastIdent = null;
+      i++;
+      continue;
+    }
     if (ch === '/') {
       // Regex-vs-division: a '/' starting a regex cannot follow an identifier/number/string/')'/']'.
       const regexAllowed = !['ident', 'str', ')', ']'].includes(prevSignificant);
@@ -2179,32 +2338,165 @@ function findImportStatements(tokens) {
   return statements;
 }
 
-function findImportSpecifiersFromTokens(tokens) {
-  return findImportStatements(tokens).map((s) => s.specifier);
+// [round 3, codex] Parses ONE import clause's raw text (from just after the `import` keyword,
+// through its specifier string) into every LOCAL NAME it introduces — default, namespace, and/or
+// named (optionally `as`-renamed) — in whichever combination the statement uses. Returns null when
+// the clause is not well-formed enough to parse (a syntax error elsewhere is not this policy's
+// concern, matching findImportStatements' own "not well-formed" bail-out). Scans the RAW SOURCE
+// (punctuation like `{`,`}`,`,`,`*`,`=` is not tokenized by scanJsTokens, unlike `[`/`]` above).
+function parseImportClause(source, fromIndex) {
+  const n = source.length;
+  let i = fromIndex;
+
+  function skipTrivia() {
+    while (i < n) {
+      if (/\s/.test(source[i])) { i++; continue; }
+      if (source[i] === '/' && source[i + 1] === '/') { i += 2; while (i < n && source[i] !== '\n') i++; continue; }
+      if (source[i] === '/' && source[i + 1] === '*') { i += 2; while (i < n && !(source[i] === '*' && source[i + 1] === '/')) i++; i += 2; continue; }
+      break;
+    }
+  }
+  function readIdentifier() {
+    skipTrivia();
+    const start = i;
+    while (i < n && /[A-Za-z0-9_$]/.test(source[i])) i++;
+    return i > start ? source.slice(start, i) : null;
+  }
+  function readNamedClause(named) {
+    skipTrivia();
+    if (source[i] !== '{') return false;
+    i++;
+    while (true) {
+      skipTrivia();
+      if (source[i] === '}') { i++; return true; }
+      if (source[i] === ',') { i++; continue; }
+      const imported = readIdentifier();
+      if (imported === null) return false;
+      let local = imported;
+      const beforeAs = i;
+      const maybeAs = readIdentifier();
+      if (maybeAs === 'as') {
+        const renamed = readIdentifier();
+        if (renamed === null) return false;
+        local = renamed;
+      } else {
+        i = beforeAs; // not 'as' — put the scanner back before whatever we just consumed
+      }
+      named.push({ imported, local });
+      skipTrivia();
+      if (source[i] === ',') { i++; continue; }
+      if (source[i] === '}') { i++; return true; }
+      return false;
+    }
+  }
+
+  const named = [];
+  let defaultName = null;
+  let namespaceName = null;
+
+  skipTrivia();
+  if (source[i] === "'" || source[i] === '"') {
+    return { defaultName, namespaceName, named }; // side-effect-only import — no bindings at all
+  }
+  if (source[i] === '*') {
+    i++;
+    if (readIdentifier() !== 'as') return null;
+    namespaceName = readIdentifier();
+    if (namespaceName === null) return null;
+    return { defaultName, namespaceName, named };
+  }
+  if (source[i] !== '{') {
+    defaultName = readIdentifier();
+    if (defaultName === null) return null;
+    skipTrivia();
+    if (source[i] === ',') {
+      i++;
+      skipTrivia();
+      if (source[i] === '*') {
+        i++;
+        if (readIdentifier() !== 'as') return null;
+        namespaceName = readIdentifier();
+        if (namespaceName === null) return null;
+        return { defaultName, namespaceName, named };
+      }
+      if (!readNamedClause(named)) return null;
+    }
+    return { defaultName, namespaceName, named };
+  }
+  if (!readNamedClause(named)) return null;
+  return { defaultName, namespaceName, named };
 }
 
-// IMPORTANT 4 (codex review): true iff the import clause between the `import` keyword and its
-// specifier string contains a top-level '{' — the NAMED/braced clause form (`import { a } from
-// 'x'`, `import a, { b } from 'x'`) as opposed to a namespace/default/side-effect-only form
-// (`import * as ns from 'x'`, `import x from 'x'`, `import 'x'`). Scans raw source (punctuation
-// like '{' is never itself tokenized by scanJsTokens) rather than tokens. Used to ban
-// `import { writeFileSync } from 'node:fs'` outright: the real module's only legitimate `node:fs`
-// import is the namespace form (`import * as fs from 'node:fs'`), and a named import destructures a
-// real fs function directly into module scope — a binding with no `fs.` prefix at all, invisible to
-// the dotBase-based direct-call check below no matter how it is later invoked.
-function importClauseIsNamed(source, importTokenEnd) {
-  let i = importTokenEnd;
+// [round 3, codex] Scans forward for `const|let|var {<prop>[: <alias>], ...} = <name>` — object
+// destructuring directly off a namespace-bound name (`const {writeFileSync} = fs;`). Each
+// destructured property becomes a fresh LOCAL BINDING equally capable of reaching the real fs
+// function it names — the dot/bracket-access checks can never see it once destructured — so every
+// non-allowed destructured name is tracked the SAME way a simple-assignment alias is: banned only
+// if LATER called bare under its own (possibly renamed) name. A hand-rolled, bounded scanner in the
+// same spirit as chapter-paths.mjs's own markdown scanners — real parsing is not required because
+// the only question is "does this exact shape appear", not full grammar coverage.
+function findFsDestructuredBindings(source, namespaceNames) {
   const n = source.length;
-  while (i < n) {
-    const ch = source[i];
-    if (/\s/.test(ch)) { i++; continue; }
-    if (ch === '/' && source[i + 1] === '/') { i += 2; while (i < n && source[i] !== '\n') i++; continue; }
-    if (ch === '/' && source[i + 1] === '*') { i += 2; while (i < n && !(source[i] === '*' && source[i + 1] === '/')) i++; i += 2; continue; }
-    if (ch === '{') return true;
-    if (ch === "'" || ch === '"') return false; // reached the specifier string with no named clause seen
-    i++;
+  const result = new Set();
+
+  function skipTriviaAt(i) {
+    while (i < n) {
+      if (/\s/.test(source[i])) { i++; continue; }
+      if (source[i] === '/' && source[i + 1] === '/') { i += 2; while (i < n && source[i] !== '\n') i++; continue; }
+      if (source[i] === '/' && source[i + 1] === '*') { i += 2; while (i < n && !(source[i] === '*' && source[i + 1] === '/')) i++; i += 2; continue; }
+      break;
+    }
+    return i;
   }
-  return false;
+  function identAt(i) {
+    const start = i;
+    while (i < n && /[A-Za-z0-9_$]/.test(source[i])) i++;
+    return i > start ? { text: source.slice(start, i), end: i } : null;
+  }
+
+  for (let start = 0; start < n; start++) {
+    const kw = identAt(skipTriviaAt(start));
+    if (kw === null || !(kw.text === 'const' || kw.text === 'let' || kw.text === 'var')) continue;
+    let j = skipTriviaAt(kw.end);
+    if (source[j] !== '{') continue;
+    j++;
+    const pairs = [];
+    let ok = true;
+    while (true) {
+      j = skipTriviaAt(j);
+      if (source[j] === '}') { j++; break; }
+      if (source[j] === ',') { j++; continue; }
+      const prop = identAt(j);
+      if (prop === null) { ok = false; break; }
+      j = prop.end;
+      let local = prop.text;
+      j = skipTriviaAt(j);
+      if (source[j] === ':') {
+        j++;
+        const alias = identAt(skipTriviaAt(j));
+        if (alias === null) { ok = false; break; }
+        local = alias.text;
+        j = alias.end;
+      }
+      pairs.push({ imported: prop.text, local });
+      j = skipTriviaAt(j);
+      if (source[j] === ',') { j++; continue; }
+      if (source[j] === '}') { j++; break; }
+      ok = false;
+      break;
+    }
+    if (!ok) continue;
+    j = skipTriviaAt(j);
+    if (source[j] !== '=') continue;
+    j++;
+    const rhs = identAt(skipTriviaAt(j));
+    if (rhs !== null && namespaceNames.has(rhs.text)) {
+      for (const { imported, local } of pairs) {
+        if (!ALLOWED_FS_MEMBERS.has(imported)) result.add(local);
+      }
+    }
+  }
+  return result;
 }
 
 const ALLOWED_IMPORT_SPECIFIERS = new Set(['node:fs', 'node:child_process', 'node:crypto', './build-identity.mjs', './chapter-paths.mjs']);
@@ -2219,25 +2511,25 @@ const UNCONDITIONALLY_BANNED = new Set(['process', 'Function', 'eval', 'require'
 // in the module passed silently).
 const ALLOWED_FS_MEMBERS = new Set(['constants']);
 
-// IMPORTANT 4 (codex review): every BARE identifier the source assigns directly from a banned
-// `fs.<method>` VALUE (`const write = fs.writeFileSync`, or a plain reassignment `write =
-// fs.writeFileSync`) — never a property-access target (`deps.openSync = fs.openSync`, the real
-// module's own DEFAULT-SEAM shape, merely spelled as an assignment instead of an object-literal
-// property; that target is always invoked back through ITS OWN object, `deps.openSync(...)`, never
-// bare, so it is not tracked here at all). Returns the set of ALIAS NAMES found, so the caller can
-// check whether any of them is ever called under its own bare name — `const write =
-// fs.writeFileSync;` alone (never called) is exactly as inert as the object-literal case, and must
-// stay legitimate (see the fs.constants VALUE-reference test below, which also assigns
-// `deps.openSync = fs.openSync` and must keep passing).
-function findBareFsAliasNames(tokens) {
+// [round 3, codex] Every LOCAL NAME the source binds to `node:fs`, traced from its actual import
+// statement(s) — see collectFsBindings below, which builds `namespaceNames`. Every BARE identifier
+// the source assigns directly from a banned `<namespace>.<method>` VALUE (`const write =
+// fs.writeFileSync`, or a plain reassignment `write = fs.writeFileSync`) — never a property-access
+// target (`deps.openSync = fs.openSync`, the real module's own DEFAULT-SEAM shape, merely spelled
+// as an assignment instead of an object-literal property; that target is always invoked back
+// through ITS OWN object, `deps.openSync(...)`, never bare, so it is not tracked here at all).
+// Returns the set of ALIAS NAMES found; the caller checks whether any is ever called under its own
+// bare name — an alias that is never called (see the fs.constants VALUE-reference test below,
+// which also assigns `deps.openSync = fs.openSync`) stays legitimate.
+function findBareFsAliasNames(tokens, namespaceNames) {
   const names = new Set();
   for (let idx = 0; idx < tokens.length; idx++) {
     const token = tokens[idx];
-    if (token.kind !== 'ident' || token.dotBase !== 'fs' || ALLOWED_FS_MEMBERS.has(token.text)) continue;
-    // The base 'fs' ident is always the array element right before this one — nothing else can be
-    // pushed between a base ident and its own '.'-continuation (the '.' itself emits no token).
+    if (token.kind !== 'ident' || !namespaceNames.has(token.dotBase) || ALLOWED_FS_MEMBERS.has(token.text)) continue;
+    // The base namespace ident is always the array element right before this one — nothing else
+    // can be pushed between a base ident and its own '.'-continuation (the '.' emits no token).
     const base = tokens[idx - 1];
-    if (base?.precededByChar !== '=') continue; // not a bare `NAME = fs.method` shape at all
+    if (base?.precededByChar !== '=') continue; // not a bare `NAME = ns.method` shape at all
     const target = tokens[idx - 2];
     if (target?.kind === 'ident' && !target.precededByDot) names.add(target.text);
   }
@@ -2256,22 +2548,88 @@ function anyAliasCalled(tokens, source, aliasNames) {
   return false;
 }
 
-function checkCapabilityPolicy(source) {
-  const tokens = scanJsTokens(source);
+// [round 3, codex] POSITIVE import-binding policy. The round-2 checker pattern-matched individual
+// bypass SHAPES (a literal `fs.<method>(...)` call, a bare alias of that exact dotted expression, a
+// named-clause import) — each closure killed the shape it named and left the CLASS open: a default
+// import (`import fsDefault from 'node:fs'`), a namespace import under any OTHER alias (`import *
+// as io from 'node:fs'`), computed/bracket member access (`fs["writeFileSync"]`), and object
+// destructuring (`const {writeFileSync} = fs`) all reach the identical banned function while being
+// invisible to a checker rooted on the literal identifier `fs` and a `.`-access shape. This traces
+// every LOCAL NAME the source binds to `node:fs`, however the import introduces it, into two
+// buckets:
+//   - NAMESPACE names — the whole module object (a namespace OR default import; Node's ESM/CJS
+//     interop makes a default import of `node:fs` equally a whole-module object). The real
+//     module's OWN binding, `fs`, is included UNCONDITIONALLY — every "mutant"/"legitimate
+//     reference" fixture in this file is an isolated SNIPPET with no import statement of its own,
+//     exercising the checker function directly, and this module's own convention (confirmed by
+//     "the real module PASSES") is that `fs` always names this binding.
+//   - DIRECT names — a named import's local binding is already bound to one resolved fs FUNCTION,
+//     no member access needed at all.
+// Every access path from either bucket to a real call is then checked in ONE place: a namespace
+// name's dot-call (below), its bracket/computed-string access (banned unconditionally — the real
+// module never uses bracket access on its own `fs` binding at all), any bare alias of either access
+// form later called under its own name, and any destructured property later called bare — plus
+// every direct name, if ever called bare. A shape not yet imagined still has to terminate in "call
+// a name that traces back to one of these bindings", which is the property being checked here, not
+// the shape.
+function collectFsBindings(source, tokens) {
+  const namespaceNames = new Set(['fs']);
+  const directNames = new Set();
   for (const { specifier, importTokenEnd } of findImportStatements(tokens)) {
-    if (!ALLOWED_IMPORT_SPECIFIERS.has(specifier)) return { ok: false, reason: `disallowed_import:${specifier}` };
-    // The real module's ONLY legitimate node:fs import is the namespace form; a named import of any
-    // node:fs export destructures a real fs function directly into scope, bypassing the `deps` seam
-    // as completely as a direct `fs.<method>(...)` call, and invisibly to the dotBase-based check
-    // below (the call site `writeFileSync(...)` carries no `fs.` prefix at all).
-    if (specifier === 'node:fs' && importClauseIsNamed(source, importTokenEnd)) {
-      return { ok: false, reason: 'named_import:node:fs' };
+    if (specifier !== 'node:fs') continue;
+    const clause = parseImportClause(source, importTokenEnd);
+    if (clause === null) continue;
+    if (clause.namespaceName !== null) namespaceNames.add(clause.namespaceName);
+    if (clause.defaultName !== null) namespaceNames.add(clause.defaultName);
+    for (const { imported, local } of clause.named) {
+      if (!ALLOWED_FS_MEMBERS.has(imported)) directNames.add(local);
     }
   }
-  const aliasNames = findBareFsAliasNames(tokens);
-  if (anyAliasCalled(tokens, source, aliasNames)) {
-    return { ok: false, reason: 'fs_alias_call' };
+  return { namespaceNames, directNames };
+}
+
+// Bracket/computed member access on a namespace-bound name (`fs["writeFileSync"]`) — the dot-based
+// check below can never see it, and the real module has zero legitimate use for bracket access on
+// its own `fs` binding at all, so ANY computed-string access to a non-allowed member is banned
+// outright, whether or not it is immediately called. `[`/`]` ARE tokenized (see scanJsTokens), so
+// this is a plain 4-token lookahead: ident(namespace) '[' string ']'.
+function anyBracketFsMemberAccess(tokens, namespaceNames) {
+  for (let idx = 0; idx < tokens.length; idx++) {
+    const t = tokens[idx];
+    if (t.kind !== 'ident' || t.precededByDot || !namespaceNames.has(t.text)) continue;
+    const open = tokens[idx + 1];
+    const key = tokens[idx + 2];
+    const close = tokens[idx + 3];
+    if (open?.kind === 'punct' && open.text === '[' && key?.kind === 'string' && close?.kind === 'punct' && close.text === ']') {
+      if (!ALLOWED_FS_MEMBERS.has(key.text)) return true;
+    }
   }
+  return false;
+}
+
+function checkCapabilityPolicy(source) {
+  const tokens = scanJsTokens(source);
+  for (const { specifier } of findImportStatements(tokens)) {
+    if (!ALLOWED_IMPORT_SPECIFIERS.has(specifier)) return { ok: false, reason: `disallowed_import:${specifier}` };
+  }
+  const { namespaceNames, directNames } = collectFsBindings(source, tokens);
+
+  if (anyBracketFsMemberAccess(tokens, namespaceNames)) {
+    return { ok: false, reason: 'fs_bracket_access' };
+  }
+
+  // Every way a real fs function can end up bound to a BARE name — a named import, a
+  // simple-assignment alias off a namespace binding, or destructuring off one — collapses to the
+  // SAME question: is that bare name ever called. One check covers all three sources.
+  const bareCallableNames = new Set([
+    ...directNames,
+    ...findBareFsAliasNames(tokens, namespaceNames),
+    ...findFsDestructuredBindings(source, namespaceNames),
+  ]);
+  if (anyAliasCalled(tokens, source, bareCallableNames)) {
+    return { ok: false, reason: 'fs_bound_name_called' };
+  }
+
   for (const token of tokens) {
     if (UNCONDITIONALLY_BANNED.has(token.text)) return { ok: false, reason: `banned_word:${token.text}` };
     // "constructor" is a legitimate class-method-definition keyword (`class X { constructor() {} }`)
@@ -2290,12 +2648,13 @@ function checkCapabilityPolicy(source) {
     if (token.kind === 'ident' && token.text === 'import' && nextSignificantChar(source, token.end) === '(') {
       return { ok: false, reason: 'dynamic_import' };
     }
-    // A direct `fs.<method>(...)` CALL — not a bare reference. `openSync: fs.openSync,` inside the
-    // default seam object is a legitimate VALUE reference (the whole point of "defaulting to
-    // node:fs bindings"); an actual invocation `fs.openSync(...)` bypasses the seam entirely, which
-    // is what this specifically bans. `token.end` is only set on 'ident' tokens (see scanJsTokens),
-    // which is exactly the token kind this branch is already scoped to.
-    if (token.kind === 'ident' && token.dotBase === 'fs' && !ALLOWED_FS_MEMBERS.has(token.text) && nextSignificantChar(source, token.end) === '(') {
+    // A direct `<namespace>.<method>(...)` CALL — not a bare reference. `openSync: fs.openSync,`
+    // inside the default seam object is a legitimate VALUE reference (the whole point of
+    // "defaulting to node:fs bindings"); an actual invocation `fs.openSync(...)` (or
+    // `io.openSync(...)` under any OTHER namespace alias — codex round 3) bypasses the seam
+    // entirely, which is what this specifically bans. `token.end` is only set on 'ident' tokens
+    // (see scanJsTokens), which is exactly the token kind this branch is already scoped to.
+    if (token.kind === 'ident' && namespaceNames.has(token.dotBase) && !ALLOWED_FS_MEMBERS.has(token.text) && nextSignificantChar(source, token.end) === '(') {
       return { ok: false, reason: `direct_fs_call:${token.text}` };
     }
   }
@@ -2356,6 +2715,13 @@ test('capability policy: mutants — each of these must FAIL', () => {
     // invisible to it, however the module later invoked it.
     "import { writeFileSync } from 'node:fs'; writeFileSync(path, data)", // a named import destructures the real fs function directly into scope — no `fs.` prefix anywhere
     "const write = fs.writeFileSync; write(...)", // a bare alias of the fs.* VALUE, later called under its own name
+    // [round 3, codex] the checker was still a denylist rooted on the literal identifier `fs` and a
+    // `.`-access shape — every one of these reaches the identical banned function through a binding
+    // or access form the round-2 checks never named.
+    'import fsDefault from "node:fs"; fsDefault.writeFileSync(...)', // a DEFAULT import — not the namespace form the round-2 checker looked for
+    'import * as io from "node:fs"; io.writeFileSync(...)', // a namespace import under an alias OTHER than "fs"
+    'fs["writeFileSync"](...)', // computed/bracket member access — the dot-based dotBase tracking never sees it
+    'const {writeFileSync} = fs; writeFileSync(...)', // destructuring off the namespace binding, not a simple assignment
   ];
   for (const mutant of mutants) {
     const result = checkCapabilityPolicy(mutant);

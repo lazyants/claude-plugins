@@ -399,8 +399,15 @@ const VALID_NULL_FIELD = { value: null, source: 'unavailable', resolution_reason
 test('isValidBuildIdentityField: accepts the two canonical shapes (known value, null value)', () => {
   assert.deepEqual(isValidBuildIdentityField(VALID_COMMAND_FIELD), { ok: true });
   assert.deepEqual(isValidBuildIdentityField(VALID_NULL_FIELD), { ok: true });
-  // detail is optional
-  assert.deepEqual(isValidBuildIdentityField({ ...VALID_COMMAND_FIELD, detail: undefined }), { ok: true });
+});
+
+test('isValidBuildIdentityField: detail is REQUIRED — every constructor in this module (resolveBuildIdentity, resolveClosingIdentity) always assigns it, so an absent detail never comes from a value this module produced', () => {
+  const { detail: _drop, ...withoutDetail } = VALID_COMMAND_FIELD;
+  assert.deepEqual(isValidBuildIdentityField(withoutDetail), { ok: false, reason: 'detail_missing' });
+  assert.deepEqual(isValidBuildIdentityField({ ...VALID_COMMAND_FIELD, detail: undefined }), {
+    ok: false,
+    reason: 'detail_missing',
+  });
 });
 
 test('isValidBuildIdentityField: rejects a non-object, an array, and null', () => {
@@ -633,6 +640,18 @@ test('formatIdentityValue: null renders as "unknown"; a real value renders as it
   assert.equal(formatIdentityValue(null), 'unknown');
   assert.equal(formatIdentityValue('4.3.1'), '4.3.1');
   assert.equal(formatIdentityValue('unknown'), 'unknown'); // the STRING "unknown" is a legal identity value too
+});
+
+test('formatIdentityValue: a real resolved "unknown" and a genuinely absent value render the SAME word — only the adjacent `source` field tells them apart', () => {
+  const realUnknown = resolveBuildIdentity({ commandOutcome: { ok: true, raw: 'unknown' } });
+  const absent = resolveBuildIdentity({ commandOutcome: null, uiReadEnabled: false });
+  // Same rendered word...
+  assert.equal(formatIdentityValue(realUnknown.value), 'unknown');
+  assert.equal(formatIdentityValue(absent.value), 'unknown');
+  // ...but distinguishable by source, per this function's docstring.
+  assert.equal(realUnknown.source, 'command');
+  assert.equal(absent.source, 'unavailable');
+  assert.notEqual(realUnknown.source, absent.source);
 });
 
 // ==== reachability gate ============================================================================
