@@ -3598,6 +3598,66 @@ function findDisallowedFsReference(source, tokens, namespaceNames, directNames, 
   return null;
 }
 
+// [round 8→9, this fix] Everything above polices the CONSTRUCTION of the seam — every occurrence of
+// an fs-bound name is confined to the one sanctioned property-value slot inside the `defaultDeps`
+// literal. None of it says anything about the CONSUMPTION of `defaultDeps` itself once built. Codex's
+// round-7 executed mutant on the real module — `capture-record.mjs:817`, `deps.mkdirSync(...)` ->
+// `defaultDeps.mkdirSync(...)` — reaches the real filesystem through the frozen module-level default
+// directly, completely ignoring whatever `deps` an injected virtual/test filesystem supplied, and
+// `checkCapabilityPolicy` returned `{ok: true}` (reproduced directly against a copy of the real
+// module's source before this fix). That matters beyond tidiness: every crash-recovery/atomicity test
+// in this suite is testable at all only because every fs call this module makes goes through the
+// injected `deps` seam; a call that reaches through `defaultDeps` instead silently unhooks itself from
+// every one of those tests, and nothing here had a rule for it — `defaultDeps` was tracked only as the
+// LOCATION of the seam literal (`findDefaultDepsLiteralSpan`), never as a name whose OWN occurrences
+// need policing.
+//
+// Grepping the real module confirms the "never called" property actually holds today: `defaultDeps`
+// appears exactly twice outside its own declaration, both inside `mergeDeps` — `{ ...defaultDeps,
+// ...deps } : defaultDeps` — and both are BARE references (a spread source, and a ternary branch
+// value), never a member access. That is the whole of its legitimate use: `defaultDeps` is the
+// default seam, referenced only when the module BUILDS it (the declaration) and MERGES it
+// (`mergeDeps`) — every actual fs operation is invoked through the merged `deps` parameter (or the
+// local an entrypoint holds after `mergeDeps(deps)`), never through the raw default directly, which is
+// the entire point of merging it rather than exporting it in the first place.
+//
+// The rule is therefore the mirror image of `fs_namespace_referenced_directly` above: for the raw
+// `fs` namespace a BARE reference is the dangerous shape (it exposes every operation at once) and a
+// `.member` is what the sanctioned slot narrows down to safely; for `defaultDeps` it is the other way
+// round — a bare reference is exactly the sanctioned merge/spread shape, and a `.member`/`?.member`/
+// `[...]` reference extracts one already-resolved, un-seamed function as a callable value. Any
+// occurrence of `defaultDeps` immediately followed (after trivia — across whitespace, a comment or a
+// newline) by `.`, `?.` or `[` is rejected outright: no key/site check needed, because there is no
+// legitimate member-access shape of `defaultDeps` at all, the way there is a legitimate slot for
+// `fs.<member>`. The declaration itself (`defaultDeps = { ... }`, in any of the spellings
+// `findDefaultDepsLiteralSpan` already recognizes) is unaffected, since it is always followed by `=`,
+// never by one of the three rejected characters — no separate declaration-exclusion check is needed.
+//
+// Deliberately NOT extended to the merged local (`deps`, or the local an entrypoint binds after
+// `mergeDeps(deps)`) — that name IS the seam, called through by design in every exported function; a
+// rule that fired on `deps.<member>(...)` would reject the module's entire normal operation, not one
+// bypass, which is exactly the false-positive risk team-lead review flagged before this fix was
+// chosen.
+//
+// Known blind spot, stated plainly rather than left implicit, in the same spirit as the residual
+// paragraphs above `findDisallowedFsReference`: this is a single-hop check on the literal name
+// `defaultDeps`. `const dd = defaultDeps; dd.mkdirSync(...)` aliases the bare (and therefore
+// "sanctioned-shaped") reference into a fresh local this checker does not track at all, and STILL
+// PASSES — measured directly, not assumed (see the dedicated test below). No legitimate edit to this
+// file has ever had reason to rebind `defaultDeps` under a second name — the module's own convention
+// is to merge it via `mergeDeps`, never to alias it — so this is a real but narrow gap, not a load-
+// bearing one, and the next round should not have to rediscover it.
+function findDisallowedDefaultDepsReference(source, tokens) {
+  for (let idx = 0; idx < tokens.length; idx++) {
+    const token = tokens[idx];
+    if (token.kind !== 'ident' || token.text !== 'defaultDeps' || token.precededByDot) continue;
+    const i = skipTriviaFrom(source, token.end);
+    const isCallOrMemberBase = source[i] === '.' || source[i] === '[' || (source[i] === '?' && source[i + 1] === '.');
+    if (isCallOrMemberBase) return 'default_deps_referenced_as_call_base';
+  }
+  return null;
+}
+
 // `export {...} from '<specifier>'` / `export * from '<specifier>'` / `export * as ns from
 // '<specifier>'` — re-publishes named bindings from an external module to every future importer of
 // THIS file. It performs no I/O of its own within this module, so none of the occurrence/slot
@@ -3648,6 +3708,9 @@ function checkCapabilityPolicy(source) {
 
   const fsReason = findDisallowedFsReference(source, tokens, namespaceNames, directNames, declarationSpans, defaultDepsSpan);
   if (fsReason) return { ok: false, reason: fsReason };
+
+  const defaultDepsReason = findDisallowedDefaultDepsReference(source, tokens);
+  if (defaultDepsReason) return { ok: false, reason: defaultDepsReason };
 
   for (const token of tokens) {
     if (UNCONDITIONALLY_BANNED.has(token.text)) return { ok: false, reason: `banned_word:${token.text}` };
@@ -3755,6 +3818,14 @@ test('capability policy: mutants — each of these must FAIL', () => {
     // likes, sits in a real property-value slot (preceded by ':') exactly as legitimately as
     // `defaultDeps` itself does, and the old rule had no way to tell them apart.
     "const bypass = { run: fs.writeFileSync };\nbypass.run('/outside', 'x');",
+    // [round 8→9, this fix] codex's round-7 executed mutant on the real module —
+    // `capture-record.mjs:817`, `deps.mkdirSync(...)` -> `defaultDeps.mkdirSync(...)` — reached
+    // through the frozen module-level default directly, bypassing whatever `deps` an injected
+    // virtual/test filesystem supplied entirely; `checkCapabilityPolicy` returned `{ok: true}`
+    // against the pre-fix checker (reproduced directly against a copy of the real module before
+    // this fix). Every occurrence-of-`fs` rule above is silent on this: `defaultDeps` was never
+    // itself a name this checker policed, only a location it looked INSIDE.
+    "defaultDeps.mkdirSync(dir, { recursive: true });",
   ];
   for (const mutant of mutants) {
     const result = checkCapabilityPolicy(mutant);
@@ -3856,6 +3927,38 @@ test('capability policy: the seam literal need not be wrapped in Object.freeze(.
 test('capability policy: the seam locator is agnostic to the declaration keyword — `let` and `export const` both find the real seam the same way `const` does', () => {
   assert.equal(checkCapabilityPolicy('let defaultDeps = { openSync: fs.openSync };').ok, true);
   assert.equal(checkCapabilityPolicy('export const defaultDeps = { openSync: fs.openSync };').ok, true);
+});
+
+// [round 8→9, this fix] dedicated coverage for findDisallowedDefaultDepsReference — every variant of
+// "a call whose base is defaultDeps" this round considered, the two ordinary shapes it must leave
+// alone, and the one still-admitted alias gap, pinned so a future round does not have to rediscover
+// any of them by hand.
+test('capability policy: defaultDeps is the seam DEFAULT, never a call target — direct, bracket and optional-chain member access are all rejected; the merged local and the real merge/spread shapes stay untouched; the un-tracked alias gap is measured, not assumed', () => {
+  // codex's round-7 executed mutant (capture-record.mjs:817), and the bracket/optional-chain
+  // variants of the identical bypass — none of these is a shape check, so all three fall to it.
+  assert.equal(checkCapabilityPolicy('defaultDeps.mkdirSync(dir, { recursive: true });').ok, false);
+  assert.equal(checkCapabilityPolicy("defaultDeps['mkdirSync'](dir, { recursive: true });").ok, false);
+  assert.equal(checkCapabilityPolicy('defaultDeps?.mkdirSync(dir, { recursive: true });').ok, false);
+  assert.equal(checkCapabilityPolicy('defaultDeps?.["mkdirSync"](dir);').ok, false);
+
+  // The real module's own two legitimate bare references, both inside mergeDeps, must keep passing —
+  // already pinned above ("spreading an object that is NOT an fs-bound name is unaffected"); repeated
+  // here as the negative control for THIS rule specifically.
+  assert.equal(checkCapabilityPolicy('const merged = deps ? { ...defaultDeps, ...deps } : defaultDeps;').ok, true);
+
+  // The merged local (`deps`, or whatever name an entrypoint binds `mergeDeps(deps)` to) is NOT
+  // `defaultDeps` — an ordinary seam call through it must not be caught by this rule, or the module's
+  // entire normal operation would fail its own capability policy.
+  assert.equal(checkCapabilityPolicy('deps.mkdirSync(dir, { recursive: true });').ok, true);
+  assert.equal(checkCapabilityPolicy('const d = mergeDeps(deps);\nd.mkdirSync(dir, { recursive: true });').ok, true);
+
+  // Known, MEASURED (not assumed) blind spot: aliasing the bare — and therefore "sanctioned-shaped"
+  // — reference into a fresh local this checker does not track defeats the rule completely. This is
+  // NOT a design goal, it is the single-hop limitation documented above
+  // findDisallowedDefaultDepsReference; pinned here as evidence rather than left as an unverified
+  // claim, the same way the decoy-declaration residual above findDefaultDepsLiteralSpan was confirmed
+  // by direct measurement rather than assumed.
+  assert.equal(checkCapabilityPolicy('const dd = defaultDeps;\ndd.mkdirSync(dir, { recursive: true });').ok, true);
 });
 
 // =================================================================================================
