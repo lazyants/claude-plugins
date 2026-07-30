@@ -6,6 +6,26 @@
 // typechecking project resolves the .ts -> .mjs import. This repo does not compile TypeScript.
 
 import type { BuildIdentity, UiReadObservation } from './build-identity.d.mts';
+import type { CaptureProfileLike, ChapterEntry, ExpectedAssetsResult } from './chapter-paths.d.mts';
+
+// [round 5, codex finding 5] The `deps.expectedAssets` override every one of `recordChapterProvenance`
+// and `buildProvenanceReport`'s runtime bodies reads (capture-record.mjs: `deps?.expectedAssets ??
+// expectedAssets`) — measured, both call sites invoke it with the IDENTICAL six-argument shape
+// chapter-paths.mjs's own `expectedAssets` accepts, so one alias covers both rather than two
+// independently-drifting inline signatures. Deliberately NOT a `CaptureRecordDeps` member (see that
+// interface's own doc comment): unlike every field there, this one is read off the RAW `deps`
+// argument rather than the `mergeDeps`-merged one, defaults inline via `??` rather than through
+// `defaultDeps`, and only these two entrypoints ever read it — the other eight exported functions'
+// `deps?: Partial<CaptureRecordDeps>` seam never sees it, so folding it into that interface would
+// wrongly imply all ten do.
+export type ExpectedAssetsOverride = (
+  profileLike: CaptureProfileLike,
+  entry: ChapterEntry,
+  chapterFile: string,
+  chapterText: string,
+  filenames: string[],
+  target: string,
+) => ExpectedAssetsResult;
 
 // [round 3, codex] `slug`/`group` were previously typed `string | number` / `string | null` — but
 // gate 1 (validateEntriesForCapture, run at the top of open/W5/W6) now deliberately REJECTS a
@@ -158,9 +178,19 @@ export function recordChapterProvenance(
   entry: ChapterEntryLike,
   chapterFile: string,
   expectedRunId: string,
-  deps?: Partial<CaptureRecordDeps> & { expectedAssets?: (...args: unknown[]) => unknown },
+  deps?: Partial<CaptureRecordDeps> & { expectedAssets?: ExpectedAssetsOverride },
 ): RecordResult;
 
+// [round 5, codex finding 4] `current_source` is `null` on exactly one branch: `buildProvenanceReport`'s
+// ownership-skip row (capture-record.mjs, the `ownership.skip` branch off `assertProvenanceOwnership`)
+// — a skipped profile performs zero identity resolutions, so this field is set to `null` there,
+// alongside the sibling `source: null` already on this same row. Every OTHER branch always assigns
+// `classifyBuildDelta`'s own `current_source` (build-identity.d.mts: `IdentitySource`, one of
+// `'command' | 'ui' | 'unavailable'`), never `null` — measured via `classifyBuildDelta`, which reads
+// `current.source` unconditionally on every return path and never substitutes a null. Typed as the
+// pre-existing looser `string | null` (matching this interface's own `value`/`source` fields) rather
+// than tightened to `IdentitySource | null`, to keep this fix scoped to the missing-vs-present defect
+// rather than also redesigning the field's string type.
 export interface ReportRow {
   key: string;
   value: string;
@@ -168,17 +198,17 @@ export interface ReportRow {
   resolution_reason: string | null;
   classification: 'unchanged' | 'changed' | 'indeterminate';
   classification_reason: string | null;
-  current_source: string;
+  current_source: string | null;
 }
 
 export type ReportResult = { rows: ReportRow[] } | NeedsUiRead | HaltResult;
 
-/** See capture-record.mjs: ledger row 5 — reads chapter records only (never the run record), verifies against current assets, and classifies the delta in manifest order. */
+/** See capture-record.mjs: ledger row 5 — reads chapter records only (never the run record), verifies against current assets, and classifies the delta in manifest order. Like `recordChapterProvenance`, the runtime reads `deps.expectedAssets` (capture-record.mjs: `deps?.expectedAssets ?? expectedAssets`) with the same six-argument shape — see `ExpectedAssetsOverride`'s own comment for why that seam is a bolt-on intersection rather than a `CaptureRecordDeps` member. [round 5, codex finding 5] Previously omitted from this signature entirely, which let a TypeScript caller pass an `expectedAssets` override here that `recordChapterProvenance`'s own declaration would have rejected — the same seam, differently typed depending only on which function you called. */
 export function buildProvenanceReport(
   profileLike: ProfileLike,
   entries: ChapterEntryLike[],
   currentObservation?: UiReadObservation | null,
-  deps?: Partial<CaptureRecordDeps>,
+  deps?: Partial<CaptureRecordDeps> & { expectedAssets?: ExpectedAssetsOverride },
 ): ReportResult;
 
 export type Row6State =
