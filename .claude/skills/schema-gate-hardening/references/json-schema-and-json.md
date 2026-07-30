@@ -8,6 +8,7 @@ The mechanical traps in reading/extending a schema or hand-writing a stdlib gate
 3. Hardening a stdlib-only JSON-reading gate — the ~7 out-permits + type traps + schema-vs-runtime
 4. A `const`-pinned field falsifies a "hardcode overrides the config knob" bug
 5. Dep-free single-field extraction from a YAML/config file
+6. EMITTING a validated string into YAML — the allowlist is not the type boundary
 
 ---
 
@@ -104,3 +105,30 @@ Node stdlib has no YAML parser but a skill must read one key (e.g. `profile_vers
 **A deferred instance signals a CLASS — state the invariant, don't enumerate/patch.** Root cause of the whole tail (unterminated flow/quote, invalid dedent, undefined/forward `*alias`, …) is one thing: the scan does **no cross-line structural validation**. Broaden the boundary note to the invariant ("no cross-line structural validation beyond the documented column-0 top-level shape") so any further same-class instance is already inside the boundary, and fold every instance into ONE tracking issue. Escalate fix-vs-defer of a shipped-example-reachable gap to the owner.
 
 **If you BUILD the deferred cross-line guard, the hard problem INVERTS to "NEVER false-reject a VALID profile"** (blocking a valid profile is strictly worse than the visible-one-step-later bug). Plan review CANNOT prove false-reject-freeness for a hand-rolled cross-line YAML lexer — only a large differential fuzz vs `ruby -ryaml` can; once the architecture is stable, STOP looping plan-review and shift to build-with-fuzz-gate. The provably-safe design is **OPACITY-FIRST + INLINE-ONLY**: never classify anything inside an open plain/block/quote/flow region (skip it as opaque); classify structural tokens ONLY inline, on the same line as their real introducer; own-line value nodes become accepted false-NEGATIVES. Flow depth is a **FLOORED UNTYPED counter** (a stray closer only decrements — dropping the typed-mismatch flag removes a whole false-reject class). Alias detection is gated on a **zero-`&` document** (any anchor present ⇒ bail). Block-scalar invalid-dedent detection had to be **CUT** — block scalars become pure opacity; a real dedent guard reintroduces the mini-parser mis-parse risk (net-negative). Two corners a fuzz corpus still missed, both found by adversarial reviewers: libyaml starts a comment at a `#` **immediately after** a flow closer `]`/`}` with NO leading space, valid **only when flow depth returns to 0** (fix = `if (flowDepth === 0) return …` the instant depth hits 0 — monotonic-safe, only ever FEWER flags); and an anchor gate `includes('&')` disables the alias mechanism for any prose `&` (`R&D`) — narrow it to `/(?:^|[^\w])&/` (a real anchor introducer is ALWAYS token-start, so excluding a word-preceded `&` never misses one). General rule: it's safe to shrink a fail-safe over-approximation as long as every removed case is PROVABLY not a real hit. Note `Psych.load` NEVER RAISES on a multi-document stream — it silently returns the FIRST doc, so a multi-doc oracle must count meaningful docs via `Psych.parse_stream(s).children`, not "load succeeded."
+
+## 6. EMITTING a validated string into YAML — the allowlist is not the type boundary
+
+A character allowlist admitting only "safe-looking" identifier characters does **not** make YAML
+emission safe, because YAML's implicit typing reads the WHOLE scalar, not its characters.
+Measured against PyYAML with `^[A-Za-z0-9][A-Za-z0-9._+:~!/-]{0,127}$`, **ten of sixteen**
+conforming values parse back as NON-strings: `4.3`→float, `123`→int, `true`/`false`/`no`/`on`→
+bool, `null`→None, `0xFF`→255, `1_000`→1000, `1:20`→80 (sexagesimal), `2024-10-01`→a date
+object. The last is not a curiosity — it is a realistic calendar version string.
+
+The allowlist stops **structural** injection (a `:` opening a mapping, a newline opening a key)
+and does nothing about **type coercion**. So:
+
+- **Always quote on emit** — single-quoted with `'` doubled, for the KEY as well as the value; a
+  key spelled `null`, `true`, or `on` types exactly the same way a value does.
+- **Prove it by PARSE-BACK, never by inspecting the emitted text.** The assertion is
+  `typeof parsed === 'string' && parsed === input`, through a real parser. A test that compares
+  the emitted LINE against an expected string passes for all ten coerced values above — the
+  emitted text was never the problem.
+- If the oracle rides an optional interpreter (this repo's precedent shells out to
+  `ruby -ryaml`), make it **fail** when that interpreter is absent. A skipped parse-back proves
+  nothing, and reads in CI exactly like a passing one.
+
+This is the write-side twin of §3's read-side traps, and it is easy to miss because both the
+regex and the rendered file look correct — only the parser disagrees. General shape: a DECLARED
+property versus the MEASURED one. Assert the property against the runtime that actually consumes
+the artifact, not against the text you produced.
