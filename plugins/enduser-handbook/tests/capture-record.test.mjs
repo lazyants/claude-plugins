@@ -3771,11 +3771,35 @@ function findDisallowedFsReference(source, tokens, namespaceNames, directNames, 
 // file has ever had reason to rebind `defaultDeps` under a second name — the module's own convention
 // is to merge it via `mergeDeps`, never to alias it — so this is a real but narrow gap, not a load-
 // bearing one, and the next round should not have to rediscover it.
+// [round 8→9, this fix] Wrapping parens are skipped before the lookahead. `(defaultDeps).mkdirSync()`,
+// `(defaultDeps)['mkdirSync']()` and `(defaultDeps)?.mkdirSync()` all reached the identical function
+// while the bare lookahead saw only `)` and reported clean (codex round 8, executed against this
+// checker). The sibling `fs` walk was never affected by the same spelling, and NOT because it shares
+// a paren-skipping helper with this one — the two rules are structurally opposite and no such helper
+// exists to share. `findDisallowedFsReference` asks whether an occurrence sits in a SANCTIONED slot
+// and looks BACKWARD to answer it: in `(fs).writeFileSync(...)` the preceding significant character
+// is `(`, which is not `:` or `=`, so the occurrence fails the slot test and is rejected without the
+// walk ever needing to see through the paren. This rule asks the mirror question — is a legitimately
+// bare name being USED as a member base — and that one can only be answered by looking FORWARD, which
+// is precisely where a paren hides. So the divergence is inherent to the two questions, not a lost
+// abstraction, and the fix belongs here rather than in a shared helper.
+//
+// Deliberate over-catch, stated rather than discovered later: closing parens are skipped
+// unconditionally, so `someCall(defaultDeps).mkdirSync()` — where the `)` closes an argument list and
+// the member access applies to the call's RESULT, not to `defaultDeps` — is rejected too. Telling the
+// two apart needs the paren classified as grouping-versus-call, which needs a backward trivia scan
+// this tokenizer does not have. Passing the default seam into a call and dotting the result is not a
+// shape this module has or needs (its only uses are `{ ...defaultDeps, ...deps }` and a ternary
+// branch, both bare), and the fail direction is the safe one: a false positive is a conversation, a
+// false negative ships an unseamed call. Same strictness bias the `fs?.constants` rejection above
+// already takes. Pinned by a test so the over-catch stays visible.
 function findDisallowedDefaultDepsReference(source, tokens) {
   for (let idx = 0; idx < tokens.length; idx++) {
     const token = tokens[idx];
     if (token.kind !== 'ident' || token.text !== 'defaultDeps' || token.precededByDot) continue;
-    const i = skipTriviaFrom(source, token.end);
+    let i = skipTriviaFrom(source, token.end);
+    // Any depth of wrapping: `((defaultDeps)).mkdirSync()`, and trivia between each layer.
+    while (source[i] === ')') i = skipTriviaFrom(source, i + 1);
     const isCallOrMemberBase = source[i] === '.' || source[i] === '[' || (source[i] === '?' && source[i + 1] === '.');
     if (isCallOrMemberBase) return 'default_deps_referenced_as_call_base';
   }
@@ -4064,6 +4088,22 @@ test('capability policy: defaultDeps is the seam DEFAULT, never a call target �
   assert.equal(checkCapabilityPolicy("defaultDeps['mkdirSync'](dir, { recursive: true });").ok, false);
   assert.equal(checkCapabilityPolicy('defaultDeps?.mkdirSync(dir, { recursive: true });').ok, false);
   assert.equal(checkCapabilityPolicy('defaultDeps?.["mkdirSync"](dir);').ok, false);
+
+  // [round 8→9] Wrapping parens hid all three of these from the forward lookahead, which saw only
+  // `)`. Any depth, and trivia between the layers, since the skip loops.
+  assert.equal(checkCapabilityPolicy('(defaultDeps).mkdirSync(dir, { recursive: true });').ok, false);
+  assert.equal(checkCapabilityPolicy("(defaultDeps)['mkdirSync'](dir);").ok, false);
+  assert.equal(checkCapabilityPolicy('(defaultDeps)?.mkdirSync(dir);').ok, false);
+  assert.equal(checkCapabilityPolicy('((defaultDeps)).mkdirSync(dir);').ok, false);
+  assert.equal(checkCapabilityPolicy('( defaultDeps /* c */ ) /* c */ . mkdirSync(dir);').ok, false);
+
+  // The deliberate over-catch that buys the above, pinned so it stays a decision rather than a
+  // surprise: here the `)` closes an ARGUMENT LIST and the member access applies to the call's
+  // result, not to `defaultDeps` — telling that apart needs the paren classified as
+  // grouping-versus-call, which needs a backward trivia scan this tokenizer does not have. Rejected
+  // anyway, because the fail direction is the safe one and this module never passes its own default
+  // seam into a call.
+  assert.equal(checkCapabilityPolicy('someCall(defaultDeps).mkdirSync(dir);').ok, false);
 
   // The real module's own two legitimate bare references, both inside mergeDeps, must keep passing —
   // already pinned above ("spreading an object that is NOT an fs-bound name is unaffected"); repeated
