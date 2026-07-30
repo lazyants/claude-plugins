@@ -3465,6 +3465,28 @@ has_in_section "SKILL: W6 — a matching version is a report, never proof the ch
   "$SKILL" '### W6 — Revalidation / audit mode (existing chapters)' \
   'A matching version is a report, never proof the chapter is current'
 
+echo "== 1.12.0 (#362): capture-record.d.mts — the declarations this release had to correct =="
+# Nothing in this repository compiles TypeScript, and a codex mutation audit confirmed that ANY
+# mutation to a .d.mts survives the entire suite — so a declaration that drifts from its runtime is
+# invisible until a downstream caller trips over it. This release found FOURTEEN such drifts across
+# five review rounds, which makes it a class rather than an incident. `assets/lib` membership is
+# already checked for the .mjs/.d.mts PAIRING (see the #297 loop above), but that is existence only;
+# capture-record.d.mts had no content check of any kind. These pins do not close the class — only a
+# typechecker would — they hold the specific corrections this release paid for, so a later edit
+# cannot quietly undo one. Each was watched failing with its own declaration decoyed out.
+has "capture-record.d.mts: declares sweepChapterProvenanceTemps (W5's crash leftover has an owner)" \
+  'export function sweepChapterProvenanceTemps' "$ASSETS/lib/capture-record.d.mts"
+has "capture-record.d.mts: RunState is a discriminated union, not all-optional" \
+  '| { skipped: true }' "$ASSETS/lib/capture-record.d.mts"
+has "capture-record.d.mts: ReportRow.current_source admits the skip branch's null" \
+  'current_source: string | null;' "$ASSETS/lib/capture-record.d.mts"
+has "capture-record.d.mts: publish.target is required, as profile.schema.json already demands" \
+  'target: string;' "$ASSETS/lib/capture-record.d.mts"
+has "capture-record.d.mts: runIdentityCommand names CommandOutcome rather than restating it" \
+  'runIdentityCommand: (command: string) => CommandOutcome;' "$ASSETS/lib/capture-record.d.mts"
+has "capture-record.d.mts: RecoveryVerdict.action is the closed set REPAIR_FOR_STATE returns" \
+  "action: 'abortCaptureRun' | 'cleanupCommittedRun' | null;" "$ASSETS/lib/capture-record.d.mts"
+
 echo "== 1.12.0 (#362): container-isolation.md — staging enumeration gains the provenance paths =="
 has_joined_in_section "container-isolation: staging enumeration is conditioned on W1 ownership outcome" \
   "$REFS/container-isolation.md" '## Capturing from a git worktree' \
