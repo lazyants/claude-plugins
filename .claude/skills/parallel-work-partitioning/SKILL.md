@@ -53,26 +53,15 @@ An investigation/scout Workflow reliably reports **root cause + fix LOCATION**, 
 
 The auto-memory dir (`~/.claude*/projects/<slug>/memory/`) is a **whole-dir symlink shared across all profiles**, so two parallel CC sessions write the **same `MEMORY.md` and `index_*.md`** — a coupling the code-file partition above does NOT cover (their repo files can be perfectly disjoint yet both append to the shared index; last-writer-wins clobbers the other's line). So during an active parallel session: (a) **do NOT rewrite/compact a shared index line the other session is editing** — e.g. a size-hook asking to compact `MEMORY.md` while the parallel session just wrote a big pointer line: DEFER the compaction until it's done; (b) capture new learnings in **unique-named memory FILES** (zero clobber) and point them from an EXISTING already-pointed file rather than adding a fresh `MEMORY.md` pointer into the contested index. Same spirit as the code-file rule: find the disjoint surface and stay on it.
 
-## A read of a teammate's work is valid only for the instant it was taken
+## The partition holds only while your picture of it is fresh
 
-While teammates are actively editing, disk state and their reports are both **timestamps**, not
-facts. Reading at the start of a turn and acting on it at the end compares two different moments —
-and the gap is where the wrong conclusion forms. Measured 2026-07-29 (enduser-handbook 1.12.0, five
-parallel teammates): this produced four false findings in one session — a teammate told their fix
-"had not landed" when it had, a "banner missing" report contradicted by my own test run **in the
-same turn**, and, worst, a teammate told to stand down and hand over their files while they were
-mid-flight and had already landed the exports being waited on. Each time the teammate's report was
-accurate and my read was stale; the reverse never once occurred.
-
-Two rules follow. **Re-read immediately before sending any corrective or directive message**, not at
-the start of the turn — the cost is one command and the alternative is instructing someone to undo
-correct work. And **never infer state from silence**: the one teammate who reported least was
-working fastest, and their quiet was mistaken for a stall three separate times.
-
-The same asymmetry applies to needles. A grep for an exact phrase reported a teammate had skipped a
-documentation note they had in fact written in different words — an over-precise needle producing a
-false accusation about someone else's work. Search for the substance, and when a check contradicts a
-teammate's specific claim, assume the check is wrong first.
+This skill covers the partition decided BEFORE dispatch. Once teammates are editing, the disk and
+their reports become timestamps rather than facts, and acting on a stale read is how a correct
+partition still produces a wrong instruction — including a stand-down order sent to someone
+mid-flight. That belongs to the mid-flight skill, not this one: **skill:subagent-trust-verification
+→ `references/verifying-teammate-state.md`, "Don't correct a teammate off a stale read"**, which
+also carries the reviewer-worktree rule (a review round needs its own detached worktree that no
+teammate writes to) and the measured 2026-07-29 evidence.
 
 ## Related
 
