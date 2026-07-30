@@ -97,8 +97,18 @@ export declare function resolveClosingIdentity(input: {
 }): BuildIdentity;
 
 /**
- * The shared validity check for a `build_identity` sub-object, run by both record readers
- * (run record and chapter record) and nothing else in either record's own shape.
+ * The shared validity check for a `build_identity` sub-object. It validates that sub-object and
+ * nothing else of either record's shape — the surrounding `record_version`/`run_id`/`asset_hashes`
+ * fields are each checked by the record readers themselves.
+ *
+ * [round 6] Three production call sites, not two: both record readers (capture-record.mjs —
+ * `readRunRecordText` for the run record, `readChapterRecordText` for the chapter record) AND
+ * `classifyBuildDelta` in this same module (build-identity.mjs:521), which reuses it to fail loudly
+ * when `recordState` is `'ok'`/`'stale'` and `record` is not a real `BuildIdentity` — see that
+ * function's own comment for why. The previous wording ("run by both record readers ... and nothing
+ * else") was ambiguous between "nothing else RUNS it" — false, `classifyBuildDelta` does — and
+ * "nothing else of the record's shape is validated BY it", which is what was meant; it is now
+ * stated so only the true reading is available.
  */
 export declare function isValidBuildIdentityField(candidate: unknown): { ok: true } | { ok: false; reason: string };
 
@@ -106,17 +116,23 @@ export declare function isValidBuildIdentityField(candidate: unknown): { ok: tru
  * Subset staleness comparison: every CURRENT embed must appear in `recordedHashes` with a matching
  * hash; an extra entry in `recordedHashes` the chapter no longer embeds is fine. Zero current embeds
  * is never `ok`.
+ *
+ * [round 6] Split per `reason` rather than one stale member with an optional `path`, because `path`
+ * is not optional — it is reason-determined, and measured so on every branch: `no_current_embeds`
+ * returns before any key is examined and so can NAME no path, while `embed_missing_from_record` and
+ * `embed_hash_changed` are both reached from inside the key loop and always carry the offending
+ * key. The old `path?: string` forced a caller handling either of the latter two to write a
+ * null-check that can never fire. Pure narrowing of what the runtime already returns — no behavior
+ * change.
  */
 export declare function verifyRecord(
   recordedHashes: Record<string, string>,
   currentHashes: Record<string, string>,
 ):
   | { status: 'ok' }
-  | {
-      status: 'stale';
-      reason: 'no_current_embeds' | 'embed_missing_from_record' | 'embed_hash_changed';
-      path?: string;
-    };
+  | { status: 'stale'; reason: 'no_current_embeds' }
+  | { status: 'stale'; reason: 'embed_missing_from_record'; path: string }
+  | { status: 'stale'; reason: 'embed_hash_changed'; path: string };
 
 /** The record-state axis `classifyBuildDelta` checks before any value comparison. */
 export type RecordState = 'absent' | 'malformed' | 'unsupported_version' | 'stale' | 'ok';

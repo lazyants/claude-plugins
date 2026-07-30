@@ -59,6 +59,15 @@ export interface LocateChapterLineResult {
   // Disambiguate via `indexForm`: 'headings' + null => uncontained (a wrong-placement case the
   // caller halts via containerTitleMatches returning false); 'non-heading' + null => the ordinary
   // membership-only case.
+  //
+  // [round 6] Read that rule only when `present` is true. Both halves of it describe where a FOUND
+  // line sits, and neither applies when there is no line: a target absent from a headings-form
+  // index also comes back `indexForm: 'headings'` with `containerTitle: null` (measured —
+  // `{"present":false,"containerTitle":null,"multiple":false,"indexForm":"headings","matches":[]}`),
+  // which the rule as written would misread as "uncontained", i.e. as a placement fault rather than
+  // as a plain absence. `present: false` always pairs with `containerTitle: null` and an empty
+  // `matches`, whatever the index form, so check `present` first and consult the disambiguation
+  // above only after it holds.
   containerTitle: string | null;
   multiple: boolean;
   indexForm: IndexForm;
@@ -183,7 +192,21 @@ export function locateChapterLine(
   options?: LocateChapterLineOptions,
 ): LocateChapterLineResult;
 
-/** See chapter-paths.mjs: [1.8.0] #295 — the exported D6 index-target formula; vaultRelChaptersDir is required (and validated) in wikilinks mode, ignored in path mode. */
+/**
+ * See chapter-paths.mjs: [1.8.0] #295 — the exported D6 index-target formula; vaultRelChaptersDir is
+ * required (and validated) in wikilinks mode, ignored in path mode.
+ *
+ * [round 6] THROWS an `Error` in wikilinks mode (`profileLike.publish.wikilinks === true`) on each
+ * of three `vaultRelChaptersDir` faults, measured at chapter-paths.mjs:1773/:1779/:1784 — omitted or
+ * nullish ("vaultRelChaptersDir is required in wikilinks mode — a silent bare-slug fallback resolves
+ * ambiguously across the whole vault (#294)"), absolute ("must be vault-root-relative"), or escaping
+ * the vault root with a leading `..`. Path mode reads the argument not at all and never throws.
+ * The parameter stays OPTIONAL because it genuinely is one — path mode is a legitimate call with it
+ * omitted (measured: returns "a.md") — so this is a documentation gap being closed, not a signature
+ * change: a wikilinks-mode caller gets no compile-time signal from the type and needs the throw
+ * spelled out, the way `manualMigrationChecklist`, `buildEmbedCandidates` and build-identity's
+ * `classifyBuildDelta` already spell theirs out.
+ */
 export function currentIndexExpectedTarget(
   profileLike: ProfileLike,
   entry: ChapterEntry,

@@ -5,7 +5,7 @@
 // capture-record.d.mts — TypeScript declarations for capture-record.mjs so a downstream
 // typechecking project resolves the .ts -> .mjs import. This repo does not compile TypeScript.
 
-import type { BuildIdentity, UiReadObservation } from './build-identity.d.mts';
+import type { BuildIdentity, CommandOutcome, UiReadObservation } from './build-identity.d.mts';
 import type { CaptureProfileLike, ChapterEntry, ExpectedAssetsResult } from './chapter-paths.d.mts';
 
 // [round 5, codex finding 5] The `deps.expectedAssets` override every one of `recordChapterProvenance`
@@ -46,7 +46,22 @@ export interface ProfileLike {
   };
   publish: {
     chapters_dir: string;
-    target?: string;
+    // [round 6] REQUIRED, not optional. `assets/profile.schema.json` lists `target` in
+    // `publish.required`, so a schema-conforming profile always carries it and this runtime can
+    // never legitimately observe `undefined` — the previous `target?: string` described a profile
+    // the schema already rejects. It matters because the value is not merely stored: capture-record.mjs
+    // passes it straight through to chapter-paths' `expectedAssets` — read in
+    // `recordChapterProvenance` and handed to the extractor there, and read inline at the
+    // equivalent call in `buildProvenanceReport` — whose own
+    // declaration types the parameter `target: string`, so the optional spelling let a
+    // TypeScript caller construct a profile that type-checks here and violates the contract
+    // there. Measured, that is not a cosmetic disagreement: with a chapter file inside its own
+    // asset dir, `buildEmbedCandidates` yields ["shot.png","../a/shot.png"] for
+    // `target: 'static_md'` and only ["shot.png"] for `undefined`, so a chapter embedding the
+    // retained legacy static_md spelling goes from `{ok:true,assets:[...]}` to
+    // `{ok:false,halt:{construct:"unmatched image destination '../a/shot.png'"}}`. The schema is
+    // what makes the requirement real; this declaration can only describe it, never enforce it.
+    target: string;
   };
 }
 
@@ -59,13 +74,36 @@ export interface Halt {
 export type HaltResult = { ok: false; halts: Halt[] };
 export type NeedsUiRead = { needs_ui_read: true; region_hint: string };
 
-/** See capture-record.mjs: RFC 8785 (JCS) canonicalization of an in-memory JS value. */
+/**
+ * See capture-record.mjs: RFC 8785 (JCS) canonicalization of an in-memory JS value.
+ *
+ * [round 6] PARTIAL, despite the total-looking result union — this function does not return on
+ * every `unknown`. The private `canonicalizeJcsValue`, which recurses into itself for each object
+ * key, carries neither a cycle guard nor a depth bound, so a self-referential value or a deep one
+ * exits by THROWING a `RangeError: Maximum call stack size exceeded` rather than by returning
+ * `{ok:false, reason}`. Measured: a `{self: <cycle>}` and a 20 000-deep nesting both throw, while
+ * `undefined`/`NaN`/`bigint`/function inputs correctly return `undefined_unsupported` /
+ * `non_finite_number` / `bigint_unsupported` / `unsupported_value_type`. Documented rather than
+ * guarded on purpose: issue #381 tracks splitting this canonicalizer out, and that is where a
+ * structural fix belongs — this release does not widen the runtime for it. No caller inside this
+ * module can reach the throw (every payload it canonicalizes is built internally from a build
+ * identity and an asset-hash map), but the export is offered over `unknown`, so a caller writing
+ * `const r = jcsCanonicalize(x); if (!r.ok) ...` must still guard the call itself.
+ */
 export function jcsCanonicalize(value: unknown): { ok: true; canonical: string } | { ok: false; reason: string };
 
 /** See capture-record.mjs: SHA-256 of the UTF-8 bytes of an already-canonicalized string, hex-encoded. */
 export function sha256HexOfCanonical(canonical: string): string;
 
-/** See capture-record.mjs: the `sha256:`-prefixed digest of an opening payload's canonical form. Throws on an uncanonicalizable payload. */
+/**
+ * See capture-record.mjs: the `sha256:`-prefixed digest of an opening payload's canonical form.
+ * Throws on an uncanonicalizable payload — an `Error` naming the reason
+ * (`digestOpeningPayload: cannot canonicalize opening payload (undefined_unsupported)`, measured).
+ * [round 6] It also inherits `jcsCanonicalize`'s own partiality, and that case is NOT the `Error`
+ * this sentence describes: a cyclic or deeply-nested payload propagates a `RangeError` from the
+ * canonicalizer instead (measured). See `jcsCanonicalize` above for why that is documented rather
+ * than fixed here.
+ */
 export function digestOpeningPayload(openingPayload: unknown): string;
 
 /** See capture-record.mjs: field-by-field validation of a run record's raw JSON text (duplicate-key- and lone-surrogate-aware). */
@@ -181,6 +219,27 @@ export function recordChapterProvenance(
   deps?: Partial<CaptureRecordDeps> & { expectedAssets?: ExpectedAssetsOverride },
 ): RecordResult;
 
+// [codex round 5, finding 3] Deliberately NOT one of row 6's repair trio below, despite an
+// identical shape to `RepairResult` — this function answers a different question (is there a
+// leftover chapter-record temp under `chapters/`?) over a domain row 6's `(token, record, temps)`
+// tuple never covers (`run/` only). See capture-record.mjs's own comment above this function's
+// definition for why chapter temps are not folded into that tuple. Given its own type rather than
+// reusing `RepairResult`, so a reader cannot infer trio membership from the shape alone; `noop` is
+// never actually part of this function's contract — there is no `expected`-fingerprint round-trip
+// here to make an already-swept call idempotent-and-reported-as-such, so it is simply omitted
+// rather than carried over as an always-false field.
+export type ChapterTempSweepResult =
+  | { ok: true; removed: string[] }
+  | { ok: true; skipped: true; removed: [] }
+  | HaltResult;
+
+/** See capture-record.mjs: finds and best-effort-removes every leftover `<slug>.json.<uuid>.tmp` chapter-record temp for each of `entries` — the artifact a crashed `recordChapterProvenance` leaves behind between closing its temp and renaming it into place. Entries-driven, like `recordChapterProvenance`/`buildProvenanceReport` above — never a raw directory walk of `chapters/`. Never reads `deps.expectedAssets` (it never extracts or hashes anything), so its `deps` seam is the plain `CaptureRecordDeps`, unlike its two neighbors above. */
+export function sweepChapterProvenanceTemps(
+  profileLike: ProfileLike,
+  entries: ChapterEntryLike[],
+  deps?: Partial<CaptureRecordDeps>,
+): ChapterTempSweepResult;
+
 // [round 5, codex finding 4] `current_source` is `null` on exactly one branch: `buildProvenanceReport`'s
 // ownership-skip row (capture-record.mjs, the `ownership.skip` branch off `assertProvenanceOwnership`)
 // — a skipped profile performs zero identity resolutions, so this field is set to `null` there,
@@ -228,11 +287,37 @@ export interface ExpectedFingerprint {
   opening_digest: string | null;
 }
 
+// [round 6] `action` is the prescribed repair's EXPORT NAME, and the runtime can only ever produce
+// one of two of them or `null` — the private `REPAIR_FOR_STATE` is a closed five-key map onto
+// `'abortCaptureRun'`/`'cleanupCommittedRun'`, read through `?? null`,
+// so the four states with no prescribed repair (`not_active`, `absent`, `malformed`, `divergent`)
+// yield `null`. Measured across all nine states: no third string is reachable. Narrowed from the
+// previous bare `string | null` for the same reason `Row6State` directly above is a closed literal
+// union rather than `string` — a caller dispatching on this value was having to compare against
+// string literals the type never promised, and the looseness was inconsistent within one file.
 export type RecoveryVerdict =
-  | { state: Row6State; action: string | null; expected: ExpectedFingerprint; files: string[] }
+  | {
+      state: Row6State;
+      action: 'abortCaptureRun' | 'cleanupCommittedRun' | null;
+      expected: ExpectedFingerprint;
+      files: string[];
+    }
   | HaltResult;
 
-/** See capture-record.mjs: ledger row 6 — the nine-state TOTAL classifier over (token, record, temps), observed after gate 6. Mutates nothing. */
+/**
+ * See capture-record.mjs: ledger row 6 — the nine-state classifier over (token, record, temps)
+ * observed under `run/` after gate 6. Mutates nothing (measured: the tree is byte-identical before
+ * and after, for all nine states).
+ *
+ * [round 6] TOTAL over its inputs, but eight of the nine states are the ones decided from that
+ * tuple: `not_active` is NOT. It is returned from this function's own first branch, off
+ * `assertProvenanceOwnership(...).skip` — this run's own W1 ownership outcome — BEFORE any token,
+ * record or temp is read, and comes back with `files: []` (measured). The runtime's own docstring
+ * says so ("with zero token/record/temp reads"); the previous one-line version of this sentence
+ * dropped that clause and so described the tuple as deciding a state it never sees. Chapter-record
+ * temps under `chapters/` are outside this tuple by design and are swept separately — see
+ * `sweepChapterProvenanceTemps` above.
+ */
 export function recoverProvenanceState(profileLike: ProfileLike, deps?: Partial<CaptureRecordDeps>): RecoveryVerdict;
 
 export type RepairResult =
@@ -261,5 +346,17 @@ export interface CaptureRecordDeps {
   renameSync: (from: string, to: string) => void;
   readdirSync: (...args: unknown[]) => unknown;
   randomUUID: () => string;
-  runIdentityCommand: (command: string) => { ok: boolean; raw?: unknown; detail?: string };
+  // [round 6] `CommandOutcome`, not a hand-rolled restatement of it. This member's result is not
+  // consumed here — it is handed STRAIGHT to build-identity's `resolveBuildIdentity` as its
+  // `commandOutcome`, at all three of this module's identity-resolution points (`openCaptureRun`,
+  // `closeCaptureRun`, `buildProvenanceReport`), and that function's own declaration types the field
+  // `CommandOutcome`. The previous inline `{ok: boolean; raw?: unknown; detail?: string}` was
+  // strictly wider on the success side: it admitted `{ok: true}` with no `raw`, which
+  // `CommandOutcome`'s `{ok: true; raw: unknown; ...}` member forbids — so the same seam was typed
+  // two different ways depending only on which of the two files a caller happened to read. Measured,
+  // the runtime does not crash on the wider shape, it degrades: an injected
+  // `runIdentityCommand: () => ({ok: true})` opens the run with
+  // `resolution_reason: 'command_output_rejected'` and a null identity. Same defect class as round
+  // 5's finding 5 (`expectedAssets`), fixed the same way — one shared alias at the seam.
+  runIdentityCommand: (command: string) => CommandOutcome;
 }
