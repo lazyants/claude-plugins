@@ -1854,6 +1854,21 @@ function walkRegularFiles(rootDir, deps, visit, onSkipped, { rootMustExist = fal
     } else if (rootIdentity !== null) {
       expectedId = rootIdentity;
       if (identityBroke(absDir, relPrefix, expectedId)) return;
+    } else {
+      // [round 23] A caller-supplied pin brackets the root across TWO calls (gate 3 to the
+      // snapshot). Without one, the root previously got no bracket at all — not even the
+      // self-established one every CHILD gets — so a substitution landing during the root's own
+      // listing was invisible to `closeCaptureRun`'s sweep and to the publish-time re-hash, both of
+      // which snapshot with no prior observation to carry. That is the same defect one function
+      // over: a root is not exempt from a rule merely because nobody told it what it used to be.
+      // Its own first observation is a baseline in exactly the way a child's is.
+      //
+      // A first observation that FAILS leaves the pin null rather than refusing here: the root is
+      // legitimately absent before a first capture, and the `readdirSync` branch below is what
+      // distinguishes that from a root the caller had already seen. Refusing at this line would
+      // turn every not-yet-created asset directory into a halt.
+      const own = assetDirIdentity(absDir, deps, { allowSymlink: true });
+      if (own.ok) expectedId = own.id;
     }
     let entries;
     try {

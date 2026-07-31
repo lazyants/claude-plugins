@@ -2543,6 +2543,58 @@ test('openCaptureRun: a root that vanishes between its identity check and its li
 // on both sides of the change: still a refusal, and now one that says which of the two things
 // happened. Written because the round-19 fix moved this case from one refusing rule to another, and
 // "the verdict is unchanged" is a claim about behaviour, not something the diff shows.
+// [round 23] The same gap one function over, found by asking the brief's own question of the sibling
+// call site: `openCaptureRun` snapshots with gate 3's observation as the root's pin, but
+// `closeCaptureRun` has no prior observation to carry and passed none — so the root got no bracket
+// AT ALL, not even the self-established one every CHILD directory gets from its own first `lstat`.
+// A substitution landing during the root's own listing was therefore invisible here: the walk went
+// on resolving `<root>/<name>` against the replacement, hashed a foreign `a.png` as this run's
+// CLOSING bytes, and W5 rule 4 reads "closing differs from opening" as a successful capture. The
+// root's own first observation is a baseline in exactly the way a child's is.
+test('the closing snapshot: an asset root swapped during its own listing is refused, not hashed as the capture', () => {
+  withTempDir((dir) => {
+    const profile = profileFor(dir);
+    const entry = { slug: 'items' };
+    const assetDir = join(profile.capture.output_dir, 'items');
+    nodeFs.mkdirSync(assetDir, { recursive: true });
+    nodeFs.writeFileSync(join(assetDir, 'a.png'), 'v1');
+    const foreign = join(dir, 'foreign-items');
+    nodeFs.mkdirSync(foreign, { recursive: true });
+    nodeFs.writeFileSync(join(foreign, 'a.png'), 'bytes the captured build never produced');
+
+    const opened = CR.openCaptureRun(profile, [entry], null, stubDepsNoIdentity());
+    assert.equal(opened.ok, true, JSON.stringify(opened));
+
+    nodeFs.writeFileSync(join(assetDir, 'a.png'), 'v2');
+    let swapped = false;
+    const closingDeps = depsWithOverride({
+      // The listing itself succeeds against the original directory; the substitution lands between
+      // that listing and any use of it, which is the window the middle observation point exists for.
+      readdirSync: (p, opts) => {
+        const listed = nodeFs.readdirSync(p, opts);
+        if (!swapped && String(p).endsWith('/items')) {
+          nodeFs.renameSync(assetDir, join(dir, 'items-moved-away'));
+          nodeFs.renameSync(foreign, assetDir);
+          swapped = true;
+        }
+        return listed;
+      },
+      runIdentityCommand: () => ({ ok: false, detail: 'no command configured in test' }),
+    });
+
+    const closed = CR.closeCaptureRun(profile, opened.runState, { ok: true }, null, closingDeps);
+    assert.equal(swapped, true, 'the root was never listed — this fixture cannot reach the condition');
+    assert.equal(
+      nodeFs.readFileSync(join(assetDir, 'a.png'), 'utf8'),
+      'bytes the captured build never produced',
+      'the swap did not take — this fixture cannot reach the condition',
+    );
+    assert.equal(closed.ok, false, `a root replaced mid-listing must not be hashed as the capture: ${JSON.stringify(closed)}`);
+    assert.equal(closed.halts[0].halt, 'provenance_hazard');
+    assert.match(closed.halts[0].message, /replaced by a different directory/);
+  });
+});
+
 test('the closing snapshot: a vanished asset still refuses the chapter, and now says why', () => {
   withTempDir((dir) => {
     const profile = profileFor(dir);
