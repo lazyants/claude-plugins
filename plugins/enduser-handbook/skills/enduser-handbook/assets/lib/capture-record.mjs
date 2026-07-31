@@ -1,9 +1,12 @@
 // enduser-handbook asset — non-normative reference implementation of the build-provenance disk
 // layer. The normative contract lives in SKILL.md (W1's ownership gate, W2's open/close sequence,
 // W5's completeness rule + chapter record, W6's report) and in references/capture-engines.md,
-// references/capture-safety.md and references/revalidation.md. The state-machine surfaces cited
-// throughout this file (the row-6 state table, its signature rows, its ledger row and its test
-// matrix) are GENERATED from row6-generated.md's authority and are not restated here in prose.
+// references/capture-safety.md and references/revalidation.md. [round 13] This header used to say
+// the row-6 surfaces were generated from a companion document's authority. That document has never
+// existed in this repository, on any branch — it was a planning artifact that stayed outside it, so
+// the citation sent a reader after a file they could not open. The declaration beside this one was
+// corrected in round 11; this copy was not, because the gate that catches dangling citations scanned
+// only `*.d.mts`. SKILL.md is the authority for the row-6 states, and it ships.
 //
 // capture-record.mjs — the ONLY module in this feature that touches disk. Every filesystem
 // operation is reached through one injectable seam (the `deps` parameter of every exported
@@ -187,7 +190,11 @@ function describeThrownField(err, ...names) {
 }
 
 // ---------------------------------------------------------------------------------------------
-// The filesystem seam. Every exported function takes `deps` last and defaults to this object; no
+// The filesystem seam. Every exported function accepts `deps` and defaults to this object. [round
+// 13] This comment used to say `deps` comes LAST, which is false for `openCaptureRun`,
+// `closeCaptureRun` and `buildProvenanceReport`: each takes `identityCommandOutcome` AFTER it. That
+// is the very wrong-slot trap round 12 fixed in SKILL.md, still spelled out here as a rule — a
+// caller trusting this line reintroduces it. Read the signature, not this comment, for position; no
 // other place in this module references `node:fs`/`node:crypto`/`node:child_process` directly —
 // that is the property the capability-policy test (tests/capture-record.test.mjs) checks by
 // scanning this file's own source text, not merely by asserting behaviour.
@@ -2082,7 +2089,16 @@ export function recordChapterProvenance(profileLike, acceptedEntries, entry, cha
     }
   }
 
-  // Rule 5: re-hash every expected image now and require it still differs from `opening`.
+  // Rule 5: re-hash every expected image now and require it to still BE the bytes this run closed
+  // over. [round 13] The rule used to require only that the re-hash differ from `opening`, which
+  // rejects a revert to the pre-capture bytes and nothing else: a replacement with any third value
+  // differs from the opening too, so it passed, and its hash was then persisted under this run's
+  // `build_identity` — W6 afterwards reported it verified, because the bytes on disk matched the
+  // hash that had just been recorded from them. What the record claims is that these bytes came
+  // from the captured build, and only `closing` carries that. Comparing against `closing` subsumes
+  // the old check: rule 4 above has already established closing !== opening, so bytes equal to
+  // closing cannot equal opening. The revert stays a distinct reason because it is the more
+  // specific diagnosis of the same failure and names what the operator most likely did.
   const assetHashes = Object.create(null);
   for (const asset of extraction.assets) {
     const rehash = hashFileNoFollow(asset.absPath, d);
@@ -2090,10 +2106,12 @@ export function recordChapterProvenance(profileLike, acceptedEntries, entry, cha
       return { recorded: false, reason: `rehash_failed:${rehash.kind}` };
     }
     assetHashes[asset.key] = rehash.digest;
+    if (rehash.digest === chapterRunData.closing[asset.key]) continue;
     const openingHash = chapterRunData.opening[asset.key];
     if (openingHash !== undefined && rehash.digest === openingHash) {
       return { recorded: false, reason: 'rule5_reverted_to_opening' };
     }
+    return { recorded: false, reason: 'rule5_replaced_since_closing' };
   }
 
   const chapterRecord = {
@@ -2427,7 +2445,8 @@ export function buildProvenanceReport(profileLike, entries, currentObservation, 
 // ---------------------------------------------------------------------------------------------
 // Row 6 — the nine-state classifier and its two repairs. Precedence, evaluated top to bottom:
 // not_active -> orphan_temp -> absent -> partial -> malformed -> prepared -> open -> committed ->
-// divergent. See row6-generated.md for the generated, byte-compared authority this mirrors.
+// divergent. SKILL.md's W2 crash-recovery section is the authority this mirrors; the generated
+// companion document this line used to cite never shipped (see the file header).
 // ---------------------------------------------------------------------------------------------
 
 const STATE_ONLY_EXPECTED = new Set(['not_active', 'orphan_temp', 'absent', 'partial', 'malformed', 'divergent']);

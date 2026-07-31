@@ -3514,11 +3514,34 @@ fi
 # `a.md` is a measured return value quoted in a doc comment, `SUMMARY.md` is GitBook's own concept
 # name. The list is itself checked: an entry that starts resolving, or stops appearing, fails, so it
 # cannot quietly become a place where a real dangling citation hides.
-declaration_citation_prose="a.md SUMMARY.md"
+declaration_citation_prose="a.md SUMMARY.md 1.md"
+# [round 13] `chapter-paths.mjs` is the one module whose JOB is deriving `.md` chapter paths, so most
+# of its `.md` tokens are worked examples of its own output (`handbook/admin/plans.md`, `x.md`, a
+# probe link) rather than documents a reader should open. Listing them individually would put a
+# dozen churning entries on the prose list and turn it into the place a real dangling citation
+# hides. For this one file the citation FORM is required instead: `references/...` or `SKILL.md`,
+# which is what its real citations already use and what no derived chapter path can be. The cost is
+# stated plainly: a bare dangling citation added to THIS file would not be caught. The list is
+# self-policing below — a file on it that stops existing, or that yields no checked citation at all,
+# fails the gate rather than quietly checking nothing.
+citation_derived_path_modules="chapter-paths.mjs"
 missing_declaration_citations=0
 checked_declaration_citations=0
 prose_seen=""
-for dmts in "$ASSETS"/lib/*.d.mts; do
+# [round 13] The gate was written because a DECLARATION cited a document that never shipped, so it
+# scanned `*.d.mts` — the extension of the one example that prompted it. The identical dangling
+# citation was sitting in `capture-record.mjs` the whole time, twice, and stayed green through eight
+# rounds: the defect had simply moved one file extension sideways, out of a scope derived from the
+# example rather than from the class. Both extensions are checked now; the same reasoning applies to
+# any future asset here, so the glob is the whole of `lib/`.
+derived_modules_seen=""
+for dmts in "$ASSETS"/lib/*.d.mts "$ASSETS"/lib/*.mjs; do
+  [ -f "$dmts" ] || continue
+  citation_form_only=no
+  case " $citation_derived_path_modules " in
+    *" $(basename "$dmts") "*) citation_form_only=yes; derived_modules_seen="$derived_modules_seen $(basename "$dmts")" ;;
+  esac
+  checked_here=0
   while IFS= read -r cited; do
     [ -n "$cited" ] || continue
     resolved=""
@@ -3539,21 +3562,40 @@ for dmts in "$ASSETS"/lib/*.d.mts; do
         continue
         ;;
     esac
+    if [ "$citation_form_only" = yes ]; then
+      case "$cited" in
+        references/*|SKILL.md) : ;;
+        *) continue ;;
+      esac
+    fi
     checked_declaration_citations=$((checked_declaration_citations + 1))
+    checked_here=$((checked_here + 1))
     [ -n "$resolved" ] || { missing_declaration_citations=$((missing_declaration_citations + 1)); bad "assets/lib/$(basename "$dmts") cites '$cited', which does not exist under the skill root or references/"; }
   done <<EOF
 $(grep -ohE '[A-Za-z0-9_./-]+\.md' "$dmts" | sort -u)
 EOF
+  if [ "$citation_form_only" = yes ] && [ "$checked_here" -eq 0 ]; then
+    bad "citation gate: $(basename "$dmts") is on the derived-path list but yielded no checked citation — the exemption now covers everything"
+  fi
+done
+for derived in $citation_derived_path_modules; do
+  case " $derived_modules_seen " in
+    *" $derived "*) : ;;
+    *) bad "citation gate: '$derived' is on the derived-path list but no such module exists — a stale exemption silently narrows the gate" ;;
+  esac
 done
 for prose in $declaration_citation_prose; do
   case " $prose_seen " in
     *" $prose "*) : ;;
-    *) bad "citation gate: '$prose' is on the prose list but appears in no declaration — a stale entry hides a real citation" ;;
+    *) bad "citation gate: '$prose' is on the prose list but appears in no shipped asset — a stale entry hides a real citation" ;;
   esac
 done
-if [ "$missing_declaration_citations" -eq 0 ] && [ "$checked_declaration_citations" -gt 20 ]; then
-  ok "assets/lib/*.d.mts: every document a declaration cites resolves ($checked_declaration_citations citations, bare and path-shaped)"
-elif [ "$checked_declaration_citations" -le 20 ]; then
+# [round 13] The floor was 20 when the gate scanned declarations alone and found 22 — one bad round
+# away from being decorative. Widened to every shipped asset it finds 72, so the floor moves with it:
+# a floor that sits just under the real population cannot notice an extraction that collapses.
+if [ "$missing_declaration_citations" -eq 0 ] && [ "$checked_declaration_citations" -gt 60 ]; then
+  ok "assets/lib/*.{d.mts,mjs}: every document a shipped asset cites resolves ($checked_declaration_citations citations, bare and path-shaped)"
+elif [ "$checked_declaration_citations" -le 60 ]; then
   bad "citation gate: only $checked_declaration_citations citations matched — the extraction is broken, not the citations"
 fi
 has_in_section "SKILL: repairs are idempotent on an already-repaired tree" \
@@ -3581,9 +3623,16 @@ has_in_section "SKILL: W5 completeness rule 3 — every expected image in the cl
 has_in_section "SKILL: W5 completeness rule 4 — every closing hash differs from opening" \
   "$SKILL" '### W5 — Publish' \
   "every expected image's \`closing\` hash differs from its \`opening\` hash"
-has_in_section "SKILL: W5 completeness rule 5 — re-hashed NOW at publish time, still differs from opening" \
+# [round 13] This pin used to hold the rule's OLD text, "still differs from its `opening` hash" —
+# which is what the runtime did, and was wrong: differing from the opening admits bytes the build
+# never produced. The pin was faithful to a false rule, so it could never have caught it. It now
+# holds the property that makes the record mean anything, equality with `closing`.
+has_in_section "SKILL: W5 completeness rule 5 — re-hashed NOW at publish time, equals the CLOSING hash" \
   "$SKILL" '### W5 — Publish' \
-  're-hashed now, at publish time — every expected image still differs from its `opening` hash'
+  're-hashed now, at publish time — every expected image still hashes to its `closing` value'
+has_in_section "SKILL: W5 rule 5 states WHY it compares against closing, not merely against opening" \
+  "$SKILL" '### W5 — Publish' \
+  'would accept bytes the captured build never produced'
 has_in_section "SKILL: W5 any completeness failure ⇒ no record written, chapter keeps prior record" \
   "$SKILL" '### W5 — Publish' \
   'no record is written and the chapter keeps whatever record it already had'

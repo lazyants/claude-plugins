@@ -405,7 +405,15 @@ export interface DirentLike {
   isFile(): boolean;
 }
 
-/** The injectable filesystem seam every exported function accepts as its last argument, defaulting to node:fs/node:crypto/node:child_process bindings. */
+/**
+ * The injectable filesystem seam every exported function accepts, defaulting to
+ * node:fs/node:crypto/node:child_process bindings.
+ *
+ * [round 13] This said "as its last argument". It is not last in `openCaptureRun`,
+ * `closeCaptureRun` or `buildProvenanceReport`, each of which takes `identityCommandOutcome` after
+ * it — the same wrong-slot trap round 12 removed from SKILL.md, restated here as a rule. The
+ * declarations below carry the real positions; this text no longer claims one.
+ */
 export interface CaptureRecordDeps {
   // [round 6] `(path, flags)` at `openLeafNoFollow` (gate 6's read-only opens: `flags | fs.constants.O_NOFOLLOW`)
   // and `(path, flags, mode)` at `openCaptureRun`'s pending-token create

@@ -92,6 +92,38 @@ test('SKILL.md spells out at least the provenance entrypoints — an empty check
   }
 });
 
+// [round 13] SKILL.md was corrected in round 12, but the same wrong-slot rule survived as PROSE in
+// two shipped assets: both stated that every exported function takes `deps` last. Three do not.
+// A doc asserting a positional RULE is read by exactly the caller the round-12 defect misled, so it
+// gets a gate of its own — one half measuring the real shape, one half forbidding the sentence that
+// misstated it.
+test('deps is last everywhere EXCEPT the three continuation entrypoints — measured from source', () => {
+  const depsNotLast = [];
+  for (const [name, { params }] of signatures) {
+    const at = params.findIndex((p) => p.split('=')[0].trim() === 'deps');
+    if (at !== -1 && at !== params.length - 1) depsNotLast.push(name);
+  }
+  assert.deepEqual(
+    depsNotLast.sort(),
+    ['buildProvenanceReport', 'closeCaptureRun', 'openCaptureRun'],
+    'the set of exports where `deps` is not the final parameter changed — every doc stating a position for `deps` must be re-read against the new shape',
+  );
+});
+
+test('no shipped asset states that deps is the last argument — it is not, for three of them', () => {
+  const offenders = [];
+  for (const file of readdirSync(LIB_DIR).filter((f) => f.endsWith('.mjs') || f.endsWith('.d.mts'))) {
+    const src = readFileSync(join(LIB_DIR, file), 'utf8');
+    // Collapse whitespace: the claim wrapped across a line break in both places it was found, and a
+    // line-oriented search would have matched neither.
+    const flat = src.replace(/\s+/g, ' ');
+    for (const claim of ['takes `deps` last', 'accepts as its last argument', '`deps` as its last argument']) {
+      if (flat.includes(claim)) offenders.push(`${file}: "${claim}"`);
+    }
+  }
+  assert.deepEqual(offenders, [], `a shipped asset states a false position for \`deps\`:\n  ${offenders.join('\n  ')}`);
+});
+
 test('every call SKILL.md spells out names the real parameters, in the real order', () => {
   const wrong = [];
   for (const { name, args } of cited) {

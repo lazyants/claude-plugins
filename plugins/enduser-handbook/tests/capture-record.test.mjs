@@ -2786,6 +2786,36 @@ test('recordChapterProvenance: rule 5 — image reverted to opening bytes before
   });
 });
 
+// [round 13] The A->B->A case above is the one rule 5 was written for, and it was the only one
+// tested — so the rule only ever had to reject a RETURN to the opening bytes. A replacement with a
+// third value passed: it differs from the opening, which was the whole of the check. The record
+// then persisted those foreign bytes under this run's `build_identity`, and W6 later called them
+// verified because the current hash matched the one just recorded. The decisive case is A->B->C:
+// only comparing against `closing` can reject it, and that comparison subsumes the A->B->A one,
+// since rule 4 has already established that closing differs from opening.
+test('recordChapterProvenance: rule 5 — image replaced with third bytes before W5 -> no record', () => {
+  withTempDir((dir) => {
+    const profile = profileFor(dir);
+    const entry = { slug: 'items' };
+    const assetDir = join(profile.capture.output_dir, 'items');
+    nodeFs.mkdirSync(assetDir, { recursive: true });
+    nodeFs.writeFileSync(join(assetDir, 'a.png'), 'v1'); // opening
+    const opened = CR.openCaptureRun(profile, [entry], null, stubDepsNoIdentity());
+    nodeFs.writeFileSync(join(assetDir, 'a.png'), 'v2'); // closing — the bytes this build produced
+    const closed = CR.closeCaptureRun(profile, opened.runState, { ok: true }, null, stubDepsNoIdentity());
+    assert.equal(closed.ok, true);
+    // Bytes this run never produced: neither the opening nor the closing ones.
+    nodeFs.writeFileSync(join(assetDir, 'a.png'), 'v3');
+    const chapterFile = join(dir, 'chapter.md');
+    nodeFs.writeFileSync(chapterFile, '# items\n');
+    const deps = { ...stubDepsNoIdentity(), expectedAssets: stubExpectedAssetsFor(assetDir, ['a.png']) };
+    const result = CR.recordChapterProvenance(profile, [entry], entry, chapterFile, opened.runState.run_id, deps);
+    assert.equal(result.recorded, false);
+    assert.equal(result.reason, 'rule5_replaced_since_closing');
+    assert.equal(nodeFs.existsSync(CR.chapterRecordPath(profile, entry)), false);
+  });
+});
+
 test('recordChapterProvenance: an ineligible chapter KEEPS its existing record byte-identical', () => {
   withTempDir((dir) => {
     const profile = profileFor(dir);
