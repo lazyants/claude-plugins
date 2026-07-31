@@ -2970,26 +2970,49 @@ test('openCaptureRun: a dangling ANCESTOR appearing after validation is refused,
 });
 
 // [round 27 BLOCKER] The closing half, where nothing upstream refuses it at all.
-test('the closing snapshot: a dangling ANCESTOR is refused, not read as a chapter that produced nothing', () => {
+//
+// [round 34] Round 33 left this one planting BEFORE the close, and codex measured what that cost.
+// With gate 3 at the close, an ancestor already dangling at call time is refused in VALIDATION — the
+// executed halt reads `lstat failed on '<out>/admin-target'` — so this fixture proved a guard one
+// layer up while the adjudication it was written for went unexercised, and it kept passing
+// throughout. It plants on the sweep seam now. The chapter also has to be one gate 3 saw ABSENT: a
+// chapter it saw present carries an identity pin, and that pin refuses first, which is a third guard
+// again. Every one of those three refuses the input; only one of them is this test's subject, and
+// the assertion says which.
+test('the closing snapshot: a dangling ANCESTOR appearing mid-sweep is refused, not read as a chapter that produced nothing', () => {
   withTempDir((dir) => {
     const profile = profileFor(dir);
     const entry = { slug: 'items', group: 'admin' };
     const groupDir = join(profile.capture.output_dir, 'admin');
     const assetDir = join(groupDir, 'items');
-    nodeFs.mkdirSync(assetDir, { recursive: true });
-    nodeFs.writeFileSync(join(assetDir, 'a.png'), 'v1');
+    nodeFs.mkdirSync(groupDir, { recursive: true });
+    assert.equal(nodeFs.existsSync(assetDir), false, 'gate 3 must see this chapter absent, or its identity pin refuses instead');
 
-    const opened = CR.openCaptureRun(profile, [entry], null, stubDepsNoIdentity());
+    // The GROUP directory — not the asset root — becomes a link to nothing, while the sweep is
+    // between chapters: after every gate has passed, and before this chapter is observed at all.
+    const arming = armAfterFirstChapterListing(profile, () => {
+      nodeFs.renameSync(groupDir, join(dir, 'admin-moved-away'));
+      nodeFs.symlinkSync(join(profile.capture.output_dir, 'admin-target'), groupDir);
+    });
+
+    const opened = CR.openCaptureRun(profile, [SWEEP_ARMING_ENTRY, entry], null, stubDepsNoIdentity());
     assert.equal(opened.ok, true, JSON.stringify(opened));
 
-    // The GROUP directory — not the asset root — is replaced by a link to nothing.
-    nodeFs.renameSync(groupDir, join(dir, 'admin-moved-away'));
-    nodeFs.symlinkSync(join(profile.capture.output_dir, 'admin-target'), groupDir);
-    assert.throws(() => nodeFs.lstatSync(assetDir), /ENOENT/, 'the asset root must lstat ENOENT');
+    const closingDeps = depsWithOverride({
+      readdirSync: arming.readdirSync,
+      runIdentityCommand: () => ({ ok: false, detail: 'no command configured in test' }),
+    });
 
-    const closed = CR.closeCaptureRun(profile, opened.runState, { ok: true }, null, stubDepsNoIdentity());
+    const closed = CR.closeCaptureRun(profile, opened.runState, { ok: true }, null, closingDeps);
+    assert.equal(arming.armed, true, 'the ancestor was never replaced — this fixture cannot reach the condition');
+    assert.equal(nodeFs.lstatSync(groupDir).isSymbolicLink(), true, 'the ancestor must be a present link');
+    assert.throws(() => nodeFs.lstatSync(assetDir), /ENOENT/, 'the asset root must lstat ENOENT');
     assert.equal(closed.ok, false, `a chapter path made absent by a dangling ancestor must not close clean: ${JSON.stringify(closed)}`);
     assert.equal(closed.halts[0].halt, 'provenance_hazard', JSON.stringify(closed.halts));
+    // The DIAGNOSTIC, not the class: the closing adjudication is the guard under test, and gate 3's
+    // own refusal and the identity pin both render as this same halt class.
+    assert.match(closed.halts[0].message, /could not be confirmed \(vanished\) and its listing then failed \(ENOENT\)/,
+      `the halt must attribute this to the closing adjudication: ${JSON.stringify(closed.halts)}`);
   });
 });
 
@@ -3189,38 +3212,53 @@ test('the closing snapshot: a dangling root symlink REMOVED before its listing r
 // strict for a reason mutation had to find: the output root ITSELF is the deepest existing ancestor
 // whenever nothing under it exists, and it is exactly where a dangling link does the damage. Widening
 // the exemption by one (`<` to `<=`) killed no test until this one existed.
-test('the closing snapshot: a dangling capture.output_dir is refused, not read as a chapter that produced nothing', () => {
+// [round 34] Round 33 moved this fixture onto the sweep seam, and codex measured the cost: the
+// replacement takes the whole output root away, so the ARMING chapter's own post-listing identity
+// re-check throws first and the halt belongs to a chapter this test is not about. Reverting is not
+// available either — measured against the real close, a root already dangling at call time halts in
+// validation (`lstat failed on '<...>/assets-target'`), which is the same false attribution one
+// guard further up. Reaching the climb needs what the sibling below needs and for the same reason:
+// an output root with NO identity at validation, so the round-31 bracket has nothing to compare and
+// stands down. The two fixtures differ only in the `..`, and they pin different things — this one
+// the exemption's `<`, the sibling the unit the depth is counted in.
+test('the closing snapshot: a dangling output root that appears mid-sweep is refused, not read as a chapter that produced nothing', () => {
   withTempDir((dir) => {
     const profile = profileFor(dir);
+    const outputRoot = profile.capture.output_dir;
     const entry = { slug: 'items' };
-    const assetDir = join(profile.capture.output_dir, 'items');
-    nodeFs.mkdirSync(assetDir, { recursive: true });
-    nodeFs.writeFileSync(join(assetDir, 'a.png'), 'v1');
+    const assetDir = join(outputRoot, 'items');
+    assert.equal(nodeFs.existsSync(outputRoot), false, 'the output root must not exist yet, or the bracket pins this instead of the climb');
 
-    // [round 33] Same measured correction as the ancestor test below: with gate 3 at the close, an
-    // output root already dangling at call time is validation's to refuse, and the `<` boundary this
-    // test exists to pin stopped being exercised — the test passed and its mutant survived. The root
-    // is replaced while the sweep is between chapters instead.
-    const arming = armAfterFirstChapterListing(profile, () => {
-      nodeFs.renameSync(profile.capture.output_dir, join(dir, 'assets-moved-away'));
-      nodeFs.symlinkSync(join(dir, 'assets-target'), profile.capture.output_dir);
-    });
+    const opened = CR.openCaptureRun(profile, [entry], null, stubDepsNoIdentity());
+    assert.equal(opened.ok, true, `a chapter under a not-yet-created output root is an ordinary first capture: ${JSON.stringify(opened)}`);
 
-    const opened = CR.openCaptureRun(profile, [SWEEP_ARMING_ENTRY, entry], null, stubDepsNoIdentity());
-    assert.equal(opened.ok, true, JSON.stringify(opened));
-
+    let planted = false;
     const closingDeps = depsWithOverride({
-      readdirSync: arming.readdirSync,
+      readdirSync: (p, opts) => {
+        if (!planted && String(p) === assetDir) {
+          // The OUTPUT ROOT — the boundary itself — comes into existence as a link to nothing, in
+          // the instant the chapter's listing reports the path gone. Everything the adjudication
+          // climbs past is absent until it reaches this, at exactly the root's own depth.
+          planted = true;
+          nodeFs.symlinkSync(join(dir, 'assets-target'), outputRoot);
+          const err = new Error('ENOENT'); err.code = 'ENOENT'; throw err;
+        }
+        return nodeFs.readdirSync(p, opts);
+      },
       runIdentityCommand: () => ({ ok: false, detail: 'no command configured in test' }),
     });
 
-    // The OUTPUT ROOT — the boundary itself — becomes a link to nothing.
     const closed = CR.closeCaptureRun(profile, opened.runState, { ok: true }, null, closingDeps);
-    assert.equal(arming.armed, true, 'the output root was never replaced — this fixture cannot reach the condition');
-    assert.equal(nodeFs.lstatSync(profile.capture.output_dir).isSymbolicLink(), true, 'the output root must be a present link');
+    assert.equal(planted, true, 'the output root was never planted — this fixture cannot reach the condition');
+    assert.equal(nodeFs.lstatSync(outputRoot).isSymbolicLink(), true, 'the output root must be a present link');
     assert.throws(() => nodeFs.lstatSync(assetDir), /ENOENT/, 'the asset root must lstat ENOENT');
     assert.equal(closed.ok, false, `a dangling output root must not certify direct absence: ${JSON.stringify(closed)}`);
     assert.equal(closed.halts[0].halt, 'provenance_hazard', JSON.stringify(closed.halts));
+    // The DIAGNOSTIC: the closing adjudication, which is the only guard that can reach this input —
+    // validation saw an ordinary first capture, and the output-root bracket has no identity to
+    // compare. A halt naming anything else means the fixture stopped reproducing the condition.
+    assert.match(closed.halts[0].message, /could not be confirmed \(vanished\) and its listing then failed \(ENOENT\)/,
+      `the halt must attribute this to the closing adjudication: ${JSON.stringify(closed.halts)}`);
   });
 });
 
@@ -3799,12 +3837,16 @@ test('openCaptureRun: a root repointed BETWEEN its resolution and its identity r
     const entry = { slug: 'items' };
     assert.equal(nodeFs.existsSync(join(treeA, 'items')), false, 'gate 3 must see an ordinary first capture');
 
-    // The seam is the boundary between the two observations: repoint the moment the root's segments
-    // have been resolved and before its identity is read.
-    // Resolution 1 of the configured root is the W1 ownership gate; resolution 2 is
-    // `containmentRootFor`'s, and the identity read follows it immediately. Firing on the FIRST one
-    // repoints before the module has observed anything and reproduces a different (unclosable)
-    // window entirely — the first version of this fixture did exactly that and proved nothing.
+    // The seam is inside the bracket, and [round 34] moved which half of it. Resolution 1 of the
+    // configured root is the W1 ownership gate; resolution 2 is now the bracket's OWN pre-resolution
+    // identity read, and resolution 3 is `canonicalizeForComparison`'s. Firing on 2 therefore
+    // repoints after the module has observed the root and before it resolves the name — so the
+    // segments describe the replacement, the identity read at `canonical` agrees with them, and
+    // NOTHING downstream disagrees with itself. Only the observation taken before the resolution
+    // holds the original. Measured: with the bracket removed this fixture returns `ok: true`.
+    // Firing on 1 instead repoints before the module has observed anything at all and reproduces a
+    // different (unclosable) window — the first version of this fixture did exactly that and proved
+    // nothing.
     let resolutions = 0;
     let repointed = false;
     const deps = depsWithOverride({
@@ -3827,6 +3869,12 @@ test('openCaptureRun: a root repointed BETWEEN its resolution and its identity r
     assert.equal(repointed, true, 'the repoint hook never ran — this fixture cannot reach the condition');
     assert.equal(opened.ok, false, `segments from one tree and an identity from another must not certify a snapshot: ${JSON.stringify(opened)}`);
     assert.equal(opened.halts[0].halt, 'provenance_hazard', JSON.stringify(opened.halts));
+    // [round 34] The DIAGNOSTIC the bot's original fixture never carried, which is why nobody noticed
+    // that this input had two possible refusers. Containment could refuse it (the repoint points
+    // OUTSIDE the root) and so can the bracket that now spans this exact window; the bracket runs
+    // first, and a halt reading `resolves outside capture.output_dir` would mean the window moved.
+    assert.match(opened.halts[0].message, /configured_and_resolved_disagree/,
+      `the halt must attribute this to the resolution bracket: ${JSON.stringify(opened.halts)}`);
   });
 });
 
@@ -3836,7 +3884,16 @@ test('openCaptureRun: a root repointed BETWEEN its resolution and its identity r
 // target and every downstream check agrees with itself — `segments` describe tree A, the identity
 // pins tree B, `outputRootChanged` compares B with B, and containment passes because B really is
 // inside A. It returned `ok: true` with the foreign bytes hashed and no hazard.
-test('openCaptureRun: a root repointed to a DESCENDANT of its own resolved target is refused', () => {
+//
+// [round 34] The DESCENDANT topology is what makes this fixture worth keeping — containment cannot
+// refuse a replacement that really is inside the root, so only an identity guard can — but the
+// window moved. Round 34 brackets the resolution itself, so a repoint landing between the two
+// observations is now refused there and this fixture stopped exercising `outputRootChanged` at all
+// (it failed on its own diagnostic assertion, which is the only reason it was noticed). The repoint
+// lands at the reservation write instead: after validation has pinned the root, before the snapshot
+// reads it. That is where the output-root bracket is the only guard left, and it is also the shape a
+// real mid-run replacement takes. The bracket's own window keeps its two fixtures, above and below.
+test('openCaptureRun: a root repointed to a DESCENDANT of its own resolved target after validation is refused', () => {
   withTempDir((dir) => {
     const treeA = join(dir, 'treeA');
     const outputRoot = join(dir, 'out');
@@ -3848,23 +3905,18 @@ test('openCaptureRun: a root repointed to a DESCENDANT of its own resolved targe
     const entry = { slug: 'items' };
     assert.equal(nodeFs.existsSync(join(treeA, 'items')), false, 'gate 3 must see an ordinary first capture');
 
-    let resolutions = 0;
     let repointed = false;
     const deps = depsWithOverride({
-      realpathSync: (p, ...rest) => {
-        const out = nodeFs.realpathSync(p, ...rest);
-        if (String(p) === outputRoot) {
-          resolutions += 1;
-          // Resolution 1 is the W1 ownership gate; resolution 2 is `containmentRootFor`'s, and the
-          // identity read follows it. The repoint is computed AFTER `out`, so the module receives
-          // tree A's segments and any later read of the configured name lands on the descendant.
-          if (resolutions === 2) {
-            nodeFs.unlinkSync(outputRoot);
-            nodeFs.symlinkSync(join(treeA, 'sub'), outputRoot);
-            repointed = true;
-          }
+      // A clock, not a filesystem: the reservation write is the one call that sits strictly between
+      // validation and the opening sweep, so the repoint lands after the root has been pinned and
+      // before anything reads it again.
+      openSync: (p, ...rest) => {
+        if (!repointed && String(p).endsWith('/pending.json')) {
+          nodeFs.unlinkSync(outputRoot);
+          nodeFs.symlinkSync(join(treeA, 'sub'), outputRoot);
+          repointed = true;
         }
-        return out;
+        return nodeFs.openSync(p, ...rest);
       },
       runIdentityCommand: () => ({ ok: false, detail: 'no command configured in test' }),
     });
@@ -3880,6 +3932,158 @@ test('openCaptureRun: a root repointed to a DESCENDANT of its own resolved targe
     // reproduced something else. Only the output-root bracket can name this one.
     assert.match(opened.halts[0].message, /output root was replaced/,
       `the halt must attribute this to the output-root bracket: ${JSON.stringify(opened.halts)}`);
+  });
+});
+
+// [round 34 BLOCKER] The third variant of the same race, and the one round 33's fix moved instead of
+// closing. Both fixtures above repoint a SYMLINK, so the configured name comes to mean a different
+// pathname and a later read of that name can see it. Codex replaced the PHYSICAL directory instead:
+// the canonical pathname is unchanged and the object beneath it is not. `canonical` is a string,
+// stat-ing it is a second syscall, and the swap lands between the two — segments describe A, the
+// identity pins B, `outputRootChanged` re-resolves the configured name to B and agrees with itself.
+// Measured against the real exported `openCaptureRun` with only storage interposed, before the fix:
+// `ok: true`, with B's `foreign.png` in the opening baseline and no hazard.
+//
+// The configured root is a plain DIRECTORY here, not a link. That is load-bearing twice over: it is
+// what lets the pathname survive the swap, and it is why the resolution count is the same with and
+// without the bracket (the bracket's own identity read does not resolve a name that is not a link),
+// so this fixture lands in the same window either way.
+test('openCaptureRun: the PHYSICAL root replaced between its resolution and its identity read is refused', () => {
+  withTempDir((dir) => {
+    const profile = profileFor(dir);
+    const outputRoot = profile.capture.output_dir;
+    const replacement = join(dir, 'assets-B');
+    nodeFs.mkdirSync(outputRoot, { recursive: true });
+    nodeFs.mkdirSync(join(replacement, 'items'), { recursive: true });
+    nodeFs.writeFileSync(join(replacement, 'items', 'foreign.png'), 'bytes from a tree this handbook does not own');
+
+    const entry = { slug: 'items' };
+    assert.equal(nodeFs.existsSync(join(outputRoot, 'items')), false, 'gate 3 must see an ordinary first capture');
+
+    let resolutions = 0;
+    let swapped = false;
+    const deps = depsWithOverride({
+      realpathSync: (p, ...rest) => {
+        const out = nodeFs.realpathSync(p, ...rest);
+        if (String(p) === outputRoot) {
+          resolutions += 1;
+          // Resolution 1 is the W1 ownership gate; resolution 2 is `canonicalizeForComparison`'s,
+          // and the identity read at `canonical` follows it. The swap is computed AFTER `out`, so
+          // the module receives A's segments and every later read of that pathname lands on B.
+          if (resolutions === 2) {
+            nodeFs.renameSync(outputRoot, join(dir, 'assets-A-moved'));
+            nodeFs.renameSync(replacement, outputRoot);
+            swapped = true;
+          }
+        }
+        return out;
+      },
+      runIdentityCommand: () => ({ ok: false, detail: 'no command configured in test' }),
+    });
+
+    const opened = CR.openCaptureRun(profile, [entry], null, deps);
+    assert.equal(swapped, true, 'the swap hook never ran — this fixture cannot reach the condition');
+    assert.equal(nodeFs.existsSync(join(outputRoot, 'items', 'foreign.png')), true,
+      'the replacement must be reachable under the root\'s OWN pathname, or this fixture reproduces something else');
+    assert.equal(opened.ok, false, `a root whose object changed under its own pathname must not certify a snapshot: ${JSON.stringify(opened)}`);
+    assert.equal(opened.halts[0].halt, 'provenance_hazard', JSON.stringify(opened.halts));
+    // The DIAGNOSTIC, and here it is the whole point: containment cannot refuse this (the
+    // replacement occupies the root's own path) and neither can the output-root bracket (it compares
+    // B with B). Only the resolution bracket can name this one.
+    assert.match(opened.halts[0].message, /configured_and_resolved_disagree/,
+      `the halt must attribute this to the resolution bracket: ${JSON.stringify(opened.halts)}`);
+  });
+});
+
+// [round 34, from mutation] The bracket's two halves must read the same OBJECT, not the same NAME,
+// and mutation is what showed the difference is observable. Reading the second half through the
+// configured name instead of through `canonical` killed nothing — every fixture above survives it,
+// because a swap makes both forms disagree with themselves. This is the input that separates them,
+// and nothing moves in it at all: the kernel resolves `link` before applying `..`, `normalizeSegments`
+// collapses `..` before ever seeing `link`, so the configured name and its resolved form denote two
+// different directories at the same instant. Read at the name, the identity would pin one tree while
+// the segments describe the other — round 33's defect, arriving through a static configuration
+// rather than through a race.
+test('openCaptureRun: an output_dir whose name and resolved form denote different directories is refused', () => {
+  withTempDir((dir) => {
+    // The temp root itself may be reached through a symlinked ancestor (macOS `/var` ->
+    // `/private/var`); resolving it once here keeps every assertion below about THIS topology.
+    const real = nodeFs.realpathSync(dir);
+    const linkParent = join(real, 'a');
+    nodeFs.mkdirSync(linkParent, { recursive: true });
+    nodeFs.mkdirSync(join(real, 'b'), { recursive: true });
+    nodeFs.symlinkSync(join(real, 'b'), join(linkParent, 'link'));
+    // What the kernel reaches through the configured name ...
+    nodeFs.mkdirSync(join(real, 'assets'), { recursive: true });
+    // ... and what collapsing `..` lexically reaches instead. Both exist, and they are not the same
+    // directory — which is the whole condition.
+    nodeFs.mkdirSync(join(linkParent, 'assets'), { recursive: true });
+
+    // NOT `join(...)`: it normalizes `..` away, and a fixture built with it carries no `..` at all.
+    const outputDir = `${linkParent}/link/../assets`;
+    // `realpathSync` cannot state this fact and asking it was this fixture's first mistake: Node's
+    // implementation calls `path.resolve` first, which collapses `..` LEXICALLY — the same thing
+    // `normalizeSegments` does, and the opposite of what an `lstat` of this name does. The kernel is
+    // the only one that can be asked, so the assertion is an inode comparison.
+    const kernelIno = nodeFs.statSync(outputDir).ino;
+    assert.equal(kernelIno, nodeFs.statSync(join(real, 'assets')).ino,
+      'the kernel must reach <root>/assets through this name, or the fixture is not ambiguous');
+    assert.notEqual(kernelIno, nodeFs.statSync(join(linkParent, 'assets')).ino,
+      'the lexical form must be a different directory, or there is nothing to disagree about');
+
+    const profile = {
+      capture: { output_dir: outputDir, build_identity: { ui_read: false } },
+      publish: { chapters_dir: join(real, 'handbook'), target: 'static_md' },
+    };
+    nodeFs.mkdirSync(profile.publish.chapters_dir, { recursive: true });
+
+    const opened = CR.openCaptureRun(profile, [{ slug: 'items' }], null, stubDepsNoIdentity());
+    assert.equal(opened.ok, false, `an output_dir that names two directories at once must not certify a snapshot: ${JSON.stringify(opened)}`);
+    assert.equal(opened.halts[0].halt, 'provenance_hazard', JSON.stringify(opened.halts));
+    assert.match(opened.halts[0].message, /configured_and_resolved_disagree/,
+      `the halt must attribute this to the resolution bracket: ${JSON.stringify(opened.halts)}`);
+  });
+});
+
+// [round 34, from mutation] The other half of the same comparison, and it is not symmetry for its own
+// sake: a bracket that only compares two SUCCESSFUL reads treats "one of them found nothing" as
+// nothing to compare, stores a null identity, and a null identity stands every later output-root
+// bracket down. The root destroyed mid-validation then reaches the climb, which finds nothing along
+// the path, classifies every candidate as above a root that no longer exists, and certifies the
+// chapter as one that produced nothing. Mutation found it: dropping the arm killed no test.
+test('openCaptureRun: an output root that vanishes between the bracket\'s two reads is refused, not read as a first capture', () => {
+  withTempDir((dir) => {
+    const profile = profileFor(dir);
+    const outputRoot = profile.capture.output_dir;
+    nodeFs.mkdirSync(outputRoot, { recursive: true });
+
+    let resolutions = 0;
+    let vanished = false;
+    const deps = depsWithOverride({
+      realpathSync: (p, ...rest) => {
+        const out = nodeFs.realpathSync(p, ...rest);
+        if (String(p) === outputRoot) {
+          resolutions += 1;
+          // Resolution 1 is the W1 ownership gate; resolution 2 is `canonicalizeForComparison`'s.
+          // The root is a plain directory, so the bracket's first read did not resolve this name —
+          // it has already observed the root, and the object it observed leaves here.
+          if (resolutions === 2) {
+            nodeFs.renameSync(outputRoot, join(dir, 'assets-vanished'));
+            vanished = true;
+          }
+        }
+        return out;
+      },
+      runIdentityCommand: () => ({ ok: false, detail: 'no command configured in test' }),
+    });
+
+    const opened = CR.openCaptureRun(profile, [{ slug: 'items' }], null, deps);
+    assert.equal(vanished, true, 'the removal hook never ran — this fixture cannot reach the condition');
+    assert.equal(nodeFs.existsSync(outputRoot), false, 'the output root must really be gone');
+    assert.equal(opened.ok, false, `an output root observed and then destroyed must not open as a first capture: ${JSON.stringify(opened)}`);
+    assert.equal(opened.halts[0].halt, 'provenance_hazard', JSON.stringify(opened.halts));
+    assert.match(opened.halts[0].message, /configured_and_resolved_disagree/,
+      `the halt must attribute this to the resolution bracket: ${JSON.stringify(opened.halts)}`);
   });
 });
 
@@ -3993,9 +4197,14 @@ test('openCaptureRun: a RESOLVING symlinked ancestor with a not-yet-created leaf
   });
 });
 
-// [round 26 BLOCKER] The closing half. `closeCaptureRun` never runs gate 3, so nothing upstream
-// refuses a dangling root link here — this branch is the only thing standing between it and a
-// committed `closing: {}` with no hazards.
+// [round 26 BLOCKER] The closing half. Nothing upstream refuses a dangling root link that appears
+// mid-sweep — this branch is the only thing standing between it and a committed `closing: {}` with
+// no hazards.
+// [round 34] The sentence that stood here said `closeCaptureRun` NEVER runs gate 3. That was true
+// when it was written and stopped being true one round later, three lines below its own correction:
+// a maintainer reading only the header would plant before the close again and retire this coverage
+// a second time, exactly as round 33 did. The close runs gates 1-4; what it cannot see is a hazard
+// that arrives after they pass.
 test('the closing snapshot: a dangling root symlink is refused, not read as a chapter that produced nothing', () => {
   withTempDir((dir) => {
     const profile = profileFor(dir);

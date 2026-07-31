@@ -1899,6 +1899,9 @@ function exactIdentityPart(value) {
 // segments against a raw count of 5.
 function containmentRootFor(profileLike, deps) {
   const raw = profileLike?.capture?.output_dir ?? '';
+  // [round 34] The FIRST half of the bracket, and it has to be taken before anything is resolved —
+  // see the block below the resolution for what it is for and what it does not buy.
+  const beforeResolution = assetDirIdentity(raw, deps, { allowSymlink: true });
   const resolved = canonicalizeForComparison(raw, deps);
   // The REASON travels, rather than being flattened into a fixed word at the call site. A symlink
   // cycle on the configured root reported `inspection_failure` to the operator — the one diagnosis
@@ -1919,17 +1922,54 @@ function containmentRootFor(profileLike, deps) {
   // comments claiming "the same moment" and "ONE observation" were false: one observation means one
   // object, not two syscalls issued close together.
   //
-  // Reading it at `canonical` binds the pair by construction. `canonical` is the fully resolved path
-  // observation A just returned, so the identity describes the object those segments name and
-  // cannot describe a different one — whatever the configured name does afterwards is precisely
-  // what `outputRootChanged` exists to catch. This does NOT reintroduce round 31's defect, which was
-  // about the later probe: pinning the target and then RE-READING the target compares an untouched
-  // object with itself forever, while pinning the target and re-reading the configured NAME is what
-  // a repoint has to move past.
+  // Reading it at `canonical` keeps the identity on the object those segments name, which is what
+  // round 33 needed. It does NOT reintroduce round 31's defect, which was about the later probe:
+  // pinning the target and then RE-READING the target compares an untouched object with itself
+  // forever, while pinning the target and re-reading the configured NAME is what a repoint has to
+  // move past.
   //
-  // A root that does not exist yet has no identity, and that is an ordinary first capture rather
-  // than a failure — `null` means "nothing to compare", never "compares equal".
+  // [round 34] What round 33 claimed for it was false, and codex executed the counterexample.
+  // "Binds the pair by construction" was a claim about two syscalls again: `canonical` is a STRING,
+  // stat-ing it is a second call, and the physical directory it names can be replaced in between —
+  // same pathname, different object. Then `segments` describe A, the identity pins B, and the later
+  // probe re-resolves the configured name to B and agrees with itself. `openCaptureRun` returned ok
+  // over another tree's bytes. Round 33 moved the split one level along and called it closed.
+  //
+  // No path-based syscall pair can bind an object; that needs a handle this seam does not have (the
+  // standing residual, stated once at `walkRegularFiles`). What is achievable is a BRACKET, and
+  // that is all this is: an identity read at the configured name BEFORE the resolution and one at
+  // `canonical` after it. A substitution that is still in place when the second read lands makes the
+  // two disagree and this refuses; one installed and reverted entirely between them leaves no trace,
+  // exactly as it does at every other observation point in this module. Detection, not prevention.
+  //
+  // It cannot refuse a run that would otherwise have closed cleanly, which is the property that
+  // matters for a check added this late: `outputRootChanged` ALREADY requires the identity read at
+  // the configured name to equal the one pinned at `canonical`, on every snapshot of every entry.
+  // Any topology where the two disagree already halts at the first snapshot. This moves that
+  // refusal to validation, before a reservation is written, and lets it be diagnosed for what was
+  // observed instead of as a replacement.
+  //
+  // Which is why the reason names the OBSERVATION and not a cause. Two different situations reach
+  // this line and these two syscalls cannot tell them apart: a substitution landing inside the
+  // window, and a configured path that is statically ambiguous — `<root>/link/../assets`, where the
+  // kernel resolves `link` before applying `..` and `normalizeSegments` collapses `..` before ever
+  // seeing it, so the name and its resolved form denote different directories with nothing moving
+  // at all. Both are refusals; only one is a race; a reason word claiming a replacement would send
+  // an operator hunting a concurrent writer that does not exist.
+  //
+  // The two halves must also agree about EXISTING. One read finding an object where the other found
+  // none is the same disagreement — the root arriving or leaving mid-validation — and reading it as
+  // "nothing to compare" would store a null identity, which stands every later bracket down and
+  // lets the climb certify the destroyed root as a chapter that produced nothing.
+  //
+  // A root that does not exist YET has no identity, and that is an ordinary first capture rather
+  // than a failure — `null` means "nothing to compare", never "compares equal". Both halves fail
+  // together there (the tail that does not resolve is the same tail in both), so the bracket stands
+  // down rather than reading two absences as a disagreement.
   const identity = assetDirIdentity(canonical, deps, { allowSymlink: true });
+  if (beforeResolution.ok !== identity.ok || (identity.ok && beforeResolution.id !== identity.id)) {
+    return { ok: false, reason: 'configured_and_resolved_disagree' };
+  }
   return {
     ok: true,
     root: {
