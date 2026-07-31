@@ -55,9 +55,13 @@ capture:
   # configured here (there is no publish.provenance_dir key). Absent, or {}, disables the COMMAND
   # source only — it does not by itself make the identity unavailable, because ui_read defaults to
   # true, so the UI-read step still runs and W2 can ask for one even with no build_identity block
-  # at all. Nothing here ever halts: every existing profile predates this key, so a build identity
-  # is never mandatory, and value: null with source: "unavailable" is what you get once every
-  # enabled source has been exhausted. See SKILL.md's W2 preflight/resolution step, which is
+  # at all. A missing or failing identity SOURCE never halts: every existing profile predates this
+  # key, so a build identity is never mandatory, and value: null with source: "unavailable" is what
+  # you get once every enabled source has been exhausted. Configuring this block is not free of
+  # halts, though, and the comment here used to claim it was: it is what arms the ownership gate,
+  # so a topology where capture.output_dir contains or equals the derived provenance root halts
+  # with provenance_root_overlap PRECISELY because a build identity was asked for. Remove the block
+  # and the same topology only warns. See SKILL.md's W2 preflight/resolution step, which is
   # normative for the precedence order.
   build_identity:
     command: "docker compose exec -T app git describe --tags --always"   # exact, copy-pasteable; run TWICE per capture run (once at open, once at close) — see SKILL.md's W2 step

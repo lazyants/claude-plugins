@@ -3648,6 +3648,18 @@ has_in_section "SKILL: W5 completeness rule 5 — re-hashed NOW at publish time,
 has_in_section "SKILL: W5 rule 5 states WHY it compares against closing, not merely against opening" \
   "$SKILL" '### W5 — Publish' \
   'would accept bytes the captured build never produced'
+# [round 15] The completeness rule gained a hazard/absence distinction, and the report row gained the
+# field that tells an operator which failure they are looking at. Both are normative — an adapter
+# author reads them here — so both are pinned where they are read.
+has_in_section "SKILL: W5 refuses an image that was unhashable at EITHER observation point" \
+  "$SKILL" '### W5 — Publish' \
+  'no expected image was unhashable at open or at close'
+has_in_section "SKILL: W5 states WHY a hazard is not an absence" \
+  "$SKILL" '### W5 — Publish' \
+  'has no established bytes there'
+has_in_section "SKILL: W6 rows carry record_detail, present-and-null when clean" \
+  "$SKILL" '### W6 — Revalidation / audit mode (existing chapters)' \
+  'present on every row and `null` when there is nothing to say'
 # [round 14] The rule-5 correction landed in SKILL.md, in the code, and in the pin above — and left
 # the EXPORTED JSDoc contract still stating the old rule, which is what a caller reading only the API
 # gets. Four statements of one rule, three corrected. This is an INSTANCE pin, not a class gate: no

@@ -1296,7 +1296,11 @@ function writeFull(fd, buffer, deps) {
 
 /**
  * Open a capture run: re-assert ownership (silently), establish the provenance hierarchy, reserve
- * a one-shot pending token via an exclusive create (before anything else this open would do),
+ * a one-shot pending token via an exclusive create (before this call spends the operator's identity
+ * command or hashes a single asset — NOT before the three steps just named, which is what "before
+ * anything else this open would do" wrongly claimed here until round 15: an invalid slug halts with
+ * no token ever attempted, deliberately, so a refusal unrelated to contention leaves nothing
+ * behind),
  * resolve the opening build identity, snapshot every entry's current asset-dir hashes as the
  * OPENING baseline, and finalize the reservation — writing in the run id and a digest of the
  * opening payload (never the snapshot itself — the snapshot travels in the returned `runState`,
@@ -1412,10 +1416,13 @@ export function openCaptureRun(profileLike, entries, openingObservation, deps, i
   // so an unexpected errno (EACCES, EIO, ...) crashed the whole call with an uncaught exception
   // instead of returning a halt (codex, important #6).
   const openingAssets = {};
+  const openingHazards = {};
   try {
     for (const entry of entries) {
       const assetDir = chapterAssetDir(profileLike, entry);
-      openingAssets[chapterKeyFor(entry)] = snapshotAssetHashes(assetDir, d);
+      const snapshot = snapshotAssetHashes(assetDir, d);
+      openingAssets[chapterKeyFor(entry)] = snapshot.hashes;
+      openingHazards[chapterKeyFor(entry)] = snapshot.hazards;
     }
   } catch (err) {
     const releaseWarning = releaseReservation();
@@ -1429,6 +1436,7 @@ export function openCaptureRun(profileLike, entries, openingObservation, deps, i
       run_id: d.randomUUID(),
       opening,
       opening_assets: openingAssets,
+      opening_asset_hazards: openingHazards,
       entries: entries.map(entryKeyShape),
     };
     runState.opening_digest = digestOpeningPayload(openingPayloadFromRunState(runState));
@@ -1497,7 +1505,16 @@ function chapterKeyFor(entry) {
 // RE-VERIFY the token's stored digest. One shared shape is what keeps the two from silently
 // drifting into two different notions of "the opening payload".
 function openingPayloadFromRunState(runState) {
-  return { entries: runState.entries, assets: runState.opening_assets, identity: runState.opening };
+  // [round 15] `asset_hazards` is authenticated too. It is the record of what could NOT be
+  // established at open, and W5 refuses on it — so leaving it outside the digest would let a caller
+  // clear the one field that blocks a confident record, which is precisely the forgery this digest
+  // exists to stop.
+  return {
+    entries: runState.entries,
+    assets: runState.opening_assets,
+    asset_hazards: runState.opening_asset_hazards,
+    identity: runState.opening,
+  };
 }
 
 // The one recursive asset-tree walk both sweeps below share (the hash snapshot and the filename
@@ -1541,17 +1558,33 @@ function walkRegularFiles(rootDir, deps, visit) {
 // (or the file vanishing between listing and open) is treated exactly like `isSymbolicLink()`
 // already is a few lines up: the entry is silently excluded from the snapshot rather than halting
 // the whole run — this tree is not ours to halt on, but it is also not ours to hash blindly through
-// a symlink. The chapter-level consequence is the existing, correct one: a missing expected image
-// fails completeness (rule 3) and the chapter is reported ineligible, never silently trusted.
+// a symlink.
+//
+// [round 15] The paragraph above used to end by calling the exclusion harmless: "a missing expected
+// image fails completeness (rule 3) and the chapter is reported ineligible, never silently
+// trusted." That is true of the CLOSING snapshot, which is what rule 3 reads. It is the exact
+// opposite for the OPENING one, where a missing key means "brand-new file this run" and so SKIPS
+// rule 4 — the check that the bytes changed during capture. One function serves both observation
+// points, and the justification was written for one of them. The consequence was a confident record
+// over stale bytes: an asset carrying old-build bytes and an extra hard link at open is dropped from
+// the opening snapshot; the capture removes only the alias, never the bytes; closing hashes it
+// fine; W5 reads the absent opening key as brand-new, skips rule 4, finds the re-hash equal to
+// closing, and attributes the old bytes to the current build. So a hazard is no longer encoded as
+// an absence: it is returned separately, and W5 refuses any asset that was hazardous at either
+// point, because "we could not read this file then" is not evidence that it changed.
 function snapshotAssetHashes(assetDir, deps) {
-  const result = Object.create(null);
+  const hashes = Object.create(null);
+  const hazards = [];
   walkRegularFiles(assetDir, deps, (absPath, relPath) => {
     const hashed = hashFileNoFollow(absPath, deps);
-    if (hashed.kind === 'present') result[relPath] = hashed.digest;
-    // 'hazard' (a symlink/hard-link/non-regular swapped in after the listing, or an inspection
-    // failure) and 'absent' (the file vanished) are both excluded, same as a symlink dirent.
+    if (hashed.kind === 'present') hashes[relPath] = hashed.digest;
+    // 'absent' (the file vanished between listing and open) stays an absence: nothing was there to
+    // establish, and a file the capture then creates is legitimately brand new. 'hazard' does not —
+    // the file WAS there and we were refused, which is a different fact and must survive as one.
+    else if (hashed.kind !== 'absent') hazards.push(`${relPath}:${hashed.kind}`);
   });
-  return result;
+  hazards.sort();
+  return { hashes, hazards };
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1599,8 +1632,9 @@ function listMatchingChapterTemps(profileLike, entry, deps) {
 }
 
 /**
- * Close a capture run: re-verify the token matches this `runState`, snapshot the CLOSING asset
- * hashes, resolve the closing build identity and the run's final recorded identity, write the run
+ * Close a capture run: re-verify the token matches this `runState`, resolve the closing build
+ * identity, snapshot the CLOSING asset hashes, combine the two halves into the run's final recorded
+ * identity, write the run
  * record to a process-unique temp under `run/`, commit by rename, then remove every leftover
  * matching temp and, ONLY once every one of them is confirmed gone, the token (codex round 7,
  * IMPORTANT 2 — a temp whose removal could not be confirmed leaves the token in place on purpose,
@@ -1721,10 +1755,13 @@ export function closeCaptureRun(profileLike, runState, captureOutcome, closingOb
   // a halt, not crash — and doing so HERE (before any temp is written) is what keeps the existing
   // "no record written before the closing resolution" guarantee true on this exit too.
   const closingAssets = {};
+  const closingHazards = {};
   try {
     for (const entry of runState.entries) {
       const assetDir = chapterAssetDir(profileLike, entry);
-      closingAssets[chapterKeyFor(entry)] = snapshotAssetHashes(assetDir, d);
+      const snapshot = snapshotAssetHashes(assetDir, d);
+      closingAssets[chapterKeyFor(entry)] = snapshot.hashes;
+      closingHazards[chapterKeyFor(entry)] = snapshot.hazards;
     }
   } catch (err) {
     return haltResult('provenance_hazard', `cannot snapshot the closing asset hashes: ${describeThrownField(err, 'code')}`, {});
@@ -1742,6 +1779,8 @@ export function closeCaptureRun(profileLike, runState, captureOutcome, closingOb
     chapters[key] = {
       opening: runState.opening_assets[key] ?? {},
       closing: closingAssets[key] ?? {},
+      opening_hazards: runState.opening_asset_hazards?.[key] ?? [],
+      closing_hazards: closingHazards[key] ?? [],
     };
   }
 
@@ -2107,6 +2146,23 @@ export function recordChapterProvenance(profileLike, acceptedEntries, entry, cha
     }
   }
 
+  // [round 15] Rule 3.5, checked FIRST because it decides whether the other rules mean anything: an
+  // asset that could not be hashed at open or at close has no established bytes at that point, so
+  // neither "it changed during capture" (rule 4) nor "it is brand new" can be concluded about it.
+  // The reason names the asset and the hazard kind rather than collapsing to one word — an operator
+  // reading `hard_link` acts differently than one reading `inspection_failure`.
+  const hazardFor = (list, key) => (list ?? []).find((h) => h.slice(0, h.lastIndexOf(':')) === key);
+  for (const asset of extraction.assets) {
+    const openingHazard = hazardFor(chapterRunData.opening_hazards, asset.key);
+    if (openingHazard !== undefined) {
+      return { recorded: false, reason: `rule5_opening_unhashable:${openingHazard}` };
+    }
+    const closingHazard = hazardFor(chapterRunData.closing_hazards, asset.key);
+    if (closingHazard !== undefined) {
+      return { recorded: false, reason: `rule5_closing_unhashable:${closingHazard}` };
+    }
+  }
+
   // Rule 3 + 4: every expected key present in `closing`, and closing != opening.
   for (const asset of extraction.assets) {
     if (!Object.hasOwn(chapterRunData.closing, asset.key)) {
@@ -2135,7 +2191,10 @@ export function recordChapterProvenance(profileLike, acceptedEntries, entry, cha
   for (const asset of extraction.assets) {
     const rehash = hashFileNoFollow(asset.absPath, d);
     if (rehash.kind !== 'present') {
-      return { recorded: false, reason: `rehash_failed:${rehash.kind}` };
+      // [round 15] Names the asset, not just the kind. Every hazard used to reduce to
+      // `rehash_failed:hazard`, so an operator holding an ineligible chapter with several embeds
+      // learned neither which file nor why.
+      return { recorded: false, reason: `rehash_failed:${asset.key}:${rehash.kind}` };
     }
     assetHashes[asset.key] = rehash.digest;
     if (rehash.digest === chapterRunData.closing[asset.key]) continue;
@@ -2435,6 +2494,7 @@ export function buildProvenanceReport(profileLike, entries, currentObservation, 
     }
 
     let recordState;
+    let staleDetail = null;
     let chapterRecord = null;
     if (recordRead.kind === 'absent') {
       recordState = 'absent';
@@ -2463,9 +2523,19 @@ export function buildProvenanceReport(profileLike, entries, currentObservation, 
         }
         if (unhashable.length > 0) {
           recordState = 'stale';
+          // [round 15] Failing closed was right and losing the reason was not: byte-changed
+          // content, a key missing from the record, a byte-identical file carrying an extra hard
+          // link, and an outright read failure all produced the same `record_stale` row. The outer
+          // verdict stays the same — the operator must not be told a chapter is verified — but
+          // "the content changed" and "we could not read the content" call for different actions,
+          // so the row carries which one it was.
+          staleDetail = `unhashable:${unhashable.join(',')}`;
         } else {
           const verify = verifyRecord(chapterRecord.asset_hashes, currentHashes);
           recordState = verify.status === 'ok' ? 'ok' : 'stale';
+          if (verify.status !== 'ok') {
+            staleDetail = verify.path === undefined ? verify.reason : `${verify.reason}:${verify.path}`;
+          }
         }
       }
     }
@@ -2483,6 +2553,10 @@ export function buildProvenanceReport(profileLike, entries, currentObservation, 
       classification: delta.classification,
       classification_reason: delta.classification_reason,
       current_source: delta.current_source,
+      // Present on every row, `null` when there is nothing to say — an absent key and "no detail"
+      // are not the same reading, and a field that appears only sometimes gets treated as optional
+      // by whatever renders it.
+      record_detail: staleDetail,
     });
   }
 

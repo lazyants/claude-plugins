@@ -175,8 +175,8 @@ export function assertProvenanceOwnership(profileLike: ProfileLike, deps?: Parti
 // capture-record.mjs's `openCaptureRun`/`closeCaptureRun`, both of which return exactly
 // `{runState: {skipped: true}}` on that branch, no other property. An active run carries
 // `skipped: false` plus every payload field `openCaptureRun` actually assigns before returning
-// (`run_id`, `opening_digest`, `opening`, `opening_assets`, `entries`) — none of those are
-// optional there, because `closeCaptureRun` reads all five unconditionally off a non-skipped
+// (`run_id`, `opening_digest`, `opening`, `opening_assets`, `opening_asset_hazards`, `entries`) —
+// none of those are optional there, because `closeCaptureRun` reads them unconditionally off a non-skipped
 // `runState`, and a caller driving W5 needs `run_id` narrowed to `string` to pass as
 // `recordChapterProvenance`'s `expectedRunId`. `closed` alone stays optional: absent before
 // `closeCaptureRun` runs, `true` on the runState it returns (`{...runState, closed: true}`), and
@@ -191,6 +191,13 @@ export type RunState =
       opening_digest: string;
       opening: BuildIdentity;
       opening_assets: Record<string, Record<string, string>>;
+      // [round 15] Per chapter key, the assets that could NOT be hashed at open, each as
+      // `<relPath>:<kind>`. Separate from `opening_assets` on purpose: dropping them left an
+      // absent key, and W5 reads an absent opening key as "brand-new file this run" and skips the
+      // did-it-change check — so a stale asset that merely could not be read at open was recorded
+      // as if the captured build had produced it. Authenticated by `opening_digest` along with the
+      // rest of the payload, since clearing it would otherwise unblock exactly that record.
+      opening_asset_hazards: Record<string, string[]>;
       entries: ChapterEntryLike[];
       closed?: boolean;
     };
@@ -203,7 +210,7 @@ export type RunState =
 // `NeedsUiRead` itself, which is shared with two entrypoints that hold no reservation.
 export type OpenResult = { ok: true; runState: RunState } | HaltResult | (NeedsUiRead & { warnings: string[] });
 
-/** See capture-record.mjs: ledger row 2 — re-assert ownership, establish the hierarchy, reserve the one-shot pending token via an exclusive create, resolve the opening identity, snapshot the opening asset hashes, and finalize the reserved token with the resolved runState. The reservation comes FIRST on purpose: a contended open must fail before it spends an operator's identity command, and must not return `needs_ui_read` for a run that could never have started. A `needs_ui_read` return releases the reservation so the continuation re-checks it cleanly; a release that could not actually remove the token surfaces a non-empty `warnings` array (present and empty on a clean release) rather than silently promising a clean check it did not deliver. Every path that leaves this function after the reservation either finalizes it or releases it — including one taken by a throw. A throw out of IDENTITY RESOLUTION returns `identity_resolution_threw`, named apart from `provenance_hazard` because it reports a malformed observation or a failing identity command rather than a disk condition; a throw out of RUN-STATE CONSTRUCTION is the disk-adjacent one and stays `provenance_hazard`. Neither escapes this declared result. */
+/** See capture-record.mjs: ledger row 2 — re-assert ownership, establish the hierarchy, reserve the one-shot pending token via an exclusive create, resolve the opening identity, snapshot the opening asset hashes, and finalize the reserved token with the resolved runState. The reservation comes before this call spends anything of the operator's — the identity command, and any asset hashing — on purpose: a contended open must fail before it spends an operator's identity command, and must not return `needs_ui_read` for a run that could never have started. [round 15] It is NOT first overall, and this sentence used to say it was: the ownership gate, the hierarchy and the entry validation run ahead of it, so an invalid slug halts without a token ever being attempted. That is deliberate — a refusal on grounds unrelated to contention must not leave a reservation behind. A `needs_ui_read` return releases the reservation so the continuation re-checks it cleanly; a release that could not actually remove the token surfaces a non-empty `warnings` array (present and empty on a clean release) rather than silently promising a clean check it did not deliver. Every path that leaves this function after the reservation either finalizes it or releases it — including one taken by a throw. A throw out of IDENTITY RESOLUTION returns `identity_resolution_threw`, named apart from `provenance_hazard` because it reports a malformed observation or a failing identity command rather than a disk condition; a throw out of RUN-STATE CONSTRUCTION is the disk-adjacent one and stays `provenance_hazard`. Neither escapes this declared result. */
 export function openCaptureRun(
   profileLike: ProfileLike,
   entries: ChapterEntryLike[],
@@ -222,7 +229,7 @@ export type CloseResult =
   | HaltResult
   | NeedsUiRead;
 
-/** See capture-record.mjs: ledger row 3 — verify the token, snapshot the closing asset hashes, resolve the run's final identity, commit the run record by temp-then-rename, then remove every leftover matching temp and, only once every one is confirmed gone, the token — a temp that cannot be confirmed removed is named in `warnings` and leaves the token in place, so the next `openCaptureRun` halts on it rather than succeeding over residue nothing would otherwise make an operator clean up.  Both identity-resolution calls here can throw — a malformed closing observation, or an identity command that threw — and are converted to an `identity_resolution_threw` halt rather than escaping this declared contract; the closing temp's own `randomUUID()` naming call is guarded the same way, before any temp exists to orphan. */
+/** See capture-record.mjs: ledger row 3 — verify the token, resolve the run's final identity, snapshot the closing asset hashes, commit the run record by temp-then-rename, then remove every leftover matching temp and, only once every one is confirmed gone, the token — a temp that cannot be confirmed removed is named in `warnings` and leaves the token in place, so the next `openCaptureRun` halts on it rather than succeeding over residue nothing would otherwise make an operator clean up.  Both identity-resolution calls here can throw — a malformed closing observation, or an identity command that threw — and are converted to an `identity_resolution_threw` halt rather than escaping this declared contract; the closing temp's own `randomUUID()` naming call is guarded the same way, before any temp exists to orphan. */
 export function closeCaptureRun(
   profileLike: ProfileLike,
   runState: RunState,
@@ -290,6 +297,14 @@ export interface ReportRow {
   classification: 'unchanged' | 'changed' | 'indeterminate';
   classification_reason: string | null;
   current_source: string | null;
+  // [round 15] Present on EVERY row, `null` when the record is clean. Names why a record is not
+  // clean — which asset, and whether its bytes changed, went missing from the record, or could not
+  // be read at all. Failing closed is the right verdict and was already correct; collapsing four
+  // distinct causes into one `record_stale` row was not, because "the content changed" and "the
+  // content could not be read" call for different operator actions. Not optional: a field that
+  // appears only sometimes is treated as optional by whatever renders it, and an absent key reads
+  // differently from "nothing to report".
+  record_detail: string | null;
 }
 
 export type ReportResult = { rows: ReportRow[] } | NeedsUiRead | HaltResult;

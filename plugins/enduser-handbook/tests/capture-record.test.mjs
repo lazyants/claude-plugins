@@ -1555,6 +1555,47 @@ test('closeCaptureRun: PAYLOAD TAMPERING — a mutated `entries` list (a differe
   });
 });
 
+// [round 15 BLOCKER] The mirror image of round 14's W6 defect, in the OPENING snapshot, and worse:
+// there a dropped embed produced a false `unchanged`; here it produces a false RECORD. The snapshot
+// excluded any asset it could not hash, so a hazard and an absence became the same missing key —
+// and W5 reads a missing OPENING key as "brand-new file this run", which SKIPS rule 4, the check
+// that the bytes changed during capture. Nothing in the run then establishes that these bytes came
+// from this build. The asset's content never changes here; only the hard link does, and it is gone
+// by publish time, so every check that looks at the file at W5 is satisfied.
+test('recordChapterProvenance: an asset UNHASHABLE AT OPEN is never recorded, even though W5 can read it', () => {
+  withTempDir((dir) => {
+    const profile = profileFor(dir);
+    const entry = { slug: 'items' };
+    const assetDir = join(profile.capture.output_dir, 'items');
+    nodeFs.mkdirSync(assetDir, { recursive: true });
+    // Old-build bytes, carrying an extra hard link at open. Gate 6 refuses it (nlink !== 1).
+    nodeFs.writeFileSync(join(assetDir, 'a.png'), 'stale-from-the-previous-build');
+    const alias = join(dir, 'a-alias.png');
+    nodeFs.linkSync(join(assetDir, 'a.png'), alias);
+
+    const opened = CR.openCaptureRun(profile, [entry], null, stubDepsNoIdentity());
+    assert.equal(opened.ok, true, JSON.stringify(opened));
+    assert.deepEqual(opened.runState.opening_asset_hazards['items'], ['a.png:hazard']);
+    assert.equal(Object.hasOwn(opened.runState.opening_assets['items'], 'a.png'), false,
+      'the hash itself is still absent — it is the HAZARD that must survive alongside it');
+
+    // The capture removes only the alias. The BYTES are never rewritten: this asset still holds
+    // the previous build's content.
+    nodeFs.unlinkSync(alias);
+    assert.equal(nodeFs.statSync(join(assetDir, 'a.png')).nlink, 1);
+
+    const closed = CR.closeCaptureRun(profile, opened.runState, { ok: true }, null, stubDepsNoIdentity());
+    assert.equal(closed.ok, true, JSON.stringify(closed));
+
+    const chapterFile = writeChapterAt(profile, entry, '# items\n');
+    const deps = { ...stubDepsNoIdentity(), expectedAssets: stubExpectedAssetsFor(assetDir, ['a.png']) };
+    const result = CR.recordChapterProvenance(profile, [entry], entry, chapterFile, opened.runState.run_id, deps);
+    assert.equal(result.recorded, false, JSON.stringify(result));
+    assert.match(result.reason, /^rule5_opening_unhashable:a\.png:/, JSON.stringify(result));
+    assert.equal(nodeFs.existsSync(CR.chapterRecordPath(profile, entry)), false);
+  });
+});
+
 // [ped-ant, round 14] The tampering test above MUTATES a payload member; this one REMOVES it. The
 // digest recompute treats `runState` as tamperable serialized input — the comment above it says so
 // outright — and then hands it to `digestOpeningPayload`, which throws on a member it cannot
@@ -1668,6 +1709,10 @@ test('RunState union: an ACTIVE run carries exactly the non-optional payload fie
     assert.match(openedState.opening_digest, /^sha256:[0-9a-f]{64}$/);
     assert.deepEqual(Object.keys(openedState.opening).sort(), ['detail', 'resolution_reason', 'source', 'value']);
     assert.equal(typeof openedState.opening_assets, 'object');
+    // [round 15] Added with the hazard/absence split: an asset that could not be hashed at open is
+    // recorded here rather than being dropped, because a missing key means "brand new" downstream.
+    assert.equal(typeof openedState.opening_asset_hazards, 'object');
+    assert.ok(Array.isArray(openedState.opening_asset_hazards[Object.keys(openedState.opening_asset_hazards)[0]]));
     assert.ok(Array.isArray(openedState.entries));
     // Not yet closed — `closed` is the one field the declaration keeps optional on this branch,
     // and it must be genuinely ABSENT here (not merely falsy), matching `openCaptureRun`'s own
@@ -1675,7 +1720,7 @@ test('RunState union: an ACTIVE run carries exactly the non-optional payload fie
     assert.equal(Object.hasOwn(openedState, 'closed'), false);
     assert.deepEqual(
       Object.keys(openedState).sort(),
-      ['entries', 'opening', 'opening_assets', 'opening_digest', 'run_id', 'skipped'].sort(),
+      ['entries', 'opening', 'opening_asset_hazards', 'opening_assets', 'opening_digest', 'run_id', 'skipped'].sort(),
     );
 
     nodeFs.writeFileSync(join(profile.capture.output_dir, 'items', 'a.png'), 'v2');
@@ -1692,7 +1737,7 @@ test('RunState union: an ACTIVE run carries exactly the non-optional payload fie
     assert.equal(closedState.closed, true);
     assert.deepEqual(
       Object.keys(closedState).sort(),
-      ['closed', 'entries', 'opening', 'opening_assets', 'opening_digest', 'run_id', 'skipped'].sort(),
+      ['closed', 'entries', 'opening', 'opening_asset_hazards', 'opening_assets', 'opening_digest', 'run_id', 'skipped'].sort(),
     );
   });
 });
@@ -3312,6 +3357,71 @@ test('buildProvenanceReport: an embed that CANNOT be hashed makes the chapter st
     const result = CR.buildProvenanceReport(profile, [entry], null, { ...stubDepsNoIdentity(), expectedAssets: both });
     assert.notEqual(result.rows[0].classification, 'unchanged', JSON.stringify(result.rows[0]));
     assert.equal(result.rows[0].classification_reason, 'record_stale', JSON.stringify(result.rows[0]));
+  });
+});
+
+// [round 15 IMPORTANT] Failing closed was right; losing the reason was not. A byte-identical file
+// carrying an extra hard link and a file whose content actually changed produced the same row, so
+// the report could not tell an operator "the content changed" from "the content could not be read"
+// — two findings that call for different actions. The outer verdict is deliberately the same.
+test('buildProvenanceReport: the row distinguishes UNREADABLE from CHANGED, though both are stale', () => {
+  withTempDir((dir) => {
+    const profile = profileFor(dir);
+    const recordFor = (slug, bytes) => {
+      const entry = { slug };
+      const assetDir = join(profile.capture.output_dir, slug);
+      nodeFs.mkdirSync(assetDir, { recursive: true });
+      nodeFs.writeFileSync(join(assetDir, 'a.png'), `${bytes}-open`);
+      const opened = CR.openCaptureRun(profile, [entry], null, stubDepsNoIdentity());
+      assert.equal(opened.ok, true);
+      nodeFs.writeFileSync(join(assetDir, 'a.png'), bytes);
+      assert.equal(CR.closeCaptureRun(profile, opened.runState, { ok: true }, null, stubDepsNoIdentity()).ok, true);
+      const chapterFile = writeChapterAt(profile, entry, `# ${slug}\n`);
+      const deps = { ...stubDepsNoIdentity(), expectedAssets: stubExpectedAssetsFor(assetDir, ['a.png']) };
+      assert.equal(CR.recordChapterProvenance(profile, [entry], entry, chapterFile, opened.runState.run_id, deps).recorded, true);
+      return { entry, assetDir };
+    };
+    const unreadable = recordFor('unreadable', 'v2');
+    const changed = recordFor('changed', 'w2');
+
+    // One becomes unreadable without changing a byte; the other changes bytes and stays readable.
+    nodeFs.linkSync(join(unreadable.assetDir, 'a.png'), join(dir, 'alias.png'));
+    nodeFs.writeFileSync(join(changed.assetDir, 'a.png'), 'w3');
+
+    const w6Deps = {
+      ...stubDepsNoIdentity(),
+      expectedAssets: (profileLikeArg, entryArg) => ({
+        ok: true,
+        assets: [{ key: 'a.png', absPath: join(profileLikeArg.capture.output_dir, entryArg.slug, 'a.png') }],
+      }),
+    };
+    const result = CR.buildProvenanceReport(profile, [unreadable.entry, changed.entry], null, w6Deps);
+    assert.equal(result.rows[0].classification_reason, 'record_stale', JSON.stringify(result.rows[0]));
+    assert.equal(result.rows[1].classification_reason, 'record_stale', JSON.stringify(result.rows[1]));
+    assert.match(result.rows[0].record_detail, /^unhashable:a\.png:/, JSON.stringify(result.rows[0]));
+    assert.match(result.rows[1].record_detail, /^embed_hash_changed/, JSON.stringify(result.rows[1]));
+    assert.notEqual(result.rows[0].record_detail, result.rows[1].record_detail);
+  });
+});
+
+test('buildProvenanceReport: every row carries record_detail, null when the record is clean', () => {
+  withTempDir((dir) => {
+    const profile = profileFor(dir);
+    const entry = { slug: 'items' };
+    const assetDir = join(profile.capture.output_dir, 'items');
+    nodeFs.mkdirSync(assetDir, { recursive: true });
+    nodeFs.writeFileSync(join(assetDir, 'a.png'), 'v1');
+    const opened = CR.openCaptureRun(profile, [entry], null, stubDepsNoIdentity());
+    nodeFs.writeFileSync(join(assetDir, 'a.png'), 'v2');
+    assert.equal(CR.closeCaptureRun(profile, opened.runState, { ok: true }, null, stubDepsNoIdentity()).ok, true);
+    const chapterFile = writeChapterAt(profile, entry, '# items\n');
+    const deps = { ...stubDepsNoIdentity(), expectedAssets: stubExpectedAssetsFor(assetDir, ['a.png']) };
+    assert.equal(CR.recordChapterProvenance(profile, [entry], entry, chapterFile, opened.runState.run_id, deps).recorded, true);
+    const result = CR.buildProvenanceReport(profile, [entry], null, deps);
+    // Present-and-null, never absent: an absent key and "nothing to report" read differently, and
+    // a field that only sometimes appears gets treated as optional by whatever renders it.
+    assert.equal(Object.hasOwn(result.rows[0], 'record_detail'), true, JSON.stringify(result.rows[0]));
+    assert.equal(result.rows[0].record_detail, null, JSON.stringify(result.rows[0]));
   });
 });
 

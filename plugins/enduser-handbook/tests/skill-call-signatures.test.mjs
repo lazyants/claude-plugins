@@ -41,7 +41,13 @@ function exportedSignatures(libDir) {
   const signatures = new Map();
   for (const file of readdirSync(libDir).filter((f) => f.endsWith('.mjs'))) {
     const src = readFileSync(join(libDir, file), 'utf8');
-    for (const m of src.matchAll(/^export function ([A-Za-z0-9_]+)\(([^)]*)\)/gm)) {
+    // [round 15] `export function` alone made the extractor silently FORGET any export written
+    // another way: codex changed one to `export async function` and every check here stayed green
+    // while the production repair had started returning a Promise. An extraction that narrows its
+    // own population is the failure mode these pins exist to prevent, so the modifiers are matched
+    // rather than assumed, and the required-entrypoint list below is the backstop that makes a
+    // shrinking population fail instead of pass.
+    for (const m of src.matchAll(/^export (?:async )?function\s*\*?\s*([A-Za-z0-9_]+)\(([^)]*)\)/gm)) {
       signatures.set(m[1], { file, params: splitParams(m[2]) });
     }
   }
@@ -130,7 +136,17 @@ test('exactly the disk-touching exports accept deps — measured from source', (
       'readChapterRecordText', 'readRunRecordText', 'sha256HexOfCanonical'],
     'the set of exports taking NO `deps` changed — any prose describing the seam as covering "every exported function" has to be re-read against it',
   );
-  assert.ok(withDeps.length > 0, 'no export takes `deps` at all — the signature extraction is broken, not the code');
+  // [round 15] `length > 0` was the whole of this side, and it is the weak half of the pin: an
+  // export that the extractor silently stops recognizing simply leaves the list, and a count that
+  // only has to beat zero never notices. Naming them means a forgotten export fails here rather
+  // than in whatever the extraction fed next.
+  assert.deepEqual(
+    withDeps.sort(),
+    ['abortCaptureRun', 'assertProvenanceOwnership', 'buildProvenanceReport', 'cleanupCommittedRun',
+      'closeCaptureRun', 'openCaptureRun', 'recordChapterProvenance', 'recoverProvenanceState',
+      'sweepChapterProvenanceTemps'],
+    'the set of capture-record exports accepting `deps` changed — if this shrank, check first whether the extractor stopped recognizing an export rather than whether the export went away',
+  );
 });
 
 test('no shipped asset states that deps is the last argument — it is not, for three of them', () => {
