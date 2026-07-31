@@ -1897,6 +1897,13 @@ function exactIdentityPart(value) {
 // true of appending and false of normalizing. Measured against the real exported `chapterAssetDir`
 // before it was believed: `/out/vault/handbook/../assets` builds `/out/vault/assets/items`, 4
 // segments against a raw count of 5.
+// [round 36] `directAbsenceConfirmed` answers two questions at once — does the deepest existing
+// ancestor RESOLVE, and does it sit inside the output root — and above `capture.output_dir` only the
+// first has meaning. A zero-depth root makes the containment comparison vacuous (`segmentsWithin([],
+// …)` is true for every path) while leaving the resolution check exactly as it is, so the root's own
+// absence is adjudicated by the same code as every other absence rather than by a second copy of it.
+const ROOT_ABSENCE_ONLY = Object.freeze({ depth: 0, segments: Object.freeze([]) });
+
 function containmentRootFor(profileLike, deps) {
   const raw = profileLike?.capture?.output_dir ?? '';
   // [round 34] The FIRST half of the bracket, and it has to be taken before anything is resolved —
@@ -2000,10 +2007,20 @@ function containmentRootFor(profileLike, deps) {
   if (beforeResolution.ok !== identity.ok || (identity.ok && beforeResolution.id !== identity.id)) {
     return { ok: false, reason: 'configured_and_resolved_disagree' };
   }
-  if (!identity.ok && !(identity.absentDirectly === true && beforeResolution.absentDirectly === true)) {
-    // The reason of whichever half could not simply report absence — that is the one an operator
-    // has to act on, and on a mixed pair it is never the tolerated half's word.
-    return { ok: false, reason: identity.absentDirectly === true ? beforeResolution.reason : identity.reason };
+  if (!identity.ok) {
+    if (!(identity.absentDirectly === true && beforeResolution.absentDirectly === true)) {
+      // The reason of whichever half could not simply report absence — that is the one an operator
+      // has to act on, and on a mixed pair it is never the tolerated half's word.
+      return { ok: false, reason: identity.absentDirectly === true ? beforeResolution.reason : identity.reason };
+    }
+    // [round 36] Two ENOENTs are two claims about the same PATH, and neither is a claim about the
+    // root. `lstat` does not follow the final component but follows every ancestor, so a present
+    // dangling symlink ABOVE `capture.output_dir` makes both halves report ENOENT for a root whose
+    // existence is simply unknown — round 27's finding, one level further up than round 27 looked.
+    // The climb is what turns an ENOENT into a statement about the object, and it is the same climb
+    // the snapshot runs; a zero-depth root asks it for the resolution half without the containment
+    // half, which is the half that has no meaning above `capture.output_dir`.
+    if (!directAbsenceConfirmed(raw, ROOT_ABSENCE_ONLY, deps)) return { ok: false, reason: 'absence_unconfirmed' };
   }
   return {
     ok: true,
@@ -2130,13 +2147,27 @@ function directAbsenceConfirmed(absPath, containmentRoot, deps) {
     // absence left to be direct: the root is present now, whatever the listing said a syscall ago,
     // and an empty snapshot for a directory that exists is the whole defect class.
     if (depth === segs.length) return false;
-    // [round 29] Above the configured output root there is nothing left to check, for gate 3's own
-    // reason: it `continue`s when the longest existing ancestor search finds nothing at or below the
-    // root, because with nothing existing along the path there is nothing that could BE a symlink
-    // redirecting it. Reaching this arm means `capture.output_dir` itself does not exist yet, which
-    // is an ordinary first capture and must not halt — bounding the climb here instead of exempting
-    // it was round 27's first attempt, and it refused 21 legitimate cases.
-    if (depth < containmentRoot.depth) return true;
+    // [round 29] Above the configured output root there is nothing left to CONTAIN: the root is not
+    // required to sit inside itself, and bounding the climb here instead of exempting it was round
+    // 27's first attempt, which refused 21 legitimate cases. Reaching this arm means
+    // `capture.output_dir` itself does not exist yet, which is an ordinary first capture.
+    //
+    // [round 36] The containment assertion is what is exempt — NOT the resolution one, and round 29
+    // exempted both with a single `return true`. Its stated reason was that "with nothing existing
+    // along the path there is nothing that could BE a symlink redirecting it", and this arm is
+    // reached precisely because something DOES exist: the climb stops at the first component that
+    // does. A present dangling symlink one level above the output root makes every `lstat` beneath
+    // it report ENOENT — `lstat` does not follow the FINAL component but follows every ancestor,
+    // which is round 27's finding one level up — so the tip's absence is not absence at all, and
+    // this arm certified it as a chapter that produced nothing. Codex executed the whole shape
+    // against the real exports: an operator's `/safe/link` dangling during an editor sync, `opening:
+    // {}` with no hazards, the sync then restoring a target that already held `old.png`, and W5
+    // reading the absent opening key as brand-new. Old bytes, attributed to this build, with a
+    // confident record.
+    //
+    // The ancestor must therefore RESOLVE, exactly as one at or below the root must. That is the
+    // same predicate on the same basis, minus the containment comparison there is no root to make.
+    if (depth < containmentRoot.depth) return assetDirIdentity(candidate, deps, { allowSymlink: true }).ok;
     if (!assetDirIdentity(candidate, deps, { allowSymlink: true }).ok) return false;
     // Gate 3's actual property, on the same comparison basis gate 3 built its root with.
     const resolved = canonicalizeForComparison(candidate, deps);

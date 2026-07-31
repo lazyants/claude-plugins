@@ -4309,6 +4309,221 @@ test('openCaptureRun: a dangling root link at the first read and plain absence a
   });
 });
 
+// [round 36 BLOCKER] Round 27's finding, one level above where round 27 looked. `lstat` does not
+// follow the FINAL component but follows every ancestor, so a present dangling symlink ABOVE
+// `capture.output_dir` makes both halves of the bracket report ENOENT for a root whose existence is
+// simply unknown — and two ENOENTs were being read as "not there yet", the one shape this module
+// tolerates. Codex executed the whole sequence against the real exports: an operator's `/safe/link`
+// dangling during an editor sync, `open_ok: true` with `opening: {items: {}}` and no hazards, the
+// sync then restoring a target that already held `old.png`, `close_ok: true`, and W5 reading the
+// absent opening key as brand-new — old bytes recorded as this build's, with a confident record.
+//
+// The absence has to be ESTABLISHED, by the same climb every other absence goes through.
+test('openCaptureRun: an output root made absent by a dangling ANCESTOR is refused, not read as not-yet-created', () => {
+  withTempDir((dir) => {
+    const real = nodeFs.realpathSync(dir);
+    const safe = join(real, 'safe');
+    const link = join(safe, 'link');
+    nodeFs.mkdirSync(safe, { recursive: true });
+    nodeFs.mkdirSync(join(real, 'handbook'), { recursive: true });
+    // The operator's own sync has the link pointing at a target that is not there right now.
+    nodeFs.symlinkSync(join(real, 'synced-target'), link);
+    assert.equal(nodeFs.lstatSync(link).isSymbolicLink(), true, 'the ancestor must be present as a link');
+    assert.equal(nodeFs.existsSync(link), false, 'and it must dangle, or nothing beneath it reports ENOENT');
+
+    const outputRoot = join(link, 'assets');
+    assert.throws(() => nodeFs.lstatSync(outputRoot), /ENOENT/,
+      'the output root must lstat ENOENT through the dangling ancestor — indistinguishable, at the tip, from a first capture');
+
+    const profile = {
+      capture: { output_dir: outputRoot, build_identity: { ui_read: false } },
+      publish: { chapters_dir: join(real, 'handbook'), target: 'static_md' },
+    };
+
+    const opened = CR.openCaptureRun(profile, [{ slug: 'items' }], null, stubDepsNoIdentity());
+    assert.equal(opened.ok, false, `a root whose absence is explained by a dangling ancestor must not open as a first capture: ${JSON.stringify(opened)}`);
+    assert.equal(opened.halts[0].halt, 'provenance_hazard', JSON.stringify(opened.halts));
+    // The DIAGNOSTIC: not a disagreement between the two halves — they agree, and that is exactly
+    // the problem — and not an unreadable observation. The absence itself is what could not be
+    // established.
+    assert.match(opened.halts[0].message, /cannot resolve capture\.output_dir: absence_unconfirmed/,
+      `the halt must say the absence could not be confirmed: ${JSON.stringify(opened.halts)}`);
+  });
+});
+
+// [round 36] The same ancestor, arriving mid-run instead of being there at validation — which is the
+// only way to reach the climb's own exemption now that validation refuses the standing case. Round
+// 29 exempted everything above the output root from BOTH of the climb's questions, on the argument
+// that "with nothing existing along the path there is nothing that could be a symlink". This arm is
+// reached precisely because something does exist; the containment question is what has no meaning
+// up there, not the resolution one.
+test('the closing snapshot: an ancestor ABOVE the output root that becomes a dangling link mid-sweep is refused', () => {
+  withTempDir((dir) => {
+    const real = nodeFs.realpathSync(dir);
+    const safe = join(real, 'safe');
+    const outputRoot = join(safe, 'assets');
+    nodeFs.mkdirSync(safe, { recursive: true });
+    nodeFs.mkdirSync(join(real, 'handbook'), { recursive: true });
+    const profile = {
+      capture: { output_dir: outputRoot, build_identity: { ui_read: false } },
+      publish: { chapters_dir: join(real, 'handbook'), target: 'static_md' },
+    };
+    const assetDir = join(outputRoot, 'items');
+    assert.equal(nodeFs.existsSync(outputRoot), false, 'an ordinary first capture: the root does not exist yet');
+
+    const opened = CR.openCaptureRun(profile, [{ slug: 'items' }], null, stubDepsNoIdentity());
+    assert.equal(opened.ok, true, `a not-yet-created root under a resolving ancestor is an ordinary first capture: ${JSON.stringify(opened)}`);
+
+    let planted = false;
+    const closingDeps = depsWithOverride({
+      readdirSync: (p, opts) => {
+        if (!planted && String(p) === assetDir) {
+          // The directory ABOVE the output root becomes a link to nothing, in the instant the
+          // chapter's listing reports the path gone. Everything the adjudication climbs past is
+          // absent until it reaches this — one level above the root's own depth, where the
+          // exemption lives.
+          planted = true;
+          nodeFs.renameSync(safe, join(real, 'safe-moved-away'));
+          nodeFs.symlinkSync(join(real, 'safe-target'), safe);
+          const err = new Error('ENOENT'); err.code = 'ENOENT'; throw err;
+        }
+        return nodeFs.readdirSync(p, opts);
+      },
+      runIdentityCommand: () => ({ ok: false, detail: 'no command configured in test' }),
+    });
+
+    const closed = CR.closeCaptureRun(profile, opened.runState, { ok: true }, null, closingDeps);
+    assert.equal(planted, true, 'the ancestor was never replaced — this fixture cannot reach the condition');
+    assert.equal(nodeFs.lstatSync(safe).isSymbolicLink(), true, 'the ancestor must be a present link');
+    assert.equal(nodeFs.existsSync(safe), false, 'and it must dangle');
+    assert.equal(closed.ok, false, `an unresolvable ancestor above the root must not certify direct absence: ${JSON.stringify(closed)}`);
+    assert.equal(closed.halts[0].halt, 'provenance_hazard', JSON.stringify(closed.halts));
+    assert.match(closed.halts[0].message, /could not be confirmed \(vanished\) and its listing then failed \(ENOENT\)/,
+      `the halt must attribute this to the closing adjudication: ${JSON.stringify(closed.halts)}`);
+  });
+});
+
+// [round 36, from mutation] Requiring an above-the-root ancestor to RESOLVE retired both depth-unit
+// mutants: every fixture that pinned the boundary did it with a DANGLING root, and a dangling root
+// is now refused by the resolution check whatever depth it is classified at. The depth still decides
+// one thing — whether the CONTAINMENT comparison is made — so the input that separates the units is
+// an ancestor that resolves perfectly well and resolves OUTSIDE the output root. It has to arrive
+// mid-listing, because round 32's containment check refuses the standing case before the climb runs.
+//
+// The topology carries a `..` AND a root reached through a symlink, so the raw count and the
+// RESOLVED count are both larger than the normalized one, and one fixture separates both mutants
+// from the unit that is correct.
+test('the closing snapshot: an outside-resolving ancestor is refused at the depth the CLIMB counts in', () => {
+  withTempDir((dir) => {
+    const real = nodeFs.realpathSync(dir);
+    const physicalRoot = join(real, 'a', 'b', 'root-target');
+    nodeFs.mkdirSync(join(physicalRoot, 'assets', 'admin'), { recursive: true });
+    // The `..` component has to EXIST on the physical path: `normalizeSegments` collapses it
+    // lexically while the kernel walks it, and a `..` over a missing directory makes the two halves
+    // of the bracket describe different objects — which this release refuses, correctly, and which
+    // would make this fixture prove that instead of what it is here for.
+    nodeFs.mkdirSync(join(physicalRoot, 'handbook'), { recursive: true });
+    nodeFs.mkdirSync(join(real, 'outside-admin'), { recursive: true });
+    nodeFs.mkdirSync(join(real, 'handbook'), { recursive: true });
+    nodeFs.symlinkSync(physicalRoot, join(real, 'rootlink'));
+
+    // NOT `join(...)`: it normalizes `..` away, and a fixture built with it carries no `..` at all.
+    const outputDir = `${join(real, 'rootlink')}/handbook/../assets`;
+    const profile = {
+      capture: { output_dir: outputDir, build_identity: { ui_read: false } },
+      publish: { chapters_dir: join(real, 'handbook'), target: 'static_md' },
+    };
+    const entry = { slug: 'items', group: 'admin' };
+    const configuredGroupDir = `${join(real, 'rootlink')}/assets/admin`;
+    const physicalGroupDir = join(physicalRoot, 'assets', 'admin');
+    const assetDir = `${configuredGroupDir}/items`;
+    assert.equal(nodeFs.existsSync(assetDir), false, 'the chapter must be absent, or the listing never fails and the climb never runs');
+
+    const opened = CR.openCaptureRun(profile, [entry], null, stubDepsNoIdentity());
+    assert.equal(opened.ok, true, `an absent chapter under a resolving group ancestor is an ordinary first capture: ${JSON.stringify(opened)}`);
+
+    let planted = false;
+    const closingDeps = depsWithOverride({
+      readdirSync: (p, opts) => {
+        if (!planted && String(p) === assetDir) {
+          // The GROUP ancestor becomes a link to a tree outside the output root, in the instant the
+          // chapter's listing reports the path gone. It resolves — so the resolution check is
+          // satisfied — and only the containment comparison can refuse it, which is the comparison
+          // the depth unit decides whether to make.
+          planted = true;
+          nodeFs.rmSync(physicalGroupDir, { recursive: true, force: true });
+          nodeFs.symlinkSync(join(real, 'outside-admin'), physicalGroupDir);
+          const err = new Error('ENOENT'); err.code = 'ENOENT'; throw err;
+        }
+        return nodeFs.readdirSync(p, opts);
+      },
+      runIdentityCommand: () => ({ ok: false, detail: 'no command configured in test' }),
+    });
+
+    const closed = CR.closeCaptureRun(profile, opened.runState, { ok: true }, null, closingDeps);
+    assert.equal(planted, true, 'the ancestor was never replaced — this fixture cannot reach the condition');
+    assert.equal(nodeFs.realpathSync(configuredGroupDir), join(real, 'outside-admin'),
+      'the ancestor must RESOLVE, and resolve outside the root — otherwise this pins the resolution check instead');
+    assert.equal(closed.ok, false, `an ancestor resolving outside the output root must not certify direct absence: ${JSON.stringify(closed)}`);
+    assert.equal(closed.halts[0].halt, 'provenance_hazard', JSON.stringify(closed.halts));
+    assert.match(closed.halts[0].message, /could not be confirmed \(vanished\) and its listing then failed \(ENOENT\)/,
+      `the halt must attribute this to the closing adjudication: ${JSON.stringify(closed.halts)}`);
+  });
+});
+
+// [round 36, from mutation] The exemption's own boundary, which the resolution requirement also
+// retired: every fixture that pinned `<` against `<=` used a DANGLING root, and a dangling root now
+// fails the resolution check at either classification. What the boundary still decides is whether
+// the ROOT ITSELF must satisfy containment — that is, whether it still canonicalizes to what
+// validation recorded. A root that springs into existence mid-sweep as a link to an outside tree
+// RESOLVES perfectly well; only the containment comparison at its own depth can refuse it, and
+// `<=` exempts exactly that one comparison. The output-root bracket cannot cover this: the root did
+// not exist at validation, so there is no identity to compare and it stands down.
+test('the closing snapshot: an output root that appears mid-sweep as a link OUTSIDE its own validated segments is refused', () => {
+  withTempDir((dir) => {
+    const real = nodeFs.realpathSync(dir);
+    const outputRoot = join(real, 'assets');
+    const outside = join(real, 'outside');
+    // The outside tree deliberately has NO `items`: with one, the chapter path resolves through the
+    // new link and the climb refuses at the TIP (round 28's rule — a tip that exists now is not
+    // absent), which is a different guard and leaves this boundary unexercised.
+    nodeFs.mkdirSync(outside, { recursive: true });
+    nodeFs.mkdirSync(join(real, 'handbook'), { recursive: true });
+
+    const profile = {
+      capture: { output_dir: outputRoot, build_identity: { ui_read: false } },
+      publish: { chapters_dir: join(real, 'handbook'), target: 'static_md' },
+    };
+    const assetDir = join(outputRoot, 'items');
+    assert.equal(nodeFs.existsSync(outputRoot), false, 'the root must not exist at validation, or the output-root bracket refuses this first');
+
+    const opened = CR.openCaptureRun(profile, [{ slug: 'items' }], null, stubDepsNoIdentity());
+    assert.equal(opened.ok, true, `a chapter under a not-yet-created output root is an ordinary first capture: ${JSON.stringify(opened)}`);
+
+    let planted = false;
+    const closingDeps = depsWithOverride({
+      readdirSync: (p, opts) => {
+        if (!planted && String(p) === assetDir) {
+          planted = true;
+          nodeFs.symlinkSync(outside, outputRoot);
+          const err = new Error('ENOENT'); err.code = 'ENOENT'; throw err;
+        }
+        return nodeFs.readdirSync(p, opts);
+      },
+      runIdentityCommand: () => ({ ok: false, detail: 'no command configured in test' }),
+    });
+
+    const closed = CR.closeCaptureRun(profile, opened.runState, { ok: true }, null, closingDeps);
+    assert.equal(planted, true, 'the root was never planted — this fixture cannot reach the condition');
+    assert.equal(nodeFs.realpathSync(outputRoot), outside,
+      'the root must RESOLVE, and resolve outside its validated segments — otherwise this pins the resolution check instead');
+    assert.equal(closed.ok, false, `a root resolving outside what validation recorded must not certify direct absence: ${JSON.stringify(closed)}`);
+    assert.equal(closed.halts[0].halt, 'provenance_hazard', JSON.stringify(closed.halts));
+    assert.match(closed.halts[0].message, /could not be confirmed \(vanished\) and its listing then failed \(ENOENT\)/,
+      `the halt must attribute this to the closing adjudication: ${JSON.stringify(closed.halts)}`);
+  });
+});
+
 // [round 27] The ancestor climb walks a PATH, so it inherits the release's other recurring defect:
 // the shipped example profile's `output_dir` is RELATIVE (`vault/handbook/assets`), and a climb that
 // prefixes `/` onto relative segments probes an entirely different tree — one where every candidate
