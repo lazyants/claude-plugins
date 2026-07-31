@@ -3429,9 +3429,12 @@ has "capture-record.d.mts: ChapterTempSweepResult carries the warnings channel" 
 has_in_section "SKILL: W2's identity warnings are values closeCaptureRun returns, not just intent" \
   "$SKILL" '### W2 — Capture screenshots' \
   'returns them in its `warnings` array, one line per run, and the drift line names both'
-has_in_section "SKILL: a UI-read continuation must thread identityCommandOutcome back" \
+# [round 12] This pin used to lock in the buggy phrasing itself — "as its next argument", which puts the
+# outcome in the deps slot and re-runs the operator command. Pin the POSITION, and pin the trap by name,
+# so the sentence cannot drift back toward the reading that was wrong.
+has_in_section "SKILL: the continuation passes identityCommandOutcome LAST, not after the observation" \
   "$SKILL" '### W2 — Capture screenshots' \
-  '`identityCommandOutcome` threaded straight through as its next argument'
+  "`identityCommandOutcome` as the call's **last** argument"
 has "capture-record.d.mts: NeedsUiRead carries identityCommandOutcome for the retry" \
   'identityCommandOutcome: CommandOutcome | null }' "$ASSETS/lib/capture-record.d.mts"
 has "build-identity.d.mts: declares describeBuildIdentityWarning" \
@@ -3457,6 +3460,9 @@ has_in_section "SKILL: the pending token is reserved before anything else the op
 has_in_section "SKILL: a contended open must not spend the operator's command or a UI read" \
   "$SKILL" '### W2 — Capture screenshots' \
   'must not send them to a UI read for a run that was never going to start'
+has_in_section "SKILL: the continuation names the deps slot as the trap it is" \
+  "$SKILL" '### W2 — Capture screenshots' \
+  'lands it in the `deps` slot instead'
 # [round 9, finding 1] The reservation made the open's failure paths load-bearing: a throw out of
 # identity resolution (which a malformed UI observation really does produce) used to leak the
 # descriptor and the token, and a release that could not remove the token promised a clean

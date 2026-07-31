@@ -125,36 +125,50 @@ function isSegmentPrefixOf(a, b) {
 // property read off a caught `err` anywhere in this file goes through one of these three now,
 // never a raw `err.<name>` access or an unguarded `String(err)`.
 //
-// `null`/`undefined` are the ONLY two values where a bracket property read (`err[name]`) itself
-// throws — every other value, INCLUDING a thrown function (`typeof === 'function'`, which the
-// previous version of this helper excluded by checking `typeof err === 'object'` — round 11,
-// finding 1c: a thrown function carrying its own `.code` silently lost that field, changing
-// `openCaptureRun`'s `EEXIST` classification to the generic `provenance_hazard`) or a primitive
-// (autoboxed safely) — supports property access with no risk at all. So the check is narrowed to
-// exactly the two values that are actually dangerous, not to a `typeof` guess at which SHAPES are
-// "safe enough to touch."
+// `null`/`undefined` are the ONLY two values where a bracket property read (`err[name]`) is
+// GUARANTEED to throw — every other value, INCLUDING a thrown function (`typeof === 'function'`,
+// which the previous version of this helper excluded by checking `typeof err === 'object'` —
+// round 11, finding 1c: a thrown function carrying its own `.code` silently lost that field,
+// changing `openCaptureRun`'s `EEXIST` classification to the generic `provenance_hazard`) or a
+// primitive (autoboxed safely) — supports property access with no risk AS A RULE. But "as a rule"
+// is not "always": a thrown Proxy (or a plain object with a throwing GETTER for this exact name)
+// can make `err[name]` itself throw regardless of `err`'s type (round 12, finding 1) — reproduced
+// by codex through `openCaptureRun`'s identity-command guard, seam trace `["open"]` only: neither
+// `close` nor `unlink` ran, the reservation leaking a FOURTH distinct way. The try/catch below is
+// what makes this total against THAT, not just against null/undefined.
 function errProp(err, name) {
-  return err === null || err === undefined ? undefined : err[name];
+  if (err === null || err === undefined) return undefined;
+  try {
+    return err[name];
+  } catch {
+    return undefined;
+  }
 }
 
 // The message-building fallback — ALWAYS returns a string, for any thrown value whatsoever.
 // `err.message` (read via `errProp`) wins ONLY when it is ALREADY a string (round 11, finding 1b: a
 // thrown `{message: Symbol(...)}` made the previous `?? ` chain hand back the Symbol itself, which
-// then threw on template-literal interpolation — the guard failing at the one moment it exists
-// for, the second time in as many rounds). Otherwise falls to `String(err)` — but `String()` is
-// not total either (round 11, finding 1a: `Object.create(null)` has no `toString`/
-// `Symbol.toPrimitive` at all, so `String()` throws `Cannot convert object to primitive value`,
-// reached through `openCaptureRun` with the seam trace showing the reservation still held) — so a
-// LAST fallback, `Object.prototype.toString.call(err)`, which the language specifies to never
-// throw for any value whatsoever, catches that. Every branch returns a string; none can throw,
-// for any input.
+// then threw on template-literal interpolation). Otherwise falls to `String(err)` — but `String()`
+// is not total either (round 11, finding 1a: `Object.create(null)` has no `toString`/
+// `Symbol.toPrimitive` at all, so `String()` throws `Cannot convert object to primitive value`) —
+// so a fallback, `Object.prototype.toString.call(err)`, which the language specifies to read
+// `err[Symbol.toStringTag]` and never throw for an ORDINARY object. "Ordinary" is doing real work
+// in that sentence: a Proxy whose `get` trap throws for EVERY property (round 12, finding 1) makes
+// even THIS throw, since the toStringTag lookup is itself a property read on `err`. The final
+// literal string below is the one thing in this chain that cannot possibly throw — no property
+// read, no coercion, nothing but a string constant — so it is where the chain has to end. Every
+// branch returns a string; none can throw, for any input, however hostile.
 function describeThrown(err) {
   const message = errProp(err, 'message');
   if (typeof message === 'string') return message;
   try {
     return String(err);
   } catch {
-    return Object.prototype.toString.call(err);
+    try {
+      return Object.prototype.toString.call(err);
+    } catch {
+      return '<unstringifiable thrown value>';
+    }
   }
 }
 

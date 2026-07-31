@@ -1925,6 +1925,47 @@ test('closeCaptureRun (codex round 11, finding 1c corroboration): a thrown FUNCT
   });
 });
 
+test('openCaptureRun (codex round 12, finding 1): a thrown Proxy whose property read ITSELF throws must not crash the guard, and the reservation must still be released', () => {
+  // `errProp` read `err[name]` directly — a Proxy `get` trap that throws for EVERY property takes
+  // the read down with it, same as `Object.prototype.toString.call(err)` invoking a hostile
+  // `Symbol.toStringTag` getter (that lookup IS a property read on `err`, so the same trap catches
+  // it too). Reproduced by codex through openCaptureRun: seam trace `["open"]` only — neither close
+  // nor unlink ran, the reservation leaking a FOURTH distinct way (round 9's throw, round 10's
+  // non-Error throw, round 11's formatter throw, now a hostile getter on the thrown value itself).
+  // This one Proxy exercises ALL THREE fallback layers in `describeThrown`: `errProp(err,
+  // 'message')` throws internally (caught, returns undefined) -> `String(err)` throws (its
+  // coercion reads a property too) -> `Object.prototype.toString.call(err)` ALSO throws (same
+  // trap intercepts Symbol.toStringTag) -> the final literal string, which cannot throw because it
+  // touches `err` not at all.
+  withTempDir((dir) => {
+    const profile = profileFor(dir, { capture: { build_identity: { command: 'get-version', ui_read: false } } });
+    const hostileProxy = new Proxy(
+      {},
+      {
+        get() {
+          throw new Error('hostile getter');
+        },
+      },
+    );
+    const deps = depsWithOverride({
+      runIdentityCommand: () => {
+        throw hostileProxy;
+      },
+    });
+    assert.doesNotThrow(() => {
+      const result = CR.openCaptureRun(profile, [], null, deps);
+      assert.equal(result.ok, false, JSON.stringify(result));
+      assert.equal(result.halts[0].halt, 'identity_resolution_threw', JSON.stringify(result));
+      assert.equal(typeof result.halts[0].message, 'string', JSON.stringify(result));
+      assert.ok(
+        result.halts[0].message.includes('<unstringifiable thrown value>'),
+        `expected the ultimate literal fallback, got ${JSON.stringify(result.halts[0].message)}`,
+      );
+    }, 'the guard itself must not throw, even when EVERY property read on the thrown value throws');
+    assert.equal(nodeFs.existsSync(tokenPathFor(profile)), false, 'a throwing identity command (a hostile Proxy) must not leave the reservation token on disk');
+  });
+});
+
 test('buildProvenanceReport (codex round 10, finding 1): a THROWING identity command with a null payload must not crash the guard — the exact shape codex reproduced', () => {
   // codex's own repro, driven through the entrypoint it actually found it in (W6, not
   // openCaptureRun): `throw null` from the injected identity command executor.
@@ -3279,6 +3320,88 @@ test('openCaptureRun (codex round 8, IMPORTANT 1): a contended open resolves to 
     // asset-hash snapshot, so a reorder reintroducing round 8's defect for the snapshot half alone
     // would still pass.
     assert.equal(snapshotCalls, 0, 'the opening asset-hash snapshot must not run before the contention check settles the call');
+  });
+});
+
+function countLines(path) {
+  if (!nodeFs.existsSync(path)) return 0;
+  return nodeFs.readFileSync(path, 'utf8').trim().split('\n').filter(Boolean).length;
+}
+
+test('openCaptureRun (codex round 12, finding 2): the DOCUMENTED continuation call shape invokes the identity command exactly once, with genuinely default deps', () => {
+  // SKILL.md instructs an operator to call the same function again "with the real observation and
+  // identityCommandOutcome threaded straight through as its next argument." Read against the real
+  // signature (profileLike, entries, openingObservation, deps, identityCommandOutcome),
+  // identityCommandOutcome's real position is FIFTH — "its next argument" after openingObservation
+  // (third) reads as FOURTH, which is `deps`. Every pre-existing continuation test in this suite
+  // supplies an injected `deps` object as the 4th argument, so none of them could ever have caught
+  // an operator who follows the instruction literally with a REAL, unmocked deps object — the only
+  // way a production call is ever actually made. The fixture happened to occupy the correct slot by
+  // construction; it never exercised what happens when deps is genuinely left at its default.
+  //
+  // Driven with NO depsWithOverride at all: a real shell command that appends to a counter file and
+  // always fails (so the run FORCES needs_ui_read, and a wrongly-shaped second call would
+  // re-invoke it) — counted directly, because a message assertion cannot show an extra invocation.
+  // The call this test makes for the continuation IS the literal text SKILL.md must document:
+  // `identityCommandOutcome` in its real 5th slot, `deps` explicitly `undefined` in its real 4th —
+  // JavaScript has no way to skip a positional argument other than writing `undefined` there.
+  withTempDir((dir) => {
+    const counterFile = join(dir, 'counter.txt');
+    const profile = profileFor(dir, { capture: { build_identity: { command: `echo x >> '${counterFile}'; exit 1`, ui_read: true } } });
+
+    const first = CR.openCaptureRun(profile, []);
+    assert.equal(first.needs_ui_read, true, JSON.stringify(first));
+    assert.equal(countLines(counterFile), 1, 'the command must have run exactly once for the opening call');
+
+    const resumed = CR.openCaptureRun(profile, [], { kind: 'value', raw: 'v1' }, undefined, first.identityCommandOutcome);
+    assert.equal(resumed.ok, true, JSON.stringify(resumed));
+    assert.equal(resumed.runState.opening.value, 'v1');
+    assert.equal(resumed.runState.opening.source, 'ui');
+    assert.equal(countLines(counterFile), 1, 'the identity command must run exactly ONCE across open + its continuation, never twice');
+  });
+});
+
+test('closeCaptureRun (codex round 12, finding 2): the DOCUMENTED continuation call shape invokes the identity command exactly once, with genuinely default deps', () => {
+  // Same contract, same gap: closeCaptureRun's signature is (profileLike, runState,
+  // captureOutcome, closingObservation, deps, identityCommandOutcome) — deps is 5th,
+  // identityCommandOutcome is 6th, and "threaded straight through as its next argument" after
+  // closingObservation (4th) reads as 5th, landing in the deps slot exactly the same way.
+  withTempDir((dir) => {
+    const profile = profileFor(dir); // ui_read:false at OPEN keeps the opening identity deterministic
+    const opened = CR.openCaptureRun(profile, []);
+    assert.equal(opened.ok, true, JSON.stringify(opened));
+
+    const counterFile = join(dir, 'counter.txt');
+    profile.capture.build_identity = { command: `echo x >> '${counterFile}'; exit 1`, ui_read: true };
+
+    const first = CR.closeCaptureRun(profile, opened.runState, { ok: true }, null);
+    assert.equal(first.needs_ui_read, true, JSON.stringify(first));
+    assert.equal(countLines(counterFile), 1, 'the command must have run exactly once for the closing call');
+
+    const resumed = CR.closeCaptureRun(profile, opened.runState, { ok: true }, { kind: 'value', raw: 'v-close' }, undefined, first.identityCommandOutcome);
+    assert.equal(resumed.ok, true, JSON.stringify(resumed));
+    assert.equal(countLines(counterFile), 1, 'the identity command must run exactly ONCE across close + its continuation, never twice');
+  });
+});
+
+test('buildProvenanceReport (codex round 12, finding 2): the DOCUMENTED continuation call shape invokes the identity command exactly once, with genuinely default deps', () => {
+  // Same contract, same gap, and the entrypoint whose report ROW literally carries the field name
+  // (`current_source`) codex's own measurement used — driven with NO `expectedAssets` override
+  // either, the real production path (a zero-embed chapter is valid input for W6, which only
+  // reports staleness, never enforces recordChapterProvenance's own completeness rule).
+  withTempDir((dir) => {
+    const counterFile = join(dir, 'counter.txt');
+    const profile = profileFor(dir, { capture: { build_identity: { command: `echo x >> '${counterFile}'; exit 1`, ui_read: true } } });
+    const entry = { slug: 'items' };
+    writeChapterAt(profile, entry, '# items\n');
+
+    const first = CR.buildProvenanceReport(profile, [entry], null);
+    assert.equal(first.needs_ui_read, true, JSON.stringify(first));
+    assert.equal(countLines(counterFile), 1, 'the command must have run exactly once for the W6 call');
+
+    const resumed = CR.buildProvenanceReport(profile, [entry], { kind: 'value', raw: 'v1' }, undefined, first.identityCommandOutcome);
+    assert.equal(resumed.rows?.[0]?.current_source, 'ui', JSON.stringify(resumed));
+    assert.equal(countLines(counterFile), 1, 'the identity command must run exactly ONCE across the W6 call + its continuation, never twice');
   });
 });
 
