@@ -2595,6 +2595,326 @@ test('the closing snapshot: an asset root swapped during its own listing is refu
   });
 });
 
+// [round 24 IMPORTANT] W5 re-runs gates 1-4 immediately before it lists the asset directory, and
+// then threw away the identity that run observed — it listed unpinned, so the only bracket was the
+// walk's own self-baseline. A self-baseline cannot see a PERSISTENT substitution by construction:
+// the replacement is already in place when the baseline is taken, so it baselines the replacement
+// and every later check agrees with it. The gate-3 pin covers the window the self-baseline cannot.
+test('W5: a root replaced between gate 3 and the asset listing is refused, not recorded', () => {
+  withTempDir((dir) => {
+    const profile = profileFor(dir);
+    const entry = { slug: 'items' };
+    const assetDir = join(profile.capture.output_dir, 'items');
+    nodeFs.mkdirSync(assetDir, { recursive: true });
+    nodeFs.writeFileSync(join(assetDir, 'a.png'), 'v1');
+
+    const opened = CR.openCaptureRun(profile, [entry], null, stubDepsNoIdentity());
+    assert.equal(opened.ok, true, JSON.stringify(opened));
+    nodeFs.writeFileSync(join(assetDir, 'a.png'), 'v2');
+    const closed = CR.closeCaptureRun(profile, opened.runState, { ok: true }, null, stubDepsNoIdentity());
+    assert.equal(closed.ok, true, JSON.stringify(closed));
+
+    // A byte-IDENTICAL copy in a different directory: every hash-based rule still passes, so
+    // identity is the only thing that can tell the two apart. This is codex's scenario minus the
+    // symlink, which keeps containment out of the measurement.
+    const impostor = join(profile.capture.output_dir, 'impostor');
+    nodeFs.mkdirSync(impostor, { recursive: true });
+    nodeFs.writeFileSync(join(impostor, 'a.png'), 'v2');
+
+    const chapterFile = writeChapterAt(profile, entry, '# items\n\n![a](items/a.png)\n');
+    let swapped = false;
+    const w5Deps = {
+      ...stubDepsNoIdentity(),
+      expectedAssets: stubExpectedAssetsFor(assetDir, ['a.png']),
+      // The chapter file is read after gate 3 and before the asset listing, so its own open is a
+      // phase boundary this seam can name — the same hook shape the root fixtures use.
+      openSync: (p, ...rest) => {
+        if (!swapped && String(p).endsWith('/items.md')) {
+          nodeFs.renameSync(assetDir, join(dir, 'items-moved-away'));
+          nodeFs.renameSync(impostor, assetDir);
+          swapped = true;
+        }
+        return nodeFs.openSync(p, ...rest);
+      },
+    };
+
+    const result = CR.recordChapterProvenance(profile, [entry], entry, chapterFile, opened.runState.run_id, w5Deps);
+    assert.equal(swapped, true, 'the chapter file was never opened — this fixture cannot reach the condition');
+    assert.equal(
+      nodeFs.readFileSync(join(assetDir, 'a.png'), 'utf8'),
+      'v2',
+      'the impostor must hash identically, or a hash rule could be doing this refusal instead of identity',
+    );
+    assert.equal(result.recorded, false, `a substituted root must not be recorded: ${JSON.stringify(result)}`);
+    assert.match(String(result.reason), /^asset_listing_failed:/, JSON.stringify(result));
+    assert.equal(nodeFs.existsSync(CR.chapterRecordPath(profile, entry)), false);
+  });
+});
+
+// [round 24 IMPORTANT] The W6 half of the same finding. W6 is the audit entrypoint an operator runs
+// over already-merged chapters; it runs gates 1-4 itself a few lines before the listing and threw
+// the observed identity away exactly as W5 did. Without this the W5 pin's mutant died alone and W6's
+// killed nothing, which is the whole reason both are pinned separately.
+test('W6: a root replaced between gate 3 and the asset listing is refused, not reported as verified', () => {
+  withTempDir((dir) => {
+    const profile = profileFor(dir, { capture: { build_identity: { command: 'get-version', ui_read: false } } });
+    const identityDeps = depsWithOverride({ runIdentityCommand: () => ({ ok: true, raw: '3.4.1' }) });
+    const entry = { slug: 'items' };
+    const assetDir = join(profile.capture.output_dir, 'items');
+    nodeFs.mkdirSync(assetDir, { recursive: true });
+    nodeFs.writeFileSync(join(assetDir, 'a.png'), 'previous-build-bytes');
+
+    const opened = CR.openCaptureRun(profile, [entry], null, identityDeps);
+    assert.equal(opened.ok, true, JSON.stringify(opened));
+    nodeFs.writeFileSync(join(assetDir, 'a.png'), 'this-build-bytes');
+    const closed = CR.closeCaptureRun(profile, opened.runState, { ok: true }, null, identityDeps);
+    assert.equal(closed.ok, true, JSON.stringify(closed));
+
+    const chapterFile = writeChapterAt(profile, entry, '# items\n');
+    const embed = chapterPathsModule.embedPath(chapterFile, assetDir, 'a.png');
+    nodeFs.writeFileSync(chapterFile, `# items\n\n1. Step\n\n   ![a](${embed})\n`);
+    const recorded = CR.recordChapterProvenance(profile, [entry], entry, chapterFile, opened.runState.run_id, identityDeps);
+    assert.equal(recorded.recorded, true, JSON.stringify(recorded));
+
+    // Byte-identical, so every hash-based rule in W6 still agrees — identity is the only thing that
+    // can separate the two directories, which is what makes this a test of the pin.
+    const impostor = join(profile.capture.output_dir, 'impostor');
+    nodeFs.mkdirSync(impostor, { recursive: true });
+    nodeFs.writeFileSync(join(impostor, 'a.png'), 'this-build-bytes');
+
+    let swapped = false;
+    const auditDeps = depsWithOverride({
+      runIdentityCommand: () => ({ ok: true, raw: '3.4.1' }),
+      openSync: (p, ...rest) => {
+        if (!swapped && String(p).endsWith('/items.md')) {
+          nodeFs.renameSync(assetDir, join(dir, 'items-moved-away'));
+          nodeFs.renameSync(impostor, assetDir);
+          swapped = true;
+        }
+        return nodeFs.openSync(p, ...rest);
+      },
+    });
+
+    const report = CR.buildProvenanceReport(profile, [entry], null, auditDeps);
+    assert.equal(swapped, true, 'the chapter file was never opened — this fixture cannot reach the condition');
+    assert.equal(report.ok, false, `a substituted root must not be audited as verified: ${JSON.stringify(report)}`);
+    assert.equal(report.halts[0].halt, 'asset_listing_failed', JSON.stringify(report.halts));
+  });
+});
+
+// [round 24] The ENOTDIR twin of the ENOENT branch below. The two branches have drawn the same
+// distinction since round 18 and must keep drawing it: whichever way a listing fails, a root this
+// walk has already identified did not fail to exist — it stopped being a directory while this run
+// was the thing looking at it.
+test('the closing snapshot: a root that lists ENOTDIR after its own baseline is refused, not read as empty', () => {
+  withTempDir((dir) => {
+    const profile = profileFor(dir);
+    const entry = { slug: 'items' };
+    const assetDir = join(profile.capture.output_dir, 'items');
+    nodeFs.mkdirSync(assetDir, { recursive: true });
+    nodeFs.writeFileSync(join(assetDir, 'a.png'), 'v1');
+
+    const opened = CR.openCaptureRun(profile, [entry], null, stubDepsNoIdentity());
+    assert.equal(opened.ok, true, JSON.stringify(opened));
+
+    let listed = false;
+    const closingDeps = depsWithOverride({
+      readdirSync: (p, opts) => {
+        if (String(p).endsWith('/items')) {
+          listed = true;
+          const err = new Error('ENOTDIR'); err.code = 'ENOTDIR'; throw err;
+        }
+        return nodeFs.readdirSync(p, opts);
+      },
+      runIdentityCommand: () => ({ ok: false, detail: 'no command configured in test' }),
+    });
+
+    const closed = CR.closeCaptureRun(profile, opened.runState, { ok: true }, null, closingDeps);
+    assert.equal(listed, true, 'the root was never listed — this fixture cannot reach the condition');
+    assert.equal(closed.ok, false, `an identified root that stopped being one must not close silently: ${JSON.stringify(closed)}`);
+    assert.equal(closed.halts[0].halt, 'provenance_hazard');
+    assert.match(closed.halts[0].message, /ENOTDIR/);
+  });
+});
+
+// [round 24 IMPORTANT] `dev`/`ino` are 64-bit; a JavaScript number is not. Codex measured inodes
+// 9007199254740992 and 9007199254740993 — two different directories — both rendering the identity
+// `7:9007199254740992`, so on a filesystem exposing identifiers above 2^53 a substitution passes
+// every observation point. The release's own defect class arriving through the number line.
+test('identity: an inode outside the safe-integer range is refused, never rounded into a match', () => {
+  withTempDir((dir) => {
+    const profile = profileFor(dir);
+    const entry = { slug: 'items' };
+    const assetDir = join(profile.capture.output_dir, 'items');
+    nodeFs.mkdirSync(assetDir, { recursive: true });
+    nodeFs.writeFileSync(join(assetDir, 'a.png'), 'v1');
+
+    assert.equal(Number.isSafeInteger(2 ** 53), false, 'the fixture value must be INEXACT, or it proves nothing');
+    const deps = depsWithOverride({
+      // A seam that answers in numbers, as `fs.lstatSync` does without `{ bigint: true }`, on a
+      // filesystem whose inodes do not fit one.
+      lstatSync: (p) => {
+        const st = nodeFs.lstatSync(p);
+        return {
+          isSymbolicLink: () => st.isSymbolicLink(),
+          isDirectory: () => st.isDirectory(),
+          isFile: () => st.isFile(),
+          dev: 7,
+          ino: 2 ** 53,
+        };
+      },
+      runIdentityCommand: () => ({ ok: false, detail: 'no command configured in test' }),
+    });
+
+    const opened = CR.openCaptureRun(profile, [entry], null, deps);
+    assert.equal(opened.ok, false, JSON.stringify(opened));
+    assert.equal(opened.halts[0].halt, 'provenance_hazard');
+    assert.match(opened.halts[0].message, /cannot establish the identity of asset directory/);
+  });
+});
+
+// The other half, and the reason the refusal above is not a usability regression: the module ASKS
+// for exact values and accepts a BigInt identity.
+//
+// The first version of this test asserted `seenOptions.some(o => o?.bigint)` and was WORTHLESS:
+// dropping the request from any ONE of the three identity reads left the other two asking, so all
+// three mutants killed nothing. Worse, dropping one is invisible on an ordinary filesystem by
+// design — `exactIdentityPart` renders a safe-integer number and a BigInt to the same digits, so a
+// site reading numbers still compares equal to a site reading BigInts. The only thing that can
+// separate them is a seam where the answer DEPENDS on the request, which is precisely the
+// production hazard: a filesystem whose inodes do not fit a number. The mock below is that seam, so
+// any site that stops asking reads an inexact value and the run refuses.
+//
+// BOTH topologies, and that is not thoroughness for its own sake — it is what makes the three sites
+// separable. On a SYMLINKED root the first `lstat` is read only for `isSymbolicLink()`, its `dev`/
+// `ino` are never touched, and the identity comes from the target stat; so a symlink-only fixture
+// leaves gate 3's and the walk's own requests unpinned, and both their mutants survived it. On a
+// PLAIN root the opposite holds and the target read never runs. One fixture cannot reach all three.
+for (const topology of ['plain', 'symlinked']) {
+test(`identity: every identity read requests exact stats when the asset root is ${topology}`, () => {
+  withTempDir((dir) => {
+    const profile = profileFor(dir);
+    const entry = { slug: 'items' };
+    const assetDir = join(profile.capture.output_dir, 'items');
+    if (topology === 'plain') {
+      nodeFs.mkdirSync(assetDir, { recursive: true });
+      nodeFs.writeFileSync(join(assetDir, 'a.png'), 'v1');
+    } else {
+      const real = join(profile.capture.output_dir, 'real-items');
+      nodeFs.mkdirSync(real, { recursive: true });
+      nodeFs.writeFileSync(join(real, 'a.png'), 'v1');
+      nodeFs.symlinkSync(real, assetDir);
+    }
+
+    let exactRequests = 0;
+    let inexactAnswers = 0;
+    const deps = depsWithOverride({
+      // Honours the request: exact BigInt when asked, and — like a filesystem whose identifiers do
+      // not fit a JavaScript number — an INEXACT number when not.
+      lstatSync: (p, opts) => {
+        const st = nodeFs.lstatSync(p);
+        const base = {
+          isSymbolicLink: () => st.isSymbolicLink(),
+          isDirectory: () => st.isDirectory(),
+          isFile: () => st.isFile(),
+        };
+        if (opts?.bigint === true) {
+          exactRequests += 1;
+          return { ...base, dev: BigInt(st.dev), ino: BigInt(st.ino) };
+        }
+        inexactAnswers += 1;
+        return { ...base, dev: 7, ino: 2 ** 53 };
+      },
+      runIdentityCommand: () => ({ ok: false, detail: 'no command configured in test' }),
+    });
+
+    const opened = CR.openCaptureRun(profile, [entry], null, deps);
+    assert.ok(exactRequests > 0, 'no identity read asked for exact values — this fixture cannot reach the condition');
+    assert.ok(inexactAnswers > 0, 'the non-requesting branch never ran, so this mock cannot distinguish the two');
+    assert.equal(opened.ok, true, `every identity read must ask for exact values: ${JSON.stringify(opened)}`);
+    assert.deepEqual(opened.runState.opening_asset_hazards.items, []);
+    assert.deepEqual(Object.keys(opened.runState.opening_assets.items), ['a.png']);
+  });
+});
+}
+
+// [round 24 BLOCKER, half one] The round-23 self-baseline deferred a failed first observation and
+// then never adjudicated it: it left the pin null and relied on "the readdirSync branch below
+// distinguishes a legitimate first capture", which only runs when the listing FAILS. A root this
+// walk HAS identified and which then fails to list is not a first capture — it existed a syscall
+// ago — but the ENOENT branch consulted only the caller's `rootMustExist`, and `closeCaptureRun`
+// passes false because it never ran gate 3. Codex executed it: `{hashes:{}, hazards:[]}`, which the
+// close reads as a chapter that produced nothing.
+test('the closing snapshot: a root that lists ENOENT after its own baseline is refused, not read as empty', () => {
+  withTempDir((dir) => {
+    const profile = profileFor(dir);
+    const entry = { slug: 'items' };
+    const assetDir = join(profile.capture.output_dir, 'items');
+    nodeFs.mkdirSync(assetDir, { recursive: true });
+    nodeFs.writeFileSync(join(assetDir, 'a.png'), 'v1');
+
+    const opened = CR.openCaptureRun(profile, [entry], null, stubDepsNoIdentity());
+    assert.equal(opened.ok, true, JSON.stringify(opened));
+
+    let listed = false;
+    const closingDeps = depsWithOverride({
+      // The baseline lstat succeeds against the real directory; the listing then reports it gone.
+      readdirSync: (p, opts) => {
+        if (String(p).endsWith('/items')) {
+          listed = true;
+          const err = new Error('ENOENT'); err.code = 'ENOENT'; throw err;
+        }
+        return nodeFs.readdirSync(p, opts);
+      },
+      runIdentityCommand: () => ({ ok: false, detail: 'no command configured in test' }),
+    });
+
+    const closed = CR.closeCaptureRun(profile, opened.runState, { ok: true }, null, closingDeps);
+    assert.equal(listed, true, 'the root was never listed — this fixture cannot reach the condition');
+    assert.equal(closed.ok, false, `an identified root that stopped existing must not close silently: ${JSON.stringify(closed)}`);
+    assert.equal(closed.halts[0].halt, 'provenance_hazard');
+    assert.match(closed.halts[0].message, /ENOENT/);
+  });
+});
+
+// [round 24 BLOCKER, half two] The mirror image, and the one codex's probe made unarguable: the
+// baseline FAILS, the listing then SUCCEEDS, and the walk processes the entries of an object it
+// never established — no second identity observation anywhere on that path. A directory that comes
+// into existence between two adjacent observations inside one call is the substitution signature,
+// not a first capture; a first capture has nothing to list.
+test('the closing snapshot: a root that lists successfully after a FAILED baseline is refused', () => {
+  withTempDir((dir) => {
+    const profile = profileFor(dir);
+    const entry = { slug: 'items' };
+    const assetDir = join(profile.capture.output_dir, 'items');
+    nodeFs.mkdirSync(assetDir, { recursive: true });
+    nodeFs.writeFileSync(join(assetDir, 'a.png'), 'v1');
+
+    const opened = CR.openCaptureRun(profile, [entry], null, stubDepsNoIdentity());
+    assert.equal(opened.ok, true, JSON.stringify(opened));
+
+    let baselineRefused = false;
+    const closingDeps = depsWithOverride({
+      // Exactly codex's probe: the root's own first observation reports it absent, and it is
+      // present and readable by the time the listing runs.
+      lstatSync: (p, ...rest) => {
+        if (!baselineRefused && String(p).endsWith('/items')) {
+          baselineRefused = true;
+          const err = new Error('ENOENT'); err.code = 'ENOENT'; throw err;
+        }
+        return nodeFs.lstatSync(p, ...rest);
+      },
+      runIdentityCommand: () => ({ ok: false, detail: 'no command configured in test' }),
+    });
+
+    const closed = CR.closeCaptureRun(profile, opened.runState, { ok: true }, null, closingDeps);
+    assert.equal(baselineRefused, true, 'the baseline never ran — this fixture cannot reach the condition');
+    assert.equal(closed.ok, false, `entries of an unidentified root must not be walked: ${JSON.stringify(closed)}`);
+    assert.equal(closed.halts[0].halt, 'provenance_hazard');
+    assert.match(closed.halts[0].message, /could not be confirmed \(vanished\) before it was listed/);
+  });
+});
+
 test('the closing snapshot: a vanished asset still refuses the chapter, and now says why', () => {
   withTempDir((dir) => {
     const profile = profileFor(dir);

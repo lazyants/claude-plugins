@@ -1158,7 +1158,7 @@ function validateEntriesForCapture(profileLike, entries, deps) {
     let assetDirExists = true;
     let assetDirIdentityId = null;
     try {
-      const st = deps.lstatSync(assetDir);
+      const st = deps.lstatSync(assetDir, EXACT_IDENTITY_STAT);
       // [round 22] The identity, read off the lstat this gate already performs.
       // [round 23] Through the shared helper, so that a symlinked root resolves to its target here
       // exactly as it does at the snapshot: the two sides derive the directory through different
@@ -1727,8 +1727,15 @@ function direntType(dirent, absPath, deps) {
 //     `Dirent` has no inode, whereas the root is reachable by a path both sides can `lstat`.
 //
 // Closing residual 2 needs `openat`/`fdopendir` (or a `readdirSync` that reports `d_ino`), which is
-// a seam change, not a logic change. Until then the guard's reach is exactly: a substitution is
-// caught if it is present at, or lands during, the listing of the directory it replaces.
+// a seam change, not a logic change. Until then the guard's reach is exactly this, and it is
+// DETECTION rather than closure: a substitution is reported if it is still in place at one of the
+// three observation points. It is never prevented — every check here re-resolves a PATH, so the
+// listing in between was not bound to the object that was checked, and a replacement installed and
+// reverted between two adjacent observations leaves no trace at all. The sentence that stood here
+// said a substitution "is caught if it is present at, or lands during, the listing", which
+// contradicted residual 1 four lines above it: one that lands during the listing is caught only if
+// it happens to persist to the next observation. Two claims about the same guard, in one comment
+// block, disagreeing — which is the shape three consecutive rounds of review have found here.
 //
 // The ROOT is not exempt any more, only differently supplied. Gate 3 permits a symlinked asset root
 // that resolves inside `capture.output_dir`, so refusing symlink-ness here would refuse a supported
@@ -1752,7 +1759,7 @@ function direntType(dirent, absPath, deps) {
 function assetDirIdentity(absPath, deps, { allowSymlink = false } = {}) {
   let st;
   try {
-    st = deps.lstatSync(absPath);
+    st = deps.lstatSync(absPath, EXACT_IDENTITY_STAT);
   } catch (err) {
     return { ok: false, reason: errProp(err, 'code') === 'ENOENT' ? 'vanished' : 'inspection_failure' };
   }
@@ -1786,7 +1793,7 @@ function identityOfListedObject(absPath, st, deps) {
   }
   let targetStat;
   try {
-    targetStat = deps.lstatSync(target);
+    targetStat = deps.lstatSync(target, EXACT_IDENTITY_STAT);
   } catch (err) {
     return { ok: false, reason: errProp(err, 'code') === 'ENOENT' ? 'vanished' : 'inspection_failure' };
   }
@@ -1801,9 +1808,39 @@ function identityOfListedObject(absPath, st, deps) {
 // A caller on the pre-round-22 declaration lands here instead of silently comparing `undefined` to
 // `undefined` — which compares EQUAL, so the guard would report success precisely because it
 // learned nothing.
+// [round 24] A `number` is accepted only when it is EXACT. `dev`/`ino` are 64-bit on the platforms
+// this runs on, and a JavaScript number cannot represent every one of them: codex measured inodes
+// `9007199254740992` and `9007199254740993` — two different directories — both producing the id
+// `7:9007199254740992`, so a substitution passes all three observation points on any filesystem
+// exposing identifiers above 2^53. That is the release's own defect class arriving through the
+// number line rather than through a missing branch. A `bigint` is exact by construction and is the
+// supported way to identify objects there; `defaultDeps` asks `node:fs` for one, so production
+// never depends on the safe-integer window at all. An inexact number is uncertainty, and this
+// module's standing rule for uncertainty is refusal.
 function identityFromStat(st) {
-  if (typeof st?.dev !== 'number' || typeof st?.ino !== 'number') return { ok: false, reason: 'inspection_failure' };
-  return { ok: true, id: `${st.dev}:${st.ino}`, isDirectory: st.isDirectory() };
+  const dev = exactIdentityPart(st?.dev);
+  const ino = exactIdentityPart(st?.ino);
+  if (dev === null || ino === null) return { ok: false, reason: 'inspection_failure' };
+  return { ok: true, id: `${dev}:${ino}`, isDirectory: st.isDirectory() };
+}
+
+// Passed as `lstatSync`'s second argument at the THREE call sites that read an identity, and
+// nowhere else. It is a REQUEST, not a requirement: `node:fs` honours it and returns `BigIntStats`,
+// a seam that ignores a second argument returns ordinary numbers and keeps working inside the
+// safe-integer window, and beyond that window `identityFromStat` refuses rather than guessing. That
+// ordering is deliberate — the shipped default is exact everywhere, and a caller who supplies a
+// narrower `lstatSync` degrades to a refusal instead of to a silent collision. Deliberately NOT
+// applied to `fstatSync`, whose consumer compares `nlink !== 1` and would silently fail that
+// against a BigInt, nor to the two lstat sites that read only predicates.
+const EXACT_IDENTITY_STAT = Object.freeze({ bigint: true });
+
+// A `bigint` renders the same digits a safe-integer `number` does, so a seam that switches between
+// them mid-run still compares equal for the same object — which matters because gate 3 and the walk
+// may be reached through different deps in a test.
+function exactIdentityPart(value) {
+  if (typeof value === 'bigint') return value.toString();
+  if (typeof value === 'number' && Number.isSafeInteger(value)) return String(value);
+  return null;
 }
 
 // `rootMustExist` and `rootIdentity` are both the caller's knowledge, not the walk's: whether this
@@ -1844,6 +1881,9 @@ function walkRegularFiles(rootDir, deps, visit, onSkipped, { rootMustExist = fal
 
   function walk(absDir, relPrefix) {
     let expectedId = null;
+    // The reason the ROOT's own first observation failed, when there was no caller pin to use
+    // instead. Non-null means this walk holds a listing of an object it never identified.
+    let rootUnidentified = null;
     if (relPrefix !== '') {
       const before = assetDirIdentity(absDir, deps, { allowSymlink: false });
       if (!before.ok) {
@@ -1863,12 +1903,18 @@ function walkRegularFiles(rootDir, deps, visit, onSkipped, { rootMustExist = fal
       // over: a root is not exempt from a rule merely because nobody told it what it used to be.
       // Its own first observation is a baseline in exactly the way a child's is.
       //
-      // A first observation that FAILS leaves the pin null rather than refusing here: the root is
-      // legitimately absent before a first capture, and the `readdirSync` branch below is what
-      // distinguishes that from a root the caller had already seen. Refusing at this line would
-      // turn every not-yet-created asset directory into a halt.
+      // A first observation that FAILS cannot refuse AT THIS LINE — the root is legitimately absent
+      // before a first capture, and refusing here would halt every not-yet-created asset directory.
+      // [round 24] But it must not be forgotten either, which is what the round-23 version did: it
+      // left the pin null and relied on "the `readdirSync` branch below distinguishes that from a
+      // root the caller had already seen". That branch only runs when the listing FAILS. When the
+      // baseline fails and the listing then SUCCEEDS, the walk was processing entries of an object
+      // it had never established — codex reproduced it: baseline ENOENT, listing returns
+      // `foreign.png`, file visited with no second identity observation anywhere. The reason is
+      // carried instead, and adjudicated once the listing's own outcome is known.
       const own = assetDirIdentity(absDir, deps, { allowSymlink: true });
       if (own.ok) expectedId = own.id;
+      else rootUnidentified = own.reason;
     }
     let entries;
     try {
@@ -1892,7 +1938,13 @@ function walkRegularFiles(rootDir, deps, visit, onSkipped, { rootMustExist = fal
       // conservative than a hazard, and the root is nameable by no relative path a hazard could use.
       if (code === 'ENOENT') {
         if (relPrefix !== '') onSkipped?.(relPrefix, 'vanished');
-        else if (rootMustExist) throw err;
+        // [round 24] `expectedId` belongs in this condition and was missing from it. A root this
+        // walk has just IDENTIFIED, by its own observation, is one that existed a syscall ago —
+        // exactly the round-21 argument, which had only been wired to the CALLER's knowledge.
+        // `closeCaptureRun` passes `rootMustExist: false` because it never ran gate 3, so a root
+        // that vanished between its baseline and its listing returned `{hashes:{}, hazards:[]}` and
+        // the close read it as a chapter that produced nothing. Codex executed exactly that.
+        else if (rootMustExist || expectedId !== null) throw err;
         return;
       }
       // [round 18] ENOTDIR used to return here too, silently, and that was the round-17 defect
@@ -1911,10 +1963,18 @@ function walkRegularFiles(rootDir, deps, visit, onSkipped, { rootMustExist = fal
       // per-directory hazard, so it is left as it was.
       if (code === 'ENOTDIR') {
         if (relPrefix !== '') onSkipped?.(relPrefix, 'inspection_failure');
-        else if (rootMustExist) throw err;
+        else if (rootMustExist || expectedId !== null) throw err;
         return;
       }
       throw err;
+    }
+    // [round 24] The listing SUCCEEDED for a root whose own identity could not be established. That
+    // is not a first capture — a first capture has nothing to list. Something came into existence,
+    // or became readable, between two adjacent observations inside this one call, which is the
+    // substitution signature itself. Refusing here is what makes the paragraph above true: the
+    // failed baseline is deferred, never dropped.
+    if (rootUnidentified !== null) {
+      throw new Error(`the asset directory could not be confirmed (${rootUnidentified}) before it was listed`);
     }
     // [round 22] The observation codex asked for and round 21 did not have: between the listing and
     // any use of it. A swap that lands during the `readdirSync` above is caught here, before a
@@ -2541,7 +2601,11 @@ export function recordChapterProvenance(profileLike, acceptedEntries, entry, cha
   const assetDir = chapterAssetDir(profileLike, entry);
   let filenames;
   try {
-    filenames = listRegularFilesRecursive(assetDir, d);
+    // [round 24] Carries the identity `validated` just observed, exactly as `openCaptureRun` does.
+    filenames = listRegularFilesRecursive(assetDir, d, {
+      rootMustExist: validated.assetDirsObserved.has(key),
+      rootIdentity: validated.assetDirsObserved.get(key) ?? null,
+    });
   } catch (err) {
     return { recorded: false, reason: `asset_listing_failed:${describeThrownField(err, 'code')}` };
   }
@@ -2725,9 +2789,18 @@ function readFileText(path, deps) {
 // unmatched destination and the chapter is reported ineligible — it is never recorded on the
 // strength of a file this feature declined to look at. Written down because the walk's two callers
 // have now been the subject of three consecutive review rounds.
-function listRegularFilesRecursive(assetDir, deps) {
+// [round 24] Takes the same root pin the snapshot does, and BOTH callers have one to give: W5 and
+// W6 each re-run gates 1-4 immediately before this listing and then discarded the identities that
+// run observed. A self-baseline established here brackets only this listing; the gate-3 pin brackets
+// the window between the gate and the listing, which is where a PERSISTENT substitution lives — and
+// a persistent one is invisible to the self-baseline by construction, since the replacement is
+// already in place when the baseline is taken. Codex's scenario: gate 3 observes an ordinary
+// in-root directory, the root becomes a symlink to an outside tree holding a byte-copy of the
+// closing asset, the walk self-baselines the replacement, W5 rule 2 canonicalizes root and asset
+// into the same outside tree and passes, and the chapter is recorded as verified.
+function listRegularFilesRecursive(assetDir, deps, { rootMustExist = false, rootIdentity = null } = {}) {
   const out = [];
-  walkRegularFiles(assetDir, deps, (_absPath, relPath) => out.push(relPath));
+  walkRegularFiles(assetDir, deps, (_absPath, relPath) => out.push(relPath), undefined, { rootMustExist, rootIdentity });
   return out;
 }
 
@@ -2944,7 +3017,12 @@ export function buildProvenanceReport(profileLike, entries, currentObservation, 
     const assetDir = chapterAssetDir(profileLike, entry);
     let filenames;
     try {
-      filenames = listRegularFilesRecursive(assetDir, d);
+      // [round 24] Same pin as W5's listing above: W6 ran gates 1-4 for this manifest a few lines
+      // up and had the observed identity in hand.
+      filenames = listRegularFilesRecursive(assetDir, d, {
+        rootMustExist: validated.assetDirsObserved.has(key),
+        rootIdentity: validated.assetDirsObserved.get(key) ?? null,
+      });
     } catch (err) {
       return { ok: false, halts: [{ halt: 'asset_listing_failed', message: `cannot list the asset directory for '${key}': ${describeThrownField(err, 'code')}`, key }] };
     }

@@ -460,8 +460,16 @@ export interface LstatResultLike {
   // hazard. (2) "Degrades to a refusal" is the whole run for an asset ROOT: gate 3 halts rather
   // than carrying a null pin forward, because the snapshot could not tell a null pin apart from a
   // caller that configured none. `rootMustExist` never covered replacement — only disappearance.
-  dev: number;
-  ino: number;
+  // [round 24] `number | bigint`, and the widening is the point rather than a convenience: these are
+  // 64-bit values and a JavaScript number cannot hold every one of them. Inodes `9007199254740992`
+  // and `9007199254740993` — two different directories — both render the id `7:9007199254740992`,
+  // so on any filesystem exposing identifiers above 2^53 a substitution passes every observation
+  // point. A `number` is therefore accepted only when `Number.isSafeInteger` says it is EXACT;
+  // anything larger is a hazard, not a comparison. A `bigint` is exact by construction, which is
+  // what the `{ bigint: true }` request on `lstatSync` above exists to obtain. Both spellings render
+  // the same digits for the same object, so a seam mixing them still compares equal.
+  dev: number | bigint;
+  ino: number | bigint;
 }
 
 /** The subset of `fs.Stats` `fstatSync`'s result is actually read through — `openLeafNoFollow` (capture-record.mjs, gate 6) calls only `stat.isFile()` and reads `stat.nlink`. The sole call site. */
@@ -513,7 +521,12 @@ export interface CaptureRecordDeps {
   // offset/length/position. See `readSync` above for why `buffer` is `Uint8Array`, not `Buffer`.
   writeSync: (fd: number, buffer: Uint8Array) => number;
   fstatSync: (fd: number) => FstatResultLike;
-  lstatSync: (path: string) => LstatResultLike;
+  // [round 24] The optional second argument is a REQUEST for exact identity values, passed at the
+  // three call sites that read `dev`/`ino` and nowhere else. `node:fs` honours it and answers with
+  // `BigIntStats`. An implementation that ignores it is still conforming — it simply answers in
+  // numbers, which stay exact inside the safe-integer window and are REFUSED beyond it rather than
+  // rounded into a false match. So the parameter widens what a caller may do, never what it must.
+  lstatSync: (path: string, options?: { bigint: true }) => LstatResultLike;
   readlinkSync: (path: string) => string;
   realpathSync: (path: string) => string;
   // [round 6, follow-up] `ensureDirComponent` calls the bare `(path)` form (gate 6's per-component
