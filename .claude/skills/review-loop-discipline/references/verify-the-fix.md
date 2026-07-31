@@ -100,6 +100,11 @@ count depends on the fixture SHAPE, not the character. Same function, same 16 ch
 | `prose + GLUE + SENTINEL` | 15/16 — prose is on the line regardless, so `trim()` never gets a chance |
 | `GLUE + SENTINEL`, no prose | 7/16 — `trim()` strips 9 of them and those are seen correctly |
 
+The canonical, domain-side write-up of that measurement lives in
+`plugins/literary-translator/skills/literary-translator/references/canon-and-glossary.md` (search
+`15 of 16 over \`GLUE_CHARS\``); this section exists to state the REVIEW rule the measurement
+produced, not to be a second copy of it.
+
 Costs that a condition-first statement would have avoided: the overclaim propagated into a PR body,
 a shipped code comment and two teammate briefs; one brief instructed a fixture design that could not
 have discriminated anything; and two artifacts that were each correct — a comment listing NBSP among
