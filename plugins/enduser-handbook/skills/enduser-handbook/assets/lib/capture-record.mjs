@@ -1966,10 +1966,22 @@ function containmentRootFor(profileLike, deps) {
   // than a failure — `null` means "nothing to compare", never "compares equal". Both halves fail
   // together there (the tail that does not resolve is the same tail in both), so the bracket stands
   // down rather than reading two absences as a disagreement.
+  //
+  // [round 34, review bot P1] And ONLY there. `identity.ok ? identity.id : null` collapsed two
+  // different failures into that same null: a root that is not there, and a root that is there and
+  // could not be identified. The second one disables every later bracket — `outputRootChanged`
+  // returns false unconditionally on a null identity — so the bot repointed the configured root to a
+  // populated descendant after an `lstat` that reported no `dev`/`ino`, and `openCaptureRun`
+  // returned ok with the foreign bytes hashed and an empty hazard list. Reproduced here through the
+  // real export before it was fixed. `absentDirectly` is exactly the fact that separates them (round
+  // 26 built it for this), and it is a claim about ONE `lstat` returning ENOENT, so nothing else can
+  // reach the tolerated branch: a present-but-dangling root symlink reports `vanished` without it
+  // and refuses here, which is the same distinction the climb draws one layer down.
   const identity = assetDirIdentity(canonical, deps, { allowSymlink: true });
   if (beforeResolution.ok !== identity.ok || (identity.ok && beforeResolution.id !== identity.id)) {
     return { ok: false, reason: 'configured_and_resolved_disagree' };
   }
+  if (!identity.ok && identity.absentDirectly !== true) return { ok: false, reason: identity.reason };
   return {
     ok: true,
     root: {

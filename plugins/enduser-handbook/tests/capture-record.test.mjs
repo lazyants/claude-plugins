@@ -2512,8 +2512,16 @@ test('openCaptureRun: an asset root this module observed but cannot identify hal
 
     const deps = depsWithOverride({
       // Exactly the pre-round-22 declaration: the three predicates, no `dev`, no `ino`.
-      lstatSync: (p) => {
-        const st = nodeFs.lstatSync(p);
+      // [round 34] Scoped to the CHAPTER directory. It used to answer this way for every path, and
+      // the output root's own identity read is now refused at validation — one guard earlier, with a
+      // different message — so a blanket seam retires this fixture's attribution rather than testing
+      // it. Scoped, it is also the more realistic input: one directory whose identity cannot be
+      // read, not a filesystem that can answer for nothing.
+      lstatSync: (p, ...rest) => {
+        const st = nodeFs.lstatSync(p, ...rest);
+        // `endsWith`, not equality: the module reaches this directory by more than one string
+        // (the configured form and its resolved twin), and an exact match interposes on neither.
+        if (!String(p).endsWith('/items')) return st;
         return {
           isSymbolicLink: () => st.isSymbolicLink(),
           isDirectory: () => st.isDirectory(),
@@ -4087,6 +4095,84 @@ test('openCaptureRun: an output root that vanishes between the bracket\'s two re
   });
 });
 
+// [round 34, review bot P1] The third way into the same null. A root that is THERE and cannot be
+// identified was stored as `identity: null`, which is the value that means "nothing to compare" —
+// and a null identity makes `outputRootChanged` return false unconditionally, so the bracket it
+// feeds is not weakened but switched off. The bot reproduced it through the real exported
+// `openCaptureRun`: an `lstat` of the root reporting no `dev`/`ino`, the configured link then
+// repointed to a populated descendant, `ok: true`, `foreign.png` hashed, empty hazard list.
+// `absentDirectly` is the fact that separates the tolerated case from this one, and it is set at
+// exactly one site, on an `lstat` that returned ENOENT.
+test('openCaptureRun: an output root that EXISTS but cannot be identified is refused, not treated as absent', () => {
+  withTempDir((dir) => {
+    // Built on the RESOLVED temp root: the identity read this fixture has to interpose on happens at
+    // `canonical`, which is a realpath, and a seam keyed on the unresolved string poisons nothing at
+    // all. The first version of this fixture did exactly that, and it passed against the unfixed
+    // module for a reason that was never the finding — the ordinary output-root bracket refused the
+    // repoint, because the identity it was comparing had never been poisoned.
+    const real = nodeFs.realpathSync(dir);
+    const treeA = join(real, 'treeA');
+    const outputRoot = join(real, 'out');
+    nodeFs.mkdirSync(join(treeA, 'sub', 'items'), { recursive: true });
+    nodeFs.writeFileSync(join(treeA, 'sub', 'items', 'foreign.png'), 'bytes from a tree this handbook does not own');
+    nodeFs.symlinkSync(treeA, outputRoot);
+    assert.equal(nodeFs.realpathSync(outputRoot), treeA, 'the interposed path must be the one the module resolves to');
+
+    const profile = profileFor(real, { capture: { output_dir: outputRoot, build_identity: { ui_read: false } } });
+    const entry = { slug: 'items' };
+    assert.equal(nodeFs.existsSync(join(treeA, 'items')), false, 'gate 3 must see an ordinary first capture');
+
+    // An `lstat` that answers every PREDICATE and cannot say WHICH object it looked at. That is not
+    // a contrivance: `identityFromStat` refuses a `dev`/`ino` it cannot represent exactly, so any
+    // filesystem reporting identifiers beyond the safe-integer window through a seam that ignores
+    // `{bigint:true}` produces this same observation.
+    const withoutIdentity = (st) => ({
+      isSymbolicLink: () => st.isSymbolicLink(),
+      isDirectory: () => st.isDirectory(),
+      isFile: () => st.isFile(),
+      nlink: st.nlink,
+      mode: st.mode,
+      size: st.size,
+    });
+
+    let repointed = false;
+    let poisonedReads = 0;
+    const deps = depsWithOverride({
+      lstatSync: (p, ...rest) => {
+        const st = nodeFs.lstatSync(p, ...rest);
+        if (String(p) !== treeA) return st;
+        poisonedReads += 1;
+        return withoutIdentity(st);
+      },
+      // The repoint lands at the reservation write: after validation, before the snapshot — the
+      // window a null identity leaves completely unwatched.
+      openSync: (p, ...rest) => {
+        if (!repointed && String(p).endsWith('/pending.json')) {
+          nodeFs.unlinkSync(outputRoot);
+          nodeFs.symlinkSync(join(treeA, 'sub'), outputRoot);
+          repointed = true;
+        }
+        return nodeFs.openSync(p, ...rest);
+      },
+      runIdentityCommand: () => ({ ok: false, detail: 'no command configured in test' }),
+    });
+
+    const opened = CR.openCaptureRun(profile, [entry], null, deps);
+    // The condition is the unidentifiable root, NOT the repoint — and with the refusal at validation
+    // the reservation is never written, so the repoint hook does not run at all. Asserting that it
+    // did would pin the pre-fix ordering; asserting the poison fired is what says the fixture
+    // reached its own subject. The repoint stays because it is what turns this into a hazard rather
+    // than a curiosity: it is what the unfixed module hashed.
+    assert.ok(poisonedReads > 0, 'the identity read was never interposed on — this fixture cannot reach the condition');
+    assert.equal(opened.ok, false, `a root that could not be identified must not stand its own bracket down: ${JSON.stringify(opened)}`);
+    assert.equal(opened.halts[0].halt, 'provenance_hazard', JSON.stringify(opened.halts));
+    // The DIAGNOSTIC: the reason travels from the failed observation itself, so an operator is told
+    // the root could not be inspected rather than that it was absent or that something moved.
+    assert.match(opened.halts[0].message, /cannot resolve capture\.output_dir: inspection_failure/,
+      `the halt must name the failed identity observation: ${JSON.stringify(opened.halts)}`);
+  });
+});
+
 // [round 27] The ancestor climb walks a PATH, so it inherits the release's other recurring defect:
 // the shipped example profile's `output_dir` is RELATIVE (`vault/handbook/assets`), and a climb that
 // prefixes `/` onto relative segments probes an entirely different tree — one where every candidate
@@ -4299,9 +4385,15 @@ test('identity: an inode outside the safe-integer range is refused, never rounde
     assert.equal(Number.isSafeInteger(2 ** 53), false, 'the fixture value must be INEXACT, or it proves nothing');
     const deps = depsWithOverride({
       // A seam that answers in numbers, as `fs.lstatSync` does without `{ bigint: true }`, on a
-      // filesystem whose inodes do not fit one.
-      lstatSync: (p) => {
-        const st = nodeFs.lstatSync(p);
+      // filesystem whose inodes do not fit one. [round 34] Scoped to the CHAPTER directory for the
+      // same reason as the round-23 fixture above: an inexact identity at the OUTPUT ROOT is now
+      // refused at validation, so answering this way everywhere would move the halt off the guard
+      // this test names.
+      lstatSync: (p, ...rest) => {
+        const st = nodeFs.lstatSync(p, ...rest);
+        // `endsWith`, not equality: the module reaches this directory by more than one string
+        // (the configured form and its resolved twin), and an exact match interposes on neither.
+        if (!String(p).endsWith('/items')) return st;
         return {
           isSymbolicLink: () => st.isSymbolicLink(),
           isDirectory: () => st.isDirectory(),
