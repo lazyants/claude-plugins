@@ -3633,6 +3633,17 @@ has_in_section "SKILL: W5 completeness rule 5 — re-hashed NOW at publish time,
 has_in_section "SKILL: W5 rule 5 states WHY it compares against closing, not merely against opening" \
   "$SKILL" '### W5 — Publish' \
   'would accept bytes the captured build never produced'
+# [round 14] The rule-5 correction landed in SKILL.md, in the code, and in the pin above — and left
+# the EXPORTED JSDoc contract still stating the old rule, which is what a caller reading only the API
+# gets. Four statements of one rule, three corrected. This is an INSTANCE pin, not a class gate: no
+# mechanical check can tell a doc block that states the rule from one that narrates its history, so
+# what it holds is that the exported contract names equality with `closing` at all.
+has "assets/lib/capture-record.mjs: the EXPORTED rule-5 contract states equality with closing, not merely difference from opening" \
+  'a fresh re-hash right now EQUALS' \
+  "$ASSETS/lib/capture-record.mjs"
+hasnt "assets/lib/capture-record.mjs: the obsolete rule-5 contract wording is gone from the export's JSDoc" \
+  'a fresh re-hash right now still' \
+  "$ASSETS/lib/capture-record.mjs"
 has_in_section "SKILL: W5 any completeness failure ⇒ no record written, chapter keeps prior record" \
   "$SKILL" '### W5 — Publish' \
   'no record is written and the chapter keeps whatever record it already had'

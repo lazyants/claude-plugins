@@ -1555,6 +1555,30 @@ test('closeCaptureRun: PAYLOAD TAMPERING — a mutated `entries` list (a differe
   });
 });
 
+// [ped-ant, round 14] The tampering test above MUTATES a payload member; this one REMOVES it. The
+// digest recompute treats `runState` as tamperable serialized input — the comment above it says so
+// outright — and then hands it to `digestOpeningPayload`, which throws on a member it cannot
+// canonicalize. So the one input shape the guard exists for escaped as an exception from a function
+// whose whole contract is that ordinary failure returns `{ok:false, halts}`, and it did so before
+// anything durable was written, leaving the pending run to be recovered by hand. A payload that
+// cannot be canonicalized cannot match the token's digest either, so it is a `stale_replay` like
+// every other non-matching payload.
+for (const missing of ['entries', 'opening', 'opening_assets']) {
+  test(`closeCaptureRun totality: a runState with '${missing}' deleted halts stale_replay rather than throwing`, () => {
+    withTempDir((dir) => {
+      const profile = profileFor(dir);
+      const opened = CR.openCaptureRun(profile, [{ slug: 'items' }], null, stubDepsNoIdentity());
+      assert.equal(opened.ok, true);
+      const tampered = JSON.parse(JSON.stringify(opened.runState));
+      assert.ok(missing in tampered, `fixture is wrong: '${missing}' is not a runState member`);
+      delete tampered[missing];
+      const closed = CR.closeCaptureRun(profile, tampered, { ok: true }, null, stubDepsNoIdentity());
+      assert.equal(closed.ok, false);
+      assert.equal(closed.halts[0].halt, 'stale_replay', JSON.stringify(closed.halts));
+    });
+  });
+}
+
 test('closeCaptureRun: BLOCKER 2 (codex review) — forging ONLY runState.opening_digest must not land the FORGED value in the committed record', () => {
   // The token on disk is the sole AUTHENTICATED source of truth for the opening digest. Close
   // recomputes the digest from runState's own entries/opening/opening_assets and checks it against

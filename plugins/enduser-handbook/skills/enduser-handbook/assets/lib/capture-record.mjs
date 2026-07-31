@@ -1664,7 +1664,26 @@ export function closeCaptureRun(profileLike, runState, captureOutcome, closingOb
   // mutated while its two scalar fields were left untouched is exactly what this closes: the token
   // on disk — the one thing an attacker did not get to also rewrite — is the sole source of truth
   // for what the opening payload was allowed to be.
-  const recomputedDigest = digestOpeningPayload(openingPayloadFromRunState(runState));
+  // [round 14, ped-ant] Guarded, and the reason is the paragraph above: this treats `runState` as
+  // tamperable serialized input, and `digestOpeningPayload` THROWS on a member it cannot
+  // canonicalize rather than returning a result. A payload whose `entries`/`opening`/
+  // `opening_assets` was DELETED (as opposed to the mutation the tampering test covers) therefore
+  // escaped this function as an exception, out of a contract that says every ordinary failure comes
+  // back as `{ok: false, halts}` — and it escaped before anything durable was written, leaving the
+  // pending run to be recovered by hand. Round 9 deliberately left this call site unguarded on the
+  // reasoning that `runState` is internal state that provably cannot throw on the legitimate path;
+  // the legitimate path was never the question here, since the whole point of the digest check is
+  // the ILLEGITIMATE one. A payload that cannot be canonicalized cannot match the token's digest
+  // either, so it takes the same `stale_replay` exit as any other non-matching payload.
+  let recomputedDigest;
+  try {
+    recomputedDigest = digestOpeningPayload(openingPayloadFromRunState(runState));
+  } catch (err) {
+    return haltResult(
+      'stale_replay',
+      `this runState's opening payload cannot be canonicalized, so it cannot match the token's stored digest (${describeThrown(err)}) — re-derive with recoverProvenanceState.`,
+    );
+  }
   if (recomputedDigest !== parsedToken.value.opening_digest) {
     return haltResult(
       'stale_replay',
@@ -1965,9 +1984,16 @@ function readChapterRecordFromDisk(profileLike, entry, deps) {
  * Record one chapter's provenance at W5, applying the completeness rule (rules 1-5 of the plan):
  * the run record verifies and its `run_id` matches `expectedRunId`; the chapter embeds at least
  * one in-directory image and no foreign one; every expected image appears in `closing`; every
- * expected image's `closing` hash differs from `opening`; and a fresh re-hash right now still
- * differs from `opening`. Any failure ⇒ no record written, the chapter's existing record (if any)
- * is left byte-identical, and the failing rule is returned as a warning.
+ * expected image's `closing` hash differs from `opening`; and a fresh re-hash right now EQUALS
+ * `closing`. Any failure ⇒ no record written, the chapter's existing record (if any) is left
+ * byte-identical, and the failing rule is returned as a warning.
+ *
+ * [round 14] That last rule used to read "still differs from `opening`", here and in SKILL.md and
+ * in the code. Differing from the opening admits bytes the captured build never produced, which the
+ * record would then attribute to it; equality with `closing` is the property that makes the record
+ * mean anything, and it subsumes the old check because rule 4 has already established that closing
+ * differs from opening. This block is the EXPORTED contract, so a caller reading only the API saw
+ * the obsolete rule after the other three sites were corrected.
  *
  * @param {object} profileLike
  * @param {Array<object>} acceptedEntries  the complete accepted manifest (gate 4 is a cross-entry recheck)
