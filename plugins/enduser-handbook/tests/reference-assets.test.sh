@@ -3434,7 +3434,7 @@ has_in_section "SKILL: W2's identity warnings are values closeCaptureRun returns
 # so the sentence cannot drift back toward the reading that was wrong.
 has_in_section "SKILL: the continuation passes identityCommandOutcome LAST, not after the observation" \
   "$SKILL" '### W2 — Capture screenshots' \
-  "`identityCommandOutcome` as the call's **last** argument"
+  '`identityCommandOutcome` as the call'\''s **last** argument'
 has "capture-record.d.mts: NeedsUiRead carries identityCommandOutcome for the retry" \
   'identityCommandOutcome: CommandOutcome | null }' "$ASSETS/lib/capture-record.d.mts"
 has "build-identity.d.mts: declares describeBuildIdentityWarning" \
@@ -3811,6 +3811,23 @@ has_joined_in_section "capture-engines: manual halts before W2 ever opens a capt
 has_joined_in_section "capture-engines: manual's perpetual record_absent is expected, not a defect" \
   "$REFS/capture-engines.md" '## Manual (halt boundary, not a ready mode)' \
   "That is the expected report for this engine value's halt boundary, not a provenance defect to chase"
+
+# [round 16] This suite's own needles are the thing it cannot check by asserting: one of them was
+# written in DOUBLE quotes around a backticked identifier, so the shell ran the identifier as a
+# command and handed the assertion the leftover text. It kept passing while no longer checking the
+# identifier or its delimiters. Nothing looked wrong — the shell's complaint went to stderr in the
+# operator's own locale, and the total was unchanged. So the file scans itself for the class.
+if [ -f "$TEST_DIR/shell-needle-scan.awk" ]; then
+  live_backticks="$(awk -f "$TEST_DIR/shell-needle-scan.awk" "$TEST_DIR/reference-assets.test.sh")"
+  if [ -z "$live_backticks" ]; then
+    ok "reference-assets.test.sh: no needle carries a shell-expanded backtick (they would silently truncate the needle)"
+  else
+    bad "reference-assets.test.sh: a needle carries a backtick the shell will EXPAND — single-quote it, or the assertion checks only what survives the substitution:
+$live_backticks"
+  fi
+else
+  bad "reference-assets.test.sh: tests/shell-needle-scan.awk is missing — the shell-expanded-backtick scan did not run, and a skipped scan looks exactly like a clean one"
+fi
 
 TOTAL=$((PASS + FAIL))
 echo "----"
