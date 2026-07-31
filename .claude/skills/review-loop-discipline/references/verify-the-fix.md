@@ -14,6 +14,7 @@
 - [RED evidence read from a MOVING ref stops being evidence at the commit](#red-evidence-that-reads-its-before-from-a-moving-ref-stops-being-evidence-at-the-commit)
 - [A staged RED gate must be SATISFIABLE by its owner](#a-staged-red-gate-must-be-satisfiable)
 - [A coverage claim needs the same evidence as the thing it covers](#a-coverage-claim-needs-the-same-evidence)
+- [Revert the whole file — the pins that SURVIVE say it was never guarded](#revert-the-whole-file-and-read-which-pins-survive)
 - [A never-varied argument is an untested argument — instrument, don't re-review](#a-never-varied-argument-is-an-untested-argument)
 - [A pin can CEMENT a wrong claim — pinning is not review](#a-pin-can-cement-a-wrong-claim)
 - [Ask which correct behaviours have NO gate at all](#ask-which-correct-behaviours-have-no-gate)
@@ -65,6 +66,25 @@ Removing a wrong term X can INTRODUCE a new inaccuracy. A blanket replacement ca
   figure lands. The technique arrived on round 6, after five rounds of number defects — it is not
   something anyone invents under time pressure, so reach for it at the start of a docs-correction
   loop rather than at its end.
+
+- **Sweeping every restatement is not enough: the restatements are NOT equal, and the one that
+  loads FIRST is the one that steers behaviour.** When a finding is refuted or corrected in a
+  reference doc, correct every surface that SUMMARIZES it in the same change, and treat the
+  index/router bullet as the load-bearing one — in a progressive-disclosure skill the router is
+  read on EVERY load while the reference is opened only conditionally, so a reader who trusts the
+  summary never reaches the correction and the stale summary silently wins. Each file stays
+  internally coherent, which is why nothing looks wrong. Verified 2026-07-25: a pre-registered
+  replication — 3 replicates per cell, blind cross-model judge, counterbalanced presentation
+  order — refuted an n=1 bake-off's "high won / xhigh over-reaches" conclusion, and
+  `.claude/skills/codex-runtime-driving/references/model-effort-bakeoff.md` was rewritten
+  accordingly; the one-line router bullet in `.claude/skills/codex-runtime-driving/SKILL.md` was
+  missed and kept presenting the refuted result as "the durable finding". ONE missed site, caught
+  only when the router was read directly rather than the reference — and not cosmetic: the stale
+  summary steered toward `high` for faithful/fidelity-risk work, against the standing rule that
+  fidelity-risk translation pins `xhigh`, so the entry point actively inverted a policy-relevant
+  recommendation while the reference it pointed at said the opposite. Where possible make the
+  summary POINT at the reference instead of restating its conclusion; where it must restate, the
+  correction is not finished until the router has been re-read.
 
 ## A rebuild can regress
 
@@ -158,6 +178,17 @@ is the pinned test, and prose points at it rather than restating the number.
 Corollary for the "obvious" member of a set: **verify membership, do not infer it from the name.**
 JS `trim()` strips U+2028 and U+2029 but NOT U+0085 NEL, which reads exactly like a line break. A
 negative control built on the plausible-looking member silently proves nothing.
+
+Corollary one step earlier, about DERIVING the count rather than generalising it: **never publish a
+count of tests or assertions obtained by grepping the helper's name once** — the same string also
+appears in echo banners, section headers, labels and comments, so a grep count is an upper bound,
+not the count. Derive the number a second, differently-shaped way — a runtime tally of what actually
+executed, reconciled against the source grep — and identify the specific non-assertion lines BY NAME
+before the figure reaches a changelog, PR body or report. Twice on one branch: at round 25 the
+source held 21 self-test assertions while a runtime scan showed 22 matching lines, the extra being a
+plain echo banner; at round 6, earlier and the same trap, a naive grep reported 3 self-tests where
+only 2 were assertions — "the apparent third self-test is an echoed section banner" — and that
+round-6 miscount reached a committed CHANGELOG line before it was corrected.
 
 ## Source-completeness
 
@@ -280,6 +311,31 @@ wrongly bound.
 Closure criterion: a rule counts as guarded ONLY if a mutant was run and a fixture went red. No
 transitive arguments; no "no realistic mutation exists" unless one was attempted and its
 impossibility can be stated. The claim that something is covered is itself a claim.
+
+## Revert the whole file and read which pins SURVIVE
+
+**After fixing a defect in text or code that already HAS coverage, revert the WHOLE edited file,
+run the FULL suite, and read which PRE-EXISTING assertions stay green.** If only your new
+assertions go red, the claim was never guarded at all — that is a coverage GAP, not a regression in
+guarded text, and the two call for different follow-up. Running the counterfactual against only the
+affected file's own assertions cannot tell the two apart, because the pins that would have caught
+the defect are precisely the ones you did not think to look at.
+
+Two independent runs on one branch, both decided by the survivors:
+
+- A wholesale revert of `obsidian-vault.md` left all FOUR pre-existing link-integrity item-2 pins
+  green — they targeted applicability, chapter-scope, gate-removal and the mode-neutral label, and
+  none touched what the gate classifies as a link. The gate's overbreadth was completely unguarded
+  in both directions.
+- Reverting either of two edited files left exactly the 2 new pins failing and all 355 others
+  green — including the 5 pre-existing manifest-discipline pins and the 6 pre-existing
+  revalidation pins, none of which reached the claims being fixed.
+
+This is the INVERSE direction of the rule banked in `close-the-class.md` →
+[Mutating an unguarded rule: read the SPREAD of the
+reds](close-the-class.md#mutating-an-unguarded-rule-read-the-spread-of-the-reds). That one mutates
+the helper and counts the blast radius of the reds; this one reverts the fix and counts the
+SURVIVORS. Same suite run, opposite question — neither substitutes for the other.
 
 ## A never-varied argument is an untested argument
 
