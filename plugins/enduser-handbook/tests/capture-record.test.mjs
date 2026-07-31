@@ -1864,6 +1864,56 @@ test('walk: the ROOT asset directory not existing yet is still an ordinary first
   });
 });
 
+// [round 21] Every other nested-subdirectory case in this file is a REFUSAL, and eight review rounds
+// have added refusals to the walk — the last three of them ON this path, twice per directory per
+// listing. A suite made entirely of refusal tests cannot tell a correct refusal from a feature that
+// refuses everything, so the ordinary case is pinned too: a nested asset, captured normally, must
+// still produce a confident record and verify afterwards. The real extractor, real deps, nothing
+// stubbed but the identity command.
+test('the ordinary case: a nested asset captured normally is recorded, and W6 verifies it', () => {
+  withTempDir((dir) => {
+    // A configured identity source, unlike almost every other fixture here: without one W6 can only
+    // answer `indeterminate`, so no test in this suite had ever reached `record_ok` — the verdict a
+    // real handbook is published on.
+    const profile = profileFor(dir, { capture: { build_identity: { command: 'get-version', ui_read: false } } });
+    const identityDeps = depsWithOverride({ runIdentityCommand: () => ({ ok: true, raw: '3.4.1' }) });
+    const entry = { slug: 'items' };
+    const assetDir = join(profile.capture.output_dir, 'items');
+    nodeFs.mkdirSync(join(assetDir, 'screens'), { recursive: true });
+    nodeFs.writeFileSync(join(assetDir, 'screens', 'a.png'), 'previous-build-bytes');
+
+    const opened = CR.openCaptureRun(profile, [entry], null, identityDeps);
+    assert.equal(opened.ok, true, JSON.stringify(opened));
+    assert.deepEqual(
+      opened.runState.opening_asset_hazards.items,
+      [],
+      'an ordinary nested tree must produce NO hazard — a refusal here refuses every real capture',
+    );
+    assert.deepEqual(Object.keys(opened.runState.opening_assets.items), ['screens/a.png']);
+
+    // The capture writes new bytes, exactly as a real capture command would.
+    nodeFs.writeFileSync(join(assetDir, 'screens', 'a.png'), 'this-build-bytes');
+    const closed = CR.closeCaptureRun(profile, opened.runState, { ok: true }, null, identityDeps);
+    assert.equal(closed.ok, true, JSON.stringify(closed));
+
+    const chapterFile = writeChapterAt(profile, entry, '# items\n');
+    const embed = chapterPathsModule.embedPath(chapterFile, assetDir, 'screens/a.png');
+    nodeFs.writeFileSync(chapterFile, `# items\n\n1. Step\n\n   ![a](${embed})\n`);
+
+    const result = CR.recordChapterProvenance(profile, [entry], entry, chapterFile, opened.runState.run_id, identityDeps);
+    assert.equal(result.recorded, true, JSON.stringify(result));
+    assert.equal(nodeFs.existsSync(CR.chapterRecordPath(profile, entry)), true);
+
+    const report = CR.buildProvenanceReport(profile, [entry], null, identityDeps);
+    const row = report.rows[0];
+    assert.equal(row.classification, 'unchanged', JSON.stringify(row));
+    assert.equal(row.classification_reason, null, JSON.stringify(row));
+    assert.equal(row.record_detail, null, JSON.stringify(row));
+    assert.equal(row.value, '3.4.1', JSON.stringify(row));
+    assert.equal(row.current_source, 'command', JSON.stringify(row));
+  });
+});
+
 // [round 21] The TOCTOU test far above swaps a LEAF, and `hashFileNoFollow`'s O_NOFOLLOW open
 // catches it. This is the ANCESTOR shape, which that flag cannot reach: O_NOFOLLOW refuses a
 // symlink at the FINAL path component only, so a DIRECTORY replaced by a symlink between its
