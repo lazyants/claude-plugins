@@ -145,7 +145,18 @@ export interface RunRecord {
   run_id: string;
   opening_digest: string;
   build_identity: BuildIdentity;
-  chapters: Record<string, { opening: Record<string, string>; closing: Record<string, string> }>;
+  // [round 16] `opening_hazards`/`closing_hazards` are REQUIRED, not optional, and the reader
+  // rejects a chapter entry missing either — a record written before they existed reads back as
+  // "no hazards", which is the one false statement they exist to prevent. Each member is
+  // `<assetDirRelativePath>:<kind>`, and W5 splits at the LAST colon so a path containing one is
+  // unambiguous. This declaration omitted them for a round while the writer persisted them, so a
+  // consumer of `readRunRecordText` could neither inspect nor preserve them.
+  chapters: Record<string, {
+    opening: Record<string, string>;
+    closing: Record<string, string>;
+    opening_hazards: string[];
+    closing_hazards: string[];
+  }>;
 }
 
 export interface ChapterRecord {

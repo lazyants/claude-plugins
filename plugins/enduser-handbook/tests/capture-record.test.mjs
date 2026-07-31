@@ -18,6 +18,24 @@ import { join } from 'node:path';
 
 import * as CR from '../skills/enduser-handbook/assets/lib/capture-record.mjs';
 
+// [round 16] The declared `ReportRow` field set, read from the declaration itself. The key-set pin
+// below used to compare against a literal list written out here, which is a second copy of the same
+// assumption: adding `record_detail` to the declaration and to the active branch, and forgetting
+// the ownership-skip branch, satisfied both copies and shipped a row missing a required field. The
+// two sides are derived from genuinely different sources now — the runtime object, and the file
+// that claims to describe it.
+function declaredReportRowKeys() {
+  const src = nodeFs.readFileSync(
+    join(import.meta.dirname, '..', 'skills', 'enduser-handbook', 'assets', 'lib', 'capture-record.d.mts'),
+    'utf8',
+  );
+  const body = src.match(/export interface ReportRow \{([\s\S]*?)\n\}/);
+  assert.ok(body, 'ReportRow is no longer declared as an interface — this extraction, not the code, is what broke');
+  const keys = [...body[1].matchAll(/^\s{2}([a-z_][A-Za-z0-9_]*)\??:/gm)].map((m) => m[1]);
+  assert.ok(keys.length >= 7, `only ${keys.length} ReportRow fields extracted — an under-reading passes every comparison`);
+  return keys.sort();
+}
+
 // ---------------------------------------------------------------------------------------------
 // Fixture builders
 // ---------------------------------------------------------------------------------------------
@@ -247,7 +265,7 @@ test('readRunRecordText: two DIFFERENT objects reusing the same key name is NOT 
     run_id: 'x',
     opening_digest: ZERO_DIGEST,
     build_identity: validBuildIdentity(),
-    chapters: { a: { opening: { x: ONE_DIGEST }, closing: { x: ONE_DIGEST } }, b: { opening: { x: ONE_DIGEST }, closing: { x: ONE_DIGEST } } },
+    chapters: { a: { opening: { x: ONE_DIGEST }, closing: { x: ONE_DIGEST }, opening_hazards: [], closing_hazards: [] }, b: { opening: { x: ONE_DIGEST }, closing: { x: ONE_DIGEST }, opening_hazards: [], closing_hazards: [] } },
   });
   assert.equal(CR.readRunRecordText(text).ok, true);
 });
@@ -279,7 +297,7 @@ test('readRunRecordText: field-by-field mutation matrix', () => {
     'chapter entry missing closing',
   );
   assert.equal(
-    CR.readRunRecordText(JSON.stringify({ ...base(), chapters: { a: { opening: { x: 'not-a-hash' }, closing: {} } } })).ok,
+    CR.readRunRecordText(JSON.stringify({ ...base(), chapters: { a: { opening: { x: 'not-a-hash' }, closing: {}, opening_hazards: [], closing_hazards: [] } } })).ok,
     false,
     'non-hash-grammar value',
   );
@@ -292,7 +310,7 @@ test('readRunRecordText: key-canonicality — structural rejects, and the load-b
       run_id: 'x',
       opening_digest: ZERO_DIGEST,
       build_identity: validBuildIdentity(),
-      chapters: { a: { opening: { [key]: ONE_DIGEST }, closing: { [key]: ONE_DIGEST } } },
+      chapters: { a: { opening: { [key]: ONE_DIGEST }, closing: { [key]: ONE_DIGEST }, opening_hazards: [], closing_hazards: [] } },
     });
   assert.equal(CR.readRunRecordText(withKey('/a.png')).ok, false, 'leading slash');
   assert.equal(CR.readRunRecordText(withKey('../a.png')).ok, false, 'dot-dot segment');
@@ -311,7 +329,7 @@ test('readRunRecordText: prototype-named keys are OWN-property checked, never vi
     run_id: 'x',
     opening_digest: ZERO_DIGEST,
     build_identity: validBuildIdentity(),
-    chapters: { a: { opening: {}, closing: {} } },
+    chapters: { a: { opening: {}, closing: {}, opening_hazards: [], closing_hazards: [] } },
   });
   const result = CR.readRunRecordText(text);
   assert.equal(result.ok, true);
@@ -1594,6 +1612,74 @@ test('recordChapterProvenance: an asset UNHASHABLE AT OPEN is never recorded, ev
     assert.match(result.reason, /^rule5_opening_unhashable:a\.png:/, JSON.stringify(result));
     assert.equal(nodeFs.existsSync(CR.chapterRecordPath(profile, entry)), false);
   });
+});
+
+// [round 16 BLOCKER] The hard-link test above passes with the symlink path completely broken: a
+// hard link's dirent is still `isFile()`, so the walk visits it and the hazard is raised one level
+// down, inside the hash. A symlink is refused by the WALK, one level up, and never reaches that
+// classification at all — so it came out as an absence again, which W5 reads as "brand-new file".
+// The test and the defect shared a blind spot, which is why the fix looked complete. Same scenario,
+// the one dirent kind that exercises the layer the other test cannot reach.
+test('recordChapterProvenance: an asset that was a SYMLINK at open is never recorded, though W5 sees a plain file', () => {
+  withTempDir((dir) => {
+    const profile = profileFor(dir);
+    const entry = { slug: 'items' };
+    const assetDir = join(profile.capture.output_dir, 'items');
+    nodeFs.mkdirSync(assetDir, { recursive: true });
+    const stale = join(dir, 'stale-source.png');
+    nodeFs.writeFileSync(stale, 'stale-from-the-previous-build');
+    nodeFs.symlinkSync(stale, join(assetDir, 'a.png'));
+
+    const opened = CR.openCaptureRun(profile, [entry], null, stubDepsNoIdentity());
+    assert.equal(opened.ok, true, JSON.stringify(opened));
+    assert.deepEqual(opened.runState.opening_asset_hazards['items'], ['a.png:symlink']);
+
+    // The capture replaces the symlink with a plain file holding the SAME stale bytes.
+    nodeFs.unlinkSync(join(assetDir, 'a.png'));
+    nodeFs.writeFileSync(join(assetDir, 'a.png'), 'stale-from-the-previous-build');
+
+    const closed = CR.closeCaptureRun(profile, opened.runState, { ok: true }, null, stubDepsNoIdentity());
+    assert.equal(closed.ok, true, JSON.stringify(closed));
+
+    const chapterFile = writeChapterAt(profile, entry, '# items\n');
+    const deps = { ...stubDepsNoIdentity(), expectedAssets: stubExpectedAssetsFor(assetDir, ['a.png']) };
+    const result = CR.recordChapterProvenance(profile, [entry], entry, chapterFile, opened.runState.run_id, deps);
+    assert.equal(result.recorded, false, JSON.stringify(result));
+    assert.equal(result.reason, 'rule5_opening_unhashable:a.png:symlink', JSON.stringify(result));
+    assert.equal(nodeFs.existsSync(CR.chapterRecordPath(profile, entry)), false);
+  });
+});
+
+// [round 16 BLOCKER] A record written before the hazard/absence split carries no hazard lists, and
+// the reader accepted it under the same `record_version: 1` — so "field absent" read back as "no
+// hazards", the exact false statement the split exists to prevent. Two version-1 shapes cannot both
+// be valid.
+test('readRunRecordText: a chapter entry without hazard lists is MALFORMED, not "no hazards"', () => {
+  const base = {
+    record_version: 1,
+    run_id: 'r1',
+    opening_digest: `sha256:${'a'.repeat(64)}`,
+    build_identity: validBuildIdentity(),
+  };
+  const preSplit = { ...base, chapters: { items: { opening: {}, closing: {} } } };
+  const rejected = CR.readRunRecordText(JSON.stringify(preSplit));
+  assert.equal(rejected.ok, false, JSON.stringify(rejected));
+  assert.match(rejected.reason, /^bad_chapter_hazards:opening_hazards$/);
+
+  for (const bad of ['not-an-array', [null], [1], {}]) {
+    const r = CR.readRunRecordText(JSON.stringify({
+      ...base,
+      chapters: { items: { opening: {}, closing: {}, opening_hazards: bad, closing_hazards: [] } },
+    }));
+    assert.equal(r.ok, false, `${JSON.stringify(bad)} was accepted: ${JSON.stringify(r)}`);
+    assert.match(r.reason, /^bad_chapter_hazards:/);
+  }
+
+  const accepted = CR.readRunRecordText(JSON.stringify({
+    ...base,
+    chapters: { items: { opening: {}, closing: {}, opening_hazards: ['a.png:symlink'], closing_hazards: [] } },
+  }));
+  assert.equal(accepted.ok, true, JSON.stringify(accepted));
 });
 
 // [ped-ant, round 14] The tampering test above MUTATES a payload member; this one REMOVES it. The
@@ -3164,15 +3250,8 @@ test('buildProvenanceReport (round 5, finding 4): a skipped-profile row carries 
       // a codex mutation audit confirmed every .d.mts mutation survives the whole suite otherwise.
       assert.equal(Object.hasOwn(row, 'current_source'), true, 'current_source must be PRESENT');
       assert.equal(row.current_source, null);
-      assert.deepEqual(Object.keys(row).sort(), [
-        'classification',
-        'classification_reason',
-        'current_source',
-        'key',
-        'resolution_reason',
-        'source',
-        'value',
-      ]);
+      assert.deepEqual(Object.keys(row).sort(), declaredReportRowKeys(),
+        'a skipped-profile row does not carry exactly the declared ReportRow fields');
     }
   });
 });

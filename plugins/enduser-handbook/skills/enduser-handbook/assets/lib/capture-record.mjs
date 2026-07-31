@@ -1524,7 +1524,15 @@ function openingPayloadFromRunState(runState) {
 // quietly (an asset directory that does not exist yet is legitimately empty — W2 snapshots the
 // opening baseline before the capture command has written anything); every OTHER errno propagates
 // to the caller, which turns it into a halt rather than a silently short list.
-function walkRegularFiles(rootDir, deps, visit) {
+// [round 16] `onSkipped` reports an entry the walk REFUSES to visit but that is nevertheless THERE.
+// Round 15 split hazard from absence inside `snapshotAssetHashes`, but only files the walk actually
+// visited could reach that classification — a symlink was dropped one level higher, here, and so
+// came out the far end as an absence again. W5 reads an absent OPENING key as "brand-new file this
+// run" and skips the did-it-change check, so an asset that was a symlink to stale bytes at open and
+// a plain file with those same stale bytes at close was recorded as this build's. The distinction
+// the previous round drew was right; it was drawn one layer too low. A caller that does not care
+// (the filename listing, which is asking which assets exist, not which could be hashed) omits it.
+function walkRegularFiles(rootDir, deps, visit, onSkipped) {
   walk(rootDir, '');
 
   function walk(absDir, relPrefix) {
@@ -1539,9 +1547,13 @@ function walkRegularFiles(rootDir, deps, visit) {
     for (const dirent of entries) {
       const childAbs = posixJoin(absDir, dirent.name);
       const childRel = relPrefix ? `${relPrefix}/${dirent.name}` : dirent.name;
-      if (dirent.isSymbolicLink()) continue;
+      if (dirent.isSymbolicLink()) { onSkipped?.(childRel, 'symlink'); continue; }
       if (dirent.isDirectory()) walk(childAbs, childRel);
       else if (dirent.isFile()) visit(childAbs, childRel);
+      // Neither a symlink, a directory, nor a regular file: a FIFO, socket or device node. Present,
+      // unreadable as an asset, and silently dropped until this line existed — the same shape as
+      // the symlink case and reachable the same way.
+      else onSkipped?.(childRel, 'not_regular');
     }
   }
 }
@@ -1575,14 +1587,22 @@ function walkRegularFiles(rootDir, deps, visit) {
 function snapshotAssetHashes(assetDir, deps) {
   const hashes = Object.create(null);
   const hazards = [];
-  walkRegularFiles(assetDir, deps, (absPath, relPath) => {
-    const hashed = hashFileNoFollow(absPath, deps);
-    if (hashed.kind === 'present') hashes[relPath] = hashed.digest;
-    // 'absent' (the file vanished between listing and open) stays an absence: nothing was there to
-    // establish, and a file the capture then creates is legitimately brand new. 'hazard' does not —
-    // the file WAS there and we were refused, which is a different fact and must survive as one.
-    else if (hashed.kind !== 'absent') hazards.push(`${relPath}:${hashed.kind}`);
-  });
+  walkRegularFiles(
+    assetDir,
+    deps,
+    (absPath, relPath) => {
+      const hashed = hashFileNoFollow(absPath, deps);
+      if (hashed.kind === 'present') hashes[relPath] = hashed.digest;
+      // 'absent' (the file vanished between listing and open) stays an absence: nothing was there
+      // to establish, and a file the capture then creates is legitimately brand new. 'hazard' does
+      // not — the file WAS there and we were refused, which is a different fact and must survive
+      // as one.
+      else if (hashed.kind !== 'absent') hazards.push(`${relPath}:${hashed.kind}`);
+    },
+    // A listed entry the walk would not even open is a hazard for the same reason: something is at
+    // that path whose bytes this run could not establish.
+    (relPath, kind) => hazards.push(`${relPath}:${kind}`),
+  );
   hazards.sort();
   return { hashes, hazards };
 }
@@ -1965,6 +1985,21 @@ export function readRunRecordText(text) {
     }
     if (!validateHashMap(entry.opening) || !validateHashMap(entry.closing)) {
       return { ok: false, reason: 'bad_chapter_hash_map' };
+    }
+    // [round 16] REQUIRED, and validated, both of them. The hazard lists arrived with the
+    // hazard/absence split one round earlier, and the reader kept accepting records without them
+    // under the same `record_version: 1` — so a record written before the split reads back as
+    // "no hazards", which is exactly the false statement the split exists to prevent: W5 then sees
+    // no hazard and no opening hash, calls the asset brand-new, and writes the confident record.
+    // Absence is not a safe default for a field whose whole content is "here is what we could not
+    // establish". Two version-1 shapes cannot both be valid; the older one is now malformed, which
+    // W6 reports as `record_malformed` and W5 refuses on, rather than silently trusting.
+    for (const field of ['opening_hazards', 'closing_hazards']) {
+      const list = entry[field];
+      if (!Array.isArray(list)) return { ok: false, reason: `bad_chapter_hazards:${field}` };
+      // Validated element-wise too: a non-string member would reach `.find()`/`.slice()` in W5 and
+      // throw out of a function whose contract is a returned reason.
+      if (list.some((h) => typeof h !== 'string')) return { ok: false, reason: `bad_chapter_hazards:${field}` };
     }
   }
   return { ok: true, record };
@@ -2427,6 +2462,12 @@ export function buildProvenanceReport(profileLike, entries, currentObservation, 
         // profile performs zero identity resolutions: there is no source, which is exactly what
         // the sibling `source: null` on this same row already says.
         current_source: null,
+        // [round 16] And `record_detail` the same way, for the same reason, in the same object
+        // literal — the comment above was written about `current_source` in round 5 and did not
+        // stop the identical omission being made one field later. A skipped profile has no record
+        // to describe, which is what `null` says; absent would make the declared `string | null`
+        // a lie on the one branch a legacy profile always takes.
+        record_detail: null,
       })),
     };
   }
