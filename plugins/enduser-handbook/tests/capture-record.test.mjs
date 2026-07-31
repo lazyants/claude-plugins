@@ -2831,6 +2831,91 @@ test('the closing snapshot: a root that never existed still closes clean with an
   });
 });
 
+// [round 26 BLOCKER] The thirteenth layer, and it is inside round 25's own fix: a REASON ALIAS.
+// `vanished` is produced by two structurally different situations, and the whitelist could not tell
+// them apart. Direct absence — `lstat(root)` itself throws ENOENT — is the one a first capture
+// produces, and it is legitimate. A DANGLING ROOT SYMLINK is the other: `lstat` succeeds and reports
+// a link, so the root is PRESENT, and only `realpathSync` then fails ENOENT. Both arrived as
+// `vanished`, the ENOENT branch whitelisted the word rather than the fact, and codex executed the
+// consequence on the real filesystem: `opening: {}` with no hazards, the link's target then
+// populated with previous-build bytes, and W5 counting every one of them as brand-new because there
+// is no opening key to compare against.
+//
+// A dangling root symlink that is present at gate 3 ALREADY halts there, for exactly this reason —
+// so refusing it here is not new policy, it is the existing policy applied to the window gate 3
+// cannot see. That is also the answer to over-refusal: an operator whose root link dangles is
+// stopped today, one syscall earlier.
+test('openCaptureRun: a dangling root symlink appearing after validation is refused, not read as a first capture', () => {
+  withTempDir((dir) => {
+    const profile = profileFor(dir);
+    const entry = { slug: 'items' };
+    const link = join(profile.capture.output_dir, 'items');
+    const target = join(profile.capture.output_dir, 'items-target');
+    nodeFs.mkdirSync(profile.capture.output_dir, { recursive: true });
+
+    // Gate 3 sees a genuinely absent root — a first capture — so it supplies no pin at all.
+    assert.equal(nodeFs.existsSync(link), false, 'the fixture must start with no asset root');
+
+    let planted = false;
+    const deps = depsWithOverride({
+      openSync: (p, ...rest) => {
+        if (!planted && String(p).endsWith('/pending.json')) {
+          // The root becomes PRESENT — as a link to a path that does not exist yet.
+          nodeFs.symlinkSync(target, link);
+          planted = true;
+        }
+        return nodeFs.openSync(p, ...rest);
+      },
+      runIdentityCommand: () => ({ ok: false, detail: 'no command configured in test' }),
+    });
+
+    const opened = CR.openCaptureRun(profile, [entry], null, deps);
+    assert.equal(planted, true, 'the plant hook never ran — this fixture cannot reach the condition');
+    assert.equal(nodeFs.lstatSync(link).isSymbolicLink(), true, 'the root must be a present link, or this test says nothing');
+    assert.equal(nodeFs.existsSync(link), false, 'the link must dangle, or this test says nothing');
+    assert.equal(opened.ok, false, `a present-but-dangling root must not be read as a first capture: ${JSON.stringify(opened)}`);
+    assert.equal(opened.halts[0].halt, 'provenance_hazard', JSON.stringify(opened.halts));
+
+    // And the consequence codex traced, closed at its far end: the link's target is populated with
+    // bytes the captured build never produced, and no chapter record may exist to vouch for them.
+    nodeFs.mkdirSync(target, { recursive: true });
+    nodeFs.writeFileSync(join(target, 'a.png'), 'previous-build-bytes');
+    const chapterFile = join(dir, 'items.md');
+    nodeFs.writeFileSync(chapterFile, '# items\n');
+    const w5 = CR.recordChapterProvenance(profile, [entry], entry, chapterFile, 'no-such-run', stubDepsNoIdentity());
+    assert.equal(w5.recorded, false, `no run opened, so no chapter may be recorded: ${JSON.stringify(w5)}`);
+  });
+});
+
+// [round 26 BLOCKER] The closing half. `closeCaptureRun` never runs gate 3, so nothing upstream
+// refuses a dangling root link here — this branch is the only thing standing between it and a
+// committed `closing: {}` with no hazards.
+test('the closing snapshot: a dangling root symlink is refused, not read as a chapter that produced nothing', () => {
+  withTempDir((dir) => {
+    const profile = profileFor(dir);
+    const entry = { slug: 'items' };
+    const assetDir = join(profile.capture.output_dir, 'items');
+    nodeFs.mkdirSync(assetDir, { recursive: true });
+    nodeFs.writeFileSync(join(assetDir, 'a.png'), 'v1');
+
+    const opened = CR.openCaptureRun(profile, [entry], null, stubDepsNoIdentity());
+    assert.equal(opened.ok, true, JSON.stringify(opened));
+
+    // The real directory is replaced by a link to a path that does not exist. No seam is mocked:
+    // `lstat` really succeeds and reports a link, `realpath` really fails ENOENT, and so does the
+    // listing — which is precisely the pair the whitelist used to tolerate.
+    nodeFs.renameSync(assetDir, join(dir, 'items-moved-away'));
+    nodeFs.symlinkSync(join(profile.capture.output_dir, 'items-target'), assetDir);
+    assert.equal(nodeFs.lstatSync(assetDir).isSymbolicLink(), true, 'the root must be a present link');
+    assert.equal(nodeFs.existsSync(assetDir), false, 'the link must dangle');
+
+    const closed = CR.closeCaptureRun(profile, opened.runState, { ok: true }, null, stubDepsNoIdentity());
+    assert.equal(closed.ok, false, `a present-but-dangling root must not close as an empty chapter: ${JSON.stringify(closed)}`);
+    assert.equal(closed.halts[0].halt, 'provenance_hazard', JSON.stringify(closed.halts));
+    assert.match(closed.halts[0].message, /could not be confirmed \(vanished\)/);
+  });
+});
+
 // [round 25] The two branches tolerate DIFFERENT reason sets, and this pins the asymmetry — without
 // it, widening ENOTDIR's whitelist to match ENOENT's kills nothing and the distinction is prose.
 // `vanished` is legitimate on ENOENT because a first capture produces exactly that pair. It is not

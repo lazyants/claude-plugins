@@ -1764,7 +1764,17 @@ function assetDirIdentity(absPath, deps, { allowSymlink = false } = {}) {
   try {
     st = deps.lstatSync(absPath, EXACT_IDENTITY_STAT);
   } catch (err) {
-    return { ok: false, reason: errProp(err, 'code') === 'ENOENT' ? 'vanished' : 'inspection_failure' };
+    // [round 26] `absentDirectly` is the ONLY place it is set, and that is the whole point of it.
+    // This catch is the one failure meaning "there is nothing at this path" — every later failure in
+    // this function had a successful `lstat` first, so SOMETHING is there. The two used to be
+    // indistinguishable downstream because both render as the hazard reason `vanished`: a dangling
+    // root symlink is present, `realpathSync` reports its TARGET absent, and the walk's ENOENT
+    // whitelist tolerated the word rather than the fact. Codex executed the consequence — `opening:
+    // {}` with no hazards for a root that was there. The hazard vocabulary is a fixed five words on
+    // the wire and must not grow a sixth, so the finer fact is carried beside the reason and never
+    // reaches a record.
+    if (errProp(err, 'code') === 'ENOENT') return { ok: false, reason: 'vanished', absentDirectly: true };
+    return { ok: false, reason: 'inspection_failure' };
   }
   if (st.isSymbolicLink() && !allowSymlink) return { ok: false, reason: 'symlink' };
   const identity = identityOfListedObject(absPath, st, deps);
@@ -1853,15 +1863,22 @@ function exactIdentityPart(value) {
 // branch that could not see it. The bug was inside the fix, one layer down, for the fifth round
 // running.
 //
-// `tolerated` is a WHITELIST of reasons that may still close silently on this outcome, not a
-// severity test, and that direction is the point: this release's defect class is an item that could
-// not be processed being read as good news, so a reason nobody has thought about yet must refuse
-// rather than pass. Today `vanished` is tolerated on ENOENT — it is what a first capture produces,
-// and a chapter that legitimately produced nothing must still close clean — and nothing at all is
-// tolerated on ENOTDIR, where an object is present that was not there one syscall earlier.
-function refuseUnadjudicatedRoot(reason, code, tolerated) {
-  if (reason === null || tolerated.includes(reason)) return;
-  throw new Error(`the asset directory could not be confirmed (${reason}) and its listing then failed (${code})`);
+// Exactly one situation may still close silently, and `tolerateDirectAbsence` is which outcome it is
+// reachable on: the root was NOT THERE at its own first `lstat`, and the listing then agreed. That
+// is what a first capture is, and a chapter that legitimately produced nothing must still close
+// clean. Everything else refuses, including a reason nobody has thought about yet — this release's
+// defect class is an item that could not be processed being read as good news, so the tolerance is a
+// single named fact rather than a severity test over a growing vocabulary.
+//
+// [round 26] It is a fact and not a REASON WORD because round 25 wrote it as a reason word and codex
+// broke it: `vanished` also names a present root symlink whose target is missing, which is not a
+// first capture and must not be tolerated. `absentDirectly` is set at one site and cannot alias.
+// Nothing is tolerated on ENOTDIR at all — an object is present there that was not there one syscall
+// earlier, which no first capture can produce.
+function refuseUnadjudicatedRoot(observation, code, tolerateDirectAbsence) {
+  if (observation === null) return;
+  if (tolerateDirectAbsence && observation.absentDirectly === true) return;
+  throw new Error(`the asset directory could not be confirmed (${observation.reason}) and its listing then failed (${code})`);
 }
 
 // `rootMustExist` and `rootIdentity` are both the caller's knowledge, not the walk's: whether this
@@ -1933,9 +1950,13 @@ function walkRegularFiles(rootDir, deps, visit, onSkipped, { rootMustExist = fal
       // it had never established — codex reproduced it: baseline ENOENT, listing returns
       // `foreign.png`, file visited with no second identity observation anywhere. The reason is
       // carried instead, and adjudicated once the listing's own outcome is known.
+      // [round 26] The whole failed OBSERVATION is carried, not its reason word. A reason is what
+      // reaches a record, and two different situations legitimately share one: `vanished` names both
+      // an absent root and a present root symlink whose target is missing. Adjudicating on the word
+      // tolerated the second as if it were the first.
       const own = assetDirIdentity(absDir, deps, { allowSymlink: true });
       if (own.ok) expectedId = own.id;
-      else rootUnidentified = own.reason;
+      else rootUnidentified = own;
     }
     let entries;
     try {
@@ -1968,11 +1989,12 @@ function walkRegularFiles(rootDir, deps, visit, onSkipped, { rootMustExist = fal
         if (rootMustExist || expectedId !== null) throw err;
         // [round 25] And a root whose baseline FAILED reaches here with `expectedId` null, which is
         // how the carried failure was dropped by the very branch a failed observation makes run.
-        // The distinction has to be finer than "the observation failed", because one reason is
-        // legitimate: `vanished` is what a first capture produces, and it must still close silently
-        // with an empty map. Every other reason says the root was there in some form this module
-        // could not identify and is gone by the time it is listed, which no first capture produces.
-        refuseUnadjudicatedRoot(rootUnidentified, code, ['vanished']);
+        // The distinction has to be finer than "the observation failed", because one situation is
+        // legitimate: a first capture, where the root is not there yet, must still close silently
+        // with an empty map. [round 26] And finer than the REASON WORD, which is where round 25 drew
+        // it and codex broke it — `vanished` names the first capture and also names a present root
+        // symlink whose target is missing, which is not one. `absentDirectly` is the fact.
+        refuseUnadjudicatedRoot(rootUnidentified, code, true);
         return;
       }
       // [round 18] ENOTDIR used to return here too, silently, and that was the round-17 defect
@@ -1992,12 +2014,13 @@ function walkRegularFiles(rootDir, deps, visit, onSkipped, { rootMustExist = fal
       if (code === 'ENOTDIR') {
         if (relPrefix !== '') { onSkipped?.(relPrefix, 'inspection_failure'); return; }
         if (rootMustExist || expectedId !== null) throw err;
-        // [round 25] No reason is tolerated on THIS branch, `vanished` included. ENOTDIR says
-        // something is at that path and it is not a directory; `vanished` says nothing was there
-        // one syscall earlier. A first capture cannot produce that pair — an object appeared. The
-        // reason actually observed here is `inspection_failure`, from a baseline whose own `lstat`
-        // succeeded and reported a non-directory, which is the review bot's reproduction.
-        refuseUnadjudicatedRoot(rootUnidentified, code, []);
+        // [round 25] Nothing is tolerated on THIS branch, direct absence included. ENOTDIR says
+        // something is at that path and it is not a directory; a baseline reporting nothing there
+        // says the opposite one syscall earlier. A first capture cannot produce that pair — an
+        // object appeared. The failure actually observed here is `inspection_failure`, from a
+        // baseline whose own `lstat` succeeded and reported a non-directory, which is the review
+        // bot's reproduction.
+        refuseUnadjudicatedRoot(rootUnidentified, code, false);
         return;
       }
       throw err;
@@ -2008,7 +2031,7 @@ function walkRegularFiles(rootDir, deps, visit, onSkipped, { rootMustExist = fal
     // substitution signature itself. Refusing here is what makes the paragraph above true: the
     // failed baseline is deferred, never dropped.
     if (rootUnidentified !== null) {
-      throw new Error(`the asset directory could not be confirmed (${rootUnidentified}) before it was listed`);
+      throw new Error(`the asset directory could not be confirmed (${rootUnidentified.reason}) before it was listed`);
     }
     // [round 22] The observation codex asked for and round 21 did not have: between the listing and
     // any use of it. A swap that lands during the `readdirSync` above and is STILL IN PLACE when
