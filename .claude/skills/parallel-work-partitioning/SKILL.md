@@ -53,6 +53,16 @@ An investigation/scout Workflow reliably reports **root cause + fix LOCATION**, 
 
 The auto-memory dir (`~/.claude*/projects/<slug>/memory/`) is a **whole-dir symlink shared across all profiles**, so two parallel CC sessions write the **same `MEMORY.md` and `index_*.md`** — a coupling the code-file partition above does NOT cover (their repo files can be perfectly disjoint yet both append to the shared index; last-writer-wins clobbers the other's line). So during an active parallel session: (a) **do NOT rewrite/compact a shared index line the other session is editing** — e.g. a size-hook asking to compact `MEMORY.md` while the parallel session just wrote a big pointer line: DEFER the compaction until it's done; (b) capture new learnings in **unique-named memory FILES** (zero clobber) and point them from an EXISTING already-pointed file rather than adding a fresh `MEMORY.md` pointer into the contested index. Same spirit as the code-file rule: find the disjoint surface and stay on it.
 
+## The partition holds only while your picture of it is fresh
+
+This skill covers the partition decided BEFORE dispatch. Once teammates are editing, the disk and
+their reports become timestamps rather than facts, and acting on a stale read is how a correct
+partition still produces a wrong instruction — including a stand-down order sent to someone
+mid-flight. That belongs to the mid-flight skill, not this one: **skill:subagent-trust-verification
+→ `references/verifying-teammate-state.md`, "Don't correct a teammate off a stale read"**, which
+also carries the reviewer-worktree rule (a review round needs its own detached worktree that no
+teammate writes to) and the measured 2026-07-29 evidence.
+
 ## Related
 
 - skill:git-worktree-pr-mechanics — one worktree per parallel session; concurrent-worktree version-collision recovery.
