@@ -216,7 +216,8 @@ export function assertProvenanceOwnership(profileLike: ProfileLike, deps?: Parti
 // capture-record.mjs's `openCaptureRun`/`closeCaptureRun`, both of which return exactly
 // `{runState: {skipped: true}}` on that branch, no other property. An active run carries
 // `skipped: false` plus every payload field `openCaptureRun` actually assigns before returning
-// (`run_id`, `opening_digest`, `opening`, `opening_assets`, `opening_asset_hazards`, `entries`) —
+// (`run_id`, `opening_digest`, `opening`, `opening_assets`, `opening_asset_hazards`, `entries`,
+// `output_root`) —
 // none of those are optional there, because `closeCaptureRun` reads them unconditionally off a non-skipped
 // `runState`, and a caller driving W5 needs `run_id` narrowed to `string` to pass as
 // `recordChapterProvenance`'s `expectedRunId`. `closed` alone stays optional: absent before
@@ -245,6 +246,19 @@ export type RunState =
       // rest of the payload, since clearing it would otherwise unblock exactly that record.
       opening_asset_hazards: Record<string, string[]>;
       entries: ChapterEntryLike[];
+      // [round 37] What `openCaptureRun` observed of `capture.output_dir`, so `closeCaptureRun` can
+      // check the root it walks is the one the run opened over. `identity` is the directory's
+      // `<dev>:<ino>`, or `null` when the root did not exist yet — the ordinary first capture, where
+      // the capture command is expected to create it. `anchor` is non-null EXACTLY when `identity`
+      // is null: the deepest ancestor that DID exist, which is the object that absence was
+      // established against and therefore the only thing the close can re-check it against.
+      // Authenticated by `opening_digest` like the rest of the payload; a caller that clears it gets
+      // `stale_replay`, not a tolerated older shape.
+      output_root: {
+        canonical: string;
+        identity: string | null;
+        anchor: { path: string; identity: string } | null;
+      };
       closed?: boolean;
     };
 

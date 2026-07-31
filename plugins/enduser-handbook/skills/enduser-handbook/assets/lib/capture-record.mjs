@@ -1550,6 +1550,15 @@ export function openCaptureRun(profileLike, entries, openingObservation, deps, i
       opening_assets: openingAssets,
       opening_asset_hazards: openingHazards,
       entries: entries.map(entryKeyShape),
+      // [round 37] What this run validated `capture.output_dir` to BE, carried to the close so the
+      // close can check it is still that. Only the three fields a later observation can re-check —
+      // `depth`, `segments` and `configured` are derivable from the profile the close already
+      // holds, and duplicating them here would create a second copy free to disagree with it.
+      output_root: {
+        canonical: validated.outputRoot.canonical,
+        identity: validated.outputRoot.identity,
+        anchor: validated.outputRoot.anchor,
+      },
     };
     runState.opening_digest = digestOpeningPayload(openingPayloadFromRunState(runState));
   } catch (err) {
@@ -1621,11 +1630,16 @@ function openingPayloadFromRunState(runState) {
   // established at open, and W5 refuses on it — so leaving it outside the digest would let a caller
   // clear the one field that blocks a confident record, which is precisely the forgery this digest
   // exists to stop.
+  // [round 37] `output_root` is authenticated for the same reason `asset_hazards` is. It is the
+  // only record of which directory this run opened over, and the close refuses on it — so leaving
+  // it outside the digest would let a caller delete or rewrite the one field standing between a
+  // replaced output root and a confident record, which is the forgery this digest exists to stop.
   return {
     entries: runState.entries,
     assets: runState.opening_assets,
     asset_hazards: runState.opening_asset_hazards,
     identity: runState.opening,
+    output_root: runState.output_root,
   };
 }
 
@@ -1904,6 +1918,12 @@ function exactIdentityPart(value) {
 // absence is adjudicated by the same code as every other absence rather than by a second copy of it.
 const ROOT_ABSENCE_ONLY = Object.freeze({ depth: 0, segments: Object.freeze([]) });
 
+// [round 37] `directAbsenceConfirmed` answers with the ANCHOR it accepted, so its refusal needs a
+// shape too. One frozen value rather than an object literal per exit: the refusal carries no
+// information beyond itself, and a fresh `{ok: false, anchor: null}` at six sites is six chances
+// for one of them to grow a field the others do not have.
+const ABSENCE_UNCONFIRMED = Object.freeze({ ok: false, anchor: null });
+
 function containmentRootFor(profileLike, deps) {
   const raw = profileLike?.capture?.output_dir ?? '';
   // [round 34] The FIRST half of the bracket, and it has to be taken before anything is resolved —
@@ -2007,6 +2027,7 @@ function containmentRootFor(profileLike, deps) {
   if (beforeResolution.ok !== identity.ok || (identity.ok && beforeResolution.id !== identity.id)) {
     return { ok: false, reason: 'configured_and_resolved_disagree' };
   }
+  let anchor = null;
   if (!identity.ok) {
     if (!(identity.absentDirectly === true && beforeResolution.absentDirectly === true)) {
       // The reason of whichever half could not simply report absence — that is the one an operator
@@ -2018,9 +2039,23 @@ function containmentRootFor(profileLike, deps) {
     // dangling symlink ABOVE `capture.output_dir` makes both halves report ENOENT for a root whose
     // existence is simply unknown — round 27's finding, one level further up than round 27 looked.
     // The climb is what turns an ENOENT into a statement about the object, and it is the same climb
-    // the snapshot runs; a zero-depth root asks it for the resolution half without the containment
-    // half, which is the half that has no meaning above `capture.output_dir`.
-    if (!directAbsenceConfirmed(raw, ROOT_ABSENCE_ONLY, deps)) return { ok: false, reason: 'absence_unconfirmed' };
+    // the snapshot runs; a zero-depth root asks it for the resolution half while neutralizing the
+    // containment half, which is the half that has no meaning above `capture.output_dir`.
+    //
+    // [round 37] Neutralizing, not skipping, and the distinction is visible in the syscalls. With
+    // `depth: 0` the climb's `depth < containmentRoot.depth` early return can never fire — no depth
+    // is below zero — so this caller always takes the OTHER arm and reaches
+    // `canonicalizeForComparison`, whose result `segmentsWithin([], …)` then accepts vacuously. So
+    // the empty segment list is what makes containment vacuous, and the zero DEPTH is what routes
+    // every candidate through the resolution call: two consequences, not one. That call is this
+    // guard's whole cost on the common path — one extra resolution per first capture — and it is
+    // also one more thing that can fail: an ancestor whose `lstat` succeeds while its `realpath`
+    // transiently does not (an automount mid-mount is the realistic one) is refused here rather
+    // than accepted. That is the conservative direction and it is deliberate, but it is a refusal
+    // this arm did not make before, so it is named rather than left for the next reader to find.
+    const confirmed = directAbsenceConfirmed(raw, ROOT_ABSENCE_ONLY, deps);
+    if (!confirmed.ok) return { ok: false, reason: 'absence_unconfirmed' };
+    anchor = confirmed.anchor;
   }
   return {
     ok: true,
@@ -2030,6 +2065,10 @@ function containmentRootFor(profileLike, deps) {
       canonical,
       configured: raw,
       identity: identity.ok ? identity.id : null,
+      // [round 37] Non-null EXACTLY when `identity` is null: the object the root's absence was
+      // established against, which is the only thing a later observation can re-check that absence
+      // against. A present root needs no anchor — it is its own.
+      anchor,
     },
   };
 }
@@ -2116,7 +2155,7 @@ function refuseUnadjudicatedRoot(observation, code, tolerateDirectAbsence, absen
 // unreachability claim is about ALL paths and was being made from the paths that had been looked at,
 // twice in two rounds. What settled it was measuring the number of resolutions, not re-reading them.
 function directAbsenceConfirmed(absPath, containmentRoot, deps) {
-  if (containmentRoot === null) return false;
+  if (containmentRoot === null) return ABSENCE_UNCONFIRMED;
   // Rootedness is preserved the way `canonicalizeForComparison` preserves it. A RELATIVE asset
   // directory is a supported shape — `capture.output_dir` may be relative and every asset path is
   // built from it — and prefixing `/` onto its segments would probe a completely different tree,
@@ -2141,12 +2180,12 @@ function directAbsenceConfirmed(absPath, containmentRoot, deps) {
       // A component this module cannot inspect is uncertainty, and uncertainty is never the
       // permissive answer here: it would tolerate exactly the empty snapshot the tip's ENOENT
       // already looks like.
-      return false;
+      return ABSENCE_UNCONFIRMED;
     }
     // The first component that exists, climbing up from the tip. When that IS the tip, there is no
     // absence left to be direct: the root is present now, whatever the listing said a syscall ago,
     // and an empty snapshot for a directory that exists is the whole defect class.
-    if (depth === segs.length) return false;
+    if (depth === segs.length) return ABSENCE_UNCONFIRMED;
     // [round 29] Above the configured output root there is nothing left to CONTAIN: the root is not
     // required to sit inside itself, and bounding the climb here instead of exempting it was round
     // 27's first attempt, which refused 21 legitimate cases. Reaching this arm means
@@ -2167,19 +2206,83 @@ function directAbsenceConfirmed(absPath, containmentRoot, deps) {
     //
     // The ancestor must therefore RESOLVE, exactly as one at or below the root must. That is the
     // same predicate on the same basis, minus the containment comparison there is no root to make.
-    if (depth < containmentRoot.depth) return assetDirIdentity(candidate, deps, { allowSymlink: true }).ok;
-    if (!assetDirIdentity(candidate, deps, { allowSymlink: true }).ok) return false;
+    //
+    // [round 37] Hoisted above the depth branch, where both arms already required it — one
+    // `assetDirIdentity` call for one decision, and its ID is now part of the answer rather than
+    // discarded down to a boolean. See the ANCHOR note below for why the ID has to travel.
+    const anchorIdentity = assetDirIdentity(candidate, deps, { allowSymlink: true });
+    if (!anchorIdentity.ok) return ABSENCE_UNCONFIRMED;
+    // [round 37] The ANCHOR is this walk's real product, and returning only `true` threw it away.
+    // "The output root is absent" is a claim resting entirely on ONE existing object — the deepest
+    // ancestor that could have explained the tip's ENOENT and did not — so a later observation can
+    // only re-check the claim if it knows which object that was. Codex replaced this directory
+    // under its own pathname after validation and before the close: the tip's absence had been
+    // certified against directory A, the close then walked directory B through the same name, and
+    // with nothing retained there was nothing left to disagree with. `openCaptureRun` pins what
+    // comes back here; `outputRootDrifted` re-reads it.
+    const anchor = Object.freeze({ path: candidate, identity: anchorIdentity.id });
+    if (depth < containmentRoot.depth) return { ok: true, anchor };
     // Gate 3's actual property, on the same comparison basis gate 3 built its root with.
     const resolved = canonicalizeForComparison(candidate, deps);
-    if (!resolved.ok) return false;
-    return segmentsWithin(containmentRoot.segments, resolved.segments);
+    if (!resolved.ok) return ABSENCE_UNCONFIRMED;
+    return segmentsWithin(containmentRoot.segments, resolved.segments) ? { ok: true, anchor } : ABSENCE_UNCONFIRMED;
   }
   // Unreachable: the loop's last iteration probes `/` (or the working directory for a relative
   // path), which exists wherever this module runs, so it always returns from inside — including for
   // an `absPath` with no segments at all, which round 27's version could not say. Refusing is the
   // fail-safe direction, and no test can kill a mutant on this line: recorded rather than papered
   // over, because an unkillable mutant reported as covered is the same lie as an untested guard.
-  return false;
+  return ABSENCE_UNCONFIRMED;
+}
+
+// [round 37] What `openCaptureRun` observed of `capture.output_dir`, checked again at the close.
+//
+// Nothing about the output root used to survive the open: `runState` carried the entries, the two
+// identity observations and the opening hashes, and the close re-derived the root from the profile
+// as if the two derivations could not disagree. They can, and while they disagree the close is
+// walking a directory this run never validated. Codex found it on the ABSENT root — the anchor case
+// below — and the same probe with the root PRESENT and identified at open showed the seam is not
+// about absence at all: a directory replaced under the same pathname between open and close closed
+// `ok: true`, with a previous build's `old.png` committed as this run's output and an empty hazard
+// list. Two more shapes did the same (the root appearing as a link into a tree outside itself, from
+// both an absent and a present open), which is what makes this a property of the open->close seam
+// rather than of any one topology.
+//
+// This is not the standing residual at `walkRegularFiles`. That one is about a substitution
+// installed and reverted BETWEEN two observations, which leaves nothing to observe. Here the
+// replacement is still in place while the close decides, so an observation retained from the open
+// is exactly what catches it.
+//
+// Returns a message on drift, `null` when the root still holds.
+function outputRootDrifted(opened, closing, deps) {
+  // A `runState` reaching the close without this field is not an old shape to tolerate: the digest
+  // authenticates it (see `openingPayloadFromRunState`), so the only ways here are a payload that
+  // was edited and a runState this module did not open. Both are refusals.
+  if (!isPlainObject(opened)) {
+    return 'this runState carries no observation of capture.output_dir from when the run opened';
+  }
+  if (opened.canonical !== closing.canonical) {
+    return `capture.output_dir resolved to '${opened.canonical}' when this run opened and resolves to '${closing.canonical}' now`;
+  }
+  if (opened.identity !== null) {
+    if (closing.identity === opened.identity) return null;
+    return 'the directory at capture.output_dir is not the one this run opened over — same path, different directory';
+  }
+  // The root did not exist when the run opened, which is the ordinary first capture this module
+  // has protected since round 27: the capture command is expected to create it, so the root having
+  // an identity NOW is not drift. What has to still hold is the object the absence was established
+  // against — that ancestor is the whole basis on which the empty opening baseline was believed.
+  if (!isPlainObject(opened.anchor)) {
+    return 'this runState records capture.output_dir as absent at open without the ancestor that absence was established against';
+  }
+  const now = assetDirIdentity(opened.anchor.path, deps, { allowSymlink: true });
+  if (!now.ok) {
+    return `the directory '${opened.anchor.path}' that capture.output_dir's absence was established against can no longer be identified (${now.reason})`;
+  }
+  if (now.id !== opened.anchor.identity) {
+    return `the directory '${opened.anchor.path}' that capture.output_dir's absence was established against has been replaced — same path, different directory`;
+  }
+  return null;
 }
 
 // `rootMustExist` and `rootIdentity` are both the caller's knowledge, not the walk's: whether this
@@ -2313,7 +2416,7 @@ function walkRegularFiles(rootDir, deps, visit, onSkipped, { rootMustExist = fal
         // with an empty map. [round 26] And finer than the REASON WORD, which is where round 25 drew
         // it and codex broke it — `vanished` names the first capture and also names a present root
         // symlink whose target is missing, which is not one. `absentDirectly` is the fact.
-        refuseUnadjudicatedRoot(rootUnidentified, code, true, () => directAbsenceConfirmed(absDir, containmentRoot, deps));
+        refuseUnadjudicatedRoot(rootUnidentified, code, true, () => directAbsenceConfirmed(absDir, containmentRoot, deps).ok);
         return;
       }
       // [round 18] ENOTDIR used to return here too, silently, and that was the round-17 defect
@@ -2339,7 +2442,7 @@ function walkRegularFiles(rootDir, deps, visit, onSkipped, { rootMustExist = fal
         // object appeared. The failure actually observed here is `inspection_failure`, from a
         // baseline whose own `lstat` succeeded and reported a non-directory, which is the review
         // bot's reproduction.
-        refuseUnadjudicatedRoot(rootUnidentified, code, false, () => directAbsenceConfirmed(absDir, containmentRoot, deps));
+        refuseUnadjudicatedRoot(rootUnidentified, code, false, () => directAbsenceConfirmed(absDir, containmentRoot, deps).ok);
         return;
       }
       throw err;
@@ -2624,6 +2727,15 @@ export function closeCaptureRun(profileLike, runState, captureOutcome, closingOb
   // both the missing gate and a fresh observation per iteration.
   const validatedClosing = validateEntriesForCapture(profileLike, runState.entries, d);
   if (!validatedClosing.ok) return validatedClosing;
+
+  // [round 37] The close's own validation says the root is fine NOW; it cannot say it is the same
+  // root the open validated, because until this round the two derivations were never compared.
+  // Refusing here — before any temp is written — leaves nothing durable behind, exactly like the
+  // identity and digest checks above.
+  const rootDrift = outputRootDrifted(runState.output_root, validatedClosing.outputRoot, d);
+  if (rootDrift) {
+    return haltResult('provenance_hazard', `capture.output_dir moved while this run was open: ${rootDrift}`, { path: profileLike?.capture?.output_dir ?? null });
+  }
 
   const closingAssets = {};
   const closingHazards = {};

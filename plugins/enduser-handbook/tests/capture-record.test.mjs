@@ -4351,6 +4351,221 @@ test('openCaptureRun: an output root made absent by a dangling ANCESTOR is refus
   });
 });
 
+// [round 37] The open -> close seam. `runState` used to carry nothing about `capture.output_dir`,
+// so the close re-derived the root from the profile and walked whatever was there. These four pin
+// the four shapes that were measured against the real exports before the fix: each returned
+// `ok: true` and committed a previous build's `old.png` as this run's output with an empty hazard
+// list. Two of them have the root PRESENT and identified at open, which is what says the defect was
+// never about the absent root the reviewer found it on.
+//
+// Each fixture asserts the halt's MESSAGE, not just its class: all four halts are
+// `provenance_hazard`, and the whole content of the fix is WHICH observation disagreed. A fixture
+// matching only the class would pass against a module that refused for an unrelated reason.
+for (const shape of [
+  {
+    name: 'the ancestor an absent root\'s absence was established against is replaced',
+    plant: (dir, outputRoot) => {
+      // The root is absent at open; `<dir>/safe` is what its absence rests on.
+      const treeB = join(dir, 'B');
+      nodeFs.mkdirSync(join(treeB, 'assets', 'items'), { recursive: true });
+      nodeFs.writeFileSync(join(treeB, 'assets', 'items', 'old.png'), 'bytes from a previous build');
+      return () => {
+        nodeFs.renameSync(join(dir, 'safe'), join(dir, 'safe-moved'));
+        nodeFs.renameSync(treeB, join(dir, 'safe'));
+      };
+    },
+    rootExistsAtOpen: false,
+    expect: /the directory '.*\/safe' that capture\.output_dir's absence was established against has been replaced/,
+  },
+  {
+    name: 'an absent root then appears as a link into a tree outside it',
+    plant: (dir, outputRoot) => {
+      const elsewhere = join(dir, 'elsewhere');
+      nodeFs.mkdirSync(join(elsewhere, 'items'), { recursive: true });
+      nodeFs.writeFileSync(join(elsewhere, 'items', 'old.png'), 'bytes from a previous build');
+      return () => nodeFs.symlinkSync(elsewhere, outputRoot);
+    },
+    rootExistsAtOpen: false,
+    expect: /capture\.output_dir resolved to '.*\/safe\/assets' when this run opened and resolves to '.*\/elsewhere' now/,
+  },
+  {
+    name: 'a PRESENT root is replaced under its own pathname',
+    plant: (dir, outputRoot) => {
+      const treeB = join(dir, 'B');
+      nodeFs.mkdirSync(join(treeB, 'items'), { recursive: true });
+      nodeFs.writeFileSync(join(treeB, 'items', 'old.png'), 'bytes from a previous build');
+      return () => {
+        nodeFs.renameSync(outputRoot, join(dir, 'A-moved'));
+        nodeFs.renameSync(treeB, outputRoot);
+      };
+    },
+    rootExistsAtOpen: true,
+    expect: /the directory at capture\.output_dir is not the one this run opened over/,
+  },
+  {
+    name: 'a PRESENT root is replaced by a link into a tree outside it',
+    plant: (dir, outputRoot) => {
+      const elsewhere = join(dir, 'elsewhere');
+      nodeFs.mkdirSync(join(elsewhere, 'items'), { recursive: true });
+      nodeFs.writeFileSync(join(elsewhere, 'items', 'old.png'), 'bytes from a previous build');
+      return () => {
+        nodeFs.rmSync(outputRoot, { recursive: true, force: true });
+        nodeFs.symlinkSync(elsewhere, outputRoot);
+      };
+    },
+    rootExistsAtOpen: true,
+    expect: /capture\.output_dir resolved to '.*\/safe\/assets' when this run opened and resolves to '.*\/elsewhere' now/,
+  },
+]) {
+  test(`the open -> close seam: ${shape.name} is refused at close`, () => {
+    withTempDir((dir) => {
+      const real = nodeFs.realpathSync(dir);
+      const safe = join(real, 'safe');
+      const outputRoot = join(safe, 'assets');
+      nodeFs.mkdirSync(safe, { recursive: true });
+      nodeFs.mkdirSync(join(real, 'handbook'), { recursive: true });
+      if (shape.rootExistsAtOpen) nodeFs.mkdirSync(join(outputRoot, 'items'), { recursive: true });
+      const profile = {
+        capture: { output_dir: outputRoot, build_identity: { ui_read: false } },
+        publish: { chapters_dir: join(real, 'handbook'), target: 'static_md' },
+      };
+
+      const mutate = shape.plant(real, outputRoot);
+      const opened = CR.openCaptureRun(profile, [{ slug: 'items' }], null, stubDepsNoIdentity());
+      assert.equal(opened.ok, true, `the open is an ordinary one and must succeed: ${JSON.stringify(opened)}`);
+      // The pinning is what the close has to work from, so assert it was actually taken — an
+      // `output_root` of the wrong shape would make every case below pass for the wrong reason.
+      assert.equal(opened.runState.output_root.identity === null, !shape.rootExistsAtOpen);
+      assert.equal(opened.runState.output_root.anchor === null, shape.rootExistsAtOpen);
+
+      mutate();
+
+      const closed = CR.closeCaptureRun(profile, opened.runState, { ok: true }, null, stubDepsNoIdentity());
+      assert.equal(closed.ok, false, `the close must refuse a root it did not open over: ${JSON.stringify(closed)}`);
+      assert.equal(closed.halts[0].halt, 'provenance_hazard', JSON.stringify(closed.halts));
+      assert.match(closed.halts[0].message, /capture\.output_dir moved while this run was open/, JSON.stringify(closed.halts));
+      assert.match(closed.halts[0].message, shape.expect,
+        `the halt must name the observation that disagreed: ${JSON.stringify(closed.halts)}`);
+      // Nothing durable may be written on this exit — the refusal happens before the temp/rename.
+      assert.equal(nodeFs.existsSync(join(real, 'handbook', '.provenance', 'run', 'current.json')), false,
+        'a refused close must leave no run record behind');
+    });
+  });
+}
+
+// The two topologies the guard above must NOT refuse. Both were measured through the real exports
+// alongside the four refusals: an output root created by the capture command during the run is the
+// ordinary first capture this module has protected since round 27, and a root that simply gains a
+// file is every run after that one.
+for (const control of [
+  { name: 'the capture command creates an absent output root during the run', rootExistsAtOpen: false },
+  { name: 'a present output root gains a file during the run', rootExistsAtOpen: true },
+]) {
+  test(`the open -> close seam: ${control.name} still closes clean`, () => {
+    withTempDir((dir) => {
+      const real = nodeFs.realpathSync(dir);
+      const safe = join(real, 'safe');
+      const outputRoot = join(safe, 'assets');
+      nodeFs.mkdirSync(safe, { recursive: true });
+      nodeFs.mkdirSync(join(real, 'handbook'), { recursive: true });
+      if (control.rootExistsAtOpen) nodeFs.mkdirSync(join(outputRoot, 'items'), { recursive: true });
+      const profile = {
+        capture: { output_dir: outputRoot, build_identity: { ui_read: false } },
+        publish: { chapters_dir: join(real, 'handbook'), target: 'static_md' },
+      };
+
+      const opened = CR.openCaptureRun(profile, [{ slug: 'items' }], null, stubDepsNoIdentity());
+      assert.equal(opened.ok, true, JSON.stringify(opened));
+
+      nodeFs.mkdirSync(join(outputRoot, 'items'), { recursive: true });
+      nodeFs.writeFileSync(join(outputRoot, 'items', 'fresh.png'), 'bytes written by THIS build');
+
+      const closed = CR.closeCaptureRun(profile, opened.runState, { ok: true }, null, stubDepsNoIdentity());
+      assert.equal(closed.ok, true, `an ordinary run must not be refused: ${JSON.stringify(closed)}`);
+      const parsed = CR.readRunRecordText(
+        nodeFs.readFileSync(join(real, 'handbook', '.provenance', 'run', 'current.json'), 'utf8'),
+      );
+      assert.equal(parsed.ok, true, JSON.stringify(parsed));
+      assert.deepEqual(Object.keys(parsed.record.chapters.items.closing), ['fresh.png'],
+        `this build's own file must still be recorded: ${JSON.stringify(parsed.record.chapters.items)}`);
+    });
+  });
+}
+
+// [round 37] The anchor GONE rather than replaced, which is a different observation and gets a
+// different word. The close's own validation still passes here — the root is still absent, so the
+// climb simply finds a higher ancestor and certifies the absence against THAT — which is exactly
+// why this needs its own check: validation is answering "is this root fine now", never "is this the
+// root you opened over". Found by mutation: neutralizing the unidentifiable-anchor arm killed
+// nothing, because every fixture reached the replaced-anchor arm one line below it.
+test('the open -> close seam: the ancestor an absent root was validated against is DELETED, not replaced', () => {
+  withTempDir((dir) => {
+    const real = nodeFs.realpathSync(dir);
+    const safe = join(real, 'safe');
+    const outputRoot = join(safe, 'assets');
+    nodeFs.mkdirSync(safe, { recursive: true });
+    nodeFs.mkdirSync(join(real, 'handbook'), { recursive: true });
+    const profile = {
+      capture: { output_dir: outputRoot, build_identity: { ui_read: false } },
+      publish: { chapters_dir: join(real, 'handbook'), target: 'static_md' },
+    };
+
+    const opened = CR.openCaptureRun(profile, [{ slug: 'items' }], null, stubDepsNoIdentity());
+    assert.equal(opened.ok, true, JSON.stringify(opened));
+    assert.equal(opened.runState.output_root.anchor.path, safe,
+      `the absence must have been established against '${safe}': ${JSON.stringify(opened.runState.output_root)}`);
+
+    nodeFs.rmSync(safe, { recursive: true, force: true });
+
+    const closed = CR.closeCaptureRun(profile, opened.runState, { ok: true }, null, stubDepsNoIdentity());
+    assert.equal(closed.ok, false, `an absence resting on a directory that is gone must not close clean: ${JSON.stringify(closed)}`);
+    assert.equal(closed.halts[0].halt, 'provenance_hazard', JSON.stringify(closed.halts));
+    // The WORD is the point: "can no longer be identified" and "has been replaced" are two
+    // different findings, and sending an operator to hunt a replacement that never happened is the
+    // same failure this module spent round 34 removing from the resolution reasons.
+    assert.match(closed.halts[0].message, /can no longer be identified \(vanished\)/,
+      `a deleted anchor must be diagnosed as unidentifiable, not as replaced: ${JSON.stringify(closed.halts)}`);
+  });
+});
+
+// [round 37] The declaration and `outputRootDrifted`'s first branch both claim that a runState
+// arriving without `output_root` is a refusal rather than an older shape to tolerate, and that the
+// digest is what makes it one. Both halves are asserted here, because a comment asserting a
+// property is not the property: the message proves WHICH guard refused, and a `stale_replay` from
+// the digest is a different (and stronger) answer than the drift check's own fallback.
+test('the open -> close seam: a runState with `output_root` stripped is refused by the digest, not tolerated', () => {
+  withTempDir((dir) => {
+    const profile = profileFor(dir);
+    nodeFs.mkdirSync(join(profile.capture.output_dir, 'items'), { recursive: true });
+
+    const opened = CR.openCaptureRun(profile, [{ slug: 'items' }], null, stubDepsNoIdentity());
+    assert.equal(opened.ok, true, JSON.stringify(opened));
+    assert.ok(Object.hasOwn(opened.runState, 'output_root'), 'the field must be there to strip');
+
+    // DELETING the key and REWRITING it take two different exits, and both are the digest's. A
+    // deleted key leaves `undefined` in the payload, which JCS refuses outright (round 14's guarded
+    // branch); a rewritten one canonicalizes fine and fails the comparison. Asserting only one of
+    // them would leave the other free to become a tolerated shape later.
+    const stripped = { ...opened.runState };
+    delete stripped.output_root;
+    const afterDelete = CR.closeCaptureRun(profile, stripped, { ok: true }, null, stubDepsNoIdentity());
+    assert.equal(afterDelete.ok, false, JSON.stringify(afterDelete));
+    assert.equal(afterDelete.halts[0].halt, 'stale_replay', JSON.stringify(afterDelete.halts));
+    assert.match(afterDelete.halts[0].message, /cannot be canonicalized, so it cannot match the token's stored digest/,
+      `a deleted field must be refused by the digest: ${JSON.stringify(afterDelete.halts)}`);
+
+    const rewritten = {
+      ...opened.runState,
+      output_root: { ...opened.runState.output_root, identity: null, anchor: { path: dir, identity: '1:1' } },
+    };
+    const afterRewrite = CR.closeCaptureRun(profile, rewritten, { ok: true }, null, stubDepsNoIdentity());
+    assert.equal(afterRewrite.ok, false, JSON.stringify(afterRewrite));
+    assert.equal(afterRewrite.halts[0].halt, 'stale_replay', JSON.stringify(afterRewrite.halts));
+    assert.match(afterRewrite.halts[0].message, /does not match the token's stored digest/,
+      `a rewritten field must be refused by the digest: ${JSON.stringify(afterRewrite.halts)}`);
+  });
+});
+
 // [round 36] The same ancestor, arriving mid-run instead of being there at validation — which is the
 // only way to reach the climb's own exemption now that validation refuses the standing case. Round
 // 29 exempted everything above the output root from BOTH of the climb's questions, on the argument
@@ -4423,6 +4638,12 @@ test('the closing snapshot: an outside-resolving ancestor is refused at the dept
     // of the bracket describe different objects — which this release refuses, correctly, and which
     // would make this fixture prove that instead of what it is here for.
     nodeFs.mkdirSync(join(physicalRoot, 'handbook'), { recursive: true });
+    // [round 37] EMPTY, and that is load-bearing rather than incidental. The climb starts at the
+    // TIP, and a tip that exists ends it immediately with a refusal (round 28) — so if this tree
+    // held an `items`, the chapter's path would resolve onto a directory that EXISTS, the climb
+    // would refuse there, and it would refuse identically at either depth unit. The test would
+    // still pass and both depth mutants would survive it. Asserted below, after the plant, where
+    // the resolution actually happens; the sibling boundary fixture states the same requirement.
     nodeFs.mkdirSync(join(real, 'outside-admin'), { recursive: true });
     nodeFs.mkdirSync(join(real, 'handbook'), { recursive: true });
     nodeFs.symlinkSync(physicalRoot, join(real, 'rootlink'));
@@ -4464,6 +4685,8 @@ test('the closing snapshot: an outside-resolving ancestor is refused at the dept
     assert.equal(planted, true, 'the ancestor was never replaced — this fixture cannot reach the condition');
     assert.equal(nodeFs.realpathSync(configuredGroupDir), join(real, 'outside-admin'),
       'the ancestor must RESOLVE, and resolve outside the root — otherwise this pins the resolution check instead');
+    assert.equal(nodeFs.existsSync(join(real, 'outside-admin', 'items')), false,
+      'the outside tree must not hold the chapter: a present TIP ends the climb before the depth boundary it is here to pin');
     assert.equal(closed.ok, false, `an ancestor resolving outside the output root must not certify direct absence: ${JSON.stringify(closed)}`);
     assert.equal(closed.halts[0].halt, 'provenance_hazard', JSON.stringify(closed.halts));
     assert.match(closed.halts[0].message, /could not be confirmed \(vanished\) and its listing then failed \(ENOENT\)/,
@@ -5546,13 +5769,22 @@ test('RunState union: an ACTIVE run carries exactly the non-optional payload fie
     assert.equal(typeof openedState.opening_asset_hazards, 'object');
     assert.ok(Array.isArray(openedState.opening_asset_hazards[Object.keys(openedState.opening_asset_hazards)[0]]));
     assert.ok(Array.isArray(openedState.entries));
+    // [round 37] The declaration promises three fields INSIDE `output_root`, and a top-level key
+    // list cannot see them: nothing in this repository compiles TypeScript, so an inner field that
+    // drifts from the `.d.mts` is invisible unless the shape is pinned here as well. This fixture's
+    // root EXISTS at open, so `identity` is a string and `anchor` is null; the absent-root shape
+    // (the inverse pairing) is pinned by the first-capture fixtures further down.
+    assert.deepEqual(Object.keys(openedState.output_root).sort(), ['anchor', 'canonical', 'identity']);
+    assert.equal(typeof openedState.output_root.canonical, 'string');
+    assert.match(openedState.output_root.identity, /^\d+:\d+$/);
+    assert.equal(openedState.output_root.anchor, null);
     // Not yet closed — `closed` is the one field the declaration keeps optional on this branch,
     // and it must be genuinely ABSENT here (not merely falsy), matching `openCaptureRun`'s own
     // construction, which never assigns it at all.
     assert.equal(Object.hasOwn(openedState, 'closed'), false);
     assert.deepEqual(
       Object.keys(openedState).sort(),
-      ['entries', 'opening', 'opening_asset_hazards', 'opening_assets', 'opening_digest', 'run_id', 'skipped'].sort(),
+      ['entries', 'opening', 'opening_asset_hazards', 'opening_assets', 'opening_digest', 'output_root', 'run_id', 'skipped'].sort(),
     );
 
     nodeFs.writeFileSync(join(profile.capture.output_dir, 'items', 'a.png'), 'v2');
@@ -5569,7 +5801,7 @@ test('RunState union: an ACTIVE run carries exactly the non-optional payload fie
     assert.equal(closedState.closed, true);
     assert.deepEqual(
       Object.keys(closedState).sort(),
-      ['closed', 'entries', 'opening', 'opening_asset_hazards', 'opening_assets', 'opening_digest', 'run_id', 'skipped'].sort(),
+      ['closed', 'entries', 'opening', 'opening_asset_hazards', 'opening_assets', 'opening_digest', 'output_root', 'run_id', 'skipped'].sort(),
     );
   });
 });
