@@ -234,6 +234,19 @@ test('sanitizeDetail: a non-string input is coerced defensively rather than thro
   assert.equal(sanitizeDetail(431), '431');
 });
 
+// [round 14] The test above says "rather than throwing" and exercises a number, which cannot throw
+// — so the claim in its own name went unchecked. These are the inputs where `String(x)` actually
+// throws: a null-prototype object has no `Symbol.toPrimitive`, no `toString` and no `valueOf`, and
+// an object whose `toString` throws is the same case reached deliberately. The module header states
+// that exactly two functions throw on out-of-domain input; this was a silent third.
+test('sanitizeDetail: an UNSTRINGIFIABLE input degrades to a marker rather than throwing', () => {
+  for (const raw of [Object.create(null), { toString() { throw new Error('nope'); } }, Object.assign(Object.create(null), { a: 1 })]) {
+    const result = sanitizeDetail(raw);
+    assert.equal(typeof result, 'string');
+    assert.ok(result.length > 0, 'a detail must still say something about what was seen');
+  }
+});
+
 // ==== resolveBuildIdentity =========================================================================
 
 test('resolveBuildIdentity: a valid command performs ZERO ui reads, source "command"', () => {

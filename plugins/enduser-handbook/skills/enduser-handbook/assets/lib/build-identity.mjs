@@ -157,7 +157,19 @@ const DETAIL_TRUNCATION_MARKER = '...';
  * @returns {string}
  */
 export function sanitizeDetail(raw) {
-  const s = typeof raw === 'string' ? raw : String(raw);
+  // [round 14] `String(raw)` is NOT total: a null-prototype object has no `Symbol.toPrimitive`, no
+  // `toString` and no `valueOf`, so `String(Object.create(null))` throws `TypeError: Cannot convert
+  // object to primitive value` — measured. This function declares `unknown` in and `string` out,
+  // and the module header states that exactly two functions throw on out-of-domain input; this was
+  // a silent third. It is also exactly the shape a detail field attracts, since the values reaching
+  // it come from parsed external output. Unstringifiable input degrades to a fixed marker, which is
+  // what a detail field is for — telling the reader what was seen, never failing the run over it.
+  let s;
+  if (typeof raw === 'string') s = raw;
+  else {
+    try { s = String(raw); }
+    catch { s = '<unstringifiable detail value>'; }
+  }
   let cleaned = '';
   for (const ch of s) {
     if (isPrintableAscii(ch.codePointAt(0))) cleaned += ch;

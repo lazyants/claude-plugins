@@ -3454,9 +3454,19 @@ has_in_section "SKILL: an unconfirmed cleanup halts the next open until recovery
 # operator shell for a run that could never start, and on the ui_read path returning `needs_ui_read`
 # without attempting the token at all, so the first call never mentioned recovery. The order is the
 # contract now, not an implementation detail, and it is pinned where an operator reads it.
-has_in_section "SKILL: the pending token is reserved before anything else the open would do" \
+# [round 14] The pin held 'FIRST exclusively reserves', and the doc said the reservation happens
+# "before anything else this open would do". Measured false: the ownership gate, the hierarchy and
+# the entry validation all run ahead of it — an invalid slug halts with `invalid_slug` and no token
+# is ever attempted. That ordering is right (a refusal unrelated to contention should not leave a
+# reservation behind), so the DOC was corrected to the guarantee that actually holds, and the pin
+# with it. Second time in two rounds that a pin faithfully held an overstated claim: a pin can only
+# ever prove the sentence is still there, never that it was true.
+has_in_section "SKILL: the pending token is reserved before the open spends the operator's command or hashes an asset" \
   "$SKILL" '### W2 — Capture screenshots' \
-  'first exclusively reserves a one-shot pending token'
+  'before it spends anything of yours — before the identity command runs and before a single asset is hashed'
+has_in_section "SKILL: and states plainly what DOES run before the reservation" \
+  "$SKILL" '### W2 — Capture screenshots' \
+  'It is not the literal first thing the call does'
 has_in_section "SKILL: a contended open must not spend the operator's command or a UI read" \
   "$SKILL" '### W2 — Capture screenshots' \
   'must not send them to a UI read for a run that was never going to start'
@@ -3524,6 +3534,11 @@ declaration_citation_prose="a.md SUMMARY.md 1.md"
 # stated plainly: a bare dangling citation added to THIS file would not be caught. The list is
 # self-policing below — a file on it that stops existing, or that yields no checked citation at all,
 # fails the gate rather than quietly checking nothing.
+# [round 14] Say what that costs, because the gate's own success line is what a reader takes as
+# coverage: a BARE dangling citation added to a listed module is NOT caught, demonstrated by codex
+# with an in-memory `// See never-existed.md` that left the count at 72 and the missing count at 0.
+# The self-policing bounds how far the exemption can spread, not what it lets through. The success
+# message below therefore claims only that every CHECKED citation resolves, and names the gap.
 citation_derived_path_modules="chapter-paths.mjs"
 missing_declaration_citations=0
 checked_declaration_citations=0
@@ -3594,7 +3609,7 @@ done
 # away from being decorative. Widened to every shipped asset it finds 72, so the floor moves with it:
 # a floor that sits just under the real population cannot notice an extraction that collapses.
 if [ "$missing_declaration_citations" -eq 0 ] && [ "$checked_declaration_citations" -gt 60 ]; then
-  ok "assets/lib/*.{d.mts,mjs}: every document a shipped asset cites resolves ($checked_declaration_citations citations, bare and path-shaped)"
+  ok "assets/lib/*.{d.mts,mjs}: every CHECKED citation resolves ($checked_declaration_citations of them, bare and path-shaped; bare names in $citation_derived_path_modules are NOT checked)"
 elif [ "$checked_declaration_citations" -le 60 ]; then
   bad "citation gate: only $checked_declaration_citations citations matched — the extraction is broken, not the citations"
 fi

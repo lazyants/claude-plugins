@@ -3280,6 +3280,41 @@ test('buildProvenanceReport: a chapter with ZERO real embeds is reported STALE e
   });
 });
 
+// [round 14 BLOCKER] The current-hash loop kept only `present` results, so an embed the chapter
+// STILL HAS but that gate 6 refuses to hash vanished from the comparison entirely. verifyRecord
+// only ever sees the keys it is handed, so a two-embed chapter whose second embed grew an extra
+// hard link after recording verified on the first alone and reported `unchanged` — the one verdict
+// that tells a reader the chapter matches the build it names.
+test('buildProvenanceReport: an embed that CANNOT be hashed makes the chapter stale, never `unchanged` on the survivors', () => {
+  withTempDir((dir) => {
+    const profile = profileFor(dir);
+    const entry = { slug: 'items' };
+    const assetDir = join(profile.capture.output_dir, 'items');
+    nodeFs.mkdirSync(assetDir, { recursive: true });
+    nodeFs.writeFileSync(join(assetDir, 'good.png'), 'g1');
+    nodeFs.writeFileSync(join(assetDir, 'bad.png'), 'b1');
+    const opened = CR.openCaptureRun(profile, [entry], null, stubDepsNoIdentity());
+    assert.equal(opened.ok, true);
+    nodeFs.writeFileSync(join(assetDir, 'good.png'), 'g2');
+    nodeFs.writeFileSync(join(assetDir, 'bad.png'), 'b2');
+    const closed = CR.closeCaptureRun(profile, opened.runState, { ok: true }, null, stubDepsNoIdentity());
+    assert.equal(closed.ok, true, JSON.stringify(closed));
+    const chapterFile = writeChapterAt(profile, entry, '# items\n');
+    const both = stubExpectedAssetsFor(assetDir, ['good.png', 'bad.png']);
+    const recorded = CR.recordChapterProvenance(profile, [entry], entry, chapterFile, opened.runState.run_id, { ...stubDepsNoIdentity(), expectedAssets: both });
+    assert.equal(recorded.recorded, true, JSON.stringify(recorded));
+
+    // Only NOW does the hazard appear: an extra hard link, which gate 6 refuses (nlink !== 1).
+    // Nothing about `good.png` changed, and both files are still embedded by the chapter.
+    nodeFs.linkSync(join(assetDir, 'bad.png'), join(dir, 'bad-alias.png'));
+    assert.equal(nodeFs.statSync(join(assetDir, 'bad.png')).nlink, 2);
+
+    const result = CR.buildProvenanceReport(profile, [entry], null, { ...stubDepsNoIdentity(), expectedAssets: both });
+    assert.notEqual(result.rows[0].classification, 'unchanged', JSON.stringify(result.rows[0]));
+    assert.equal(result.rows[0].classification_reason, 'record_stale', JSON.stringify(result.rows[0]));
+  });
+});
+
 test('buildProvenanceReport: record_unsupported_version is REACHABLE — a structurally valid record with a non-1 version reports as such, not as record_malformed (codex DO-NOT-SHIP blocker 4)', () => {
   withTempDir((dir) => {
     const profile = profileFor(dir);

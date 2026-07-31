@@ -190,7 +190,13 @@ function describeThrownField(err, ...names) {
 }
 
 // ---------------------------------------------------------------------------------------------
-// The filesystem seam. Every exported function accepts `deps` and defaults to this object. [round
+// The filesystem seam. Every exported function THAT TOUCHES DISK accepts `deps` and defaults to
+// this object; the pure ones (`jcsCanonicalize`, `sha256HexOfCanonical`, `digestOpeningPayload`,
+// `provenanceRoot`, `chapterRecordPath`, `readRunRecordText`, `readChapterRecordText`) take no
+// `deps` at all. [round 14] The unqualified "every exported function" was itself false, and it was
+// written in round 13 while correcting a DIFFERENT false universal in this same sentence — the
+// replacement inherited the shape of what it replaced. The set is pinned in
+// tests/skill-call-signatures.test.mjs rather than restated here. [round
 // 13] This comment used to say `deps` comes LAST, which is false for `openCaptureRun`,
 // `closeCaptureRun` and `buildProvenanceReport`: each takes `identityCommandOutcome` AFTER it. That
 // is the very wrong-slot trap round 12 fixed in SKILL.md, still spelled out here as a rule — a
@@ -2439,13 +2445,28 @@ export function buildProvenanceReport(profileLike, entries, currentObservation, 
       if (chapterRecord.record_version !== 1) {
         recordState = 'unsupported_version';
       } else {
+        // [round 14] The `if present` used to be the whole of it, and it made a hazardous embed
+        // DISAPPEAR: `verifyRecord` compares only the keys it is handed, so an embed the chapter
+        // still has but that gate 6 refuses to hash (a symlink, a directory, or an extra hard link
+        // arriving after the record was written) was dropped from the comparison, and a chapter
+        // with one good embed and one unhashable one reported `ok` and classified `unchanged`.
+        // W6's promise is that every CURRENT embed is verified against the record; an embed whose
+        // bytes cannot be read is neither verified nor absent, so it cannot be silently skipped.
+        // It is `stale` — the same verdict as a differing hash, which is what "we cannot show this
+        // is the recorded content" means — and never `ok`.
         const currentHashes = Object.create(null);
+        const unhashable = [];
         for (const asset of extraction.assets) {
           const hashed = hashFileNoFollow(asset.absPath, d);
           if (hashed.kind === 'present') currentHashes[asset.key] = hashed.digest;
+          else unhashable.push(`${asset.key}:${hashed.kind}`);
         }
-        const verify = verifyRecord(chapterRecord.asset_hashes, currentHashes);
-        recordState = verify.status === 'ok' ? 'ok' : 'stale';
+        if (unhashable.length > 0) {
+          recordState = 'stale';
+        } else {
+          const verify = verifyRecord(chapterRecord.asset_hashes, currentHashes);
+          recordState = verify.status === 'ok' ? 'ok' : 'stale';
+        }
       }
     }
 

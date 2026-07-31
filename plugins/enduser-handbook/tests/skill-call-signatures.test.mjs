@@ -110,6 +110,29 @@ test('deps is last everywhere EXCEPT the three continuation entrypoints — meas
   );
 });
 
+// [round 14] Round 13 replaced the false "takes `deps` last" with "every exported function accepts
+// `deps`", which is false too — seven exports are pure and take none. The replacement inherited the
+// shape of what it replaced, which is why the set is pinned here rather than asserted in prose: a
+// sentence naming a set has to be re-read by a human every time the set changes, and this does not.
+// Scoped to capture-record.mjs, because that is the module the seam comment belongs to — the other
+// modules in `lib/` are pure by design and take no `deps` at all, so folding them in would say
+// nothing about the sentence under test.
+test('exactly the disk-touching exports accept deps — measured from source', () => {
+  const withDeps = [];
+  const withoutDeps = [];
+  for (const [name, { file, params }] of signatures) {
+    if (file !== 'capture-record.mjs') continue;
+    (params.some((p) => p.split('=')[0].trim() === 'deps') ? withDeps : withoutDeps).push(name);
+  }
+  assert.deepEqual(
+    withoutDeps.sort(),
+    ['chapterRecordPath', 'digestOpeningPayload', 'jcsCanonicalize', 'provenanceRoot',
+      'readChapterRecordText', 'readRunRecordText', 'sha256HexOfCanonical'],
+    'the set of exports taking NO `deps` changed — any prose describing the seam as covering "every exported function" has to be re-read against it',
+  );
+  assert.ok(withDeps.length > 0, 'no export takes `deps` at all — the signature extraction is broken, not the code');
+});
+
 test('no shipped asset states that deps is the last argument — it is not, for three of them', () => {
   const offenders = [];
   for (const file of readdirSync(LIB_DIR).filter((f) => f.endsWith('.mjs') || f.endsWith('.d.mts'))) {

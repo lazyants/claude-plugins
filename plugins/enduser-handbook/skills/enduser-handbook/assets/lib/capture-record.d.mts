@@ -406,8 +406,10 @@ export interface DirentLike {
 }
 
 /**
- * The injectable filesystem seam every exported function accepts, defaulting to
- * node:fs/node:crypto/node:child_process bindings.
+ * The injectable filesystem seam every exported function THAT TOUCHES DISK accepts, defaulting to
+ * node:fs/node:crypto/node:child_process bindings. The pure exports take no `deps` — [round 14]
+ * "every exported function" was false here too, written while correcting the neighbouring false
+ * universal about argument position. The exact set is pinned by a test, not by this sentence.
  *
  * [round 13] This said "as its last argument". It is not last in `openCaptureRun`,
  * `closeCaptureRun` or `buildProvenanceReport`, each of which takes `identityCommandOutcome` after
