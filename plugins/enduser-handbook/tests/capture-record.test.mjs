@@ -3254,6 +3254,104 @@ test('the closing snapshot: an output root that becomes unresolvable AFTER its o
     assert.ok(resolutions > 1, `the output root was resolved only ${resolutions} time(s) — there is no second resolution, so the arm is unreachable after all`);
     assert.equal(closed.ok, false, `an output root unresolvable at snapshot time must not certify absence: ${JSON.stringify(closed)}`);
     assert.equal(closed.halts[0].halt, 'provenance_hazard', JSON.stringify(closed.halts));
+    // [round 31, codex MINOR] The halt CLASS is not enough. Deleting the null guard entirely also
+    // halts — with `Cannot read properties of null` — so a test asserting only the class passes
+    // under a mutant that removed the thing it claims to pin. Fail-closed by crash is not the same
+    // fact as fail-closed by adjudication, and only the message tells them apart.
+    assert.match(closed.halts[0].message, /could not be confirmed .* listing then failed/,
+      `the halt must be the adjudicated refusal, not a crash: ${closed.halts[0].message}`);
+  });
+});
+
+// [round 31 BLOCKER] The eighteenth layer, and it steps up a level: not the chapter root but the
+// OUTPUT ROOT. Gate 3 keeps an identity only for a chapter directory that already EXISTS, so a
+// first capture supplies no pin at all — and the direct-absence machinery of rounds 25 through 30
+// cannot help here, because the replacement directory is POPULATED and lists successfully, so the
+// failed-listing adjudication is never reached. The walk simply self-baselines whatever is there.
+//
+// Codex executed it end to end through the real exports: gate 3 saw `<out> -> safeA` with
+// `safeA/items` legitimately absent; the output root was repointed to a populated `outsideB` before
+// the snapshot; `openCaptureRun` returned ok and captured the foreign bytes with no hazard; and W5
+// then returned `recorded: true`, confidently attributing another tree's bytes to this build.
+test('openCaptureRun: the OUTPUT ROOT repointed after validation is refused, even for a first capture', () => {
+  withTempDir((dir) => {
+    const safeA = join(dir, 'safeA');
+    const outsideB = join(dir, 'outsideB');
+    const outputRoot = join(dir, 'out');
+    nodeFs.mkdirSync(safeA, { recursive: true });
+    nodeFs.mkdirSync(join(outsideB, 'items'), { recursive: true });
+    nodeFs.writeFileSync(join(outsideB, 'items', 'a.png'), 'bytes from a tree this handbook does not own');
+    nodeFs.symlinkSync(safeA, outputRoot);
+
+    const profile = profileFor(dir, { capture: { output_dir: outputRoot, build_identity: { ui_read: false } } });
+    const entry = { slug: 'items' };
+    // Gate 3 sees an ordinary first capture: the chapter directory does not exist under safeA.
+    assert.equal(nodeFs.existsSync(join(safeA, 'items')), false, 'the chapter root must start absent');
+
+    let repointed = false;
+    const deps = depsWithOverride({
+      openSync: (p, ...rest) => {
+        if (!repointed && String(p).endsWith('/pending.json')) {
+          nodeFs.unlinkSync(outputRoot);
+          nodeFs.symlinkSync(outsideB, outputRoot);
+          repointed = true;
+        }
+        return nodeFs.openSync(p, ...rest);
+      },
+      runIdentityCommand: () => ({ ok: false, detail: 'no command configured in test' }),
+    });
+
+    const opened = CR.openCaptureRun(profile, [entry], null, deps);
+    assert.equal(repointed, true, 'the repoint hook never ran — this fixture cannot reach the condition');
+    assert.equal(
+      nodeFs.readFileSync(join(outputRoot, 'items', 'a.png'), 'utf8'),
+      'bytes from a tree this handbook does not own',
+      'the output root must now resolve to the foreign tree, or the repoint did not take',
+    );
+    assert.equal(opened.ok, false, `a repointed output root must not be snapshotted as this run's own: ${JSON.stringify(opened)}`);
+    assert.equal(opened.halts[0].halt, 'provenance_hazard', JSON.stringify(opened.halts));
+    assert.match(opened.halts[0].message, /output/i, `the halt must name the output root, not a chapter: ${opened.halts[0].message}`);
+  });
+});
+
+// [round 31, from mutation] The output-root bracket also runs on the PINNED path, where the chapter
+// directory existed at gate 3 and carries its own identity. Removing it there killed no test: the
+// chapter pin refuses the same scenario, so the two are behaviourally equivalent on `ok`. They are
+// not equivalent on the DIAGNOSTIC, and that is what an operator acts on — one says a chapter's
+// directory could not be confirmed, the other says the output root was replaced, and only the
+// second points at what actually moved. The assertion is therefore on the message.
+test('openCaptureRun: a repointed OUTPUT ROOT is diagnosed as such, not as a chapter that vanished', () => {
+  withTempDir((dir) => {
+    const safeA = join(dir, 'safeA');
+    const outsideB = join(dir, 'outsideB');
+    const outputRoot = join(dir, 'out');
+    // This time the chapter directory EXISTS at validation, so gate 3 pins it.
+    nodeFs.mkdirSync(join(safeA, 'items'), { recursive: true });
+    nodeFs.writeFileSync(join(safeA, 'items', 'a.png'), 'v1');
+    nodeFs.mkdirSync(outsideB, { recursive: true });
+    nodeFs.symlinkSync(safeA, outputRoot);
+
+    const profile = profileFor(dir, { capture: { output_dir: outputRoot, build_identity: { ui_read: false } } });
+    const entry = { slug: 'items' };
+
+    let repointed = false;
+    const deps = depsWithOverride({
+      openSync: (p, ...rest) => {
+        if (!repointed && String(p).endsWith('/pending.json')) {
+          nodeFs.unlinkSync(outputRoot);
+          nodeFs.symlinkSync(outsideB, outputRoot);
+          repointed = true;
+        }
+        return nodeFs.openSync(p, ...rest);
+      },
+      runIdentityCommand: () => ({ ok: false, detail: 'no command configured in test' }),
+    });
+
+    const opened = CR.openCaptureRun(profile, [entry], null, deps);
+    assert.equal(repointed, true, 'the repoint hook never ran — this fixture cannot reach the condition');
+    assert.equal(opened.ok, false, `a repointed output root must not open: ${JSON.stringify(opened)}`);
+    assert.match(opened.halts[0].message, /output root was replaced/,
+      `the diagnostic must name the output root, not the chapter beneath it: ${opened.halts[0].message}`);
   });
 });
 

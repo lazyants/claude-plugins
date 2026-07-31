@@ -1254,7 +1254,7 @@ function validateEntriesForCapture(profileLike, entries, deps) {
     );
   }
 
-  return { ok: true, assetDirsObserved };
+  return { ok: true, assetDirsObserved, outputRoot: containmentRootFor(profileLike, deps) };
 }
 
 // Shared by all three identity-resolution call sites below (openCaptureRun's opening step,
@@ -1523,7 +1523,7 @@ export function openCaptureRun(profileLike, entries, openingObservation, deps, i
       const snapshot = snapshotAssetHashes(assetDir, d, {
         rootMustExist: validated.assetDirsObserved.has(snapshotting),
         rootIdentity: validated.assetDirsObserved.get(snapshotting) ?? null,
-        containmentRoot: containmentRootFor(profileLike, d),
+        containmentRoot: validated.outputRoot,
       });
       openingAssets[snapshotting] = snapshot.hashes;
       openingHazards[snapshotting] = snapshot.hazards;
@@ -1893,7 +1893,40 @@ function containmentRootFor(profileLike, deps) {
   const raw = profileLike?.capture?.output_dir ?? '';
   const resolved = canonicalizeForComparison(raw, deps);
   if (!resolved.ok) return null;
-  return { depth: normalizeSegments(rawSegments(raw), isAbsolutePath(raw)).length, segments: resolved.segments };
+  const canonical = `/${resolved.segments.join('/')}`;
+  // [round 31] The root's own physical identity, observed at the same moment its segments are, and
+  // observed THROUGH THE CONFIGURED PATH rather than through its resolved form. The first version of
+  // this probed `canonical` and the guard could never fire: when the configured root is a symlink,
+  // repointing it leaves the old target untouched, so an identity taken on the target agrees with
+  // itself forever while the name the module actually reads through now names a different tree.
+  // What is being pinned is what `capture.output_dir` RESOLVES TO, so the probe has to start where
+  // the module starts.
+  //
+  // A root that does not exist yet has no identity, and that is an ordinary first capture rather
+  // than a failure — `null` means "nothing to compare", never "compares equal".
+  const identity = assetDirIdentity(raw, deps, { allowSymlink: true });
+  return {
+    depth: normalizeSegments(rawSegments(raw), isAbsolutePath(raw)).length,
+    segments: resolved.segments,
+    canonical,
+    configured: raw,
+    identity: identity.ok ? identity.id : null,
+  };
+}
+
+// [round 31] Every guard this release built brackets a CHAPTER directory, and gate 3 keeps an
+// identity only for one that already EXISTS — so a first capture had no pin anywhere, and the level
+// ABOVE it was never bracketed at all. Codex swapped the output root itself between validation and
+// the snapshot, from a tree whose chapter directory was legitimately absent to a populated one, and
+// none of rounds 25 through 30 could see it: the direct-absence machinery only ever runs when a
+// listing FAILS, and the replacement lists perfectly well. `openCaptureRun` returned ok, hashed
+// another tree's bytes with no hazard, and W5 attributed them to this build.
+//
+// The output root is one object for the whole of a snapshot. This says so.
+function outputRootChanged(containmentRoot, deps) {
+  if (containmentRoot === null || containmentRoot.identity === null) return false;
+  const now = assetDirIdentity(containmentRoot.configured, deps, { allowSymlink: true });
+  return !now.ok || now.id !== containmentRoot.identity;
 }
 
 function segmentsWithin(rootSegs, segs) {
@@ -1934,17 +1967,19 @@ function refuseUnadjudicatedRoot(observation, code, tolerateDirectAbsence, absen
 // /outside/admin-real`, an empty hazard-free opening baseline, and the capture command's later
 // writes landing under `/outside/admin-real/items`. The prose asserting parity was the tell.
 //
-// `containmentRoot` carries what gate 3 establishes once — the canonical output root's segments,
-// and its RAW depth. Absent it, nothing here can establish the property, so the answer is refusal.
+// `containmentRoot` carries what gate 3 establishes once — the output root's canonical segments,
+// its NORMALIZED depth, the configured path, and the physical identity observed through it. Absent
+// it, nothing here can establish the property, so the answer is refusal.
 //
-// That null arm is UNREACHABLE through every public entrypoint, and the way that was established is
-// worth more than the fact: a test written to pin it passed under its own mutant, because all four
-// callers sit behind a guard that already halts when `capture.output_dir` cannot be resolved — gate
-// 3 for the open, W5 and W6, and `closeCaptureRun`'s own resolution for the close. Production and
-// the mutant returned the identical halt, `cannot resolve capture.output_dir`. The test was removed
-// rather than kept: a green that cannot distinguish the fix from its absence is worse than no test,
-// because it reports coverage it does not have. The mutant is recorded as an expected survivor with
-// that measurement beside it.
+// [round 30] That null arm was called UNREACHABLE in round 29, on the argument that every caller
+// sits behind a guard which halts when `capture.output_dir` cannot be resolved. The premise is true
+// and does not carry the conclusion: the guard and `containmentRootFor` are two SEPARATE resolutions
+// of the same path, so the tree can change between them, and an ELOOP introduced after the guard
+// passes reaches this line. It is reached, it is tested, and no mutant on it is expected to survive.
+//
+// The round-29 reasoning is left standing here because the mistake is the reusable part: an
+// unreachability claim is about ALL paths and was being made from the paths that had been looked at,
+// twice in two rounds. What settled it was measuring the number of resolutions, not re-reading them.
 function directAbsenceConfirmed(absPath, containmentRoot, deps) {
   if (containmentRoot === null) return false;
   // Rootedness is preserved the way `canonicalizeForComparison` preserves it. A RELATIVE asset
@@ -2048,8 +2083,17 @@ function walkRegularFiles(rootDir, deps, visit, onSkipped, { rootMustExist = fal
       expectedId = before.id;
     } else if (rootIdentity !== null) {
       expectedId = rootIdentity;
+      if (outputRootChanged(containmentRoot, deps)) {
+        throw new Error('the capture output root was replaced between its validation and this snapshot');
+      }
       if (identityBroke(absDir, relPrefix, expectedId)) return;
     } else {
+      // [round 31] Before the root establishes anything about ITSELF, the tree it is being read out
+      // of must still be the one validation approved. This is the only guard that runs at all for a
+      // first capture, whose chapter directory gate 3 saw absent and therefore never pinned.
+      if (outputRootChanged(containmentRoot, deps)) {
+        throw new Error('the capture output root was replaced between its validation and this snapshot');
+      }
       // [round 23] A caller-supplied pin brackets the root across TWO calls (gate 3 to the
       // snapshot). Without one, the root previously got no bracket at all — not even the
       // self-established one every CHILD gets — so a substitution landing during the root's own
@@ -2782,7 +2826,7 @@ export function recordChapterProvenance(profileLike, acceptedEntries, entry, cha
     filenames = listRegularFilesRecursive(assetDir, d, {
       rootMustExist: validated.assetDirsObserved.has(key),
       rootIdentity: validated.assetDirsObserved.get(key) ?? null,
-      containmentRoot: containmentRootFor(profileLike, d),
+      containmentRoot: validated.outputRoot,
     });
   } catch (err) {
     return { recorded: false, reason: `asset_listing_failed:${describeThrownField(err, 'code')}` };
@@ -3200,7 +3244,7 @@ export function buildProvenanceReport(profileLike, entries, currentObservation, 
       filenames = listRegularFilesRecursive(assetDir, d, {
         rootMustExist: validated.assetDirsObserved.has(key),
         rootIdentity: validated.assetDirsObserved.get(key) ?? null,
-        containmentRoot: containmentRootFor(profileLike, d),
+        containmentRoot: validated.outputRoot,
       });
     } catch (err) {
       return { ok: false, halts: [{ halt: 'asset_listing_failed', message: `cannot list the asset directory for '${key}': ${describeThrownField(err, 'code')}`, key }] };
