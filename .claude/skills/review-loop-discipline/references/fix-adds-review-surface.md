@@ -4,9 +4,17 @@ A fix that inserts new machinery — a validation layer, a new pipeline script, 
 
 ## Adding a validation LAYER
 
-Inserting a whole new validation layer (a schema check, a new gate stage, an allowlist, a coverage check) creates three follow-on hazards:
+This fires for anything that now runs in FRONT of checks that already existed — a schema check, a new gate stage, an allowlist, a coverage check, **and equally an existing gate function reused at a second call site.** That last shape is the one that slips through: calling a reviewed, well-tested gate from one more entrypoint reads like wiring, not like inserting a layer, and the hazards below land in full anyway.
+
+Inserting such a layer creates three follow-on hazards:
 
 1. **Vacuous negative tests.** Existing bypass/violation tests may now trip the NEW layer before ever reaching the check they were written to prove — they still pass, but for the wrong reason (e.g. a test with `block_ids: []` fails schema `minItems:1` before the intended check runs). Re-audit EVERY negative test: each must construct input that is VALID at the new layer but violates ONLY its target invariant. Use a shared fixture-builder so this stays true.
+
+   **Re-auditing by READING is what fails here, so measure it instead: diff the mutation-survivor set against the pre-change commit.** The suite stays fully green, and the fixtures still look correct — what changed is invisible from the test file, because the input now dies upstream and the downstream guard is simply never asked. The mechanical tell is a mutant that DIED before the layer existed and SURVIVES after: its test kept passing while its guard stopped being exercised. Run the same matrix against a worktree at the prior commit and compare the two survivor lists; anything newly surviving is coverage the layer silently retired. (A guard's coverage moving is not the same as the guard becoming redundant — the layer usually refuses only what is present at CALL time, while the guard still owns the window that opens mid-run. Fix by moving the fixture's plant into that window, not by deleting either one.)
+
+   Watch for the inverse while you are in there: a mutant that suddenly kills far MORE tests than its blast radius can explain is usually no longer expressing the property it names — a refactor turned it into a type error. Re-read it before believing the kill.
+
+   A second measurement is worth making at the same time, because branch coverage does not imply BOUNDARY coverage: a comparison can be executed by dozens of tests while none of them straddles its edge, so `<` and `<=` are interchangeable and both mutants live. Instrumenting the branch to throw names every test that reaches it in one run; if that list is long and the boundary mutant still survives, the edge is the thing with no test, not the branch.
 2. **The layer's OWN failure modes.** The validator itself can get bad input — a malformed bundled schema crashing `Draft202012Validator(schema)` with a traceback instead of a clean exit. Add the layer's bad-input → clean-error path (a `check_schema()` guard), never a traceback.
 3. **What the layer structurally CANNOT express.** JSON Schema can't express cross-references, so a dangling `block_ids` ref / `block.id != dict key` passes green until an explicit referential-integrity check is added. Enumerate the layer's blind spots (cross-refs, referential integrity, ordering) and add explicit checks.
 
